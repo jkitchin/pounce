@@ -18,7 +18,7 @@ import Mathlib
 import PounceLean.ConvexQP
 import PounceLean.Unbounded
 
-namespace PounceLean.CertifyUnbounded
+namespace PounceLean.CertifyUnboundedQP
 
 open Matrix
 
@@ -40,18 +40,18 @@ set_option maxRecDepth 100000
 open PounceLean.ConvexQP (obj Feasible)
 
 -- binding (cert.binding); embed so the verdict provably concerns these bytes
-def nlSha256  : String := "3a6c933d79c231c566f3efa5c634fef6583ec27b3dcadb52b100769745ecc75b"
-def solSha256 : String := "2e10ae3993a15faa8513180c8c0ee44a7d959a791a54f0255fca00bb833d33e8"
+def nlSha256  : String := "bed641788b099304976756b031f1c2c8e03710f5dc3192226ceca1d0fdfb5bc2"
+def solSha256 : String := "27600115846ae9068bdf5614645d17f7b54956bc1cff8c80b5174277dce54137"
 
-def Qmat : Matrix (Fin 2) (Fin 2) ℚ := !![0, 0; 0, 0]
-def cvec : Fin 2 → ℚ := ![-1, -1]
+def Qmat : Matrix (Fin 2) (Fin 2) ℚ := !![2, 0; 0, 0]
+def cvec : Fin 2 → ℚ := ![0, -1]
 def kconst : ℚ := 0
 def Amat : Matrix (Fin 1) (Fin 2) ℚ := !![1, 1]
 def bvec : Fin 1 → ℚ := ![1]
 
 -- recession witnesses (cert.witnesses.recession); untrusted — checked below
-def xzero : Fin 2 → ℚ := ![1755237233921853 / 8796093022208, 438809890021405 / 2199023255552]
-def dvec  : Fin 2 → ℚ := ![1755237233921853 / 1755239560085620, 1]
+def xzero : Fin 2 → ℚ := ![5199754501109941 / 4835703278458516698824704, 7020953587091071 / 17592186044416]
+def dvec  : Fin 2 → ℚ := ![0, 1]
 
 theorem hQsymm : Qmatᵀ = Qmat := by
   funext i j
@@ -81,4 +81,4 @@ theorem unbounded :
   PounceLean.Unbounded.unbounded_of_recession
     Qmat cvec kconst Amat bvec xzero dvec hQsymm hfeas hQd hAd hcd
 
-end PounceLean.CertifyUnbounded
+end PounceLean.CertifyUnboundedQP

@@ -79,6 +79,8 @@ pub enum EmitError {
     Refine(RefineError),
     /// The exact Farkas refinement failed (infeasible verdict).
     Farkas(crate::refine_farkas::FarkasError),
+    /// The exact recession refinement failed (unbounded verdict).
+    Recession(crate::refine_recession::RecessionError),
     /// Defensive: an assembled cert failed its own exact recheck.
     SelfCheck(&'static str),
 }
@@ -525,27 +527,30 @@ pub fn emit_infeasible_certificate(
 
 /// Build an exact `verdict = "unbounded"` certificate, or refuse.
 ///
-/// Unlike the Farkas path this needs **no refinement**. The recession
-/// conditions are inequalities (`A d ≥ 0`, `c·d < 0`) plus, for an LP, the
-/// vacuous `Q d = 0`; an inequality satisfied with margin survives the
-/// lossless f64→ℚ conversion intact, because the exact value is still on the
-/// correct side of zero. The equality `Aᵀy = 0` that forces `refine_farkas`
-/// has no counterpart here while `Q = 0`.
-///
 /// `x_float` is the solver's diverging primal iterate, which serves as **both**
-/// witnesses: it is feasible, and it points along the recession direction. Both
-/// roles are verified exactly below rather than assumed.
+/// witnesses: it is the feasible point `x₀`, and it is the hint for the
+/// recession direction `d`. The two roles are verified independently and
+/// exactly below — they are separate obligations in the Lean theorem, and a
+/// certificate that conflated them would be proving less than it claims.
 ///
-/// v1 restriction, enforced: `Q` must be zero (the LP slice). A nonzero `Q`
-/// reintroduces the equality `Q d = 0`, which the float direction will miss —
-/// that case needs a null-space refinement and is refused here rather than
-/// emitted unsoundly.
+/// The two roles also diverge in how much of the float survives. `x₀` must be
+/// *exactly* feasible, so it is the iterate verbatim; there is nothing to
+/// refine, because feasibility is a set of inequalities and an inequality with
+/// margin survives the lossless f64→ℚ conversion. `d` must satisfy the
+/// **equality** `Q d = 0`, which a float direction misses whenever `Q ≠ 0`, so
+/// it is recomputed exactly by [`crate::refine_recession`] — the same reason
+/// the Farkas path cannot copy the solver's ray.
+///
+/// This covers any `Q`, including an indefinite one: the recession theorem
+/// needs `Q` symmetric and flat along `d`, not convex. Where `Q = 0` the
+/// refinement is the identity and this reduces to the original LP slice.
 pub fn emit_unbounded_certificate(
     input: &QpInput,
     meta: &CertMeta,
     x_float: &[f64],
 ) -> Result<Certificate, EmitError> {
-    let problem = problem_block(input)?;
+    let view = build_problem_view(input)?;
+    let problem = view.problem;
     let n = problem.n_vars;
     if x_float.len() != n {
         return Err(EmitError::SelfCheck("iterate length != n_vars"));
@@ -556,11 +561,6 @@ pub fn emit_unbounded_certificate(
         .objective
         .as_ref()
         .ok_or(EmitError::SelfCheck("unbounded requires a QP objective"))?;
-    if !obj.q.entries.is_empty() {
-        return Err(EmitError::SelfCheck(
-            "unbounded v1 is the LP slice (Q = 0); nonzero Q needs Q d = 0 refinement",
-        ));
-    }
 
     // Every row must be `a·x ≥ lower`, matching the Lean feasible-set encoding.
     let mut a_rows: Vec<Vec<BigRational>> = Vec::new();
@@ -581,20 +581,20 @@ pub fn emit_unbounded_certificate(
         .collect::<Result<_, _>>()?;
     let c: Vec<BigRational> = obj.c.iter().map(|r| r.inner().clone()).collect();
 
-    // --- exact checks: the iterate is feasible AND a recession direction -----
+    // --- x₀: exactly feasible, verbatim -------------------------------------
     for (i, row) in a_rows.iter().enumerate() {
-        let ax: BigRational = row.iter().zip(&v).map(|(a, x)| a * x).sum();
-        if ax < b_vec[i] {
+        if dot(row, &v) < b_vec[i] {
             return Err(EmitError::SelfCheck("iterate is not exactly feasible"));
         }
-        if ax < BigRational::zero() {
-            return Err(EmitError::SelfCheck("A d ≥ 0 fails"));
-        }
     }
-    let cd: BigRational = c.iter().zip(&v).map(|(ci, di)| ci * di).sum();
-    if cd >= BigRational::zero() {
-        return Err(EmitError::SelfCheck("c·d < 0 fails"));
-    }
+
+    // --- d: exactly flat, feasible to travel, and descending ----------------
+    // `q_dense` rather than `m_dense`: this is the matrix the generated Lean
+    // will carry, so it is the one whose kernel the proof will be about. (The
+    // two differ by a positive factor and so have the same kernel — matching
+    // the Lean file is about the recheck being the check, not about the math.)
+    let d = crate::refine_recession::refine_recession(&view.q_dense, &c, &a_rows, &v)
+        .map_err(EmitError::Recession)?;
 
     Ok(Certificate {
         schema: SCHEMA_TAG.to_string(),
@@ -619,8 +619,8 @@ pub fn emit_unbounded_certificate(
             active_set: None,
             farkas: None,
             recession: Some(Recession {
-                x0: v.iter().cloned().map(Rat).collect(),
-                d: v.into_iter().map(Rat).collect(),
+                x0: v.into_iter().map(Rat).collect(),
+                d: d.into_iter().map(Rat).collect(),
             }),
             sos: None,
             feasible_witness: None,

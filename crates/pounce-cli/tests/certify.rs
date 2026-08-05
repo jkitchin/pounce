@@ -251,6 +251,61 @@ fn certify_routes_an_unbounded_solve_to_a_recession_certificate() {
 }
 
 #[test]
+fn certify_handles_an_unbounded_solve_with_a_nonzero_hessian() {
+    // `min x₀² − x₁ s.t. x₀ + x₁ ≥ 1`: curved in x₀, flat and descending in
+    // x₁. The LP fixture above never exercises `Q d = 0`, because for `Q = 0`
+    // that condition is vacuous — every recession condition it has is an
+    // *inequality*, and inequalities survive the f64→ℚ conversion with their
+    // margin intact. A nonzero Q reintroduces an equality, and the solver's
+    // diverging iterate misses it: its x₀ coordinate is a small nonzero
+    // dyadic, so `Q d` would be nonzero and the Lean goal undischargeable.
+    //
+    // So `d` here is the exact projection of that iterate onto ker Q, which is
+    // what makes the emitted direction the round `[0, 1]` rather than the
+    // 16-digit fraction `x0` still is.
+    let nl = fixture("certify_unbounded_qp.nl");
+    let _ = Command::new(pounce_exe()).arg(&nl).output();
+    let sol = fixture("certify_unbounded_qp.sol");
+    assert!(sol.exists(), "an unbounded solve must still write its .sol");
+
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(&nl)
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "a nonzero Hessian is no longer refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["verdict"], "unbounded");
+    assert!(
+        !cert["problem"]["objective"]["Q"]["entries"]
+            .as_array()
+            .expect("Q entries")
+            .is_empty(),
+        "the point of this fixture is that Q is not empty"
+    );
+    assert_eq!(
+        cert["witnesses"]["recession"]["d"],
+        serde_json::json!([{"num":"0","den":"1"}, {"num":"1","den":"1"}]),
+        "d is projected onto ker Q exactly, then normalized"
+    );
+    // x₀ is a different kind of witness and keeps its float provenance: it is
+    // a claim about *that* point being feasible, so it is the iterate verbatim.
+    let x0 = cert["witnesses"]["recession"]["x0"]
+        .as_array()
+        .expect("x0 array");
+    assert_ne!(
+        x0[0]["den"], "1",
+        "x₀ is the raw iterate, not a rounded one"
+    );
+}
+
+#[test]
 fn certify_routes_a_nonconvex_polynomial_to_an_sos_global_min() {
     // x⁴ − 2x² + 2 has two global minima at x = ±1 and a local max at 0, so
     // the f64 solve lands on ONE basin and can say nothing global. The SOS

@@ -53,6 +53,13 @@ FIXTURES=(
   "certify_lp    PounceLean.CertifyLP    global_min"  # LP: Q = 0, optimum 4/3 (not an f64)
   "certify_infeasible PounceLean.CertifyInfeasible infeasible"  # no solution; Farkas ray
   "certify_unbounded  PounceLean.CertifyUnbounded  unbounded"   # unbounded below; recession
+  # The same verdict with a nonzero Hessian, and the difference is the whole
+  # point: for an LP the recession conditions are all inequalities, which
+  # survive f64→ℚ, so the solver's diverging iterate IS the direction. A
+  # nonzero Q adds the equality `Q d = 0`, which a float never satisfies, so
+  # `d` here is the exact projection of that iterate onto ker Q — visibly
+  # ![0, 1] rather than a 16-digit dyadic.
+  "certify_unbounded_qp PounceLean.CertifyUnboundedQP unbounded"  # curved but flat along d
   # The two SOS fixtures differ in *verdict*, and the difference is the point:
   # x⁴−2x²+2 attains its bound at the rational x = 1, so it certifies a global
   # minimum; x⁴−3x²+2 minimizes at ±√(3/2), which no rational point reaches, so
@@ -272,6 +279,11 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # in isolation; it is covered by both of these.)
     "certify_feasible_forged_witness PounceLean.Generated.ForgedFeasWitness witness (within ε of x*, but not feasible — x* itself)"
     "certify_feasible_forged_far     PounceLean.Generated.ForgedFeasFar     witness (exactly feasible, but far outside ε)"
+    # `Q d = 0` is the obligation that only exists once Q is nonzero, so it
+    # needs its own forgery. This direction still satisfies every condition the
+    # LP slice ever checked — A d = 2 ≥ 0, c·d = −1 < 0 — and fails only the
+    # new one. Without it, a regression that dropped `hQd` would still pass.
+    "certify_unbounded_qp_forged_dir PounceLean.Generated.ForgedRecessionDir direction (feasible and descending, but Q d ≠ 0)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

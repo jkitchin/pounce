@@ -21,7 +21,7 @@ changes.
   the field-by-field format in `docs/src/schema/lean-cert-v1.md`.
 - Four verdicts, selected automatically from the `.nl`: `global-min` (convex
   QP — KKT point plus PSD Hessian), `infeasible` (Farkas witness), `unbounded`
-  (recession direction, LP slice only), and `global-lower-bound` (sum of
+  (recession direction), and `global-lower-bound` (sum of
   squares). Anything else exits 2 rather than emit an unsound certificate —
   maximize objectives, non-polynomial objectives, and constrained
   higher-degree problems are all refused.
@@ -58,6 +58,29 @@ changes.
   `--feasible` where it would prove nothing (an unconstrained polynomial) is
   refused too. This closes the last verdict the Lean consumer accepted but the
   producer could not emit.
+- **`unbounded` is no longer restricted to LPs**; any `Q` is now certifiable,
+  including an indefinite one. The recession theorem never wanted convexity —
+  it wants `Q` symmetric and *flat along `d`* — so the restriction was in the
+  emitter, not the mathematics. What it was standing in for is worth naming:
+  an LP's recession conditions (`A d ≥ 0`, `c·d < 0`) are inequalities, and an
+  inequality satisfied with margin survives the f64→ℚ conversion with its sign
+  intact, so the solver's diverging iterate was already an exact witness,
+  copied verbatim. A nonzero `Q` adds `Q d = 0`, an **equality**, which no
+  float meets — the same failure mode as the Farkas ray. So `d` is now
+  recomputed by projecting that iterate onto `ker Q` over ℚ, and normalized so
+  its largest entry is `±1` (every condition is homogeneous, so the scale is
+  free, and the witness reads `![0, 1]` instead of a 16-digit dyadic). The
+  split was never LP-vs-QP: it is equality-vs-inequality. A definite `Q` has no
+  flat direction at all and is refused with exactly that reason, rather than by
+  reporting some downstream inequality that happened to fail.
+- **`RefineError::Singular` split into `FlatFace` and `SingularUnexpected`.**
+  The old variant merged "the active set does not pin a unique point" with
+  "a solve that cannot be singular came back singular", which are a modelling
+  fact and a bug respectively. The new `FlatFace { free_dims, reduced_rank }`
+  is an *exact* diagnosis rather than a guess: with `R` of full row rank the
+  KKT matrix is nonsingular iff the reduced Hessian `Zᵀ Q Z` is, so the
+  reported rank shortfall is literally how far the active set falls short of
+  determining a point.
 - The `γ` ladder now orders candidates by **sharpness** rather than by
   denominator grid. The two disagree: for `x⁴ − 3x² + 2` the tight `−1/4` needs
   a denominator of 4 while the four-times-weaker `−1` sits on the coarsest
@@ -68,7 +91,8 @@ changes.
   (`feasible` is the one verdict where ε *is* the claim rather than slack in
   it), so the f64
   solve only ever *proposes* — an active set, a Gram matrix, a bound — and each
-  is recomputed exactly over ℚ (`refine_kkt`, `refine_farkas`, `round_gram`),
+  is recomputed exactly over ℚ (`refine_kkt`, `refine_farkas`, `round_gram`,
+  `refine_recession`),
   with the emitter refusing rather than shipping a certificate that cannot
   verify. This is not a formality: on the `certify_infeasible` fixture the
   float Farkas ray satisfies `Aᵀy = 0` to a ~1.7e-11 relative residual, which
@@ -92,7 +116,9 @@ changes.
   wrong minimizer attached to a bound that is entirely genuine (so only the
   `p(x₀) = γ` goal can), and for `feasible` a pair that isolates its two
   obligations against each other: an `x̂` close to `x*` but infeasible, and one
-  feasible but too far away.
+  feasible but too far away. The recession forgery is built the same way: a
+  direction that is feasible and descending — passing every condition the LP
+  slice ever had — and fails only the new `Q d = 0`.
 
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 

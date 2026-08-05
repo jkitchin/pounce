@@ -74,8 +74,18 @@ reads the certificate.
 > hypothesis would be undischargeable. Each verdict therefore needed a
 > refinement step that treats the float object as a *hint* for the exact one's
 > support: `refine_kkt` for `global-min`, `refine_farkas` for `infeasible`
-> (which recovers `y = (1,1,1)` on that fixture), and `round_gram` for the SOS
-> Gram matrix. Float proposes; exact arithmetic decides.
+> (which recovers `y = (1,1,1)` on that fixture), `round_gram` for the SOS
+> Gram matrix, and `refine_recession` for `unbounded` with a nonzero `Q`.
+> Float proposes; exact arithmetic decides.
+>
+> The `unbounded` row is worth its own sentence, because for a while it looked
+> like the exception. An LP recession direction needs `A d ≥ 0` and `c·d < 0` —
+> both **inequalities**, and an inequality satisfied with margin survives the
+> f64→ℚ conversion with its sign intact, so the solver's diverging iterate was
+> already an exact witness, verbatim. A nonzero `Q` adds `Q d = 0`, and that is
+> an equality again. So the split was never LP-vs-QP: it is
+> equality-vs-inequality, which is the same distinction that made every other
+> row need refinement.
 
 ## How it differs from `pounce verify`
 
@@ -159,7 +169,7 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
 | `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
-| `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. |
+| `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. A **shape** discriminator — which half of `problem` is populated, and so which theorem the codegen routes to — *not* a convexity claim. `feasible` ships `qp-convex` on an indefinite `Q`, and so does `unbounded`, because neither verdict needs convexity. Only `global-min` on the KKT path does, and there the PSD claim is carried by `witnesses.hessian_psd` and checked by Lean. |
 | `tolerance` | rational | Feasibility ε. `0` for every verdict except `feasible`, whose whole subject is a point that misses feasibility — there it is an exact rational bound on the residual, computed over ℚ and rounded **up** to one significant digit, never a solver setting copied across. |
 | `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
@@ -216,6 +226,9 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | `duals` | KKT stationarity | exactly **one per constraint**, in order; the nonnegative multiplier of the normalized `A x ≥ b` row. |
 | `hessian_psd` | convexity ⟹ global | `LDLᵀ` of `Q`: the identity `Q = L·diag(D)·Lᵀ` (`ring`/`norm_num`) **and** `Dᵢ ≥ 0` entrywise. `unit_lower` `L` omits its implied unit diagonal. |
 | `active_set` | complementarity | indices of constraints treated as active (informational). |
+| `farkas.y` | `infeasible` | `y ≥ 0`, `Aᵀ y = 0`, `bᵀ y > 0` — refined exactly, since the middle condition is an equality. |
+| `recession.x0`, `recession.d` | `unbounded` | `x0` feasible, and `Q d = 0`, `A d ≥ 0`, `c·d < 0`. **Both** are required: a direction alone cannot distinguish an unbounded problem from an empty feasible set, where such a `d` also exists and there is nothing to travel from. `d` is normalized so its largest-magnitude entry is `±1` (all three conditions are homogeneous, so the scale is free). |
+| `feasible_witness.xhat` | `feasible` | exactly feasible, and within `tolerance` of `candidate.x` in ∞-norm. |
 
 ## What the witnesses must satisfy
 
@@ -352,9 +365,11 @@ is always emitted as the infinite sentinels in v1; bounds live in `constraints`.
 
 Outside this slice `pounce certify` **exits 2** rather than emit an unsound
 certificate — except that a higher-degree unconstrained polynomial objective is
-routed to the SOS slice above instead of refused, and that `--feasible` opts
-into the weaker `feasible` verdict, which needs no convexity (indefinite `Q` is
-fine — it certifies only where the point sits, not that it is optimal).
+routed to the SOS slice above instead of refused, that `--feasible` opts into
+the weaker `feasible` verdict, which needs no convexity (indefinite `Q` is
+fine — it certifies only where the point sits, not that it is optimal), and
+that `unbounded` likewise accepts any `Q` (it needs `Q` flat along `d`, never
+convex) as long as the constraints are all inequalities.
 Maximize objectives, *optimality* claims on constrained nonconvex problems, and
 the `local-min-strict` verdict remain additive future work.
 

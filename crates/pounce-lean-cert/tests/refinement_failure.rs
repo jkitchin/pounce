@@ -8,11 +8,11 @@
 //!
 //! | Construction | Outcome |
 //! |---|---|
-//! | duplicate active row | `Refine(Singular)` |
-//! | scaled-duplicate active row (`2·c0`) | `Refine(Singular)` |
-//! | contradictory equalities (`x₀ = 0` and `x₀ = 1`) | `Refine(Singular)` |
-//! | more equality rows than variables | `Refine(Singular)` |
-//! | indefinite `Q`, diagonal (`diag(-2, 2)`) | `Refine(Singular)` |
+//! | duplicate active row | **succeeds** — basis selection drops it |
+//! | scaled-duplicate active row (`2·c0`) | **succeeds** — same |
+//! | contradictory equalities (`x₀ = 0` and `x₀ = 1`) | `Refine(EqualityResidual)` |
+//! | more equality rows than variables, consistent | **succeeds** |
+//! | indefinite `Q`, diagonal (`diag(-2, 2)`) | `Refine(FlatFace)` |
 //! | indefinite `Q`, off-diagonal | `Ldl(Indefinite { col })` |
 //! | wrongly-active slack row | `Refine(NegativeDual)` |
 //! | empty active set, infeasible result | `Refine(InactiveViolated)` |
@@ -21,15 +21,18 @@
 //!
 //! # Two things this established
 //!
-//! **`Singular` is the catch-all.** Every way of making the active set
-//! degenerate — duplicated rows, linearly dependent rows, contradictory or
-//! over-determined equalities — arrives at the same error. That is sound but
-//! coarse: a caller cannot distinguish "your active set is redundant" from
-//! "your equalities contradict each other". Worth splitting if refusals ever
-//! need to be diagnosed in the field.
+//! **Degeneracy is not one failure but two, and they now report differently.**
+//! Redundant rows are no longer a failure at all — basis selection drops them
+//! and the residual checks confirm nothing was lost, so a *contradictory*
+//! equality is caught by name rather than folded into a generic singularity.
+//! What remains is `FlatFace`: the selected rows are independent but leave a
+//! subspace the objective does not curve in, so the face has no unique
+//! minimizer. Its `free_dims` is exactly how far the active set falls short of
+//! pinning the point, which is the number a caller wants when a real LP
+//! refuses.
 //!
 //! **Diagonal indefiniteness is caught by the KKT solve, not by `LDLᵀ`.**
-//! Refinement runs first, so `diag(-2, 2)` reports `Singular` rather than the
+//! Refinement runs first, so `diag(-2, 2)` reports a flat face rather than the
 //! more informative `Indefinite`. Only off-diagonal indefiniteness survives to
 //! the `LDLᵀ` factorization. Both paths refuse, so this costs diagnosis, not
 //! soundness.
@@ -205,15 +208,53 @@ fn off_diagonal_indefinite_q_is_caught_by_ldlt() {
 
 #[test]
 fn diagonal_indefinite_q_is_caught_earlier_by_the_kkt_solve() {
-    // Refinement runs before the LDLᵀ factorization, so this reports Singular
-    // rather than the more informative Indefinite. Refused either way.
+    // Refinement runs before the LDLᵀ factorization, so this reports a flat
+    // face rather than the more informative Indefinite. Refused either way.
+    //
+    // The diagnosis is exact and worth reading: one row is active in two
+    // dimensions, leaving a 1-D flat spanned by z = (−1, 1). The reduced
+    // Hessian there is zᵀ diag(−2, 2) z = −2 + 2 = 0 — the two curvatures
+    // cancel *along the face*, so the objective is literally flat on it and no
+    // point on it is the minimizer.
     let input = qp(
         2,
         vec![(0, 0, -2.0), (1, 1, 2.0)],
         vec![con("c0", vec![1.0, 1.0], 1.0, f64::INFINITY)],
         vec![0.5, 0.5],
     );
-    assert_eq!(err(&input), EmitError::Refine(RefineError::Singular));
+    assert_eq!(
+        err(&input),
+        EmitError::Refine(RefineError::FlatFace {
+            free_dims: 1,
+            reduced_rank: 0
+        })
+    );
+}
+
+/// The same diagnosis on the case it exists for: a **degenerate LP**, where
+/// `Q = 0` makes every face flat and the only escape is enough active rows.
+///
+/// One active row in two dimensions leaves a 1-D flat along which the objective
+/// is constant, so the "optimum" is a whole edge and the float landed on an
+/// arbitrary point of it. `free_dims = 1` says precisely that, and says how many
+/// more independent active rows a certifiable vertex would need.
+#[test]
+fn a_degenerate_lp_reports_how_far_short_the_active_set_falls() {
+    let input = qp(
+        2,
+        vec![], // Q = 0
+        vec![con("c0", vec![1.0, 1.0], 1.0, f64::INFINITY)],
+        vec![0.5, 0.5],
+    );
+    let mut input = input;
+    input.c = vec![1.0, 1.0]; // minimize x₀ + x₁ — the whole edge is optimal
+    assert_eq!(
+        err(&input),
+        EmitError::Refine(RefineError::FlatFace {
+            free_dims: 1,
+            reduced_rank: 0
+        })
+    );
 }
 
 // --- the cases that must NOT be treated as failures ------------------------

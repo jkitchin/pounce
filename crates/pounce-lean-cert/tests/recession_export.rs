@@ -17,7 +17,7 @@
 //! * it satisfies the direction conditions exactly (`A d ≥ 0`, `c·d < 0`), so it
 //!   is also a `d` witness.
 //!
-//! # Why no refinement is needed here — and when it will be
+//! # Why no refinement was needed here — and where it became necessary
 //!
 //! This is the part worth remembering. The Farkas path *requires* exact
 //! refinement because its defining condition is an **equality**, `Aᵀy = 0`, and
@@ -29,15 +29,20 @@
 //! because the exact rational value is still on the correct side of zero. So for
 //! `Q = 0` the float witness is already an exact certificate, verbatim.
 //!
-//! The general QP case reintroduces an equality, `Q d = 0`, and with it the need
-//! for a null-space refinement of the same shape as `refine_farkas`. So the
-//! split is not LP-vs-QP by accident: it is equality-vs-inequality.
+//! The general QP case reintroduces an equality, `Q d = 0`, and with it a
+//! null-space refinement of the same shape as `refine_farkas`. So the split was
+//! never LP-vs-QP by accident: it is equality-vs-inequality. That refinement now
+//! exists ([`pounce_lean_cert::refine_recession`]) and the emitter covers any
+//! `Q`; the last two tests here are the QP case that the LP measurements above
+//! could not reach.
 
 #![allow(clippy::unwrap_used)]
 
 use num_rational::BigRational;
 use num_traits::Zero;
-use pounce_lean_cert::Rat;
+use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput, emit_unbounded_certificate};
+use pounce_lean_cert::refine_recession::RecessionError;
+use pounce_lean_cert::{EmitError, Rat};
 
 fn q(v: f64) -> BigRational {
     Rat::from_f64(v).unwrap().inner().clone()
@@ -130,4 +135,96 @@ fn a_rounded_direction_is_also_exact() {
     let d = vec![int(1), int(1)];
     assert_eq!(row_dot(&a[0], &d), int(2));
     assert_eq!(row_dot(&c, &d), int(-2));
+}
+
+// --- the QP case: `Q d = 0` is a real obligation ---------------------------
+
+fn meta() -> CertMeta {
+    CertMeta {
+        nl_sha256: "0".repeat(64),
+        sol_sha256: "0".repeat(64),
+        solver: "pounce test".to_string(),
+    }
+}
+
+/// `min x₀² − x₁ s.t. x₀ + x₁ ≥ 1`, with the iterate a solver would diverge to.
+///
+/// Curved in `x₀`, flat and descending in `x₁`: unbounded below, but not an LP.
+fn curved_unbounded_qp(x_float: Vec<f64>) -> QpInput {
+    QpInput {
+        n: 2,
+        q_lower: vec![(0, 0, 2.0)], // ½·2·x₀² = x₀²
+        half_quadratic: true,
+        c: vec![0.0, -1.0],
+        constant: 0.0,
+        constraints: vec![LinearConstraint {
+            name: "c0".to_string(),
+            coeffs: vec![1.0, 1.0],
+            lower: 1.0,
+            upper: f64::INFINITY,
+        }],
+        var_lower: vec![f64::NEG_INFINITY; 2],
+        var_upper: vec![f64::INFINITY; 2],
+        x_float: x_float.clone(),
+        active_tol: 1e-7,
+    }
+}
+
+/// The old emitter refused this outright. It now certifies, and the interesting
+/// part is that the two witnesses have **come apart**: `x₀` is the iterate
+/// verbatim, while `d` is the exact projection onto `ker Q`, which discards the
+/// iterate's `x₀` coordinate entirely.
+#[test]
+fn a_nonzero_hessian_is_certified_by_projecting_the_direction() {
+    // The solver's `x₀` settles near 0 (it is being minimized) while `x₁` runs
+    // away. Neither coordinate is a round number, which is the point.
+    let iterate = vec![1.0 / 3.0, 4.2e6];
+    let cert = emit_unbounded_certificate(&curved_unbounded_qp(iterate.clone()), &meta(), &iterate)
+        .expect("a curved-but-flat-along-d QP is certifiable");
+
+    let rec = cert.witnesses.recession.as_ref().unwrap();
+    assert_eq!(
+        rec.x0[0].inner(),
+        Rat::from_f64(1.0 / 3.0).unwrap().inner(),
+        "x₀ is the iterate verbatim — feasibility is a claim about that point"
+    );
+    assert_eq!(
+        rec.d
+            .iter()
+            .map(|r| r.inner().to_string())
+            .collect::<Vec<_>>(),
+        vec!["0", "1"],
+        "d is the exact projection onto ker Q, normalized"
+    );
+    // The obligation the LP slice never had to meet: Q d = 0, on the nose.
+    let qd0 = int(2) * rec.d[0].inner();
+    assert!(
+        qd0.is_zero(),
+        "Q d = 0 must hold exactly, not approximately"
+    );
+}
+
+/// Copying the float direction would **not** have worked, which is why the
+/// projection is not a stylistic choice. The iterate's `x₀` coordinate is
+/// `1/3`'s nearest double — a nonzero dyadic — so `Q d` is nonzero and the Lean
+/// hypothesis `Q d = 0` is undischargeable.
+#[test]
+fn the_unprojected_float_direction_would_have_failed() {
+    let qd0 = int(2) * q(1.0 / 3.0);
+    assert!(
+        !qd0.is_zero(),
+        "the raw float direction misses Q d = 0 — exactly the Farkas situation"
+    );
+}
+
+/// A positive definite `Q` curves in every direction, so no ray can leave the
+/// quadratic term unchanged. The refusal says that, rather than reporting some
+/// downstream inequality that happened to fail.
+#[test]
+fn a_strictly_convex_qp_is_refused_with_the_reason() {
+    let mut input = curved_unbounded_qp(vec![1.0, 1.0e6]);
+    input.q_lower = vec![(0, 0, 2.0), (1, 1, 2.0)];
+    let err = emit_unbounded_certificate(&input, &meta(), &[1.0, 1.0e6])
+        .expect_err("a strictly convex QP has no recession direction");
+    assert_eq!(err, EmitError::Recession(RecessionError::NoFlatDirection));
 }

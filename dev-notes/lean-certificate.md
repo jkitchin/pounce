@@ -282,6 +282,19 @@ silently rotting.
   because on a *linear* face the projection is a closed form rather than a
   fixed-point argument. Interval-Newton is still what a nonlinear equality
   will need.
+* **Phase 2c — done.** `unbounded` lifted from the LP slice to any `Q`. The
+  restriction had always been on the emitter: `unbounded_of_recession` takes an
+  arbitrary symmetric `Q` and asks only that `Q d = 0`. What made the LP case
+  easy is worth recording, because it is the same axis as everything else here:
+  its recession conditions are **inequalities**, which survive f64→ℚ with their
+  sign intact, so the diverging iterate was itself an exact witness. `Q ≠ 0`
+  reintroduces an equality and with it a null-space refinement of the same
+  shape as `refine_farkas` — project the iterate onto `ker Q` over ℚ. The
+  hint's contamination is `O(1/t)` after normalization (the iterate is
+  `x_finite + t·d_true`), so it is invisible to a strict row but could tip a row
+  that holds with `A_i d = 0` exactly; such a row is refused rather than
+  nudged, since a tolerance there would be a tolerance in the proof. Equality
+  constraint rows remain outside the slice.
 * **Phase 3.** `local-min-strict` for general smooth algebraic NLP; later,
   transcendentals (where `dReal` may complement Mathlib's thin interval
   arithmetic).

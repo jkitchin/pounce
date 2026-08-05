@@ -65,7 +65,7 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 |---|---|---|
 | `global-min` | convex QP | `x*` is feasible and no feasible point has a lower objective |
 | `infeasible` | LP / QP | no feasible point exists (Farkas witness) |
-| `unbounded` | LP (`Q = 0`) | the objective decreases without bound along a recession direction |
+| `unbounded` | LP or QP, any `Q` | the objective decreases without bound along a recession direction |
 | `global-lower-bound` | unconstrained polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` |
 | `global-min` | unconstrained polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` everywhere |
 
@@ -264,7 +264,9 @@ does not attain a bound which is itself genuine, and — for `feasible` — an `
 that is close to `x*` but not feasible, alongside one that is feasible but too
 far away. That last pair is the point of the technique: each forgery leaves the
 *other* obligation perfectly intact, so a proof that checked only one of them
-would sail through.
+would sail through. The recession forgery works the same way: a direction that
+is feasible (`A d = 2 ≥ 0`) and descending (`c·d = −1 < 0`), and so passes every
+condition the LP slice ever had, but is not flat (`Q d ≠ 0`).
 
 A test suite where everything passes proves only that valid inputs work; these
 fixtures are the ones that would catch a proof that accepts too much.
@@ -277,8 +279,15 @@ fixtures are the ones that would catch a proof that accepts too much.
 * **The slice is narrow by construction.** Every extension is real
   mathematics — the SOS route needed exact Gram rounding, not plumbing — so
   refusal is the honest default rather than a limitation to work around.
-* **`unbounded` covers LP only** (`Q = 0`); a nonzero Hessian needs a
-  recession-direction refinement that does not exist yet.
+* **`unbounded` needs a direction the objective is *exactly* flat along.** For
+  an LP every direction qualifies (`Q = 0`), which is why that case needed no
+  refinement at all: its conditions `A d ≥ 0` and `c·d < 0` are inequalities,
+  and an inequality satisfied with margin survives the f64→ℚ conversion. A
+  nonzero `Q` adds the equality `Q d = 0`, which no float meets, so the
+  direction is recomputed by projecting the solver's diverging iterate onto
+  `ker Q` over ℚ. If `Q` is definite there is no such direction and the emitter
+  refuses — correctly, since the objective is then bounded below along every
+  line. Equality rows are still outside the slice.
 * **The SOS route is unconstrained-only.** The theorem quantifies over all of
   ℝⁿ, so a constrained problem would get a statement that is true but about the
   wrong problem. Routing is decided by objective *degree*, never by a QP

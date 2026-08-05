@@ -19,6 +19,7 @@
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
 //! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
 //! * [`refine_feasible`] — exact rational feasible point for the `feasible` verdict.
+//! * [`refine_recession`] — exact rational recession direction for `unbounded`.
 //! * [`round_gram`] — exact rational SOS Gram matrix from the SDP's float one.
 //!
 //! * [`emit`] — the neutral-`f64` QP → certificate driver + exact self-check gate.
@@ -31,6 +32,7 @@ pub mod rational;
 pub mod refine;
 pub mod refine_farkas;
 pub mod refine_feasible;
+pub mod refine_recession;
 pub mod round_gram;
 pub mod schema;
 

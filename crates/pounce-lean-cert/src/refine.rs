@@ -47,8 +47,29 @@ pub struct RefinedEq {
 /// Why refinement failed — every variant means "do not emit".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefineError {
-    /// The KKT system is singular (degenerate / linearly dependent active set).
-    Singular,
+    /// **The active face does not pin a unique point.** After basis selection
+    /// the selected rows are independent, so they cut out a flat of dimension
+    /// `free_dims`; the objective's curvature on that flat is the reduced
+    /// Hessian `Zᵀ Q Z`, and it has rank only `reduced_rank`. A face the
+    /// objective does not curve in has no unique minimizer, so there is no
+    /// exact point to certify — the float landed *somewhere* on the flat, and
+    /// which point it landed on is an artifact of the iteration.
+    ///
+    /// For an LP (`Q = 0`) the reduced Hessian is zero, so this fires whenever
+    /// `free_dims > 0` — fewer than `n` independent constraints active, i.e.
+    /// not a vertex. That is the ordinary reason a degenerate LP refuses, and
+    /// `free_dims` is exactly how far the active set falls short.
+    ///
+    /// This is an exact diagnosis rather than a guess: with `R` of full row
+    /// rank the KKT matrix is nonsingular **iff** `Zᵀ Q Z` is.
+    FlatFace {
+        free_dims: usize,
+        reduced_rank: usize,
+    },
+    /// Defensive: a linear solve came back singular where the construction
+    /// guarantees it cannot be (a face that pins every direction, or a Gram
+    /// matrix of independent rows). Means a shape bug, not bad input.
+    SingularUnexpected,
     /// Active constraint `constraint` got a negative multiplier — wrong active
     /// set, or the point is not a minimizer.
     NegativeDual { constraint: usize },
@@ -59,6 +80,52 @@ pub enum RefineError {
     /// Defensive: stationarity did not hold exactly (should be impossible by
     /// construction; guards against a shape bug).
     StationarityResidual,
+}
+
+/// Say *why* the KKT matrix was singular, exactly rather than by guess.
+///
+/// With the selected rows `R` of full row rank (which basis selection
+/// guarantees), the KKT matrix `[[Q, −Rᵀ], [R, 0]]` is nonsingular **iff** the
+/// reduced Hessian `Zᵀ Q Z` is, where `Z` spans `ker R`. So a singular solve
+/// means one of exactly two things, and this decides which: either the face is
+/// flat in some direction (the real case), or `R` was not full rank after all
+/// and something upstream is broken.
+///
+/// Only called on the failure path — the happy path pays nothing for it.
+fn diagnose_singular(
+    q: &[Vec<BigRational>],
+    cand: &[Vec<BigRational>],
+    keep: &[usize],
+    n: usize,
+) -> RefineError {
+    let r_rows: Vec<Vec<BigRational>> = keep.iter().map(|&i| cand[i].clone()).collect();
+    let z = crate::linalg::nullspace_exact(&r_rows, n);
+    let free_dims = z.len();
+    if free_dims == 0 {
+        return RefineError::SingularUnexpected;
+    }
+    // Zᵀ Q Z, one entry per pair of null-space directions.
+    let reduced: Vec<Vec<BigRational>> = z
+        .iter()
+        .map(|zi| {
+            z.iter()
+                .map(|zj| {
+                    let qzj: Vec<BigRational> = q.iter().map(|row| dot(row, zj)).collect();
+                    dot(zi, &qzj)
+                })
+                .collect()
+        })
+        .collect();
+    let reduced_rank = crate::linalg::select_independent_rows(&reduced).len();
+    if reduced_rank == free_dims {
+        // The reduced Hessian is nonsingular, so the KKT matrix should have
+        // been too. Reaching here means `R` was not full row rank.
+        return RefineError::SingularUnexpected;
+    }
+    RefineError::FlatFace {
+        free_dims,
+        reduced_rank,
+    }
 }
 
 /// Inequality-only refinement — a thin wrapper over [`refine_kkt_eq`] with no
@@ -167,12 +234,12 @@ pub fn refine_kkt_eq(
         rhs[n + k + ei] = d[se].clone();
     }
 
-    // Diagnostic for refusals in the field. `Singular` is a catch-all, and the
-    // most common cause is a DEGENERATE active set: for an LP (`Q = 0`) the KKT
-    // matrix is nonsingular only when exactly `n` independent constraints are
-    // active, and real LPs routinely have more. Set POUNCE_REFINE_DEBUG=1 to see
-    // the counts. Example: netlib afiro reports n=32, active=29, equalities=8 —
-    // 37 active constraints in 32 dimensions, degenerate by 5.
+    // Diagnostic for refusals in the field. The most common cause of a refusal
+    // here is a DEGENERATE active set: for an LP (`Q = 0`) the KKT matrix is
+    // nonsingular only when exactly `n` independent constraints are active, and
+    // real LPs routinely have more. Set POUNCE_REFINE_DEBUG=1 to see the counts.
+    // Example: netlib afiro reports n=32, active=29, equalities=8 — 37 active
+    // constraints in 32 dimensions, degenerate by 5.
     if std::env::var("POUNCE_REFINE_DEBUG").is_ok() {
         eprintln!(
             "REFINE_DEBUG n={n} m={m} active(k)={k} equalities={} => KKT {}x{} \
@@ -182,7 +249,9 @@ pub fn refine_kkt_eq(
             mat.first().map_or(0, |r| r.len())
         );
     }
-    let sol = solve_exact(&mat, &rhs).ok_or(RefineError::Singular)?;
+    let Some(sol) = solve_exact(&mat, &rhs) else {
+        return Err(diagnose_singular(q, &cand, &keep, n));
+    };
     let x = sol[..n].to_vec();
 
     // Inequality dual feasibility, assemble the full λ. Rows the basis dropped

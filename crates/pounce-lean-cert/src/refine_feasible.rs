@@ -69,9 +69,10 @@ pub fn refine_feasible(
     if !keep.is_empty() {
         // Normal equations for the minimum-norm correction: (R Rᵀ) y = R x₀ − r,
         // then x̂ = x₀ − Rᵀ y. `R` has independent rows, so `R Rᵀ` is invertible
-        // and the `Singular` arm is unreachable by construction — kept because
-        // "unreachable" here rests on `select_independent_rows` being right,
-        // which is exactly the kind of assumption worth not betting soundness on.
+        // and the `SingularUnexpected` arm is unreachable by construction — kept
+        // because "unreachable" here rests on `select_independent_rows` being
+        // right, which is exactly the kind of assumption worth not betting
+        // soundness on.
         let k = keep.len();
         let mut gram = vec![vec![BigRational::zero(); k]; k];
         let mut resid = vec![BigRational::zero(); k];
@@ -81,7 +82,7 @@ pub fn refine_feasible(
             }
             resid[i] = dot(&rows[ri], x0) - &rhs[ri];
         }
-        let y = solve_exact(&gram, &resid).ok_or(RefineError::Singular)?;
+        let y = solve_exact(&gram, &resid).ok_or(RefineError::SingularUnexpected)?;
         for (i, &ri) in keep.iter().enumerate() {
             for j in 0..n {
                 x[j] -= &y[i] * &rows[ri][j];
