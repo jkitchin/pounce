@@ -23,8 +23,8 @@ changes.
   QP — KKT point plus PSD Hessian), `infeasible` (Farkas witness), `unbounded`
   (recession direction, LP slice only), and `global-lower-bound` (sum of
   squares). Anything else exits 2 rather than emit an unsound certificate —
-  maximize objectives, indefinite `Q`, non-polynomial objectives, and
-  constrained higher-degree problems are all refused.
+  maximize objectives, non-polynomial objectives, and constrained
+  higher-degree problems are all refused.
 - `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
   polynomial, which is the case where a local solve is worth least: it returns
   one basin and can say nothing about the others, and no KKT argument repairs
@@ -40,13 +40,33 @@ changes.
   `x = 1`, while `x⁴ − 3x² + 2` minimizes at `±√(3/2)` and correctly stops at
   the bound `γ = −1/4` — a certificate over ℚ cannot exhibit an irrational
   minimizer, and reporting the weaker true claim is the point.
+- **`pounce certify --feasible` certifies the float you were actually handed**,
+  on any linearly-constrained QP — convex or not. Every other verdict claims
+  optimality and is therefore available only where the mathematics closes; on a
+  nonconvex QP none of them are, and the honest remaining statement is about
+  where the returned point *sits*. The certificate proves two things at an
+  exact rational ε the emitter computes rather than accepts: every row is
+  violated by at most ε at `x*`, **and** a genuinely feasible `x̂` exists within
+  `‖·‖∞ ≤ ε` of it. The existence claim is the load-bearing half — ε-feasibility
+  alone is satisfiable by a point just outside an *empty* feasible region.
+  `x̂` is the minimum-norm projection of `x*` onto the affine hull of the
+  equalities and active inequalities, computed entirely over ℚ with the float
+  proposing only *which* face to project onto; if it lands outside an inactive
+  row, or the problem has no feasible point, the emitter refuses rather than
+  inflating ε. Opt-in, never a fallback: a failed optimality certificate is a
+  result worth seeing, not one to silently replace with a weaker claim, and
+  `--feasible` where it would prove nothing (an unconstrained polynomial) is
+  refused too. This closes the last verdict the Lean consumer accepted but the
+  producer could not emit.
 - The `γ` ladder now orders candidates by **sharpness** rather than by
   denominator grid. The two disagree: for `x⁴ − 3x² + 2` the tight `−1/4` needs
   a denominator of 4 while the four-times-weaker `−1` sits on the coarsest
   grid, and the old order certified `−1`.
 - **Witnesses are untrusted, and the solver's numbers are never copied.** Wrong
   witness data makes the generated Lean fail to typecheck; it can never make a
-  false statement pass. Every certificate carries `tolerance = 0`, so the f64
+  false statement pass. Every optimality certificate carries `tolerance = 0`
+  (`feasible` is the one verdict where ε *is* the claim rather than slack in
+  it), so the f64
   solve only ever *proposes* — an active set, a Gram matrix, a bound — and each
   is recomputed exactly over ℚ (`refine_kkt`, `refine_farkas`, `round_gram`),
   with the emitter refusing rather than shipping a certificate that cannot
@@ -68,9 +88,11 @@ changes.
   `propext`, `Classical.choice`, `Quot.sound` with no `sorry`; and
   **deliberately corrupted certificates must fail to build** — one forgery per
   obligation a verdict rests on, including an indefinite Gram matrix that still
-  satisfies the SOS identity (so the identity check alone cannot catch it) and
-  a wrong minimizer attached to a bound that is entirely genuine (so only the
-  `p(x₀) = γ` goal can).
+  satisfies the SOS identity (so the identity check alone cannot catch it), a
+  wrong minimizer attached to a bound that is entirely genuine (so only the
+  `p(x₀) = γ` goal can), and for `feasible` a pair that isolates its two
+  obligations against each other: an `x̂` close to `x*` but infeasible, and one
+  feasible but too far away.
 
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 

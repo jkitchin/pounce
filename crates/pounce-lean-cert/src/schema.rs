@@ -171,6 +171,22 @@ pub struct Witnesses {
     /// `global-lower-bound` only. v1 emits exactly one (the unconstrained case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sos: Option<Vec<SosBlock>>,
+    /// An exactly-feasible point near the candidate — `feasible` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feasible_witness: Option<FeasibleWitness>,
+}
+
+/// A point that satisfies every constraint **exactly over ℚ**, close to the
+/// certificate's candidate.
+///
+/// This is what makes `feasible` a claim worth certifying. The candidate is the
+/// solver's float point, so its rational image misses the constraints by a
+/// residual and only ε-feasibility can be asserted about it — a statement with a
+/// knob in it. `xhat` turns that into an existence theorem with no knob: a
+/// genuine feasible point exists, within ε of what the solver reported.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FeasibleWitness {
+    pub xhat: Vec<Rat>,
 }
 
 /// One SOS block: `σ(x) = m(x)ᵀ G m(x)` with `G = L·diag(D)·Lᵀ ⪰ 0`.

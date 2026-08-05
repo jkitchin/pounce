@@ -269,6 +269,19 @@ silently rotting.
   over ℚ rather than a gap. Constrained problems still need Positivstellensatz
   multipliers on the emitter side — `constrained_lower_bound_of_sos` already
   exists in pounce-lean.
+* **Phase 2b — done.** Tier 1 (`feasible`) closed on the emitter side with
+  `pounce certify --feasible`, for linearly-constrained QPs of any curvature.
+  This was the last verdict the consumer accepted and the producer could not
+  emit. Note which of the two Tier-1 treatments it implements: **both**, and
+  the ε is not the equality-residual fuzz option (a) anticipated. The linear
+  equalities are satisfied *exactly* by the emitted `x̂` — the minimum-norm
+  projection of `x*` onto the affine hull of the equalities and the active
+  inequalities, over ℚ — so ε measures only the distance from the reported
+  float to that exact point, and the certificate carries option (b)'s existence
+  claim (`∃ x̂ feasible, ‖x̂ − x*‖∞ ≤ ε`) without needing interval-Newton,
+  because on a *linear* face the projection is a closed form rather than a
+  fixed-point argument. Interval-Newton is still what a nonlinear equality
+  will need.
 * **Phase 3.** `local-min-strict` for general smooth algebraic NLP; later,
   transcendentals (where `dReal` may complement Mathlib's thin interval
   arithmetic).
@@ -304,9 +317,12 @@ Worked example: [`dev-notes/lean-cert-example/`](lean-cert-example/).
 
 ## Open questions
 
-1. **Equality constraints in tier 1:** ship declared-tolerance ε now, or invest
-   in interval-Newton existence? Changes what "verified feasible" *means* to a
-   consumer.
+1. ~~**Equality constraints in tier 1:** ship declared-tolerance ε now, or invest
+   in interval-Newton existence?~~ **Answered for the linear case, and the
+   dichotomy was false.** Projecting onto the affine hull satisfies the
+   equalities exactly *and* yields the existence witness in closed form, so
+   `--feasible` ships both halves without interval-Newton. The question stands
+   as posed only for *nonlinear* equalities, where no such projection exists.
 2. **Consumer ergonomics:** is requiring `lake build` acceptable, or do we also
    ship a prebuilt/attested verdict for consumers who will not run Lean? (The
    latter reintroduces a trust-the-attester problem the proof was meant to

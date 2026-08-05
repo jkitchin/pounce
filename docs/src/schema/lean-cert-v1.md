@@ -19,14 +19,15 @@ Implementation: the serde structs and the exact-rational emitter live in
 [`crates/pounce-cli/src/certify.rs`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-cli/src/certify.rs)
 wires it to the CLI.
 
-> **Status.** Four verdicts are **validated end-to-end** — `global-min`
-> (from `qp-convex` via KKT, *and* from `sos-poly` via an attained bound),
-> `infeasible`, `unbounded`, and `global-lower-bound` (`sos-poly`): `pounce certify` emits each, and `pounce-lean` kernel-checks it
-> (reusable lemmas → codegen → `lake build`) with proofs resting only on Lean's
-> standard axioms (`propext`, `Classical.choice`, `Quot.sound`; no `sorry`).
-> Each has a fixture in `crates/pounce-cli/tests/fixtures/` that
-> `scripts/check-lean-cert.sh` regenerates, rebuilds, and audits. The `feasible`
-> verdict is the one the consumer accepts and the producer still cannot emit.
+> **Status.** Every verdict the consumer accepts is now **validated
+> end-to-end** — `global-min` (from `qp-convex` via KKT, *and* from `sos-poly`
+> via an attained bound), `infeasible`, `unbounded`, `global-lower-bound`
+> (`sos-poly`), and `feasible`: `pounce certify` emits each, and `pounce-lean`
+> kernel-checks it (reusable lemmas → codegen → `lake build`) with proofs
+> resting only on Lean's standard axioms (`propext`, `Classical.choice`,
+> `Quot.sound`; no `sorry`). Each has a fixture in
+> `crates/pounce-cli/tests/fixtures/` that `scripts/check-lean-cert.sh`
+> regenerates, rebuilds, and audits.
 
 ## Two documents, two audiences — and one asymmetry
 
@@ -52,15 +53,18 @@ reads the certificate.
 > | `infeasible` (Farkas witness `witnesses.farkas.y`) | yes | yes |
 > | `unbounded` (recession witness `witnesses.recession`) | yes | yes |
 > | `global-lower-bound` (SOS witness `witnesses.sos`) | yes | yes |
-> | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | **no** | **yes** |
+> | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | yes (`--feasible`) | yes |
 > | `local-min-strict` | no | no |
 >
-> `feasible` is the residual gap: **every `feasible` certificate in existence is
-> hand-written.** The consumer-side machinery for it (`candidate_eps_feasible`,
-> `feasible_point_exists`, and the `feasible_witness` field) is implemented and
-> tested there, and is described in § 9 of the consumer document — but nothing
-> in POUNCE can produce input for it yet. Until that changes, treat § 9 of the
-> consumer document as a specification the producer has not met.
+> `local-min-strict` is now the only gap. It is a different kind of gap from the
+> ones that closed: those needed a refinement step, this needs a second-order
+> theory the consumer does not yet have either.
+>
+> `feasible` was the last row where the consumer ran ahead of the producer, and
+> it closed differently from the others — it is the one verdict the emitter will
+> not choose on its own. `pounce certify --feasible` is an explicit request,
+> because a failed optimality certificate is a result worth seeing rather than
+> one to quietly replace with a weaker claim.
 >
 > None of the closed rows was a field copy, and it is easy to assume otherwise.
 > `QpStatus::PrimalInfeasible` is a unit variant carrying no payload, and the
@@ -154,14 +158,14 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
-| `verdict` | enum | The single proven claim: `"global-min"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
+| `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
 | `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. |
-| `tolerance` | rational | Feasibility ε. Always `0` — every emitted slice is exact. |
+| `tolerance` | rational | Feasibility ε. `0` for every verdict except `feasible`, whose whole subject is a point that misses feasibility — there it is an exact rational bound on the residual, computed over ℚ and rounded **up** to one significant digit, never a solver setting copied across. |
 | `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
 | `toolchain` | object | The Lean toolchain + Mathlib revision the cert is authored against (a proof reproduces only under the same pin). |
 | `problem` | object | The problem over ℚ — see below. |
-| `candidate` | object | `x*` and its objective over ℚ. **Absent** whenever the verdict names no point (`infeasible`, `unbounded`, `global-lower-bound`) — the key is omitted, not nulled, so a consumer cannot mistake a bound for a claimed minimizer. |
+| `candidate` | object | `x*` and its objective over ℚ. **Absent** whenever the verdict names no point (`infeasible`, `unbounded`, `global-lower-bound`) — the key is omitted, not nulled, so a consumer cannot mistake a bound for a claimed minimizer. For `feasible` it is the solver's float verbatim, not a refined point: that point is what the verdict is *about*. |
 | `witnesses` | object | Untrusted proof hints — see below. |
 
 ## Problem encoding
@@ -348,9 +352,11 @@ is always emitted as the infinite sentinels in v1; bounds live in `constraints`.
 
 Outside this slice `pounce certify` **exits 2** rather than emit an unsound
 certificate — except that a higher-degree unconstrained polynomial objective is
-routed to the SOS slice above instead of refused. Indefinite `Q`, maximize
-objectives, constrained nonconvex problems, and the `feasible` /
-`local-min-strict` verdicts remain additive future work.
+routed to the SOS slice above instead of refused, and that `--feasible` opts
+into the weaker `feasible` verdict, which needs no convexity (indefinite `Q` is
+fine — it certifies only where the point sits, not that it is optimal).
+Maximize objectives, *optimality* claims on constrained nonconvex problems, and
+the `local-min-strict` verdict remain additive future work.
 
 ## Consumer acceptance
 

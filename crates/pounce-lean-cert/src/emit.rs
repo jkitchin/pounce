@@ -17,9 +17,9 @@ use crate::linalg::dot;
 use crate::rational::{Bound, Rat, RatError};
 use crate::refine::{RefineError, refine_kkt_eq};
 use crate::schema::{
-    Binding, Candidate, Certificate, Constraint, Entry, Farkas, HessianPsd, Objective, Problem,
-    Recession, SCHEMA_TAG, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds,
-    Witnesses,
+    Binding, Candidate, Certificate, Constraint, Entry, Farkas, FeasibleWitness, HessianPsd,
+    Objective, Problem, Recession, SCHEMA_TAG, SparseMatrix, Toolchain, VALIDATED_LEAN,
+    VALIDATED_MATHLIB, VarBounds, Witnesses,
 };
 use num_rational::BigRational;
 use num_traits::Zero;
@@ -359,6 +359,93 @@ fn build_problem_view(input: &QpInput) -> Result<ProblemView, EmitError> {
     })
 }
 
+/// Which system an expanded constraint row landed in, so a cert-order dual can
+/// be read back out of the right multiplier vector.
+enum RowRef {
+    Ineq(usize),
+    Eq(usize),
+}
+
+/// The expanded rows split into `A x ≥ b` (multipliers `λ ≥ 0`) and `E x = d`
+/// (free-sign `μ`), plus the float slacks used to guess which inequalities are
+/// active.
+struct NormalizedRows {
+    a_rows: Vec<Vec<BigRational>>,
+    b_rhs: Vec<BigRational>,
+    e_rows: Vec<Vec<BigRational>>,
+    d_rhs: Vec<BigRational>,
+    /// `A_i x̃ − b_i` in f64, aligned with `a_rows`. Float, and only ever used
+    /// to *propose* an active set.
+    nslack: Vec<f64>,
+    /// One entry per expanded constraint, in cert order.
+    row_ref: Vec<RowRef>,
+}
+
+/// Normalize expanded constraints to the two systems the Lean side speaks.
+///
+/// A `≤` row is negated rather than given a sign convention of its own, so
+/// every inequality multiplier is `≥ 0` and one KKT theorem covers all of them.
+fn normalize_rows(
+    n: usize,
+    all_constraints: &[LinearConstraint],
+    x_float: &[f64],
+) -> Result<NormalizedRows, EmitError> {
+    let mut out = NormalizedRows {
+        a_rows: Vec::new(),
+        b_rhs: Vec::new(),
+        e_rows: Vec::new(),
+        d_rhs: Vec::new(),
+        nslack: Vec::new(),
+        row_ref: Vec::with_capacity(all_constraints.len()),
+    };
+    for con in all_constraints {
+        if con.coeffs.len() != n {
+            return Err(EmitError::DimensionMismatch);
+        }
+        let ax: f64 = con.coeffs.iter().zip(x_float).map(|(a, x)| a * x).sum();
+        let (lo_fin, hi_fin) = (con.lower.is_finite(), con.upper.is_finite());
+        if lo_fin && hi_fin {
+            // Equality `a·x = lower` (ranges were split upstream, so lower == upper).
+            if con.lower != con.upper {
+                return Err(EmitError::SelfCheck("range survived expansion"));
+            }
+            let row = con
+                .coeffs
+                .iter()
+                .map(|&v| br(v))
+                .collect::<Result<Vec<_>, _>>()?;
+            out.row_ref.push(RowRef::Eq(out.e_rows.len()));
+            out.e_rows.push(row);
+            out.d_rhs.push(br(con.lower)?);
+        } else if lo_fin {
+            // lower ≤ a·x  ⇒  a·x ≥ lower
+            let row = con
+                .coeffs
+                .iter()
+                .map(|&v| br(v))
+                .collect::<Result<Vec<_>, _>>()?;
+            out.row_ref.push(RowRef::Ineq(out.a_rows.len()));
+            out.a_rows.push(row);
+            out.b_rhs.push(br(con.lower)?);
+            out.nslack.push(ax - con.lower);
+        } else if hi_fin {
+            // a·x ≤ upper  ⇒  −a·x ≥ −upper
+            let row = con
+                .coeffs
+                .iter()
+                .map(|&v| br(v).map(|r| -r))
+                .collect::<Result<Vec<_>, _>>()?;
+            out.row_ref.push(RowRef::Ineq(out.a_rows.len()));
+            out.a_rows.push(row);
+            out.b_rhs.push(-br(con.upper)?);
+            out.nslack.push(con.upper - ax);
+        } else {
+            return Err(EmitError::SelfCheck("free row after expansion"));
+        }
+    }
+    Ok(out)
+}
+
 /// Build an exact `verdict = "infeasible"` certificate from a solve that
 /// terminated primal-infeasible, or refuse.
 ///
@@ -431,6 +518,7 @@ pub fn emit_infeasible_certificate(
             }),
             recession: None,
             sos: None,
+            feasible_witness: None,
         },
     })
 }
@@ -535,6 +623,163 @@ pub fn emit_unbounded_certificate(
                 d: v.into_iter().map(Rat).collect(),
             }),
             sos: None,
+            feasible_witness: None,
+        },
+    })
+}
+
+/// Round `v > 0` **up** to one significant decimal digit; `0` stays `0`.
+///
+/// A tolerance is a declared bound, and a declaration reads better as `4/10^9`
+/// than as the 60-digit fraction an f64 residual actually is. Rounding *up* is
+/// what keeps it a bound: the true residual stays below the number published.
+fn round_up_1sig(v: &BigRational) -> BigRational {
+    if v.is_zero() {
+        return BigRational::zero();
+    }
+    let ten = BigRational::from_integer(10.into());
+    let one = BigRational::from_integer(1.into());
+    let mut scale = one.clone();
+    // Smallest power of ten that lifts `v` to at least 1 — i.e. its leading
+    // digit. Terminates because `v > 0`.
+    while &scale * v < one {
+        scale *= &ten;
+    }
+    let scaled = &scale * v;
+    BigRational::from_integer(scaled.ceil().to_integer()) / scale
+}
+
+/// Build an exact `verdict = "feasible"` certificate, or refuse.
+///
+/// This is the weakest verdict in the schema and the only one that says nothing
+/// about optimality: *the reported point misses feasibility by at most ε, and a
+/// genuinely feasible point exists within ε of it*. It is worth having because a
+/// solve that cannot be certified optimal — a nonconvex model, a `Q` that is not
+/// PSD, an active set that will not refine — has still produced something, and
+/// "this is a real feasible point of the real problem" is a claim a reviewer can
+/// use.
+///
+/// Unlike every other verdict, ε is **nonzero**: the candidate is the solver's
+/// float `x̃` verbatim (rational image), residual and all. The exactness lives in
+/// `witnesses.feasible_witness`, which [`crate::refine_feasible`] computes by
+/// projecting `x̃` onto the active face over ℚ, and in ε itself, which is a
+/// rational bound on residuals computed exactly rather than a solver tolerance
+/// copied across.
+///
+/// Refuses when no exactly-feasible point can be produced — a wrong active set
+/// or an infeasible problem — rather than publishing a bare ε-feasibility claim
+/// about a point that may have no feasible neighbourhood at all.
+pub fn emit_feasible_certificate(
+    input: &QpInput,
+    meta: &CertMeta,
+) -> Result<Certificate, EmitError> {
+    let n = input.n;
+    let view = build_problem_view(input)?;
+    if input.x_float.len() != n {
+        return Err(EmitError::DimensionMismatch);
+    }
+    let ProblemView {
+        problem,
+        all_constraints,
+        m_dense,
+        c_rat,
+        constant_rat,
+        ..
+    } = view;
+
+    let NormalizedRows {
+        a_rows,
+        b_rhs,
+        e_rows,
+        d_rhs,
+        nslack,
+        ..
+    } = normalize_rows(n, &all_constraints, &input.x_float)?;
+
+    // The candidate is the float point itself. Nothing is refined into it: the
+    // whole point of this verdict is to certify what the solver actually
+    // returned, with the correction shipped alongside as a separate witness.
+    let xstar: Vec<BigRational> = input
+        .x_float
+        .iter()
+        .map(|&v| br(v))
+        .collect::<Result<_, _>>()?;
+
+    // Rows the float solve sits on are the ones to pin; the projection is
+    // verified against every row afterwards, so this is a guess like any other.
+    let active: Vec<usize> = (0..a_rows.len())
+        .filter(|&i| nslack[i].abs() <= input.active_tol)
+        .collect();
+    let xhat =
+        crate::refine_feasible::refine_feasible(&a_rows, &b_rhs, &e_rows, &d_rhs, &active, &xstar)?;
+
+    // ε must cover both claims the consumer makes: that `x*` is ε-feasible, and
+    // that `x̂` is within ε of `x*`. Neither implies the other — a row with large
+    // coefficients turns a small step into a large residual, and a nearly
+    // parallel pair of rows the reverse — so ε is the max of the two.
+    let mut worst = BigRational::zero();
+    for (i, row) in a_rows.iter().enumerate() {
+        let violation = &b_rhs[i] - dot(row, &xstar);
+        if violation > worst {
+            worst = violation;
+        }
+    }
+    for (j, row) in e_rows.iter().enumerate() {
+        let residual = dot(row, &xstar) - &d_rhs[j];
+        let residual = if residual < BigRational::zero() {
+            -residual
+        } else {
+            residual
+        };
+        if residual > worst {
+            worst = residual;
+        }
+    }
+    for (xh, xs) in xhat.iter().zip(&xstar) {
+        let step = xh - xs;
+        let step = if step < BigRational::zero() {
+            -step
+        } else {
+            step
+        };
+        if step > worst {
+            worst = step;
+        }
+    }
+    let eps = round_up_1sig(&worst);
+
+    let objective = objective_value(&m_dense, &c_rat, &constant_rat, &xstar);
+
+    Ok(Certificate {
+        schema: SCHEMA_TAG.to_string(),
+        verdict: "feasible".to_string(),
+        problem_class: "qp-convex".to_string(),
+        tolerance: Rat(eps),
+        bound: None,
+        binding: Binding {
+            nl_sha256: meta.nl_sha256.clone(),
+            sol_sha256: meta.sol_sha256.clone(),
+            solver: meta.solver.clone(),
+        },
+        toolchain: Toolchain {
+            lean: VALIDATED_LEAN.to_string(),
+            mathlib: VALIDATED_MATHLIB.to_string(),
+        },
+        problem,
+        candidate: Some(Candidate {
+            x: xstar.into_iter().map(Rat).collect(),
+            objective: Rat(objective),
+        }),
+        witnesses: Witnesses {
+            duals: None,
+            hessian_psd: None,
+            active_set: None,
+            farkas: None,
+            recession: None,
+            sos: None,
+            feasible_witness: Some(FeasibleWitness {
+                xhat: xhat.into_iter().map(Rat).collect(),
+            }),
         },
     })
 }
@@ -557,68 +802,15 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
 
     // Route each row to the inequality system `A x ≥ b` (λ ≥ 0) or the equality
     // system `E x = d` (free-sign μ), remembering which the cert constraint maps
-    // to so its single dual lands in the right place. `nslack` is the float
-    // normalized slack, used only for active-set detection on inequalities.
-    enum RowRef {
-        Ineq(usize),
-        Eq(usize),
-    }
-    let mut a_rows: Vec<Vec<BigRational>> = Vec::new();
-    let mut b_rhs: Vec<BigRational> = Vec::new();
-    let mut nslack: Vec<f64> = Vec::new();
-    let mut e_rows: Vec<Vec<BigRational>> = Vec::new();
-    let mut d_rhs: Vec<BigRational> = Vec::new();
-    let mut row_ref: Vec<RowRef> = Vec::with_capacity(all_constraints.len());
-    for con in all_constraints.iter() {
-        if con.coeffs.len() != n {
-            return Err(EmitError::DimensionMismatch);
-        }
-        let ax: f64 = con
-            .coeffs
-            .iter()
-            .zip(&input.x_float)
-            .map(|(a, x)| a * x)
-            .sum();
-        let (lo_fin, hi_fin) = (con.lower.is_finite(), con.upper.is_finite());
-        if lo_fin && hi_fin {
-            // Equality `a·x = lower` (ranges were split upstream, so lower == upper).
-            if con.lower != con.upper {
-                return Err(EmitError::SelfCheck("range survived expansion"));
-            }
-            let row = con
-                .coeffs
-                .iter()
-                .map(|&v| br(v))
-                .collect::<Result<Vec<_>, _>>()?;
-            row_ref.push(RowRef::Eq(e_rows.len()));
-            e_rows.push(row);
-            d_rhs.push(br(con.lower)?);
-        } else if lo_fin {
-            // lower ≤ a·x  ⇒  a·x ≥ lower
-            let row = con
-                .coeffs
-                .iter()
-                .map(|&v| br(v))
-                .collect::<Result<Vec<_>, _>>()?;
-            row_ref.push(RowRef::Ineq(a_rows.len()));
-            a_rows.push(row);
-            b_rhs.push(br(con.lower)?);
-            nslack.push(ax - con.lower);
-        } else if hi_fin {
-            // a·x ≤ upper  ⇒  −a·x ≥ −upper
-            let row = con
-                .coeffs
-                .iter()
-                .map(|&v| br(v).map(|r| -r))
-                .collect::<Result<Vec<_>, _>>()?;
-            row_ref.push(RowRef::Ineq(a_rows.len()));
-            a_rows.push(row);
-            b_rhs.push(-br(con.upper)?);
-            nslack.push(con.upper - ax);
-        } else {
-            return Err(EmitError::SelfCheck("free row after expansion"));
-        }
-    }
+    // to so its single dual lands in the right place.
+    let NormalizedRows {
+        a_rows,
+        b_rhs,
+        e_rows,
+        d_rhs,
+        nslack,
+        row_ref,
+    } = normalize_rows(n, &all_constraints, &input.x_float)?;
 
     // Active-set guess from the float point; refinement validates it exactly.
     let active: Vec<usize> = (0..a_rows.len())
@@ -697,6 +889,7 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
             farkas: None,
             recession: None,
             sos: None,
+            feasible_witness: None,
         },
     };
 

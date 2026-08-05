@@ -2,3 +2,10 @@
 # integration tests run the solver against a fixture. They're not
 # fixtures themselves; the tests parse them in-process and discard.
 *.sol
+
+# One exception. The `feasible` verdict certifies the *float* the solver
+# returned — that point is the subject of the claim, not an intermediate on the
+# way to an exact one. Regenerating it would make the golden certificate track
+# solver iterates rather than emitter behaviour, so this `.sol` is a fixture in
+# its own right and is committed.
+!certify_feasible.sol

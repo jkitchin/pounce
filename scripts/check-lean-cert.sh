@@ -34,14 +34,17 @@ cd "$(git rev-parse --show-toplevel)"
 
 FIX="crates/pounce-cli/tests/fixtures"
 
-# Each fixture: "<basename> <Lean module>". The basename names the committed
-# <basename>.{nl,cert.json,expected.lean} triple. The `.sol` is NOT committed —
-# `$FIX/.gitignore` excludes `*.sol` because they are solver byproducts — so we
-# solve each `.nl` below to produce it. That also makes this a true end-to-end
-# check: f64 solve, then exact certification of the refined point.
+# Each fixture: "<basename> <Lean module> <theorem> [certify flags]". The
+# basename names the committed <basename>.{nl,cert.json,expected.lean} triple.
+# The `.sol` is usually NOT committed — `$FIX/.gitignore` excludes `*.sol`
+# because they are solver byproducts — so we solve each `.nl` below to produce
+# it. That also makes this a true end-to-end check: f64 solve, then exact
+# certification of the refined point. A fixture whose `.sol` *is* committed
+# (see certify_feasible) is used as committed instead of re-solved.
 # Third field: the theorem the axiom audit targets. It is NOT always
 # `global_min` — an `infeasible` certificate proves `infeasible` instead, and
 # hardcoding the optimality name silently skipped that fixture's real check.
+# Fourth field (optional): extra flags for `pounce certify`.
 FIXTURES=(
   "certify_qp    PounceLean.CertifyQP    global_min"  # free vars, one general constraint
   "certify_box   PounceLean.CertifyBox   global_min"  # box variable bounds (folded to rows)
@@ -57,6 +60,14 @@ FIXTURES=(
   # in exactly one direction.
   "certify_sos        PounceLean.CertifySOS        global_min"  # nonconvex quartic; bound attained
   "certify_sos_bound  PounceLean.CertifySOSBound   global_lb"   # irrational minimizer; bound only
+  # The one verdict that is not about optimality: an indefinite Hessian, so the
+  # global-min path refuses (Ldl(Indefinite)) and there is nothing to certify
+  # about the solve EXCEPT that its answer is a real point of the real feasible
+  # set. Its `.sol` is committed rather than re-solved, because unlike every
+  # other fixture the certificate is about the *float* the solver returned — a
+  # regenerated `.sol` would make this golden track solver noise instead of
+  # emitter behaviour.
+  "certify_feasible   PounceLean.CertifyFeasible   feasible_point_exists --feasible"
 )
 
 tmp="$(mktemp -d)"
@@ -93,18 +104,24 @@ else
 fi
 
 for entry in "${FIXTURES[@]}"; do
-  read -r base module thm <<<"$entry"
+  read -r base module thm flags <<<"$entry"
   golden_cert="$FIX/$base.cert.json"
-  # Produce the (gitignored) .sol by actually solving; see FIXTURES comment.
-  # The exit code is deliberately ignored: an INFEASIBLE solve exits 1 while
-  # still writing a perfectly good .sol, and that .sol is exactly what the
-  # `infeasible` fixture certifies. What matters is that the file appears.
-  "${PNC[@]}" "$FIX/$base.nl" >/dev/null 2>&1 || true
-  if [[ ! -f "$FIX/$base.sol" ]]; then
-    echo "FAIL — $base: solve did not write $FIX/$base.sol" >&2
-    exit 1
+  if git ls-files --error-unmatch "$FIX/$base.sol" >/dev/null 2>&1; then
+    # A committed .sol is the fixture; re-solving would overwrite it.
+    echo "  .. $base: using the committed .sol (not re-solving)"
+  else
+    # Produce the (gitignored) .sol by actually solving; see FIXTURES comment.
+    # The exit code is deliberately ignored: an INFEASIBLE solve exits 1 while
+    # still writing a perfectly good .sol, and that .sol is exactly what the
+    # `infeasible` fixture certifies. What matters is that the file appears.
+    "${PNC[@]}" "$FIX/$base.nl" >/dev/null 2>&1 || true
+    if [[ ! -f "$FIX/$base.sol" ]]; then
+      echo "FAIL — $base: solve did not write $FIX/$base.sol" >&2
+      exit 1
+    fi
   fi
-  "${PNC[@]}" certify "$FIX/$base.nl" "$FIX/$base.sol" -o "$tmp/$base.cert.json"
+  # shellcheck disable=SC2086  # $flags is a deliberate word-split of the 4th field
+  "${PNC[@]}" certify $flags "$FIX/$base.nl" "$FIX/$base.sol" -o "$tmp/$base.cert.json"
   if ! diff_nv "$base" "$golden_cert" "$tmp/$base.cert.json"; then
     echo "FAIL — emitted certificate drifted from $golden_cert" >&2
     echo "       (intentional? regenerate: pounce certify $FIX/$base.nl $FIX/$base.sol -o $golden_cert)" >&2
@@ -139,7 +156,7 @@ cleanup() { rm -rf "$tmp"; for f in "${placed[@]}"; do rm -f "$f"; done; }
 trap cleanup EXIT
 
 for entry in "${FIXTURES[@]}"; do
-  read -r base module thm <<<"$entry"
+  read -r base module thm _flags <<<"$entry"
   golden_lean="$FIX/$base.expected.lean"
 
   echo "== $base: codegen reproduces the golden .lean =="
@@ -247,6 +264,14 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # other check passes, so `p xstar = γ` is the sole thing standing between a
     # true bound and a false claim about where it is reached.
     "certify_sos_forged_candidate PounceLean.Generated.ForgedSosCand  minimizer (bound holds, but not at that point)"
+    # The `feasible` verdict's existence claim rests on two properties of the
+    # witness — that it is exactly feasible, and that it is within ε of the
+    # reported point — and neither implies the other, so each gets a forgery
+    # that leaves the other intact. (The third obligation, ε-feasibility of the
+    # candidate, shares ε with the closeness check and so cannot be corrupted
+    # in isolation; it is covered by both of these.)
+    "certify_feasible_forged_witness PounceLean.Generated.ForgedFeasWitness witness (within ε of x*, but not feasible — x* itself)"
+    "certify_feasible_forged_far     PounceLean.Generated.ForgedFeasFar     witness (exactly feasible, but far outside ε)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

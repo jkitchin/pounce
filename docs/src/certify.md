@@ -39,11 +39,14 @@ is exactly as trustworthy as the secrecy of the key. A Lean proof has no such
 dependency: the trust anchor is the kernel, which the consumer runs, using
 *their* pinned Lean and Mathlib.
 
-**Nothing is approximate.** Every certificate carries `tolerance = 0`. The f64
-solve is treated as a *heuristic that proposes* — an active set, a Gram matrix,
-a bound — and everything emitted is recomputed exactly over ℚ. If the float
-guess was wrong, the emitter refuses rather than shipping a certificate that
-cannot verify.
+**Nothing is approximate.** Every optimality certificate carries
+`tolerance = 0`. The f64 solve is treated as a *heuristic that proposes* — an
+active set, a Gram matrix, a bound — and everything emitted is recomputed
+exactly over ℚ. If the float guess was wrong, the emitter refuses rather than
+shipping a certificate that cannot verify. (The one verdict with a nonzero
+tolerance is [`feasible`](#certifying-the-float-itself), where ε is *the claim*
+rather than slack in it — and even there ε is an exact rational the kernel
+checks, not a comparison threshold.)
 
 That last point is the one that surprises people, so it is worth being concrete.
 On the `certify_infeasible` fixture the solver's Farkas ray has norm ≈ 2.3e10
@@ -65,6 +68,12 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 | `unbounded` | LP (`Q = 0`) | the objective decreases without bound along a recession direction |
 | `global-lower-bound` | unconstrained polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` |
 | `global-min` | unconstrained polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` everywhere |
+
+plus one you *do* select, with `--feasible`:
+
+| Verdict | Slice | The proven statement |
+|---|---|---|
+| `feasible` | any linearly-constrained QP, convex or not | `x*` violates no row by more than ε, **and** a genuinely feasible point exists within ε of it |
 
 The last two rows are the interesting ones, because they cover the case where a
 solver's usual answer is worth very little. A nonconvex polynomial has many
@@ -93,6 +102,55 @@ is the honest answer rather than a limitation to route around: a certificate
 over ℚ cannot exhibit an irrational minimizer, and the bound it does prove still
 holds for every real `x`.
 
+## Certifying the float itself
+
+Every verdict above claims *optimality*, and each is available only where the
+mathematics closes. On a nonconvex QP none of them do: the KKT argument needs
+convexity, and the SOS route is unconstrained-only. The solver still returns a
+point, and a weaker but genuine statement about that point is still worth
+having.
+
+```console
+$ pounce certify nonconvex_qp.nl nonconvex_qp.sol -o c.json
+pounce certify: cannot certify this solve: Ldl(Indefinite { col: 0 })
+$ pounce certify --feasible nonconvex_qp.nl nonconvex_qp.sol -o c.json
+```
+
+`--feasible` proves two things about the returned `x*`, at an ε the emitter
+computes rather than accepts:
+
+1. **ε-feasibility** — every constraint row is violated by at most ε at `x*`.
+2. **Existence** — there is a genuinely feasible `x̂` with `‖x̂ − x*‖∞ ≤ ε`.
+
+The second claim is the load-bearing one. Claim 1 alone is satisfiable by a
+point sitting just outside an *empty* feasible region, which would make the
+certificate worthless; `x̂` rules that out by construction. It is found by
+projecting `x*` onto the affine hull of the equalities and the active
+inequalities — `x̂ = x₀ − Rᵀ(RRᵀ)⁻¹(Rx₀ − r)` — entirely over ℚ, with the float
+solve proposing only *which* face to project onto. If the projection lands
+outside some inactive row, or the problem has no feasible point at all, the
+emitter refuses; there is no phase-1 search hiding behind the flag.
+
+```json
+"verdict": "feasible",
+"tolerance": { "num": "1", "den": "25000000" },
+"candidate": { "x": [ … ] },
+"witnesses": { "feasible_witness": { "xhat": [ … ] } }
+```
+
+`candidate.x` is the solver's float converted losslessly to ℚ — the point being
+certified is the one you were actually handed, not a cleaned-up neighbour. ε is
+the true worst case over both claims, rounded *up* to one significant figure so
+the number stays readable without ever understating the violation.
+
+The flag is opt-in rather than a fallback. A failed optimality certificate is a
+result worth seeing, not one to quietly replace with a weaker claim — so
+`certify` never downgrades on its own, and `--feasible` on a problem where it
+would prove nothing (an unconstrained polynomial, where every point is trivially
+feasible) is refused too.
+
+## What it refuses
+
 Anything outside these slices **exits 2** rather than emit something unsound:
 
 ```console
@@ -102,8 +160,9 @@ $ echo $?
 2
 ```
 
-Maximize objectives, indefinite `Q`, non-polynomial objectives, and
-constrained higher-degree problems are all refused today.
+Maximize objectives, non-polynomial objectives, and constrained higher-degree
+problems are all refused today. Indefinite `Q` is refused for *optimality*, but
+is exactly the case `--feasible` exists to cover.
 
 ## Emitting a certificate
 
@@ -200,10 +259,15 @@ is the one that tests the actual soundness claim:
 
 Layer 3 carries one forgery per obligation a verdict rests on — a corrupted KKT
 dual, an indefinite Hessian, a broken Farkas ray, an inflated SOS bound, an
-indefinite Gram matrix that still satisfies the SOS identity, and a minimizer
-that does not attain a bound which is itself genuine. A test suite where
-everything passes proves only that valid inputs work; these fixtures are the
-ones that would catch a proof that accepts too much.
+indefinite Gram matrix that still satisfies the SOS identity, a minimizer that
+does not attain a bound which is itself genuine, and — for `feasible` — an `x̂`
+that is close to `x*` but not feasible, alongside one that is feasible but too
+far away. That last pair is the point of the technique: each forgery leaves the
+*other* obligation perfectly intact, so a proof that checked only one of them
+would sail through.
+
+A test suite where everything passes proves only that valid inputs work; these
+fixtures are the ones that would catch a proof that accepts too much.
 
 ## Limits
 
@@ -220,6 +284,12 @@ ones that would catch a proof that accepts too much.
   wrong problem. Routing is decided by objective *degree*, never by a QP
   extraction failing, so a convex QP can never silently downgrade from
   `global-min` to a mere bound.
-* **`feasible` is emitted by nobody.** The consumer accepts an ε-feasibility
-  verdict with an existence witness; POUNCE cannot construct one, so every such
-  certificate in existence is hand-written.
+* **`feasible` proves nothing about optimality.** It is a statement about where
+  a point *sits*, not about whether anything better exists. On a nonconvex
+  problem that is genuinely all a local solve establishes — the verdict is
+  narrow on purpose, and reaching for it says the optimality claim was not
+  available.
+* **`--feasible` needs an active set the float gets right.** The projection
+  target comes from the solver's slacks. If the guess is wrong the exact
+  projection lands outside an inactive row and the emitter refuses rather than
+  widening ε to cover the miss.

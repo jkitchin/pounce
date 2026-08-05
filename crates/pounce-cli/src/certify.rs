@@ -16,8 +16,8 @@ use pounce_convex::sos::{PolyProblem, Polynomial, sos_constrained_lower_bound_gr
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
 use pounce_lean_cert::emit_sos::{SosInput, emit_sos_certificate, sos_problem_block};
 use pounce_lean_cert::{
-    Certificate, canonical_problem, emit_certificate, emit_infeasible_certificate,
-    emit_unbounded_certificate, problem_block, to_canonical_json,
+    Certificate, canonical_problem, emit_certificate, emit_feasible_certificate,
+    emit_infeasible_certificate, emit_unbounded_certificate, problem_block, to_canonical_json,
 };
 use pounce_nl::nl_reader;
 
@@ -65,10 +65,19 @@ Supported slices (v1), chosen automatically from the .nl:
 Maximize, non-polynomial objectives, and constrained higher-degree problems
 are refused (exit 2).
 
+With --feasible, the weaker verdict `feasible` is emitted instead: the
+reported point violates no constraint by more than the certificate's own
+exact tolerance, and a genuinely feasible point exists within that distance
+of it. Nothing is claimed about optimality. This is opt-in rather than a
+fallback -- a failed optimality certificate is a result worth seeing, not
+one to quietly replace with a weaker claim.
+
 options:
   -o, --output <path>     write the certificate JSON here (default: stdout)
       --active-tol <eps>  active-set detection tolerance on the float
                           solution (default: 1e-7)
+      --feasible          certify feasibility of the reported point instead
+                          of optimality
   -h, --help              show this message";
 
 #[derive(Debug)]
@@ -77,6 +86,8 @@ struct CertifyArgs {
     sol: PathBuf,
     output: Option<PathBuf>,
     active_tol: f64,
+    /// Certify feasibility of the reported point instead of optimality.
+    feasible: bool,
 }
 
 pub fn run_from_argv(rest: &[String]) -> ExitCode {
@@ -115,6 +126,7 @@ pub fn run_from_argv(rest: &[String]) -> ExitCode {
 fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
     let mut output = None;
     let mut active_tol = 1e-7;
+    let mut feasible = false;
     let mut positionals: Vec<PathBuf> = Vec::new();
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
@@ -128,6 +140,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
                 let v = it.next().ok_or("--active-tol requires a value")?;
                 active_tol = v.parse().map_err(|e| format!("--active-tol: {e}"))?;
             }
+            "--feasible" => feasible = true,
             other if other.starts_with('-') => return Err(format!("unknown flag `{other}`")),
             _ => positionals.push(PathBuf::from(arg)),
         }
@@ -138,6 +151,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
             sol: positionals[1].clone(),
             output,
             active_tol,
+            feasible,
         })),
         _ => Err("expected two positional arguments: <problem.nl> <claim.sol>".to_string()),
     }
@@ -350,11 +364,37 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         && !unbounded
         && let Some(po) = sos_slice(&prob)
     {
+        if args.feasible {
+            // Every point is feasible for an unconstrained polynomial, so the
+            // certificate would prove nothing. Say so rather than emit it.
+            return Err(
+                "--feasible: this problem is an unconstrained polynomial, so feasibility \
+                 is vacuous; drop the flag to certify the objective bound instead"
+                    .to_string(),
+            );
+        }
         let cert = certify_sos(&po, &iterate, &meta)?;
         return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
     }
 
     let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
+
+    if args.feasible {
+        if infeasible {
+            // The two claims are contradictory. `emit_feasible_certificate`
+            // would refuse anyway, but on a projection failure deep inside the
+            // exact arithmetic — a needlessly obscure way to report that the
+            // solver already answered this question.
+            return Err(
+                "--feasible: the solve terminated infeasible, so there is no feasible \
+                 point to certify; drop the flag for a Farkas certificate of that"
+                    .to_string(),
+            );
+        }
+        let cert = emit_feasible_certificate(&input, &meta)
+            .map_err(|e| format!("cannot certify this point feasible: {e}"))?;
+        return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
+    }
 
     let cert = if infeasible {
         if dual_ray.len() != input.constraints.len() {

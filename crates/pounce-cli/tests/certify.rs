@@ -30,11 +30,14 @@ fn fixture(name: &str) -> PathBuf {
 /// Solve `<stem>.nl` to produce `<stem>.sol` beside it, and return that path.
 ///
 /// `.sol` files are solver byproducts, not fixtures — `tests/fixtures/.gitignore`
-/// excludes `*.sol`, so one can never be committed and any test naming a
-/// committed `.sol` fails (or, worse, passes for the wrong reason: a missing
-/// file also exits 2). Generating it here makes this a genuine end-to-end run:
-/// solve in f64, then certify exactly. The float `x*` lands ~4e-9 off the true
-/// optimum, which is exactly the input Mode B refinement has to snap.
+/// excludes `*.sol`, so a test naming one that was never generated fails (or,
+/// worse, passes for the wrong reason: a missing file also exits 2). Generating
+/// it here makes this a genuine end-to-end run: solve in f64, then certify
+/// exactly. The float `x*` lands ~4e-9 off the true optimum, which is exactly
+/// the input Mode B refinement has to snap.
+///
+/// The one committed `.sol` (`certify_feasible`) is the exception the gitignore
+/// spells out, and tests use it directly rather than through this helper.
 fn solve_to_sol(stem: &str) -> PathBuf {
     let out = Command::new(pounce_exe())
         .arg(fixture(&format!("{stem}.nl")))
@@ -353,4 +356,95 @@ fn cert_verify_rejects_an_sos_certificate_against_the_wrong_nl() {
         "SOS cert for a different .nl must be rejected"
     );
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// Run `pounce certify --feasible` on the committed nonconvex fixture.
+fn certify_feasible_output() -> std::process::Output {
+    Command::new(pounce_exe())
+        .arg("certify")
+        .arg("--feasible")
+        .arg(fixture("certify_feasible.nl"))
+        .arg(fixture("certify_feasible.sol"))
+        .output()
+        .expect("run pounce certify --feasible")
+}
+
+/// The fixture's whole point: an indefinite Hessian, so the optimality path has
+/// nothing to say — and says so, rather than quietly emitting something weaker.
+#[test]
+fn a_nonconvex_qp_cannot_be_certified_optimal() {
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_feasible.nl"))
+        .arg(fixture("certify_feasible.sol"))
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        !out.status.success(),
+        "an indefinite Q has no KKT certificate"
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("Indefinite"),
+        "refusal should name the indefinite Hessian, got: {err}"
+    );
+}
+
+/// ...and the same solve certifies `feasible` when that is what is asked for.
+#[test]
+fn the_feasible_flag_certifies_the_reported_point() {
+    let out = certify_feasible_output();
+    assert!(
+        out.status.success(),
+        "--feasible should certify: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certificate should be JSON");
+
+    assert_eq!(cert["verdict"], "feasible");
+    // The one verdict with a nonzero tolerance, and it is measured from the
+    // reported point rather than copied from a solver setting.
+    assert_eq!(
+        cert["tolerance"],
+        serde_json::json!({"num": "1", "den": "25000000"})
+    );
+    // The exact vertex (4/3, 4/3) — a point no f64 holds.
+    assert_eq!(
+        cert["witnesses"]["feasible_witness"]["xhat"],
+        serde_json::json!([{"num":"4","den":"3"}, {"num":"4","den":"3"}])
+    );
+    // Nothing about optimality is claimed, so no optimality witness is shipped.
+    assert!(cert["witnesses"]["duals"].is_null());
+    assert!(cert["witnesses"]["hessian_psd"].is_null());
+}
+
+#[test]
+fn cert_verify_accepts_the_feasible_certificate() {
+    let out = cert_verify("certify_feasible.nl", "certify_feasible.cert.json");
+    assert!(
+        out.status.success(),
+        "feasible cert should verify against its .nl: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The flag is not a universal weakening. Where feasibility is vacuous or
+/// already contradicted, asking for it gets an explanation, not a certificate.
+#[test]
+fn the_feasible_flag_is_refused_where_it_would_prove_nothing() {
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg("--feasible")
+        .arg(fixture("certify_sos.nl"))
+        .arg(solve_to_sol("certify_sos"))
+        .output()
+        .expect("run pounce certify --feasible");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("vacuous"),
+        "an unconstrained polynomial should be refused as vacuous, got: {err}"
+    );
 }

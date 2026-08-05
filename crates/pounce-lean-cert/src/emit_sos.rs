@@ -400,6 +400,7 @@ pub fn emit_sos_certificate(
             farkas: None,
             recession: None,
             sos: Some(vec![block]),
+            feasible_witness: None,
         },
     })
 }

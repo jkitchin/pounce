@@ -18,6 +18,7 @@
 //! * [`ldlt`] — exact `LDLᵀ` PSD factorization of `Q`.
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
 //! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
+//! * [`refine_feasible`] — exact rational feasible point for the `feasible` verdict.
 //! * [`round_gram`] — exact rational SOS Gram matrix from the SDP's float one.
 //!
 //! * [`emit`] — the neutral-`f64` QP → certificate driver + exact self-check gate.
@@ -29,12 +30,14 @@ pub mod linalg;
 pub mod rational;
 pub mod refine;
 pub mod refine_farkas;
+pub mod refine_feasible;
 pub mod round_gram;
 pub mod schema;
 
 pub use emit::{
     CertMeta, EmitError, LinearConstraint, QpInput, canonical_problem, emit_certificate,
-    emit_infeasible_certificate, emit_unbounded_certificate, problem_block,
+    emit_feasible_certificate, emit_infeasible_certificate, emit_unbounded_certificate,
+    problem_block,
 };
 pub use emit_sos::{SosEmitError, SosInput, emit_sos_certificate, sos_problem_block};
 pub use rational::{Bound, Rat, RatError};
