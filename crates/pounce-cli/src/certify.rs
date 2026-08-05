@@ -57,6 +57,11 @@ Supported slices (v1), chosen automatically from the .nl:
     convexity assumed, which is the point: a KKT argument cannot establish
     global optimality for a nonconvex polynomial.
 
+    If an exact rational point attains that bound, the verdict strengthens
+    to `global-min` and the certificate exhibits the minimizer. A minimizer
+    at irrational coordinates leaves the bound unattained; the certificate
+    then proves the bound alone, which still holds for every x.
+
 Maximize, non-polynomial objectives, and constrained higher-degree problems
 are refused (exit 2).
 
@@ -251,7 +256,16 @@ fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
 /// re-derives an exact `γ` and an exact `G` and refuses if it cannot. So a
 /// relaxation that is loose, or a solve that fails outright, costs a
 /// certificate; it cannot produce a wrong one.
-fn certify_sos(po: &PolyObjective, meta: &CertMeta) -> Result<Certificate, String> {
+///
+/// `x_float` is the local solve's iterate. It is a *hint*: the emitter tries to
+/// snap it to a nearby rational point that attains the exact `γ`, which upgrades
+/// the verdict from a bound to a global minimum. A wrong or missing point leaves
+/// the bound unattained, never a wrong verdict.
+fn certify_sos(
+    po: &PolyObjective,
+    x_float: &[f64],
+    meta: &CertMeta,
+) -> Result<Certificate, String> {
     let poly = Polynomial::new(po.n, po.terms.clone());
     let (bound, gram) =
         sos_constrained_lower_bound_gram(&PolyProblem::new(poly), None, &sos_opts(), backend);
@@ -278,6 +292,7 @@ fn certify_sos(po: &PolyObjective, meta: &CertMeta) -> Result<Certificate, Strin
             basis: block.basis.clone(),
             gram_float: block.matrix.clone(),
             bound_float: bound.lower_bound,
+            x_float: x_float.to_vec(),
         },
         meta,
     )
@@ -335,7 +350,7 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         && !unbounded
         && let Some(po) = sos_slice(&prob)
     {
-        let cert = certify_sos(&po, &meta)?;
+        let cert = certify_sos(&po, &iterate, &meta)?;
         return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
     }
 

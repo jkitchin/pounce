@@ -64,11 +64,12 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 | `infeasible` | LP / QP | no feasible point exists (Farkas witness) |
 | `unbounded` | LP (`Q = 0`) | the objective decreases without bound along a recession direction |
 | `global-lower-bound` | unconstrained polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` |
+| `global-min` | unconstrained polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` everywhere |
 
-The last row is the interesting one, because it is the case where a solver's
-usual answer is worth very little. A nonconvex polynomial has many basins; a
-local solve returns one and can say nothing about the others, and no KKT
-argument fixes that. What *can* be established is a bound, via a
+The last two rows are the interesting ones, because they cover the case where a
+solver's usual answer is worth very little. A nonconvex polynomial has many
+basins; a local solve returns one and can say nothing about the others, and no
+KKT argument fixes that. What *can* be established is a bound, via a
 sum-of-squares identity — exhibit a monomial basis `m(x)`, a rational `γ`, and
 a positive-semidefinite Gram matrix `G` with
 
@@ -79,6 +80,18 @@ p(x) − γ = m(x)ᵀ G m(x)
 The right-hand side is a nonnegative quadratic form for every `x`, so the
 bound holds globally. Lean closes the identity with `ring` and discharges
 `G ⪰ 0` from an exact `LDLᵀ` — two independent obligations, both required.
+
+If some rational point *reaches* γ, the claim strengthens from a bound to a
+minimum, and the extra obligation is a single equation: `p(x₀) = γ` over ℚ. For
+`x⁴ − 2x² + 2` that point is `x = 1`, and `pounce certify` finds it by snapping
+the local solve's iterate to a short ladder of rational grids and evaluating `p`
+**exactly** — equality or nothing, never closeness.
+
+Not every polynomial has one. `x⁴ − 3x² + 2` minimizes at `±√(3/2)`, which no
+rational point reaches, so its certificate stops at `γ = −1/4` and says so. That
+is the honest answer rather than a limitation to route around: a certificate
+over ℚ cannot exhibit an irrational minimizer, and the bound it does prove still
+holds for every real `x`.
 
 Anything outside these slices **exits 2** rather than emit something unsound:
 
@@ -108,7 +121,7 @@ lands in one basin arbitrarily — the certificate opens:
 ```json
 {
   "schema": "pounce.lean-cert/v1",
-  "verdict": "global-lower-bound",
+  "verdict": "global-min",
   "problem_class": "sos-poly",
   "tolerance": { "num": "0", "den": "1" },
   "bound":     { "num": "1", "den": "1" },
@@ -117,14 +130,18 @@ lands in one basin arbitrarily — the certificate opens:
     "sol_sha256": "ff379f9e3437895a5af918b6e01e71a6c7742795bc710689f10a05ee4bb9ff49",
     "solver": "pounce 0.9.0"
   },
-  "toolchain": { "lean": "leanprover/lean4:v4.31.0", "mathlib": "fabf563a…" }
+  "toolchain": { "lean": "leanprover/lean4:v4.31.0", "mathlib": "fabf563a…" },
+  "candidate": { "x": [ { "num": "1", "den": "1" } ],
+                 "objective": { "num": "1", "den": "1" } }
 }
 ```
 
-Two details are load-bearing. The SDP that finds `G` returns a bound near
-`1 − 1e-9`; the certificate says exactly `1/1`. And there is **no `candidate`
-key at all** — a bound names no minimizer, and the key is omitted rather than
-nulled so a consumer cannot mistake one for the other.
+Three details are load-bearing. The SDP that finds `G` returns a bound near
+`1 − 1e-9`; the certificate says exactly `1/1`. The iterate is near `1 − 4e-10`;
+the candidate is exactly `1/1`. And `candidate.objective` equals `bound` — that
+equality is the entire difference between this and a `global-lower-bound`
+certificate, which omits the `candidate` key rather than nulling it, so a
+consumer cannot mistake a bound for a claimed minimizer.
 
 The full field-by-field reference is the
 [Lean Certificate Schema v1](schema/lean-cert-v1.md).
@@ -182,8 +199,9 @@ is the one that tests the actual soundness claim:
 | 3 | **deliberately corrupted certificates must FAIL to build** | yes |
 
 Layer 3 carries one forgery per obligation a verdict rests on — a corrupted KKT
-dual, an indefinite Hessian, a broken Farkas ray, an inflated SOS bound, and an
-indefinite Gram matrix that still satisfies the SOS identity. A test suite where
+dual, an indefinite Hessian, a broken Farkas ray, an inflated SOS bound, an
+indefinite Gram matrix that still satisfies the SOS identity, and a minimizer
+that does not attain a bound which is itself genuine. A test suite where
 everything passes proves only that valid inputs work; these fixtures are the
 ones that would catch a proof that accepts too much.
 

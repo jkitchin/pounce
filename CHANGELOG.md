@@ -31,6 +31,19 @@ changes.
   that. POUNCE solves an SOS relaxation, then certifies the identity
   `p(x) − γ = m(x)ᵀ G m(x)` with `G ⪰ 0` — Lean closes the identity with
   `ring` and discharges positive-semidefiniteness from an exact `LDLᵀ`.
+- **A nonconvex polynomial whose bound is attained gets `global-min`**, not
+  merely a bound: if an exact rational `x₀` satisfies `p(x₀) = γ`, then `x₀`
+  minimizes `p` over all of ℝⁿ — a global claim about a problem where no KKT
+  argument applies. The emitter snaps the local solve's iterate to a short
+  ladder of rational grids and evaluates `p` exactly; equality is required, so
+  a near miss is not a minimizer. `x⁴ − 2x² + 2` certifies `global-min` at
+  `x = 1`, while `x⁴ − 3x² + 2` minimizes at `±√(3/2)` and correctly stops at
+  the bound `γ = −1/4` — a certificate over ℚ cannot exhibit an irrational
+  minimizer, and reporting the weaker true claim is the point.
+- The `γ` ladder now orders candidates by **sharpness** rather than by
+  denominator grid. The two disagree: for `x⁴ − 3x² + 2` the tight `−1/4` needs
+  a denominator of 4 while the four-times-weaker `−1` sits on the coarsest
+  grid, and the old order certified `−1`.
 - **Witnesses are untrusted, and the solver's numbers are never copied.** Wrong
   witness data makes the generated Lean fail to typecheck; it can never make a
   false statement pass. Every certificate carries `tolerance = 0`, so the f64
@@ -55,7 +68,9 @@ changes.
   `propext`, `Classical.choice`, `Quot.sound` with no `sorry`; and
   **deliberately corrupted certificates must fail to build** — one forgery per
   obligation a verdict rests on, including an indefinite Gram matrix that still
-  satisfies the SOS identity, so the identity check alone cannot catch it.
+  satisfies the SOS identity (so the identity check alone cannot catch it) and
+  a wrong minimizer attached to a bound that is entirely genuine (so only the
+  `p(x₀) = γ` goal can).
 
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 

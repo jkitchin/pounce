@@ -1,18 +1,18 @@
 {
   "schema": "pounce.lean-cert/v1",
-  "verdict": "global-min",
+  "verdict": "global-lower-bound",
   "problem_class": "sos-poly",
   "tolerance": {
     "num": "0",
     "den": "1"
   },
   "bound": {
-    "num": "1",
-    "den": "1"
+    "num": "-1",
+    "den": "4"
   },
   "binding": {
-    "nl_sha256": "69ee731038777d1c5b26b0ada4191a93d11dd91b10d427a0e7a16d2da01946d8",
-    "sol_sha256": "ff379f9e3437895a5af918b6e01e71a6c7742795bc710689f10a05ee4bb9ff49",
+    "nl_sha256": "23837e508a3937687e870134d88764b2383f4b29e6731d9afcdcd6602a00f80d",
+    "sol_sha256": "00872b2662644b6222ce0478a55414f059f402c76f7ec9060ba5cff980050736",
     "solver": "pounce 0.9.0"
   },
   "toolchain": {
@@ -37,7 +37,7 @@
             2
           ],
           "coeff": {
-            "num": "-2",
+            "num": "-3",
             "den": "1"
           }
         },
@@ -51,18 +51,6 @@
           }
         }
       ]
-    }
-  },
-  "candidate": {
-    "x": [
-      {
-        "num": "1",
-        "den": "1"
-      }
-    ],
-    "objective": {
-      "num": "1",
-      "den": "1"
     }
   },
   "witnesses": {
@@ -88,16 +76,16 @@
               "i": 0,
               "j": 0,
               "val": {
-                "num": "1",
-                "den": "1"
+                "num": "9",
+                "den": "4"
               }
             },
             {
               "i": 2,
               "j": 0,
               "val": {
-                "num": "-1",
-                "den": "1"
+                "num": "-3",
+                "den": "2"
               }
             },
             {
@@ -119,16 +107,16 @@
               "i": 2,
               "j": 0,
               "val": {
-                "num": "-1",
-                "den": "1"
+                "num": "-2",
+                "den": "3"
               }
             }
           ]
         },
         "D": [
           {
-            "num": "1",
-            "den": "1"
+            "num": "9",
+            "den": "4"
           },
           {
             "num": "0",

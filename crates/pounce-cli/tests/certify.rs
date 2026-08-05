@@ -248,11 +248,12 @@ fn certify_routes_an_unbounded_solve_to_a_recession_certificate() {
 }
 
 #[test]
-fn certify_routes_a_nonconvex_polynomial_to_an_sos_lower_bound() {
+fn certify_routes_a_nonconvex_polynomial_to_an_sos_global_min() {
     // x⁴ − 2x² + 2 has two global minima at x = ±1 and a local max at 0, so
-    // the f64 solve lands on ONE of them and can say nothing global. The SOS
-    // route proves 1 ≤ p(x) for every real x — a weaker claim than global-min,
-    // but one that holds without trusting the solver's basin.
+    // the f64 solve lands on ONE basin and can say nothing global. The SOS
+    // route proves 1 ≤ p(x) for every real x without trusting that basin — and
+    // since the solve's own point snaps to x = 1, where p is exactly 1, the
+    // bound is attained and the verdict is a global minimum.
     let sol = solve_to_sol("certify_sos");
     let out = Command::new(pounce_exe())
         .arg("certify")
@@ -268,16 +269,19 @@ fn certify_routes_a_nonconvex_polynomial_to_an_sos_lower_bound() {
 
     let cert: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
-    assert_eq!(cert["verdict"], "global-lower-bound");
+    assert_eq!(cert["verdict"], "global-min");
     assert_eq!(cert["problem_class"], "sos-poly");
     // The SDP's float bound is ~1 − 1e-9; the emitted γ is exactly 1.
     assert_eq!(cert["bound"], serde_json::json!({"num":"1","den":"1"}));
     assert_eq!(cert["tolerance"], serde_json::json!({"num":"0","den":"1"}));
-    // A bound is not a claim about any point, and the QP half is absent.
-    assert!(
-        cert.get("candidate").is_none(),
-        "a lower-bound certificate names no minimizer"
+    // The iterate is ~1 − 4e-10; the exhibited minimizer is exactly 1, and its
+    // objective is γ itself — that equality is what makes the bound a minimum.
+    assert_eq!(
+        cert["candidate"]["x"],
+        serde_json::json!([{"num":"1","den":"1"}])
     );
+    assert_eq!(cert["candidate"]["objective"], cert["bound"]);
+    // The QP half is absent: this is not a KKT claim.
     assert!(cert["problem"].get("objective").is_none());
     assert!(cert["witnesses"].get("duals").is_none());
 
@@ -295,6 +299,37 @@ fn certify_routes_a_nonconvex_polynomial_to_an_sos_lower_bound() {
             {"num":"0","den":"1"}
         ])
     );
+}
+
+/// The other half of the distinction: a polynomial whose minimizer is
+/// irrational. `x⁴ − 3x² + 2` minimizes at `±√(3/2)`, so no rational point
+/// attains the bound and the verdict must stay a bound — a weaker claim,
+/// correctly made, rather than a stronger one made up.
+#[test]
+fn an_irrational_minimizer_certifies_only_a_bound() {
+    let sol = solve_to_sol("certify_sos_bound");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos_bound.nl"))
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["verdict"], "global-lower-bound");
+    assert!(
+        cert.get("candidate").is_none(),
+        "a bound names no minimizer"
+    );
+    // p + 1/4 = (x² − 3/2)², so the tight γ is −1/4 — reachable only on a grid
+    // finer than the slack −1 sits on. Anything coarser here is a sharpness
+    // regression in the γ ladder, not a soundness one.
+    assert_eq!(cert["bound"], serde_json::json!({"num":"-1","den":"4"}));
 }
 
 #[test]

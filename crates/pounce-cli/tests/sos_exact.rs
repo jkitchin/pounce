@@ -124,6 +124,9 @@ fn the_solver_output_alone_produces_a_writable_certificate() {
             basis: gram[0].basis.clone(),
             gram_float: gram[0].matrix.clone(),
             bound_float: bound.lower_bound,
+            // No iterate, so this stays the bound path; the upgrade to a
+            // minimum is exercised below.
+            x_float: vec![],
         },
         &meta(),
     )
@@ -183,6 +186,7 @@ fn a_nonnegative_but_not_sos_polynomial_is_refused_at_the_tight_bound() {
             ],
             gram_float: vec![vec![0.0; 10]; 10],
             bound_float: 0.0,
+            x_float: vec![],
         },
         &meta(),
     )

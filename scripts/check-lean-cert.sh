@@ -50,7 +50,13 @@ FIXTURES=(
   "certify_lp    PounceLean.CertifyLP    global_min"  # LP: Q = 0, optimum 4/3 (not an f64)
   "certify_infeasible PounceLean.CertifyInfeasible infeasible"  # no solution; Farkas ray
   "certify_unbounded  PounceLean.CertifyUnbounded  unbounded"   # unbounded below; recession
-  "certify_sos        PounceLean.CertifySOS        global_lb"   # nonconvex quartic; SOS bound
+  # The two SOS fixtures differ in *verdict*, and the difference is the point:
+  # x⁴−2x²+2 attains its bound at the rational x = 1, so it certifies a global
+  # minimum; x⁴−3x²+2 minimizes at ±√(3/2), which no rational point reaches, so
+  # the honest verdict stays a bound. Losing either one would hide a regression
+  # in exactly one direction.
+  "certify_sos        PounceLean.CertifySOS        global_min"  # nonconvex quartic; bound attained
+  "certify_sos_bound  PounceLean.CertifySOSBound   global_lb"   # irrational minimizer; bound only
 )
 
 tmp="$(mktemp -d)"
@@ -236,6 +242,11 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # each must be able to reject on its own.
     "certify_sos_forged_bound     PounceLean.Generated.ForgedSosBound bound γ (identity no longer closes)"
     "certify_sos_forged_psd       PounceLean.Generated.ForgedSosPsd   Gram (satisfies the identity but is indefinite)"
+    # Attainment is a third, independent obligation: this cert's bound, Gram and
+    # identity are all genuine — only the exhibited minimizer is wrong. Every
+    # other check passes, so `p xstar = γ` is the sole thing standing between a
+    # true bound and a false claim about where it is reached.
+    "certify_sos_forged_candidate PounceLean.Generated.ForgedSosCand  minimizer (bound holds, but not at that point)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

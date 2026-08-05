@@ -20,8 +20,8 @@ Implementation: the serde structs and the exact-rational emitter live in
 wires it to the CLI.
 
 > **Status.** Four verdicts are **validated end-to-end** — `global-min`
-> (`qp-convex`), `infeasible`, `unbounded`, and `global-lower-bound`
-> (`sos-poly`): `pounce certify` emits each, and `pounce-lean` kernel-checks it
+> (from `qp-convex` via KKT, *and* from `sos-poly` via an attained bound),
+> `infeasible`, `unbounded`, and `global-lower-bound` (`sos-poly`): `pounce certify` emits each, and `pounce-lean` kernel-checks it
 > (reusable lemmas → codegen → `lake build`) with proofs resting only on Lean's
 > standard axioms (`propext`, `Classical.choice`, `Quot.sound`; no `sorry`).
 > Each has a fixture in `crates/pounce-cli/tests/fixtures/` that
@@ -48,6 +48,7 @@ reads the certificate.
 > | Verdict | `pounce certify` emits | `pounce-lean` verifies |
 > |---|---|---|
 > | `global-min` (KKT + PSD Hessian) | yes | yes |
+> | `global-min` (SOS bound + attaining point) | yes | yes |
 > | `infeasible` (Farkas witness `witnesses.farkas.y`) | yes | yes |
 > | `unbounded` (recession witness `witnesses.recession`) | yes | yes |
 > | `global-lower-bound` (SOS witness `witnesses.sos`) | yes | yes |
@@ -153,10 +154,10 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
-| `verdict` | enum | The single proven claim: `"global-min"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. |
+| `verdict` | enum | The single proven claim: `"global-min"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
 | `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. |
 | `tolerance` | rational | Feasibility ε. Always `0` — every emitted slice is exact. |
-| `bound` | rational | `global-lower-bound` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. |
+| `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
 | `toolchain` | object | The Lean toolchain + Mathlib revision the cert is authored against (a proof reproduces only under the same pin). |
 | `problem` | object | The problem over ℚ — see below. |
@@ -230,7 +231,7 @@ rational active-set refinement**: it takes the float active set, solves the KKT
 system exactly over ℚ for the true rational `(x*, λ)`, and verifies dual
 feasibility and that the inactive rows hold — refusing if the guess was wrong.
 
-## The SOS slice: `global-lower-bound`
+## The SOS slice: `global-lower-bound` and `global-min`
 
 A nonconvex polynomial has no KKT-based global argument — a local solve returns
 one basin and can say nothing about the others. What it *can* support is a
@@ -274,6 +275,38 @@ Two obligations means two ways to forge, so the drift guard carries two negative
 fixtures: `certify_sos_forged_bound` inflates γ (the identity stops closing) and
 `certify_sos_forged_psd` swaps in an indefinite `G` that still satisfies the
 identity (the nonnegativity goal fails). Both must fail `lake build`.
+
+### When the bound is attained: `global-min`
+
+A bound plus a point that *reaches* it is a global minimum. If some `x₀` has
+`p(x₀) = γ`, then `γ ≤ p(x)` everywhere makes `x₀` a global minimizer — of a
+polynomial that need not be convex, where no KKT argument applies at all. The
+certificate then carries a `candidate` alongside the `bound`, the verdict
+becomes `global-min`, and Lean discharges one extra equation:
+
+| Witness | Lean checks |
+|---|---|
+| `candidate.x` | `p(x₀) = γ`, by `norm_num` over ℚ |
+
+The emitter looks for such an `x₀` by snapping the local solve's `x*` to a short
+ladder of rational grids and evaluating `p` **exactly**; equality is required,
+never closeness. So the two verdicts differ by whether a rational minimizer
+exists and was found, and the fixtures are a matched pair:
+
+| Fixture | Polynomial | Minimizer | Verdict |
+|---|---|---|---|
+| `certify_sos` | `x⁴ − 2x² + 2` | `±1` | `global-min`, γ = 1 |
+| `certify_sos_bound` | `x⁴ − 3x² + 2` | `±√(3/2)` | `global-lower-bound`, γ = −1/4 |
+
+The second is not a shortcoming to be fixed: a certificate over ℚ cannot exhibit
+an irrational minimizer, and `1.2247…` is not one. Publishing the bound alone is
+the correct answer, and it is still a global statement about every real `x`.
+
+Attainment is a third independent obligation, so it gets a third negative
+fixture: `certify_sos_forged_candidate` keeps the genuine bound, Gram, and
+identity and corrupts only the exhibited point. Everything else about it checks
+out, which is exactly why the `p(x₀) = γ` goal has to be the thing that catches
+it — and it must fail `lake build`.
 
 The SDP that finds `G` runs in f64 and returns a bound like `1 − 1e-9`, which is
 not a rational the identity can close on. `round_gram` searches a small ladder

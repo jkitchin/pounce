@@ -261,8 +261,14 @@ silently rotting.
   theorem + `cert → .lean` codegen. End-to-end: QP → certified **global** min.
   The smallest thing that exercises the whole architecture; global result on day
   one; no SOS machinery; no equality-residual fuzz.
-* **Phase 2.** SOS identity checker in pounce-lean + Gram-matrix witnesses from
-  `sos.py` → certified global min for nonconvex polynomials.
+* **Phase 2 — done.** SOS identity checker in pounce-lean + Gram-matrix
+  witnesses → certified global min for nonconvex polynomials. The bound half
+  (`global_lower_bound_of_sos`) and the attainment half
+  (`global_min_of_sos_attained`, `p x₀ = γ`) both ship; a polynomial with an
+  irrational minimizer keeps the bound verdict, which is the correct answer
+  over ℚ rather than a gap. Constrained problems still need Positivstellensatz
+  multipliers on the emitter side — `constrained_lower_bound_of_sos` already
+  exists in pounce-lean.
 * **Phase 3.** `local-min-strict` for general smooth algebraic NLP; later,
   transcendentals (where `dReal` may complement Mathlib's thin interval
   arithmetic).

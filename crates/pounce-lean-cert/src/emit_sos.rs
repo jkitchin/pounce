@@ -36,8 +36,8 @@ use crate::ldlt::ldlt;
 use crate::rational::Rat;
 use crate::round_gram::{RoundError, round_gram};
 use crate::schema::{
-    Binding, Certificate, Entry, PolyTerm, PolynomialSpec, Problem, SCHEMA_TAG, SosBlock,
-    SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, Witnesses,
+    Binding, Candidate, Certificate, Entry, PolyTerm, PolynomialSpec, Problem, SCHEMA_TAG,
+    SosBlock, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, Witnesses,
 };
 
 /// Neutral input: an SOS relaxation of an unconstrained polynomial minimization,
@@ -55,6 +55,12 @@ pub struct SosInput {
     /// The SDP's numeric lower bound. A *hint* only — it seeds the search for an
     /// exact `γ`, and never becomes the emitted bound itself.
     pub bound_float: f64,
+    /// The local solve's `x*`, if there was one. A *hint* only: it seeds the
+    /// search for a rational point that attains `γ` exactly, which upgrades the
+    /// verdict from a bound to a global minimum. An empty vector, a wrong point,
+    /// or a minimizer at irrational coordinates all simply leave the bound
+    /// unattained — never a wrong verdict.
+    pub x_float: Vec<f64>,
 }
 
 /// Denominators tried for the free parameters of the coefficient-matching
@@ -152,13 +158,17 @@ pub fn sos_problem_block(n: usize, terms: &[(Vec<usize>, f64)]) -> Result<Proble
     })
 }
 
-/// Candidate exact bounds near `bound_float`, best first.
+/// Candidate exact bounds near `bound_float`, **sharpest first**.
 ///
-/// For each grid, the *nearest* multiple comes before the one *below*: when the
-/// SDP has converged, nearest recovers the true optimum exactly (the
-/// `0.9999999997 → 1` case), and a tight bound is the one worth certifying.
-/// Rounding down is the fallback — it always weakens the claim, never
-/// invalidates it, so trying it can only cost sharpness.
+/// Each grid contributes the nearest multiple and the one below; the pooled
+/// candidates are then ordered by value, largest first. Ordering by sharpness
+/// rather than by grid matters because the two disagree: for `x⁴ − 3x² + 2` the
+/// SDP bound is ≈ −0.25 and the tight `−1/4` needs a denominator of 4, while the
+/// slack `−1` sits on the coarsest grid. Grid-major order certifies `−1` — true,
+/// checkable, and four times weaker than what was available.
+///
+/// Trying a candidate above the true minimum costs only a failed round: the PSD
+/// step refuses it, so the search can afford to be greedy about sharpness.
 fn gamma_candidates(bound_float: f64) -> Vec<BigRational> {
     let mut out: Vec<BigRational> = Vec::new();
     for d in GAMMA_DENOMS {
@@ -175,10 +185,79 @@ fn gamma_candidates(bound_float: f64) -> Vec<BigRational> {
             }
         }
     }
+    // Descending, so ties in value (`2/4` and `1/2` are one candidate after
+    // normalization) cannot reorder between runs.
+    out.sort_by(|a, b| b.cmp(a));
     out
 }
 
-/// Build an exact `verdict = "global-lower-bound"` certificate, or refuse.
+/// Denominators tried when snapping the float `x*` to a rational point that
+/// attains `γ` exactly.
+///
+/// Deliberately short. A minimizer either has small rational coordinates or, far
+/// more often for a nonconvex polynomial, irrational ones — `x⁴ − 3x² + 2`
+/// minimizes at `±√(3/2)`, which no grid will ever hit. Searching harder buys
+/// almost nothing and costs a slower refusal on exactly the problems where
+/// refusal is the right answer.
+const ATTAIN_DENOMS: [i64; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 100];
+
+/// Look for an exact rational `x₀` with `p(x₀) = γ`, seeded by the float `x*`.
+///
+/// A proven bound that is *attained* is a global minimum — the Lean step is one
+/// rewrite. So this is the whole difference between certifying `γ ≤ p(x)` and
+/// certifying that a specific point minimizes a nonconvex polynomial globally,
+/// which no KKT argument can deliver.
+///
+/// Every candidate is checked by evaluating `p` exactly over ℚ and comparing to
+/// `γ` for equality — never within a tolerance. A near miss is not a minimizer,
+/// and accepting one would emit a certificate that cannot verify. Returning
+/// `None` is the honest outcome and costs only sharpness: the bound still holds.
+fn attaining_point(
+    p_terms: &[(Vec<usize>, BigRational)],
+    gamma: &BigRational,
+    n: usize,
+    x_float: &[f64],
+) -> Option<Vec<BigRational>> {
+    if x_float.len() != n || x_float.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    for d in ATTAIN_DENOMS {
+        let snapped: Option<Vec<BigRational>> = x_float
+            .iter()
+            .map(|v| {
+                let scaled = (v * d as f64).round();
+                // `as i64` saturates rather than failing, which would snap an
+                // absurd coordinate to i64::MAX instead of skipping this grid.
+                (scaled.is_finite() && scaled.abs() < i64::MAX as f64)
+                    .then(|| BigRational::new((scaled as i64).into(), d.into()))
+            })
+            .collect();
+        // A coordinate that overflows on a fine grid may be fine on a coarser
+        // one, so this skips the grid rather than abandoning the search.
+        let Some(x) = snapped else { continue };
+        if eval_poly(p_terms, &x) == *gamma {
+            return Some(x);
+        }
+    }
+    None
+}
+
+/// Evaluate `p` at a rational point, exactly.
+fn eval_poly(p_terms: &[(Vec<usize>, BigRational)], x: &[BigRational]) -> BigRational {
+    let mut acc = BigRational::zero();
+    for (exps, coeff) in p_terms {
+        let mut term = coeff.clone();
+        for (i, &e) in exps.iter().enumerate() {
+            for _ in 0..e {
+                term *= &x[i];
+            }
+        }
+        acc += term;
+    }
+    acc
+}
+
+/// Build an exact SOS certificate, or refuse.
 ///
 /// Searches the `(γ, grid)` ladder for an exact rational certificate, then
 /// rechecks the assembled result — identity and PSD — *from the serialized
@@ -280,9 +359,26 @@ pub fn emit_sos_certificate(
     // --- exact self-check of what will be written ---------------------------
     recheck(&problem, &gamma, &block)?;
 
+    // --- try to upgrade the bound to a minimum ------------------------------
+    // If some rational `x₀` hits `γ` exactly, the bound is attained and the
+    // stronger verdict is available; otherwise the bound stands alone. Both are
+    // sound, and the emitter never guesses between them — attainment is decided
+    // by exact evaluation, not by how close the float solve looked.
+    let attained = attaining_point(&p_terms, &gamma, n, &input.x_float);
+    let (verdict, candidate) = match attained {
+        Some(x) => (
+            "global-min",
+            Some(Candidate {
+                x: x.into_iter().map(Rat).collect(),
+                objective: Rat(gamma.clone()),
+            }),
+        ),
+        None => ("global-lower-bound", None),
+    };
+
     Ok(Certificate {
         schema: SCHEMA_TAG.to_string(),
-        verdict: "global-lower-bound".to_string(),
+        verdict: verdict.to_string(),
         problem_class: "sos-poly".to_string(),
         tolerance: Rat(BigRational::zero()),
         bound: Some(Rat(gamma)),
@@ -296,7 +392,7 @@ pub fn emit_sos_certificate(
             mathlib: VALIDATED_MATHLIB.to_string(),
         },
         problem,
-        candidate: None,
+        candidate,
         witnesses: Witnesses {
             duals: None,
             hessian_psd: None,
@@ -424,6 +520,8 @@ mod tests {
                 vec![-0.9999999997, -3e-11, 1.0000000002],
             ],
             bound_float: 0.9999999997,
+            // No iterate: the bound path, uncontaminated by attainment.
+            x_float: vec![],
         }
     }
 
@@ -443,6 +541,105 @@ mod tests {
         );
         assert!(rat(&cert.tolerance).is_zero(), "certs claim tolerance = 0");
         assert!(cert.candidate.is_none(), "a bound is not a point claim");
+    }
+
+    /// Hand the same quartic an iterate, and the verdict strengthens: `γ = 1` is
+    /// a lower bound *and* `p(1) = 1`, so 1 is the global minimum. The iterate is
+    /// the solver's, off by ~4e-10 — it is snapped and then checked exactly.
+    #[test]
+    fn an_iterate_that_attains_the_bound_upgrades_it_to_a_global_minimum() {
+        let input = SosInput {
+            x_float: vec![0.99999999962],
+            ..quartic()
+        };
+        let cert = emit_sos_certificate(&input, &meta()).unwrap();
+        assert_eq!(cert.verdict, "global-min");
+        let cand = cert.candidate.as_ref().expect("a minimum exhibits a point");
+        assert_eq!(rat(&cand.x[0]), BigRational::from_integer(1.into()));
+        // The claimed objective is γ itself, not a re-evaluation that might
+        // differ: attainment is what makes the two the same number.
+        assert_eq!(rat(&cand.objective), rat(cert.bound.as_ref().unwrap()));
+    }
+
+    /// The other basin. `x⁴ − 2x² + 2` minimizes at both `±1`; which one the
+    /// local solve reports is arbitrary, and either is a valid minimizer.
+    #[test]
+    fn the_other_minimizer_certifies_the_same_minimum() {
+        let cert = emit_sos_certificate(
+            &SosInput {
+                x_float: vec![-1.0000000004],
+                ..quartic()
+            },
+            &meta(),
+        )
+        .unwrap();
+        assert_eq!(cert.verdict, "global-min");
+        assert_eq!(
+            rat(&cert.candidate.as_ref().unwrap().x[0]),
+            BigRational::from_integer((-1).into())
+        );
+    }
+
+    /// A minimizer at `±√(3/2)` is irrational, so no grid attains it and the
+    /// verdict must stay a bound. This is the failure mode that would be
+    /// dangerous if attainment were tested within a tolerance: `x = 1.2247` is
+    /// arbitrarily close and is not a minimizer.
+    #[test]
+    fn an_irrational_minimizer_leaves_the_verdict_a_bound() {
+        // p = x⁴ − 3x² + 2; p + 1/4 = (x² − 3/2)², so γ = −1/4.
+        let cert = emit_sos_certificate(
+            &SosInput {
+                n: 1,
+                terms: vec![(vec![4], 1.0), (vec![2], -3.0), (vec![0], 2.0)],
+                basis: vec![vec![0], vec![1], vec![2]],
+                gram_float: vec![
+                    vec![2.2500000003, 1e-11, -1.4999999997],
+                    vec![1e-11, 3.1e-10, -2e-11],
+                    vec![-1.4999999997, -2e-11, 1.0000000002],
+                ],
+                bound_float: -0.2500000003,
+                x_float: vec![1.2247448713915892],
+            },
+            &meta(),
+        )
+        .unwrap();
+        assert_eq!(cert.verdict, "global-lower-bound");
+        assert!(cert.candidate.is_none());
+        assert_eq!(
+            rat(cert.bound.as_ref().unwrap()),
+            BigRational::new((-1).into(), 4.into())
+        );
+    }
+
+    /// A hint pointing somewhere else costs sharpness, never soundness: the
+    /// bound is still the true minimum, it is just not exhibited as attained.
+    #[test]
+    fn a_wrong_hint_degrades_to_a_bound_rather_than_a_wrong_point() {
+        let cert = emit_sos_certificate(
+            &SosInput {
+                x_float: vec![7.0],
+                ..quartic()
+            },
+            &meta(),
+        )
+        .unwrap();
+        assert_eq!(cert.verdict, "global-lower-bound");
+        assert!(cert.candidate.is_none());
+    }
+
+    /// A hint of the wrong length is a caller bug, not a certificate: it must be
+    /// ignored rather than indexed into.
+    #[test]
+    fn a_hint_of_the_wrong_arity_is_ignored() {
+        let cert = emit_sos_certificate(
+            &SosInput {
+                x_float: vec![1.0, 1.0],
+                ..quartic()
+            },
+            &meta(),
+        )
+        .unwrap();
+        assert_eq!(cert.verdict, "global-lower-bound");
     }
 
     /// The QP half must be *absent*, not zeroed — a zero `Q` would assert the
@@ -545,7 +742,23 @@ mod tests {
         assert_eq!(
             cands[0],
             BigRational::from_integer(1.into()),
-            "nearest at the coarsest grid comes first"
+            "the sharpest candidate comes first"
+        );
+    }
+
+    /// Sharpness must beat grid coarseness. A bound of ≈ −0.25 puts the tight
+    /// `−1/4` on the `d = 4` grid and the slack `−1` on the coarsest one; a
+    /// ladder ordered by grid would certify `−1` and never look further.
+    #[test]
+    fn a_finer_grid_wins_when_it_is_sharper() {
+        let cands = gamma_candidates(-0.2500000003);
+        let quarter = BigRational::new((-1).into(), 4.into());
+        let one = BigRational::from_integer((-1).into());
+        let pos = |g: &BigRational| cands.iter().position(|c| c == g).unwrap();
+        assert!(pos(&quarter) < pos(&one), "got {cands:?}");
+        assert!(
+            cands.windows(2).all(|w| w[0] > w[1]),
+            "candidates must be strictly descending: {cands:?}"
         );
     }
 
