@@ -9,14 +9,14 @@
   solver        = pounce 0.9.0
   toolchain     = leanprover/lean4:v4.31.0 / fabf563a7c95a166b8d7b6efca11c8b4dc9d911f
 
-  Certifies  γ ≤ p(x)  at every FEASIBLE x, with γ = -2, via
-  p(x) − γ = σ₀(x) + Σᵢ σᵢ(x)·gᵢ(x) and every σ a PSD Gram form. The bound
-  holds on the feasible set only — that is weaker than an unconstrained
-  SOS bound and also far more widely available: `p − γ` need only be a sum
-  of squares MODULO the constraints.
+  Certifies  γ ≤ p(x)  at every FEASIBLE x, with γ = -2,
+  via  p(x) − γ = σ₀(x) + Σᵢ σᵢ(x)·gᵢ(x)
+  and every σ a PSD Gram form. The bound holds on that set only — weaker
+  than an unconstrained SOS bound, and also far more widely available:
+  `p − γ` need only be a sum of squares MODULO the constraints.
 
-  The bound is ATTAINED at the exhibited xstar, which is itself proved
-  feasible, so it is the constrained global minimum.
+  The bound is ATTAINED at the exhibited xstar, itself proved to lie in
+  the set the bound is about, so it is the constrained global minimum.
 -/
 import Mathlib
 import PounceLean.PSD
@@ -91,7 +91,7 @@ theorem hsigma : ∀ i x, 0 ≤ sigma i x := by
   · exact sos_nonneg G2 mon2 hG2
 
 /-- The Putinar identity, closed by `ring` in the free variable `x`. -/
-theorem sos_identity : ∀ x, p x - (-2) = sigma0 x + ∑ i, sigma i x * g i x := by
+theorem sos_identity : ∀ x, p x - (-2) = sigma0 x + (∑ i, sigma i x * g i x) := by
   intro x
   simp only [p, g, sigma0, sigma, mon0, mon1, mon2, G0, G1, G2, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one]
   ring

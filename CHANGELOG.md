@@ -24,7 +24,9 @@ changes.
   (recession direction), and `global-lower-bound` (sum of
   squares). Anything else exits 2 rather than emit an unsound certificate —
   maximize objectives, non-polynomial objectives, and equality constraints on a
-  higher-degree problem are all refused.
+  higher-degree problem are all refused. Three more are opt-in, because each
+  states something weaker than the automatic verdict would have: `feasible`
+  (`--feasible`), and `local-min` / `local-lower-bound` (`--local`).
 - `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
   polynomial, which is the case where a local solve is worth least: it returns
   one basin and can say nothing about the others, and no KKT argument repairs
@@ -70,6 +72,41 @@ changes.
     does not have: a *localizing* block that goes indefinite while the identity
     still closes exactly (mass moved into σ₀), and a candidate that attains γ
     from outside the feasible set. Both must fail `lake build`, and do.
+- **`pounce certify --local` certifies a local minimum — with no second-order
+  theory at all.** At a local minimum that is not global, every verdict above is
+  *false*, so no certificate for one exists at any relaxation order:
+  `3x⁴ + 4x³ − 12x²` has a minimum at `x = 1` worth `−5` and another at `x = −2`
+  worth `−32`. What is true is that nothing nearby beats it, and a neighborhood
+  turns out to be a polynomial inequality like any other — `r² − ‖x − c‖² ≥ 0`.
+  Adjoining it to the Putinar multiplier family gives
+  `p − γ = σ₀ + Σₖ σₖ·gₖ + σ_B·(r² − ‖x − c‖²)` and a theorem guarded by
+  membership in the ball, which *is* local minimality: verdicts `local-min` and
+  `local-lower-bound`.
+  - This replaced the planned KKT + reduced-Hessian-`LDLᵀ` route, which needed a
+    second-order-sufficiency theorem Mathlib does not have. The trusted lemmas
+    here are four-line sign arguments — no constraint qualification, no Taylor
+    remainder, no implicit function theorem. It is also *numerically* easier: a
+    ball is a strong localizer, so a low-order relaxation often closes where the
+    global problem's gap will not.
+  - The ball is stored structurally in `problem.neighborhood` (`center`,
+    `radius_sq`) rather than as a `poly_constraints` entry, which would put it
+    in the certificate twice in two spellings nothing forces to agree.
+    `radius_sq` because ℚ has no square roots; `--radius <r>` takes an ordinary
+    radius and squares it. A non-positive `radius_sq` is refused by emitter and
+    codegen alike — the claim would be vacuous. `cert-verify` carries the
+    neighborhood across unchanged rather than re-deriving it, since no `.nl`
+    determines it.
+  - **The candidate must be inside the ball**, and that does not follow from
+    attainment — `x⁴ − 2x² + 2` attains its minimum at both `±1`. So `local-min`
+    proves `‖x₀ − c‖² ≤ r²` as a third exact obligation next to feasibility and
+    `p(x₀) = γ`. Two forged fixtures cover the new obligations: a candidate that
+    attains γ two units outside a unit ball, and a `σ_B` rewritten over a longer
+    monomial basis so it still evaluates correctly while its Gram goes
+    indefinite. Both must fail `lake build`, and do.
+  - Refused on the convex-QP path, where the KKT certificate already proves a
+    *global* minimum, and refused alongside `--feasible`, which asks for a
+    different claim. What it does **not** prove is *strictness*: nothing rules
+    out a tie elsewhere in the ball.
 - **Fixed: `sos_constrained_lower_bound_gram` returned Gram blocks in
   equilibrated coordinates.** The SDP is solved after a domain map
   `x = shift + scale·u` and a per-polynomial coefficient rescale, and only the

@@ -444,6 +444,125 @@ fn a_box_constrained_polynomial_certifies_a_bound_on_the_feasible_set() {
     }
 }
 
+/// `--local` on a problem whose local minimum is emphatically NOT global.
+///
+/// 3x⁴ + 4x³ − 12x² has two minima: x = −2 with p = −32, and x = 1 with p = −5.
+/// Started near the second, the solver reports x = 1 — and the global claim
+/// "−5 ≤ p(x) everywhere" is simply false, so no certificate for it exists at
+/// any relaxation order. Restricted to a ball around x = 1 the claim is true,
+/// and the same Putinar machinery proves it with one extra multiplier.
+#[test]
+fn the_local_flag_certifies_a_minimum_that_is_not_global() {
+    let sol = solve_to_sol("certify_sos_local");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos_local.nl"))
+        .arg(&sol)
+        .arg("--local")
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certify --local failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["problem_class"], "sos-poly");
+    // The verdict says `local`, and that word is load-bearing: p(−2) = −32 < −5.
+    assert_eq!(cert["verdict"], "local-min");
+    assert_eq!(cert["bound"], serde_json::json!({"num":"-5","den":"1"}));
+    assert_eq!(
+        cert["candidate"]["x"],
+        serde_json::json!([{"num":"1","den":"1"}])
+    );
+
+    // The ball travels with the certificate — exactly, as a centre and a
+    // *squared* radius, because ℚ has no square roots. Without it the bound
+    // would read as a global claim.
+    let nb = &cert["problem"]["neighborhood"];
+    assert_eq!(nb["center"], serde_json::json!([{"num":"1","den":"1"}]));
+    let r: i64 = nb["radius_sq"]["num"]
+        .as_str()
+        .expect("radius_sq num")
+        .parse()
+        .expect("integer");
+    assert!(r > 0, "a non-positive radius² would make the claim vacuous");
+
+    // The global minimizer is outside that ball — otherwise the local claim
+    // would be a global one wearing a disguise, and this fixture would be
+    // testing nothing.
+    assert!(
+        (-2f64 - 1.0).powi(2) > r as f64,
+        "x = -2 must lie outside the ball for this to be a genuinely local claim"
+    );
+
+    // No constraints, so the multiplier family is the ball alone: σ₀ (no
+    // `multiplier`) plus one block at index 0, the ball's slot.
+    assert!(cert["problem"]["poly_constraints"].is_null());
+    let sos = cert["witnesses"]["sos"].as_array().expect("sos blocks");
+    assert_eq!(sos.len(), 2, "σ₀ plus the ball's multiplier");
+    assert!(sos[0].get("multiplier").is_none());
+    assert_eq!(sos[1]["multiplier"], 0);
+}
+
+/// `--local` and `--feasible` ask for different claims, and `--radius` means
+/// nothing on its own. Both are refused rather than silently resolved: a user
+/// who typed both wanted one of them, and guessing which would be a claim they
+/// did not ask for.
+#[test]
+fn the_local_flag_refuses_incoherent_combinations() {
+    let sol = solve_to_sol("certify_sos_local");
+    for flags in [
+        vec!["--local", "--feasible"],
+        vec!["--radius", "0.5"], // no --local
+    ] {
+        let mut cmd = Command::new(pounce_exe());
+        cmd.arg("certify")
+            .arg(fixture("certify_sos_local.nl"))
+            .arg(&sol);
+        for f in &flags {
+            cmd.arg(f);
+        }
+        let out = cmd.output().expect("run pounce certify");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{flags:?} should be refused, got: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+/// A KKT certificate for a convex QP already proves a *global* minimum, so
+/// restricting it to a ball would replace a strong claim with a weaker one for
+/// no reason. Refused, with that as the explanation.
+#[test]
+fn the_local_flag_is_refused_where_the_claim_is_already_global() {
+    let sol = solve_to_sol("certify_qp");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_qp.nl"))
+        .arg(&sol)
+        .arg("--local")
+        .output()
+        .expect("run pounce certify");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn cert_verify_accepts_the_local_sos_certificate() {
+    // The re-derivation must carry the neighborhood across untouched: it is the
+    // certificate's choice, not something the `.nl` determines, so a consumer
+    // that re-derived it would either invent one or drop it.
+    let out = cert_verify("certify_sos_local.nl", "certify_sos_local.cert.json");
+    assert!(
+        out.status.success(),
+        "real local SOS cert should verify against its .nl: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn cert_verify_accepts_the_constrained_sos_certificate() {
     // The re-derivation has to reproduce the *constraints* too, in the same

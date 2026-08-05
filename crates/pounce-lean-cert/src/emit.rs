@@ -199,6 +199,14 @@ pub fn canonical_problem(p: &Problem) -> serde_json::Value {
     if let Some(poly) = p.polynomial.as_mut() {
         poly.terms.sort_by_key(|t| t.exponents.clone());
     }
+    // Same for each `gₖ`, but *within* a constraint only: the order of the
+    // constraints themselves is the certificate's `multiplier` numbering, so
+    // sorting that list would renumber the witnesses.
+    if let Some(cons) = p.poly_constraints.as_mut() {
+        for g in cons.iter_mut() {
+            g.terms.sort_by_key(|t| t.exponents.clone());
+        }
+    }
     serde_json::to_value(&p).unwrap_or(serde_json::Value::Null)
 }
 
@@ -350,6 +358,7 @@ fn build_problem_view(input: &QpInput) -> Result<ProblemView, EmitError> {
         constraints: Some(constraints),
         polynomial: None,
         poly_constraints: None,
+        neighborhood: None,
     };
 
     Ok(ProblemView {

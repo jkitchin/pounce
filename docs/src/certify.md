@@ -69,11 +69,13 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 | `global-lower-bound` | polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` — or, if the problem has constraints, for every *feasible* `x` |
 | `global-min` | polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` (again, everywhere or on the feasible set) |
 
-plus one you *do* select, with `--feasible`:
+plus three you *do* select, with `--feasible` or `--local`:
 
 | Verdict | Slice | The proven statement |
 |---|---|---|
 | `feasible` | any linearly-constrained QP, convex or not | `x*` violates no row by more than ε, **and** a genuinely feasible point exists within ε of it |
+| `local-lower-bound` | polynomial, degree > 2, with `--local` | `γ ≤ p(x)` for every feasible `x` **within an exhibited ball** — and nothing outside it |
+| `local-min` | polynomial, degree > 2, with `--local` | that bound is attained at an `x₀` proved to lie in the ball, so `p(x₀) ≤ p(x)` there |
 
 The last two rows are the interesting ones, because they cover the case where a
 solver's usual answer is worth very little. A nonconvex polynomial has many
@@ -142,6 +144,63 @@ things are worth knowing about the difference:
   and `−h ≥ 0` leaves a feasible set with empty interior, where Putinar's
   theorem stops guaranteeing that a certificate exists at *any* degree. Refusing
   is better than searching forever.
+
+### `--local`: a ball is just another constraint
+
+A nonconvex problem usually has local minima that are not global, and at one of
+those every claim above is simply **false**. `3x⁴ + 4x³ − 12x²` has a minimum at
+`x = 1` worth `−5`, and another at `x = −2` worth `−32`. Started near the first,
+the solver reports `x = 1` — and no certificate that `−5 ≤ p(x)` exists at any
+relaxation order, because it is not true.
+
+What *is* true is that nothing nearby beats it. So say that instead:
+
+```console
+$ pounce certify --local cubic.nl cubic.sol -o c.json    # verdict: local-min
+```
+
+The point is that this needs no new theory. A neighborhood is a polynomial
+inequality like any other —
+
+```text
+r² − ‖x − c‖² ≥ 0
+```
+
+— so `--local` adjoins it to the `gₖ` family and runs the *same* Putinar
+machinery with one extra multiplier `σ_B`:
+
+```text
+p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x) + σ_B(x)·(r² − ‖x − c‖²)
+```
+
+The proved statement is `γ ≤ p(x)` for every feasible `x` **within the ball**,
+and with an attaining candidate inside it, `p(x₀) ≤ p(x)` there — which is
+local minimality, stated directly. No second-order sufficient conditions, no
+constraint qualification, no Taylor remainder, no implicit function theorem: the
+Lean proof is the two-line sign argument the unconstrained case already used.
+
+Three practical notes:
+
+- **The radius is stored squared.** ℚ is not closed under square roots, so `c`
+  and `r²` are what travel in `problem.neighborhood` and what the theorem
+  mentions. `--radius <r>` takes an ordinary radius (default `1`) and squares
+  it. A non-positive `r²` is refused: the claim would be vacuous.
+- **The centre is not `x*`.** It is `x*` snapped to a coarse rational grid,
+  chosen so the true solution stays well inside — the certificate is about the
+  ball it names, so that ball has to be one a rational centre can describe
+  exactly.
+- **Localizing also helps numerically.** A ball is a strong localizer, so a
+  low-order relaxation often closes where the global problem's gap will not —
+  even when the global claim happens to be true.
+- **The candidate must be inside.** `p(x₀) = γ` does not imply `x₀` is in the
+  neighborhood: for `x⁴ − 2x² + 2` both `±1` attain the minimum. So the
+  candidate carries `‖x₀ − c‖² ≤ r²` as a third exact obligation, next to
+  feasibility and attainment.
+
+`--local` is refused on the convex-QP path, where the KKT certificate already
+proves a *global* minimum: narrowing that to a ball would trade a strong claim
+for a weaker one and gain nothing. It is also refused together with
+`--feasible`, which asks for a different claim entirely.
 
 ## Certifying the float itself
 
@@ -331,11 +390,19 @@ fixtures are the ones that would catch a proof that accepts too much.
   `ker Q` over ℚ. If `Q` is definite there is no such direction and the emitter
   refuses — correctly, since the objective is then bounded below along every
   line. Equality rows are still outside the slice.
-* **The SOS route is unconstrained-only.** The theorem quantifies over all of
-  ℝⁿ, so a constrained problem would get a statement that is true but about the
-  wrong problem. Routing is decided by objective *degree*, never by a QP
+* **The SOS route handles inequalities, not equalities.** Inequality
+  constraints go in as Putinar multipliers; an equality would need a
+  sign-unrestricted one, and splitting it into two inequalities empties the
+  feasible set's interior, where Putinar stops guaranteeing that a certificate
+  exists at any degree. Routing is decided by objective *degree*, never by a QP
   extraction failing, so a convex QP can never silently downgrade from
   `global-min` to a mere bound.
+* **A `local-min` is only ever about the ball it names.** It is silent outside
+  it, and at a local minimum that is not global, silent is the only honest
+  thing to be — a wider claim would be false. The ball is part of the theorem
+  statement, so a consumer that ignored `problem.neighborhood` would read a
+  local result as a global one. What `--local` does *not* prove is *strict*
+  local minimality: nothing rules out a tie elsewhere in the ball.
 * **`feasible` proves nothing about optimality.** It is a statement about where
   a point *sits*, not about whether anything better exists. On a nonconvex
   problem that is genuinely all a local solve establishes — the verdict is

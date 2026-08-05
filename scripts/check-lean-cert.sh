@@ -74,6 +74,13 @@ FIXTURES=(
   # (a bound on the feasible set). Losing this would let the two shapes drift
   # into each other unnoticed.
   "certify_sos_box    PounceLean.CertifySOSBox     constrained_min"  # box-constrained cubic
+  # The local shape. 3x⁴+4x³−12x² has its global minimum at x = −2 (p = −32) and
+  # a *second*, strictly worse local minimum at x = 1 (p = −5). So a certificate
+  # here that reproduced the global claim would be flatly false, which is what
+  # makes it a fixture worth keeping: it can only pass by restricting the claim
+  # to the emitted ball. Note the `--local` flag in field 4 and the different
+  # theorem name in field 3 — both are the check.
+  "certify_sos_local  PounceLean.CertifySOSLocal   local_min --local"
   # The one verdict that is not about optimality: an indefinite Hessian, so the
   # global-min path refuses (Ldl(Indefinite)) and there is nothing to certify
   # about the solve EXCEPT that its answer is a real point of the real feasible
@@ -303,6 +310,20 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # feasibility check this would prove a minimum at a point that is not in
     # the feasible set at all.
     "certify_sos_box_forged_infeasible_min PounceLean.Generated.ForgedSosInfeasMin candidate (attains γ, but outside the feasible set)"
+    # The local path adds the ball, and the ball adds two obligations of its
+    # own. First, its multiplier must be PSD like any other. This forgery
+    # rewrites σ_B over the longer basis (1, x, x²), where the Gram is no longer
+    # pinned down by the polynomial: the entries chosen still EVALUATE to
+    # (3/2)(x−1)², so the identity closes exactly, but the matrix has a negative
+    # diagonal entry. Only `hG1` can catch it.
+    "certify_sos_local_forged_ball_psd PounceLean.Generated.ForgedLocalBallPsd ball Gram σ_B (identity closes, but σ_B ⋡ 0)"
+    # Second, the candidate must lie INSIDE the ball, and that does not follow
+    # from attaining the bound: x⁴ − 2x² + 2 attains its minimum at BOTH ±1, so
+    # x = −1 satisfies `p xstar = γ` exactly while sitting a distance 2 from a
+    # ball of radius 1 centred at +1. Every witness here is genuine and every
+    # other check passes; without `xstar_in_ball` this would prove a minimum of
+    # the neighborhood at a point the neighborhood does not contain.
+    "certify_sos_local_forged_outside_ball PounceLean.Generated.ForgedLocalOutside candidate (attains γ, but outside the ball)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

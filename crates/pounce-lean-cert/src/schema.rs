@@ -100,6 +100,42 @@ pub struct Problem {
     /// field's presence rather than off the verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poly_constraints: Option<Vec<PolynomialSpec>>,
+    /// The neighborhood a *local* claim is restricted to — `sos-poly` only, and
+    /// absent unless the verdict is `local-min` or `local-lower-bound`.
+    ///
+    /// Present, it narrows the claim once more: the bound holds on
+    /// `K ∩ B(center, radius_sq)` rather than on `K`. Absent, the claim is over
+    /// all of `K`, which is strictly stronger — so, exactly as with
+    /// `poly_constraints`, a consumer that dropped this field would read a local
+    /// certificate as a global one and be wrong. Presence is what the codegen
+    /// keys the local theorem off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighborhood: Option<Neighborhood>,
+}
+
+/// The closed ball `‖x − center‖² ≤ radius_sq` a local claim is made on.
+///
+/// Stored *structurally* — center and squared radius — rather than as another
+/// entry in `poly_constraints`, even though that is exactly what it becomes in
+/// the Putinar identity. Two reasons. The ball would otherwise appear twice, in
+/// two spellings that must agree and nothing forces to; and `poly_constraints`
+/// then keeps its honest meaning as *the problem's* feasible set, with the
+/// neighborhood — which is the certificate's own choice, not the problem's —
+/// kept separate from it.
+///
+/// The radius is *squared* because ℚ is not closed under square roots. Nothing
+/// is lost: `‖x − c‖ ≤ r` and `‖x − c‖² ≤ r²` say the same thing for `r ≥ 0`.
+///
+/// A `radius_sq` of zero would make the claim true and vacuous — the "ball" is
+/// then the single point `center`. The emitter refuses to produce one; a reader
+/// auditing a certificate from elsewhere should check it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Neighborhood {
+    /// The ball's center, length `n_vars`. Need not be the minimizer: it only
+    /// has to put the minimizer inside the ball.
+    pub center: Vec<Rat>,
+    /// The *squared* radius. Strictly positive.
+    pub radius_sq: Rat,
 }
 
 impl Problem {

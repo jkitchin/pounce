@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use pounce_convex::sos::{PolyProblem, Polynomial, sos_constrained_lower_bound_gram, sos_opts};
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
 use pounce_lean_cert::emit_sos::{
-    SosConstraint, SosInput, emit_sos_certificate, sos_problem_block,
+    Ball, SosConstraint, SosInput, emit_sos_certificate, sos_problem_block,
 };
 use pounce_lean_cert::{
     Certificate, canonical_problem, emit_certificate, emit_feasible_certificate,
@@ -83,12 +83,23 @@ of it. Nothing is claimed about optimality. This is opt-in rather than a
 fallback -- a failed optimality certificate is a result worth seeing, not
 one to quietly replace with a weaker claim.
 
+With --local the claim is narrowed to a ball around the solution, giving
+`local-min` (or `local-lower-bound`). A ball is just one more polynomial
+inequality, so this is the same Putinar machinery with one extra multiplier
+-- no second-order conditions, no constraint qualification. That matters
+because a nonconvex problem usually has local minima that are not global:
+there the global claim is FALSE, so no certificate for it exists at any
+relaxation order, while the local one is both true and easier to certify.
+
 options:
   -o, --output <path>     write the certificate JSON here (default: stdout)
       --active-tol <eps>  active-set detection tolerance on the float
                           solution (default: 1e-7)
       --feasible          certify feasibility of the reported point instead
                           of optimality
+      --local             certify optimality within a ball around the
+                          solution instead of globally
+      --radius <r>        radius of that ball (default: 1); needs --local
   -h, --help              show this message";
 
 #[derive(Debug)]
@@ -99,7 +110,19 @@ struct CertifyArgs {
     active_tol: f64,
     /// Certify feasibility of the reported point instead of optimality.
     feasible: bool,
+    /// Radius of the ball a *local* claim is restricted to. `None` is the
+    /// unrestricted claim.
+    radius: Option<f64>,
 }
+
+/// Ball radius `--local` uses when `--radius` is not given.
+///
+/// There is no principled default — the right radius is problem-specific — so
+/// this is chosen to be a round number that produces small exact coefficients
+/// and a claim big enough to be interesting. Too large and the SOS certificate
+/// stops existing (the ball swallows a better minimum); too small and the claim
+/// is true but says little. `--radius` exists because this will often be wrong.
+const DEFAULT_RADIUS: f64 = 1.0;
 
 pub fn run_from_argv(rest: &[String]) -> ExitCode {
     let args = match parse_argv(rest) {
@@ -138,6 +161,8 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
     let mut output = None;
     let mut active_tol = 1e-7;
     let mut feasible = false;
+    let mut local = false;
+    let mut radius: Option<f64> = None;
     let mut positionals: Vec<PathBuf> = Vec::new();
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
@@ -152,9 +177,22 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
                 active_tol = v.parse().map_err(|e| format!("--active-tol: {e}"))?;
             }
             "--feasible" => feasible = true,
+            "--local" => local = true,
+            "--radius" => {
+                let v = it.next().ok_or("--radius requires a value")?;
+                radius = Some(v.parse().map_err(|e| format!("--radius: {e}"))?);
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag `{other}`")),
             _ => positionals.push(PathBuf::from(arg)),
         }
+    }
+    // `--radius` without `--local` would silently do nothing, which is the kind
+    // of flag that costs someone an afternoon.
+    if radius.is_some() && !local {
+        return Err("--radius has no meaning without --local".to_string());
+    }
+    if feasible && local {
+        return Err("--feasible and --local ask for different claims; pick one".to_string());
     }
     match positionals.len() {
         2 => Ok(Some(CertifyArgs {
@@ -163,6 +201,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
             output,
             active_tol,
             feasible,
+            radius: local.then(|| radius.unwrap_or(DEFAULT_RADIUS)),
         })),
         _ => Err("expected two positional arguments: <problem.nl> <claim.sol>".to_string()),
     }
@@ -301,16 +340,34 @@ fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
 /// With `g` non-empty the claim becomes a bound *on the feasible set*, proved by
 /// a Putinar identity. Same relaxation, same emitter, same exactness argument —
 /// what changes is that the blocks now come with the polynomial each multiplies.
+///
+/// With `radius` set the claim is narrowed once more, to a ball around a
+/// rational point near `x*`. That is what makes a *local* certificate possible
+/// at all on a nonconvex problem: at a local minimum that is not global, the
+/// unrestricted claim is simply false, so no certificate for it exists at any
+/// relaxation order. Restricted to a ball it becomes true — and easier, since a
+/// ball is a strong localizer.
 fn certify_sos(
     po: &PolyObjective,
     g: &PolyFeasibleSet,
     x_float: &[f64],
+    radius: Option<f64>,
     meta: &CertMeta,
 ) -> Result<Certificate, String> {
+    let ball = radius.map(|r| ball_around(po.n, x_float, r)).transpose()?;
+
     let poly = Polynomial::new(po.n, po.terms.clone());
     let prob = g.iter().fold(PolyProblem::new(poly), |p, gk| {
         p.ge(Polynomial::new(po.n, gk.clone()))
     });
+    // The ball goes in last, matching the multiplier order the emitter uses.
+    let prob = match ball.as_ref() {
+        Some((center, radius_sq)) => prob.ge(Polynomial::new(
+            po.n,
+            ball_terms_float(po.n, center, *radius_sq),
+        )),
+        None => prob,
+    };
     let (bound, gram) = sos_constrained_lower_bound_gram(&prob, None, &sos_opts(), backend);
     if !bound.lower_bound.is_finite() {
         return Err(format!(
@@ -327,14 +384,21 @@ fn certify_sos(
     let Some((sigma0, localizing)) = gram.split_first() else {
         return Err("the SOS relaxation returned no Gram blocks".to_string());
     };
-    if localizing.len() != g.len() {
+    let expected = g.len() + usize::from(ball.is_some());
+    if localizing.len() != expected {
         return Err(format!(
-            "expected {} localizing block(s) for {} constraint(s), got {}",
+            "expected {expected} localizing block(s) for {} constraint(s){}, got {}",
             g.len(),
-            g.len(),
+            if ball.is_some() {
+                " plus a neighborhood"
+            } else {
+                ""
+            },
             localizing.len()
         ));
     }
+    // The ball's block is the last one, because that is where it was appended.
+    let (con_blocks, ball_block) = localizing.split_at(g.len());
     emit_sos_certificate(
         &SosInput {
             n: po.n,
@@ -343,7 +407,7 @@ fn certify_sos(
             gram_float: sigma0.matrix.clone(),
             constraints: g
                 .iter()
-                .zip(localizing)
+                .zip(con_blocks)
                 .map(|(gk, blk)| SosConstraint {
                     g: gk.clone(),
                     basis: blk.basis.clone(),
@@ -352,10 +416,87 @@ fn certify_sos(
                 .collect(),
             bound_float: bound.lower_bound,
             x_float: x_float.to_vec(),
+            neighborhood: ball.map(|(center, radius_sq)| Ball {
+                center,
+                radius_sq,
+                basis: ball_block[0].basis.clone(),
+                gram_float: ball_block[0].matrix.clone(),
+            }),
         },
         meta,
     )
     .map_err(|e| format!("cannot certify a bound for this polynomial: {e}"))
+}
+
+/// Grids the ball's center is snapped to, coarsest first.
+const CENTER_DENOMS: [i64; 8] = [1, 2, 3, 4, 8, 64, 1024, 1 << 20];
+
+/// Choose the ball for a local claim: a rational center near `x*`, and `r²`.
+///
+/// The center is *snapped*, and deliberately to the coarsest grid that still
+/// holds `x*` well inside the ball (within half the radius). It does not need to
+/// be the minimizer — it only needs to contain it — and a coarse center keeps
+/// the ball's expanded coefficients small, which keeps both the SDP well
+/// conditioned and the generated Lean readable. Snapping to the raw f64 would
+/// give a center with a 2⁵²-ish denominator and a correspondingly ugly theorem.
+///
+/// Nothing here can make a certificate wrong: whatever ball comes out, that ball
+/// is what the emitted theorem quantifies over.
+fn ball_around(n: usize, x_float: &[f64], radius: f64) -> Result<(Vec<f64>, f64), String> {
+    if x_float.len() != n {
+        return Err(format!(
+            "--local needs a solution point of length {n}, got {}",
+            x_float.len()
+        ));
+    }
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err("--radius must be a finite positive number".to_string());
+    }
+    if let Some(bad) = x_float.iter().find(|v| !v.is_finite()) {
+        return Err(format!(
+            "--local needs a finite solution point; found {bad} in the .sol"
+        ));
+    }
+    let radius_sq = radius * radius;
+    for d in CENTER_DENOMS {
+        let center: Vec<f64> = x_float
+            .iter()
+            .map(|v| (v * d as f64).round() / d as f64)
+            .collect();
+        let dist_sq: f64 = center
+            .iter()
+            .zip(x_float)
+            .map(|(c, v)| (c - v) * (c - v))
+            .sum();
+        if center.iter().all(|c| c.is_finite()) && dist_sq * 4.0 <= radius_sq {
+            return Ok((center, radius_sq));
+        }
+    }
+    // Every grid was too coarse for this radius, so use `x*` itself: it is an
+    // f64 and therefore already rational, just an inconvenient one.
+    Ok((x_float.to_vec(), radius_sq))
+}
+
+/// `r² − Σⱼ(xⱼ − cⱼ)²` in f64, for the SDP's benefit only.
+///
+/// The exact expansion the *claim* rests on is `pounce_lean_cert::ball_terms`,
+/// computed over ℚ from the same center and radius. This one feeds the float
+/// relaxation, which only ever produces a Gram hint, so rounding here costs at
+/// most a failed search.
+fn ball_terms_float(n: usize, center: &[f64], radius_sq: f64) -> Vec<(Vec<usize>, f64)> {
+    let mut terms: Vec<(Vec<usize>, f64)> = Vec::with_capacity(2 * n + 1);
+    let mut constant = radius_sq;
+    for (j, cj) in center.iter().enumerate() {
+        constant -= cj * cj;
+        let mut lin = vec![0usize; n];
+        lin[j] = 1;
+        terms.push((lin, 2.0 * cj));
+        let mut quad = vec![0usize; n];
+        quad[j] = 2;
+        terms.push((quad, -1.0));
+    }
+    terms.push((vec![0usize; n], constant));
+    terms
 }
 
 fn run(args: &CertifyArgs) -> Result<String, String> {
@@ -427,8 +568,20 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
                     .to_string()
             });
         }
-        let cert = certify_sos(&po, &g, &iterate, &meta)?;
+        let cert = certify_sos(&po, &g, &iterate, args.radius, &meta)?;
         return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
+    }
+
+    // `--local` is only meaningful where a claim can be *restricted*, and the
+    // polynomial slice is the only one that admits one. On the QP path a KKT
+    // certificate already proves global optimality, so narrowing it to a ball
+    // would be strictly weaker for no gain.
+    if args.radius.is_some() {
+        return Err(
+            "--local applies to the polynomial slice (objective degree > 2); this problem \
+             is a convex QP, where the certificate already proves global optimality"
+                .to_string(),
+        );
     }
 
     let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
@@ -553,7 +706,18 @@ fn verify(nl: &PathBuf, cert_path: &PathBuf) -> Result<(), String> {
                 .map_err(|e| format!("cannot re-derive the polynomial from this .nl: {e}"))?;
             let g = extract_poly_constraints(&prob)
                 .map_err(|e| format!("cannot re-derive the feasible set from this .nl: {e}"))?;
-            sos_problem_block(po.n, &po.terms, &g)
+            // The neighborhood of a local claim is the *certificate's* choice,
+            // not something the `.nl` determines — no re-derivation could
+            // reproduce it, and it is not supposed to. So it is carried across
+            // rather than re-derived, and the comparison below then checks
+            // exactly what the `.nl` does determine: the polynomial and the
+            // feasible set. `sos_problem_block` still validates it (length `n`,
+            // radius² > 0), so a malformed one is refused here rather than
+            // reaching the codegen.
+            // It is carried exactly, not through f64: a rational center with an
+            // awkward denominator would not survive the round trip, and the
+            // comparison below is byte-for-byte.
+            sos_problem_block(po.n, &po.terms, &g, cert.problem.neighborhood.as_ref())
                 .map_err(|e| format!("cannot re-derive problem: {e}"))?
         }
         _ => {

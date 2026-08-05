@@ -106,9 +106,42 @@ Given exact-rational `x̃`, Lean proves `g_l ≤ g(x̃) ≤ g_u` and
   Mathlib coverage is thin. Out of scope for v1; `dReal` (δ-complete nonlinear
   SMT) is a complementary checker for this fragment later.
 
-### Tier 2 — strict local minimum (smooth algebraic NLP)
+### Tier 2 — local minimum
 
-Second-order *sufficient* conditions, all Lean-checkable over ℚ:
+**Shipped, but not the way this section planned.** What follows was the design;
+read it, then read the note below, because the route actually taken skips all of
+it.
+
+> **What shipped instead: SOS on a ball (`--local`).** A neighborhood is a
+> polynomial inequality, `r² − ‖x − c‖² ≥ 0`. Adjoin it to the Putinar
+> multiplier family that Tier 3's constrained SOS path already had, and the
+> resulting certificate proves
+>
+>     ∀ x, (∀ i, gᵢ(x) ≥ 0) → ‖x − c‖² ≤ r² → p(x₀) ≤ p(x)
+>
+> which *is* local minimality. The trusted lemmas are
+> `local_lower_bound_of_sos` and `local_min_of_sos_attained`, each a four-line
+> sign argument. No KKT, no LICQ, no active-set identification, no reduced
+> Hessian, no Taylor remainder, no implicit function theorem — and, decisively,
+> **no SOSC theorem, which Mathlib does not have.** The plan below would have
+> required proving one first; that was the real cost, and it was invisible
+> until the Tier 3 SOS work made the alternative obvious.
+>
+> Two things the ball route gives that the SOSC route would not:
+>
+> * It is a *numerically easier* problem, not just an easier proof. A ball is a
+>   strong localizer, so a low-order relaxation often closes where the global
+>   problem's gap will not.
+> * It is the only route that says anything at all at a local minimum that is
+>   not global, where the global claim is false and no certificate for it exists
+>   at any relaxation order.
+>
+> What it does **not** prove is *strictness* — nothing rules out a tie elsewhere
+> in the ball. So `local-min-strict` stays open, and the SOSC development below
+> is still what would close it. It is now a much smaller gap than it was.
+
+The original design, for the record — second-order *sufficient* conditions, all
+Lean-checkable over ℚ:
 
 * KKT stationarity `∇f + Jᵀλ + (bound multipliers) = 0` — exact, given `λ` as
   rationals.
@@ -336,9 +369,28 @@ silently rotting.
   have made the exact rounding fail on precisely the boxed problems this phase
   exists to certify — a silent "cannot certify", not a wrong certificate, but a
   bug that would have looked like a limitation of the method.
-* **Phase 3.** `local-min-strict` for general smooth algebraic NLP; later,
-  transcendentals (where `dReal` may complement Mathlib's thin interval
-  arithmetic).
+* **Phase 3 — done, via a different route than planned.** Local optimality
+  ships as `--local` / `local-min` / `local-lower-bound`: the Putinar
+  certificate with the neighborhood `r² − ‖x − c‖² ≥ 0` adjoined as one more
+  multiplier. See the note under Tier 2 for why this replaced the KKT +
+  reduced-Hessian-`LDLᵀ` plan — in one line, that plan needed an SOSC theorem
+  Mathlib does not have, and this one needs no new theory at all.
+
+  The emitter stores the ball structurally in `problem.neighborhood`
+  (`center`, `radius_sq`) rather than as a `poly_constraints` entry: it would
+  otherwise appear twice in two spellings nothing forces to agree, and
+  `poly_constraints` would stop meaning *the problem's* feasible set. The
+  radius is squared because ℚ has no square roots; a non-positive `radius_sq`
+  is refused by both emitter and codegen, since the claim would be vacuous.
+  `cert-verify` carries the neighborhood across unchanged rather than
+  re-deriving it — no `.nl` determines it.
+
+  The candidate gained a third exact obligation, `‖x₀ − c‖² ≤ r²`, which does
+  *not* follow from attainment: `x⁴ − 2x² + 2` attains its minimum at both
+  `±1`. That is the `certify_sos_local_forged_outside_ball` negative fixture.
+
+  Still open here: `local-min-strict` (strictness), and later transcendentals
+  (where `dReal` may complement Mathlib's thin interval arithmetic).
 
 ## Recommended first slice
 

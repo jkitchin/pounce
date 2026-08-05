@@ -22,7 +22,8 @@ wires it to the CLI.
 > **Status.** Every verdict the consumer accepts is now **validated
 > end-to-end** — `global-min` (from `qp-convex` via KKT, *and* from `sos-poly`
 > via an attained bound), `infeasible`, `unbounded`, `global-lower-bound`
-> (`sos-poly`), and `feasible`: `pounce certify` emits each, and `pounce-lean`
+> (`sos-poly`), `local-lower-bound` and `local-min` (`sos-poly` restricted to a
+> ball), and `feasible`: `pounce certify` emits each, and `pounce-lean`
 > kernel-checks it (reusable lemmas → codegen → `lake build`) with proofs
 > resting only on Lean's standard axioms (`propext`, `Classical.choice`,
 > `Quot.sound`; no `sorry`). Each has a fixture in
@@ -55,11 +56,20 @@ reads the certificate.
 > | `global-lower-bound` (SOS witness `witnesses.sos`) | yes | yes |
 > | either SOS verdict with Putinar multipliers (`problem.poly_constraints`) | yes | yes |
 > | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | yes (`--feasible`) | yes |
+> | `local-min` / `local-lower-bound` (Putinar plus a ball, `problem.neighborhood`) | yes (`--local`) | yes |
 > | `local-min-strict` | no | no |
 >
-> `local-min-strict` is now the only gap. It is a different kind of gap from the
-> ones that closed: those needed a refinement step, this needs a second-order
-> theory the consumer does not yet have either.
+> Local optimality closed **without** the second-order theory that row had been
+> waiting on. The plan had been KKT plus a reduced-Hessian `LDLᵀ`, which needs
+> an SOSC theorem Mathlib does not have. But a neighborhood is a polynomial
+> inequality — `r² − ‖x − c‖² ≥ 0` — so adjoining it to the Putinar family
+> proves minimality over the ball using machinery that already existed and a
+> sign argument two lines long. No constraint qualification, no Taylor
+> remainder, no implicit function theorem.
+>
+> `local-min-strict` remains open, and is now a genuinely smaller gap: what is
+> missing is only *strictness*, since nothing above rules out a tie elsewhere in
+> the ball.
 >
 > `feasible` was the last row where the consumer ran ahead of the producer, and
 > it closed differently from the others — it is the one verdict the emitter will
@@ -169,7 +179,7 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
-| `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
+| `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, `"global-lower-bound"`, `"local-min"`, or `"local-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. The `local-` pair is the SOS pair restricted to `problem.neighborhood`, and the two must agree — a `global-` verdict carrying a neighborhood is refused. |
 | `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. A **shape** discriminator — which half of `problem` is populated, and so which theorem the codegen routes to — *not* a convexity claim. `feasible` ships `qp-convex` on an indefinite `Q`, and so does `unbounded`, because neither verdict needs convexity. Only `global-min` on the KKT path does, and there the PSD claim is carried by `witnesses.hessian_psd` and checked by Lean. |
 | `tolerance` | rational | Feasibility ε. `0` for every verdict except `feasible`, whose whole subject is a point that misses feasibility — there it is an exact rational bound on the residual, computed over ℚ and rounded **up** to one significant digit, never a solver setting copied across. |
 | `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` — for all `x`, or, when `problem.poly_constraints` is present, for all *feasible* `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
@@ -405,6 +415,71 @@ the feasible set with empty interior — where Putinar's theorem stops
 guaranteeing a certificate exists at any degree. Refusing beats searching a
 relaxation ladder that may have nothing on it.
 
+### `problem.neighborhood`: local optimality, at no extra theory
+
+At a local minimum that is not global, every claim above is *false*, so no
+certificate for it exists at any relaxation order. `pounce certify --local`
+narrows the claim to a ball instead:
+
+```json
+"problem": {
+  "n_vars": 1,
+  "polynomial":   { "terms": [ … ] },
+  "neighborhood": { "center": [ {"num":"1","den":"1"} ],
+                    "radius_sq": {"num":"1","den":"1"} }
+}
+```
+
+This needs no new machinery, because a ball is a polynomial inequality:
+
+    r² − ‖x − c‖² ≥ 0
+
+so it joins the `gₖ` family as one more multiplier and the identity becomes
+
+    p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x) + σ_B(x)·(r² − ‖x − c‖²)
+
+with the proved statement guarded by `sqdist x center ≤ rsq` alongside
+feasibility. That is local minimality stated directly — no second-order
+sufficient conditions, no constraint qualification, no Taylor remainder.
+
+Four things the encoding is deliberate about:
+
+* **`radius_sq`, not `radius`.** ℚ is not closed under square roots, so a
+  radius of `√2` has no exact representation while `r² = 2` does. The theorem
+  mentions the square throughout and never takes a root. A non-positive
+  `radius_sq` is refused by both emitter and codegen: the claim would be
+  vacuous, and a module that builds and means nothing is worse than an error.
+* **Structural, not a `poly_constraints` entry.** Storing the ball as a term
+  list would put it in the certificate twice in two spellings nothing forces to
+  agree, and would blur `poly_constraints`, whose honest meaning is *the
+  problem's* feasible set — the ball is the certificate's own choice, not
+  something the `.nl` says. Its `multiplier` index is one past the last
+  constraint, so the multiplier family reads: constraints, then the ball.
+* **`cert-verify` carries it across rather than re-deriving it.** Everything
+  else in `problem` is rebuilt from the consumer's `.nl` and compared; the
+  neighborhood cannot be, because no `.nl` determines it. It is copied
+  unchanged, which is what makes the comparison of the rest exact.
+* **The candidate needs a third obligation.** `p(x₀) = γ` does not put `x₀` in
+  the ball: `x⁴ − 2x² + 2` attains its minimum at both `±1`. So the generated
+  theorem proves `‖x₀ − c‖² ≤ r²` too, and states it:
+
+      ((∀ i, 0 ≤ g i xstar) ∧ sqdist xstar center ≤ rsq) ∧
+        ∀ x, (∀ i, 0 ≤ g i x) → sqdist x center ≤ rsq → p xstar ≤ p x
+
+  `certify_sos_local_forged_outside_ball` is exactly that forgery — every
+  witness genuine, `x₀ = −1` attaining exactly, two units outside a ball of
+  radius one — and `certify_sos_local_forged_ball_psd` rewrites `σ_B` over a
+  longer monomial basis so it still evaluates correctly while the Gram goes
+  indefinite. Both must fail `lake build`, and `scripts/check-lean-cert.sh`
+  checks that they do.
+
+The centre is `x*` snapped to a coarse rational grid chosen to keep the true
+solution well inside the ball — a certificate is about the ball it names, so
+that ball must be one a rational centre describes exactly. The verdicts are
+`local-min` and `local-lower-bound`, and the codegen refuses a certificate whose
+verdict and shape disagree (a `global-min` carrying a neighborhood would
+overclaim on read).
+
 Routing between the QP and polynomial slices is on **degree**, not on
 QP-extraction failure — a convex QP must never silently downgrade from
 `global-min` to a mere bound. The degree test is on the *objective*, so a linear
@@ -441,9 +516,11 @@ if any, becoming Putinar multipliers), that `--feasible` opts into the weaker
 `feasible` verdict, which needs no convexity (indefinite `Q` is fine — it
 certifies only where the point sits, not that it is optimal), and that
 `unbounded` likewise accepts any `Q` (it needs `Q` flat along `d`, never convex)
-as long as the constraints are all inequalities.
+as long as the constraints are all inequalities, and that `--local` narrows the
+SOS claim to a ball (`local-min` / `local-lower-bound`), which is what makes a
+certificate possible at a local minimum that is not global.
 Maximize objectives, *equality* constraints on a nonconvex polynomial, and the
-`local-min-strict` verdict remain additive future work.
+*strict* local verdict `local-min-strict` remain additive future work.
 
 ## Consumer acceptance
 

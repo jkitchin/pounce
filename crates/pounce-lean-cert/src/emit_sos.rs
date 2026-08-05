@@ -58,8 +58,8 @@ use crate::ldlt::ldlt;
 use crate::rational::Rat;
 use crate::round_gram::{BlockSpec, RoundError, round_gram_blocks};
 use crate::schema::{
-    Binding, Candidate, Certificate, Entry, PolyTerm, PolynomialSpec, Problem, SCHEMA_TAG,
-    SosBlock, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, Witnesses,
+    Binding, Candidate, Certificate, Entry, Neighborhood, PolyTerm, PolynomialSpec, Problem,
+    SCHEMA_TAG, SosBlock, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, Witnesses,
 };
 
 /// Neutral input: an SOS relaxation of a polynomial minimization, in `f64`,
@@ -88,6 +88,35 @@ pub struct SosInput {
     /// or a minimizer at irrational coordinates all simply leave the bound
     /// unattained — never a wrong verdict.
     pub x_float: Vec<f64>,
+    /// The ball to restrict the claim to, for a *local* certificate. `None`
+    /// leaves the claim over all of `K` (or all of `ℝⁿ`, unconstrained).
+    pub neighborhood: Option<Ball>,
+}
+
+/// The closed ball `‖x − center‖² ≤ radius_sq` a local claim is made on, with
+/// the localizing block the relaxation proposed for it.
+///
+/// Unlike `gram_float` and `bound_float`, `center` and `radius_sq` are **not**
+/// hints. They are converted losslessly to ℚ and become part of the claim, so a
+/// different center is a different theorem — not a failed search. `basis` and
+/// `gram_float` are hints like every other Gram.
+///
+/// The ball is deliberately not passed as one more [`SosConstraint`]. It would
+/// then need a term list, which is the same polynomial written a second way,
+/// and nothing would force the two spellings to agree; here the expansion has
+/// exactly one source ([`ball_terms`]).
+#[derive(Clone, Debug)]
+pub struct Ball {
+    /// Center, length `n`. Need not be the minimizer — only close enough to it
+    /// to contain it.
+    pub center: Vec<f64>,
+    /// The *squared* radius; must be strictly positive. A zero radius makes the
+    /// local claim true and vacuous, so the emitter refuses it.
+    pub radius_sq: f64,
+    /// The localizing monomial lift for this block, as exponent vectors.
+    pub basis: Vec<Vec<usize>>,
+    /// The SDP's Gram matrix for this block. A hint.
+    pub gram_float: Vec<Vec<f64>>,
 }
 
 /// One inequality of the feasible set, `g(x) ≥ 0`, with the localizing SOS
@@ -181,10 +210,15 @@ fn br(x: f64) -> Result<BigRational, SosEmitError> {
 /// what `canonical_problem` compares against. Their presence is load-bearing
 /// here and not merely informational: it is the difference between a bound over
 /// `ℝⁿ` and a bound over `K`.
+///
+/// `neighborhood` is likewise part of the problem block rather than of the
+/// witnesses, for the same reason: it changes what region the bound is claimed
+/// on, so it has to be inside what `canonical_problem` compares.
 pub fn sos_problem_block(
     n: usize,
     terms: &[(Vec<usize>, f64)],
     constraints: &[Vec<(Vec<usize>, f64)>],
+    neighborhood: Option<&Neighborhood>,
 ) -> Result<Problem, SosEmitError> {
     if terms.is_empty() {
         return Err(SosEmitError::Shape("empty polynomial"));
@@ -201,6 +235,23 @@ pub fn sos_problem_block(
             "a term's exponent vector is not length n",
         ));
     }
+    let neighborhood = neighborhood
+        .map(|nb| {
+            if nb.center.len() != n {
+                return Err(SosEmitError::Shape("neighborhood center is not length n"));
+            }
+            // A zero radius would collapse the ball to a point, making the
+            // local claim true and empty; a negative one makes the region empty,
+            // so *every* bound holds on it. Both are sound and worthless, which
+            // is the worst kind of certificate to emit silently.
+            if !nb.radius_sq.inner().is_positive() {
+                return Err(SosEmitError::Shape(
+                    "neighborhood radius² must be strictly positive",
+                ));
+            }
+            Ok(nb.clone())
+        })
+        .transpose()?;
     Ok(Problem {
         n_vars: n,
         objective: None,
@@ -210,7 +261,73 @@ pub fn sos_problem_block(
         poly_constraints: (!constraints.is_empty())
             .then(|| constraints.iter().map(|g| poly_spec(g)).collect())
             .transpose()?,
+        neighborhood,
     })
+}
+
+/// The ball `‖x − c‖² ≤ r²` as the polynomial inequality
+/// `g(x) = r² − Σⱼ(xⱼ − cⱼ)² ≥ 0`, expanded exactly:
+///
+/// ```text
+///     g(x) = (r² − Σⱼ cⱼ²)  +  Σⱼ 2cⱼ·xⱼ  −  Σⱼ xⱼ²
+/// ```
+///
+/// **The one place a neighborhood becomes a polynomial.** The certificate
+/// stores the ball structurally, so the Rust recheck, the exact rounder, and
+/// (mirrored) the Lean codegen all have to expand it — and if they expanded it
+/// differently the identity would be about a different region. Deriving it from
+/// one function makes that impossible on this side; on the Lean side the
+/// mismatch would surface as a failing `ring`.
+///
+/// Terms are sorted by exponent vector and exact zeros dropped, matching
+/// [`poly_spec`]'s convention: a zero coefficient is a real equation to the
+/// coefficient-matching system, not a harmless placeholder.
+pub fn ball_terms(
+    center: &[BigRational],
+    radius_sq: &BigRational,
+) -> Vec<(Vec<usize>, BigRational)> {
+    let n = center.len();
+    let mut terms: std::collections::BTreeMap<Vec<usize>, BigRational> =
+        std::collections::BTreeMap::new();
+
+    let two = BigRational::from_integer(2.into());
+    let mut constant = radius_sq.clone();
+    for (j, cj) in center.iter().enumerate() {
+        constant -= cj * cj;
+
+        let mut lin = vec![0usize; n];
+        lin[j] = 1;
+        *terms.entry(lin).or_insert_with(BigRational::zero) += &two * cj;
+
+        let mut quad = vec![0usize; n];
+        quad[j] = 2;
+        *terms.entry(quad).or_insert_with(BigRational::zero) -= BigRational::from_integer(1.into());
+    }
+    terms.insert(vec![0usize; n], constant);
+
+    terms.retain(|_, c| !c.is_zero());
+    terms.into_iter().collect()
+}
+
+/// The polynomials the certificate's SOS blocks multiply, in `multiplier` index
+/// order.
+///
+/// That family is the problem's own `gₖ ≥ 0`, **extended by the ball** when the
+/// claim is local. So on a local certificate the last index does not name an
+/// entry of `poly_constraints` — it names the neighborhood, which is stored
+/// separately and derived here. One rule, stated once, and every consumer that
+/// resolves a `multiplier` goes through it.
+fn multiplier_terms(problem: &Problem) -> Vec<Vec<(Vec<usize>, BigRational)>> {
+    let mut out: Vec<Vec<(Vec<usize>, BigRational)>> = problem
+        .poly_constraint_specs()
+        .iter()
+        .map(spec_terms)
+        .collect();
+    if let Some(nb) = problem.neighborhood.as_ref() {
+        let center: Vec<BigRational> = nb.center.iter().map(|r| r.inner().clone()).collect();
+        out.push(ball_terms(&center, nb.radius_sq.inner()));
+    }
+    out
 }
 
 /// A float term list as an exact [`PolynomialSpec`]. Lossless — an f64 *is* a
@@ -280,6 +397,55 @@ fn gamma_candidates(bound_float: f64) -> Vec<BigRational> {
 /// almost nothing and costs a slower refusal on exactly the problems where
 /// refusal is the right answer.
 const ATTAIN_DENOMS: [i64; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 100];
+
+/// The exact values `p` takes at the *feasible* rational points `x*` snaps to.
+///
+/// These are the `γ`s worth trying first, for a reason the grid ladder cannot
+/// reach: if the minimizer really is the rational `x₀`, the sharpest true bound
+/// is exactly `p(x₀)` — a rational with whatever denominator `p` and `x₀`
+/// happen to produce, `−14/81` say, which no ladder short of luck will hit.
+/// Reaching it is the difference between a bound and a minimum.
+///
+/// **Trying these first cannot cost sharpness**, which is why they may jump the
+/// queue. Suppose `γ = p(x₀)` survives the exact rounding: then `γ ≤ p(x)` for
+/// every feasible `x`. But `x₀` is itself feasible — that is what the `g` check
+/// here is for — so `γ = p(x₀) ≥ inf p`. The two together force `γ = inf p`, the
+/// sharpest bound that exists. A candidate from an infeasible point carries no
+/// such guarantee and could be provable *and* slack, so those are dropped rather
+/// than merely ranked.
+///
+/// Everything else is free: a `γ` above the infimum fails the coefficient
+/// matching or the PSD step, and the search moves on.
+fn attained_gamma_candidates(
+    p_terms: &[(Vec<usize>, BigRational)],
+    g_terms: &[Vec<(Vec<usize>, BigRational)>],
+    n: usize,
+    x_float: &[f64],
+) -> Vec<BigRational> {
+    if x_float.len() != n || x_float.iter().any(|v| !v.is_finite()) {
+        return Vec::new();
+    }
+    let mut out: Vec<BigRational> = Vec::new();
+    for d in ATTAIN_DENOMS {
+        let snapped: Option<Vec<BigRational>> = x_float
+            .iter()
+            .map(|v| {
+                let scaled = (v * d as f64).round();
+                (scaled.is_finite() && scaled.abs() < i64::MAX as f64)
+                    .then(|| BigRational::new((scaled as i64).into(), d.into()))
+            })
+            .collect();
+        let Some(x) = snapped else { continue };
+        if g_terms.iter().any(|g| eval_poly(g, &x).is_negative()) {
+            continue;
+        }
+        let v = eval_poly(p_terms, &x);
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
 
 /// Look for an exact rational `x₀` with `p(x₀) = γ`, seeded by the float `x*`.
 ///
@@ -382,6 +548,13 @@ pub fn emit_sos_certificate(
             "a localizing basis or Gram hint has a bad shape",
         ));
     }
+    if let Some(b) = input.neighborhood.as_ref()
+        && !shape_ok(&b.basis, &b.gram_float)
+    {
+        return Err(SosEmitError::Shape(
+            "the neighborhood's basis or Gram hint has a bad shape",
+        ));
+    }
 
     // Exact problem. This — not the float term lists — is what the certificate
     // claims a bound for, and the conversion is lossless, so the claim is about
@@ -391,19 +564,35 @@ pub fn emit_sos_certificate(
     // problems.
     let g_float: Vec<Vec<(Vec<usize>, f64)>> =
         input.constraints.iter().map(|c| c.g.clone()).collect();
-    let problem = sos_problem_block(n, &input.terms, &g_float)?;
+    // The ball's exact form. f64 → ℚ is lossless, so the emitted claim is about
+    // precisely the ball the caller named — no rounding, no tolerance.
+    let ball = input
+        .neighborhood
+        .as_ref()
+        .map(|b| -> Result<Neighborhood, SosEmitError> {
+            Ok(Neighborhood {
+                center: b
+                    .center
+                    .iter()
+                    .map(|c| br(*c).map(Rat))
+                    .collect::<Result<_, _>>()?,
+                radius_sq: Rat(br(b.radius_sq)?),
+            })
+        })
+        .transpose()?;
+    let problem = sos_problem_block(n, &input.terms, &g_float, ball.as_ref())?;
     let p_terms = spec_terms(
         problem
             .polynomial
             .as_ref()
             .ok_or(SosEmitError::SelfCheck("problem block lost its polynomial"))?,
     );
-    let g_terms: Vec<Vec<(Vec<usize>, BigRational)>> = problem
-        .poly_constraint_specs()
-        .iter()
-        .map(spec_terms)
-        .collect();
-    if g_terms.len() != input.constraints.len() {
+    // The multiplier family: the problem's constraints, then the ball if the
+    // claim is local. Derived from the *problem block* rather than from `input`
+    // so the witness search runs against the same polynomials that get written.
+    let g_terms = multiplier_terms(&problem);
+    let expected = input.constraints.len() + usize::from(input.neighborhood.is_some());
+    if g_terms.len() != expected {
         return Err(SosEmitError::SelfCheck(
             "problem block lost a constraint polynomial",
         ));
@@ -425,11 +614,26 @@ pub fn emit_sos_certificate(
             gram_float: &c.gram_float,
         });
     }
+    // The ball's block goes last, so its multiplier index is the one past the
+    // problem's constraints — which is exactly how `multiplier_terms` numbers it.
+    if let Some(b) = input.neighborhood.as_ref() {
+        blocks.push(BlockSpec {
+            basis: &b.basis,
+            multiplier: &g_terms[input.constraints.len()],
+            gram_float: &b.gram_float,
+        });
+    }
 
     // --- search the ladder for an exact certificate --------------------------
     let mut last = RoundError::Inconsistent;
     let mut found: Option<(BigRational, Vec<Vec<Vec<BigRational>>>)> = None;
-    'search: for gamma in gamma_candidates(input.bound_float) {
+    // Exact values at the snapped `x*` first, then the grid ladder. The former
+    // are the only way to reach a `γ` with an awkward denominator, and they are
+    // precisely the ones that make the bound attained.
+    let candidates = attained_gamma_candidates(&p_terms, &g_terms, n, &input.x_float)
+        .into_iter()
+        .chain(gamma_candidates(input.bound_float));
+    'search: for gamma in candidates {
         for denom in DENOMS {
             match round_gram_blocks(&p_terms, &gamma, &blocks, denom) {
                 Ok(g) => {
@@ -503,16 +707,29 @@ pub fn emit_sos_certificate(
     // stronger verdict is available; otherwise the bound stands alone. Both are
     // sound, and the emitter never guesses between them: attainment is decided
     // by exact evaluation, not by how close the float solve looked.
+    //
+    // The `local` prefix is not cosmetic. It travels with `problem.neighborhood`
+    // and says the same thing twice on purpose: a reader skimming verdicts and a
+    // consumer keying off the problem block should not be able to disagree about
+    // whether the claim is restricted to a ball.
     let attained = attaining_point(&p_terms, &g_terms, &gamma, n, &input.x_float);
+    let local = input.neighborhood.is_some();
     let (verdict, candidate) = match attained {
         Some(x) => (
-            "global-min",
+            if local { "local-min" } else { "global-min" },
             Some(Candidate {
                 x: x.into_iter().map(Rat).collect(),
                 objective: Rat(gamma.clone()),
             }),
         ),
-        None => ("global-lower-bound", None),
+        None => (
+            if local {
+                "local-lower-bound"
+            } else {
+                "global-lower-bound"
+            },
+            None,
+        ),
     };
 
     Ok(Certificate {
@@ -565,7 +782,10 @@ fn recheck(
     blocks: &[SosBlock],
 ) -> Result<(), SosEmitError> {
     let n = problem.n_vars;
-    let cons = problem.poly_constraint_specs();
+    // Resolved through `multiplier_terms`, so the recheck reads a `multiplier`
+    // index exactly as the emitter wrote it — including the local case, where
+    // the last index names the ball rather than a constraint.
+    let cons = multiplier_terms(problem);
     let one = vec![(vec![0usize; n], BigRational::from_integer(1.into()))];
 
     // The identity's left side, accumulated over every block.
@@ -622,7 +842,7 @@ fn recheck(
         let mult = match block.multiplier {
             None => one.clone(),
             Some(k) => {
-                let spec = cons
+                let terms = cons
                     .get(k)
                     .ok_or(SosEmitError::SelfCheck("block.multiplier is out of range"))?;
                 if seen[k] {
@@ -631,7 +851,7 @@ fn recheck(
                     ));
                 }
                 seen[k] = true;
-                spec_terms(spec)
+                terms.clone()
             }
         };
 
@@ -717,6 +937,7 @@ mod tests {
             // No iterate: the bound path, uncontaminated by attainment.
             x_float: vec![],
             constraints: Vec::new(),
+            neighborhood: None,
         }
     }
 
@@ -795,6 +1016,7 @@ mod tests {
                 bound_float: -0.2500000003,
                 x_float: vec![1.2247448713915892],
                 constraints: Vec::new(),
+                neighborhood: None,
             },
             &meta(),
         )
