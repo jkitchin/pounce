@@ -3,7 +3,10 @@
 **Schema tag:** `pounce.lean-cert/v1`
 
 This document is the canonical reference for the exact-rational certificate
-emitted by `pounce certify <problem.nl> <claim.sol>`. The certificate lets the
+emitted by `pounce certify <problem.nl> <claim.sol>`. For how to *use* the
+command — what it proves, and how a certificate is accepted — start with
+[Certifying Solutions (Lean)](../certify.md); this page is the field-by-field
+format specification. The certificate lets the
 external `pounce-lean` repository (not yet public) produce a **kernel-checked
 Lean 4 proof** of what the solve actually established — that `x*` is feasible
 and a **global** minimizer, that the problem is infeasible or unbounded, or that

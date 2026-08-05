@@ -9,6 +9,54 @@ changes.
 
 ## [Unreleased]
 
+### Added — machine-checked optimality certificates (`pounce certify`)
+
+- `pounce certify <problem.nl> <claim.sol>` emits an exact-rational
+  `pounce.lean-cert/v1` certificate that an external Lean 4 development
+  (`pounce-lean`, not yet public) turns into a **kernel-checked proof**. This
+  is a different claim from `pounce verify`, which recomputes feasibility in
+  f64 and is candid that global optimality is not checkable that way. Here the
+  trust anchor is the Lean kernel: there is no key, no tolerance, and no
+  floating point in the trusted path. Documented in `docs/src/certify.md`, with
+  the field-by-field format in `docs/src/schema/lean-cert-v1.md`.
+- Four verdicts, selected automatically from the `.nl`: `global-min` (convex
+  QP — KKT point plus PSD Hessian), `infeasible` (Farkas witness), `unbounded`
+  (recession direction, LP slice only), and `global-lower-bound` (sum of
+  squares). Anything else exits 2 rather than emit an unsound certificate —
+  maximize objectives, indefinite `Q`, non-polynomial objectives, and
+  constrained higher-degree problems are all refused.
+- `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
+  polynomial, which is the case where a local solve is worth least: it returns
+  one basin and can say nothing about the others, and no KKT argument repairs
+  that. POUNCE solves an SOS relaxation, then certifies the identity
+  `p(x) − γ = m(x)ᵀ G m(x)` with `G ⪰ 0` — Lean closes the identity with
+  `ring` and discharges positive-semidefiniteness from an exact `LDLᵀ`.
+- **Witnesses are untrusted, and the solver's numbers are never copied.** Wrong
+  witness data makes the generated Lean fail to typecheck; it can never make a
+  false statement pass. Every certificate carries `tolerance = 0`, so the f64
+  solve only ever *proposes* — an active set, a Gram matrix, a bound — and each
+  is recomputed exactly over ℚ (`refine_kkt`, `refine_farkas`, `round_gram`),
+  with the emitter refusing rather than shipping a certificate that cannot
+  verify. This is not a formality: on the `certify_infeasible` fixture the
+  float Farkas ray satisfies `Aᵀy = 0` to a ~1.7e-11 relative residual, which
+  over ℚ is `−103801/262144` — not zero, and undischargeable. The exact ray is
+  `(1, 1, 1)`.
+- `pounce cert-verify <problem.nl> <cert.json>` is the consumer-side binding
+  check. A matching `nl_sha256` is necessary but not sufficient: a certificate
+  can carry the right hash while proving an *easier* problem, and that proof
+  would be perfectly valid. `cert-verify` re-derives the problem from the
+  consumer's own `.nl` and compares it to the certificate's `problem` block,
+  sharing the derivation code with the emitter so a mismatch is always real
+  drift rather than two implementations disagreeing.
+- `scripts/check-lean-cert.sh` guards all of it in three layers, of which the
+  third is the one that tests the soundness claim: certificates regenerate
+  byte-identically and bind to their `.nl` (no Lean needed); codegen reproduces
+  the golden `.lean`, `lake build` succeeds, and the axiom audit shows only
+  `propext`, `Classical.choice`, `Quot.sound` with no `sorry`; and
+  **deliberately corrupted certificates must fail to build** — one forgery per
+  obligation a verdict rests on, including an indefinite Gram matrix that still
+  satisfies the SOS identity, so the identity check alone cannot catch it.
+
 ### Added — POUNCE runs in the browser (WebAssembly)
 
 - The default build has no C or Fortran dependency, so the whole solver —
