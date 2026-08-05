@@ -266,9 +266,7 @@ silently rotting.
   (`global_lower_bound_of_sos`) and the attainment half
   (`global_min_of_sos_attained`, `p x₀ = γ`) both ship; a polynomial with an
   irrational minimizer keeps the bound verdict, which is the correct answer
-  over ℚ rather than a gap. Constrained problems still need Positivstellensatz
-  multipliers on the emitter side — `constrained_lower_bound_of_sos` already
-  exists in pounce-lean.
+  over ℚ rather than a gap.
 * **Phase 2b — done.** Tier 1 (`feasible`) closed on the emitter side with
   `pounce certify --feasible`, for linearly-constrained QPs of any curvature.
   This was the last verdict the consumer accepted and the producer could not
@@ -295,6 +293,49 @@ silently rotting.
   that holds with `A_i d = 0` exactly; such a row is refused rather than
   nudged, since a tolerance there would be a tolerance in the proof. Equality
   constraint rows remain outside the slice.
+* **Phase 2d — done.** Positivstellensatz (Putinar) multipliers on the emitter
+  side, so the polynomial slice takes constraints:
+  `p − γ = σ₀ + Σₖ σₖ·gₖ`, discharged by `constrained_lower_bound_of_sos`,
+  which already existed in pounce-lean; the attainment half
+  (`constrained_min_of_sos_attained`) was added alongside it.
+
+  Three things are worth recording.
+
+  1. **It is not an extension of the unconstrained case, it is the general
+     case.** The unconstrained shape is the Putinar shape with one block whose
+     multiplier is the constant `1`; there is one code path, one exact rounder
+     (`round_gram_blocks`, jointly over all blocks' packed upper triangles),
+     one identity check. What differs is the *claim*, and that difference is
+     carried in the `problem` block (`poly_constraints`) rather than in the
+     witnesses — so `cert-verify` re-derives it from the consumer's `.nl` like
+     everything else, and the codegen routes on its presence rather than on the
+     verdict, which is unchanged.
+  2. **Attainment stops being sufficient.** On ℝⁿ, `p(x₀) = γ` makes `x₀` a
+     minimizer. On `K` it does not — a point outside `K` can beat every point
+     inside it — so the candidate carries feasibility as a second obligation
+     and the theorem states both halves. The asymmetry between them is the
+     reason to check both: snapping a float to a rational grid can *create*
+     feasibility (an inequality with slack absorbs the perturbation) but
+     essentially never preserves attainment (an equation does not).
+  3. **Equalities are refused, and not for want of effort.** An equality wants
+     a free multiplier, not an SOS one; splitting it into `h ≥ 0`, `−h ≥ 0`
+     gives a feasible set with empty interior, where Putinar's theorem no
+     longer guarantees a certificate exists at *any* relaxation degree. A
+     ladder search there can only fail slowly. The honest move is to refuse
+     with that reason, and to add free multipliers as their own piece of work.
+
+  A latent producer bug surfaced doing this: `sos_constrained_lower_bound_gram`
+  returned its Gram blocks in *equilibrated* coordinates. Equilibration applies
+  a domain map `x = shift + scale·u` on boxed variables plus a per-polynomial
+  coefficient scale, and only the objective's scale was being undone. The fix
+  is a congruence: with `T` the transition matrix of `u^{basisᵢ}` expanded over
+  the same basis (square, because a full monomial basis of degree ≤ d is closed
+  under the substitution), `G_x = Tᵀ G_u T`, which preserves PSD-ness; each
+  localizing block is additionally divided by its constraint's scale. Worth
+  noting *why* it was latent: nothing consumed the blocks until now. It would
+  have made the exact rounding fail on precisely the boxed problems this phase
+  exists to certify — a silent "cannot certify", not a wrong certificate, but a
+  bug that would have looked like a limitation of the method.
 * **Phase 3.** `local-min-strict` for general smooth algebraic NLP; later,
   transcendentals (where `dReal` may complement Mathlib's thin interval
   arithmetic).

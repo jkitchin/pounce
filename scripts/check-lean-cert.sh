@@ -67,6 +67,13 @@ FIXTURES=(
   # in exactly one direction.
   "certify_sos        PounceLean.CertifySOS        global_min"  # nonconvex quartic; bound attained
   "certify_sos_bound  PounceLean.CertifySOSBound   global_lb"   # irrational minimizer; bound only
+  # The constrained (Putinar) shape, and the reason it earns its own fixture:
+  # x³ − 3x has NO lower bound on ℝ at all, so the unconstrained emitter has
+  # nothing to certify. On 0 ≤ x ≤ 3 it does — via σ₀ plus one localizing
+  # multiplier per bound — and the theorem it proves is correspondingly weaker
+  # (a bound on the feasible set). Losing this would let the two shapes drift
+  # into each other unnoticed.
+  "certify_sos_box    PounceLean.CertifySOSBox     constrained_min"  # box-constrained cubic
   # The one verdict that is not about optimality: an indefinite Hessian, so the
   # global-min path refuses (Ldl(Indefinite)) and there is nothing to certify
   # about the solve EXCEPT that its answer is a real point of the real feasible
@@ -284,6 +291,18 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # LP slice ever checked — A d = 2 ≥ 0, c·d = −1 < 0 — and fails only the
     # new one. Without it, a regression that dropped `hQd` would still pass.
     "certify_unbounded_qp_forged_dir PounceLean.Generated.ForgedRecessionDir direction (feasible and descending, but Q d ≠ 0)"
+    # The constrained path adds two obligations the unconstrained one does not
+    # have, so it needs two more forgeries. First: PSD-ness is checked per
+    # block, and a *localizing* block is the one that would be easy to skip.
+    # This cert's identity closes exactly — mass was moved into σ₀, which stays
+    # genuinely PSD — so only the σ₂ PSD check can catch it.
+    "certify_sos_box_forged_localizing PounceLean.Generated.ForgedSosLocalizing localizing Gram σ₂ (identity closes, but σ₂ ⋡ 0)"
+    # Second: the candidate must be FEASIBLE, not merely attaining. x = −2 is
+    # the other root of p − γ, so every witness here is genuine and `p x₀ = γ`
+    # holds exactly — the point is simply outside 0 ≤ x ≤ 3. Without the
+    # feasibility check this would prove a minimum at a point that is not in
+    # the feasible set at all.
+    "certify_sos_box_forged_infeasible_min PounceLean.Generated.ForgedSosInfeasMin candidate (attains γ, but outside the feasible set)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

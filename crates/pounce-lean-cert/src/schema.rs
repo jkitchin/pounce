@@ -65,8 +65,9 @@ pub struct Toolchain {
 /// `problem_class`:
 ///
 /// * `qp-convex` — `objective` / `var_bounds` / `constraints`, all present.
-/// * `sos-poly` — `polynomial` alone: a term list for a possibly nonconvex
-///   polynomial over free variables.
+/// * `sos-poly` — `polynomial`, plus `poly_constraints` when the problem is
+///   constrained: term lists for a possibly nonconvex polynomial and for the
+///   `gₖ(x) ≥ 0` its bound is claimed over.
 ///
 /// The unused half is *absent*, not zero-filled. A zeroed `Q` would not be a
 /// harmless placeholder: [`crate::canonical_problem`] compares problem blocks to
@@ -85,14 +86,33 @@ pub struct Problem {
     /// The objective as an exact term list — `sos-poly` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polynomial: Option<PolynomialSpec>,
+    /// The feasible set as `gₖ(x) ≥ 0` term lists — `sos-poly` only, and absent
+    /// on an unconstrained problem.
+    ///
+    /// Absence and `[]` would mean the same thing mathematically, but absence is
+    /// what an unconstrained certificate has always serialized, and
+    /// [`crate::canonical_problem`] compares these blocks byte-for-byte.
+    ///
+    /// This field changes what the bound *means*: with it, `γ ≤ p(x)` is claimed
+    /// only where every `gₖ(x) ≥ 0`. A consumer that ignored it would read a
+    /// constrained bound as a global one, which is strictly stronger and
+    /// generally false — so the codegen keys the theorem it emits off this
+    /// field's presence rather than off the verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poly_constraints: Option<Vec<PolynomialSpec>>,
 }
 
 impl Problem {
     /// Constraint rows of a `qp-convex` problem. An `sos-poly` problem carries
-    /// none — it is a statement about all of `ℝⁿ` — so it reads as empty here
-    /// rather than being a case every caller must handle.
+    /// none — its feasible set, if any, is in `poly_constraints` — so it reads
+    /// as empty here rather than being a case every caller must handle.
     pub fn constraint_rows(&self) -> &[Constraint] {
         self.constraints.as_deref().unwrap_or(&[])
+    }
+
+    /// The `gₖ(x) ≥ 0` of an `sos-poly` problem; empty when unconstrained.
+    pub fn poly_constraint_specs(&self) -> &[PolynomialSpec] {
+        self.poly_constraints.as_deref().unwrap_or(&[])
     }
 }
 
@@ -204,6 +224,15 @@ pub struct SosBlock {
     pub l: SparseMatrix,
     #[serde(rename = "D")]
     pub d: Vec<Rat>,
+    /// Which `problem.poly_constraints[k]` this block multiplies. Absent for
+    /// `σ₀`, whose multiplier is the constant `1`.
+    ///
+    /// Named rather than positional because the identity is only true for the
+    /// *right* pairing: swap two localizing blocks and the coefficients no
+    /// longer match, but nothing in the block itself would say so. The index is
+    /// what the codegen reads to build the `Σᵢ σᵢ·gᵢ` sum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<usize>,
 }
 
 /// Recession certificate: a feasible `x0` together with a direction `d`

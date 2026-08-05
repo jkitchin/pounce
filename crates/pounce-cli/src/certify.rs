@@ -14,7 +14,9 @@ use std::process::ExitCode;
 
 use pounce_convex::sos::{PolyProblem, Polynomial, sos_constrained_lower_bound_gram, sos_opts};
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
-use pounce_lean_cert::emit_sos::{SosInput, emit_sos_certificate, sos_problem_block};
+use pounce_lean_cert::emit_sos::{
+    SosConstraint, SosInput, emit_sos_certificate, sos_problem_block,
+};
 use pounce_lean_cert::{
     Certificate, canonical_problem, emit_certificate, emit_feasible_certificate,
     emit_infeasible_certificate, emit_unbounded_certificate, problem_block, to_canonical_json,
@@ -22,7 +24,7 @@ use pounce_lean_cert::{
 use pounce_nl::nl_reader;
 
 use crate::dispatch::analyze_quadratic_full;
-use crate::poly_extract::{PolyObjective, extract_poly_objective};
+use crate::poly_extract::{PolyObjective, extract_poly_constraints, extract_poly_objective};
 use crate::verify::{parse_sol, sha256};
 
 /// `nl_reader` encodes "no bound" as the AMPL sentinel `±1e19` (see
@@ -51,19 +53,28 @@ Supported slices (v1), chosen automatically from the .nl:
     minimize, linear constraints (one-sided, two-sided ranges, or
     equalities), and variable bounds (one-sided, box, or fixed).
 
-  * unconstrained polynomial -> verdict `global-lower-bound`: an objective
-    of degree > 2 over free variables. POUNCE solves an SOS relaxation and
-    certifies an exact rational bound `g <= p(x)` for every x -- with no
-    convexity assumed, which is the point: a KKT argument cannot establish
-    global optimality for a nonconvex polynomial.
+  * polynomial -> verdict `global-lower-bound`: an objective of degree > 2.
+    POUNCE solves an SOS relaxation and certifies an exact rational bound
+    `g <= p(x)` -- with no convexity assumed, which is the point: a KKT
+    argument cannot establish global optimality for a nonconvex polynomial.
 
-    If an exact rational point attains that bound, the verdict strengthens
-    to `global-min` and the certificate exhibits the minimizer. A minimizer
-    at irrational coordinates leaves the bound unattained; the certificate
-    then proves the bound alone, which still holds for every x.
+    With no constraints the bound holds for every x. With polynomial
+    inequality constraints (including finite variable bounds) it holds on
+    the feasible set, via a Putinar certificate: one sum-of-squares
+    multiplier per constraint, plus a bare square, matching `p - g`
+    identically. That is what lets a bound exist at all for an objective
+    that is unbounded below off the feasible set.
 
-Maximize, non-polynomial objectives, and constrained higher-degree problems
-are refused (exit 2).
+    If an exact rational *feasible* point attains that bound, the verdict
+    strengthens to `global-min` and the certificate exhibits the minimizer.
+    A minimizer at irrational coordinates leaves the bound unattained; the
+    certificate then proves the bound alone, which still holds.
+
+Maximize, non-polynomial objectives, and equality constraints on a
+higher-degree problem are refused (exit 2). An equality needs a
+sign-unrestricted multiplier rather than an SOS one, and splitting it into
+two inequalities leaves the feasible set with empty interior, where Putinar
+no longer guarantees a certificate exists at any degree.
 
 With --feasible, the weaker verdict `feasible` is emitted instead: the
 reported point violates no constraint by more than the certificate's own
@@ -255,10 +266,21 @@ fn nl_to_qp_input(
 /// Returns `None` (rather than an error) whenever the problem is not on the SOS
 /// slice, so the caller can fall through to the QP path and report *its*
 /// diagnosis — which is the relevant one for, say, a nonlinear constraint.
-fn sos_slice(prob: &nl_reader::NlProblem) -> Option<PolyObjective> {
+///
+/// The degree test is on the *objective*: a linear objective under polynomial
+/// constraints stays on the QP path, which is right, because it is a linear
+/// program there and nothing about SOS improves on that.
+fn sos_slice(prob: &nl_reader::NlProblem) -> Option<(PolyObjective, PolyFeasibleSet)> {
     let po = extract_poly_objective(prob).ok()?;
-    (po.degree() > 2).then_some(po)
+    if po.degree() <= 2 {
+        return None;
+    }
+    let g = extract_poly_constraints(prob).ok()?;
+    Some((po, g))
 }
+
+/// The feasible set as `gₖ(x) ≥ 0` term lists; empty means all of `ℝⁿ`.
+type PolyFeasibleSet = Vec<Vec<(Vec<usize>, f64)>>;
 
 fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
     Box::new(pounce_feral::FeralSolverInterface::new())
@@ -275,14 +297,21 @@ fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
 /// snap it to a nearby rational point that attains the exact `γ`, which upgrades
 /// the verdict from a bound to a global minimum. A wrong or missing point leaves
 /// the bound unattained, never a wrong verdict.
+///
+/// With `g` non-empty the claim becomes a bound *on the feasible set*, proved by
+/// a Putinar identity. Same relaxation, same emitter, same exactness argument —
+/// what changes is that the blocks now come with the polynomial each multiplies.
 fn certify_sos(
     po: &PolyObjective,
+    g: &PolyFeasibleSet,
     x_float: &[f64],
     meta: &CertMeta,
 ) -> Result<Certificate, String> {
     let poly = Polynomial::new(po.n, po.terms.clone());
-    let (bound, gram) =
-        sos_constrained_lower_bound_gram(&PolyProblem::new(poly), None, &sos_opts(), backend);
+    let prob = g.iter().fold(PolyProblem::new(poly), |p, gk| {
+        p.ge(Polynomial::new(po.n, gk.clone()))
+    });
+    let (bound, gram) = sos_constrained_lower_bound_gram(&prob, None, &sos_opts(), backend);
     if !bound.lower_bound.is_finite() {
         return Err(format!(
             "the SOS relaxation did not produce a finite bound (status {:?}); \
@@ -290,21 +319,37 @@ fn certify_sos(
             bound.status
         ));
     }
-    // The unconstrained relaxation has exactly one PSD block (σ₀). More would
-    // mean localizing blocks from constraints, which `poly_extract` refuses, so
-    // this is a shape check on our own pipeline rather than on user input.
-    let [block] = &gram[..] else {
-        return Err(format!(
-            "expected one SOS block for an unconstrained problem, got {}",
-            gram.len()
-        ));
+    // σ₀ plus one localizing block per inequality, in that order. This is a
+    // shape check on our own pipeline rather than on user input — but the
+    // certificate's `multiplier` indices are built from this alignment, so it is
+    // worth failing loudly rather than emitting a mispaired identity for the
+    // exact rounder to reject with a much vaguer message.
+    let Some((sigma0, localizing)) = gram.split_first() else {
+        return Err("the SOS relaxation returned no Gram blocks".to_string());
     };
+    if localizing.len() != g.len() {
+        return Err(format!(
+            "expected {} localizing block(s) for {} constraint(s), got {}",
+            g.len(),
+            g.len(),
+            localizing.len()
+        ));
+    }
     emit_sos_certificate(
         &SosInput {
             n: po.n,
             terms: po.terms.clone(),
-            basis: block.basis.clone(),
-            gram_float: block.matrix.clone(),
+            basis: sigma0.basis.clone(),
+            gram_float: sigma0.matrix.clone(),
+            constraints: g
+                .iter()
+                .zip(localizing)
+                .map(|(gk, blk)| SosConstraint {
+                    g: gk.clone(),
+                    basis: blk.basis.clone(),
+                    gram_float: blk.matrix.clone(),
+                })
+                .collect(),
             bound_float: bound.lower_bound,
             x_float: x_float.to_vec(),
         },
@@ -351,29 +396,38 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         solver: format!("pounce {}", env!("CARGO_PKG_VERSION")),
     };
 
-    // A higher-degree unconstrained polynomial gets a *bound*, not a claim about
-    // `parsed.x`. Checked before the QP extraction, which would reject it for
-    // being degree > 2 — and reject it with the wrong diagnosis, since such a
-    // problem is certifiable, just by a different theorem.
+    // A higher-degree polynomial gets a *bound*, not a claim about `parsed.x`.
+    // Checked before the QP extraction, which would reject it for being degree
+    // > 2 — and reject it with the wrong diagnosis, since such a problem is
+    // certifiable, just by a different theorem.
     //
     // The infeasible/unbounded verdicts take precedence: they are statements
-    // about the solve, and neither has an SOS reading (an unconstrained
-    // polynomial is never infeasible, and an unbounded one has no lower bound
-    // to certify).
+    // about the solve, and neither has an SOS reading (an SOS bound says
+    // nothing about whether the feasible set is empty, and an unbounded
+    // problem has no lower bound to certify).
     if !infeasible
         && !unbounded
-        && let Some(po) = sos_slice(&prob)
+        && let Some((po, g)) = sos_slice(&prob)
     {
         if args.feasible {
-            // Every point is feasible for an unconstrained polynomial, so the
-            // certificate would prove nothing. Say so rather than emit it.
-            return Err(
+            return Err(if g.is_empty() {
+                // Every point is feasible for an unconstrained polynomial, so
+                // the certificate would prove nothing. Say so rather than emit
+                // it.
                 "--feasible: this problem is an unconstrained polynomial, so feasibility \
                  is vacuous; drop the flag to certify the objective bound instead"
-                    .to_string(),
-            );
+                    .to_string()
+            } else {
+                // The `feasible` verdict is proved by exact projection onto the
+                // active constraints, which needs them linear. Nothing here is
+                // wrong with the problem — the emitter just does not cover it.
+                "--feasible: the feasible verdict covers linear constraints only, and this \
+                 problem is on the polynomial slice; drop the flag to certify a bound on \
+                 the feasible set instead"
+                    .to_string()
+            });
         }
-        let cert = certify_sos(&po, &iterate, &meta)?;
+        let cert = certify_sos(&po, &g, &iterate, &meta)?;
         return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
     }
 
@@ -497,7 +551,9 @@ fn verify(nl: &PathBuf, cert_path: &PathBuf) -> Result<(), String> {
         "sos-poly" => {
             let po = extract_poly_objective(&prob)
                 .map_err(|e| format!("cannot re-derive the polynomial from this .nl: {e}"))?;
-            sos_problem_block(po.n, &po.terms)
+            let g = extract_poly_constraints(&prob)
+                .map_err(|e| format!("cannot re-derive the feasible set from this .nl: {e}"))?;
+            sos_problem_block(po.n, &po.terms, &g)
                 .map_err(|e| format!("cannot re-derive problem: {e}"))?
         }
         _ => {

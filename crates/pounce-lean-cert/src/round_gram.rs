@@ -1,15 +1,34 @@
-//! Exact rational Gram matrix from the SDP's floating-point one.
+//! Exact rational Gram matrices from the SDP's floating-point ones.
 //!
 //! This is the SOS analogue of [`crate::refine`] and
 //! [`crate::refine_farkas`], and it exists for the same reason: the Lean
-//! identity `p − γ = m(x)ᵀ G m(x)` must hold **exactly** over ℚ, coefficient by
-//! coefficient, and a float Gram never satisfies it exactly.
+//! identity must hold **exactly** over ℚ, coefficient by coefficient, and a
+//! float Gram never satisfies it exactly.
+//!
+//! Two identities, one machine. Unconstrained:
+//!
+//! ```text
+//!     p(x) − γ = m(x)ᵀ G m(x),                          G ⪰ 0
+//! ```
+//!
+//! and Putinar, for `min p(x)` subject to `gₖ(x) ≥ 0`:
+//!
+//! ```text
+//!     p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x),   each σ a Gram form, each G ⪰ 0.
+//! ```
+//!
+//! The second is the first with more blocks and a polynomial attached to each,
+//! so [`round_gram_blocks`] is the real routine and [`round_gram`] is the
+//! one-block, multiplier-`1` case of it. Coefficient matching stays a single
+//! linear system over *all* blocks' entries at once — which it has to be, since
+//! the blocks are only jointly constrained: no individual block satisfies
+//! anything on its own.
 //!
 //! The pattern is the one used throughout: **the float proposes, the exact
-//! arithmetic decides.** Here the float Gram is used only to choose values for
-//! the *free* parameters of the coefficient-matching system; the constrained
-//! entries are then solved for exactly, and the result is checked --- both the
-//! polynomial identity and positive-semidefiniteness --- before it is returned.
+//! arithmetic decides.** The float Grams are used only to choose values for the
+//! *free* parameters of that system; the constrained entries are then solved
+//! for exactly, and the result is checked --- both the polynomial identity and
+//! positive-semidefiniteness of every block --- before it is returned.
 //!
 //! # Why this can genuinely fail
 //!
@@ -36,9 +55,14 @@ pub enum RoundError {
     Shape(&'static str),
     /// The coefficient-matching system has no solution for these free values.
     Inconsistent,
-    /// A rounded solution exists but is not positive semidefinite, so it
+    /// Block `block`'s rounded solution is not positive semidefinite, so it
     /// witnesses nothing. Try a finer rounding grid.
-    NotPsd,
+    ///
+    /// Named per block because in the Putinar case they fail separately and for
+    /// different reasons: `σ₀` is pushed off the cone by a tight bound, whereas
+    /// a localizing `σₖ` more often goes indefinite because the relaxation
+    /// order is too low for that constraint to carry its share.
+    NotPsd { block: usize },
     /// Defensive: the assembled Gram failed its own exact identity recheck.
     SelfCheck(&'static str),
 }
@@ -62,8 +86,27 @@ fn ut_index(bn: usize, i: usize, j: usize) -> usize {
     i * bn - i * i.saturating_sub(1) / 2 + (j - i)
 }
 
+/// One SOS block of a Putinar certificate: a Gram form `m(x)ᵀ G m(x)` together
+/// with the constraint polynomial it multiplies.
+///
+/// `σ₀` is the block whose `multiplier` is the constant `1`; there is nothing
+/// else special about it, which is why it is not a separate parameter.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockSpec<'a> {
+    /// The monomial lift `m`, as exponent vectors.
+    pub basis: &'a [Vec<usize>],
+    /// The constraint polynomial `g` this block multiplies, as
+    /// `(exponent vector, coefficient)` pairs. Pass `[(0…0, 1)]` for `σ₀`.
+    pub multiplier: &'a [(Vec<usize>, BigRational)],
+    /// The SDP's Gram matrix for this block; a *hint* only.
+    pub gram_float: &'a [Vec<f64>],
+}
+
 /// Produce an exact rational Gram matrix `G` with
 /// `p(x) − γ = m(x)ᵀ G m(x)` as a polynomial identity, and `G ⪰ 0`.
+///
+/// The unconstrained case: one block, multiplied by the constant `1`. See
+/// [`round_gram_blocks`] for what actually happens.
 ///
 /// * `p_terms` — the polynomial as `(exponent vector, coefficient)` pairs.
 /// * `gamma` — the claimed lower bound, already exact.
@@ -77,30 +120,110 @@ pub fn round_gram(
     g_float: &[Vec<f64>],
     denom: i64,
 ) -> Result<Vec<Vec<BigRational>>, RoundError> {
-    let bn = basis.len();
-    if bn == 0 || g_float.len() != bn || g_float.iter().any(|r| r.len() != bn) {
-        return Err(RoundError::Shape("Gram is not bn × bn"));
+    if basis.is_empty() {
+        return Err(RoundError::Shape("empty basis"));
+    }
+    let one = [(
+        vec![0usize; basis[0].len()],
+        BigRational::from_integer(1.into()),
+    )];
+    let blocks = [BlockSpec {
+        basis,
+        multiplier: &one,
+        gram_float: g_float,
+    }];
+    let mut out = round_gram_blocks(p_terms, gamma, &blocks, denom)?;
+    Ok(out.remove(0))
+}
+
+/// Produce exact rational Gram matrices for a Putinar certificate:
+///
+/// ```text
+///     p(x) − γ = Σₖ mₖ(x)ᵀ Gₖ mₖ(x) · gₖ(x),   every Gₖ ⪰ 0,
+/// ```
+///
+/// as a polynomial identity over ℚ, with `gₖ` the block's `multiplier`.
+///
+/// The blocks are solved **together**, in one linear system over every block's
+/// packed upper triangle. That is not an optimization: a block satisfies
+/// nothing on its own, and the only true statement is about their sum. Solving
+/// them one at a time would have no meaning to give the intermediate results.
+///
+/// PSD-ness, by contrast, *is* per block, and is checked per block — with the
+/// failing index reported, since a `σ₀` that leaves the cone and a localizing
+/// `σₖ` that does are different diagnoses.
+pub fn round_gram_blocks(
+    p_terms: &[(Vec<usize>, BigRational)],
+    gamma: &BigRational,
+    blocks: &[BlockSpec<'_>],
+    denom: i64,
+) -> Result<Vec<Vec<Vec<BigRational>>>, RoundError> {
+    if blocks.is_empty() {
+        return Err(RoundError::Shape("no SOS blocks"));
     }
     if denom <= 0 {
         return Err(RoundError::Shape("denominator must be positive"));
     }
-    let nvars = basis[0].len();
-    let nunk = bn * (bn + 1) / 2;
+    for b in blocks {
+        let bn = b.basis.len();
+        if bn == 0 || b.gram_float.len() != bn || b.gram_float.iter().any(|r| r.len() != bn) {
+            return Err(RoundError::Shape("Gram is not bn × bn"));
+        }
+        if b.multiplier.is_empty() {
+            return Err(RoundError::Shape("a block multiplier has no terms"));
+        }
+    }
+    let nvars = blocks[0].basis[0].len();
+    if blocks
+        .iter()
+        .any(|b| b.basis.iter().any(|e| e.len() != nvars))
+        || blocks
+            .iter()
+            .any(|b| b.multiplier.iter().any(|(e, _)| e.len() != nvars))
+    {
+        return Err(RoundError::Shape(
+            "blocks disagree on the number of variables",
+        ));
+    }
+
+    // Packed layout: block k's upper triangle occupies `offset[k] .. offset[k+1]`.
+    let mut offset = Vec::with_capacity(blocks.len() + 1);
+    let mut nunk = 0usize;
+    for b in blocks {
+        offset.push(nunk);
+        let bn = b.basis.len();
+        nunk += bn * (bn + 1) / 2;
+    }
+    offset.push(nunk);
 
     // --- assemble the coefficient-matching system ---------------------------
     //
-    // For each monomial α: Σ_{i≤j, basis_i+basis_j = α} c_ij · G_ij = coeff_α,
+    // For each monomial α, and each block k, each pair i≤j and each term
+    // (β, cβ) of gₖ with basisₖ_i + basisₖ_j + β = α:
+    //
+    //     Σ  c_ij · cβ · G^k_ij  =  coeff_α(p − γ),
+    //
     // where c_ij is 1 on the diagonal and 2 off it (G is symmetric, and the
     // packed unknown stands for both G_ij and G_ji).
     let mut rows: std::collections::BTreeMap<Vec<usize>, Vec<BigRational>> =
         std::collections::BTreeMap::new();
-    for i in 0..bn {
-        for j in i..bn {
-            let alpha: Vec<usize> = basis[i].iter().zip(&basis[j]).map(|(a, b)| a + b).collect();
-            let coef = if i == j { 1i64 } else { 2i64 };
-            rows.entry(alpha)
-                .or_insert_with(|| vec![BigRational::zero(); nunk])[ut_index(bn, i, j)] +=
-                BigRational::from_integer(coef.into());
+    for (k, b) in blocks.iter().enumerate() {
+        let bn = b.basis.len();
+        for i in 0..bn {
+            for j in i..bn {
+                let sym = BigRational::from_integer(if i == j { 1i64 } else { 2i64 }.into());
+                let col = offset[k] + ut_index(bn, i, j);
+                for (beta, cbeta) in b.multiplier {
+                    if cbeta.is_zero() {
+                        continue;
+                    }
+                    let alpha: Vec<usize> = (0..nvars)
+                        .map(|v| b.basis[i][v] + b.basis[j][v] + beta[v])
+                        .collect();
+                    rows.entry(alpha)
+                        .or_insert_with(|| vec![BigRational::zero(); nunk])[col] += &sym * cbeta;
+                }
+            }
         }
     }
     // Right-hand side: coefficients of p − γ.
@@ -116,8 +239,8 @@ pub fn round_gram(
     *rhs_of.entry(zero_exp).or_insert_with(BigRational::zero) -= gamma;
 
     // Every monomial mentioned by either side becomes an equation. A monomial
-    // in p that no basis product can reach yields an all-zero row with nonzero
-    // rhs, i.e. an inconsistency — caught below rather than silently ignored.
+    // in p that no block can reach yields an all-zero row with nonzero rhs,
+    // i.e. an inconsistency — caught below rather than silently ignored.
     let mut all: Vec<Vec<usize>> = rows.keys().cloned().collect();
     for k in rhs_of.keys() {
         if !rows.contains_key(k) {
@@ -183,18 +306,8 @@ pub fn round_gram(
     let mut g = vec![BigRational::zero(); nunk];
     for c in 0..nunk {
         if pivot_row_of_col[c].is_none() {
-            // recover (i, j) for this packed index
-            let (mut ii, mut jj) = (0usize, 0usize);
-            'outer: for i in 0..bn {
-                for j in i..bn {
-                    if ut_index(bn, i, j) == c {
-                        ii = i;
-                        jj = j;
-                        break 'outer;
-                    }
-                }
-            }
-            g[c] = snap(g_float[ii][jj], denom);
+            let (k, i, j) = unpack(&offset, blocks, c);
+            g[c] = snap(blocks[k].gram_float[i][j], denom);
         }
     }
     // --- solve the pivots exactly against those choices ---------------------
@@ -211,47 +324,71 @@ pub fn round_gram(
         g[pc] = acc;
     }
 
-    // --- unpack to a dense symmetric matrix ---------------------------------
-    let mut gm = vec![vec![BigRational::zero(); bn]; bn];
-    for i in 0..bn {
-        for j in i..bn {
-            let v = g[ut_index(bn, i, j)].clone();
-            gm[i][j] = v.clone();
-            gm[j][i] = v;
+    // --- unpack to dense symmetric matrices ---------------------------------
+    let mut out: Vec<Vec<Vec<BigRational>>> = Vec::with_capacity(blocks.len());
+    for (k, blk) in blocks.iter().enumerate() {
+        let bn = blk.basis.len();
+        let mut gm = vec![vec![BigRational::zero(); bn]; bn];
+        for i in 0..bn {
+            for j in i..bn {
+                let v = g[offset[k] + ut_index(bn, i, j)].clone();
+                gm[i][j] = v.clone();
+                gm[j][i] = v;
+            }
         }
+        out.push(gm);
     }
 
     // --- exact self-checks: identity, then PSD ------------------------------
-    for (idx, alpha) in all.iter().enumerate() {
-        let lhs: BigRational = (0..bn)
-            .flat_map(|i| (i..bn).map(move |j| (i, j)))
-            .filter(|&(i, j)| {
-                let s: Vec<usize> = basis[i].iter().zip(&basis[j]).map(|(x, y)| x + y).collect();
-                &s == alpha
-            })
-            .map(|(i, j)| {
-                let c = if i == j { 1i64 } else { 2i64 };
-                BigRational::from_integer(c.into()) * &gm[i][j]
-            })
-            .sum();
-        if lhs != b_original(&rhs_of, alpha) {
-            let _ = idx;
+    //
+    // The identity is rechecked from the *assembled* matrices rather than from
+    // the solved vector, so a mistake in the packing would be caught too.
+    for alpha in &all {
+        let mut lhs = BigRational::zero();
+        for (k, blk) in blocks.iter().enumerate() {
+            let bn = blk.basis.len();
+            for i in 0..bn {
+                for j in i..bn {
+                    let sym = BigRational::from_integer(if i == j { 1i64 } else { 2i64 }.into());
+                    for (beta, cbeta) in blk.multiplier {
+                        let s: Vec<usize> = (0..nvars)
+                            .map(|v| blk.basis[i][v] + blk.basis[j][v] + beta[v])
+                            .collect();
+                        if &s == alpha {
+                            lhs += &sym * cbeta * &out[k][i][j];
+                        }
+                    }
+                }
+            }
+        }
+        if lhs != rhs_of.get(alpha).cloned().unwrap_or_else(BigRational::zero) {
             return Err(RoundError::SelfCheck("coefficient identity"));
         }
     }
     // PSD via exact LDLᵀ: a factorization with nonnegative diagonal exists iff
     // the matrix is PSD (for the unit-lower form used here).
-    match ldlt(&gm) {
-        Ok(f) if f.d.iter().all(|v| !v.is_negative()) => Ok(gm),
-        _ => Err(RoundError::NotPsd),
+    for (k, gm) in out.iter().enumerate() {
+        match ldlt(gm) {
+            Ok(f) if f.d.iter().all(|v| !v.is_negative()) => {}
+            _ => return Err(RoundError::NotPsd { block: k }),
+        }
     }
+    Ok(out)
 }
 
-fn b_original(
-    rhs_of: &std::collections::BTreeMap<Vec<usize>, BigRational>,
-    alpha: &[usize],
-) -> BigRational {
-    rhs_of.get(alpha).cloned().unwrap_or_else(BigRational::zero)
+/// Recover `(block, i, j)` from a packed column index.
+fn unpack(offset: &[usize], blocks: &[BlockSpec<'_>], col: usize) -> (usize, usize, usize) {
+    let k = offset.partition_point(|&o| o <= col) - 1;
+    let bn = blocks[k].basis.len();
+    let local = col - offset[k];
+    for i in 0..bn {
+        for j in i..bn {
+            if ut_index(bn, i, j) == local {
+                return (k, i, j);
+            }
+        }
+    }
+    (k, 0, 0)
 }
 
 #[cfg(test)]
@@ -335,7 +472,11 @@ mod tests {
         ];
         // True minimum is 1; claim 2.
         let err = round_gram(&p, &r(2), &basis, &g_float, 1).unwrap_err();
-        assert_eq!(err, RoundError::NotPsd, "γ = 2 exceeds the minimum");
+        assert_eq!(
+            err,
+            RoundError::NotPsd { block: 0 },
+            "γ = 2 exceeds the minimum"
+        );
     }
 
     /// A polynomial term the basis cannot reach makes the system inconsistent
@@ -348,5 +489,189 @@ mod tests {
         let g_float = vec![vec![0.0; 3]; 3];
         let err = round_gram(&p, &r(0), &basis, &g_float, 1).unwrap_err();
         assert_eq!(err, RoundError::Inconsistent);
+    }
+
+    // --- the constrained (Putinar) case -------------------------------------
+
+    /// `σ₀`'s multiplier: the constant polynomial 1, in `n` variables.
+    fn one(n: usize) -> Vec<(Vec<usize>, BigRational)> {
+        vec![(vec![0usize; n], r(1))]
+    }
+
+    /// `min x² s.t. x − 1 ≥ 0`, minimum 1 at `x = 1`.
+    ///
+    /// The case that motivates the whole constrained path: `p − 1 = x² − 1` is
+    /// **not** a sum of squares — it is negative on `(−1, 1)` — so no
+    /// unconstrained certificate for this bound exists at any basis size. Modulo
+    /// the constraint it is easy:
+    ///
+    /// ```text
+    ///     x² − 1 = (x − 1)² + 2·(x − 1)
+    /// ```
+    ///
+    /// so `σ₀ = (x−1)²` on the basis `(1, x)` and `σ₁ = 2` on the basis `(1)`.
+    #[test]
+    fn a_bound_that_is_sos_only_modulo_the_constraint() {
+        let p = vec![(vec![2usize], r(1))];
+        let g1 = vec![(vec![1usize], r(1)), (vec![0usize], r(-1))]; // x − 1
+        let basis0 = vec![vec![0usize], vec![1usize]];
+        let basis1 = vec![vec![0usize]];
+        // A plausible SDP output: near the exact answer, not equal to it.
+        let f0 = vec![
+            vec![1.0000000004, -0.9999999996],
+            vec![-0.9999999996, 1.0000000002],
+        ];
+        let f1 = vec![vec![1.9999999997]];
+        let out = round_gram_blocks(
+            &p,
+            &r(1),
+            &[
+                BlockSpec {
+                    basis: &basis0,
+                    multiplier: &one(1),
+                    gram_float: &f0,
+                },
+                BlockSpec {
+                    basis: &basis1,
+                    multiplier: &g1,
+                    gram_float: &f1,
+                },
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        // σ₀ = (x − 1)², i.e. G₀ = [[1,-1],[-1,1]] on (1, x).
+        assert_eq!(out[0], vec![vec![r(1), r(-1)], vec![r(-1), r(1)]]);
+        // σ₁ = 2.
+        assert_eq!(out[1], vec![vec![r(2)]]);
+    }
+
+    /// The same bound really is out of reach without the constraint, so the
+    /// previous test is measuring the constrained path and not a coincidence.
+    #[test]
+    fn the_same_bound_is_unreachable_unconstrained() {
+        let p = vec![(vec![2usize], r(1))];
+        let basis = vec![vec![0usize], vec![1usize]];
+        let g_float = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        assert_eq!(
+            round_gram(&p, &r(1), &basis, &g_float, 1).unwrap_err(),
+            RoundError::NotPsd { block: 0 },
+            "x² − 1 is negative on (−1, 1), so it is not a sum of squares"
+        );
+    }
+
+    /// The identity is a *joint* claim, so it must be verified as one: evaluate
+    /// `σ₀(x) + σ₁(x)·g(x)` against `p(x) − γ` at sample points. (The routine's
+    /// own check is on coefficients; this one is on values, so a packing error
+    /// that happened to preserve the coefficient sums would still show up.)
+    #[test]
+    fn the_putinar_identity_holds_pointwise() {
+        let p = vec![(vec![2usize], r(1))];
+        let g1 = vec![(vec![1usize], r(1)), (vec![0usize], r(-1))];
+        let basis0 = vec![vec![0usize], vec![1usize]];
+        let basis1 = vec![vec![0usize]];
+        let f0 = vec![vec![1.0, -1.0], vec![-1.0, 1.0]];
+        let f1 = vec![vec![2.0]];
+        let out = round_gram_blocks(
+            &p,
+            &r(1),
+            &[
+                BlockSpec {
+                    basis: &basis0,
+                    multiplier: &one(1),
+                    gram_float: &f0,
+                },
+                BlockSpec {
+                    basis: &basis1,
+                    multiplier: &g1,
+                    gram_float: &f1,
+                },
+            ],
+            1,
+        )
+        .unwrap();
+        for x in [-3i64, -1, 0, 1, 2, 5] {
+            let xv = BigRational::from_integer(x.into());
+            let m0 = [r(1), xv.clone()];
+            let sigma0: BigRational = (0..2)
+                .flat_map(|i| (0..2).map(move |j| (i, j)))
+                .map(|(i, j)| &m0[i] * &out[0][i][j] * &m0[j])
+                .sum();
+            let sigma1 = out[1][0][0].clone();
+            let gx = &xv - r(1);
+            assert_eq!(
+                sigma0 + sigma1 * gx,
+                xv.pow(2) - r(1),
+                "Putinar identity fails at x = {x}"
+            );
+        }
+    }
+
+    /// A localizing block that goes indefinite is named as **block 1**, so a
+    /// user is not sent to inspect the wrong multiplier.
+    ///
+    /// Same problem as above, but `σ₀`'s basis is cut to the constant `(1)`,
+    /// which leaves the system with no freedom at all: matching
+    /// `x² − 1 = σ₀ + σ₁·(x − 1)` term by term forces `σ₁ = x + 1` and
+    /// `σ₀ = 0`. So `G₁ = [[1, ½], [½, 0]]`, whose determinant is `−¼` — `x + 1`
+    /// is not a sum of squares, and no rounding grid can change that. `G₀ = [[0]]`
+    /// stays perfectly PSD throughout, which is what makes the index informative.
+    #[test]
+    fn an_indefinite_localizing_block_is_named() {
+        let p = vec![(vec![2usize], r(1))];
+        let g1 = vec![(vec![1usize], r(1)), (vec![0usize], r(-1))];
+        let basis0 = vec![vec![0usize]];
+        let basis1 = vec![vec![0usize], vec![1usize]];
+        let f0 = vec![vec![0.0]];
+        let f1 = vec![vec![1.0, 0.5], vec![0.5, 0.0]];
+        let err = round_gram_blocks(
+            &p,
+            &r(1),
+            &[
+                BlockSpec {
+                    basis: &basis0,
+                    multiplier: &one(1),
+                    gram_float: &f0,
+                },
+                BlockSpec {
+                    basis: &basis1,
+                    multiplier: &g1,
+                    gram_float: &f1,
+                },
+            ],
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, RoundError::NotPsd { block: 1 });
+    }
+
+    /// Blocks must agree on the number of variables — a mismatch is a caller
+    /// bug and is refused rather than silently indexing out of range.
+    #[test]
+    fn blocks_must_agree_on_arity() {
+        let p = vec![(vec![2usize, 0usize], r(1))];
+        let basis0 = vec![vec![0usize, 0usize]];
+        let basis1 = vec![vec![0usize]]; // one variable, not two
+        let f = vec![vec![1.0]];
+        let err = round_gram_blocks(
+            &p,
+            &r(0),
+            &[
+                BlockSpec {
+                    basis: &basis0,
+                    multiplier: &one(2),
+                    gram_float: &f,
+                },
+                BlockSpec {
+                    basis: &basis1,
+                    multiplier: &one(1),
+                    gram_float: &f,
+                },
+            ],
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RoundError::Shape(_)));
     }
 }

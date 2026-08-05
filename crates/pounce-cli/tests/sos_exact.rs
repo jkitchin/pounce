@@ -94,7 +94,7 @@ fn a_bound_above_the_true_minimum_is_still_refused_end_to_end() {
         1,
     )
     .unwrap_err();
-    assert_eq!(err, RoundError::NotPsd);
+    assert_eq!(err, RoundError::NotPsd { block: 0 });
 }
 
 fn meta() -> CertMeta {
@@ -127,6 +127,7 @@ fn the_solver_output_alone_produces_a_writable_certificate() {
             // No iterate, so this stays the bound path; the upgrade to a
             // minimum is exercised below.
             x_float: vec![],
+            constraints: Vec::new(),
         },
         &meta(),
     )
@@ -187,6 +188,7 @@ fn a_nonnegative_but_not_sos_polynomial_is_refused_at_the_tight_bound() {
             gram_float: vec![vec![0.0; 10]; 10],
             bound_float: 0.0,
             x_float: vec![],
+            constraints: Vec::new(),
         },
         &meta(),
     )

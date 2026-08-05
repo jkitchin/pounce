@@ -23,8 +23,8 @@ changes.
   QP — KKT point plus PSD Hessian), `infeasible` (Farkas witness), `unbounded`
   (recession direction), and `global-lower-bound` (sum of
   squares). Anything else exits 2 rather than emit an unsound certificate —
-  maximize objectives, non-polynomial objectives, and constrained
-  higher-degree problems are all refused.
+  maximize objectives, non-polynomial objectives, and equality constraints on a
+  higher-degree problem are all refused.
 - `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
   polynomial, which is the case where a local solve is worth least: it returns
   one basin and can say nothing about the others, and no KKT argument repairs
@@ -40,6 +40,47 @@ changes.
   `x = 1`, while `x⁴ − 3x² + 2` minimizes at `±√(3/2)` and correctly stops at
   the bound `γ = −1/4` — a certificate over ℚ cannot exhibit an irrational
   minimizer, and reporting the weaker true claim is the point.
+- **The polynomial slice now takes constraints**, via a Putinar
+  (Positivstellensatz) certificate. This is not a convenience: `x³ − 3x` has no
+  lower bound on ℝ at all, so for *no* γ is `p − γ` a sum of squares and the
+  unconstrained emitter has nothing to certify. On `0 ≤ x ≤ 3` it does — `p − γ`
+  need only be a sum of squares **modulo the constraints**:
+  `p − γ = σ₀ + Σₖ σₖ·gₖ`, one SOS multiplier per constraint, each with its own
+  exact `LDLᵀ`. POUNCE certifies `γ = −2` attained at `x = 1`. Finite variable
+  bounds fold into the feasible set as ordinary `xⱼ − lⱼ ≥ 0` rows, which is
+  exactly what makes a box give a bound where ℝⁿ gives none.
+  - The claim is correspondingly weaker and the certificate says so: the
+    feasible set travels in `problem.poly_constraints`, each localizing block
+    names the constraint it multiplies, and the generated theorem is guarded by
+    `∀ i, 0 ≤ g i x`. A consumer that ignored that field would read a bound on a
+    box as a bound on all of ℝⁿ, so the codegen routes on the field's presence
+    rather than on the verdict — which is the same either way.
+  - **Attainment now requires feasibility.** A point outside the feasible set
+    can beat every point inside it: `x = −2` is the other root of `p − γ` and
+    attains `−2` exactly. So `global-min` here proves `gₖ(x₀) ≥ 0` for every `k`
+    *and* `p(x₀) = γ`, and states both. The asymmetry is worth knowing —
+    snapping a float minimizer to a rational grid can *create* feasibility it
+    did not have, but essentially never preserves attainment.
+  - Equality constraints are refused, with a reason rather than a TODO: an
+    equality needs a sign-unrestricted multiplier, not an SOS one, and splitting
+    `h = 0` into two inequalities leaves the feasible set with empty interior,
+    where Putinar's theorem stops guaranteeing a certificate exists at any
+    degree.
+  - Two new forged fixtures cover the two obligations the unconstrained shape
+    does not have: a *localizing* block that goes indefinite while the identity
+    still closes exactly (mass moved into σ₀), and a candidate that attains γ
+    from outside the feasible set. Both must fail `lake build`, and do.
+- **Fixed: `sos_constrained_lower_bound_gram` returned Gram blocks in
+  equilibrated coordinates.** The SDP is solved after a domain map
+  `x = shift + scale·u` and a per-polynomial coefficient rescale, and only the
+  objective's scale was undone — so the blocks did not satisfy
+  `p − γ = σ₀ + Σ σᵢgᵢ` in the caller's variables, contrary to the function's
+  own documentation. The change of variables is a congruence `G_x = Tᵀ G_u T`
+  (a full monomial basis is closed under the substitution, so `T` is square),
+  which preserves PSD-ness; blocks are now mapped back through it and each
+  localizing block divided by its constraint's scale. Latent until now because
+  nothing consumed the blocks; it would have made every boxed problem's exact
+  rounding fail.
 - **`pounce certify --feasible` certifies the float you were actually handed**,
   on any linearly-constrained QP — convex or not. Every other verdict claims
   optimality and is therefore available only where the mathematics closes; on a

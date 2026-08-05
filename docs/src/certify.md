@@ -66,8 +66,8 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 | `global-min` | convex QP | `x*` is feasible and no feasible point has a lower objective |
 | `infeasible` | LP / QP | no feasible point exists (Farkas witness) |
 | `unbounded` | LP or QP, any `Q` | the objective decreases without bound along a recession direction |
-| `global-lower-bound` | unconstrained polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` |
-| `global-min` | unconstrained polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` everywhere |
+| `global-lower-bound` | polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` — or, if the problem has constraints, for every *feasible* `x` |
+| `global-min` | polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` (again, everywhere or on the feasible set) |
 
 plus one you *do* select, with `--feasible`:
 
@@ -101,6 +101,47 @@ rational point reaches, so its certificate stops at `γ = −1/4` and says so. T
 is the honest answer rather than a limitation to route around: a certificate
 over ℚ cannot exhibit an irrational minimizer, and the bound it does prove still
 holds for every real `x`.
+
+### Constraints: the same idea, modulo the feasible set
+
+`x³ − 3x` has no lower bound on ℝ at all, so no γ makes `p − γ` a sum of
+squares and the identity above simply does not exist. On `0 ≤ x ≤ 3` it does —
+not outright, but *modulo the constraints*. Write the feasible set as
+`gₖ(x) ≥ 0` (POUNCE folds finite variable bounds into that list, so a box
+becomes `x ≥ 0` and `3 − x ≥ 0`) and the certificate becomes a **Putinar**
+identity:
+
+```text
+p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x),      every σ a sum of squares
+```
+
+At a feasible point every `gₖ(x) ≥ 0` and every `σₖ(x) ≥ 0`, so the right-hand
+side is nonnegative and `γ ≤ p(x)` — on the feasible set, which is all that was
+claimed. For `min x³ − 3x` on `[0, 3]` POUNCE finds `γ = −2` with
+
+```text
+x³ − 3x + 2 = ½(x−1)² + 3⁄2(x−1)²·x + ½(x−1)²·(3−x)
+```
+
+and `x = 1` attains it, so the verdict is `global-min`.
+
+Mechanically this is the same machinery with more Gram blocks: one per σ, each
+with its own `LDLᵀ`, jointly matching `p − γ` coefficient by coefficient. Three
+things are worth knowing about the difference:
+
+- **The claim is weaker, and the certificate says which.** The constraints
+  travel with it in `problem.poly_constraints`, and the generated Lean theorem
+  is guarded by `∀ i, 0 ≤ g i x`. A consumer that ignored that field would read
+  a bound on a box as a bound on all of ℝⁿ.
+- **Attainment now needs feasibility.** A point outside the feasible set can
+  beat every point inside it — `x = −2` also gives `x³ − 3x = −2` — so the
+  candidate carries a second obligation, `gₖ(x₀) ≥ 0` for every `k`, alongside
+  `p(x₀) = γ`. Both are exact checks over ℚ.
+- **Equality constraints are refused.** An equality needs a sign-unrestricted
+  multiplier rather than a sum of squares, and splitting `h = 0` into `h ≥ 0`
+  and `−h ≥ 0` leaves a feasible set with empty interior, where Putinar's
+  theorem stops guaranteeing that a certificate exists at *any* degree. Refusing
+  is better than searching forever.
 
 ## Certifying the float itself
 
@@ -147,7 +188,9 @@ The flag is opt-in rather than a fallback. A failed optimality certificate is a
 result worth seeing, not one to quietly replace with a weaker claim — so
 `certify` never downgrades on its own, and `--feasible` on a problem where it
 would prove nothing (an unconstrained polynomial, where every point is trivially
-feasible) is refused too.
+feasible) is refused too. It is also refused on the constrained polynomial
+slice, where the claim would be meaningful but the emitter's exact projection
+needs the constraints to be linear.
 
 ## What it refuses
 
@@ -160,9 +203,9 @@ $ echo $?
 2
 ```
 
-Maximize objectives, non-polynomial objectives, and constrained higher-degree
-problems are all refused today. Indefinite `Q` is refused for *optimality*, but
-is exactly the case `--feasible` exists to cover.
+Maximize objectives, non-polynomial objectives, and equality constraints on a
+higher-degree problem are all refused today. Indefinite `Q` is refused for
+*optimality*, but is exactly the case `--feasible` exists to cover.
 
 ## Emitting a certificate
 

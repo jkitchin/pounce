@@ -53,6 +53,7 @@ reads the certificate.
 > | `infeasible` (Farkas witness `witnesses.farkas.y`) | yes | yes |
 > | `unbounded` (recession witness `witnesses.recession`) | yes | yes |
 > | `global-lower-bound` (SOS witness `witnesses.sos`) | yes | yes |
+> | either SOS verdict with Putinar multipliers (`problem.poly_constraints`) | yes | yes |
 > | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | yes (`--feasible`) | yes |
 > | `local-min-strict` | no | no |
 >
@@ -171,7 +172,7 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. |
 | `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. A **shape** discriminator — which half of `problem` is populated, and so which theorem the codegen routes to — *not* a convexity claim. `feasible` ships `qp-convex` on an indefinite `Q`, and so does `unbounded`, because neither verdict needs convexity. Only `global-min` on the KKT path does, and there the PSD claim is carried by `witnesses.hessian_psd` and checked by Lean. |
 | `tolerance` | rational | Feasibility ε. `0` for every verdict except `feasible`, whose whole subject is a point that misses feasibility — there it is an exact rational bound on the residual, computed over ℚ and rounded **up** to one significant digit, never a solver setting copied across. |
-| `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
+| `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` — for all `x`, or, when `problem.poly_constraints` is present, for all *feasible* `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
 | `toolchain` | object | The Lean toolchain + Mathlib revision the cert is authored against (a proof reproduces only under the same pin). |
 | `problem` | object | The problem over ℚ — see below. |
@@ -279,9 +280,11 @@ one, and the bound in place of a candidate:
 
 Each `monomials[k]` is an **exponent vector** of length `n_vars`, matching
 `polynomial.terms[*].exponents`; `witnesses.sos[b]` is one PSD block. There is
-no `objective`, `var_bounds`, or `constraints` key — the keys are absent, since
-the slice admits no constraints and the objective is the polynomial. Lean
-discharges two independent obligations, and both must hold:
+no `objective`, `var_bounds`, or `constraints` key — the keys are absent,
+because the QP encoding does not apply and the objective is the polynomial.
+(A constrained problem carries its feasible set in `problem.poly_constraints`
+instead; see below.) Lean discharges two independent obligations, and both must
+hold:
 
 | Witness | Lean checks |
 |---|---|
@@ -334,11 +337,79 @@ writing. A polynomial that is nonnegative but not SOS (Motzkin's
 `x⁴y² + x²y⁴ − 3x²y² + 1` at its tight bound) is refused rather than
 approximated.
 
-This slice is deliberately narrow: **unconstrained, minimize, no variable
-bounds**, objective degree > 2. The theorem quantifies over all of ℝⁿ, so any
-constraint would make the proven statement true but about the wrong problem.
-Routing is on **degree**, not on QP-extraction failure — a convex QP must never
-silently downgrade from `global-min` to a mere bound.
+### Constraints: `problem.poly_constraints` and Putinar multipliers
+
+An objective can be unbounded below on ℝⁿ and still have a perfectly good bound
+on its feasible set — `x³ − 3x` on `[0, 3]` is the small example. There, no γ
+makes `p − γ` a sum of squares, so the identity above does not exist at all.
+What does exist is a **Putinar** identity, one sum-of-squares multiplier per
+constraint:
+
+    p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x),   feasible set: gₖ(x) ≥ 0
+
+The certificate then carries the feasible set alongside the objective, and each
+localizing block names the constraint it multiplies:
+
+```json
+"problem": {
+  "n_vars": 1,
+  "polynomial":       { "terms": [ … ] },
+  "poly_constraints": [ { "terms": [ … ] },     // g₀ = x
+                        { "terms": [ … ] } ]    // g₁ = 3 − x
+},
+"witnesses": {
+  "sos": [ { "monomials": [[0],[1],[2]], "gram": …, "L": …, "D": … },
+           { "multiplier": 0, "monomials": [[0],[1]], "gram": …, "L": …, "D": … },
+           { "multiplier": 1, "monomials": [[0],[1]], "gram": …, "L": …, "D": … } ]
+}
+```
+
+Each entry of `poly_constraints` is a `gₖ(x) ≥ 0` term list in the same
+encoding as `polynomial`. Finite **variable bounds** are folded in as ordinary
+rows (`xⱼ − lⱼ ≥ 0`, `uⱼ − xⱼ ≥ 0`) rather than a separate `var_bounds` block —
+which is precisely what lets a box give a bound where ℝⁿ gives none.
+
+`witnesses.sos[b].multiplier` is the **index into `poly_constraints`** of the
+constraint that block multiplies. It is **absent** for `σ₀`, whose multiplier is
+the constant `1`. So the unconstrained shape is not a special case in the
+machinery — it is the Putinar shape with exactly one block and no constraints —
+but it *is* a different claim, and the schema keeps the two apart in the one way
+that matters: the constraints are in the `problem`, not the witnesses, so
+`cert-verify` re-derives them from the consumer's `.nl` like everything else.
+
+The codegen routes on **`poly_constraints` being present**, not on the verdict
+(`global-lower-bound` and `global-min` occur in both shapes). A consumer that
+ignored the field would read a bound on a box as a bound on all of ℝⁿ — the one
+misreading this schema must make impossible. Every constraint must have exactly
+one localizing block and no block may claim two, or the certificate is refused.
+
+PSD-ness is checked **per block**, and the joint identity ties the blocks
+together — the linear system matching `p − γ` runs over all blocks at once,
+which is why a bad block cannot be compensated for elsewhere without being
+caught. Two negative fixtures cover what the unconstrained ones cannot:
+`certify_sos_box_forged_localizing` moves mass into σ₀ so the identity still
+closes exactly while a *localizing* block goes indefinite, and
+`certify_sos_box_forged_infeasible_min` exhibits `x = −2`, the other root of
+`p − γ`: genuine bound, genuine Gram, exact attainment, simply not in `[0, 3]`.
+
+That second one is the new obligation the constrained path brings. On the
+unconstrained slice attainment alone makes `x₀` a minimizer; here a point
+outside the feasible set can beat every point inside it, so the generated
+theorem proves `gₖ(x₀) ≥ 0` for every `k` *and* `p(x₀) = γ`, and states both:
+
+    (∀ i, 0 ≤ g i xstar) ∧ ∀ x, (∀ i, 0 ≤ g i x) → p xstar ≤ p x
+
+**Equality constraints are refused.** `h(x) = 0` needs a sign-unrestricted
+multiplier, not an SOS one, and splitting it into `h ≥ 0` and `−h ≥ 0` leaves
+the feasible set with empty interior — where Putinar's theorem stops
+guaranteeing a certificate exists at any degree. Refusing beats searching a
+relaxation ladder that may have nothing on it.
+
+Routing between the QP and polynomial slices is on **degree**, not on
+QP-extraction failure — a convex QP must never silently downgrade from
+`global-min` to a mere bound. The degree test is on the *objective*, so a linear
+objective under polynomial constraints stays on the QP path, where it is a
+linear program and nothing about SOS improves on that.
 
 ## Supported slice (v1)
 
@@ -364,14 +435,15 @@ Variable bounds fold the same way: `xᵢ ≥ lᵢ` → `var{i}_lb`, `xᵢ ≤ u�
 is always emitted as the infinite sentinels in v1; bounds live in `constraints`.
 
 Outside this slice `pounce certify` **exits 2** rather than emit an unsound
-certificate — except that a higher-degree unconstrained polynomial objective is
-routed to the SOS slice above instead of refused, that `--feasible` opts into
-the weaker `feasible` verdict, which needs no convexity (indefinite `Q` is
-fine — it certifies only where the point sits, not that it is optimal), and
-that `unbounded` likewise accepts any `Q` (it needs `Q` flat along `d`, never
-convex) as long as the constraints are all inequalities.
-Maximize objectives, *optimality* claims on constrained nonconvex problems, and
-the `local-min-strict` verdict remain additive future work.
+certificate — except that a higher-degree polynomial objective is routed to the
+SOS slice above instead of refused (with its polynomial inequality constraints,
+if any, becoming Putinar multipliers), that `--feasible` opts into the weaker
+`feasible` verdict, which needs no convexity (indefinite `Q` is fine — it
+certifies only where the point sits, not that it is optimal), and that
+`unbounded` likewise accepts any `Q` (it needs `Q` flat along `d`, never convex)
+as long as the constraints are all inequalities.
+Maximize objectives, *equality* constraints on a nonconvex polynomial, and the
+`local-min-strict` verdict remain additive future work.
 
 ## Consumer acceptance
 

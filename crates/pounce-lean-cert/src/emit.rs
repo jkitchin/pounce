@@ -349,6 +349,7 @@ fn build_problem_view(input: &QpInput) -> Result<ProblemView, EmitError> {
         var_bounds: Some(var_bounds),
         constraints: Some(constraints),
         polynomial: None,
+        poly_constraints: None,
     };
 
     Ok(ProblemView {

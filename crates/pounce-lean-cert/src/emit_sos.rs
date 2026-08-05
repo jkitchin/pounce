@@ -17,6 +17,28 @@
 //! `γ ≤ p(x)` follows. Lean closes the identity with `ring` and the PSD claim
 //! with an exact `LDLᵀ`, so nothing in the trusted path is floating point.
 //!
+//! # Constraints
+//!
+//! With a feasible set `K = {x : gₖ(x) ≥ 0}` the same machinery proves a bound
+//! *on `K`*, through the Putinar form
+//!
+//! ```text
+//!     p(x) − γ = σ₀(x) + Σₖ σₖ(x)·gₖ(x),   every σ a Gram form with G ⪰ 0.
+//! ```
+//!
+//! At a feasible `x` every product is a nonnegative times a nonnegative, so the
+//! same one-line sign argument closes it. The demand on `p − γ` is far weaker
+//! than being a sum of squares outright — it need only be one *modulo the
+//! constraints* — which is why this reaches problems the unconstrained form
+//! cannot, starting with every one whose objective is unbounded off `K`.
+//!
+//! The two shapes are one code path here, not two: the unconstrained case is the
+//! Putinar case with a single block whose multiplier is the constant `1`. What
+//! differs is the *claim*. A constrained bound holds on `K` alone, and reading
+//! it as a global bound would be strictly stronger and generally false — so
+//! `problem.poly_constraints` travels with the certificate and the codegen keys
+//! the theorem it emits off that field rather than off the verdict.
+//!
 //! # What the float solver is (and is not) allowed to decide
 //!
 //! The SDP proposes two things: a numeric bound `γ̃` and a Gram matrix `G̃`.
@@ -34,14 +56,15 @@ use num_traits::{Signed, Zero};
 use crate::emit::{CertMeta, EmitError};
 use crate::ldlt::ldlt;
 use crate::rational::Rat;
-use crate::round_gram::{RoundError, round_gram};
+use crate::round_gram::{BlockSpec, RoundError, round_gram_blocks};
 use crate::schema::{
     Binding, Candidate, Certificate, Entry, PolyTerm, PolynomialSpec, Problem, SCHEMA_TAG,
     SosBlock, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, Witnesses,
 };
 
-/// Neutral input: an SOS relaxation of an unconstrained polynomial minimization,
-/// in `f64`, exactly as POUNCE's SDP produces it.
+/// Neutral input: an SOS relaxation of a polynomial minimization, in `f64`,
+/// exactly as POUNCE's SDP produces it. `constraints` empty is the
+/// unconstrained case.
 #[derive(Clone, Debug)]
 pub struct SosInput {
     pub n: usize,
@@ -52,6 +75,10 @@ pub struct SosInput {
     pub basis: Vec<Vec<usize>>,
     /// The SDP's Gram matrix, `basis.len()` square. A *hint* only.
     pub gram_float: Vec<Vec<f64>>,
+    /// The feasible set, one entry per `gₖ(x) ≥ 0`, with the localizing block
+    /// the relaxation proposed for each. Empty for an unconstrained problem,
+    /// which is then certified over all of `ℝⁿ`.
+    pub constraints: Vec<SosConstraint>,
     /// The SDP's numeric lower bound. A *hint* only — it seeds the search for an
     /// exact `γ`, and never becomes the emitted bound itself.
     pub bound_float: f64,
@@ -61,6 +88,23 @@ pub struct SosInput {
     /// or a minimizer at irrational coordinates all simply leave the bound
     /// unattained — never a wrong verdict.
     pub x_float: Vec<f64>,
+}
+
+/// One inequality of the feasible set, `g(x) ≥ 0`, with the localizing SOS
+/// block the relaxation proposed to multiply it by.
+///
+/// `g` is part of the *problem*: it is converted losslessly and serialized, and
+/// the emitted bound is only claimed where it holds. `basis` and `gram_float`
+/// are part of the *witness search*, and are hints — a wrong Gram costs a
+/// certificate, never a wrong one.
+#[derive(Clone, Debug)]
+pub struct SosConstraint {
+    /// `g` as `(exponent vector, coefficient)` pairs, exponents of length `n`.
+    pub g: Vec<(Vec<usize>, f64)>,
+    /// The localizing monomial lift, as exponent vectors of length `n`.
+    pub basis: Vec<Vec<usize>>,
+    /// The SDP's Gram matrix for this block, `basis.len()` square. A hint.
+    pub gram_float: Vec<Vec<f64>>,
 }
 
 /// Denominators tried for the free parameters of the coefficient-matching
@@ -123,18 +167,36 @@ fn br(x: f64) -> Result<BigRational, SosEmitError> {
         .map_err(|_| SosEmitError::NonFinite)
 }
 
-/// Re-derive the certificate `problem` block from the polynomial alone — the
-/// SOS analogue of [`crate::emit::problem_block`], and for the same reason:
-/// `cert-verify` re-derives this from the consumer's own `.nl` and compares it
-/// to the certificate's, so producer and consumer must run *identical* code.
-/// Two implementations that agree today are a drift waiting to happen.
+/// Re-derive the certificate `problem` block from the polynomial and its
+/// feasible set — the SOS analogue of [`crate::emit::problem_block`], and for
+/// the same reason: `cert-verify` re-derives this from the consumer's own `.nl`
+/// and compares it to the certificate's, so producer and consumer must run
+/// *identical* code. Two implementations that agree today are a drift waiting to
+/// happen.
 ///
 /// The QP half of [`Problem`] stays absent, not zeroed; see the type's docs.
-pub fn sos_problem_block(n: usize, terms: &[(Vec<usize>, f64)]) -> Result<Problem, SosEmitError> {
+///
+/// `constraints` are the `gₖ(x) ≥ 0`; an empty slice leaves `poly_constraints`
+/// absent, which is what an unconstrained certificate has always carried and
+/// what `canonical_problem` compares against. Their presence is load-bearing
+/// here and not merely informational: it is the difference between a bound over
+/// `ℝⁿ` and a bound over `K`.
+pub fn sos_problem_block(
+    n: usize,
+    terms: &[(Vec<usize>, f64)],
+    constraints: &[Vec<(Vec<usize>, f64)>],
+) -> Result<Problem, SosEmitError> {
     if terms.is_empty() {
         return Err(SosEmitError::Shape("empty polynomial"));
     }
-    if terms.iter().any(|(e, _)| e.len() != n) {
+    if constraints.iter().any(|g| g.is_empty()) {
+        return Err(SosEmitError::Shape("a constraint polynomial has no terms"));
+    }
+    if terms
+        .iter()
+        .chain(constraints.iter().flatten())
+        .any(|(e, _)| e.len() != n)
+    {
         return Err(SosEmitError::Shape(
             "a term's exponent vector is not length n",
         ));
@@ -144,18 +206,36 @@ pub fn sos_problem_block(n: usize, terms: &[(Vec<usize>, f64)]) -> Result<Proble
         objective: None,
         var_bounds: None,
         constraints: None,
-        polynomial: Some(PolynomialSpec {
-            terms: terms
-                .iter()
-                .map(|(e, c)| {
-                    br(*c).map(|r| PolyTerm {
-                        exponents: e.clone(),
-                        coeff: Rat(r),
-                    })
-                })
-                .collect::<Result<_, _>>()?,
-        }),
+        polynomial: Some(poly_spec(terms)?),
+        poly_constraints: (!constraints.is_empty())
+            .then(|| constraints.iter().map(|g| poly_spec(g)).collect())
+            .transpose()?,
     })
+}
+
+/// A float term list as an exact [`PolynomialSpec`]. Lossless — an f64 *is* a
+/// rational — so this never approximates and never needs a tolerance.
+fn poly_spec(terms: &[(Vec<usize>, f64)]) -> Result<PolynomialSpec, SosEmitError> {
+    Ok(PolynomialSpec {
+        terms: terms
+            .iter()
+            .map(|(e, c)| {
+                br(*c).map(|r| PolyTerm {
+                    exponents: e.clone(),
+                    coeff: Rat(r),
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// A [`PolynomialSpec`] as the `(exponents, coefficient)` pairs the rounding
+/// kernel and the exact evaluator consume.
+fn spec_terms(spec: &PolynomialSpec) -> Vec<(Vec<usize>, BigRational)> {
+    spec.terms
+        .iter()
+        .map(|t| (t.exponents.clone(), t.coeff.inner().clone()))
+        .collect()
 }
 
 /// Candidate exact bounds near `bound_float`, **sharpest first**.
@@ -212,8 +292,15 @@ const ATTAIN_DENOMS: [i64; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 100];
 /// `γ` for equality — never within a tolerance. A near miss is not a minimizer,
 /// and accepting one would emit a certificate that cannot verify. Returning
 /// `None` is the honest outcome and costs only sharpness: the bound still holds.
+///
+/// On a constrained problem the bound holds on `K` only, so a point that attains
+/// `γ` outside `K` witnesses nothing — every `gₖ(x₀) ≥ 0` is checked exactly
+/// too. Note the asymmetry with the objective: attainment is an equation and
+/// feasibility an inequality, so snapping `x*` to the grid can *create*
+/// feasibility it did not have, but never attainment.
 fn attaining_point(
     p_terms: &[(Vec<usize>, BigRational)],
+    g_terms: &[Vec<(Vec<usize>, BigRational)>],
     gamma: &BigRational,
     n: usize,
     x_float: &[f64],
@@ -235,7 +322,9 @@ fn attaining_point(
         // A coordinate that overflows on a fine grid may be fine on a coarser
         // one, so this skips the grid rather than abandoning the search.
         let Some(x) = snapped else { continue };
-        if eval_poly(p_terms, &x) == *gamma {
+        if eval_poly(p_terms, &x) == *gamma
+            && g_terms.iter().all(|g| !eval_poly(g, &x).is_negative())
+        {
             return Some(x);
         }
     }
@@ -271,39 +360,78 @@ pub fn emit_sos_certificate(
     meta: &CertMeta,
 ) -> Result<Certificate, SosEmitError> {
     let n = input.n;
-    let bn = input.basis.len();
-    if bn == 0 {
+    let shape_ok = |basis: &[Vec<usize>], g: &[Vec<f64>]| {
+        let bn = basis.len();
+        bn > 0
+            && basis.iter().all(|e| e.len() == n)
+            && g.len() == bn
+            && g.iter().all(|r| r.len() == bn)
+    };
+    if input.basis.is_empty() {
         return Err(SosEmitError::Shape("empty monomial basis"));
     }
-    if input.basis.iter().any(|e| e.len() != n) {
-        return Err(SosEmitError::Shape("a basis monomial is not length n"));
+    if !shape_ok(&input.basis, &input.gram_float) {
+        return Err(SosEmitError::Shape("σ₀ basis or Gram hint has a bad shape"));
     }
-    if input.gram_float.len() != bn || input.gram_float.iter().any(|r| r.len() != bn) {
-        return Err(SosEmitError::Shape("Gram hint is not basis × basis"));
+    if input
+        .constraints
+        .iter()
+        .any(|c| !shape_ok(&c.basis, &c.gram_float))
+    {
+        return Err(SosEmitError::Shape(
+            "a localizing basis or Gram hint has a bad shape",
+        ));
     }
 
-    // Exact objective. This — not the float term list — is what the certificate
+    // Exact problem. This — not the float term lists — is what the certificate
     // claims a bound for, and the conversion is lossless, so the claim is about
-    // the polynomial the `.nl` actually encodes. Built through the same
-    // `sos_problem_block` the consumer will re-run, then read back, so the
-    // witness search and the emitted block cannot describe different
-    // polynomials.
-    let problem = sos_problem_block(n, &input.terms)?;
-    let p_terms: Vec<(Vec<usize>, BigRational)> = problem
-        .polynomial
-        .as_ref()
-        .ok_or(SosEmitError::SelfCheck("problem block lost its polynomial"))?
-        .terms
+    // the polynomial and feasible set the `.nl` actually encodes. Built through
+    // the same `sos_problem_block` the consumer will re-run, then read back, so
+    // the witness search and the emitted block cannot describe different
+    // problems.
+    let g_float: Vec<Vec<(Vec<usize>, f64)>> =
+        input.constraints.iter().map(|c| c.g.clone()).collect();
+    let problem = sos_problem_block(n, &input.terms, &g_float)?;
+    let p_terms = spec_terms(
+        problem
+            .polynomial
+            .as_ref()
+            .ok_or(SosEmitError::SelfCheck("problem block lost its polynomial"))?,
+    );
+    let g_terms: Vec<Vec<(Vec<usize>, BigRational)>> = problem
+        .poly_constraint_specs()
         .iter()
-        .map(|t| (t.exponents.clone(), t.coeff.inner().clone()))
+        .map(spec_terms)
         .collect();
+    if g_terms.len() != input.constraints.len() {
+        return Err(SosEmitError::SelfCheck(
+            "problem block lost a constraint polynomial",
+        ));
+    }
+
+    // Block 0 is σ₀ — multiplier the constant 1 — and block `k+1` multiplies
+    // `g_terms[k]`. The order is the certificate's `multiplier` indices, so it
+    // must not drift from what is serialized below.
+    let one = [(vec![0usize; n], BigRational::from_integer(1.into()))];
+    let mut blocks = vec![BlockSpec {
+        basis: &input.basis,
+        multiplier: &one,
+        gram_float: &input.gram_float,
+    }];
+    for (k, c) in input.constraints.iter().enumerate() {
+        blocks.push(BlockSpec {
+            basis: &c.basis,
+            multiplier: &g_terms[k],
+            gram_float: &c.gram_float,
+        });
+    }
 
     // --- search the ladder for an exact certificate --------------------------
     let mut last = RoundError::Inconsistent;
-    let mut found: Option<(BigRational, Vec<Vec<BigRational>>)> = None;
+    let mut found: Option<(BigRational, Vec<Vec<Vec<BigRational>>>)> = None;
     'search: for gamma in gamma_candidates(input.bound_float) {
         for denom in DENOMS {
-            match round_gram(&p_terms, &gamma, &input.basis, &input.gram_float, denom) {
+            match round_gram_blocks(&p_terms, &gamma, &blocks, denom) {
                 Ok(g) => {
                     found = Some((gamma, g));
                     break 'search;
@@ -312,59 +440,70 @@ pub fn emit_sos_certificate(
             }
         }
     }
-    let Some((gamma, gram)) = found else {
+    let Some((gamma, grams)) = found else {
         return Err(SosEmitError::NoExactCertificate { last });
     };
-
-    // --- factor for the PSD witness -----------------------------------------
-    // `round_gram` already refused a non-PSD Gram via this same factorization,
-    // so a failure here would mean the matrix changed underneath us.
-    let ldl = ldlt(&gram).map_err(|_| SosEmitError::SelfCheck("Gram lost its LDLᵀ"))?;
-    if ldl.d.iter().any(|v| v.is_negative()) {
-        return Err(SosEmitError::SelfCheck("LDLᵀ diagonal is not nonnegative"));
+    if grams.len() != blocks.len() {
+        return Err(SosEmitError::SelfCheck(
+            "rounding returned the wrong block count",
+        ));
     }
 
-    // --- sparsify exactly as the schema specifies ----------------------------
-    let mut gram_entries: Vec<Entry> = Vec::new();
-    for i in 0..bn {
-        for j in 0..=i {
-            if !gram[i][j].is_zero() {
-                gram_entries.push(Entry {
-                    i,
-                    j,
-                    val: Rat(gram[i][j].clone()),
-                });
+    // --- factor each block for its PSD witness, and sparsify -----------------
+    let mut out_blocks: Vec<SosBlock> = Vec::with_capacity(grams.len());
+    for (k, gram) in grams.iter().enumerate() {
+        // `round_gram_blocks` already refused a non-PSD block via this same
+        // factorization, so a failure here would mean the matrix changed
+        // underneath us.
+        let ldl = ldlt(gram).map_err(|_| SosEmitError::SelfCheck("Gram lost its LDLᵀ"))?;
+        if ldl.d.iter().any(|v| v.is_negative()) {
+            return Err(SosEmitError::SelfCheck("LDLᵀ diagonal is not nonnegative"));
+        }
+        let bn = gram.len();
+        let mut gram_entries: Vec<Entry> = Vec::new();
+        for i in 0..bn {
+            for j in 0..=i {
+                if !gram[i][j].is_zero() {
+                    gram_entries.push(Entry {
+                        i,
+                        j,
+                        val: Rat(gram[i][j].clone()),
+                    });
+                }
             }
         }
+        out_blocks.push(SosBlock {
+            monomials: blocks[k].basis.to_vec(),
+            gram: SparseMatrix::symmetric(bn, bn, gram_entries),
+            l: SparseMatrix::unit_lower(
+                bn,
+                bn,
+                ldl.l_below
+                    .iter()
+                    .filter(|(_, _, v)| !v.is_zero())
+                    .map(|(i, j, v)| Entry {
+                        i: *i,
+                        j: *j,
+                        val: Rat(v.clone()),
+                    })
+                    .collect(),
+            ),
+            d: ldl.d.iter().cloned().map(Rat).collect(),
+            // Block 0 is σ₀ (no multiplier); block k multiplies constraint k−1.
+            multiplier: (k > 0).then(|| k - 1),
+        });
     }
-    let block = SosBlock {
-        monomials: input.basis.clone(),
-        gram: SparseMatrix::symmetric(bn, bn, gram_entries),
-        l: SparseMatrix::unit_lower(
-            bn,
-            bn,
-            ldl.l_below
-                .iter()
-                .filter(|(_, _, v)| !v.is_zero())
-                .map(|(i, j, v)| Entry {
-                    i: *i,
-                    j: *j,
-                    val: Rat(v.clone()),
-                })
-                .collect(),
-        ),
-        d: ldl.d.iter().cloned().map(Rat).collect(),
-    };
 
     // --- exact self-check of what will be written ---------------------------
-    recheck(&problem, &gamma, &block)?;
+    recheck(&problem, &gamma, &out_blocks)?;
 
     // --- try to upgrade the bound to a minimum ------------------------------
-    // If some rational `x₀` hits `γ` exactly, the bound is attained and the
+    // If some rational `x₀` hits `γ` exactly — and lies in `K`, which on a
+    // constrained problem is half the claim — the bound is attained and the
     // stronger verdict is available; otherwise the bound stands alone. Both are
-    // sound, and the emitter never guesses between them — attainment is decided
+    // sound, and the emitter never guesses between them: attainment is decided
     // by exact evaluation, not by how close the float solve looked.
-    let attained = attaining_point(&p_terms, &gamma, n, &input.x_float);
+    let attained = attaining_point(&p_terms, &g_terms, &gamma, n, &input.x_float);
     let (verdict, candidate) = match attained {
         Some(x) => (
             "global-min",
@@ -399,82 +538,136 @@ pub fn emit_sos_certificate(
             active_set: None,
             farkas: None,
             recession: None,
-            sos: Some(vec![block]),
+            sos: Some(out_blocks),
             feasible_witness: None,
         },
     })
 }
 
-/// Re-derive both proof obligations from the serialized blocks alone, the way
+/// Re-derive every proof obligation from the serialized blocks alone, the way
 /// the Lean codegen will read them:
 ///
-/// 1. `p(x) − γ = m(x)ᵀ G m(x)` as an identity of coefficient lists, and
-/// 2. `G = L·diag(D)·Lᵀ` with `D ≥ 0`.
+/// 1. `p(x) − γ = Σₖ mₖ(x)ᵀ Gₖ mₖ(x)·gₖ(x)` as an identity of coefficient
+///    lists, with `g₀ ≡ 1`, and
+/// 2. per block, `G = L·diag(D)·Lᵀ` with `D ≥ 0`.
 ///
 /// Checking (2) is what makes shipping both `gram` and `L`/`D` safe rather than
 /// merely redundant: they are two independent descriptions of the same matrix,
 /// and here they are forced to agree before either is written.
+///
+/// (1) is checked against the blocks' *own* `multiplier` indices rather than
+/// against their position, so a block pointing at the wrong constraint fails
+/// here — where the diagnosis is one line — instead of in the kernel.
 #[allow(clippy::needless_range_loop)] // index loops cross-reference g, l, d
-fn recheck(problem: &Problem, gamma: &BigRational, block: &SosBlock) -> Result<(), SosEmitError> {
-    let bn = block.monomials.len();
+fn recheck(
+    problem: &Problem,
+    gamma: &BigRational,
+    blocks: &[SosBlock],
+) -> Result<(), SosEmitError> {
     let n = problem.n_vars;
+    let cons = problem.poly_constraint_specs();
+    let one = vec![(vec![0usize; n], BigRational::from_integer(1.into()))];
 
-    // Rebuild the dense Gram from the sparse symmetric block.
-    let mut g = vec![vec![BigRational::zero(); bn]; bn];
-    for e in &block.gram.entries {
-        if e.i >= bn || e.j >= bn {
-            return Err(SosEmitError::SelfCheck("Gram entry out of range"));
-        }
-        g[e.i][e.j] = e.val.inner().clone();
-        g[e.j][e.i] = e.val.inner().clone();
-    }
-    // ... and the dense unit-lower L.
-    let mut l = vec![vec![BigRational::zero(); bn]; bn];
-    for (k, row) in l.iter_mut().enumerate() {
-        row[k] = BigRational::from_integer(1.into());
-    }
-    for e in &block.l.entries {
-        if e.i <= e.j || e.i >= bn {
-            return Err(SosEmitError::SelfCheck(
-                "L entry is not strictly below the diagonal",
-            ));
-        }
-        l[e.i][e.j] = e.val.inner().clone();
-    }
-    let d: Vec<BigRational> = block.d.iter().map(|r| r.inner().clone()).collect();
-    if d.len() != bn {
-        return Err(SosEmitError::SelfCheck("D length != basis size"));
-    }
-    if d.iter().any(|v| v.is_negative()) {
-        return Err(SosEmitError::SelfCheck("D has a negative entry"));
-    }
-
-    // (2) L·diag(D)·Lᵀ == G.
-    for i in 0..bn {
-        for j in 0..bn {
-            let v: BigRational = (0..bn).map(|k| &l[i][k] * &d[k] * &l[j][k]).sum();
-            if v != g[i][j] {
-                return Err(SosEmitError::SelfCheck("L·diag(D)·Lᵀ != G"));
-            }
-        }
-    }
-
-    // (1) Expand m(x)ᵀ G m(x) into a coefficient map and compare with p − γ.
+    // The identity's left side, accumulated over every block.
     let mut lhs: std::collections::BTreeMap<Vec<usize>, BigRational> =
         std::collections::BTreeMap::new();
-    for i in 0..bn {
-        for j in 0..bn {
-            if g[i][j].is_zero() {
-                continue;
+
+    let mut seen: Vec<bool> = vec![false; cons.len()];
+    for block in blocks {
+        let bn = block.monomials.len();
+
+        // Rebuild the dense Gram from the sparse symmetric block.
+        let mut g = vec![vec![BigRational::zero(); bn]; bn];
+        for e in &block.gram.entries {
+            if e.i >= bn || e.j >= bn {
+                return Err(SosEmitError::SelfCheck("Gram entry out of range"));
             }
-            let alpha: Vec<usize> = block.monomials[i]
-                .iter()
-                .zip(&block.monomials[j])
-                .map(|(a, b)| a + b)
-                .collect();
-            *lhs.entry(alpha).or_insert_with(BigRational::zero) += &g[i][j];
+            g[e.i][e.j] = e.val.inner().clone();
+            g[e.j][e.i] = e.val.inner().clone();
+        }
+        // ... and the dense unit-lower L.
+        let mut l = vec![vec![BigRational::zero(); bn]; bn];
+        for (k, row) in l.iter_mut().enumerate() {
+            row[k] = BigRational::from_integer(1.into());
+        }
+        for e in &block.l.entries {
+            if e.i <= e.j || e.i >= bn {
+                return Err(SosEmitError::SelfCheck(
+                    "L entry is not strictly below the diagonal",
+                ));
+            }
+            l[e.i][e.j] = e.val.inner().clone();
+        }
+        let d: Vec<BigRational> = block.d.iter().map(|r| r.inner().clone()).collect();
+        if d.len() != bn {
+            return Err(SosEmitError::SelfCheck("D length != basis size"));
+        }
+        if d.iter().any(|v| v.is_negative()) {
+            return Err(SosEmitError::SelfCheck("D has a negative entry"));
+        }
+
+        // (2) L·diag(D)·Lᵀ == G.
+        for i in 0..bn {
+            for j in 0..bn {
+                let v: BigRational = (0..bn).map(|k| &l[i][k] * &d[k] * &l[j][k]).sum();
+                if v != g[i][j] {
+                    return Err(SosEmitError::SelfCheck("L·diag(D)·Lᵀ != G"));
+                }
+            }
+        }
+
+        // Which polynomial this block multiplies. A `multiplier` that names a
+        // constraint the problem does not have would otherwise silently drop
+        // the whole block from the identity.
+        let mult = match block.multiplier {
+            None => one.clone(),
+            Some(k) => {
+                let spec = cons
+                    .get(k)
+                    .ok_or(SosEmitError::SelfCheck("block.multiplier is out of range"))?;
+                if seen[k] {
+                    return Err(SosEmitError::SelfCheck(
+                        "two blocks claim the same constraint",
+                    ));
+                }
+                seen[k] = true;
+                spec_terms(spec)
+            }
+        };
+
+        // (1), this block's contribution: expand m(x)ᵀ G m(x)·g(x).
+        for i in 0..bn {
+            for j in 0..bn {
+                if g[i][j].is_zero() {
+                    continue;
+                }
+                let base: Vec<usize> = block.monomials[i]
+                    .iter()
+                    .zip(&block.monomials[j])
+                    .map(|(a, b)| a + b)
+                    .collect();
+                for (beta, cbeta) in &mult {
+                    if beta.len() != n {
+                        return Err(SosEmitError::SelfCheck(
+                            "a multiplier term is not length n_vars",
+                        ));
+                    }
+                    let alpha: Vec<usize> = base.iter().zip(beta).map(|(a, b)| a + b).collect();
+                    *lhs.entry(alpha).or_insert_with(BigRational::zero) += &g[i][j] * cbeta;
+                }
+            }
         }
     }
+    // Every constraint must carry a multiplier, even a zero one: a missing
+    // block is not an error of arithmetic — the identity still closes — but it
+    // means the certificate's block list does not describe the problem's, and
+    // the codegen builds its `Σᵢ σᵢ·gᵢ` from that list.
+    if !seen.iter().all(|s| *s) {
+        return Err(SosEmitError::SelfCheck(
+            "a constraint has no localizing block",
+        ));
+    }
+
     let mut rhs: std::collections::BTreeMap<Vec<usize>, BigRational> =
         std::collections::BTreeMap::new();
     let spec = problem
@@ -490,7 +683,7 @@ fn recheck(problem: &Problem, gamma: &BigRational, block: &SosBlock) -> Result<(
     lhs.retain(|_, v| !v.is_zero());
     rhs.retain(|_, v| !v.is_zero());
     if lhs != rhs {
-        return Err(SosEmitError::SelfCheck("p − γ != m(x)ᵀ G m(x)"));
+        return Err(SosEmitError::SelfCheck("p − γ != σ₀ + Σᵢ σᵢ·gᵢ"));
     }
     Ok(())
 }
@@ -523,6 +716,7 @@ mod tests {
             bound_float: 0.9999999997,
             // No iterate: the bound path, uncontaminated by attainment.
             x_float: vec![],
+            constraints: Vec::new(),
         }
     }
 
@@ -600,6 +794,7 @@ mod tests {
                 ],
                 bound_float: -0.2500000003,
                 x_float: vec![1.2247448713915892],
+                constraints: Vec::new(),
             },
             &meta(),
         )

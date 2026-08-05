@@ -390,6 +390,86 @@ fn an_irrational_minimizer_certifies_only_a_bound() {
     assert_eq!(cert["bound"], serde_json::json!({"num":"-1","den":"4"}));
 }
 
+/// The constrained (Putinar) shape, on a problem the unconstrained emitter
+/// cannot touch at all: `x³ − 3x` has no lower bound on ℝ, so `p − γ` is never
+/// a sum of squares for any γ. On `0 ≤ x ≤ 3` it is one *modulo the
+/// constraints*, and that is the whole content of the constrained path.
+#[test]
+fn a_box_constrained_polynomial_certifies_a_bound_on_the_feasible_set() {
+    let sol = solve_to_sol("certify_sos_box");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos_box.nl"))
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["problem_class"], "sos-poly");
+    // x = 1 is rational and feasible, and p(1) = −2 exactly, so the bound is
+    // attained and the verdict is a (constrained) minimum.
+    assert_eq!(cert["verdict"], "global-min");
+    assert_eq!(cert["bound"], serde_json::json!({"num":"-2","den":"1"}));
+    assert_eq!(
+        cert["candidate"]["x"],
+        serde_json::json!([{"num":"1","den":"1"}])
+    );
+
+    // The feasible set travels with the certificate. Without it the same bound
+    // would read as a claim about every x — which is false here.
+    let g = cert["problem"]["poly_constraints"]
+        .as_array()
+        .expect("poly_constraints");
+    assert_eq!(g.len(), 2, "a box on one variable is two constraints");
+
+    // σ₀ carries no `multiplier` (its multiplier is the constant 1); the
+    // localizing blocks name the constraint each multiplies, in that order.
+    let sos = cert["witnesses"]["sos"].as_array().expect("sos blocks");
+    assert_eq!(sos.len(), 3, "σ₀ plus one block per constraint");
+    assert!(sos[0].get("multiplier").is_none());
+    assert_eq!(sos[1]["multiplier"], 0);
+    assert_eq!(sos[2]["multiplier"], 1);
+    // Every block's D is nonnegative — that is what PSD-ness reduces to, and
+    // it is checked per block, not just for σ₀.
+    for blk in sos {
+        for d in blk["D"].as_array().expect("D") {
+            let num: i64 = d["num"].as_str().expect("num").parse().expect("integer");
+            assert!(num >= 0, "block diagonal must be nonneg, got {d}");
+        }
+    }
+}
+
+#[test]
+fn cert_verify_accepts_the_constrained_sos_certificate() {
+    // The re-derivation has to reproduce the *constraints* too, in the same
+    // order — that order is what the `multiplier` indices refer to.
+    let out = cert_verify("certify_sos_box.nl", "certify_sos_box.cert.json");
+    assert!(
+        out.status.success(),
+        "real constrained SOS cert should verify against its .nl: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The unconstrained fixture's certificate must not verify against the
+/// constrained `.nl`: same problem class, same variable count, different
+/// feasible set. If `poly_constraints` were dropped from the re-derivation this
+/// would pass, and a bound on a box would read as a bound on all of ℝ.
+#[test]
+fn cert_verify_rejects_a_constrained_cert_against_an_unconstrained_nl() {
+    let out = cert_verify("certify_sos.nl", "certify_sos_box.cert.json");
+    assert!(
+        !out.status.success(),
+        "a constrained cert must be rejected against a different .nl"
+    );
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn cert_verify_accepts_the_sos_certificate() {
     // Same re-derivation path as the QP case, but through sos_problem_block:
