@@ -91,7 +91,8 @@ jobs:
   # wasm32 (a new `libc`/`dlopen`/thread call somewhere in the tree), and one
   # that compiles but traps at run time on a syscall WASI does not have. The
   # smoke test drives the same C ABI the page uses — load a `.nl`, solve it,
-  # check the objective — under Node's WASI.
+  # check the objective — under Node's WASI. It also calls a pounce-rs builder
+  # entry point.
   wasm:
     name: WebAssembly build + smoke
     runs-on: ubuntu-latest

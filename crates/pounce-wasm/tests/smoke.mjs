@@ -69,6 +69,23 @@ function solve(options = '') {
   }
 }
 
+const builderResult = fromWasmJson(wasm.pounce_builder_regression());
+assert.equal(
+  builderResult.error,
+  undefined,
+  `builder regression failed: ${builderResult.error}`,
+);
+assert.equal(
+  builderResult.success,
+  true,
+  `unexpected builder status ${builderResult.status}`,
+);
+assert.equal(builderResult.x.length, 2);
+assert.ok(
+  builderResult.objective < 1e-2,
+  `builder objective ${builderResult.objective} did not converge`,
+);
+
 // min x0  s.t.  x0^2 + x1^2 == 1,  x0 + x1 >= 0   ⇒   x0 = -1/√2
 const summary = load(readFileSync(join(here, 'simple.nl'), 'utf8'), 'alpha\nbeta\n', 'ring\nline\n');
 assert.equal(summary.error, undefined, `load failed: ${summary.error}`);
@@ -96,6 +113,29 @@ assert.ok(sol.includes('\nipopt_zL_out\n'), '.sol must carry the reduced-cost su
 const csv = fromWasm(wasm.pounce_solution_csv());
 assert.equal(csv.trimEnd().split('\n').length, 1 + 2 + 2, 'csv must cover every row');
 assert.ok(csv.includes('"alpha"'), 'csv must use the .col names');
+
+const twoInequalities = load(
+  readFileSync(join(here, 'two_inequalities.nl'), 'utf8'),
+);
+assert.equal(
+  twoInequalities.error,
+  undefined,
+  `two-inequality load failed: ${twoInequalities.error}`,
+);
+assert.equal(twoInequalities.n_vars, 2);
+assert.equal(twoInequalities.n_cons, 2);
+const twoInequalityResult = solve('print_level 0\n');
+assert.equal(
+  twoInequalityResult.error,
+  undefined,
+  `two-inequality solve failed: ${twoInequalityResult.error}`,
+);
+assert.equal(
+  twoInequalityResult.success,
+  true,
+  `unexpected two-inequality status ${twoInequalityResult.status}`,
+);
+assert.equal(twoInequalityResult.x.length, 2);
 
 // A malformed model must come back as JSON, not a trapped instance.
 assert.equal(typeof load('this is not an .nl file').error, 'string');
