@@ -1,0 +1,61 @@
+#+TITLE: Adversary Run: Hock-Schittkowski Problem 12
+#+DATE: 2026-08-05
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: inequality-constrained NLP (nonconvex quadratic constraint)
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes", Springer LNEMS 187 (1981), Problem 12
+:KNOWN_OPTIMAL: -30.0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 1 inequality (nonconvex), no bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min\quad & 0.5x_1^2 + x_2^2 - x_1x_2 - 7x_1 - 7x_2 \\
+\text{s.t.}\quad & 25 - 4x_1^2 - x_2^2 \ge 0
+\end{align}
+
+Starting point \(x_0=(0,0)\). Known optimum \(f^*=-30\) at \(x^*=(2,3)\)
+(the inequality is active: \(25-16-9=0\)).
+
+Solved via Pyomo, on one shared model, with two independent paths:
+`SolverFactory('pounce')` (the `pyomo-pounce` ASL/.nl plugin) and
+`scipy.optimize.minimize(method="trust-constr")` — no Linux Ipopt is
+available in this sandbox, so scipy is the environment-adapted oracle per
+the adversary run's environment adaptations.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                | Status  | Objective       | Rel Err  | Wall Time |
+|-----------------------+---------+-----------------+----------+-----------|
+| pounce (pyomo-pounce) | optimal | -30.0000001225  | 4.08e-09 | 0.0253s   |
+| scipy trust-constr    | success | -29.9999999999  | -        | 0.0384s   |
+
+Known optimal: -30.0 at x* = (2, 3)
+
+pounce: x = (2.00000001, 3.00000001). Matches both the published optimum
+and the scipy oracle to ~4e-9 in objective and ~1.2e-8 in x (inf-norm).
+
+* Cross-check / Verification
+Three independent checks agree:
+1. Published HS12 optimum: rel err 4.08e-09.
+2. scipy.optimize.minimize (trust-constr, tight gtol/xtol): obj_err
+   4.09e-09, x_inf_err 1.20e-08.
+3. `pounce verify` on the actual `.nl`/`.sol` pair pyomo-pounce wrote (a
+   solver-independent KKT/feasibility oracle): **VERIFIED**. Max
+   constraint violation 2.45e-7 (c1, active inequality), max bound
+   violation 0.0, KKT stationarity residual 6.13e-14, complementarity
+   residual 1.23e-7 — all comfortably inside the 1e-6 verify tolerance.
+
+* Verdict
+PASS — pounce solves HS12 (a nonconvex quadratic-inequality-constrained
+NLP) correctly: objective and solution agree with the published optimum
+and an independent scipy trust-constr solve to ~1e-8, and `pounce verify`
+independently confirms KKT-stationarity + feasibility + complementarity on
+the actual `.nl`/`.sol` artifacts. No defect found.

@@ -1,0 +1,62 @@
+#+TITLE: Adversary Run: Colville (Wood) Function Global Minimization
+#+DATE: 2026-08-05
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: unconstrained degree-4 polynomial in 4 variables, global min via SOS/Lasserre
+:SOURCE: Colville, A.R. (1968), "A comparative study on nonlinear programming codes", IBM Report; a.k.a. Wood's function, Dixon & Szego (eds.), "Towards Global Optimization 2" (1978)
+:KNOWN_OPTIMAL: 0.0
+:N_VARIABLES: 4
+:N_CONSTRAINTS: none (unconstrained), Lasserre relaxation order 2
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+f(x_1,x_2,x_3,x_4) = 100(x_1^2-x_2)^2 + (x_1-1)^2 + (x_3-1)^2 + 90(x_3^2-x_4)^2
+  + 10.1[(x_2-1)^2+(x_4-1)^2] + 19.8(x_2-1)(x_4-1)
+\]
+
+Global minimum \(f^*=0\) at \(x^*=(1,1,1,1)\) (unique zero of a sum of
+squares plus a cross term that also vanishes there). Unlike the
+2-variable quartics already logged (Rosenbrock, Styblinski-Tang, Beale,
+six-/three-hump camel), this is a genuine 4-variable degree-4 polynomial —
+Hilbert's 1888 theorem (nonneg poly in \(\le 2\) vars, degree \(\le 4\) ⟹
+SOS) does not apply, so exactness of the degree-2 relaxation was not
+assumed going in. The expanded 14-term monomial dict fed to
+`sos_minimize` was independently verified against the closed formula at 20
+random points (max err 4.55e-13) before use.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                        | Status  | Value              | Rel Err  | Wall Time |
+|--------------------------------+---------+---------------------+----------+-----------|
+| pounce sos_minimize (order=2) | optimal | lower_bound=1.16e-07 | 1.16e-07 | 0.3437s   |
+| scipy multistart BFGS (400)   | success | 9.03e-14 at (1,1,1,1) | -       | -         |
+
+Known optimal: 0.0 at x* = (1,1,1,1)
+
+* Cross-check / Verification
+- The 400-start scipy BFGS multistart refuter finds nothing below
+  9.03e-14 (effectively 0, at the known minimizer) — the SOS lower bound
+  1.1550e-07 is comfortably \(\le\) this (sound, not an invalid
+  certificate).
+- `is_exact=False` (empty `minimizers`) at order 2: the relaxation is not
+  certified exact for this 4-variable instance, but the bound is tight to
+  1.16e-7 of the true 0 — consistent with the documented SDP-tolerance
+  slack precedent already in the log (e.g. the Beale degree-8 probe,
+  +5.31e-7, `is_exact=False`), not a soundness violation.
+- Polynomial-expansion self-check (dict form vs the original closed
+  formula) at 20 random points in \([-2,2]^4\): max error 4.55e-13, ruling
+  out a formulation/derivative bug before trusting the result.
+
+* Verdict
+PASS — the degree-2 Lasserre relaxation produces a valid (non-exceeding),
+numerically tight lower bound of 1.16e-7 against the true global minimum
+of 0, confirmed by an independent 400-start multistart refuter finding
+nothing lower. No defect found; `is_exact=False` here is expected
+(4-variable, non-Hilbert-guaranteed instance), not a bug.

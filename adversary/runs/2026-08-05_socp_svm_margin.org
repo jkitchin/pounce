@@ -1,0 +1,66 @@
+#+TITLE: Adversary Run: Hard-Margin SVM via SOC Epigraph
+#+DATE: 2026-08-05
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: SOC epigraph + linear (nonneg) constraints, symmetric closed-form
+:SOURCE: Boyd & Vandenberghe, Convex Optimization, Sec 8.6.1 "Linear discrimination" / classic maximum-margin SVM (Vapnik)
+:KNOWN_OPTIMAL: 1.0
+:N_VARIABLES: 4 (t, w1, w2, b)
+:N_CONSTRAINTS: cones=[("soc",3), ("nonneg",4)]
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+4 points in \(\mathbb{R}^2\), symmetric by construction so the optimum is
+known exactly by inspection: class +1 at \((1,1),(1,-1)\), class \(-1\) at
+\((-1,1),(-1,-1)\).
+
+\begin{align}
+\min\quad & t \\
+\text{s.t.}\quad & \|w\|_2 \le t \\
+& y_i(w^\top x_i + b) \ge 1,\ i=1..4
+\end{align}
+
+By symmetry the maximum-margin hyperplane is \(x=0\) (\(w^*=(1,0)\),
+\(b^*=0\)), with all 4 points on their margin (\(y_i(w^{*\top}x_i+b^*)=1\)
+for every \(i\), verified by direct substitution before use). Known
+optimal \(t^* = \|w^*\|_2 = 1\).
+
+This exercises pounce's actual conic entry point (`solve_socp`) rather
+than the more common \(\min \tfrac12\|w\|^2\) QP form of hard-margin SVM,
+which would route through the QP solver instead.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective       | Rel Err  | Wall Time |
+|-----------------+---------+-----------------+----------+-----------|
+| pounce solve_socp | optimal | 1.0000000001e+00 | 1.18e-10 | 0.0033s   |
+| cvxpy CLARABEL  | optimal | 9.9999999999e-01 | -        | 0.0112s   |
+| cvxpy SCS       | optimal | 1.0000000001e+00 | -        | -         |
+
+Known optimal: 1.0 at w* = (1, 0), b* = 0
+
+pounce: w = (1.0, 3.66e-22), b = 5.25e-23 — matches the closed-form
+symmetric solution to float64 noise level.
+
+* Cross-check / Verification
+- cvxpy CLARABEL and SCS (independent conic solvers, same SOCP model):
+  both agree with pounce to <3e-10, and agree with each other to 1.02e-10.
+- All four margin constraints evaluated at pounce's own solution:
+  \(y_i(w^\top x_i+b) = [1,1,1,1]\) exactly (to display precision) — every
+  point active, matching the closed-form prediction that all 4 points are
+  support vectors.
+- Cone dimensions re-derived from scratch before formulating (SOC block
+  dim 3 for \((t,w_1,w_2)\), nonneg block dim 4 for the margin rows) rather
+  than trusted by assumption.
+
+* Verdict
+PASS — pounce's `solve_socp` correctly solves a hard-margin SVM posed via
+genuine SOC epigraph (not the more commonly tested QP form), matching the
+closed-form symmetric solution and two independent cvxpy backends to
+~1e-10. No defect found.

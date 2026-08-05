@@ -1,0 +1,60 @@
+#+TITLE: Adversary Run: Differentiable QpLayer.batch() Gradient Correctness
+#+DATE: 2026-08-05
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: fixed-structure batched QP layer (rayon-parallel), gradient w.r.t. batched c
+:SOURCE: Constructed; OptNet implicit-diff rule, cross-checked vs per-item loop, FD, JAX<->Torch parity
+:KNOWN_OPTIMAL: batch-vs-loop forward 0.0; gradient-vs-perloop 0.0; FD max err 8.93e-10
+:N_VARIABLES: 3 (per item), batch size 6
+:N_CONSTRAINTS: 2 inequalities, box bounds, shared structure across the batch
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\min_{x} \tfrac{1}{2}x^\top P x + c_i^\top x \quad\text{s.t.}\quad Gx\le h,\ \ell\le x\le u
+\]
+
+Fixed \(P,G,h,\ell,u\) captured once in a `pounce.jax.QpLayer` /
+`pounce.torch.QpLayer`, solved for a batch of \(B=6\) different \(c_i\) via
+the layer's own `.batch()` method (the rayon-parallel batch driver) rather
+than `jax.vmap` of a single-item solve or the free-function
+`solve_qp_batch` — both of those paths are already covered in the log, but
+`QpLayer.batch()` itself had never been exercised under autodiff.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                              | Result   |
+|-------------------------------------+----------|
+| forward: batch vs loop-of-single    | 0.00e+00 |
+| forward: batch[0] vs cvxpy          | 1.69e-09 |
+| gradient: batch vs per-item loop    | 0.00e+00 |
+| gradient: batch vs central FD       | 8.93e-10 |
+| forward parity: jax vs torch        | 0.00e+00 |
+| gradient parity: jax vs torch       | 1.11e-16 |
+
+* Cross-check / Verification
+1. `QpLayer.batch(cs)` matches a Python loop over `QpLayer(c_i)` bit-exactly
+   (0.0 max abs diff) — the rayon batch driver produces identical primal
+   solutions to independent single solves.
+2. `jax.grad` through `loss_batch` (one call through the batch driver)
+   matches the sum of independent `jax.grad` calls through the single-item
+   `__call__` (a materially different Rust code path) to 0.0 max abs diff.
+3. Central finite difference (\(\epsilon=10^{-6}\), float64) on two batch
+   items (6 scalar perturbations total) matches the batched analytic
+   gradient to 8.93e-10, well under the 5e-5 FD tolerance.
+4. `pounce.jax.QpLayer.batch` and `pounce.torch.QpLayer.batch` agree
+   forward (0.0) and on the backward gradient (1.11e-16, float64 machine
+   epsilon) — full JAX<->Torch parity on this entry point.
+
+* Verdict
+PASS — `QpLayer.batch()`'s implicit-differentiation gradient is correct
+against three independent checks (per-item loop, finite difference, and
+JAX<->Torch parity), and its forward solve matches an independent cvxpy
+solve. No defect found; this closes a previously-untested combination
+(batched layer x autodiff) in the diff family's coverage.

@@ -1,0 +1,60 @@
+#+TITLE: Adversary Run: Rank-Deficient (Singular PSD) Hessian, Bound-Constrained
+#+DATE: 2026-08-05
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: rank-deficient Hessian, one active bound
+:SOURCE: Constructed; closed form by inspection
+:KNOWN_OPTIMAL: -18.0
+:N_VARIABLES: 3
+:N_CONSTRAINTS: box bounds [-5,5]^3, no linear constraints
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min\quad & x_1^2 + x_2^2 - 4x_1 - 6x_2 - x_3 \\
+\text{s.t.}\quad & -5 \le x_1,x_2,x_3 \le 5
+\end{align}
+
+\(P=\mathrm{diag}(2,2,0)\) is positive SEMIdefinite with a genuine zero
+eigenvalue (flat direction along \(x_3\)); \(f\) is unbounded below in
+\(x_3\) without the box bound. By inspection the unconstrained-in-\(x_1,
+x_2\) minimizer is \((2,3)\) (interior to \([-5,5]\)), and \(f\) decreases
+linearly in \(x_3\) until the upper bound is hit, giving \(x^*=(2,3,5)\),
+\(f^*=(4-8)+(9-18)+(-5)=-18\), with exactly one active bound.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver               | Status  | Objective        | Rel Err  | Wall Time |
+|----------------------+---------+-------------------+----------+-----------|
+| pounce (ipm)         | optimal | -1.8000000000e+01 | 7.44e-12 | 0.0085s   |
+| pounce (active-set)  | optimal | -1.8000000000e+01 | 0.00e+00 | 0.0016s   |
+| cvxpy CLARABEL       | optimal | -1.7999999999e+01 | -        | 0.0561s   |
+| cvxpy SCS            | optimal | -1.8000079700e+01 | -        | -         |
+
+Known optimal: -18.0 at x* = (2, 3, 5)
+
+Both pounce methods recover x=(2,3,5) exactly (active-set to machine
+precision, 4.44e-16), and both agree with each other (routing-transparency
+check: 7.44e-12 objective gap) and with both cvxpy backends.
+
+* Cross-check / Verification
+- cvxpy CLARABEL and SCS (independent conic solvers, `P` declared via
+  `cp.psd_wrap` since it is only semidefinite): both agree with pounce to
+  <5e-6, and agree with each other to 4.43e-6.
+- `method="ipm"` vs `method="active-set"` on the SAME pounce entry point
+  (routing-transparency contract): objective gap 7.44e-12, well under the
+  1e-4 threshold.
+- eig(P) = [0, 2, 2] confirmed numerically as a genuine zero eigenvalue
+  before trusting the "rank-deficient" framing.
+
+* Verdict
+PASS — the `qp-active-set` parametric-homotopy engine correctly handles a
+Hessian with a genuine zero eigenvalue, resolving the flat direction via
+the active bound rather than curvature, and agrees exactly with the IPM
+path and with two independent cvxpy backends. No defect found.

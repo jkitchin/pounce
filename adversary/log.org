@@ -10,18 +10,18 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     10 | 2026-08-02 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
+| nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
-| qp-active-set   |     11 | 2026-07-30 | —             |
-| socp            |     10 | 2026-08-03 | —             |
+| qp-active-set   |     12 | 2026-08-05 | —             |
+| socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
 | sdp             |     10 | 2026-08-03 | —             |
-| sos             |     10 | 2026-08-03 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
+| sos             |     11 | 2026-08-05 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |     10 | 2026-08-04 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, and bounds-only diagonal QP)  |
 | batch           |     10 | 2026-08-04 | —             |
-| diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
+| diff            |     11 | 2026-08-05 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
@@ -4611,3 +4611,102 @@ with its OWN randomly-generated A_k (varying row count) and b_k -- P, c,
 AND shape all vary simultaneously (prior batch runs varied only one of
 P/c against shared structure). Matches nnls to ~1e-9 on all 8 items;
 item 0 also cross-checked against single solve_qp (exact match).
+
+** [2026-08-05] Hock-Schittkowski Problem 12 (nlp/inequality-constrained, nonconvex quadratic) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: Hock & Schittkowski 1981, problem 12
+:KNOWN_OPTIMAL: -30.0
+:POUNCE_OBJECTIVE: -30.0000001225
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0253s
+:ORACLE: scipy trust-constr + pounce verify
+:ORACLE_OBJECTIVE: -29.9999999999
+:ORACLE_TIME: 0.0384s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-05_nlp_hs12.org]]
+:COVERAGE_TARGET: -
+:END:
+Solved via pyomo-pounce vs scipy trust-constr; pounce verify VERIFIED
+(KKT stationarity 6.13e-14, complementarity 1.23e-7). x=(2,3) to ~1e-8.
+
+** [2026-08-05] Rank-Deficient (Singular PSD) Hessian, Bound-Constrained QP (qp-active-set/rank-deficient Hessian) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: constructed; closed form by inspection
+:KNOWN_OPTIMAL: -18.0
+:POUNCE_OBJECTIVE: -18.0000000000 (both ipm and active-set)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0085s (ipm), 0.0016s (active-set)
+:ORACLE: cvxpy CLARABEL + SCS
+:ORACLE_OBJECTIVE: -17.999999999 (CLARABEL), -18.0000797 (SCS)
+:ORACLE_TIME: 0.0561s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-05_qp-active-set_rank-deficient-hessian-bounds.org]]
+:COVERAGE_TARGET: -
+:END:
+P=diag(2,2,0), genuine zero eigenvalue; active-set resolves the flat
+direction via the box bound (x3=ub=5) exactly (4.44e-16), IPM/active-set
+routing-transparency gap 7.44e-12, both cvxpy backends agree.
+
+** [2026-08-05] Differentiable QpLayer.batch() gradient (diff/batched layer autodiff) - PASS
+:PROPERTIES:
+:FAMILY: diff
+:SOURCE: constructed; OptNet implicit-diff rule vs per-item loop, FD, JAX<->Torch parity
+:KNOWN_OPTIMAL: batch-vs-loop 0.0; grad-vs-perloop 0.0; FD max err 8.93e-10
+:POUNCE_OBJECTIVE: n/a (gradient-correctness check, not a scalar objective)
+:POUNCE_STATUS: all checks PASS
+:POUNCE_TIME: n/a
+:ORACLE: per-item loop grad + central FD (float64) + cvxpy CLARABEL forward + torch parity
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-05_diff_qplayer_batch_grad.org]]
+:COVERAGE_TARGET: -
+:END:
+First probe of QpLayer's own .batch() method under autodiff (previously
+only solve_qp_batch and jax.vmap-of-single-solve were tested). Batch
+gradient matches summed per-item gradients bit-exactly (different Rust
+code path), FD to 8.93e-10, and JAX<->Torch parity to 1.11e-16.
+
+** [2026-08-05] Colville (Wood) function global min, 4-var degree-4 (sos/unconstrained quartic, Lasserre order 2) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: Colville 1968 (IBM report); a.k.a. Wood's function, Dixon & Szego (1978)
+:KNOWN_OPTIMAL: 0.0
+:POUNCE_OBJECTIVE: lower_bound=1.1550e-07 (is_exact=False)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.3437s
+:ORACLE: scipy multistart BFGS (400 starts)
+:ORACLE_OBJECTIVE: 9.03e-14 at (1,1,1,1)
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-05_sos_colville.org]]
+:COVERAGE_TARGET: -
+:END:
+First 4-variable SOS instance in the log (prior sos probes were all
+2-variable, where Hilbert's theorem guarantees exactness; here it does
+not apply). Lower bound sound (<= multistart min + 1e-6) and tight to
+1.16e-7, consistent with documented SDP-tolerance slack precedent
+(Beale degree-8, +5.31e-7). Polynomial-dict expansion independently
+verified against the closed formula (max err 4.55e-13) before trusting it.
+
+** [2026-08-05] Hard-margin SVM via SOC epigraph (socp/SOC epigraph + linear, symmetric closed-form) - PASS
+:PROPERTIES:
+:FAMILY: socp
+:SOURCE: Boyd & Vandenberghe, Convex Optimization, Sec 8.6.1; classic maximum-margin SVM
+:KNOWN_OPTIMAL: 1.0
+:POUNCE_OBJECTIVE: 1.0000000001
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0033s
+:ORACLE: cvxpy CLARABEL + SCS
+:ORACLE_OBJECTIVE: 0.9999999999 (CLARABEL), 1.0000000001 (SCS)
+:ORACLE_TIME: 0.0112s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-05_socp_svm_margin.org]]
+:COVERAGE_TARGET: -
+:END:
+Hard-margin SVM posed via genuine SOC epigraph (min ||w||, not the more
+commonly-tested 1/2||w||^2 QP form) -- exercises solve_socp directly. 4
+symmetric points, all support vectors; w=(1,3.7e-22), b=5.2e-23 matches
+closed form w*=(1,0), b*=0 to float64 noise.
