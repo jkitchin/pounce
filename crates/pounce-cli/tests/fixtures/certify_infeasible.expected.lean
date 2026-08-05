@@ -40,7 +40,7 @@ open PounceLean.ConvexQP (Feasible)
 
 -- binding (cert.binding); embed so the verdict provably concerns these bytes
 def nlSha256  : String := "c2ce4026a4f1338b8996f8603ad6b07604125613201b1e39ac3f0ae134b45347"
-def solSha256 : String := "6ed24301b237c2ce4191e96726b53cb10fa5bb20b63c6b55a62f39364f77b20f"
+def solSha256 : String := "be43482e0926e0a52ffef83f64d2b64ade4f6fb6f2a3864e61fd657c1fc710d1"
 
 def Amat : Matrix (Fin 3) (Fin 2) ℚ := !![1, 1; -1, 0; 0, -1]
 def bvec : Fin 3 → ℚ := ![2, 0, 0]

@@ -41,7 +41,7 @@ open PounceLean.ConvexQP (obj Feasible)
 
 -- binding (cert.binding); embed so the verdict provably concerns these bytes
 def nlSha256  : String := "3a6c933d79c231c566f3efa5c634fef6583ec27b3dcadb52b100769745ecc75b"
-def solSha256 : String := "4870cf3f245456cdf6503925e075fcd21fd879aa4f132c9e1970f105f01c4d5a"
+def solSha256 : String := "2e10ae3993a15faa8513180c8c0ee44a7d959a791a54f0255fca00bb833d33e8"
 
 def Qmat : Matrix (Fin 2) (Fin 2) ℚ := !![0, 0; 0, 0]
 def cvec : Fin 2 → ℚ := ![-1, -1]

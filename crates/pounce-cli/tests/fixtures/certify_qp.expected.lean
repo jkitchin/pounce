@@ -43,7 +43,7 @@ open PounceLean.ConvexQP (obj Feasible global_min_of_kkt)
 
 -- binding (cert.binding); embed so the verdict provably concerns these bytes
 def nlSha256  : String := "ba8f872e8e6881259b04c6c5999ee211bd2e75c2f977e6ff853b6f18e701f10b"
-def solSha256 : String := "adc650057f49fe5d9ddb5197aaf3a1ea92644794432b5f34c5673817aea4b451"
+def solSha256 : String := "90cb65f5b4d271ae3acf49049d217dc4c21f0e0c1209b3cf5d919df636d198b4"
 
 /-! ### Problem data, transcribed from the certificate. -/
 
