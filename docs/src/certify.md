@@ -190,9 +190,13 @@ Three practical notes:
   chosen so the true solution stays well inside — the certificate is about the
   ball it names, so that ball has to be one a rational centre can describe
   exactly.
-- **Localizing also helps numerically.** A ball is a strong localizer, so a
-  low-order relaxation often closes where the global problem's gap will not —
-  even when the global claim happens to be true.
+- **Localizing usually helps numerically, but not always.** A ball is a strong
+  localizer, so a low-order relaxation often closes where the global problem's
+  gap will not — even when the global claim happens to be true. The converse
+  also happens: the extra multiplier is one more block to round, and on
+  separable quartics it is the *global* bound that certifies while `--local`
+  refuses ([details](#what-it-costs-and-what-it-changes)). Neither flag
+  dominates, so a refusal from one is a reason to try the other.
 - **The candidate must be inside.** `p(x₀) = γ` does not imply `x₀` is in the
   neighborhood: for `x⁴ − 2x² + 2` both `±1` attain the minimum. So the
   candidate carries `‖x₀ − c‖² ≤ r²` as a third exact obligation, next to
@@ -357,6 +361,31 @@ consumer cannot mistake a bound for a claimed minimizer.
 The full field-by-field reference is the
 [Lean Certificate Schema v1](schema/lean-cert-v1.md).
 
+### Options
+
+| Option | Effect |
+|---|---|
+| `-o, --output <path>` | write the certificate here instead of stdout. Nothing is written if the emitter refuses. |
+| `--feasible` | certify [feasibility of the reported point](#certifying-the-float-itself) instead of optimality |
+| `--local` | narrow the claim to [a ball](#--local-a-ball-is-just-another-constraint) around the solution |
+| `--radius <r>` | radius of that ball (default `1`); needs `--local` |
+| `--growth` | also certify [a growth modulus](#--growth-strictness-without-the-second-order-machinery), for `local-min-strict`; needs `--local` |
+| `--active-tol <ε>` | which constraint rows the *float* solve counts as active (default `1e-7`). A hint only — it selects which exact system to solve, never what is claimed. Too loose and the exact projection lands outside an inactive row; too tight and a genuinely active row is dropped. Either way the emitter refuses rather than shipping something weaker. |
+
+`--local` and `--feasible` ask for different claims and are refused together;
+so is any request whose region does not exist (`--growth` or `--radius` without
+`--local`). Refusals are always exit 2, never a quiet downgrade — the one rule
+that makes the flags trustworthy is that a flag which is accepted is a flag that
+was *used*.
+
+What the emitter may do on its own is **weaken a verdict it cannot reach**, and
+it always does so visibly, by shipping a different `verdict` string and dropping
+the fields that claim more. `--growth` on `x⁴ − 3x² + 2` gives
+`local-lower-bound` with no candidate at all — no rational point attains the
+bound. `--growth` on `x⁴`, where `x = 0` attains it exactly, gives `local-min`
+with no `growth_modulus`: the minimum is real but too flat for any quadratic
+modulus, since `μx² ≤ x⁴` fails near the origin for every `μ > 0`.
+
 ## Binding a certificate to your problem
 
 A hash match alone is not enough. A certificate could carry the right
@@ -422,6 +451,87 @@ condition the LP slice ever had, but is not flat (`Q d ≠ 0`).
 
 A test suite where everything passes proves only that valid inputs work; these
 fixtures are the ones that would catch a proof that accepts too much.
+
+Two things that structure cannot reach are covered separately.
+
+**Codegen's refusals.** Layer 3 only works if codegen *accepts* the forged
+certificate — otherwise the kernel is never asked, and the script says so and
+fails. So every certificate codegen refuses **by design** (a modulus that is
+zero or negative, growth with no ball, a strict verdict with no modulus) is
+invisible to it. `pounce-lean`'s `codegen/check_refusals.py` is their only
+guard, and runs in that repo's CI.
+
+**The seams between features.** Each forgery above attacks one obligation of
+one verdict. What none of them attack is two features *interacting*: a
+certificate offered a problem it was not written about, a flag silently dropped
+when a second flag changes the code path, a ball widened until the bound it
+carries stops being true. `crates/pounce-cli/tests/certify_adversarial.rs`
+covers those as invariants over the whole feature set rather than per-fixture
+assertions — the cross product of every certificate against every fixture `.nl`
+must reject off the diagonal; every combination of `--local`, `--growth`,
+`--feasible` and `--radius` must be refused or deliver exactly the verdict it
+names; a certified bound must hold at every sampled point of the ball the
+certificate itself declares; and a refusal must leave no file behind. They
+grow with the fixture set, so a new verdict that weakens one of these shows up
+without a new test being written for it.
+
+## What it costs, and what it changes
+
+**Nothing, if you do not ask for it.** `certify` is a separate subcommand, not a
+phase of the solve. `pounce problem.nl` does exactly what it did before —
+certification is never attempted, never consulted, and cannot change the
+reported answer. It is not behind a build feature either, so nothing about
+which binary you have depends on this.
+
+`certify` treats the `.sol` as **input**: it reads the point, it does not rerun
+the solver and does not rewrite the file. That matters because the SOS path
+does move to a nearby *exact* point internally — but that refined point lives
+only in the certificate, as `candidate.x`. Your `.sol` is byte-identical
+whether or not you certify it, and a test pins that.
+
+**On the QP, LP, infeasible and unbounded slices the cost is negligible** — a
+few milliseconds, at or below the cost of the solve itself, because the work is
+a linear solve over ℚ on an active set the float already identified.
+
+**On the SOS path it is not negligible, and it grows fast.** The relaxation is
+an SDP over the monomial basis, and both it and the exact rounding that follows
+grow steeply with the number of variables. For a degree-4 objective
+`Σᵢ (xᵢ⁴ − 2xᵢ²)` on this machine:
+
+| variables | solve | `certify` | certificate |
+|---|---|---|---|
+| 1 | 6 ms | 5 ms | 2.4 KB |
+| 3 | 6 ms | 9 ms | 6.0 KB |
+| 5 | 6 ms | 48 ms | 11 KB |
+| 6 | 6 ms | 204 ms | 15 KB |
+| 8 | 6 ms | 2.9 s | 24 KB |
+| 10 | 6 ms | 15 s | 37 KB |
+| 12 | 6 ms | > 10 min | — |
+
+Read the first column: the *solve* is flat. All of the growth is certification.
+Roughly a factor of five per added variable, which puts the practical ceiling
+for a quartic at **single-digit variables** — and lower for higher degree,
+since the basis grows in the degree too. This is not a tuning problem to work
+around; it is what proving the statement costs.
+
+Two consequences worth planning around:
+
+- **A refusal costs the same as a success.** The emitter has to run the whole
+  relaxation before it can know the rounding will not close, so `exit 2` at
+  n = 10 also takes ~15 s. Certification is not something to call
+  speculatively in a loop.
+- **`--local` is not reliably the cheaper or easier ask.** It often is — a ball
+  is a strong localizer and a low-order relaxation frequently closes where the
+  global one will not. But on the family above the *opposite* happens: the
+  global bound certifies at every size tried, while `--local` refuses from two
+  variables on, because the localized Gram matrix will not round to something
+  exactly PSD. Which of the two closes is a property of the problem, so if one
+  is refused the other is worth trying.
+
+**The consumer side needs Lean; emitting does not.** `pounce certify` and
+`pounce cert-verify` are self-contained — no Lean, no Mathlib, no network. Only
+the final `lake build` step needs a toolchain, and that is the consumer's to
+run, deliberately (see [the acceptance rule](#the-acceptance-rule)).
 
 ## Limits
 

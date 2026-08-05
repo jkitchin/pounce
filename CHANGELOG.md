@@ -235,6 +235,43 @@ changes.
   feasible but too far away. The recession forgery is built the same way: a
   direction that is feasible and descending — passing every condition the LP
   slice ever had — and fails only the new `Q d = 0`.
+- **Adversarial tests across the features, not just within them**
+  (`crates/pounce-cli/tests/certify_adversarial.rs`). Every forgery above
+  attacks one obligation of one verdict; none of them attack two features
+  *interacting*, which is where the remaining soundness risk lives. These are
+  invariants over the whole feature set rather than per-fixture assertions, so
+  they tighten as fixtures are added: the cross product of every certificate
+  against every fixture `.nl` must reject off the diagonal (a re-derivation
+  that quietly matched everything would pass every single-fixture test in the
+  suite while binding nothing); every combination of `--local`, `--growth`,
+  `--feasible` and `--radius` must be refused or deliver exactly the verdict it
+  names, never a third thing with a flag silently dropped; a certified bound
+  must hold at every sampled point of the ball the certificate itself declares,
+  across a radius ladder wide enough that the claim stops being true; the
+  neighborhood, the verdict and the modulus must never disagree about what
+  region or strength is being claimed; a refusal must leave no output file; and
+  certifying must not rewrite the `.sol` it was handed. Two documented
+  degradations are pinned as behaviour rather than left as prose: `--growth`
+  with no rational minimizer falls back to `local-lower-bound` with no
+  candidate, and `--growth` on `x⁴` — attained exactly at `0`, but too flat for
+  any modulus — falls back to `local-min` with no `growth_modulus`.
+- `certify` and `cert-verify` are now listed under **Subcommands** in
+  `pounce --help`, which they were not. `verify` and `check-x0` were, so the
+  feature was undiscoverable except by reading the docs.
+- **Documented what certification costs**, which the page did not say. The
+  solve is untouched — `certify` is a separate subcommand, not a phase, is not
+  behind a build feature, and treats the `.sol` as read-only input. On the QP,
+  LP, infeasible and unbounded slices the cost is a few milliseconds. On the
+  **SOS path it grows roughly fivefold per added variable**: for
+  `Σᵢ (xᵢ⁴ − 2xᵢ²)` the solve stays flat at ~6 ms while `certify` goes 5 ms at
+  n = 1, 204 ms at n = 6, 15 s at n = 10 and past ten minutes at n = 12 — a
+  practical ceiling of single-digit variables for a quartic. A refusal costs the
+  same as a success, since the relaxation has to run before the rounding can be
+  known to fail. Also documented: `--local` is *not* reliably the easier ask —
+  on that family the global bound certifies at every size while `--local`
+  refuses from two variables on, so a refusal from one is a reason to try the
+  other. The `certify` options table (including `--active-tol`, previously
+  undocumented) is now on the page.
 
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 

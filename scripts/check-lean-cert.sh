@@ -90,6 +90,13 @@ FIXTURES=(
   # is what this pair is here to pin. μ comes off a fixed ladder, so a drift in
   # the shifted-σ₀ hint shows up as a *weaker* μ rather than a failure.
   "certify_sos_local_strict PounceLean.CertifySOSLocalStrict local_min_strict --local --growth"
+  # Strictness COMPOSED with Putinar multipliers, which the fixture above cannot
+  # reach: with no constraints its `xstar_feasible` is `fun i => i.elim0`, a
+  # vacuous proof over `Fin 0`. Here m = 2, so that obligation is a real
+  # `fin_cases` over real constraint rows, and the growth shift has to survive
+  # alongside localizing blocks rather than the ball alone. Two features that
+  # each work in isolation are not the same as two that work together.
+  "certify_sos_box_strict PounceLean.CertifySOSBoxStrict local_min_strict --local --growth"
   # The one verdict that is not about optimality: an indefinite Hessian, so the
   # global-min path refuses (Ldl(Indefinite)) and there is nothing to certify
   # about the solve EXCEPT that its answer is a real point of the real feasible

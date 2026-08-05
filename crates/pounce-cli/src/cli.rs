@@ -272,6 +272,21 @@ Subcommands:
                             before any solve. Exit 0 = evaluates cleanly,
                             21 = NaN/inf at x0.
                             Run `pounce check-x0 --help` for details.
+  pounce certify <problem.nl> <claim.sol> [--local] [--growth] [--feasible]
+                            emit an exact-rational certificate that an
+                            external Lean 4 development turns into a
+                            kernel-checked proof of the claim -- global or
+                            local optimality, infeasibility, unboundedness,
+                            or (with --feasible) feasibility of the reported
+                            point. Covers a narrow slice by design and exits
+                            2 rather than emit anything unsound. Does not
+                            re-solve and does not touch the .sol.
+                            Run `pounce certify --help` for details.
+  pounce cert-verify <problem.nl> <cert.json>
+                            check that such a certificate concerns THIS .nl,
+                            by re-deriving the problem from the .nl rather
+                            than trusting the certificate's own copy of it.
+                            Exit 0 = matches, 2 = does not. Does not run Lean.
 
 When the .nl declares the sIPOPT suffixes (sens_state_1,
 sens_state_value_1, sens_init_constr), pounce additionally runs the
