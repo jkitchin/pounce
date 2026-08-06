@@ -10,7 +10,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     11 | 2026-08-05 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
+| nlp             |     13 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 produces no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option) |
 | lp              |     11 | 2026-08-06 | —             |
 | qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
@@ -4898,3 +4898,69 @@ problem class for sensitivity, distinct from prior generic KKT dx/db probes.
 vectors (y, z, z_lb, z_ub) -- not just x*/obj -- checked batch vs
 per-item solve_qp: bitwise-identical across all 7 instances. No
 multiplier mis-indexing/unscaling bug found in the batched path.
+
+** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized families built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 12000 fuzz instances + 120 end-to-end .nl solves, 0 failures
+:POUNCE_TIME: ~4 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); central finite differences of the wrapper's own reduced eval_f/eval_g; in-script row re-evaluation
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_linear-eq-reduction.org]]
+:COVERAGE_TARGET: linear_eq_plan.rs / linear_eq_elim.rs — new files, no prior adversarial coverage
+:END:
+
+Probes validated by mutation testing: five injected defects (Hessian
+symmetric-pair x2 factor, bound-transfer sign, row constant, lift offset, dual
+recovery) were each caught. The row-constant defect initially escaped every
+probe — derivatives are blind to an affine offset — which is why the probe now
+carries a primal-fidelity check through =finalize_solution=.
+
+Recorded non-defect: a row whose constant lives in its =.nl= expression segment
+is tagged NonLinear by the reader, so the elimination declines it. The
+row-constant branch is therefore reachable only on the general TNLP path (C
+interface, GAMS, callbacks), not via =.nl=.
+
+** [2026-08-06] Phase 6 bound-multiplier attribution (nlp/presolve, gh#493) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized family around a known feasible point, boxes drawn so bounds are ACTIVE on the columns Phase 6 removes; no published instance
+:KNOWN_OPTIMAL: n/a (oracle is the KKT system)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: ~700 end-to-end .nl solves over 9 seeds, 0 gh#493 failures (parent commit: 15-22 per seed)
+:POUNCE_TIME: ~6 min total
+:ORACLE: textbook KKT (feasibility, stationarity, dual feasibility, bound complementarity) computed in-script from the generator's own arrays against the .sol ipopt_zL_out/ipopt_zU_out suffixes; no-presolve control arm; LICQ rank test for dual uniqueness; pounce verify
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS (gh#493); one separate pre-existing defect filed as gh#495
+:REPORT: [[file:runs/2026-08-06_nlp_phase6_bound_attribution.org]]
+:COVERAGE_TARGET: linear_eq_elim.rs postsolve / linear_eq_plan.rs bound transfer - the bound-multiplier path, which the gh#487 probes never reach (their boxes never bind)
+:END:
+
+The gh#487 probes cannot see this: their generator gives every box at least 1.0
+of margin around x*, so no bound is ever active and every bound multiplier is
+zero. This probe makes bounds active on the eliminated columns, and reads the
+zL/zU suffixes the earlier ones ignore.
+
+Bound complementarity is the discriminating condition. Parking a transferred
+bound's multiplier on the survivor leaves stationarity — the property #487's
+tests checked — intact while breaking complementarity in the original space.
+pounce verify is blind to it by construction: it reports bound-projected
+stationarity and never reads the suffixes, and it rejected none of the failing
+instances.
+
+Two formulation traps, both of which silently empty the probe: a quadratic
+objective routes the model to pounce-convex before any presolve wrapper exists
+(gh#494), and `presolve=yes` turns on Phases 1-4, whose own dual attribution
+confounds the measurement. The probe asserts engagement rather than assuming it.
+
+Separate finding, filed as gh#495 and NOT caused by the gh#493 change (residuals
+identical before and after): when Phase 6 removes a column whose declared bound
+is active, no bound multiplier is produced for it at all and the reported duals
+are not a KKT multiplier set. Minimal repro in the issue.
+
