@@ -88,6 +88,32 @@
 //! from `∇f + Jᵀλ` alone, so the recovered row multipliers absorb the
 //! difference and full-space stationarity closes either way.
 //!
+//! # Bound multipliers the reduced solve never produced (issue #495)
+//!
+//! Re-attribution can only move a multiplier that exists, and sometimes
+//! none does. Accumulated transfers can squeeze `[x_l_red, x_u_red]` down
+//! to a single value, and a variable with equal bounds is a *fixed*
+//! variable, which the solver drops from its internal problem. It comes
+//! back with `z_l = z_u = 0` even though the full-space cluster it stands
+//! for is sitting on a bound that needs a multiplier.
+//!
+//! The sweep above cannot make that up. It closes stationarity at every
+//! column it consumed, but only because it is free to choose the row
+//! multiplier it is solving for; it has no such freedom over the bound
+//! multipliers of columns the reduced problem no longer has. So what it
+//! leaves behind at a surviving column *is* the multiplier that went
+//! unreported, and [`attribute_bound_residual`] places it on the declared
+//! bound the point is resting on — the survivor's own where that is the
+//! active one, otherwise the column the bound was borrowed from, through
+//! the same chain rule, with the sweep redone so the row multipliers
+//! account for it.
+//!
+//! Nothing is invented: a residual with no active declared bound to carry
+//! it is left alone. And a column the *original model* declares fixed is
+//! out of scope — the solver drops those as parameters whether or not
+//! Phase 6 runs, so a multiplier there would be a divergence from the
+//! no-presolve solve rather than a repair of one.
+//!
 //! # What is still non-unique
 //!
 //! When the survivor's *own* bound and a transferred bound are active at
@@ -108,7 +134,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pounce_common::types::{Index, Number};
+use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData,
     NlpInfo, ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -177,6 +203,11 @@ struct ElimState {
     /// Reduced constraint bounds, aligned with `plan.rows_kept`.
     g_l_red: Vec<Number>,
     g_u_red: Vec<Number>,
+    /// The inner problem's **declared** variable bounds, full length. The
+    /// postsolve bound-multiplier attribution needs to know which box a
+    /// column really owns, which the reduced box no longer says.
+    x_l_full: Vec<Number>,
+    x_u_full: Vec<Number>,
     /// `col_of[i]` is where full column `i` lands: the reduced column and
     /// the scale, or `None` when the variable became a constant.
     col_of: Vec<Option<(usize, Number)>>,
@@ -448,7 +479,7 @@ impl LinearEqElimTnlp {
         }
 
         self.install(
-            info_inner, plan, g_l, g_u, jac_irow, jac_jcol, h_irow, h_jcol,
+            info_inner, plan, g_l, g_u, x_l, x_u, jac_irow, jac_jcol, h_irow, h_jcol,
         );
         self.state.as_ref()
     }
@@ -467,6 +498,8 @@ impl LinearEqElimTnlp {
             passthrough: true,
             g_l_red: Vec::new(),
             g_u_red: Vec::new(),
+            x_l_full: Vec::new(),
+            x_u_full: Vec::new(),
             col_of: Vec::new(),
             grad_gather: Gather::default(),
             jac_irow_outer: Vec::new(),
@@ -494,6 +527,8 @@ impl LinearEqElimTnlp {
         plan: EliminationPlan,
         g_l: Vec<Number>,
         g_u: Vec<Number>,
+        x_l: Vec<Number>,
+        x_u: Vec<Number>,
         jac_irow: Vec<Index>,
         jac_jcol: Vec<Index>,
         h_irow: Vec<Index>,
@@ -609,6 +644,8 @@ impl LinearEqElimTnlp {
             passthrough: false,
             g_l_red,
             g_u_red,
+            x_l_full: x_l,
+            x_u_full: x_u,
             col_of,
             grad_gather,
             jac_irow_outer,
@@ -720,6 +757,16 @@ fn attribute_bound_multiplier(
 ///
 /// Public because the convex QP presolve shares this recovery rather than
 /// restating it in `(y, z)` conventions; see `pounce_convex::aggregate`.
+///
+/// The consumed rows' multipliers are zeroed on entry and filled in on the
+/// way out, so a second call with a bound multiplier that was not there the
+/// first time re-solves from the same starting point rather than compounding
+/// the first answer.
+///
+/// The returned residual is zero at every column the sweep consumed. What
+/// survives at a *surviving* column is exactly the part of that column's
+/// bound multiplier the reduced solve did not report — see
+/// [`attribute_bound_residual`].
 pub fn recover_dropped_multipliers(
     plan: &EliminationPlan,
     grad_f: &[Number],
@@ -730,20 +777,24 @@ pub fn recover_dropped_multipliers(
     jac_values: &[Number],
     one_based: bool,
     lambda_full: &mut [Number],
-) {
-    if plan.steps.is_empty() {
-        return;
-    }
+) -> Vec<Number> {
     let n = plan.n_full;
     let m = plan.m_full;
 
-    // Row-wise view of J, so each reverse step can update the residual over
-    // just the row it resolved.
-    let mut row_entries: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
     let mut resid = grad_f.to_vec();
     for (j, r) in resid.iter_mut().enumerate() {
         *r += z_u_full.get(j).copied().unwrap_or(0.0) - z_l_full.get(j).copied().unwrap_or(0.0);
     }
+    if plan.steps.is_empty() {
+        return resid;
+    }
+    for step in &plan.steps {
+        lambda_full[step.row] = 0.0;
+    }
+
+    // Row-wise view of J, so each reverse step can update the residual over
+    // just the row it resolved.
+    let mut row_entries: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
     for k in 0..jac_irow.len() {
         let (i, j) = decode(jac_irow[k], jac_jcol[k], one_based);
         if i >= m || j >= n {
@@ -787,6 +838,139 @@ pub fn recover_dropped_multipliers(
             }
         }
     }
+    resid
+}
+
+/// How close to a declared bound the point has to sit before that bound is
+/// allowed to carry a multiplier.
+///
+/// An interior-point method stops short of its bounds by about its own
+/// convergence tolerance, and `bound_relax_factor` can leave it a little
+/// the other side, so this is looser than `tol` — but not so loose that a
+/// multiplier lands on a bound the point is not on, which is the failure
+/// mode being avoided in the first place.
+const BOUND_ACTIVE_TOL: Number = 1e-6;
+
+/// True when the model itself declares `j` fixed.
+///
+/// Such a column is dropped as a parameter by the solver whether or not
+/// Phase 6 runs, and a no-presolve solve reports no multiplier for it.
+/// Attributing one here would be a divergence from that baseline rather
+/// than a repair of one, so this pass leaves them alone.
+///
+/// The test is exact equality because that is the test that decides it:
+/// `pounce_nlp::tnlp_adapter`'s `lo == hi`. A column a hair wider than
+/// that reaches the solver, so its multiplier is one the reduction really
+/// did lose.
+fn declared_fixed(j: usize, x_l: &[Number], x_u: &[Number]) -> bool {
+    let (lo, hi) = (x_l[j], x_u[j]);
+    lower_bound_present(lo) && upper_bound_present(hi) && lo == hi
+}
+
+/// Park a leftover stationarity residual on column `j`'s own declared
+/// bound, if that is a bound the point is sitting on.
+///
+/// `∇f + Jᵀλ − z_l + z_u = 0` means a positive residual is carried by a
+/// *lower*-bound multiplier and a negative one by an *upper*-bound
+/// multiplier, and each is only admissible where its bound is active —
+/// otherwise complementarity would be traded for stationarity, which is no
+/// improvement. Returns whether the residual found a home.
+fn park_on_own_bound(
+    j: usize,
+    residual: Number,
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    z_l: &mut [Number],
+    z_u: &mut [Number],
+) -> bool {
+    if !residual.is_finite() || residual == 0.0 || declared_fixed(j, x_l, x_u) {
+        return false;
+    }
+    let at = |bound: Number| (x[j] - bound).abs() <= BOUND_ACTIVE_TOL * bound.abs().max(1.0);
+    if residual > 0.0 && lower_bound_present(x_l[j]) && at(x_l[j]) {
+        z_l[j] += residual;
+        return true;
+    }
+    if residual < 0.0 && upper_bound_present(x_u[j]) && at(x_u[j]) {
+        z_u[j] -= residual;
+        return true;
+    }
+    false
+}
+
+/// Give the bound multipliers the reduced solve never produced a home, and
+/// say whether the row multipliers have to be re-solved because of it
+/// (issue #495).
+///
+/// `attribute_bound_multiplier` above can only move a multiplier the solver
+/// reported. This is the case where there is none to move: accumulated
+/// transfers can leave a survivor's reduced box as a single point, and a
+/// variable with equal bounds is a *fixed* variable, which the solver drops
+/// from its internal problem and reports `z_l = z_u = 0` for.
+///
+/// After [`recover_dropped_multipliers`], `resid` is zero at every column
+/// the sweep consumed, so anything left sits on a surviving column — and,
+/// because the reduced problem's own stationarity holds at every column it
+/// still had, a non-zero residual there means the solver never enforced
+/// stationarity for that column at all. That is the identity that makes the
+/// leftover interpretable: it *is* the multiplier that went unreported.
+///
+/// It goes on the declared bound the point is resting on. When that is not
+/// the survivor's own box, it belongs to a column the survivor borrowed a
+/// bound from during planning; `x_i = coeff·x_rep + offset`, so a
+/// multiplier of `resid / coeff` there moves exactly `resid` off the
+/// survivor — the same chain rule `attribute_bound_multiplier` applies to a
+/// multiplier that does exist. Placing it changes what the consumed rows
+/// have to carry, so a `true` return asks the caller to re-sweep.
+///
+/// Only surviving columns are examined. An eliminated column with an
+/// elimination step of its own already had its residual closed by that
+/// step's row multiplier, and one without a step is a column the model
+/// declares fixed, which is out of scope here.
+fn attribute_bound_residual(
+    plan: &EliminationPlan,
+    resid: &[Number],
+    resid_tol: Number,
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    z_l: &mut [Number],
+    z_u: &mut [Number],
+) -> bool {
+    let mut pending: Vec<Number> = vec![0.0; plan.n_full];
+    let mut any_pending = false;
+    for j in 0..plan.n_full {
+        let r = resid[j];
+        if !r.is_finite()
+            || r.abs() <= resid_tol
+            || !matches!(plan.recovery[j], VarRecovery::Kept(_))
+        {
+            continue;
+        }
+        if park_on_own_bound(j, r, x, x_l, x_u, z_l, z_u) {
+            continue;
+        }
+        pending[j] = r;
+        any_pending = true;
+    }
+    if !any_pending {
+        return false;
+    }
+    let mut biased = false;
+    for (i, rec) in plan.recovery.iter().enumerate() {
+        let VarRecovery::Affine { rep, coeff, .. } = *rec else {
+            continue;
+        };
+        if rep >= pending.len() || pending[rep] == 0.0 || coeff == 0.0 || !coeff.is_finite() {
+            continue;
+        }
+        if park_on_own_bound(i, pending[rep] / coeff, x, x_l, x_u, z_l, z_u) {
+            pending[rep] = 0.0;
+            biased = true;
+        }
+    }
+    biased
 }
 
 // Every `.expect("inited")` below is guarded by the preceding
@@ -1121,17 +1305,43 @@ impl TNLP for LinearEqElimTnlp {
                 );
             if ok_grad && ok_jac {
                 let s = self.state.as_ref().expect("inited");
-                recover_dropped_multipliers(
+                // Below this, a residual is float noise from the sweep
+                // rather than a multiplier somebody dropped, and inventing
+                // a bound multiplier for it would only add a
+                // complementarity error where there was no stationarity
+                // error worth speaking of.
+                let resid_tol = 1e-9 * grad_f.iter().fold(1.0 as Number, |m, v| m.max(v.abs()));
+                let sweep = |z_l: &[Number], z_u: &[Number], lam: &mut [Number]| {
+                    recover_dropped_multipliers(
+                        &s.plan,
+                        &grad_f,
+                        z_l,
+                        z_u,
+                        &s.jac_irow_inner,
+                        &s.jac_jcol_inner,
+                        &jac_values,
+                        one_based,
+                        lam,
+                    )
+                };
+                let resid = sweep(&z_l_full, &z_u_full, &mut lambda_full);
+                // Whatever stationarity the row multipliers could not close
+                // is a bound multiplier the reduced solve never produced
+                // (issue #495). Handing one to an *eliminated* column
+                // changes what the consumed rows have to carry, so the
+                // sweep is redone with it in hand.
+                if attribute_bound_residual(
                     &s.plan,
-                    &grad_f,
-                    &z_l_full,
-                    &z_u_full,
-                    &s.jac_irow_inner,
-                    &s.jac_jcol_inner,
-                    &jac_values,
-                    one_based,
-                    &mut lambda_full,
-                );
+                    &resid,
+                    resid_tol,
+                    &x_full,
+                    &s.x_l_full,
+                    &s.x_u_full,
+                    &mut z_l_full,
+                    &mut z_u_full,
+                ) {
+                    sweep(&z_l_full, &z_u_full, &mut lambda_full);
+                }
             } else {
                 tracing::warn!(
                     target: "pounce::presolve",
@@ -1773,6 +1983,244 @@ mod tests {
             &mut lambda,
         );
         assert!((lambda[0] + 8.0).abs() < 1e-12, "{lambda:?}");
+    }
+
+    /// A plan that only says how each column is recovered — enough for the
+    /// residual attribution, which reads nothing else.
+    fn recovery_plan(recovery: Vec<VarRecovery>) -> EliminationPlan {
+        let n = recovery.len();
+        EliminationPlan {
+            n_full: n,
+            m_full: 0,
+            recovery,
+            vars_kept: Vec::new(),
+            rows_kept: Vec::new(),
+            row_kept: Vec::new(),
+            x_l_red: Vec::new(),
+            x_u_red: Vec::new(),
+            x_l_src: Vec::new(),
+            x_u_src: Vec::new(),
+            steps: Vec::new(),
+            parent: vec![None; n],
+            report: LinearEqElimReport::default(),
+        }
+    }
+
+    /// `x0` folded onto `x1`; the point rests on `x1`'s own upper bound, so
+    /// `x1` carries the multiplier the reduced solve never produced. This
+    /// is gh#495's minimal case, at the postsolve boundary.
+    #[test]
+    fn a_leftover_residual_lands_on_the_survivors_active_bound() {
+        let plan = recovery_plan(vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff: 1.0,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ]);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let again = attribute_bound_residual(
+            &plan,
+            &[0.0, -216.0],
+            1e-6,
+            &[1.0, 1.0],
+            &[1.0, -5.0],
+            &[5.0, 1.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert!(!again, "no hand-off was needed, so no re-sweep is either");
+        assert_eq!(z_u, vec![0.0, 216.0]);
+        assert_eq!(z_l, vec![0.0, 0.0]);
+    }
+
+    /// The survivor is sitting on its *lower* bound and the residual wants
+    /// an upper-bound multiplier, so the only column that can carry it is
+    /// the one whose box supplied the collapsing side.
+    #[test]
+    fn a_residual_the_survivor_cannot_carry_moves_to_a_cluster_member() {
+        let plan = recovery_plan(vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff: 1.0,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ]);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let again = attribute_bound_residual(
+            &plan,
+            &[0.0, -2744.0],
+            1e-6,
+            &[3.0, 3.0],
+            &[1.0, 3.0],
+            &[3.0, 5.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert!(again, "the row multipliers have to be re-solved for this");
+        assert_eq!(z_u, vec![2744.0, 0.0]);
+        assert_eq!(z_l, vec![0.0, 0.0]);
+    }
+
+    /// `x0 = −2·x1`, so the multiplier is rescaled by the substitution
+    /// coefficient on the way across — and a negative one sends it to the
+    /// other side of the origin's box, the same flip
+    /// `attribute_bound_multiplier` performs for a multiplier that exists.
+    #[test]
+    fn the_residual_hand_off_rescales_by_the_substitution_coefficient() {
+        let plan = recovery_plan(vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff: -2.0,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ]);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let again = attribute_bound_residual(
+            &plan,
+            &[0.0, -4.0],
+            1e-6,
+            &[-2.0, 1.0],
+            &[-2.0, 0.0],
+            &[10.0, 5.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert!(again);
+        // −4 / −2 = +2: a lower-bound multiplier on x0, not an upper one.
+        assert_eq!(z_l, vec![2.0, 0.0]);
+        assert_eq!(z_u, vec![0.0, 0.0]);
+    }
+
+    /// A residual with no active bound anywhere in the cluster is left
+    /// alone. Trading a stationarity error for a complementarity error is
+    /// not a repair.
+    #[test]
+    fn a_residual_with_nowhere_to_go_invents_nothing() {
+        let plan = recovery_plan(vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff: 1.0,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ]);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let again = attribute_bound_residual(
+            &plan,
+            &[0.0, 5.0],
+            1e-6,
+            &[2.0, 2.0],
+            &[-10.0, -10.0],
+            &[10.0, 10.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert!(!again);
+        assert_eq!(z_l, vec![0.0, 0.0]);
+        assert_eq!(z_u, vec![0.0, 0.0]);
+    }
+
+    /// A column the model declares fixed is dropped as a parameter with or
+    /// without this pass, so it is left reporting what a no-presolve solve
+    /// reports: nothing.
+    #[test]
+    fn a_declared_fixed_column_is_not_given_a_multiplier() {
+        let plan = recovery_plan(vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff: 1.0,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ]);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let again = attribute_bound_residual(
+            &plan,
+            &[0.0, -9.0],
+            1e-6,
+            &[4.0, 4.0],
+            &[1.0, 4.0],
+            &[7.0, 4.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert!(!again);
+        assert_eq!(z_u, vec![0.0, 0.0]);
+    }
+
+    /// Noise below the tolerance is noise, not a multiplier.
+    #[test]
+    fn a_sub_tolerance_residual_is_left_where_it_is() {
+        let plan = recovery_plan(vec![VarRecovery::Kept(0)]);
+        let (mut z_l, mut z_u) = (vec![0.0], vec![0.0]);
+        attribute_bound_residual(
+            &plan,
+            &[-1e-12],
+            1e-9,
+            &[1.0],
+            &[-5.0],
+            &[1.0],
+            &mut z_l,
+            &mut z_u,
+        );
+        assert_eq!(z_u, vec![0.0]);
+    }
+
+    /// The sweep hands back the residual it could not close, and re-running
+    /// it with a multiplier now in hand re-solves the row rather than
+    /// compounding the first answer.
+    #[test]
+    fn the_sweep_reports_its_residual_and_can_be_re_run() {
+        // min f s.t. x0 − x1 = 0 (row 0 consumed, x0 eliminated), with
+        // ∇f = (−108, −108) — gh#495's minimal model at the optimum.
+        let plan = plan_with(
+            vec![ElimStep {
+                row: 0,
+                var: 0,
+                pivot: 1.0,
+            }],
+            vec![Some((1, 1.0)), None],
+            1,
+        );
+        let grad = [-108.0, -108.0];
+        let (irow, jcol, vals) = ([0, 0], [0, 1], [1.0, -1.0]);
+        let mut lambda = vec![0.0];
+        let resid = recover_dropped_multipliers(
+            &plan,
+            &grad,
+            &[0.0; 2],
+            &[0.0; 2],
+            &irow,
+            &jcol,
+            &vals,
+            false,
+            &mut lambda,
+        );
+        assert!((lambda[0] - 108.0).abs() < 1e-12, "{lambda:?}");
+        assert!(resid[0].abs() < 1e-12, "{resid:?}");
+        assert!((resid[1] + 216.0).abs() < 1e-12, "{resid:?}");
+
+        // Hand x1's upper bound the 216 and sweep again: λ is unchanged
+        // (nothing moved on x0's side) and the residual now closes.
+        let resid = recover_dropped_multipliers(
+            &plan,
+            &grad,
+            &[0.0; 2],
+            &[0.0, 216.0],
+            &irow,
+            &jcol,
+            &vals,
+            false,
+            &mut lambda,
+        );
+        assert!((lambda[0] - 108.0).abs() < 1e-12, "{lambda:?}");
+        for (j, r) in resid.iter().enumerate() {
+            assert!(r.abs() < 1e-12, "residual at column {j} = {r}");
+        }
     }
 
     #[test]

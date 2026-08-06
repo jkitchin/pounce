@@ -349,7 +349,7 @@ lifts the primal back to the original variable order and recovers a
 multiplier for each consumed row, so `.sol` / JSON solution blocks keep the
 original model's shape and can still be read positionally by AMPL or Pyomo.
 
-Two things to know before turning it on:
+Three things to know before turning it on:
 
 * **Dual attribution.** A transferred bound's multiplier comes back on the
   variable that *declared* the bound, not on the survivor that inherited
@@ -376,6 +376,24 @@ Two things to know before turning it on:
   zero — as it already must for any variable whose bound multiplier lands
   exactly on zero. Row multipliers are unaffected: the dual block is dense
   and comes back at the original row count.
+* **Bounds the reduced problem never saw.** Re-attribution can only move a
+  multiplier the solver reported, and sometimes there is none. The
+  transfers can leave a survivor's reduced box as a single point, and a
+  variable with equal bounds is a *fixed* variable, which the solver drops
+  — so it comes back with no bound multiplier at all even though the
+  cluster it stands for is sitting on a bound that needs one. Postsolve
+  fills that in: whatever stationarity residual the recovered row
+  multipliers cannot close is a bound multiplier that was never reported,
+  and it goes on the declared bound the point is actually resting on — the
+  survivor's own where that is the active one, otherwise the column the
+  bound was borrowed from, through the same `α` rescale as above. A
+  residual with no active declared bound to carry it is left alone rather
+  than parked somewhere that would break complementarity.
+
+  One column is deliberately outside this: one the *model* declares fixed
+  (`x_l == x_u`). The solver drops those as parameters whether or not the
+  reduction runs, and reports no multiplier for them either way, so nothing
+  here changes what they report.
 * **Failing closed.** If the equality system is contradictory, the pass
   stands down entirely and hands the model to the solver untouched, rather
   than being the first and only voice to call a model infeasible. The same

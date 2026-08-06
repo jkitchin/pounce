@@ -119,6 +119,22 @@ changes.
   no-presolve solve. Where the survivor's own bound is active *as well*, the
   split is genuinely non-unique and the multiplier stays on the survivor —
   still a valid KKT point, and documented as such in `docs/src/options.md`.
+- A bound multiplier the reduced solve never *produced* is now recovered
+  too (#495). Re-attribution can only move a multiplier that exists, and
+  accumulated bound transfers can leave a survivor's reduced box as a
+  single point — a fixed variable, which the solver drops as a parameter,
+  so it reports `z_l = z_u = 0` even though the cluster it stands for is
+  sitting on a bound carrying load. Stationarity in the original space was
+  off by exactly the missing multiplier, and `ipopt_zL_out` /
+  `ipopt_zU_out` came back empty where Pyomo and AMPL expect a value.
+  Postsolve now reads the residual its row-multiplier sweep cannot close —
+  which is precisely that multiplier — and places it on the declared bound
+  the point is resting on, the survivor's own or, through the same `α`
+  rescale, the column the bound was borrowed from. A residual with no
+  active declared bound to carry it is left alone: trading a stationarity
+  error for a complementarity error is not a repair. A column the *model*
+  declares fixed is untouched, since the solver drops those with or without
+  the reduction and a no-presolve solve reports nothing for them either.
 - One documented caveat remains, in `docs/src/options.md`: a contradictory
   equality system makes the pass stand down entirely rather than be the
   first and only voice calling a model infeasible.
