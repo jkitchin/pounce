@@ -1,0 +1,62 @@
+#+TITLE: Adversary Run: Economic-Dispatch QP Sensitivity dP_i/dD
+#+DATE: 2026-08-06
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: parametric dx/db, applied power-systems QP (equal-incremental-cost)
+:SOURCE: Wood, Wollenberg & Sheble, "Power Generation, Operation, and Control", Ch. 3 (economic dispatch / equal incremental cost criterion)
+:KNOWN_OPTIMAL: closed form dP_i/dD = (1/(2 a_i)) / sum_j(1/(2 a_j))
+:N_VARIABLES: 4 generators
+:N_CONSTRAINTS: 1 equality (power balance sum P_i = D), box [Pmin,Pmax] (inactive at this D)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Quadratic generator cost \(C_i(P_i) = a_i P_i^2 + b_i P_i\), minimized
+subject to power balance \(\sum_i P_i = D\) and box limits (inactive at
+\(D=400\) by construction, so the equal-incremental-cost closed form
+applies). At an interior optimum \(2a_iP_i+b_i=\lambda\) for all \(i\);
+differentiating the KKT system w.r.t. \(D\) gives
+
+\[ \frac{dP_i}{dD} = \frac{1/(2a_i)}{\sum_j 1/(2a_j)} \]
+
+independent of \(D\) and \(b\) while the active set is unchanged. 4
+generators, \(a=(0.02,0.03,0.015,0.025)\), \(b=(20,18,22,19)\), \(D_0=400\).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Method                              | dP/dD                              | Rel Err |
+|--------------------------------------+-------------------------------------+---------|
+| pounce QpSensitivity.parametric_step | [0.26316, 0.17544, 0.35088, 0.21053] | -       |
+| closed-form (equal incr. cost)       | [0.26316, 0.17544, 0.35088, 0.21053] | 5.55e-17 |
+| bordered-KKT re-solve (numpy, +-delta FD) | [0.26316, 0.17544, 0.35088, 0.21053] | 1.04e-13 |
+
+Known optimal: closed form above; x0 (base dispatch) cross-checked
+against an independently-assembled numpy bordered-KKT solve, agreeing to
+4.04e-11.
+
+* Cross-check / Verification
+- Closed-form equal-incremental-cost formula (independent of any solver,
+  derived directly from the KKT stationarity condition): agrees with
+  pounce's ~parametric_step~ to 5.55e-17 (machine epsilon).
+- Central finite-difference re-solve: NOT done by calling pounce's own
+  ~solve_qp~ twice (that would be pounce-vs-pounce); instead the bordered
+  KKT system \(\begin{psmallmatrix}2A&\mathbf1\\\mathbf1^\top&0\end{psmallmatrix}\)
+  was assembled and solved directly with ~numpy.linalg.solve~ at \(D_0\pm1\),
+  fully independent of pounce. Agrees to 1.04e-13.
+- ~sens.ill_conditioned~ and ~sens.weakly_active_indices~ checked and
+  confirmed clean (no bound/inequality near-activity) before trusting the
+  first-order predictor, per the QpSensitivity docstring's own caveat
+  about near-LICQ over-damping (issues #284, #328) — not applicable here
+  since this problem has generous box slack by construction.
+
+* Verdict
+PASS — pounce's parametric sensitivity matches both the closed-form
+economic-dispatch derivative and an independently-assembled
+finite-difference oracle to machine precision. A genuinely new applied
+problem class (power-systems dispatch) for the ~sensitivity~ family,
+distinct from the generic KKT dx/db probes already in the log.

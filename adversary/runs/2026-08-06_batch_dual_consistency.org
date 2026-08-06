@@ -1,0 +1,55 @@
+#+TITLE: Adversary Run: solve_qp_batch Dual/Multiplier Consistency
+#+DATE: 2026-08-06
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: KKT multiplier (y, z, z_lb, z_ub) parity vs single solve
+:SOURCE: per the family table, the batch oracle IS the per-item single solve_qp() call
+:KNOWN_OPTIMAL: none (cross-checked against solve_qp per item)
+:N_VARIABLES: 7 random SPD QPs, n in [3,5], mixed eq/ineq/box
+:N_CONSTRAINTS: varies per instance (0-1 eq, 1-2 ineq, box on all vars)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+7 randomly generated small convex QPs (random-seeded, SPD Hessian via
+\(A A^\top + \tfrac12 I\), feasible equality/inequality RHS constructed
+from a known interior point) solved both via ~solve_qp_batch~ and via 7
+individual ~solve_qp~ calls. Prior batch-family runs in the log checked
+\(x^*\)/obj/status parity; this run additionally checks the *full KKT
+multiplier vectors* — equality \(y\), inequality \(z\), and bound
+\(z_{lb}/z_{ub}\) — which a batched interior-point implementation could
+plausibly mis-index or fail to correctly unscale per-instance even while
+getting \(x^*\) right.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                | Status      | Wall Time (7 items) |
+|-----------------------+-------------+----------------------|
+| pounce solve_qp_batch | all optimal | 0.0099s              |
+| pounce solve_qp (x7)  | all optimal | 0.0262s              |
+
+Known optimal: none (parity check).
+
+max_x_err=0.00e+00, max_obj_err=0.00e+00, max_y_err=0.00e+00,
+max_z_err=0.00e+00, max_zlb_err=0.00e+00, max_zub_err=0.00e+00 — exact
+bitwise agreement, not just within tolerance.
+
+* Cross-check / Verification
+- Per-item ~solve_qp~ (the prescribed batch-family oracle): every
+  multiplier vector (\(y\), \(z\), \(z_{lb}\), \(z_{ub}\)) matches the
+  batched result exactly across all 7 instances, including instances with
+  0 vs 1 equality constraints and differing inequality-row counts (ruling
+  out a fixed-offset mis-indexing bug across heterogeneous shapes).
+- pounce's own reported ~residuals["kkt_error"]~ on the batched results,
+  independently: max 6.90e-10 across all 7 — internally consistent with
+  the exact-agreement multiplier comparison.
+
+* Verdict
+PASS — solve_qp_batch's dual/multiplier vectors are bitwise-identical to
+the per-item solve_qp oracle across 7 heterogeneous-shape random QPs, no
+evidence of multiplier mis-indexing or unscaling bugs in the batched path.

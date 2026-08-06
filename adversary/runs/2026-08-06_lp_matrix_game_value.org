@@ -1,0 +1,60 @@
+#+TITLE: Adversary Run: Value of a 2x2 Zero-Sum Matrix Game via LP
+#+DATE: 2026-08-06
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: minimax game-theory LP (von Neumann), free variable + simplex constraint
+:SOURCE: von Neumann minimax theorem; standard LP formulation of matrix games, e.g. Chvatal, Linear Programming (1983) Ch. 15
+:KNOWN_OPTIMAL: 0.2 (v* = 1/5)
+:N_VARIABLES: 3 (p0, p1, v; v free)
+:N_CONSTRAINTS: 2 inequalities + 1 equality (simplex sum p=1)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Payoff matrix to the row player \(A=\begin{pmatrix}2&-1\\-1&1\end{pmatrix}\),
+no saddle point in pure strategies (maximin \(=-1 \ne\) minimax \(=1\)).
+Row player's LP:
+
+\begin{align}
+\max_{p,v}\quad & v \\
+\text{s.t.}\quad & v \le \sum_i p_i A_{ij},\ j=1,2 \\
+& \textstyle\sum_i p_i = 1,\ p\ge0,\ v\ \text{free}
+\end{align}
+
+For a 2x2 game the value has the closed form
+\(v^*=(a_{11}a_{22}-a_{12}a_{21})/(a_{11}+a_{22}-a_{12}-a_{21}) = (2-1)/5 =
+0.2\), with optimal row strategy \(p^*=((a_{22}-a_{21})/D,
+(a_{11}-a_{12})/D) = (0.4, 0.6)\), \(D=5\).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status  | Objective (v)     | Rel Err  | Wall Time |
+|---------------------------+---------+--------------------+----------+-----------|
+| pounce solve_qp (P=None)  | optimal | 1.9999999976e-01   | 2.43e-10 | 0.0059s   |
+| scipy linprog (HiGHS)     | optimal | 2.0000000000e-01   | -        | 0.0033s   |
+
+Known optimal: v* = 0.2, p* = (0.4, 0.6)
+
+pounce recovers \(p=(0.4,0.6)\) exactly matching the closed form, and
+\(v\) to 2.43e-10.
+
+* Cross-check / Verification
+- scipy.optimize.linprog (HiGHS, independent LP solver): v and p agree to
+  <5e-10.
+- Closed-form von Neumann formula (independent of any solver): v and p
+  agree to <5e-10.
+- The free variable \(v\) (unrestricted sign) is routed through pounce's
+  LP path via ~lb=-inf~ on the last coordinate — exercises the
+  free-variable handling already probed for other LPs in the log, now
+  combined with a genuinely mixed-strategy (non-degenerate, no saddle
+  point) equilibrium structure.
+
+* Verdict
+PASS — pounce's LP solve matches both the independent scipy/HiGHS oracle
+and the exact closed-form game value to <1e-9. Clean pass on a
+genuinely new problem class (game-theoretic LP) for the ~lp~ family.

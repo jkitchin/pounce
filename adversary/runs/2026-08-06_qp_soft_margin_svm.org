@@ -1,0 +1,61 @@
+#+TITLE: Adversary Run: Soft-Margin (C-SVM) Dual QP
+#+DATE: 2026-08-06
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: box (0<=a<=C) + equality convex QP, kernel Gram-matrix Hessian
+:SOURCE: Cortes & Vapnik (1995), "Support-Vector Networks"; standard C-SVM dual, e.g. Bishop PRML Sec. 7.1.1 Eq. (7.10)-(7.11)
+:KNOWN_OPTIMAL: none published (validated against cvxpy oracle per family table)
+:N_VARIABLES: 6 (dual alphas)
+:N_CONSTRAINTS: 1 equality (sum a_i y_i = 0), box 0<=a_i<=1 (C=1)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Small non-separable 2D dataset (6 points, 3 per class) with one point
+placed on the wrong side of the margin so the box bound \(0 \le \alpha_i
+\le C\) is genuinely exercised (unlike the hard-margin QP already in the
+log, which never activates a box constraint):
+
+\begin{align}
+\max_{\alpha}\quad & \sum_i \alpha_i - \tfrac12 \sum_{ij} \alpha_i\alpha_j y_i y_j K(x_i,x_j) \\
+\text{s.t.}\quad & \sum_i \alpha_i y_i = 0,\quad 0 \le \alpha_i \le C=1
+\end{align}
+
+with linear kernel \(K(x_i,x_j)=x_i^\top x_j\). No closed form for this
+instance; validated purely against the independent cvxpy (CLARABEL)
+oracle, which is the prescribed oracle for the ~qp~ family.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | Objective         | Rel Err  | Wall Time |
+|------------------+---------+--------------------+----------+-----------|
+| pounce solve_qp  | optimal | -8.7336244354e-01  | 1.67e-09 | 0.0042s   |
+| cvxpy CLARABEL   | optimal | -8.7336244521e-01  | -        | 0.0123s   |
+
+Known optimal: none (oracle-only, per family table).
+
+alpha_inf_err = 1.16e-08, primal-weight w_inf_err (recovered \(w=\sum
+\alpha_i y_i x_i\)) = 1.11e-08. Both solvers put nearly all mass on the
+two points nearest the boundary (support vectors), with the remaining
+alphas at numerical zero — consistent sparsity pattern between solvers.
+
+* Cross-check / Verification
+- cvxpy/CLARABEL (independent conic-QP solver, same model): objective and
+  alpha vector agree to <2e-8.
+- Recovered primal hyperplane weight \(w\) from pounce's alphas and from
+  cvxpy's alphas independently: agree to 1.11e-08.
+- Feasibility of pounce's own solution checked independently of pounce's
+  internal residuals: box \(0\le\alpha\le C\) satisfied, equality
+  \(\sum\alpha_i y_i=0\) satisfied to <1e-6.
+
+* Verdict
+PASS — pounce's soft-margin dual QP solution matches the independent
+cvxpy oracle to ~1e-8 on both objective and the primal decision boundary
+recovered from the duals. This exercises the box-bound path of
+~solve_qp~ (0<=a<=C) that the existing hard-margin QP test in the log
+never activates.

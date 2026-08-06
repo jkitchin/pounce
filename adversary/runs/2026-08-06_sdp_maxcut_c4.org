@@ -1,0 +1,64 @@
+#+TITLE: Adversary Run: MAX-CUT SDP Relaxation on the 4-Cycle C4
+#+DATE: 2026-08-06
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: PSD cone, Goemans-Williamson Laplacian relaxation
+:SOURCE: Goemans & Williamson (1995), J. ACM 42(6), "Improved Approximation Algorithms for Maximum Cut..."
+:KNOWN_OPTIMAL: 4.0
+:N_VARIABLES: svec(Y), Y a 4x4 symmetric matrix (10 svec entries)
+:N_CONSTRAINTS: 4 equalities (diag(Y)=1), cones=[("psd",4)]
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\max_Y\quad & \sum_{(i,j)\in E} \tfrac12(1-Y_{ij}) \\
+\text{s.t.}\quad & \mathrm{diag}(Y)=1,\ Y\succeq 0
+\end{align}
+
+Graph: the 4-cycle \(C_4\) (edges 0-1, 1-2, 2-3, 3-0). \(C_4\) is
+bipartite (\(\{0,2\}\) vs \(\{1,3\}\)), so the SDP relaxation is *tight*
+— achieved exactly by the rank-1 \(\pm1\) solution \(Y_{ij}=-1\) across
+the bipartition, \(+1\) within each side, which is trivially PSD. Every
+edge crosses the bipartition, so the known max cut is all 4 edges: known
+optimal = 4.0.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | Objective (cut) | Rel Err  | Wall Time |
+|--------------------+---------+------------------+----------+-----------|
+| pounce solve_socp  | optimal | 3.9999999983e+00 | 4.19e-10 | 0.0060s   |
+| cvxpy CLARABEL     | optimal | 3.9999999991e+00 | -        | 0.0141s   |
+
+Known optimal: 4.0
+
+pounce recovers \(\mathrm{diag}(Y)=[1,1,1,1]\) exactly and a cut value
+matching the known tight bound to 4.19e-10.
+
+* Cross-check / Verification
+- cvxpy/CLARABEL on the same PSD model: cut value agrees to 2.00e-10;
+  full \(Y\) matrix agrees entrywise, \(\|Y_{\text{pounce}} -
+  Y_{\text{cvxpy}}\|_\infty = 7.55e-10\).
+- The svec layout (lower triangle, column-major, off-diagonals
+  \(\times\sqrt2\)) was re-derived from scratch via an explicit
+  ~svec()~/~smat()~ helper rather than hand-indexed, after a first attempt
+  with hand-computed scaling constants produced a self-inconsistent
+  formulation (pounce and cvxpy disagreeing with EACH OTHER, not just with
+  the known optimum) — a clear formulation bug, caught and fixed before
+  drawing any conclusion about pounce (see workflow step 5: cone-encoding
+  errors are the #1 suspect for conic mismatches, confirmed here).
+- Known-optimal check: bipartite graph -> relaxation is provably tight,
+  independent of any solver.
+
+* Verdict
+PASS — pounce's PSD-cone solve matches both the independent cvxpy oracle
+and the analytically-known-tight optimum to <1e-9. The corrected svec
+formulation (documented above) is worth noting for future SDP probes:
+hand-indexing svec scaling constants is error-prone; building an explicit
+symmetric matrix and converting via a verified svec() helper avoids the
+class of bug hit on the first attempt here.
