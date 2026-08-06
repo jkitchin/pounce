@@ -41,11 +41,17 @@ changes.
   the elimination forest, not a factorization. `.sol` and JSON solution
   blocks come back at the original model's length, in the original order,
   and can still be read positionally by AMPL and Pyomo.
-- Two documented caveats, both in `docs/src/options.md`: an eliminated
-  variable's *bound* multiplier is reported on the survivor that inherited
-  the bound (the same attribution trade the Phase-2 row drop makes), and a
-  contradictory equality system makes the pass stand down entirely rather
-  than be the first and only voice calling a model infeasible.
+- A transferred bound's multiplier is reported on the variable that
+  **declared** the bound, not on the survivor that inherited it (#493). The
+  plan records where each reduced bound came from; postsolve rescales the
+  multiplier by the substitution coefficient `α` and sends it to the other
+  side of the box when `α < 0`, so `ipopt_zL_out` / `ipopt_zU_out` match a
+  no-presolve solve. Where the survivor's own bound is active *as well*, the
+  split is genuinely non-unique and the multiplier stays on the survivor —
+  still a valid KKT point, and documented as such in `docs/src/options.md`.
+- One documented caveat remains, in `docs/src/options.md`: a contradictory
+  equality system makes the pass stand down entirely rather than be the
+  first and only voice calling a model infeasible.
 
 ### Fixed — the C working-set API validated nothing structural, and reported the wrong row order (#484 follow-up, round 4)
 

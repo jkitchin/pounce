@@ -8,7 +8,7 @@
 //!
 //! Every instance is generated **around a known feasible point** `x*`: the
 //! right-hand sides are computed from `x*`, and every box is drawn to contain
-//! it. That makes `x*` an oracle the pass has never seen, and it pins five
+//! it. That makes `x*` an oracle the pass has never seen, and it pins six
 //! properties that a wrong substitution cannot fake:
 //!
 //! * **Fidelity** — projecting `x*` onto the survivors and lifting must
@@ -24,6 +24,12 @@
 //!   converse direction, and it is the one the `α < 0` bound flip breaks.
 //! * **Row fidelity at an arbitrary point** — every consumed row must hold at
 //!   the lift of a random reduced point, not just at `x*`.
+//! * **Bound provenance** — every reduced bound must lift, through the
+//!   recovery map of the column the plan says it came from, exactly onto that
+//!   column's declared bound (gh#493). This is the identity postsolve relies
+//!   on to hand a bound multiplier back to the column that owns it, and it is
+//!   invisible to a stationarity check: full-space stationarity closes with
+//!   the multiplier on either column.
 //! * **Structural integrity** — rows and columns account exactly, and every
 //!   `Affine` representative is a survivor (the wrapper's `lift_x` reads that
 //!   slot directly).
@@ -303,6 +309,73 @@ pub fn check_plan(inst: &Instance) -> PlanVerdict {
             return PlanVerdict::Failed(format!(
                 "reduced upper bound on column {full} is {hi}, below the feasible x*[{full}] = {v}"
             ));
+        }
+    }
+
+    // --- bound provenance (gh#493) ---------------------------------------
+    // Postsolve hands a reduced bound's multiplier to the column the bound
+    // was declared on, rescaled by that column's coefficient and flipped to
+    // the other side of its box when the coefficient is negative. All of
+    // that rests on one identity, which is what this checks: lifting the
+    // reduced bound through the origin's own recovery map must land exactly
+    // on the origin's declared bound. The stationarity checks elsewhere in
+    // this probe cannot see a wrong answer here — they pass with the
+    // multiplier on either column.
+    if plan.vars_kept.len() != plan.x_l_src.len() || plan.vars_kept.len() != plan.x_u_src.len() {
+        return PlanVerdict::Failed(
+            "bound provenance length disagrees with the survivor count".into(),
+        );
+    }
+    for (red, &full) in plan.vars_kept.iter().enumerate() {
+        for (src, bound, upper) in [
+            (plan.x_l_src[red], plan.x_l_red[red], false),
+            (plan.x_u_src[red], plan.x_u_red[red], true),
+        ] {
+            if src >= inst.n {
+                return PlanVerdict::Failed(format!(
+                    "bound provenance on column {full} names column {src}, out of range"
+                ));
+            }
+            // An absent bound carries no multiplier, so it needs no owner.
+            if bound <= SENTINEL_LO || bound >= SENTINEL_HI || !bound.is_finite() {
+                continue;
+            }
+            let (coeff, offset) = if src == full {
+                (1.0, 0.0)
+            } else {
+                match plan.recovery[src] {
+                    VarRecovery::Affine { rep, coeff, offset } if rep == full => (coeff, offset),
+                    other => {
+                        return PlanVerdict::Failed(format!(
+                            "column {full}'s {} bound is attributed to column {src}, whose \
+                             recovery is {other:?} rather than an affine image of {full}",
+                            if upper { "upper" } else { "lower" }
+                        ));
+                    }
+                }
+            };
+            // Which side of the origin's box: its own when α > 0, the
+            // opposite one when α < 0.
+            let declared = if upper != (coeff < 0.0) {
+                inst.x_u[src]
+            } else {
+                inst.x_l[src]
+            };
+            if declared <= SENTINEL_LO || declared >= SENTINEL_HI {
+                return PlanVerdict::Failed(format!(
+                    "column {full}'s finite {} bound {bound} is attributed to column {src}, \
+                     which declares no bound on that side",
+                    if upper { "upper" } else { "lower" }
+                ));
+            }
+            let lifted = coeff * bound + offset;
+            if (lifted - declared).abs() > tol {
+                return PlanVerdict::Failed(format!(
+                    "column {full}'s {} bound {bound} lifts to {lifted} on column {src}, whose \
+                     declared bound there is {declared}",
+                    if upper { "upper" } else { "lower" }
+                ));
+            }
         }
     }
 
