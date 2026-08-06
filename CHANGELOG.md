@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — false primal-infeasible certificate on redundant equality rows that disagree by one ULP (#496)
+
+- The convex presolve fixes a variable from a singleton equality row and
+  substitutes it into the remaining rows. A row that empties in the process
+  becomes the feasibility test `0 = rhs`, and that test was written against
+  **exact zero**. But `rhs` at that point is `b − Σ aⱼ vⱼ`, a computed
+  difference — so it carries the subtraction's rounding error, and a second
+  equality that pins the same variable to the same value fails the test by
+  one ULP.
+- Found by the adversary agent while probing #492; unrelated to that change
+  and reproduced on `main`. Two rows on one column, `−2.830268 x₀ =
+  0.13596324445199998` and `2.470924 x₀ = −0.11870071803600002`, imply
+  values of `x₀` that differ by `6.9e-18`. POUNCE answered *primal
+  infeasible* at iteration 0; HiGHS solves the model it was reduced from.
+  Making the right-hand sides bit-exact, or duplicating a row verbatim, made
+  it optimal again — so the redundancy was never the trigger, only its
+  inexactness.
+- The residual is now compared against a tolerance scaled by the magnitude
+  of the terms that cancelled — the scale the rounding error actually lives
+  on — so the verdict does not change when the same rows are multiplied
+  through by 1000. Real conflicts are unaffected: rows that disagree by
+  anything a solve could act on are still certified infeasible at presolve
+  time, and the empty rows present in the *input* (no substitution, no
+  rounding) keep their exact check. The emptied-inequality test `0 ≤ rhs`
+  gets the same treatment.
+- This is the worst failure mode available to a presolver: a redundant
+  balance, an alias plus its defining equation, or a unit conversion stated
+  twice is ordinary in real models, and its right-hand sides are usually
+  computed rather than typed. Regression coverage in
+  `crates/pounce-convex/tests/issue496_ulp_inconsistent_equalities.rs`.
+
 ### Fixed — `solve_qp(method="active-set")` panicked across the FFI on a reversed box (#491)
 
 - `pounce.solve_qp(..., method="active-set")` with a crossed bound

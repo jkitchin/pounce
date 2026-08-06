@@ -16,7 +16,10 @@
 //! Reductions implemented:
 //! - **Empty rows** (equality / inequality with no nonzeros): a
 //!   feasibility check, then drop. Their dual is zero. Detects trivial
-//!   primal infeasibility (`0 = b≠0` or `0 ≤ h<0`).
+//!   primal infeasibility (`0 = b≠0` or `0 ≤ h<0`). A row emptied by
+//!   *substitution* is judged against the rounding error of the terms
+//!   that cancelled, not against exact zero — otherwise two equalities
+//!   that agree to all but the last bit read as contradictory (gh#496).
 //! - **Fixed-variable elimination** from a singleton equality row
 //!   (`a·x_k = b ⇒ x_k = b/a`): substitute `x_k` out of `P`, `c`, `A`,
 //!   `G` (adjusting the objective constant and the row right-hand
@@ -295,6 +298,14 @@ const ZERO_TOL: f64 = 0.0;
 const BOUND_FEAS_TOL: f64 = 1e-9;
 /// Slack allowed in activity-bound comparisons (redundancy / feasibility).
 const ACTIVITY_TOL: f64 = 1e-9;
+/// Relative slack allowed when a row emptied by substitution is checked for
+/// feasibility (`0 = rhs` / `0 ≤ rhs`). Scaled by the size of the terms that
+/// cancelled, because that is where the residual's rounding error lives —
+/// judging it against exact zero declares a redundant equality inconsistent
+/// at one ULP (gh#496). Matches [`ACTIVITY_TOL`], the same feasibility
+/// question asked of a row that kept its coefficients, and sits far above
+/// accumulated `f64` cancellation yet far below any real conflict.
+const EMPTY_ROW_TOL: f64 = 1e-9;
 /// How close `x_i` must be to a box bound to count it *active* when
 /// recovering bound multipliers. Looser than [`BOUND_FEAS_TOL`] because an
 /// interior-point solve only drives a variable to within ~1e-8 of a bound,
@@ -342,6 +353,12 @@ struct Row {
     coeffs: Vec<(usize, f64)>,
     rhs: f64,
     orig: usize,
+    /// Magnitude of the largest term that went into `rhs` — the original
+    /// `|b|` and every substituted `|aⱼ vⱼ|`. This is the scale the
+    /// subtraction's rounding error lives on, so it is what an emptied
+    /// row's residual must be judged against (see [`build_rows`]); a row
+    /// that keeps coefficients never consults it.
+    scale: f64,
 }
 
 /// Run presolve on `prob`, iterating the reduction passes to a **fixpoint**
@@ -1353,8 +1370,16 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
 /// Build per-row coefficient lists in the reduced column space,
 /// substituting fixed variables into the right-hand side. Rows that
 /// become empty after substitution trigger a feasibility check:
-/// `0 = rhs` (equality) requires `rhs == 0`; `0 ≤ rhs` (inequality)
-/// requires `rhs ≥ 0`. Returns `Err(())` on detected infeasibility.
+/// `0 = rhs` (equality) requires `rhs ≈ 0`; `0 ≤ rhs` (inequality)
+/// requires `rhs ⪆ 0`. Returns `Err(())` on detected infeasibility.
+///
+/// The residual `rhs` of an emptied row is `b − Σ aⱼ vⱼ`, a *computed*
+/// difference of terms of size up to [`Row::scale`], so it carries that
+/// subtraction's rounding error — testing it against exact zero would call
+/// a redundant-but-inexact row (two equalities implying the same value to
+/// the last bit) infeasible. Compare against
+/// [`EMPTY_ROW_TOL`] × the cancellation scale instead; see
+/// `tests/issue496_ulp_inconsistent_equalities.rs`.
 fn build_rows(
     triplets: &[Triplet],
     m: usize,
@@ -1380,6 +1405,7 @@ fn build_rows(
                     coeffs: Vec::new(),
                     rhs: base_rhs[r],
                     orig: r,
+                    scale: base_rhs[r].abs(),
                 })
             }
         })
@@ -1391,7 +1417,9 @@ fn build_rows(
         }
         let row = acc[t.row].as_mut().expect("non-dropped row");
         if let Some(v) = fixed[t.col] {
-            row.rhs -= t.val * v;
+            let term = t.val * v;
+            row.rhs -= term;
+            row.scale = row.scale.max(term.abs());
         } else {
             row.coeffs.push((col_new[t.col], t.val));
         }
@@ -1408,12 +1436,15 @@ fn build_rows(
                 out.push(row);
                 continue;
             }
-            // Row reduced to `0 (cmp) rhs`: a feasibility check.
+            // Row reduced to `0 (cmp) rhs`: a feasibility check, on a
+            // residual that is only meaningful down to the rounding error
+            // of the substitution that produced it.
+            let tol = EMPTY_ROW_TOL * (1.0 + row.scale);
             if is_equality {
-                if row.rhs.abs() > 0.0 {
+                if row.rhs.abs() > tol {
                     return Err(());
                 }
-            } else if row.rhs < 0.0 {
+            } else if row.rhs < -tol {
                 return Err(());
             }
             // Feasible empty row: drop it (no coefficients, no dual).
