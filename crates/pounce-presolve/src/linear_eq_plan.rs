@@ -165,6 +165,22 @@ pub struct EliminationPlan {
     /// every bound transferred off an eliminated variable.
     pub x_l_red: Vec<Number>,
     pub x_u_red: Vec<Number>,
+    /// Provenance of each reduced bound: the **full-space column whose own
+    /// declared bound** the reduced bound came from, aligned with
+    /// [`Self::x_l_red`] / [`Self::x_u_red`]. Equal to `vars_kept[i]` when
+    /// the survivor's own bound won, and some eliminated column of the same
+    /// cluster when a transferred bound did.
+    ///
+    /// Postsolve reads this to hand a reduced bound's multiplier back to the
+    /// column that actually owns the bound; see
+    /// [`crate::linear_eq_elim`]'s `attribute_bound_multiplier` (issue
+    /// #493). Which *side* of the origin column's box a reduced bound
+    /// corresponds to is not recorded separately: it is the origin's own
+    /// side when the composed coefficient `α` of `x_src = α·x_kept + β` is
+    /// positive and the opposite side when it is negative, which is exactly
+    /// the flip [`transfer_bounds`] performs on the way in.
+    pub x_l_src: Vec<usize>,
+    pub x_u_src: Vec<usize>,
     /// Accepted eliminations in application order.
     pub steps: Vec<ElimStep>,
     /// Elimination forest: `parent[i] = Some((p, α))` when `i` was folded
@@ -187,6 +203,8 @@ impl EliminationPlan {
             rows_kept: (0..n_rows).collect(),
             x_l_red: x_l.to_vec(),
             x_u_red: x_u.to_vec(),
+            x_l_src: (0..n_vars).collect(),
+            x_u_src: (0..n_vars).collect(),
             steps: Vec::new(),
             parent: vec![None; n_vars],
             report: LinearEqElimReport::default(),
@@ -238,11 +256,19 @@ impl EliminationPlan {
 struct Box2 {
     lo: Vec<Number>,
     hi: Vec<Number>,
+    /// Which full-space column's own declared bound each entry came from.
+    /// Starts as the identity and follows the bound through every transfer,
+    /// so a survivor's final box knows where each of its two sides was born
+    /// (gh#493).
+    lo_src: Vec<usize>,
+    hi_src: Vec<usize>,
 }
 
 impl Box2 {
     fn from_declared(x_l: &[Number], x_u: &[Number]) -> Self {
         Self {
+            lo_src: (0..x_l.len()).collect(),
+            hi_src: (0..x_u.len()).collect(),
             lo: x_l
                 .iter()
                 .map(|&v| {
@@ -583,11 +609,24 @@ fn transfer_bounds(
     if !derived_hi.is_finite() {
         derived_hi = Number::INFINITY;
     }
+    // The same flip the interval carries: with α < 0 it is `elim`'s *upper*
+    // bound that becomes the survivor's lower bound. Provenance rides along
+    // (gh#493), so a bound that has hopped several times still names the
+    // column that declared it.
+    let (src_lo, src_hi) = if alpha > 0.0 {
+        (bounds.lo_src[elim], bounds.hi_src[elim])
+    } else {
+        (bounds.hi_src[elim], bounds.lo_src[elim])
+    };
+    // Strict comparisons, so a tie leaves the incumbent — including the
+    // survivor's own declared bound — in place.
     if derived_lo > bounds.lo[keep] {
         bounds.lo[keep] = derived_lo;
+        bounds.lo_src[keep] = src_lo;
     }
     if derived_hi < bounds.hi[keep] {
         bounds.hi[keep] = derived_hi;
+        bounds.hi_src[keep] = src_hi;
     }
     let (lo, hi) = (bounds.lo[keep], bounds.hi[keep]);
     if lo.is_finite() && hi.is_finite() && lo > hi {
@@ -670,17 +709,23 @@ fn finish(
     // derived, so an "absent" bound stays spelled the way it arrived.
     let mut x_l_red = Vec::with_capacity(vars_kept.len());
     let mut x_u_red = Vec::with_capacity(vars_kept.len());
+    let mut x_l_src = Vec::with_capacity(vars_kept.len());
+    let mut x_u_src = Vec::with_capacity(vars_kept.len());
     for &j in &vars_kept {
-        x_l_red.push(if bounds.lo[j].is_finite() {
-            bounds.lo[j]
+        if bounds.lo[j].is_finite() {
+            x_l_red.push(bounds.lo[j]);
+            x_l_src.push(bounds.lo_src[j]);
         } else {
-            input.x_l[j]
-        });
-        x_u_red.push(if bounds.hi[j].is_finite() {
-            bounds.hi[j]
+            x_l_red.push(input.x_l[j]);
+            x_l_src.push(j);
+        }
+        if bounds.hi[j].is_finite() {
+            x_u_red.push(bounds.hi[j]);
+            x_u_src.push(bounds.hi_src[j]);
         } else {
-            input.x_u[j]
-        });
+            x_u_red.push(input.x_u[j]);
+            x_u_src.push(j);
+        }
     }
 
     EliminationPlan {
@@ -692,6 +737,8 @@ fn finish(
         rows_kept,
         x_l_red,
         x_u_red,
+        x_l_src,
+        x_u_src,
         steps,
         parent,
         report,
@@ -926,6 +973,126 @@ mod tests {
         assert_eq!(p.vars_kept, vec![1]);
         assert!((p.x_l_red[0] + 3.0).abs() < 1e-12, "{:?}", p.x_l_red);
         assert!((p.x_u_red[0] + 1.0).abs() < 1e-12, "{:?}", p.x_u_red);
+    }
+
+    /// A transferred bound records the column that declared it, so postsolve
+    /// can hand that column's multiplier back (gh#493).
+    #[test]
+    fn a_transferred_bound_names_the_column_it_came_from() {
+        // x0 = 2·x1 with x0 ∈ [-inf, 1] pins x1 ≤ 0.5; x1's own lower bound
+        // survives untouched.
+        let f = Fixture::new(2)
+            .eq(&[(0, 1.0), (1, -2.0)], 0.0)
+            .bounds(0, -1e19, 1.0)
+            .bounds(1, -4.0, 1e19);
+        let p = f.plan();
+        assert_eq!(p.vars_kept, vec![1]);
+        assert!((p.x_u_red[0] - 0.5).abs() < 1e-12, "{:?}", p.x_u_red);
+        assert_eq!(p.x_u_src, vec![0], "the upper bound is x0's");
+        assert_eq!(p.x_l_src, vec![1], "the lower bound is x1's own");
+    }
+
+    /// The provenance carries the same flip the interval does: with α < 0 the
+    /// survivor's *lower* bound is the eliminated column's *upper* one.
+    #[test]
+    fn a_negative_coefficient_flips_which_side_the_provenance_lands_on() {
+        // x0 = -2·x1 with x0 ∈ [-inf, 1] pins x1 ≥ -0.5.
+        let f = Fixture::new(2)
+            .eq(&[(0, 1.0), (1, 2.0)], 0.0)
+            .bounds(0, -1e19, 1.0);
+        let p = f.plan();
+        assert_eq!(p.vars_kept, vec![1]);
+        assert!((p.x_l_red[0] + 0.5).abs() < 1e-12, "{:?}", p.x_l_red);
+        assert_eq!(p.x_l_src, vec![0], "x1's lower bound is x0's upper bound");
+        assert_eq!(p.x_u_src, vec![1], "nothing tightened x1 from above");
+    }
+
+    /// Provenance follows a chain: a bound that hops twice still names the
+    /// column that declared it, and each hop composes the sign flip.
+    #[test]
+    fn provenance_survives_a_chain_of_transfers() {
+        // x0 = -x1 (row 0), then x1 = -0.1·x2 (row 1 — the lopsided
+        // coefficients make x2 the pivot, so the transfer chains rather than
+        // fanning in). x0 ≤ 1 becomes x1 ≥ -1 becomes x2 ≤ 10, still owned by
+        // x0's *upper* bound.
+        let f = Fixture::new(3)
+            .eq(&[(0, 1.0), (1, 1.0)], 0.0)
+            .eq(&[(1, 1.0), (2, 0.1)], 0.0)
+            .bounds(0, -1e19, 1.0);
+        let p = f.plan();
+        assert_eq!(p.vars_kept, vec![2]);
+        assert!((p.x_u_red[0] - 10.0).abs() < 1e-12, "{:?}", p.x_u_red);
+        assert_eq!(p.x_u_src, vec![0]);
+        assert_eq!(p.x_l_src, vec![2], "nothing tightened x2 from below");
+        // x0 = (-1)·(-0.1)·x2, so the composed α is positive: two flips put
+        // the side back where it started, and 0.1·10 is x0's own bound.
+        assert_eq!(
+            p.recovery[0],
+            VarRecovery::Affine {
+                rep: 2,
+                coeff: 0.1,
+                offset: 0.0
+            }
+        );
+    }
+
+    /// A tie leaves the incumbent alone, which is what keeps the degenerate
+    /// both-bounds-active case attributed to the survivor.
+    #[test]
+    fn a_tied_transfer_leaves_the_provenance_on_the_survivor() {
+        // x0 = 2·x1, x0 ≤ 1 and x1 ≤ 0.5 are the same constraint.
+        let f = Fixture::new(2)
+            .eq(&[(0, 1.0), (1, -2.0)], 0.0)
+            .bounds(0, -1e19, 1.0)
+            .bounds(1, -1e19, 0.5);
+        let p = f.plan();
+        assert_eq!(p.vars_kept, vec![1]);
+        assert!((p.x_u_red[0] - 0.5).abs() < 1e-12, "{:?}", p.x_u_red);
+        assert_eq!(p.x_u_src, vec![1]);
+    }
+
+    /// Every reduced bound must be the origin's own bound pulled back through
+    /// the recovery map — the identity postsolve's rescaling relies on.
+    #[test]
+    fn provenance_and_the_recovery_map_agree_on_every_reduced_bound() {
+        let f = Fixture::new(4)
+            .eq(&[(0, 1.0), (1, 3.0)], 6.0)
+            .eq(&[(1, 2.0), (2, -0.5)], 1.0)
+            .opaque(&[(2, 1.0), (3, 1.0)], 0.0, 10.0)
+            .bounds(0, -2.0, 7.0)
+            .bounds(1, -5.0, 5.0)
+            .bounds(2, -20.0, 20.0);
+        let p = f.plan();
+        assert!(!p.is_identity());
+        for (red, &kept) in p.vars_kept.iter().enumerate() {
+            for (src, red_bound, upper) in [
+                (p.x_l_src[red], p.x_l_red[red], false),
+                (p.x_u_src[red], p.x_u_red[red], true),
+            ] {
+                if src == kept || !red_bound.is_finite() || red_bound.abs() >= 1e19 {
+                    continue;
+                }
+                let VarRecovery::Affine { rep, coeff, offset } = p.recovery[src] else {
+                    panic!(
+                        "provenance {src} is not an affine image: {:?}",
+                        p.recovery[src]
+                    );
+                };
+                assert_eq!(rep, kept, "provenance {src} names a different survivor");
+                // Which side of the origin's box: its own when α > 0, the
+                // other one when α < 0.
+                let origin = if upper != (coeff < 0.0) {
+                    f.x_u[src]
+                } else {
+                    f.x_l[src]
+                };
+                let lifted = coeff * red_bound + offset;
+                assert!(
+                    (lifted - origin).abs() < 1e-12,
+                    "reduced bound {red_bound} lifts to {lifted}, not {src}'s {origin}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -36,9 +36,11 @@
 //! in the convention POUNCE hands to `finalize_solution` (Ipopt's: the
 //! Lagrangian is `f + λᵀg`), is
 //! `∇f + J_Kᵀλ_K + J_Dᵀλ_D − z_l + z_u = 0`. Restricted to the eliminated
-//! columns (where `z_l = z_u = 0`, see the caveat below) that is a square
-//! system `J_D[:,e]ᵀ λ_D = −(∇f_e + J_K[:,e]ᵀ λ_K)` — which, taken all at
-//! once, is a sparse solve nobody wants inside presolve.
+//! columns — where the bound multipliers are known before the sweep starts,
+//! either zero or whatever the attribution below placed there — that is a
+//! square system `J_D[:,e]ᵀ λ_D = −(∇f_e + J_K[:,e]ᵀ λ_K − z_l,e + z_u,e)`
+//! — which, taken all at once, is a sparse solve nobody wants inside
+//! presolve.
 //!
 //! Taken one elimination at a time in **reverse** order it is triangular
 //! instead. Step `t` consumed row `r_t` to determine variable `v_t`; every
@@ -57,17 +59,51 @@
 //! Jacobian row is annihilated by `A` and so contributes nothing to
 //! stationarity in either space.
 //!
-//! # Dual-attribution caveat
+//! # Bound multipliers, and where they belong
 //!
-//! The recovery assumes an eliminated variable is interior to its own
-//! bounds at the optimum, so `z_l = z_u = 0` there — the same assumption
-//! [`crate::reduction_frame`] documents. When an eliminated variable's
-//! bound *is* active, that bound was transferred onto its survivor during
-//! planning, so the IPM reports the dual on the **survivor's** bound
-//! multiplier instead. The primal point, the objective, and full-space
-//! stationarity are all unaffected; only the attribution of that one dual
-//! differs from a no-presolve solve. This is the same class of caveat as
-//! the Phase-2 note in [`crate`]'s module docs (issue M24).
+//! An eliminated column's box does not disappear during planning: it is
+//! *transferred* onto its survivor, so the reduced problem's box is an
+//! intersection of boxes borrowed from the whole cluster. The IPM therefore
+//! reports one `z_l` / `z_u` pair per surviving column, for a bound that
+//! may well have been declared on a column that is no longer there.
+//!
+//! Handing that multiplier back verbatim to the survivor is a valid KKT
+//! point but the wrong *attribution*: a no-presolve solve reports it on the
+//! column that owns the bound. [`EliminationPlan::x_l_src`] /
+//! [`EliminationPlan::x_u_src`] record which column each reduced bound came
+//! from, and `attribute_bound_multiplier` routes the multiplier there
+//! (issue #493).
+//!
+//! Two details make that routing exact rather than approximate. With
+//! `x_src = α·x_kept + β`, the survivor's bound is the origin's bound
+//! divided by `α`, so the multiplier — a derivative with respect to the
+//! *other* variable — is multiplied by `1/|α|` for the chain rule to close.
+//! And a negative `α` reverses the interval, so a **lower** bound on the
+//! survivor is an **upper** bound of the eliminated column, and the
+//! multiplier has to change sides with it. That is the same flip
+//! `transfer_bounds` performs on the way in.
+//!
+//! With the bound multipliers placed first, the dual sweep below starts
+//! from the full stationarity residual `∇f + Jᵀλ − z_l + z_u` rather than
+//! from `∇f + Jᵀλ` alone, so the recovered row multipliers absorb the
+//! difference and full-space stationarity closes either way.
+//!
+//! # What is still non-unique
+//!
+//! When the survivor's *own* bound and a transferred bound are active at
+//! the same point, the reduced problem has one multiplier where the full
+//! problem has two, and any split summing correctly is a valid KKT point.
+//! The plan breaks that tie in favour of the incumbent (see
+//! `transfer_bounds`'s strict comparisons), so the multiplier stays on the
+//! survivor. Tests pin KKT validity there, not equality with a bare solve —
+//! the posture `pounce-convex` already takes for forcing constraints.
+//!
+//! A column pinned to a constant by a singleton row `a·x = b` is the other
+//! degenerate case: if `b/a` lands on that column's bound, the row
+//! multiplier and the bound multiplier are interchangeable, and the sweep
+//! puts the whole thing on the row. That too is a valid KKT point, and the
+//! same class of caveat as the Phase-2 note in [`crate`]'s module docs
+//! (issue M24).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -605,6 +641,61 @@ fn decode(irow: Index, jcol: Index, one_based: bool) -> (usize, usize) {
     }
 }
 
+/// Hand one reduced bound multiplier to the full-space column whose own
+/// declared bound produced that reduced bound (issue #493).
+///
+/// `src` is the plan's recorded provenance for the bound, `survivor` the
+/// full-space index of the surviving column the IPM reported `z` against,
+/// and `upper` says which side of the *reduced* box `z` belongs to.
+///
+/// With `x_src = α·x_survivor + β`, the reduced bound is the origin's bound
+/// pulled back through that map, so the multiplier scales by `1/|α|`, and a
+/// negative `α` sends it to the opposite side of the origin's box. That
+/// keeps `Σ over the cluster of α_e·(−z_l[e] + z_u[e])` equal to what the
+/// survivor alone used to contribute, which is exactly what full-space
+/// stationarity at the survivor needs.
+///
+/// Anything the plan cannot vouch for — a provenance that is not an affine
+/// image of this survivor, a non-finite or zero coefficient — leaves the
+/// multiplier where the solver put it. A wrong attribution would be worse
+/// than the old one.
+fn attribute_bound_multiplier(
+    plan: &EliminationPlan,
+    src: usize,
+    survivor: usize,
+    z: Number,
+    upper: bool,
+    z_l_full: &mut [Number],
+    z_u_full: &mut [Number],
+) {
+    let keep_here = |z_l_full: &mut [Number], z_u_full: &mut [Number]| {
+        if upper {
+            z_u_full[survivor] += z;
+        } else {
+            z_l_full[survivor] += z;
+        }
+    };
+    if src == survivor || src >= plan.n_full || z == 0.0 {
+        keep_here(z_l_full, z_u_full);
+        return;
+    }
+    let VarRecovery::Affine { rep, coeff, .. } = plan.recovery[src] else {
+        keep_here(z_l_full, z_u_full);
+        return;
+    };
+    if rep != survivor || !coeff.is_finite() || coeff == 0.0 {
+        keep_here(z_l_full, z_u_full);
+        return;
+    }
+    // `upper XOR (α < 0)`: the side flips exactly when the map reverses the
+    // interval.
+    if upper != (coeff < 0.0) {
+        z_u_full[src] += z / coeff.abs();
+    } else {
+        z_l_full[src] += z / coeff.abs();
+    }
+}
+
 /// Recover a multiplier for every row the plan consumed.
 ///
 /// See the module docs for why a reverse sweep over the elimination steps
@@ -615,9 +706,16 @@ fn decode(irow: Index, jcol: Index, one_based: bool) -> (usize, usize) {
 /// Signs follow the convention `finalize_solution` uses, `∇f + Jᵀλ − z_l +
 /// z_u = 0`, so `resid` accumulates `+Jᵀλ` and each pivot solve carries the
 /// matching negation.
+///
+/// `z_l_full` / `z_u_full` are the full-space bound multipliers **after**
+/// attribution (gh#493). They belong in the residual the sweep cancels: an
+/// eliminated column that carries an attributed multiplier needs a
+/// correspondingly smaller row multiplier for stationarity to close there.
 fn recover_dropped_multipliers(
     plan: &EliminationPlan,
     grad_f: &[Number],
+    z_l_full: &[Number],
+    z_u_full: &[Number],
     jac_irow: &[Index],
     jac_jcol: &[Index],
     jac_values: &[Number],
@@ -634,6 +732,9 @@ fn recover_dropped_multipliers(
     // just the row it resolved.
     let mut row_entries: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
     let mut resid = grad_f.to_vec();
+    for (j, r) in resid.iter_mut().enumerate() {
+        *r += z_u_full.get(j).copied().unwrap_or(0.0) - z_l_full.get(j).copied().unwrap_or(0.0);
+    }
     for k in 0..jac_irow.len() {
         let (i, j) = decode(jac_irow[k], jac_jcol[k], one_based);
         if i >= m || j >= n {
@@ -928,18 +1029,37 @@ impl TNLP for LinearEqElimTnlp {
             s.plan.lift_x(sol.x, &mut x_full);
         }
 
-        // Bound multipliers: the survivors' values where they belong, zero
-        // at every eliminated column (see the dual-attribution caveat).
+        // Bound multipliers: each one routed to the column whose declared
+        // bound the reduced bound came from, which is the survivor itself
+        // unless a transfer moved that bound there (gh#493). This has to
+        // happen before the dual sweep below, which cancels the residual
+        // these leave behind.
         let mut z_l_full = vec![0.0; n_in];
         let mut z_u_full = vec![0.0; n_in];
         {
             let s = self.state.as_ref().expect("inited");
             for (red, &full) in s.plan.vars_kept.iter().enumerate() {
                 if red < sol.z_l.len() {
-                    z_l_full[full] = sol.z_l[red];
+                    attribute_bound_multiplier(
+                        &s.plan,
+                        s.plan.x_l_src.get(red).copied().unwrap_or(full),
+                        full,
+                        sol.z_l[red],
+                        false,
+                        &mut z_l_full,
+                        &mut z_u_full,
+                    );
                 }
                 if red < sol.z_u.len() {
-                    z_u_full[full] = sol.z_u[red];
+                    attribute_bound_multiplier(
+                        &s.plan,
+                        s.plan.x_u_src.get(red).copied().unwrap_or(full),
+                        full,
+                        sol.z_u[red],
+                        true,
+                        &mut z_l_full,
+                        &mut z_u_full,
+                    );
                 }
             }
         }
@@ -995,6 +1115,8 @@ impl TNLP for LinearEqElimTnlp {
                 recover_dropped_multipliers(
                     &s.plan,
                     &grad_f,
+                    &z_l_full,
+                    &z_u_full,
                     &s.jac_irow_inner,
                     &s.jac_jcol_inner,
                     &jac_values,
@@ -1389,6 +1511,8 @@ mod tests {
             row_kept,
             x_l_red: Vec::new(),
             x_u_red: Vec::new(),
+            x_l_src: Vec::new(),
+            x_u_src: Vec::new(),
             steps,
             parent,
             report: LinearEqElimReport::default(),
@@ -1409,7 +1533,17 @@ mod tests {
             1,
         );
         let mut lambda = vec![0.0];
-        recover_dropped_multipliers(&plan, &[4.0], &[0], &[0], &[1.0], false, &mut lambda);
+        recover_dropped_multipliers(
+            &plan,
+            &[4.0],
+            &[0.0],
+            &[0.0],
+            &[0],
+            &[0],
+            &[1.0],
+            false,
+            &mut lambda,
+        );
         assert!((lambda[0] + 4.0).abs() < 1e-12, "{lambda:?}");
     }
 
@@ -1446,6 +1580,8 @@ mod tests {
         recover_dropped_multipliers(
             &plan,
             &[2.0, 3.0, 5.0],
+            &[0.0; 3],
+            &[0.0; 3],
             &irow,
             &jcol,
             &vals,
@@ -1484,7 +1620,17 @@ mod tests {
         let vals = [1.0, -2.0, 1.0, -1.0, 0.3, 0.7, 1.1];
         let grad = [2.0, 3.0, 5.0];
         let mut lambda = vec![0.0, 0.0, 0.5];
-        recover_dropped_multipliers(&plan, &grad, &irow, &jcol, &vals, false, &mut lambda);
+        recover_dropped_multipliers(
+            &plan,
+            &grad,
+            &[0.0; 3],
+            &[0.0; 3],
+            &irow,
+            &jcol,
+            &vals,
+            false,
+            &mut lambda,
+        );
         for col in [0usize, 1] {
             let mut resid = grad[col];
             for k in 0..irow.len() {
@@ -1497,6 +1643,127 @@ mod tests {
                 "stationarity at eliminated column {col} = {resid}, λ = {lambda:?}"
             );
         }
+    }
+
+    /// `x0 = α·x1 + β` with x0's bound transferred onto x1: the multiplier
+    /// goes back to x0, scaled by `1/|α|`, and changes sides when α < 0
+    /// (gh#493).
+    fn plan_with_transferred_bound(coeff: Number) -> EliminationPlan {
+        let mut plan = plan_with(
+            vec![ElimStep {
+                row: 0,
+                var: 0,
+                pivot: 1.0,
+            }],
+            vec![Some((1, coeff)), None],
+            1,
+        );
+        plan.recovery = vec![
+            VarRecovery::Affine {
+                rep: 1,
+                coeff,
+                offset: 0.0,
+            },
+            VarRecovery::Kept(0),
+        ];
+        plan.vars_kept = vec![1];
+        // Both of x1's reduced bounds were born on x0.
+        plan.x_l_src = vec![0];
+        plan.x_u_src = vec![0];
+        plan
+    }
+
+    #[test]
+    fn a_positive_coefficient_keeps_the_multiplier_on_the_same_side() {
+        let plan = plan_with_transferred_bound(2.0);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        attribute_bound_multiplier(&plan, 0, 1, 12.0, true, &mut z_l, &mut z_u);
+        assert_eq!(z_u, vec![6.0, 0.0], "z_u = 12/|α| on x0");
+        assert_eq!(z_l, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_negative_coefficient_flips_the_side_the_multiplier_lands_on() {
+        let plan = plan_with_transferred_bound(-2.0);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        // The survivor's *lower* bound is x0's *upper* bound when α < 0.
+        attribute_bound_multiplier(&plan, 0, 1, 12.0, false, &mut z_l, &mut z_u);
+        assert_eq!(z_u, vec![6.0, 0.0]);
+        assert_eq!(z_l, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_survivors_own_bound_keeps_its_multiplier() {
+        let plan = plan_with_transferred_bound(2.0);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        attribute_bound_multiplier(&plan, 1, 1, 7.0, false, &mut z_l, &mut z_u);
+        assert_eq!(z_l, vec![0.0, 7.0]);
+    }
+
+    /// A provenance the plan cannot vouch for must not move the multiplier:
+    /// a wrong attribution is worse than the old one.
+    #[test]
+    fn an_unvouched_provenance_leaves_the_multiplier_where_it_was() {
+        let mut plan = plan_with_transferred_bound(2.0);
+        plan.recovery[0] = VarRecovery::Constant(3.0);
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        attribute_bound_multiplier(&plan, 0, 1, 5.0, true, &mut z_l, &mut z_u);
+        assert_eq!(z_u, vec![0.0, 5.0]);
+
+        // Out of range, and pointing at a different survivor, likewise.
+        let mut plan = plan_with_transferred_bound(2.0);
+        plan.recovery[0] = VarRecovery::Affine {
+            rep: 9,
+            coeff: 2.0,
+            offset: 0.0,
+        };
+        let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+        attribute_bound_multiplier(&plan, 0, 1, 5.0, true, &mut z_l, &mut z_u);
+        attribute_bound_multiplier(&plan, 99, 1, 4.0, true, &mut z_l, &mut z_u);
+        assert_eq!(z_u, vec![0.0, 9.0]);
+    }
+
+    /// The sweep has to see the attributed multipliers, or the row
+    /// multiplier it recovers will double-count them.
+    ///
+    /// `min 4·x0  s.t.  x0 − 2·x1 = 0`, row 0 consumed to eliminate x0.
+    /// Stationarity at x0 is `∇f + λ·1 − z_l + z_u = 0`, so with nothing
+    /// attributed there the sweep must return `λ = −4`, and with `z_u = 4`
+    /// attributed to x0 it must return `λ = −8` instead.
+    #[test]
+    fn the_sweep_absorbs_an_attributed_bound_multiplier() {
+        let plan = plan_with_transferred_bound(2.0);
+        let irow = [0, 0];
+        let jcol = [0, 1];
+        let vals = [1.0, -2.0];
+
+        let mut lambda = vec![0.0];
+        recover_dropped_multipliers(
+            &plan,
+            &[4.0, 0.0],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+            &irow,
+            &jcol,
+            &vals,
+            false,
+            &mut lambda,
+        );
+        assert!((lambda[0] + 4.0).abs() < 1e-12, "{lambda:?}");
+
+        let mut lambda = vec![0.0];
+        recover_dropped_multipliers(
+            &plan,
+            &[4.0, 0.0],
+            &[0.0, 0.0],
+            &[4.0, 0.0],
+            &irow,
+            &jcol,
+            &vals,
+            false,
+            &mut lambda,
+        );
+        assert!((lambda[0] + 8.0).abs() < 1e-12, "{lambda:?}");
     }
 
     #[test]

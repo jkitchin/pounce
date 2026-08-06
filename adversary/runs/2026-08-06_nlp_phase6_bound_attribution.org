@@ -1,0 +1,134 @@
+#+TITLE: Adversary Run: Phase 6 bound-multiplier attribution (gh#493)
+#+DATE: <2026-08-06>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: bound-constrained + linear-equality structure
+:SOURCE: no published instance — a randomized family generated around a known feasible point, checked against the textbook KKT conditions
+:KNOWN_OPTIMAL: n/a (oracle is the KKT system, not a published optimum)
+:N_VARIABLES: 4–9
+:N_CONSTRAINTS: 1–7 linear equality rows
+:SELECTED_BY: topic-guidance (validating the gh#493 fix on branch claude/issue-493-u1tkfp)
+:COVERAGE_TARGET: -
+:END:
+
+Minimize a strictly convex quartic over linear equality rows, with boxes drawn
+so that bounds are **active on the columns Phase 6 eliminates**:
+
+\[
+\min_x \sum_j (x_j - t_j)^4 \quad\text{s.t.}\quad \sum_j a_{ij} x_j + c_i = b_i,\quad x_l \le x \le x_u
+\]
+
+Each instance is built around a random feasible point \(x^*\); the right-hand
+sides are computed from it, one side of each box is often pinned exactly onto
+it, and the objective targets \(t_j\) are placed beyond the pinned side so the
+objective drives \(x\) into that bound.
+
+Two formulation traps were hit and fixed while writing this, both worth
+recording because either one silently empties the probe:
+
+- **A quadratic objective routes the model away from the code under test.**
+  With squares, the model classifies as a convex QP and the CLI dispatches to
+  =pounce-convex= before any presolve wrapper is built, so Phase 6 never runs
+  (gh#494). The first draft reported "0 columns eliminated" on every instance.
+  The probe now asserts engagement and refuses to pass vacuously.
+- **=presolve=yes= turns on Phases 1–4 as well.** Phase 1 hands the solver
+  *tightened* bounds, against which a multiplier is complementary to a bound
+  this script never wrote. The probe drives Phase 6 alone and measures the
+  other phases in a separate arm.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+80 instances per seed, 9 seeds (~700 instances), each solved three ways.
+
+| Build                          | gh#493 KKT violations | gh#495 class | verdict |
+|--------------------------------+-----------------------+--------------+---------|
+| parent commit (#487 as merged) | 15–22 per seed        | 8–13         | FAIL    |
+| this branch (gh#493 fixed)     | **0** on every seed   | 10–15        | PASS    |
+
+Per-seed, fixed build: 0/0/0/0/0/0/0/0/0 gh#493 violations across seeds
+11/22/33/44/55/66/77/88/99, and 0 dual differences anywhere the multipliers are
+provably unique.
+
+The minimal case the fix targets, solved end to end through the CLI:
+
+| Model                              | reported                | matches bare solve |
+|------------------------------------+-------------------------+--------------------|
+| =min (x0-4)^2=, =x0 = 2·x1=, x0≤1  | z_u[x0] = 6, λ = 0      | yes, exactly       |
+| same with =x0 = -2·x1=             | z_u[x0] = 6, λ = 0      | yes, exactly       |
+
+Before the fix both reported z on =x1= — a bound =x1= is not sitting on.
+
+* Cross-check / Verification
+
+The oracle is the full KKT system, evaluated in the probe from the same arrays
+used to write the =.nl=, against the =ipopt_zL_out= / =ipopt_zU_out= suffixes
+that come back:
+
+1. primal feasibility (rows hold, =x= inside its declared box),
+2. stationarity =∇f + Jᵀλ − z_l + z_u = 0=,
+3. dual feasibility =z_l, z_u ≥ 0=,
+4. **bound complementarity** =z_l·(x − x_l) = 0=, =z_u·(x_u − x) = 0=.
+
+(4) is what discriminates: parking a transferred bound's multiplier on the
+survivor puts a non-zero multiplier on a bound the survivor is not sitting on,
+which breaks complementarity in the original space while leaving stationarity —
+the property #487's own tests checked — perfectly intact.
+
+Three things make the oracle trustworthy rather than merely plausible:
+
+- **A control arm.** The identical check runs on the =presolve=no= solve of
+  every instance. It certifies essentially all of them; instances it cannot
+  certify are skipped rather than judged, and a run in which more than 5% fail
+  is declared miscalibrated rather than passed.
+- **A convention self-check.** The probe solves a hand-computed model
+  (=min (x0-4)^4 + x1^4 s.t. x0 = x1, x0 ≤ 1=, where λ = 4 and z_u[0] = 104)
+  and refuses to run at all unless the =.sol= dual-negation and the
+  =ipopt_zU_out = −z_u= export behave as assumed.
+- **An exact uniqueness test.** Dual equality with the bare solve is asserted
+  only where the active constraint gradients are linearly independent (LICQ),
+  checked by a rank computation. Earlier drafts used cluster- and
+  pinned-column heuristics; both let through instances where a degenerate
+  active set made the duals legitimately non-unique, and both were replaced.
+
+=pounce verify= was run on every instance and rejected none — including the
+instances that violate KKT. That is expected and worth recording: =verify=
+reports *bound-projected* stationarity (=verify.rs=, =stationarity_residual=),
+which projects out exactly the component a bound multiplier carries, and never
+reads the =zL=/=zU= suffixes. It is a feasibility oracle here, not a
+discriminating one.
+
+The Rust =adversary-fuzz linelim= probe was extended with a bound-provenance
+property — every reduced bound must lift, through the recovery map of the column
+the plan says it came from, exactly onto that column's declared bound — and run
+over 12,000 instances across three seeds: 0 failures. Inverting the sign flip in
+the provenance makes it fail 34/4000, so it bites.
+
+* Verdict
+
+*PASS* for gh#493. The fix does what it claims: across ~700 randomized
+instances the reduced solve's bound multipliers land on the columns that own
+the bounds, complementarity holds in the original variable space, and wherever
+the multipliers are provably unique they equal the no-presolve solve's to
+tolerance. The same probe fails the parent commit on every seed, 15–22
+violations each, so this is a measured change and not an absence of testing.
+
+*One separate finding, filed as gh#495.* When Phase 6 removes a column whose
+declared bound is active, no bound multiplier is produced for it at all, and
+the reported duals are not a KKT multiplier set — stationarity misses by
+O(10²–10³). It has two routes in (a survivor whose reduced box collapses to a
+point, and a pinned constant landing on its own bound), a minimal
+hand-checkable reproduction, and **identical residuals before and after the
+gh#493 change**, so it is pre-existing #487 behaviour rather than a regression.
+It is not fixable by re-attribution: there is no multiplier to re-attribute.
+Phase 6 is off by default, so no default user is affected.
+
+Also observed, out of scope and not filed: with every presolve phase on, 22–31
+instances per seed fail the same KKT check. Phase 1 hands the solver tightened
+bounds and Phase 2 drops rows, both of which move duals for reasons of their
+own (the documented M24 attribution caveat). The probe measures this in a
+separate arm so it cannot be confused with Phase 6's behaviour.

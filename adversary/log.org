@@ -10,48 +10,21 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     12 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |     10 | 2026-08-04 | —             |
-| qp              |     10 | 2026-08-03 | —             |
+| nlp             |     13 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 produces no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option) |
+| lp              |     11 | 2026-08-06 | —             |
+| qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     11 | 2026-08-05 | —             |
 | exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
-| sdp             |     10 | 2026-08-03 | —             |
+| sdp             |     11 | 2026-08-06 | —             |
 | sos             |     11 | 2026-08-05 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |     10 | 2026-08-04 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, and bounds-only diagonal QP)  |
-| batch           |     10 | 2026-08-04 | —             |
+| batch           |     11 | 2026-08-06 | —             |
 | diff            |     11 | 2026-08-05 | — (all PASS; near-LICQ degradation expected, not filed) |
-| sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
+| sensitivity     |     11 | 2026-08-06 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
-** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
-:PROPERTIES:
-:FAMILY: nlp
-:SOURCE: randomized families built around a known feasible point x*; no published instance
-:KNOWN_OPTIMAL: n/a (property-based)
-:POUNCE_OBJECTIVE: n/a
-:POUNCE_STATUS: 12000 fuzz instances + 120 end-to-end .nl solves, 0 failures
-:POUNCE_TIME: ~4 min total
-:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); central finite differences of the wrapper's own reduced eval_f/eval_g; in-script row re-evaluation
-:ORACLE_OBJECTIVE: n/a
-:ORACLE_TIME: n/a
-:VERDICT: PASS
-:REPORT: [[file:runs/2026-08-06_nlp_linear-eq-reduction.org]]
-:COVERAGE_TARGET: linear_eq_plan.rs / linear_eq_elim.rs — new files, no prior adversarial coverage
-:END:
-
-Probes validated by mutation testing: five injected defects (Hessian
-symmetric-pair x2 factor, bound-transfer sign, row constant, lift offset, dual
-recovery) were each caught. The row-constant defect initially escaped every
-probe — derivatives are blind to an affine offset — which is why the probe now
-carries a primal-fidelity check through =finalize_solution=.
-
-Recorded non-defect: a row whose constant lives in its =.nl= expression segment
-is tagged NonLinear by the reader, so the elimination declines it. The
-row-constant branch is therefore reachable only on the general TNLP path (C
-interface, GAMS, callbacks), not via =.nl=.
-
 ** [2026-08-05] l1-elastic infeasibility certificate under nonconvex step QPs (qp-active-set/certificate-soundness) - FAIL
 :PROPERTIES:
 :FAMILY: qp-active-set
@@ -4825,3 +4798,169 @@ Hard-margin SVM posed via genuine SOC epigraph (min ||w||, not the more
 commonly-tested 1/2||w||^2 QP form) -- exercises solve_socp directly. 4
 symmetric points, all support vectors; w=(1,3.7e-22), b=5.2e-23 matches
 closed form w*=(1,0), b*=0 to float64 noise.
+
+** [2026-08-06] Soft-margin (C-SVM) dual QP (qp/box+equality, kernel Gram-matrix) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Cortes & Vapnik (1995); standard C-SVM dual, e.g. Bishop PRML Sec 7.1.1
+:KNOWN_OPTIMAL: none published (oracle-only)
+:POUNCE_OBJECTIVE: -8.7336244354e-01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0042s
+:ORACLE: cvxpy CLARABEL
+:ORACLE_OBJECTIVE: -8.7336244521e-01
+:ORACLE_TIME: 0.0123s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_qp_soft_margin_svm.org]]
+:COVERAGE_TARGET: -
+:END:
+6-point non-separable 2D dataset, C=1, genuinely activates the box bound
+0<=alpha<=C (unlike the hard-margin QP already logged). obj/alpha/w all
+agree with cvxpy to ~1e-8.
+
+** [2026-08-06] MAX-CUT SDP relaxation on C4 (sdp/PSD cone, bipartite-tight) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Goemans & Williamson (1995), J. ACM 42(6)
+:KNOWN_OPTIMAL: 4.0
+:POUNCE_OBJECTIVE: 3.9999999983e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0060s
+:ORACLE: cvxpy CLARABEL
+:ORACLE_OBJECTIVE: 3.9999999991e+00
+:ORACLE_TIME: 0.0141s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_sdp_maxcut_c4.org]]
+:COVERAGE_TARGET: -
+:END:
+Bipartite 4-cycle -> SDP relaxation is provably tight at 4.0. First
+attempt had a self-inconsistent svec scaling (pounce and cvxpy
+disagreeing with EACH OTHER) -- caught via the explicit svec()/smat()
+helper rewrite before concluding anything about pounce; final run
+matches known-tight optimum and cvxpy to <1e-9.
+
+** [2026-08-06] 2x2 zero-sum matrix game value via LP (lp/minimax, von Neumann) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: von Neumann minimax theorem; Chvatal, Linear Programming (1983) Ch. 15
+:KNOWN_OPTIMAL: 0.2
+:POUNCE_OBJECTIVE: 1.9999999976e-01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0059s
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 2.0000000000e-01
+:ORACLE_TIME: 0.0033s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_lp_matrix_game_value.org]]
+:COVERAGE_TARGET: -
+:END:
+A=[[2,-1],[-1,1]], no pure saddle point. Closed-form v*=1/5, p*=(0.4,0.6)
+matches pounce and scipy/HiGHS to <5e-10. New problem class for lp
+(game-theoretic minimax) with a genuinely mixed equilibrium.
+
+** [2026-08-06] Economic-dispatch QP sensitivity dP_i/dD (sensitivity/dx-db, applied power-systems) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: Wood, Wollenberg & Sheble, Power Generation Operation and Control, Ch. 3
+:KNOWN_OPTIMAL: closed-form equal-incremental-cost dP_i/dD
+:POUNCE_OBJECTIVE: n/a (sensitivity vector, see report)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: n/a
+:ORACLE: closed-form + independent numpy bordered-KKT finite-difference
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_sensitivity_economic_dispatch.org]]
+:COVERAGE_TARGET: -
+:END:
+4-generator economic dispatch, QpSensitivity.parametric_step vs
+closed-form equal-incremental-cost formula (5.55e-17) and vs an
+independently-assembled numpy bordered-KKT finite-difference re-solve
+(1.04e-13) -- neither oracle touches pounce's own solve_qp. New applied
+problem class for sensitivity, distinct from prior generic KKT dx/db probes.
+
+** [2026-08-06] solve_qp_batch dual/multiplier consistency (batch/KKT-multiplier-parity) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: family-table oracle = per-item solve_qp
+:KNOWN_OPTIMAL: none (parity check)
+:POUNCE_OBJECTIVE: n/a (7-instance batch, see report)
+:POUNCE_STATUS: all optimal
+:POUNCE_TIME: 0.0099s (batch total)
+:ORACLE: pounce solve_qp per item (7x)
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: 0.0262s (sum)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_batch_dual_consistency.org]]
+:COVERAGE_TARGET: -
+:END:
+7 random SPD QPs, heterogeneous eq/ineq/box shapes. Full KKT multiplier
+vectors (y, z, z_lb, z_ub) -- not just x*/obj -- checked batch vs
+per-item solve_qp: bitwise-identical across all 7 instances. No
+multiplier mis-indexing/unscaling bug found in the batched path.
+
+** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized families built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 12000 fuzz instances + 120 end-to-end .nl solves, 0 failures
+:POUNCE_TIME: ~4 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); central finite differences of the wrapper's own reduced eval_f/eval_g; in-script row re-evaluation
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_linear-eq-reduction.org]]
+:COVERAGE_TARGET: linear_eq_plan.rs / linear_eq_elim.rs — new files, no prior adversarial coverage
+:END:
+
+Probes validated by mutation testing: five injected defects (Hessian
+symmetric-pair x2 factor, bound-transfer sign, row constant, lift offset, dual
+recovery) were each caught. The row-constant defect initially escaped every
+probe — derivatives are blind to an affine offset — which is why the probe now
+carries a primal-fidelity check through =finalize_solution=.
+
+Recorded non-defect: a row whose constant lives in its =.nl= expression segment
+is tagged NonLinear by the reader, so the elimination declines it. The
+row-constant branch is therefore reachable only on the general TNLP path (C
+interface, GAMS, callbacks), not via =.nl=.
+
+** [2026-08-06] Phase 6 bound-multiplier attribution (nlp/presolve, gh#493) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized family around a known feasible point, boxes drawn so bounds are ACTIVE on the columns Phase 6 removes; no published instance
+:KNOWN_OPTIMAL: n/a (oracle is the KKT system)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: ~700 end-to-end .nl solves over 9 seeds, 0 gh#493 failures (parent commit: 15-22 per seed)
+:POUNCE_TIME: ~6 min total
+:ORACLE: textbook KKT (feasibility, stationarity, dual feasibility, bound complementarity) computed in-script from the generator's own arrays against the .sol ipopt_zL_out/ipopt_zU_out suffixes; no-presolve control arm; LICQ rank test for dual uniqueness; pounce verify
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS (gh#493); one separate pre-existing defect filed as gh#495
+:REPORT: [[file:runs/2026-08-06_nlp_phase6_bound_attribution.org]]
+:COVERAGE_TARGET: linear_eq_elim.rs postsolve / linear_eq_plan.rs bound transfer - the bound-multiplier path, which the gh#487 probes never reach (their boxes never bind)
+:END:
+
+The gh#487 probes cannot see this: their generator gives every box at least 1.0
+of margin around x*, so no bound is ever active and every bound multiplier is
+zero. This probe makes bounds active on the eliminated columns, and reads the
+zL/zU suffixes the earlier ones ignore.
+
+Bound complementarity is the discriminating condition. Parking a transferred
+bound's multiplier on the survivor leaves stationarity — the property #487's
+tests checked — intact while breaking complementarity in the original space.
+pounce verify is blind to it by construction: it reports bound-projected
+stationarity and never reads the suffixes, and it rejected none of the failing
+instances.
+
+Two formulation traps, both of which silently empty the probe: a quadratic
+objective routes the model to pounce-convex before any presolve wrapper exists
+(gh#494), and `presolve=yes` turns on Phases 1-4, whose own dual attribution
+confounds the measurement. The probe asserts engagement rather than assuming it.
+
+Separate finding, filed as gh#495 and NOT caused by the gh#493 change (residuals
+identical before and after): when Phase 6 removes a column whose declared bound
+is active, no bound multiplier is produced for it at all and the reported duals
+are not a KKT multiplier set. Minimal repro in the issue.
+

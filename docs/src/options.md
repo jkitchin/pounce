@@ -346,21 +346,31 @@ original model's shape and can still be read positionally by AMPL or Pyomo.
 
 Two things to know before turning it on:
 
-* **Dual attribution.** The recovery assumes an eliminated variable is
-  interior to its own bounds at the optimum. When one of those bounds is
-  active, the dual is reported on the *survivor's* bound multiplier (which
-  carries the transferred bound) and the eliminated variable's bound
-  multiplier is zero. The primal point, the objective, and KKT stationarity
-  are unaffected — only the attribution differs, the same way Phase 2's
-  dropped rows behave.
+* **Dual attribution.** A transferred bound's multiplier comes back on the
+  variable that *declared* the bound, not on the survivor that inherited
+  it. The plan records where each reduced bound came from, and postsolve
+  rescales the multiplier by the substitution's coefficient `α` — and moves
+  it to the other side of the box when `α < 0`, since a negative
+  coefficient turns a lower bound into an upper one. On a model with a
+  single active transferred bound the reported duals match a no-presolve
+  solve exactly.
 
-  A practical consequence for `.sol` readers: the writer omits exact zeros
-  from suffix blocks (it always has), so an eliminated variable gets **no**
-  `ipopt_zL_out` / `ipopt_zU_out` entry at all rather than an entry of zero.
-  Code that indexes those suffixes must treat a missing index as zero — as
-  it already must for any variable whose bound multiplier lands exactly on
-  zero. Row multipliers are unaffected: the dual block is dense and comes
-  back at the original row count.
+  Where the survivor's *own* bound and a transferred bound are active at
+  the same point, the split between the two multipliers is genuinely
+  non-unique — the reduced problem has one where the full problem has two —
+  and the pass leaves the whole multiplier on the survivor. That is a valid
+  KKT point, but it is not the split a no-presolve solve happens to report.
+  The same holds for a variable pinned by a singleton row `a·x = b` whose
+  value lands on one of its own bounds: the row multiplier absorbs it.
+
+  A practical consequence for `.sol` readers, unchanged by any of the
+  above: the writer omits exact zeros from suffix blocks (it always has),
+  so a variable whose bound multiplier is zero gets **no**
+  `ipopt_zL_out` / `ipopt_zU_out` entry at all rather than an entry of
+  zero. Code that indexes those suffixes must treat a missing index as
+  zero — as it already must for any variable whose bound multiplier lands
+  exactly on zero. Row multipliers are unaffected: the dual block is dense
+  and comes back at the original row count.
 * **Failing closed.** If the equality system is contradictory, the pass
   stands down entirely and hands the model to the solver untouched, rather
   than being the first and only voice to call a model infeasible. The same
