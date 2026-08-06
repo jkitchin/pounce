@@ -10,7 +10,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     14 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP) |
+| nlp             |     14 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321) |
 | lp              |     11 | 2026-08-06 | —             |
 | qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
