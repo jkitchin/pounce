@@ -1,0 +1,145 @@
+#+TITLE: Adversary Run: Linear-Equality Variable Elimination (Phase 6, gh#487)
+#+DATE: <2026-08-06>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: presolve — equality-constrained, linear-equality structure
+:SOURCE: no published instance; randomized families built around a KNOWN feasible point x*, plus mutation testing of the probes themselves
+:KNOWN_OPTIMAL: n/a (property-based, not a single instance)
+:N_VARIABLES: 3–10 (Rust probe), 4–9 (.nl sweep)
+:N_CONSTRAINTS: 1–9
+:SELECTED_BY: topic-guidance (new code under review for gh#487)
+:COVERAGE_TARGET: crates/pounce-presolve/src/linear_eq_plan.rs, linear_eq_elim.rs — brand new, zero adversarial coverage
+:END:
+
+Target under test: =presolve_linear_eq_reduction= (Phase 6). It rewrites the
+problem as an affine map $x = A y + c$ derived from the linear equality rows,
+solves the reduced problem, then lifts the primal and recovers a multiplier for
+every consumed row.
+
+Three shapes are recognised: a variable fixed by equal bounds, a singleton row
+$a x = b$, and a two-variable row $a_1 x + a_2 y = b$.
+
+* Method
+
+Nothing here validates pounce against pounce-with-the-option-off. Three
+independent attacks:
+
+1. *Plan invariants* (=adversary-fuzz linelim=, plan half). Every instance is
+   generated around a random feasible point $x^*$: right-hand sides are
+   computed from it and every box is drawn to contain it. $x^*$ is then an
+   oracle the pass has never seen.
+2. *Derivative transforms* (=adversary-fuzz linelim=, deriv half). Central
+   finite differences of the wrapper's *own* reduced =eval_f= / =eval_g=. This
+   deliberately knows nothing about the plan; it asks only whether the
+   published derivative is the derivative of the published function. Model and
+   substitution are quadratic/affine, so the third derivative vanishes and the
+   differences are exact to roundoff.
+3. *End to end* (=runs/2026-08-06_nlp_linear_eq_reduction_verify.py=).
+   Randomized =.nl= files through the CLI, checked with =pounce verify= — an
+   independent feasibility/KKT check against the ORIGINAL model — and with a
+   second, in-script re-evaluation of every row from the source data (which
+   =verify= alone would not distinguish from a correctly-sized but permuted
+   =.sol=).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Probe                          | Instances | Reduced | Failures |
+|--------------------------------+-----------+---------+----------|
+| linelim (seed 20260806)        |      4000 |    2952 |        0 |
+| linelim (seed 987654321)       |      4000 |    2953 |        0 |
+| linelim (seed 13579)           |      4000 |    2972 |        0 |
+| .nl + =pounce verify= sweep    |       120 |      82 |        0 |
+
+All four rows re-run after rebasing onto =origin/main= at #489, which changed
+=.nl= derivative evaluation (quotient rule, fused entropy opcodes) — the sweep
+above is the post-rebase result.
+
+~30k columns eliminated across the Rust runs. Every =.nl= solve was accepted by
+=pounce verify=, every reported point satisfied all its rows and bounds, and
+every objective agreed with the un-reduced solve.
+
+* Mutation testing — do the probes actually bite?
+
+A green probe is worth nothing until it has been shown to fail. Five deliberate
+defects were injected into the pass, one at a time, and reverted:
+
+| # | Injected defect                                        | Caught by                        | Signal      |
+|---+--------------------------------------------------------+----------------------------------+-------------|
+| 1 | drop the Hessian symmetric-pair ×2 factor              | derivative probe                 | 573 / 1200  |
+| 2 | ignore the sign of α when transferring bounds          | plan probe                       | 600 / 1200  |
+| 3 | forget the row constant $c$ in $g_r = \sum a_j x_j + c$ | primal-fidelity check (see below) | 459 / 1200 |
+| 4 | lift an eliminated column without its offset β         | plan probe                       | 573 / 1200  |
+| 5 | skip the dual recovery (report λ = 0)                  | integration test                 | 2 tests     |
+
+Defect 3 initially escaped *every* probe, which was the run's most useful
+result. Derivatives cannot see it: the substitution is affine, and an error in
+its constant term shifts the lifted point without touching a single
+derivative — $\nabla(\alpha y + \beta) = \alpha$ either way. The probe was
+extended with a *primal-fidelity* check that pushes an arbitrary reduced point
+through =finalize_solution= and asserts that at least as many original rows
+hold at the lift as the reduction claims to have dropped. That catches it.
+
+* Cross-check / Verification
+
+- =pounce verify= exit code 0 on all 120 =.nl= solves (it re-derives feasibility
+  and KKT from the original file and has no knowledge of the reduction).
+- Independent in-script re-evaluation: all rows within 1e-6, all bounds
+  respected, objectives matching the un-reduced solve within 1e-4 relative.
+- Plan-level: lifting $x^*$'s survivor coordinates reproduced $x^*$ exactly on
+  all 12000 instances; the reduced box retained $x^*$ every time; a random
+  point of the reduced box always lifted inside the *original* declared box.
+
+* Finding (not a defect): the =.nl= path cannot reach the row-constant branch
+
+Chasing defect 3 end to end turned up a real fact worth recording. Writing a
+row's constant into its expression segment makes pounce's =.nl= reader tag the
+row *NonLinear*, so the elimination declines it. Verified directly: the model
+=x0 - x1 + 3 = 3= with the constant in the =C0= segment reduces nothing, while
+the same model with the constant folded into the bound eliminates one column
+and one row — both reaching unscaled objective 10.125.
+
+So on the =.nl= path the row-constant branch is dead code, conservatively.
+It is live on the general TNLP path (C interface, GAMS link, callback bridges),
+which is exactly where the Rust probe exercises it. No action; recorded so a
+later reader does not mistake the =.nl= sweep's silence for coverage.
+
+* Verdict
+
+PASS — no defect found in Phase 6. Three independent attacks over ~12k
+randomized instances plus 120 end-to-end =.nl= solves found nothing, and the
+probes were shown to catch five injected defects covering the Hessian
+symmetric-pair factor, the bound-transfer sign, the row constant, the lift
+offset, and the dual recovery.
+
+The honest scope: this establishes the *transform* is faithful and the
+*reporting* is in the original space. It does not establish anything about
+models the presolve layer never sees — in particular LPs and convex QPs, which
+route to =pounce-convex= before any presolve wrapper is built.
+
+* Scale
+
+Not a correctness result, but the reason the pass exists. A synthetic
+alias-heavy model of 24000 columns / 21600 rows, mirroring the shape gh#487
+measured:
+
+| Reduction | Columns to the solver | Rows | Wall time (release) |
+|-----------+-----------------------+------+---------------------|
+| off       |                 24000 | 21600 | 1.63 s             |
+| on        |                  2400 |     0 | 0.30 s             |
+
+Same objective, =.sol= body identical in length (45600 entries), all duals
+agreeing to 1e-8, and every alias row satisfied to exactly 0.0 in the reported
+point.
+
+* Coverage effect
+
+Both target files were new in this change and had no adversarial coverage at
+all. The probes now exercise the planner's three shapes, chain propagation,
+bound transfer in both signs, the redundant-row path, the fail-closed paths,
+the three derivative gathers including the same-reduced-column Hessian case,
+and the postsolve multiplier recovery.

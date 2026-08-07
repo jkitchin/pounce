@@ -1,0 +1,140 @@
+#+TITLE: Adversary Run: C warm-start working-set answer transparency
+#+DATE: <2026-08-05>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: C ABI metamorphic property — warm-start working set must not change the answer
+:SOURCE: property-based; the contract stated in crates/pounce-cinterface/include/pounce.h
+:KNOWN_OPTIMAL: n/a — metamorphic, no reference optimum needed
+:N_VARIABLES: 3-5
+:N_CONSTRAINTS: 1 equality + 1 inequality + box
+:SELECTED_BY: topic-guidance (adversarial review of the gh#484 fix)
+:COVERAGE_TARGET: crates/pounce-cinterface/src/lib.rs (IpoptSetWarmStartWorkingSet / IpoptSolve) — the code changed in d352838
+:END:
+
+A working set is a hint about which constraints are active. It selects the
+*path* an active-set method takes, never the *answer* it arrives at. So the
+C ABI owes the caller:
+
+#+begin_quote
+For any problem and any starting point, staging a valid working set before
+`IpoptSolve` must not change where the solve ends up.
+#+end_quote
+
+That is precisely what gh#484 violated: the call also reset the primal
+iterate to zero, so on a box excluding the origin the "hint" decided the
+answer — `x = 0` and `Infeasible_Problem_Detected`.
+
+The probe is metamorphic rather than oracle-based on purpose. It needs no
+reference optimum, so it can hammer randomized problems where no published
+solution exists, and it compares pounce against *itself under a
+transformation that must be answer-preserving* — a different and stronger
+thing than comparing two solvers.
+
+Problem family:
+
+\[
+\min_x\ \tfrac12\sum_j (x_j-t_j)^2 \;[+\; \tfrac12\sum_j c_j x_j x_{j+1}]
+\quad\text{s.t.}\quad \textstyle\sum_j x_j = s,\quad q(x)\ge p,\quad lo\le x\le hi
+\]
+
+Half the instances are *convex* (cross terms dropped, \(q\) linear); half are
+nonconvex (\(q(x)=x_0x_1\), cross terms on). Boxes are translated away from
+the origin half the time — the discarded-iterate bug is only catastrophic
+when 0 is outside the box.
+
+** Two invariants, scoped to where each is actually true
+
+1. *Feasibility* — asserted on every instance, convex or not. Whatever local
+   solution a warm solve reaches, a converged answer must satisfy the
+   constraints. This alone catches gh#484, which returned an out-of-box point.
+2. *Answer transparency* — asserted on the convex half only. There the
+   objective is strictly convex over a polytope, so the minimizer is unique
+   and a working set cannot move it. On a nonconvex program an SQP is a local
+   method and a different working set may legitimately steer it to a different
+   local minimum; asserting transparency there would be asserting a falsehood.
+   The first draft of this probe did exactly that and produced a "failure"
+   that was mine, not pounce's — recorded here because the distinction is the
+   whole point.
+
+Working sets staged (all range-valid; most deliberately *wrong*, because a bad
+hint must still be answer-preserving — case D of the reporter's driver showed
+the contents never mattered, making the call at all was the defect):
+`all-inactive`, `all-at-lower`, `all-at-upper`, `random-active-set` (codes
+0..=2), `random-with-fixed-code` (codes 0..=3), and the working set read back
+from a converged solve.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS (after the two fixes below)
+:END:
+
+300 problems, seed 20260805 → 1398 comparisons (67 skipped: baseline did not
+converge, so there was no answer to preserve).
+
+| Staged working set        | comparisons | violations |
+|---------------------------+-------------+------------|
+| all-inactive              | ~233        |          0 |
+| all-at-lower              | ~233        |          0 |
+| all-at-upper              | ~233        |          0 |
+| random-active-set (0..=2) | ~233        |          0 |
+| converged                 | ~233        |          0 |
+| random-with-fixed-code    | ~233        |      *5*   |
+
+Against the pre-fix binary the same probe fails immediately and broadly — the
+whole point of the gh#484 fix is that these 1398 comparisons now agree.
+
+The five violations are confined to `random-with-fixed-code` and all occur on
+*convex* programs, where the minimizer is unique. Example (seed 22568839235):
+
+: base x = [4.176350746639021, 5.309835327988521, 5.108607281950252]
+: warm x = [2.4911667687681014, 6.091217590111601, 6.01240899769809]
+: |Δx|∞ = 1.685e0   Δobj_rel = 3.727e-1
+
+* Cross-check / Verification
+
+The isolation *is* the cross-check: five staged working sets differing only in
+whether code 3 can appear, over the same 300 problems and the same starting
+points. Codes 0..=2 (`Inactive` / `AtLower` / `AtUpper`) are transparent in
+233 comparisons; adding code 3 breaks transparency in 5. Nothing else varies.
+
+Convexity was verified structurally, not assumed: in the convex variant the
+objective is \(\tfrac12\|x-t\|^2\) and every constraint is linear, so the
+feasible set is a polytope and the minimizer is unique.
+
+* Verdict
+
+*SOLVER_BUG — found and fixed in this run.* Two defects, the second only
+visible because the first was fixed.
+
+*Unvalidated status codes.* `POUNCE_WS_FIXED_OR_EQ` does not describe an
+active set; it asserts something about the *problem* — that a variable is
+fixed (`x_l == x_u`) or a row is an equality (`b_l == b_u`). `AtLower` /
+`AtUpper` likewise assert the bound being sat on exists. Passing a false one
+was accepted, `TRUE` was returned, the solve over-constrained itself, and a
+*convex* program — unique minimizer — came back with the wrong optimum.
+Codes are now checked against the model, and a false claim returns `FALSE`,
+which callers already handle.
+
+*Wrong row order.* Adding that validation immediately rejected pounce's own
+`IpoptGetWorkingSet` output, which is how the real defect surfaced: the
+statuses were indexed by the SQP's *internal* constraint ordering —
+equalities first — not the caller's. HS071's rows are
+`[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, and `IpoptGetWorkingSet` returned
+`[Equality, AtLower]`: exactly reversed. The documented get → set round-trip
+had therefore been feeding every warm start a working set with its rows
+swapped, and nothing complained, because a wrong working set is a wrong
+*hint* and hints are answer-preserving. Both entry points now translate
+between the two indexings; the permutation is a pure function of the bounds,
+so it is reconstructed in the C layer and no plumbing crosses a crate
+boundary.
+
+The probe now passes: 510 structurally-invalid sets correctly rejected, and
+answer transparency holds on every accepted one.
+
+* Coverage effect
+
+Not a coverage-driven run. The probe exercises `IpoptSetWarmStartWorkingSet`,
+the `IpoptSolve` merge path, and `IpoptGetWorkingSet` over 300 randomized
+problems.

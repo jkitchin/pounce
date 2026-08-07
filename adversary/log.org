@@ -10,21 +10,115 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     13 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 produces no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option) |
+| nlp             |     14 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321) |
 | lp              |     11 | 2026-08-06 | —             |
 | qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
-| socp            |     11 | 2026-08-05 | —             |
-| exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
+| socp            |     12 | 2026-08-07 | —             |
+| exp             |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
 | sdp             |     11 | 2026-08-06 | —             |
-| sos             |     11 | 2026-08-05 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |     10 | 2026-08-04 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, and bounds-only diagonal QP)  |
+| sos             |     12 | 2026-08-07 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
+| autoroute       |     11 | 2026-08-07 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, and the warm_start+auto routing-decision contract)  |
 | batch           |     11 | 2026-08-06 | —             |
 | diff            |     11 | 2026-08-05 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |     11 | 2026-08-06 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Doubleton-equality aggregation in the convex presolve (qp/lp, gh#494) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: randomized alias-linked convex QPs built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 438 end-to-end .nl solves across 3 seeds, 0 failures
+:POUNCE_TIME: ~3 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); in-script row re-evaluation; in-script bound-aware stationarity of the reported duals; qp_presolve=no objective agreement
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_convex_doubleton_aggregation_verify.py]]
+:COVERAGE_TARGET: crates/pounce-convex/src/aggregate.rs — new file, no prior adversarial coverage
+:END:
+
+Probe validated by mutation testing rather than asserted: dropping =Gᵀz= from the
+gradient the dual sweep is handed, and dropping the substitution offset from a
+surviving row's right-hand side, were each caught (13 and 31 failures in 40
+instances). The =Gᵀz= defect is caught only by the bound-aware stationarity
+oracle — =pounce verify= alone passes it — which is why that oracle exists.
+
+Re-run after merging gh#492 (#498), which folds a constant row body into the
+row bounds at parse. Most generated rows now carry their constant in the C
+segment rather than pre-folded: 10 of 12 sampled models, all still classified
+LP/convex-QP where before #498 they would have been NLP and never reached this
+pass. Same reduction counts, same objectives, same verdicts as the pre-folded
+spelling — which is the claim, since they are the same constraints.
+
+Measured limit, stated because it changes what this run does and does not
+cover: the CLI's QP extractor lowers every variable bound to a row of =G=, so
+the =QpProblem= the convex presolve sees from a =.nl= has an empty box.
+Instrumenting the branch shows the transferred-bound multiplier
+re-attribution firing in 0 of 114 instances here — there is no box to
+transfer. That path is reached only by callers who build a =QpProblem= with
+=lb=/=ub= directly, and is covered at the library level by
+=crates/pounce-convex/tests/presolve_aggregation.rs= (a targeted fixture plus a
+randomized probe reaching it in 19 of 400 draws), where five injected defects
+in the recovery were each caught.
+
+** [2026-08-06] Constant row bodies folded into row bounds (nlp/.nl parse boundary, gh#492) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: no published instance; randomized LP family around a KNOWN feasible point, five constant spellings x five r-segment bound kinds
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: agrees with HiGHS to <1e-6 relative on all 999 instances
+:POUNCE_STATUS: Optimal Solution Found (999/999; 1 instance skipped, gh#496)
+:POUNCE_TIME: ~0.01s per instance
+:ORACLE: scipy HiGHS (linprog); rows re-evaluated in-script against the file's declared bounds; hand-folded twin model (primal + duals); interior-column stationarity
+:ORACLE_OBJECTIVE: matches
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_row_constant_fold.org]]
+:COVERAGE_TARGET: crates/pounce-nl/src/nl_reader.rs (parse_nl_text fold) - new code, no prior adversarial coverage
+:END:
+999 randomized LPs over 4 seeds, every row carrying a constant in its C<i>
+segment, plus 60 sentinel cases at |k| up to 1e18 and 8 decline cases. All
+999 classified LP and were accepted by pounce verify. The probe was
+mutation-tested: five of six injected defects caught, the sixth (no fold at
+all) is not a correctness defect and moved only the classified-LP counter
+(60 -> 33). Two defects in the probe itself were found and fixed en route
+(bounds rounded to 9 places made redundant equality systems inconsistent; a
+1e-6 interior margin called bound-active columns interior). One unrelated
+pre-existing pounce bug was found and filed: gh#496, a false
+primal-infeasible certificate at iteration 0 when two rank-deficient
+equality rows disagree by one ULP -- reproduced on origin/main at cad2b13
+with no C-segment content, so not reachable from gh#492.
+** [2026-08-06] Linear-equality variable elimination, Phase 6 (nlp/presolve, gh#487) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: randomized families built around a known feasible point x*; no published instance
+:KNOWN_OPTIMAL: n/a (property-based)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: 12000 fuzz instances + 120 end-to-end .nl solves, 0 failures
+:POUNCE_TIME: ~4 min total
+:ORACLE: pounce verify (independent KKT/feasibility vs the original .nl); central finite differences of the wrapper's own reduced eval_f/eval_g; in-script row re-evaluation
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-06_nlp_linear-eq-reduction.org]]
+:COVERAGE_TARGET: linear_eq_plan.rs / linear_eq_elim.rs — new files, no prior adversarial coverage
+:END:
+
+Probes validated by mutation testing: five injected defects (Hessian
+symmetric-pair x2 factor, bound-transfer sign, row constant, lift offset, dual
+recovery) were each caught. The row-constant defect initially escaped every
+probe — derivatives are blind to an affine offset — which is why the probe now
+carries a primal-fidelity check through =finalize_solution=.
+
+Recorded non-defect: a row whose constant lives in its =.nl= expression segment
+is tagged NonLinear by the reader, so the elimination declines it. The
+row-constant branch is therefore reachable only on the general TNLP path (C
+interface, GAMS, callbacks), not via =.nl=.
+
 ** [2026-08-05] l1-elastic infeasibility certificate under nonconvex step QPs (qp-active-set/certificate-soundness) - FAIL
 :PROPERTIES:
 :FAMILY: qp-active-set
@@ -4964,3 +5058,105 @@ identical before and after): when Phase 6 removes a column whose declared bound
 is active, no bound multiplier is produced for it at all and the reported duals
 are not a KKT multiplier set. Minimal repro in the issue.
 
+
+** [2026-08-07] AM-GM Constrained GP, sum obj / product constraint (exp/geometric program) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: AM-GM inequality (Hardy, Littlewood & Polya, "Inequalities" 2nd ed., Thm 9)
+:KNOWN_OPTIMAL: 6.0
+:POUNCE_OBJECTIVE: 5.9999999531e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0092s
+:ORACLE: cvxpy/Clarabel (DCP cp.exp model)
+:ORACLE_OBJECTIVE: 5.9999999959e+00
+:ORACLE_TIME: 0.0139s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-07_exp_sum_amgm_gp.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh GP shape: minimize x1+x2+x3 s.t. x1*x2*x3>=8. Log-transform makes the
+constraint purely affine, so the only nonlinearity is 3 chained Kexp
+epigraphs in the objective -- distinct from prior reciprocal-sum and
+Cauchy-Schwarz GP probes. Matches AM-GM closed form and cvxpy/Clarabel to
+~8e-9 relative error.
+
+** [2026-08-07] Cubic-Sum Budget Minimization, inactive box (power/p-norm epigraph p=3 + bound) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: convexity of t^3 on t>=0 + symmetric Lagrange stationarity
+:KNOWN_OPTIMAL: 111.111111... (3000/27)
+:POUNCE_OBJECTIVE: 1.1111108870e+02
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0122s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 1.1111111111e+02
+:ORACLE_TIME: 0.0126s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-07_power_cubic_sum_budget.org]]
+:COVERAGE_TARGET: -
+:END:
+min sum x_i^3 s.t. sum x_i=10, x_i>=1 (bound provably inactive at x_i=10/3).
+Probes that the pow-cone epigraph and a plain nonneg-cone row compose
+correctly in one problem without the inactive row perturbing multiplier
+bookkeeping. Matches closed form and cvxpy/Clarabel to 2e-7.
+
+** [2026-08-07] Weighted Fermat-Weber Facility Location (socp/weighted sum-of-norms) - PASS
+:PROPERTIES:
+:FAMILY: socp
+:SOURCE: Boyd & Vandenberghe Sec 8.7 (unweighted case), generalized with weights; Weiszfeld 1937 fixed-point oracle
+:KNOWN_OPTIMAL: none published (no closed form); Weiszfeld fixed point = 1.5883581166e+01
+:POUNCE_OBJECTIVE: 1.5883581166e+01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0102s
+:ORACLE: cvxpy/Clarabel AND independent Weiszfeld fixed-point iteration
+:ORACLE_OBJECTIVE: 1.5883581179e+01 (cvxpy); 1.5883581166e+01 (Weiszfeld)
+:ORACLE_TIME: 0.0111s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-07_socp_weighted_fermat_weber.org]]
+:COVERAGE_TARGET: -
+:END:
+4-point weighted facility location, unequal weights (no closed form).
+Cross-checked against TWO independent oracles: cvxpy/Clarabel (obj err
+8e-10) and Weiszfeld's algorithm, a non-conic non-cvxpy fixed-point method
+converged to 1e-14 (obj err 3.4e-16, x err 4.8e-08) -- essentially exact
+agreement.
+
+** [2026-08-07] Zakharov Function n=2 Global Polynomial Min (sos/unconstrained quartic, Lasserre order 2) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: Molga & Smutnicki "Test functions for optimization needs" (2005) Sec 2.19
+:KNOWN_OPTIMAL: 0.0
+:POUNCE_OBJECTIVE: -4.5313406830e-09 (lower_bound, is_exact=True)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0212s
+:ORACLE: 200-restart scipy BFGS + dense 601x601 grid refutation
+:ORACLE_OBJECTIVE: 3.6016161540e-18 (BFGS best); 0.0 (grid min)
+:ORACLE_TIME: 0.5632s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-07_sos_zakharov2d.org]]
+:COVERAGE_TARGET: -
+:END:
+Order-2 Lasserre relaxation is exact by Hilbert 1888 (<=2 vars, deg<=4).
+Bound validated as sound (never exceeds either independent witness);
+minimizer correctly recovered at the origin.
+
+** [2026-08-07] warm_start Forces NLP Path Under solver_selection=auto (autoroute/routing-contract) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: pounce.minimize docstring + python/pounce/_minimize.py L1114-1120
+:KNOWN_OPTIMAL: -2.5
+:POUNCE_OBJECTIVE: -2.5000000000e+00 (both r1 auto-routed and r2 warm_start-forced-NLP)
+:POUNCE_STATUS: 0 (both)
+:POUNCE_TIME: 0.0054s (r1) / 0.0039s (r2)
+:ORACLE: scipy SLSQP
+:ORACLE_OBJECTIVE: -2.5000000000e+00
+:ORACLE_TIME: 0.0032s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-07_autoroute_warmstart_forces_nlp.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh autoroute angle: not an answer-agreement check but a routing-DECISION
+contract check. Confirmed solver_selection="auto" + warm_start= correctly
+warns and forces the NLP path (info["solver"] not a convex tag) rather than
+silently keeping "auto" semantics inconsistent with a warm start built for
+the NLP path. Both numerical answers agree with scipy/SLSQP to <5e-10.

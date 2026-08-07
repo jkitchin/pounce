@@ -1,0 +1,49 @@
+#+TITLE: Adversary Run: AM-GM Constrained GP (sum objective, product constraint)
+#+DATE: 2026-08-07
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: geometric program, sum objective / product-lower-bound constraint
+:SOURCE: AM-GM inequality (Hardy, Littlewood & Polya, "Inequalities" 2nd ed., Thm 9)
+:KNOWN_OPTIMAL: 6.0
+:N_VARIABLES: 6 (3 log-vars y_i, 3 epigraph t_i)
+:N_CONSTRAINTS: 3 Kexp cones (dim 3 each) + 1 nonneg cone row
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per sandbox env adaptations; family-coverage table used instead, exp tied least-tested at 10)
+:END:
+
+Minimize $x_1+x_2+x_3$ subject to $x_1 x_2 x_3 \ge 8$, $x_i>0$. By AM-GM,
+$x_1+x_2+x_3 \ge 3(x_1x_2x_3)^{1/3} \ge 3\cdot 8^{1/3}=6$, equality at
+$x_1=x_2=x_3=2$. Log-transformed ($y_i=\ln x_i$): minimize
+$\sum e^{y_i}$ s.t. $\sum y_i \ge \ln 8$, encoded as 3 exponential-cone
+epigraphs $(y_i,1,t_i)\in K_{exp}$ plus one affine (nonneg-cone) inequality.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective        | Rel Err  | Wall Time |
+|-----------------+---------+-------------------+----------+-----------|
+| pounce          | optimal | 5.9999999531e+00  | 7.81e-09 | 0.0092s   |
+| cvxpy/Clarabel  | optimal | 5.9999999959e+00  | -        | 0.0139s   |
+
+Known optimal: 6.0
+
+pounce's objective matches both the closed-form AM-GM bound and the
+independent cvxpy/Clarabel conic solve to ~8e-9 relative error; the
+recovered $x$ matches $(2,2,2)$ to 1.6e-4 (IPM tolerance-scale, not a
+correctness issue).
+
+* Cross-check / Verification
+cvxpy oracle built directly in $x$-space via ~cp.exp~ (DCP-valid: exp of an
+affine expression is convex, sum of convex is convex), entirely independent
+of pounce's cone encoding. Agreement to ~7e-9 on the objective and ~1.6e-4
+on $x$ (well within IPM solve tolerance).
+
+* Verdict
+PASS -- pounce's exponential-cone solver correctly handles a GP whose only
+nonlinearity is in the objective epigraph with a purely affine feasible
+region, matching both the AM-GM closed form and an independent cvxpy/Clarabel
+solve.

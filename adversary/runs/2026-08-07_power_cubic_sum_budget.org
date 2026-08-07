@@ -1,0 +1,52 @@
+#+TITLE: Adversary Run: Cubic-Sum Budget Minimization (power cone + inactive box)
+#+DATE: 2026-08-07
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: p-norm epigraph (p=3) with equality budget + inactive box lower bound
+:SOURCE: convexity of t^3 on t>=0 + symmetric Lagrange stationarity (elementary)
+:KNOWN_OPTIMAL: 111.111111... (=3000/27)
+:N_VARIABLES: 6 (3 x_i, 3 epigraph t_i)
+:N_CONSTRAINTS: 3 pow cones (alpha=1/3, dim 3 each) + 3 nonneg rows + 1 equality
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per sandbox env adaptations; family-coverage table used instead, power tied least-tested at 10)
+:END:
+
+Minimize $\sum x_i^3$ s.t. $\sum x_i = 10$, $x_i \ge 1$. Symmetric
+Lagrange stationarity ($3x_i^2=\lambda\ \forall i$, unconstrained by the
+bound) forces $x_i=10/3$ for all $i$, which satisfies $10/3>1$ so the box
+is provably inactive. Known optimum $3(10/3)^3=3000/27\approx111.1111$.
+Encoded via pow-cone epigraph $(x_i,t_i,1)\in K_{pow}(\alpha=1/3)$
+($|x_i|\le t_i^{1/3}\Leftrightarrow x_i^3\le t_i$ for $x_i\ge0$), plus an
+explicit nonneg-cone row for the (inactive) bound $x_i\ge1$ and an
+equality block for the budget.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective        | Rel Err  | Wall Time |
+|-----------------+---------+-------------------+----------+-----------|
+| pounce          | optimal | 1.1111108870e+02  | 2.02e-07 | 0.0122s   |
+| cvxpy/Clarabel  | optimal | 1.1111111111e+02  | -        | 0.0126s   |
+
+Known optimal: 111.111111...
+
+pounce matches the closed-form optimum and cvxpy/Clarabel to 2e-7 relative
+error; $x$ matches $(10/3,10/3,10/3)$ to 2.7e-4.
+
+* Cross-check / Verification
+cvxpy oracle built with ~cp.power(x,3)~ over the same equality/bound
+constraints (DCP-valid for $x\ge0$, guaranteed by the $x_i\ge1$ bound).
+Independent conic solve agrees to 2e-7. The inactive-bound design verifies
+that the pow-cone epigraph and a plain nonneg cone row compose correctly in
+one problem without the inactive row perturbing the multiplier bookkeeping
+(all 3 nonneg-row multipliers should be ~0 at the solution -- pounce's
+reported dual for those rows was consistent with that).
+
+* Verdict
+PASS -- the power-cone epigraph correctly reproduces cubic-sum minimization
+under a budget with an inactive box bound, matching both the closed-form
+KKT solution and the independent cvxpy/Clarabel conic solve.

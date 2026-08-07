@@ -1,0 +1,55 @@
+#+TITLE: Adversary Run: Zakharov Function (n=2) Global Polynomial Minimum
+#+DATE: 2026-08-07
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: unconstrained quartic, Lasserre order 2 (exact by Hilbert 1888: nonneg polys in <=2 vars, deg<=4, are always SOS)
+:SOURCE: Zakharov function, Molga & Smutnicki "Test functions for optimization needs" (2005) Sec. 2.19
+:KNOWN_OPTIMAL: 0.0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: unconstrained
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per sandbox env adaptations; family-coverage table used instead, sos tied least-tested at 11, oldest last-run among ties)
+:END:
+
+$f(x_1,x_2)=x_1^2+x_2^2+(0.5x_1+x_2)^2+(0.5x_1+x_2)^4$. Sum of even powers
+of $x_1,x_2,(0.5x_1+x_2)$, so $f(x)=0 \Rightarrow x_1=x_2=0$; unique global
+minimizer at the origin, $f^*=0$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                  | Status  | Lower Bound / Obj  | Rel Err  | Wall Time |
+|--------------------------+---------+---------------------+----------+-----------|
+| pounce (sos_minimize)   | optimal | -4.5313406830e-09  | 4.53e-09 | 0.0212s   |
+| scipy multistart BFGS   | -       | 3.6016161540e-18   | 3.60e-18 | 0.5632s   |
+| dense grid (601x601)    | -       | 0.0                | -        | -         |
+
+Known optimal: 0.0
+
+pounce's ~is_exact=True~ with 1 recovered minimizer at $(0,0)$; the
+recovered minimizer's objective matches the reported lower bound. The
+lower bound (-4.5e-9, numerically indistinguishable from 0 at SDP solve
+tolerance) never exceeds either independent witness (200-start BFGS best:
+3.6e-18; dense grid min: 0.0), so it is a *valid* lower bound, not an
+unsound over-estimate.
+
+* Cross-check / Verification
+Two independent non-SOS refutation oracles: (1) 200-restart
+~scipy.optimize.minimize(method="BFGS")~ from uniform random starts in
+$[-5,5]^2$, best objective 3.6e-18 at $x\approx(-1.6\times10^{-9},
+-1.4\times10^{-10})$ -- consistent with the global min being exactly 0 at
+the origin; (2) a dense $601\times601$ grid over $[-3,3]^2$, minimum
+exactly 0.0 at the grid point nearest the origin. Neither witness is below
+pounce's reported bound (bound_valid=True), and the SOS relaxation reports
+~is_exact=True~ with a minimizer recovery whose own objective is
+self-consistent with the bound.
+
+* Verdict
+PASS -- the order-2 Lasserre relaxation is exact on this quartic (as
+guaranteed by Hilbert's 1888 theorem for <=2 variables), pounce recovers
+the correct unique minimizer, and the bound is validated as sound (not
+exceeding independent refutation witnesses) rather than merely close.

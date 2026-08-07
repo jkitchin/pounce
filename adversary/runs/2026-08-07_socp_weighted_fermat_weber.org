@@ -1,0 +1,48 @@
+#+TITLE: Adversary Run: Weighted Fermat-Weber Facility Location
+#+DATE: 2026-08-07
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: weighted sum-of-norms (SOC epigraph per term)
+:SOURCE: Boyd & Vandenberghe, Convex Optimization (2004) Sec. 8.7 (unweighted case), generalized with weights
+:KNOWN_OPTIMAL: none published (no closed form for 4 non-collinear weighted points); Weiszfeld fixed point used as ground truth
+:N_VARIABLES: 6 (2 location x, 4 epigraph t_i)
+:N_CONSTRAINTS: 4 SOC cones, dim 3 each
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per sandbox env adaptations; family-coverage table used instead, socp tied least-tested at 11, oldest last-run among ties)
+:END:
+
+Minimize $\sum_i w_i \|x-p_i\|_2$ over points
+$p=\{(0,0),(4,0),(2,3),(-1,2)\}$, weights $w=\{1,2,1,3\}$. No closed form
+for a non-symmetric weighted instance; cross-checked against (a) cvxpy/
+Clarabel (independent conic solve, DCP via ~cp.norm~) and (b) Weiszfeld's
+algorithm (1937 fixed-point iteration, converged to $\sim10^{-14}$ step
+size) -- two mutually-independent oracles, neither of which trusts pounce
+or each other's cone encoding.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective          | Wall Time |
+|---------------------+---------+---------------------+-----------|
+| pounce              | optimal | 1.5883581166e+01    | 0.0102s   |
+| cvxpy/Clarabel      | optimal | 1.5883581179e+01    | 0.0111s   |
+| Weiszfeld (fixed pt)| -       | 1.5883581166e+01    | -         |
+
+pounce $x=(-0.10066038, 1.61504127)$; cvxpy $x=(-0.10076052, 1.61514663)$;
+Weiszfeld $x=(-0.10066043, 1.61504126)$.
+
+* Cross-check / Verification
+- vs cvxpy/Clarabel: obj rel err 7.98e-10, x inf-err 1.05e-04.
+- vs Weiszfeld fixed point (independent, non-conic, non-cvxpy numerical
+  method): obj rel err 3.36e-16, x inf-err 4.77e-08 -- essentially exact
+  agreement, tighter than the cvxpy comparison (Clarabel's own solve
+  tolerance dominates that gap, not pounce's).
+
+* Verdict
+PASS -- pounce's SOC solver reproduces the weighted Fermat-Weber optimum to
+near machine precision against an independent fixed-point method, and
+matches cvxpy/Clarabel to solver-tolerance-scale agreement. No defect.

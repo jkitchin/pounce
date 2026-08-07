@@ -1,0 +1,213 @@
+#+TITLE: Adversary Run: Constant Row Bodies Folded into Row Bounds (gh#492)
+#+DATE: <2026-08-06>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: =.nl= parse boundary — linear rows carrying constant offsets
+:SOURCE: no published instance; randomized LP family built around a KNOWN feasible point, with scipy HiGHS as the external oracle
+:KNOWN_OPTIMAL: n/a (property-based, not a single instance)
+:N_VARIABLES: 4–8
+:N_CONSTRAINTS: 1–7
+:SELECTED_BY: topic-guidance (new code under review for gh#492)
+:COVERAGE_TARGET: crates/pounce-nl/src/nl_reader.rs — =parse_nl_text='s constant-row-body fold, brand new, zero adversarial coverage
+:END:
+
+The =.nl= format lets a writer leave a constant on the left of a constraint:
+
+\[ lo_i \le \sum_j a_{ij} x_j + k_i \le hi_i \]
+
+with $k_i$ living in the row's *nonlinear-part* expression segment rather than
+in the bound. The change under test rewrites this at the parse boundary: when
+row $i$'s =C<i>= body evaluates to a constant $k_i$, the reader subtracts
+$k_i$ from that row's bounds and replaces the body with zero, giving
+
+\[ lo_i - k_i \le \sum_j a_{ij} x_j \le hi_i - k_i . \]
+
+The claim is that this is exact — body and bound move together, so the
+feasible set, the active set, the objective, and every multiplier are
+unchanged — and that it fires on every constant and only on constants.
+
+* Method
+
+Nothing here validates pounce against pounce-with-the-fold-off; that binary
+no longer exists. Four oracles on a randomized family, plus two targeted
+batteries.
+
+The family: LPs with $n \in [4,8]$, $m \in [1,n-1]$, generated around a random
+feasible $x^*$ so every instance is feasible by construction. Every row
+carries a constant, written in one of five spellings — =literal= (=n3=),
+=add= (=o0=), =sub= (=o1=), =neg= (=o16=), =sqrt= (=o39=) — and takes one of
+all five =r=-segment bound kinds, including *free* rows, where both ±1e19
+sentinels are live at once. One row in five gets $k_i = 0$ to keep the
+nothing-to-fold path live inside the same generator.
+
+1. *scipy HiGHS* (=linprog=) on the model as the script assembles it from the
+   generator's own numbers. The constants are moved into the bounds *in
+   Python*; nothing in that path reads the =.nl=, so agreement is evidence
+   about the reader.
+2. *Rows re-evaluated against the file's own bounds.* Each row is recomputed
+   here as $\sum a_{ij} x_j + k_i$ — constant included — and checked against
+   the bounds the file *declares*, not the ones the reader derived. This is
+   the invented/lost-bound check.
+3. *The hand-folded model.* The same instance is also written with the
+   constant folded into the bound by hand and an empty =C<i>=. That file
+   reaches the reader with nothing to fold, so it exercises none of the new
+   code. Primal *and* duals must agree with the offset form.
+4. *Stationarity of the reported duals.* $(c + A^\mathsf{T}\lambda)_j \approx 0$
+   at every strictly-interior column, using only the generator's $c$/$A$ and
+   the =.sol= dual block.
+
+Two targeted batteries:
+
+- *Sentinels*, at $|k| \in \{3, 10^{17}, 10^{18}\}$ on upper-only, lower-only,
+  and free rows. The large magnitudes are the point: at everyday scale an
+  unguarded =g_l -= c= is absorbed by the sentinel's own ULP (2048 at 1e19)
+  and the defect is invisible. At 1e18 a shifted =-1e19= lands at =-9e18=, a
+  real bound.
+- *Declines*: a =log(-1)= body (non-finite) and an imported-function body
+  (=myfunc(2)=), neither of which may be pushed into a bound.
+
+=pounce verify= is also run on every instance, and is reported as the weak
+oracle it is here: it re-reads the =.nl= through the same reader, so it shares
+the fold and cannot by itself catch a bound the fold moved wrongly. It does
+catch a non-stationary or out-of-box point, so it is kept.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Probe                                      | Instances | Skipped | Classified LP | Failures |
+|--------------------------------------------+-----------+---------+---------------+----------|
+| row-constant fold, seed 20260806           |       250 |       0 |           250 |        0 |
+| row-constant fold, seed 987654321          |       249 |       1 |           249 |        0 |
+| row-constant fold, seed 13579              |       250 |       0 |           250 |        0 |
+| row-constant fold, seed 31415926           |       250 |       0 |           250 |        0 |
+| sentinel battery (15 cases × 4 runs)       |        60 |       - | -             |        0 |
+| decline battery (2 cases × 4 runs)         |         8 |       - | -             |        0 |
+| gh#490 linear-eq-reduction sweep, ×2 seeds |       240 |       0 | -             |        0 |
+
+The single skip is gh#496, filed from this run and unrelated to this change —
+see below. The last row is a regression check, not a new probe: gh#490's =.nl=
+sweep already emits row constants into =C<i>= segments, so it exercises
+exactly the path this change rewrites. It is unchanged and green.
+
+* Cross-check / Verification
+
+All 999 randomized instances agreed with HiGHS on the objective to better than
+1e-6 relative, satisfied every row *as the file declares it* including the
+constant, matched the hand-folded model on both the primal and the full dual
+block to better than 1e-6, and passed the interior-column stationarity check.
+All 999 were accepted by =pounce verify=. All 999 classified as LP — the
+routing claim, measured rather than asserted.
+
+* Mutation testing of the probe itself
+
+A probe that never fails is worth nothing, so six defects were injected into
+the fold one at a time, each inside an isolated git worktree so the primary
+checkout was never dirtied, and each reverted after. Run at 60 instances per
+mutation, seed 20260806.
+
+| injected defect | probe verdict | caught by |
+|-----------------+---------------+-----------|
+| =row_constant_value= always returns =None= (no fold) | PASS | *not a correctness defect* — see below |
+| shift added instead of subtracted (=+= c=) | FAIL (53) | HiGHS, row re-eval, hand-folded model, sentinels |
+| only =g_l= shifted, =g_u= forgotten | FAIL (41) | HiGHS, row re-eval, hand-folded model, sentinels |
+| sentinel presence guard removed | FAIL (2) | *sentinel battery only* |
+| finiteness check removed (fold a NaN) | FAIL (1) | decline battery |
+| funcall guard removed | FAIL (1) | decline battery, *after* strengthening |
+
+Four of these are worth recording.
+
+*The no-fold mutation passing is the correct result.* Without the fold the
+model is still solved correctly — it just goes to the general NLP solver
+instead of the convex route. The fold is a normalization, not a correctness
+fix, and the probe says so: the only number that moved was the classified-LP
+counter, 60 → 33. That counter is therefore a live signal and not decoration.
+
+*The sentinel guard was caught by nothing except the battery built for it.*
+Nearly a thousand randomized instances at ordinary magnitudes are blind to it,
+exactly as the ULP argument predicts. Property-based coverage does not
+substitute for a battery aimed at a known cliff.
+
+*The funcall mutation initially escaped, and that was this exercise's most
+useful result.* The first draft of the decline battery asserted only that the
+run did not reach optimality. But a model calling an unresolved external
+function fails either way — with the guard it dies later at external-function
+resolution ("AMPLFUNC is not set"), without it the fold reaches =eval_expr=
+with a =Funcall=, which panics by construction. "It failed" was a vacuous
+check. The battery now asserts *which* failure occurred, and the mutation is
+caught.
+
+*The non-finite mutation is worth quoting for what it produces.* Folding
+=log(-1)= into the bounds makes both bounds NaN, every bound-presence test
+then reads the row as *free*, and pounce returns "Optimal Solution Found" at
+$x = (3, 3)$ for a model containing an unsatisfiable row. That is the failure
+the finiteness guard exists to prevent, and it is a silent wrong answer rather
+than an error.
+
+* Defects found in the probe itself
+
+The first sweep reported two failures. Neither was in pounce, and in both
+cases the offset and hand-folded spellings behaved *identically* — which is
+the fold working. Both were fixed and are recorded here because they are the
+kind of thing that otherwise gets quietly deleted:
+
+1. *Bounds were rounded to 9 places* after being derived from $x^*$. The
+   generator draws several singleton equality rows on one column often enough,
+   and independently-rounded right-hand sides then pin that column to values
+   ~3e-10 apart. The model was genuinely inconsistent — the probe should not
+   have written it. Bounds now come straight from the row value at $x^*$.
+2. *The stationarity check called a column interior at 1e-6 from its bound.*
+   An IPM settles a bound-active column a small distance off that bound, so
+   such a column read as interior and the check demanded that the row duals
+   alone cancel a gradient a bound multiplier was carrying — a false positive
+   on a solve that matched HiGHS to 6e-10. The margin is now 1e-4.
+
+* Defect found in pounce (unrelated to gh#492): gh#496
+
+After fix (1), one instance still failed, and it turned out to be a real bug
+with nothing to do with this change. Reduced by exhaustive subset search to
+two rows on one column:
+
+#+begin_example
+min  -x0
+s.t. -2.830268 x0 =  0.13596324445199998
+      2.470924 x0 = -0.11870071803600002
+     -10 <= x0 <= 10
+#+end_example
+
+The system is rank-deficient (rank 1, two rows) and consistent: the two rows
+imply values of $x_0$ differing by 6.94e-18, one ULP, with row residuals
+around 1e-17. =pounce-convex= declares *primal infeasible at iteration 0*;
+HiGHS solves it. Making the right-hand sides exactly consistent fixes it, and
+so does an exact duplicate row, so it is the *inexactness* of the redundancy
+that fires, not the redundancy.
+
+Reproduced identically on =origin/main= at =cad2b13=, and the reproducer has
+no =C=-segment content at all, so it predates gh#492 and is not reachable from
+it. Filed as gh#496. The probe now counts such instances as skips rather than
+failures — visibly, with a printed counter, so it cannot silently swallow a
+regression.
+
+* Verdict
+
+PASS. No defect found in the constant-row-body fold across 999 randomized LPs
+against an external oracle, 60 sentinel cases at magnitudes where an unguarded
+shift is visible, and 8 decline cases. The probe was itself mutation-tested;
+five of six injected defects are caught and the sixth is not a defect.
+
+One unrelated pre-existing bug was found and filed (gh#496). One pre-existing
+wart was observed and *not* filed, because it is neither a correctness bug nor
+related to this change: a =.nl= that calls an imported function without
+=AMPLFUNC= set aborts with a Rust panic and a backtrace (=nl_reader.rs:2480=)
+rather than a clean solver error.
+
+* Coverage effect
+
+Not measured — this run was topic-driven (new code under review), not
+coverage-driven, and no combined-coverage report exists in this environment.
+The qualitative effect is that =parse_nl_text='s fold, its sentinel guard, and
+both of its decline paths went from zero adversarial coverage to
+mutation-verified.

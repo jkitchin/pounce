@@ -1,0 +1,62 @@
+#+TITLE: Adversary Run: warm_start Forces the NLP Path Under solver_selection="auto"
+#+DATE: 2026-08-07
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: routing-transparency contract (warm_start vs auto), not a numerical-error probe
+:SOURCE: pounce.minimize docstring + python/pounce/_minimize.py ~L1114-1120 (warm_start != None and selection != "nlp" -> warn + force selection="nlp"). Problem: bound-constrained convex QP, closed-form KKT.
+:KNOWN_OPTIMAL: -2.5 at x=(1,2)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 2 bounds (x>=0) + 1 inactive inequality (x1+x2<=5)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per sandbox env adaptations; family-coverage table used instead, autoroute tied least-tested at 10)
+:END:
+
+$f(x)=0.5x_1^2+0.5x_2^2-x_1-2x_2$ s.t. $x_1,x_2\ge0$, $x_1+x_2\le5$
+(inactive). Unconstrained stationary point $(1,2)$ is feasible, so
+$x^*=(1,2)$, $f^*=-2.5$.
+
+Two calls: (r1) ~solver_selection="auto"~, no warm_start -- expected to
+route to the convex QP solver (~info["solver"]~ set). (r2) same options
+plus a ~WarmStart~ captured from r1 -- per the docstring and the code path
+cited above, this must *force* the NLP path (warn, and ~info["solver"]~
+must NOT show a convex-solver tag), not silently honor "auto" and use the
+convex solver while ignoring (or mis-seeding) the warm start.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Run                        | Status | Objective  | x        | solver tag | Wall Time |
+|-----------------------------+--------+------------+----------+-------------+-----------|
+| r1: auto, no warm_start     | 0      | -2.5000000 | (1,2)    | 'qp-ipm'    | 0.0054s   |
+| r2: auto + warm_start       | 0      | -2.5000000 | (1,2)    | None        | 0.0039s   |
+| oracle: scipy SLSQP         | -      | -2.5000000 | (1,2)    | -           | 0.0032s   |
+
+Known optimal: -2.5
+
+r1 correctly routed to the convex QP solver (solver tag ~'qp-ipm'~). r2,
+with an auto selection *and* a warm start, correctly fell back to the NLP
+path (~solver tag None~, i.e. not a convex-solver tag) and raised the
+documented ~UserWarning~ ("warm_start= runs on the NLP path;
+solver_selection='auto' is ignored for this solve."). Both objectives and
+solutions match the closed-form optimum and the independent scipy/SLSQP
+oracle to <5e-10.
+
+* Cross-check / Verification
+Independent oracle: ~scipy.optimize.minimize(method="SLSQP")~ on the same
+callable ~fun~/~jac~/bounds/constraint, entirely outside pounce. Agreement
+to machine-precision-scale (rel err 0 to 4.6e-12) on both r1 and r2.
+Routing-contract check: ~r1_routed_convex=True~,
+~r2_fell_back_to_nlp=True~, ~r2_warned=True~ -- all three expected
+conditions held.
+
+* Verdict
+PASS -- solver_selection="auto" combined with warm_start= is handled
+exactly as documented: the convex fast path is used only when no warm
+start is supplied, and supplying one deterministically (and audibly, via
+the warning) forces the NLP path rather than silently either ignoring the
+warm start or silently keeping "auto" bookkeeping inconsistent with the
+actual route taken. No contract violation found.
