@@ -1,0 +1,347 @@
+#+TITLE: Exit status on an infeasible model, as a function of the infeasibility gap
+#+DATE: 2026-08-06
+
+* Summary
+
+*Status: found the defect, filed as gh#508, fixed by =097a4719=. This file is
+now the regression guard, and it passes.* Sections 1-2 carry both the pre-fix
+and the post-fix measurement, because the /shape/ of the old boundary is what
+made the diagnosis, and a guard that no longer says what it guards against
+decays into a test nobody can read.
+
+Adjacent probe to gh#505 (David Bernal). That issue reports a point IPOPT
+accepts and POUNCE calls locally infeasible, and names gh#379 / gh#446 /
+gh#138 / gh#119 as the same family: /a good or interpretable point returned
+under the wrong status/. Every prior attack on that family came from the
+"false infeasibility on a feasible model" side. This one comes from the other
+side — the model really is infeasible, and the only question is which status
+comes out.
+
+*Before the fix, 20 of 60 cells returned =solve_result_num = 500=* — Pyomo
+=internalSolverError=, "your solver broke" — on a two-line model that is simply
+infeasible.
+
+The finding was never the count. It was the /shape/ of the boundary: it was
+governed by =max(100·tol, 1e-4)=, a threshold in KKT-error units. Consequently
+=constr_viol_tol= — the option that declares what "violated" means — did not
+move it at all, and *loosening* =tol= widened the failure band, which is the
+opposite of what a user does when a solve is struggling. At =tol=1e-4= a model
+infeasible by a full 1% came back as an internal error.
+
+Filed as gh#508 — /not/ a duplicate of gh#505: that one is `200` where `100`
+was right on a feasible model, this one is `500` where `200` was right on an
+infeasible one, and fixing either leaves the other standing.
+
+*After =097a4719=, the guard passes: zero cells return a failure status while
+violating =constr_viol_tol=.* Seven cells still return 500, all of them cells
+whose violation is /below/ the declared tolerance — see §5, which also records
+the smaller inconsistency that remains there and why it is noted rather than
+asserted on.
+
+Control arm clean before and after: no false infeasibility on any feasible
+instance, and POUNCE beat IPOPT on three of the seven.
+
+* The model
+
+#+begin_src
+min (x - 5)^2   s.t.   x^2 + delta == 0
+#+end_src
+
+Infeasible for every =delta > 0=. The violation =½‖c‖²= has a strict local
+minimum at =x = 0=, where the violation is exactly =delta= and
+=Jᵀc = 2x(x² + delta) = 0=, so restoration converges there and no local move
+reduces the violation. The honest verdict is "converged to a point of local
+infeasibility" at every =delta=, and =delta= /is/ the violation POUNCE reports
+— which makes the threshold measurable to the digit.
+
+Nothing about the model is adversarial in construction. It is the smallest
+thing that is infeasible with a controllable gap.
+
+* What the oracle is and is not good for
+
+IPOPT 3.14.19 on the identical =.nl= with identical options, classified off its
+own =.sol= by the same function applied to POUNCE. Classifying POUNCE by its
+=objno= code and IPOPT by its console banner would be two different
+measurements dressed up as a comparison, so both are read the same way.
+
+Read that way, *the oracle is not clean either*: on 7 of 60 cells IPOPT's own
+=.sol= carries =solve_result_num = 501= (restoration failure), the same 500+
+band that Pyomo maps to =internalSolverError=. An earlier draft of this report
+claimed "IPOPT never returns a failure status on any cell"; that was read off
+the banner and is false. The finding does not rest on it.
+
+What survives is narrower and still sharp (pre-fix counts):
+
+| cells (of 60)                                        | count |
+|------------------------------------------------------+-------|
+| POUNCE 500+ (=Error in step computation=)             |    20 |
+| IPOPT 500+ (=Restoration Failed!=, code 501)          |     7 |
+| POUNCE 500+ *while IPOPT returns a clean 200*         |    11 |
+| IPOPT 500+ while POUNCE returns a clean 200           |     4 |
+
+On those 11 cells IPOPT gave the interpretable, correct answer — locally
+infeasible — and POUNCE reported that it broke.
+
+Post-fix the same four rows read 5 / 7 / *0* / 7. The third row is the one that
+mattered and it is empty: there is no longer a cell where IPOPT certifies local
+infeasibility and POUNCE reports an internal error. On all five cells where
+POUNCE still returns 500, IPOPT does not certify infeasibility either — it
+reports the point as solved, the gap being smaller than its own tolerances.
+The oracle's own 7 are unchanged, since nothing about IPOPT moved; POUNCE now
+returns a clean 200 on all of them, which is the fourth row going 4 → 7.
+
+The load-bearing evidence is not the comparison at all. It is §2 below.
+
+* Results
+
+** 1. The failure band, and how it moves with =tol=
+
+=constr_viol_tol=1e-6=, =acceptable_tol=1e-12= (so the acceptable-level exit is
+out of the picture and only the failure/infeasible decision is measured).
+"seen" is what a modelling layer receives, classified from the =.sol='s
+=objno= line rather than the console banner.
+
+*Before =097a4719=:*
+
+| tol  | threshold | cells returning FAILURE(500) out of 15                |
+|------+-----------+-------------------------------------------------------|
+| 1e-8 |      1e-4 | 4  (delta = 1e-9, 1e-7, 1e-6, 1e-4)                   |
+| 1e-6 |      1e-4 | 3  (delta = 1e-9, 3e-5, 1e-4)                         |
+| 1e-5 |      1e-3 | 6  (delta = 1e-9, 3e-6, 3e-5, 1e-4, 3e-4, 1e-3)       |
+| 1e-4 |      1e-2 | 7  (delta = 1e-8, 3e-6, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2) |
+
+The band tracked =max(100·tol, 1e-4)= exactly. At =tol=1e-5= the boundary sat
+at =1e-3=: =delta=1e-3= failed, =delta=3e-3= was reported infeasible. At
+=tol=1e-4= the boundary was =1e-2=: =delta=1e-2= failed, and everything from
+=3e-4= to =1e-2= — five consecutive gaps — came back as an internal error.
+
+The threshold was a strict =>=, so a violation landing exactly on it took the
+failure branch. =delta=1e-4= at =tol=1e-6= and =tol=1e-8= was that cell, and it
+failed in every run. (The fix keeps a comparison that fires on equality, but
+now against =constr_viol_tol=, where "violation equals the declared tolerance"
+is a violated constraint by definition rather than by accident.)
+
+The two branches also separated by cost. Within =delta ≤ 1e-2=, the
+=infeasible= verdicts arrived in 22-48 iterations and the failures took 65-802
+— so the failing cells were not short-circuiting, they ground and then gave up.
+(The =delta=1e-1= cells take 229-258 iterations and still return =infeasible=.)
+
+*After =097a4719=:*
+
+| tol  | threshold | cells returning FAILURE(500) out of 15 |
+|------+-----------+----------------------------------------|
+| 1e-8 |      1e-6 | 2  (delta = 1e-9, 1e-7)                |
+| 1e-6 |      1e-6 | 1  (delta = 1e-9)                      |
+| 1e-5 |      1e-6 | 1  (delta = 1e-9)                      |
+| 1e-4 |      1e-6 | 1  (delta = 1e-8)                      |
+
+The column that used to move with =tol= no longer does: the threshold is
+=constr_viol_tol=, which was held at =1e-6= across all four rows. Every gap at
+or above it — 1e-6 through 1e-1, ten of the fifteen deltas, in all four rows —
+returns a clean =200=. Nothing above the declared tolerance fails any more, at
+any =tol=.
+
+The five that remain all sit /below/ =1e-6=; they are §5's business, not
+gh#508's.
+
+** 2. =constr_viol_tol= now moves the boundary, and it is the only thing that does
+
+Same three gaps, =tol= fixed at =1e-6=, =constr_viol_tol= swept four orders.
+This is the load-bearing section: it needs no oracle, because it is a statement
+about POUNCE's own option semantics.
+
+*Before =097a4719=:*
+
+| constr_viol_tol | delta=1e-5 | delta=3e-5   | delta=1e-4   |
+|-----------------+------------+--------------+--------------|
+| 1e-8            | infeasible | FAILURE(500) | FAILURE(500) |
+| 1e-6            | infeasible | FAILURE(500) | FAILURE(500) |
+| 1e-5            | infeasible | FAILURE(500) | FAILURE(500) |
+| 1e-3            | infeasible | FAILURE(500) | FAILURE(500) |
+
+Identical down the column. If the boundary encoded "is this violation real",
+the option that declares what a real violation is would move it. The threshold
+was built from =tol=, a tolerance on the KKT error — a different quantity in
+different units. The bottom row was the sharpest reading: at
+=constr_viol_tol=1e-3= a violation of =1e-4= is /inside/ the user's declared
+feasibility tolerance, and the answer was an internal error.
+
+*After =097a4719=:*
+
+| constr_viol_tol | delta=1e-5 | delta=3e-5   | delta=1e-4   |
+|-----------------+------------+--------------+--------------|
+| 1e-8            | infeasible | infeasible   | infeasible   |
+| 1e-6            | infeasible | infeasible   | infeasible   |
+| 1e-5            | infeasible | infeasible   | infeasible   |
+| 1e-3            | infeasible | FAILURE(500) | FAILURE(500) |
+
+The top three rows are gaps at or above the declared tolerance, and all nine
+now report cleanly. The bottom row is gaps /below/ it, where a 500 is the
+intended answer — the user has said violations under =1e-3= do not count as
+violations, so POUNCE declines to certify local infeasibility rather than
+certifying something the user's own tolerance contradicts.
+
+That the table changed at all is the fix. That it changed only in the row where
+the deltas cross the tolerance is the fix being right.
+
+The =delta=1e-5= cell in the bottom row is the exception, and §5 is about it.
+
+** 3. Console banner vs =.sol= status — no longer reproduces
+
+On the original run (=main= at a694ea31) two cells printed the MC64 re-solve's
+second =EXIT:= banner while leaving the first solve's verdict in the =.sol=:
+
+| tol  | delta | console                    | .sol       |
+|------+-------+----------------------------+------------|
+| 1e-4 |  1e-9 | Error in step computation. | infeasible |
+| 1e-4 |  1e-1 | Maximum Iterations Exceeded | infeasible |
+
+A user reading the terminal and the same user's Pyomo script got different
+answers about the same solve. Two banners is expected (the re-solve is
+deliberate, and it announces itself); the two disagreeing is not.
+
+*Neither cell splits on the current build*: the probe's banner-split detector
+fires zero times at =4a5dca8a=. Both now print =infeasible= on the console and
+carry =200= in the =.sol=. This was never filed on its own and was not what
+=097a4719= set out to change, so it is recorded as observed-then-gone rather
+than as fixed; the detector stays in the probe, and if a split reappears the
+run will say so.
+
+The second row is still worth its own look, and that part /does/ persist: 3000
+iterations, and the constraint violation POUNCE reports at the end is *1.49*,
+against a =delta= of =0.1= — it wanders an order of magnitude away from the
+=x=0= minimum of the violation that every other cell in the column finds in ~40
+iterations. Only the status disagreement went away, not the wandering.
+
+** 4. Control arm — feasible models in the same residual regime
+
+gh#505's regime is a /feasible/ model whose absolute residual is floored by the
+row's own magnitude. Seven instances of a chain whose coefficient grows to
+1e14, so the late rows cannot be driven below ~K·eps:
+
+| n  |    K0 | rho |    Kmax | pounce     |       cv | ipopt      |
+|----+-------+-----+---------+------------+----------+------------|
+| 20 |  1e+0 | 1.0 |   1.0e0 | optimal    | 4.44e-16 | optimal    |
+| 20 |  1e+6 | 1.0 |   1.0e6 | optimal    | 1.40e-09 | optimal    |
+| 20 | 1e+10 | 1.0 |  1.0e10 | acceptable | 3.81e-06 | acceptable |
+| 20 | 1e+12 | 1.0 |  1.0e12 | acceptable | 2.44e-04 | acceptable |
+| 20 | 1e+13 | 1.0 |  1.0e13 | optimal    | 0.00e+00 | max-iter   |
+| 20 | 1e+14 | 1.0 |  1.0e14 | optimal    | 0.00e+00 | max-iter   |
+| 36 |  1e+4 | 2.0 |  1.7e14 | optimal    | 2.91e-11 | max-iter   |
+
+No false infeasibility anywhere, and POUNCE reaches the optimum on the three
+hardest instances where IPOPT exhausts its iteration budget. The acceptable
+path fires exactly where it should. This is the arm that would catch a probe
+whose infeasible verdict fired indiscriminately, and it stays clean. Identical
+before and after the fix, which is the point of a control.
+
+** 5. What is left below the tolerance, and why the guard does not assert on it
+
+Seven cells still return =500= after the fix, and all seven have a violation
+strictly inside the declared =constr_viol_tol=. That much is deliberate: the
+user has said gaps that small do not count as violations, so certifying "this
+model has no solution" would contradict the user's own tolerance, and
+=Error in step computation= is the honest refusal.
+
+What is /not/ deliberate is that below the threshold the two statuses are
+handed out inconsistently. At =tol=1e-8=, =constr_viol_tol=1e-6=:
+
+| delta | seen         |
+|-------+--------------|
+|  1e-9 | FAILURE(500) |
+|  1e-8 | infeasible   |
+|  3e-8 | infeasible   |
+|  1e-7 | FAILURE(500) |
+|  3e-7 | infeasible   |
+
+Five gaps, all equally inside the tolerance, two verdicts, no ordering. Same
+shape in §2's bottom row: at =constr_viol_tol=1e-3=, =delta=1e-5= comes back
+=infeasible= while =3e-5= and =1e-4= come back =500=.
+
+The mechanism is that two different exits can end these runs and only one of
+them was taught the new question. The =ConvergenceStatus::LocallyInfeasible=
+detector (=ipopt_alg.rs:1743=) returns =LocalInfeasibility= unconditionally;
+the restoration-cycle exit (=:2602=) is the one =097a4719= rewrote to consult
+=constr_viol_tol=. Which of the two fires depends on how the run happens to
+stall, which is why the verdict looks arbitrary in =delta=.
+
+Deliberately not asserted on, for two reasons. It is a different defect from
+gh#508 — that one was "the threshold is in the wrong units", this one is "two
+exits apply different standards" — and pinning it would require deciding which
+standard is right, which is a design question rather than a measurement. And a
+guard that fails on it would stop guarding the thing it was written for. Noted
+here so the next pass over this region has the measurement already made.
+
+* Two attacks that did NOT find anything
+
+Recorded because a negative result on a well-aimed attack is information about
+the code, not about the probe.
+
+** The relative-violation measure, attacked through cancellation
+
+=relative_c_infeasibility_max= divides =|c_i|= by the declared RHS, gated by
+=row_noise_floor = κ·eps·‖J_row‖_∞·‖x‖_∞=. That floor carries no row length,
+by explicit design (the doc comment records that the per-row =|J|·|x|= version
+was implemented and reverted because it regressed QETAMACR, QSCORPIO and
+QPILOTNO of gh#446). So a /dense/ row should be able to beat it: summation
+roundoff over =n= large, nearly-cancelling terms is ~=n·eps·X=, while the floor
+sees only =eps·X=.
+
+Eight instances of =Σ_j x_j == b= with =n= up to 2000, =|x_j|= up to 1e4, and
+=b= from 1e-10 to 1.0, chosen so =b= sits above the floor but below
+=n·eps·X/0.01=. All eight returned =Optimal Solution Found= with the relative
+violation at 4e-4 or below. The IPM drives the residual far better than the
+summation-roundoff bound predicts, and the estimate the attack was built on is
+simply not tight. The floor holds.
+
+** gh#505's own regime, reproduced in miniature
+
+The feasible chain above /is/ that attempt (a Landau-transform factor growing
+geometrically along a horizon, as in the =1/(H−S)²= term that grows 1.9e4 →
+7.7e8 in the reporter's model). It does not reproduce gh#505: POUNCE's
+acceptable-level path fires correctly at every scale, and beats IPOPT at the
+top of the range. Whatever routes the reporter's 4666-variable instance to the
+infeasibility exit is not row scale on its own.
+
+* Adjacent, noted, not probed
+
+Two things read out of the same code that this run did not measure, listed so
+the next pass has somewhere to start.
+
+- =acceptable_iter= defaults to *15* consecutive qualifying iterates while
+  =infeas_max_streak= defaults to *5*. Where both bands are live — and the
+  overlap =(infeas_viol_kappa·constr_viol_tol, acceptable_constr_viol_tol]= is
+  non-empty by construction — the infeasibility exit wins a race the acceptable
+  exit would have won ten iterations later. /Posted to gh#505 as a hypothesis
+  with a falsification test attached; the reporter ran it, and =acceptable_iter=5=
+  flips that instance to =Solved To Acceptable Level=. Confirmed, still open./
+- The four exits that can fire on a stalled restoration disagree about whether
+  to consult a stored acceptable point: =ipopt_alg.rs:2628= and =:2658= go
+  through =terminate_acceptable_or=, while =:2724= and the
+  =ConvergenceStatus::LocallyInfeasible= arm at =:1743= do not. The gh#274
+  rationale covers =:2724=; it is not obvious it covers =:1743=. (The three
+  restoration-exit line numbers are post-=097a4719=; they were =:2542= /
+  =:2572= / =:2638= when first read. The =:1743= arm did not move.)
+- §5's sub-tolerance inconsistency between the =:1743= detector and the =:2602=
+  cycle exit. Measured, not filed.
+
+* Reproduction
+
+#+begin_src sh
+cargo build --release -p pounce-cli
+./.venv-qa/bin/python adversary/runs/2026-08-06_nlp_infeasible_gap_status.py
+#+end_src
+
+Exits non-zero when a cell returns a failure status while its reported
+violation is at or above the declared =constr_viol_tol= — i.e. when gh#508
+regresses. Cells whose violation is inside the tolerance are printed as =by
+design= and do not fail the run; see §5.
+
+Deterministic in both directions: the same 20 cells failed on every pre-fix
+run, across three runs, and the post-fix run has zero failures with the same
+seven =by design= cells each time.
+
+Environment (post-fix numbers throughout, except where a table is explicitly
+labelled pre-fix): POUNCE 0.9.0 (=main= at 4a5dca8a, which contains =097a4719=),
+IPOPT 3.14.19 (Darwin arm64, ASL 20241202), Pyomo 6.10.1, macOS arm64. The
+pre-fix numbers were taken at =main= at a694ea31.

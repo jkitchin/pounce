@@ -10,7 +10,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     14 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321) |
+| nlp             |     15 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
 | lp              |     11 | 2026-08-06 | —             |
 | qp              |     11 | 2026-08-06 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
@@ -25,6 +25,76 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     11 | 2026-08-06 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-06] Exit status vs infeasibility gap (nlp/infeasible-by-construction, adjacent to gh#505) - FAIL, FIXED gh#508
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: no published instance — min (x-5)^2 s.t. x^2 + delta == 0, whose infeasibility gap is an exact input parameter and whose violation has a strict local minimum with J^T c = 0
+:KNOWN_OPTIMAL: n/a — infeasible by construction; the property under test is the status, not the optimum
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: at a694ea31, 20/60 cells returned solve_result_num=500 (Pyomo internalSolverError) on an infeasible model; 11 of those where IPOPT returned a clean 200. Fixed by 097a4719; at 4a5dca8a the same sweep has 0 cells failing above constr_viol_tol, and the 11-cell contrast row is empty
+:POUNCE_TIME: ~4 min for all 60 cells + controls
+:ORACLE: IPOPT 3.14.19 on the identical .nl with identical options, classified off its own .sol by the same classifier (NOT by banner); plus an oracle-free arm — constr_viol_tol swept four orders with tol fixed
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: ~1 min
+:VERDICT: FAIL -> FIXED (gh#508, 097a4719); the probe is now the regression guard and exits 0
+:REPORT: [[file:runs/2026-08-06_nlp_infeasible_gap_status.org]]
+:COVERAGE_TARGET: crates/pounce-algorithm/src/ipopt_alg.rs:2602 (was :2517) — the LocalInfeasibility/ErrorInStepComputation cycle-exit decision. No prior adversarial coverage; the whole family had only been attacked from the false-infeasibility-on-a-feasible-model side.
+:END:
+
+Adjacent to gh#505, from the opposite side: not "is a feasible point called
+infeasible" but "when the model really is infeasible, which of two failure
+statuses comes out". The answer was decided at =ipopt_alg.rs:2517= by
+=unscaled_primal_inf_max > max(100·tol, 1e-4)= — a threshold on the constraint
+violation built out of =tol=, a tolerance on the KKT error, with a hard-coded
+floor and no reference to =constr_viol_tol=.
+
+Two consequences, both measured (pre-fix):
+
+- =constr_viol_tol= swept 1e-8 → 1e-3 with =tol= fixed moved the boundary *not
+  at all*. At =constr_viol_tol=1e-3= a violation of =1e-4= — inside the user's
+  own declared feasibility tolerance — returned an internal error. This arm
+  needs no oracle; it was an internal contradiction in POUNCE's option
+  semantics.
+- The band tracked =max(100·tol, 1e-4)= exactly, so *loosening* =tol= widened
+  it: 4 failing cells at =tol=1e-8=, 7 at =tol=1e-4=, where five consecutive
+  gaps from =3e-4= to =1e-2= returned =solve_result_num=500= — including a
+  model infeasible by a full 1%.
+
+The oracle is *not* clean here and the finding does not rest on it: IPOPT's own
+=.sol= carries 501 (restoration failure) on 7 of 60 cells. An earlier draft
+claimed "IPOPT never fails on any cell"; that was read off the console banner
+rather than the =.sol= and was false. Corrected by classifying both solvers the
+same way, which is what the run now does. The surviving pre-fix comparison was
+11 cells where IPOPT returned a clean 200 and POUNCE reported that it broke.
+
+Control arm (7 feasible ill-conditioned models in gh#505's residual regime):
+clean — zero false infeasibility, and POUNCE reaches the optimum on the three
+hardest where IPOPT exhausts its iteration budget.
+
+Two attacks in this run found nothing, recorded in the report because a
+negative on a well-aimed attack is information: the =row_noise_floor='s missing
+row-length term does *not* let a dense nearly-cancelling row read as violated
+(the IPM beats the summation-roundoff bound the attack was built on), and
+gh#505's Landau-transform scale regime does not reproduce gh#505 in miniature —
+so row scale alone is not that issue's trigger.
+
+Filed as gh#508, fixed by 097a4719, which asks "is this violation real" with
+=constr_viol_tol= instead of =max(100·tol, 1e-4)=. Re-measured on the fix
+(=main= at 4a5dca8a): the §2 sweep now moves with =constr_viol_tol= and with
+nothing else, and every gap at or above the declared tolerance returns a clean
+200 at all four values of =tol=. The probe's pass criterion was rewritten to
+match the post-fix contract — a 500 counts as a failure only when the reported
+violation is at least =constr_viol_tol= — and it now exits 0.
+
+Two things noted on the re-run, neither filed. The banner/=.sol= disagreement
+of §3 no longer reproduces (observed-then-gone, not deliberately fixed). And
+below the tolerance the two exits still disagree with each other: the
+=ConvergenceStatus::LocallyInfeasible= detector at =:1743= returns 200
+unconditionally while the cycle exit at =:2602= returns 500, so which verdict a
+sub-tolerance gap gets looks arbitrary in =delta=. Smaller and different from
+gh#508; measured in §5 of the report, left un-asserted so the guard keeps
+guarding what it was written for.
+
 ** [2026-08-06] Doubleton-equality aggregation in the convex presolve (qp/lp, gh#494) - PASS
 :PROPERTIES:
 :FAMILY: qp
