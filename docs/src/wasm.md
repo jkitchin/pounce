@@ -184,6 +184,14 @@ instead of surfacing later as an unrelated parse error.
 
 - **Single-threaded.** No threads are spawned; rayon-parallel paths run
   serially. Results are unaffected.
+- **No in-process iteration-history capture.** The Wasm build does not install
+  the thread-scoped tracing collector, so `pounce_rs::Nlp::capture_iterations()`
+  and `IpoptApplication::enable_iter_history()` (including the CLI/Python
+  full-detail paths) return an empty `stats.iterations` vector. The scalar
+  `iteration_count` remains available.
+- **No live-iterate inspection.** `GetIpoptCurrentIterate` and
+  `GetIpoptCurrentViolations` report “not available” because the callback
+  context is not installed in the Wasm build.
 - **No AMPL imported functions.** A model that calls compiled-C external
   functions (`funcadd_ASL` — IDAES property packages, for instance) needs a
   dynamic loader the browser sandbox does not provide. The summary flags

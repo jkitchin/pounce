@@ -23,7 +23,10 @@ out="$root/target/$target/release/pounce_wasm.wasm"
 
 # wasm-opt (binaryen) is optional; it typically takes another ~15% off.
 if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -Oz --enable-bulk-memory "$out" -o "$here/web/pounce.wasm"
+  # Rust's wasm32-wasip1 code uses non-trapping float-to-int conversions.
+  # Keep the feature enabled when Binaryen validates the module.
+  wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd \
+    "$out" -o "$here/web/pounce.wasm"
 else
   cp "$out" "$here/web/pounce.wasm"
 fi

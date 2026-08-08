@@ -39,6 +39,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::cell::RefCell;
+use std::mem::MaybeUninit;
 
 use pounce_common::types::{Index, Number};
 use pounce_nlp::solve_statistics::IterRecord;
@@ -58,10 +59,45 @@ pub const RESTORATION_SPAN: &str = "restoration";
 
 // ---- Per-solve capture slot ----
 
+/// A TLS cell whose storage does not register a thread-local destructor.
+struct CaptureSlot {
+    value: MaybeUninit<Option<Vec<IterRecord>>>,
+    initialized: bool,
+}
+
+impl CaptureSlot {
+    const fn new() -> Self {
+        Self {
+            value: MaybeUninit::uninit(),
+            initialized: false,
+        }
+    }
+
+    fn get(&self) -> Option<&Option<Vec<IterRecord>>> {
+        self.initialized.then(|| {
+            // SAFETY: `initialized` is set only after `value` is initialized.
+            unsafe { self.value.assume_init_ref() }
+        })
+    }
+
+    fn get_mut(&mut self) -> &mut Option<Vec<IterRecord>> {
+        if !self.initialized {
+            self.value.write(None);
+            self.initialized = true;
+        }
+        // SAFETY: the branch above initializes `value` before this access.
+        unsafe { self.value.assume_init_mut() }
+    }
+
+    fn replace(&mut self, value: Option<Vec<IterRecord>>) -> Option<Vec<IterRecord>> {
+        std::mem::replace(self.get_mut(), value)
+    }
+}
+
 thread_local! {
     /// Active capture buffer for the current solve, or `None` when no
     /// solve on this thread is recording its iteration history.
-    static CAPTURE: RefCell<Option<Vec<IterRecord>>> = const { RefCell::new(None) };
+    static CAPTURE: RefCell<CaptureSlot> = const { RefCell::new(CaptureSlot::new()) };
 }
 
 /// Set once at subscriber install when `POUNCE_LOG_FORMAT=json`, so the
@@ -88,7 +124,7 @@ pub fn iteration_event_wanted() -> bool {
     if JSON_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
         return true;
     }
-    CAPTURE.with(|c| c.borrow().is_some())
+    CAPTURE.with(|c| c.borrow().get().is_some_and(Option::is_some))
 }
 
 /// RAII activation of per-iteration capture for one solve.
@@ -108,7 +144,7 @@ pub struct IterCaptureGuard {
 impl IterCaptureGuard {
     /// Begin capturing iteration records on this thread.
     pub fn start() -> Self {
-        let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
+        let prev = CAPTURE.with(|c| c.borrow_mut().replace(Some(Vec::new())));
         Self { prev }
     }
 
@@ -118,10 +154,9 @@ impl IterCaptureGuard {
     pub fn finish(mut self) -> Vec<IterRecord> {
         let prev = self.prev.take();
         let captured = CAPTURE
-            .with(|c| std::mem::replace(&mut *c.borrow_mut(), prev))
+            .with(|c| c.borrow_mut().replace(prev))
             .unwrap_or_default();
-        // Skip `Drop`: it would re-restore `self.prev` (now `None`) and
-        // clobber the buffer we just put back for an enclosing guard.
+        // `Drop`would re-restore `self.prev`
         std::mem::forget(self);
         captured
     }
@@ -131,14 +166,16 @@ impl Drop for IterCaptureGuard {
     fn drop(&mut self) {
         // Restore the previous buffer if `finish` wasn't called.
         let prev = self.prev.take();
-        CAPTURE.with(|c| *c.borrow_mut() = prev);
+        CAPTURE.with(|c| {
+            c.borrow_mut().replace(prev);
+        });
     }
 }
 
 /// Append a record to the active capture slot, if any.
 fn push_record(rec: IterRecord) {
     CAPTURE.with(|c| {
-        if let Some(buf) = c.borrow_mut().as_mut() {
+        if let Some(buf) = c.borrow_mut().get_mut().as_mut() {
             buf.push(rec);
         }
     });
@@ -155,7 +192,7 @@ pub fn extend_active_capture(records: &[IterRecord]) {
         return;
     }
     CAPTURE.with(|c| {
-        if let Some(buf) = c.borrow_mut().as_mut() {
+        if let Some(buf) = c.borrow_mut().get_mut().as_mut() {
             buf.extend_from_slice(records);
         }
     });
@@ -288,7 +325,17 @@ pub struct CollectorScope {
 /// collector already covers this thread and the scope is a no-op.
 /// Otherwise a collector-only registry is installed as the thread-default
 /// subscriber, which shadows the host's own subscriber (its log output
-/// from this thread is dropped) for the scope's lifetime.
+/// from this thread is dropped) for the scope's lifetime. On WASI this is a
+/// deliberate no-op; the platform exposes no in-process iteration collector.
+#[cfg(target_os = "wasi")]
+pub fn collector_scope() -> CollectorScope {
+    // WASI's browser/Node shim has no supported thread-scoped subscriber
+    // installation. Keep the public API usable, but make iteration capture
+    // explicitly empty rather than entering a host TLS path that can stall.
+    CollectorScope { _default: None }
+}
+
+#[cfg(not(target_os = "wasi"))]
 pub fn collector_scope() -> CollectorScope {
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::prelude::*;
@@ -545,6 +592,11 @@ mod tests {
             !iteration_event_wanted(),
             "capture ended → event suppressed"
         );
+    }
+
+    #[test]
+    fn capture_slot_has_no_thread_local_drop_glue() {
+        assert!(!std::mem::needs_drop::<CaptureSlot>());
     }
 
     #[test]

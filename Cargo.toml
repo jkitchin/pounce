@@ -75,6 +75,7 @@ pounce-nl = { path = "crates/pounce-nl", version = "0.9.0" }
 pounce-hsl = { path = "crates/pounce-hsl", version = "0.9.0" }
 pounce-feral = { path = "crates/pounce-feral", version = "0.9.0" }
 pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.9.0" }
+pounce-rs = { path = "crates/pounce-rs", version = "0.9.0" }
 pounce-restoration = { path = "crates/pounce-restoration", version = "0.9.0" }
 pounce-presolve = { path = "crates/pounce-presolve", version = "0.9.0" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.9.0" }

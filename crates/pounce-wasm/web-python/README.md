@@ -87,6 +87,9 @@ comma-separated list of wheel URLs, installed in order.
 - **The log arrives at the end.** The solver writes to stdout while Python
   is blocked in the backend call, so the whole iteration table appears when
   the solve returns rather than streaming line by line.
+- **No in-process iteration history or live-iterate inspection.** The WASI
+  backend leaves `stats.iterations` empty and reports
+  `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` as unavailable.
 - **First load is slow** — ~15 MB of runtime, cached by the browser
   afterwards. The solve is the fast part.
 - Everything the `.nl` app cannot do, this cannot either: single-threaded,

@@ -417,6 +417,8 @@ impl IpoptApplication {
     /// populated with one [`pounce_nlp::solve_statistics::IterRecord`]
     /// per accepted iterate. Off by default — the `pounce_sens` and
     /// `pounce` binaries opt in when `--json-output` is passed.
+    /// The `wasm32-wasip1` build has no in-process tracing collector, so its
+    /// iteration vector remains empty even when this flag is enabled.
     pub fn enable_iter_history(&mut self) {
         self.record_iter_history = true;
     }
@@ -3561,6 +3563,13 @@ pub fn feral_config_from_options(
         if let Some(s) = pounce_feral::parse_scaling_strategy(&v) {
             cfg.scaling = s;
         }
+    }
+    // wasm32-wasip1 browser and Node hosts used by pounce-wasm have no
+    // native threads. FERAL's Rayon-backed factor driver can block while
+    // creating its pool, so make the backend explicitly serial.
+    #[cfg(target_os = "wasi")]
+    {
+        cfg.parallel = Some(false);
     }
     cfg
 }

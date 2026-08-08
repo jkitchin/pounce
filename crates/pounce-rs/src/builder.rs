@@ -211,6 +211,8 @@ impl<P: Problem + 'static> Nlp<P> {
     /// (`solver_selection=qp-active-set`/`algorithm=active-set-sqp`)
     /// `stats.iterations` stays empty even though
     /// `stats.iteration_count` still reports the iterations run.
+    /// On `wasm32-wasip1`, in-process tracing capture is unavailable, so
+    /// `stats.iterations` likewise stays empty.
     pub fn capture_iterations(mut self) -> Self {
         self.capture_iterations = true;
         self

@@ -19,6 +19,9 @@
 //!   a JSON summary. Returns `{"error": …}` on a bad file.
 //! * [`pounce_solve`] — solve the loaded problem with an `ipopt.opt`-style
 //!   options string, returning a JSON result.
+//! * [`pounce_builder_regression`] — solve the constrained two-variable
+//!   builder fixture used by the Wasm regression smoke test. This deliberately
+//!   exercises `pounce_rs::builder::Nlp`.
 //! * [`pounce_solution_sol`] — format the last solve as an AMPL `.sol` file,
 //!   the same bytes `pounce model.nl` writes, so a browser result can be read
 //!   back by AMPL or Pyomo.
@@ -44,6 +47,7 @@ use pounce_nl::sol_writer::{
 };
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{Linearity, TNLP};
+use pounce_rs::builder::{Nlp as BuilderNlp, Problem as BuilderProblem};
 
 /// Bound on how many per-variable / per-constraint entries a JSON payload
 /// carries. A million-variable model would otherwise serialize a JSON array
@@ -663,6 +667,49 @@ fn csv_field(name: &str, index: usize, fallback: &str) -> String {
         name.to_string()
     };
     format!("\"{}\"", text.replace('"', "\"\""))
+}
+
+struct BuilderRegressionProblem;
+
+impl BuilderProblem for BuilderRegressionProblem {
+    fn objective(&self, x: &[f64]) -> f64 {
+        (1.0 - x[0]).powi(2) + 100.0 * (x[1] - x[0].powi(2)).powi(2)
+    }
+
+    fn n_constraints(&self) -> usize {
+        2
+    }
+
+    fn constraints(&self, x: &[f64], out: &mut [f64]) {
+        out[0] = x[0].powi(2) + x[1].powi(2);
+        out[1] = x[0] + x[1];
+    }
+}
+
+/// Run the constrained builder fixture used by the Wasm regression smoke.
+#[unsafe(no_mangle)]
+pub extern "C" fn pounce_builder_regression() -> *mut u8 {
+    guarded("builder regression", || {
+        let solution = BuilderNlp::new(BuilderRegressionProblem)
+            .var_bounds(&[-3.0, -3.0], &[3.0, 3.0])
+            .constraint_bounds(&[-2.0e19, 0.5], &[4.0, 2.0e19])
+            .x0(&[-1.2, 1.0])
+            .capture_iterations()
+            .option_num("tol", 1.0e-3)
+            .option_int("print_level", 0)
+            .solve();
+        to_payload(
+            &serde_json::json!({
+                "success": solution.success,
+                "status": format!("{:?}", solution.status),
+                "objective": solution.objective,
+                "x": solution.x,
+                "iterations": solution.stats.iteration_count,
+                "captured_iterations": solution.stats.iterations.len(),
+            })
+            .to_string(),
+        )
+    })
 }
 
 #[cfg(test)]

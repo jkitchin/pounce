@@ -79,6 +79,11 @@ re-render.
 
 - **Single-threaded.** The build never spawns a thread, so rayon-parallel
   paths run serially. Nothing else changes: results match the native build.
+- **No in-process iteration history.** `capture_iterations()` and
+  `enable_iter_history()` return an empty `stats.iterations` vector in the
+  Wasm build; the scalar iteration count remains available.
+- **No live-iterate inspection.** `GetIpoptCurrentIterate` and
+  `GetIpoptCurrentViolations` report “not available” in Wasm.
 - **No AMPL imported functions.** Models that call compiled-C external
   functions (`funcadd_ASL`, e.g. IDAES property packages) need a dynamic
   loader the browser sandbox has none of. The summary flags such a model.
