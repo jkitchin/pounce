@@ -1,0 +1,74 @@
+#+TITLE: Adversary Run: QP Envelope Theorem, dObj*/db = -y*
+#+DATE: 2026-08-08
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: dual-multiplier-as-objective-sensitivity (envelope theorem), distinct from prior primal dx*/db probes
+:SOURCE: Nocedal & Wright, Numerical Optimization 2nd ed., the standard Lagrangian sensitivity/envelope theorem; also Boyd & Vandenberghe Sec 5.6.3
+:KNOWN_OPTIMAL: dObj*/db = -y* (pounce's Lagrangian sign convention, determined empirically, not assumed)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 2 equalities (bounds inactive at this instance)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (sensitivity tied-least-tested at 11, last run 2026-08-06)
+:END:
+
+\[
+\min \tfrac12\|x\|^2 \quad\text{s.t.}\quad x_1+x_2+x_3=10,\ x_1-x_2=2,\ x\ge0
+\]
+
+Every prior ~sensitivity~-family probe in the log (near-LICQ dx/db,
+barrier-curvature, ~reduced_hessian~, multi-parameter dx/db, economic
+dispatch) checked the PRIMAL sensitivity \(dx^*/db\). This probe instead
+checks the classical envelope/duality theorem for the OPTIMAL VALUE:
+\(d(\mathrm{obj}^*)/db_i = \pm y_i^*\) (sign depending on the Lagrangian
+convention), where \(y^*\) is the equality constraint's own optimal
+multiplier -- read directly off a *plain* ~solve_qp~ result, independent
+of ~QpSensitivity~'s own factorization.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Quantity              | pounce           | FD oracle        | Rel Err   |
+|------------------------+-------------------+-------------------+-----------|
+| \(-y_0^*\) vs \(d\mathrm{obj}/db_0\) | 3.33333333e+00 | 3.33333333e+00 | 7.33e-11 |
+| \(-y_1^*\) vs \(d\mathrm{obj}/db_1\) | 1.00000000e+00 | 1.00000000e+00 | 9.42e-11 |
+
+Base point: \(x^*=(4.3333,2.3333,3.3333)\), \(\mathrm{obj}^*=17.6667\),
+\(y^*=(-3.3333,-1.0)\), bounds confirmed inactive
+(\(\min x_i \gg 0\)), so the equality-only envelope theorem applies
+cleanly with no bound-multiplier correction term needed.
+
+** Sign convention (not a bug)
+The raw comparison \(y^*\) vs \(d\mathrm{obj}/db\) initially showed the
+right magnitude but opposite sign (\(y^*=(-3.333,-1.0)\) vs FD
+\((3.333,1.0)\)) -- pounce's internal Lagrangian convention is
+\(L=f(x)-y^T(Ax-b)\) (stationarity \(\nabla f = A^Ty\) with this sign
+giving \(d\mathrm{obj}/db=-y\)), rather than the opposite-sign convention
+this probe initially assumed. Flipping the sign in the comparison (not in
+pounce) resolves it to \(<10^{-10}\) relative error. Documented here, not
+filed -- FORMULATION_ERROR in the adversary script's assumed sign, not a
+pounce defect (the magnitude match on the first, unflipped run was already
+strong evidence of this).
+
+** Secondary check: parametric_step consistency
+~QpSensitivity.parametric_step~'s predicted primal step for a small
+(\(10^{-4}\)) perturbation of each equality RHS matches an independent
+fresh ~solve_qp~ re-solve to \(6.7\times10^{-16}\) / \(1.3\times10^{-15}\)
+absolute error (row 0 / row 1) -- consistent with all prior dx/db findings
+in the log.
+
+* Cross-check / Verification
+Central finite difference of the optimal *objective* (not just \(x^*\)),
+computed via two independent, freshly-constructed ~solve_qp~ calls per
+perturbed RHS (an entirely separate code path from ~QpSensitivity~'s own
+cached factorization), confirms pounce's dual multiplier is exactly the
+(sign-corrected) objective sensitivity to \(10^{-10}\) precision.
+
+* Verdict
+PASS -- pounce's equality-constraint dual multiplier correctly reports the
+Lagrangian-consistent objective sensitivity via the envelope theorem, and
+~QpSensitivity.parametric_step~'s primal prediction remains accurate on
+this new problem instance.

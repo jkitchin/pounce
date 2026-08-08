@@ -11,20 +11,125 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |     15 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
-| lp              |     11 | 2026-08-06 | —             |
-| qp              |     11 | 2026-08-06 | —             |
+| lp              |     12 | 2026-08-08 | —             |
+| qp              |     12 | 2026-08-08 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     12 | 2026-08-07 | —             |
 | exp             |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
-| sdp             |     11 | 2026-08-06 | —             |
+| sdp             |     12 | 2026-08-08 | —             |
 | sos             |     12 | 2026-08-07 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |     11 | 2026-08-07 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, and the warm_start+auto routing-decision contract)  |
 | batch           |     11 | 2026-08-06 | —             |
-| diff            |     11 | 2026-08-05 | — (all PASS; near-LICQ degradation expected, not filed) |
-| sensitivity     |     11 | 2026-08-06 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
+| diff            |     12 | 2026-08-08 | — (all PASS; near-LICQ degradation expected, not filed; JAX-only this run, torch CPU wheel blocked by proxy) |
+| sensitivity     |     12 | 2026-08-08 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08) |
 
 * Problem Index
+** [2026-08-08] Degenerate-Vertex LP (lp/degenerate optimal BFS) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: Hillier & Lieberman, Introduction to Operations Research, classic degenerate-LP example: max 3x1+9x2 s.t. x1+4x2<=8, x1+2x2<=4, x>=0
+:KNOWN_OPTIMAL: -18.0
+:POUNCE_OBJECTIVE: -1.7999999997e+01 (ipm) / -1.8000000000e+01 (active-set)
+:POUNCE_STATUS: optimal (both engines)
+:POUNCE_TIME: 0.0039s (ipm) / 0.0018s (active-set)
+:ORACLE: scipy.optimize.linprog (HiGHS) AND cvxpy/Clarabel
+:ORACLE_OBJECTIVE: -1.8000000000e+01 (scipy) / -1.7999999976e+01 (cvxpy)
+:ORACLE_TIME: 0.0091s (scipy) / 0.0136s (cvxpy)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-08_lp_degenerate_vertex.org]]
+:COVERAGE_TARGET: -
+:END:
+Textbook degenerate optimal basis (both slacks zero at the optimal vertex,
+only one of two required basic variables nonzero). Both pounce IPM and
+active-set engines resolve it correctly, matching two independent LP
+oracles to <1.4e-9 relative error.
+
+** [2026-08-08] Markowitz Minimum-Variance Portfolio QP (qp/equality+active-bound KKT) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Markowitz (1952) J. Finance 7(1); Boyd & Vandenberghe Sec 4.4.1, box bounds added
+:KNOWN_OPTIMAL: none published; cross-validated vs cvxpy/Clarabel and scipy SLSQP
+:POUNCE_OBJECTIVE: 9.4107269830e-03
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0033-0.0054s
+:ORACLE: cvxpy/Clarabel AND scipy SLSQP
+:ORACLE_OBJECTIVE: 9.4107265301e-03 (cvxpy) / 9.4107264666e-03 (scipy)
+:ORACLE_TIME: 0.0094-0.0098s (cvxpy) / 0.0012-0.0025s (scipy)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-08_qp_markowitz_portfolio.org]]
+:COVERAGE_TARGET: -
+:END:
+4-asset portfolio, two active equalities (budget + target return) plus
+one deliberately-forced active upper bound, simultaneously. Two script
+false alarms along the way (uncapped bound at first pass; then a stale
+hard-coded cvxpy constraint after tightening the cap) were both
+FORMULATION_ERRORs, documented in the report. Final run: all three
+solvers agree to <8e-8 primal error.
+
+** [2026-08-08] Minimum Eigenvalue via SDP (sdp/PSD cone, non-diagonal svec) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Boyd & Vandenberghe Sec 4.6.2 (lambda_min(A) = max{t : A-tI>=0})
+:KNOWN_OPTIMAL: 1.0 (lambda_min of a symmetric tridiagonal 3x3 A, via numpy/LAPACK eigvalsh)
+:POUNCE_OBJECTIVE: t*=9.9999999968e-01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0035s
+:ORACLE: numpy/LAPACK eigvalsh AND cvxpy/Clarabel SDP
+:ORACLE_OBJECTIVE: 1.0000000000e+00 (LAPACK) / 1.0000000025e+00 (cvxpy)
+:ORACLE_TIME: 0.000137s (LAPACK) / 0.0085s (cvxpy)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-08_sdp_min_eigenvalue.org]]
+:COVERAGE_TARGET: -
+:END:
+Non-diagonal (tridiagonal) 3x3 matrix, genuinely exercising the svec
+off-diagonal sqrt(2) scaling (unlike the diagonal-dominant MAX-CUT/C4
+problem logged 2026-08-06). Matches a direct LAPACK eigensolver -- not
+just another SDP solver -- to 3.18e-10.
+
+** [2026-08-08] Differentiable QP layer, gradients w.r.t. P and c (diff/dx*-dP,dc) - PASS
+:PROPERTIES:
+:FAMILY: diff
+:SOURCE: OptNet (Amos & Kolter 2017) implicit-diff QP layer rule; instance constructed for this probe
+:KNOWN_OPTIMAL: n/a (gradient-correctness check); directional-deriv rel err 6.54e-09 (dP), 5.86e-09 (dc)
+:POUNCE_STATUS: PASS (JAX-only; torch CPU wheel install blocked by proxy 403 on download.pytorch.org)
+:POUNCE_TIME: 0.24s (jax.grad, JIT-compiled)
+:ORACLE: central FD of independent plain solve_qp re-solves (separate code path from the jax custom_vjp)
+:ORACLE_TIME: 0.01-0.02s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-08_diff_qp_dP_dc_gradient.org]]
+:COVERAGE_TARGET: -
+:END:
+Targets dx*/dP and dx*/dc, the two angles the 2026-07-23 diff probes
+(dx*/dG, dx*/dA) did not cover. Root-caused an apparent factor-of-2
+mismatch to =_to_coo_lower= reading only P's lower triangle in forward,
+vs the OptNet backward's documented symmetric-gradient convention --
+confirmed correct via a convention-agnostic directional-derivative test
+(6.5e-9), not a defect. JAX<->Torch parity NOT run this session (env
+limitation, see report and top-level session note).
+
+** [2026-08-08] QP Envelope Theorem, dObj*/db = -y* (sensitivity/dual-as-value-sensitivity) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: Nocedal & Wright, Numerical Optimization 2nd ed.; Boyd & Vandenberghe Sec 5.6.3
+:KNOWN_OPTIMAL: dObj*/db = -y* (pounce's Lagrangian sign convention, determined empirically)
+:POUNCE_OBJECTIVE: 1.7666666667e+01 (base point); y*=(-3.3333,-1.0)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0033s
+:ORACLE: central FD of the optimal objective via independent solve_qp re-solves
+:ORACLE_TIME: 0.0092s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-08_sensitivity_envelope_theorem.org]]
+:COVERAGE_TARGET: -
+:END:
+New sensitivity angle: checks the dual multiplier against objective
+(not primal x) sensitivity via the envelope theorem -- all five prior
+sensitivity-family log entries checked dx*/db only. Sign-convention false
+alarm on first pass (magnitude matched exactly, sign didn't -- pounce's
+Lagrangian is L=f-y^T(Ax-b)); resolved to 7-9e-11 relative error once
+flipped. parametric_step's primal prediction also re-confirmed accurate
+on this new instance (<1.4e-15 abs error).
+
 ** [2026-08-06] Exit status vs infeasibility gap (nlp/infeasible-by-construction, adjacent to gh#505) - FAIL, FIXED gh#508
 :PROPERTIES:
 :FAMILY: nlp

@@ -1,0 +1,61 @@
+#+TITLE: Adversary Run: Markowitz Minimum-Variance Portfolio QP
+#+DATE: 2026-08-08
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: convex QP, two active equalities (budget + target return) plus one active upper bound simultaneously
+:SOURCE: Markowitz (1952), "Portfolio Selection", J. Finance 7(1); formulation per Boyd & Vandenberghe, Convex Optimization, Sec 4.4.1 (minimum-variance frontier), with box bounds added
+:KNOWN_OPTIMAL: none published in closed form for this instance; validated against two independent solvers (cvxpy/Clarabel, scipy SLSQP)
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 2 equalities + 4 box bounds (one active)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (qp tied-least-tested at 11, last run 2026-08-06)
+:END:
+
+\[
+\min \tfrac12 w^T \Sigma w \quad \text{s.t.}\quad \mathbf{1}^Tw=1,\ \mu^Tw=0.10,\ 0\le w\le \mathrm{ub}
+\]
+
+\(\Sigma=\mathrm{diag}(0.04,0.09,0.16,0.01)\), \(\mu=(0.08,0.12,0.15,0.05)\),
+\(\mathrm{ub}=(0.4,0.4,0.4,0.15)\) -- asset 4's cap of 0.15 is set below its
+natural (uncapped) optimal weight (\(\approx0.209\)) specifically to force
+that bound active on top of the two equalities, exercising the IPM's
+combined equality+inequality+bound KKT block.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver         | Status  | Objective        | Rel Err vs pounce | Wall Time |
+|----------------+---------+-------------------+--------------------+-----------|
+| pounce         | optimal | 9.4107269830e-03  | -                  | 0.0033-0.0054s |
+| cvxpy/Clarabel | optimal | 9.4107265301e-03  | 4.53e-10           | 0.0094-0.0098s |
+| scipy SLSQP    | success | 9.4107264666e-03  | 5.16e-10           | 0.0012-0.0025s |
+
+\(w^*_{\text{pounce}} = (0.38377, 0.27121, 0.19502, 0.15000)\), matching
+both oracles to \(x\)-inf-error \(\le 8\times10^{-8}\). Asset 4 confirmed
+at its upper bound (0.150000).
+
+** False start (documented)
+The first version of this script fixed \(\mathrm{ub}=0.4\) uniformly; at
+that cap NO bound was active (asset 4 settled at \(w_4=0.209\), all three
+solvers agreeing to \(\sim 10^{-11}\)/\(10^{-7}\)) -- a correct pounce
+answer, just not the KKT structure this probe targeted. Tightening asset
+4's cap to 0.15 (below its natural weight) forced the bound active as
+intended; a second false alarm then appeared when the cvxpy oracle's
+constraint list still hard-coded ~w <= 0.4~ instead of referencing the
+updated ~ub~ array -- a script bug (cvxpy silently solving the OLD,
+looser problem), fixed by referencing ~lb~/~ub~ directly in the cvxpy
+constraint list. Both are FORMULATION_ERRORs in the adversary script, not
+pounce defects; recorded here so a future run doesn't rediscover them.
+
+* Cross-check / Verification
+Two independent solvers (cvxpy/Clarabel interior-point conic, scipy SLSQP
+active-set SQP) agree with pounce to \(\sim10^{-10}\) objective error and
+\(\sim10^{-7}\) primal error, with the intended bound genuinely active.
+
+* Verdict
+PASS -- pounce's combined equality+bound QP KKT solve is correct to high
+precision against two independently-implemented solvers.

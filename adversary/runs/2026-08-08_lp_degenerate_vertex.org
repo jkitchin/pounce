@@ -1,0 +1,59 @@
+#+TITLE: Adversary Run: Degenerate-Vertex LP (Hillier & Lieberman classic)
+#+DATE: 2026-08-08
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: degenerate optimal basic feasible solution (two constraints bind, one basic slack forced to zero)
+:SOURCE: Hillier & Lieberman, Introduction to Operations Research -- the standard textbook example used to illustrate LP degeneracy: max 3x1+9x2 s.t. x1+4x2<=8, x1+2x2<=4, x>=0
+:KNOWN_OPTIMAL: -18.0 (minimized form of max 3x1+9x2=18)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 2 inequalities + 2 nonneg bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; log rotation used instead, lp tied-least-tested at 11, last run 2026-08-06)
+:END:
+
+\[
+\min -3x_1 - 9x_2 \quad \text{s.t.} \quad x_1+4x_2 \le 8,\ x_1+2x_2 \le 4,\ x\ge 0
+\]
+
+Known optimal vertex \((0,2)\), \(Z=18\). In standard form with slacks
+\(s_1=8-x_1-4x_2\), \(s_2=4-x_1-2x_2\), both \(s_1=s_2=0\) at the optimum
+while \(x_1=0\) too -- so of the two basic variables required at a BFS
+in this 2-constraint LP, only \(x_2\) is actually nonzero: a textbook
+degenerate optimal basis, which stresses the simplex/crossover ratio-test
+tie-break rather than a generic interior vertex.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective       | Rel Err  | Wall Time |
+|----------------------+---------+-----------------+----------+-----------|
+| pounce (ipm)         | optimal | -1.7999999997e+01 | 1.56e-10 | 0.0039s |
+| pounce (active-set)  | optimal | -1.8000000000e+01 | 0.00e+00 | 0.0018s |
+| scipy linprog (HiGHS)| 0       | -1.8000000000e+01 | 0.00e+00 | 0.0091s |
+| cvxpy/Clarabel       | optimal | -1.7999999976e+01 | 1.34e-09 | 0.0136s |
+
+Known optimal: -18.0, \(x^*=(0,2)\)
+
+Both pounce engines (default convex IPM and the qp-active-set parametric
+active-set path, reached here via ~method="active-set"~ on ~solve_qp~)
+converge to the correct degenerate vertex, matching each independent
+oracle to well under \(10^{-8}\) objective error and \(10^{-8}\) primal
+error. The IPM's \(x_1\) component settles at \(3.2\times10^{-10}\)
+(interior-point's expected small residual off an exact zero bound), while
+the active-set engine, which pivots to an exact vertex, lands at
+\(-5.3\times10^{-16}\) -- both well inside tolerance.
+
+* Cross-check / Verification
+Two independent oracles (scipy HiGHS simplex/IPM and cvxpy/Clarabel, an
+interior-point conic solver) agree with pounce and with each other to
+machine-adjacent precision. No discrepancy between pounce's IPM and
+active-set routes (routing-transparency check, informal).
+
+* Verdict
+PASS -- pounce correctly resolves the degenerate optimal vertex via both
+its IPM and active-set engines, matching two independent LP oracles. No
+issue with the ratio-test tie-break at this degenerate basis.

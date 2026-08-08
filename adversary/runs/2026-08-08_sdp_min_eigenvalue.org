@@ -1,0 +1,59 @@
+#+TITLE: Adversary Run: Minimum Eigenvalue via SDP
+#+DATE: 2026-08-08
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: 1-variable PSD-cone program on a non-diagonal 3x3 matrix (genuine svec off-diagonal sqrt(2) scaling)
+:SOURCE: Boyd & Vandenberghe, Convex Optimization, Sec 4.6.2 ("Minimum eigenvalue via SDP"): lambda_min(A) = max{t : A - tI >= 0}
+:KNOWN_OPTIMAL: 1.0 (lambda_min of A = [[2,1,0],[1,3,1],[0,1,2]], via numpy/LAPACK eigvalsh)
+:N_VARIABLES: 1
+:N_CONSTRAINTS: PSD cone, n=3 (svec dim 6)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (sdp tied-least-tested at 11, last run 2026-08-06)
+:END:
+
+\[
+\max_t\ t \quad\text{s.t.}\quad A - tI \succeq 0,\qquad A=\begin{pmatrix}2&1&0\\1&3&1\\0&1&2\end{pmatrix}
+\]
+
+Cast as ~solve_socp~ with a single variable \(t\), \(G\) the single column
+\(\mathrm{svec}(I)\), \(h=\mathrm{svec}(A)\), cone \(("psd",3)\), objective
+\(\min -t\). \(A\) is symmetric tridiagonal (not diagonal), so the
+off-diagonal \(\sqrt2\) svec scaling is genuinely exercised, unlike the
+previously-logged MAX-CUT/C4 problem (2026-08-06), whose relaxation matrix
+was diagonal-dominant but the probe there used a different (bipartite
+graph Laplacian) structure.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                  | Status  | t* / lambda_min   | Rel Err   | Wall Time |
+|--------------------------+---------+--------------------+-----------+-----------|
+| pounce (solve_socp/psd)  | optimal | 9.9999999968e-01   | -         | 0.0035s   |
+| numpy/LAPACK eigvalsh    | (exact) | 1.0000000000e+00   | 3.18e-10  | 0.000137s |
+| cvxpy/Clarabel SDP       | optimal | 1.0000000025e+00   | 2.82e-09  | 0.0085s   |
+
+Known optimal: 1.0
+
+pounce's reported \(t^*\) matches the LAPACK direct eigensolver (a
+completely non-SDP, non-cone independent computation) to \(3\times10^{-10}\)
+relative error, and matches cvxpy's own independent SDP formulation to
+\(2.8\times10^{-9}\). The PSD residual check -- \(\lambda_{\min}(A-t^*I)\)
+recomputed via a fresh LAPACK eigendecomposition -- gives \(3.18\times
+10^{-10}\), confirming the returned point is (numerically) feasible, not
+just numerically close to the right scalar.
+
+* Cross-check / Verification
+Two independent oracles: (1) numpy/LAPACK ~eigvalsh~, a direct dense
+eigensolver with no relation to any conic/SDP algorithm; (2) cvxpy/Clarabel,
+an independently-implemented SDP solver. Both agree with pounce to
+\(<3\times10^{-9}\).
+
+* Verdict
+PASS -- pounce's PSD cone (svec/smat round-trip, including the
+off-diagonal \(\sqrt2\) scaling on a genuinely non-diagonal matrix) is
+correct against both a direct linear-algebra oracle and an independent SDP
+solver.

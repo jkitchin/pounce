@@ -1,0 +1,90 @@
+#+TITLE: Adversary Run: Differentiable QP Layer, Gradients w.r.t. P and c
+#+DATE: 2026-08-08
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: pounce.jax QP layer, dx*/dP (Hessian gradient) and dx*/dc (linear-term gradient)
+:SOURCE: OptNet (Amos & Kolter 2017) implicit-function differentiation rule for a QP layer; instance constructed for this probe
+:KNOWN_OPTIMAL: n/a (gradient-correctness check); directional-derivative rel err 6.54e-09 (dP), max rel err 5.86e-09 (dc)
+:N_VARIABLES: 2 (QP), 4 (P entries) + 2 (c entries) differentiated
+:N_CONSTRAINTS: 1 inequality (active at optimum)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (diff tied-least-tested at 11, oldest last-run 2026-08-05; environment note: torch CPU wheel install blocked by proxy 403 on download.pytorch.org, so this run is JAX-only, no JAX<->Torch parity check)
+:END:
+
+\[
+\min \tfrac12 x^TPx + c^Tx \quad\text{s.t.}\quad Gx\le h,\qquad P=\begin{pmatrix}2&0.5\\0.5&1\end{pmatrix},\ c=\begin{pmatrix}1\\-1\end{pmatrix},\ G=(1\ \ 1),\ h=1
+\]
+
+Loss \(L(P,c)=w^Tx^*(P,c)\), \(w=(0.3,0.7)\). \(dL/dP\), \(dL/dc\) computed
+via ~jax.grad~ through ~pounce.jax.solve_qp~ (OptNet custom_vjp backward),
+cross-checked against central finite differences of independent forward
+re-solves via the plain (non-differentiable) ~pounce.qp.solve_qp~ IPM --
+an entirely separate code path from the jax custom_vjp under test. Prior
+diff-family probes (2026-07-23) covered \(dx^*/dG\) and \(dx^*/dA\); this
+run targets the two angles they did not: the quadratic term \(P\) and the
+linear term \(c\).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                                          | Predicted    | FD oracle    | Rel Err  |
+|-------------------------------------------------+--------------+--------------+----------|
+| dc (both components)                             | see note     | matches      | 5.86e-09 |
+| dP directional deriv, along D=dL/dP itself       | 1.255077e+00 | 1.255077e+00 | 6.54e-09 |
+| dP directional deriv, random asymmetric direction| 5.586128e-02 | 3.081152e-01 | 2.52e-01 (expected -- out of contract, see below) |
+
+** The apparent dP mismatch, and why it is not a bug
+A naive per-entry finite-difference check (perturb symmetric pair
+\((i,j)\)/\((j,i)\) together, compare to ~jax.grad~'s single-slot
+\((i,j)\) entry) initially showed each off-diagonal entry of \(dL/dP\)
+low by exactly a factor of 2 (e.g. jax reported \(0.32653\) at both
+\([0,1]\) and \([1,0]\), while the symmetric-pair FD gave \(0.65306\) for
+that pair). Root cause, confirmed by reading
+~python/pounce/jax/_qp.py::_to_coo_lower~: the forward solve reads *only*
+the lower triangle of ~P~ (~keep = r >= cc~), discarding the upper
+triangle entirely, while the OptNet backward -- by design, per the module
+docstring ("\(\nabla P\) is the symmetric gradient") -- returns a
+symmetric matrix, splitting the true single-parameter sensitivity evenly
+across both mirrored slots. This is the standard "matrix-cookbook"
+convention for differentiating w.r.t. a symmetric-matrix parameter and
+matches the documented contract ("P (lower triangle is used; assumed
+symmetric)").
+
+The unambiguous, convention-agnostic adjudicator is a directional
+derivative: \(d/dt\, L(P_0+tD)|_{t=0}\) for \(D=dL/dP\) (jax's own
+returned matrix) must equal \(\langle D,D\rangle_F\) regardless of any
+internal doubling convention, because it exercises the SAME raw \(P\)
+array through the SAME forward solver on both sides. That check passes to
+\(6.5\times10^{-9}\). A second check along a *non-symmetric* random
+direction was also run and, as analytically predicted, disagrees (25%) --
+because a non-symmetric perturbation direction is outside the documented
+"P assumed symmetric" contract (the forward solver provably has zero
+sensitivity to the discarded upper triangle, while the backward's
+symmetric-gradient convention only ever needs to be correct when
+contracted against a symmetric direction, which is the only kind any real
+gradient-descent-on-a-symmetric-parameter workflow will ever apply). This
+is documented, intentional behavior, not a defect -- kept in the script
+as a diagnostic so a future run does not have to re-derive the reasoning.
+
+* Cross-check / Verification
+~dL/dc~: matches independent central FD of plain ~solve_qp~ re-solves to
+\(5.86\times10^{-9}\), no ambiguity (linear term has no symmetric-mirroring
+convention issue). ~dL/dP~: matches, in-contract, to \(6.54\times10^{-9}\)
+via the directional-derivative test along its own reported gradient
+direction; symmetry residual of the returned matrix is exactly 0.
+
+* Verdict
+PASS -- both gradients are correct once tested against the documented
+"P assumed symmetric" contract. Two false alarms along the way (a
+double-counting FD comparison, and an out-of-contract asymmetric-direction
+probe) were both traced to genuine, cited code (~_to_coo_lower~) and
+docstring text, not to solver behavior -- FORMULATION_ERROR on the
+adversary script's part in both cases, not filed.
+
+* Coverage effect
+Not measured this run (targeted by log-rotation, not coverage ranking; no
+before/after coverage delta collected).
