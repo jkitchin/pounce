@@ -207,9 +207,33 @@ weighting treats each term as a Gaussian likelihood with learned noise:
 L = Σ_j [ L_j / (2 σ_j²) + log σ_j ]
 ```
 
-with `σ_j` free parameters. Principled, self-tuning, and it removes a
-hyperparameter sweep that otherwise has to be repeated per problem family. This
-is the recommended default over hand-tuned `w_V`/`w_D`.
+with `σ_j` free parameters. This is a genuine negative log likelihood, not a
+heuristic dressed as one: assume `p(y_j | f_j) = N(f_j, σ_j²)`, take `−log`, and
+the expression falls out with `log σ_j` as the Gaussian normalizer — which is why
+it cannot be dropped (without it the objective is minimized at `σ_j → ∞`, i.e.
+all weights zero).
+
+Solving for `σ` at fixed model gives `σ_j² = L_j`, and substituting back leaves
+`L ≈ Σ_j ½ log L_j` — **a sum of logs**. That is the real content: it equalizes
+*relative* progress across blocks rather than absolute magnitudes, which is
+exactly what makes it robust to the unit mismatch between `V` and `∂V/∂p`.
+
+Implement by learning `s_j = log σ_j²` rather than `σ_j` (positivity for free,
+`s_j = 0` initializes at equal weighting):
+
+```python
+loss = sum(0.5 * torch.exp(-s[j]) * L[j] + 0.5 * s[j] for j in blocks)
+```
+
+Two known failure modes. The objective is **unbounded below as `L_j → 0`**
+(optimal value `½ log L_j → −∞`), so a block that overfits easily can hijack
+training — clamp `s_j`, or use the bounded `log(1+σ²)` variant. And it corrects
+for *noise*, not *importance*: if derivative accuracy genuinely matters more
+than value accuracy, this will happily downweight derivatives for being noisier.
+
+**The per-sample version is the one to use here** — see §2.4. Unlike typical
+multi-task settings, `σ` has a concrete meaning in this pipeline: it is solver
+label noise, and for the derivative block it is *not constant across samples*.
 
 ### 2.4 Where the DFT analogy breaks — and it matters
 
@@ -232,12 +256,31 @@ near such a point and can say so:
 - `pounce-sensitivity`'s boundcheck path already deals with steps that leave the
   box.
 
-So the generator can **emit a degeneracy flag alongside every sample**. Three
-usable responses: downweight or drop flagged samples; use Huber rather than L2
-on the derivative term so boundary samples cannot dominate; or model the
-piecewise structure explicitly (classify the active set, regress within region)
-— which for the thermo case is the same architecture the phase-boundary problem
-demands anyway (§1.3).
+So the generator can **emit a degeneracy flag alongside every sample**.
+
+The best use of that flag is not to drop the sample — it is to feed it to §2.3's
+likelihood as a *known per-sample noise scale*. The derivative labels near a
+boundary are not wrong, they are **less precise**, and the Gaussian NLL has a
+slot for exactly that. Set
+
+```text
+σ_ij = σ_j · c_i
+```
+
+with `c_i` the known relative label noise for sample `i` (from the activity
+classification / complementarity products) and `σ_j` the learned per-block scale.
+Because `c_i` is known, its `log` term is constant and drops, so this degenerates
+to weighted least squares with weights `1/c_i²` inside a learned global scale.
+
+That dominates the cruder alternatives: dropping flagged samples discards real
+information, and Huber on the derivative term is a blunt instrument that does not
+know *why* a residual is large. Here the reason is known and quantified.
+
+Two responses remain useful alongside it: Huber as a backstop against genuinely
+mislabelled samples (a solve that converged to the wrong local solution, not
+merely an imprecise one), and modelling the piecewise structure explicitly
+(classify the active set, regress within region) — which for the thermo case is
+the architecture the phase-boundary problem demands anyway (§1.3).
 
 This is a genuine advantage of generating data with an instrumented solver
 rather than a black box, and it should be designed in from the start rather than
