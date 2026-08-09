@@ -1,0 +1,55 @@
+#+TITLE: Adversary Run: solve_qp_multi_rhs vs Closed-Form Box QP
+#+DATE: 2026-08-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: fixed geometry, varying linear objective (multi-RHS)
+:SOURCE: closed-form separable box-QP (per-coordinate clip of the unconstrained stationary point; Nocedal & Wright projected-gradient argument).
+:KNOWN_OPTIMAL: per-item, see table below
+:N_VARIABLES: 4 per item, 6 items
+:N_CONSTRAINTS: box bounds [-3,3]^4 only, fixed across the batch
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $0.5\sum_i P_{ii}x_i^2 + c_i x_i$ s.t. $lb \le x \le ub$, with fixed
+diagonal $P=\mathrm{diag}(2,4,6,8)$, $lb=-3,ub=3$, and 6 different $c$
+vectors solved in one =solve_qp_multi_rhs= call (interior-point, at-bound,
+and both-bounds-clipped cases mixed in).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| item | pounce obj | known obj | x_err vs known | x_err vs single solve_qp |
+|------+------------+-----------+-----------------+----------------------------|
+|    0 |    -2.5000 |   -2.5000 | ~0              | 0                          |
+|    1 |   -63.0000 |  -63.0000 | ~0              | 0                          |
+|    2 |   -63.0000 |  -63.0000 | ~0              | 0                          |
+|    3 |     0.0000 |    0.0000 | ~0              | 0                          |
+|    4 |  -857.0833 | -857.0833 | ~7e-6 (at-bound)| 0                          |
+|    5 |   -90.0000 |  -90.0000 | ~2e-5 (at-bound)| 0                          |
+
+max_x_err_vs_known=6.95e-06, max_obj_err_vs_known=1.53e-11,
+max_x_err_vs_single=0.00e+00, max_obj_err_vs_single=0.00e+00.
+solve_qp_multi_rhs took 0.0023s for all 6 vs 0.0191s summed over 6 separate
+solve_qp calls.
+
+* Cross-check / Verification
+The x-vs-known error (6.95e-6) is entirely IPM boundary-approach slack at
+active bounds (items 4, 5 land at e.g. 2.99998 instead of exactly 3.0) — an
+expected interior-point property, not a discrepancy; the objective error is
+1.5e-11. Crucially, =solve_qp_multi_rhs= agrees with 6 independent
+=solve_qp= calls to 0 (exact bitwise/tolerance match), confirming the
+shared-factorization multi-RHS code path produces identical results to the
+single-solve path it is meant to accelerate.
+
+* Verdict
+PASS — =solve_qp_multi_rhs= correctly solves a fixed box-QP structure
+against 6 different linear-cost vectors, matching both the closed-form
+optimum and per-item =solve_qp= exactly, while running ~8x faster than the
+looped single-solve baseline. This is a fresh probe of a batch API surface
+(shared geometry, varying objective) distinct from the previously-logged
+=solve_qp_batch= tests (heterogeneous per-item P/A/G).

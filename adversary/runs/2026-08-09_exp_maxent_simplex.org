@@ -1,0 +1,48 @@
+#+TITLE: Adversary Run: Maximum-Entropy Distribution on the Simplex
+#+DATE: 2026-08-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: entropy maximization (relative-entropy epigraph via Kexp, equality constraint)
+:SOURCE: Cover & Thomas, "Elements of Information Theory", Thm 2.6.4; Boyd & Vandenberghe, "Convex Optimization" Sec 5.2 style. Uniform distribution maximizes entropy on the simplex.
+:KNOWN_OPTIMAL: -log(4) = -1.3862943611198906
+:N_VARIABLES: 8 (4 x_i, 4 t_i)
+:N_CONSTRAINTS: 1 equality row; 4 Kexp cones of dim 3
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $\sum_i x_i \log x_i$ s.t. $\sum_i x_i = 1$, $x \ge 0$, via the
+non-symmetric exponential-cone triple $(t_i, x_i, 1) \in K_{\exp}$
+(pounce convention $\{(x,y,z): y e^{x/y} \le z\}$), enforcing
+$t_i \le \mathrm{entr}(x_i)$, and minimizing $-\sum_i t_i$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective         | Rel Err vs known | Wall Time |
+|---------------------+---------+--------------------+-------------------+-----------|
+| pounce (solve_socp)  | optimal | -1.3862943581e+00 | 2.16e-09          | 0.0138s   |
+| cvxpy/Clarabel       | optimal | -1.3862943606e+00 | 3.6e-10           | 0.0200s   |
+
+Known optimal: -1.3862943611198906 at x = (0.25, 0.25, 0.25, 0.25)
+
+pounce's x = [0.24999122 0.25000438 0.2500022  0.2500022], within 8.8e-6 of
+uniform; cvxpy within 3.7e-6. Both solvers land on the same point to
+first-order tolerance and match the closed-form optimum to ~1e-9 relative
+error in the objective.
+
+* Cross-check / Verification
+Objective error vs cvxpy/Clarabel: 1.78e-09. x_inf_err vs cvxpy: 1.25e-05.
+Both independently confirm the closed-form -log(4) optimum. No discrepancy.
+
+* Verdict
+PASS — pounce's exponential-cone solver correctly recovers the maximum-entropy
+distribution to ~1e-9 relative accuracy, matching both the independent cvxpy
+oracle and the textbook closed form. This exercises the (t_i, x_i, 1) Kexp
+triple (relative-entropy epigraph), a different Kexp embedding than the
+previously-logged (y_i, 1, t_i) epigraph-of-exp triple used for the AM-GM GP
+probe, plus an equality (not just inequality) constraint.

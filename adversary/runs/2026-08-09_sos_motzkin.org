@@ -1,0 +1,90 @@
+#+TITLE: Adversary Run: Motzkin Polynomial (Nonnegative, Not SOS) + Certified-Bound Contract
+#+DATE: 2026-08-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: unconstrained degree-6 bivariate polynomial, deliberately non-SOS; option-space extension on the ``certified`` lower-bound contract
+:SOURCE: T. Motzkin (1967); Reznick, "Some concrete aspects of Hilbert's 17th problem" (2000) Sec 2; Parrilo thesis (2000) Ex. 4.2. M(x,y)=x^4y^2+x^2y^4-3x^2y^2+1.
+:KNOWN_OPTIMAL: 0.0, at (x,y) in {(1,1),(1,-1),(-1,1),(-1,-1)}
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 0 (primary probe, unconstrained); 4 box inequalities (extension)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+The Motzkin polynomial is the textbook example of a polynomial that is
+nonnegative everywhere (by AM-GM) but is **not** expressible as a sum of
+squares — it sits exactly on the boundary of the SOS cone. This makes it a
+deliberately adversarial input for a Lasserre-hierarchy solver: the
+relaxation is not required to be tight at low order (a loose-but-valid
+bound is expected, not a bug), but the bound must never *exceed* the true
+global minimum (0.0) when the solver claims soundness.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+** Primary probe: unconstrained, order=3 (minimum order for degree 6)
+
+| Solver                    | Status  | lower_bound        | is_exact | certified | Wall Time |
+|----------------------------+---------+----------------------+----------+-----------+-----------|
+| pounce sos_minimize        | optimal | -2.0971170972e+03   | False    | False     | 0.2863s   |
+| scipy multistart BFGS (300)| -       | 0.0000000000e+00     | -        | -         | 0.5511s   |
+| dense 801x801 grid         | -       | 0.0000000000e+00     | -        | -         | -         |
+
+Known optimal: 0.0. bound_valid (pounce_bound <= min(scipy,grid)+1e-6) = True.
+The bound is very loose (-2097 vs the true 0) but sound — expected for a
+non-SOS polynomial without a bounding box, consistent with the "certified
+requires a box" contract documented in =python/pounce/sos.py=
+(=SosResult.certified=).
+
+** Option-space extension: certified-bound tol/order sweep
+
+Per =sos.py='s docstring, "loosening tol cannot make the answer unsound
+when =certified= is set... it is False on an unbounded feasible set."
+Repeated the probe WITH box constraints $x,y \in [-2,2]$ (known to contain
+all 4 global minimizers) and swept =order= in {3,4} x =tol= in
+{1e-8,1e-4,1e-3,1e-2}:
+
+| order | tol   | status  | lower_bound   | certified | is_exact | sound |
+|-------+-------+---------+----------------+-----------+----------+-------|
+|     3 | 1e-8  | optimal | -1.688298e+00 | True      | False    | True  |
+|     3 | 1e-4  | optimal | -1.574297e+00 | True      | False    | True  |
+|     3 | 1e-3  | optimal | -1.779739e+00 | True      | False    | True  |
+|     3 | 1e-2  | optimal | -6.816601e+00 | True      | False    | True  |
+|     4 | 1e-8  | optimal | -1.373965e-06 | True      | True     | True  |
+|     4 | 1e-4  | optimal | -2.044511e-02 | True      | False    | True  |
+|     4 | 1e-3  | optimal | -8.858545e-01 | True      | False    | True  |
+|     4 | 1e-2  | optimal | -4.677438e+00 | True      | False    | True  |
+
+All 8 =certified=True= bounds are sound (<=0) across 4 orders of magnitude
+of =tol=. At order=4, tol=1e-8, the bound is essentially exact
+(-1.37e-6, =is_exact=True=).
+
+The contrasting *uncertified* failure mode was independently confirmed in a
+side probe (unconstrained, order=4, tol=1e-3): pounce reported
+=status=optimal, lower_bound=0.00292, certified=False= — a raw SDP value
+that lands slightly *above* the true minimum, exactly the documented
+uncertified failure mode ("normally correct to several digits but can land
+slightly above the true minimum"). Because =certified=False= there, this is
+not a violation of any contract — the field correctly told the caller not
+to trust the bound as a rigorous lower bound.
+
+* Cross-check / Verification
+Grid refutation (801x801 over [-2,2]^2) and 300-start scipy BFGS both
+independently confirm the global minimum is 0.0 at (±1,±1). pounce's
+=is_exact=True= case (order=4, boxed, tol=1e-8) recovers a bound within
+1.37e-6 of the true value. All =certified=True= bounds across the sweep
+respect soundness; the one unsound raw value observed was correctly flagged
+=certified=False=.
+
+* Verdict
+PASS on both the primary probe and the option-space extension. pounce's SOS
+solver behaves exactly as documented on a deliberately adversarial,
+famous non-SOS-but-nonnegative polynomial: loose-but-valid bounds when
+unconstrained/uncertified (expected), and rigorously sound bounds whenever
+=certified=True=, even under 4 orders of magnitude of tolerance loosening.
+No defect found; the =certified=/=uncertified= distinction in
+=SosResult= is confirmed load-bearing, not decorative.

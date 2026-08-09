@@ -1,0 +1,50 @@
+#+TITLE: Adversary Run: Auto-Routing on an Equality+Inactive-Inequality QP
+#+DATE: 2026-08-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: QP -> qp-ipm specialized route vs forced NLP
+:SOURCE: closed-form KKT (Nocedal & Wright, "Numerical Optimization" 2e style Lagrangian stationarity).
+:KNOWN_OPTIMAL: 6.0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 1 equality, 1 inequality (strictly inactive)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $x_1^2 + 2x_2^2$ s.t. $x_1+x_2=3$, $x_1-x_2 \le 5$ (inactive), via
+pounce.minimize with solver_selection="auto" vs "nlp".
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver               | Status | Objective        | Rel Err | Wall Time |
+|-----------------------+--------+-------------------+---------+-----------|
+| pounce auto (qp-ipm)  | 0      | 6.0000000000e+00 | 5.24e-13| 0.0055s   |
+| pounce forced-nlp     | 0      | 6.0000000000e+00 | 1.48e-16| 0.0082s   |
+| scipy SLSQP           | -      | 6.0000000253e+00 | 4.22e-09| 0.0033s   |
+
+Known optimal: 6.0 at x=(2,1)
+
+info["solver"] for the auto call was 'qp-ipm' — confirming the auto-router
+correctly detected the convex-QP structure (non-uniform diagonal Hessian,
+general affine equality, strictly-inactive general affine inequality — not
+a box) and dispatched to the specialized path rather than falling through
+to NLP.
+
+* Cross-check / Verification
+Auto and forced-NLP answers agree to <5e-11 (x_inf_err_auto=4.53e-11,
+x_inf_err_nlp=2.09e-10). Both match the independent scipy SLSQP oracle
+(rel_err_scipy=4.22e-09) and the closed-form KNOWN_OPTIMAL. The inequality
+multiplier is correctly inactive (constraint value 1 <= 5, not binding).
+
+* Verdict
+PASS — the routing-transparency contract holds: solver_selection="auto"
+correctly dispatches to the specialized qp-ipm path (info["solver"]='qp-ipm')
+and the numerical answer is identical to the forced-NLP path and the
+independent scipy oracle. Distinct structural combination from prior
+autoroute log entries (no box constraints, non-uniform diagonal Hessian,
+general affine equality/inequality rather than bounds).

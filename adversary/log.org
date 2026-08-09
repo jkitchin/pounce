@@ -15,16 +15,126 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | qp              |     12 | 2026-08-08 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     12 | 2026-08-07 | —             |
-| exp             |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |     11 | 2026-08-07 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
+| exp             |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
 | sdp             |     12 | 2026-08-08 | —             |
-| sos             |     12 | 2026-08-07 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |     11 | 2026-08-07 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, and the warm_start+auto routing-decision contract)  |
-| batch           |     11 | 2026-08-06 | —             |
+| sos             |     13 | 2026-08-09 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
+| autoroute       |     12 | 2026-08-09 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, and the warm_start+auto routing-decision contract)  |
+| batch           |     12 | 2026-08-09 | —             |
 | diff            |     12 | 2026-08-08 | — (all PASS; near-LICQ degradation expected, not filed; JAX-only this run, torch CPU wheel blocked by proxy) |
 | sensitivity     |     12 | 2026-08-08 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08) |
 
 * Problem Index
+** [2026-08-09] Motzkin Polynomial + Certified-Bound Contract Sweep (sos/non-SOS nonnegative polynomial, option-space) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: Motzkin (1967); Reznick "Hilbert's 17th problem" (2000) Sec 2; Parrilo thesis Ex. 4.2
+:KNOWN_OPTIMAL: 0.0
+:POUNCE_OBJECTIVE: lower_bound=-2.0971170972e+03 (order=3, unconstrained, sound but loose, is_exact=False, certified=False)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.2863s
+:ORACLE: scipy multistart BFGS (300 starts) + dense 801x801 grid refutation
+:ORACLE_OBJECTIVE: 0.0 (both)
+:ORACLE_TIME: 0.5511s (scipy)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-09_sos_motzkin.org]]
+:COVERAGE_TARGET: -
+:END:
+Deliberately adversarial polynomial: nonnegative everywhere but provably NOT
+a sum of squares, sitting exactly on the boundary of the SOS cone. Primary
+probe confirms a sound-but-loose bound at order=3 (expected, not a bug).
+Option-space extension (per "Attack the option space") added box
+constraints to unlock `certified=True` and swept order in {3,4} x tol in
+{1e-8,1e-4,1e-3,1e-2}: all 8 certified bounds held sound (<=0). A side
+probe on the unconstrained (uncertified) case at order=4/tol=1e-3
+independently reproduced the exact failure mode the sos.py docstring
+documents for uncertified bounds (raw value 0.0029 landed slightly ABOVE
+the true minimum 0.0) -- correctly flagged certified=False, so no contract
+violation. Confirms the certified/uncertified distinction in SosResult is
+load-bearing.
+
+** [2026-08-09] solve_qp_multi_rhs vs Closed-Form Box QP (batch/fixed-geometry varying-objective) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: closed-form separable box-QP (per-coordinate clip of unconstrained stationary point)
+:KNOWN_OPTIMAL: per-item, see report
+:POUNCE_OBJECTIVE: matches known/single-solve exactly (max_obj_err_vs_known=1.53e-11, max_obj_err_vs_single=0)
+:POUNCE_STATUS: optimal (all 6 items)
+:POUNCE_TIME: 0.0023s (multi_rhs, 6 items) vs 0.0191s (6x single solve_qp)
+:ORACLE: closed-form (independent) + per-item solve_qp
+:ORACLE_OBJECTIVE: matches
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-09_batch_multi_rhs_box_qp.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh batch-API angle: solve_qp_multi_rhs (fixed P/A/G/lb/ub, varying linear
+objective c) rather than solve_qp_batch (heterogeneous per-item structure,
+already logged). x-vs-known error (7e-6) is IPM boundary-approach slack at
+active bounds, not a discrepancy; x-vs-single-solve_qp error is exactly 0.
+
+** [2026-08-09] Equality+Inactive-Inequality QP Auto-Routing (autoroute/QP->qp-ipm, non-box) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: closed-form KKT (Nocedal & Wright style Lagrangian stationarity)
+:KNOWN_OPTIMAL: 6.0
+:POUNCE_OBJECTIVE: 6.0000000000e+00 (both auto and forced-nlp)
+:POUNCE_STATUS: 0 (both)
+:POUNCE_TIME: 0.0055s (auto) / 0.0082s (nlp)
+:ORACLE: scipy SLSQP
+:ORACLE_OBJECTIVE: 6.0000000253e+00
+:ORACLE_TIME: 0.0033s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-09_autoroute_eq_ineq_qp.org]]
+:COVERAGE_TARGET: -
+:END:
+Auto-router correctly detected the convex-QP structure (non-uniform
+diagonal Hessian, general affine equality, strictly-inactive general affine
+inequality -- not a box) and dispatched to info["solver"]='qp-ipm'. Answers
+agree with forced-nlp to <5e-11 and with the independent scipy SLSQP oracle
+to 4.22e-09.
+
+** [2026-08-09] Weighted p=4-Norm Minimization, Hoelder Duality (power/non-uniform equality, alpha=1/4) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: Boyd & Vandenberghe "Convex Optimization" Sec 3.1.2 Hoelder-duality/Lagrange closed form
+:KNOWN_OPTIMAL: 4.2922199444e+01 (computed exactly from a=(1,2,3), b=12)
+:POUNCE_OBJECTIVE: 4.2922194570e+01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0100s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 4.2922199445e+01
+:ORACLE_TIME: 0.0142s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-09_power_holder_weighted_p4.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh power-cone angle: p=4 (not p=3), non-uniform linear-constraint weight
+vector (not all-ones budget), no box constraint. obj_err_vs_oracle=1.14e-07;
+x_inf_err=1.7e-4 is expected quartic-objective flatness near the optimum,
+not a discrepancy.
+
+** [2026-08-09] Maximum-Entropy Distribution on the Simplex (exp/entropy, relative-entropy Kexp triple) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: Cover & Thomas "Elements of Information Theory" Thm 2.6.4
+:KNOWN_OPTIMAL: -log(4) = -1.3862943611198906
+:POUNCE_OBJECTIVE: -1.3862943581e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0138s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: -1.3862943606e+00
+:ORACLE_TIME: 0.0200s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-09_exp_maxent_simplex.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh exp-cone angle: the (t_i, x_i, 1) relative-entropy Kexp triple
+(t_i <= entr(x_i)) plus an equality constraint, distinct from the
+previously-logged (y_i, 1, t_i) epigraph-of-exp triple used for the AM-GM
+GP probe. Matches cvxpy and the textbook uniform-distribution closed form
+to ~1e-9 relative error.
+
 ** [2026-08-08] Degenerate-Vertex LP (lp/degenerate optimal BFS) - PASS
 :PROPERTIES:
 :FAMILY: lp
