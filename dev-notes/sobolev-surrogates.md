@@ -282,6 +282,61 @@ merely an imprecise one), and modelling the piecewise structure explicitly
 (classify the active set, regress within region) — which for the thermo case is
 the architecture the phase-boundary problem demands anyway (§1.3).
 
+### 2.4.1 This is an open problem in MLIPs, and we are better placed than they are
+
+Worth stating, because it inverts the direction the analogy has run so far.
+*Six Open Questions in Machine-Learned Interatomic Potential Foundation Models*
+([arXiv:2606.07327](https://arxiv.org/abs/2606.07327), 2026) names per-sample
+reliability weighting as an open direction, in the subjunctive: "Such per-sample
+DFT error bars **could** inform multi-fidelity training by allowing heterogeneous
+data to be weighted by its estimated reliability, rather than relying on uniform
+loss weighting across datasets of varying fidelity."
+
+What the MLIP field does today is strictly coarser:
+
+- **Hand-scheduled block weights.** MACE ships 1:100 energy:force in stage one,
+  flipping to 1000:100 in stage two; the `mlip` library uses 40:1000 flipped at
+  epoch 115. Global, manual, per-run tuned.
+- **Adaptive block weighting** — *Adaptive loss weighting for MLIPs* (Comput.
+  Mater. Sci., 2024) learns the energy/force balance. Still block-level.
+- **Per-sample weights inferred from the model, not the source.** *Cutting
+  Through the Noise* ([arXiv:2602.08849](https://arxiv.org/abs/2602.08849)) does
+  on-the-fly outlier detection with dynamic bootstrapping, weighting samples in
+  [0,1] by assessed label noise — but the assessment comes from the model's own
+  disagreement during training, so it cannot separate "noisy label" from "region
+  the model has not learned yet."
+- **Fidelity-*level* weighting** in multi-fidelity work — weight by *which
+  method* produced the label, not by how well the individual calculation
+  converged.
+
+The blocker is structural: SCF tolerance, k-point density and basis size are
+*input settings*, not per-configuration uncertainty estimates, and recovering a
+real error bar means a convergence study per configuration — more expensive than
+the label itself. Hence that paper's hope resting on differentiable-DFT
+frameworks that can propagate convergence-setting uncertainty. Relatedly,
+*Application-specific MLIPs*
+([10.1039/D5DD00294J](https://doi.org/10.1039/D5DD00294J)) trains deliberately on
+loosely converged DFT and compensates by upweighting forces so errors average
+out — a blunt block-level fix for precisely the problem a per-sample error bar
+would solve exactly.
+
+**An interior-point solver has no such blocker.** The complementarity products
+`sᵢzᵢ`, the smallest active multiplier, the terminating KKT residual, the
+`activity.rs` classification, and the reduced-Hessian spectrum all fall out of a
+solve already performed. So on this axis the optimization analogue is not merely
+*like* the DFT case — it is **better instrumented than the original**, and can do
+on day one what the MLIP community currently lists as future work. That is a
+methods claim that generalizes back to MLIPs, and is plausibly a stronger result
+than any single surrogate application.
+
+**Caveat, and the calibration recipe.** The activity/complementarity signal is a
+*proxy* for label precision, not a calibrated error bar; asserting otherwise
+would be overselling it. Calibration is cheap, though: re-solve a random subset
+at tighter tolerance, measure the actual drift in `∂x*/∂p`, and regress
+proxy → observed noise. A few hundred extra solves converts the proxy into a
+defensible `c_i`. Build this into the generator from the start rather than
+retrofitting it.
+
 This is a genuine advantage of generating data with an instrumented solver
 rather than a black box, and it should be designed in from the start rather than
 discovered when the surrogate misbehaves near constraint boundaries.
@@ -332,6 +387,16 @@ Only then decide whether generation throughput justifies §4's GPU kernel.
 - Czarnecki, W. M., et al. *Sobolev Training for Neural Networks.* NeurIPS 2017.
 - Kendall, A., Gal, Y., Cipolla, R. *Multi-task learning using uncertainty to
   weigh losses.* CVPR 2018.
+- *Six Open Questions in Machine-Learned Interatomic Potential Foundation
+  Models.* [arXiv:2606.07327](https://arxiv.org/abs/2606.07327) (2026). (Names
+  per-sample reliability weighting as an open direction — see §2.4.1.)
+- *Cutting Through the Noise: On-the-fly Outlier Detection for Robust Training
+  of MLIPs.* [arXiv:2602.08849](https://arxiv.org/abs/2602.08849).
+- *Adaptive loss weighting for machine learning interatomic potentials.*
+  Comput. Mater. Sci. (2024).
+- *Application-specific machine-learned interatomic potentials: the trade-off
+  between DFT convergence, MLIP expressivity, and cost.* Digital Discovery
+  (2025). [10.1039/D5DD00294J](https://doi.org/10.1039/D5DD00294J).
 - Michelsen, M. L. *The isothermal flash problem.* Fluid Phase Equilibria (1982).
   (Phase stability / tangent plane.)
 - Pirnay, H., López-Negrete, R., Biegler, L. T. *Optimal sensitivity based on
