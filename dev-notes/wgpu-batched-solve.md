@@ -341,7 +341,9 @@ existing warm-start machinery, which is already built out
 only close — POUNCE still certifies. This is the variant with no correctness
 risk, and it composes with (a)/(b) rather than competing.
 
-**(d) Thermodynamic equilibrium surrogates.** Constrained Gibbs free-energy
+**(d) Thermodynamic equilibrium surrogates.** *(expanded in
+`dev-notes/sobolev-surrogates.md`, along with the training methodology for all
+of §7.)* Constrained Gibbs free-energy
 minimization gives equilibrium composition `x*(T, P, z)`; the sensitivities
 `∂x*/∂T`, `∂x*/∂P`, `∂x*/∂z` are physically meaningful (they connect to reaction
 enthalpy and heat capacity), which means the "forces" are quantities the domain
