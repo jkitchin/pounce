@@ -81,9 +81,33 @@ evaluation and cannot be spelled in source. `f64` is
 [a live spec issue](https://github.com/gpuweb/gpuweb/issues/2805) with only an
 unofficial `naga_ext_f64` extension behind it, and Metal has no fp64 in the
 language *or* the hardware — so on Apple silicon it is not emulatable at
-acceptable cost, ever. Even where fp64 does exist (CUDA on consumer NVIDIA
-parts) it runs at 1/64 FP32 rate, which destroys the throughput argument that
-motivated the exercise in the first place.
+acceptable cost, ever.
+
+To be precise about what this is and is not: "GPUs are fp32" is **false** as a
+hardware claim. The fp64:fp32 ratio is market segmentation, not physics —
+NVIDIA A100/H100 are 1:2, AMD MI250X is 1:1 (vector), MI300X is 1:2 vector /
+1:1 matrix. Exascale HPC runs fp64 on GPUs routinely. What is true is narrower:
+consumer NVIDIA is deliberately crippled to 1:64, Apple silicon has no fp64 at
+all, and WebGPU spec'd it out because the spec must hold on the weakest
+conforming target (mobile Mali/Adreno, Apple).
+
+So the real trade is **fp64 or portability, not both** — and it is a genuine
+fork, not a constraint handed to us. Targeting CUDA on a datacenter part would
+give fp64 at half rate and make Gate 1 (§8) unnecessary entirely; that is
+effectively what `jaxipm` does, which is why it has no single-precision research
+problem and can lean on cuDSS. Choosing `wgpu` buys Metal + AMD + Intel + the
+browser and pays for it with an open numerical problem.
+
+Two things argue for fp32 even on hardware that has fast fp64. First, the
+binding constraint in this design is **shared memory, not FLOPs** (see (c)
+below): 16 KB is 4096 `f32` but only 2048 `f64`, so fp64 halves the problem size
+per workgroup and halves occupancy — for batched-tiny-problems that costs more
+than the 2× arithmetic rate buys. Second, the trend runs the other way: Blackwell
+deliberately trades FP64 silicon for FP4/FP8/BF16 tensor throughput, and B300's
+FP64 is *lower than H100's*. Betting a solver on GPU fp64 throughput is betting
+against the roadmap — which is exactly the Arrizabalaga framing, that IPMs cannot
+exploit "the accelerated hardware that underpins modern machine learning" because
+that hardware is moving to lower precision, not higher.
 
 Consequence: **a wgpu module is an fp32 module, unconditionally.** Which makes
 Arrizabalaga et al. a hard dependency rather than a nice citation. Without that
