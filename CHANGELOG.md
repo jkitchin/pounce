@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — Hessian coloring no longer collapses to ~n colors on models with a dense Hessian row (#554)
+
+The `.nl` evaluator recovers the Lagrangian Hessian from compressed
+Hessian-vector products, one per color of a greedy distance-1 coloring of
+the column-intersection graph (Coleman–Moré direct recovery). A column
+whose Hessian row is **dense** — the free-time `step`/`tf` variable of a
+COPS-style optimal-control model, which multiplies every collocation
+equation, or any shared design parameter — makes *every pair* of columns
+adjacent through that one shared row. The intersection graph degenerates
+toward a clique, the coloring toward one color per variable, and since
+the seed and compressed buffers are each `n_colors × n` doubles, memory
+and per-evaluation zeroing cost turn O(n²): `rocket_12800` (n = 51 205)
+needed ~42 GB and was OOM-killed on a 15 GB machine, and on instances
+that fit, `eval_h` — not the linear solver — was the dominant
+per-iteration cost that #554 measured (5.07 s of a 6.85 s
+`rocket_3200` solve).
+
+The coloring now **peels dense columns first**: any column whose degree
+exceeds `max(64, 8 × average degree)` gets an exclusive color, whose
+product `H·e_j` is the exact symmetric column j. The remaining columns
+are colored as before, except that conflicts routed *through a peeled
+row* are ignored — those entries decode from the peeled column's
+exclusive product instead, so recovery stays exact. With `p` peeled
+columns the color count drops from ~n to `p + χ(rest)`. The threshold is
+conservative by design: a mesh/stencil model (uniform degree) never
+trips it and keeps its historical coloring bit for bit.
+
+On `rocket_3200`, colors drop 12 800 → 5, Lagrangian-Hessian time
+5.07 s → 0.28 s, and the whole solve 6.85 s → 1.83 s, with an identical
+iterate path (same 30 iterations, objective equal to all printed
+digits). `rocket_12800` and `steering_12800` — the two cleanest signals
+in #554, previously requiring tens of GB — now solve in ~7.5 s at
+~310 MB peak. The remaining per-iteration gap against MA57 on
+fixed-horizon collocation chains is the factorization-kernel question
+tracked in #552.
+
 ### Fixed — the filter's `theta_max` ceiling is now raised on demand instead of blocking a solve forever (#476, #546)
 
 The filter rejects any trial iterate whose constraint violation exceeds

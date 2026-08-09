@@ -2395,7 +2395,7 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
 }
 
 /// Greedy column coloring of a symmetric sparsity pattern stored
-/// as lower-triangle pairs.
+/// as lower-triangle pairs, with dense-column peeling.
 ///
 /// Builds the column-intersection graph: columns `c1` and `c2` are
 /// adjacent iff there exists a row `r` with `H[r, c1] != 0` and
@@ -2405,13 +2405,43 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
 /// pairwise disjoint row supports, so a single H·s product
 /// recovers them all unambiguously.
 ///
-/// Returns `(var_color, n_colors)` where `var_color[k]` is the
-/// color assigned to variable `k`, or `u32::MAX` for variables
-/// not in any Hessian pair (they contribute nothing and don't
-/// need a color).
-fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32>, usize) {
+/// **Dense-column peeling (pounce#554).** A column whose degree is
+/// far above the average — the free-time `step`/`tf` variable of a
+/// COPS-style optimal-control model couples with *every* state, so
+/// its Hessian row is dense — makes every pair of columns adjacent
+/// through that shared row, collapsing the intersection graph
+/// toward a clique and the coloring toward `n` colors. Since the
+/// seed and compressed buffers are `n_colors × n`, that is O(n²)
+/// memory and O(n²) zeroing per `eval_h` (rocket_12800: ~42 GB,
+/// OOM). The classical remedy: peel such columns out first, giving
+/// each an **exclusive** color whose product `H·e_j` recovers the
+/// whole symmetric column j directly, and color the remaining graph
+/// while ignoring conflicts routed through peeled rows — those
+/// entries are decoded from the peeled column's side instead (see
+/// the decode-table construction in `NlTnlp::try_new`). With p
+/// peeled columns the count drops to `p + χ(rest)`; for the
+/// collocation models that is ~5 instead of ~n.
+///
+/// Recovery stays exact: a lower pair `(i, j)` with `j` (or `i`)
+/// peeled reads `H[i, j]` out of the peeled column's exclusive
+/// product, and a pair with both sparse decodes from `color(j)` at
+/// row `i`, which cannot collide — any column sharing the
+/// (non-peeled) row `i` with `j` was seen by the conflict scan and
+/// forced into a different color.
+///
+/// Returns `(var_color, n_colors, is_dense)` where `var_color[k]`
+/// is the color assigned to variable `k`, or `u32::MAX` for
+/// variables not in any Hessian pair (they contribute nothing and
+/// don't need a color), and `is_dense[k]` marks peeled columns
+/// (each alone in its color). When no column crosses the peeling
+/// threshold the coloring is identical to the historical un-peeled
+/// one.
+fn greedy_hessian_coloring(
+    n: usize,
+    lower_pairs: &[(usize, usize)],
+) -> (Vec<u32>, usize, Vec<bool>) {
     if n == 0 {
-        return (Vec::new(), 0);
+        return (Vec::new(), 0, Vec::new());
     }
 
     // For each variable k, list of rows in which column k has a
@@ -2429,21 +2459,64 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
         }
     }
 
+    // Peel columns whose degree dwarfs the average. The threshold is
+    // deliberately conservative — max(64, 8·avg) — so a mesh/stencil
+    // model (degree ≈ stencil size, uniform) never trips it and keeps
+    // its historical coloring bit-for-bit; only genuinely dense
+    // rows/columns (free-time variables, shared design parameters)
+    // are peeled. Each peeled column costs exactly one extra H·s
+    // product per eval, which a dense column costs under any exact
+    // scheme.
+    let mut is_dense = vec![false; n];
+    let nz_cols = col_rows.iter().filter(|r| !r.is_empty()).count();
+    if nz_cols > 0 {
+        let total_deg: usize = col_rows.iter().map(|r| r.len()).sum();
+        let avg_deg = total_deg as f64 / nz_cols as f64;
+        let threshold = (8.0 * avg_deg).max(64.0);
+        for j in 0..n {
+            if col_rows[j].len() as f64 > threshold {
+                is_dense[j] = true;
+            }
+        }
+    }
+
     let mut var_color = vec![u32::MAX; n];
-    let mut forbidden = vec![u32::MAX; n + 1];
     let mut n_colors: u32 = 0;
+
+    // Exclusive colors 0..p for the peeled columns. The greedy pass
+    // below starts at `first_shared` so no sparse column ever joins
+    // a peeled color and the `H·e_j` products stay pure columns.
+    for j in 0..n {
+        if is_dense[j] {
+            var_color[j] = n_colors;
+            n_colors += 1;
+        }
+    }
+    let first_shared = n_colors;
+
+    let mut forbidden = vec![u32::MAX; n + 1];
 
     for j in 0..n {
         // Variable `j` has no Hessian entries → skip (no color).
-        if col_rows[j].is_empty() {
+        // Peeled columns already hold their exclusive color.
+        if col_rows[j].is_empty() || is_dense[j] {
             continue;
         }
         // Mark colors used by any column sharing a row with `j`.
         // Row-of-col -> col-in-row visit pattern collects all
         // distance-1 neighbors in the column-intersection graph.
+        // Conflicts routed through a peeled row are skipped: those
+        // Hessian entries are decoded from the peeled column's
+        // exclusive product, never from a shared color, so they
+        // impose no constraint here. Peeled neighbor columns are
+        // likewise irrelevant (their colors are below
+        // `first_shared`, which the greedy never picks).
         for &r in &col_rows[j] {
+            if is_dense[r as usize] {
+                continue;
+            }
             for &c in &row_cols[r as usize] {
-                if c as usize == j {
+                if c as usize == j || is_dense[c as usize] {
                     continue;
                 }
                 let cc = var_color[c as usize];
@@ -2452,8 +2525,8 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
                 }
             }
         }
-        // First color not stamped with `j as u32`.
-        let mut chosen: u32 = 0;
+        // First shared color not stamped with `j as u32`.
+        let mut chosen: u32 = first_shared;
         while (chosen as usize) < forbidden.len() && forbidden[chosen as usize] == j as u32 {
             chosen += 1;
         }
@@ -2463,7 +2536,7 @@ fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32
         }
     }
 
-    (var_color, n_colors as usize)
+    (var_color, n_colors as usize, is_dense)
 }
 
 impl NlTnlp {
@@ -2578,7 +2651,7 @@ impl NlTnlp {
         // Hessian-vector products we need per `eval_h` call —
         // typically O(stencil) for PDE-mesh problems.
         let lower_pairs: Vec<(usize, usize)> = pairs.iter().copied().collect();
-        let (var_color, n_colors) = greedy_hessian_coloring(prob.n, &lower_pairs);
+        let (var_color, n_colors, is_dense) = greedy_hessian_coloring(prob.n, &lower_pairs);
 
         // Per-color seed vectors (dense for O(1) Var lookup in
         // `Tape::hessian_directional`).
@@ -2594,15 +2667,29 @@ impl NlTnlp {
         // computing compressed_{c_j} = (H · s_{c_j}), the value at
         // row i is exactly H[i, j] (coloring guarantees no other
         // column in c_j has a nonzero at row i).
+        //
+        // Peeled-column exception (pounce#554): a pair whose row `i`
+        // is a peeled (dense) column but whose column `j` is not must
+        // decode from the *peeled* side — `H[i, j] = H[j, i]`, read at
+        // row j of column i's exclusive `H·e_i` product. Row `i` of a
+        // shared color may mix several columns' entries (the conflict
+        // scan deliberately ignores peeled rows), so it must never be
+        // read. Pairs whose column `j` is peeled already sit in an
+        // exclusive color and decode as usual.
         let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
         for (&(i, j), &idx) in hess_map.iter() {
-            let c = var_color[j];
+            let (col, row) = if is_dense[i] && !is_dense[j] {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let c = var_color[col];
             debug_assert!(
                 c != u32::MAX,
-                "column {j} has Hessian pair {idx} but no color"
+                "column {col} has Hessian pair {idx} but no color"
             );
             decoding[c as usize].push(ColorWrite {
-                row: i as u32,
+                row: row as u32,
                 hess_idx: idx as u32,
             });
         }
@@ -2672,10 +2759,12 @@ impl NlTnlp {
             let nnz_h = h_irow.len();
             let avg_decode =
                 decoding.iter().map(|d| d.len()).sum::<usize>() as f64 / n_colors.max(1) as f64;
+            let n_dense = is_dense.iter().filter(|&&d| d).count();
             eprintln!(
                 "[tape stats] summands={total} (obj={n_obj} con={n_con}) \
                  total_ops={sum_ops} avg_ops={:.1} max_ops={max_tape_n} \
-                 n_colors={n_colors} avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h}",
+                 n_colors={n_colors} dense_cols={n_dense} \
+                 avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h}",
                 sum_ops as f64 / t as f64,
             );
         }
@@ -5447,5 +5536,123 @@ G0 3
         t.hessian_vector_product(&[1.0], &[1.0], 1.0, None, &mut out)
             .expect("hvp");
         assert!((out[0] + 2.0).abs() < 1e-12, "out = {out:?}");
+    }
+
+    /// A hub column (dense Hessian row — the free-time variable of a
+    /// collocation model) must be peeled into an exclusive color
+    /// instead of collapsing the column-intersection graph to a
+    /// clique and the coloring to ~n colors (pounce#554: the seed and
+    /// compressed buffers are `n_colors × n`, so rocket_12800 needed
+    /// ~42 GB and OOM'd).
+    #[test]
+    fn dense_column_peeling_caps_colors() {
+        // Star pattern: hub column 0 couples with every other
+        // variable; everyone has a diagonal. Un-peeled, every pair of
+        // columns shares row 0 → all 200 columns conflict → 200
+        // colors. Peeled, the hub takes one exclusive color and the
+        // rest — pairwise disjoint once hub-routed conflicts are
+        // ignored — share one.
+        let n = 200;
+        let mut pairs: Vec<(usize, usize)> = (0..n).map(|j| (j, j)).collect();
+        pairs.extend((1..n).map(|j| (j, 0)));
+        let (var_color, n_colors, is_dense) = greedy_hessian_coloring(n, &pairs);
+        assert!(is_dense[0], "hub column must be peeled");
+        assert!(!is_dense[1], "spoke columns must not be peeled");
+        assert!(
+            n_colors <= 3,
+            "peeling must cap the coloring; got {n_colors} colors"
+        );
+        // The hub's color is exclusive — the H·e_hub product must be a
+        // pure column for the decode to be exact.
+        let hub_color = var_color[0];
+        assert!(
+            (1..n).all(|j| var_color[j] != hub_color),
+            "no spoke may share the hub's color"
+        );
+
+        // A uniform-degree chain (no dense column) keeps the
+        // historical behavior: nothing peeled.
+        let chain: Vec<(usize, usize)> = (0..n)
+            .map(|j| (j, j))
+            .chain((1..n).map(|j| (j, j - 1)))
+            .collect();
+        let (_, chain_colors, chain_dense) = greedy_hessian_coloring(n, &chain);
+        assert!(chain_dense.iter().all(|&d| !d), "chain must not peel");
+        assert!(chain_colors <= 3, "chain colors: {chain_colors}");
+    }
+
+    /// End-to-end `eval_h` exactness through the peeled-column decode
+    /// path: `min Σ_i t·x_i²` has ∂²/∂x_i² = 2t and the mixed
+    /// ∂²/(∂t ∂x_i) = 2x_i sitting in the hub variable's dense row,
+    /// which is recovered from the peeled column's exclusive `H·e_t`
+    /// product rather than a shared color.
+    #[test]
+    fn dense_hub_hessian_evaluates_exactly() {
+        // Var 0 is the hub `t`; vars 1..=N are the spokes.
+        let nspokes = 100;
+        let n = nspokes + 1;
+        let obj = Expr::Sum(
+            (1..=nspokes)
+                .map(|i| bin(BinOp::Mul, v(0), bin(BinOp::Pow, v(i), c(2.0))))
+                .collect(),
+        );
+        let prob = NlProblem::from_expressions(parts(n, obj, Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        let info = t.get_nlp_info().unwrap();
+        let nnz = info.nnz_h_lag as usize;
+
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            false,
+            1.0,
+            None,
+            false,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+
+        // The model must actually exercise the peeled path: the hub's
+        // degree (nspokes) is far past max(64, 8·avg).
+        let lower: Vec<(usize, usize)> = (0..nnz)
+            .map(|k| (irow[k] as usize, jcol[k] as usize))
+            .collect();
+        let (_, n_colors, is_dense) = greedy_hessian_coloring(n, &lower);
+        assert!(is_dense[0], "hub variable must be peeled");
+        assert!(n_colors <= 4, "colors must stay bounded; got {n_colors}");
+
+        let mut x = vec![0.0; n];
+        x[0] = 0.7; // t
+        for i in 1..=nspokes {
+            x[i] = 0.01 * i as f64 - 0.3;
+        }
+        let obj_factor = 1.5;
+        let mut hvals = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            obj_factor,
+            None,
+            true,
+            SparsityRequest::Values { values: &mut hvals }
+        ));
+
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            let expect = if i == j && i >= 1 {
+                2.0 * obj_factor * x[0] // ∂²(t·x_i²)/∂x_i²
+            } else if j == 0 && i >= 1 {
+                2.0 * obj_factor * x[i] // ∂²(t·x_i²)/(∂t ∂x_i)
+            } else {
+                0.0 // structural (t,t) if present
+            };
+            assert!(
+                (hvals[k] - expect).abs() < 1e-12,
+                "H[{i},{j}] = {} but expected {expect}",
+                hvals[k]
+            );
+        }
     }
 }
