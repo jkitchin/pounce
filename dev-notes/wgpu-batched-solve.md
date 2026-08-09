@@ -116,10 +116,43 @@ NaN on the rest, and produce sensitivities that are quietly garbage. Any plan
 that treats "port to fp32" as a mechanical type substitution is a plan that
 fails at the end, expensively.
 
+**(a′) The fork may be a type parameter, not an architecture decision.** Rust
+has three ordinary routes to CUDA — `cudarc` (safe wrappers over the driver API
+plus cuBLAS/cuSOLVER/cuSPARSE/NVRTC; mature, used by `candle` and `dfdx`;
+**no cuDSS bindings**), `rustc_codegen_nvvm`
+([Rust CUDA](https://rust-gpu.github.io/rust-cuda/), rebooted 2025, kernels in
+Rust but pinned to an exact nightly because it hooks rustc internals), and
+plain nvcc/NVRTC FFI. None of them resolve the portability trade.
+
+[CubeCL](https://github.com/tracel-ai/cubecl) does. It is a Rust compute DSL
+(`#[cube]`) that JIT-compiles one kernel to CUDA, ROCm/HIP, Metal, Vulkan,
+WebGPU, *and* CPU-SIMD, and it is the compute backend under Burn. `f64` is
+supported on its CUDA backend and structurally cannot be on its wgpu backends
+(WGSL has none). So a kernel written **generic over the float type** gives
+`f64` on CUDA/ROCm and `f32` on Metal/Vulkan/WebGPU from one source.
+
+That reorders the risk in §8 substantially: land the **CUDA fp64 path first**
+— no numerical research risk at all — prove the batching design beats the rayon
+baseline, and only then take on Gate 1's single-precision reformulation for the
+portable path. It also yields an fp64 reference implementation in the same
+language to validate the fp32 kernel against, and lets Gate 0's CPU baseline
+share source with the kernel via the CPU-SIMD backend.
+
+Costs: CubeCL is **alpha** (its README warns of breaking changes between minor
+versions and recommends pinning); unsupported instructions fail at *runtime*,
+not compile time, so per-backend CI coverage is mandatory; and it is a young
+dependency for a core numerical component versus `wgpu`, which ships in Firefox.
+Recommendation: prototype Gate 2 in CubeCL. If the alpha status bites, dropping
+to raw `wgpu` loses only the DSL layer.
+
 **(b) There is no `cuDSS`, and there will not be one.** `jaxipm` gets to call a
 vendor sparse-direct solver. Under `wgpu` the options are: write a supernodal
 sparse LDLᵀ in WGSL (nobody sane does this), or **do not use a sparse solver**.
-The second option is fine, and is in fact the correct design — see §4.
+The second option is fine, and is in fact the correct design — see §4. Note this
+cuts both ways and mostly in our favour: `cudarc` has no cuDSS bindings either,
+but because the §4 kernel needs no vendor sparse solver at all, that gap is
+irrelevant to us. Avoiding vendor libraries is precisely what lets one kernel
+run on all six CubeCL targets.
 
 **(c) The portable resource limits are tight.** The defaults we must design
 against, not the ones a desktop Vulkan backend happens to report:
@@ -371,6 +404,13 @@ H=20`; batches of 64 / 1k / 16k) with symbolic-factor reuse and warm starts on.
 This produces the number a GPU has to beat. *Kill if* CPU throughput already
 covers the plausible application demand.
 
+**Ordering note.** If Gate 2 is built in CubeCL (§3 a′), Gates 1 and 2 can swap:
+a CUDA **fp64** kernel carries no numerical research risk, so it can validate the
+whole batching design against Gate 0's baseline *before* any single-precision
+work is funded. Gate 1 then becomes the portability step rather than the
+feasibility step. Prefer this ordering unless the browser/Apple targets are the
+primary motivation, in which case Gate 1 remains the gate.
+
 **Gate 1 — fp32 on the CPU (1–2 weeks).** Implement the Arrizabalaga
 complementarity reformulation in `pounce-convex` and run the IPM in fp32 *on the
 CPU*, checking both solution and sensitivity accuracy against the fp64 path.
@@ -415,6 +455,11 @@ funding.
   KKT; the CPU precedent for §4.)
 - WebGPU f64: [gpuweb#2805](https://github.com/gpuweb/gpuweb/issues/2805).
   WGSL float atomics: [gpuweb#4894](https://github.com/gpuweb/gpuweb/issues/4894).
+- Rust GPU tooling: [CubeCL](https://github.com/tracel-ai/cubecl) (multi-target
+  `#[cube]` DSL; Burn's compute backend),
+  [`cudarc`](https://crates.io/crates/cudarc) (driver + cuBLAS/cuSOLVER/cuSPARSE;
+  no cuDSS), [Rust CUDA](https://rust-gpu.github.io/rust-cuda/)
+  (`rustc_codegen_nvvm`, kernels in Rust, nightly-pinned).
 
 ## Related notes
 
