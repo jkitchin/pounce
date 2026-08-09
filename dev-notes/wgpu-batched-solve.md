@@ -436,6 +436,65 @@ application — **in parallel with Gate 0/1**. It is independent, cheap, uses on
 shipped functionality, and its outcome informs whether Gates 2–3 are worth
 funding.
 
+## 9. Packaging: in-tree crate, or a downstream application?
+
+Both use cases above are better built as a **separate repo depending on
+published pounce crates** than as a 21st workspace member. The reasoning is
+specific, not stylistic.
+
+**The dependency is clean here, unlike discopt.**
+`dev-notes/discopt-pounce-integration.md` argues the opposite case for spatial
+B&B: a generic plugin boundary makes discopt "a dispatcher," and the leverage
+comes from warm state, certificates, and μ flowing *through the tree*. That
+argument does not transfer. B&B wants state to flow node-to-node; a batch is
+independent by construction. What this application needs from pounce is problem
+data structures, `pounce-sensitivity`, and the fp64 solver as a correctness
+oracle — an API boundary, not a lossy serialization boundary.
+
+**Release lockstep.** Per `CLAUDE.md`, pounce publishes 20 crates in topological
+order behind a guard that fails unless all versions agree, gating two PyPI
+packages as well. Putting **CubeCL — self-described alpha, breaking changes
+between minor versions** — inside that lockstep taxes every future release for
+the sake of an experiment. `publish = false` and the long-lived
+`feature/global` branch are the existing escape hatches; neither is pleasant.
+
+**Maturity contract.** The README promises "production-ready for the core IPM
+workflow." An fp32 GPU kernel is research-grade and serves a different audience
+(control/RL, not process optimization). Keeping it out of the workspace keeps
+both promises honest.
+
+**Frame the app around §7, not around the kernel.** A repo whose only claim on
+pounce is "we share a `QpProblem`" is thin — §4's kernel reuses none of
+`pounce-convex`'s IPM. But the amortized-optimization layer of §7 depends on
+pounce deeply and legitimately (batch solving, sIPOPT sensitivities, warm
+starts, fp64 ground truth), needs **zero new numerics**, and is buildable
+against pounce 0.9 today. Under that framing the GPU is a throughput
+optimization *inside* the application, adopted iff Gate 0 says generation is the
+bottleneck — so the app has a reason to exist whether or not the GPU bet pays
+off. Sketch:
+
+```
+pounce-amortize/          (separate repo, deps from crates.io)
+  ├── dataset/   generate (p, x*, ∂x*/∂p, V, ∂V/∂p) — CPU fp64, today
+  ├── train/     Sobolev training recipes (JAX / PyTorch)
+  ├── verify/    predict-then-certify: model proposes, pounce checks
+  └── gpu/       CubeCL kernel — added later, gated on Gate 0/2
+```
+
+**The payoff is an API-surface test.** `pounce-rs` is the curated facade —
+"re-exports only… pins a single curated public surface, so downstream code is
+insulated from churn in the internal crate layout" — but it covers
+`pounce-common`/`-nlp`/`-algorithm`/`-observability`, i.e. **the NLP path only**.
+There is no `pounce-convex`, no `pounce-sensitivity`, no `pounce-qp`. A
+downstream batched-QP-plus-sensitivity consumer must therefore reach past the
+facade into precisely the internal crates it exists to hide.
+
+That gap is the finding. Building out-of-tree forces the convex/QP + sensitivity
++ batch facade to be designed deliberately, by a real consumer, instead of being
+assumed. Whatever exports turn out to be missing are a genuine improvement to
+pounce; and if the application *cannot* be built at arm's length, that is a
+cheap, early result about how modular the workspace actually is.
+
 ## References
 
 - Arrizabalaga, J., Tracy, K., Manchester, Z. *A Differentiable Interior-Point
