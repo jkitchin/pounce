@@ -1,0 +1,43 @@
+#+TITLE: Adversary Run: Minimum Eigenvalue of a 3x3 Symmetric Matrix via SDP
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: min-eigenvalue SDP (PSD cone, dense off-diagonal svec block)
+:SOURCE: Vandenberghe & Boyd, "Semidefinite Programming", SIAM Review 38(1), 1996, sec 3.1; Boyd & Vandenberghe, Convex Optimization, sec 5.9. lambda_min(A) = max t s.t. A - tI psd.
+:KNOWN_OPTIMAL: 2.2679491924e+00
+:N_VARIABLES: 1 (t)
+:N_CONSTRAINTS: 1 PSD cone block, n=3 (svec length 6)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+A = [[3,1,0],[1,4,1],[0,1,5]]. max t s.t. A - tI \succeq 0, encoded via
+svec(A) - t*svec(I) in the PSD cone (lower-triangle, column-major, off-diag
+x sqrt(2)). Larger / denser than the existing 2x2 fixtures in
+python/tests/test_socp.py (test_psd_min_eigenvalue_diagonal /
+_offdiagonal): 3x3 with a fully populated off-diagonal, svec length 6
+instead of 3.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | lambda_min       | Rel Err | Iters | Wall Time |
+|-----------------+---------+------------------+---------+-------+-----------|
+| pounce          | optimal | 2.2679491912e+00 | -       |     - |   0.0037s |
+| cvxpy/Clarabel  | optimal | 2.2679491952e+00 | -       |     - |   0.0153s |
+
+Known optimal (numpy eigvalsh): 2.2679491924e+00
+
+* Cross-check / Verification
+rel_err_vs_known = 5.52e-10, rel_err_vs_oracle = 1.78e-09. All three
+(pounce SDP, cvxpy/Clarabel SDP, numpy's direct eigenvalue decomposition)
+agree to ~1e-9.
+
+* Verdict
+PASS — pounce's PSD-cone solver reproduces the analytic minimum eigenvalue
+and matches cvxpy/Clarabel on a denser 3x3 instance than existing test
+fixtures. No defect found.

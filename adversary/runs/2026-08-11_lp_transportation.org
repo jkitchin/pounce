@@ -1,0 +1,46 @@
+#+TITLE: Adversary Run: Classic Transportation LP
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: equality-constrained, degenerate (balanced transportation problem)
+:SOURCE: standard transportation-problem formulation (Hillier & Lieberman, Introduction to Operations Research; Bertsimas & Tsitsiklis, Introduction to Linear Optimization ch. 1)
+:KNOWN_OPTIMAL: 250.0
+:N_VARIABLES: 6
+:N_CONSTRAINTS: 5 equality rows (balanced supply/demand, rank-deficient by 1 as is standard for transportation LPs), nonneg bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+2 supplies (30, 20), 3 demands (15, 25, 10), costs c = (4,6,8,5,7,3) for
+routes s1->{d1,d2,d3}, s2->{d1,d2,d3}. min c^Tx s.t. supply/demand equalities,
+x >= 0.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | Objective       | Rel Err  | Iters | Wall Time |
+|--------------------+---------+-----------------+----------+-------+-----------|
+| pounce (solve_qp)  | optimal | 2.4999999998e+02 | -        |     - |   0.0048s |
+| scipy linprog/HiGHS| 0 (opt) | 2.5000000000e+02 | -        |     - |   0.0025s |
+
+Known optimal: 250.0
+
+* Cross-check / Verification
+Objective rel_err_vs_known = 6.95e-11, rel_err_vs_oracle = 6.95e-11 — exact
+agreement. The primal vector x differs materially between pounce and HiGHS
+(x_inf_err = 4.35) because this transportation instance is *degenerate*
+(the 5 equality rows have rank 4; multiple optimal basic feasible solutions
+exist). HiGHS's simplex returns a vertex; pounce's interior-point method
+converges to an interior/analytic-center point among the alternate optima.
+Verified c^T x_pounce = 250.0 to the same precision as c^T x_HiGHS, so both
+are valid global optima — this is expected IPM behavior on a degenerate LP,
+not a discrepancy.
+
+* Verdict
+PASS — objective matches the closed-form/oracle optimum to ~1e-10. The
+differing primal vertex is a known, harmless consequence of LP degeneracy
+and the IPM vs. simplex path difference, not a bug.

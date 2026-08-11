@@ -1,0 +1,40 @@
+#+TITLE: Adversary Run: Minimum-Norm Solution of an Underdetermined Linear System
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: equality-constrained SOC, closed-form optimum
+:SOURCE: classic least-norm result, e.g. Boyd & Vandenberghe, Convex Optimization, sec 4.3 "least-norm problems"; x* = A^T(AA^T)^{-1}b, obj* = sqrt(b^T(AA^T)^{-1}b)
+:KNOWN_OPTIMAL: 3.7984959429e+00
+:N_VARIABLES: 6 (t, x in R^5)
+:N_CONSTRAINTS: 3 equality rows; 1 SOC block of dim 6
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+min t s.t. (t, x) \in SOC (t \ge ||x||_2), Ax = b, with
+A = [[1,0,1,0,1],[0,1,0,1,0],[1,1,0,0,1]], b = (3,4,2).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective       | Rel Err   | Iters | Wall Time |
+|-----------------+---------+-----------------+-----------+-------+-----------|
+| pounce          | optimal | 3.7984959391e+00 | -         |     - |   0.0092s |
+| cvxpy/Clarabel  | optimal | 3.7984959429e+00 | -         |     - |   0.0216s |
+
+Known optimal: 3.7984959429e+00
+
+* Cross-check / Verification
+rel_err_vs_known = 1.00e-09, x_inf_err_vs_known = 3.06e-09.
+rel_err_vs_oracle = 1.00e-09, x_inf_err_vs_oracle = 3.06e-09.
+Both pounce's primal x and its objective agree with the closed-form
+pseudoinverse solution and with cvxpy/Clarabel to ~1e-9, well inside the
+1e-4 threshold.
+
+* Verdict
+PASS — pounce's SOCP solver matches both the analytic minimum-norm solution
+and an independent conic oracle to ~1e-9. No defect found.

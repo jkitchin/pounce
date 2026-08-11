@@ -1,0 +1,47 @@
+#+TITLE: Adversary Run: pounce.jax Differentiable QP Layer dx/dtheta
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: QP OptNet-style implicit differentiation (equality-only, scalar parameter in c)
+:SOURCE: Amos & Kolter, "OptNet: Differentiable Optimization as a Layer in Neural Networks", ICML 2017, sec 3
+:KNOWN_OPTIMAL: gradient-correctness check; no scalar objective optimum to compare (per diff family convention)
+:N_VARIABLES: 3 (plus 1 scalar differentiated parameter theta)
+:N_CONSTRAINTS: 1 equality
+:SELECTED_BY: log-rotation (diff attempted per environment adaptation #3; CPU jax wheel installed this run)
+:COVERAGE_TARGET: -
+:END:
+
+min (1/2)x^T P x + c(theta)^Tx s.t. 1^Tx=1, c(theta) = c0 + theta*e0,
+theta0 = 0.3. P = [[4,0.4,0.2],[0.4,3,0.3],[0.2,0.3,2]], c0=(0.1,-0.2,0.05).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Method                             | dx/dtheta                          | Wall Time |
+|-------------------------------------+-------------------------------------+-----------|
+| pounce.jax layer (jax.jacobian)     | (-0.20922492, 0.09034712, 0.11887779) | 1.8707s (incl. JAX/XLA warm-up) |
+| central finite diff (host solve_qp) | (-0.20922492, 0.09034712, 0.11887779) | 0.0028s   |
+| closed-form KKT inverse             | (-0.20922492, 0.09034712, 0.11887779) | -         |
+
+Known optimal: n/a (gradient check)
+
+* Cross-check / Verification
+Three-way agreement: implicit-function autodiff via the pounce.jax layer,
+a central finite difference (delta=1e-6, float64) using the independent
+non-differentiable host API `pounce.qp.solve_qp` (never touches the layer
+under test), and the closed-form KKT-inverse expression for this
+equality-only QP (dx/dtheta = -[P A^T;A 0]^{-1}[:n,:n] @ e0).
+max|ad-fd| = 6.90e-11, max|ad-closed| = 1.39e-17, max|fd-closed| = 6.90e-11.
+Forward solve of the jax layer also matches the host solve_qp forward
+solve exactly (max_err = 0.0).
+
+* Verdict
+PASS — the OptNet implicit-differentiation gradient matches both an
+independent finite-difference re-solve and a closed-form KKT-inverse
+expression to ~1e-10/1e-17. No defect found. (torch not attempted this run
+— budget spent on jax; torch CPU wheel remains untested, noted for a future
+rotation per the standing log note.)

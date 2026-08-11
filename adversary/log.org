@@ -11,17 +11,17 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |     15 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
-| lp              |     13 | 2026-08-11 | —             |
-| qp              |     13 | 2026-08-11 | —             |
+| lp              |     14 | 2026-08-11 | —             |
+| qp              |     14 | 2026-08-11 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
-| socp            |     13 | 2026-08-11 | —             |
+| socp            |     14 | 2026-08-11 | —             |
 | exp             |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
-| sdp             |     13 | 2026-08-11 | —             |
+| sdp             |     14 | 2026-08-11 | —             |
 | sos             |     13 | 2026-08-09 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
 | autoroute       |     12 | 2026-08-09 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, and the warm_start+auto routing-decision contract)  |
 | batch           |     12 | 2026-08-09 | —             |
-| diff            |     13 | 2026-08-11 | — (all PASS; near-LICQ degradation expected, not filed; JAX-only again, torch CPU wheel still blocked by proxy) |
+| diff            |     14 | 2026-08-11 | — (all PASS; near-LICQ degradation expected, not filed; two independent same-day probes: QP layer dx/dc (closed-form+FD 3-way agreement) and SOCP layer dx/dh; torch CPU wheel still untested) |
 | sensitivity     |     12 | 2026-08-08 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08) |
 
 * Problem Index
@@ -5553,3 +5553,100 @@ jax.grad(obj)(a) matches the constant vector c exactly (to printed
 float64 precision) and a central finite difference to 9.89e-10. Torch CPU
 wheel install failed (403, proxy) -- JAX-only, consistent with the
 2026-08-08 diff run.
+
+** [2026-08-11] Minimum-Norm Solution of Underdetermined Linear System (socp/equality-constrained SOC) - PASS
+:PROPERTIES:
+:FAMILY: socp
+:SOURCE: Boyd & Vandenberghe, Convex Optimization, sec 4.3 (least-norm problems)
+:KNOWN_OPTIMAL: 3.7984959429e+00
+:POUNCE_OBJECTIVE: 3.7984959391e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0092s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 3.7984959429e+00
+:ORACLE_TIME: 0.0216s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_socp_min_norm_underdetermined.org]]
+:COVERAGE_TARGET: -
+:END:
+Closed-form pseudoinverse solution vs pounce SOCP vs cvxpy/Clarabel agree to
+~1e-9 on obj and x.
+
+** [2026-08-11] Classic Transportation LP (lp/degenerate equality-constrained) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: Hillier & Lieberman, Introduction to Operations Research; Bertsimas & Tsitsiklis ch.1
+:KNOWN_OPTIMAL: 250.0
+:POUNCE_OBJECTIVE: 2.4999999998e+02
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0048s
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 2.5000000000e+02
+:ORACLE_TIME: 0.0025s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_lp_transportation.org]]
+:COVERAGE_TARGET: -
+:END:
+Degenerate balanced transportation problem (rank-deficient equalities);
+objective matches oracle to 1e-10, primal vertex differs (expected: IPM
+interior point vs HiGHS simplex vertex among alternate optima) - not a bug.
+
+** [2026-08-11] Minimum-Variance Portfolio / Markowitz QP (qp/equality-constrained) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Markowitz (1952); closed-form KKT x*=Sigma^{-1}1/(1^TSigma^{-1}1)
+:KNOWN_OPTIMAL: 1.9270833333e-02
+:POUNCE_OBJECTIVE: 1.9270833143e-02
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0050s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 1.9270833333e-02
+:ORACLE_TIME: 0.0120s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_qp_min_variance_portfolio.org]]
+:COVERAGE_TARGET: -
+:END:
+Closed-form Lagrangian solution vs pounce QP IPM vs cvxpy/Clarabel agree to
+~1e-9/1e-10. (Different instance from the concurrent same-day
+qp_markowitz_option_sweep.py run — that one reused a previously logged
+Markowitz PASS for an option-space sweep; this one is a fresh closed-form
+Markowitz instance.)
+
+** [2026-08-11] Minimum Eigenvalue of 3x3 Symmetric Matrix (sdp/dense off-diagonal PSD cone) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Vandenberghe & Boyd, SIAM Review 38(1) 1996 sec 3.1; Boyd & Vandenberghe sec 5.9
+:KNOWN_OPTIMAL: 2.2679491924e+00
+:POUNCE_OBJECTIVE: 2.2679491912e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0037s
+:ORACLE: cvxpy/Clarabel; numpy.linalg.eigvalsh
+:ORACLE_OBJECTIVE: 2.2679491952e+00 (cvxpy); 2.2679491924e+00 (eigvalsh)
+:ORACLE_TIME: 0.0153s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_sdp_min_eigenvalue_3x3.org]]
+:COVERAGE_TARGET: -
+:END:
+3x3 dense off-diagonal instance (larger than existing 2x2 test_socp.py
+fixtures); pounce PSD cone solver, cvxpy/Clarabel, and numpy eigvalsh agree
+to ~1e-9.
+
+** [2026-08-11] pounce.jax Differentiable QP Layer dx/dtheta (diff/OptNet implicit differentiation) - PASS
+:PROPERTIES:
+:FAMILY: diff
+:SOURCE: Amos & Kolter, OptNet, ICML 2017 sec 3
+:KNOWN_OPTIMAL: n/a (gradient-correctness check)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: optimal (forward); autodiff dx/dtheta=(-0.20922492,0.09034712,0.11887779)
+:POUNCE_TIME: 1.8707s (incl. JAX/XLA warm-up)
+:ORACLE: central finite difference (host solve_qp, delta=1e-6) AND closed-form KKT inverse
+:ORACLE_OBJECTIVE: dx/dtheta=(-0.20922492,0.09034712,0.11887779) (both)
+:ORACLE_TIME: 0.0028s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_diff_qp_layer_dxdtheta.org]]
+:COVERAGE_TARGET: -
+:END:
+Three-way agreement (autodiff, finite difference, closed-form KKT inverse)
+to 1e-10/1e-17. QP layer (this run tests the QP layer's dx/dc; the
+concurrent same-day diff_socp_dxdh run tests the SOCP layer's dx/dh —
+complementary coverage, not a duplicate).

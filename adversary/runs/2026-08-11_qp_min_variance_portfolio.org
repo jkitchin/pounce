@@ -1,0 +1,38 @@
+#+TITLE: Adversary Run: Minimum-Variance Portfolio (Markowitz QP)
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: equality-constrained convex QP, closed-form KKT optimum
+:SOURCE: Markowitz (1952) minimum-variance portfolio; Boyd & Vandenberghe, Convex Optimization, related exercises. x* = Sigma^{-1}1 / (1^T Sigma^{-1} 1)
+:KNOWN_OPTIMAL: 1.9270833333e-02
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 equality (fully invested), no bounds (long/short allowed)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Sigma = [[0.10,0.02,0.01],[0.02,0.08,0.03],[0.01,0.03,0.06]]. min (1/2)x^T Sigma x
+s.t. 1^Tx = 1.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective       | Rel Err | Iters | Wall Time |
+|-----------------+---------+-----------------+---------+-------+-----------|
+| pounce          | optimal | 1.9270833143e-02 | -       |     - |   0.0050s |
+| cvxpy/Clarabel  | optimal | 1.9270833333e-02 | -       |     - |   0.0120s |
+
+Known optimal: 1.9270833333e-02
+
+* Cross-check / Verification
+rel_err_vs_known = 1.90e-10, x_inf_err_vs_known = 2.36e-09.
+rel_err_vs_oracle = 1.90e-10, x_inf_err_vs_oracle = 2.36e-09.
+Primal x also matches the closed-form Sigma^{-1}1/(1^TSigma^{-1}1) to ~1e-9.
+
+* Verdict
+PASS — pounce's convex QP IPM matches both the analytic Lagrangian solution
+and cvxpy/Clarabel to ~1e-9/1e-10. No defect found.
