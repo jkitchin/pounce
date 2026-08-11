@@ -11,17 +11,17 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |     15 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
-| lp              |     12 | 2026-08-08 | —             |
-| qp              |     12 | 2026-08-08 | —             |
+| lp              |     13 | 2026-08-11 | —             |
+| qp              |     13 | 2026-08-11 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
-| socp            |     12 | 2026-08-07 | —             |
+| socp            |     13 | 2026-08-11 | —             |
 | exp             |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
-| sdp             |     12 | 2026-08-08 | —             |
+| sdp             |     13 | 2026-08-11 | —             |
 | sos             |     13 | 2026-08-09 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
 | autoroute       |     12 | 2026-08-09 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, and the warm_start+auto routing-decision contract)  |
 | batch           |     12 | 2026-08-09 | —             |
-| diff            |     12 | 2026-08-08 | — (all PASS; near-LICQ degradation expected, not filed; JAX-only this run, torch CPU wheel blocked by proxy) |
+| diff            |     13 | 2026-08-11 | — (all PASS; near-LICQ degradation expected, not filed; JAX-only again, torch CPU wheel still blocked by proxy) |
 | sensitivity     |     12 | 2026-08-08 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08) |
 
 * Problem Index
@@ -5445,3 +5445,111 @@ contract check. Confirmed solver_selection="auto" + warm_start= correctly
 warns and forces the NLP path (info["solver"] not a convex tag) rather than
 silently keeping "auto" semantics inconsistent with a warm start built for
 the NLP path. Both numerical answers agree with scipy/SLSQP to <5e-10.
+
+** [2026-08-11] LP with fixed variable + duplicate equality row (lp/presolve degeneracy) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: self-constructed instance, dominance-argument optimum on a simplex slice
+:KNOWN_OPTIMAL: 38.0
+:POUNCE_OBJECTIVE: 3.7999999999e+01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0051s
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 3.8000000000e+01
+:ORACLE_TIME: 0.0110s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_lp_fixed_var_duplicate_row.org]]
+:COVERAGE_TARGET: -
+:END:
+Redundant row (exact 2x scalar multiple of another) and a variable fixed
+via lb==ub, exercised together. rel err vs oracle and vs hand-derived
+known optimum both 2.96e-11; x agrees with the exact vertex (10,0,0,7) to
+7.6e-10.
+
+** [2026-08-11] Markowitz portfolio QP option-space sweep (qp/tol+engine, reused PASS) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: adversary/log.org 2026-06-09 Markowitz portfolio entry, re-run under a swept option grid
+:KNOWN_OPTIMAL: -3.9343566048e-03
+:POUNCE_OBJECTIVE: -3.9343566057e-03 (ipm) / -3.9343566048e-03 (active-set)
+:POUNCE_STATUS: optimal (all 6 tol values x 2 engines)
+:POUNCE_TIME: ~0.003-0.004s per solve
+:ORACLE: closed-form KKT (from the 2026-06-09 script); no new external oracle needed
+:ORACLE_OBJECTIVE: -3.9343566048e-03
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_qp_markowitz_option_sweep.org]]
+:COVERAGE_TARGET: -
+:END:
+Option-space arm (adversary.md "attack the option space, not only the
+problem space"): tol swept 1e-4..1e-12 on method=ipm, no cell reports
+anything but optimal, error monotonically shrinks with tighter tol
+(3.16e-9 -> 5.2e-17). method=ipm vs method=active-set cross-check agrees
+to 1.78e-8 in x, both within 1e-12 of the closed-form objective. No
+verdict flip anywhere in the grid; no external oracle needed for the
+cross-path check.
+
+** [2026-08-11] L2-norm (group-lasso) proximal operator, P+SOC (socp/quadratic-objective+cone) - PASS
+:PROPERTIES:
+:FAMILY: socp
+:SOURCE: Parikh & Boyd, Proximal Algorithms (2014) sec 6.5.3; Boyd et al ADMM monograph (2011) sec 6.2
+:KNOWN_OPTIMAL: case (a) -2.1170872496e+00; case (b) 0.0 (boundary, x*=0)
+:POUNCE_OBJECTIVE: case (a) -2.1170872472e+00; case (b) 2.0251603729e-09
+:POUNCE_STATUS: optimal (both cases)
+:POUNCE_TIME: 0.0054s (a) / 0.0041s (b)
+:ORACLE: cvxpy (CLARABEL)
+:ORACLE_OBJECTIVE: case (a) -2.1170872418e+00; case (b) 1.5301460253e-09
+:ORACLE_TIME: 0.0202s (a) / 0.0084s (b)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_socp_group_lasso_prox.org]]
+:COVERAGE_TARGET: -
+:END:
+First socp probe in the log combining a nonzero quadratic P with a plain
+SOC block (prior socp entries are all linear-objective/c-only). Case (b)
+lands exactly at the cone apex (x*=0, t*=0), a boundary case; pounce
+matches cvxpy and the closed-form block-soft-threshold formula to ~1e-9
+on both cases.
+
+** [2026-08-11] Boolean Least Squares SDP relaxation, n=4 (sdp/PSD cone, dense quadratic form) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Boyd & Vandenberghe, Convex Optimization (2004) sec 4.6.4; Luo/Ma/So/Ye/Zhang IEEE SP Mag 27(3), 2010
+:KNOWN_OPTIMAL: brute-force combinatorial min 2.1806657546e+00 (2^4=16 sign vectors) is a valid upper bound on the (tight, here) SDP relaxation
+:POUNCE_OBJECTIVE: 2.1806657441e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0108s
+:ORACLE: cvxpy (CLARABEL)
+:ORACLE_OBJECTIVE: 2.1806657579e+00
+:ORACLE_TIME: 0.0168s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_sdp_boolean_least_squares.org]]
+:COVERAGE_TARGET: -
+:END:
+Dense (non-graph-structured) SDP objective, distinct from prior
+max-cut/Lovasz-theta sparse-edge-objective sdp probes. Relaxation is
+tight on this seed: pounce's value sits 1.06e-8 BELOW the brute-force
+true combinatorial minimum (as the lower-bound property requires),
+matching cvxpy to 6.3e-9 relative error.
+
+** [2026-08-11] Differentiable SOCP layer dx*/dh via ball-constrained LP (diff/SOCP dx*-dh) - PASS
+:PROPERTIES:
+:FAMILY: diff
+:SOURCE: closed-form projection onto a ball, x*(a)=a-r*c/||c||, giving exact dx*/da=I and dObj/da=c
+:KNOWN_OPTIMAL: obj*(a0) = -4.8063465777e+00
+:POUNCE_OBJECTIVE: -4.8063465759e+00
+:POUNCE_STATUS: forward solve matches closed form to 8.37e-10; grad matches closed form to 0.0 and finite-diff to 9.89e-10
+:POUNCE_TIME: <0.01s
+:ORACLE: exact closed-form Jacobian (dx*/da=I, dObj/da=c) + central finite differences
+:ORACLE_OBJECTIVE: -4.8063465777e+00
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-11_diff_socp_dxdh_ball_constraint.org]]
+:COVERAGE_TARGET: -
+:END:
+First diff-family probe targeting the SOCP layer's gradient w.r.t. h
+specifically (prior entries covered dP/dc for the QP layer and dG for the
+SOCP layer). jax.jacobian(x*)(a) matches the identity matrix exactly;
+jax.grad(obj)(a) matches the constant vector c exactly (to printed
+float64 precision) and a central finite difference to 9.89e-10. Torch CPU
+wheel install failed (403, proxy) -- JAX-only, consistent with the
+2026-08-08 diff run.

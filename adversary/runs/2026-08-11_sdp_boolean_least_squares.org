@@ -1,0 +1,79 @@
+#+TITLE: Adversary Run: Boolean Least Squares SDP relaxation
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: PSD cone, homogenized lifting (diag(Y)=1), dense least-squares
+  objective -- distinct in structure from prior sdp probes (max-cut/
+  Lovasz-theta use a sparse {-1,+1} edge objective; this uses a dense
+  quadratic form trace(QY) built from a random data matrix, checked
+  against a brute-force combinatorial bound rather than a graph symmetry
+  argument).
+:SOURCE: Boolean least squares SDP relaxation; Boyd & Vandenberghe,
+  Convex Optimization (2004) sec 4.6.4 / exercises; Luo, Ma, So, Ye, Zhang,
+  "Semidefinite Relaxation of Quadratic Optimization Problems," IEEE SP
+  Mag 27(3), 2010.
+:KNOWN_OPTIMAL: SDP relaxation value must lower-bound the brute-force
+  combinatorial optimum 2.1806657546e+00 (n=4, 2^4=16 sign vectors)
+:N_VARIABLES: 15 (svec of a 5x5 symmetric matrix)
+:N_CONSTRAINTS: 5 equalities (diag(Y)=1) + 1 PSD cone (n=5)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation driven; coverage-combined.sh skipped per environment adaptations)
+:END:
+
+True (NP-hard) problem: $\min_{x\in\{-1,1\}^n} \|Ax-b\|_2^2$, $A\in\mathbb
+R^{5\times4}$, $b\in\mathbb R^5$ (seed 11). Homogenize $y=(1,x)$,
+$Y=yy^\top$ (rank-1 PSD, $\mathrm{diag}(Y)=1$):
+\[
+\|Ax-b\|_2^2 = \mathrm{trace}(QY), \qquad
+Q = \begin{pmatrix} b^\top b & -(A^\top b)^\top \\ -(A^\top b) & A^\top A \end{pmatrix}.
+\]
+SDP relaxation (drop the rank-1 constraint):
+\[
+\min_Y\ \mathrm{trace}(QY) \quad\text{s.t.}\quad \mathrm{diag}(Y)=1,\ Y\succeq 0.
+\]
+This is a genuine mathematical *lower bound* on the true combinatorial
+minimum for any Y feasible in the relaxation -- so pounce's returned
+"optimal" value must satisfy
+$\text{pounce\_obj} \le \text{true\_combinatorial\_min} + \text{tol}$.
+A violation (pounce returning a value strictly above what is actually
+achievable) would indicate an invalid solve, not merely a loose bound.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective          | Rel Err (vs cvxpy) |
+|----------------------+---------+---------------------+----------------------|
+| pounce               | optimal | 2.1806657441e+00    | 6.34e-09             |
+| cvxpy (CLARABEL)     | -       | 2.1806657579e+00    | -                    |
+| brute force (n=4)    | -       | 2.1806657546e+00 at x=(-1,1,-1,-1) | -    |
+
+Known optimal (brute force over 16 sign vectors): 2.1806657546e+00
+
+The relaxation is *tight* on this instance -- pounce's SDP value matches
+the brute-force combinatorial optimum to $\sim10^{-8}$, and
+$\text{bound\_violation} = \text{pounce\_obj} - \text{true\_min} =
+-1.06\times10^{-8}$ (i.e. pounce's value is at or fractionally below the
+true achievable minimum, exactly as the lower-bound property requires,
+within numerical tolerance). $\mathrm{diag}(Y_{\text{pounce}})$ is
+$(1,1,1,1,1)$ to the printed precision, confirming the equality block was
+respected.
+
+* Cross-check / Verification
+Independent oracle: cvxpy/CLARABEL on the identical $(Q,\text{diag}(Y)=1,
+Y\succeq0)$ problem, formulated directly with cvxpy's own PSD variable
+type (no shared svec-encoding code with the pounce script's =svec=/=smat=
+helpers). $Y$ matrices agree to $5.5\times10^{-9}$ ($\ell_\infty$).
+Independent mathematical necessity check: brute-force enumeration of all
+$2^4=16$ sign vectors confirms the SDP value does not exceed the true
+achievable minimum.
+
+* Verdict
+PASS -- pounce's PSD-cone =solve_socp= path correctly solves a dense
+(non-graph-structured) SDP relaxation, matches cvxpy to $\sim10^{-8}$
+relative error, and its value provably lower-bounds (does not exceed) the
+true brute-force combinatorial optimum, as the relaxation's mathematics
+requires.

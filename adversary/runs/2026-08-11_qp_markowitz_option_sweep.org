@@ -1,0 +1,84 @@
+#+TITLE: Adversary Run: Markowitz portfolio QP option-space sweep
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: option-space attack (tolerance monotonicity + engine cross-check), reusing a logged PASS
+:SOURCE: adversary/log.org 2026-06-09 entry "Markowitz portfolio (qp/eq+box)",
+  re-derived from adversary-runs:adversary/runs/2026-06-09_qp_markowitz_portfolio.py
+  (seed=3, n=8, gamma=0.1). Markowitz 1952 mean-variance; closed-form equality-KKT.
+:KNOWN_OPTIMAL: -3.9343566048e-03
+:N_VARIABLES: 8
+:N_CONSTRAINTS: 1 equality (sum(x)=1) + box (x>=0, inactive at the optimum by construction)
+:SELECTED_BY: log-rotation (option-space arm, per adversary.md "attack the option space, not only the problem space")
+:COVERAGE_TARGET: - (not coverage-driven; this run targets the option grid, not a new source region)
+:END:
+
+\[
+\min_x \ \tfrac12 x^\top \Sigma x - \gamma \mu^\top x \quad
+\text{s.t.} \ \mathbf{1}^\top x = 1,\ x \ge 0
+\]
+
+$\Sigma,\mu$ constructed (seed 3) so the equality-only KKT optimum is
+strictly interior (every $x_i>0$), so the no-short bound never binds and
+the closed-form solution $x^* = \gamma\,\Sigma^{-1}\mu - \lambda\,\Sigma^{-1}\mathbf 1$
+(with $\lambda$ fixing $\mathbf 1^\top x^*=1$) is exact.
+
+This run does not re-adjudicate the formulation (already PASS since
+2026-06-09, rel err 6.5e-12). Instead it sweeps two option axes on the
+*same* data and data, per adversary.md's "attack the option space" arm:
+
+1. =tol= over 1e-4 .. 1e-12 (6 values), default =method="ipm"=.
+2. =method="ipm"= vs =method="active-set"= (the two QP engines pounce
+   ships through =solve_qp=), same problem.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Probe                  | Status(all)  | Max rel err vs known | Note |
+|-------------------------+--------------+-----------------------+------|
+| tol sweep 1e-4..1e-12   | optimal (6/6) | 3.16e-09 (loosest tol) | monotonically tightens with tol, never degrades |
+| method=ipm              | optimal      | 9.04e-13              | |
+| method=active-set       | optimal      | 1.73e-18               | essentially exact |
+| ipm vs active-set x-inf-disagreement | -  | 1.78e-08              | |
+
+Known optimal: -3.9343566048e-03
+
+Full tol sweep:
+
+| tol   | status  | obj              | rel_err |
+|-------+---------+------------------+---------|
+| 1e-4  | optimal | -3.9343597697e-03 | 3.16e-09 |
+| 1e-6  | optimal | -3.9343566228e-03 | 1.80e-11 |
+| 1e-8  | optimal | -3.9343566057e-03 | 9.04e-13 |
+| 1e-9  | optimal | -3.9343566048e-03 | 4.52e-14 |
+| 1e-10 | optimal | -3.9343566048e-03 | 2.26e-15 |
+| 1e-12 | optimal | -3.9343566048e-03 | 5.20e-17 |
+
+No cell reports anything other than =optimal=; no tolerance value
+manufactures an infeasibility or a solver error on this feasible,
+strictly-complementary model. Tightening =tol= only ever tightens the
+answer, exactly the expected monotone behavior described in
+=dev-notes/termination-status-invariants.md=.
+
+The =ipm= vs =active-set= cross-check needs no external oracle: both
+QP engines pounce ships are being asked the identical question, and both
+report =optimal= with $x$ agreeing to $1.78\times10^{-8}$ ($\ell_\infty$)
+and objectives agreeing with the closed-form value to $\le 10^{-12}$
+relative error.
+
+* Cross-check / Verification
+No new oracle needed for this run -- the base problem was already
+cross-validated against cvxpy/CLARABEL on 2026-06-09 (rel obj err
+6.5e-12). This run's discriminator is internal: the =solve_qp= IPM path,
+the =solve_qp= active-set path, and 6 tolerance settings all agree with
+each other and with the closed-form KKT solution to well within 1e-4.
+
+* Verdict
+PASS -- no verdict flip anywhere in the swept option grid (tolerance
+1e-4..1e-12, or IPM vs active-set engine). This is a clean result for
+the option-space arm: the swept axes are option-invariant on a
+known-feasible strictly-complementary QP, as they should be.

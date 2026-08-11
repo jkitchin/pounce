@@ -1,0 +1,66 @@
+#+TITLE: Adversary Run: LP with fixed variable + duplicate equality row
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: bounded LP, presolve-relevant degeneracy (fixed var + redundant row)
+:SOURCE: self-constructed instance; optimum derived analytically by a
+  dominance argument on the simplex slice {x1+x2+x3=10, 0<=xi<=10}
+:KNOWN_OPTIMAL: 38.0
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 2 equalities (one redundant) + box bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptations; log rotation used instead)
+:END:
+
+\[
+\begin{aligned}
+\min_{x} \quad & x_1 + 2x_2 + 3x_3 + 4x_4 \\
+\text{s.t.} \quad & x_1+x_2+x_3 = 10 \\
+& 2x_1+2x_2+2x_3 = 20 \quad (\text{redundant, } = 2\times\text{row 1}) \\
+& x_4 = 7 \quad (\mathrm{lb}_4=\mathrm{ub}_4=7) \\
+& 0 \le x_1,x_2,x_3 \le 10
+\end{aligned}
+\]
+
+Since row 2 is an exact scalar multiple of row 1, the feasible set in
+$(x_1,x_2,x_3)$ collapses to the simplex slice $x_1+x_2+x_3=10$. On that
+slice, minimizing $x_1+2x_2+3x_3$ is a pure dominance argument: put all
+mass on the cheapest-cost coordinate $x_1$ (coefficient 1), which is
+reachable within its bound ($x_1 \le 10$ covers the whole required sum).
+$x_4$ is pinned by its bounds regardless of its cost coefficient.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver       | Status  | Objective     | Rel Err | Wall Time |
+|--------------+---------+---------------+---------+-----------|
+| pounce       | optimal | 3.7999999999e+01 | 2.96e-11 | 0.0051s |
+| scipy HiGHS  | success | 3.8000000000e+01 | -       | 0.0110s |
+
+Known optimal: 38.0
+
+pounce returns $x^*=(10, 3.2\times10^{-10}, 4.8\times10^{-11}, 7)$,
+matching the exact vertex $(10,0,0,7)$ to $7.6\times10^{-10}$ in
+$\ell_\infty$, and agreeing with both scipy's HiGHS LP solver and the
+closed-form optimum to $\sim 3\times10^{-11}$ relative objective error.
+The redundant row and the fixed variable were both handled transparently
+-- no rank-deficiency complaint, no wrong multiplicity artifact in the
+returned solution.
+
+* Cross-check / Verification
+scipy.optimize.linprog(method="highs") on the identical (A_eq, b_eq,
+bounds) data agrees to the tolerances above. The known optimum was
+additionally verified by hand (dominance argument, not just solver
+agreement), so this is a three-way check: pounce vs scipy vs analytic
+derivation.
+
+* Verdict
+PASS -- pounce correctly solves a bounded LP with an exact-duplicate
+(scaled) equality row and a variable pinned by lb==ub, matching both an
+independent LP oracle (scipy/HiGHS) and the hand-derived closed-form
+optimum to numerical tolerance. No evidence of a redundant-row or
+fixed-variable presolve defect.

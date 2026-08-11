@@ -1,0 +1,74 @@
+#+TITLE: Adversary Run: differentiable SOCP layer, dx*/dh via a ball-constrained LP
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: SOCP layer gradient w.r.t. h (cone RHS) -- prior diff-family probes
+  covered dP/dc for the QP layer and dG for the SOCP layer; dh for the
+  SOCP layer was untested in the log.
+:SOURCE: closed-form solution of "minimize c'x s.t. ||x-a||_2<=r" is the
+  projection of the linear-cost direction onto the ball boundary,
+  x*(a)=a-r*c/||c||_2, giving EXACT closed-form Jacobians dx*/da=I_n and
+  dObj/da=c (both independent of a's value) -- not merely a
+  finite-difference oracle.
+:KNOWN_OPTIMAL: obj*(a0) = c.a0 - r*||c||_2 = -4.8063465777e+00 (seed 21, n=4, r=2.5)
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 SOC block, dim 5
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation driven; coverage-combined.sh skipped per environment adaptations)
+:END:
+
+$a$ enters only through $h=(r,a)$, with $G$'s first row all-zero and rows
+$1..n = I_n$, so $s=h-Gx=(r,a-x)$ isolates the SOCP layer's dependence on
+$h$:
+\[
+\min_x\ c^\top x \quad\text{s.t.}\quad \|x-a\|_2\le r
+\qquad\Rightarrow\qquad
+x^*(a) = a - r\frac{c}{\|c\|_2},\qquad
+\mathrm{obj}^*(a) = c^\top a - r\|c\|_2.
+\]
+\[
+\frac{\partial x^*}{\partial a} = I_n \qquad
+\frac{\partial\, \mathrm{obj}^*}{\partial a} = c \quad (\text{constant, independent of } a).
+\]
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                              | Result                              |
+|--------------------------------------+----------------------------------------|
+| forward solve x* vs closed form (inf-err) | 8.37e-10                       |
+| obj* vs closed form                  | matches to 1.8e-9 (printed digits)   |
+| dObj/da: JAX autodiff vs closed form (=c=) | 0.00e+00 (exact to printed precision) |
+| dObj/da: JAX autodiff vs central finite-diff | 9.89e-10                     |
+| dx*/da: JAX jacobian vs identity (inf-err) | 0.00e+00                         |
+
+$x_{\text{pounce}} = (0.96770601, -0.17136721, -1.15728152, 1.97714345)$
+matches the closed-form point component-for-component to the printed
+precision. The autodiff gradient of the objective w.r.t. $a$ reproduces
+the constant vector $c$ exactly (to float64 printed precision) and agrees
+with an independently computed central finite difference
+($\varepsilon=10^{-5}$) to $9.89\times10^{-10}$. The full Jacobian
+$\partial x^*/\partial a$ (via =jax.jacobian=) matches the identity matrix
+exactly.
+
+* Cross-check / Verification
+Three independent checks, all agreeing: (1) exact closed-form Jacobian
+derived analytically from the projection-onto-ball formula (no dependence
+on either pounce or a numerical oracle); (2) central finite difference of
+a fresh re-solve at $a\pm\varepsilon e_i$ for each coordinate; (3) the
+forward solve itself against the closed-form optimal point. All three
+agree with the JAX =pounce.jax.solve_socp= autodiff gradient to
+$\lesssim10^{-9}$.
+
+* Verdict
+PASS -- the differentiable SOCP layer's gradient with respect to =h=
+(previously untested in the adversary log, which had only exercised
+=dP=/=dc=/=dG=/=dA=) is correct, verified against both an exact
+closed-form Jacobian and central finite differences. Torch CPU wheel
+install failed (403 from the proxy, consistent with the 2026-08-08 diff
+run's note), so this run is JAX-only; no JAX vs Torch parity check was
+possible.

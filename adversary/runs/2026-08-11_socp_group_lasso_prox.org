@@ -1,0 +1,75 @@
+#+TITLE: Adversary Run: L2-norm (group-lasso) proximal operator as SOCP with P+cone
+#+DATE: 2026-08-11
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: quadratic objective (P) combined with a plain SOC block -- prior
+  socp probes in the log use linear-only (c-only) objectives; this exercises
+  the HSDE driver's handling of a nonzero P alongside a SOC constraint.
+:SOURCE: Parikh & Boyd, "Proximal Algorithms" (2014) sec 6.5.3
+  (block/group soft-thresholding); Boyd, Parikh, Chu, Peleato, Eckstein,
+  ADMM monograph (2011) sec 6.2.
+:KNOWN_OPTIMAL: closed form, see below (two cases)
+:N_VARIABLES: 6 (5 + epigraph var t)
+:N_CONSTRAINTS: 1 SOC block, dim 6
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation driven; coverage-combined.sh skipped per environment adaptations)
+:END:
+
+The proximal operator of $\lambda\|\cdot\|_2$ is the well-known block
+soft-threshold:
+\[
+\mathrm{prox}_{\lambda\|\cdot\|_2}(b) = b\cdot\max\!\left(0, 1-\tfrac{\lambda}{\|b\|_2}\right)
+= \arg\min_x \ \tfrac12\|x-b\|_2^2 + \lambda\|x\|_2 .
+\]
+Reformulated (dropping the additive constant $\tfrac12\|b\|_2^2$, which
+cancels identically out of every objective comparison below since both
+solvers omit it) as an SOCP over $z=(x,t)\in\mathbb R^{n+1}$:
+\[
+\min_z\ \tfrac12 x^\top x - b^\top x + \lambda t \quad\text{s.t.}\quad (t,x)\in\mathrm{SOC}.
+\]
+$P=\mathrm{blkdiag}(I_n,0)$, $c=(-b,\lambda)$, and the cone is encoded via
+$G=-\Pi$, $h=0$ where $\Pi$ permutes $t$ to the front of $z$, giving
+$s=h-Gz=\Pi z=(t,x)$.
+
+Two cases, $n=5$, seed 7, $\|b\|_2 = 2.939587$:
+- (a) $\lambda = 0.3\|b\|_2$ -- shrinkage active, $x^*\ne 0$ (interior optimum).
+- (b) $\lambda = 1.5\|b\|_2$ -- $x^*=0$, $t^*=0$ exactly: the optimum sits
+  at the *apex* of the cone, the degenerate boundary case the family notes
+  flag as the encoding trap.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Case                         | pounce status | obj_err vs cvxpy | obj_err vs closed form | x_inf_err vs closed form |
+|-------------------------------+----------------+-------------------+--------------------------+---------------------------|
+| (a) shrinkage active          | optimal        | 2.53e-09          | 1.14e-09                 | 2.25e-10                  |
+| (b) boundary, x*=0 (apex)     | optimal        | 4.95e-10          | 2.03e-09                 | 4.15e-10                  |
+
+Known optimal (case a): $x^*=(-1.18633679,\ 0.78377262,\ -0.17245415,\ 0.6257025,\ 1.33837063)$,
+shifted objective $-2.1170872496\times10^{0}$.
+Known optimal (case b): $x^*=0$, shifted objective $0$.
+
+Both cases agree with cvxpy/CLARABEL and with the exact closed-form
+proximal-operator formula to $\sim 10^{-9}$. Case (b) is the more
+demanding check: pounce returns $x$ on the order of $10^{-10}$ (not
+exactly 0, as expected from an interior-point method approaching a
+boundary point), which is well inside tolerance and matches cvxpy's own
+residual at the same point.
+
+* Cross-check / Verification
+Independent oracle: cvxpy/CLARABEL, formulated directly with
+=cp.SOC(t, x)= (no shared code with the pounce cone-encoding path).
+Independent closed form: the textbook group-lasso/block-soft-threshold
+formula, evaluated directly from $b$ and $\lambda$ (no dependence on
+either solver). All three agree on both the interior and the boundary
+case.
+
+* Verdict
+PASS -- pounce's =solve_socp= correctly handles a nonzero quadratic term
+$P$ combined with a plain SOC cone, on both an interior optimum and a
+degenerate optimum sitting exactly at the cone's apex, matching cvxpy and
+the closed-form proximal-operator solution to $\sim 10^{-9}$.
