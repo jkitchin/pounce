@@ -1,0 +1,65 @@
+#+TITLE: Adversary Run: QpSensitivity kkt_cond_estimate Diagnostic vs Exact Condition Number
+#+DATE: 2026-08-12
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: diagnostic correctness (kkt_cond_estimate / ill_conditioned), not dx/db
+:SOURCE: Nocedal & Wright, "Numerical Optimization" 2e, eq. 16.4 (active-set KKT system); numpy.linalg.cond
+:KNOWN_OPTIMAL: none published — diagnostic-accuracy check
+:N_VARIABLES: 3, two equality-constrained cases (well-conditioned / near-singular)
+:N_CONSTRAINTS: 2 equalities each
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Every prior sensitivity probe checked whether ``parametric_step``'s
+$dx/db$ prediction is numerically correct. This probe instead checks the
+*diagnostic* — ``kkt_cond_estimate`` (a "cheap Hager 1-norm estimate" per
+its docstring) and the derived ``ill_conditioned`` boolean — against an
+independently hand-assembled exact KKT matrix
+$K=\begin{pmatrix}P&A^T\\A&0\end{pmatrix}$ and ``numpy.linalg.cond(K,1)``
+(LAPACK via numpy — a code path pounce's Hager estimator never touches).
+
+Case A (well-conditioned): $A=\begin{pmatrix}1&1&1\\1&-1&0\end{pmatrix}$.
+Case B (near-singular): $A=\begin{pmatrix}1&1&1\\1&1&1+10^{-8}\end{pmatrix}$
+— rows nearly parallel (near-LICQ failure).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Case             | pounce kkt_cond_estimate (build) | exact cond(K,1) | ill_conditioned (post-step) |
+|------------------+-----------------------------------+------------------+------------------------------|
+| well-conditioned |  1.2222e+01                        | 1.2222e+01       | False                        |
+| near-singular    |  5.0000e+10                        | 2.2000e+17       | True                         |
+
+* Cross-check / Verification
+Case A: pounce's build-time Hager estimate matches the exact 1-norm
+condition number essentially exactly (log10 discrepancy 0.00).
+
+Case B: the build-time estimate (5e10) is ~6.6 orders of magnitude below
+the true condition number (2.2e17), which on first read looked like a
+diagnostic defect. It is not — it is exactly the documented blind spot in
+``QpSensitivity.ill_conditioned``'s own docstring (issue #328): "on a
+well-scaled P with a near-parallel constraint Jacobian the condition
+estimate saturates below its threshold... the stalled refinement residual
+now fires the flag instead." The first run of this probe checked
+``ill_conditioned`` *before* calling ``parametric_step`` and reported a
+false mismatch; the class's contract is explicitly two-clause (build-time
+estimate OR post-step residual), and the residual clause only populates
+after a step. Re-running with ``parametric_step`` called first, per the
+documented usage pattern, gives ``ill_conditioned=True`` with
+``last_step_residual=0.5`` (unmistakably a failed/garbage step) — correctly
+flagging the near-singular case despite the build-time estimate's blind
+spot. Both formulation slips (checking too early, and initially demanding
+build-time-estimate accuracy the docstring itself disclaims) were caught
+and fixed before concluding anything about pounce.
+
+* Verdict
+PASS — this is a positive, reproducing confirmation that the documented
+#328 fix (two-clause ``ill_conditioned`` contract) behaves exactly as
+specified: the build-time estimate is accurate when it can be, and the
+post-step residual clause correctly catches the near-parallel-Jacobian
+blind spot the build-time estimate alone misses. No new defect.

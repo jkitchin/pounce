@@ -1,0 +1,54 @@
+#+TITLE: Adversary Run: Batched Bound-Constrained Ridge Regression vs scipy.optimize.lsq_linear
+#+DATE: 2026-08-12
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: heterogeneous-shape solve_qp_batch vs a genuinely third-party oracle
+:SOURCE: standard bound-constrained ridge/Tikhonov least squares; scipy.optimize.lsq_linear (trust-region reflective / bvls)
+:KNOWN_OPTIMAL: none published (numerical cross-check, not a reference optimum)
+:N_VARIABLES: 10 items, n in [3,6], m in [4,8] each
+:N_CONSTRAINTS: box bounds per item
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\min_x \ \tfrac12\|Ax-b\|_2^2 + \tfrac12\lambda\|x\|_2^2 \quad \text{s.t.} \quad lb \le x \le ub
+\]
+
+10 random heterogeneous instances, solved via ``solve_qp_batch`` (with
+$P=A^TA+\lambda I$, $c=-A^Tb$) and cross-checked against BOTH the family
+table's sanctioned oracle (per-item ``solve_qp``) AND a genuinely
+independent third-party solver, ``scipy.optimize.lsq_linear``, applied to
+the mathematically-equivalent augmented formulation
+$\min \tfrac12\|[A;\sqrt\lambda I]x-[b;0]\|_2^2$ s.t. bounds — a solver
+that shares no code with pounce's QP path at all.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Comparison                              | max x err | max obj err |
+|------------------------------------------+-----------+-------------|
+| solve_qp_batch vs per-item solve_qp     | 0.00e+00  | 0.00e+00    |
+| solve_qp_batch vs scipy.lsq_linear      | 3.49e-10  | 3.68e-16    |
+
+t_batch=0.0029s, t_single_sum=0.0337s (10x speedup from batching), all 10
+items status=optimal.
+
+* Cross-check / Verification
+First pass against lsq_linear reported a spurious ~3.3 objective gap while
+x agreed to 3.5e-10 — a formulation bug in the adversary script itself, not
+pounce: the QP form's objective $\tfrac12 x^TPx+c^Tx$ omits the constant
+$\tfrac12\|b\|^2$ term present in the true ridge objective
+$\tfrac12\|Ax-b\|^2+\tfrac12\lambda\|x\|^2$. Adding the constant back
+resolved the discrepancy to 3.7e-16 (machine precision). Textbook case of
+"your script is wrong more often than the solver" (per the family
+constraints) — caught and fixed before concluding anything about pounce.
+
+* Verdict
+PASS — solve_qp_batch matches per-item solve_qp exactly (bit-for-bit) and
+matches a fully independent third-party bounded-least-squares solver to
+machine precision across 10 heterogeneous instances.

@@ -15,14 +15,14 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | qp              |     14 | 2026-08-11 | —             |
 | qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     14 | 2026-08-11 | —             |
-| exp             |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |     12 | 2026-08-09 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
+| exp             |     13 | 2026-08-12 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |     13 | 2026-08-12 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
 | sdp             |     14 | 2026-08-11 | —             |
 | sos             |     13 | 2026-08-09 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
-| autoroute       |     12 | 2026-08-09 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, and the warm_start+auto routing-decision contract)  |
-| batch           |     12 | 2026-08-09 | —             |
+| autoroute       |     13 | 2026-08-12 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, linear-objective ball SOCP (dual-norm), and the warm_start+auto routing-decision contract)  |
+| batch           |     13 | 2026-08-12 | —             |
 | diff            |     14 | 2026-08-11 | — (all PASS; near-LICQ degradation expected, not filed; two independent same-day probes: QP layer dx/dc (closed-form+FD 3-way agreement) and SOCP layer dx/dh; torch CPU wheel still untested) |
-| sensitivity     |     12 | 2026-08-08 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08) |
+| sensitivity     |     13 | 2026-08-12 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08; kkt_cond_estimate/ill_conditioned two-clause #328 contract reproduced clean 2026-08-12) |
 
 * Problem Index
 ** [2026-08-09] Motzkin Polynomial + Certified-Bound Contract Sweep (sos/non-SOS nonnegative polynomial, option-space) - PASS
@@ -5650,3 +5650,108 @@ Three-way agreement (autodiff, finite difference, closed-form KKT inverse)
 to 1e-10/1e-17. QP layer (this run tests the QP layer's dx/dc; the
 concurrent same-day diff_socp_dxdh run tests the SOCP layer's dx/dh —
 complementary coverage, not a duplicate).
+
+** [2026-08-12] Minimum-Surface-Area Cylindrical Can (exp/geometric program, monomial equality) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: Boyd, Kim, Vandenberghe & Hassibi, "A Tutorial on Geometric Programming", Optim. Eng. 8:67-127 (2007), sec 2.1
+:KNOWN_OPTIMAL: 2.5694955951e+01
+:POUNCE_OBJECTIVE: 2.5694954628e+01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0119s
+:ORACLE: cvxpy DGP (disciplined geometric programming, original r,h variables)
+:ORACLE_OBJECTIVE: 2.5694955863e+01
+:ORACLE_TIME: 0.0111s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-12_exp_can_min_surface_gp.org]]
+:COVERAGE_TARGET: -
+:END:
+Classic can problem (monomial equality constraint, posynomial objective).
+Objective matches closed-form calculus and independent cvxpy DGP oracle to
+~5e-8. r/h individually showed ~1e-4 error at default tol due to
+exp()-amplification of solver precision (confirmed benign by tightening
+tol to 1e-12: both errors shrink proportionally) -- not a defect.
+
+** [2026-08-12] Minimize Sum x_i^5 on the Simplex (power/p=5 mixed nonneg+pow cone) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: power-mean/Lagrange-symmetry argument; Boyd & Vandenberghe sec 3.1.5
+:KNOWN_OPTIMAL: 3.90625000e-03
+:POUNCE_OBJECTIVE: 3.9062501231e-03
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0152s
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 3.9062500000e-03
+:ORACLE_TIME: 0.0142s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-12_power_p5_simplex_symmetry.org]]
+:COVERAGE_TARGET: -
+:END:
+First power probe mixing an explicit ("nonneg",d) cone block with power-cone
+triples in one G/h partition, and first with an odd exponent (p=5) needing
+x>=0 supplied separately from the cone. Agrees with closed-form symmetric
+optimum and cvxpy/Clarabel to ~1e-10.
+
+** [2026-08-12] Linear Objective Over a Euclidean Ball (autoroute/dual-norm SOCP) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", example 5.1 / sec 3.1.6
+:KNOWN_OPTIMAL: -1.5000000000e+01
+:POUNCE_OBJECTIVE: -1.5000000000e+01
+:POUNCE_STATUS: 0 (optimal)
+:POUNCE_TIME: 0.0098s
+:ORACLE: scipy SLSQP
+:ORACLE_OBJECTIVE: -1.5000000000e+01
+:ORACLE_TIME: 0.0047s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-12_autoroute_linear_over_ball.org]]
+:COVERAGE_TARGET: -
+:END:
+LINEAR objective + quadratic ball constraint (textbook dual-norm SOCP) --
+distinct structural class from the prior ball-QCQP probe (quadratic
+objective). Auto path correctly tags solver='socp', agrees with
+forced-nlp and scipy to <1e-7; routing-transparency contract upheld.
+
+** [2026-08-12] Batched Bound-Constrained Ridge Regression vs scipy.optimize.lsq_linear (batch/third-party oracle) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: standard ridge/Tikhonov QP; scipy.optimize.lsq_linear (bvls) on the augmented formulation
+:KNOWN_OPTIMAL: n/a (numerical cross-check)
+:POUNCE_OBJECTIVE: n/a (10-item batch; max obj err vs single=0.00e+00)
+:POUNCE_STATUS: optimal (all 10 items)
+:POUNCE_TIME: 0.0029s (batch) vs 0.0337s (10x single solve_qp)
+:ORACLE: scipy.optimize.lsq_linear (bvls, augmented formulation) + per-item solve_qp
+:ORACLE_OBJECTIVE: matches to 3.68e-16 (lsq_linear), 0.00e+00 (single solve_qp)
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-12_batch_ridge_lsq_linear_oracle.org]]
+:COVERAGE_TARGET: -
+:END:
+First batch probe to cross-check against a solver outside the pounce QP
+family entirely (lsq_linear), not just solve_qp vs solve_qp_batch. First
+pass had a ~3.3 spurious obj gap from omitting the QP form's missing
+0.5||b||^2 constant in the oracle's objective -- own script bug, fixed;
+final agreement to machine precision.
+
+** [2026-08-12] QpSensitivity kkt_cond_estimate Diagnostic vs Exact Condition Number (sensitivity/diagnostic correctness) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: Nocedal & Wright, "Numerical Optimization" 2e eq. 16.4; numpy.linalg.cond
+:KNOWN_OPTIMAL: n/a (diagnostic-accuracy check)
+:POUNCE_OBJECTIVE: n/a
+:POUNCE_STATUS: kkt_cond_estimate matches exact cond to 0.00 log10 (good case); ill_conditioned correctly False/True (post-step) both cases
+:POUNCE_TIME: <0.01s
+:ORACLE: numpy.linalg.cond(K,1) on hand-assembled exact active-set KKT matrix
+:ORACLE_OBJECTIVE: 1.2222e+01 (good) / 2.2000e+17 (near-singular)
+:ORACLE_TIME: n/a
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-12_sensitivity_kkt_cond_estimate.org]]
+:COVERAGE_TARGET: -
+:END:
+First probe testing the kkt_cond_estimate/ill_conditioned DIAGNOSTIC itself
+rather than dx/db predictions. Reproduces and confirms the documented
+two-clause #328 contract: build-time estimate accurate when well-scaled P
++ near-parallel Jacobian isn't in play; post-step residual clause correctly
+catches that exact blind spot (build-time estimate 6.6 orders of magnitude
+low in the near-singular case, but ill_conditioned=True after a step, per
+the documented design). No defect -- positive confirmation of #328's fix.

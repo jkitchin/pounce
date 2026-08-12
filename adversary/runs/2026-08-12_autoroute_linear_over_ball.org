@@ -1,0 +1,54 @@
+#+TITLE: Adversary Run: Linear Objective Over a Euclidean Ball (Auto-Routing)
+#+DATE: 2026-08-12
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: LINEAR objective + quadratic (ball) constraint, dual-norm SOCP
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", example 5.1 / sec 3.1.6 (dual norm)
+:KNOWN_OPTIMAL: -1.5000000000e+01
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 2 inequalities (1 quadratic ball, 1 strictly-inactive linear)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min_x \quad & x_1 + 2x_2 - 2x_3 \\
+\text{s.t.} \quad & x_1^2+x_2^2+x_3^2 \le 25 \\
+& x_1 - x_2 \le 100 \ \text{(inactive)}
+\end{align}
+
+Cauchy-Schwarz equality case: $x^*=-r c/\|c\|_2 = (-5/3,-10/3,10/3)$,
+$obj^*=-r\|c\|_2=-15$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status | Objective        | Rel Err  | Solver tag | Wall Time |
+|---------------------+--------+-------------------+----------+------------+-----------|
+| pounce (auto)       |   0    | -1.5000000000e+01 | 3.22e-13 | socp       | 0.0098s   |
+| pounce (forced-nlp) |   0    | -1.5000000000e+01 | 3.32e-11 | None       | 0.0161s   |
+| scipy SLSQP         |   -    | -1.5000000000e+01 | 7.82e-15 | -          | 0.0047s   |
+
+Known optimal: -15.0 at x=(-1.6667,-3.3333,3.3333)
+
+Unlike the previously-logged ball-QCQP autoroute probe (2026-07-30), which
+used a *quadratic* objective (distance-to-a-point), this problem has a
+purely *linear* objective over the same ball-constraint shape — the
+textbook dual-norm SOCP, a different structural class for the router's
+classifier (no quadratic term in the objective to key off of).
+
+* Cross-check / Verification
+auto and forced-nlp agree to 4.8e-08 (x, Linf) and route to the same
+answer; scipy SLSQP (fully independent) agrees to 7.8e-15 relative. The
+auto path correctly reports ``solver_tag='socp'`` — routing-transparency
+contract upheld, and the specialized (non-NLP) path was genuinely used, not
+a silent fallback.
+
+* Verdict
+PASS — auto-routing correctly detects the SOCP structure for a
+linear-objective/quadratic-constraint problem and the routed answer
+matches the forced-NLP path and an independent oracle.

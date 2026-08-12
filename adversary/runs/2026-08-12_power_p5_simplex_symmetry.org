@@ -1,0 +1,51 @@
+#+TITLE: Adversary Run: Minimize Sum x_i^5 on the Simplex (Power Cone)
+#+DATE: 2026-08-12
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: p-norm epigraph (p=5, odd exponent) mixed with nonneg orthant
+:SOURCE: power-mean/Lagrange-symmetry argument; Boyd & Vandenberghe, "Convex Optimization" sec 3.1.5
+:KNOWN_OPTIMAL: 3.90625000e-03 (= 1/256)
+:N_VARIABLES: 8 (x_0..x_3, t_0..t_3)
+:N_CONSTRAINTS: 1 equality row; cones = [("nonneg",4)] + [("pow",0.2)]*4
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min_x \quad & \sum_{i=1}^4 x_i^5 \\
+\text{s.t.} \quad & \sum_i x_i = 1, \quad x \ge 0
+\end{align}
+
+By Lagrange stationarity ($5x_i^4=\lambda$ for all active $i$) and convexity
+of the objective over the simplex, $x^*=(1/4,1/4,1/4,1/4)$ is the unique
+global minimizer.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective        | Rel Err  | Iters | Wall Time |
+|-----------------+---------+-------------------+----------+-------+-----------|
+| pounce          | optimal | 3.9062501231e-03 | 1.23e-10 |   -   | 0.0152s   |
+| cvxpy/Clarabel  | -       | 3.9062500000e-03 | -        |   -   | 0.0142s   |
+
+Known optimal: 3.90625000e-03 at x=(0.25,0.25,0.25,0.25)
+
+This is the first power-family probe to mix an explicit ``("nonneg", d)``
+cone block with power-cone triples in the *same* ``G``/``h`` partition, and
+the first to use an odd exponent (p=5) where nonnegativity has to be
+supplied separately from the cone itself (the pow cone bounds \|x\|, not x;
+without the nonneg block the problem is unbounded below). pounce handled
+the mixed-cone partition correctly.
+
+* Cross-check / Verification
+cvxpy/Clarabel (fully independent conic solver) agrees to 1.2e-10 relative
+objective error; pounce's recovered x agrees with the closed-form
+symmetric optimum to 2.8e-05 (Linf).
+
+* Verdict
+PASS — pounce correctly solves a mixed nonneg+power-cone SOCP and matches
+both the closed-form symmetry argument and an independent conic oracle.
