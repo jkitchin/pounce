@@ -439,7 +439,10 @@ pub fn main() -> ExitCode {
     // not implement, and the same reason for checking here: a model that
     // routes to `pounce-convex` never reaches `optimize_tnlp`, where the
     // library-side copy of this guard lives.
-    if let Some(msg) = app.unimplemented_option_refusal() {
+    if let Some(msg) = app
+        .unimplemented_option_refusal()
+        .or_else(|| app.unimplemented_option_value_refusal())
+    {
         eprintln!("{msg}");
         return ExitCode::from(2);
     }

@@ -106,10 +106,18 @@ structurally redundant rows; see `presolve`. Remove it to run.
 The features in question: the Chen-Goldfarb (CG-penalty) / inexact-Newton
 line search, derivative approximation by finite differences,
 linear-dependency detection, the per-iteration NaN/Inf derivative check,
-multiplier recalculation by least squares, a selectable
+multiplier recalculation by least squares, least-square initialization of
+*all* duals (`least_square_init_duals`), a selectable
 constraint-violation norm, magic steps, bound replacement, the L-BFGS
 augmented-system variants, skipping the finalize callback, the dynamic
 HSL loader, and `suppress_all_output` / `debug_print_level`.
+
+The same rule applies one level down, to a single *value* of an option
+that otherwise works. `bound_mult_init_method` is read and honoured, but
+only its default `constant` is implemented; `mu-based` parses (an
+`ipopt.opt` written for Ipopt still loads) and is then refused, because
+serving it as `constant` would run a different initialization than the
+one you asked for under the name you asked for.
 
 `option_file_name` was on that list until
 [#518](https://github.com/jkitchin/pounce/issues/518) implemented it;

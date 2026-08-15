@@ -55,13 +55,18 @@ The default interior-point path ports Ipopt's iterate initializer
    behave like one.
 2. **Slacks** are set to `s = d(x)` and pushed into the slack bounds
    the same way.
-3. **Duals** get fixed defaults: constraint multipliers `y = 0` (or a
-   least-square estimate, see `bound_mult_init_method` below) and
-   bound multipliers `z = v = bound_mult_init_val = 1.0`.
+3. **Duals** get fixed defaults: constraint multipliers start at
+   `y = 0` and are then replaced by a least-square estimate, unless
+   that estimate exceeds `constr_mult_init_max` (in which case it is
+   discarded and `y` stays at zero); bound multipliers are
+   `z = v = bound_mult_init_val = 1.0`.
 4. **The barrier parameter** starts at `mu_init = 0.1` (monotone
    `mu_strategy`, the default) regardless of how good your point is.
 
-The knobs, all Ipopt-compatible:
+The knobs, all Ipopt-compatible, and all settable through every
+frontend's option path (`Problem.solve(options={...})`, `pounce
+model.nl bound_push=0.1`, an `ipopt.opt` line, `IpoptApplication::
+options_mut`):
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -69,7 +74,7 @@ The knobs, all Ipopt-compatible:
 | `bound_frac` | `1e-2` | Cap on the push as a fraction of the bound interval. |
 | `slack_bound_push` / `slack_bound_frac` | `1e-2` | Same, for inequality slacks. |
 | `bound_mult_init_val` | `1.0` | Initial bound-multiplier value. |
-| `bound_mult_init_method` | `constant` | `constant` / `mu-based` / `least-square`. |
+| `bound_mult_init_method` | `constant` | `constant` is the only implemented mode; upstream's `mu-based` parses and is then refused rather than silently served as `constant`. |
 | `constr_mult_init_max` | `1e3` | Cap on the least-square constraint-multiplier estimate; `0` keeps `y = 0`. |
 | `least_square_init_primal` | `no` | Replace the starting `x` with the min-norm solution of the linearized constraints before the interior push. |
 | `mu_init` | `0.1` | Initial barrier parameter (monotone strategy). |

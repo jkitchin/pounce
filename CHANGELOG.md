@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+- **The cold-start initialization options are settable** (#604).
+  `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,
+  `constr_mult_init_max`, `bound_mult_init_val`, `bound_mult_init_method`
+  and `least_square_init_primal` were read by the algorithm builder but
+  never registered, so every frontend rejected them at the *set* call
+  with `Unknown option "bound_push"` — the documentation described knobs
+  that no supported path could reach. This is the inverse of #551
+  (registered-but-unread), and the same class of silence.
+
+  They now register under upstream's `Initialization` category with
+  upstream's types, defaults and ranges. The registered defaults equal
+  the values the builder already hard-coded and the read sites still fire
+  only when a caller sets the key explicitly, so nothing moves unless you
+  ask it to: the fixture sweep is identical across all 57 models, status,
+  objective and iteration count.
+
+  Two of upstream's knobs name behaviour POUNCE does not have, and both
+  now say so instead of doing something else. `bound_mult_init_method=
+  mu-based` used to fall through to a third path — the NLP's own `y`
+  guess — that is neither documented mode; it is refused, as is
+  `least_square_init_duals=yes`. Both values still *parse*, so an
+  `ipopt.opt` written for Ipopt loads unchanged.
+
+  A registry invariant test now runs in CI in both directions: no option
+  is read without being registered, and no `Initialization` option is
+  registered without being either consumed or explicitly refused.
+
 - **A feasible NLP whose constraint rows sit at their own floating-point
   resolution is no longer refused a certificate — or convicted of local
   infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit

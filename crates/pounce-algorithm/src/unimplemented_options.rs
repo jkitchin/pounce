@@ -144,6 +144,15 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         options: &["recalc_y", "recalc_y_feas_tol"],
     },
     UnimplementedFeature {
+        feature: "least-square initialization of *all* dual variables \
+                  (the first-order-optimality fit)",
+        advice: "the equality multipliers are least-square initialized \
+                 regardless (capped by `constr_mult_init_max`), and the bound \
+                 multipliers take `bound_mult_init_val` — which is what \
+                 `least_square_init_duals=no` asks for",
+        options: &["least_square_init_duals"],
+    },
+    UnimplementedFeature {
         feature: "a selectable constraint-violation norm",
         advice: "pounce measures the violation in the 2-norm throughout",
         options: &["constraint_violation_norm_type"],
@@ -193,6 +202,36 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         options: &["point_perturbation_radius"],
     },
 ];
+
+/// One registered *value* of a string option that pounce does not
+/// implement, even though the option itself is read and other values of
+/// it work.
+///
+/// [`UNIMPLEMENTED_FEATURES`] refuses a whole option; this refuses one
+/// mode of one. The registry keeps upstream's full value list so an
+/// `ipopt.opt` written for Ipopt still parses — but a value that parses
+/// and then quietly behaves as a *different* mode is the same lie the
+/// module docstring is about, one level down.
+pub struct UnimplementedValue {
+    /// The option's registered name.
+    pub option: &'static str,
+    /// The value pounce does not implement.
+    pub value: &'static str,
+    /// What that value would mean, named in the error.
+    pub feature: &'static str,
+    /// What the caller can do instead. Empty when there is nothing.
+    pub advice: &'static str,
+}
+
+/// String-option values pounce does not implement. Refused when set.
+pub const UNIMPLEMENTED_VALUES: &[UnimplementedValue] = &[UnimplementedValue {
+    option: "bound_mult_init_method",
+    value: "mu-based",
+    feature: "initializing each bound multiplier to mu_init divided by its \
+              own slack",
+    advice: "`bound_mult_init_method=constant` (the default) initializes them \
+             all to `bound_mult_init_val`, which you can set",
+}];
 
 /// Options that *are* honored in the sense that matters — the answer is
 /// unaffected — but whose performance hint pounce does not exploit.
@@ -256,6 +295,39 @@ pub fn refusal(options: &OptionsList, reg: &RegisteredOptions) -> Option<String>
                 ));
             }
         }
+    }
+    None
+}
+
+/// The first unimplemented *value* the caller selected, with the message
+/// it earns. `None` when every string option holds a mode pounce runs.
+///
+/// No default gate here, unlike [`refusal`]: a value that equals the
+/// registered default is by construction the implemented one, so it
+/// never reaches the table.
+pub fn value_refusal(options: &OptionsList) -> Option<String> {
+    for entry in UNIMPLEMENTED_VALUES {
+        let selected = matches!(
+            options.get_string_value(entry.option, ""),
+            Ok((v, true)) if v.eq_ignore_ascii_case(entry.value)
+        );
+        if !selected {
+            continue;
+        }
+        let advice = if entry.advice.is_empty() {
+            String::new()
+        } else {
+            format!(" Instead: {}.", entry.advice)
+        };
+        return Some(format!(
+            "pounce: `{}={}` selects {}, which pounce does not implement. The \
+             value is registered so an ipopt.opt written for Ipopt still \
+             parses; falling back to another mode would silently run a \
+             different initialization than the one you asked for, so it is \
+             refused instead.{advice} Tracking issue: \
+             https://github.com/jkitchin/pounce/issues/604",
+            entry.option, entry.value, entry.feature,
+        ));
     }
     None
 }

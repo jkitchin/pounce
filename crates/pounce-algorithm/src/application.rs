@@ -771,8 +771,12 @@ impl IpoptApplication {
         // gh#518: same treatment for `option_file_name` on an entry point
         // that cannot resolve it. Separate from the table above because
         // the *feature* now exists — just not here.
+        // gh#604: same treatment one level down, for a registered *value*
+        // of an option pounce otherwise reads (`bound_mult_init_method=
+        // mu-based`).
         if let Some(msg) = self
             .unimplemented_option_refusal()
+            .or_else(|| self.unimplemented_option_value_refusal())
             .or_else(|| self.unhonored_option_file_name())
         {
             use pounce_common::journalist::JournalCategory;
@@ -1134,6 +1138,17 @@ impl IpoptApplication {
     /// `optimize_tnlp`. See [`crate::unimplemented_options`].
     pub fn unimplemented_option_refusal(&self) -> Option<String> {
         crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+    }
+
+    /// The message for the first string option the caller set to a
+    /// registered *value* pounce does not implement, or `None`.
+    ///
+    /// Separate from [`Self::unimplemented_option_refusal`] because the
+    /// option itself is read and its other values work — it is one mode
+    /// that is missing, not the feature. See
+    /// [`crate::unimplemented_options::UNIMPLEMENTED_VALUES`].
+    pub fn unimplemented_option_value_refusal(&self) -> Option<String> {
+        crate::unimplemented_options::value_refusal(&self.options)
     }
 
     /// `option_file_name` set on a surface that never resolves it.

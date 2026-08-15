@@ -12,19 +12,16 @@
 //!    [`DefaultIterateInitializer::push_to_interior`].
 //! 2. Set `s = d(x)` (evaluated through CQ on a transient iterate)
 //!    and push it into the interior of `[d_l, d_u]`.
-//! 3. Initialize `y_c`, `y_d`:
-//!    * `bound_mult_init_method == "constant"` — leave at zero (the
-//!      default y-targets that the linear-solver sweep will refine).
-//!    * `bound_mult_init_method == "least-square"` — call
-//!      [`crate::eq_mult::least_square::LeastSquareMults`] via the
-//!      provided `aug_solver`. **Phase 7 default is "constant"** to
-//!      avoid pulling the aug-system through this path on bring-up.
+//! 3. Initialize `y_c`, `y_d` to zero, then revise them with the
+//!    least-square estimate from
+//!    [`crate::eq_mult::least_square::LeastSquareMults`] when an
+//!    `EqMultCalculator` is wired and `constr_mult_init_max > 0`
+//!    (an estimate above that cap is discarded, per upstream).
 //! 4. Initialize `z_l`, `z_u`, `v_l`, `v_u` to `bound_mult_init_val`
-//!    (component-wise).
-//!
-//! The fully-loaded mu-based / least-square multiplier paths land
-//! once `LeastSquareMults` and the iterate-trace gold tests are
-//! online.
+//!    (component-wise) — i.e. `bound_mult_init_method = "constant"`,
+//!    the only mode pounce implements. `"mu-based"` is registered for
+//!    `ipopt.opt` compatibility and refused rather than silently
+//!    served as `"constant"` (gh#604).
 
 use crate::eq_mult::r#trait::EqMultCalculator;
 use crate::init::r#trait::IterateInitializer;
@@ -46,7 +43,10 @@ pub struct DefaultIterateInitializer {
     pub slack_bound_frac: Number,
     pub constr_mult_init_max: Number,
     pub bound_mult_init_val: Number,
-    /// "constant" / "mu-based" / "least-square".
+    /// `bound_mult_init_method`. Must be `"constant"` — upstream's
+    /// `"mu-based"` is registered for `ipopt.opt` compatibility but not
+    /// implemented, and `set_initial_iterates` returns `false` on it
+    /// rather than serving a third, undocumented behaviour (gh#604).
     pub bound_mult_init_method: String,
     /// Equality-multiplier calculator used by the
     /// `least_square_mults` step at the end of `set_initial_iterates`,
@@ -329,22 +329,36 @@ impl IterateInitializer for DefaultIterateInitializer {
             );
         }
 
+        // `bound_mult_init_method` — pounce implements `constant` only
+        // (gh#604). The refusal that a caller actually sees is raised at
+        // the application layer, before any work
+        // (`unimplemented_options::UNIMPLEMENTED_VALUES`); this is the
+        // backstop for a caller who builds the initializer directly.
+        //
+        // It used to fall through to `nlp.get_starting_y` here, which is
+        // neither of the documented modes — an unsupported value silently
+        // bought a *third* behaviour. Failing is the honest answer.
+        if !self.bound_mult_init_method.eq_ignore_ascii_case("constant") {
+            tracing::error!(
+                target: "pounce::algorithm",
+                method = %self.bound_mult_init_method,
+                "pounce: bound_mult_init_method must be \"constant\"; \
+                 \"mu-based\" is registered for ipopt.opt compatibility but \
+                 not implemented (gh#604)."
+            );
+            return false;
+        }
+
         // Step 3: y_c, y_d initial guesses. `constant` mode leaves
-        // them at zero (the algorithm refines on the first KKT solve).
+        // them at zero (the algorithm refines on the first KKT solve),
+        // and the least-square step below revises them when an
+        // `EqMultCalculator` is wired.
         let mut y_c = DenseVectorSpace::new(n_yc).make_new_dense();
         let mut y_d = DenseVectorSpace::new(n_yd).make_new_dense();
-        if self.bound_mult_init_method == "constant" {
-            // Materialize as homogeneous-zero so callers' asum / values
-            // probes don't trip the `initialized` debug-assert.
-            y_c.set(0.0);
-            y_d.set(0.0);
-        } else {
-            // Other modes (mu-based, least-square) require the
-            // aug-system path; fall back to NLP's own y-init for now.
-            nlp.borrow_mut().get_starting_y(&mut y_c, &mut y_d);
-            cap_constraint_multipliers(&mut y_c, self.constr_mult_init_max);
-            cap_constraint_multipliers(&mut y_d, self.constr_mult_init_max);
-        }
+        // Materialize as homogeneous-zero so callers' asum / values
+        // probes don't trip the `initialized` debug-assert.
+        y_c.set(0.0);
+        y_d.set(0.0);
 
         // Step 4: bound multipliers — constant init.
         let mut z_l = DenseVectorSpace::new(n_zl).make_new_dense();
@@ -510,18 +524,6 @@ fn expand_packed_into_dense(
     }
 }
 
-/// Clamp every component of `y` to `[-max, max]`. Mirrors the
-/// upstream `constr_mult_init_max` cap.
-fn cap_constraint_multipliers(y: &mut DenseVector, max: Number) {
-    for v in y.values_mut() {
-        if *v > max {
-            *v = max;
-        } else if *v < -max {
-            *v = -max;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +587,428 @@ mod tests {
         // x=0 → 0 + 1e-6 = 1e-6.
         let v = DefaultIterateInitializer::push_to_interior(1e-2, 1e-2, 0.0, Some(0.0), Some(1e-4));
         assert!((v - 1e-6).abs() < 1e-18);
+    }
+}
+
+/// Behavior tests for the cold-start options (gh#604).
+///
+/// The wiring tests in `tests/init_options_wiring.rs` prove each option
+/// reaches [`crate::alg_builder::InitOptions`]; these prove the value
+/// then changes the iterate the initializer produces. An option that is
+/// registered, read, threaded onto the strategy and then ignored is the
+/// same silent no-op with more steps.
+#[cfg(test)]
+mod option_behavior {
+    use super::*;
+    use crate::ipopt_cq::IpoptCalculatedQuantities;
+    use crate::ipopt_data::IpoptData;
+    use pounce_linalg::{IdentityMatrix, Matrix, SymMatrix};
+    use pounce_linsol::status::ESymSolverStatus;
+
+    const N_X: Index = 2;
+    const N_S: Index = 1;
+    const N_C: Index = 1;
+
+    /// `x0 = [0, 10]` sits on both bounds of `[0, 10]^2`, and
+    /// `d(x) = -5` sits on the lower inequality bound, so every push
+    /// knob has something visible to move.
+    struct StubNlp {
+        x_l: DenseVector,
+        x_u: DenseVector,
+        d_l: DenseVector,
+        d_u: DenseVector,
+        p2: Rc<dyn Matrix>,
+        p1: Rc<dyn Matrix>,
+    }
+
+    impl StubNlp {
+        fn new() -> Self {
+            let s2 = DenseVectorSpace::new(N_X);
+            let mut x_l = DenseVector::new(Rc::clone(&s2));
+            x_l.set_values(&[0.0, 0.0]);
+            let mut x_u = DenseVector::new(Rc::clone(&s2));
+            x_u.set_values(&[10.0, 10.0]);
+            let s1 = DenseVectorSpace::new(N_S);
+            let mut d_l = DenseVector::new(Rc::clone(&s1));
+            d_l.set_values(&[-5.0]);
+            let mut d_u = DenseVector::new(Rc::clone(&s1));
+            d_u.set_values(&[5.0]);
+            Self {
+                x_l,
+                x_u,
+                d_l,
+                d_u,
+                p2: Rc::new(IdentityMatrix::new(N_X)),
+                p1: Rc::new(IdentityMatrix::new(N_S)),
+            }
+        }
+    }
+
+    impl crate::ipopt_nlp::Nlp for StubNlp {
+        fn n(&self) -> Index {
+            N_X
+        }
+        fn m_eq(&self) -> Index {
+            N_C
+        }
+        fn m_ineq(&self) -> Index {
+            N_S
+        }
+        fn eval_f(&mut self, _x: &dyn Vector) -> Number {
+            0.0
+        }
+        fn eval_grad_f(&mut self, _x: &dyn Vector, g: &mut dyn Vector) {
+            g.set(0.0);
+        }
+        fn eval_c(&mut self, _x: &dyn Vector, c: &mut dyn Vector) {
+            c.set(1.0);
+        }
+        fn eval_d(&mut self, _x: &dyn Vector, d: &mut dyn Vector) {
+            d.set(-5.0);
+        }
+        fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            Rc::new(IdentityMatrix::new(N_X))
+        }
+        fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            Rc::new(IdentityMatrix::new(N_X))
+        }
+        fn eval_h(
+            &mut self,
+            _x: &dyn Vector,
+            _obj_factor: Number,
+            _y_c: &dyn Vector,
+            _y_d: &dyn Vector,
+        ) -> Rc<dyn SymMatrix> {
+            let s = pounce_linalg::DenseSymMatrixSpace::new(N_X);
+            Rc::new(pounce_linalg::DenseSymMatrix::new(s))
+        }
+    }
+
+    impl crate::ipopt_nlp::IpoptNlp for StubNlp {
+        fn x_l(&self) -> &dyn Vector {
+            &self.x_l
+        }
+        fn x_u(&self) -> &dyn Vector {
+            &self.x_u
+        }
+        fn d_l(&self) -> &dyn Vector {
+            &self.d_l
+        }
+        fn d_u(&self) -> &dyn Vector {
+            &self.d_u
+        }
+        fn px_l(&self) -> Rc<dyn Matrix> {
+            self.p2.clone()
+        }
+        fn px_u(&self) -> Rc<dyn Matrix> {
+            self.p2.clone()
+        }
+        fn pd_l(&self) -> Rc<dyn Matrix> {
+            self.p1.clone()
+        }
+        fn pd_u(&self) -> Rc<dyn Matrix> {
+            self.p1.clone()
+        }
+        fn get_starting_x(&mut self, x: &mut dyn Vector) -> bool {
+            let dense = x
+                .as_any_mut()
+                .downcast_mut::<DenseVector>()
+                .expect("dense x");
+            dense.set_values(&[0.0, 10.0]);
+            true
+        }
+    }
+
+    /// Fails every solve, so the least-square primal step is a no-op.
+    /// Nothing else in the tested paths touches the aug solver.
+    struct FailingAugSolver;
+    /// Returns a fixed `sol_x`, so `least_square_init_primal=yes` lands
+    /// on a point the bound push alone could never produce.
+    struct FixedAugSolver;
+
+    macro_rules! aug_solver_boilerplate {
+        () => {
+            fn provides_inertia(&self) -> bool {
+                false
+            }
+            fn number_of_neg_evals(&self) -> Index {
+                0
+            }
+            fn increase_quality(&mut self) -> bool {
+                false
+            }
+            fn last_solve_status(&self) -> ESymSolverStatus {
+                ESymSolverStatus::Success
+            }
+        };
+    }
+
+    impl AugSystemSolver for FailingAugSolver {
+        aug_solver_boilerplate!();
+        fn solve(
+            &mut self,
+            _coeffs: &AugSysCoeffs<'_>,
+            _rhs: &AugSysRhs<'_>,
+            _sol: &mut AugSysSol<'_>,
+            _check_neg_evals: bool,
+            _num_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            ESymSolverStatus::Singular
+        }
+    }
+
+    impl AugSystemSolver for FixedAugSolver {
+        aug_solver_boilerplate!();
+        fn solve(
+            &mut self,
+            _coeffs: &AugSysCoeffs<'_>,
+            _rhs: &AugSysRhs<'_>,
+            sol: &mut AugSysSol<'_>,
+            _check_neg_evals: bool,
+            _num_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            // The initializer negates this, so `x_ls = [1, 3]`.
+            sol.sol_x
+                .as_any_mut()
+                .downcast_mut::<DenseVector>()
+                .expect("dense sol_x")
+                .set_values(&[-1.0, -3.0]);
+            sol.sol_s.set(0.0);
+            sol.sol_c.set(0.0);
+            sol.sol_d.set(0.0);
+            ESymSolverStatus::Success
+        }
+    }
+
+    /// Hands back a fixed equality-multiplier estimate so the
+    /// `constr_mult_init_max` cap has something to accept or discard.
+    struct FixedEqMults(Number);
+    impl EqMultCalculator for FixedEqMults {
+        fn calculate_y_eq(
+            &mut self,
+            _data: &IpoptDataHandle,
+            _cq: &IpoptCqHandle,
+            _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+            _aug_solver: &mut dyn AugSystemSolver,
+            y_c: &mut dyn Vector,
+            y_d: &mut dyn Vector,
+        ) -> bool {
+            y_c.set(self.0);
+            y_d.set(self.0);
+            true
+        }
+    }
+
+    fn zeros(n: Index) -> Rc<DenseVector> {
+        let mut v = DenseVectorSpace::new(n).make_new_dense();
+        v.set(0.0);
+        Rc::new(v)
+    }
+
+    /// A data/cq pair over [`StubNlp`] with a correctly-shaped `curr`
+    /// installed — the initializer reads the block dimensions off it.
+    fn fixture() -> (IpoptDataHandle, IpoptCqHandle, Rc<RefCell<dyn IpoptNlp>>) {
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(StubNlp::new()));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::new()));
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            Rc::clone(&data),
+            Rc::clone(&nlp),
+        )));
+        let template = IteratesVector::new(
+            zeros(N_X),
+            zeros(N_S),
+            zeros(N_C),
+            zeros(N_S),
+            zeros(N_X),
+            zeros(N_X),
+            zeros(N_S),
+            zeros(N_S),
+        );
+        data.borrow_mut().set_curr(template);
+        (data, cq, nlp)
+    }
+
+    /// Run the initializer and return the installed `curr`.
+    fn run(init: &mut DefaultIterateInitializer, aug: &mut dyn AugSystemSolver) -> IteratesVector {
+        let (data, cq, nlp) = fixture();
+        assert!(
+            init.set_initial_iterates(&data, &cq, &nlp, aug),
+            "initializer should succeed"
+        );
+        data.borrow().curr.clone().expect("curr installed")
+    }
+
+    /// `expanded_values` rather than `values`: a block the initializer
+    /// filled with `set` stays in the homogeneous representation, which
+    /// `values` refuses to hand out.
+    fn values_of(v: &Rc<dyn Vector>) -> Vec<Number> {
+        v.as_any()
+            .downcast_ref::<DenseVector>()
+            .expect("dense")
+            .expanded_values()
+    }
+    fn x_of(iv: &IteratesVector) -> Vec<Number> {
+        values_of(&iv.x)
+    }
+
+    /// `bound_push` moves `x0` off its lower bound by
+    /// `min(bound_push * max(|lo|, 1), bound_frac * span)`.
+    #[test]
+    fn bound_push_changes_the_initial_primal() {
+        let mut aug = FailingAugSolver;
+
+        let mut d = DefaultIterateInitializer::new();
+        let base = x_of(&run(&mut d, &mut aug));
+        assert!((base[0] - 1e-2).abs() < 1e-15, "default: {base:?}");
+
+        let mut pushed = DefaultIterateInitializer {
+            bound_push: 5e-2,
+            ..DefaultIterateInitializer::new()
+        };
+        let moved = x_of(&run(&mut pushed, &mut aug));
+        assert!(
+            (moved[0] - 5e-2).abs() < 1e-15,
+            "bound_push=5e-2: {moved:?}"
+        );
+        assert_ne!(base[0], moved[0]);
+    }
+
+    /// `bound_frac` is the other arm of the same min, and it binds when
+    /// the interval is narrow relative to `bound_push`.
+    #[test]
+    fn bound_frac_changes_the_initial_primal() {
+        let mut aug = FailingAugSolver;
+        let mut init = DefaultIterateInitializer {
+            bound_frac: 5e-4,
+            ..DefaultIterateInitializer::new()
+        };
+        // span = 10, so the frac arm gives 5e-3 < bound_push's 1e-2.
+        let x = x_of(&run(&mut init, &mut aug));
+        assert!((x[0] - 5e-3).abs() < 1e-15, "bound_frac=5e-4: {x:?}");
+    }
+
+    /// The slack knobs do the same job for `s`, which starts on the
+    /// lower inequality bound `-5`.
+    #[test]
+    fn slack_bound_push_and_frac_change_the_initial_slack() {
+        let mut aug = FailingAugSolver;
+
+        let mut d = DefaultIterateInitializer::new();
+        // p_l = min(1e-2 * max(|-5|, 1), 1e-2 * 10) = 5e-2.
+        let base = values_of(&run(&mut d, &mut aug).s);
+        assert!((base[0] - -4.95).abs() < 1e-14, "default: {base:?}");
+
+        let mut pushed = DefaultIterateInitializer {
+            slack_bound_push: 1e-1,
+            ..DefaultIterateInitializer::new()
+        };
+        // p_l = min(1e-1 * 5, 1e-2 * 10) = 1e-1 — the frac arm still binds.
+        let s = values_of(&run(&mut pushed, &mut aug).s);
+        assert!((s[0] - -4.9).abs() < 1e-14, "slack_bound_push=1e-1: {s:?}");
+
+        let mut fracced = DefaultIterateInitializer {
+            slack_bound_frac: 1e-3,
+            ..DefaultIterateInitializer::new()
+        };
+        // p_l = min(1e-2 * 5, 1e-3 * 10) = 1e-2.
+        let s = values_of(&run(&mut fracced, &mut aug).s);
+        assert!((s[0] - -4.99).abs() < 1e-14, "slack_bound_frac=1e-3: {s:?}");
+    }
+
+    /// `bound_mult_init_val` is the value every bound multiplier takes.
+    #[test]
+    fn bound_mult_init_val_changes_the_bound_multipliers() {
+        let mut aug = FailingAugSolver;
+
+        let base = run(&mut DefaultIterateInitializer::new(), &mut aug);
+        assert_eq!(values_of(&base.z_l), vec![1.0, 1.0]);
+        assert_eq!(values_of(&base.v_u), vec![1.0]);
+
+        let mut init = DefaultIterateInitializer {
+            bound_mult_init_val: 7.5,
+            ..DefaultIterateInitializer::new()
+        };
+        let iv = run(&mut init, &mut aug);
+        assert_eq!(values_of(&iv.z_l), vec![7.5, 7.5]);
+        assert_eq!(values_of(&iv.z_u), vec![7.5, 7.5]);
+        assert_eq!(values_of(&iv.v_l), vec![7.5]);
+        assert_eq!(values_of(&iv.v_u), vec![7.5]);
+    }
+
+    /// `constr_mult_init_max` caps the least-square equality-multiplier
+    /// estimate: above the cap upstream discards it and leaves zeros.
+    #[test]
+    fn constr_mult_init_max_gates_the_equality_multipliers() {
+        let mut aug = FailingAugSolver;
+
+        let mut accepted = DefaultIterateInitializer {
+            constr_mult_init_max: 1e3,
+            ..DefaultIterateInitializer::with_eq_mult_calculator(Box::new(FixedEqMults(2.0)))
+        };
+        assert_eq!(values_of(&run(&mut accepted, &mut aug).y_c), vec![2.0]);
+
+        let mut capped = DefaultIterateInitializer {
+            constr_mult_init_max: 1.0,
+            ..DefaultIterateInitializer::with_eq_mult_calculator(Box::new(FixedEqMults(2.0)))
+        };
+        assert_eq!(
+            values_of(&run(&mut capped, &mut aug).y_c),
+            vec![0.0],
+            "an estimate above the cap is discarded, not clamped"
+        );
+
+        // 0 switches the least-square step off entirely.
+        let mut off = DefaultIterateInitializer {
+            constr_mult_init_max: 0.0,
+            ..DefaultIterateInitializer::with_eq_mult_calculator(Box::new(FixedEqMults(2.0)))
+        };
+        assert_eq!(values_of(&run(&mut off, &mut aug).y_c), vec![0.0]);
+    }
+
+    /// `least_square_init_primal=yes` replaces the user's `x0` with the
+    /// solution of the linearized-constraint system.
+    #[test]
+    fn least_square_init_primal_replaces_the_starting_point() {
+        let mut fixed = FixedAugSolver;
+
+        let mut off = DefaultIterateInitializer::new();
+        let base = x_of(&run(&mut off, &mut fixed));
+        assert!((base[0] - 1e-2).abs() < 1e-15, "user x0, pushed: {base:?}");
+
+        let mut on = DefaultIterateInitializer {
+            least_square_init_primal: true,
+            ..DefaultIterateInitializer::new()
+        };
+        let ls = x_of(&run(&mut on, &mut fixed));
+        assert_eq!(
+            ls,
+            vec![1.0, 3.0],
+            "the least-square point, already interior"
+        );
+    }
+
+    /// The one mode pounce implements runs; anything else fails rather
+    /// than quietly running a third behaviour (gh#604). The refusal a
+    /// caller actually sees is raised earlier, at the application layer.
+    #[test]
+    fn an_unsupported_bound_mult_init_method_fails_instead_of_falling_back() {
+        let (data, cq, nlp) = fixture();
+        let mut aug = FailingAugSolver;
+        let mut init = DefaultIterateInitializer {
+            bound_mult_init_method: "mu-based".into(),
+            ..DefaultIterateInitializer::new()
+        };
+        assert!(
+            !init.set_initial_iterates(&data, &cq, &nlp, &mut aug),
+            "`mu-based` is not implemented and must not be served as `constant`"
+        );
+
+        // Spelling is the only thing that varies — case does not.
+        let (data, cq, nlp) = fixture();
+        let mut cased = DefaultIterateInitializer {
+            bound_mult_init_method: "CONSTANT".into(),
+            ..DefaultIterateInitializer::new()
+        };
+        assert!(cased.set_initial_iterates(&data, &cq, &nlp, &mut aug));
     }
 }
