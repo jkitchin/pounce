@@ -238,19 +238,71 @@ sensitivity, automatic LP/QP routing, infeasibility *refutation*, and
 the WASM/browser and Pyomo/GAMS surfaces have no counterpart in
 KNITRO 5.0.
 
-## 5. Suggested order
+## 5. Priority — against pounce's measured position, not the paper's
 
-1. **Crossover** (§3.1) — both endpoints exist; opt-in; unblocks
-   IPM→SQP warm starts and firms up the active set that sensitivity
-   already depends on.
-2. **Feasible mode** (§3.2) — smallest change here, aimed straight at
-   pounce's documented top starting-point failure.
-3. **Affine-scaling initial point** (§3.3) — cheap code, but budget
-   the fixture sweep, not the patch.
-4. **FD-of-gradients Hessian-vector products** (§3.4) — the half of
-   Interior/CG Level B that needs no new user API.
-5. Everything else follows the composite-step / Interior/CG notes.
+The paper's thesis is that **robustness** comes from integrating an
+interior and an active-set method. Taken at face value that would make
+the active-set/crossover half of KNITRO the headline import. It is
+worth being clear that pounce does not have the problem that thesis
+solves:
 
-Items 1, 2 and 4 are additive and opt-in: they do not move the default
-trajectory, so they do not need a baseline sweep. Item 3 does. That
-distinction is the real effort ranking.
+- `mittelmann-post-546-sweep.md` §3: **pounce 47/47, IPOPT+MA57
+  41/47.** Robustness on the reference suite is already ahead of the
+  code pounce was ported from.
+- The residual gap that sweep found is **per-iteration linear-algebra
+  cost on collocation-discretized optimal control** — `steering_12800`
+  8.88×, `rocket_12800` 8.33×, at *matched iteration counts*. That is
+  a direct-factorization performance question (#554), and nothing in
+  this paper addresses it. Interior/CG is the paper-adjacent answer
+  for that model class, but it is a new globalization spine, it is
+  already designed in-repo, and it is not the near-term fix.
+
+So: **nothing in this paper is urgent for robustness or for speed.**
+One item is nonetheless high priority, on a different axis.
+
+### The one high-priority item: crossover (§3.1)
+
+Not because it makes solves succeed or run faster — because it
+supplies a thing pounce currently approximates, and has built visible
+machinery to work around. Three independent places in the tree are
+paying for the absence of an exact active set:
+
+1. **`covariance()`'s activity taxonomy** (`docs/src/sensitivity.md`).
+   Activity is classified from the barrier geometry into STRONGLY
+   ACTIVE / WEAKLY ACTIVE / **AMBIGUOUS (loosely converged)** /
+   UNIDENTIFIED, each with its own warning path. That taxonomy — in
+   particular the AMBIGUOUS class — exists precisely because an
+   interior solve cannot say which constraints are active. Crossover
+   is the mechanism that collapses it.
+2. **Degeneracy keeps coming back as an inertia problem.** #540, #541,
+   #544, #592, and the `feral_singular_pivot_floor` knob
+   (`troubleshooting.md`) are all the same underlying situation — the
+   reduced Hessian collapses at a degenerate solution — met each time
+   with a perturbation-side heuristic. Crossover attacks it
+   structurally instead: identify a linearly independent active set,
+   satisfy it to near equality, certify stationarity against it.
+3. **The IPM→SQP handoff does not exist.** The active-set SQP
+   warm-starts from a previous *SQP* solve. So a warm-started sequence
+   whose first solve wants the IPM (cold, large, where the IPM is
+   strong) cannot then hand off to the SQP (warm, 0.02–0.17× per
+   `warm-start-benchmark.md`). Crossover is the missing edge, and it
+   is what makes the MPC / homotopy story end-to-end rather than
+   SQP-only.
+
+Its cost is also uniquely favorable: both endpoints exist, the
+`pounce-convex` LP crossover is the precedent for the translation, and
+it runs **after** convergence on an opt-in flag — so it moves no
+default trajectory and needs no baseline fixture sweep.
+
+### Everything else
+
+4. **FD-of-gradients Hessian-vector products** (§3.4) — additive, no
+   new user API, independent of Interior/CG.
+5. **Affine-scaling initial point** (§3.3) — cheap patch, but it moves
+   every trajectory; budget the sweep, not the code.
+6. **Feasible mode** (§3.2) — small and self-contained, but flagged
+   honestly: `troubleshooting.md` has no section on functions
+   undefined outside the feasible region, and no filed issue points at
+   it. The argument for it in §3.2 is from pounce's *user base*, not
+   from its failure record. Speculative until a real model asks.
+7. Everything else follows the composite-step / Interior/CG notes.
