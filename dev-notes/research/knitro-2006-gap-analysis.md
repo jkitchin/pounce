@@ -306,3 +306,62 @@ default trajectory and needs no baseline fixture sweep.
    it. The argument for it in §3.2 is from pounce's *user base*, not
    from its failure record. Speculative until a real model asks.
 7. Everything else follows the composite-step / Interior/CG notes.
+
+## 6. What would demonstrate the crossover advantage
+
+Worth writing down before any code, because the paper predicts a null
+result on most problems and a validation set chosen carelessly would
+measure nothing.
+
+**The discriminating property is failure of strict complementarity.**
+§7 of the paper is explicit: where strict complementarity holds, the
+tolerance-based active-set estimate is already correct, crossover
+finishes in one iteration and solves no LPs. On a nondegenerate
+problem it is a no-op *by design*. So the metric is never "did it
+solve" or "how fast" — the objective was already right — it is
+**active-set correctness, dual uniqueness, and the ambiguity classes**.
+
+Three degeneracy modes matter and are not interchangeable. pounce
+already separates them, in the warm-start benchmark's three families
+(`warm-start-benchmark.md`):
+
+| Family | Degeneracy | What crossover would show |
+|---|---|---|
+| `degenerate_corner` | strict complementarity fails (zero multiplier) | slack and multiplier are both `O(√μ)` at a weakly active bound (`sensitivity.md:528`), so activity is a *guess*; crossover forces the decision |
+| `redundant_rows` | LICQ fails (duplicated rows) | the IPM splits a multiplier across duplicates by centering; crossover puts it on a linearly independent subset, so the duals become unique |
+| `degenerate_vertex` | primal degeneracy (12 rows tight at a 4-var vertex) | which maximal independent subset gets chosen, and whether it is stable under perturbation |
+
+These are small and analytic by construction, so the true active set
+is known and can be scored directly — that is the ground truth the
+experiment needs and CUTEst does not give.
+
+Beyond the synthetic families, four real shapes:
+
+1. **Shadow prices off a degenerate model.** When the dual optimum is
+   a set rather than a point, an IPM returns its analytic center — a
+   particular interior point, reported as *the* marginal. For the
+   blending / pooling / network models pounce targets, those numbers
+   get read as decisions. NETLIB `gen`/`gen1` is the in-tree LP
+   demonstration (`lp-qp-routing.md` §the fallback): degenerate,
+   rank-deficient, strict complementarity fails, and the convex IPM
+   burns 200 iterations without a certificate.
+2. **Parameter estimation with a fitted parameter at a bound.**
+   `sensitivity.md`'s Pyomo estimation model. Whether `covariance()`
+   projects depends on whether the bound is *really* active; a weakly
+   active one is kept at full variance with a warning today. Crossover
+   turns a warning into an answer.
+3. **Over-modeled engineering models with redundant constraints** —
+   the population `future-work-roadmap.md` §4.1 already names for C3
+   (CUTEst DECONVBNE, S365, S365MOD, HIMMELBJ, PFIT\*, the ACOPR
+   family).
+4. **MPC with a cold first solve.** The one archetype where the metric
+   *is* wall time. The benchmark harness already excludes step 0 as a
+   cold solve; the new arm is IPM-cold → crossover → SQP-warm against
+   SQP-cold → SQP-warm. This measures whether crossover's active set
+   is a *usable* seed, which is a stronger claim than it being correct.
+
+**Where it would show nothing**, and this should be stated up front so
+a null result is not read as failure: the nondegenerate bulk of
+Hock–Schittkowski, and the Mittelmann collocation models — strict
+complementarity typically holds there, and their cost is linear
+algebra (#554), which crossover does not touch.
