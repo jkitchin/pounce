@@ -281,12 +281,13 @@ fn least_square_init_duals_parses_and_is_refused_when_requested() {
 /// `OptionsList`, harvested from the sources themselves so a read site
 /// added tomorrow is covered without anyone editing a list here.
 ///
-/// Scope is the crates whose reads are served by the registry a bare
-/// [`IpoptApplication::new`] builds: `pounce-algorithm` and
-/// `pounce-presolve`. `pounce-cli` is deliberately out — it registers
-/// its own `qp_*` convex knobs onto the app's registry at startup, so a
-/// static check against a bare application would report them missing
-/// when they are not.
+/// Scope is every crate whose reads are served by the registry a bare
+/// [`IpoptApplication::new`] builds — which, since gh#604 moved the
+/// `qp_*` convex knobs out of `pounce-cli`'s startup path and into the
+/// core registry, includes the CLI. Nothing registers options onto that
+/// registry from outside it any more, so a name read anywhere here and
+/// missing from the registry is a real defect rather than a scoping
+/// artifact.
 ///
 /// Only literal tags are visible this way — a call whose tag is a
 /// variable (`read_num(key)`) is invisible, which is why the reverse
@@ -302,7 +303,7 @@ fn option_names_read_by_the_solver_crates() -> BTreeSet<String> {
         "get_integer_value(",
         "get_enum_value(",
     ];
-    const CRATES: &[&str] = &["pounce-algorithm", "pounce-presolve"];
+    const CRATES: &[&str] = &["pounce-algorithm", "pounce-cli", "pounce-presolve"];
 
     fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {

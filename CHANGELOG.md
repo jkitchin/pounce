@@ -36,6 +36,29 @@ changes.
   is read without being registered, and no `Initialization` option is
   registered without being either consumed or explicitly refused.
 
+- **The convex LP/QP knobs are registered core-side and refused where
+  they configure nothing** (#604). `qp_tau`, `qp_tau_max`, `qp_reg`,
+  `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` were
+  registered by the `pounce` CLI at startup, onto the same registry the
+  core builds. Setting one from Python or the C interface therefore
+  failed with `Unknown option "qp_tau"` — naming an option that exists —
+  and adding any `qp_*` name to the core registry would have aborted the
+  CLI binary at startup with `OPTION_ALREADY_REGISTERED`, a hazard
+  documented in a comment and tested by nothing. #360 moved the
+  `sqp_qp_*` block out of the CLI for those two reasons; this is the
+  other half.
+
+  They now live beside `solver_selection` and `qp_presolve` in the core
+  registry, so every frontend parses them. Parsing is not honouring: only
+  the CLI classifies a `.nl` model and routes it to the convex engines,
+  so a library solve now **refuses** a non-default `qp_*` (including
+  `qp_presolve`, previously a documented silent no-op there) with a
+  message naming the surfaces that do honour it — `option_file_name`'s
+  treatment from #518, one feature over. Explicitly-set defaults still
+  pass, as everywhere else. CLI behaviour is unchanged, including the
+  fallback where a convex attempt hands the model to the NLP path having
+  genuinely used those values.
+
 - **A feasible NLP whose constraint rows sit at their own floating-point
   resolution is no longer refused a certificate — or convicted of local
   infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit

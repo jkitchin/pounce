@@ -256,6 +256,29 @@ compare timings or isolate a solver issue):
 pounce model.nl qp_presolve=no
 ```
 
+## Tuning the convex IPM
+
+Beyond the shared `tol` and `max_iter`, the convex engine takes these:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `qp_presolve` | `yes` | Presolve before the solve (above). |
+| `qp_tau` | `0.95` | Fraction-to-boundary τ ∈ (0,1): the floor of the adaptive rule, and the flat value on the predictor step and on second-order / PSD cone blocks. |
+| `qp_tau_max` | `1 − 1e-12` | Ceiling of the adaptive (Mehrotra-tail) τ on orthant blocks. Set equal to `qp_tau` to pin τ flat. |
+| `qp_reg` | `1e-10` | Static KKT regularization δ ≥ 0, for a stable LDLᵀ inertia. |
+| `qp_infeas_tol` | `1e-7` | Relative tolerance on the value and cone-membership parts of an infeasibility / unboundedness certificate. |
+| `qp_hsde` | `yes` | Homogeneous self-dual embedding (self-starting, native certificates) vs. the infeasible-start primal–dual method. |
+| `qp_equilibrate` | `yes` | Ruiz-equilibrate the data first. Only when `qp_hsde=no`; HSDE conditions internally. |
+| `qp_crossover` | `no` | Pure LPs only: purify the interior iterate to an exact vertex. Opt-in; slow on large degenerate LPs (#133). |
+
+These reach the engine through the `pounce` CLI, which is the one entry
+point that classifies a `.nl` model and routes it. **A library solve
+refuses a non-default value** rather than accepting one it would drop —
+`IpoptApplication` has no structure extraction, so it cannot route to the
+convex engines at all (the same reason `solver_selection=lp-ipm` errors
+there). From Python, `pounce.solve_qp` / `pounce.solve_cone` drive the
+engine directly and take these knobs as typed arguments.
+
 ## Scope and limitations
 
 - **Convex problems only.** Nonconvex (indefinite-Hessian) QPs, quadratic

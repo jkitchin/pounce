@@ -119,6 +119,15 @@ only its default `constant` is implemented; `mu-based` parses (an
 serving it as `constant` would run a different initialization than the
 one you asked for under the name you asked for.
 
+And it applies per *entry point*, for an option whose feature exists but
+sits somewhere this caller cannot reach. `option_file_name` is refused by
+a library caller that reads no options file, and the convex `qp_*` knobs
+(see [LP/QP Routing](lp-qp-routing.md#tuning-the-convex-ipm)) are refused
+by one that cannot route a model to the convex engines. Both are
+registered centrally, so they parse everywhere and the message can say
+which surface honours them — rather than the caller getting `Unknown
+option` for a name that exists.
+
 `option_file_name` was on that list until
 [#518](https://github.com/jkitchin/pounce/issues/518) implemented it;
 refusing an option is the cheap half of "implement it or fail loudly",

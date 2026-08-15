@@ -195,3 +195,97 @@ fn solver_selection_and_qp_presolve_are_registered() {
         "an unregistered value must be rejected by the validating registry"
     );
 }
+
+// ---------------------------------------------------------------------
+// The convex `qp_*` knobs on an entry point that cannot reach the engine
+// that reads them (gh#604).
+// ---------------------------------------------------------------------
+
+/// All eight convex knobs live in the core registry, so every frontend
+/// *parses* them. Until gh#604 the seven `qp_tau`-family names were
+/// registered by `pounce-cli` at startup instead, which made setting one
+/// from Python or the C interface fail with `Unknown option "qp_tau"` —
+/// naming an option that exists — and made adding any `qp_*` name to the
+/// core registry abort the CLI binary at startup.
+#[test]
+fn every_convex_knob_is_registered_core_side() {
+    let mut app = IpoptApplication::new();
+    let o = app.options_mut();
+    for (name, value) in [
+        ("qp_tau", 0.9),
+        ("qp_tau_max", 0.99),
+        ("qp_reg", 1e-9),
+        ("qp_infeas_tol", 1e-6),
+    ] {
+        assert!(
+            o.set_numeric_value(name, value, true, true).is_ok(),
+            "`{name}` should be a registered library option"
+        );
+    }
+    for name in ["qp_hsde", "qp_equilibrate", "qp_crossover", "qp_presolve"] {
+        assert!(
+            o.set_string_value(name, "no", true, true).is_ok(),
+            "`{name}` should be a registered library option"
+        );
+    }
+    // The registered ranges still bite: τ ∈ (0,1) open at both ends.
+    assert!(o.set_numeric_value("qp_tau", 1.0, true, true).is_err());
+    assert!(o.set_numeric_value("qp_reg", -1.0, true, true).is_err());
+    assert!(o.set_string_value("qp_hsde", "maybe", true, true).is_err());
+}
+
+/// Parsing is not honouring. A library solve cannot route to the convex
+/// engines at all (`forced_convex_selection_is_rejected_in_library`
+/// above), so a `qp_*` value set here would configure nothing — and is
+/// refused with a message rather than accepted and dropped.
+#[test]
+fn a_convex_knob_is_refused_on_a_library_solve() {
+    let (_app, status, _out) = solve_hs35_with("print_level 0\nqp_tau 0.9\n");
+    assert_eq!(
+        status,
+        ApplicationReturnStatus::InvalidOption,
+        "a convex-only knob must not be silently ignored on a library solve"
+    );
+
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.initialize_with_options_str("qp_crossover yes\n")
+        .unwrap();
+    let msg = app
+        .unhonored_convex_option()
+        .expect("a non-default convex knob must be refused");
+    assert!(msg.contains("qp_crossover"), "{msg}");
+    assert!(msg.contains("604"), "message should name the issue: {msg}");
+}
+
+/// The same default gate the rest of the refusals use: an `ipopt.opt`
+/// that spells out defaults, or a round-tripped full option dump, asks
+/// for nothing and must keep solving.
+#[test]
+fn a_convex_knob_at_its_default_asks_nothing_of_a_library_solve() {
+    let (_app, status, _out) =
+        solve_hs35_with("print_level 0\nqp_presolve yes\nqp_hsde yes\nqp_tau 0.95\n");
+    assert!(
+        converged(status),
+        "explicitly-set defaults must not fail the solve; status = {status:?}"
+    );
+}
+
+/// The `pounce` CLI *can* route to those engines, and says so. That is
+/// also what keeps its NLP fallback working: a convex attempt that
+/// returns no verified point hands the model to `optimize_tnlp`, having
+/// genuinely used the `qp_*` values on the way.
+#[test]
+fn declaring_convex_routing_silences_the_guard() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.initialize_with_options_str("qp_tau 0.9\n").unwrap();
+    assert!(app.unhonored_convex_option().is_some(), "library default");
+
+    app.set_convex_routing_available(true);
+    assert_eq!(
+        app.unhonored_convex_option(),
+        None,
+        "a caller that can reach the convex engines honours the knob"
+    );
+}
