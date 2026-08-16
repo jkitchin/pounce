@@ -42,6 +42,10 @@ pounce-dbg-viz = "pounce._debug_viz:main"
 # `pounce-gams-link` is the launcher GAMS invokes with a control file.
 pounce-gams = "pounce._gams_cli:main"
 pounce-gams-link = "pounce.gams.link:main"
+# Continuation over a path manifest (pounce#608): one command traces a
+# whole parametric sequence of models, carrying each solve's answer into
+# the next, and writes a single trace report. See docs/src/continuation.md.
+pounce-continue = "pounce._continuation_cli:main"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]

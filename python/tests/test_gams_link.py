@@ -698,3 +698,99 @@ def test_gams_pi_wyndor_shadow_prices_both_senses():
     lam = [0.0, 1.5, 1.0]  # POUNCE internal multipliers for the Wyndor optimum
     assert link.gams_pi(lam, obj_sign=-1.0) == pytest.approx([0.0, 1.5, 1.0])
     assert link.gams_pi(lam, obj_sign=1.0) == pytest.approx([0.0, -1.5, -1.0])
+
+
+# ======================================================================
+# Continuation over a GAMS path (pounce#608). The pip link builds an
+# ordinary pounce.Problem from a GMO view, so the whole driver applies;
+# these drive it on the same license-free fake as everything above.
+# ======================================================================
+
+
+class ParametricHS071View(HS071View):
+    """HS071 with the equality right-hand side as the parameter.
+
+    ``x0^2 + x1^2 + x2^2 + x3^2 == theta`` (40 in the original). A path
+    in ``theta`` is a path in the equality RHS, which is what a
+    sensitivity step's `deltas` argument means.
+    """
+
+    def __init__(self, theta, **kw):
+        super().__init__(**kw)
+        self.theta = float(theta)
+
+    def con_lower(self):
+        return [25.0, self.theta]
+
+    def con_upper(self):
+        return [POUNCE_INF, self.theta]
+
+
+def _gams_thetas(k=6):
+    return [np.array([40.0 + 0.5 * i]) for i in range(k)]
+
+
+def test_gams_continuation_traces_a_path():
+    from pounce.gams import continuation as gams_cont
+
+    thetas = _gams_thetas()
+    trace = gams_cont.trace(
+        lambda th: ParametricHS071View(float(np.asarray(th).ravel()[0]),
+                                       with_hessian=True),
+        thetas,
+        options={"tol": 1e-8, "print_level": 0, "sb": "yes"},
+    )
+    assert trace.n_steps == len(thetas)
+    assert trace.status == "ok"
+    assert all(st.status in (0, 1) for st in trace.steps)
+
+    # Every traced point matches an independent cold solve at the same
+    # parameter: a warm start may make the answer cheaper, never
+    # different. (Same contract the Pyomo adapter's tests assert.)
+    for th, st in zip(thetas, trace.steps):
+        view = ParametricHS071View(float(th[0]), with_hessian=True)
+        _gp, x, info = link.solve_view(
+            view, options={"tol": 1e-8, "print_level": 0, "sb": "yes"})
+        assert st.obj == pytest.approx(info["obj_val"], rel=1e-6)
+
+
+def test_gams_continuation_warm_start_beats_cold_on_the_path():
+    """The reason to route GAMS through the driver at all."""
+    from pounce.gams import continuation as gams_cont
+
+    thetas = _gams_thetas(8)
+    opts = {"tol": 1e-8, "print_level": 0, "sb": "yes"}
+    trace = gams_cont.trace(
+        lambda th: ParametricHS071View(float(np.asarray(th).ravel()[0]),
+                                       with_hessian=True),
+        thetas, options=opts,
+    )
+    cold = 0
+    for th in thetas:
+        _gp, _x, info = link.solve_view(
+            ParametricHS071View(float(th[0]), with_hessian=True),
+            options=opts)
+        cold += int(info["iter_count"])
+    assert trace.total_iters < cold
+
+
+def test_gams_continuation_reports_the_predictor_it_got():
+    """`pins` is what enables the tangent; without it the driver runs
+    the zero-order fallback, and says so rather than leaving it to be
+    inferred from timings."""
+    from pounce.gams import continuation as gams_cont
+
+    def view_of(th):
+        return ParametricHS071View(float(np.asarray(th).ravel()[0]),
+                                   with_hessian=True)
+
+    opts = {"tol": 1e-8, "print_level": 0, "sb": "yes"}
+    zero = gams_cont.trace(view_of, _gams_thetas(4), options=opts)
+    assert {st.predictor for st in zero.steps} == {"cold", "zero"}
+
+
+def test_gams_continuation_rejects_a_view_factory_returning_none():
+    from pounce.gams import continuation as gams_cont
+
+    with pytest.raises(TypeError, match="must return the GmoView"):
+        gams_cont.trace(lambda th: None, [np.array([40.0])])

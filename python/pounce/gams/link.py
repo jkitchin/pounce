@@ -263,6 +263,30 @@ def solve_view(
     link options) route a ``pounce.solve-report/v1`` JSON to disk via the
     canonical Rust writer, matching the native C link (pounce#187).
     """
+    gp, prob = problem_from_view(
+        view, options=options, max_iter=max_iter, max_wall_time=max_wall_time
+    )
+    x, info = prob.solve(
+        x0=gp.x0, report_path=report_path, report_detail=report_detail
+    )
+    return gp, x, info
+
+
+def problem_from_view(
+    view: "GmoView",
+    *,
+    options: dict | None = None,
+    max_iter: int | None = None,
+    max_wall_time: float | None = None,
+):
+    """Build ``(GmoProblem, pounce.Problem)`` from a GMO view, unsolved.
+
+    Split out of :func:`solve_view` so a caller that drives its own
+    solve loop -- :mod:`pounce.gams.continuation`, which hands the
+    ``Problem`` to :class:`pounce.Continuation` -- constructs it exactly
+    the way an ordinary GAMS solve does, options and all, rather than
+    reimplementing the defaults and drifting from them (pounce#608).
+    """
     import pounce
 
     gp: "GmoProblem" = problem_from_gmo(view)
@@ -294,10 +318,7 @@ def solve_view(
         except Exception as exc:  # unknown / invalid option: warn, keep going
             sys.stderr.write(f"pounce-gams: ignoring option '{key}': {exc}\n")
 
-    x, info = prob.solve(
-        x0=gp.x0, report_path=report_path, report_detail=report_detail
-    )
-    return gp, x, info
+    return gp, prob
 
 
 def solve_from_control_file(
