@@ -235,6 +235,11 @@ pub struct IpoptApplication {
     /// re-optimize branch of `WarmStartIterateInitializer` keeps the
     /// installed iterate. Wire-set via [`Self::set_warm_start_iterate`].
     warm_start_iterate: Option<crate::debug::IterateSnapshot>,
+    /// The warm-start initializer's verdict on the most recent solve's
+    /// supplied iterate (gh#606). Lifted off the solve-local
+    /// `IpoptData` so a caller can read it after `optimize_tnlp`
+    /// returns; `None` when the last solve was a cold start.
+    warm_start_diag: RefCell<Option<crate::init::warm_start::WarmStartDiagnostics>>,
     /// Caller-supplied fill-reducing permutation for the KKT linear
     /// solver (pounce#180 item 1 / FERAL#107). When `Some`, it overrides
     /// whatever `feral_ordering` / `POUNCE_FERAL_ORDERING` resolves to,
@@ -312,6 +317,7 @@ impl IpoptApplication {
             sqp_warm_start: None,
             sqp_last_working_set: None,
             warm_start_iterate: None,
+            warm_start_diag: RefCell::new(None),
             external_ordering: None,
             kkt_schur_block: None,
         }
@@ -631,6 +637,19 @@ impl IpoptApplication {
 
     pub fn statistics(&self) -> SolveStatistics {
         self.statistics.borrow().clone()
+    }
+
+    /// What the warm-start initializer made of the iterate the caller
+    /// supplied to the most recent solve (gh#606): the residuals it
+    /// measured, whether each multiplier block was accepted,
+    /// reconstructed or discarded, and the barrier parameter it
+    /// settled on.
+    ///
+    /// `None` when the last solve was a cold start
+    /// (`warm_start_init_point=no`), or when no solve has run. Reset at
+    /// the top of every solve, like [`Self::timing_stats`].
+    pub fn warm_start_diagnostics(&self) -> Option<crate::init::warm_start::WarmStartDiagnostics> {
+        self.warm_start_diag.borrow().clone()
     }
 
     /// Shared timing accumulator from the most recent `optimize_tnlp`
@@ -2147,6 +2166,10 @@ impl IpoptApplication {
         // via [`Self::timing_stats`].
         let timing = Rc::new(TimingStatistics::new());
         *self.timing.borrow_mut() = Rc::clone(&timing);
+        // gh#606: same lifetime as the timings — a solve that bails out
+        // before the initializer runs must not report the previous
+        // solve's warm-start verdict.
+        *self.warm_start_diag.borrow_mut() = None;
         // Gate the *detailed* per-subsystem timers on `timing_statistics`
         // (default "no"), matching upstream Ipopt. Without this, every
         // timed `eval_*` / phase section pays two `getrusage` syscalls per
@@ -2621,6 +2644,10 @@ impl IpoptApplication {
                 // for predictor–corrector path following (pounce#86).
                 stats.final_mu = d.curr_mu;
             }
+            // gh#606: the warm-start initializer's verdict on what the
+            // caller supplied. Lifted off the (solve-local) data handle
+            // so it outlives the solve; `None` on a cold start.
+            *self.warm_start_diag.borrow_mut() = alg.data.borrow().warm_start_diagnostics.clone();
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
             // Restoration-phase audit counters (pounce#12). Zero on
             // problems where restoration never fires; populated by
@@ -3501,11 +3528,6 @@ impl IpoptApplication {
                 builder.warm_start_init_point = v;
             }
         }
-        if let Ok((v, found)) = self.options.get_bool_value("warm_start_same_structure", "") {
-            if found {
-                builder.warm.same_structure = v;
-            }
-        }
         if let Some(v) = read_num("warm_start_bound_push") {
             builder.warm.bound_push = v;
         }
@@ -3527,12 +3549,18 @@ impl IpoptApplication {
         if let Some(v) = read_num("warm_start_target_mu") {
             builder.warm.target_mu = v;
         }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("warm_start_entire_iterate", "")
-        {
+        // gh#606: residual-adaptive recentering. `warm_start_entire_iterate`
+        // and `warm_start_same_structure` used to be parsed here into
+        // fields nothing read; they are refused by
+        // `unimplemented_options` instead (they name the
+        // `GetWarmStartIterate` TNLP surface pounce does not expose).
+        if let Ok((v, found)) = self.options.get_string_value("warm_start_recentering", "") {
             if found {
-                builder.warm.entire_iterate = v == "yes";
+                builder.warm.recentering = if v.eq_ignore_ascii_case("none") {
+                    crate::alg_builder::WarmStartRecentering::None
+                } else {
+                    crate::alg_builder::WarmStartRecentering::Residual
+                };
             }
         }
 

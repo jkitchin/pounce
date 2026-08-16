@@ -71,11 +71,14 @@ pub struct UnimplementedFeature {
     pub advice: &'static str,
     /// The options that belong to it.
     pub options: &'static [&'static str],
+    /// Issue tracking the missing feature, named in the error.
+    pub issue: u32,
 }
 
 /// Feature groups pounce does not implement. Refused when set.
 pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
     UnimplementedFeature {
+        issue: 483,
         feature: "the Chen-Goldfarb (CG-penalty) / inexact-Newton line search \
                   — Ipopt's `CGPenaltyLSAcceptor`",
         advice: "pounce implements the filter line search (the default) and \
@@ -113,6 +116,7 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         ],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "derivative approximation by finite differences",
         advice: "supply `eval_grad_f` / `eval_jac_g` / `eval_h`, and check them \
                  with `derivative_test=first-order`",
@@ -123,6 +127,7 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         ],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "linear-dependency detection on the equality constraints",
         advice: "pounce's presolve removes structurally redundant rows; see \
                  `presolve`",
@@ -133,17 +138,20 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         ],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "the per-iteration NaN/Inf check on derivative matrices",
         advice: "`derivative_test=first-order` checks the derivatives once, at \
                  the starting point",
         options: &["check_derivatives_for_naninf"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "multiplier recalculation by least squares",
         advice: "",
         options: &["recalc_y", "recalc_y_feas_tol"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "least-square initialization of *all* dual variables \
                   (the first-order-optimality fit)",
         advice: "the equality multipliers are least-square initialized \
@@ -153,53 +161,72 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         options: &["least_square_init_duals"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "a selectable constraint-violation norm",
         advice: "pounce measures the violation in the 2-norm throughout",
         options: &["constraint_violation_norm_type"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "magic steps",
         advice: "",
         options: &["magic_steps"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "bound replacement on the original problem",
         advice: "",
         options: &["replace_bounds"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "the L-BFGS augmented-system and space variants",
         advice: "`hessian_approximation=limited-memory` uses the low-rank \
                  augmented system unconditionally",
         options: &["hessian_approximation_space", "limited_memory_aug_solver"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "the linear-variable count hint for L-BFGS",
         advice: "",
         options: &["num_linear_variables"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "skipping the finalize-solution callback",
         advice: "",
         options: &["skip_finalize_solution_call"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "the dynamic HSL loader",
         advice: "MA57 is linked at build time with `--features ma57`",
         options: &["hsllib"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "these output controls",
         advice: "use `print_level` (0 silences the solver) and `sb=yes` to \
                  suppress the banner",
         options: &["suppress_all_output", "debug_print_level"],
     },
     UnimplementedFeature {
+        issue: 483,
         feature: "a randomly perturbed evaluation point for the derivative \
                   checker",
         advice: "pounce's checker tests at the (bound-projected) starting point, \
                  which is where the solve actually begins",
         options: &["point_perturbation_radius"],
+    },
+    UnimplementedFeature {
+        issue: 606,
+        feature: "reuse of a previously-solved iterate or problem structure \
+                  through Ipopt's `TNLP::GetWarmStartIterate` surface",
+        advice: "pounce's warm start goes through `TNLP::get_starting_point` \
+                 with `warm_start_init_point=yes`, which carries the primal \
+                 point and all three multiplier blocks; from Python, \
+                 `pounce.WarmStart.from_info` packages it",
+        options: &["warm_start_entire_iterate", "warm_start_same_structure"],
     },
 ];
 
@@ -290,8 +317,8 @@ pub fn refusal(options: &OptionsList, reg: &RegisteredOptions) -> Option<String>
                      Ipopt still parses, but setting it used to do nothing at \
                      all — silently — so it is refused instead.{advice} \
                      Remove it to run. Tracking issue: \
-                     https://github.com/jkitchin/pounce/issues/483",
-                    group.feature
+                     https://github.com/jkitchin/pounce/issues/{}",
+                    group.feature, group.issue
                 ));
             }
         }

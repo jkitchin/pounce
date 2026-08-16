@@ -943,12 +943,17 @@ fn hs071_probing_oracle_honors_user_sigma_max() {
     );
 }
 
+/// The `Warm Start` category still parses in full — an `ipopt.opt`
+/// written for Ipopt must load unchanged — including the two flags
+/// gh#606 refuses at solve time. Parsing and honouring are separate
+/// questions; `warm_start_recentering.rs` covers the second one.
 #[test]
 fn warm_start_options_flow_through_builder() {
     let mut app = IpoptApplication::new();
     let opts = "\
         warm_start_init_point yes\n\
         warm_start_same_structure yes\n\
+        warm_start_recentering none\n\
         warm_start_bound_push 1e-2\n\
         warm_start_bound_frac 1e-2\n\
         warm_start_slack_bound_push 1e-2\n\
@@ -966,6 +971,7 @@ fn warm_start_options_flow_through_builder() {
         "warm_start_init_point",
         "warm_start_same_structure",
         "warm_start_entire_iterate",
+        "warm_start_recentering",
     ] {
         let (_, found) = app.options().get_string_value(key, "").unwrap();
         assert!(found, "{key} did not parse through the registry");

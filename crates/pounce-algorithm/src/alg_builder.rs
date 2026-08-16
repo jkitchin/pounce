@@ -375,14 +375,12 @@ impl Default for InitOptions {
 /// [`WarmStartIterateInitializer`]. Defaults mirror
 /// `IpWarmStartIterateInitializer.cpp:RegisterOptions`.
 ///
-/// Wired today: `mult_init_max` (clamps |y_c|, |y_d| and caps z/v
-/// blocks) and `target_mu` (overrides `data.curr_mu` at iter 0).
-/// The remaining knobs (`bound_push`, `bound_frac`, `slack_bound_push`,
-/// `slack_bound_frac`, `mult_bound_push`, `entire_iterate`,
-/// `same_structure`) are stored on the initializer but not yet
-/// consumed — `WarmStartIterateInitializer::set_initial_iterates`
-/// currently trusts the caller-populated `data.curr` rather than
-/// re-running the upstream `push_variables` machinery.
+/// Wired today: every knob above plus the gh#606 recentering pair.
+/// `warm_start_entire_iterate` / `warm_start_same_structure` are
+/// deliberately *not* here — they name the `GetWarmStartIterate` TNLP
+/// surface pounce does not expose, and are refused by
+/// [`crate::unimplemented_options`] rather than parsed into a field
+/// nothing reads (gh#606).
 #[derive(Debug, Clone)]
 pub struct WarmStartOptions {
     pub bound_push: Number,
@@ -392,14 +390,51 @@ pub struct WarmStartOptions {
     pub mult_bound_push: Number,
     pub mult_init_max: Number,
     pub target_mu: Number,
-    pub entire_iterate: bool,
-    pub same_structure: bool,
     /// The value a NaN-seeded bound multiplier takes: NaN in a
     /// user-supplied `z`/`v` seed means "unseeded, use the default".
     /// Threaded from `builder.init.bound_mult_init_val` at build time
     /// so the Mehrotra override and any user setting stay the single
     /// source of truth.
     pub bound_mult_init_val: Number,
+    /// `constr_mult_init_max`, threaded from the init options at build
+    /// time (gh#606). The warm path's reconstruction of an unseeded
+    /// equality-multiplier block runs the *cold* path's least-squares
+    /// solve, so it is capped by the cold path's cap — not by
+    /// `warm_start_mult_init_max`, which caps multipliers a caller
+    /// actually supplied and is three orders looser (1e6 vs 1e3).
+    /// Measured: on `redundant_rows`, whose duplicated equality rows
+    /// make the least-squares system singular, the looser cap let an
+    /// arbitrary estimate through and cost 7 -> 25 iterations.
+    pub constr_mult_init_max: Number,
+    /// `warm_start_recentering` (gh#606). Whether the initializer
+    /// measures the supplied point and adapts μ / the multiplier fills
+    /// to it, or keeps the pre-gh#606 universal constants.
+    pub recentering: WarmStartRecentering,
+}
+
+/// Value of `warm_start_recentering` (gh#606).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmStartRecentering {
+    /// Pre-gh#606 behaviour: constant pushes and floors, `y` left at
+    /// zero when unseeded, μ untouched unless `warm_start_target_mu`
+    /// is set. The kill switch.
+    None,
+    /// Measure the supplied iterate's residuals and derive μ, the
+    /// bound-multiplier fills, and the equality-multiplier
+    /// reconstruction from them.
+    Residual,
+}
+
+impl WarmStartOptions {
+    /// `mult_init_max` as a usable cap: the registered `0` sentinel
+    /// means "no cap".
+    pub(crate) fn mult_init_max_or_inf(&self) -> Number {
+        if self.mult_init_max > 0.0 {
+            self.mult_init_max
+        } else {
+            Number::INFINITY
+        }
+    }
 }
 
 impl Default for WarmStartOptions {
@@ -412,26 +447,27 @@ impl Default for WarmStartOptions {
             mult_bound_push: 1e-3,
             mult_init_max: 1e6,
             target_mu: 0.0,
-            entire_iterate: false,
-            same_structure: false,
             // seeded from the init options so the default has one
             // home; build() re-resolves it from the live init options
             // anyway (see `resolved_warm_options`)
             bound_mult_init_val: InitOptions::default().bound_mult_init_val,
+            constr_mult_init_max: InitOptions::default().constr_mult_init_max,
+            recentering: WarmStartRecentering::Residual,
         }
     }
 }
 
 /// The warm-start options as the initializer actually receives them:
-/// `bound_mult_init_val` comes from the (option-read,
-/// Mehrotra-resolved) init options, never from `WarmStartOptions`'s
-/// own copy. Split out of `build()` so the threading is testable.
+/// `bound_mult_init_val` and `constr_mult_init_max` come from the
+/// (option-read, Mehrotra-resolved) init options, never from
+/// `WarmStartOptions`'s own copy. Split out of `build()` so the threading is testable.
 pub(crate) fn resolved_warm_options(
     warm: &WarmStartOptions,
     init: &InitOptions,
 ) -> WarmStartOptions {
     let mut w = warm.clone();
     w.bound_mult_init_val = init.bound_mult_init_val;
+    w.constr_mult_init_max = init.constr_mult_init_max;
     w
 }
 
