@@ -61,6 +61,56 @@ changes.
   iteration count across them are unchanged. See #605 for the per-fixture
   accounting.
 
+- **The cold-start initialization options are settable** (#604).
+  `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,
+  `constr_mult_init_max`, `bound_mult_init_val`, `bound_mult_init_method`
+  and `least_square_init_primal` were read by the algorithm builder but
+  never registered, so every frontend rejected them at the *set* call
+  with `Unknown option "bound_push"` — the documentation described knobs
+  that no supported path could reach. This is the inverse of #551
+  (registered-but-unread), and the same class of silence.
+
+  They now register under upstream's `Initialization` category with
+  upstream's types, defaults and ranges. The registered defaults equal
+  the values the builder already hard-coded and the read sites still fire
+  only when a caller sets the key explicitly, so nothing moves unless you
+  ask it to: the fixture sweep is identical across all 57 models, status,
+  objective and iteration count.
+
+  Two of upstream's knobs name behaviour POUNCE does not have, and both
+  now say so instead of doing something else. `bound_mult_init_method=
+  mu-based` used to fall through to a third path — the NLP's own `y`
+  guess — that is neither documented mode; it is refused, as is
+  `least_square_init_duals=yes`. Both values still *parse*, so an
+  `ipopt.opt` written for Ipopt loads unchanged.
+
+  A registry invariant test now runs in CI in both directions: no option
+  is read without being registered, and no `Initialization` option is
+  registered without being either consumed or explicitly refused.
+
+- **The convex LP/QP knobs are registered core-side and refused where
+  they configure nothing** (#604). `qp_tau`, `qp_tau_max`, `qp_reg`,
+  `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` were
+  registered by the `pounce` CLI at startup, onto the same registry the
+  core builds. Setting one from Python or the C interface therefore
+  failed with `Unknown option "qp_tau"` — naming an option that exists —
+  and adding any `qp_*` name to the core registry would have aborted the
+  CLI binary at startup with `OPTION_ALREADY_REGISTERED`, a hazard
+  documented in a comment and tested by nothing. #360 moved the
+  `sqp_qp_*` block out of the CLI for those two reasons; this is the
+  other half.
+
+  They now live beside `solver_selection` and `qp_presolve` in the core
+  registry, so every frontend parses them. Parsing is not honouring: only
+  the CLI classifies a `.nl` model and routes it to the convex engines,
+  so a library solve now **refuses** a non-default `qp_*` (including
+  `qp_presolve`, previously a documented silent no-op there) with a
+  message naming the surfaces that do honour it — `option_file_name`'s
+  treatment from #518, one feature over. Explicitly-set defaults still
+  pass, as everywhere else. CLI behaviour is unchanged, including the
+  fallback where a convex attempt hands the model to the NLP path having
+  genuinely used those values.
+
 - **A feasible NLP whose constraint rows sit at their own floating-point
   resolution is no longer refused a certificate — or convicted of local
   infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit

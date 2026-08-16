@@ -201,6 +201,14 @@ pub struct IpoptApplication {
     /// setting the option on a surface that cannot honor it is refused
     /// rather than dropped (gh#518).
     option_file_resolved: bool,
+    /// Whether this caller can route a model to the convex LP/QP/SOCP
+    /// engines — i.e. whether the `qp_*` knobs those engines read
+    /// configure anything here. Only the `pounce` CLI can (it owns the
+    /// `.nl` structure extraction that classifies a model), and it says
+    /// so via [`Self::set_convex_routing_available`]. The guard in
+    /// [`Self::unhonored_convex_option`] reads this, on the same
+    /// contract as `option_file_resolved` above (gh#604).
+    convex_routing_available: bool,
     /// Shared sink that the linear-solver backend writes a rolling
     /// [`LinearSolverSummary`] into after every factor. Reset at the
     /// top of every solve (so back-to-back `optimize_tnlp` calls don't
@@ -305,6 +313,7 @@ impl IpoptApplication {
             on_converged: None,
             record_iter_history: false,
             option_file_resolved: false,
+            convex_routing_available: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
@@ -787,9 +796,17 @@ impl IpoptApplication {
         // gh#518: same treatment for `option_file_name` on an entry point
         // that cannot resolve it. Separate from the table above because
         // the *feature* now exists — just not here.
+        // gh#604: same treatment one level down, for a registered *value*
+        // of an option pounce otherwise reads (`bound_mult_init_method=
+        // mu-based`).
+        // gh#604: and for a convex-engine knob on an entry point that
+        // cannot route to that engine — `option_file_name`'s case, one
+        // feature over.
         if let Some(msg) = self
             .unimplemented_option_refusal()
+            .or_else(|| self.unimplemented_option_value_refusal())
             .or_else(|| self.unhonored_option_file_name())
+            .or_else(|| self.unhonored_convex_option())
         {
             use pounce_common::journalist::JournalCategory;
             eprintln!("{msg}");
@@ -1152,6 +1169,17 @@ impl IpoptApplication {
         crate::unimplemented_options::refusal(&self.options, &self.reg_options)
     }
 
+    /// The message for the first string option the caller set to a
+    /// registered *value* pounce does not implement, or `None`.
+    ///
+    /// Separate from [`Self::unimplemented_option_refusal`] because the
+    /// option itself is read and its other values work — it is one mode
+    /// that is missing, not the feature. See
+    /// [`crate::unimplemented_options::UNIMPLEMENTED_VALUES`].
+    pub fn unimplemented_option_value_refusal(&self) -> Option<String> {
+        crate::unimplemented_options::value_refusal(&self.options)
+    }
+
     /// `option_file_name` set on a surface that never resolves it.
     ///
     /// The option reaches a file through exactly one path —
@@ -1195,6 +1223,70 @@ impl IpoptApplication {
             )),
             _ => None,
         }
+    }
+
+    /// Declare that this caller can route a model to the convex LP/QP /
+    /// SOCP engines, so the `qp_*` knobs they read configure something.
+    ///
+    /// The `pounce` CLI calls this: it owns the `.nl` structure
+    /// extraction that classifies a model, which is the whole of what
+    /// `solver_selection`'s convex values need. No library frontend can
+    /// (see [`Self::unsupported_library_solver_selection`]), so the
+    /// default is `false` and [`Self::unhonored_convex_option`] refuses
+    /// the knobs there.
+    ///
+    /// Declaring it also covers the CLI's *fallback*: a convex attempt
+    /// that returns no verified point hands the model to
+    /// [`Self::optimize_tnlp`], and the `qp_*` values it was given
+    /// configured that attempt for real. Refusing them at the handoff
+    /// would fail a run that used them.
+    pub fn set_convex_routing_available(&mut self, available: bool) {
+        self.convex_routing_available = available;
+    }
+
+    /// The convex LP/QP knobs are registered core-side so every frontend
+    /// parses them — but only the CLI can reach the engines that read
+    /// them. On any other entry point the option names a whole
+    /// configuration and applies none of it; this is the message that
+    /// says so, in place of the silence.
+    ///
+    /// gh#604. Same shape and same default gate as
+    /// [`Self::unhonored_option_file_name`]: an explicitly-set *default*
+    /// asks for nothing and must keep working, so only a value that
+    /// differs is refused.
+    pub fn unhonored_convex_option(&self) -> Option<String> {
+        if self.convex_routing_available {
+            return None;
+        }
+        const CONVEX_ONLY: &[&str] = &[
+            "qp_presolve",
+            "qp_tau",
+            "qp_tau_max",
+            "qp_reg",
+            "qp_infeas_tol",
+            "qp_hsde",
+            "qp_equilibrate",
+            "qp_crossover",
+        ];
+        let name = CONVEX_ONLY.iter().find(|name| {
+            crate::unimplemented_options::set_to_a_non_default(
+                &self.options,
+                &self.reg_options,
+                name,
+            )
+        })?;
+        Some(format!(
+            "pounce: `{name}` tunes the convex LP/QP interior-point engine, but \
+             this entry point cannot route a model to it — the option would \
+             configure nothing. The `pounce` CLI reaches that engine on `.nl` \
+             input (`solver_selection=lp-ipm` / `qp-ipm` / `socp`, or `auto` on \
+             a model that classifies as one); from Python, `pounce.solve_qp` / \
+             `pounce.solve_cone` drive it directly and take the same knobs as \
+             typed arguments. On this path, `solver_selection=qp-active-set` \
+             (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
+             `sqp_qp_*` options. Tracking issue: \
+             https://github.com/jkitchin/pounce/issues/604"
+        ))
     }
 
     /// Warnings for caching hints pounce does not exploit. These never

@@ -163,6 +163,81 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_number_option("adaptive_mu_monotone_init_factor", "Determines the initial value of the barrier parameter when switching to the monotone mode.", 0.0, true, 0.8, "When the globalization strategy for the adaptive barrier algorithm switches to the monotone mode and fixed_mu_oracle is chosen as \"average_compl\", the barrier parameter is set to the current average complementarity times the value of \"adaptive_mu_monotone_init_factor\".")?;
     r.add_string_option("adaptive_mu_kkt_norm_type", "Norm used for the KKT error in the adaptive mu globalization strategies.", "2-norm-squared", &[("1-norm", "use the 1-norm (abs sum)"), ("2-norm-squared", "use the 2-norm squared (sum of squares)"), ("max-norm", "use the infinity norm (max)"), ("2-norm", "use 2-norm")], "When computing the KKT error for the globalization strategies, the norm to be used is specified with this option. Note, this option is also used in the QualityFunctionMuOracle.")?;
 
+    // ===== DefaultIterateInitializer::RegisterOptions (Algorithm/IpDefaultIterateInitializer.cpp) =====
+    //
+    // gh#604: these have read sites in
+    // `IpoptApplication::algorithm_builder_from_options` (the
+    // `builder.init.*` block) but were missing from the registry, so
+    // `set_numeric_value("bound_push", …)` raised `Unknown option` and
+    // the cold-start initializer was untunable from every frontend.
+    // The inverse of gh#551 (registered-but-unread).
+    //
+    // Defaults, types and ranges are upstream's, and they equal the
+    // hard-coded `InitOptions::default()` / `DefaultIterateInitializer::
+    // default()` values, so registering them changes no trajectory: the
+    // read sites use the `found` flag and only override when the caller
+    // set the key explicitly.
+    //
+    // `warm_start_init_point` is registered by this same upstream class
+    // but is left where it already sits (in the `OrigIpoptNLP` section,
+    // under "Warm Start") so registration order — and with it the
+    // `--print-options` ordering — does not shift for an option that was
+    // already reachable.
+    r.set_registering_category("Initialization");
+    r.add_lower_bounded_number_option("bound_push", "Desired minimum absolute distance from the initial point to bound.", 0.0, true, 1e-2, "Determines how much the initial point might have to be modified in order to be sufficiently inside the bounds (together with \"bound_frac\"). (This is kappa_1 in Section 3.6 of implementation paper.)")?;
+    r.add_bounded_number_option("bound_frac", "Desired minimum relative distance from the initial point to bound.", 0.0, true, 0.5, false, 1e-2, "Determines how much the initial point might have to be modified in order to be sufficiently inside the bounds (together with \"bound_push\"). (This is kappa_2 in Section 3.6 of implementation paper.)")?;
+    r.add_lower_bounded_number_option("slack_bound_push", "Desired minimum absolute distance from the initial slack to bound.", 0.0, true, 1e-2, "Determines how much the initial slack variables might have to be modified in order to be sufficiently inside the inequality bounds (together with \"slack_bound_frac\"). (This is kappa_1 in Section 3.6 of implementation paper.)")?;
+    r.add_bounded_number_option("slack_bound_frac", "Desired minimum relative distance from the initial slack to bound.", 0.0, true, 0.5, false, 1e-2, "Determines how much the initial slack variables might have to be modified in order to be sufficiently inside the inequality bounds (together with \"slack_bound_push\"). (This is kappa_2 in Section 3.6 of implementation paper.)")?;
+    r.add_lower_bounded_number_option("constr_mult_init_max", "Maximum allowed least-square guess of constraint multipliers.", 0.0, false, 1e3, "Determines how large the initial least-square guesses of the constraint multipliers are allowed to be (in max-norm). If the guess is larger than this value, it is discarded and all constraint multipliers are set to zero. This options is also used when initializing the restoration phase. By default, \"resto.constr_mult_init_max\" (the one used in RestoIterateInitializer) is set to zero.")?;
+    r.add_lower_bounded_number_option(
+        "bound_mult_init_val",
+        "Initial value for the bound multipliers.",
+        0.0,
+        true,
+        1.0,
+        "All dual variables corresponding to bound constraints are initialized to this value.",
+    )?;
+    r.add_string_option(
+        "bound_mult_init_method",
+        "Initialization method for bound multipliers",
+        "constant",
+        &[
+            (
+                "constant",
+                "set all bound multipliers to the value of bound_mult_init_val",
+            ),
+            (
+                "mu-based",
+                "initialize to mu_init/(x_i-x_L_i) (NOT IMPLEMENTED in pounce; refused, see gh#604)",
+            ),
+        ],
+        "This option defines how the iterates for the bound multipliers are initialized. If \"constant\" is chosen, then all bound multipliers are initialized to the value of \"bound_mult_init_val\". If \"mu-based\" is chosen, the each value is initialized to the the value of \"mu_init\" divided by the corresponding slack variable. This latter option might be useful if the starting point is close to the optimal solution. pounce implements \"constant\" only; \"mu-based\" is registered so an ipopt.opt written for Ipopt still parses, and is refused with a message rather than silently served as \"constant\" (gh#604).",
+    )?;
+    r.add_string_option(
+        "least_square_init_primal",
+        "Least square initialization of the primal variables",
+        "no",
+        &[
+            ("no", "take user-provided point"),
+            (
+                "yes",
+                "overwrite user-provided point with least-square estimates",
+            ),
+        ],
+        "If set to yes, Ipopt ignores the user provided point and solves a least square problem for the primal variables (x and s) to fit the linearized equality and inequality constraints. This might be useful if the user doesn't know anything about the starting point, or for solving an LP or QP. This option is enabled by the \"mehrotra_algorithm\" cascade.",
+    )?;
+    r.add_string_option(
+        "least_square_init_duals",
+        "Least square initialization of all dual variables",
+        "no",
+        &[
+            ("no", "use bound_mult_init_val and least-square equality constraint multipliers"),
+            ("yes", "overwrite user-provided point with least-square estimates"),
+        ],
+        "If set to yes, Ipopt tries to solve a least square problem for the primal and dual variables to fit the linearized equality and inequality constraints as well as the first-order optimality conditions. NOT IMPLEMENTED in pounce: registered so an ipopt.opt written for Ipopt still parses, and refused when set to \"yes\" rather than silently ignored (gh#604). The equality multipliers are always least-square initialized (subject to constr_mult_init_max), and the bound multipliers always take bound_mult_init_val — i.e. exactly the \"no\" behaviour.",
+    )?;
+    r.set_registering_category("");
+
     // ===== AlgorithmBuilder::RegisterOptions (Algorithm/IpAlgBuilder.cpp) =====
     r.set_registering_category("");
     r.set_registering_category("Linear Solver");
@@ -307,11 +382,119 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
             ("no", "Solve the extracted problem directly, without presolve."),
         ],
         "Only affects the convex LP/QP path (`solver_selection` routing to \
-         pounce-convex), which runs only in the pounce CLI on `.nl` input; it \
-         has no effect on a library (`IpoptApplication`) solve. When on, \
-         presolve removes empty / duplicate / redundant rows, fixes and \
+         pounce-convex), which runs only in the pounce CLI on `.nl` input; a \
+         library (`IpoptApplication`) solve cannot route there, and refuses a \
+         non-default value rather than accepting one it would ignore (gh#604). \
+         When on, presolve removes empty / duplicate / redundant rows, fixes and \
          substitutes structural columns, and may report infeasible / unbounded \
          without invoking the solver.",
+    )?;
+
+    // The rest of `pounce_convex::QpOptions`, in the same category and on the
+    // same contract as `qp_presolve` above: read by the CLI's convex dispatch,
+    // refused by an entry point that cannot reach it.
+    //
+    // These lived in `pounce-cli/src/main.rs` until gh#604, registered onto
+    // this same registry at startup. That put them out of reach of every
+    // library frontend — `set_numeric_value("qp_tau", …)` from Python or the C
+    // interface raised `Unknown option "qp_tau"`, naming an option that exists
+    // — and it made adding any `qp_*` name here abort the CLI binary at
+    // startup with OPTION_ALREADY_REGISTERED. gh#360 moved the `sqp_qp_*`
+    // block out of the CLI for the same two reasons; this is the other half.
+    r.add_bounded_number_option(
+        "qp_tau",
+        "Convex IPM fraction-to-boundary parameter τ ∈ (0,1).",
+        0.0,
+        true,
+        1.0,
+        true,
+        0.95,
+        "Convex LP/QP interior-point only. Caps each Newton step at a fraction \
+         τ of the distance to the cone boundary; nearer 1 is more aggressive. \
+         The floor of the adaptive rule capped by qp_tau_max, and the flat \
+         value on the predictor step and on second-order / PSD cone blocks. \
+         Default 0.95.",
+    )?;
+    r.add_bounded_number_option(
+        "qp_tau_max",
+        "Convex IPM adaptive fraction-to-boundary ceiling τ_max ∈ (0,1).",
+        0.0,
+        true,
+        1.0,
+        true,
+        1.0 - 1e-12,
+        "Convex LP/QP interior-point only. As the solve converges, the \
+         corrector's τ on nonnegative-orthant blocks follows the Mehrotra tail \
+         τ = clamp(1 − μ, qp_tau, qp_tau_max), so a near-optimal iterate can \
+         take a near-full Newton step — worth 35–60% of the iterations when \
+         warm starting a sequence of nearby QPs. Set equal to qp_tau to pin τ \
+         flat (the most conservative setting). Default 1 − 1e-12.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "qp_reg",
+        "Convex IPM static KKT regularization δ ≥ 0.",
+        0.0,
+        false,
+        1e-10,
+        "Convex LP/QP interior-point only. Added on the (block) diagonal to \
+         keep the reduced KKT quasi-definite for a stable LDLᵀ inertia. Too \
+         large freezes the primal residual on badly-scaled LPs; the default \
+         1e-10 is centered in the band that converges the LP/QP suites.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "qp_infeas_tol",
+        "Convex IPM infeasibility-certificate value tolerance > 0.",
+        0.0,
+        true,
+        1e-7,
+        "Convex LP/QP interior-point only. Relative tolerance on the value and \
+         cone-membership parts of an infeasibility / unboundedness \
+         certificate. The certificate's defining-equation residual is held to a \
+         far tighter internal tolerance; this only governs when a status is \
+         backed by a verified proof. Default 1e-7.",
+    )?;
+    r.add_string_option(
+        "qp_hsde",
+        "Use the homogeneous self-dual embedding for the convex IPM.",
+        "yes",
+        &[
+            ("yes", "Self-dual embedding: self-starting, native certificates, robust on ill-conditioned data."),
+            ("no", "Infeasible-start primal–dual method (the warm-start / build-once substrate)."),
+        ],
+        "Convex LP/QP interior-point only. HSDE (default) self-starts and \
+         produces infeasibility / unboundedness certificates natively; it is \
+         also the substrate for non-symmetric cones. Default yes.",
+    )?;
+    r.add_string_option(
+        "qp_equilibrate",
+        "Ruiz-equilibrate the data before the direct convex IPM solve.",
+        "yes",
+        &[
+            (
+                "yes",
+                "Apply Ruiz row/column scaling before solving (direct, non-HSDE path).",
+            ),
+            ("no", "Solve the raw data without equilibration."),
+        ],
+        "Convex LP/QP interior-point only, and only when `qp_hsde=no` (the \
+         direct infeasible-start path): a conditioning aid for the raw KKT \
+         factorization. HSDE conditions internally and ignores this. Default \
+         yes.",
+    )?;
+    r.add_string_option(
+        "qp_crossover",
+        "Run LP crossover to purify the IPM iterate to an exact vertex.",
+        "no",
+        &[
+            ("yes", "After the IPM, pivot the interior iterate to an exact optimal vertex (active-set purification)."),
+            ("no", "Return the interior-point iterate directly (default)."),
+        ],
+        "Convex LP path only (pure LP, P=0); a no-op for genuine QPs. Correct \
+         (never-regress) but currently slow on the degenerate / large NETLIB \
+         LPs it targets and does not yet reach an exact `Optimal` vertex on the \
+         GEN family (issue #133), so it is off by default and offered as an \
+         opt-in for small, well-behaved LPs that want exact-vertex refinement. \
+         Default no.",
     )?;
 
     // SQP outer-loop options. Inactive when `algorithm =

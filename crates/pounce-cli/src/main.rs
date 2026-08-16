@@ -150,128 +150,24 @@ pub fn main() -> ExitCode {
 
     let mut app = IpoptApplication::new();
 
-    // ---- Convex LP/QP interior-point knobs (pounce-convex `QpOptions`) ----
-    // These only affect the `solver_selection` paths that route to
-    // pounce-convex (`lp-ipm` / `qp-ipm` / `auto` on an LP / convex QP, and
-    // the SOCP IPM). Each forwards only when the user *explicitly* sets it
-    // (see the convex dispatch below); otherwise the driver keeps its own
-    // tuned default. The standard `tol` and `max_iter` options feed the
-    // convex solve too — these `qp_*` knobs cover the rest of `QpOptions`.
-    let convex_knobs: Result<(), pounce_common::SolverException> = (|| {
-        let r = app.registered_options();
-        // τ ∈ (0,1): fraction-to-boundary step damping (Mehrotra σ is adaptive).
-        r.add_bounded_number_option(
-            "qp_tau",
-            "Convex IPM fraction-to-boundary parameter τ ∈ (0,1).",
-            0.0,
-            true,
-            1.0,
-            true,
-            0.95,
-            "Convex LP/QP interior-point only. Caps each Newton step at a \
-             fraction τ of the distance to the cone boundary; nearer 1 is more \
-             aggressive. The floor of the adaptive rule capped by qp_tau_max, \
-             and the flat value on the predictor step and on second-order / \
-             PSD cone blocks. Default 0.95.",
-        )?;
-        // Ceiling of the adaptive (Mehrotra-tail) τ on orthant blocks.
-        r.add_bounded_number_option(
-            "qp_tau_max",
-            "Convex IPM adaptive fraction-to-boundary ceiling τ_max ∈ (0,1).",
-            0.0,
-            true,
-            1.0,
-            true,
-            1.0 - 1e-12,
-            "Convex LP/QP interior-point only. As the solve converges, the \
-             corrector's τ on nonnegative-orthant blocks follows the Mehrotra \
-             tail τ = clamp(1 − μ, qp_tau, qp_tau_max), so a near-optimal \
-             iterate can take a near-full Newton step — worth 35–60% of the \
-             iterations when warm starting a sequence of nearby QPs. Set equal \
-             to qp_tau to pin τ flat (the most conservative setting). Default \
-             1 − 1e-12.",
-        )?;
-        // Static KKT regularization δ ≥ 0.
-        r.add_lower_bounded_number_option(
-            "qp_reg",
-            "Convex IPM static KKT regularization δ ≥ 0.",
-            0.0,
-            false,
-            1e-10,
-            "Convex LP/QP interior-point only. Added on the (block) diagonal to \
-             keep the reduced KKT quasi-definite for a stable LDLᵀ inertia. Too \
-             large freezes the primal residual on badly-scaled LPs; the default \
-             1e-10 is centered in the band that converges the LP/QP suites.",
-        )?;
-        // Certificate value / cone-membership tolerance > 0.
-        r.add_lower_bounded_number_option(
-            "qp_infeas_tol",
-            "Convex IPM infeasibility-certificate value tolerance > 0.",
-            0.0,
-            true,
-            1e-7,
-            "Convex LP/QP interior-point only. Relative tolerance on the value \
-             and cone-membership parts of an infeasibility / unboundedness \
-             certificate. The certificate's defining-equation residual is held \
-             to a far tighter internal tolerance; this only governs when a \
-             status is backed by a verified proof. Default 1e-7.",
-        )?;
-        r.add_string_option(
-            "qp_hsde",
-            "Use the homogeneous self-dual embedding for the convex IPM.",
-            "yes",
-            &[
-                ("yes", "Self-dual embedding: self-starting, native certificates, robust on ill-conditioned data."),
-                ("no", "Infeasible-start primal–dual method (the warm-start / build-once substrate)."),
-            ],
-            "Convex LP/QP interior-point only. HSDE (default) self-starts and \
-             produces infeasibility / unboundedness certificates natively; it \
-             is also the substrate for non-symmetric cones. Default yes.",
-        )?;
-        r.add_string_option(
-            "qp_equilibrate",
-            "Ruiz-equilibrate the data before the direct convex IPM solve.",
-            "yes",
-            &[
-                (
-                    "yes",
-                    "Apply Ruiz row/column scaling before solving (direct, non-HSDE path).",
-                ),
-                ("no", "Solve the raw data without equilibration."),
-            ],
-            "Convex LP/QP interior-point only, and only when `qp_hsde=no` (the \
-             direct infeasible-start path): a conditioning aid for the raw KKT \
-             factorization. HSDE conditions internally and ignores this. \
-             Default yes.",
-        )?;
-        r.add_string_option(
-            "qp_crossover",
-            "Run LP crossover to purify the IPM iterate to an exact vertex.",
-            "no",
-            &[
-                ("yes", "After the IPM, pivot the interior iterate to an exact optimal vertex (active-set purification)."),
-                ("no", "Return the interior-point iterate directly (default)."),
-            ],
-            "Convex LP path only (pure LP, P=0); a no-op for genuine QPs. \
-             Correct (never-regress) but currently slow on the degenerate / \
-             large NETLIB LPs it targets and does not yet reach an exact \
-             `Optimal` vertex on the GEN family (issue #133), so it is off by \
-             default and offered as an opt-in for small, well-behaved LPs that \
-             want exact-vertex refinement. Default no.",
-        )?;
-        Ok(())
-    })();
-    if let Err(e) = convex_knobs {
-        eprintln!("pounce: failed to register convex LP/QP options: {e}");
-        return ExitCode::from(2);
-    }
+    // This binary is the one entry point that can route a model to the
+    // convex LP/QP/SOCP engines (`solver_selection` + the structure
+    // extraction that classifies the `.nl`), so the `qp_*` knobs those
+    // engines read configure something here. Declaring that is what keeps
+    // `IpoptApplication`'s guard from refusing them on the NLP fallback
+    // path — a convex attempt that hands off to `optimize_tnlp` used them
+    // for real (gh#604).
+    app.set_convex_routing_available(true);
 
-    // NOTE: the active-set SQP QP-subproblem knobs (`sqp_qp_feas_tol`,
-    // `sqp_qp_opt_tol`, `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`,
-    // `sqp_qp_anti_cycling`) used to be registered here. They now live in the
-    // core registry (`pounce_algorithm::upstream_options`) so the library and
-    // Python paths see them too — registering them here as well would raise
-    // OPTION_ALREADY_REGISTERED and abort the binary at startup (gh #360).
+    // NOTE: the convex LP/QP knobs (`qp_tau`, `qp_tau_max`, `qp_reg`,
+    // `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate`, `qp_crossover`) and the
+    // active-set SQP QP-subproblem knobs (`sqp_qp_feas_tol`, `sqp_qp_opt_tol`,
+    // `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`, `sqp_qp_anti_cycling`) used to
+    // be registered here. They now live in the core registry
+    // (`pounce_algorithm::upstream_options`) so the library and Python paths
+    // see them too — registering them here as well would raise
+    // OPTION_ALREADY_REGISTERED and abort the binary at startup (gh #360 for
+    // the SQP block, gh #604 for the convex one).
 
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
@@ -439,7 +335,10 @@ pub fn main() -> ExitCode {
     // not implement, and the same reason for checking here: a model that
     // routes to `pounce-convex` never reaches `optimize_tnlp`, where the
     // library-side copy of this guard lives.
-    if let Some(msg) = app.unimplemented_option_refusal() {
+    if let Some(msg) = app
+        .unimplemented_option_refusal()
+        .or_else(|| app.unimplemented_option_value_refusal())
+    {
         eprintln!("{msg}");
         return ExitCode::from(2);
     }

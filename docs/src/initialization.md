@@ -55,13 +55,18 @@ The default interior-point path ports Ipopt's iterate initializer
    behave like one.
 2. **Slacks** are set to `s = d(x)` and pushed into the slack bounds
    the same way.
-3. **Duals** get fixed defaults: constraint multipliers `y = 0` (or a
-   least-square estimate, see `bound_mult_init_method` below) and
-   bound multipliers `z = v = bound_mult_init_val = 1.0`.
+3. **Duals** get fixed defaults: constraint multipliers start at
+   `y = 0` and are then replaced by a least-square estimate, unless
+   that estimate exceeds `constr_mult_init_max` (in which case it is
+   discarded and `y` stays at zero); bound multipliers are
+   `z = v = bound_mult_init_val = 1.0`.
 4. **The barrier parameter** starts at `mu_init = 0.1` (monotone
    `mu_strategy`, the default) regardless of how good your point is.
 
-The knobs, all Ipopt-compatible:
+The knobs, all Ipopt-compatible, and all settable through every
+frontend's option path (`Problem.solve(options={...})`, `pounce
+model.nl bound_push=0.1`, an `ipopt.opt` line, `IpoptApplication::
+options_mut`):
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -69,7 +74,7 @@ The knobs, all Ipopt-compatible:
 | `bound_frac` | `1e-2` | Cap on the push as a fraction of the bound interval. |
 | `slack_bound_push` / `slack_bound_frac` | `1e-2` | Same, for inequality slacks. |
 | `bound_mult_init_val` | `1.0` | Initial bound-multiplier value. |
-| `bound_mult_init_method` | `constant` | `constant` / `mu-based` / `least-square`. |
+| `bound_mult_init_method` | `constant` | `constant` is the only implemented mode; upstream's `mu-based` parses and is then refused rather than silently served as `constant`. |
 | `constr_mult_init_max` | `1e3` | Cap on the least-square constraint-multiplier estimate; `0` keeps `y = 0`. |
 | `least_square_init_primal` | `no` | Replace the starting `x` with the min-norm solution of the linearized constraints before the interior push — but only if that actually reduces the true nonlinear violation (see [Safeguarding the least-square start](#safeguarding-the-least-square-start)). |
 | `mu_init` | `0.1` | Initial barrier parameter (monotone strategy). |
@@ -110,6 +115,13 @@ CLI reports as the model's constraint violation — the initializer:
    model predicts `θ → 0` at `α = 1`, so this is exactly "the actual
    feasibility reduction is at least `η` times the predicted one";
 5. keeps your original `x` if no trial qualifies.
+
+`least_square_init_max_trials` and `least_square_init_accept_ratio` are
+fields on `DefaultIterateInitializer`, not registered options: unlike
+every knob in the table above they are not settable from a frontend,
+and setting them by name is rejected with `Unknown option`. They are
+named here because the safeguard's behaviour is defined in terms of
+them, not because you can tune them.
 
 Each trial costs one constraint evaluation; none costs a Jacobian or a
 KKT solve, because only the length of the step changes. A point that is
