@@ -104,12 +104,81 @@ users.
 
 ### E. Drop-in `libipopt` replacement
 
-Verdict: **rejected, and it should stay rejected.** CasADi's Ipopt plugin
-uses the Ipopt **C++** API (`IpoptApplication`, `SmartPtr`, `TNLP`
-subclassing, `RegOptions()`), not the C API POUNCE implements. Matching
-that means matching a C++ vtable/ABI from Rust. POUNCE's Ipopt-C-API
-parity buys us cyipopt, GAMS, and our own plugin — it does not buy us
-CasADi.
+Verdict: **rejected**, and the reason is worth stating precisely, because
+"our C API is Ipopt-compatible" invites the question.
+
+Nothing is *missing from the C API* for this job — the entire plugin in
+§3 runs on it, and the parity table is what that buys. What a drop-in
+would need is not more C API, it is a **C++ ABI**, which is a different
+kind of artifact and not something a C API grows into.
+
+Measured on the installed wheel:
+
+```
+$ objdump -p libcasadi_nlpsol_ipopt.so | grep -E 'NEEDED|RPATH'
+  RPATH   $ORIGIN:$ORIGIN/.
+  NEEDED  libcasadi.so.3.7
+  NEEDED  libipopt.so.3          <- bundled *inside* the casadi wheel (3.14.11)
+
+$ nm -D --undefined-only -C libcasadi_nlpsol_ipopt.so | grep Ipopt
+  U Ipopt::IpoptApplication::IpoptApplication(bool, bool)
+  U Ipopt::StreamJournal::StreamJournal(std::string const&, Ipopt::EJournalLevel)
+  U Ipopt::StreamJournal::SetOutputStream(std::ostream*)
+  U Ipopt::Journal::~Journal()
+  U Ipopt::TNLP::get_curr_iterate(Ipopt::IpoptData const*, …) const
+  U vtable for Ipopt::StreamJournal
+  U vtable for Ipopt::RegisteredOption
+  U vtable for Ipopt::RegisteredOptions
+```
+
+Eight symbols — but they are constructors, a non-virtual member with a
+real implementation, and three **vtables**. Satisfying them means
+reproducing Ipopt's object model: `ReferencedObject` refcounting and
+`SmartPtr` semantics, the `TNLP` abstract base that the plugin
+*subclasses* (so we own the callback side of its vtable too),
+`RegisteredOptions` with its whole option registry, `OptionsList`,
+`Journalist`, the opaque `IpoptData` / `IpoptCalculatedQuantities`
+handed back to TNLP methods, `SolveStatistics`, and RTTI for the
+`dynamic_cast`s. The library those come from exports 4770 symbols. Rust
+cannot express C++ vtables, RTTI or mangling, so this would be a C++
+layer re-implementing Ipopt's public classes — far larger than the
+~420-line plugin, pinned to an Ipopt *ABI* version (3.14 differs from
+3.13, and the soname moves), and carrying the same libstdc++ dual-ABI
+trap, since `std::string` appears in the signatures above.
+
+And then it would have to *displace* the `libipopt.so.3` sitting next to
+`libcasadi_nlpsol_ipopt.so` under `$ORIGIN`, i.e. overwrite a file inside
+someone else's wheel. That is hostile, it is not per-project, and it
+destroys the property this integration is validated by: both solvers
+loadable in one process, so `nlpsol('ipopt')` and `nlpsol('pounce')` can
+be run against the same model object.
+
+**Would it make a `pounce-casadi` wheel easier?** No — it makes it
+harder. It trades "match CasADi's internal C++ ABI" for "match Ipopt's
+C++ ABI *and* substitute a bundled shared library", and gives up
+side-by-side operation. The plugin's coupling is the cheaper one.
+
+### What a wheel actually takes
+
+Worth writing down, since it is the open decision and it is smaller than
+it looks. The plugin's only version-sensitive dependency is CasADi's
+internal C++ headers, and CasADi minor releases are infrequent (3.6 in
+2023, 3.7 in 2025). So:
+
+* one plugin build per (CasADi minor × platform), each a `pip install
+  casadi==X.Y.*` plus a `git clone --branch X.Y.Z` for headers — both
+  scriptable, and already what `make fetch-src` does;
+* ship the resulting `libcasadi_nlpsol_pounce.so` files plus
+  `libpounce_cinterface.so` in one wheel, and select at import time on
+  `casadi.__version__`;
+* build inside manylinux with `-D_GLIBCXX_USE_CXX11_ABI=0` to match the
+  CasADi wheels (§3), plus macOS x86_64/arm64 and Windows;
+* installation is then a file copy into CasADi's package directory —
+  already implemented as `make install`, no `sudo`, no env var.
+
+The recurring cost is one matrix entry per CasADi minor version, which
+is also exactly the maintenance that goes away if the interface is
+upstreamed (route D).
 
 ---
 
