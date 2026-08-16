@@ -113,6 +113,10 @@ pub(crate) enum Event {
     AddRowLower(usize),
     /// Inactive row `i` reaches its upper bound.
     AddRowUpper(usize),
+    /// Inactive variable `j` reaches its lower bound.
+    AddBoundLower(usize),
+    /// Inactive variable `j` reaches its upper bound.
+    AddBoundUpper(usize),
     /// Active row `i`'s multiplier reaches zero and must leave.
     DropRow(usize),
     /// Active bound on variable `j` has its multiplier reach zero.
@@ -321,7 +325,14 @@ const PATH_FEAS_TOL_REL: Number = 1e-6;
 /// This is the invariant the module header used to assert held by construction;
 /// see the report in [`ParametricActiveSetSolver::trace_path`] for why it does
 /// not. Row bounds interpolate `bl0 -> qp.bl` and `bu0 -> qp.bu` in `t`; variable
-/// bounds do not move along this path, so they are not checked here.
+/// bounds do not move along this path, so they are checked against `qp` directly.
+///
+/// The box used to be skipped here entirely, on the reasoning that it does not
+/// move. Not moving is not the same as not being violated: until gh #602 there
+/// was no bound-adding ratio test, so `x(t)` could walk straight out of a
+/// stationary box and this report — the only instrument pointed at path
+/// feasibility — was blind to it by construction. Variables are reported with
+/// index `n_rows + j` so one return type covers both.
 fn worst_path_violation(
     qp: &QpProblem<'_>,
     x: &[Number],
@@ -338,6 +349,12 @@ fn worst_path_violation(
         let v = (blt - ax[i]).max(ax[i] - but);
         if v > PATH_FEAS_TOL_REL * (1.0 + ax[i].abs()) && worst.is_none_or(|(_, prev)| v > prev) {
             worst = Some((i, v));
+        }
+    }
+    for j in 0..qp.n {
+        let v = (qp.xl[j] - x[j]).max(x[j] - qp.xu[j]);
+        if v > PATH_FEAS_TOL_REL * (1.0 + x[j].abs()) && worst.is_none_or(|(_, prev)| v > prev) {
+            worst = Some((m + j, v));
         }
     }
     worst
@@ -608,6 +625,11 @@ impl ParametricActiveSetSolver {
         // dependency that justified the prune no longer necessarily holds — this
         // suppresses the cycle without permanently blinding the ratio test.
         let mut tabu_cons = vec![false; m];
+        // The same tabu for bounds, and it only became necessary with the
+        // bound-adding ratio test above: before that a bound the rank repair
+        // pruned could never come back, so the prune -> re-add cycle `tabu_cons`
+        // exists to break had no bound analogue. It does now.
+        let mut tabu_bounds = vec![false; n];
         // Iterations actually executed. Distinct from `n_changes`: a rank repair
         // and a degenerate zero-length advance both consume a step (and a
         // factorization) without necessarily moving the working set or `t`.
@@ -745,6 +767,7 @@ impl ParametricActiveSetSolver {
                         if !keep_b[j] {
                             working.bounds[j] = BoundStatus::Inactive;
                             lambda_x[j] = 0.0;
+                            tabu_bounds[j] = true;
                             n_changes += 1;
                         }
                     }
@@ -805,6 +828,35 @@ impl ParametricActiveSetSolver {
                 }
             }
 
+            // ---- Ratio test 1b (primal): when does an inactive *bound* bind? ----
+            //
+            // The same test as the rows above, on the identity rows of the box.
+            // It is simpler because variable bounds do not move along this path:
+            // the bound's own rate is zero, so the crossing is governed by `dx`
+            // alone.
+            //
+            // This did not exist before gh #602. Without it the path could drop
+            // a bound but never add one, so `x(t)` crossed inactive bounds with
+            // nothing to cap the step — silently, since `worst_path_violation`
+            // skipped the box too. That is a defect on the *cold* arm as much as
+            // the warm one: nothing about the box relaxation start prevents the
+            // direction from leaving the box on the way to `t = 1`.
+            //
+            // Same absorbing-violation logic as the rows: the ratio test can only
+            // *prevent* a crossing, never repair one, so a bound crossed once
+            // stays crossed for the rest of the path.
+            for j in 0..n {
+                if working.bounds[j].is_active() || tabu_bounds[j] {
+                    continue;
+                }
+                if qp.xu[j] < NLP_UPPER_BOUND_INF && dx[j] > 0.0 {
+                    ratio.admit((qp.xu[j] - x[j]) / dx[j], Event::AddBoundUpper(j));
+                }
+                if qp.xl[j] > NLP_LOWER_BOUND_INF && dx[j] < 0.0 {
+                    ratio.admit((x[j] - qp.xl[j]) / -dx[j], Event::AddBoundLower(j));
+                }
+            }
+
             // ---- Ratio test 2 (dual): when does an active multiplier vanish? ----
             //
             // An inequality's multiplier must keep its sign; reaching zero means
@@ -847,6 +899,7 @@ impl ParametricActiveSetSolver {
                 // Real progress along the path: the rank-repair tabu was scoped
                 // to the parameter value it was raised at, so release it.
                 tabu_cons.iter_mut().for_each(|f| *f = false);
+                tabu_bounds.iter_mut().for_each(|f| *f = false);
                 stalled = 0;
             } else {
                 stalled += 1;
@@ -906,7 +959,14 @@ impl ParametricActiveSetSolver {
             // a *fallback that exists* when its prediction turns out unusable —
             // which is what `pounce-convex`'s seeded last-resort retry restores.
             if trace && let Some((i, v)) = worst_path_violation(qp, &x, &bl0, &bu0, t, m) {
-                eprintln!("[hom] path infeasible at t={t:.9e}: row {i} by {v:.3e}");
+                // Indices at or past `m` are variables, not rows — decode them
+                // here or a box violation prints as a row that does not exist.
+                let what = if i < m {
+                    format!("row {i}")
+                } else {
+                    format!("bound on x[{}]", i - m)
+                };
+                eprintln!("[hom] path infeasible at t={t:.9e}: {what} by {v:.3e}");
             }
 
             if ratio.winners.is_empty() {
@@ -921,6 +981,12 @@ impl ParametricActiveSetSolver {
                     }
                     Event::AddRowLower(i) => {
                         working.constraints[i] = ConsStatus::AtLower;
+                    }
+                    Event::AddBoundUpper(j) => {
+                        working.bounds[j] = BoundStatus::AtUpper;
+                    }
+                    Event::AddBoundLower(j) => {
+                        working.bounds[j] = BoundStatus::AtLower;
                     }
                     Event::DropRow(i) => {
                         working.constraints[i] = ConsStatus::Inactive;

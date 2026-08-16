@@ -20,7 +20,14 @@ from ._pounce import (
 )
 # Installs the Problem.solve(warm_start=...) wrapper as an import side
 # effect — keep this import directly after ._pounce.
-from ._warm_start import WarmStart
+from ._warm_start import (
+    WarmStart,
+    TransferContext,
+    ProblemSignature,
+    WarmStartCompatibilityError,
+    WarmStartCompatibilityWarning,
+    WarmStartLegacyWarning,
+)
 from ._minimize import minimize, OptimizeResult
 from ._nlp_batch import solve_nlp_batch
 from ._curve_fit import (
@@ -93,6 +100,11 @@ __all__ = [
     "preflight",
     "PreflightReport",
     "WarmStart",
+    "TransferContext",
+    "ProblemSignature",
+    "WarmStartCompatibilityError",
+    "WarmStartCompatibilityWarning",
+    "WarmStartLegacyWarning",
     "generate_starts",
     "project_to_feasible",
     "ProjectionReport",

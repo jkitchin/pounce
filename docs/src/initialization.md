@@ -155,6 +155,14 @@ below, and forwards the SQP working set when the state was captured
 from that path. The rest of this section is what it does under the
 hood (and the only route from the CLI or an options file).
 
+The enabling options are **scoped to the call**: they are installed for
+that one solve and taken back afterwards, including when the solve
+raises. A warm solve therefore never changes what the next ordinary
+`solve` on the same `Problem` does. (Before pounce#607 it did, and the
+cost was invisible: on HS071 an ordinary cold solve went from 17
+iterations to 24 on a `Problem` that had served one warm solve, with the
+same objective to ten digits.)
+
 Passing a previous solution as `x0` is **not** a warm start by
 itself. The IPM warm start is a package of three things, and skipping
 any one of them silently degrades to (roughly) a cold solve:
@@ -274,6 +282,114 @@ nothing read, and change nothing at all. Since #606 it fails with a
 message instead. `warm_start_init_point=yes` is the supported route
 and carries the primal point and every multiplier block the TNLP
 surface has.
+
+### Which model does this warm start belong to?
+
+A warm start is a point in *one* model's variable space, with
+multipliers in that model's constraint space. Replay it against a model
+whose variables have been reordered, whose bounds have moved, or which
+is simply a different model of the same shape, and the arrays are still
+the right *length* — so nothing objects. What comes back is a wrong
+answer, or the right answer down a much longer trajectory.
+
+Pass `problem=` when you capture, and the object records a
+**signature** of the model as well: dimensions, the bound signature, the
+declared sparsity, the scaling convention, the algorithm/backend, and
+the model-defining options.
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob)
+ws.save("state.npz")
+
+# ... later, possibly in another process
+ws = pounce.WarmStart.load("state.npz")
+x2, info2 = prob.solve(warm_start=ws)     # checked before the solver runs
+```
+
+A mismatch is refused *before the solver is entered*, with a report
+naming every facet that moved:
+
+```text
+warm start is not compatible with this problem (1 mismatch,
+exact-structure replay, schema v2):
+  - bounds: captured '51e5c8cd33c97b92', target '42ae305673e91939'
+resolve it by one of:
+  - re-capture against this problem: WarmStart.from_info(x, info, problem=prob)
+  - transfer it explicitly: ws.transfer(prob, mapper) or, with stable IDs
+    on both sides, ws.reindex(prob)
+  - assert it transfers as-is: ws.migrate(prob)
+  - downgrade the check: compat='warn' or compat='unsafe'
+```
+
+`compat` picks how hard that is enforced — `"strict"` (the default)
+raises, `"warn"` emits the same report as a warning and proceeds,
+`"unsafe"` skips the comparison. Set it on the object, on `load()`, or
+per call: `prob.solve(warm_start=ws, compat="warn")`.
+`ws.describe_compatibility(prob)` returns the report as a string without
+raising, which is the dry run for a replay you are unsure of.
+
+One structural change a fingerprint cannot see is a **reordering**:
+permuting a model with a uniform box and a dense jacobian leaves every
+digest bit-identical. Ordering is knowledge only you have, so name it:
+
+```python
+ws = pounce.WarmStart.from_info(x, info, problem=prob,
+                                var_ids=names, con_ids=con_names)
+...
+prob2.solve(warm_start=ws, var_ids=names_in_prob2_order)   # refused
+```
+
+### Transferring a warm start: horizon shifts and reindexing
+
+When the model *has* changed and you know how, say so. `transfer()`
+takes a mapper and produces a **mapped** replay — labelled as such, and
+still refused on any problem other than the one it was mapped to:
+
+```python
+def shift(ctx):                       # ctx: source, target, problem
+    m = ctx.index_map("var")          # target-indexed source positions, -1 = new
+    return {"x": ..., "lagrange": ..., "zl": ..., "zu": ...}
+
+moved = ws.transfer(next_prob, shift, var_ids=next_ids, con_ids=next_con_ids)
+```
+
+With stable IDs on both sides, `reindex` writes that mapper for you —
+entries the target shares with the source move to their new positions,
+entries only the target has are left *unseeded* (`NaN`, which the warm
+initializer reads as "you decide") rather than fabricated:
+
+```python
+moved = ws.reindex(next_prob, var_ids=next_ids, con_ids=next_con_ids)
+x, info = next_prob.solve(warm_start=moved)
+```
+
+That covers both cases: a reordering, where the ID sets are equal, and a
+receding horizon, where they overlap. Note what it does *not* buy you —
+a transferred interior-point start is about validity, not speed. On a
+slew-limited tracking model the mapped point costs 12 iterations against
+7 for a cold solve; on a longer sinusoidal track the gap widens with the
+horizon (12 vs 9 at horizon 5, 30 vs 10 at horizon 40). That is the same
+barrier/active-set limit described just below, and the reason the SQP
+path exists.
+
+### Artifacts written before pounce#607
+
+Archives from earlier releases carry no signature. They are
+*unverifiable*, not incompatible, so they still load and still replay;
+what you get is one `WarmStartLegacyWarning` and a dimension check
+(the only facet their own arrays witness). Two ways to clear it:
+
+```python
+ws = pounce.WarmStart.load("old.npz")      # warns on replay
+ws = ws.migrate(prob)                      # re-sign it against this problem
+ws.save("old.npz")                         # ... and it is a v2 artifact now
+```
+
+`migrate` is an **assertion**, not a conversion: it re-signs the arrays
+without touching them, so use it only when they really do belong to this
+problem. When they need rearranging, that is `reindex` / `transfer`. An
+unsigned warm start held only in memory — `from_info(x, info)` with no
+`problem=` — behaves exactly as it always has, and says nothing.
 
 Even a well-executed IPM warm start has a structural limit: the
 barrier pushes iterates off the bounds, so the active-set information

@@ -61,9 +61,27 @@ pub trait QpSolver {
     ) -> Result<QpSolution, QpError>;
 
     /// Parametric solve: trace the homotopy from `(qp_prev,
-    /// sol_prev)` to `qp_new`. Falls back to
-    /// [`solve`](Self::solve) when the parametric path detects a
-    /// structural change that requires a fresh refactor.
+    /// sol_prev)` to `qp_new`.
+    ///
+    /// The path interpolates `g` and the row bounds, and is traced when the
+    /// two problems have the same shape and a bit-identical `H`. A pair
+    /// that fails that — or a previous solve that did not reach
+    /// [`QpStatus::Optimal`], or a path the tracer cannot complete — falls
+    /// back to [`solve_with_working_set`](Self::solve_with_working_set) on
+    /// `sol_prev`'s working set, and to a cold [`solve`](Self::solve) when
+    /// that working set is unusable too. So handing over a previous solve
+    /// that turns out ineligible costs nothing beyond the cold solve the
+    /// caller would have done anyway.
+    ///
+    /// **`A` and `xl`/`xu` are not interpolated and not guarded on.** A pair
+    /// differing in either is still traced, and the path then extrapolates
+    /// about a point that is not on the previous problem's solution
+    /// manifold. The result stays correct — the path is a predictor and the
+    /// corrector re-solves — but the active-set prediction degrades, and how
+    /// much is not predictable from the size of the change. Callers wanting
+    /// the path to model what it is given should keep `A` and the variable
+    /// bounds fixed and vary `g` and the row bounds, which is the parametric
+    /// family this entry point is for. See gh #602.
     fn solve_parametric(
         &mut self,
         qp_prev: &QpProblem,
@@ -410,6 +428,45 @@ impl ParametricActiveSetSolver {
         }
 
         point_is_feasible(qp, &x_cur, opts.feas_tol).then_some((x_cur, w_cur))
+    }
+
+    /// How wrong the caller's working set turns out to be, measured on `qp`
+    /// itself rather than predicted from it.
+    ///
+    /// Pins the hinted active rows and counts how many *other* rows and bounds
+    /// the resulting point violates. That count is the cheapest honest answer
+    /// available to "is this active set a good guess for this problem": it is a
+    /// property of the hint applied to the target, so it needs no model of what
+    /// changed between the two problems and no threshold on problem data — the
+    /// approach gh #434 refuted when `n_eq / n` failed to discriminate.
+    ///
+    /// Costs one pinned-KKT factorization, which
+    /// [`Self::solve_with_working_set`] already pays, so a caller that goes on
+    /// to take the working-set route pays nothing extra for having asked.
+    ///
+    /// `None` when the pin does not take at all — an active row itself
+    /// violated, or a factorization failure. That is a hint too broken to
+    /// measure, which callers should read the same way as a large count.
+    ///
+    /// **Test-only, deliberately.** This measures cleanly and cheaply; what it
+    /// does not do is answer the question the solver actually has. See
+    /// `tests::hint_signal` for the sweep that declined it, and
+    /// `dev-notes/issue-602-parametric-eligibility.md` for why. It stays in the
+    /// tree because the next person to reach for this idea should find the
+    /// instrument and the negative result, not just the idea.
+    #[cfg(test)]
+    pub(crate) fn hint_pin_quality(
+        &mut self,
+        qp: &QpProblem,
+        working: &WorkingSet,
+        opts: &QpOptions,
+    ) -> Option<HintPinQuality> {
+        let (x, w) = self.pin_working_set(qp, working, opts).ok()?;
+        let (cons, bounds) = violated_inactive(qp, &x, &w, opts.feas_tol)?;
+        Some(HintPinQuality {
+            active: w.active_count(),
+            violated: cons.len() + bounds.len(),
+        })
     }
 
     /// Primal active-set path for box-constrained QPs
@@ -3781,19 +3838,133 @@ impl ParametricActiveSetSolver {
         // same `H`. `H` is not interpolated along the path (only `g` and the row
         // bounds are), so a changed Hessian would make the traced path solve a
         // different problem than the one requested. Rather than silently
-        // mispredict, fall back to a cold solve — correct, just not warm.
+        // mispredict, fall back (see below) — correct, just not warm.
+        //
+        // `A`, `xl`/`xu` and `hessian_inertia` are **deliberately not** guarded
+        // on, though the path does not model them either. gh #602 proposed
+        // adding them and the measurement declined it; do not re-add without
+        // reading `dev-notes/issue-602-parametric-eligibility.md`.
+        //
+        // The short version: it is not that tracing an unmodelled change is
+        // harmless, it is that declining is not reliably better. Rejecting sends
+        // the call to the working-set fallback, and which of the two wins swings
+        // with problem size on one synthetic family — at `n = 30` the guard is
+        // better or equal in 14 of 14 rows, at `n = 20` it is worse in 9 of 14,
+        // by as much as 2 working-set changes against 34. That is #434's
+        // situation exactly: a rule that fires on the losses and the gains alike.
+        //
+        // `hessian_inertia` is the clearest case against, because it has no
+        // upside at all: the tracer never reads it and neither does
+        // `factorize_with_inertia_control`, so declining on it can only cost —
+        // measured at 2 working-set changes becoming 5, for nothing.
+        //
+        // What would settle it is the discriminator #434 also wanted and did not
+        // find: something observable at runtime that says whether the previous
+        // active set is a good guess for this problem.
+        // Bound *topology* — which rows are equalities, which variables are
+        // fixed — is guarded on, and this is a correctness guard rather than a
+        // cost one, which is why it stands where the `A` / box guards were
+        // declined.
+        //
+        // `ConsStatus::Equality` and `BoundStatus::Fixed` are claims about the
+        // problem, and no drop test can retract either. The tracer starts from
+        // `sol_prev.working` and cannot re-type a row mid-path: the row type
+        // does not interpolate, so a row that is an equality at `t = 0` and a
+        // range at every `t > 0` stays marked `Equality` the whole way and is
+        // handed to the corrector still claiming it. That pins it to
+        // `qp_new.bl[i]` — the `-1e20` sentinel when the new lower bound is
+        // infinite — at a point the feasibility audit accepts, and the solve
+        // reports `Optimal`. Measured: `min ½x² s.t. x == 1` re-solved as
+        // `min x² s.t. x ≤ 2` returned `Optimal` at `x = -1e19`, and the same
+        // through `Fixed` when a pinned variable is freed (gh #602, found in
+        // review of #614).
+        //
+        // Declining sends the pair to the fallback below, which runs the hint
+        // through `WorkingSet::reconciled_with` and so cannot make that claim.
+        // A genuine parametric family does not trip this: an equality row stays
+        // an equality across a sweep, and a fixed variable stays fixed.
+        let same_topology = qp_prev.m == qp_new.m
+            && qp_prev.n == qp_new.n
+            && (0..qp_prev.m)
+                .all(|i| (qp_prev.bl[i] == qp_prev.bu[i]) == (qp_new.bl[i] == qp_new.bu[i]))
+            && (0..qp_prev.n).all(|j| {
+                let fixed = |xl: Number, xu: Number| {
+                    xl > NLP_LOWER_BOUND_INF
+                        && xu < NLP_UPPER_BOUND_INF
+                        && (xl - xu).abs() <= opts.feas_tol
+                };
+                fixed(qp_prev.xl[j], qp_prev.xu[j]) == fixed(qp_new.xl[j], qp_new.xu[j])
+            });
+
         let same_shape = qp_prev.n == qp_new.n && qp_prev.m == qp_new.m;
         let same_h = qp_prev.h.nonzeros() == qp_new.h.nonzeros()
             && qp_prev.h.values() == qp_new.h.values()
             && qp_prev.h.irows() == qp_new.h.irows()
             && qp_prev.h.jcols() == qp_new.h.jcols();
+
         if same_shape
             && same_h
+            && same_topology
             && sol_prev.status == QpStatus::Optimal
             && sol_prev.x.len() == qp_new.n
             && let Some(sol) = self.solve_homotopy(qp_new, Some((qp_prev, sol_prev)), opts)?
         {
             return Ok(sol);
+        }
+
+        // The path did not run — the guard declined it, or the tracer returned
+        // `Ok(None)`. Neither is a reason to throw away the *working set* the
+        // caller just handed us, which is what a cold solve here does.
+        //
+        // The primal genuinely does not carry over (that is why there is a
+        // homotopy at all), but the discrete state does: `solve_with_working_set`
+        // pins a fresh primal satisfying the hinted active rows, repairs the pin
+        // if some other row is violated (#428), and only then runs the
+        // conventional loop. So the hint costs one pinned-KKT factorization and
+        // is worth having even when it is stale — which is exactly the SQP
+        // driver's standing bet (`sqp_alg.rs` warm-starts this way on every
+        // iteration, because each linearization moves `A` and translates the row
+        // bounds by `-c(x_k)`).
+        //
+        // Measured on the synthetic family in
+        // `examples/parametric_eligibility_sweep.rs`, over the rejected pairs
+        // (`H` perturbed, so `same_h` is false and this branch is the whole
+        // behaviour of `solve_parametric`):
+        //
+        // | H perturbation | cold (was) | working-set hint (now) |
+        // |---|---|---|
+        // | 1%  | 18 changes | **3** |
+        // | 10% | 18 changes | **3** |
+        // | 50% | 17 changes | **2** |
+        //
+        // The hint survives a 50% Hessian perturbation because what it encodes
+        // is which constraints bind, and that is far more stable under a change
+        // of `H` than the iterate is. See gh #602 and
+        // `dev-notes/issue-602-parametric-eligibility.md`.
+        //
+        // Conditions. The working set must be dimensionally valid for the new
+        // problem, or `solve_with_working_set` rejects it with
+        // `WarmStartDimensionMismatch` — a hard `Err` out of a call that has a
+        // perfectly good cold answer available, which would turn a shape change
+        // from "warm start unavailable" into "solve failed". And the previous
+        // solve must have reached `Optimal`: a `TimeLimit` result carries
+        // `WorkingSet::cold` (all-inactive, i.e. no information) and a `MaxIter`
+        // one carries a set that was still moving, neither of which the
+        // measurement above covers.
+        //
+        // `reconciled_with` is not optional. Dimensional validity is not enough
+        // to make a working set *meaningful* for another problem: `Equality`
+        // and `Fixed` assert `bl == bu` / `xl == xu` about the problem they came
+        // from, and the solver never drops either, so carrying one onto a
+        // problem where the row is an inequality pins it to a bound that does
+        // not exist and reports the result `Optimal`. That is a wrong answer,
+        // not a slow one — see `WorkingSet::reconciled_with`, and the two
+        // regression tests it names.
+        if sol_prev.status == QpStatus::Optimal
+            && sol_prev.working.validate_dims(qp_new.n, qp_new.m).is_ok()
+        {
+            let hint = sol_prev.working.reconciled_with(qp_new, opts);
+            return self.solve_with_working_set(qp_new, &hint, opts);
         }
         self.solve(qp_new, None, opts)
     }
@@ -3809,6 +3980,32 @@ impl ParametricActiveSetSolver {
         if crate::deadline::expired() {
             return Ok(time_limit_solution(qp, None, 0));
         }
+
+        // Make the hint well-formed for `qp` before anything trusts it.
+        //
+        // This entry point is public API and the hint is caller-supplied, so
+        // `Equality` / `Fixed` can arrive on a problem where the row is a range
+        // or the variable free. Neither status is droppable, so the pin lands on
+        // a bound `qp` does not have — the `-1e20` sentinel — and the feasibility
+        // audit accepts it, because such a point genuinely is feasible. The
+        // result is `Optimal` at a wrong answer, and no check downstream of here
+        // can catch it: the point is optimal for the problem the working set
+        // describes, and it is the working set that describes the wrong problem
+        // (gh #602, raised in review of #614).
+        //
+        // It is *close* to a no-op for a well-formed hint — it re-derives
+        // statuses that already agree with `qp` — but not exactly one, and the
+        // measurement is the honest version of that claim rather than the
+        // convenient one. On `benchmarks/warmstart` the conventional arms are
+        // bit-identical and the homotopy arms improve (`cold-sqp-hom`
+        // 28487 -> 27828, `warm-sqp-hom` 2005 -> 1755), solved counts unchanged.
+        // On the CLI fixture sweep five lines move, all on fixtures that were
+        // already failing; `jit1` on the homotopy arm goes from
+        // `MaximumIterationsExceeded` to a converged solve (dual inf 9.3e-9,
+        // constraint violation 6.5e-19). The residual difference comes from
+        // hints where a variable's bounds sit within `feas_tol` of each other
+        // without being equal, which this promotes to `Fixed`.
+        let working = &working.reconciled_with(qp, opts);
 
         // Factor the pinned KKT for a primal that satisfies the hinted active
         // rows (pruning the hint first if it is rank-deficient).
@@ -3894,6 +4091,18 @@ fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32)
 /// `Optimal` and recovers through elastic mode on failure.
 /// Largest constraint / bound violation at `x` (0.0 when feasible).
 ///
+/// What [`ParametricActiveSetSolver::hint_pin_quality`] measured about a
+/// working-set hint: how big it is, and how many rows and bounds outside it the
+/// pinned point violates.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HintPinQuality {
+    /// Rows plus bounds the hint marks active.
+    pub(crate) active: usize,
+    /// Inactive rows plus bounds the pinned point violates beyond `feas_tol`.
+    pub(crate) violated: usize,
+}
+
 /// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
 /// path can tell whether the point it is about to substitute is actually an
 /// improvement on the one it is discarding.

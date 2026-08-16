@@ -410,9 +410,12 @@ pub trait QpSolver {
     ) -> Result<QpSolution, QpError>;
 
     /// Parametric solve: trace the homotopy from a previous QP+solution
-    /// to a new QP. Falls back to `solve` if the previous solution is
-    /// `None`. This is the entry point SQP uses across outer iterations
-    /// to reuse the cached factorization across consecutive QPs.
+    /// to a new QP. The path interpolates `g` and the row bounds only, so
+    /// it is traced when the two problems share a shape, a bit-identical
+    /// `H`, and the same bound topology (which rows are equalities, which
+    /// variables fixed); otherwise the previous *working set* is still
+    /// reused, through `solve_with_working_set`, and only an unusable one
+    /// falls all the way back to a cold `solve` (gh #602).
     fn solve_parametric(
         &mut self,
         qp_prev: &QpProblem,

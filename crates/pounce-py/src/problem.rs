@@ -24,7 +24,7 @@ use pounce_solve_report::{
 };
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -600,6 +600,99 @@ impl PyProblem {
                 .collect::<Vec<_>>()
                 .into_pyarray_bound(py)
         })
+    }
+
+    /// A snapshot of the pending option list, as the 3-tuple
+    /// `(string_opts, number_opts, integer_opts)` where each element is
+    /// a list of `(name, value)` pairs in the order `add_option`
+    /// recorded them.
+    ///
+    /// Paired with `restore_options`, this is what makes a **scoped**
+    /// option overlay possible (pounce#607). `add_option` is
+    /// append-only: there is otherwise no way to take back an option a
+    /// helper set for the duration of one solve, which is how the
+    /// Python `solve(warm_start=…)` wrapper used to leave its enabling
+    /// options behind on the Problem for every later solve.
+    fn options_snapshot<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
+        let strs = PyList::new_bound(py, self.str_opts.iter().map(|(k, v)| (k, v)));
+        let nums = PyList::new_bound(py, self.num_opts.iter().map(|(k, v)| (k, *v)));
+        let ints = PyList::new_bound(py, self.int_opts.iter().map(|(k, v)| (k, *v as i64)));
+        PyTuple::new_bound(py, [strs.into_any(), nums.into_any(), ints.into_any()])
+    }
+
+    /// Replace the pending option list wholesale with a snapshot taken
+    /// by `options_snapshot`. Every `add_option` made since the snapshot
+    /// is undone — including one that introduced a name that had never
+    /// been set, which no sequence of `add_option` calls can express.
+    fn restore_options(&mut self, snapshot: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (strs, nums, ints): (
+            Vec<(String, String)>,
+            Vec<(String, Number)>,
+            Vec<(String, i64)>,
+        ) = snapshot.extract().map_err(|e| {
+            PyValueError::new_err(format!(
+                "restore_options: expected a 3-tuple from options_snapshot() \
+                 (string / number / integer option pairs): {e}"
+            ))
+        })?;
+        let mut int_opts = Vec::with_capacity(ints.len());
+        for (k, v) in ints {
+            let converted = Index::try_from(v).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "restore_options({k}): integer value {v} is out of range \
+                     (must be between {} and {})",
+                    Index::MIN,
+                    Index::MAX
+                ))
+            })?;
+            int_opts.push((k, converted));
+        }
+        self.str_opts = strs;
+        self.num_opts = nums;
+        self.int_opts = int_opts;
+        Ok(())
+    }
+
+    /// The bounds this Problem was constructed with, as the 4-tuple of
+    /// float ndarrays `(lb, ub, cl, cu)`. Read-only; bounds are fixed at
+    /// construction. Used by `pounce.WarmStart` to fingerprint the box a
+    /// warm start was captured against (pounce#607).
+    fn get_bounds<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
+        PyTuple::new_bound(
+            py,
+            [
+                self.x_l.clone().into_pyarray_bound(py).into_any(),
+                self.x_u.clone().into_pyarray_bound(py).into_any(),
+                self.g_l.clone().into_pyarray_bound(py).into_any(),
+                self.g_u.clone().into_pyarray_bound(py).into_any(),
+            ],
+        )
+    }
+
+    /// The user scaling installed by `set_problem_scaling`, as
+    /// `(obj_scaling, x_scaling, g_scaling)` with `None` for an axis
+    /// left unscaled, or `None` when no user scaling is installed.
+    fn get_problem_scaling<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
+        self.user_scaling.as_ref().map(|s| {
+            let x: PyObject = match &s.x_scaling {
+                Some(v) => v.clone().into_pyarray_bound(py).into_any().unbind(),
+                None => py.None(),
+            };
+            let g: PyObject = match &s.g_scaling {
+                Some(v) => v.clone().into_pyarray_bound(py).into_any().unbind(),
+                None => py.None(),
+            };
+            PyTuple::new_bound(py, [s.obj.into_py(py), x, g])
+        })
+    }
+
+    /// The `problem_obj` this Problem was constructed with. Exposed so
+    /// Python-side helpers can interrogate the model's declared
+    /// structure (`jacobianstructure` / `hessianstructure`) without the
+    /// caller having to thread the object through alongside the Problem.
+    #[getter]
+    fn problem_obj(&self, py: Python<'_>) -> Py<PyAny> {
+        self.problem_obj.clone_ref(py)
     }
 
     /// Solve, then run a parametric sensitivity step at the converged

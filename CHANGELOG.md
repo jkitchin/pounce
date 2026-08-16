@@ -9,6 +9,76 @@ changes.
 
 ## [Unreleased]
 
+- **`WarmStart` artifacts carry the model they belong to, and warm-start
+  options no longer outlive the call that asked for them** (#607). Two
+  independent silences in `pounce.WarmStart`, both of the shape gh#544
+  taught us to distrust — the answer is fine, everything else is not.
+
+  *Option scoping.* Applying a warm start called `add_option` on the
+  **persistent** `Problem`, and `add_option` is append-only, so the seven
+  enabling options (`warm_start_init_point`, `mu_init`, the four
+  `warm_start_*_push` / `_frac` and `warm_start_mult_bound_push`) stayed
+  set for every later solve on that object. Measured on HS071 at the
+  parent commit `70bf53de`: an ordinary cold solve that takes 17
+  iterations on a fresh `Problem` takes **24** on one that has served a
+  warm solve — the same objective to ten digits, 41% more iterations, and
+  nothing anywhere saying why. A warm solve that *raised* left the same
+  residue. They are now installed as a scoped overlay and taken back in a
+  `finally`, so both cases come back to 17. The overlay snapshots and
+  restores the whole option list rather than unsetting a list of names,
+  so an option added to `WarmStart.options()` later is scoped by
+  construction.
+
+  *Persistence schema.* A serialized warm start recorded arrays and four
+  floats — no dimensions, ordering, sparsity, bounds, scaling, algorithm
+  or model fingerprint — so an incompatible replay was simply attempted.
+  Replayed against the same model with its variables reordered it
+  returned objective **16.3801** where the truth is 17.0140, `x` wrong by
+  0.257, status `Error_In_Step_Computation`, no exception and no warning;
+  against a changed box, 15.8436 and `Restoration_Failed`; against a
+  different model of the same shape, a clean `Solve_Succeeded` for the
+  wrong reason. The archive schema is now versioned (v2) and carries a
+  `ProblemSignature`: dimensions, optional stable variable/constraint
+  IDs, and digests of the bound signature, declared sparsity, scaling
+  convention, algorithm/backend and the model-defining options. Capture
+  it with `WarmStart.from_info(x, info, problem=prob)`; a mismatch is
+  refused **before the solver is entered**, with a report naming every
+  facet that moved and the ways forward.
+
+  `compat="strict"` (default) raises, `"warn"` warns and proceeds,
+  `"unsafe"` skips the check. Replay is labelled `exact` or `mapped`:
+  `ws.transfer(prob, mapper)` is the explicit hook for a horizon shift or
+  a changed discretization, `ws.reindex(prob, var_ids=…)` writes the
+  mapper for you when both sides carry stable IDs, and a mapped artifact
+  is still refused on a third problem. Unmapped multiplier entries are
+  seeded `NaN`, the native "unseeded" contract, rather than fabricated.
+
+  *Migration.* Version-1 archives — everything written before this — load
+  and replay unchanged; they are *unverifiable*, not incompatible, and
+  refusing them outright would be a migration cost with no safety return.
+  What they get is a one-line `WarmStartLegacyWarning` naming
+  `ws.migrate(prob)`, plus the one check their own arrays support: the
+  dimensions. An unsigned *in-memory* `from_info(x, info)` stays silent,
+  as before. A v2 archive stays readable by a v1 loader — the new keys
+  are additive and `_meta` is untouched.
+
+  Known limitations, stated because one of them is a case the issue
+  names: a permutation of a model with a uniform box and a dense
+  jacobian leaves every structural digest bit-identical, so a reordering
+  is detectable only when the caller supplies `var_ids` on both sides.
+  And a mapped interior-point warm start is a correctness mechanism, not
+  a speed-up — on a slew-limited receding-horizon fixture the transferred
+  point costs 12 iterations against 7 for a cold solve, and on a longer
+  sinusoidal track the gap widens with the horizon (12 vs 9 at horizon 5,
+  30 vs 10 at horizon 40). That is the barrier/active-set limit
+  `docs/src/initialization.md` already describes.
+
+  Python-side, plus four additive `Problem` accessors
+  (`options_snapshot` / `restore_options`, `get_bounds`,
+  `get_problem_scaling`, `problem_obj`); no solver step moved. The
+  fixture sweep is identical across all 57 models — status, objective and
+  iteration count.
+
 - **The feasibility projection is sparse, and the linearized normal step is
   safeguarded against making the true violation worse** (#605). Two related
   defects, one in the Python helper and one in the Rust core.
@@ -202,6 +272,209 @@ changes.
   fallback where a convex attempt hands the model to the NLP path having
   genuinely used those values.
 
+### Changed — a declined `solve_parametric` now keeps the caller's working set (#602)
+
+`QpSolver::solve_parametric` admits the homotopy only when the two problems
+have the same shape and a bit-identical `H`, because `H` is not interpolated
+along the path. When it declines — or when the tracer returns `Ok(None)` — it
+used to fall through to `self.solve(qp_new, None, opts)`: a cold solve that
+throws away the working set the caller has just handed over, one argument
+earlier in the same call.
+
+The primal genuinely does not carry over between two QPs, which is why the
+homotopy exists at all. The *discrete* state does, and it is far more stable
+than the iterate: it records which constraints bind, not where the solution is.
+The declined branch now routes through `solve_with_working_set`, which pins a
+fresh primal satisfying the hinted active rows and repairs the pin if some
+other row is violated (#428) — the same standing bet the active-set SQP driver
+already makes on every outer iteration, where each linearization moves `A` and
+translates the row bounds by `-c(x_k)`.
+
+Measured over rejected pairs (`H` perturbed, so the guard declines and this
+branch is the whole behaviour of `solve_parametric`), on the synthetic family
+in the new `pounce-qp` example `parametric_eligibility_sweep`:
+
+| `H` perturbation | working-set changes, was → now | time |
+|---|---|---|
+| 1% | 18 → **3** | 13.9 ms → **1.3 ms** |
+| 10% | 18 → **3** | 14.8 ms → **1.1 ms** |
+| 50% | 17 → **2** | 14.2 ms → **0.8 ms** |
+| 10%, with `A` also 10% off | 84 → **67** | 61.8 ms → **42.5 ms** |
+
+Answers are unchanged (agreement with a cold solve of the same target within
+`1.8e-15` across the sweep); this moves how the answer is reached, not what it
+is. Two conditions gate the hint: the previous solve must have reached
+`Optimal` (a `TimeLimit` result carries an all-inactive `WorkingSet::cold`, and
+a `MaxIter` one carries a set that was still moving), and the working set must
+be dimensionally valid for the new problem — otherwise `solve_with_working_set`
+would return `WarmStartDimensionMismatch` and turn "no warm start available"
+into "solve failed".
+
+Matching dimensions is necessary but not sufficient to reuse a working set, and
+the first cut of this change got that wrong (caught in review of #602).
+`ConsStatus::Equality` and `BoundStatus::Fixed` assert `bl == bu` / `xl == xu`
+about the problem they came from, and no drop test can ever remove either, so
+carrying one onto a problem where the row is a range pins it to a bound that
+does not exist — the `-1e20` sentinel — at a point the feasibility audit
+accepts. `min ½x² s.t. x == 1` re-solved as `min x² s.t. x ≤ 2` returned
+`Optimal` at `x = -1e19`, objective `1e38`, against a true optimum of 0; the
+same shape reproduced through `Fixed` when a pinned variable is freed. The hint
+is now passed through `WorkingSet::reconciled_with`, which re-derives both
+topology-dependent statuses from the new problem and drops any status naming a
+bound it does not have, using the same predicates the solver applies when it
+builds a working set itself.
+
+Review of #614 found that fix incomplete in two ways, both now closed. The
+reconciliation ran only on the *declined* branch, so with `H` identical the
+guard admits and the traced path clones the stale working set straight through
+to the corrector — three of four topology-change cases returned `Optimal` at
+`x = -1e19`, and the first round of tests missed it because every one of them
+perturbed `H` and so only ever exercised the fallback. The row type does not
+interpolate (a row that is an equality at `t = 0` is a range at every `t > 0`),
+so the path cannot re-type it; the guard now also requires the same bound
+topology — which rows are equalities, which variables fixed. That is a
+**correctness** guard, unlike the cost-motivated `A`/box guards declined above,
+and it is inert on the fixture sweep since `solve_parametric` has no production
+caller.
+
+`solve_with_working_set` now reconciles too, closing the same hazard for any
+external caller. This was previously deferred as a trajectory change needing
+its own measurement; the measurement says it moves the trajectory in the right
+direction — `cold-sqp-hom` 28487 → 27828 and `warm-sqp-hom` 2005 → 1755 on
+`benchmarks/warmstart` with the conventional and IPM arms bit-identical and
+solved counts unchanged, and on the CLI sweep five lines move, all on fixtures
+already failing, one of which (`jit1`, homotopy arm) now converges in 11
+iterations at dual infeasibility 9.3e-9.
+
+`crates/pounce-qp/tests/homotopy.rs` pins the change count, not just the
+answer: the previous behaviour returned the *right* result and would have
+passed an answer-only assertion, which is the gh #544 failure mode. Four
+further tests cover the working-set reconciliation, two of which fail against
+the unfixed change. The CLI fixture sweep is unchanged on both the default and
+`algorithm=active-set-sqp` arms — expected, since `solve_parametric` currently
+has no production caller, and therefore *not* evidence for the change on its
+own.
+
+**The stricter eligibility guard #602 asks for was implemented, measured, and
+declined.** Requiring an unchanged `A`, unchanged `xl`/`xu` and unchanged
+inertia declaration makes the guard better or equal in 14 of 14 rows at
+`n = 30` and worse in 9 of 14 at `n = 20` — same family, same generator, with
+`A` perturbed 10% going from 2 working-set changes to 34. That is #434's
+situation restated, and its standard ("the failure mode of a bad threshold is
+giving back more than it recovers, silently") rules it out. Rejecting a pair is
+not a return to correctness; it is a switch to the working-set heuristic, which
+has its own failure mode, and nothing available predicts which of the two wins.
+The inertia condition is the clearest case against, having no upside even in
+principle: the tracer never reads the declaration, so declining on it only ever
+trades a working path for the fallback — measured at 2 working-set changes
+becoming 5, for nothing. The reasoning is recorded at the guard itself in
+`solver.rs` so the next reader with the same idea meets the data first.
+
+Both the surviving change and the declined one shared one open question, which
+is also #434's: **is there a runtime signal for whether the previous active set
+is worth keeping?** That was then built and measured, and the answer is no —
+see below.
+
+Background and the full measurement are in
+`dev-notes/issue-602-parametric-eligibility.md`.
+
+### Measured — no runtime signal for "is this working set worth keeping" (#602, #434)
+
+Three decisions in `pounce-qp` want the same missing discriminator: #434's
+abandon-the-path guard, the parametric fallback's choice of route, and the
+eligibility guard declined above. #434 refuted the obvious *predictor*
+(`n_eq / n`, from problem data with no solve) and concluded that a
+discriminator, if one exists, must be **measured**. So one was built.
+
+The candidate: pin the hinted active rows, then count the rows and bounds
+*outside* the hint that the pinned point violates — a property of the hint
+applied to the target, needing no model of what changed. It costs one
+pinned-KKT factorization, which `solve_with_working_set` already pays. Swept
+over 360 pairs (5 sizes from `n = 12` to `n = 50`, crossed over `H`, `A`, `g`,
+row-bound and box perturbations) against ground truth, on both arms — the
+fallback's opponent differs by caller, since `pounce-qp` defaults
+`use_homotopy` off and `pounce-convex`'s driver turns it on.
+
+Against the **conventional** cold path there is nothing to decide: always
+keeping the hint is wrong on 2 of 360 cases and sits 9 working-set changes —
+0.05% — above the per-case oracle. That is a positive result about the shipped
+fallback, which is not a heuristic awaiting a guard.
+
+Against the **homotopy** cold path there is a real prize and this signal cannot
+reach it: always-keep costs 17497 against an oracle of 12693 (−27%), and every
+threshold on either normalization scores *worse* than having no rule at all
+(best 17613 and 17787). The refutation is direct rather than statistical —
+samples with identical signal values carry opposite correct answers, one pair
+differing 20× one way and 3× the other. The reason is structural: the signal
+measures "is the hint good", while the decision is "is the hint better than the
+alternative", and on that arm the alternative's cost is a property of the
+*path*, which the hint says nothing about.
+
+So no rule ships — only the instrument and the negative result.
+`hint_pin_quality` is `#[cfg(test)]`, and the sweep is
+`crates/pounce-qp/src/tests/hint_signal.rs`, runnable with
+`cargo test -p pounce-qp --release --lib hint_signal -- --ignored --nocapture`.
+Three declined guards in this area now agree: the discriminator is not in the
+problem data (#434), not in the change between the two problems (the guard
+above), and not in the hint (here). What is left is the path measured while it
+runs, which is where the 27% lives.
+
+### Fixed — the QP homotopy could not add a variable bound to the working set (#602)
+
+The §4.2 path's `Event` enum had `AddRowLower`/`AddRowUpper`/`DropRow`/
+`DropBound`, and its primal ratio test looped over general rows only. Bounds
+could therefore be *dropped* but never *added*: no inactive variable bound could
+become active along the path, so `x(t)` crossed one with nothing capping the
+step, and `worst_path_violation` skipped the box, so nothing reported it either.
+A crossing is absorbing — the ratio test only ever prevents a violation, never
+repairs one — so a bound crossed once stayed crossed for the rest of the path.
+
+This is a defect on the **cold** arm as much as the parametric one: nothing
+about starting from the box relaxation stops the direction leaving the box on
+the way to `t = 1`.
+
+Adds `AddBoundLower`/`AddBoundUpper` and the matching ratio test over
+`j in 0..n` (simpler than the row test — variable bounds do not move along the
+path, so `dx` alone governs the crossing), a `tabu_bounds` mirroring
+`tabu_cons` because the rank repair can now fight the new test the way it did
+for rows, and the box to the path-feasibility report.
+
+Measured on `benchmarks/warmstart`, whose `-hom` arms differ from their twins by
+exactly one option — the instrument #434 used — over 42 family×scale
+combinations, summing inner-QP working-set changes:
+
+| arm | base → new |
+|---|---|
+| `cold-sqp`, `warm-sqp`, all IPM arms | **bit-identical** |
+| `cold-sqp-hom` | 36726 → **28487** (−22%) |
+| `warm-sqp-hom` | 2240 → **2005** (−10%) |
+
+The non-homotopy arms being bit-identical is the control: the change is confined
+to the tracer. Solved counts are unchanged (855/855 SQP, 549/549 QP). In #434's
+framing, the homotopy's excess inner work over the conventional path falls from
+2.82× to 2.18× cold, and 2.22× to 1.99× warm.
+
+The aggregate hides the distribution, so: 4 rows better and 16 worse on
+`cold-sqp-hom`, 9 and 9 on `warm-sqp-hom`, with the entire net coming from one
+family — `mpc_horizon_80` drops ~4× (−10580) while every other family together
+moves +2341. Wall-clock is flat (41.8 s → 42.7 s). Part of the "worse" is the
+metric rather than the path: the tracer now takes pivots it used to skip by
+walking through the bound, and each counts as a working-set change. That the win
+lands on MPC is not incidental — MPC is mostly box constraints, which is exactly
+what the missing events were blind to.
+
+The CLI fixture sweep is empty on the default and `active-set-sqp` arms. With
+`sqp_qp_use_homotopy=yes` one line moves: `jit1` goes from
+`SearchDirectionBecomesTooSmall it=8` to `MaximumIterationsExceeded it=2`. That
+fixture does not solve on the active-set-SQP path in any configuration —
+homotopy off it is `MaximumIterationsExceeded it=0` before and after alike — so
+it is a fixture that fails either way changing which failure it reports.
+
+**Not yet measured:** `pounce-convex`'s active-set QP driver sets
+`use_homotopy: true` and is the one shipped path where the tracer runs by
+default. The Maros-Mészáros corpus it needs was not available where this ran, so
+`pounce-convex/examples/homotopy_sweep.rs` over the 138 problems, homotopy-on
+before and after, is outstanding and should happen before release.
 - **A feasible NLP whose constraint rows sit at their own floating-point
   resolution is no longer refused a certificate — or convicted of local
   infeasibility** (#590). Reported against LyoPRONTO's pseudosteady-limit

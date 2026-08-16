@@ -155,3 +155,85 @@ fn restart_clears_the_previous_step() {
     assert_eq!(firing(&r), vec![Event::DropRow(4)]);
     assert!((r.t_next - 0.5).abs() < 1e-15, "t_next = {}", r.t_next);
 }
+
+// ---------------------------------------------------------------------------
+// gh #602 — bound-adding events.
+//
+// Until #602 the `Event` enum had no way to say "an inactive variable bound
+// became active": rows could be added and dropped and bounds could be
+// *dropped*, but the primal ratio test looped over general rows only. So
+// `x(t)` crossed inactive variable bounds with nothing capping the step, on the
+// cold arm as much as the warm one, and `worst_path_violation` skipped the box
+// so nothing reported it either.
+//
+// These pin the selection rule for the new events. The rule itself is shared
+// with the rows — earliest wins, coincident set fires together — so what is
+// worth testing here is that a bound crossing *competes on the same footing*
+// as a row crossing rather than being ignored or always losing.
+// ---------------------------------------------------------------------------
+
+/// A bound crossing earlier than every row crossing has to win the step. This
+/// is the case that previously could not exist: the step ran to the row and
+/// walked the variable straight through its bound.
+#[test]
+fn an_earlier_bound_crossing_beats_a_later_row_crossing() {
+    let mut r = RatioTest::new(0.0);
+    r.admit(0.4, Event::AddRowUpper(3));
+    r.admit(0.1, Event::AddBoundUpper(7));
+
+    assert_eq!(
+        firing(&r),
+        vec![Event::AddBoundUpper(7)],
+        "the bound binds first and must cap the step"
+    );
+    assert!(
+        (r.t_next - 0.1).abs() < 1e-15,
+        "t_next = {}, expected 0.1",
+        r.t_next
+    );
+}
+
+/// The converse, so the new events cannot simply pre-empt everything: a row
+/// that binds first still wins.
+#[test]
+fn an_earlier_row_crossing_still_beats_a_later_bound_crossing() {
+    let mut r = RatioTest::new(0.0);
+    r.admit(0.6, Event::AddBoundLower(2));
+    r.admit(0.25, Event::AddRowLower(1));
+
+    assert_eq!(firing(&r), vec![Event::AddRowLower(1)]);
+}
+
+/// A bound and a row binding at the same `t` are a degenerate vertex, and both
+/// have to enter the working set. Firing only one leaves the other sitting
+/// exactly on a bound it is not in the working set for, which the next
+/// direction then pushes it across — the #434 mechanism, now reachable through
+/// the box as well as through the rows.
+#[test]
+fn a_coincident_bound_and_row_both_fire() {
+    let mut r = RatioTest::new(0.25);
+    r.admit(0.125, Event::AddRowUpper(4));
+    r.admit(0.125, Event::AddBoundLower(9));
+
+    let fired = firing(&r);
+    assert_eq!(fired.len(), 2, "both must fire, got {fired:?}");
+    assert!(fired.contains(&Event::AddRowUpper(4)), "{fired:?}");
+    assert!(fired.contains(&Event::AddBoundLower(9)), "{fired:?}");
+}
+
+/// A variable already a hair past its bound is admitted and clamped to `t`, so
+/// it binds now with a zero-length step rather than being skipped — the same
+/// treatment `admit` gives a row, and the reason is the same: a crossing the
+/// ratio test declines to cap is never repaired.
+#[test]
+fn a_bound_just_past_its_crossing_still_binds() {
+    let mut r = RatioTest::new(0.3);
+    r.admit(-1e-13, Event::AddBoundUpper(5));
+
+    assert_eq!(firing(&r), vec![Event::AddBoundUpper(5)]);
+    assert!(
+        (r.t_next - 0.3).abs() < 1e-15,
+        "must clamp to the current t, got {}",
+        r.t_next
+    );
+}
