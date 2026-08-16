@@ -28,6 +28,13 @@ from ._warm_start import (
     WarmStartCompatibilityWarning,
     WarmStartLegacyWarning,
 )
+from ._continuation import (
+    Continuation,
+    ContinuationStep,
+    ContinuationTrace,
+    StepController,
+    kkt_residual_monitor,
+)
 from ._minimize import minimize, OptimizeResult
 from ._nlp_batch import solve_nlp_batch
 from ._curve_fit import (
@@ -105,6 +112,13 @@ __all__ = [
     "WarmStartCompatibilityError",
     "WarmStartCompatibilityWarning",
     "WarmStartLegacyWarning",
+    # Predictor--corrector continuation over a repeated-NLP sequence
+    # (see docs: continuation.md)
+    "Continuation",
+    "ContinuationStep",
+    "ContinuationTrace",
+    "StepController",
+    "kkt_residual_monitor",
     "generate_starts",
     "project_to_feasible",
     "ProjectionReport",

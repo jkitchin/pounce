@@ -44,6 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .._ad_common import ACTIVE_TOL
+from .._continuation import StepController
 
 _OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
@@ -326,6 +327,14 @@ class PathFollower:
         self._grow = float(grow)
         self._shrink = float(shrink)
         self._max_steps = int(max_steps)
+        # Step-size policy lives in pounce._continuation.StepController so
+        # this follower and the frontend-neutral driver (pounce#608) cannot
+        # drift apart. The constructor keeps its own knobs unchanged; the
+        # controller is built per `follow` call from them.
+        self._controller_kwargs = dict(
+            ds0=self._ds0, ds_min=self._ds_min, ds_max=self._ds_max,
+            grow=self._grow, shrink=self._shrink,
+        )
 
     # ----- monitors -----
 
@@ -434,10 +443,14 @@ class PathFollower:
         status = "ok"
 
         s = s0
-        ds = self._ds0
+        ctl = StepController(**self._controller_kwargs)
         while s < s1 - 1e-12 and n_steps < self._max_steps:
             n_steps += 1
-            ds = min(ds, s1 - s)
+            # Clamp the controller's own state, not a local copy: the
+            # pre-#608 loop mutated `ds` here, and the policy must stay
+            # bit-identical across the refactor.
+            ctl.ds = min(ctl.ds, s1 - s)
+            ds = ctl.ds
             s_new = s + ds
             th_cur = th(s)
             th_new = th(s_new)
@@ -473,7 +486,7 @@ class PathFollower:
                 TH.append(np.asarray(th_new))
                 X.append(np.asarray(x))
                 LAM.append(np.asarray(lam))
-                ds = min(ds * self._grow, self._ds_max)
+                ctl.accepted()
                 continue
 
             # CORRECT: warm-μ re-solve from the predicted point, which
@@ -486,8 +499,7 @@ class PathFollower:
             if cinfo["status_msg"] not in _OK_STATUS:
                 # Back off and retry a shorter step from the same anchor.
                 new_state.close()
-                ds *= self._shrink
-                if ds < self._ds_min:
+                if ctl.rejected() is None:
                     status = "corrector_failed"
                     break
                 continue
@@ -501,17 +513,11 @@ class PathFollower:
             s = s_new
 
             new_sig = self._active_signature(lam, zL, zU)
-            if new_sig != sig:
+            event = new_sig != sig
+            if event:
                 as_changes.append(s)
                 sig = new_sig
-                # Resolve the region near the change finely.
-                ds = min(self._ds0, max(ds * self._shrink, self._ds_min))
-            else:
-                iters = int(cinfo["iter_count"])
-                if iters <= 3:
-                    ds = min(ds * self._grow, self._ds_max)
-                elif iters >= 10:
-                    ds = max(ds * self._shrink, self._ds_min)
+            ctl.corrected(int(cinfo["iter_count"]), active_set_event=event)
 
             S.append(s)
             TH.append(np.asarray(th_new))
