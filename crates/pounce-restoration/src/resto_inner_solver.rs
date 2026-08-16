@@ -319,6 +319,16 @@ pub fn run_inner_resto(
 
     // ---- 4. Build the inner alg bundle and override its init /
     //         conv_check / iter_output slots with resto-side ones. ----
+    // The nonlinear-variable mask (gh#624) names positions in the
+    // *original* NLP's `x_var` space. The restoration sub-NLP's primal is
+    // the 5-block `[orig | n_c | p_c | n_d | p_d]` compound, where those
+    // indices mean something else entirely, so the mask never crosses
+    // into the inner solve: restoration approximates over its whole
+    // space, exactly as it did before the mask existed.
+    let mut inner_alg_builder = inner_alg_builder.clone();
+    inner_alg_builder.limited_memory_nonlinear_vars = None;
+    let inner_alg_builder = &inner_alg_builder;
+
     let mut alg_bundle = inner_alg_builder.build_with_backend(backend_factory);
 
     // Wrap the inner `StdAugSystemSolver` with `AugRestoSystemSolver`,

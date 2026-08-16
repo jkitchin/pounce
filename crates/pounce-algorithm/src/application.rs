@@ -2415,6 +2415,36 @@ impl IpoptApplication {
         // HS71-class problems.
         let mut builder = self.algorithm_builder_from_options();
 
+        // Which variables the limited-memory Hessian should span (gh#624).
+        // Upstream's precedence: a TNLP that implements
+        // `get_number_of_nonlinear_variables` wins, and
+        // `num_linear_variables` is only the contiguous-prefix fallback.
+        // Exact-Hessian solves never consult either.
+        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory {
+            let num_linear_variables = self
+                .options
+                .get_integer_value("num_linear_variables", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(0);
+            match adapter
+                .borrow()
+                .quasi_newton_nonlinear_vars(num_linear_variables)
+            {
+                Ok(mask) => builder.limited_memory_nonlinear_vars = mask,
+                Err(e) => {
+                    use pounce_common::journalist::JournalCategory;
+                    self.journalist.print(
+                        JournalLevel::J_ERROR,
+                        JournalCategory::J_MAIN,
+                        &format!("\nEXIT: Invalid nonlinear-variable list: {}\n", e.message),
+                    );
+                    timing.overall_alg.end();
+                    return ApplicationReturnStatus::InvalidProblemDefinition;
+                }
+            }
+        }
+
         // Linear-solver backend. The default factory is option-aware
         // — it reads the `feral_*` extension options off the same
         // `OptionsList` that drove the IPM-level builder above so

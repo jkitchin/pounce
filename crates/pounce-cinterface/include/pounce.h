@@ -396,6 +396,43 @@ Bool IpoptSetWarmStartWorkingSet(
 Bool IpoptClearWarmStartWorkingSet(IpoptProblem ipopt_problem);
 
 /**
+ * Declare which variables enter the problem NONLINEARLY.
+ *
+ * The C-API face of Ipopt's TNLP::get_number_of_nonlinear_variables /
+ * get_list_of_nonlinear_variables pair (which upstream exposes only to
+ * C++ callers), for frontends that already know their model's
+ * structure — CasADi's `pass_nonlinear_variables`, an algebraic
+ * modeling language, a hand-written driver.
+ *
+ * The effect is confined to the LIMITED-MEMORY Hessian
+ * (`hessian_approximation=limited-memory`): curvature is approximated
+ * over the declared subset only, and the Hessian is exactly zero for
+ * every other variable — the win on a model whose variables mostly
+ * enter linearly. Exact-Hessian solves ignore the declaration, and so
+ * does any solve that never calls this: the default is "all variables
+ * are nonlinear", identical to previous behavior. The subset takes
+ * precedence over the `num_linear_variables` option, matching Ipopt.
+ *
+ * `pos_nonlin_vars` holds `num_nonlin_vars` variable indices in the
+ * problem's own index style (the `index_style` given to
+ * CreateIpoptProblem). The subset may be arbitrary and noncontiguous;
+ * order does not matter. Declaring all `n` variables is the same as
+ * not calling this at all.
+ *
+ * Returns 1 on success, 0 — leaving any previous declaration in place
+ * — on a NULL handle, a negative or oversized count, a NULL array with
+ * a positive count, or an out-of-range index.
+ */
+Bool IpoptSetNonlinearVariables(
+    IpoptProblem   ipopt_problem,
+    ipindex        num_nonlin_vars,
+    const ipindex *pos_nonlin_vars
+);
+
+/** Drop a declared nonlinear-variable subset (back to "all nonlinear"). */
+Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
+
+/**
  * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,
  * IpoptSolve, and IpoptGetWorkingSet. Any of the in/out buffers
  * may be NULL to skip that side. Returns the

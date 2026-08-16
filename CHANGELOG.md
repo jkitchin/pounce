@@ -120,7 +120,65 @@ changes.
   Where continuation does pay is `follow`, which skips the solve
   entirely. Full write-up, including what the CLI path is and is not:
   `docs/src/continuation.md`.
+- **A CasADi `nlpsol` plugin, and the two POUNCE-side gaps it exposed**
+  (#624). POUNCE now registers with [CasADi](docs/src/casadi.md) as a
+  first-class solver plugin: `nlpsol('S', 'pounce', nlp, opts)` and
+  `opti.solver('pounce')`, on MX graphs with parameters, with option
+  pass-through, warm starts, live iteration callbacks, the full
+  per-iteration `stats()['iterations']` trace, and derivatives of the
+  solution map (inherited from CasADi's `Nlpsol` base class, so
+  `jacobian(sol['x'], p)` and bilevel problems work). Source, build, and
+  parity tests against CasADi's bundled Ipopt live in `casadi/`; six
+  runnable examples in `casadi/examples/`. Installation is
+  `make -C casadi install`, which drops the plugin into CasADi's own
+  package directory — the first place its loader looks, so no
+  environment variable and no `sudo`. A prebuilt `pounce-casadi` wheel is
+  not there yet; `dev-notes/casadi-interface-options.md` records why this
+  shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
+  drop-in `libipopt`, and what the wheel would take.
 
+- **Ipopt-compatible nonlinear-variable subsets for the limited-memory
+  Hessian** (#624). `TNLP::get_number_of_nonlinear_variables` /
+  `get_list_of_nonlinear_variables` were declared but read nowhere. They
+  are now honoured: `TNLPAdapter::quasi_newton_nonlinear_vars` (a port of
+  upstream's `GetQuasiNewtonApproxSpaces`) maps an arbitrary,
+  noncontiguous subset through fixed-variable removal into the
+  algorithm's compressed space, and the L-BFGS updater projects its
+  curvature pairs onto that subspace and publishes `B = P·B_red·Pᵀ`, so
+  the Hessian is exactly zero for variables that only enter linearly. The
+  C API gains `IpoptSetNonlinearVariables` / `IpoptClearNonlinearVariables`
+  (a count plus an index list, not the `Bool` mask the issue suggested —
+  see the ABI note in the dev-note), and the CasADi plugin's
+  `pass_nonlinear_variables` routes through it. `num_linear_variables` is
+  now implemented as the contiguous-prefix fallback and has left the
+  unimplemented-options list; callback-supplied information takes
+  precedence over it, as in Ipopt. Exact-Hessian solves are untouched, a
+  solve that declares nothing behaves exactly as before, and the
+  restoration sub-IPM clears the subset (its primal is a different
+  space).
+
+  *Measured, and worth knowing before switching it on:* on a synthetic
+  model with 2 nonlinear and 2000 linear variables the restriction made
+  the solve **slower** (4.6 s / 28 iterations against 0.85 s / 25
+  unmasked) — zeroing the quasi-Newton diagonal on the linear block
+  leaves those KKT rows carrying only the barrier term. The same model
+  under CasADi's Ipopt plugin goes from 0.40 s to **399 s**, so the
+  effect is a property of the formulation, not of this port, and POUNCE
+  absorbs it two orders of magnitude better. The feature is Ipopt parity
+  and is correct — the same KKT point either way — but it is not a
+  default to turn on without measuring.
+
+- **`GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` aborted the
+  process when used as documented.** Called from inside an intermediate
+  callback — the only place they are valid — asking for `g` (or, for the
+  violations sibling, `grad_lag_x`) panicked with `RefCell already
+  borrowed`, and because the panic crosses an `extern "C"` boundary the
+  process **aborted** rather than returning `FALSE`. Both functions held
+  a shared borrow of the algorithm-side NLP across an `IpoptCq` accessor
+  that re-enters it mutably. Any C consumer that logs its iterates hits
+  this — the CasADi plugin found it, the GAMS C link is on the same path.
+  Regression test:
+  `crates/pounce-cinterface/tests/current_iterate_inspectors.rs`.
 - **`WarmStart` artifacts carry the model they belong to, and warm-start
   options no longer outlive the call that asked for them** (#607). Two
   independent silences in `pounce.WarmStart`, both of the shape gh#544

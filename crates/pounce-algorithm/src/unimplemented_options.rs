@@ -187,12 +187,6 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
     },
     UnimplementedFeature {
         issue: 483,
-        feature: "the linear-variable count hint for L-BFGS",
-        advice: "",
-        options: &["num_linear_variables"],
-    },
-    UnimplementedFeature {
-        issue: 483,
         feature: "skipping the finalize-solution callback",
         advice: "",
         options: &["skip_finalize_solution_call"],

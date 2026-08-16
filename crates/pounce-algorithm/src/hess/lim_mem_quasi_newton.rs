@@ -37,6 +37,7 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::Vector;
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
 use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
 use pounce_linalg::multi_vector_matrix::{MultiVectorMatrix, MultiVectorMatrixSpace};
 use std::rc::Rc;
@@ -91,6 +92,16 @@ pub struct LimMemQuasiNewtonUpdater {
     /// (NOT `y_c_prev`).
     pub last_jac_c: Option<Rc<dyn pounce_linalg::matrix::Matrix>>,
     pub last_jac_d: Option<Rc<dyn pounce_linalg::matrix::Matrix>>,
+    /// Positions in the primal space that enter *nonlinearly* (gh#624),
+    /// sorted and deduplicated. `None` — the default — approximates over
+    /// the whole space, which is what every solve did before the mask
+    /// existed. When set, curvature pairs are projected onto these
+    /// positions and the published `W` carries the corresponding
+    /// expansion `P` so the KKT solvers see `B = P · B_red · Pᵀ`: zero
+    /// curvature, and no stored columns, for variables that only ever
+    /// appear linearly. Mirrors upstream's `P_LM` from
+    /// `IpTNLPAdapter::GetQuasiNewtonApproxSpaces`.
+    pub nonlinear_vars: Option<Vec<Index>>,
 }
 
 impl Default for LimMemQuasiNewtonUpdater {
@@ -106,6 +117,7 @@ impl Default for LimMemQuasiNewtonUpdater {
             last_grad_f: None,
             last_jac_c: None,
             last_jac_d: None,
+            nonlinear_vars: None,
         }
     }
 }
@@ -201,7 +213,21 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
             curr_jac_d.trans_mult_vector(1.0, &*curr_y_d, 1.0, &mut *y);
             prev_jac_d.trans_mult_vector(-1.0, &*curr_y_d, 1.0, &mut *y);
 
-            self.ingest_pair(Rc::from(s), Rc::from(y));
+            // Restrict the pair to the nonlinear subspace before it
+            // enters the history: everything downstream (σ, the BFGS /
+            // SR1 recurrences, the stored columns) then lives in the
+            // reduced space, exactly as upstream does once `P_LM` is
+            // present.
+            match self.active_mask(curr_x.dim()) {
+                Some(mask) => {
+                    let s_red = project_onto(&*s, mask);
+                    let y_red = project_onto(&*y, mask);
+                    self.ingest_pair(s_red, y_red);
+                }
+                None => {
+                    self.ingest_pair(Rc::from(s), Rc::from(y));
+                }
+            }
         }
         self.last_x = Some(Rc::clone(&curr_x));
         self.last_grad_f = Some(Rc::clone(&curr_grad_f));
@@ -209,7 +235,13 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         self.last_jac_d = Some(Rc::clone(&curr_jac_d));
 
         let n_idx = curr_x.dim();
-        let nu = n_idx as usize;
+        // Dimension the low-rank build runs in: the nonlinear subspace
+        // when a mask is active, the full primal space otherwise.
+        let n_red = match self.active_mask(n_idx) {
+            Some(mask) => mask.len() as Index,
+            None => n_idx,
+        };
+        let nu = n_red as usize;
         let sigma = match self.update_type {
             UpdateType::Bfgs => self.compute_sigma_bfgs(),
             // SR1 uses the same `LIM_MEM_INIT` sigma source as BFGS for
@@ -235,17 +267,38 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         // `element_wise_multiply`/`lr_mult_vector` the moment restoration
         // runs (pounce#102). Cloning `curr_x` keeps `W` type-consistent
         // with the space it operates on.
-        let col_space = DenseVectorSpace::new(n_idx);
-        let mut diag = curr_x.make_new();
+        //
+        // Under a nonlinear-variable mask the reduced space is a plain
+        // dense space of its own — the compound-vector concern above is
+        // moot there, because the mask is only ever installed for the
+        // original NLP (the restoration sub-IPM clears it: its primal is
+        // the 5-block compound, whose indices mean something else).
+        let mask = self.active_mask(n_idx).map(|m| m.to_vec());
+        let col_space = DenseVectorSpace::new(n_red);
+        let reduced_proto: Option<DenseVector> = mask.as_ref().map(|_| col_space.make_new_dense());
+        let proto: &dyn Vector = match reduced_proto.as_ref() {
+            Some(p) => p,
+            None => curr_x.as_ref(),
+        };
+
+        let mut diag = proto.make_new();
         diag.set(sigma);
 
-        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, None, false);
+        // `P` lifts the reduced update back into full-x; `reduced_diag`
+        // says σ lives in the small space too, so the Hessian is exactly
+        // zero on the linear variables (upstream
+        // `IpLowRankUpdateSymMatrixSpace(dim, P_LM, /*reduced_diag=*/true)`).
+        let p_lm: Option<Rc<dyn pounce_linalg::matrix::Matrix>> = mask.as_ref().map(|m| {
+            let space = ExpansionMatrixSpace::new(n_idx, n_red, m, 0);
+            Rc::new(ExpansionMatrix::new(space)) as Rc<dyn pounce_linalg::matrix::Matrix>
+        });
+        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, p_lm, mask.is_some());
         let mut lr = lr_space.make_new_low_rank();
         lr.set_diag(Rc::from(diag));
-        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &v_cols) {
+        if let Some(mvm) = build_multi_vector(&col_space, proto, &v_cols) {
             lr.set_v(Rc::new(mvm));
         }
-        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &u_cols) {
+        if let Some(mvm) = build_multi_vector(&col_space, proto, &u_cols) {
             lr.set_u(Rc::new(mvm));
         }
 
@@ -255,6 +308,27 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
 }
 
 impl LimMemQuasiNewtonUpdater {
+    /// The nonlinear-variable mask, if one applies to a primal space of
+    /// dimension `n`.
+    ///
+    /// The guard is deliberate: a mask is stated over the *original*
+    /// NLP's variables, and the restoration sub-IPM solves a different
+    /// problem whose primal is `[orig | n_c | p_c | n_d | p_d]`.
+    /// `run_inner_resto` clears the mask for that solve; this check is
+    /// the belt to that suspenders, so a masked updater reused against a
+    /// space it was not built for silently degrades to the full-space
+    /// approximation instead of indexing into the wrong variables.
+    fn active_mask(&self, n: Index) -> Option<&[Index]> {
+        let mask = self.nonlinear_vars.as_deref()?;
+        if mask.is_empty() || mask.len() as Index >= n {
+            return None;
+        }
+        if mask.last().is_some_and(|&last| last >= n) {
+            return None;
+        }
+        Some(mask)
+    }
+
     fn compute_sigma_bfgs(&self) -> Number {
         if self.history.is_empty() {
             return 1.0;
@@ -412,6 +486,18 @@ fn set_expanded(dst: &mut dyn Vector, flat: &[Number]) {
         return;
     }
     panic!("LimMemQuasiNewtonUpdater: unsupported primal vector type for set_expanded");
+}
+
+/// Gather the entries of `v` named by `mask` into a fresh dense vector
+/// of dimension `mask.len()` — the `Pᵀ v` of upstream's expansion
+/// matrix, done by index because the mask path never sees a compound
+/// primal.
+fn project_onto(v: &dyn Vector, mask: &[Index]) -> Rc<dyn Vector> {
+    let full = expanded_of(v);
+    let small: Vec<Number> = mask.iter().map(|&i| full[i as usize]).collect();
+    let mut out = DenseVectorSpace::new(mask.len() as Index).make_new_dense();
+    out.set_values(&small);
+    Rc::new(out)
 }
 
 fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
@@ -712,5 +798,62 @@ mod tests {
         let up = LimMemQuasiNewtonUpdater::new();
         let (v, u) = up.build_low_rank(1.0, 4);
         assert!(v.is_empty() && u.is_empty());
+    }
+
+    // ---- gh#624: nonlinear-variable mask ----
+
+    #[test]
+    fn no_mask_is_the_default() {
+        let u = LimMemQuasiNewtonUpdater::new();
+        assert!(u.nonlinear_vars.is_none());
+        assert!(u.active_mask(5).is_none());
+    }
+
+    #[test]
+    fn mask_spanning_the_whole_space_is_no_mask() {
+        // A "restriction" to every variable is the identity; publishing
+        // an expansion matrix for it would cost work and change nothing.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.nonlinear_vars = Some(vec![0, 1, 2]);
+        assert!(u.active_mask(3).is_none());
+        u.nonlinear_vars = Some(vec![]);
+        assert!(u.active_mask(3).is_none());
+    }
+
+    #[test]
+    fn mask_is_ignored_for_a_space_it_does_not_fit() {
+        // The restoration sub-IPM's primal is a wider compound vector.
+        // `run_inner_resto` clears the mask, but if one ever reached a
+        // space it was not built for, the full-space approximation is
+        // the safe answer — never a gather from the wrong indices.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.nonlinear_vars = Some(vec![0, 4]);
+        assert_eq!(u.active_mask(9).map(|m| m.to_vec()), Some(vec![0, 4]));
+        assert!(u.active_mask(3).is_none());
+    }
+
+    #[test]
+    fn projection_gathers_the_masked_entries() {
+        let v = rcv(&[10.0, 20.0, 30.0, 40.0]);
+        let p = project_onto(&*v, &[1, 3]);
+        assert_eq!(p.dim(), 2);
+        assert_eq!(expanded_of(&*p), vec![20.0, 40.0]);
+    }
+
+    #[test]
+    fn masked_history_lives_in_the_reduced_space() {
+        // Curvature pairs are projected before they enter the history,
+        // so σ and the stored columns are all reduced-dimension.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.nonlinear_vars = Some(vec![0, 2]);
+        let s = rcv(&[1.0, 5.0, 1.0, 7.0]);
+        let y = rcv(&[1.0, 9.0, 1.0, 3.0]);
+        let mask = u.active_mask(4).unwrap().to_vec();
+        assert!(u.ingest_pair(project_onto(&*s, &mask), project_onto(&*y, &mask)));
+        let stored = &u.history[0];
+        assert_eq!(stored.s.dim(), 2);
+        // s·y over the nonlinear coordinates only: 1*1 + 1*1 = 2. The
+        // linear coordinates (5·9 + 7·3) must not contribute.
+        assert!((stored.s_dot_y - 2.0).abs() < 1e-15);
     }
 }

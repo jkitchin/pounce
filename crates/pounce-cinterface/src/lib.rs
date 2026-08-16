@@ -168,6 +168,15 @@ pub struct IpoptProblemInfo {
     /// iterate instead of querying the NLP for a starting point. The
     /// merge therefore has to happen inside `IpoptSolve` (gh#484).
     pub(crate) pending_working_set: Option<pounce_qp::WorkingSet>,
+    /// Nonlinear-variable subset staged by
+    /// [`IpoptSetNonlinearVariables`] (gh#624). Stored in the problem's
+    /// own index style, exactly as the caller passed it; the bridge
+    /// TNLP serves it back through
+    /// `get_number_of_nonlinear_variables` /
+    /// `get_list_of_nonlinear_variables`, which is where the algorithm
+    /// reads it. `None` — the default — means "every variable is
+    /// nonlinear".
+    pub(crate) nonlinear_vars: Option<Vec<Index>>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -370,6 +379,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             eval_h,
             intermediate_cb: None,
             user_scaling: None,
+            nonlinear_vars: None,
             last_solve: None,
             pending_working_set: None,
         });
@@ -704,6 +714,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 user_data,
                 intermediate_cb: info.intermediate_cb,
                 user_scaling: info.user_scaling.clone(),
+                nonlinear_vars: info.nonlinear_vars.clone(),
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],
@@ -832,44 +843,62 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
             return FALSE;
         }
         let result = ip_intermediate::with_current(|ctx| {
-            let data = ctx.data.borrow();
-            let Some(curr) = data.curr.as_ref() else {
-                return false;
+            // Snapshot the iterate handles and release the `data` borrow
+            // before touching `cq`: several `IpoptCq` accessors
+            // (`curr_c`, `curr_d`, …) evaluate through the NLP and take
+            // `nlp.borrow_mut()` internally, so no `nlp`/`data` borrow may
+            // be alive across them. Holding one here panicked
+            // ("RefCell already borrowed") on every `g != NULL` call, and
+            // a panic across this `extern "C"` boundary aborts the
+            // process rather than returning `FALSE`.
+            let curr = {
+                let data = ctx.data.borrow();
+                match data.curr.as_ref() {
+                    Some(curr) => curr.clone(),
+                    None => return false,
+                }
             };
-            let nlp = ctx.nlp.borrow();
             let n_us = n as usize;
             let m_us = m as usize;
             if !x.is_null() && n_us > 0 {
-                let full_x = nlp.lift_x_to_full(&*curr.x);
+                let full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
                 if full_x.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
             }
             if !z_l.is_null() && n_us > 0 {
-                let full = nlp.pack_z_l_for_user(&*curr.z_l);
+                let full = ctx.nlp.borrow().pack_z_l_for_user(&*curr.z_l);
                 if full.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
             }
             if !z_u.is_null() && n_us > 0 {
-                let full = nlp.pack_z_u_for_user(&*curr.z_u);
+                let full = ctx.nlp.borrow().pack_z_u_for_user(&*curr.z_u);
                 if full.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
             }
             if !g.is_null() && m_us > 0 {
-                let cq = ctx.cq.borrow();
-                let full = nlp.pack_g_for_user(&*cq.curr_c(), &*cq.curr_d());
+                // `curr_c` / `curr_d` re-enter the NLP mutably: evaluate
+                // them first, *then* borrow `nlp` to pack the result.
+                let (c, d) = {
+                    let cq = ctx.cq.borrow();
+                    (cq.curr_c(), cq.curr_d())
+                };
+                let full = ctx.nlp.borrow().pack_g_for_user(&*c, &*d);
                 if full.len() != m_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(full.as_ptr(), g, m_us);
             }
             if !lambda.is_null() && m_us > 0 {
-                let full = nlp.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                let full = ctx
+                    .nlp
+                    .borrow()
+                    .pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
                 if full.len() != m_us {
                     return false;
                 }
@@ -924,10 +953,14 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 return false;
             };
             drop(data);
-            let nlp = ctx.nlp.borrow();
             let cq = ctx.cq.borrow();
             let n_us = n as usize;
             let m_us = m as usize;
+            // No `nlp` borrow may be held across a `cq` accessor that
+            // evaluates through the NLP (`curr_grad_lag_x` reaches
+            // `curr_grad_f`, which takes `nlp.borrow_mut()`); each branch
+            // below therefore borrows `nlp` only to pack a value that has
+            // already been computed. See `GetIpoptCurrentIterate`.
             // x_L / x_U violations: scatter the compressed slack-shortfalls
             // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
             // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
@@ -935,7 +968,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
             // sign and clamp.
             if !x_l_violation.is_null() && n_us > 0 {
                 let slack = cq.curr_slack_x_l();
-                let z_l_full = nlp.pack_z_l_for_user(&*slack);
+                let z_l_full = ctx.nlp.borrow().pack_z_l_for_user(&*slack);
                 // Guard the scatter length exactly like the sibling branches
                 // below: an unexpected packed length would otherwise index
                 // `v[i]` out of bounds and panic across this `extern "C"`
@@ -955,7 +988,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
             }
             if !x_u_violation.is_null() && n_us > 0 {
                 let slack = cq.curr_slack_x_u();
-                let s_full = nlp.pack_z_u_for_user(&*slack);
+                let s_full = ctx.nlp.borrow().pack_z_u_for_user(&*slack);
                 if s_full.len() != n_us {
                     return false;
                 }
@@ -966,14 +999,16 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
             }
             if !compl_x_l.is_null() && n_us > 0 {
-                let v = nlp.pack_z_l_for_user(&*cq.curr_compl_x_l());
+                let compl = cq.curr_compl_x_l();
+                let v = ctx.nlp.borrow().pack_z_l_for_user(&*compl);
                 if v.len() != n_us {
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
             }
             if !compl_x_u.is_null() && n_us > 0 {
-                let v = nlp.pack_z_u_for_user(&*cq.curr_compl_x_u());
+                let compl = cq.curr_compl_x_u();
+                let v = ctx.nlp.borrow().pack_z_u_for_user(&*compl);
                 if v.len() != n_us {
                     return false;
                 }
@@ -984,7 +1019,7 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
                 // Scatter compressed x-var → full-x via lift_x_to_full
                 // (treats `glx` as if it were an x-vector). Fixed-variable
                 // slots remain zero.
-                let full = nlp.lift_x_to_full(&*glx);
+                let full = ctx.nlp.borrow().lift_x_to_full(&*glx);
                 if full.len() != n_us {
                     return false;
                 }
@@ -1399,6 +1434,98 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
     }
 }
 
+/// Declare which variables enter the problem **nonlinearly** (gh#624).
+///
+/// This is the C-API face of Ipopt's `TNLP::get_number_of_nonlinear_variables`
+/// / `get_list_of_nonlinear_variables` pair, which upstream exposes only
+/// to C++ callers. It exists so a frontend that already knows the
+/// structure of its model — CasADi's `pass_nonlinear_variables`, an
+/// algebraic modeling language, a hand-written driver — can hand that
+/// knowledge to pounce.
+///
+/// Effect is confined to the **limited-memory** Hessian: curvature is
+/// approximated over the declared subset only, and the Hessian is
+/// exactly zero for every other variable. Exact-Hessian solves ignore
+/// the declaration entirely, and so does any solve that never calls
+/// this function — the default remains "all variables are nonlinear".
+/// The subset takes precedence over the `num_linear_variables` option,
+/// matching Ipopt's own ordering.
+///
+/// `pos_nonlin_vars` holds `num_nonlin_vars` variable indices **in the
+/// problem's index style** (the `index_style` passed to
+/// [`CreateIpoptProblem`]). The subset may be arbitrary and
+/// noncontiguous; order does not matter. Passing `num_nonlin_vars == n`
+/// is equivalent to not calling this at all.
+///
+/// Returns `FALSE` (leaving any previous declaration untouched) on a
+/// NULL problem, a negative or oversized count, a NULL array with a
+/// positive count, or an index outside the problem's variable range.
+///
+/// Note the deliberate signature choice: the issue that requested this
+/// suggested a `const Bool*` mask, but `Bool` in the Ipopt C API is a
+/// C99 `bool`, and a *array* of those would be a per-element
+/// data-layout contract that is easy to get wrong from a caller with a
+/// different boolean width. The count-plus-index-list shape is the one
+/// the TNLP callbacks already use.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+/// `pos_nonlin_vars`, when non-NULL, must point at `num_nonlin_vars`
+/// readable `ipindex` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn IpoptSetNonlinearVariables(
+    ipopt_problem: IpoptProblem,
+    num_nonlin_vars: Index,
+    pos_nonlin_vars: *const Index,
+) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        if num_nonlin_vars < 0 || num_nonlin_vars > info.n {
+            return FALSE;
+        }
+        if num_nonlin_vars > 0 && pos_nonlin_vars.is_null() {
+            return FALSE;
+        }
+        let offset = if info.index_style == 1 { 1 } else { 0 };
+        let raw = if num_nonlin_vars == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(pos_nonlin_vars, num_nonlin_vars as usize)
+        };
+        // Validate before storing: a half-applied declaration would be
+        // worse than a refused one.
+        for &p in raw {
+            let zero_based = p - offset;
+            if zero_based < 0 || zero_based >= info.n {
+                return FALSE;
+            }
+        }
+        info.nonlinear_vars = Some(raw.to_vec());
+        TRUE
+    }
+}
+
+/// Drop a subset declared by [`IpoptSetNonlinearVariables`], restoring
+/// the default (every variable treated as nonlinear).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProblem) -> Bool {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        (*ipopt_problem).nonlinear_vars = None;
+        TRUE
+    }
+}
+
 /// Drop any pending warm-start working set without solving. The
 /// next [`IpoptSolve`] will cold-start.
 ///
@@ -1509,6 +1636,9 @@ pub(crate) struct CCallbackTnlp {
     pub(crate) intermediate_cb: Option<Intermediate_CB>,
     /// Snapshot of user-provided scaling captured at solve time.
     pub(crate) user_scaling: Option<UserScaling>,
+    /// Snapshot of the nonlinear-variable subset (gh#624), in the
+    /// problem's index style.
+    pub(crate) nonlinear_vars: Option<Vec<Index>>,
     pub(crate) final_status: Option<pounce_nlp::alg_types::SolverReturn>,
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_z_l: Vec<Number>,
@@ -1531,6 +1661,30 @@ impl TNLP for CCallbackTnlp {
                 IndexStyle::C
             },
         })
+    }
+
+    /// gh#624 — serve the subset staged by
+    /// [`IpoptSetNonlinearVariables`]. `-1` (no subset) keeps the
+    /// upstream default of "all variables are nonlinear".
+    fn get_number_of_nonlinear_variables(&mut self) -> pounce_common::types::Index {
+        match &self.nonlinear_vars {
+            Some(v) => v.len() as pounce_common::types::Index,
+            None => -1,
+        }
+    }
+
+    fn get_list_of_nonlinear_variables(
+        &mut self,
+        pos_nonlin_vars: &mut [pounce_common::types::Index],
+    ) -> bool {
+        let Some(v) = self.nonlinear_vars.as_ref() else {
+            return false;
+        };
+        if v.len() != pos_nonlin_vars.len() {
+            return false;
+        }
+        pos_nonlin_vars.copy_from_slice(v);
+        true
     }
 
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {

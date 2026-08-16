@@ -198,6 +198,7 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 user_data,
                 intermediate_cb: info.problem.intermediate_cb,
                 user_scaling: info.problem.user_scaling.clone(),
+                nonlinear_vars: info.problem.nonlinear_vars.clone(),
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],

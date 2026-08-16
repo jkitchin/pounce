@@ -231,6 +231,19 @@ pub struct AlgorithmBuilder {
     /// the read sites were missing (gh#483, #191 round 2).
     pub limited_memory_init_val_max: Number,
     pub limited_memory_init_val_min: Number,
+    /// Positions in the algorithm's compressed `x_var` space that enter
+    /// the problem *nonlinearly* (gh#624). `None` — the default —
+    /// approximates the Hessian over every variable, which is what the
+    /// limited-memory path has always done. When set, the quasi-Newton
+    /// update is restricted to this subspace and the Hessian is exactly
+    /// zero elsewhere. Comes from
+    /// `TNLPAdapter::quasi_newton_nonlinear_vars` (the TNLP's
+    /// `get_list_of_nonlinear_variables`, or the `num_linear_variables`
+    /// prefix fallback) and is ignored on the exact-Hessian path.
+    ///
+    /// The restoration sub-IPM must clear this: the mask indexes the
+    /// original NLP's variables, not the restoration compound primal.
+    pub limited_memory_nonlinear_vars: Option<Vec<Index>>,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
     /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
@@ -895,6 +908,7 @@ impl Default for AlgorithmBuilder {
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
             limited_memory_init_val_min: 1e-8,
+            limited_memory_nonlinear_vars: None,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
@@ -1216,6 +1230,7 @@ impl AlgorithmBuilder {
                 max_history: self.limited_memory_max_history,
                 init_val_max: self.limited_memory_init_val_max,
                 init_val_min: self.limited_memory_init_val_min,
+                nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
                 ..LimMemQuasiNewtonUpdater::default()
             }),
         };
@@ -1328,6 +1343,7 @@ mod tests {
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,
                             limited_memory_init_val_min: 1e-8,
+                            limited_memory_nonlinear_vars: None,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,

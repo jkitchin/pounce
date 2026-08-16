@@ -14,7 +14,7 @@
 //! treatment, scaling) lands with Phase 5 when `IpoptNLP` and
 //! `ExpansionMatrix` are wired up.
 
-use crate::tnlp::{BoundsInfo, NlpInfo, TNLP};
+use crate::tnlp::{BoundsInfo, IndexStyle, NlpInfo, TNLP};
 use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::types::{Index, Number};
 use std::cell::RefCell;
@@ -305,6 +305,107 @@ impl TNLPAdapter {
 
     pub fn tnlp(&self) -> &Rc<RefCell<dyn TNLP>> {
         &self.tnlp
+    }
+
+    /// Which variables the limited-memory quasi-Newton approximation
+    /// should span — port of `IpTNLPAdapter::GetQuasiNewtonApproxSpaces`
+    /// (`IpTNLPAdapter.cpp:2330`), the Ipopt hook behind CasADi's
+    /// `pass_nonlinear_variables` (gh#624).
+    ///
+    /// Returns positions in the algorithm's **compressed `x_var` space**
+    /// (fixed variables already removed), sorted and deduplicated.
+    /// `None` means "every variable is nonlinear" — the default, and the
+    /// identity case upstream signals with a NULL expansion matrix.
+    ///
+    /// Precedence mirrors upstream: a TNLP that implements
+    /// `get_number_of_nonlinear_variables` wins; `num_linear_variables`
+    /// is the contiguous-prefix fallback consulted only when the
+    /// callback declines (returns a negative count).
+    pub fn quasi_newton_nonlinear_vars(
+        &self,
+        num_linear_variables: Index,
+    ) -> Result<Option<Vec<Index>>, SolverException> {
+        let n_full_x = self.classification.n_full_x;
+        let num_nonlin = self.tnlp.borrow_mut().get_number_of_nonlinear_variables();
+
+        let full_positions: Vec<Index> = if num_nonlin < 0 {
+            // No callback information. Upstream then treats the first
+            // `num_linear_variables` variables as linear and everything
+            // after them as nonlinear; `0` (the default) means "all
+            // nonlinear", i.e. no restriction at all.
+            if num_linear_variables <= 0 {
+                return Ok(None);
+            }
+            if num_linear_variables > n_full_x {
+                return Err(SolverException::new(
+                    ExceptionKind::INVALID_TNLP,
+                    "num_linear_variables exceeds the number of variables",
+                    file!(),
+                    line!() as Index,
+                ));
+            }
+            (num_linear_variables..n_full_x).collect()
+        } else {
+            if num_nonlin > n_full_x {
+                return Err(SolverException::new(
+                    ExceptionKind::INVALID_TNLP,
+                    "TNLP's get_number_of_nonlinear_variables exceeds the number of variables",
+                    file!(),
+                    line!() as Index,
+                ));
+            }
+            let mut pos = vec![0 as Index; num_nonlin as usize];
+            if !self
+                .tnlp
+                .borrow_mut()
+                .get_list_of_nonlinear_variables(&mut pos)
+            {
+                return Err(SolverException::new(
+                    ExceptionKind::INVALID_TNLP,
+                    "TNLP's get_number_of_nonlinear_variables returns a non-negative number, \
+                     but get_list_of_nonlinear_variables returns false",
+                    file!(),
+                    line!() as Index,
+                ));
+            }
+            // The list arrives in the TNLP's own index style.
+            let offset = match self.info.index_style {
+                IndexStyle::C => 0,
+                IndexStyle::Fortran => 1,
+            };
+            for p in pos.iter_mut() {
+                *p -= offset;
+                if *p < 0 || *p >= n_full_x {
+                    return Err(SolverException::new(
+                        ExceptionKind::INVALID_TNLP,
+                        "TNLP's get_list_of_nonlinear_variables returned an out-of-range index",
+                        file!(),
+                        line!() as Index,
+                    ));
+                }
+            }
+            pos
+        };
+
+        // Drop fixed variables and translate to the compressed space —
+        // upstream filters through `P_x_full_x_` the same way, so a mask
+        // stated over the user's variables survives
+        // `fixed_variable_treatment = make_parameter`.
+        let mut small: Vec<Index> = full_positions
+            .iter()
+            .filter_map(|&i| {
+                let v = self.classification.full_to_var[i as usize];
+                (v >= 0).then_some(v)
+            })
+            .collect();
+        small.sort_unstable();
+        small.dedup();
+
+        // Everything nonlinear ⇒ no restriction (and no expansion matrix).
+        if small.len() as Index == self.classification.n_x_var() {
+            return Ok(None);
+        }
+        Ok(Some(small))
     }
 }
 
@@ -980,5 +1081,179 @@ mod tests {
         assert_eq!(c.n_d, 1);
         assert_eq!(c.d_l_map, vec![0]);
         assert!(c.d_u_map.is_empty());
+    }
+
+    // ---- gh#624: nonlinear-variable subsets for the L-BFGS Hessian ----
+
+    /// Same 3-variable model as [`Mixed`] (x[0] fixed at 3), with the
+    /// two Ipopt nonlinear-variable callbacks under test control.
+    struct NonlinVars {
+        style: IndexStyle,
+        num: Index,
+        list: Vec<Index>,
+        list_ok: bool,
+    }
+
+    impl NonlinVars {
+        fn declaring(list: &[Index]) -> Self {
+            Self {
+                style: IndexStyle::C,
+                num: list.len() as Index,
+                list: list.to_vec(),
+                list_ok: true,
+            }
+        }
+        fn silent() -> Self {
+            Self {
+                style: IndexStyle::C,
+                num: -1,
+                list: Vec::new(),
+                list_ok: false,
+            }
+        }
+    }
+
+    impl TNLP for NonlinVars {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: self.style,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[3.0, -2.0e19, -2.0e19]);
+            b.x_u.copy_from_slice(&[3.0, 2.0e19, 7.0]);
+            b.g_l.copy_from_slice(&[0.0, -2.0e19]);
+            b.g_u.copy_from_slice(&[1.0, 2.0e19]);
+            true
+        }
+        fn get_starting_point(&mut self, _sp: StartingPoint<'_>) -> bool {
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.fill(0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _m: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+
+        fn get_number_of_nonlinear_variables(&mut self) -> Index {
+            self.num
+        }
+        fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
+            if !self.list_ok {
+                return false;
+            }
+            pos.copy_from_slice(&self.list);
+            true
+        }
+    }
+
+    fn adapter_for(t: NonlinVars) -> TNLPAdapter {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(t));
+        TNLPAdapter::new(tnlp).unwrap()
+    }
+
+    #[test]
+    fn silent_tnlp_and_no_option_means_all_nonlinear() {
+        let adapter = adapter_for(NonlinVars::silent());
+        assert_eq!(adapter.quasi_newton_nonlinear_vars(0).unwrap(), None);
+    }
+
+    #[test]
+    fn declared_subset_maps_through_fixed_variable_removal() {
+        // x[0] is fixed, so it leaves the algorithm's space entirely;
+        // x[2] is var-index 1. Declaring {x[0], x[2]} must come out as
+        // the single compressed position 1 — not 2, and not a
+        // dangling reference to the removed variable.
+        let adapter = adapter_for(NonlinVars::declaring(&[0, 2]));
+        assert_eq!(
+            adapter.quasi_newton_nonlinear_vars(0).unwrap(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn declared_subset_is_read_in_the_tnlp_index_style() {
+        let mut t = NonlinVars::declaring(&[3]); // 1-based ⇒ x[2]
+        t.style = IndexStyle::Fortran;
+        let adapter = adapter_for(t);
+        assert_eq!(
+            adapter.quasi_newton_nonlinear_vars(0).unwrap(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn declaring_every_free_variable_is_the_identity_case() {
+        // {x[1], x[2]} is the whole compressed space ⇒ no restriction,
+        // and no expansion matrix downstream.
+        let adapter = adapter_for(NonlinVars::declaring(&[1, 2]));
+        assert_eq!(adapter.quasi_newton_nonlinear_vars(0).unwrap(), None);
+    }
+
+    #[test]
+    fn unsorted_and_duplicated_declarations_are_normalized() {
+        let adapter = adapter_for(NonlinVars::declaring(&[2, 2, 0]));
+        assert_eq!(
+            adapter.quasi_newton_nonlinear_vars(0).unwrap(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn num_linear_variables_is_the_fallback_prefix() {
+        // No callback information: the first two variables are linear,
+        // leaving full-x {2} ⇒ compressed {1}.
+        let adapter = adapter_for(NonlinVars::silent());
+        assert_eq!(
+            adapter.quasi_newton_nonlinear_vars(2).unwrap(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn callback_information_beats_num_linear_variables() {
+        // Upstream precedence: with the callback answered,
+        // `num_linear_variables` is ignored outright.
+        let adapter = adapter_for(NonlinVars::declaring(&[0, 2]));
+        assert_eq!(
+            adapter.quasi_newton_nonlinear_vars(2).unwrap(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn refusing_the_list_after_declaring_a_count_is_an_error() {
+        let mut t = NonlinVars::declaring(&[2]);
+        t.list_ok = false;
+        let adapter = adapter_for(t);
+        assert!(adapter.quasi_newton_nonlinear_vars(0).is_err());
+    }
+
+    #[test]
+    fn out_of_range_declarations_are_rejected() {
+        let adapter = adapter_for(NonlinVars::declaring(&[7]));
+        assert!(adapter.quasi_newton_nonlinear_vars(0).is_err());
+
+        let adapter = adapter_for(NonlinVars::silent());
+        assert!(adapter.quasi_newton_nonlinear_vars(99).is_err());
     }
 }

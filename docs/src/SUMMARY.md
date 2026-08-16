@@ -30,6 +30,7 @@
 
 - [Pyomo](pyomo.md)
 - [GAMS](gams.md)
+- [CasADi](casadi.md)
 - [Python API](python.md)
 - [Rust API](rust.md)
   - [Path Following & Inverse Mapping](path-following.md)
