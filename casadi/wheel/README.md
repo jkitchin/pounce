@@ -53,9 +53,12 @@ resulting `_plugins/<minor>/` trees merged into one wheel per platform:
 - **macOS** — x86_64 and arm64. The Makefile rewrites the plugin's reference
   to `libpounce_cinterface` to `@rpath` and adds `@loader_path`, because Rust
   stamps a cdylib's install name with its absolute *build* path; without that
-  the staged plugin loads only on the build machine. Verify with
-  `otool -L` before shipping — the line must read
-  `@rpath/libpounce_cinterface.dylib`, not an absolute path.
+  the staged plugin loads only on the build machine. CI asserts this on the
+  `macos-latest` leg of the `CasADi plugin parity` job — `otool -L` must read
+  `@rpath/libpounce_cinterface.dylib`, never an absolute path — and then hides
+  the build tree and re-solves through the installed wheel, since a plugin
+  that only *appears* relocatable passes every other test on the build
+  machine.
 - **Windows** — MSVC, matching CasADi's own toolchain.
 
 CasADi minor releases are infrequent (3.6 in 2023, 3.7 in 2025), so the matrix

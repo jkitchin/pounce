@@ -1,7 +1,7 @@
 # CasADi `Nlpsol` plugin for POUNCE
 
-Builds `libcasadi_nlpsol_pounce.so`, which registers POUNCE as a CasADi
-NLP solver. Once it is on CasADi's plugin search path:
+Builds `libcasadi_nlpsol_pounce.so` (`.dylib` on macOS), which registers
+POUNCE as a CasADi NLP solver. Once it is on CasADi's plugin search path:
 
 ```python
 import casadi as ca
@@ -58,7 +58,7 @@ plugin only has to land there — no environment variable, and no `sudo`,
 because that is the user's `site-packages`:
 
 ```bash
-make install       # copies the .so next to the casadi that will load it
+make install       # copies the plugin next to the casadi that will load it
 ```
 
 For a system-wide CasADi you cannot write to, keep the plugin where it
