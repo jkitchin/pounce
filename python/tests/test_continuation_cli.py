@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -26,6 +27,27 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 _FIXTURES = os.path.join(_ROOT, "crates", "pounce-cli", "tests", "fixtures")
 
 
+def _works(path):
+    """A path is only a usable CLI if it actually runs.
+
+    `shutil.which("pounce")` finds the wheel's *console-script shim*,
+    which is present whenever pounce-solver is installed but only
+    execs a real binary when the wheel was built with `pounce/bin/`
+    staged. CI builds the wheel straight from `maturin-action` with no
+    staging step, so the shim is on PATH, exits 1, and every solve in
+    a trace silently returns nothing — which is how this arrived as
+    `assert 0 == 2` rather than as a skip.
+    """
+    if path is None:
+        return False
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def _binary():
     local = os.path.join(_ROOT, "target", "release", "pounce")
     if os.path.exists(local):
@@ -36,9 +58,13 @@ def _binary():
     return shutil.which("pounce")
 
 
+_CLI = _binary() if _works(_binary()) else None
+
 needs_cli = pytest.mark.skipif(
-    _binary() is None or not os.path.isdir(_FIXTURES),
-    reason="needs a built pounce binary and the CLI fixture corpus",
+    _CLI is None or not os.path.isdir(_FIXTURES),
+    reason="needs a *working* pounce binary (a wheel built without "
+           "pounce/bin/ staged leaves only a shim that exits 1) and the "
+           "CLI fixture corpus",
 )
 
 
@@ -188,7 +214,7 @@ def test_trace_manifest_solves_every_point(tmp_path):
                    {"model": "p1.nl", "theta": [0.0]}],
         "options": {"print_level": "0", "sb": "yes"},
     }))
-    trace = trace_manifest(man, binary=_binary(), workdir=str(tmp_path))
+    trace = trace_manifest(man, binary=_CLI, workdir=str(tmp_path))
     assert trace["n_points"] == 2
     assert trace["n_converged"] == 2
     assert all(s["status"] in (0, 1) for s in trace["steps"])
@@ -211,7 +237,7 @@ def test_cold_mode_does_not_transfer(tmp_path):
         "points": [{"model": "p0.nl"}, {"model": "p1.nl"}],
         "options": {"print_level": "0", "sb": "yes"},
     }))
-    trace = trace_manifest(man, binary=_binary(), cold=True,
+    trace = trace_manifest(man, binary=_CLI, cold=True,
                            workdir=str(tmp_path))
     assert trace["mode"] == "cold"
     assert [s["predictor"] for s in trace["steps"]] == ["cold", "cold"]
@@ -229,7 +255,8 @@ def test_cli_entry_point_runs(tmp_path):
     })
     out = str(tmp_path / "trace.json")
     proc = subprocess.run(
-        ["python", "-m", "pounce._continuation_cli", man, "--out", out],
+        [sys.executable, "-m", "pounce._continuation_cli", man,
+         "--out", out, "--binary", _CLI],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
