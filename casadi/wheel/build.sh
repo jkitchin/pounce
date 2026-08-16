@@ -20,7 +20,19 @@ make -C "$here/.." "$@"
 dest="$here/pounce_casadi/_plugins/$minor"
 mkdir -p "$dest"
 cp "$here/../libcasadi_nlpsol_pounce."* "$dest/"
-cp "$root/target/release/libpounce_cinterface."* "$dest/" 2>/dev/null || true
+
+# The shared library only. The old glob also matched the sibling `.d`
+# depfile and `.rlib`, which are build artefacts -- the `.rlib` alone is
+# 1.3 MB of Rust static archive shipped to every user for nothing.
+copied=0
+for f in "$root/target/release/libpounce_cinterface.so" \
+         "$root/target/release/libpounce_cinterface.dylib" \
+         "$root/target/release/pounce_cinterface.dll"; do
+  if [ -f "$f" ]; then cp "$f" "$dest/"; copied=1; fi
+done
+if [ "$copied" = 0 ]; then
+  echo "warning: no libpounce_cinterface shared library in $root/target/release" >&2
+fi
 
 python3 -m pip wheel --no-deps -w "$here/dist" "$here"
 echo "wheel written to $here/dist"

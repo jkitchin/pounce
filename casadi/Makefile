@@ -37,10 +37,29 @@ POUNCE_LIB  ?= $(POUNCE_ROOT)/target/release
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
   SO_EXT := dylib
-  RPATH   = -Wl,-rpath,$(CASADI_LIB) -Wl,-rpath,$(POUNCE_LIB)
+  # `@loader_path` covers the layout the wheel ships: plugin and solver
+  # library side by side in one directory, wherever pip put it.
+  RPATH   = -Wl,-rpath,$(CASADI_LIB) -Wl,-rpath,$(POUNCE_LIB) \
+            -Wl,-rpath,@loader_path
+  # Rust stamps a cdylib's LC_ID_DYLIB with its absolute build path, so the
+  # plugin links against `/abs/.../target/release/deps/libpounce_cinterface.dylib`
+  # and BOTH -rpath entries above are inert for it: dyld resolves an absolute
+  # install name directly and never consults the rpath list. Left alone the
+  # plugin loads only while that exact build tree survives at that exact path
+  # -- and when it does not, CasADi's loader swallows the dlopen error and
+  # reports `Plugin 'pounce' is not found`, which sends you looking in the
+  # wrong place entirely. Rewrite the reference to @rpath so the rpath list
+  # above is what decides.
+  #
+  # Linux needs none of this: the reference there is the soname, which the
+  # rpath already resolves.
+  FIXUP = install_name_tool -change \
+            "$$(otool -D $(POUNCE_LIB)/libpounce_cinterface.dylib | tail -1)" \
+            @rpath/libpounce_cinterface.dylib $(PLUGIN)
 else
   SO_EXT := so
   RPATH   = -Wl,-rpath,$(CASADI_LIB) -Wl,-rpath,$(POUNCE_LIB)
+  FIXUP = :
 endif
 
 PLUGIN := libcasadi_nlpsol_pounce.$(SO_EXT)
@@ -102,6 +121,7 @@ abi-flags:
 
 $(PLUGIN): casadi_nlpsol_pounce.cpp pounce_runtime.hpp
 	$(CXX) -shared $(CXXFLAGS) $(DEFS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+	@$(FIXUP)
 
 ## Install the plugin next to the CasADi that will load it. CasADi's
 ## plugin loader searches its own package directory first, so this makes
