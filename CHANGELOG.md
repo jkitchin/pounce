@@ -9,6 +9,75 @@ changes.
 
 ## [Unreleased]
 
+- **`WarmStart` artifacts carry the model they belong to, and warm-start
+  options no longer outlive the call that asked for them** (#607). Two
+  independent silences in `pounce.WarmStart`, both of the shape gh#544
+  taught us to distrust — the answer is fine, everything else is not.
+
+  *Option scoping.* Applying a warm start called `add_option` on the
+  **persistent** `Problem`, and `add_option` is append-only, so the seven
+  enabling options (`warm_start_init_point`, `mu_init`, the four
+  `warm_start_*_push` / `_frac` and `warm_start_mult_bound_push`) stayed
+  set for every later solve on that object. Measured on HS071 at the
+  parent commit `70bf53de`: an ordinary cold solve that takes 17
+  iterations on a fresh `Problem` takes **24** on one that has served a
+  warm solve — the same objective to ten digits, 41% more iterations, and
+  nothing anywhere saying why. A warm solve that *raised* left the same
+  residue. They are now installed as a scoped overlay and taken back in a
+  `finally`, so both cases come back to 17. The overlay snapshots and
+  restores the whole option list rather than unsetting a list of names,
+  so an option added to `WarmStart.options()` later is scoped by
+  construction.
+
+  *Persistence schema.* A serialized warm start recorded arrays and four
+  floats — no dimensions, ordering, sparsity, bounds, scaling, algorithm
+  or model fingerprint — so an incompatible replay was simply attempted.
+  Replayed against the same model with its variables reordered it
+  returned objective **16.3801** where the truth is 17.0140, `x` wrong by
+  0.257, status `Error_In_Step_Computation`, no exception and no warning;
+  against a changed box, 15.8436 and `Restoration_Failed`; against a
+  different model of the same shape, a clean `Solve_Succeeded` for the
+  wrong reason. The archive schema is now versioned (v2) and carries a
+  `ProblemSignature`: dimensions, optional stable variable/constraint
+  IDs, and digests of the bound signature, declared sparsity, scaling
+  convention, algorithm/backend and the model-defining options. Capture
+  it with `WarmStart.from_info(x, info, problem=prob)`; a mismatch is
+  refused **before the solver is entered**, with a report naming every
+  facet that moved and the ways forward.
+
+  `compat="strict"` (default) raises, `"warn"` warns and proceeds,
+  `"unsafe"` skips the check. Replay is labelled `exact` or `mapped`:
+  `ws.transfer(prob, mapper)` is the explicit hook for a horizon shift or
+  a changed discretization, `ws.reindex(prob, var_ids=…)` writes the
+  mapper for you when both sides carry stable IDs, and a mapped artifact
+  is still refused on a third problem. Unmapped multiplier entries are
+  seeded `NaN`, the native "unseeded" contract, rather than fabricated.
+
+  *Migration.* Version-1 archives — everything written before this — load
+  and replay unchanged; they are *unverifiable*, not incompatible, and
+  refusing them outright would be a migration cost with no safety return.
+  What they get is a one-line `WarmStartLegacyWarning` naming
+  `ws.migrate(prob)`, plus the one check their own arrays support: the
+  dimensions. An unsigned *in-memory* `from_info(x, info)` stays silent,
+  as before. A v2 archive stays readable by a v1 loader — the new keys
+  are additive and `_meta` is untouched.
+
+  Known limitations, stated because one of them is a case the issue
+  names: a permutation of a model with a uniform box and a dense
+  jacobian leaves every structural digest bit-identical, so a reordering
+  is detectable only when the caller supplies `var_ids` on both sides.
+  And a mapped interior-point warm start is a correctness mechanism, not
+  a speed-up — on a receding-horizon fixture the transferred point costs
+  12 iterations against 7 cold, widening to 30 against 10 at horizon 40,
+  which is the barrier/active-set limit `docs/src/initialization.md`
+  already describes.
+
+  Python-side, plus four additive `Problem` accessors
+  (`options_snapshot` / `restore_options`, `get_bounds`,
+  `get_problem_scaling`, `problem_obj`); no solver step moved. The
+  fixture sweep is identical across all 57 models — status, objective and
+  iteration count.
+
 - **The cold-start initialization options are settable** (#604).
   `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,
   `constr_mult_init_max`, `bound_mult_init_val`, `bound_mult_init_method`
