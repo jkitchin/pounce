@@ -456,9 +456,24 @@ clean *"Plugin 'pounce' is not found"*.
 
 ## What is not supported
 
-- **Code generation.** `solver.generate()` is not available, the same as
-  for CasADi's Ipopt plugin. The oracle still generates; the solver call
-  does not.
+- **Code generation of the solver call.** `solver.generate()` runs, but
+  warns *"cannot be code generated"* and emits a stub that will not
+  compile — CasADi's fallback for a plugin with no `codegen_body`. The
+  oracle functions generate fine; the solve does not.
+
+  Unlike the other entries here, this one is **not** a limitation
+  CasADi's Ipopt plugin shares: that plugin does generate, emitting C
+  that includes `<coin-or/IpStdCInterface.h>` and drives Ipopt through
+  its C API. Since that C API is precisely what `pounce.h` reimplements,
+  the gap is small — swapping the include in Ipopt's generated file and
+  linking `libpounce_cinterface` already compiles and links, and only
+  falls over at run time because CasADi bakes Ipopt's registry defaults
+  (`linear_solver=mumps`) into the emitted option calls, which POUNCE
+  refuses by design. A proper implementation means POUNCE's own
+  equivalent of `ipopt_runtime.hpp` plus `codegen_body` /
+  `codegen_declarations` / `codegen_init_mem` / `codegen_free_mem`.
+  Not done here; say so on the issue tracker if you are deploying to an
+  embedded target and need it.
 - **Integer variables.** POUNCE is a continuous local NLP solver, so
   `discrete` is refused by CasADi's base class rather than quietly
   relaxed.
