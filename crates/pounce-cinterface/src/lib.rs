@@ -57,11 +57,43 @@ use std::rc::Rc;
 pub type Number = f64;
 /// Mirrors C `Index`.
 pub type Index = c_int;
-/// Mirrors C `Bool`.
-pub type Bool = c_int;
+/// Mirrors C `Bool`, which `pounce.h` — like Ipopt 3.14's
+/// `IpStdCInterface.h` — declares as the C99 `bool`. That is **one byte**,
+/// so this is `u8` and not `c_int`.
+///
+/// It was `c_int` until gh#624, i.e. four bytes on the Rust side against
+/// one on every C caller's, in both directions:
+///
+/// * a callback returning `false` sets only `AL`, and the x86-64 psABI
+///   leaves the rest of `EAX` unspecified — read as an `i32`, a failed
+///   evaluation could come back nonzero, which reads as *success*. The
+///   solver would then accept a point it was told it could not evaluate
+///   instead of cutting the step. gcc and clang emit `movzbl`, which is
+///   why this stayed latent rather than exploding;
+/// * an *array* of them would have been a hard stride bug, 1-byte
+///   elements read at 4-byte spacing. That is why
+///   [`IpoptSetNonlinearVariables`] takes a count plus an index list
+///   rather than the `Bool` mask gh#624 originally proposed.
+///
+/// `u8` rather than Rust's `bool` on purpose: the two have identical
+/// layout, but `bool` carries a validity invariant (it *must* hold 0 or
+/// 1), and a C caller reaching this boundary with anything else — an
+/// older header where `Bool` was `int`, a hand-rolled binding, a value
+/// that came through a `memcpy` — would be instant undefined behaviour.
+/// `u8` accepts whatever arrives and tests it the way C does, which is
+/// the same reason the entry points validate rather than trust.
+pub type Bool = u8;
 
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
+
+// The whole point of the alias. `pounce.h` says `typedef bool Bool`, so a
+// build where this stops being one byte is one where every C caller
+// disagrees with the implementation about every boolean.
+const _: () = assert!(
+    core::mem::size_of::<Bool>() == 1,
+    "Bool must be one byte to match `typedef bool Bool` in pounce.h"
+);
 
 /// Run an FFI entry-point body, converting any Rust panic into `fallback`
 /// rather than letting it unwind across the `extern "C"` boundary — which is

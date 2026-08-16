@@ -18,7 +18,7 @@
 //! the buffer with trailing-space stripping ([`f2cstr`]).
 
 use crate::{
-    AddIpoptIntOption, AddIpoptNumOption, AddIpoptStrOption, CreateIpoptProblem, Eval_F_CB,
+    AddIpoptIntOption, AddIpoptNumOption, AddIpoptStrOption, Bool, CreateIpoptProblem, Eval_F_CB,
     Eval_G_CB, Eval_Grad_F_CB, Eval_H_CB, Eval_Jac_G_CB, FreeIpoptProblem, Index, Intermediate_CB,
     IpoptProblem, IpoptSolve, Number, SetIntermediateCallback,
 };
@@ -137,10 +137,10 @@ pub type FIntermediate_CB = unsafe extern "C" fn(
 unsafe extern "C" fn c_eval_f(
     n: Index,
     x: *const Number,
-    new_x: c_int,
+    new_x: Bool,
     obj_value: *mut Number,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let mut ierr: Index = 0;
@@ -162,10 +162,10 @@ unsafe extern "C" fn c_eval_f(
 unsafe extern "C" fn c_eval_grad_f(
     n: Index,
     x: *const Number,
-    new_x: c_int,
+    new_x: Bool,
     grad_f: *mut Number,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let mut ierr: Index = 0;
@@ -187,11 +187,11 @@ unsafe extern "C" fn c_eval_grad_f(
 unsafe extern "C" fn c_eval_g(
     n: Index,
     x: *const Number,
-    new_x: c_int,
+    new_x: Bool,
     m: Index,
     g: *mut Number,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let Some(cb) = fud.eval_g else {
@@ -218,14 +218,14 @@ unsafe extern "C" fn c_eval_g(
 unsafe extern "C" fn c_eval_jac_g(
     n: Index,
     x: *const Number,
-    new_x: c_int,
+    new_x: Bool,
     m: Index,
     nele_jac: Index,
     irow: *mut Index,
     jcol: *mut Index,
     values: *mut Number,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let Some(cb) = fud.eval_jac_g else {
@@ -265,17 +265,17 @@ unsafe extern "C" fn c_eval_jac_g(
 unsafe extern "C" fn c_eval_h(
     n: Index,
     x: *const Number,
-    new_x: c_int,
+    new_x: Bool,
     obj_factor: Number,
     m: Index,
     lambda: *const Number,
-    new_lambda: c_int,
+    new_lambda: Bool,
     nele_hess: Index,
     irow: *mut Index,
     jcol: *mut Index,
     values: *mut Number,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let Some(cb) = fud.eval_hess else {
@@ -329,7 +329,7 @@ unsafe extern "C" fn c_intermediate(
     alpha_pr: Number,
     ls_trials: Index,
     user_data: *mut c_void,
-) -> c_int {
+) -> Bool {
     unsafe {
         let fud = &mut *(user_data as *mut FortranUserData);
         let Some(cb) = fud.intermediate_cb else {
@@ -594,8 +594,7 @@ pub unsafe extern "C" fn ipsetcallback_(fproblem: *mut *mut c_void, inter_cb: FI
         }
         let fud = &mut *(*fproblem as *mut FortranUserData);
         fud.intermediate_cb = Some(inter_cb);
-        let _: Index =
-            SetIntermediateCallback(fud.problem, Some(c_intermediate as Intermediate_CB));
+        let _: Bool = SetIntermediateCallback(fud.problem, Some(c_intermediate as Intermediate_CB));
     }
 }
 
@@ -611,7 +610,7 @@ pub unsafe extern "C" fn ipunsetcallback_(fproblem: *mut *mut c_void) {
         }
         let fud = &mut *(*fproblem as *mut FortranUserData);
         fud.intermediate_cb = None;
-        let _: Index = SetIntermediateCallback(fud.problem, None);
+        let _: Bool = SetIntermediateCallback(fud.problem, None);
     }
 }
 

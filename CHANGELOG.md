@@ -9,6 +9,35 @@ changes.
 
 ## [Unreleased]
 
+- **`Bool` in the C API is one byte again, matching the header** (#624
+  follow-up). `pounce.h` declares `typedef bool Bool` — the C99 `bool`,
+  which is what Ipopt 3.14's `IpStdCInterface.h` uses and what makes the
+  header a source-level drop-in. The Rust implementation behind it used
+  `c_int`. Four bytes against one, in both directions, for every boolean
+  the C API exchanges.
+
+  Nothing observably misbehaved, and that is the uncomfortable part: on
+  x86-64 both gcc and clang zero-extend a `bool` return, so the values
+  came through. The psABI does not require it. It leaves the upper bits
+  of a `bool` return unspecified, which means a callback answering
+  `false` — *"I cannot evaluate at this point"* — was one compiler
+  decision away from being read as a nonzero, i.e. as success, and the
+  solver would accept a point it had been told was unusable instead of
+  cutting the step. The affected callers are real: the GAMS C link
+  (`static bool gams_eval_f(..., bool new_x, ...)`) and the CasADi plugin
+  both declare their callbacks with C99 `bool`, as the header instructs.
+
+  `Bool` is now `u8` — same layout as `_Bool`, but without Rust `bool`'s
+  validity invariant, so a caller arriving with something other than 0 or
+  1 (an older header where `Bool` was `int`, a hand-rolled binding) is
+  tested the way C would test it rather than being undefined behaviour.
+  The Fortran interface is unaffected; it never used this type.
+
+  `crates/pounce-cinterface/tests/header_abi.rs` now reads the typedefs
+  out of the shipped header and checks each against the implementation,
+  so editing either side alone fails the build rather than drifting. Both
+  of its tests fail on the parent commit, naming the size mismatch.
+
 - **Predictor-corrector NLP continuation, exposed across the non-AD
   frontends** (#608). #90 delivered a path follower, but only for the
   differentiable frontend: `pounce.jax.PathFollower` is written against
