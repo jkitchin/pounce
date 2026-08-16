@@ -9,6 +9,74 @@ changes.
 
 ## [Unreleased]
 
+- **A warm start now completes the iterate you gave it, and adapts the
+  barrier to how good it was** (#606). Two things were wrong with the
+  interior-point warm start, and both were invisible.
+
+  First, you cannot seed every multiplier block.
+  `TNLP::get_starting_point` — what `lagrange` / `zl` / `zu` reach on
+  every frontend — carries the constraint multipliers and the
+  *variable*-bound multipliers. The IPM also needs a multiplier for
+  each inequality row's slack, and no frontend has a field for one. On
+  every warm start POUNCE has ever run, those arrived as zero and were
+  floored at `warm_start_mult_bound_push` — a constant with no relation
+  to the slacks it is paired against. The "warm" point handed to the
+  solver was therefore not a stationary point of anything, and the
+  first few iterations went on repairing it.
+
+  Second, `mu_init` was taken on trust. A restart at the optimum and a
+  stale point from a different parameter both started on exactly the
+  barrier the caller named.
+
+  `warm_start_recentering` (new, default `residual`) fixes both. A
+  bound multiplier that arrives as exactly `0` or `NaN` is not a legal
+  barrier multiplier, so it was never a seed; it is re-derived from the
+  stationarity identity against the multipliers you *did* supply, and
+  floored at `μ / slack` so an inactive bound still gets the value
+  complementarity implies. A constraint-multiplier block of all zeros
+  goes through the same regularized least-squares solve the cold path
+  uses (and the same `constr_mult_init_max` cap). And `mu` is raised to
+  the point's measured complementarity when that overshoots `mu_init`
+  by more than 10x. `warm_start_target_mu` still pins `mu` outright,
+  and `warm_start_recentering=none` restores the old behaviour exactly.
+
+  Measured over the 27 parametric paths of `benchmarks/warmstart`,
+  against `70bf53de`: a full warm start re-converges in 677 iterations
+  instead of 715 (-5.3%) and 1068 objective evaluations instead of 1207
+  (-11.5%); a partial one (bound multipliers kept, `lagrange` dropped)
+  in 709 instead of 718. Exact same-model restarts improve or hold on
+  every family, two of them from 2 iterations to 0. The CLI fixture
+  sweep is bit-identical across all 57 models both cold and with
+  `warm_start_init_point=yes`; under the tightened-push recipe from
+  `docs/src/initialization.md` three models move (`hs13_bigstart`
+  30 -> 29, `jit1_boxed` 16 -> 17, `jit1_node` 19 -> 21), same status
+  and same objective.
+
+  Deliberately **not** reconstructed: a seed carrying no dual
+  information at all. Completing a partial warm start is well-posed;
+  manufacturing a whole one from a primal point is not, and doing it
+  anyway measured 1102 -> 1211 iterations on the same corpus. Such a
+  seed is reported as `unseeded` and left exactly as before.
+
+  What the initializer decided is now readable rather than guessed at:
+  `info["warm_start"]` from Python,
+  `IpoptApplication::warm_start_diagnostics()` from Rust, and `wz` /
+  `wy` / `wy0` / `wmu` tags on the `print_level=5` iteration line.
+
+- **`warm_start_same_structure` and `warm_start_entire_iterate` are
+  refused instead of silently doing nothing** (#606). Both parsed, set
+  a field on the initializer, and changed nothing whatsoever — verified
+  bit-for-bit before the change: same iteration count, same objective,
+  same KKT error to the last digit with either set to `yes`. They name
+  Ipopt's `TNLP::GetWarmStartIterate` surface, which POUNCE does not
+  expose, so they now fail with a message pointing at
+  `warm_start_init_point=yes` — the route that does carry the primal
+  point and every multiplier block the TNLP surface has. Both still
+  *parse*, so an `ipopt.opt` written for Ipopt loads unchanged, and
+  `=no` (the registered default) asks for nothing and keeps working.
+  The registry invariant test from #604 now runs over the `Warm Start`
+  category too, which is what would have caught this.
+
 - **The cold-start initialization options are settable** (#604).
   `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,
   `constr_mult_init_max`, `bound_mult_init_val`, `bound_mult_init_method`

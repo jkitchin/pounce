@@ -114,7 +114,9 @@ any one of them silently degrades to (roughly) a cold solve:
 2. **Lower `mu_init`.** The default `0.1` makes the solver walk the
    barrier schedule down from scratch even when started at the
    optimum. Seed it near the converged complementarity (e.g. `1e-7`
-   after a `tol=1e-8` solve).
+   after a `tol=1e-8` solve). Since #606 this is a *floor*: the solver
+   measures the point you supplied and raises `mu` above it if the
+   point cannot support that barrier (see below).
 3. **Tighten the warm-start pushes.** The warm initializer applies
    its own interior clamp with `warm_start_bound_push` / `_frac`
    (default `1e-3`), which shoves an at-the-bound solution back off
@@ -152,6 +154,71 @@ the `.nl` file's dual segment when present.
 | `warm_start_slack_bound_push` / `warm_start_slack_bound_frac` | `1e-3` | Same, for slacks. |
 | `warm_start_mult_bound_push` | `1e-3` | Floor on seeded bound multipliers (a carried-in `z = 0` must not start on the barrier's boundary). |
 | `warm_start_mult_init_max` | `1e6` | Cap on seeded equality multipliers. |
+| `warm_start_recentering` | `residual` | Reconstruct the multiplier blocks the caller did not supply, and raise `mu` when the supplied point cannot support it. `none` restores the pre-#606 constants. |
+
+### What the solver does with a partial warm start
+
+Two things about the list above are worth knowing before you tune it.
+
+**You cannot seed every multiplier block.** `TNLP::get_starting_point`
+— which is what `lagrange` / `zl` / `zu` reach — carries the equality
+multipliers and the *variable*-bound multipliers. The interior-point
+method also needs a multiplier for each inequality row's slack
+(`v_L` / `v_U` internally), and there is no field for those on any
+frontend. On every warm start ever run they arrived as zero and were
+floored at `warm_start_mult_bound_push`.
+
+**A constant is the wrong fill.** `warm_start_mult_bound_push` is a
+number chosen with no reference to the slacks it is paired against, so
+the "warm" point it produces is not a stationary point of anything.
+
+Under `warm_start_recentering=residual` (the default since #606) the
+initializer instead rebuilds what it was not given:
+
+- a bound-multiplier entry that arrives as exactly `0` (or `NaN`) is
+  not a legal barrier multiplier, so it was never a seed; it is
+  re-derived from the stationarity identity
+  `P_L z_L − P_U z_U = ∇f + J_c^T y_c + J_d^T y_d` (and its slack-block
+  twin `P_L v_L − P_U v_U = −y_d`), floored at `μ / slack` so an
+  inactive bound still gets the value complementarity implies;
+- an equality-multiplier block that is identically zero goes through
+  the same regularized least-squares augmented solve the cold path
+  uses, now with real bound multipliers in its right-hand side;
+- `mu` is raised to the point's measured average complementarity when
+  that exceeds `mu_init`, so a stale seed gets a looser barrier instead
+  of being trusted. The primal and dual residuals deliberately do
+  **not** move `mu`: a warm point at a moved parameter carries both by
+  construction, and reacting to them discards the warm start to pay for
+  a Newton step that was about to happen anyway.
+
+`warm_start_target_mu`, when set, still pins `mu` outright.
+
+What happened is reported back. From Python it is `info["warm_start"]`:
+
+```python
+x2, info2 = warm.solve(x0=x, zl=..., zu=...)
+info2["warm_start"]
+# {'primal_residual': 1.6e-09, 'dual_residual': 3.5e-10,
+#  'complementarity': 4.2e-09, 'mu_in': 2.5e-09, 'mu_out': 4.2e-09,
+#  'bound_duals': 'reconstructed', 'eq_duals': 'accepted',
+#  'bound_duals_reconstructed': 1, 'recentering_disabled': False}
+```
+
+From Rust it is `IpoptApplication::warm_start_diagnostics()`. At
+`print_level=5` the iteration line carries `wz` (bound multipliers
+rebuilt), `wy` (equality multipliers rebuilt), `wy0` (a reconstruction
+was discarded) and `wmu` (the barrier was loosened).
+
+### Two options that are refused
+
+`warm_start_same_structure` and `warm_start_entire_iterate` are
+registered — an `ipopt.opt` written for Ipopt parses unchanged — but
+both name Ipopt's `TNLP::GetWarmStartIterate` surface, which pounce
+does not expose. Setting either to `yes` used to parse, set a field
+nothing read, and change nothing at all. Since #606 it fails with a
+message instead. `warm_start_init_point=yes` is the supported route
+and carries the primal point and every multiplier block the TNLP
+surface has.
 
 Even a well-executed IPM warm start has a structural limit: the
 barrier pushes iterates off the bounds, so the active-set information
