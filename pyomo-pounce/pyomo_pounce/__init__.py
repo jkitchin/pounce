@@ -24,6 +24,10 @@ Initialization helpers (see the POUNCE docs' initialization chapter):
     #     plan a valid specification: which candidates to hold as the
     #     decisions, which to prune, and what gets pinned automatically
 
+Predictor--corrector continuation over a parameter path (pounce#608):
+    trace = pyomo_pounce.continuation(m, [m.p], path)   # repeated NLPs
+    pyomo_pounce.shift_map(m, [m.x])                    # horizon-shift transfer
+
 Parametric sensitivity (see pyomo_pounce.sens):
     declare_sens_param(m.p)      # flag parameters when building the model
     SolverFactory('pounce').solve(m)   # normal solve keeps the KKT factor
@@ -40,6 +44,7 @@ from pyomo_pounce.block_init import (
     block_repair_plan,
     structural_incidence,
 )
+from pyomo_pounce.continuation import continuation, shift_map
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
     Covariance,
@@ -108,6 +113,8 @@ __all__ = [
     "gradient",
     "estimate",
     "estimate_report",
+    "continuation",
+    "shift_map",
     "EstimateReport",
     "Gradient",
     "preflight",
