@@ -123,10 +123,16 @@ impl TNLP for PoorLinearization {
 
 fn solve_with_ls_init() -> IpoptApplication {
     let mut app = IpoptApplication::new();
-    // The Mehrotra cascade is the route that turns
-    // `least_square_init_primal` on.
+    // Set the option under test directly. Before gh#604 registered it
+    // this had to go through `mehrotra_algorithm=yes`, which turns on
+    // `least_square_init_primal` as part of a cascade that also
+    // rewrites `bound_push`, `bound_frac` and `bound_mult_init_val` —
+    // three confounds in a test about one code path. (The report is
+    // the same either way here: this model's `x` bounds are far enough
+    // from every point the safeguard visits that neither push moves
+    // it. The point is that the test no longer depends on that.)
     app.options_mut()
-        .set_string_value("mehrotra_algorithm", "yes", true, false)
+        .set_string_value("least_square_init_primal", "yes", true, false)
         .unwrap();
     // The initializer runs once, before iteration 1, so the report is
     // fully populated no matter where the solve goes afterwards. Cap

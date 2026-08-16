@@ -55,11 +55,19 @@ changes.
   and termination reason.
 
   Trajectory: the fixture sweep is **bit-identical across all 57 fixtures**
-  under default options — `least_square_init_primal` is off by default and is
-  reachable only through `mehrotra_algorithm=yes`. Under that option 12 lines
-  move; the set of solved fixtures (27), every solved objective, and the total
-  iteration count across them are unchanged. See #605 for the per-fixture
-  accounting.
+  under default options — `least_square_init_primal` is off by default, so
+  nothing moves unless you turn it on. There are two ways to do that: set it
+  directly (registered by #604, the entry below) or `mehrotra_algorithm=yes`,
+  whose cascade turns it on for you. Under `mehrotra_algorithm=yes` 12 lines
+  move, and the set of solved fixtures (27), every solved objective and the
+  total iteration count across them (292) are unchanged. Under
+  `least_square_init_primal=yes` on its own 14 lines move: the same 46 fixtures
+  reach a solved-or-acceptable status and the total iteration count across them
+  falls from 2067 to 1687, but two of the 46 (`csfi2`, `eigenb2`) come back
+  `SolvedToAcceptableLevel` where they were `SolveSucceeded`, and on two
+  nonconvex models the different starting point finds a different local optimum
+  — `deb7` a better one, `pooling_rt2stp` a worse one. See #605 for the
+  per-fixture accounting.
 
 - **The cold-start initialization options are settable** (#604).
   `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,

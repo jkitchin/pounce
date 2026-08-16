@@ -38,9 +38,11 @@ use std::rc::Rc;
 
 /// What the safeguarded least-square initializer did. Returned by
 /// [`DefaultIterateInitializer::safeguarded_least_square_x`] and
-/// printed at `print_level >= 5`, so a starting point that silently
-/// got worse is visible in the log instead of only in the iteration
-/// count.
+/// readable after the solve through
+/// [`crate::application::IpoptApplication::least_square_init_report`],
+/// so a starting point that silently got worse is visible somewhere
+/// other than the iteration count. Nothing prints it: it is a
+/// programmatic accessor, not a log line.
 #[derive(Debug, Clone, Default)]
 pub struct LeastSquareInitReport {
     /// Nonlinear violation at the user's `x0`, after the interior push.
@@ -884,8 +886,24 @@ mod option_behavior {
         fn eval_grad_f(&mut self, _x: &dyn Vector, g: &mut dyn Vector) {
             g.set(0.0);
         }
-        fn eval_c(&mut self, _x: &dyn Vector, c: &mut dyn Vector) {
-            c.set(1.0);
+        /// `c(x) = x0 + x1 - 4`, which [`FixedAugSolver`]'s `x_ls =
+        /// [1, 3]` satisfies exactly.
+        ///
+        /// This was a constant `1.0` when gh#604 wrote these tests, and
+        /// a constant will not do since gh#605: the least-square step is
+        /// now taken only when it reduces the *true* nonlinear
+        /// violation, and against a constant `c` no step ever can, so
+        /// `least_square_init_primal` would be correctly declined and
+        /// the option untestable here. An `x`-dependent row also makes
+        /// the stub honest — `x_ls` is supposed to be the point that
+        /// solves the linearized constraints, and now it is one.
+        fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
+            let v = x
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .expect("dense x")
+                .expanded_values();
+            c.set(v[0] + v[1] - 4.0);
         }
         fn eval_d(&mut self, _x: &dyn Vector, d: &mut dyn Vector) {
             d.set(-5.0);
