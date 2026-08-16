@@ -141,19 +141,49 @@ python -m warmstart.run --families mpc_horizon_40 \
 ```
 
 Summed over the `mpc_horizon_{10,20,40,80}` families at all three step
-scales — 12 cells, 240 solves per arm, warm-start-eligible steps only:
+scales — 12 cells, 240 solves per arm, warm-start-eligible steps only.
+Measured on **`cfc1121`**, at both settings of `warm_start_recentering`
+(pounce#606), because the warm baseline is what every margin here is
+quoted against and a claim about the predictor has to name the baseline
+it was taken against:
 
-| arm | iterations | vs. `warm-ipm` |
-|---|---|---|
-| `cold-ipm` | 2360 | +115% |
-| `warm-ipm` | 1097 | — |
-| `pred-ipm` | 1125 | **+2.6%** |
-| `predcorr-ipm` | 1083 | **−1.3%** |
+| arm | iterations (`recentering=residual`) | vs. `warm-ipm` | iterations (`recentering=none`) | vs. `warm-ipm` |
+|---|---|---|---|---|
+| `cold-ipm` | 2492 | +102.8% | 2492 | +102.8% |
+| `warm-ipm` | 1229 | — | 1229 | — |
+| `pred-ipm` | 1258 | **+2.4%** | 1257 | **+2.3%** |
+| `predcorr-ipm` | 1242 | **+1.1%** | 1215 | **−1.1%** |
 
-Warm starting is worth 2.15×. The tangent predictor on top of it is
-noise, and at the largest step scale `pred-ipm` is reliably *worse*
-(+18% at horizon 80) because it extrapolates across critical-region
-boundaries the corrector then has to undo.
+Warm starting is worth 2.03×. The tangent predictor on top of it is
+noise — within ±3% either way — and at the largest step scale `pred-ipm`
+is reliably *worse* (+17.5% at horizon 80) because it extrapolates
+across critical-region boundaries the corrector then has to undo.
+
+**`warm_start_recentering` does not move this verdict, and it is worth
+saying why.** The `cold-ipm`, `warm-ipm` and `pred-ipm` columns are
+*bit-identical* between the two settings: over 240 steps each, zero
+steps change iteration count. Only `predcorr-ipm` moves, on 14 of 240
+steps. That is the mechanism, not a coincidence — recentering measures
+the supplied iterate and adapts to how far off-centre it is, and
+`predcorr-ipm` is the only arm that supplies a *perturbed* multiplier
+seed (the previous solution stepped along the tangent). The other arms
+hand over either a cold point or an exactly-converged one, and on these
+single-block, zero-inequality-row models there is nothing for the
+measurement to change.
+
+The consequence for reading the table: the `−1.1%` at `recentering=none`
+is not the predictor being better there. It is the same predictor with
+its off-centre dual seed left alone, landing better on 14 steps and
+worse on others, against an *identical* 1229-iteration baseline. Since
+the baseline does not move between settings, the failure mode of "the
+predictor looks better because the warm baseline was raised under it"
+does not arise here — it could not, because nothing raised it.
+
+The baseline *did* move against the previous measurement on `70bf53de`
+(warm 1097 → 1229, cold 2360 → 2492). Because `recentering=none` is by
+definition pre-pounce#606 behaviour and reproduces 1229 exactly,
+pounce#606/#620 contributes **none** of that move; it comes from the
+other merges in between (pounce#605/#619, #602/#614, #607/#623).
 
 ### Why — the one-iteration floor
 
@@ -218,20 +248,206 @@ are obtained: the AD frontend gets them from `jax.grad` / `jax.jacobian`
 and `jvp_from_state`, this one from the problem's own callbacks and
 `Solver.parametric_step`.
 
-`PathFollower` additionally offers pseudo-arclength continuation past
-folds (`trace_arclength`). That is **not** exposed here — see below.
+Both frontends now offer pseudo-arclength continuation past folds;
+`Continuation.trace_arclength` is described above.
+
+## Subdividing a prescribed path
+
+`run` traces the points you asked for. When a corrector rejects between
+two of them, it does not have to give up or record the runaway iterate
+as an answer: it halves the gap and re-predicts from the last point
+known good, and repeats. Inserted points carry `prescribed=False` and
+are counted by `trace.n_inserted`; every prescribed point still appears,
+in order.
+
+```python
+trace = drv.run(thetas, subdivide=True, max_subdivisions=10)
+print(trace.n_inserted, trace.n_rejections)
+```
+
+This is on by default and is a **no-op on a healthy path** — the step
+count and the per-step iteration counts are unchanged when nothing goes
+wrong. `subdivide=False` restores the one-solve-per-point behaviour
+exactly.
+
+Monitor-driven subdivision is opt-in and separate, via `subdivide_tol`:
+with a `monitor` supplied, a predicted point whose KKT residual exceeds
+it is not even attempted, and the gap is halved first. It is a *separate*
+knob from `monitor_tol` on purpose — `monitor_tol` is `follow`'s
+accept-without-solving threshold, typically `1e-6`, which as a
+subdivision trigger would subdivide on essentially every step.
+
+`max_subdivisions` caps halvings, not inserted points; once the budget
+is spent the driver attempts the prescribed point directly rather than
+abandoning it.
+
+## Past a fold: `trace_arclength`
+
+`run` and `follow` both march in `θ`, so both stop dead at a turning
+point — past a fold there is no solution at the next `θ` for the
+corrector to find. `trace_arclength` parametrises the solution curve of
+
+```
+R(x, λ, θ) = [ ∇f(x) + A(x)ᵀλ ; g(x) − c(θ) ] = 0
+```
+
+by its own arclength instead, so `θ` is free to stop and reverse.
+
+```python
+trace = drv.trace_arclength(x0, theta0, callbacks=obj,
+                            ds=0.25, n_steps=40, direction=-1.0)
+```
+
+**Why not the held factor.** `Solver.parametric_step` back-solves
+against the factor of a *converged* solve. A fold has none: `∂x*/∂θ` is
+singular there — that is what "fold" means — and past it there is no
+solution at that `θ` for any factor to belong to. So the tangent is
+taken instead as the null vector of the `(d, d+1)` augmented matrix
+`[∂R/∂z | ∂R/∂θ]`, obtained by **bordering** it with the previous
+tangent and solving
+
+```
+[ ∂R/∂z   ∂R/∂θ ] [ t ]   [ 0 ]
+[     t_prevᵀ   ]       = [ 1 ]
+```
+
+which is nonsingular *at* a simple fold — that is the point of the
+pseudo-arclength formulation — and needs no SVD, unlike `PathFollower`'s
+dense route. `R` and its Jacobian are assembled sparsely from the
+problem's own cyipopt-shaped callbacks; the Hessian of the Lagrangian is
+exactly `∂/∂x` of the stationarity block, so nothing is approximated and
+no third derivative appears.
+
+**The cost.** One sparse LU per Newton iteration, where parameter
+continuation gets a back-solve against a factor the solver already
+built. That is the honest price of going round the corner at all: there
+is no factor to reuse there. On the test fixture the whole 40-point
+traverse takes single-digit milliseconds; on a large model the LU is the
+dominant cost and this mode is correspondingly more expensive per point
+than `run`.
+
+**Measured.** On `min x₀³/3 + x₁²/2  s.t.  x₀ + x₁ = θ`, whose solution
+curve `x₀ + x₀² = θ` folds at `x₀ = −1/2, θ = −1/4`:
+
+| | result |
+|---|---|
+| `run`, marching θ from 2.0 to −0.4 | fails at θ = −0.4 with `Diverging_Iterates`, \|x₀\| > 10¹⁰ |
+| `run` with `subdivide=True` | walks in to θ = −0.250, x₀ = −0.49995 — locating the fold to 1.2×10⁻³ — then reports `subdivision_exhausted` |
+| `trace_arclength`, same start | turns at θ ≈ −0.25 and continues onto the branch with x₀ < −1/2, every point a root of `R` to < 10⁻⁷ |
+
+**Scope (v1)** — deliberately `PathFollower`'s: scalar `θ`, equality /
+unconstrained families, fixed active set along the traced branch.
+Two-sided inequality rows are rejected with an error rather than
+mis-traced; a branch that runs into a variable bound ends the trace with
+`status="bound_active"` rather than reporting a wrong curve. Bifurcation
+and branch switching are out of scope.
+
+The fixture is built so LICQ holds at the fold and `λ` stays finite
+there. A fold resting on a vanishing constraint gradient sends `λ` to
+infinity, and no arclength scheme in `(x, λ, θ)` passes that — such a
+fixture would flatter the method rather than test it.
+
+## The CLI: a path manifest
+
+`pounce-continue` traces a whole parametric path from one command:
+
+```
+pounce-continue path.json --out trace.json
+pounce-continue path.json --cold          # the baseline it is measured against
+```
+
+The manifest names the models the modeling system already emitted, one
+per parameter value:
+
+```json
+{
+  "version": 1,
+  "points": [
+    {"model": "mpc_000.nl", "theta": [1.5, 0.0]},
+    {"model": "mpc_001.nl", "theta": [1.45, 0.03]}
+  ],
+  "options": {"tol": "1e-8"},
+  "warm": true
+}
+```
+
+**There is no tangent predictor here, and there cannot be.** The
+predictor is a back-solve against the KKT factor the previous solve left
+in memory, and that factor does not survive `exec`. A CLI path is a
+sequence of separate processes, so the transfer is zero-order. The trace
+says so in its `predictor` field rather than leaving it to be inferred.
+
+What *does* cross the boundary is more than the primal point. An AMPL
+`.nl` file carries an initial primal point (the `x` segment) *and*
+initial duals (the `d` segment), and pounce's reader honours both, so
+the driver folds the previous point's answer into the next model and
+turns on `warm_start_init_point`. The bound multipliers and the barrier
+parameter have nowhere to go in the `.nl` format, and that is the gap
+against the in-process driver.
+
+**Measured**, on a 20-point van der Pol NMPC path (horizon 40, n = 122):
+
+| | iterations | evaluations | wall |
+|---|---|---|---|
+| repeated cold `pounce model.nl` | 226 | 1230 | 233 ms |
+| `pounce-continue` (warm transfer) | 193 | 1166 | 221 ms |
+| | **−14.6%** | **−5.2%** | **−5%** |
+
+Iteration counts are exactly reproducible run to run; the wall-clock
+figure is the mean of three and the spread overlaps. The gap between
+−14.6% of iterations and −5% of wall clock is process startup, `.nl`
+parse and presolve, which at these sizes dominate the solve — repeating
+at horizon 300 (n = 902) moves the iteration saving not at all
+(225 → 193) and the wall time not at all. **If you are paying per
+process, that overhead is what you are paying, and the warm transfer
+does not address it.** The in-process driver is the answer there.
+
+One thing worth knowing: a linear-quadratic MPC is a convex QP, and the
+CLI routes convex QPs to `pounce-convex`, which never reaches the NLP
+warm-start path at all. The measurement above uses van der Pol dynamics
+for that reason; a linear-quadratic path shows exactly 0% because the
+warm-start options are not consulted.
+
+## GAMS
+
+`pounce.gams.continuation.trace` drives a GAMS path through the same
+driver. The pip link builds an ordinary `pounce.Problem` from a GMO
+view, so when the points are driven from one Python process the whole
+driver applies — **including** the tangent predictor, unlike the CLI
+path:
+
+```python
+from pounce.gams import continuation as gams_cont
+trace = gams_cont.trace(view_of_theta, thetas, pins=[0, 1],
+                        options={"tol": 1e-8})
+```
+
+Driving it the other way — `option nlp = pounce;` inside a GAMS loop —
+is one link invocation per solve, GAMS owns the process, and the same
+process-boundary limit as the CLI applies.
+
+**The native C link's state file does not help here**, and it is worth
+being precise about why. `gams/gams_pounce.c`'s `sqp_state_file` holds
+the *discrete working set only*: one byte of `bound_status` per variable
+and one of `cons_status` per constraint, behind a magic string and a
+checksum over `(n, m, bounds)`. No primal point, no multipliers, no
+barrier parameter — it feeds `IpoptSetWarmStartWorkingSet` on the
+active-set SQP path. For interior-point continuation that is strictly
+less than the pip link already holds in memory. And the checksum is
+taken over the bounds, so any change of problem *shape* — a horizon
+shift, a remesh — invalidates it, which is precisely the case the
+transfer map exists to serve.
 
 ## Not implemented
 
-* **Pseudo-arclength continuation** past turning points. `PathFollower`'s
-  version is written directly against `jax.jacobian` of the stationarity
-  system and an SVD of it; the generic frontend has no equivalent of that
-  dense `(d, d+1)` Jacobian, and manufacturing one from `Solver.kkt_solve`
-  is a separate piece of work rather than an adaptation. pounce#608 marks
-  it optional; use `pounce.jax.PathFollower.trace_arclength` if you need
-  it.
-* **CLI and GAMS adapters.** pounce#608 sequences these after the
-  `Problem` and Pyomo ones. Both need a path manifest / repeated-solve
-  protocol that does not exist yet, and neither can hold a KKT factor
-  across process boundaries, so both would run the zero-order fallback
-  only — which is what `--warm-start` already does.
+* **Bifurcation detection and branch switching.** `trace_arclength`
+  follows the branch it starts on. At a bifurcation (as opposed to a
+  simple fold) the bordered system is singular and the trace stops
+  rather than picking a branch.
+* **Folds with a moving active set.** The arclength residual `R` treats
+  every general row as an active equality, so a branch whose active set
+  changes as it turns is out of scope, and two-sided inequality rows are
+  rejected rather than mis-traced.
+* **Vector-parameter arclength.** "Past the fold" is not defined for a
+  solution manifold of dimension > 1; reparametrise onto a scalar path
+  and trace that.

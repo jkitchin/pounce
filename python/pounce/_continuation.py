@@ -916,7 +916,7 @@ class Continuation:
             array, ``kkt_error`` is ``‖R‖∞`` at the accepted point, and
             ``iters`` is the corrector's Newton count.
         """
-        from scipy.sparse import csc_matrix, hstack, vstack
+        from scipy.sparse import csc_matrix, vstack
         from scipy.sparse.linalg import spsolve
 
         x = np.asarray(x0, float).ravel()

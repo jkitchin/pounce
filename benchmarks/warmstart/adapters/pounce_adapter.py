@@ -84,8 +84,12 @@ _OK_QP_STATUS = ("optimal", "optimal_inaccurate")
 class PounceAdapter(SolverAdapter):
     name = "pounce"
 
-    def __init__(self, max_iter: int = 500):
+    def __init__(self, max_iter: int = 500, recentering: str = "residual"):
         self.max_iter = max_iter
+        # `warm_start_recentering` (pounce#606 / #620). The warm-start
+        # baseline this corpus reports moves with it, so it is a swept
+        # axis rather than a default: see docs/src/continuation.md.
+        self.recentering = recentering
 
     def supports(self, arm: str) -> bool:
         return arm in ARMS
@@ -285,6 +289,7 @@ class PounceAdapter(SolverAdapter):
                     )
                 kwargs["warm_start"] = pounce.WarmStart(
                     x=seed_x, lagrange=lam, zl=zl, zu=zu, mu=warm.mu,
+                    recentering=self.recentering,
                 )
         else:
             kwargs["x0"] = np.asarray(x0, dtype=float)

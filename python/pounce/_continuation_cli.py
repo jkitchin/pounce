@@ -68,7 +68,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import List, Optional
+from typing import List
 
 __all__ = [
     "PathManifest",
