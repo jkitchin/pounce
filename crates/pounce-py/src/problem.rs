@@ -9,6 +9,7 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::init::warm_start::{BlockVerdict, WarmStartDiagnostics};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -382,6 +383,7 @@ impl PyProblem {
             stats.final_unscaled_compl,
             stats.sqp_qp_solves,
             stats.sqp_qp_working_set_changes,
+            app.warm_start_diagnostics(),
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -733,6 +735,7 @@ impl PyProblem {
             stats.final_unscaled_compl,
             stats.sqp_qp_solves,
             stats.sqp_qp_working_set_changes,
+            app.warm_start_diagnostics(),
         )?;
         info.set_item("dx", opt_vec_to_py(py, result.dx))?;
         info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
@@ -1087,6 +1090,18 @@ fn write_solve_report(
     Ok(())
 }
 
+/// Stable string name for a warm-start block verdict, so
+/// `info["warm_start"]` reads the same from Python as the Rust enum.
+fn verdict_name(v: BlockVerdict) -> &'static str {
+    match v {
+        BlockVerdict::Absent => "absent",
+        BlockVerdict::Accepted => "accepted",
+        BlockVerdict::Reconstructed => "reconstructed",
+        BlockVerdict::Discarded => "discarded",
+        BlockVerdict::Unseeded => "unseeded",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_info_dict<'py>(
     py: Python<'py>,
@@ -1104,8 +1119,26 @@ pub(crate) fn build_info_dict<'py>(
     final_unscaled_compl: Number,
     sqp_qp_solves: i32,
     sqp_qp_working_set_changes: i32,
+    warm_start: Option<WarmStartDiagnostics>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
+    // gh#606: what the warm-start initializer made of the seeds this
+    // call supplied. Absent on a cold solve, so a caller can tell
+    // "warm start did nothing" from "warm start was not requested".
+    if let Some(w) = warm_start {
+        let d = PyDict::new_bound(py);
+        d.set_item("primal_residual", w.primal_residual)?;
+        d.set_item("dual_residual", w.dual_residual)?;
+        d.set_item("complementarity", w.complementarity)?;
+        d.set_item("mu_in", w.mu_in)?;
+        d.set_item("mu_out", w.mu_out)?;
+        d.set_item("bound_duals", verdict_name(w.bound_duals))?;
+        d.set_item("eq_duals", verdict_name(w.eq_duals))?;
+        d.set_item("bound_duals_reconstructed", w.bound_duals_reconstructed)?;
+        d.set_item("stationarity_split", w.stationarity_split)?;
+        d.set_item("recentering_disabled", w.recentering_disabled)?;
+        info.set_item("warm_start", d)?;
+    }
     info.set_item("status", status as i32)?;
     info.set_item("status_msg", status_message(status))?;
     info.set_item("obj_val", bridge.state.final_obj)?;

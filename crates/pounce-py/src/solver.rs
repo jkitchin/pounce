@@ -147,6 +147,7 @@ impl PySolver {
             stats.final_unscaled_compl,
             stats.sqp_qp_solves,
             stats.sqp_qp_working_set_changes,
+            inner.app().warm_start_diagnostics(),
         )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone

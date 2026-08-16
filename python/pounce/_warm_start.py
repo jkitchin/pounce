@@ -20,6 +20,16 @@ recipe into a single argument::
 and dual iterates and sets the five enabling options; on the active-set
 SQP path (``algorithm=active-set-sqp``) it forwards the captured
 working set, which is that path's warm-start payload.
+
+Since pounce#606 the *quality* of the supplied point is the solver's
+business rather than this object's: with the default
+``recentering="residual"`` the interior-point initializer measures the
+seeded iterate's primal, dual and complementarity residuals and picks
+μ, the fills for any multiplier block the caller left out, and the
+recentering strength from that measurement. The knobs here therefore
+set a floor, not a verdict — ``mu_init`` is the barrier the caller
+would *like*, and a stale point gets a looser one. What the solver
+decided is reported back in ``info["warm_start"]``.
 """
 
 from __future__ import annotations
@@ -60,8 +70,20 @@ class WarmStart:
             at-the-bound solution essentially where it is; raise it if
             the next problem's solution may sit elsewhere.
         mu_init: Explicit ``mu_init`` override; default derives it from
-            ``mu`` (clamped to ``[1e-9, 1e-1]``).
+            ``mu`` (clamped to ``[1e-9, 1e-1]``). Under the default
+            ``recentering="residual"`` this is a **floor**, not a
+            setting: the solver measures the supplied point and raises
+            μ above it when the point cannot support that barrier
+            (pounce#606). Pass ``warm_start_target_mu`` yourself to pin
+            μ outright.
         mu_init_fallback: ``mu_init`` used when ``mu`` is unknown.
+        recentering: ``warm_start_recentering`` (pounce#606).
+            ``"residual"`` (the default) lets the solver measure the
+            supplied point's primal/dual/complementarity residuals and
+            derive μ, the unseeded bound-multiplier fills, and the
+            equality-multiplier reconstruction from them.
+            ``"none"`` restores the pre-#606 universal constants.
+            ``None`` leaves the option unset (solver default).
     """
 
     x: np.ndarray
@@ -73,6 +95,7 @@ class WarmStart:
     bound_push: float = 1e-9
     mu_init: Optional[float] = None
     mu_init_fallback: float = 1e-6
+    recentering: Optional[str] = "residual"
 
     def __post_init__(self):
         self.x = np.asarray(self.x, dtype=float).ravel()
@@ -119,6 +142,11 @@ class WarmStart:
              self.mu_init if self.mu_init is not None else np.nan,
              self.mu_init_fallback]
         )}
+        # `recentering` is a string, so it rides in its own array
+        # rather than in the numeric `_meta` row. Absent in archives
+        # written before pounce#606; `load` treats that as the default.
+        if self.recentering is not None:
+            payload["_recentering"] = np.array(self.recentering)
         for key in ("lagrange", "zl", "zu"):
             v = getattr(self, key)
             if v is not None:
@@ -135,6 +163,11 @@ class WarmStart:
             working_set = None
             if "ws_bounds" in data.files:
                 working_set = (data["ws_bounds"], data["ws_constraints"])
+            recentering = (
+                str(data["_recentering"])
+                if "_recentering" in data.files
+                else None
+            )
             return cls(
                 x=data["x"],
                 lagrange=data["lagrange"] if "lagrange" in data.files else None,
@@ -145,6 +178,7 @@ class WarmStart:
                 bound_push=float(meta[1]),
                 mu_init=None if np.isnan(meta[2]) else float(meta[2]),
                 mu_init_fallback=float(meta[3]),
+                recentering=recentering,
             )
 
     # -- application ----------------------------------------------------
@@ -164,7 +198,7 @@ class WarmStart:
         else:
             mu_init = self.mu_init_fallback
         p = self.bound_push
-        return {
+        opts = {
             "warm_start_init_point": "yes",
             "mu_init": mu_init,
             "warm_start_bound_push": p,
@@ -173,6 +207,9 @@ class WarmStart:
             "warm_start_slack_bound_frac": p,
             "warm_start_mult_bound_push": p,
         }
+        if self.recentering is not None:
+            opts["warm_start_recentering"] = self.recentering
+        return opts
 
     def solve_kwargs(self) -> dict:
         """The seed keyword arguments for :meth:`Problem.solve`."""
