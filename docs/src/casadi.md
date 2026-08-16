@@ -352,6 +352,35 @@ convergence plot, `Opti` optimal control, the warm-started MPC loop, the
 sensitivity and bilevel example, the nonlinear-variable mask measured at two
 problem sizes, and the Ipopt cross-check.
 
+## When your model raises
+
+POUNCE is Rust behind a C API, and an exception unwinding out of an oracle
+callback into Rust frames aborts the process — `fatal runtime error:
+Rust cannot catch foreign exceptions`. So the plugin converts at the
+boundary rather than propagating through it. A model containing a
+`casadi.Callback` that raises reports the error and fails that
+evaluation, which the solver treats as an un-evaluable point and
+responds to by cutting the step:
+
+```
+POUNCE: objective evaluation failed: boom: the user's model raised
+...
+return_status = 'Invalid_Number_Detected'
+```
+
+Identical to what CasADi's Ipopt plugin does with the same model. A
+transient bad point is therefore recoverable rather than fatal, and a
+genuinely broken model gives you a status and a message instead of a
+dead interpreter.
+
+A `KeyboardInterrupt` is treated differently from an evaluation error:
+it is remembered, the solve is stopped at the next iteration
+(`User_Requested_Stop`), and the interrupt is re-raised once control is
+back on the C++ side — so Ctrl-C is responsive without crossing the
+language boundary. `iteration_callback_ignore_errors` (CasADi's base
+option) decides whether a *throwing iteration callback* stops the solve
+or is shrugged off.
+
 ## What is not supported
 
 - **Code generation.** `solver.generate()` is not available, the same as

@@ -54,6 +54,11 @@ namespace casadi {
     std::vector<IpoptConsStatus> ws_cons;
     bool ws_valid = false;      // a set is stored and worth trying
     bool ws_used = false;       // the last solve actually started from it
+    /// Set when a callback caught a Ctrl-C. The solve is asked to stop and
+    /// the interrupt is re-thrown once control is back on the C++ side.
+    bool interrupted = false;
+    /// How many evaluations failed by throwing, for the warning and stats.
+    int eval_errors = 0;
   };
 
   class PounceInterface : public Nlpsol {
@@ -93,6 +98,46 @@ namespace casadi {
     double inactive_lam_value_ = 10;
 
     static const std::string meta_doc;
+
+    /// Run an oracle evaluation, converting *any* escaping exception into the
+    /// C API's "this point could not be evaluated" answer.
+    ///
+    /// This is not defensive style, it is a hard requirement of the boundary:
+    /// POUNCE is Rust, and an exception unwinding out of a callback into Rust
+    /// frames aborts the process outright —
+    ///
+    ///     fatal runtime error: Rust cannot catch foreign exceptions, aborting
+    ///
+    /// — which is what a model containing a `casadi.Callback` that raises, or a
+    /// Ctrl-C during a long solve, used to do. Returning `false` instead is the
+    /// contract Ipopt's own callbacks use, and the solver responds by cutting
+    /// the step, so a transient bad point is recoverable rather than fatal.
+    ///
+    /// A KeyboardInterrupt is remembered rather than swallowed: the iteration
+    /// callback then stops the solve and `solve()` re-throws it, so Ctrl-C is
+    /// responsive without ever crossing the language boundary.
+    template <typename F>
+    static bool guarded(PounceMemory* m, const char* what, F&& body) {
+      if (m->interrupted) return false;         // fail fast once stopping
+      try {
+        return body();
+      } catch (KeyboardInterruptException&) {
+        m->interrupted = true;
+        return false;
+      } catch (std::exception& e) {
+        m->eval_errors++;
+        if (m->self->show_eval_warnings_) {
+          casadi_warning(std::string("POUNCE: ") + what + " failed: " + e.what());
+        }
+        return false;
+      } catch (...) {
+        m->eval_errors++;
+        if (m->self->show_eval_warnings_) {
+          casadi_warning(std::string("POUNCE: ") + what + " failed: unknown exception");
+        }
+        return false;
+      }
+    }
 
     /// `constr_viol_tol` as POUNCE will see it: the user's value from the
     /// `pounce` dict when given, else upstream's registered default.
@@ -209,27 +254,33 @@ namespace casadi {
 
   bool PounceInterface::cb_f(ipindex, ipnumber* x, bool, ipnumber* obj, UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
-    m->arg[0] = x;
-    m->arg[1] = m->d_nlp.p;
-    m->res[0] = obj;
-    return m->self->calc_function(m, "nlp_f") == 0;
+    return guarded(m, "objective evaluation", [&] {
+      m->arg[0] = x;
+      m->arg[1] = m->d_nlp.p;
+      m->res[0] = obj;
+      return m->self->calc_function(m, "nlp_f") == 0;
+    });
   }
 
   bool PounceInterface::cb_grad_f(ipindex, ipnumber* x, bool, ipnumber* gf, UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
-    m->arg[0] = x;
-    m->arg[1] = m->d_nlp.p;
-    m->res[0] = nullptr;
-    m->res[1] = gf;
-    return m->self->calc_function(m, "nlp_grad_f") == 0;
+    return guarded(m, "objective gradient", [&] {
+      m->arg[0] = x;
+      m->arg[1] = m->d_nlp.p;
+      m->res[0] = nullptr;
+      m->res[1] = gf;
+      return m->self->calc_function(m, "nlp_grad_f") == 0;
+    });
   }
 
   bool PounceInterface::cb_g(ipindex, ipnumber* x, bool, ipindex, ipnumber* g, UserDataPtr ud) {
     auto m = static_cast<PounceMemory*>(ud);
-    m->arg[0] = x;
-    m->arg[1] = m->d_nlp.p;
-    m->res[0] = g;
-    return m->self->calc_function(m, "nlp_g") == 0;
+    return guarded(m, "constraint evaluation", [&] {
+      m->arg[0] = x;
+      m->arg[1] = m->d_nlp.p;
+      m->res[0] = g;
+      return m->self->calc_function(m, "nlp_g") == 0;
+    });
   }
 
   bool PounceInterface::cb_jac_g(ipindex, ipnumber* x, bool, ipindex, ipindex nele,
@@ -238,11 +289,13 @@ namespace casadi {
     auto m = static_cast<PounceMemory*>(ud);
     const PounceInterface* self = m->self;
     if (values) {
-      m->arg[0] = x;
-      m->arg[1] = m->d_nlp.p;
-      m->res[0] = nullptr;
-      m->res[1] = values;
-      return self->calc_function(m, "nlp_jac_g") == 0;
+      return guarded(m, "constraint Jacobian", [&] {
+        m->arg[0] = x;
+        m->arg[1] = m->d_nlp.p;
+        m->res[0] = nullptr;
+        m->res[1] = values;
+        return self->calc_function(m, "nlp_jac_g") == 0;
+      });
     }
     // sparsity, CCS -> triplet
     casadi_int ncol = self->jacg_sp_.size2();
@@ -264,12 +317,14 @@ namespace casadi {
     auto m = static_cast<PounceMemory*>(ud);
     const PounceInterface* self = m->self;
     if (values) {
-      m->arg[0] = x;
-      m->arg[1] = m->d_nlp.p;
-      m->arg[2] = &obj_factor;
-      m->arg[3] = lambda;
-      m->res[0] = values;
-      return self->calc_function(m, "nlp_hess_l") == 0;
+      return guarded(m, "Lagrangian Hessian", [&] {
+        m->arg[0] = x;
+        m->arg[1] = m->d_nlp.p;
+        m->arg[2] = &obj_factor;
+        m->arg[3] = lambda;
+        m->res[0] = values;
+        return self->calc_function(m, "nlp_hess_l") == 0;
+      });
     }
     // upper-triangular CCS == lower-triangular triplet (row/col swap)
     casadi_int ncol = self->hesslag_sp_.size2();
@@ -302,6 +357,11 @@ namespace casadi {
     m->ls_trials.push_back(ls_trials);
     m->iter = iter_count;
 
+    // A Ctrl-C caught in an oracle callback stops the solve here: returning
+    // false is `User_Requested_Stop`, the one channel POUNCE offers for
+    // "stop now" that does not involve unwinding through it.
+    if (m->interrupted) return false;
+
     // Full callback: pull the current iterate out of POUNCE and drive
     // casadi's `iteration_callback` with it.
     const PounceInterface* self = m->self;
@@ -328,7 +388,14 @@ namespace casadi {
       std::fill_n(m->res, self->fcallback_.n_out(), nullptr);
       double ret_double = 0;
       m->res[0] = &ret_double;
-      self->fcallback_(m->arg, m->res, m->iw, m->w, 0);
+      // The user's callback is user code: the same boundary rule applies.
+      // `iteration_callback_ignore_errors` is CasADi's switch for whether a
+      // throwing callback should stop the solve or be shrugged off.
+      bool cb_ok = guarded(m, "iteration callback", [&] {
+        self->fcallback_(m->arg, m->res, m->iw, m->w, 0);
+        return true;
+      });
+      if (!cb_ok) return self->iteration_callback_ignore_errors_ && !m->interrupted;
       return static_cast<casadi_int>(ret_double) == 0;
     }
     return true;
@@ -449,6 +516,10 @@ namespace casadi {
     m->iter = GetIpoptIterCount(prob);
     m->t_solve = GetIpoptSolveTime(prob);
     FreeIpoptProblem(prob);
+
+    // Back on the C++ side, with POUNCE's frames unwound and its handle
+    // freed: now a Ctrl-C caught during a callback can be re-thrown safely.
+    if (m->interrupted) throw KeyboardInterruptException();
 
     // Write back to casadi's nlpsol data layout
     casadi_copy(m->xk.data(), n, d_nlp->z);

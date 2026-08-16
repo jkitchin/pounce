@@ -139,6 +139,19 @@ changes.
   shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
   drop-in `libipopt`, and what the wheel would take.
 
+- **A raising model no longer takes the process down with it** in the
+  CasADi plugin. POUNCE is Rust behind a C API, so an exception unwinding
+  out of an oracle callback aborts outright — `fatal runtime error: Rust
+  cannot catch foreign exceptions`. A model containing a `casadi.Callback`
+  that raises did exactly that. Every callback now converts at the
+  boundary: the error is reported and the evaluation fails, which the
+  solver treats as an un-evaluable point and answers by cutting the step,
+  reaching `Invalid_Number_Detected` — the same outcome CasADi's Ipopt
+  plugin gives on the same model. A `KeyboardInterrupt` is remembered
+  instead of swallowed: the solve stops at the next iteration and the
+  interrupt is re-raised once control is back on the C++ side, so Ctrl-C
+  is responsive without crossing the boundary.
+
 - **The CasADi plugin can carry the active-set SQP working set between
   calls** (`warm_start_from_previous`, default off). `x0`/`lam_g0`/`lam_x0`
   restart the iterate; the working set — which bounds and constraints were

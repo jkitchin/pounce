@@ -334,6 +334,83 @@ def test_working_set_carries_between_calls():
           f"max|Δu0| = {np.abs(plain - carried).max():.2e}")
 
 
+def test_a_raising_model_fails_the_solve_not_the_process():
+    """POUNCE is Rust behind a C API, and an exception unwinding out of an
+    oracle callback into Rust frames aborts the process outright. A model with
+    a `casadi.Callback` that raises — or a Ctrl-C mid-solve — must therefore be
+    converted at the boundary, not propagated through it. Ipopt's plugin
+    reports `Invalid_Number_Detected` here; so should this one, and the process
+    has to still be alive to say so."""
+
+    class Boom(ca.Callback):
+        def __init__(self, trip):
+            ca.Callback.__init__(self)
+            self.n, self.trip = 0, trip
+            self.construct("boom", {"enable_fd": True})
+
+        def get_n_in(self): return 1
+        def get_n_out(self): return 1
+        def get_sparsity_in(self, i): return ca.Sparsity.dense(2, 1)
+        def get_sparsity_out(self, i): return ca.Sparsity.dense(1, 1)
+
+        def eval(self, arg):
+            self.n += 1
+            if self.n >= self.trip:
+                raise RuntimeError("boom: the user's model raised")
+            x = arg[0]
+            return [(1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2]
+
+    cb = Boom(trip=25)
+    x = ca.MX.sym("x", 2)
+    S = ca.nlpsol("S", "pounce", {"x": x, "f": cb(x)},
+                  {"print_time": False, "pounce": {"print_level": 0}})
+    try:
+        S(x0=[0.5, 0.5])
+        survived, status = True, S.stats()["return_status"]
+    except Exception as exc:                     # a clean exception is fine too
+        survived, status = True, type(exc).__name__
+    check("a raising oracle does not abort the process", survived, status)
+
+
+def test_iteration_callback_can_interrupt():
+    """A KeyboardInterrupt raised inside `iteration_callback` has to stop the
+    solve rather than unwind through POUNCE."""
+    nx = 2
+
+    class Stopper(ca.Callback):
+        def __init__(self):
+            ca.Callback.__init__(self)
+            self.n = 0
+            self.construct("stopper", {})
+
+        def get_n_in(self): return ca.nlpsol_n_out()
+        def get_n_out(self): return 1
+        def get_name_in(self, i): return ca.nlpsol_out(i)
+
+        def get_sparsity_in(self, i):
+            d = {"f": 1, "x": nx, "g": 0, "lam_x": nx,
+                 "lam_g": 0, "lam_p": 0}.get(ca.nlpsol_out(i), 0)
+            return ca.Sparsity.dense(d, 1) if d else ca.Sparsity(0, 0)
+
+        def eval(self, arg):
+            self.n += 1
+            if self.n >= 3:
+                raise KeyboardInterrupt("user pressed Ctrl-C")
+            return [0]
+
+    x = ca.MX.sym("x", nx)
+    S = ca.nlpsol("S", "pounce", {"x": x, "f": (1 - x[0])**2 + 100*(x[1] - x[0]**2)**2},
+                  {"print_time": False, "iteration_callback": Stopper(),
+                   "pounce": {"print_level": 0}})
+    try:
+        S(x0=[-1.2, 1.0])
+        outcome = S.stats()["return_status"]
+    except KeyboardInterrupt:
+        outcome = "KeyboardInterrupt"
+    check("an interrupting callback stops the solve",
+          outcome in ("User_Requested_Stop", "KeyboardInterrupt"), outcome)
+
+
 def test_option_pass_through():
     nlp = rosenbrock_nlp()
     S = ca.nlpsol("S", "pounce", nlp, {
@@ -369,6 +446,8 @@ def main():
         test_nmpc_feedback_gain_is_not_silently_zero,
         test_active_set_sqp_algorithm,
         test_working_set_carries_between_calls,
+        test_a_raising_model_fails_the_solve_not_the_process,
+        test_iteration_callback_can_interrupt,
         test_option_pass_through,
     ):
         t()
