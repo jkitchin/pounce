@@ -1256,6 +1256,22 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "",
     )?;
     r.add_number_option("warm_start_target_mu", "", 0.0, "Experimental!")?;
+    r.add_string_option(
+        "warm_start_recentering",
+        "How the warm-start initializer adapts to the quality of the supplied iterate.",
+        "residual",
+        &[
+            (
+                "residual",
+                "measure the supplied point and derive mu, the bound-multiplier fills, and the equality-multiplier reconstruction from it",
+            ),
+            (
+                "none",
+                "pre-pounce#606 behaviour: universal constants, zero-filled unseeded multipliers, mu untouched",
+            ),
+        ],
+        "DELIBERATE DEVIATION FROM UPSTREAM IPOPT (pounce#606). Ipopt's warm-start initializer applies fixed pushes and floors regardless of what the caller handed it, and fills a missing multiplier block with a constant. That makes the warm start's behaviour a function of the options rather than of the iterate: an at-the-optimum restart and a stale point from a different parameter both start on the same barrier, and a caller who supplies only a primal point gets bound multipliers of warm_start_mult_bound_push -- a number chosen with no reference to the slacks it is paired against. Under `residual` the initializer instead measures the supplied point's primal residual, complementarity and stationarity residual; fills unseeded bound multipliers from mu/slack; re-derives an identically-zero equality-multiplier block from the same regularized stationarity least-squares solve the cold path uses; and raises mu to the measured average complementarity (clamped to [1e-11, 0.1]) when the supplied point cannot support the barrier mu_init asked for. Only complementarity moves mu: a warm point at a moved parameter carries primal and dual residuals of order delta-theta by construction, and raising mu to meet those discards the warm start to pay for a Newton step that was about to happen anyway -- measured at 715 -> 1129 iterations over the 27 parametric paths in benchmarks/warmstart before that term was dropped. `warm_start_target_mu` still overrides mu outright. Set to `none` to restore bit-for-bit pre-pounce#606 warm-start behaviour.",
+    )?;
 
     // ===== CGSearchDirCalculator::RegisterOptions (contrib/CGPenalty/IpCGSearchDirCalc.cpp) =====
     r.set_registering_category("CG Penalty");

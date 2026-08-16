@@ -10,6 +10,7 @@
 //! search, mu update, etc.) read/write fields here as their inputs
 //! and outputs.
 
+use crate::init::warm_start::WarmStartDiagnostics;
 use crate::iterates_vector::IteratesVector;
 use pounce_common::timing::{Deadline, TimingStatistics};
 use pounce_common::types::{Index, Number};
@@ -118,6 +119,13 @@ pub struct IpoptData {
     /// counterpart. See pounce#58.
     pub request_resto: bool,
 
+    /// What the warm-start initializer accepted, reconstructed, or
+    /// discarded from the supplied iterate, and the residuals it based
+    /// those calls on (gh#606). `None` on the cold path, which has no
+    /// supplied iterate to report on. Read back after a solve through
+    /// [`crate::application::IpoptApplication::warm_start_diagnostics`].
+    pub warm_start_diagnostics: Option<WarmStartDiagnostics>,
+
     /// Line-search reset request from the μ-update layer (pounce#510).
     /// Upstream's μ updates hold a `linesearch_` handle and call
     /// `linesearch_->Reset()` themselves at fixed points
@@ -218,6 +226,7 @@ impl IpoptData {
             info_string: String::new(),
             tiny_step_flag: false,
             request_resto: false,
+            warm_start_diagnostics: None,
             request_ls_reset: false,
             request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',
