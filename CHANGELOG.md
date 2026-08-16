@@ -129,11 +129,13 @@ changes.
   solution map (inherited from CasADi's `Nlpsol` base class, so
   `jacobian(sol['x'], p)` and bilevel problems work). Source, build, and
   parity tests against CasADi's bundled Ipopt live in `casadi/`; six
-  runnable examples in `casadi/examples/`. Installation is
+  runnable examples in `casadi/examples/`. Installation is either
   `make -C casadi install`, which drops the plugin into CasADi's own
   package directory — the first place its loader looks, so no
-  environment variable and no `sudo`. A prebuilt `pounce-casadi` wheel is
-  not there yet; `dev-notes/casadi-interface-options.md` records why this
+  environment variable and no `sudo` — or a wheel: `casadi/wheel/build.sh`
+  packages `pounce-casadi`, and `import pounce_casadi` then registers the
+  plugin in-process, leaving CasADi's installation untouched and its
+  bundled Ipopt loadable alongside. Nothing is published to PyPI yet; `dev-notes/casadi-interface-options.md` records why this
   shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
   drop-in `libipopt`, and what the wheel would take.
 

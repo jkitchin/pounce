@@ -95,11 +95,26 @@ to line up:
    installed CasADi was actually built with, for comparison with `DEFS`
    in the Makefile.
 
-## Packaging status
+## Packaging
 
-Building from source is the only route today. A `pounce-casadi` wheel
-shipping prebuilt plugins per CasADi minor version — the packaging
-counterpart of `pip install pounce-solver[gams]` + `pounce-gams
-register` — is the intended distribution, and is tracked alongside the
-design notes in
-[`dev-notes/casadi-interface-options.md`](../dev-notes/casadi-interface-options.md).
+[`wheel/`](wheel/) packages the plugin as `pounce-casadi`, so that
+installing it is all a user does:
+
+```sh
+cd wheel && ./build.sh          # builds for the installed casadi -> dist/*.whl
+pip install dist/pounce_casadi-*.whl
+```
+
+```python
+import casadi as ca
+import pounce_casadi             # registers the plugin; nothing else needed
+ca.nlpsol("solver", "pounce", nlp, {"pounce": {"tol": 1e-9}})
+```
+
+Importing it `dlopen`s the shipped plugin and calls its
+`casadi_load_nlpsol_pounce` hook — the entry point CasADi's own loader
+would call — so nothing is written into CasADi's installation, no
+`CASADIPATH` is set, and CasADi's bundled plugins stay loadable
+alongside. Nothing is published to PyPI yet; what a release build adds
+(the manylinux / macOS / Windows matrix, one entry per CasADi minor
+version) is in [`wheel/README.md`](wheel/README.md).

@@ -1,0 +1,5 @@
+# Staged binaries and built wheels — produced by ./build.sh.
+pounce_casadi/_plugins/
+dist/
+build/
+*.egg-info/

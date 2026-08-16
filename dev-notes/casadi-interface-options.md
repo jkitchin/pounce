@@ -158,27 +158,58 @@ harder. It trades "match CasADi's internal C++ ABI" for "match Ipopt's
 C++ ABI *and* substitute a bundled shared library", and gives up
 side-by-side operation. The plugin's coupling is the cheaper one.
 
-### What a wheel actually takes
+### What a wheel actually takes — built, and it works
 
-Worth writing down, since it is the open decision and it is smaller than
-it looks. The plugin's only version-sensitive dependency is CasADi's
-internal C++ headers, and CasADi minor releases are infrequent (3.6 in
-2023, 3.7 in 2025). So:
+Worth writing down, since it was the open decision. It is smaller than
+it looks, and the awkward part turned out to be avoidable.
 
-* one plugin build per (CasADi minor × platform), each a `pip install
-  casadi==X.Y.*` plus a `git clone --branch X.Y.Z` for headers — both
-  scriptable, and already what `make fetch-src` does;
-* ship the resulting `libcasadi_nlpsol_pounce.so` files plus
-  `libpounce_cinterface.so` in one wheel, and select at import time on
-  `casadi.__version__`;
-* build inside manylinux with `-D_GLIBCXX_USE_CXX11_ABI=0` to match the
-  CasADi wheels (§3), plus macOS x86_64/arm64 and Windows;
-* installation is then a file copy into CasADi's package directory —
-  already implemented as `make install`, no `sudo`, no env var.
+**Registration.** A wheel does not have to copy files into CasADi's
+installation. The plugin exports `casadi_load_nlpsol_pounce`, which calls
+`Nlpsol::registerPlugin` — the entry point CasADi's own loader calls
+after finding a plugin on its search path. A Python package can `dlopen`
+the shipped library and call it directly:
 
-The recurring cost is one matrix entry per CasADi minor version, which
-is also exactly the maintenance that goes away if the interface is
-upstreamed (route D).
+```python
+lib = ctypes.CDLL(path_to_plugin, mode=ctypes.RTLD_GLOBAL)
+lib.casadi_load_nlpsol_pounce()
+```
+
+so `import pounce_casadi` is the whole setup: no `CASADIPATH`, nothing
+written into site-packages/casadi, and CasADi's bundled plugins stay
+loadable alongside — which matters, because side-by-side Ipopt is how
+this integration is validated. The plugin's `DT_NEEDED` on
+`libcasadi.so.3.7` resolves against the copy already loaded by `import
+casadi`, so the wheel is relocatable; `libpounce_cinterface` ships
+beside it and is loaded explicitly rather than through an rpath.
+
+**Demonstrated.** `casadi/wheel/` builds `pounce-casadi` and it was
+installed into a clean virtualenv containing nothing but `casadi==3.7.2`:
+
+```
+$ pip install casadi==3.7.2 dist/pounce_casadi-0.10.0-py3-none-any.whl
+$ python -c "import casadi as ca, pounce_casadi; ..."
+casadi 3.7.2 | plugin builds shipped: ['3.7']
+pounce x*: [0.90723395 0.82275544] | ipopt x*: [0.90723395 0.82275544]
+Opti:      [0.90723395 0.82275544]
+```
+
+**What a *published* wheel still needs** is only the build matrix, since
+the plugin is bound to a CasADi minor version and to the platform C++
+ABI. The package ships one build per minor under
+`pounce_casadi/_plugins/<minor>/` and selects on `casadi.__version__`,
+raising a clear `ImportError` rather than guessing — CasADi itself
+performs no version handshake, so guessing would mean loading a plugin
+that misbehaves. Per platform:
+
+* **Linux** — a manylinux image, `-D_GLIBCXX_USE_CXX11_ABI=0` to match
+  the CasADi wheels (§3), and `auditwheel` **excluding** `libcasadi`,
+  which must resolve to the user's installed copy rather than be
+  vendored.
+* **macOS** x86_64 + arm64, **Windows** MSVC matching CasADi's toolchain.
+
+CasADi minor releases are infrequent (3.6 in 2023, 3.7 in 2025), so the
+matrix is small and mostly static — and it is exactly the maintenance
+that disappears if the interface is contributed upstream (route D).
 
 ---
 

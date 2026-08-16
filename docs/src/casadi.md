@@ -28,13 +28,31 @@ another `Function`, and **differentiating through the solve**.
 ## Install
 
 The plugin is a small C++ shared library built against the CasADi you
-have installed. There is no wheel yet — build it from the repository:
+have installed. Nothing is published to PyPI yet, so either route starts
+from the repository.
+
+**As a wheel.** `casadi/wheel/build.sh` builds the plugin for the CasADi
+in your environment and packages it:
 
 ```bash
 pip install casadi
-git clone https://github.com/jkitchin/pounce && cd pounce
-cargo build --release -p pounce-cinterface
+git clone https://github.com/jkitchin/pounce && cd pounce/casadi/wheel
+./build.sh && pip install dist/pounce_casadi-*.whl
+```
 
+```python
+import casadi as ca
+import pounce_casadi     # registers the plugin — no CASADIPATH, no file copying
+```
+
+Importing the package loads the plugin into the process and registers it
+with CasADi directly, which leaves CasADi's own installation untouched
+and its bundled plugins — Ipopt included — loadable alongside.
+
+**Or in place**, without packaging:
+
+```bash
+cargo build --release -p pounce-cinterface
 cd casadi
 make fetch-src     # CasADi source at your exact version, for its headers
 make

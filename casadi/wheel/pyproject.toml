@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pounce-casadi"
+version = "0.10.0"
+description = "POUNCE as a CasADi nlpsol plugin"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["casadi>=3.7,<3.8"]
+
+[project.urls]
+Homepage = "https://github.com/jkitchin/pounce"
+Documentation = "https://jkitchin.github.io/pounce/casadi.html"
+
+[tool.setuptools]
+packages = ["pounce_casadi"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+pounce_casadi = ["_plugins/*/*"]
