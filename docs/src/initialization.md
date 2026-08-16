@@ -71,7 +71,7 @@ The knobs, all Ipopt-compatible:
 | `bound_mult_init_val` | `1.0` | Initial bound-multiplier value. |
 | `bound_mult_init_method` | `constant` | `constant` / `mu-based` / `least-square`. |
 | `constr_mult_init_max` | `1e3` | Cap on the least-square constraint-multiplier estimate; `0` keeps `y = 0`. |
-| `least_square_init_primal` | `no` | Replace the starting `x` with the min-norm solution of the linearized constraints before the interior push. |
+| `least_square_init_primal` | `no` | Replace the starting `x` with the min-norm solution of the linearized constraints before the interior push — but only if that actually reduces the true nonlinear violation (see [Safeguarding the least-square start](#safeguarding-the-least-square-start)). |
 | `mu_init` | `0.1` | Initial barrier parameter (monotone strategy). |
 | `start_with_resto` | `no` | Jump straight into feasibility restoration at iteration 1 (aborts if the start is already feasible). |
 
@@ -82,6 +82,49 @@ iteration-0 infeasibility on mostly-linear models (the
 more aggressive `bound_push` / `bound_frac` / `bound_mult_init_val`).
 A point where a function *fails to evaluate* is not fine; see
 [Diagnosing a bad start](#diagnosing-a-bad-start).
+
+### Safeguarding the least-square start
+
+The min-norm solution of the *linearized* constraints is a local model
+step, not automatically a better starting point. Where the Jacobian is
+small relative to the residual, the linearization asks for a very large
+correction and the true nonlinear violation at the far end can be far
+worse than where it started. On `x₀² + x₁² = 1` from `(0.05, 0.05)` the
+Jacobian is `(0.1, 0.1)`, the linearized correction is about 7 units
+long, and the violation at the far end is `48.5` against the `0.995` it
+started with.
+
+So the step is scored before it is taken. Writing `θ(x)` for the
+unscaled max-norm nonlinear violation —
+`max(‖c(x)‖∞, ‖max(d_l − d(x), d(x) − d_u, 0)‖∞)`, the same quantity the
+CLI reports as the model's constraint violation — the initializer:
+
+1. evaluates `θ₀` at your point, after the interior push;
+2. computes the least-square direction `d = x_ls − x₀` once;
+3. tries `α = 1, ½, ¼, …` (at most `least_square_init_max_trials`,
+   default 4), pushing each candidate into the bound interior *before*
+   measuring it, so the accepted merit is the merit of the point the
+   algorithm will really start from;
+4. accepts the first `α` with `θ(α) ≤ (1 − η·α)·θ₀`, where
+   `η = least_square_init_accept_ratio` (default `1e-2`). The linear
+   model predicts `θ → 0` at `α = 1`, so this is exactly "the actual
+   feasibility reduction is at least `η` times the predicted one";
+5. keeps your original `x` if no trial qualifies.
+
+Each trial costs one constraint evaluation; none costs a Jacobian or a
+KKT solve, because only the length of the step changes. A point that is
+already feasible is left alone — no step can improve a violation of
+zero.
+
+The decision is readable after the solve:
+
+```rust
+if let Some(r) = app.least_square_init_report() {
+    println!("{} -> {} (alpha {}, {} rejected, {})",
+             r.violation_initial, r.violation_final,
+             r.alpha, r.rejected_trials, r.termination);
+}
+```
 
 ## Warm-starting the interior-point path
 
@@ -255,9 +298,15 @@ workflows from Python:
 # jitter / bounds midpoint. Feed them to solve_nlp_batch or race them.
 starts = pounce.generate_starts(16, bounds=bounds, seed=0)
 
-# Min-norm repair of a candidate onto the linearized constraints +
-# bounds (the standalone form of least_square_init_primal).
+# Safeguarded sparse elastic repair of a candidate onto the constraints
+# + bounds (the standalone form of least_square_init_primal). Never
+# returns a point whose true nonlinear violation is worse than the one
+# you gave it; pass return_report=True for the diagnostics.
 x0 = pounce.project_to_feasible(problem_obj, x0, lb=lb, ub=ub, cl=cl, cu=cu)
+x0, rep = pounce.project_to_feasible(problem_obj, x0, lb=lb, ub=ub,
+                                     cl=cl, cu=cu, return_report=True)
+# rep.violation_initial / .violation_final / .step_norm /
+# .rejected_trials / .elastic_total / .termination
 
 # Cheap tournament: a few iterations from each start, ranked; continue
 # the winner at full effort with a WarmStart.
