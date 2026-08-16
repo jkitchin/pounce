@@ -157,16 +157,26 @@ changes.
   restoration sub-IPM clears the subset (its primal is a different
   space).
 
-  *Measured, and worth knowing before switching it on:* on a synthetic
-  model with 2 nonlinear and 2000 linear variables the restriction made
-  the solve **slower** (4.6 s / 28 iterations against 0.85 s / 25
-  unmasked) — zeroing the quasi-Newton diagonal on the linear block
-  leaves those KKT rows carrying only the barrier term. The same model
-  under CasADi's Ipopt plugin goes from 0.40 s to **399 s**, so the
-  effect is a property of the formulation, not of this port, and POUNCE
-  absorbs it two orders of magnitude better. The feature is Ipopt parity
-  and is correct — the same KKT point either way — but it is not a
-  default to turn on without measuring.
+  *One deliberate divergence from upstream, and the measurement behind
+  it.* Ipopt drops the quasi-Newton diagonal to exactly zero on the
+  masked-out variables — truthful (their second derivatives really are
+  zero) and a trap: those rows of the augmented system's `(1,1)` block
+  are then carried by the barrier term alone, which is ~0 for a variable
+  far from its bounds, and the symmetric factorization pays for a
+  near-singular diagonal on every one of them. Ported faithfully, a
+  model with 2 nonlinear and 2000 linear variables went from 0.85 s
+  unmasked to **4.7 s** masked; the same model through CasADi's Ipopt
+  plugin goes from 0.40 s to **399 s**, which is what identified the
+  flag rather than the port as the problem. POUNCE instead keeps a
+  curvature floor (`limited_memory_init_val_min`, 1e-8 by default and
+  registered with a strict positive lower bound) on those coordinates.
+  That restores parity at 2000 linear variables (0.93 s against 0.89 s)
+  and turns the feature into the win the issue asked for at 10 000
+  (5.1 s / 27 iterations against 6.0 s / 31). Filling the diagonal with
+  σ instead is equally fast and measurably worse — it injects a proximal
+  term at the problem's own curvature scale that the masked update has
+  no columns to learn back down, and it stalls the 6-variable fixture at
+  `Solved_To_Acceptable_Level` where `tol=1e-9` was reached before.
 
 - **`GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` aborted the
   process when used as documented.** Called from inside an intermediate

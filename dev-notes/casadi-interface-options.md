@@ -140,28 +140,51 @@ Worth noting: CasADi's own Ipopt plugin **cannot** give you a full
 the callback nothing. POUNCE's `GetIpoptCurrentIterate` makes the full
 callback work out of the box. That is a genuine advantage to advertise.
 
-### Is the mask a performance win? Not automatically — measured
+### Is the mask a performance win? Only after fixing the diagonal
 
-The motivating claim in gh#624 is performance. On a synthetic model with
-2 nonlinear and 2000 linear variables, `hessian_approximation=limited-memory`:
+The motivating claim in gh#624 is performance. The faithful port of
+upstream's choice — `reduced_diag = true`, i.e. `W` *exactly zero* on the
+variables that enter linearly — is markedly **slower**, on a synthetic
+model with 2 nonlinear and 2000 linear variables:
 
 | | unmasked | masked |
 | --- | --- | --- |
-| POUNCE | 0.85 s, 25 iters | 4.6 s, 28 iters |
-| CasADi's Ipopt | 0.40 s, 20 iters | **399 s**, 23 iters |
+| POUNCE, exact-zero diagonal (upstream's choice) | 0.85 s, 25 iters | 4.7 s, 28 iters |
+| CasADi's Ipopt (`pass_nonlinear_variables`) | 0.40 s, 20 iters | **399 s**, 23 iters |
 
-All four reach `f = 1.00861565`. Restricting the approximation zeroes
-the quasi-Newton diagonal on the linear block, leaving those KKT rows
-carrying only the barrier term; the linear solve pays more than the
-smaller update saves. Ipopt's own implementation shows the same effect
-two orders of magnitude more severely, so this is a property of the
-formulation rather than of our port — and POUNCE's low-rank
-Sherman-Morrison-Woodbury path handles it far better than Ipopt's.
+Ipopt reproducing the same effect two orders of magnitude more severely
+is what said the flag, not the port, was at fault. Zeroing the
+quasi-Newton diagonal leaves those rows of the augmented system's
+`(1,1)` block carrying the barrier term `Σ_x` alone — ~0 for a variable
+far from its bounds — and the symmetric factorization pays for a
+near-singular diagonal on every one of them.
 
-Reading: ship the feature (it is Ipopt parity, it is what a CasADi
-frontend asks for, and it is correct), document it as measure-before-you-adopt,
-and do **not** advertise it as a speedup. A profile of the masked KKT
-solve is worth doing before anyone recommends it as a default.
+The fix that shipped: keep a **curvature floor**
+(`limited_memory_init_val_min`, 1e-8 by default, registered with a strict
+positive lower bound so it can never be zero) on the masked-out
+coordinates, σ on the rest, and restrict only the `V`/`U` columns.
+
+| n linear | unmasked | masked, exact zero | masked, floor |
+| --- | --- | --- | --- |
+| 2 000 | 0.89 s, 25 it | 4.7 s, 28 it | 0.93 s, 28 it |
+| 10 000 | 6.0 s, 31 it | — | **5.1 s, 27 it** |
+
+So the feature now does what the issue asked for, and the win grows with
+the linear-to-nonlinear ratio.
+
+The obvious cheaper alternative — fill the whole diagonal with σ — is
+equally fast and *wrong in a way that shows up*: it injects a proximal
+term of the problem's own curvature scale into coordinates whose
+curvature is zero, and the masked update has no columns there to learn
+it back down (the unmasked path does, which is why it never had this
+problem). On the 6-variable fixture in
+`crates/pounce-cinterface/tests/nonlinear_variables_mask.rs` that turns
+`Solve_Succeeded` at `tol=1e-9` into a stall at
+`Solved_To_Acceptable_Level`. 1e-8 is below anything the solver reasons
+about and the tail converges.
+
+This is a documented divergence from upstream, in
+`hess/lim_mem_quasi_newton.rs`, with the measurements in the comment.
 
 ### Packaging constraints found the hard way
 

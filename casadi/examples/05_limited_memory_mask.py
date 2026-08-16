@@ -9,19 +9,20 @@ information on variables whose second derivatives are identically zero.
 
 `pass_nonlinear_variables=True` asks CasADi to work out which variables
 actually enter nonlinearly (`which_depends`) and hand that set to POUNCE,
-which then approximates over the subspace and leaves the Hessian exactly
-zero elsewhere. It is an approximation-space restriction, not a different
-problem: the KKT point is the same, which is what this script checks.
+which then approximates curvature over that subspace only. It is an
+approximation-space restriction, not a different problem: the KKT point
+is the same, which is what this script checks.
 
-Whether it is *faster* is a different question, and the honest answer is
-"measure it". On this model scaled up to 2000 linear variables the
-restriction costs time rather than saving it (4.6 s against 0.9 s
-unmasked): zeroing the quasi-Newton diagonal on the linear block leaves
-those KKT rows carrying only the barrier term, and the linear solve pays
-more than the smaller update saves. That is a property of the
-formulation — the same model through CasADi's Ipopt plugin goes from
-0.4 s to 399 s — not of POUNCE. Switch it on for a model where you have
-measured a win.
+The payoff grows with the ratio of linear to nonlinear variables. On this
+model at 10 000 linear variables the masked solve takes 5.1 s / 27
+iterations against 6.0 s / 31 unmasked; at 2000 it is a wash. A model
+that is mostly nonlinear has nothing to gain, so measure rather than
+switching it on by default.
+
+(For scale, the same 2000-variable model through CasADi's Ipopt plugin
+goes from 0.40 s unmasked to 399 s masked — Ipopt zeroes the quasi-Newton
+diagonal on the linear block, which leaves those KKT rows carrying only
+the barrier term. POUNCE keeps a small curvature floor there instead.)
 
 Give the set yourself with `nonlinear_variables=[bool]*nx` when you know
 the structure better than the symbolic analysis can (for example when an

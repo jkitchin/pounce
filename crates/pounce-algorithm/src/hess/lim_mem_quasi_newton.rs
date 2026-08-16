@@ -97,10 +97,13 @@ pub struct LimMemQuasiNewtonUpdater {
     /// the whole space, which is what every solve did before the mask
     /// existed. When set, curvature pairs are projected onto these
     /// positions and the published `W` carries the corresponding
-    /// expansion `P` so the KKT solvers see `B = P · B_red · Pᵀ`: zero
-    /// curvature, and no stored columns, for variables that only ever
-    /// appear linearly. Mirrors upstream's `P_LM` from
-    /// `IpTNLPAdapter::GetQuasiNewtonApproxSpaces`.
+    /// expansion `P`, so the KKT solvers see
+    /// `B = σ I + P (V Vᵀ − U Uᵀ) Pᵀ`: no stored curvature, and no
+    /// stored columns, for variables that only ever appear linearly.
+    /// The subset comes from upstream's `P_LM`
+    /// (`IpTNLPAdapter::GetQuasiNewtonApproxSpaces`); see
+    /// `update_hessian` for why σ stays on the full diagonal where
+    /// upstream drops it.
     pub nonlinear_vars: Option<Vec<Index>>,
 }
 
@@ -281,18 +284,74 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
             None => curr_x.as_ref(),
         };
 
-        let mut diag = proto.make_new();
+        // The diagonal `B0` spans the **full** primal space, masked or
+        // not: σ on the nonlinear coordinates, and
+        // `limited_memory_init_val_min` (1e-8 by default) as a floor on
+        // the rest. Only the curvature columns `V`/`U` are restricted to
+        // the subspace.
+        //
+        // **Deliberate divergence from upstream (gh#624).** Ipopt builds
+        // this space as
+        // `LowRankUpdateSymMatrixSpace(dim, P_LM, /*reduced_diag=*/true)`
+        // (`IpOrigIpoptNLP.cpp:InitializeStructures`), which puts σ in the
+        // small space only, so `W` is *exactly zero* on the variables that
+        // enter linearly. That is the truthful Hessian — the second
+        // derivatives really are zero there — and it is a trap for the
+        // augmented system: those rows of the `(1,1)` block are then
+        // carried by the barrier term `Σ_x` alone, which is ~0 for a
+        // variable sitting far from its bounds, and the symmetric
+        // factorization pays for a near-singular diagonal on every one of
+        // them. Measured on a model with 2 nonlinear and 2000 linear
+        // variables (all three reach the same KKT point):
+        //
+        //     exact zero (upstream)      4.7 s   28 iterations
+        //     floor = 1e-8 (this code)   0.93 s  28 iterations
+        //     no mask at all             0.89 s  25 iterations
+        //
+        // At 10 000 linear variables the mask then does what it is for:
+        // 5.1 s / 27 iterations against 6.0 s / 31 unmasked.
+        //
+        // Ipopt's own limited-memory path takes **399 s** on that model
+        // with `pass_nonlinear_variables` on, against 0.40 s off — the
+        // same effect, two orders of magnitude worse, which is what
+        // convinced us the flag rather than the port was at fault.
+        //
+        // The floor is the smallest intervention that works, and it was
+        // picked over the obvious alternative. Filling the whole diagonal
+        // with σ (`reduced_diag = false` and nothing else) is equally
+        // fast, but it injects a proximal term of the *problem's own
+        // curvature scale* into coordinates whose curvature is zero, and
+        // — unlike the unmasked path, where L-BFGS learns that and
+        // corrects σ back down — the masked update has no columns there
+        // to correct it with. On the 6-variable fixture in
+        // `crates/pounce-cinterface/tests/nonlinear_variables_mask.rs`
+        // that turns a `Solve_Succeeded` at `tol=1e-9` into a stall at
+        // `Solved_To_Acceptable_Level`. At 1e-8 the term is far below any
+        // tolerance the solver reasons about, and the tail converges.
+        //
+        // What the mask buys is untouched either way: curvature
+        // information kept free of the linear block, and `O(n_nonlin · m)`
+        // rather than `O(n · m)` storage for the columns.
+        let mut diag = curr_x.make_new();
         diag.set(sigma);
+        if let Some(m) = mask.as_ref() {
+            // σ on the nonlinear coordinates, the curvature floor on the
+            // rest. `limited_memory_init_val_min` is registered with a
+            // strict lower bound of 0, so this diagonal can never be
+            // exactly zero — which is the whole point (see above).
+            let mut vals = vec![self.init_val_min; n_idx as usize];
+            for &i in m {
+                vals[i as usize] = sigma;
+            }
+            set_expanded(diag.as_mut(), &vals);
+        }
 
-        // `P` lifts the reduced update back into full-x; `reduced_diag`
-        // says σ lives in the small space too, so the Hessian is exactly
-        // zero on the linear variables (upstream
-        // `IpLowRankUpdateSymMatrixSpace(dim, P_LM, /*reduced_diag=*/true)`).
+        // `P` lifts the reduced low-rank update back into full-x.
         let p_lm: Option<Rc<dyn pounce_linalg::matrix::Matrix>> = mask.as_ref().map(|m| {
             let space = ExpansionMatrixSpace::new(n_idx, n_red, m, 0);
             Rc::new(ExpansionMatrix::new(space)) as Rc<dyn pounce_linalg::matrix::Matrix>
         });
-        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, p_lm, mask.is_some());
+        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, p_lm, false);
         let mut lr = lr_space.make_new_low_rank();
         lr.set_diag(Rc::from(diag));
         if let Some(mvm) = build_multi_vector(&col_space, proto, &v_cols) {
