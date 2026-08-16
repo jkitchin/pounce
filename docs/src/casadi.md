@@ -66,7 +66,7 @@ write, skip `make install` and set `CASADIPATH` to the `casadi/`
 directory instead.
 
 Verify with `make test`, which cross-checks POUNCE against CasADi's
-bundled Ipopt on the same models (40 checks, also run in CI).
+bundled Ipopt on the same models (50 checks, also run in CI).
 
 Two constraints are worth knowing before you file a bug: the plugin must
 be rebuilt for each CasADi **minor** version, and it must match CasADi's
@@ -379,6 +379,7 @@ with `make examples`:
 | `05_limited_memory_mask.py` | `pass_nonlinear_variables` with L-BFGS |
 | `06_iteration_callback.py` | Live iterates and early termination |
 | `07_custom_derivatives_and_saving.py` | Your own `grad_f`/`jac_g`/`hess_lag`, `convexify_strategy`, and `save`/`load` |
+| `08_codegen_embedded.py` | `generate()` the whole solve to C, compile it, check it matches |
 
 ## Notebook
 
@@ -454,26 +455,54 @@ process (`import pounce_casadi`, or the plugin on the search path) — the
 rule for every out-of-tree CasADi plugin. Without it the failure is a
 clean *"Plugin 'pounce' is not found"*.
 
+## Code generation
+
+`generate()` on an `nlpsol` emits the model **and** the solve — the
+oracle functions, the option calls, and the loop that drives them — as
+one C file:
+
+```python
+solver = ca.nlpsol("mpc_step", "pounce", nlp, {"pounce": {"tol": 1e-9}})
+solver.generate("mpc_step.c")
+```
+
+```bash
+cc -O2 -shared -fPIC -o mpc_step.so mpc_step.c \
+   -I .../crates/pounce-cinterface/include \
+   -L .../target/release -lpounce_cinterface -lm
+```
+
+Neither CasADi nor Python is on that command line, and neither is needed
+at run time — which is the point, for firmware, a ROS node, or a
+real-time target. What *is* needed is `libpounce_cinterface`: the
+generated file includes `pounce.h` and calls the solver through it, the
+same way CasADi's generated Ipopt code includes
+`<coin-or/IpStdCInterface.h>` and links libipopt. This is linked
+codegen, not freestanding C, so it does not reach the smallest
+microcontrollers.
+
+The generated solve reaches the same point as the interpreted one — `x`,
+`f`, `lam_x`, `lam_g` all bit-identical, pinned in the parity suite,
+which compiles a generated file and runs it on every CI build. That
+includes `clip_inactive_lam`, reproduced inside the emitted runtime
+rather than skipped, and the L-BFGS nonlinear-variable subset, emitted
+as a static index array.
+
+Three options cannot be reproduced in generated code, and `generate()`
+refuses them by name rather than quietly dropping them:
+
+| Option | Why |
+| --- | --- |
+| `iteration_callback` | The callback is a CasADi `Function` living in this process; generated code runs without CasADi. |
+| `warm_start_from_previous` | It carries an active set between calls of one solver *object*; the generated entry point has no such channel. Pass `x0` / `lam_g0` / `lam_x0` instead. |
+| `convexify_strategy` | Not emitted yet. |
+
+The runtime the plugin emits is `casadi/pounce_runtime.hpp`, the
+counterpart of CasADi's `ipopt_runtime.hpp`. Worked example:
+[`casadi/examples/08_codegen_embedded.py`](https://github.com/jkitchin/pounce/blob/main/casadi/examples/08_codegen_embedded.py).
+
 ## What is not supported
 
-- **Code generation of the solver call.** `solver.generate()` runs, but
-  warns *"cannot be code generated"* and emits a stub that will not
-  compile — CasADi's fallback for a plugin with no `codegen_body`. The
-  oracle functions generate fine; the solve does not.
-
-  Unlike the other entries here, this one is **not** a limitation
-  CasADi's Ipopt plugin shares: that plugin does generate, emitting C
-  that includes `<coin-or/IpStdCInterface.h>` and drives Ipopt through
-  its C API. Since that C API is precisely what `pounce.h` reimplements,
-  the gap is small — swapping the include in Ipopt's generated file and
-  linking `libpounce_cinterface` already compiles and links, and only
-  falls over at run time because CasADi bakes Ipopt's registry defaults
-  (`linear_solver=mumps`) into the emitted option calls, which POUNCE
-  refuses by design. A proper implementation means POUNCE's own
-  equivalent of `ipopt_runtime.hpp` plus `codegen_body` /
-  `codegen_declarations` / `codegen_init_mem` / `codegen_free_mem`.
-  Not done here; say so on the issue tracker if you are deploying to an
-  embedded target and need it.
 - **Integer variables.** POUNCE is a continuous local NLP solver, so
   `discrete` is refused by CasADi's base class rather than quietly
   relaxed.

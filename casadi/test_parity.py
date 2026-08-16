@@ -10,7 +10,11 @@ same model, so a failure says "the two solvers disagree", not "the
 number moved".
 """
 
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 import casadi as ca
 import numpy as np
@@ -547,9 +551,6 @@ def test_convexify_matches_ipopt():
 
 def test_serialization_round_trip():
     """`S.save()` / `Function.load()`, as CasADi's own plugins support."""
-    import os
-    import tempfile
-
     nlp = rosenbrock_nlp()
     opts = dict(QUIET_POUNCE, clip_inactive_lam=False,
                 var_string_md={"names": ["a", "b"]})
@@ -629,6 +630,151 @@ def test_iteration_callback_step():
           f"{iters} recorded iterations")
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+POUNCE_INC = os.path.join(HERE, "..", "crates", "pounce-cinterface", "include")
+POUNCE_LIB = os.path.join(HERE, "..", "target", "release")
+
+
+def _compile_generated(solver, workdir, stem):
+    """`solver.generate()` → a shared object → a callable `ca.external`.
+
+    The C compiler sees only `pounce.h` and links `libpounce_cinterface`:
+    no CasADi, no Python, no plugin. That is the whole point of the
+    exercise, so the command line is deliberately spelled out.
+    """
+    cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        solver.generate(f"{stem}.c")
+        so = os.path.join(workdir, f"{stem}.so")
+        cc = shutil.which("cc") or shutil.which("gcc")
+        subprocess.run(
+            [cc, "-O2", "-Wall", "-shared", "-fPIC", "-o", so, f"{stem}.c",
+             "-I", POUNCE_INC, "-L", POUNCE_LIB, "-lpounce_cinterface",
+             "-Wl,-rpath," + os.path.abspath(POUNCE_LIB), "-lm"],
+            check=True, capture_output=True, text=True)
+    finally:
+        os.chdir(cwd)
+    return ca.external(solver.name(), so)
+
+
+def test_codegen_matches_the_interpreted_solve():
+    """`solver.generate()` — the model *and* the solve, as compiled C.
+
+    CasADi's ipopt plugin generates C that talks to Ipopt's C API; POUNCE
+    generates C that talks to the same API through `pounce.h`. The
+    generated solve has to reach the same point as the interpreted one,
+    multipliers included — including `clip_inactive_lam`, which lives in
+    the plugin and so has to be reproduced in the emitted runtime.
+    """
+    if not (shutil.which("cc") or shutil.which("gcc")):
+        print("SKIP  codegen (no C compiler)")
+        return
+
+    with tempfile.TemporaryDirectory() as d:
+        # 1. A plain solve, exact Hessian.
+        nlp = rosenbrock_nlp()
+        kw = dict(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+        S = ca.nlpsol("cg_plain", "pounce", nlp,
+                      {"print_time": False, "pounce": {"print_level": 0, "tol": 1e-10}})
+        want = S(**kw)
+        try:
+            G = _compile_generated(S, d, "cg_plain")
+        except subprocess.CalledProcessError as exc:
+            check("generated C compiles", False, exc.stderr.strip().splitlines()[-1][:120])
+            return
+        check("generated C compiles and links against libpounce_cinterface", True)
+        got = G(x0=[0.5, 0.5], p=1.5, lbx=-ca.inf, ubx=ca.inf, lbg=-ca.inf, ubg=0,
+                lam_x0=0, lam_g0=0)
+        for key in ("x", "f", "lam_x", "lam_g"):
+            check(f"codegen == interpreted: {key}",
+                  float(ca.norm_inf(ca.DM(got[key]) - ca.DM(want[key]))) == 0.0,
+                  f"{np.array(got[key]).ravel()}" if key == "x" else "")
+
+        # 2. A bounded model, where the plugin's default clipping is what
+        #    keeps the bound multipliers usable. If the runtime skipped it,
+        #    lam_x would differ here and nowhere else.
+        y = ca.MX.sym("y", 2)
+        bounded = {"x": y, "f": (y[0] - 3) ** 2 + (y[1] - 0.5) ** 2,
+                   "g": y[0] + y[1]}
+        bkw = dict(x0=[0.0, 0.0], lbx=[-10, -10], ubx=[1, 10], lbg=-10, ubg=10)
+        B = ca.nlpsol("cg_bounded", "pounce", bounded,
+                      {"print_time": False, "pounce": {"print_level": 0}})
+        bwant = B(**bkw)
+        BG = _compile_generated(B, d, "cg_bounded")
+        bgot = BG(lam_x0=0, lam_g0=0, **bkw)
+        check("codegen reproduces clip_inactive_lam",
+              float(ca.norm_inf(ca.DM(bgot["lam_x"]) - ca.DM(bwant["lam_x"]))) == 0.0,
+              f"lam_x={np.array(bgot['lam_x']).ravel()} (one active, one clipped to 0)")
+
+        # 3. Limited memory plus a nonlinear-variable subset: the mask has to
+        #    reach the generated solver too, or it silently approximates over
+        #    every variable.
+        n = 12
+        z = ca.MX.sym("z", n)
+        masked = {"x": z,
+                  "f": (1 - z[0]) ** 2 + 100 * (z[1] - z[0] ** 2) ** 2 + ca.sum1(z[2:]),
+                  "g": ca.sum1(z)}
+        mkw = dict(x0=[0.5] * n, lbx=-5, ubx=5, lbg=-10, ubg=10)
+        M = ca.nlpsol("cg_masked", "pounce", masked, {
+            "print_time": False, "pass_nonlinear_variables": True,
+            "pounce": {"print_level": 0, "hessian_approximation": "limited-memory"}})
+        mwant = M(**mkw)
+        MG = _compile_generated(M, d, "cg_masked")
+        mgot = MG(lam_x0=0, lam_g0=0, **mkw)
+        check("codegen carries the L-BFGS nonlinear-variable subset",
+              float(ca.norm_inf(ca.DM(mgot["x"]) - ca.DM(mwant["x"]))) == 0.0,
+              f"f={float(mgot['f']):.9f}")
+
+
+def test_codegen_refuses_what_it_cannot_reproduce():
+    """Options the generated code cannot honour fail loudly at generate()."""
+    nlp = rosenbrock_nlp()
+
+    class Noop(ca.Callback):
+        def __init__(self):
+            ca.Callback.__init__(self)
+            self.construct("noop", {})
+
+        def get_n_in(self):
+            return ca.nlpsol_n_out()
+
+        def get_n_out(self):
+            return 1
+
+        def get_name_in(self, i):
+            return ca.nlpsol_out(i)
+
+        def get_sparsity_in(self, i):
+            name = ca.nlpsol_out(i)
+            sizes = {"f": 1, "x": 2, "g": 1, "lam_x": 2, "lam_g": 1, "lam_p": 1}
+            return ca.Sparsity.dense(sizes[name], 1) if name in sizes else ca.Sparsity(0, 0)
+
+        def eval(self, arg):
+            return [0]
+
+    cases = [
+        ("iteration_callback", {"iteration_callback": Noop()}),
+        ("warm_start_from_previous", {"warm_start_from_previous": True}),
+        ("convexify_strategy", {"convexify_strategy": "eigen-clip"}),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        for label, opts in cases:
+            S = ca.nlpsol("cg_" + label, "pounce", nlp, dict(QUIET_POUNCE, **opts))
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                S.generate("bad.c")
+                refused = False
+                detail = "generated anyway"
+            except RuntimeError as exc:
+                refused = label in str(exc)
+                detail = str(exc).strip().splitlines()[-1][:70]
+            finally:
+                os.chdir(cwd)
+            check(f"codegen refuses {label} by name", refused, detail)
+
+
 def main():
     probe_x = ca.MX.sym("x")
     try:
@@ -659,6 +805,8 @@ def main():
         test_serialization_round_trip,
         test_metadata_options_are_accepted,
         test_iteration_callback_step,
+        test_codegen_matches_the_interpreted_solve,
+        test_codegen_refuses_what_it_cannot_reproduce,
     ):
         t()
     print()

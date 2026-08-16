@@ -100,7 +100,7 @@ abi-flags:
 	@echo "installed casadi $(CASADI_VER) at $(CASADI_LIB)"
 	@$(PYTHON) -c "import casadi; print(casadi.CasadiMeta.compiler_flags())"
 
-$(PLUGIN): casadi_nlpsol_pounce.cpp
+$(PLUGIN): casadi_nlpsol_pounce.cpp pounce_runtime.hpp
 	$(CXX) -shared $(CXXFLAGS) $(DEFS) $(INCLUDES) $< -o $@ $(LDFLAGS)
 
 ## Install the plugin next to the CasADi that will load it. CasADi's

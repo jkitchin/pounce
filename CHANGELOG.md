@@ -176,7 +176,46 @@ changes.
   channel, so nothing reaches the solver; the documentation says so
   rather than implying a forward.
 
-  Also fixed: `iteration_callback_step` was read by CasADi and ignored
+- **The CasADi plugin generates C for the whole solve** (#624), so a
+  POUNCE-solved model can be deployed to a target with no Python and no
+  CasADi on it — firmware, a ROS node, a real-time target.
+  `solver.generate('mpc_step.c')` emits the oracle functions, the option
+  calls and the loop that drives them; the file needs `pounce.h` at
+  compile time and `libpounce_cinterface` at link time and nothing else.
+  This is the same bargain CasADi's Ipopt plugin strikes (its generated
+  code includes `<coin-or/IpStdCInterface.h>` and links libipopt), and it
+  works here for the same reason: that C API is what `pounce.h` is.
+  Linked codegen, not freestanding C, so it does not reach the smallest
+  microcontrollers.
+
+  The claim it replaces was wrong in a way worth recording: the docs said
+  code generation was unavailable *"the same as for CasADi's Ipopt
+  plugin"*. Ipopt's plugin has generated all along. What settled it was
+  not reading more source but taking the file CasADi generates for an
+  ipopt solver, swapping that one include for `pounce.h`, and compiling
+  it — which worked on the first try, and failed only at run time,
+  because CasADi resolves options through Ipopt's registry and bakes
+  `linear_solver=mumps` into the emitted calls. POUNCE's codegen types
+  options off CasADi's own `GenericType` instead, the way the
+  interpreted path already did.
+
+  The generated solve is required to be *bit-identical* to the
+  interpreted one — `x`, `f`, `lam_x`, `lam_g` — which is a stronger
+  contract than it sounds: `clip_inactive_lam` is a plugin-side
+  correction, so the emitted runtime (`casadi/pounce_runtime.hpp`) has to
+  reproduce it or the bound multipliers silently differ between the two
+  paths. So is the L-BFGS nonlinear-variable subset, emitted as a static
+  index array. CI compiles a generated file with `cc` and runs it on
+  every build. `iteration_callback`, `warm_start_from_previous` and
+  `convexify_strategy` cannot cross into generated code and are refused
+  **by name** at `generate()` rather than dropped.
+
+  Found while pinning it: the emitted runtime carves `z_L`/`z_U` out of
+  CasADi's `w` scratch, which the plugin had never reserved — the
+  generated code wrote past the caller's buffer. A heap corruption, not
+  an error message, and only in generated code. `alloc_w(2 * nx_, true)`.
+
+- Also fixed: `iteration_callback_step` was read by CasADi and ignored
   here, so a callback throttled to every tenth iteration still ran on all
   of them. It now throttles — but, unlike the ipopt plugin, only the
   callback: there, the whole intermediate callback returns early, so the
