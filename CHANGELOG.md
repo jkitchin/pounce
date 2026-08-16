@@ -110,7 +110,22 @@ changes.
   `warm_start_init_point=yes`; under the tightened-push recipe from
   `docs/src/initialization.md` three models move (`hs13_bigstart`
   30 -> 29, `jit1_boxed` 16 -> 17, `jit1_node` 19 -> 21), same status
-  and same objective.
+  and same objective. Re-swept against `369f13e` after #605 landed:
+  the same three lines, and no others.
+
+  The reconstruction reaches a model with only equality rows or only
+  inequality rows, which is most real NLPs and 12 of the 14 families in
+  `benchmarks/warmstart`. It did not in the first cut of this change —
+  an empty multiplier block read as "seeded", so the least-squares step
+  was skipped and then reported as though it had run. What that repair
+  is worth, measured on the stationarity residual the warm point is
+  handed to the solver with: `mpc_horizon_10` 2.3e+1 -> 3.7e-6,
+  `nmpc_vanderpol` 9.7e+0 -> 4.3e-6, `simplex_proj` 4.1e-1 -> 2.0e-2.
+  In iterations it is close to a wash on that corpus — 3052 -> 3050
+  over 42 partial-seed paths, 8 of them moving, the best `rosenbrock_ring`
+  at `tiny` 49 -> 43 and the worst `nmpc_vanderpol` at `large` 195 -> 209.
+  A full-seed run does not move at all, because a supplied `lagrange`
+  was never the block at issue.
 
   Deliberately **not** reconstructed: a seed carrying no dual
   information at all. Completing a partial warm start is well-posed;
