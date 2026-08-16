@@ -521,11 +521,13 @@ jobs:
       - name: Build the plugin
         run: make -C casadi
 
-      # 29 checks: primal, both multiplier sets and lam_p against Ipopt;
-      # Opti; stats and the per-iteration trace; live iteration callbacks;
-      # warm starts; the L-BFGS nonlinear-variable mask; the NMPC feedback
-      # gain against a re-solve (the bounded-variable trap); active-set SQP
-      # and its working-set carry; a raising model that must not abort the
+      # 40 checks: primal, both multiplier sets and lam_p against Ipopt;
+      # Opti; stats and the per-iteration trace; live iteration callbacks
+      # and their throttle; warm starts; the L-BFGS nonlinear-variable
+      # mask; the NMPC feedback gain against a re-solve (the
+      # bounded-variable trap); active-set SQP and its working-set carry;
+      # user-supplied grad_f/jac_g/hess_lag; convexify against Ipopt; a
+      # save/load round trip; a raising model that must not abort the
       # process; and a threaded map matching serial.
       - name: Parity suite
         run: make -C casadi test

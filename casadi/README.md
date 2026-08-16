@@ -21,13 +21,14 @@ covers building and installing the plugin.
   the Ipopt-3.14-compatible C API exported by `libpounce_cinterface`.
   Registration entry point: `casadi_register_nlpsol_pounce`.
 - `Makefile` — build, install, test, run examples.
-- `test_parity.py` — 29 checks cross-referencing POUNCE against CasADi's
+- `test_parity.py` — 40 checks cross-referencing POUNCE against CasADi's
   bundled `ipopt` plugin on the same models: primal, both multiplier sets and
   `lam_p`, solution-map derivatives and the bounded-variable gain trap,
-  `Opti`, stats, live iteration callbacks, warm starts and the working-set
-  carry, L-BFGS masks, exception safety, and a threaded map. Run in CI by the
-  `CasADi plugin parity` job.
-- `examples/` — six runnable scripts, from hello-world to MPC.
+  `Opti`, stats, live iteration callbacks and their throttle, warm starts and
+  the working-set carry, L-BFGS masks, user-supplied derivative functions,
+  convexification, a save/load round trip, exception safety, and a threaded
+  map. Run in CI by the `CasADi plugin parity` job.
+- `examples/` — seven runnable scripts, from hello-world to MPC.
 
 ## Build
 
