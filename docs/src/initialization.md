@@ -245,7 +245,8 @@ That covers both cases: a reordering, where the ID sets are equal, and a
 receding horizon, where they overlap. Note what it does *not* buy you —
 a transferred interior-point start is about validity, not speed. On a
 slew-limited tracking model the mapped point costs 12 iterations against
-7 for a cold solve, and 30 against 10 at horizon 40; that is the same
+7 for a cold solve; on a longer sinusoidal track the gap widens with the
+horizon (12 vs 9 at horizon 5, 30 vs 10 at horizon 40). That is the same
 barrier/active-set limit described just below, and the reason the SQP
 path exists.
 

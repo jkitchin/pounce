@@ -67,10 +67,11 @@ changes.
   jacobian leaves every structural digest bit-identical, so a reordering
   is detectable only when the caller supplies `var_ids` on both sides.
   And a mapped interior-point warm start is a correctness mechanism, not
-  a speed-up — on a receding-horizon fixture the transferred point costs
-  12 iterations against 7 cold, widening to 30 against 10 at horizon 40,
-  which is the barrier/active-set limit `docs/src/initialization.md`
-  already describes.
+  a speed-up — on a slew-limited receding-horizon fixture the transferred
+  point costs 12 iterations against 7 for a cold solve, and on a longer
+  sinusoidal track the gap widens with the horizon (12 vs 9 at horizon 5,
+  30 vs 10 at horizon 40). That is the barrier/active-set limit
+  `docs/src/initialization.md` already describes.
 
   Python-side, plus four additive `Problem` accessors
   (`options_snapshot` / `restore_options`, `get_bounds`,

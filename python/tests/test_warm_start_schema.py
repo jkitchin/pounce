@@ -500,9 +500,12 @@ def test_horizon_shift_transfers_and_replays():
     assert warm_info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(warm_x, cold_x, atol=1e-6)
     # Deliberately no assertion that the mapped replay is *cheaper*. On
-    # this family it is not: measured on the parent commit's solver, the
-    # shifted point costs 12 iterations against 7 cold at HORIZON=5, and
-    # the gap widens with the horizon (22 vs 9 at 20, 30 vs 10 at 40).
+    # this family it is not: the shifted point costs 12 iterations here
+    # against 7 for a cold solve, and on a longer sinusoidal track the
+    # gap widens with the horizon -- 12 vs 9 at HORIZON=5, 15 vs 11 at
+    # 10, 22 vs 9 at 20, 30 vs 10 at 40. Neither dropping the carried mu
+    # nor loosening it nor loosening bound_push moves it (11-13 across
+    # six variants).
     # That is the structural limit docs/src/initialization.md already
     # states — the barrier pushes iterates off their bounds, so a
     # converged interior point's active-set information does not survive
