@@ -379,6 +379,12 @@ pub struct IpoptAlgorithm {
 }
 
 impl IpoptAlgorithm {
+    /// Diagnostics from the safeguarded `least_square_init_primal`
+    /// initializer step (gh#605). `None` when the step was not run.
+    pub fn least_square_init_report(&self) -> Option<crate::init::default::LeastSquareInitReport> {
+        self.bundle.init.least_square_report()
+    }
+
     pub fn new(data: IpoptDataHandle, cq: IpoptCqHandle, mut bundle: AlgorithmBundle) -> Self {
         // The builder may pre-populate `bundle.search_dir` when given a
         // `LinearBackendFactory`; lift it onto the algorithm so the

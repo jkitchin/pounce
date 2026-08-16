@@ -32,7 +32,12 @@ from ._curve_fit import (
 from ._minima import find_minima, MinimaResult
 from .trf import trf_minimize, TRFResult, TRFConfig
 from ._preflight import preflight, PreflightReport
-from ._starts import generate_starts, project_to_feasible, race_starts
+from ._starts import (
+    ProjectionReport,
+    generate_starts,
+    project_to_feasible,
+    race_starts,
+)
 from ._critical import (
     find_critical_points, find_saddles, reaction_network,
     CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
@@ -90,6 +95,7 @@ __all__ = [
     "WarmStart",
     "generate_starts",
     "project_to_feasible",
+    "ProjectionReport",
     "race_starts",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "ActiveSet",
