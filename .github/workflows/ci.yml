@@ -482,3 +482,73 @@ jobs:
           /tmp/floorenv/bin/pip install -q pytest
           /tmp/floorenv/bin/python -m pytest pyomo-pounce/tests/test_v2.py \
             -q --no-header -rs 2>&1 | tail -5
+
+  # Build the CasADi `nlpsol` plugin and run its parity suite against
+  # CasADi's *bundled Ipopt*, on the same model objects. Nothing else in
+  # CI touches `casadi/`: without this job the plugin, and every claim in
+  # docs/src/casadi.md about matching Ipopt, is verified only on whatever
+  # machine last ran `make -C casadi test`.
+  #
+  # The plugin subclasses CasADi's internal C++ classes, and the pip wheel
+  # ships only public headers — hence the source checkout at exactly the
+  # installed version. CasADi performs no version handshake of its own, so
+  # a mismatch here is what the build is meant to catch.
+  casadi-plugin:
+    name: CasADi plugin parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install CasADi
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install casadi numpy
+
+      # The tag has to match the installed wheel exactly; `make fetch-src`
+      # derives it from `casadi.__version__` rather than pinning a literal,
+      # so a CasADi release bumps this job automatically.
+      - name: Fetch matching CasADi headers
+        run: make -C casadi fetch-src
+
+      - name: Build the solver's C library
+        run: cargo build --release -p pounce-cinterface
+
+      - name: Build the plugin
+        run: make -C casadi
+
+      # 29 checks: primal, both multiplier sets and lam_p against Ipopt;
+      # Opti; stats and the per-iteration trace; live iteration callbacks;
+      # warm starts; the L-BFGS nonlinear-variable mask; the NMPC feedback
+      # gain against a re-solve (the bounded-variable trap); active-set SQP
+      # and its working-set carry; a raising model that must not abort the
+      # process; and a threaded map matching serial.
+      - name: Parity suite
+        run: make -C casadi test
+
+      - name: Examples
+        run: make -C casadi examples
+
+      # The wheel is the intended distribution route, so build it and
+      # prove it works from a clean environment with nothing but casadi.
+      - name: Wheel builds and registers the plugin
+        run: |
+          cd casadi/wheel && ./build.sh
+          python -m venv /tmp/casadi-wheel-env
+          /tmp/casadi-wheel-env/bin/pip install -q casadi dist/pounce_casadi-*.whl
+          /tmp/casadi-wheel-env/bin/python - <<'PY'
+          import casadi as ca
+          import pounce_casadi  # registers the plugin in-process
+          x = ca.MX.sym("x", 2)
+          S = ca.nlpsol("S", "pounce",
+                        {"x": x, "f": (1 - x[0])**2 + 100*(x[1] - x[0]**2)**2},
+                        {"print_time": False, "pounce": {"print_level": 0}})
+          sol = S(x0=[0.5, 0.5])["x"].full().ravel()
+          assert abs(sol[0] - 1) < 1e-6 and abs(sol[1] - 1) < 1e-6, sol
+          print("pounce-casadi wheel OK, x* =", sol,
+                "| builds shipped:", pounce_casadi.supported_casadi_versions())
+          PY

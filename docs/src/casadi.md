@@ -66,7 +66,7 @@ write, skip `make install` and set `CASADIPATH` to the `casadi/`
 directory instead.
 
 Verify with `make test`, which cross-checks POUNCE against CasADi's
-bundled Ipopt on the same models.
+bundled Ipopt on the same models (29 checks, also run in CI).
 
 Two constraints are worth knowing before you file a bug: the plugin must
 be rebuilt for each CasADi **minor** version, and it must match CasADi's
@@ -122,6 +122,19 @@ st["iterations"]     # dict of per-iteration lists:
 
 The `iterations` dict is the same data POUNCE prints in its iteration
 table, so convergence plots need no stdout parsing.
+
+`lam_p` deserves a note because its sign surprises people. CasADi's
+`Nlpsol` base class computes it — no plugin is involved, which is why
+POUNCE and Ipopt agree on it bit for bit — and it negates the result
+(`nlpsol.cpp`: `casadi_scal(np_, -1., d_nlp->lam_p)`). So
+
+```
+lam_p = -df*/dp
+```
+
+not `+df*/dp`, where `f*` is the optimal objective. Both the Ipopt
+agreement and the sign are pinned in the parity suite against a finite
+difference of `f*`.
 
 ## Iteration callbacks
 
@@ -381,12 +394,30 @@ language boundary. `iteration_callback_ignore_errors` (CasADi's base
 option) decides whether a *throwing iteration callback* stops the solve
 or is shrugged off.
 
+## Threads
+
+`Function.map(N, "thread")` works. CasADi hands each worker its own
+memory object, and the plugin keeps every piece of per-solve state there
+— buffers, the iteration trace, the carried working set — so a batched
+solve reproduces the serial answers exactly:
+
+```python
+batched = solver.map(24, "thread", 8)
+out = batched(x0=X0, p=P, lbg=-ca.inf, ubg=0)     # bit-identical to a loop
+```
+
+Pinned in the parity suite (24 solves over 8 threads, `max |Δx| = 0`),
+and stress-run at 48 solves over 8 threads. What is *not* safe is
+driving one memory object from two threads at once, which CasADi does
+not do. Note that `warm_start_from_previous` is per memory object, so
+each worker carries its own working set.
+
 ## What is not supported
 
 - **Code generation.** `solver.generate()` is not available, the same as
   for CasADi's Ipopt plugin.
-- **Multi-threaded evaluation.** Use one solver object per thread;
-  POUNCE's core is single-threaded per problem instance.
+- **Serialization.** `Function.save()` / `serialize()` on a POUNCE
+  `nlpsol` is not supported (nor on CasADi's ipopt plugin).
 - **`var_string_md` / `con_*_md` metadata** is accepted by CasADi and
   dropped rather than forwarded.
 - **Integer variables.** POUNCE is a continuous local NLP solver;

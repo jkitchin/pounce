@@ -411,6 +411,65 @@ def test_iteration_callback_can_interrupt():
           outcome in ("User_Requested_Stop", "KeyboardInterrupt"), outcome)
 
 
+def test_lam_p_matches_ipopt_and_the_envelope_theorem():
+    """`lam_p` is computed by CasADi's `Nlpsol` base class, not by the plugin,
+    but it is a promised output and worth pinning: it must match Ipopt, and it
+    must match a finite difference of the optimal objective. Note the sign —
+    CasADi negates it (`nlpsol.cpp`: `casadi_scal(np_, -1., d_nlp->lam_p)`), so
+    `lam_p = -df*/dp`, not `+`."""
+    x, p = ca.MX.sym("x", 2), ca.MX.sym("p", 2)
+    nlp = {"x": x, "p": p,
+           "f": (x[0] - p[0])**2 + (x[1] - p[1])**2 + 0.1 * x[0] * x[1],
+           "g": x[0]**2 + x[1]**2 - 1}
+    kw = dict(x0=[0.1, 0.1], lbg=-ca.inf, ubg=0)
+    pv, eps = ca.DM([2.0, 1.0]), 1e-6
+
+    def lam_p_of(plugin, key):
+        S = ca.nlpsol("S", plugin, nlp,
+                      {"print_time": False, key: {"print_level": 0, "tol": 1e-12}})
+        r = S(p=pv, **kw)
+        fd = []
+        for j in range(2):
+            d = ca.DM.zeros(2)
+            d[j] = eps
+            fd.append((float(S(p=pv + d, **kw)["f"]) - float(S(p=pv - d, **kw)["f"]))
+                      / (2 * eps))
+        return np.array(r["lam_p"]).ravel(), np.array(fd)
+
+    lam_pounce, fd = lam_p_of("pounce", "pounce")
+    lam_ipopt, _ = lam_p_of("ipopt", "ipopt")
+    check("lam_p matches ipopt", np.abs(lam_pounce - lam_ipopt).max() < 1e-7,
+          f"{lam_pounce}")
+    check("lam_p is -df*/dp (CasADi's sign)",
+          np.abs(lam_pounce + fd).max() < 1e-5,
+          f"lam_p {lam_pounce} vs -df*/dp {-fd}")
+
+
+def test_threaded_map_matches_serial():
+    """CasADi batches solves with `Function.map(N, "thread")`, giving each
+    worker its own memory object. The plugin keeps every piece of per-solve
+    state there — buffers, the iteration trace, the carried working set — so
+    the batch must reproduce the serial answers exactly."""
+    x, p = ca.MX.sym("x", 2), ca.MX.sym("p")
+    nlp = {"x": x, "p": p,
+           "f": (1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2,
+           "g": x[0]**2 + x[1]**2 - p}
+    S = ca.nlpsol("S", "pounce", nlp,
+                  {"print_time": False, "pounce": {"print_level": 0, "tol": 1e-9}})
+    n = 24
+    P = ca.DM(np.linspace(1.2, 2.0, n)).T
+    X0 = ca.repmat(ca.DM([0.5, 0.5]), 1, n)
+    serial = ca.hcat([S(x0=X0[:, i], p=P[0, i], lbg=-ca.inf, ubg=0)["x"]
+                      for i in range(n)])
+    try:
+        batched = S.map(n, "thread", 8)(x0=X0, p=P, lbg=-ca.inf, ubg=0)["x"]
+    except Exception as exc:                 # no thread support in this build
+        check("threaded map", False, f"{type(exc).__name__}: {exc}")
+        return
+    err = float(ca.norm_inf(batched - serial))
+    check("threaded map matches serial", err == 0.0, f"max|Δx| = {err:.2e}")
+
+
 def test_option_pass_through():
     nlp = rosenbrock_nlp()
     S = ca.nlpsol("S", "pounce", nlp, {
@@ -448,6 +507,8 @@ def main():
         test_working_set_carries_between_calls,
         test_a_raising_model_fails_the_solve_not_the_process,
         test_iteration_callback_can_interrupt,
+        test_lam_p_matches_ipopt_and_the_envelope_theorem,
+        test_threaded_map_matches_serial,
         test_option_pass_through,
     ):
         t()
