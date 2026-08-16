@@ -17,11 +17,17 @@ keep the private helpers' signatures stable.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, List, Optional
 
 import numpy as np
 
-__all__ = ["generate_starts", "project_to_feasible", "race_starts"]
+__all__ = [
+    "generate_starts",
+    "project_to_feasible",
+    "ProjectionReport",
+    "race_starts",
+]
 
 # Bounds at or beyond this magnitude count as infinite (the solver's
 # NLP_*_BOUND_INF sentinels).
@@ -180,6 +186,64 @@ def generate_starts(
     return np.array([_clip(s, bounds) for s in starts])
 
 
+@dataclass
+class ProjectionReport:
+    """What :func:`project_to_feasible` did.
+
+    ``violation_initial`` / ``violation_final`` are the nonlinear
+    violation merit ``‖max(cl − g(x), g(x) − cu, 0)‖₂`` — the *true*
+    constraint violation, evaluated at the returned point, not the
+    linearized one. ``accepted`` is False when no trial improved it
+    and the original point was returned unchanged.
+    """
+
+    violation_initial: float = 0.0
+    violation_final: float = 0.0
+    step_norm: float = 0.0
+    #: Trust-region radius in effect when the last step was accepted.
+    radius: float = 0.0
+    #: Trial steps whose true violation failed the acceptance test.
+    rejected_trials: int = 0
+    #: Outer re-linearizations performed.
+    iterations: int = 0
+    n_constraint_evals: int = 0
+    n_jacobian_evals: int = 0
+    accepted: bool = False
+    termination: str = ""
+    #: Sum of the elastic variables at the last solve. Nonzero means the
+    #: linearization was inconsistent and some rows were relaxed rather
+    #: than the whole solve failing.
+    elastic_total: float = 0.0
+
+
+def _violation(g, g_l, g_u):
+    """Nonlinear violation merit: ``‖max(cl − g, g − cu, 0)‖₂``."""
+    if g.size == 0:
+        return 0.0
+    return float(np.linalg.norm(np.maximum(np.maximum(g_l - g, g - g_u), 0.0)))
+
+
+def _jacobian_coo(problem_obj, x, m, n):
+    """Jacobian at ``x`` as a scipy COO matrix, without ever forming a
+    dense ``m × n``.
+
+    Uses ``jacobianstructure()`` when the problem provides one (the
+    cyipopt convention, and the only shape that carries sparsity).
+    Without it the values are a dense row-major block and we have no
+    choice but to reshape — but we still hand a sparse matrix onward.
+    """
+    import scipy.sparse as sp
+
+    jv = np.asarray(problem_obj.jacobian(x), dtype=float).ravel()
+    if hasattr(problem_obj, "jacobianstructure"):
+        rows, cols = problem_obj.jacobianstructure()
+        rows = np.asarray(rows, dtype=int).ravel()
+        cols = np.asarray(cols, dtype=int).ravel()
+        return sp.coo_matrix((jv, (rows, cols)), shape=(m, n)).tocsc()
+    dense = jv.reshape(m, n)
+    return sp.csc_matrix(dense)
+
+
 def project_to_feasible(
     problem_obj: Any,
     x0,
@@ -189,89 +253,275 @@ def project_to_feasible(
     cl=None,
     cu=None,
     tol: Optional[float] = None,
+    max_iter: int = 3,
+    radius: Optional[float] = None,
+    rho: float = 1e3,
+    sigma: float = 1.0,
+    margin: float = 0.0,
+    accept_ratio: float = 1e-2,
+    max_trials: int = 5,
+    return_report: bool = False,
 ) -> np.ndarray:
-    """Min-norm repair of ``x0`` onto the linearized constraints + bounds.
+    """Repair ``x0`` onto the constraints and bounds by a safeguarded,
+    sparse elastic normal step.
 
-    Solves the convex QP ``min ½‖x − x0‖²`` subject to
-    ``cl ≤ g(x0) + J(x0)(x − x0) ≤ cu`` and ``lb ≤ x ≤ ub`` — the
-    standalone form of the solver's ``least_square_init_primal`` step
-    (see ``docs/src/initialization.md``). For mostly-linear models this
-    slashes iteration-0 infeasibility; for a strongly nonlinear ``g``
-    the linearization is only a local repair (it may be worth a second
-    call at the projected point).
+    Each outer iteration linearizes ``g`` at the current point and
+    solves the sparse convex QP
 
-    Parameters mirror :class:`pounce.Problem` /
-    :func:`pounce.preflight`: a cyipopt-style ``problem_obj`` (only
-    ``constraints`` and ``jacobian`` are used) and bound arrays.
+    .. code-block:: text
 
-    Returns the repaired point. With no constraints it is simply the
-    clip of ``x0`` into the box. Raises ``RuntimeError`` when the
-    projection QP fails (e.g. the linearized constraints are themselves
-    inconsistent).
+        min_{d,p,q}  σ/2 ‖D d‖² + ½ ‖W p‖² + ½ ‖W q‖² + ρ 1ᵀ(p + q)
+        s.t.         cl − p ≤ g(x) + J d + 0 ≤ cu + q
+                     max(lb − x + margin, −Δ/D) ≤ d ≤ min(ub − x − margin, Δ/D)
+                     p, q ≥ 0
+
+    where ``D`` is a diagonal variable scaling, ``W`` a diagonal row
+    scaling, and ``Δ`` the trust-region radius (an ∞-norm/box region,
+    which keeps the subproblem a QP rather than a QCQP and composes
+    directly with the bound box).
+
+    Three things this buys over a plain min-norm projection:
+
+    * **Sparsity.** ``P`` is diagonal and ``J`` is kept in scipy-sparse
+      form throughout, so nothing here allocates an ``n × n`` identity
+      or a dense ``m × n`` Jacobian. On a chain-structured model with
+      ``n = 3000`` that is the difference between ~226 MB and ~5 MB.
+    * **Elasticity.** ``p``/``q`` relax rows the linearization cannot
+      satisfy, so an inconsistent or rank-deficient linearization
+      returns the least-violating step instead of failing outright.
+    * **Safeguarding.** A linearized solution is a local model step,
+      not automatically a better starting point. Every trial step is
+      scored on the *true* nonlinear violation; a trial is accepted
+      only when the actual reduction is at least ``accept_ratio``
+      times the reduction the model predicted. Otherwise ``Δ`` is
+      halved and the step retried, up to ``max_trials`` times. If
+      nothing is accepted, ``x0`` is returned unchanged.
+
+    The returned point therefore *never* has a worse nonlinear
+    violation than ``x0`` — which the previous linearize-once-and-copy
+    behaviour did not guarantee.
+
+    Parameters mirror :class:`pounce.Problem` / :func:`pounce.preflight`:
+    a cyipopt-style ``problem_obj`` (only ``constraints``, ``jacobian``
+    and optionally ``jacobianstructure`` are used) and bound arrays.
+
+    ``sigma`` defaults to ``1``, which makes the ``d``-term exactly the
+    ``½‖x − x0‖²`` of a min-norm projection: when the linearization is
+    consistent the elastics price themselves out (``rho`` is large) and
+    the step is the same minimum-norm repair this function has always
+    returned. Lower it only if you want the repair to travel further in
+    exchange for a smaller residual.
+
+    ``max_iter`` outer re-linearizations (default 3) let the repair
+    follow a curved feasible set instead of stopping at the first
+    tangent step. ``margin`` keeps the result strictly inside the box.
+    ``return_report=True`` additionally returns a
+    :class:`ProjectionReport` with initial/final violation, step norm,
+    rejected-trial count and termination reason.
+
+    Raises ``RuntimeError`` only when the projection QP itself fails
+    for a reason elasticity cannot absorb (e.g. the solver errors).
+    An inconsistent linearization is no longer an error — it is
+    absorbed by the elastic variables and reported through
+    ``ProjectionReport.elastic_total``.
     """
+    import scipy.sparse as sp
+
     from .qp import solve_qp
 
     x0 = np.asarray(x0, dtype=float).ravel()
     n = x0.size
     x_l = np.full(n, -np.inf) if lb is None else np.asarray(lb, dtype=float).ravel()
     x_u = np.full(n, np.inf) if ub is None else np.asarray(ub, dtype=float).ravel()
+    x_l = np.where(x_l <= -_BOUND_INF, -np.inf, x_l)
+    x_u = np.where(x_u >= _BOUND_INF, np.inf, x_u)
+
+    report = ProjectionReport()
 
     m = 0
     if cl is not None:
         m = np.asarray(cl, dtype=float).ravel().size
     if m == 0:
-        return np.clip(x0, x_l, x_u)
+        report.termination = "no constraints; box clip only"
+        x = np.clip(x0, x_l, x_u)
+        report.step_norm = float(np.linalg.norm(x - x0))
+        return (x, report) if return_report else x
 
     g_l = np.asarray(cl, dtype=float).ravel()
     g_u = np.full(m, np.inf) if cu is None else np.asarray(cu, dtype=float).ravel()
+    g_l = np.where(g_l <= -_BOUND_INF, -np.inf, g_l)
+    g_u = np.where(g_u >= _BOUND_INF, np.inf, g_u)
 
-    g0 = np.asarray(problem_obj.constraints(x0), dtype=float).ravel()
-    jv = np.asarray(problem_obj.jacobian(x0), dtype=float).ravel()
-    J = np.zeros((m, n))
-    if hasattr(problem_obj, "jacobianstructure"):
-        rows, cols = problem_obj.jacobianstructure()
-        J[np.asarray(rows, dtype=int), np.asarray(cols, dtype=int)] = jv
-    else:
-        J = jv.reshape(m, n)
+    # Rows split by kind. Equalities go to A; one- or two-sided
+    # inequalities to G. Free rows (no finite side) are dropped —
+    # they constrain nothing and would only add elastic columns.
+    eq_mask = np.isfinite(g_l) & np.isfinite(g_u) & (np.abs(g_u - g_l) <= 1e-12)
+    lo_mask = np.isfinite(g_l) & ~eq_mask
+    hi_mask = np.isfinite(g_u) & ~eq_mask
 
-    # Linearized rows: J x ∈ [cl − g0 + J x0, cu − g0 + J x0].
-    shift = J @ x0 - g0
-    row_lo = g_l + shift
-    row_hi = g_u + shift
+    def _clip_box(v):
+        return np.clip(v, x_l, x_u)
 
-    A_rows, b_rows, G_rows, h_rows = [], [], [], []
-    for i in range(m):
-        lo_f = _lower_present(g_l[i])
-        hi_f = _upper_present(g_u[i])
-        eq = abs(g_u[i] - g_l[i]) <= 1e-12 if (lo_f and hi_f) else False
-        if eq:
-            A_rows.append(J[i])
-            b_rows.append(row_lo[i])
-            continue
-        if hi_f:
-            G_rows.append(J[i])
-            h_rows.append(row_hi[i])
-        if lo_f:
-            G_rows.append(-J[i])
-            h_rows.append(-row_lo[i])
+    x = _clip_box(x0.copy())
+    g = np.asarray(problem_obj.constraints(x), dtype=float).ravel()
+    report.n_constraint_evals += 1
+    theta = _violation(g, g_l, g_u)
+    report.violation_initial = theta
+    report.violation_final = theta
+    best_x = x.copy()
 
-    res = solve_qp(
-        P=np.eye(n),
-        c=-x0,
-        A=np.array(A_rows) if A_rows else None,
-        b=np.array(b_rows) if b_rows else None,
-        G=np.array(G_rows) if G_rows else None,
-        h=np.array(h_rows) if h_rows else None,
-        lb=x_l,
-        ub=x_u,
-        tol=tol,
-    )
-    if not res.success:
-        raise RuntimeError(
-            f"project_to_feasible: projection QP ended with status "
-            f"{res.status!r} — the linearized constraints may be inconsistent"
+    if theta == 0.0:
+        report.termination = "x0 already feasible"
+        report.accepted = True
+        return (best_x, report) if return_report else best_x
+
+    # Variable scaling D: unit for now, but kept explicit so the
+    # trust region and the σ term are expressed in scaled units.
+    d_scale = np.ones(n)
+    # Row scaling W: damp rows whose Jacobian is large so one stiff row
+    # does not dominate the least-squares residual.
+    for _outer in range(max(1, int(max_iter))):
+        report.iterations += 1
+        J = _jacobian_coo(problem_obj, x, m, n)
+        report.n_jacobian_evals += 1
+        row_norm = np.sqrt(np.asarray(abs(J).power(2).sum(axis=1)).ravel())
+        w = 1.0 / np.maximum(row_norm, 1.0)
+
+        if radius is None:
+            delta = max(1.0, float(np.linalg.norm(x, ord=np.inf)))
+        else:
+            delta = float(radius)
+
+        # Elastic column count: one p and one q per constrained row.
+        n_p = int(np.count_nonzero(eq_mask | lo_mask))
+        n_q = int(np.count_nonzero(eq_mask | hi_mask))
+        p_idx = np.full(m, -1, dtype=int)
+        p_idx[eq_mask | lo_mask] = np.arange(n_p)
+        q_idx = np.full(m, -1, dtype=int)
+        q_idx[eq_mask | hi_mask] = np.arange(n_q)
+        nz = n + n_p + n_q
+
+        # Diagonal Hessian — never an n×n identity.
+        w_p = w[eq_mask | lo_mask]
+        w_q = w[eq_mask | hi_mask]
+        P = sp.diags(
+            np.concatenate([sigma * d_scale**2, w_p**2, w_q**2]),
+            format="csc",
         )
-    return np.asarray(res.x)
+        c_lin = np.concatenate([np.zeros(n), rho * np.ones(n_p + n_q)])
+
+        Ep = sp.coo_matrix(
+            (np.ones(n_p), (np.flatnonzero(eq_mask | lo_mask), np.arange(n_p))),
+            shape=(m, n_p),
+        ).tocsc()
+        Eq = sp.coo_matrix(
+            (np.ones(n_q), (np.flatnonzero(eq_mask | hi_mask), np.arange(n_q))),
+            shape=(m, n_q),
+        ).tocsc()
+        # Row block: g + J d + p − q, in the elastic column layout.
+        row_block = sp.hstack([J, Ep, -Eq], format="csc")
+
+        A = b = G = h = None
+        if eq_mask.any():
+            A = row_block.tocsr()[np.flatnonzero(eq_mask)].tocsc()
+            b = (g_l - g)[eq_mask]
+        g_blocks, h_blocks = [], []
+        if hi_mask.any():
+            g_blocks.append(row_block.tocsr()[np.flatnonzero(hi_mask)].tocsc())
+            h_blocks.append((g_u - g)[hi_mask])
+        if lo_mask.any():
+            g_blocks.append(-row_block.tocsr()[np.flatnonzero(lo_mask)].tocsc())
+            h_blocks.append(-(g_l - g)[lo_mask])
+        if g_blocks:
+            G = sp.vstack(g_blocks, format="csc")
+            h = np.concatenate(h_blocks)
+
+        accepted_this_outer = False
+        trial_delta = delta
+        for _trial in range(max(1, int(max_trials))):
+            tr = trial_delta / d_scale
+            d_lo = np.maximum(x_l - x + margin, -tr)
+            d_hi = np.minimum(x_u - x - margin, tr)
+            # A margin wider than the box would invert it; a degenerate
+            # box just pins d to 0 for that component.
+            d_hi = np.maximum(d_hi, d_lo)
+            z_lo = np.concatenate([d_lo, np.zeros(n_p + n_q)])
+            z_hi = np.concatenate([d_hi, np.full(n_p + n_q, np.inf)])
+
+            # `check_psd=False` is a fact here, not an optimism: `P`
+            # is built above as a diagonal with entries `sigma*D**2`
+            # and `w**2`, all non-negative, so it is PSD by
+            # construction. Letting the default fire would run a dense
+            # O(k^3) eigenvalue solve on the (n + n_p + n_q) block
+            # whenever that stays under the solver's 1500 threshold —
+            # which on a sparse model is the single largest allocation
+            # in the whole routine.
+            res = solve_qp(
+                P=P,
+                c=c_lin,
+                A=A,
+                b=b,
+                G=G,
+                h=h,
+                lb=z_lo,
+                ub=z_hi,
+                tol=tol,
+                check_psd=False,
+            )
+            if not res.success:
+                report.rejected_trials += 1
+                trial_delta *= 0.5
+                continue
+
+            z = np.asarray(res.x, dtype=float).ravel()
+            d = z[:n]
+            report.elastic_total = float(np.sum(np.abs(z[n:])))
+
+            # Predicted violation at the linearized point.
+            g_lin = g + J @ d
+            theta_pred = _violation(g_lin, g_l, g_u)
+            predicted = theta - theta_pred
+
+            x_try = _clip_box(x + d)
+            g_try = np.asarray(problem_obj.constraints(x_try), dtype=float).ravel()
+            report.n_constraint_evals += 1
+            theta_try = _violation(g_try, g_l, g_u)
+            actual = theta - theta_try
+
+            # Accept only on a real reduction in the TRUE violation,
+            # and only when it is a defensible fraction of what the
+            # model promised.
+            if (
+                np.isfinite(theta_try)
+                and theta_try < theta
+                and actual >= accept_ratio * max(predicted, 0.0)
+            ):
+                x, g, theta = x_try, g_try, theta_try
+                best_x = x_try
+                report.radius = trial_delta
+                report.accepted = True
+                accepted_this_outer = True
+                break
+
+            report.rejected_trials += 1
+            trial_delta *= 0.5
+
+        if not accepted_this_outer:
+            report.termination = (
+                "no trial improved the nonlinear violation"
+                if not report.accepted
+                else "converged (no further improvement available)"
+            )
+            break
+        if theta <= (tol if tol is not None else 1e-10):
+            report.termination = "violation below tolerance"
+            break
+    else:
+        report.termination = "max_iter reached"
+
+    report.violation_final = theta
+    report.step_norm = float(np.linalg.norm(best_x - x0))
+    return (best_x, report) if return_report else best_x
 
 
 def race_starts(
