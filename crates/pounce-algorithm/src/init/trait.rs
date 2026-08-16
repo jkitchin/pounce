@@ -1,5 +1,6 @@
 //! `IterateInitializer` trait — port of `IpIterateInitializer.hpp`.
 
+use crate::init::default::LeastSquareInitReport;
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
@@ -21,4 +22,13 @@ pub trait IterateInitializer {
         nlp: &Rc<RefCell<dyn IpoptNlp>>,
         aug_solver: &mut dyn AugSystemSolver,
     ) -> bool;
+
+    /// Diagnostics from the safeguarded `least_square_init_primal`
+    /// step (gh#605): initial/final nonlinear violation, accepted step
+    /// norm, rejected-trial count, termination reason. `None` for
+    /// initializers that do not run that step, or when it was not
+    /// attempted on this solve.
+    fn least_square_report(&self) -> Option<LeastSquareInitReport> {
+        None
+    }
 }
