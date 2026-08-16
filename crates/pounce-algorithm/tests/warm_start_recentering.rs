@@ -549,3 +549,385 @@ fn solver_sources() -> Vec<String> {
     walk(root, &mut out);
     out
 }
+
+// ---------------------------------------------------------------
+// gh#606 review regressions.
+//
+// The model above has one equality row and one inequality row, so
+// both `y` blocks are non-empty in every test written against it.
+// That is exactly the shape that hid the first defect below, so
+// these use a two-variable model with only *one* of the two blocks.
+// ---------------------------------------------------------------
+
+/// Which constraint block the single row lands in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Row {
+    /// `x0 + x1 == 2` — `y_c` has one entry, `y_d` is empty.
+    Equality,
+    /// `x0 + x1 <= 2`, active at the optimum — `y_c` is empty.
+    Inequality,
+}
+
+/// `min (x0−3)² + (x1−3)²` over `0 ≤ x ≤ 10` with a single row, whose
+/// optimum sits on that row at `x = (1, 1)`.
+struct OneBlock {
+    row: Row,
+    /// With `free`, `x` has no finite bounds — so the four bound
+    /// multiplier blocks are all zero-dimension and there is nothing
+    /// for the stationarity split to rebuild.
+    free: bool,
+    x0: Option<[Number; 2]>,
+    lambda0: Option<Vec<Number>>,
+    z_l0: Option<Vec<Number>>,
+    z_u0: Option<Vec<Number>>,
+    final_x: Option<[Number; 2]>,
+    final_obj: Option<Number>,
+    final_lambda: Option<Vec<Number>>,
+    final_z_l: Option<Vec<Number>>,
+    final_z_u: Option<Vec<Number>>,
+}
+
+impl OneBlock {
+    fn new(row: Row) -> Self {
+        Self {
+            row,
+            free: false,
+            x0: None,
+            lambda0: None,
+            z_l0: None,
+            z_u0: None,
+            final_x: None,
+            final_obj: None,
+            final_lambda: None,
+            final_z_l: None,
+            final_z_u: None,
+        }
+    }
+}
+
+impl TNLP for OneBlock {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 1,
+            nnz_jac_g: 2,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        if self.free {
+            b.x_l.copy_from_slice(&[-2.0e19, -2.0e19]);
+            b.x_u.copy_from_slice(&[2.0e19, 2.0e19]);
+        } else {
+            b.x_l.copy_from_slice(&[0.0, 0.0]);
+            b.x_u.copy_from_slice(&[10.0, 10.0]);
+        }
+        match self.row {
+            Row::Equality => {
+                b.g_l.copy_from_slice(&[2.0]);
+                b.g_u.copy_from_slice(&[2.0]);
+            }
+            Row::Inequality => {
+                b.g_l.copy_from_slice(&[-2.0e19]);
+                b.g_u.copy_from_slice(&[2.0]);
+            }
+        }
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        if sp.init_x {
+            sp.x.copy_from_slice(&self.x0.unwrap_or([0.5, 0.5]));
+        }
+        // Left unserved by default: the "bound multipliers kept,
+        // `lagrange` dropped" shape. The free-variable fixture is the
+        // mirror image and seeds it.
+        if sp.init_lambda {
+            if let Some(l) = &self.lambda0 {
+                sp.lambda.copy_from_slice(l);
+            }
+        }
+        if sp.init_z {
+            if let Some(z) = &self.z_l0 {
+                sp.z_l.copy_from_slice(z);
+            }
+            if let Some(z) = &self.z_u0 {
+                sp.z_u.copy_from_slice(z);
+            }
+        }
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some((x[0] - 3.0).powi(2) + (x[1] - 3.0).powi(2))
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = 2.0 * (x[0] - 3.0);
+        g[1] = 2.0 * (x[1] - 3.0);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] + x[1];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = 1.0;
+                values[1] = 1.0;
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                // The row is linear, so `lambda` contributes nothing.
+                values[0] = 2.0 * obj_factor;
+                values[1] = 2.0 * obj_factor;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+        if sol.x.len() == 2 {
+            self.final_x = Some([sol.x[0], sol.x[1]]);
+        }
+        self.final_obj = Some(sol.obj_value);
+        self.final_lambda = Some(sol.lambda.to_vec());
+        self.final_z_l = Some(sol.z_l.to_vec());
+        self.final_z_u = Some(sol.z_u.to_vec());
+    }
+}
+
+/// Cold-solve a `OneBlock`, then warm-restart it from its own answer
+/// with the bound multipliers seeded and `lagrange` left out.
+fn one_block_restart(
+    row: Row,
+    mu_init: Number,
+) -> (
+    ApplicationReturnStatus,
+    pounce_algorithm::init::warm_start::WarmStartDiagnostics,
+) {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let concrete = Rc::new(RefCell::new(OneBlock::new(row)));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "cold OneBlock must solve: {status:?}"
+    );
+    let (x, z_l, z_u, obj) = {
+        let b = concrete.borrow();
+        (
+            b.final_x.unwrap(),
+            b.final_z_l.clone().unwrap(),
+            b.final_z_u.clone().unwrap(),
+            b.final_obj.unwrap(),
+        )
+    };
+    // The row is active at the optimum in both variants, which is what
+    // makes the missing `y` worth reconstructing.
+    assert!(
+        (x[0] + x[1] - 2.0).abs() < 1e-6,
+        "fixture must sit on its row: x={x:?} obj={obj}"
+    );
+
+    let mut app = IpoptApplication::new();
+    let o = app.options_mut();
+    o.set_integer_value("print_level", 0, true, false).unwrap();
+    o.set_string_value("warm_start_init_point", "yes", true, false)
+        .unwrap();
+    o.set_string_value("warm_start_recentering", "residual", true, false)
+        .unwrap();
+    o.set_numeric_value("mu_init", mu_init, true, false)
+        .unwrap();
+    for k in [
+        "warm_start_bound_push",
+        "warm_start_bound_frac",
+        "warm_start_slack_bound_push",
+        "warm_start_slack_bound_frac",
+        "warm_start_mult_bound_push",
+    ] {
+        o.set_numeric_value(k, 1e-9, true, false).unwrap();
+    }
+    app.initialize().unwrap();
+    let concrete = Rc::new(RefCell::new(OneBlock {
+        x0: Some(x),
+        z_l0: Some(z_l),
+        z_u0: Some(z_u),
+        ..OneBlock::new(row)
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    (
+        status,
+        app.warm_start_diagnostics()
+            .expect("a warm solve must report diagnostics"),
+    )
+}
+
+/// gh#606 review defect 1. `is_identically_zero` answered `false` for a
+/// zero-dimension block, so on a model with only equality rows (or only
+/// inequality rows) the `seeded` test short-circuited to `true`, the
+/// least-squares reconstruction never ran, and the diagnostics reported
+/// `eq_duals: Accepted` for a block nothing had seeded.
+///
+/// Equality-only and inequality-only models are most of the feature's
+/// reach, and `Hs071Seeded` cannot see this: it has one row of each.
+#[test]
+fn a_single_constraint_block_still_reaches_the_reconstruction() {
+    for row in [Row::Equality, Row::Inequality] {
+        let (status, diag) = one_block_restart(row, 1e-7);
+        let which = if row == Row::Equality { "eq" } else { "ineq" };
+        eprintln!(
+            "OneBlock {which}-only: status={status:?} eq_duals={:?} \
+             bound_duals={:?} reconstructed={} inf_du={:e} split={}",
+            diag.eq_duals,
+            diag.bound_duals,
+            diag.bound_duals_reconstructed,
+            diag.dual_residual,
+            diag.stationarity_split
+        );
+        assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+        assert_eq!(
+            diag.eq_duals,
+            BlockVerdict::Reconstructed,
+            "{which}-only model: the y block was never seeded, so it must \
+             be rebuilt rather than reported as kept"
+        );
+    }
+}
+
+/// gh#606 review defect 2. `final_mu` applied the `[MU_FLOOR,
+/// MU_CEILING]` clamp to the pass-through value as well as to the
+/// escalated one, so an explicit `mu_init` above the ceiling was
+/// silently lowered on every warm start — and silently, because the
+/// `wmu` info token only fires when μ goes *up*.
+///
+/// The function's own contract is "`mu_in` is a floor, never a
+/// ceiling".
+#[test]
+fn an_explicit_mu_init_above_the_ceiling_survives_when_nothing_escalates() {
+    // 1.0 is ten times `MU_CEILING`. A restart from the model's own
+    // answer measures a complementarity far below `10 · mu_in`, so no
+    // escalation fires and μ must come out exactly as it went in.
+    let (status, diag) = one_block_restart(Row::Equality, 1.0);
+    eprintln!(
+        "OneBlock mu pass-through: status={status:?} mu {:e} -> {:e} compl={:e}",
+        diag.mu_in, diag.mu_out, diag.complementarity
+    );
+    assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
+    assert!(
+        diag.complementarity <= 10.0 * diag.mu_in,
+        "fixture must not escalate, or it tests the wrong branch: \
+         compl={:e} mu_in={:e}",
+        diag.complementarity,
+        diag.mu_in
+    );
+    assert_eq!(
+        diag.mu_out, diag.mu_in,
+        "an explicit mu_init the caller chose must not be capped: \
+         mu_in={:e} mu_out={:e}",
+        diag.mu_in, diag.mu_out
+    );
+}
+
+/// gh#606 review, the cosmetic one: `stationarity_split` was set from
+/// the fact that the split was *called*, not from whether it did
+/// anything. It returns early when there is no unseeded bound
+/// multiplier to rebuild, and claiming otherwise made
+/// `info["warm_start"]` untrue.
+///
+/// Reaching that early return takes a model with **no bound
+/// multipliers at all** and a seeded `y`: free variables make the four
+/// `z`/`v` blocks zero-dimension, and a supplied `lagrange` keeps
+/// `eq_duals` at `Accepted` so the split is still called. On HS071 it
+/// is unreachable — the slack-bound block is never seedable, so
+/// something is always rebuilt there and the flag was accidentally
+/// right.
+#[test]
+fn stationarity_split_is_reported_only_when_it_runs() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let concrete = Rc::new(RefCell::new(OneBlock {
+        free: true,
+        ..OneBlock::new(Row::Equality)
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    assert!(matches!(
+        app.optimize_tnlp(tnlp),
+        ApplicationReturnStatus::SolveSucceeded
+    ));
+    let (x, lambda) = {
+        let b = concrete.borrow();
+        (b.final_x.unwrap(), b.final_lambda.clone().unwrap())
+    };
+
+    let mut app = IpoptApplication::new();
+    let o = app.options_mut();
+    o.set_integer_value("print_level", 0, true, false).unwrap();
+    o.set_string_value("warm_start_init_point", "yes", true, false)
+        .unwrap();
+    o.set_string_value("warm_start_recentering", "residual", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let concrete = Rc::new(RefCell::new(OneBlock {
+        free: true,
+        x0: Some(x),
+        lambda0: Some(lambda),
+        ..OneBlock::new(Row::Equality)
+    }));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    let diag = app.warm_start_diagnostics().expect("diagnostics");
+    eprintln!(
+        "OneBlock free+seeded-y: status={status:?} bound_duals={:?} \
+         eq_duals={:?} reconstructed={} split={}",
+        diag.bound_duals, diag.eq_duals, diag.bound_duals_reconstructed, diag.stationarity_split
+    );
+    assert_eq!(
+        diag.bound_duals_reconstructed, 0,
+        "fixture must have no bound multiplier to rebuild, or it tests \
+         the wrong branch"
+    );
+    assert!(
+        !diag.stationarity_split,
+        "the flag must track the work, not the call site"
+    );
+}

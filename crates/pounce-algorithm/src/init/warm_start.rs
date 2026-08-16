@@ -261,15 +261,26 @@ impl IterateInitializer for WarmStartIterateInitializer {
             // circular, and measurably so (see the fn docs). Only a
             // caller-supplied `y` earns it.
             if diag.eq_duals != BlockVerdict::Reconstructed {
-                refine_bound_duals_from_stationarity(data, cq, nlp, &self.opts, mu_hat, &unseeded);
-                diag.stationarity_split = true;
+                // Reported from the function's own return value, not
+                // from the fact that it was called: it returns early
+                // with nothing to do when every bound multiplier
+                // arrived seeded, and claiming the split ran there
+                // made `info["warm_start"]` say something untrue
+                // (gh#606 review).
+                diag.stationarity_split = refine_bound_duals_from_stationarity(
+                    data, cq, nlp, &self.opts, mu_hat, &unseeded,
+                );
             }
             Some(mu_hat)
         } else if self.opts.recentering == WarmStartRecentering::Residual {
             diag.primal_residual = cq.borrow().curr_primal_infeasibility_max();
             diag.bound_duals = BlockVerdict::Unseeded;
             diag.eq_duals = BlockVerdict::Unseeded;
-            Some(safe_mu(data.borrow().curr_mu))
+            // Only the `is_some()` is read on this path — `final_mu`
+            // re-reads `curr_mu` itself — so this carried a clamp that
+            // was computed and thrown away. Left as the plain value so
+            // it does not read as a policy it never was.
+            Some(data.borrow().curr_mu)
         } else {
             None
         };
@@ -538,13 +549,15 @@ fn refine_bound_duals_from_stationarity(
     opts: &WarmStartOptions,
     mu_hat: Number,
     unseeded: &[Vec<bool>; 4],
-) {
+) -> bool {
+    // `true` only when the split actually rewrote a multiplier, so the
+    // caller can report `stationarity_split` honestly (gh#606 review).
     if unseeded.iter().all(|m| m.is_empty()) {
-        return;
+        return false;
     }
     let curr = match data.borrow().curr.clone() {
         Some(c) => c,
-        None => return,
+        None => return false,
     };
 
     // r_x = ∇f + J_cᵀ y_c + J_dᵀ y_d, and r_s = −y_d.
@@ -621,7 +634,7 @@ fn refine_bound_duals_from_stationarity(
     }
 
     if rebuilt.iter().all(|r| r.is_none()) {
-        return;
+        return false;
     }
     let pick = |i: usize, orig: &Rc<dyn Vector>| -> Rc<dyn Vector> {
         rebuilt[i].clone().unwrap_or_else(|| Rc::clone(orig))
@@ -637,6 +650,7 @@ fn refine_bound_duals_from_stationarity(
         pick(3, &curr.v_u),
     );
     data.borrow_mut().set_curr(new_curr);
+    true
 }
 
 /// `sign · Pᵀ r`, as a plain slice of length `n_out`. `P` is one of the
@@ -782,11 +796,24 @@ fn final_mu(data: &IpoptDataHandle, cq: &IpoptCqHandle, diag: &mut WarmStartDiag
     diag.dual_residual = inf_du;
 
     let mu_in = data.borrow().curr_mu;
-    let mut mu = mu_in;
-    if compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
-        mu = compl;
+    // A non-finite or non-positive barrier is not a setting, it is a
+    // broken one, and the band's fallback still applies to it.
+    if !mu_in.is_finite() || mu_in <= 0.0 {
+        return MU_CEILING;
     }
-    safe_mu(mu).max(mu_in.min(MU_CEILING))
+    // Clamp the *measurement*, never the caller's setting (gh#606
+    // review). The previous form applied `safe_mu` to the pass-through
+    // value too, so an explicit `mu_init = 1.0` silently started the
+    // solve at `MU_CEILING` — on every warm start, escalation or not,
+    // and without printing anything, since the `wmu` token only fires
+    // when μ goes up. `.max(mu_in)` keeps the floor semantics this
+    // function documents without capping a barrier the caller chose on
+    // purpose.
+    if compl.is_finite() && compl > MU_ESCALATION_TRIGGER * mu_in {
+        safe_mu(compl).max(mu_in)
+    } else {
+        mu_in
+    }
 }
 
 /// Clamp a candidate μ into the band a warm start may use, and reject
@@ -847,9 +874,17 @@ fn scatter(v: &mut dyn Vector, src: &[Number]) -> bool {
 /// equality-multiplier block that no caller seeded. An uninitialized
 /// block counts as zero: that is what the clamp step below fills it
 /// with.
+///
+/// An **empty** block is zero vacuously, and saying so is what makes
+/// [`reconstruct_eq_duals`] work on a model that has only equality
+/// rows or only inequality rows. Returning `false` there — "this
+/// zero-dimension block carries a seed" — short-circuited the
+/// reconstruction on every single-block model and then reported the
+/// result as `Accepted` (gh#606 review). The two [`any_dual_seeded`]
+/// call sites already guard on `dim() > 0`, so they are unaffected.
 fn is_identically_zero(v: &Rc<dyn Vector>) -> bool {
     if v.dim() == 0 {
-        return false;
+        return true;
     }
     match flatten(&**v) {
         Some(vals) => vals.iter().all(|e| *e == 0.0),

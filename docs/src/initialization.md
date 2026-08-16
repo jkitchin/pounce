@@ -185,8 +185,13 @@ initializer instead rebuilds what it was not given:
   the same regularized least-squares augmented solve the cold path
   uses, now with real bound multipliers in its right-hand side;
 - `mu` is raised to the point's measured average complementarity when
-  that exceeds `mu_init`, so a stale seed gets a looser barrier instead
-  of being trusted. The primal and dual residuals deliberately do
+  that exceeds `mu_init` **by more than a factor of ten**, so a stale
+  seed gets a looser barrier instead of being trusted while a merely
+  imperfect one keeps the barrier it asked for. Moving `mu` reroutes
+  the whole trajectory, so a near miss is not worth what the reroute
+  costs. The measurement is clamped to `[1e-11, 0.1]`; `mu_init`
+  itself is not, so an explicit setting outside that band is a floor
+  and is never capped. The primal and dual residuals deliberately do
   **not** move `mu`: a warm point at a moved parameter carries both by
   construction, and reacting to them discards the warm start to pay for
   a Newton step that was about to happen anyway.
