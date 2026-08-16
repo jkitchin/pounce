@@ -176,6 +176,10 @@ class ContinuationStep:
             accepted.
         active_set_event: Whether the active-set fingerprint changed
             here relative to the previous accepted point.
+        prescribed: ``True`` for a point the caller asked for, ``False``
+            for one :meth:`Continuation.run` inserted to get to the next
+            prescribed point. Always ``True`` from :meth:`follow`, whose
+            interior points are all the driver's own.
         iters, solve_time, obj, kkt_error, status, status_msg: The
             corrector solve's outcome (zeros / ``None`` on an accepted
             predictor step, which runs no solve).
@@ -191,6 +195,7 @@ class ContinuationStep:
     corrected: bool = False
     rejections: int = 0
     active_set_event: bool = False
+    prescribed: bool = True
     iters: int = 0
     solve_time: float = 0.0
     obj: float = float("nan")
@@ -227,6 +232,11 @@ class ContinuationTrace:
     @property
     def n_steps(self) -> int:
         return len(self.steps)
+
+    @property
+    def n_inserted(self) -> int:
+        """Points the driver inserted that the caller did not ask for."""
+        return sum(1 for st in self.steps if not st.prescribed)
 
     @property
     def n_corrections(self) -> int:
@@ -270,6 +280,7 @@ class ContinuationTrace:
         return "\n".join([
             f"continuation: {self.status}",
             f"  points            {self.n_steps}",
+            f"  inserted points   {self.n_inserted}",
             f"  corrections       {self.n_corrections}",
             f"  predictor accepts {self.n_predictor_accepts}",
             f"  step rejections   {self.n_rejections}",
@@ -499,7 +510,8 @@ class Continuation:
 
     # -- entry points -------------------------------------------------
 
-    def run(self, thetas, *, x0=None, counter=None) -> ContinuationTrace:
+    def run(self, thetas, *, x0=None, counter=None, subdivide=True,
+            subdivide_tol=None, max_subdivisions=8) -> ContinuationTrace:
         """Trace a **prescribed** parameter sequence, solving every point.
 
         This is the repeated-NLP case pounce#608's first acceptance
@@ -507,12 +519,23 @@ class Continuation:
         wants each one solved, without rebuilding the transfer,
         warm-start, and predictor plumbing in user code.
 
-        Every point is corrected, because every point is an answer the
-        caller asked for. The predictor's job here is to make each solve
-        cheaper — which, on an interior-point method, it largely cannot;
-        see the module docstring and ``docs/src/continuation.md``. Use
-        :meth:`follow` when the intermediate points are a means rather
-        than an end.
+        Every prescribed point is corrected, because every prescribed
+        point is an answer the caller asked for. The predictor's job
+        here is to make each solve cheaper — which, on an interior-point
+        method, it largely cannot; see the module docstring and
+        ``docs/src/continuation.md``. Use :meth:`follow` when the
+        intermediate points are a means rather than an end.
+
+        **Subdivision.** The caller chose the points they care about;
+        nothing says the driver may not visit more. When a corrector
+        rejects between two prescribed points — or, with
+        `subdivide_tol` set, when the monitor says the predicted point
+        is too far from the curve to seed a solve — the driver inserts
+        an intermediate parameter value and walks to the prescribed one
+        through it, rather than failing or ploughing on from a poisoned
+        warm start. Inserted points carry ``prescribed=False`` and are
+        reported separately by :attr:`ContinuationTrace.n_inserted`;
+        every prescribed point still appears, in order.
 
         Args:
             thetas: Iterable of parameter values.
@@ -521,6 +544,27 @@ class Continuation:
             counter: Optional object with ``reset_counts()`` and
                 ``counts()`` returning ``{"n_obj": ..., ...}``, used to
                 fill the per-step evaluation counts.
+            subdivide: Insert intermediate points when a corrector
+                rejects. On by default: it strictly improves on the
+                alternative, which is to record the failure and carry
+                on cold. Set ``False`` for the pre-subdivision
+                behaviour (one solve per prescribed point, exactly).
+            subdivide_tol: Also subdivide when the `monitor` reports a
+                predicted-point residual above this. ``None`` (the
+                default) subdivides on corrector rejection only —
+                :attr:`monitor_tol` is :meth:`follow`'s *accept without
+                solving* threshold and is far too tight to double as a
+                subdivision trigger, so this is a separate knob rather
+                than a reuse of that one. Needs a `monitor`.
+            max_subdivisions: Cap on step *halvings* per prescribed
+                interval — not on points inserted, which is smaller:
+                reaching a usable step can take several halvings, and
+                each landing resets the attempt to aim at the
+                prescribed point again. Once the budget is spent the
+                driver stops subdividing and attempts the prescribed
+                point directly, so a path that only needed help early
+                still finishes; if that direct attempt then fails, the
+                trace ends with ``status="subdivision_exhausted"``.
 
         Returns:
             ContinuationTrace
@@ -529,46 +573,114 @@ class Continuation:
         thetas = [np.asarray(t, float) for t in thetas]
         if not thetas:
             return trace
+        if subdivide_tol is not None and self._monitor is None:
+            raise ValueError(
+                "Continuation.run: subdivide_tol needs a monitor; pass "
+                "monitor=kkt_residual_monitor(...) to the constructor"
+            )
 
         ws = None
         solver = None
         prev_theta = None
         prev_sig = None
+        index = 0
         self._anchor_x0 = None if x0 is None else np.asarray(x0, float)
 
         for k, theta in enumerate(thetas):
-            kind = "cold"
-            dx = dlam = dzl = dzu = None
-            if ws is not None:
-                kind = "transfer" if self._transfer is not None else "zero"
-                dtheta = theta - prev_theta
-                dx, dlam, dzl, dzu = self._tangent(solver, self._last_problem,
-                                                   dtheta)
-                if dx is not None:
-                    kind = "tangent"
-                    ws = self._advance(ws, dx, dlam, dzl, dzu, theta)
+            # Walk from the last accepted point to this prescribed one,
+            # inserting intermediates only when the direct attempt will
+            # not carry. `frac` is the share of the remaining gap the
+            # next attempt covers; 1.0 is the un-subdivided step.
+            frac = 1.0
+            halvings = 0   # step halvings spent on this prescribed interval
+            rejected = 0   # of those, the ones a corrector failure forced
+            while True:
+                at_target = (prev_theta is None or frac >= 1.0)
+                theta_try = theta if at_target else (
+                    prev_theta + frac * (theta - prev_theta)
+                )
 
-            problem, solver, x, info, elapsed = self._solve_at(
-                theta, ws, counter
-            )
-            self._last_problem = problem
-            step = self._record(k, float(k), theta, kind, info, elapsed,
-                                counter, corrected=True)
+                kind = "cold"
+                ws_try = ws
+                resid = None
+                if ws is not None:
+                    kind = "transfer" if self._transfer is not None else "zero"
+                    dx, dlam, dzl, dzu = self._tangent(
+                        solver, self._last_problem, theta_try - prev_theta
+                    )
+                    if dx is not None:
+                        kind = "tangent"
+                        ws_try = self._advance(ws, dx, dlam, dzl, dzu,
+                                               theta_try)
+                    if subdivide and subdivide_tol is not None:
+                        resid = self._monitor_at(theta_try, ws_try)
+                        if (resid is not None and resid > subdivide_tol
+                                and halvings < max_subdivisions):
+                            # Too far to seed a solve from. Halve the gap
+                            # and re-predict rather than spend the solve.
+                            halvings += 1
+                            frac *= 0.5
+                            continue
 
-            sig = self._active_signature(info.get("mult_x_L"),
-                                         info.get("mult_x_U"))
-            step.active_set_event = self._signature_changed(prev_sig, sig)
-            prev_sig = sig
-            trace.steps.append(step)
-            trace.x.append(np.asarray(x, float).copy())
+                problem, solver, x, info, elapsed = self._solve_at(
+                    theta_try, ws_try, counter
+                )
+                self._last_problem = problem
+                status = int(info.get("status", -99))
 
-            if step.status not in _OK_STATUS:
-                ws = None
-                solver = None
-                trace.status = f"solve_failed at step {k}: {step.status_msg}"
-                continue
-            ws = WarmStart.from_info(x, info, bound_push=self._bound_push)
-            prev_theta = theta
+                if (status not in _OK_STATUS and subdivide
+                        and prev_theta is not None
+                        and halvings < max_subdivisions):
+                    # The corrector rejected. Do not record the failure
+                    # and do not carry its state: shorten the step and
+                    # re-predict from the last point known good.
+                    halvings += 1
+                    rejected += 1
+                    frac *= 0.5
+                    continue
+
+                step = self._record(index, float(index), theta_try, kind,
+                                    info, elapsed, counter, corrected=True)
+                step.predictor_residual = resid
+                step.prescribed = bool(at_target)
+                # Charged once, to the step that ends the interval, so
+                # `n_rejections` counts corrector failures and not the
+                # monitor-driven subdivisions that cost no solve.
+                step.rejections = rejected if at_target else 0
+                sig = self._active_signature(info.get("mult_x_L"),
+                                             info.get("mult_x_U"))
+                step.active_set_event = self._signature_changed(prev_sig, sig)
+                prev_sig = sig
+                trace.steps.append(step)
+                trace.x.append(np.asarray(x, float).copy())
+                index += 1
+
+                if step.status not in _OK_STATUS:
+                    # The interval is being abandoned; charge its
+                    # absorbed failures to the step that records the
+                    # abandonment, wherever on the interval it fell.
+                    step.rejections = rejected
+                    ws = None
+                    solver = None
+                    prev_theta = None
+                    if halvings >= max_subdivisions:
+                        trace.status = (
+                            f"subdivision_exhausted at prescribed point {k}: "
+                            f"{step.status_msg}"
+                        )
+                    else:
+                        trace.status = (
+                            f"solve_failed at step {k}: {step.status_msg}"
+                        )
+                    break
+
+                ws = WarmStart.from_info(x, info, bound_push=self._bound_push)
+                prev_theta = theta_try
+                if at_target:
+                    break
+                # Landed on an inserted point; aim at the prescribed one
+                # again, from closer in.
+                frac = 1.0
 
         return trace
 
@@ -682,6 +794,281 @@ class Continuation:
             trace.status = "max_steps"
         return trace
 
+    # -- pseudo-arclength ---------------------------------------------
+
+    def _arclength_shape(self, callbacks, n):
+        """Validate the arclength preconditions and return ``(m, cl, pin)``."""
+        if self._bounds is None:
+            raise ValueError(
+                "Continuation.trace_arclength: needs bounds=(lb, ub, cl, cu) "
+                "to know the equality right-hand side the parameter enters"
+            )
+        if not self._pins or len(self._pins) != 1:
+            raise ValueError(
+                "Continuation.trace_arclength: needs exactly one pin row "
+                "(a scalar parameter). Got "
+                f"{0 if not self._pins else len(self._pins)}. Vector-parameter "
+                "arclength is not a curve — the solution set is a manifold of "
+                "the parameter's dimension and 'past the fold' is not defined "
+                "for it; reparametrise onto a scalar path and trace that."
+            )
+        lb, ub, cl, cu = (np.asarray(v, float) for v in (
+            self._bounds(np.asarray([0.0])) if callable(self._bounds)
+            else self._bounds))
+        m = int(cl.size)
+        if m and np.any(cl != cu):
+            raise ValueError(
+                "Continuation.trace_arclength supports equality constraints "
+                "(cl == cu) and inactive variable bounds only; this problem "
+                "has two-sided inequality rows (cl != cu), for which the "
+                "arclength system R = [grad f + A^T lam; g - c] is not the "
+                "right residual — it treats every row as active. Reformulate "
+                "the inequalities with slack equalities, or remove them. "
+                "(Same v1 scope as pounce.jax.PathFollower.trace_arclength.)"
+            )
+        for name in ("gradient", "constraints", "jacobian", "jacobianstructure",
+                     "hessian", "hessianstructure"):
+            if m == 0 and name in ("constraints", "jacobian",
+                                   "jacobianstructure"):
+                continue
+            if not callable(getattr(callbacks, name, None)):
+                raise TypeError(
+                    f"Continuation.trace_arclength: callbacks is missing "
+                    f"{name!r}. The arclength corrector is a Newton solve on "
+                    "the KKT system, so it needs the derivative callbacks "
+                    "themselves, not just a built Problem."
+                )
+        return m, cl, (self._pins[0] if m else 0), lb, ub
+
+    def trace_arclength(self, x0, theta0, *, callbacks, lam0=None,
+                        ds=0.05, n_steps=200, direction=1.0,
+                        newton_tol=1e-9, newton_max=40,
+                        ds_min=1e-6, ds_max=None) -> ContinuationTrace:
+        """Pseudo-arclength continuation **past folds**, without autodiff.
+
+        The opt-in mode pounce#608's last scope bullet asks for.
+        :meth:`run` and :meth:`follow` march in ``θ``, so both stop dead
+        at a turning point: past a fold there is no solution at the next
+        ``θ``, and the corrector can only fail or fall back onto the
+        branch it came from. This parametrises the solution curve of
+
+        .. math:: R(x, λ, θ) = [∇f(x) + A(x)ᵀλ ;\\; g(x) - c(θ)] = 0
+
+        by its own arclength instead, so ``θ`` is free to stop and
+        reverse. It is :meth:`pounce.jax.PathFollower.trace_arclength`
+        (pounce#90) with the dense ``jax.jacobian`` and its SVD replaced
+        by a sparse assembly from the ``Problem``'s own callbacks and a
+        bordered solve.
+
+        **Why not the held factor.** :meth:`pounce.Solver.parametric_step`
+        back-solves against the factor of a *converged* solve, and at a
+        fold there is no converged solve to hold: ``∂x*/∂θ`` is singular
+        there, which is the definition of the fold. Worse, past the fold
+        there is no solution at that ``θ`` at all, so no factor can
+        exist. The tangent here is instead the null vector of the
+        ``(d, d+1)`` augmented matrix ``[∂R/∂z | ∂R/∂θ]``, obtained by
+        **bordering** it with the previous tangent and solving
+
+        .. code::
+
+            [ ∂R/∂z   ∂R/∂θ ] [ t ]   [ 0 ]
+            [     t_prevᵀ   ] [   ] = [ 1 ]
+
+        which is nonsingular *at* a simple fold — that is the whole
+        point of the pseudo-arclength formulation — and needs no SVD.
+        The cost is one sparse LU per Newton iteration rather than a
+        back-solve against a factor the solver already built; on the
+        fixtures in ``python/tests/test_continuation.py`` that is
+        sub-millisecond, and it is the price of being able to go round
+        the corner at all. See ``docs/src/continuation.md``.
+
+        **Scope (v1), matching pounce#90.** Scalar ``θ``; equality /
+        unconstrained families with a fixed active set along the traced
+        branch. Two-sided inequality rows are rejected explicitly rather
+        than silently mis-traced. Variable bounds are permitted but must
+        stay inactive; a branch that runs into one ends the trace with
+        ``status="bound_active"`` rather than reporting a wrong curve.
+        Bifurcation and branch switching remain out of scope.
+
+        Args:
+            x0: Primal guess near a point on the curve. Projected onto
+                ``R = 0`` at ``theta0`` before tracing.
+            theta0: Starting (scalar) parameter value.
+            callbacks: The cyipopt-shaped object handed to
+                ``Problem(problem_obj=...)`` — ``gradient``,
+                ``constraints``, ``jacobian``, ``jacobianstructure``,
+                ``hessian``, ``hessianstructure``. The same object the
+                whole path uses: in the pin convention ``θ`` enters only
+                through the right-hand side, never through the
+                callbacks.
+            lam0: Multiplier guess; defaults to zeros.
+            ds: Initial arclength step.
+            n_steps: Cap on accepted points.
+            direction: ``+1`` to set off toward increasing ``θ``, ``-1``
+                toward decreasing.
+            newton_tol: Max-norm ``‖R‖`` the corrector must reach.
+            newton_max: Newton iterations before a step is rejected.
+            ds_min, ds_max: Arclength step floor and ceiling. ``ds_max``
+                defaults to ``8 * ds``.
+
+        Returns:
+            ContinuationTrace. Each step's ``theta`` is a 1-element
+            array, ``kkt_error`` is ``‖R‖∞`` at the accepted point, and
+            ``iters`` is the corrector's Newton count.
+        """
+        from scipy.sparse import csc_matrix, hstack, vstack
+        from scipy.sparse.linalg import spsolve
+
+        x = np.asarray(x0, float).ravel()
+        n = int(x.size)
+        m, cl, pin, lb, ub = self._arclength_shape(callbacks, n)
+        lam = (np.zeros(m) if lam0 is None
+               else np.asarray(lam0, float).ravel())
+        if lam.size != m:
+            raise ValueError(
+                f"Continuation.trace_arclength: lam0 has {lam.size} entries, "
+                f"expected {m}"
+            )
+        theta = float(theta0)
+        d = n + m
+        ds_max = float(8.0 * ds) if ds_max is None else float(ds_max)
+        ds = float(ds)
+        trace = ContinuationTrace()
+
+        def RJ(x_, lam_, th_):
+            return _augmented_kkt(callbacks, n, m, cl, pin, x_, lam_, th_)
+
+        def bordered(J, row):
+            """``[[J], [row]]`` as a square ``(d+1, d+1)`` sparse matrix."""
+            return vstack([J, csc_matrix(np.asarray(row).reshape(1, d + 1))],
+                          format="csc")
+
+        def inside_bounds(x_):
+            return not (np.any(x_ < lb - 1e-9) or np.any(x_ > ub + 1e-9))
+
+        # -- anchor: project (x0, lam0) onto R = 0 at theta0, Newton in
+        # (x, lam) only. This is the one place theta is held fixed.
+        t_anchor = time.perf_counter()
+        it = 0
+        R, J = RJ(x, lam, theta)
+        while np.max(np.abs(R)) > newton_tol and it < newton_max:
+            dz = spsolve(csc_matrix(J[:, :d]), -R)
+            if not np.all(np.isfinite(dz)):
+                break
+            x = x + dz[:n]
+            lam = lam + dz[n:]
+            it += 1
+            R, J = RJ(x, lam, theta)
+        anchor = ContinuationStep(
+            index=0, s=0.0, theta=np.array([theta]), predictor="cold",
+            corrected=True, iters=it,
+            solve_time=time.perf_counter() - t_anchor,
+            obj=float(callbacks.objective(x)) if hasattr(
+                callbacks, "objective") else float("nan"),
+            kkt_error=float(np.max(np.abs(R))),
+            status=0 if np.max(np.abs(R)) <= newton_tol else 2,
+            status_msg="" if np.max(np.abs(R)) <= newton_tol
+            else "anchor projection did not converge",
+        )
+        trace.steps.append(anchor)
+        trace.x.append(x.copy())
+        if anchor.status != 0:
+            trace.status = f"anchor_failed: {anchor.status_msg}"
+            return trace
+
+        # -- first tangent: border with the theta axis, which is the
+        # parameter-continuation direction and is valid at a regular
+        # anchor. Thereafter border with the previous tangent.
+        t_prev = np.zeros(d + 1)
+        t_prev[d] = float(np.sign(direction) or 1.0)
+        rhs = np.zeros(d + 1)
+        rhs[d] = 1.0
+        s = 0.0
+        sig = None
+
+        for index in range(1, int(n_steps) + 1):
+            t0 = time.perf_counter()
+            R, J = RJ(x, lam, theta)
+            tan = spsolve(bordered(J, t_prev), rhs)
+            nrm = float(np.linalg.norm(tan))
+            if not np.all(np.isfinite(tan)) or nrm == 0.0:
+                trace.status = "tangent_failed"
+                break
+            tan = tan / nrm
+            if float(tan @ t_prev) < 0.0:
+                tan = -tan
+
+            # PREDICT along the arclength tangent: theta moves with the
+            # curve rather than being prescribed, which is what lets the
+            # step go round a turning point.
+            z = np.concatenate([x, lam, [theta]])
+            while True:
+                z_pred = z + ds * tan
+                zc = z_pred.copy()
+                it = 0
+                ok = False
+                while it < newton_max:
+                    Rc, Jc = RJ(zc[:n], zc[n:d], float(zc[d]))
+                    arc = float(tan @ (zc - z_pred))
+                    res = max(float(np.max(np.abs(Rc))) if Rc.size else 0.0,
+                              abs(arc))
+                    if res <= newton_tol:
+                        ok = True
+                        break
+                    F = np.concatenate([Rc, [arc]])
+                    dz = spsolve(bordered(Jc, tan), -F)
+                    if not np.all(np.isfinite(dz)):
+                        break
+                    zc = zc + dz
+                    it += 1
+                else:
+                    Rc, _ = RJ(zc[:n], zc[n:d], float(zc[d]))
+                    ok = float(np.max(np.abs(Rc))) <= newton_tol if Rc.size \
+                        else True
+                if ok:
+                    break
+                ds *= 0.5
+                if ds < ds_min:
+                    break
+            if not ok:
+                trace.status = "corrector_failed"
+                break
+
+            x, lam, theta = zc[:n], zc[n:d], float(zc[d])
+            if not inside_bounds(x):
+                trace.status = "bound_active"
+                break
+            s += ds
+            Rf, _ = RJ(x, lam, theta)
+            step = ContinuationStep(
+                index=index, s=s, theta=np.array([theta]),
+                predictor="tangent", corrected=True, iters=it,
+                solve_time=time.perf_counter() - t0,
+                obj=float(callbacks.objective(x)) if hasattr(
+                    callbacks, "objective") else float("nan"),
+                kkt_error=float(np.max(np.abs(Rf))) if Rf.size else 0.0,
+                status=0, status_msg="",
+            )
+            new_sig = (np.asarray(lam) > ACTIVE_TOL,
+                       np.asarray(lam) < -ACTIVE_TOL)
+            step.active_set_event = self._signature_changed(sig, new_sig)
+            sig = new_sig
+            trace.steps.append(step)
+            trace.x.append(x.copy())
+
+            # ADAPT, on the corrector's work, as StepController does for
+            # follow(). The controller's own state is per-`follow`, so
+            # the same policy is applied here to the arclength ds.
+            if it <= 2:
+                ds = min(ds * 1.5, ds_max)
+            elif it >= 6:
+                ds = max(ds * 0.5, ds_min)
+            t_prev = tan
+        else:
+            trace.status = "max_steps"
+
+        return trace
+
     # -- helpers ------------------------------------------------------
 
     def _advance(self, ws, dx, dlam, dzl, dzu, theta=None) -> WarmStart:
@@ -724,6 +1111,71 @@ class Continuation:
             for key, val in counter.counts().items():
                 setattr(step, key, int(val))
         return step
+
+
+def _augmented_kkt(problem_obj, n, m, cl, pin, x, lam, theta):
+    """``(R, J)`` of the parametric KKT system at ``(x, lam, theta)``.
+
+    ``R(x, λ, θ) = [∇f(x) + A(x)ᵀλ ; g(x) - c(θ)]`` — stationarity over
+    feasibility — where ``c(θ)`` is the equality right-hand side with
+    the pin row replaced by ``θ``. This is #90's ``R``, assembled from
+    the cyipopt-shaped callbacks instead of from ``jax.jacobian``.
+
+    ``J`` is the ``(n+m) × (n+m+1)`` Jacobian ``[∂R/∂x, ∂R/∂λ, ∂R/∂θ]``,
+    sparse:
+
+    .. code::
+
+        [ H(x, λ)   A(x)ᵀ    0      ]
+        [ A(x)      0       -e_pin  ]
+
+    ``H`` is the Hessian of the Lagrangian at multiplier ``λ`` with
+    ``obj_factor = 1``, which is exactly ``∂/∂x`` of the stationarity
+    block, so no third derivative is needed and nothing is approximated.
+    cyipopt hands back its lower triangle; it is mirrored here.
+    """
+    from scipy.sparse import coo_matrix, csc_matrix
+
+    x = np.asarray(x, float).ravel()
+    lam = np.asarray(lam, float).ravel()
+
+    grad = np.asarray(problem_obj.gradient(x), float).ravel()
+    if m:
+        jr, jc = (np.asarray(v, np.int64).ravel()
+                  for v in problem_obj.jacobianstructure())
+        jv = np.asarray(problem_obj.jacobian(x), float).ravel()
+        A = coo_matrix((jv, (jr, jc)), shape=(m, n)).tocsc()
+        g = np.asarray(problem_obj.constraints(x), float).ravel()
+        c = np.array(cl, float)
+        c[pin] = theta
+        R = np.concatenate([grad + A.T @ lam, g - c])
+    else:
+        A = coo_matrix((0, n))
+        R = grad
+
+    hr, hc = (np.asarray(v, np.int64).ravel()
+              for v in problem_obj.hessianstructure())
+    hv = np.asarray(problem_obj.hessian(x, lam, 1.0), float).ravel()
+    # Mirror the lower triangle, without doubling the diagonal.
+    off = hr != hc
+    H = coo_matrix(
+        (np.concatenate([hv, hv[off]]),
+         (np.concatenate([hr, hc[off]]), np.concatenate([hc, hr[off]]))),
+        shape=(n, n),
+    ).tocsc()
+
+    R_theta = np.zeros(n + m)
+    if m:
+        R_theta[n + pin] = -1.0
+
+    from scipy.sparse import bmat
+    J = bmat(
+        [[H, A.T if m else None, csc_matrix(R_theta[:n].reshape(n, 1))],
+         [A if m else None, None, csc_matrix(R_theta[n:].reshape(m, 1))]]
+        if m else [[H, csc_matrix(R_theta.reshape(n, 1))]],
+        format="csc",
+    )
+    return R, J
 
 
 def kkt_residual_monitor(problem_obj, bounds):

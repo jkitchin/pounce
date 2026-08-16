@@ -381,3 +381,276 @@ def test_empty_path_is_an_empty_trace():
     trace = pounce.Continuation(make_update(ParametricNLP())).run([])
     assert trace.n_steps == 0
     assert trace.status == "ok"
+
+
+# ======================================================================
+# Folds: pseudo-arclength past a turning point (pounce#608's last scope
+# bullet). See docs/src/continuation.md.
+# ======================================================================
+
+
+class FoldNLP:
+    """``min x0**3/3 + x1**2/2  s.t.  x0 + x1 = theta``.
+
+    Stationarity gives ``lam = -x0**2`` and ``x1 = x0**2``, so the
+    solution curve is ``x0 + x0**2 = theta``: a parabola in ``(x0,
+    theta)`` with a **turning point at x0 = -1/2, theta = -1/4**. Above
+    the fold there are two branches (the minimizing one is
+    ``x0 = (-1 + sqrt(1 + 4 theta)) / 2``); below it there is no
+    solution at all, which is what stops parameter continuation.
+
+    LICQ holds at the fold (``grad g = (1, 1)``) and ``lam = -1/4``
+    stays finite there, so the ``(x, lam, theta)`` curve is smooth
+    through the turning point and pseudo-arclength can follow it. A
+    fold built on a vanishing constraint gradient instead would send
+    ``lam`` to infinity and no arclength scheme would pass it either --
+    the fixture is built to isolate the fold, not to smuggle in a
+    degeneracy.
+    """
+
+    def objective(self, x):
+        return x[0] ** 3 / 3.0 + 0.5 * x[1] ** 2
+
+    def gradient(self, x):
+        return np.array([x[0] ** 2, x[1]])
+
+    def constraints(self, x):
+        return np.array([x[0] + x[1]])
+
+    def jacobianstructure(self):
+        return (np.array([0, 0], dtype=np.int64),
+                np.array([0, 1], dtype=np.int64))
+
+    def jacobian(self, x):
+        return np.array([1.0, 1.0])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 1], dtype=np.int64),
+                np.array([0, 0, 1], dtype=np.int64))
+
+    def hessian(self, x, lagrange, obj_factor):
+        return np.array([obj_factor * 2.0 * x[0], 0.0, obj_factor * 1.0])
+
+
+FOLD_THETA = -0.25
+FOLD_X0 = -0.5
+FOLD_LB = np.full(2, -1e20)
+FOLD_UB = np.full(2, 1e20)
+
+
+def fold_exact(theta):
+    """The minimizing branch, defined only for ``theta >= -1/4``."""
+    x0 = (-1.0 + np.sqrt(1.0 + 4.0 * theta)) / 2.0
+    return np.array([x0, x0 ** 2])
+
+
+def fold_bounds(theta):
+    t = float(np.asarray(theta, float).ravel()[0])
+    return (FOLD_LB, FOLD_UB, np.array([t]), np.array([t]))
+
+
+def fold_update(obj):
+    def update(theta):
+        lb, ub, cl, cu = fold_bounds(theta)
+        p = pounce.Problem(n=2, m=1, problem_obj=obj,
+                           lb=lb, ub=ub, cl=cl, cu=cu)
+        p.add_option("tol", 1e-10)
+        p.add_option("print_level", 0)
+        p.add_option("sb", "yes")
+        return p
+    return update
+
+
+def fold_driver(obj=None, **kw):
+    obj = obj if obj is not None else FoldNLP()
+    return pounce.Continuation(fold_update(obj), pins=[0],
+                               bounds=fold_bounds, **kw), obj
+
+
+def test_parameter_continuation_cannot_pass_the_fold():
+    """The premise of the arclength mode. Marching theta down through
+    -1/4 is not a tuning failure -- there is no solution on the other
+    side to march to -- so `run` must report it, not invent one."""
+    drv, _ = fold_driver()
+    thetas = [np.array([t]) for t in (2.0, 1.0, 0.0, -0.4)]
+    trace = drv.run(thetas, x0=fold_exact(2.0), subdivide=False)
+
+    assert trace.status.startswith("solve_failed")
+    assert [st.status for st in trace.steps[:3]] == [0, 0, 0]
+    assert trace.steps[-1].status not in (0, 1)
+    # And the answer it does not have is not quietly plausible: the
+    # iterates run away rather than settling on a wrong point.
+    assert abs(trace.x[-1][0]) > 1e3
+
+
+def test_arclength_traverses_the_fold():
+    """The acceptance test for pounce#608's pseudo-arclength bullet:
+    the same start that dead-ends above goes round the corner here."""
+    drv, obj = fold_driver()
+    trace = drv.trace_arclength(fold_exact(2.0), 2.0, callbacks=obj,
+                                ds=0.25, n_steps=40, direction=-1.0)
+
+    assert trace.status in ("ok", "max_steps")
+    theta = np.array([float(st.theta[0]) for st in trace.steps])
+    x0 = np.array([v[0] for v in trace.x])
+
+    # It reached the fold ...
+    assert theta.min() < FOLD_THETA + 0.02
+    # ... turned round (theta stops decreasing and increases again) ...
+    turn = int(np.argmin(theta))
+    assert 0 < turn < len(theta) - 1
+    assert theta[-1] > theta[turn] + 0.5
+    # ... and came back on the *other* branch, past the fold in x0,
+    # which is the half of the curve parameter continuation cannot see.
+    assert x0[turn] < FOLD_X0
+    assert x0[-1] < -1.0
+
+    # Every accepted point is on the curve x0 + x0^2 = theta.
+    assert np.max(np.abs(x0 + x0 ** 2 - theta)) < 1e-7
+    # and each is a genuine root of R, not merely close.
+    assert max(st.kkt_error for st in trace.steps) < 1e-7
+
+
+def test_arclength_brackets_the_turning_point():
+    """A finer step must localise the fold better -- the discretisation
+    is the only thing keeping theta.min() off -1/4."""
+    drv, obj = fold_driver()
+    coarse = drv.trace_arclength(fold_exact(2.0), 2.0, callbacks=obj,
+                                 ds=0.4, n_steps=60, direction=-1.0)
+    fine = drv.trace_arclength(fold_exact(2.0), 2.0, callbacks=obj,
+                               ds=0.02, n_steps=400, direction=-1.0,
+                               ds_max=0.02)
+    c = min(float(st.theta[0]) for st in coarse.steps)
+    f = min(float(st.theta[0]) for st in fine.steps)
+    assert f <= c
+    assert abs(f - FOLD_THETA) < 1e-3
+
+
+def test_arclength_rejects_two_sided_inequalities():
+    """v1 scope, stated as an error rather than a silently wrong curve
+    -- the same guard pounce.jax.PathFollower.trace_arclength applies."""
+    obj = FoldNLP()
+
+    def bounds(theta):
+        return (FOLD_LB, FOLD_UB, np.array([-1.0]), np.array([1.0]))
+
+    drv = pounce.Continuation(fold_update(obj), pins=[0], bounds=bounds)
+    with pytest.raises(ValueError, match="equality constraints"):
+        drv.trace_arclength(fold_exact(2.0), 2.0, callbacks=obj)
+
+
+def test_arclength_needs_a_scalar_parameter():
+    drv = pounce.Continuation(make_update(ParametricNLP()), pins=PINS,
+                              bounds=bounds_at)
+    with pytest.raises(ValueError, match="exactly one pin row"):
+        drv.trace_arclength(X0, 0.0, callbacks=ParametricNLP())
+
+
+def test_arclength_needs_the_derivative_callbacks():
+    class NoHessian:
+        def gradient(self, x):
+            return np.zeros(2)
+
+        def constraints(self, x):
+            return np.zeros(1)
+
+        def jacobian(self, x):
+            return np.zeros(2)
+
+        def jacobianstructure(self):
+            return (np.array([0, 0]), np.array([0, 1]))
+
+    drv, _ = fold_driver()
+    with pytest.raises(TypeError, match="hessian"):
+        drv.trace_arclength(fold_exact(2.0), 2.0, callbacks=NoHessian())
+
+
+# ======================================================================
+# Subdivision in run() (pounce#608, step-size adaptation on a
+# prescribed sequence).
+# ======================================================================
+
+
+def test_run_subdivides_toward_the_fold_instead_of_diverging():
+    """The caller chose the points; nothing says the driver may not
+    visit more. Asked for a point past the fold, `run` walks in rather
+    than handing back the runaway iterate `subdivide=False` returns."""
+    drv, _ = fold_driver()
+    thetas = [np.array([t]) for t in (2.0, 1.0, 0.0, -0.4)]
+
+    plain = drv.run(thetas, x0=fold_exact(2.0), subdivide=False)
+    sub = drv.run(thetas, x0=fold_exact(2.0), subdivide=True,
+                  max_subdivisions=10)
+
+    assert sub.n_inserted > 0
+    assert sub.n_rejections > 0
+    assert sub.status.startswith("subdivision_exhausted")
+    assert plain.n_inserted == 0
+
+    # The inserted points are real solutions, and they get closer to the
+    # fold than the un-subdivided path ever does.
+    good = [st for st in sub.steps if st.status in (0, 1)]
+    reached = min(float(st.theta[0]) for st in good)
+    assert reached < -0.2
+    assert abs(reached - FOLD_THETA) < 1e-2
+    assert len(good) > len([st for st in plain.steps if st.status in (0, 1)])
+
+    for st, xv in zip(sub.steps, sub.x):
+        if st.status in (0, 1):
+            assert xv[0] + xv[0] ** 2 == pytest.approx(float(st.theta[0]),
+                                                       abs=1e-7)
+
+
+def test_run_subdivision_keeps_every_prescribed_point_in_order():
+    """Inserted points are additions, never substitutions."""
+    obj = FoldNLP()
+    drv = pounce.Continuation(fold_update(obj), pins=[0],
+                              bounds=fold_bounds,
+                              monitor=pounce.kkt_residual_monitor(
+                                  obj, fold_bounds))
+    want = [2.0, 1.0, 0.0]
+    trace = drv.run([np.array([t]) for t in want], x0=fold_exact(2.0),
+                    subdivide=True, subdivide_tol=0.1)
+
+    assert trace.status == "ok"
+    assert trace.n_inserted > 0
+    got = [float(st.theta[0]) for st in trace.steps if st.prescribed]
+    assert got == pytest.approx(want)
+    # The inserted ones sit strictly between prescribed neighbours.
+    seq = [float(st.theta[0]) for st in trace.steps]
+    assert seq == sorted(seq, reverse=True)
+    assert trace.x[-1][0] == pytest.approx(fold_exact(0.0)[0], abs=1e-7)
+
+
+def test_run_monitor_subdivision_is_off_by_default():
+    """`monitor_tol` is follow()'s accept-without-solving threshold and
+    is far too tight to double as a subdivision trigger, so run() does
+    not reuse it: no `subdivide_tol`, no monitor-driven inserts."""
+    obj = FoldNLP()
+    drv = pounce.Continuation(fold_update(obj), pins=[0],
+                              bounds=fold_bounds,
+                              monitor=pounce.kkt_residual_monitor(
+                                  obj, fold_bounds))
+    trace = drv.run([np.array([2.0]), np.array([0.0])], x0=fold_exact(2.0))
+    assert trace.status == "ok"
+    assert trace.n_inserted == 0
+    assert trace.n_steps == 2
+
+
+def test_run_subdivide_tol_requires_a_monitor():
+    drv, _ = fold_driver()
+    with pytest.raises(ValueError, match="needs a monitor"):
+        drv.run([np.array([2.0])], subdivide_tol=1e-3)
+
+
+def test_subdivision_does_not_change_a_healthy_path():
+    """The default must be a no-op where nothing goes wrong, or every
+    existing caller's step count silently moves."""
+    obj = ParametricNLP()
+    drv = pounce.Continuation(make_update(obj), pins=PINS, bounds=bounds_at)
+    path = theta_path()
+    on = drv.run(path, x0=X0, subdivide=True)
+    off = drv.run(path, x0=X0, subdivide=False)
+    assert on.n_steps == off.n_steps == len(path)
+    assert on.n_inserted == 0
+    assert [s.iters for s in on.steps] == [s.iters for s in off.steps]
