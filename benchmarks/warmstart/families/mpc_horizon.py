@@ -56,6 +56,11 @@ class LinearMpcBase(ParametricFamily):
     quadratic = True
     n_steps = 20
 
+    #: `c[:2] = X0 - theta` with `cl == cu == 0`, so stepping theta is
+    #: exactly stepping these two rows' right-hand side -- the sIPOPT
+    #: `deltas` convention the tangent predictor takes (pounce#608).
+    pin_rows = (0, 1)
+
     _NH = 10  # overridden per horizon
     _H = 0.1
     _A = 1.0  # stiffness

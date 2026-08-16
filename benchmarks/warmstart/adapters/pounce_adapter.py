@@ -9,6 +9,12 @@ cold-ipm     ``interior-point`` (default)         none
 cold-sqp     ``active-set-sqp``                   none
 warm-ipm     ``interior-point``                   ``WarmStart`` (x, λ, z, μ)
 warm-sqp     ``active-set-sqp``                   working set + previous x
+pred-ipm     ``interior-point``                   previous state, primal seed
+                                                  stepped by the held-factor
+                                                  tangent
+predcorr-ipm ``interior-point``                   as above, multipliers
+                                                  stepped too, reanchored on
+                                                  an active-set event
 cold-qp-ipm  ``pounce.solve_qp`` (pounce-convex)  none
 warm-qp-ipm  ``pounce.solve_qp``                  previous ``QpResult``
 ===========  ===================================  =========================
@@ -57,7 +63,16 @@ import pounce
 from .. import qpform
 from ..spec import ParametricFamily, StepResult, WarmState
 from ..sparsity import SparseCallbacks
-from .base import ARMS, QP_ARMS, SolverAdapter, is_sqp, is_warm, uses_homotopy
+from .base import (
+    ARMS,
+    QP_ARMS,
+    SolverAdapter,
+    is_sqp,
+    is_warm,
+    predicts_duals,
+    uses_homotopy,
+    uses_predictor,
+)
 
 # ApplicationReturnStatus values that count as a solved step.
 _OK_STATUS = (0, 1)  # SolveSucceeded, SolvedToAcceptableLevel
@@ -165,6 +180,69 @@ class PounceAdapter(SolverAdapter):
         )
         return result, next_warm
 
+    # -- the tangent predictor (pounce#608) ------------------------
+
+    def _predict(self, family, warm, arm, x, lam, zl, zu):
+        """Step the previous state along ``∂·/∂θ`` for this step's Δθ.
+
+        The sensitivity is a back-solve against the previous solve's
+        held factor, carried in `warm.extra`. Everything here degrades
+        to the plain warm start rather than failing: a factor that
+        cannot answer, a missing Δθ, or an active-set event on the
+        previous step all return the seed unchanged, which is the
+        zero-order transfer.
+        """
+        extra = warm.extra or {}
+        session = extra.get("session")
+        theta_prev = extra.get("theta")
+        theta_now = family.current_theta()
+        if session is None or theta_prev is None or theta_now is None:
+            return x, lam, zl, zu
+        dtheta = np.asarray(theta_now, float) - np.asarray(theta_prev, float)
+        if not dtheta.size:
+            return x, lam, zl, zu
+        if predicts_duals(arm) and extra.get("active_set_event"):
+            return x, lam, zl, zu          # reanchor: drop the stale tangent
+
+        pins = list(family.pin_rows)
+        deltas = [float(v) for v in np.asarray(dtheta, dtype=float).ravel()]
+        if len(deltas) != len(pins):
+            return x, lam, zl, zu
+        n = family.n
+        b = family.bounds()
+        try:
+            if not predicts_duals(arm):
+                dx = np.asarray(session.parametric_step(pins, deltas),
+                                dtype=float)[:n]
+                return np.clip(x + dx, b.lb, b.ub), lam, zl, zu
+            full = np.asarray(session.parametric_step_full(pins, deltas),
+                              dtype=float)
+        except Exception:
+            return x, lam, zl, zu
+
+        dims = list(session.block_dims)
+        x = np.clip(x + full[:n], b.lb, b.ub)
+        if lam is not None:
+            dlam = np.zeros(family.m)
+            rows = session.multiplier_rows(list(range(family.m)))
+            for i, r in enumerate(rows):
+                if r is not None and 0 <= r < full.size:
+                    dlam[i] = full[r]
+            lam = lam + dlam
+        off = dims[0] + dims[1] + dims[2] + dims[3]
+        # Bound multipliers are nonnegative; a linear step can drive one
+        # through zero, which is the active-set event the solve resolves.
+        if zl is not None and off + dims[4] <= full.size:
+            k = min(n, dims[4])
+            zl = zl.copy()
+            zl[:k] = np.maximum(zl[:k] + full[off:off + k], 0.0)
+        if zu is not None and off + dims[4] + dims[5] <= full.size:
+            k = min(n, dims[5])
+            zu = zu.copy()
+            zu[:k] = np.maximum(
+                zu[:k] + full[off + dims[4]:off + dims[4] + k], 0.0)
+        return x, lam, zl, zu
+
     # -- one step --------------------------------------------------
 
     def solve(
@@ -182,6 +260,11 @@ class PounceAdapter(SolverAdapter):
 
         prob = self._build(family, callbacks, arm, tol)
         callbacks.reset_counts()
+        # The predictor arms need the session handle, because the tangent
+        # is a back-solve against the factor this step leaves behind. The
+        # session is created for every IPM arm so that arm-to-arm timing
+        # is not confounded by the wrapper itself.
+        session = pounce.Solver(prob) if not is_sqp(arm) else None
 
         # Step 0 of a warm arm has nothing to warm from: it is a cold
         # solve, and is reported as one.
@@ -194,18 +277,33 @@ class PounceAdapter(SolverAdapter):
                 if warm.working_set is not None:
                     kwargs["working_set"] = warm.working_set
             else:
+                seed_x = warm.x
+                lam, zl, zu = warm.mult_g, warm.mult_x_L, warm.mult_x_U
+                if uses_predictor(arm):
+                    seed_x, lam, zl, zu = self._predict(
+                        family, warm, arm, seed_x, lam, zl, zu
+                    )
                 kwargs["warm_start"] = pounce.WarmStart(
-                    x=warm.x,
-                    lagrange=warm.mult_g,
-                    zl=warm.mult_x_L,
-                    zu=warm.mult_x_U,
-                    mu=warm.mu,
+                    x=seed_x, lagrange=lam, zl=zl, zu=zu, mu=warm.mu,
                 )
         else:
             kwargs["x0"] = np.asarray(x0, dtype=float)
 
         t0 = time.perf_counter()
-        x, info = prob.solve(**kwargs)
+        if session is not None:
+            # `Solver.solve` takes the seeds directly; the WarmStart's
+            # enabling options still have to be installed on the Problem.
+            ws = kwargs.pop("warm_start", None)
+            if ws is not None:
+                for key, val in ws.options().items():
+                    prob.add_option(key, val)
+                sk = ws.solve_kwargs()
+                sk.pop("working_set", None)
+                x, info = session.solve(x0=ws.x, **sk)
+            else:
+                x, info = session.solve(x0=kwargs["x0"])
+        else:
+            x, info = prob.solve(**kwargs)
         elapsed = time.perf_counter() - t0
 
         status = int(info.get("status", -99))
@@ -262,4 +360,27 @@ class PounceAdapter(SolverAdapter):
                 else None
             ),
         )
+        if uses_predictor(arm):
+            # What the next step's tangent needs: the live session (it
+            # owns the converged factor), the theta this solve was run
+            # at (the runner fills `theta` after the fact, so record it
+            # here from the family), and whether the bound activity just
+            # moved -- which invalidates the tangent for `predcorr-ipm`.
+            act = None
+            if info.get("mult_x_L") is not None and info.get("mult_x_U") is not None:
+                act = (np.asarray(info["mult_x_L"]) > 1e-6,
+                       np.asarray(info["mult_x_U"]) > 1e-6)
+            prev_act = (warm.extra or {}).get("active") if warm else None
+            next_warm.extra = {
+                "session": session if status in _OK_STATUS else None,
+                # Delta theta for the next step is formed against this,
+                # not handed down: an adapter never sees the runner's path.
+                "theta": family.current_theta(),
+                "active": act,
+                "active_set_event": bool(
+                    prev_act is not None and act is not None
+                    and (np.any(act[0] != prev_act[0])
+                         or np.any(act[1] != prev_act[1]))
+                ),
+            }
         return result, next_warm

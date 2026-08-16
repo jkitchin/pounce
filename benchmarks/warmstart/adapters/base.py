@@ -37,6 +37,18 @@ defines:
     the suite exercises working-set hot starts but never the parametric
     path. Paired against ``cold-sqp`` / ``warm-sqp``, which differ in
     that one option and nothing else.
+``pred-ipm`` / ``predcorr-ipm``
+    Interior point seeded with a **tangent predictor** rather than with
+    the previous solution alone: the first-order parametric step
+    ``Δx ≈ ∂x*/∂θ · Δθ`` read off the previous solve's held KKT factor
+    (``pounce.Solver.parametric_step``). ``predcorr-ipm`` additionally
+    steps the multipliers (``parametric_step_full``) and re-anchors on
+    an active-set event. These are the third and fourth arms pounce#608
+    asks for; paired against ``warm-ipm``, which differs only in the
+    seed. Defined only for families that route θ through pin-equality
+    rows (:attr:`ParametricFamily.pin_rows`), because that is what the
+    sensitivity step's ``deltas`` argument means -- on any other family
+    they are skipped with a reason rather than silently omitted.
 ``cold-qp-ipm`` / ``warm-qp-ipm``
     The dedicated convex QP interior-point solver, handed the problem
     in matrix form rather than through callbacks, cold and seeded with
@@ -68,6 +80,8 @@ ARMS: List[str] = [
     "warm-sqp",
     "cold-sqp-hom",
     "warm-sqp-hom",
+    "pred-ipm",
+    "predcorr-ipm",
     "cold-qp-ipm",
     "warm-qp-ipm",
 ]
@@ -83,6 +97,11 @@ HOMOTOPY_ARMS = ("cold-sqp-hom", "warm-sqp-hom")
 #: Arms that need the family's instances to be QPs.
 QP_ARMS = ("cold-qp-ipm", "warm-qp-ipm")
 
+#: Arms whose primal seed is a held-factor tangent predictor rather than
+#: the previous solution (pounce#608). They need the family to declare
+#: which constraint rows carry θ.
+PREDICTOR_ARMS = ("pred-ipm", "predcorr-ipm")
+
 #: The arm whose per-step solutions every other arm is checked
 #: against, and which generates the parameter path for adaptive
 #: families.
@@ -90,7 +109,21 @@ REFERENCE_ARM = "cold-ipm"
 
 
 def is_warm(arm: str) -> bool:
-    return arm.startswith("warm")
+    """Whether the arm carries state forward from the previous step.
+
+    The predictor arms do: they seed from the previous solve and then
+    step that seed along the sensitivity, so they are warm arms with a
+    better seed, not a separate category.
+    """
+    return arm.startswith("warm") or arm in PREDICTOR_ARMS
+
+
+def uses_predictor(arm: str) -> bool:
+    return arm in PREDICTOR_ARMS
+
+
+def predicts_duals(arm: str) -> bool:
+    return arm == "predcorr-ipm"
 
 
 def is_sqp(arm: str) -> bool:
@@ -113,6 +146,11 @@ def arm_applies(arm: str, family: ParametricFamily) -> Optional[str]:
     """
     if arm in QP_ARMS and not family.quadratic:
         return "family is not a QP (nonlinear objective or constraints)"
+    if arm in PREDICTOR_ARMS and not family.pin_rows:
+        return (
+            "family does not route theta through pin-equality rows, so a "
+            "sensitivity step has no deltas to take"
+        )
     return None
 
 
