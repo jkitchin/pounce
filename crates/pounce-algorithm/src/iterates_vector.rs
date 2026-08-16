@@ -76,6 +76,14 @@ impl IteratesVector {
         }
     }
 
+    /// Clone this iterate with `x` swapped out and every other
+    /// component shared. `Rc` makes it a pointer copy, so this is the
+    /// cheap way to re-stage a candidate `x` for a CQ evaluation
+    /// without rebuilding the other seven blocks.
+    pub fn with_x(&self, x: Rc<dyn Vector>) -> Self {
+        Self { x, ..self.clone() }
+    }
+
     /// Total dimension across all eight components.
     pub fn dim(&self) -> i32 {
         self.x.dim()

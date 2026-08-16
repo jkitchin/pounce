@@ -79,6 +79,66 @@ changes.
   fixture sweep is identical across all 57 models — status, objective and
   iteration count.
 
+- **The feasibility projection is sparse, and the linearized normal step is
+  safeguarded against making the true violation worse** (#605). Two related
+  defects, one in the Python helper and one in the Rust core.
+
+  `pounce.project_to_feasible` built a dense `P = eye(n)` and a dense
+  `m × n` Jacobian regardless of how sparse the model was — an `O(n²)`
+  allocation on a problem whose data is `O(n)`. Measured peak allocation on a
+  chain-structured model (2 nonzeros per row) quadrupled on every doubling of
+  `n`: 32.3 MB at `n = 1000`, 225.7 MB at `n = 3000`, 901.3 MB at `n = 6000`.
+  The library's own `PounceSparsityWarning` fired on the way through. It now
+  builds a diagonal `P` and keeps the Jacobian in scipy-sparse form, so the
+  same three sizes cost 1.5 MB, 4.7 MB and 9.4 MB — linear, and 96× smaller at
+  `n = 6000`.
+
+  Both the helper and the solver's `least_square_init_primal` step also
+  accepted the linearized least-squares point unconditionally. A linearized
+  solution is a local model step, not automatically a better starting point:
+  where the Jacobian is small relative to the residual, the correction is huge
+  and the true nonlinear violation at the far end is far worse than where it
+  started. On `x₀² + x₁² = 1` started at `(0.05, 0.05)` the projection took the
+  violation from `0.995` to `49.5`, and the Rust initializer took it from
+  `0.995` to `48.5` — a starting point roughly 50× worse than the user's own.
+
+  Both paths now score every trial step on the true nonlinear violation and
+  accept only a step whose *actual* feasibility reduction is a documented
+  fraction of what the linear model predicted, backtracking otherwise and
+  keeping the original point if nothing qualifies. The Python side additionally
+  carries elastic variables, so an inconsistent or rank-deficient linearization
+  returns the least-violating point instead of raising.
+
+  **Behaviour changes.** `project_to_feasible` no longer raises `RuntimeError`
+  on an inconsistent linearization — that case is now absorbed by the elastic
+  variables and reported through the new `ProjectionReport`. It also
+  re-linearizes up to `max_iter` times (default 3) rather than once, so it
+  costs more constraint evaluations and returns a smaller residual; pass
+  `max_iter=1` for the old single-linearization budget. In the Rust
+  initializer, a starting point that is *already* feasible is now left alone
+  rather than being replaced by the min-norm point, since no step can improve a
+  violation of zero.
+
+  Diagnostics are new on both sides: `ProjectionReport` in Python
+  (`return_report=True`) and `IpoptApplication::least_square_init_report()` in
+  Rust, each carrying initial/final violation, step norm, rejected-trial count
+  and termination reason.
+
+  Trajectory: the fixture sweep is **bit-identical across all 57 fixtures**
+  under default options — `least_square_init_primal` is off by default, so
+  nothing moves unless you turn it on. There are two ways to do that: set it
+  directly (registered by #604, the entry below) or `mehrotra_algorithm=yes`,
+  whose cascade turns it on for you. Under `mehrotra_algorithm=yes` 12 lines
+  move, and the set of solved fixtures (27), every solved objective and the
+  total iteration count across them (292) are unchanged. Under
+  `least_square_init_primal=yes` on its own 14 lines move: the same 46 fixtures
+  reach a solved-or-acceptable status and the total iteration count across them
+  falls from 2067 to 1687, but two of the 46 (`csfi2`, `eigenb2`) come back
+  `SolvedToAcceptableLevel` where they were `SolveSucceeded`, and on two
+  nonconvex models the different starting point finds a different local optimum
+  — `deb7` a better one, `pooling_rt2stp` a worse one. See #605 for the
+  per-fixture accounting.
+
 - **The cold-start initialization options are settable** (#604).
   `bound_push`, `bound_frac`, `slack_bound_push`, `slack_bound_frac`,
   `constr_mult_init_max`, `bound_mult_init_val`, `bound_mult_init_method`

@@ -36,6 +36,31 @@ use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// What the safeguarded least-square initializer did. Returned by
+/// [`DefaultIterateInitializer::safeguarded_least_square_x`] and
+/// readable after the solve through
+/// [`crate::application::IpoptApplication::least_square_init_report`],
+/// so a starting point that silently got worse is visible somewhere
+/// other than the iteration count. Nothing prints it: it is a
+/// programmatic accessor, not a log line.
+#[derive(Debug, Clone, Default)]
+pub struct LeastSquareInitReport {
+    /// Nonlinear violation at the user's `x0`, after the interior push.
+    pub violation_initial: Number,
+    /// Nonlinear violation at the point actually handed to the
+    /// algorithm. Equal to `violation_initial` when nothing was
+    /// accepted.
+    pub violation_final: Number,
+    /// `alpha * ||x_ls - x0||_2` for the accepted trial; 0 if none was.
+    pub step_norm: Number,
+    /// Step fraction of the accepted trial; 0 if none was.
+    pub alpha: Number,
+    /// Backtracking trials whose true violation failed the test.
+    pub rejected_trials: Index,
+    /// Why the safeguard stopped.
+    pub termination: &'static str,
+}
+
 pub struct DefaultIterateInitializer {
     pub bound_push: Number,
     pub bound_frac: Number,
@@ -61,6 +86,24 @@ pub struct DefaultIterateInitializer {
     /// (`IpIpoptAlg.cpp:182`) to dramatically reduce iter-0 primal
     /// infeasibility on LP-shaped problems.
     pub least_square_init_primal: bool,
+    /// `least_square_init_primal_max_trials` — how many backtracking
+    /// trials the safeguard in [`Self::safeguarded_least_square_x`] may
+    /// take before it gives up and keeps the user's point. Each trial
+    /// costs one constraint evaluation (`c` and `d`); none of them
+    /// costs a Jacobian or a KKT solve, because the step direction is
+    /// computed once and only its length changes.
+    pub least_square_init_max_trials: Index,
+    /// Armijo-style acceptance ratio for the safeguard: a trial at
+    /// step fraction `alpha` is accepted when the true nonlinear
+    /// violation satisfies `theta(alpha) <= (1 - eta*alpha) * theta_0`,
+    /// i.e. when the *actual* feasibility reduction is at least `eta`
+    /// times the reduction the linearization *predicted*.
+    pub least_square_init_accept_ratio: Number,
+    /// Diagnostics from the most recent safeguarded least-square
+    /// initialization: initial/final violation, accepted step norm,
+    /// rejected trial count, termination reason. `None` when the step
+    /// was never attempted.
+    pub last_least_square_report: Option<LeastSquareInitReport>,
 }
 
 impl Default for DefaultIterateInitializer {
@@ -75,6 +118,9 @@ impl Default for DefaultIterateInitializer {
             bound_mult_init_method: "constant".into(),
             eq_mult_calculator: None,
             least_square_init_primal: false,
+            least_square_init_max_trials: 4,
+            least_square_init_accept_ratio: 1e-2,
+            last_least_square_report: None,
         }
     }
 }
@@ -201,6 +247,173 @@ impl DefaultIterateInitializer {
         Some(Rc::new(sol_x))
     }
 
+    /// Stage `x_cand` as the current iterate and return the true
+    /// nonlinear constraint violation there.
+    ///
+    /// The merit is `curr_unscaled_nlp_constraint_violation_max()` —
+    /// `max(||c(x)||_inf, ||max(d_l - d(x), d(x) - d_u, 0)||_inf)` in
+    /// unscaled NLP units. It is the same quantity the CLI reports as
+    /// the model's constraint violation, so "the initializer improved
+    /// feasibility" means the number a user can read improved.
+    ///
+    /// Costs one `c`/`d` evaluation. No Jacobian, no KKT solve.
+    fn violation_at(
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        template: &IteratesVector,
+        x_cand: &dyn Vector,
+    ) -> Number {
+        let mut x_stage = DenseVectorSpace::new(x_cand.dim()).make_new_dense();
+        x_stage.copy(x_cand);
+        let staged = template.with_x(Rc::new(x_stage));
+        data.borrow_mut().set_curr(staged);
+        cq.borrow().curr_unscaled_nlp_constraint_violation_max()
+    }
+
+    /// Safeguarded least-square normal step.
+    ///
+    /// `calculate_least_square_primals` returns the minimum-norm
+    /// solution of the *linearized* constraints. That is a local model
+    /// step, not automatically a better NLP starting point: where the
+    /// Jacobian is small relative to the residual the linearization
+    /// asks for a huge correction, and the true nonlinear violation at
+    /// the far end can be orders of magnitude worse than where it
+    /// started. Accepting it unconditionally (which is what upstream
+    /// `IpDefaultIterateInitializer.cpp:200-222` does, and what pounce
+    /// did through 0.10.0) hands the algorithm a worse starting point
+    /// than the user supplied.
+    ///
+    /// So: compute the direction once, then walk it back.
+    ///
+    /// * Trial `k` uses `alpha = 2^-k` for `k` in `0..max_trials`.
+    /// * Every candidate is pushed into the bound interior *before*
+    ///   its violation is measured, so the accepted merit is the merit
+    ///   of the point the algorithm will actually start from, and
+    ///   bound interiority is preserved by construction.
+    /// * A trial is accepted when
+    ///   `theta(alpha) <= (1 - eta*alpha) * theta_0`. The linear model
+    ///   predicts `theta -> 0` at `alpha = 1`, so the predicted
+    ///   reduction at `alpha` is `alpha * theta_0` and this test is
+    ///   exactly "actual reduction is at least `eta` times predicted".
+    /// * The first accepted trial wins (they are tried longest-first,
+    ///   so that is also the best available reduction on this ray).
+    /// * If no trial is accepted the user's `x` is returned unchanged.
+    ///
+    /// Returns `(accepted_x, diagnostics)`.
+    #[allow(clippy::too_many_arguments)]
+    fn safeguarded_least_square_x(
+        &self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        aug_solver: &mut dyn AugSystemSolver,
+        template: &IteratesVector,
+        x0: &dyn Vector,
+        n_x: Index,
+    ) -> (Option<Box<dyn Vector>>, LeastSquareInitReport) {
+        let mut report = LeastSquareInitReport::default();
+
+        // theta_0 at the user's point, measured after the interior
+        // push so it is comparable with every trial below.
+        let mut x_base = DenseVectorSpace::new(n_x).make_new_dense();
+        x_base.copy(x0);
+        self.push_into_bounds(nlp, &mut x_base);
+        let theta_0 = Self::violation_at(data, cq, template, &x_base);
+        report.violation_initial = theta_0;
+        report.violation_final = theta_0;
+
+        if !theta_0.is_finite() {
+            report.termination = "x0 violation is not finite";
+            return (None, report);
+        }
+        if theta_0 == 0.0 {
+            report.termination = "x0 already feasible";
+            return (None, report);
+        }
+
+        // The direction. Computed at the user's point, so re-stage it
+        // first: `calculate_least_square_primals` linearizes at
+        // whatever `data.curr` holds.
+        let staged = template.with_x({
+            let mut xs = DenseVectorSpace::new(n_x).make_new_dense();
+            xs.copy(x0);
+            Rc::new(xs)
+        });
+        data.borrow_mut().set_curr(staged);
+        let x_ls = match self.calculate_least_square_primals(cq, nlp, aug_solver, n_x) {
+            Some(v) => v,
+            None => {
+                report.termination = "augmented system solve failed";
+                return (None, report);
+            }
+        };
+
+        // d = x_ls - x0, formed once and reused at every trial.
+        let mut dir = DenseVectorSpace::new(n_x).make_new_dense();
+        dir.copy(&*x_ls);
+        dir.axpy(-1.0, x0);
+        let dir_norm = dir.nrm2();
+        if !dir_norm.is_finite() {
+            report.termination = "least-square step is not finite";
+            return (None, report);
+        }
+
+        let mut alpha = 1.0;
+        for _ in 0..self.least_square_init_max_trials.max(1) {
+            let mut cand = DenseVectorSpace::new(n_x).make_new_dense();
+            if alpha == 1.0 {
+                // Use `x_ls` itself rather than `x0 + 1.0*(x_ls - x0)`.
+                // The two differ in the last bit, and that is enough to
+                // move a borderline model by an iteration — so the
+                // full-length trial stays bit-identical to what the
+                // unsafeguarded path produced, and the only trajectory
+                // change is on the models where the step is actually
+                // rejected.
+                cand.copy(&*x_ls);
+            } else {
+                cand.copy(x0);
+                cand.axpy(alpha, &dir);
+            }
+            self.push_into_bounds(nlp, &mut cand);
+
+            let theta = Self::violation_at(data, cq, template, &cand);
+            let predicted = alpha * theta_0;
+            let actual = theta_0 - theta;
+            if theta.is_finite()
+                && actual >= self.least_square_init_accept_ratio * predicted
+                && theta < theta_0
+            {
+                report.violation_final = theta;
+                report.step_norm = alpha * dir_norm;
+                report.alpha = alpha;
+                report.termination = "accepted";
+                return (Some(Box::new(cand)), report);
+            }
+            report.rejected_trials += 1;
+            alpha *= 0.5;
+        }
+
+        report.termination = "no trial improved the nonlinear violation";
+        (None, report)
+    }
+
+    /// Push `x` into the interior of `[x_l, x_u]` with this
+    /// initializer's `bound_push` / `bound_frac`. Split out so the
+    /// safeguard can measure candidates at the point the algorithm
+    /// would actually use.
+    fn push_into_bounds(&self, nlp: &Rc<RefCell<dyn IpoptNlp>>, x: &mut DenseVector) {
+        let nlp_ref = nlp.borrow();
+        push_x_into_interior(
+            x,
+            &*nlp_ref.px_l(),
+            nlp_ref.x_l(),
+            &*nlp_ref.px_u(),
+            nlp_ref.x_u(),
+            self.bound_push,
+            self.bound_frac,
+        );
+    }
+
     pub fn push_to_interior(
         bound_push: Number,
         bound_frac: Number,
@@ -229,6 +442,10 @@ impl DefaultIterateInitializer {
 }
 
 impl IterateInitializer for DefaultIterateInitializer {
+    fn least_square_report(&self) -> Option<LeastSquareInitReport> {
+        self.last_least_square_report.clone()
+    }
+
     fn set_initial_iterates(
         &mut self,
         data: &IpoptDataHandle,
@@ -293,11 +510,20 @@ impl IterateInitializer for DefaultIterateInitializer {
                 Rc::new(v_l_zero),
                 Rc::new(v_u_zero),
             );
-            data.borrow_mut().set_curr(stage_iv);
+            data.borrow_mut().set_curr(stage_iv.clone());
 
-            if let Some(x_ls) = self.calculate_least_square_primals(cq, nlp, aug_solver, n_x) {
-                x.copy(&*x_ls);
+            // The linearized least-squares point is only accepted when
+            // it actually reduces the *true* nonlinear violation; see
+            // `safeguarded_least_square_x`. Rejecting it leaves `x` as
+            // the user gave it, which is the pre-0.11 behaviour minus
+            // the cases where the linearization sent the starting
+            // point somewhere worse.
+            let (accepted, report) =
+                self.safeguarded_least_square_x(data, cq, nlp, aug_solver, &stage_iv, &x, n_x);
+            if let Some(x_new) = accepted {
+                x.copy(&*x_new);
             }
+            self.last_least_square_report = Some(report);
         }
 
         {
@@ -660,8 +886,24 @@ mod option_behavior {
         fn eval_grad_f(&mut self, _x: &dyn Vector, g: &mut dyn Vector) {
             g.set(0.0);
         }
-        fn eval_c(&mut self, _x: &dyn Vector, c: &mut dyn Vector) {
-            c.set(1.0);
+        /// `c(x) = x0 + x1 - 4`, which [`FixedAugSolver`]'s `x_ls =
+        /// [1, 3]` satisfies exactly.
+        ///
+        /// This was a constant `1.0` when gh#604 wrote these tests, and
+        /// a constant will not do since gh#605: the least-square step is
+        /// now taken only when it reduces the *true* nonlinear
+        /// violation, and against a constant `c` no step ever can, so
+        /// `least_square_init_primal` would be correctly declined and
+        /// the option untestable here. An `x`-dependent row also makes
+        /// the stub honest — `x_ls` is supposed to be the point that
+        /// solves the linearized constraints, and now it is one.
+        fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
+            let v = x
+                .as_any()
+                .downcast_ref::<DenseVector>()
+                .expect("dense x")
+                .expanded_values();
+            c.set(v[0] + v[1] - 4.0);
         }
         fn eval_d(&mut self, _x: &dyn Vector, d: &mut dyn Vector) {
             d.set(-5.0);

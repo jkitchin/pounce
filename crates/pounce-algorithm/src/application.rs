@@ -128,6 +128,11 @@ use std::time::Instant;
 
 pub struct IpoptApplication {
     options: OptionsList,
+    /// Diagnostics from the safeguarded `least_square_init_primal`
+    /// initializer step of the most recent solve (gh#605). `None` when
+    /// the step was not run. Read with
+    /// [`Self::least_square_init_report`].
+    least_square_init_report: Option<crate::init::default::LeastSquareInitReport>,
     /// Per-variable scaling factors applied by the wrapper installed in
     /// [`Self::optimize_tnlp`] (gh#486). Recorded so consumers that read
     /// the algorithm's own iterate rather than the `finalize_solution`
@@ -293,6 +298,7 @@ impl IpoptApplication {
         let reg = Rc::new(reg);
         Self {
             options: OptionsList::with_registered(Rc::clone(&reg)),
+            least_square_init_report: None,
             variable_scaling: RefCell::new(None),
             presolve_already_applied: false,
             reg_options: reg,
@@ -627,6 +633,16 @@ impl IpoptApplication {
     /// the full IPM path covers every entry shape.
     pub fn problem_dimensions(&self, tnlp: &mut dyn TNLP) -> Option<NlpInfo> {
         tnlp.get_nlp_info()
+    }
+
+    /// Diagnostics from the safeguarded `least_square_init_primal`
+    /// initializer step of the last solve (gh#605): the nonlinear
+    /// violation before and after, the accepted step norm, how many
+    /// backtracking trials were rejected, and why it stopped. `None`
+    /// when `least_square_init_primal` was off or the model had no
+    /// constraints.
+    pub fn least_square_init_report(&self) -> Option<crate::init::default::LeastSquareInitReport> {
+        self.least_square_init_report.clone()
     }
 
     pub fn statistics(&self) -> SolveStatistics {
@@ -2597,6 +2613,9 @@ impl IpoptApplication {
             .then(pounce_observability::IterCaptureGuard::start);
 
         let solver_status = alg.optimize();
+        // Keep the initializer's feasibility diagnostics reachable
+        // after the algorithm goes out of scope (gh#605).
+        self.least_square_init_report = alg.least_square_init_report();
 
         let captured_iters = iter_capture.map(|g| g.finish()).unwrap_or_default();
         // Propagate to any enclosing capture (e.g. `with_iter_capture`
