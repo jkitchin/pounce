@@ -158,6 +158,62 @@ On the 20-step MPC in
 [`casadi/examples/03_mpc_warm_start.py`](https://github.com/jkitchin/pounce/blob/main/casadi/examples/03_mpc_warm_start.py)
 this takes the loop from a mean of 8.1 iterations per step to 5.3.
 
+### Carrying the working set between calls
+
+`x0` / `lam_g0` / `lam_x0` restart the *iterate*. The active-set SQP has a
+second thing worth reusing: the **working set** — which bounds and
+constraints it found active — and identifying that set is most of what a
+QP solve does. There is no slot in `nlpsol`'s fixed input signature to
+pass one, so the plugin can carry it for you, from one call of the same
+solver object to the next:
+
+```python
+solver = ca.nlpsol("solver", "pounce", nlp, {"pounce": {
+    "algorithm": "active-set-sqp",
+    "warm_start_init_point": "yes", "mu_init": 1e-6,
+}, "warm_start_from_previous": True})
+```
+
+**Turn this on if you select `active-set-sqp` for a receding-horizon
+loop.** On a cart-pole MPC whose force limits saturate — so the active
+set is large and genuinely has to be found — carrying it is the
+difference between the SQP being the fastest option available and the
+worst:
+
+| 30-step loop, per solve | mean | max |
+| --- | --- | --- |
+| active-set SQP, no working set | 233 ms | 375 ms |
+| active-set SQP, `warm_start_from_previous` | 18 ms | 23 ms |
+| interior point, warm started (reference) | 27 ms | 38 ms |
+
+An order of magnitude, and the control trajectory is identical throughout
+(`max |Δu₀| ≈ 3e-11`): the working set is a starting guess for the QP,
+not a constraint on the answer. The iteration counts barely move
+(2.86 → 2.79) — the saving is *inside* each SQP iteration, in the QP that
+no longer has to rediscover the active set from scratch. Those numbers
+are the run saved in
+[`python/notebooks/35_casadi.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/35_casadi.ipynb);
+the ratio moves between runs, the order of magnitude does not.
+
+On a loop whose bounds stay inactive there is much less to reuse; the
+same measurement on the unsaturated version of that model gives 11.0 ms
+against 10.1 ms, which is close to noise.
+
+Two things to know before switching it on:
+
+- **It makes the function stateful.** Call *k+1* starts from what call
+  *k* found, so a solver object is no longer a pure map of its inputs.
+  That is why it is off by default. Evaluate the same solver on
+  unrelated problems in an interleaved way and each will hand the other
+  a misleading guess — use separate solver objects.
+- **A stale set is refused, not obeyed.** Bounds arrive as per-call
+  inputs and may have moved under the stored set; POUNCE validates it
+  against the model and rejects it, and that call cold-starts its
+  working set. `stats()["warm_started_working_set"]` reports whether the
+  call actually started from one.
+
+Inert under the interior-point default, which produces no working set.
+
 ## Differentiating through a solve
 
 A `nlpsol` object is a CasADi `Function`, so it composes into larger

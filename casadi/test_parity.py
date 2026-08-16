@@ -13,6 +13,7 @@ number moved".
 import sys
 
 import casadi as ca
+import numpy as np
 
 QUIET_POUNCE = {"pounce": {"print_level": 0}, "print_time": False}
 QUIET_IPOPT = {"ipopt": {"print_level": 0}, "print_time": False}
@@ -267,6 +268,72 @@ def test_active_set_sqp_algorithm():
           f"x={sqp['x'].T}")
 
 
+def test_working_set_carries_between_calls():
+    """`warm_start_from_previous` hands the active-set SQP the working set its
+    last call ended on. The check is that it engages, and that engaging it
+    changes nothing about the answer — the working set is a starting guess for
+    the QP, not a constraint on the solution."""
+    mc, mp_, L_, g_ = 1.0, 0.2, 0.5, 9.81
+
+    def cartpole(s, u):
+        th, dx, dth = s[1], s[2], s[3]
+        sth, cth = ca.sin(th), ca.cos(th)
+        den = mc + mp_ * sth**2
+        return ca.vertcat(dx, dth,
+                          (u + mp_ * sth * (L_ * dth**2 + g_ * cth)) / den,
+                          (-u * cth - mp_ * L_ * dth**2 * cth * sth
+                           - (mc + mp_) * g_ * sth) / (L_ * den))
+
+    def rk4(s, u, h):
+        k1 = cartpole(s, u); k2 = cartpole(s + h/2*k1, u)
+        k3 = cartpole(s + h/2*k2, u); k4 = cartpole(s + h*k3, u)
+        return s + h/6 * (k1 + 2*k2 + 2*k3 + k4)
+
+    N, h = 25, 0.04
+    S, U = ca.MX.sym("S", 4, N + 1), ca.MX.sym("U", 1, N)
+    s0 = ca.MX.sym("s0", 4)
+    cost, cons = 0, [S[:, 0] - s0]
+    for k in range(N):
+        cons.append(S[:, k+1] - rk4(S[:, k], U[0, k], h))
+        cost += (10*S[1, k]**2 + S[0, k]**2
+                 + 0.1*(S[2, k]**2 + S[3, k]**2) + 0.01*U[0, k]**2)
+    cost += 100 * (S[1, N]**2 + S[3, N]**2)
+    nlp = {"x": ca.vertcat(ca.vec(S), ca.vec(U)), "p": s0,
+           "f": cost, "g": ca.vertcat(*cons)}
+    nx = 4 * (N + 1) + N
+    # Tight force limits, so the control saturates and the active set is
+    # something the QP has to work for.
+    args = dict(lbg=0, ubg=0,
+                lbx=[-ca.inf] * (4 * (N + 1)) + [-2.5] * N,
+                ubx=[ca.inf] * (4 * (N + 1)) + [2.5] * N)
+
+    def run(carry):
+        opts = {"print_time": False, "pounce": {
+            "print_level": 0, "tol": 1e-6, "algorithm": "active-set-sqp",
+            "warm_start_init_point": "yes", "mu_init": 1e-6}}
+        if carry:
+            opts["warm_start_from_previous"] = True
+        S_ = ca.nlpsol("S", "pounce", nlp, opts)
+        state, prev, us, reused = ca.DM([0.0, 0.8, 0.0, 0.0]), None, [], 0
+        for _ in range(12):
+            prev = (S_(x0=ca.DM.zeros(nx), p=state, **args) if prev is None else
+                    S_(x0=prev["x"], lam_g0=prev["lam_g"], lam_x0=prev["lam_x"],
+                       p=state, **args))
+            reused += bool(S_.stats().get("warm_started_working_set"))
+            u0 = float(prev["x"][4 * (N + 1)])
+            us.append(u0)
+            state = ca.DM(np.array(rk4(state, u0, h)).ravel())
+        return np.array(us), reused
+
+    plain, reused_off = run(False)
+    carried, reused_on = run(True)
+    check("working set is not carried by default", reused_off == 0, f"{reused_off} reuses")
+    check("working set carries between calls", reused_on >= 10, f"{reused_on}/12 reuses")
+    check("carrying it does not change the trajectory",
+          float(np.abs(plain - carried).max()) < 1e-6,
+          f"max|Δu0| = {np.abs(plain - carried).max():.2e}")
+
+
 def test_option_pass_through():
     nlp = rosenbrock_nlp()
     S = ca.nlpsol("S", "pounce", nlp, {
@@ -301,6 +368,7 @@ def main():
         test_limited_memory_and_nonlinear_variables,
         test_nmpc_feedback_gain_is_not_silently_zero,
         test_active_set_sqp_algorithm,
+        test_working_set_carries_between_calls,
         test_option_pass_through,
     ):
         t()

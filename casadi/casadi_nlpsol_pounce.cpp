@@ -47,6 +47,13 @@ namespace casadi {
     std::vector<double> inf_pr, inf_du, mu_trace, d_norm, obj_trace,
                         alpha_pr, alpha_du, regularization_size;
     std::vector<casadi_int> ls_trials;
+    /// Working set carried from this memory object's previous solve
+    /// (`warm_start_from_previous`). Statuses are ints, in the caller's own
+    /// variable / row numbering. Empty until a solve produces one.
+    std::vector<IpoptBoundStatus> ws_bounds;
+    std::vector<IpoptConsStatus> ws_cons;
+    bool ws_valid = false;      // a set is stored and worth trying
+    bool ws_used = false;       // the last solve actually started from it
   };
 
   class PounceInterface : public Nlpsol {
@@ -81,6 +88,7 @@ namespace casadi {
     bool pass_nonlinear_variables_ = false;
     std::vector<bool> nl_ex_;          // which x enter nonlinearly
     bool clip_inactive_lam_ = true;
+    bool warm_start_from_previous_ = false;
     std::string inactive_lam_strategy_ = "reltol";
     double inactive_lam_value_ = 10;
 
@@ -135,7 +143,14 @@ namespace casadi {
                    "inactive_lam_value * constr_viol_tol) or 'abstol' "
                    "(margin = inactive_lam_value)"}},
       {"inactive_lam_value",
-       {OT_DOUBLE, "Value used by inactive_lam_strategy (default 10)"}}
+       {OT_DOUBLE, "Value used by inactive_lam_strategy (default 10)"}},
+      {"warm_start_from_previous",
+       {OT_BOOL,
+        "Carry the active-set-SQP working set from one call of this solver to "
+        "the next (default false). Only the active-set path produces one, so "
+        "this is inert under the interior-point default. It makes the "
+        "function stateful — call k+1 starts from what call k found — which "
+        "is why it is opt-in; see the docs before switching it on."}}
      }
   };
 
@@ -155,6 +170,8 @@ namespace casadi {
         inactive_lam_strategy_ = op.second.to_string();
       } else if (op.first == "inactive_lam_value") {
         inactive_lam_value_ = op.second;
+      } else if (op.first == "warm_start_from_previous") {
+        warm_start_from_previous_ = op.second;
       }
     }
 
@@ -387,12 +404,46 @@ namespace casadi {
       }
     }
 
+    // Start this solve from the active set the previous one ended on.
+    //
+    // The working set is the SQP's guess at which bounds and constraints are
+    // active; identifying it is most of the work, and in a receding-horizon
+    // loop the answer barely moves between steps. There is nowhere in
+    // `nlpsol`'s fixed input signature to pass one, so it is carried here, in
+    // this memory object, rather than by the caller.
+    //
+    // A stale set is a guess, not a claim: bounds arrive as per-call inputs
+    // and may have moved under it, in which case POUNCE validates and refuses
+    // it, and this solve simply cold-starts its working set.
+    m->ws_used = false;
+    if (warm_start_from_previous_ && m->ws_valid) {
+      m->ws_used = IpoptSetWarmStartWorkingSet(
+          prob, m->ws_bounds.data(), ng ? m->ws_cons.data() : nullptr) != 0;
+      if (!m->ws_used) {
+        m->ws_valid = false;      // do not keep re-offering a rejected set
+        if (verbose_) {
+          casadi_message("POUNCE: previous working set refused; cold-starting it.");
+        }
+      }
+    }
+
     SetIntermediateCallback(prob, &PounceInterface::cb_iter);
 
     enum ApplicationReturnStatus st = IpoptSolve(
       prob, m->xk.data(), ng ? m->gk.data() : nullptr, &m->obj,
       ng ? m->lam_g.data() : nullptr, m->z_L.data(), m->z_U.data(),
       static_cast<UserDataPtr>(m));
+
+    // Harvest the working set for the next call. `IpoptGetWorkingSet`
+    // returns false when there is nothing to carry — the interior-point path
+    // produces no working set, and neither does an SQP solve that converged
+    // before its first QP — so the option is inert rather than wrong there.
+    if (warm_start_from_previous_) {
+      m->ws_bounds.resize(n);
+      m->ws_cons.resize(ng);
+      m->ws_valid = IpoptGetWorkingSet(prob, m->ws_bounds.data(),
+                                       ng ? m->ws_cons.data() : nullptr) != 0;
+    }
 
     m->return_status = static_cast<int>(st);
     m->iter = GetIpoptIterCount(prob);
@@ -481,6 +532,10 @@ namespace casadi {
     stats["return_status"] = pounce_status_name(m->return_status);
     stats["iter_count"] = m->iter;
     stats["t_solve_pounce"] = m->t_solve;
+    // Whether this call started from the previous call's active set, and
+    // whether it left one behind for the next.
+    stats["warm_started_working_set"] = m->ws_used;
+    stats["working_set_available"] = m->ws_valid;
     Dict iterations;
     iterations["inf_pr"] = m->inf_pr;
     iterations["inf_du"] = m->inf_du;

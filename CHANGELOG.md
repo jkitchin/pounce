@@ -139,6 +139,24 @@ changes.
   shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
   drop-in `libipopt`, and what the wheel would take.
 
+- **The CasADi plugin can carry the active-set SQP working set between
+  calls** (`warm_start_from_previous`, default off). `x0`/`lam_g0`/`lam_x0`
+  restart the iterate; the working set — which bounds and constraints were
+  active — is the other half, and `nlpsol`'s fixed input signature has
+  nowhere to pass one, so the plugin carries it in its memory object from
+  one call of a solver to the next. On a cart-pole MPC with saturating
+  force limits, a receding-horizon loop goes from 233 ms mean / 375 ms max
+  per solve to **18 ms / 23 ms** — an order of magnitude, and the
+  difference between active-set SQP being the worst option on that problem
+  and the best (the warm interior point reference is 27 ms / 38 ms). The
+  control trajectory is identical to 3e-11: a working set is a starting guess for the QP, not a constraint on
+  the answer, and the iteration count barely moves (2.86 → 2.79) because
+  the saving is inside each QP. Off by default because it makes the
+  function stateful; a stale set is validated and refused rather than
+  obeyed, and `stats()["warm_started_working_set"]` says whether a call
+  used one. Inert under the interior-point default, which produces no
+  working set.
+
 - **The CasADi plugin clips the multipliers of inactive bounds by default**
   (#624), because not doing so silently zeroes sensitivities. An
   interior-point solve leaves a residual ~1e-12 multiplier on bounds it
