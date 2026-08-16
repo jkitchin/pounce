@@ -18,10 +18,16 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 01 | [`01_getting_started.ipynb`](01_getting_started.ipynb) | First solve — define a problem, call `minimize`, read the result. |
 | 02 | [`02_jax_autodiff.ipynb`](02_jax_autodiff.ipynb) | Let JAX supply exact gradients/Hessians. |
-| 05 | [`05_pyomo.ipynb`](05_pyomo.ipynb) | Drive POUNCE from a Pyomo model. |
 | 07 | [`07_scaling.ipynb`](07_scaling.ipynb) | NLP scaling and why it matters for convergence. |
 | 08 | [`08_fbbt.ipynb`](08_fbbt.ipynb) | Feasibility-based bound tightening. |
 | 28 | [`28_pyomo_initialization_repair.ipynb`](28_pyomo_initialization_repair.ipynb) | The two ways an initialization goes bad, on a 569-equation distillation train: a structurally singular specification (diagnosed by `block_analyze`, repaired by `block_repair_plan`, applied automatically by `initialize`) and a garbage starting point (rebuilt by the block-triangular solve, even from all zeros). |
+
+## Modeling-language front ends
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 05 | [`05_pyomo.ipynb`](05_pyomo.ipynb) | Drive POUNCE from a Pyomo model. |
+| 35 | [`35_casadi.ipynb`](35_casadi.ipynb) | POUNCE as a CasADi `nlpsol` plugin: MX models with parameters, `Opti`, warm-started MPC, differentiating through the solve (and a bilevel problem built on it), L-BFGS restricted to the nonlinear variables, and a side-by-side check against CasADi's bundled Ipopt. |
 
 ## Differentiating through the solver
 

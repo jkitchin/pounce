@@ -184,24 +184,28 @@ is unchanged, which
 [`casadi/examples/05_limited_memory_mask.py`](https://github.com/jkitchin/pounce/blob/main/casadi/examples/05_limited_memory_mask.py)
 demonstrates.
 
-**Expect a modest win, and measure.** On a synthetic model with 2
-nonlinear variables and 10 000 linear ones, the restriction takes the
-solve from 6.0 s / 31 iterations to 5.1 s / 27. At 2000 linear variables
-it is a wash (0.93 s against 0.89 s). The saving is in the curvature
-information and the stored columns, not in the linear algebra, so the
-win grows with the ratio of linear to nonlinear variables — and a model
+**Whether it is faster depends on the model, so measure.** The restriction is
+a different approximation, so it takes a different path to the same KKT point.
+Measured on a synthetic model with 2 nonlinear variables (saved outputs in the
+notebook below):
+
+| linear variables | full space | masked |
+| --- | --- | --- |
+| 2 000 | 0.86 s, 25 iterations | 1.13 s, 28 iterations |
+| 10 000 | 8.3 s, 31 iterations | 7.1 s, 27 iterations |
+
+The saving is in the curvature information and the stored columns, not in the
+linear algebra, so it only pays once the linear block dominates — and a model
 that is mostly nonlinear has nothing to gain.
 
-For contrast, the same 2000-variable model through CasADi's Ipopt plugin
-goes from 0.40 s unmasked to **399 s** masked. Ipopt zeroes the
-quasi-Newton diagonal on the linear block, which leaves those rows of
-the KKT system carrying only the barrier term and makes the symmetric
-factorization pay for a near-singular diagonal. POUNCE keeps a small
-curvature floor there instead (`limited_memory_init_val_min`, 1e-8 by
-default), which costs nothing anyone can measure in the answer and
-avoids the cliff entirely — a
-[deliberate divergence](https://github.com/jkitchin/pounce/blob/main/crates/pounce-algorithm/src/hess/lim_mem_quasi_newton.rs)
-from upstream.
+For contrast, the same 2000-variable model through CasADi's Ipopt plugin goes
+from 0.40 s unmasked to **399 s** masked. Ipopt zeroes the quasi-Newton
+diagonal on the linear block, which leaves those rows of the KKT system
+carrying only the barrier term and makes the symmetric factorization pay for a
+near-singular diagonal. POUNCE keeps a small curvature floor there instead
+(`limited_memory_init_val_min`, 1e-8 by default), which avoids the cliff
+entirely — a deliberate divergence from upstream, documented at the code site
+in `crates/pounce-algorithm/src/hess/lim_mem_quasi_newton.rs`.
 
 The underlying entry point is `IpoptSetNonlinearVariables` in POUNCE's C
 API, and `num_linear_variables` is the Ipopt-compatible
@@ -221,6 +225,14 @@ with `make examples`:
 | `04_parametric_sensitivity.py` | `jacobian` through a solve; a bilevel problem |
 | `05_limited_memory_mask.py` | `pass_nonlinear_variables` with L-BFGS |
 | `06_iteration_callback.py` | Live iterates and early termination |
+
+## Notebook
+
+[`python/notebooks/35_casadi.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/35_casadi.ipynb)
+walks through all of the above end to end with saved outputs — first solve and
+convergence plot, `Opti` optimal control, the warm-started MPC loop, the
+sensitivity and bilevel example, the nonlinear-variable mask measured at two
+problem sizes, and the Ipopt cross-check.
 
 ## What is not supported
 
