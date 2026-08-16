@@ -83,6 +83,8 @@ has the details and the failure signatures.
 | `pounce` | Dict of POUNCE options, using Ipopt-compatible names — `tol`, `max_iter`, `print_level`, `mu_strategy`, `hessian_approximation`, `linear_solver`, … Anything you would put in an `ipopt.opt`. |
 | `pass_nonlinear_variables` | Let CasADi work out which variables enter nonlinearly and tell POUNCE. Affects the limited-memory Hessian only — see below. |
 | `nonlinear_variables` | The same subset, given explicitly as a list of booleans of length `nx`. |
+| `clip_inactive_lam` | Zero the multipliers of demonstrably inactive bounds (default **true**). Needed for correct sensitivities — see below. `false` reproduces CasADi's ipopt-plugin default. |
+| `inactive_lam_strategy`, `inactive_lam_value` | How that inactivity margin is sized: `reltol` (default) means `inactive_lam_value * constr_viol_tol`; `abstol` uses the value directly. Same meaning as in the ipopt plugin. |
 
 Everything in CasADi's base `nlpsol` option set also applies:
 `iteration_callback`, `print_time`, `bound_consistency`, `calc_lam_p`,
@@ -175,9 +177,51 @@ if the sensitivities look off.
 [`casadi/examples/04_parametric_sensitivity.py`](https://github.com/jkitchin/pounce/blob/main/casadi/examples/04_parametric_sensitivity.py)
 checks it against a finite difference and then solves a bilevel problem.
 
-POUNCE also has its own [parametric sensitivity](sensitivity.md) and
-[active-set SQP warm start](active-set-sqp-warm-start.md) machinery,
-which the plugin does not expose yet.
+### Bounded variables and silently-zero gains
+
+There is a trap here that costs correctness, not speed, and it is worth
+understanding before you trust a gain.
+
+An interior-point method drives the multipliers of untouched bounds
+toward zero without reaching it — POUNCE leaves ~1e-12 on them. CasADi's
+solution-map derivative reads *any* nonzero bound multiplier as an active
+constraint and holds that variable fixed, so one residual 1e-12 turns the
+whole sensitivity row into zeros. On an NMPC model with bounded controls,
+`jacobian(u0, x0)` — the feedback gain — then reads exactly zero where a
+re-solve says −9.11.
+
+The plugin therefore clips the multipliers of demonstrably inactive
+bounds to zero by default, testing *primal distance to the bound* rather
+than multiplier magnitude. It is the same rule, option name and margin as
+CasADi's ipopt plugin `clip_inactive_lam` — with the default flipped,
+because that plugin defaults it off and a silently-zero gain is a bad
+default. `clip_inactive_lam=False` restores the Ipopt-identical
+behaviour.
+
+```python
+# with the default, the analytic gain matches a re-solve;
+# with clip_inactive_lam=False it comes back as 0.0
+gain = ca.Function("gain", [x0_par], [ca.jacobian(sol["x"][iu0], x0_par)])
+```
+
+Pinned by `test_nmpc_feedback_gain_is_not_silently_zero` in
+`casadi/test_parity.py`.
+
+### POUNCE-specific algorithms
+
+`algorithm=active-set-sqp` selects POUNCE's
+[active-set SQP](active-set-sqp.md) driver through the ordinary option
+dict — no plugin support needed, and it agrees with the interior-point
+default (checked in the parity suite). Whether it is *faster* depends on
+the problem; the notebook measures both on an MPC model.
+
+What the plugin does **not** expose yet is the machinery that needs an
+API beyond `nlpsol`'s: POUNCE's own
+[parametric sensitivity](sensitivity.md) (the factor-once/solve-many
+session, which would replace CasADi's generic KKT linearization) and
+[working-set warm starts](active-set-sqp-warm-start.md) carried between
+calls. Both are reachable from the C API the plugin already uses; say so
+on the issue tracker if you want them.
 
 ## Limited-memory Hessians and nonlinear variables
 

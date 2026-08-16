@@ -80,8 +80,18 @@ namespace casadi {
     Dict opts_;                        // forwarded to POUNCE
     bool pass_nonlinear_variables_ = false;
     std::vector<bool> nl_ex_;          // which x enter nonlinearly
+    bool clip_inactive_lam_ = true;
+    std::string inactive_lam_strategy_ = "reltol";
+    double inactive_lam_value_ = 10;
 
     static const std::string meta_doc;
+
+    /// `constr_viol_tol` as POUNCE will see it: the user's value from the
+    /// `pounce` dict when given, else upstream's registered default.
+    double constr_viol_tol() const {
+      auto it = opts_.find("constr_viol_tol");
+      return it == opts_.end() ? 1e-4 : static_cast<double>(it->second);
+    }
 
     // callbacks
     static bool cb_f(ipindex n, ipnumber* x, bool new_x, ipnumber* obj, UserDataPtr ud);
@@ -110,7 +120,22 @@ namespace casadi {
       {"pass_nonlinear_variables",
        {OT_BOOL, "Pass the list of variables entering nonlinearly to POUNCE"}},
       {"nonlinear_variables",
-       {OT_BOOLVECTOR, "Manually specify which variables enter nonlinearly"}}
+       {OT_BOOLVECTOR, "Manually specify which variables enter nonlinearly"}},
+      {"clip_inactive_lam",
+       {OT_BOOL,
+        "Set multipliers of demonstrably inactive bounds to exactly zero "
+        "(default true). An interior-point solve leaves a residual ~1e-12 "
+        "multiplier on bounds it never touched, and CasADi's solution-map "
+        "derivative reads any nonzero multiplier as an active constraint — "
+        "which silently zeroes the sensitivity rows of every bounded "
+        "variable. Set false for bit-identical parity with CasADi's ipopt "
+        "plugin, which defaults this off."}},
+      {"inactive_lam_strategy",
+       {OT_STRING, "How to size the inactivity margin: 'reltol' (margin = "
+                   "inactive_lam_value * constr_viol_tol) or 'abstol' "
+                   "(margin = inactive_lam_value)"}},
+      {"inactive_lam_value",
+       {OT_DOUBLE, "Value used by inactive_lam_strategy (default 10)"}}
      }
   };
 
@@ -124,6 +149,12 @@ namespace casadi {
         pass_nonlinear_variables_ = op.second;
       } else if (op.first == "nonlinear_variables") {
         nl_ex_ = op.second;
+      } else if (op.first == "clip_inactive_lam") {
+        clip_inactive_lam_ = op.second;
+      } else if (op.first == "inactive_lam_strategy") {
+        inactive_lam_strategy_ = op.second.to_string();
+      } else if (op.first == "inactive_lam_value") {
+        inactive_lam_value_ = op.second;
       }
     }
 
@@ -374,6 +405,39 @@ namespace casadi {
     d_nlp->objective = m->obj;
     for (int i = 0; i < n; ++i) d_nlp->lam[i] = m->z_U[i] - m->z_L[i];
     casadi_copy(m->lam_g.data(), ng, d_nlp->lam + n);
+
+    // Zero the multipliers of bounds the iterate is demonstrably far from.
+    //
+    // An interior-point method leaves a residual multiplier — order 1e-12
+    // here — on every bound it never came near, because those multipliers
+    // approach zero from above rather than reaching it. CasADi's
+    // solution-map derivative treats any nonzero bound multiplier as an
+    // *active* constraint and fixes that variable, so a single stray
+    // 1e-12 turns the whole sensitivity row into zeros. On an NMPC model
+    // whose controls are bounded, that means `jacobian(u0, x0)` — the
+    // feedback gain — silently reads 0 where a re-solve says -9.11.
+    //
+    // The test is primal distance, not multiplier magnitude: a variable
+    // more than `margin` away from a bound is not sitting on it, whatever
+    // the arithmetic left behind. Same rule, option names and margin as
+    // CasADi's ipopt plugin (`clip_inactive_lam`), except that this
+    // defaults **on** — the Ipopt plugin defaults it off, which is where
+    // the trap comes from.
+    if (clip_inactive_lam_) {
+      double margin;
+      if (inactive_lam_strategy_ == "abstol") {
+        margin = inactive_lam_value_;
+      } else if (inactive_lam_strategy_ == "reltol") {
+        margin = inactive_lam_value_ * constr_viol_tol();
+      } else {
+        casadi_error("inactive_lam_strategy '" + inactive_lam_strategy_ +
+                     "' unknown. Use 'abstol' or 'reltol'.");
+      }
+      for (casadi_int i = 0; i < nx_ + ng_; ++i) {
+        if (d_nlp->lam[i] > 0 && d_nlp->ubz[i] - d_nlp->z[i] > margin) d_nlp->lam[i] = 0;
+        if (d_nlp->lam[i] < 0 && d_nlp->z[i] - d_nlp->lbz[i] > margin) d_nlp->lam[i] = 0;
+      }
+    }
 
     m->n_iter = m->iter;
     m->success = (st == Solve_Succeeded || st == Solved_To_Acceptable_Level);

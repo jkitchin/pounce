@@ -208,6 +208,65 @@ def test_limited_memory_and_nonlinear_variables():
     check("L-BFGS masked == ipopt", close(b["x"], c["x"], 1e-4), f"f={float(b['f']):.6f}")
 
 
+def test_nmpc_feedback_gain_is_not_silently_zero():
+    """The sensitivity of a *bounded* variable, which is where CasADi's
+    solution-map derivative has a trap: an interior-point solve leaves a
+    residual ~1e-12 multiplier on bounds it never touched, and the
+    derivative reads any nonzero bound multiplier as an active constraint,
+    zeroing that variable's whole row. The plugin clips demonstrably
+    inactive multipliers by default, so the gain is right; the check is
+    against a re-solve, which cannot be fooled the same way."""
+    Nh, dt = 20, 0.05
+    X, U = ca.MX.sym("X", 2, Nh + 1), ca.MX.sym("U", 1, Nh)
+    x0p = ca.MX.sym("x0p", 2)
+    cost, cons = 0, [X[:, 0] - x0p]
+    for k in range(Nh):
+        cons.append(X[:, k + 1] - ca.vertcat(
+            X[0, k] + dt * X[1, k],
+            X[1, k] + dt * (U[0, k] - 0.1 * X[1, k] * ca.fabs(X[1, k]))))
+        cost += X[0, k]**2 + 0.1 * X[1, k]**2 + 0.01 * U[0, k]**2
+    cost += 10 * (X[0, Nh]**2 + X[1, Nh]**2)
+    nlp = {"x": ca.vertcat(ca.vec(X), ca.vec(U)), "p": x0p,
+           "f": cost, "g": ca.vertcat(*cons)}
+    nx, iu0 = 2 * (Nh + 1) + Nh, 2 * (Nh + 1)
+    args = dict(lbg=0, ubg=0,
+                lbx=[-ca.inf] * (2 * (Nh + 1)) + [-2.0] * Nh,
+                ubx=[ca.inf] * (2 * (Nh + 1)) + [2.0] * Nh)
+    opts = {"print_time": False, "pounce": {"print_level": 0, "tol": 1e-11}}
+
+    S = ca.nlpsol("S", "pounce", nlp, opts)
+    p0, eps = ca.DM([0.05, 0.0]), 1e-4
+    u = lambda pv: float(S(x0=ca.DM.zeros(nx), p=pv, **args)["x"][iu0])
+    truth = (u(p0 + ca.DM([eps, 0])) - u(p0 - ca.DM([eps, 0]))) / (2 * eps)
+
+    ps = ca.MX.sym("p", 2)
+    sol = S(x0=ca.DM.zeros(nx), p=ps, **args)
+    analytic = float(ca.Function("J", [ps], [ca.jacobian(sol["x"][iu0], ps)])(p0)[0])
+    check("NMPC feedback gain vs re-solve",
+          abs(analytic - truth) < 1e-3 * max(1.0, abs(truth)),
+          f"analytic {analytic:.6f} vs re-solve {truth:.6f}")
+
+    # And the escape hatch reproduces the Ipopt-plugin default.
+    unclipped = ca.nlpsol("U", "pounce", nlp, dict(opts, clip_inactive_lam=False))
+    sol_u = unclipped(x0=ca.DM.zeros(nx), p=ps, **args)
+    zeroed = float(ca.Function("J", [ps], [ca.jacobian(sol_u["x"][iu0], ps)])(p0)[0])
+    check("clip_inactive_lam=False restores ipopt-plugin behaviour",
+          abs(zeroed) < 1e-9, f"{zeroed:.3e}")
+
+
+def test_active_set_sqp_algorithm():
+    """`algorithm=active-set-sqp` is POUNCE-specific and reachable through
+    the option dict; it must agree with the interior-point default."""
+    nlp = rosenbrock_nlp()
+    kw = dict(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    ipm = ca.nlpsol("ipm", "pounce", nlp, QUIET_POUNCE)(**kw)
+    sqp_opts = {"print_time": False,
+                "pounce": {"print_level": 0, "algorithm": "active-set-sqp"}}
+    sqp = ca.nlpsol("sqp", "pounce", nlp, sqp_opts)(**kw)
+    check("active-set-sqp agrees with the IPM", close(ipm["x"], sqp["x"], 1e-6),
+          f"x={sqp['x'].T}")
+
+
 def test_option_pass_through():
     nlp = rosenbrock_nlp()
     S = ca.nlpsol("S", "pounce", nlp, {
@@ -240,6 +299,8 @@ def main():
         test_iteration_callback,
         test_warm_start,
         test_limited_memory_and_nonlinear_variables,
+        test_nmpc_feedback_gain_is_not_silently_zero,
+        test_active_set_sqp_algorithm,
         test_option_pass_through,
     ):
         t()

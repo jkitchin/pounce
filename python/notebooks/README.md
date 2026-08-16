@@ -27,7 +27,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 05 | [`05_pyomo.ipynb`](05_pyomo.ipynb) | Drive POUNCE from a Pyomo model. |
-| 35 | [`35_casadi.ipynb`](35_casadi.ipynb) | POUNCE as a CasADi `nlpsol` plugin: MX models with parameters, `Opti`, warm-started MPC, differentiating through the solve (and a bilevel problem built on it), L-BFGS restricted to the nonlinear variables, and a side-by-side check against CasADi's bundled Ipopt. |
+| 35 | [`35_casadi.ipynb`](35_casadi.ipynb) | POUNCE as a CasADi `nlpsol` plugin: MX models with parameters, `Opti`, warm-started MPC, differentiating through the solve (with the bounded-variable trap that silently zeroes NMPC feedback gains), L-BFGS restricted to the nonlinear variables, timings against CasADi's bundled Ipopt, and a cart-pole worked example — swing-up, then balancing against a control deadline. |
 
 ## Differentiating through the solver
 

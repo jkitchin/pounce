@@ -139,6 +139,23 @@ changes.
   shape was chosen over an AMPL bridge, a Python `Callback` shim, or a
   drop-in `libipopt`, and what the wheel would take.
 
+- **The CasADi plugin clips the multipliers of inactive bounds by default**
+  (#624), because not doing so silently zeroes sensitivities. An
+  interior-point solve leaves a residual ~1e-12 multiplier on bounds it
+  never touched; CasADi's solution-map derivative reads any nonzero bound
+  multiplier as an active constraint and holds that variable fixed, so
+  one such residual turns the variable's whole sensitivity row into
+  zeros. On an NMPC model with bounded controls that means
+  `jacobian(u0, x0)` — the feedback gain — reads exactly `0.0` where a
+  re-solve says `-9.109838`. The same is true of CasADi's own Ipopt
+  plugin at its defaults. POUNCE's plugin now tests primal distance to
+  the bound and zeroes what is demonstrably inactive: same rule, option
+  name and margin as the ipopt plugin's `clip_inactive_lam`, with the
+  default flipped to on. `clip_inactive_lam=False` restores the
+  Ipopt-identical behaviour. Pinned by
+  `test_nmpc_feedback_gain_is_not_silently_zero` in
+  `casadi/test_parity.py`.
+
 - **Ipopt-compatible nonlinear-variable subsets for the limited-memory
   Hessian** (#624). `TNLP::get_number_of_nonlinear_variables` /
   `get_list_of_nonlinear_variables` were declared but read nowhere. They
