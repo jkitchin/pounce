@@ -22,6 +22,7 @@
 - [Verifying Solutions](verify.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
+- [Continuation over a Parametric NLP Sequence](continuation.md)
 - [Differentiable Solves & the DiffHandoff Contract](differentiable-solves.md)
 - [Interactive Debugger](debugger.md)
 
