@@ -26,18 +26,38 @@
 //! 2. the *feature* it configures is absent too.
 //!
 //! Both are needed. An option whose name is unread but whose feature
-//! runs — the `limited_memory_*` tail, the corrector knobs — is a
-//! missing read site, not a missing feature; refusing those would fail
-//! solves whose current answers are already correct. They are
-//! deliberately **not** here; wiring them is the other half of the work.
+//! runs — the `limited_memory_*` tail — is a missing read site, not a
+//! missing feature; refusing those would fail solves whose current
+//! answers are already correct. They are deliberately **not** here;
+//! wiring them is the other half of the work.
 //!
-//! A third shape turned up while wiring that half and belongs to
-//! neither: an option for a *sub-capability* of a feature that does run.
-//! `max_resto_iter` and `resto_failure_feasibility_threshold` are the
-//! examples — restoration runs, but there is no iteration cap or failure
-//! threshold to point a read site at, so honouring them means building
-//! the capability, not adding a line. They are left out of this table
-//! until that call is made, and so remain silent for now.
+//! Rule 2 is the one that takes work, and the corrector knobs are why.
+//! `corrector_type` and its three safeguards were once listed here as an
+//! example of rule 1 alone — "the Mehrotra corrector runs, so these need
+//! read sites" — on the strength of pounce having a corrector at all.
+//! They configure a different one. The registry files them under
+//! `FilterLSAcceptor::RegisterOptions`, and what they select is
+//! `FilterLSAcceptor::TryCorrector`: a corrector step *tried inside the
+//! line search* and accepted only if complementarity does not grow by
+//! more than `corrector_compl_avrg_red_fact`. pounce's corrector is
+//! Mehrotra's, in the search-direction right-hand side, reached through
+//! `mehrotra_algorithm` — an option upstream registers separately and
+//! pounce reads. No acceptor here takes a corrector trial, so the four
+//! are refused (#551 / #677). A dev-note had already measured the
+//! consequence without naming it: `corrector_type=affine` on `robot_a`
+//! was recorded as "identical to plain adaptive".
+//!
+//! A third shape belongs to neither rule: an option for a
+//! *sub-capability* of a feature that does run.
+//! `resto_failure_feasibility_threshold` is the example — restoration
+//! runs, but nothing reclassifies a stopped restoration as a failure
+//! below a feasibility threshold, so honouring it means building the
+//! capability, not adding a line. Those entries are refused too, and
+//! their `advice` says what the parent feature does instead, so the
+//! message tells a user which of the two they hit. `max_resto_iter`
+//! looked like this shape and was not: `RestoConvCheckAdapter` has
+//! capped successive restoration iterations all along, under the name
+//! `maximum_resto_iters`. It is wired, not refused.
 //!
 //! The clearest case is the penalty line search. pounce implements
 //! `IpPenaltyLSAcceptor` (`line_search_method=penalty`), so its knobs
@@ -55,10 +75,9 @@
 //! # The default gate
 //!
 //! Only an explicit value **different from the registered default** is
-//! refused. `expect_infeasible_problem_ctol` left alone, or an
-//! `ipopt.opt` that spells out defaults, must keep working: those ask
-//! for nothing. Refusing them would break the very compatibility the
-//! registry exists to provide.
+//! refused. `corrector_type` left alone, or an `ipopt.opt` that spells
+//! out defaults, must keep working: those ask for nothing. Refusing them
+//! would break the very compatibility the registry exists to provide.
 
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::{DefaultValue, RegisteredOptions};
@@ -205,6 +224,77 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         advice: "pounce's checker tests at the (bound-projected) starting point, \
                  which is where the solve actually begins",
         options: &["point_perturbation_radius"],
+    },
+    // ---- #551 / #677 round 3. Four groups whose *name* appears nowhere
+    // outside the registry and whose feature is absent too, so they were
+    // silent no-ops. The first is a whole feature pounce never ported;
+    // the other three are sub-capabilities of features that do run —
+    // restoration and L-BFGS — which is why each `advice` says what the
+    // parent feature does instead of what a replacement option is.
+    UnimplementedFeature {
+        issue: 551,
+        feature: "the corrector step tried inside the filter line search \
+                  under the adaptive barrier strategy — Ipopt's \
+                  `FilterLSAcceptor::TryCorrector`, which these four knobs \
+                  select and safeguard",
+        advice: "pounce's line search takes no corrector step at all, so \
+                 there is nothing for these to gate. The predictor-corrector \
+                 pounce does implement is Mehrotra's, applied to the \
+                 search-direction right-hand side rather than as a \
+                 line-search trial: `mehrotra_algorithm=yes` is read and \
+                 honoured (it also selects `mu_strategy=adaptive` and \
+                 `mu_oracle=probing`)",
+        options: &[
+            "corrector_type",
+            "skip_corr_if_neg_curv",
+            "skip_corr_in_monotone_mode",
+            "corrector_compl_avrg_red_fact",
+        ],
+    },
+    UnimplementedFeature {
+        issue: 551,
+        feature: "the `expect_infeasible_problem` heuristics inside the \
+                  filter line search — switching them off once the \
+                  constraint violation drops below a threshold (`_ctol`), \
+                  and diverting to restoration once the constraint \
+                  multipliers' max-norm rises above one (`_ytol`)",
+        advice: "the restoration phase itself runs and is unaffected; \
+                 pounce enters it when the line search cannot make \
+                 progress, and `required_infeasibility_reduction` sets how \
+                 much infeasibility reduction it must deliver before \
+                 handing back. `IpBacktrackingLineSearch`'s \
+                 `count_successive_shortened_steps_` machinery, which is \
+                 what these two thresholds steer, has no counterpart here",
+        options: &[
+            "expect_infeasible_problem_ctol",
+            "expect_infeasible_problem_ytol",
+        ],
+    },
+    UnimplementedFeature {
+        issue: 551,
+        feature: "the special quasi-Newton update Ipopt used inside the \
+                  restoration phase before Nov 2010",
+        advice: "L-BFGS runs in the restoration sub-solve; it uses the \
+                 regular update procedure there, which is what \
+                 `limited_memory_special_for_resto=no` — upstream's own \
+                 default, and its recommendation — asks for. Only the \
+                 revert to the old update is missing",
+        options: &["limited_memory_special_for_resto"],
+    },
+    UnimplementedFeature {
+        issue: 551,
+        feature: "declaring the restoration phase *failed* when it stops on \
+                  the acceptable-point criteria at a primal infeasibility \
+                  below a threshold",
+        advice: "restoration runs and reports failure on its own terms — \
+                 the reduction guard (`required_infeasibility_reduction`), \
+                 the successive-iteration cap (`max_resto_iter`), and the \
+                 locally-infeasible verdicts, which measure a violation \
+                 against `constr_viol_tol` relative to the offending row. \
+                 There is no threshold below which a stopped restoration is \
+                 reclassified as a failure, so this option has nothing to \
+                 set",
+        options: &["resto_failure_feasibility_threshold"],
     },
     UnimplementedFeature {
         issue: 606,
@@ -611,6 +701,130 @@ mod tests {
         }
     }
 
+    /// `max_resto_iter` reaches the builder (#551 / #677). The cap it
+    /// sets is enforced by `RestoConvCheckAdapter::maximum_resto_iters`,
+    /// which `pounce-restoration` tests against this field; here we only
+    /// pin the option → builder link and the default.
+    #[test]
+    fn max_resto_iter_reaches_the_builder() {
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        let b = app.algorithm_builder_from_options();
+        // NOT the registered default (3000000). pounce has capped
+        // successive restoration iterations at 3000 since the cap landed,
+        // and wiring the option must not move that for anyone who did not
+        // ask. See `RestoOptions::max_resto_iter`.
+        assert_eq!(b.resto.max_resto_iter, 3000);
+        let reg = registry();
+        let registered = reg.get_option("max_resto_iter").expect("registered");
+        assert!(
+            matches!(registered.default, DefaultValue::Integer(3_000_000)),
+            "the registry no longer declares 3000000 — if upstream's number \
+             was adopted as the effective default, that is a trajectory \
+             change and this test should be the one that says so",
+        );
+
+        let mut app = crate::application::IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("max_resto_iter 17\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_from_options().resto.max_resto_iter,
+            17,
+            "never reached the builder",
+        );
+    }
+
+    /// The four corrector knobs select `FilterLSAcceptor::TryCorrector`,
+    /// which pounce does not have — no acceptor here takes a corrector
+    /// trial. They were classified as missing read sites on the strength
+    /// of pounce having *a* corrector (Mehrotra's, in the search-direction
+    /// RHS, reached through `mehrotra_algorithm`); that is a different
+    /// mechanism and a different option (#551 / #677).
+    #[test]
+    fn the_corrector_knobs_are_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("corrector_type", "affine", true, false)
+            .unwrap();
+        let msg = refusal(&opts, &reg).expect("must refuse");
+        assert!(msg.contains("`corrector_type`"), "{msg}");
+        assert!(msg.contains("TryCorrector"), "{msg}");
+        assert!(msg.contains("mehrotra_algorithm"), "{msg}");
+        assert!(msg.contains("551"), "{msg}");
+
+        for (name, value) in [
+            ("skip_corr_if_neg_curv", "no"),
+            ("skip_corr_in_monotone_mode", "no"),
+        ] {
+            let (mut opts, reg) = fixture();
+            opts.set_string_value(name, value, true, false).unwrap();
+            assert!(refusal(&opts, &reg).is_some(), "`{name}` must refuse");
+        }
+        let (mut opts, reg) = fixture();
+        opts.set_numeric_value("corrector_compl_avrg_red_fact", 2.0, true, false)
+            .unwrap();
+        assert!(refusal(&opts, &reg).is_some());
+
+        // …and the default gate still holds: `corrector_type=none` is what
+        // an untouched solve already does.
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("corrector_type", "none", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
+    }
+
+    /// The remaining three restoration/L-BFGS sub-capabilities. Each
+    /// message must distinguish "the feature runs, this part of it does
+    /// not" from "pounce does not implement this feature" — that is what
+    /// the `advice` half is for, and a user who set one of these needs to
+    /// know restoration itself is still doing its job.
+    #[test]
+    fn the_missing_restoration_sub_capabilities_are_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_numeric_value("expect_infeasible_problem_ctol", 1e-4, true, false)
+            .unwrap();
+        let msg = refusal(&opts, &reg).expect("must refuse");
+        assert!(msg.contains("filter line search"), "{msg}");
+        assert!(
+            msg.contains("restoration phase itself runs"),
+            "the message must say the parent feature is unaffected: {msg}",
+        );
+
+        let (mut opts, reg) = fixture();
+        opts.set_numeric_value("expect_infeasible_problem_ytol", 1e6, true, false)
+            .unwrap();
+        assert!(refusal(&opts, &reg).is_some());
+
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("limited_memory_special_for_resto", "yes", true, false)
+            .unwrap();
+        let msg = refusal(&opts, &reg).expect("must refuse");
+        assert!(msg.contains("Nov 2010"), "{msg}");
+        assert!(
+            msg.contains("L-BFGS runs in the restoration sub-solve"),
+            "{msg}",
+        );
+
+        let (mut opts, reg) = fixture();
+        opts.set_numeric_value("resto_failure_feasibility_threshold", 1e-6, true, false)
+            .unwrap();
+        let msg = refusal(&opts, &reg).expect("must refuse");
+        assert!(msg.contains("restoration runs"), "{msg}");
+        // The wired sibling is named as the thing that *does* bound a
+        // restoration, so the message points somewhere real.
+        assert!(msg.contains("max_resto_iter"), "{msg}");
+
+        // Defaults ask for nothing, on every one of them.
+        let (mut opts, reg) = fixture();
+        opts.set_numeric_value("expect_infeasible_problem_ctol", 1e-3, true, false)
+            .unwrap();
+        opts.set_string_value("limited_memory_special_for_resto", "no", true, false)
+            .unwrap();
+        opts.set_numeric_value("resto_failure_feasibility_threshold", 0.0, true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
+    }
+
     /// The L-BFGS σ clamp, wired in gh#483 / #191 round 2.
     /// `LimMemQuasiNewtonUpdater` consumes both bounds in
     /// `initial_hessian_scalar`; only the read sites were missing. Note
@@ -648,14 +862,13 @@ mod tests {
     #[test]
     fn options_on_implemented_features_are_not_refused() {
         for (name, value) in [
-            // restoration runs; these are missing read sites (#191 round 2)
+            // restoration's successive-iteration cap, wired in #551 /
+            // #677 round 3 — `RestoConvCheckAdapter::maximum_resto_iters`
             ("max_resto_iter", "17"),
             // the filter line search runs
             ("accept_after_max_steps", "3"),
             // L-BFGS runs
             ("limited_memory_max_skipping", "4"),
-            // the Mehrotra corrector runs
-            ("corrector_type", "affine"),
             // `PdSearchDirCalc` has the flag and consumes it; it was
             // briefly in the refusal table by hand, against the rule
             // above, which would have failed a solve it can serve.

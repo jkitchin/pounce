@@ -398,29 +398,12 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     ];
 
     // #551 section 1 — feature runs, read site missing.
-    const CORRECTOR: &[&str] = &[
-        "corrector_compl_avrg_red_fact",
-        "corrector_type",
-        "skip_corr_if_neg_curv",
-        "skip_corr_in_monotone_mode",
-    ];
-
-    // #551 section 1 — feature runs, read site missing.
     const BARRIER_KKT: &[&str] = &[
         "fixed_mu_oracle",
         "neg_curv_test_reg",
         "neg_curv_test_tol",
         "s_max",
         "tau_min",
-    ];
-
-    // #551 section 1 — feature runs, read site missing.
-    const RESTORATION: &[&str] = &[
-        "expect_infeasible_problem_ctol",
-        "expect_infeasible_problem_ytol",
-        "limited_memory_special_for_resto",
-        "max_resto_iter",
-        "resto_failure_feasibility_threshold",
     ];
 
     // #551 section 1 — feature runs, read site missing.
@@ -453,9 +436,7 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     let known_debt: BTreeSet<&str> = BACKEND_KNOBS
         .iter()
         .chain(LINE_SEARCH)
-        .chain(CORRECTOR)
         .chain(BARRIER_KKT)
-        .chain(RESTORATION)
         .chain(SENSITIVITY)
         .chain(NLP_HINTS)
         .chain(MISC)

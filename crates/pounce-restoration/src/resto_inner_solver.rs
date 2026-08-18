@@ -69,9 +69,14 @@ pub type InnerBackendFactoryFactory = Box<dyn FnMut() -> LinearBackendFactory>;
 /// a feasibility-recovery side-solve and gets its own generous budget.
 const RESTO_INNER_MAX_ITERS: i32 = 3000;
 
-/// Cap on successive restoration iterations
-/// (`IpRestoConvCheck.cpp:144` `maximum_resto_iters`).
-const RESTO_MAX_SUCCESSIVE_ITERS: i32 = 3000;
+// The cap on *successive* restoration iterations
+// (`IpRestoConvCheck.cpp:144` `maximum_resto_iters`) used to be a second
+// constant here. It is now the `max_resto_iter` option, carried on
+// `AlgorithmBuilder::resto` and read in `algorithm_builder_from_options`
+// (#551 / #677) — the option was registered and this constant is what
+// actually decided, so setting it did nothing. `RestoOptions::default`
+// keeps pounce's 3000, which is NOT the registered default (3000000);
+// see the field docs there for why the effective value did not change.
 
 /// How much worse than the violation restoration was *entered* at a
 /// recovered point may be and still support a locally-infeasible verdict
@@ -178,17 +183,24 @@ fn diverged_from_restoration_entry(
 /// inner builder's `conv_check` options — which
 /// [`pounce_algorithm::application::IpoptApplication::algorithm_builder_from_options`]
 /// populates from the same `tol`/`acceptable_tol`/`acceptable_iter`
-/// options the outer solve reads — restores upstream's inheritance. The
-/// two iteration budgets stay at the resto-phase constants.
+/// options the outer solve reads — restores upstream's inheritance.
+///
+/// `max_resto_iter` is
+/// [`pounce_algorithm::alg_builder::RestoOptions::max_resto_iter`], the cap
+/// on successive restoration iterations. It arrives from the user's
+/// `max_resto_iter` option (#551 / #677) and defaults to the 3000 this
+/// function used to hard-code. The per-call inner-IPM iteration budget
+/// stays a resto-phase constant.
 fn build_resto_conv_check_adapter(
     conv: &pounce_algorithm::alg_builder::ConvCheckOptions,
+    max_resto_iter: i32,
 ) -> crate::conv_check::RestoConvCheckAdapter {
     crate::conv_check::RestoConvCheckAdapter::new(
         conv.tol,
         conv.acceptable_tol,
         conv.acceptable_iter,
         RESTO_INNER_MAX_ITERS,
-        RESTO_MAX_SUCCESSIVE_ITERS,
+        max_resto_iter,
     )
 }
 
@@ -471,17 +483,20 @@ pub fn run_inner_resto(
     // default `tol` was correctly diagnosed. Same defect, and the same repair,
     // as the outer cycle exit in `ipopt_alg`.
     let outer_constr_viol_tol = inner_alg_builder.conv_check.constr_viol_tol;
-    let mut adapter = build_resto_conv_check_adapter(&inner_alg_builder.conv_check)
-        .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto)
-        // Layer 2 of `IpRestoConvCheck::CheckConvergence` (pounce#438).
-        // `constr_viol_tol` is read with the *original* prefix upstream
-        // (`IpRestoConvCheck::InitializeImpl`), which is exactly what the
-        // inner builder's conv-check options carry here.
-        .with_orig_convergence_verdict(
-            outer_tol,
-            inner_alg_builder.conv_check.constr_viol_tol,
-            is_square_problem,
-        );
+    let mut adapter = build_resto_conv_check_adapter(
+        &inner_alg_builder.conv_check,
+        inner_alg_builder.resto.max_resto_iter,
+    )
+    .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto)
+    // Layer 2 of `IpRestoConvCheck::CheckConvergence` (pounce#438).
+    // `constr_viol_tol` is read with the *original* prefix upstream
+    // (`IpRestoConvCheck::InitializeImpl`), which is exactly what the
+    // inner builder's conv-check options carry here.
+    .with_orig_convergence_verdict(
+        outer_tol,
+        inner_alg_builder.conv_check.constr_viol_tol,
+        is_square_problem,
+    );
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
     }
@@ -1399,10 +1414,44 @@ mod tests {
         conv.acceptable_tol = 1e-2;
         conv.acceptable_iter = 7;
 
-        let adapter = build_resto_conv_check_adapter(&conv);
+        let adapter = build_resto_conv_check_adapter(
+            &conv,
+            pounce_algorithm::alg_builder::RestoOptions::default().max_resto_iter,
+        );
         assert_eq!(adapter.inner_tol(), 1e-3, "outer tol must propagate");
         assert_eq!(adapter.inner_acceptable_tol(), 1e-2);
         assert_eq!(adapter.inner_acceptable_iter(), 7);
+    }
+
+    /// `max_resto_iter` (#551 / #677) must *change what the solver does*,
+    /// not merely land in a field. The cap it sets is the one
+    /// [`crate::conv_check::RestoConvCheckAdapter`] enforces on successive
+    /// restoration iterations, so this drives the adapter the production
+    /// path builds and shows the verdict flipping to `MaxIterExceeded` at
+    /// the requested count — and *not* at that count under the default.
+    #[test]
+    fn max_resto_iter_caps_the_restoration_conv_check_it_builds() {
+        use pounce_algorithm::conv_check::r#trait::{ConvCheck, ConvergenceStatus};
+        let conv = pounce_algorithm::alg_builder::ConvCheckOptions::default();
+
+        // Default: pounce's effective 3000 (NOT the registered 3000000),
+        // so three restoration iterations are nowhere near the cap.
+        let resto = pounce_algorithm::alg_builder::RestoOptions::default();
+        assert_eq!(resto.max_resto_iter, 3000);
+        let mut a = build_resto_conv_check_adapter(&conv, resto.max_resto_iter);
+        for i in 0..3 {
+            assert_eq!(a.check_convergence(1.0, i), ConvergenceStatus::Continue);
+        }
+
+        // The user's value, and only it, decides where the cap falls.
+        let mut a = build_resto_conv_check_adapter(&conv, 2);
+        assert_eq!(a.check_convergence(1.0, 0), ConvergenceStatus::Continue);
+        assert_eq!(a.check_convergence(1.0, 1), ConvergenceStatus::Continue);
+        assert_eq!(
+            a.check_convergence(1.0, 2),
+            ConvergenceStatus::MaxIterExceeded,
+            "`max_resto_iter=2` must stop the restoration sub-solve at 2",
+        );
     }
 
     #[test]

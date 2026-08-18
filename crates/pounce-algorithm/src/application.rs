@@ -3926,6 +3926,24 @@ impl IpoptApplication {
         if let Some(v) = read_yes("start_with_resto") {
             builder.resto.start_with_resto = v;
         }
+        // `max_resto_iter` (#551 / #677) — the cap on *successive*
+        // restoration iterations. `RestoConvCheckAdapter` has enforced a cap
+        // all along (returning `MaxIterExceeded` at the limit); the number
+        // it enforced was a hard-coded constant in `resto_inner_solver.rs`,
+        // so setting the option did nothing. The consumer's field is
+        // `maximum_resto_iters`, not the option name — grepping for
+        // `max_resto_iter` found only the registry (#551 caution 2).
+        //
+        // DEFAULT MISMATCH, LEFT AS IT IS ON PURPOSE: the registry declares
+        // upstream's 3000000, pounce's effective cap is 3000
+        // (`RestoOptions::default`). `read_int` fires only when the user set
+        // the key, so an unset `max_resto_iter` still means 3000 and this
+        // wiring is trajectory-neutral. Adopting upstream's number would let
+        // restorations pounce currently truncates run on, which is a
+        // trajectory change and needs its own measurement.
+        if let Some(v) = read_int("max_resto_iter") {
+            builder.resto.max_resto_iter = v;
+        }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {

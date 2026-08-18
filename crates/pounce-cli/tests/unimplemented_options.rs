@@ -74,6 +74,44 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
     }
 }
 
+/// #551 / #677 round 3: the corrector knobs and the three restoration /
+/// L-BFGS sub-capabilities. Separate from the loop above because these
+/// carry their own tracking issue, and because the point of the last
+/// three is the *shape* of the message — a user who set one of them has
+/// to be able to tell "restoration does not run here" (which would be
+/// false) from "restoration runs, this part of it does not".
+#[test]
+fn the_corrector_and_resto_sub_capability_refusals_explain_themselves() {
+    for (i, (opt, needle)) in [
+        ("corrector_type=affine", "TryCorrector"),
+        ("skip_corr_if_neg_curv=no", "corrector step"),
+        ("corrector_compl_avrg_red_fact=2.0", "corrector step"),
+        (
+            "expect_infeasible_problem_ctol=1e-4",
+            "restoration phase itself runs",
+        ),
+        (
+            "limited_memory_special_for_resto=yes",
+            "L-BFGS runs in the restoration sub-solve",
+        ),
+        (
+            "resto_failure_feasibility_threshold=1e-6",
+            "restoration runs",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (code, err) = run("user_scaling_suffix.nl", &format!("c{i}"), &[opt]);
+        assert_eq!(code, Some(2), "`{opt}` should fail; stderr:\n{err}");
+        assert!(
+            err.contains(needle),
+            "`{opt}` should mention `{needle}`; stderr:\n{err}",
+        );
+        assert!(err.contains("551"), "stderr:\n{err}");
+    }
+}
+
 /// The message names the option, not just the feature — with ~200
 /// registered names, "some option is unsupported" would be useless.
 #[test]
@@ -103,10 +141,12 @@ fn explicitly_setting_a_default_still_solves() {
 #[test]
 fn knobs_on_implemented_features_still_solve() {
     for (i, opt) in [
+        // #551/#677: the successive-restoration cap is a real field
+        // (`RestoConvCheckAdapter::maximum_resto_iters`) and the option
+        // now sets it, so asking for it must solve rather than fail.
         "max_resto_iter=17",
         "accept_after_max_steps=3",
         "limited_memory_max_skipping=4",
-        "corrector_type=affine",
         // #677: `recalc_y` was refused as unimplemented until the
         // least-square multiplier recalculation landed. It is a real
         // feature now, so asking for it must solve rather than fail.

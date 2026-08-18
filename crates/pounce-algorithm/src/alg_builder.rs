@@ -831,6 +831,25 @@ pub struct RestoOptions {
     /// `start_with_resto` — switch to restoration in the first iteration.
     /// Upstream default `no`. Same story.
     pub start_with_resto: bool,
+    /// `max_resto_iter` — cap on *successive* restoration iterations
+    /// (`IpRestoConvCheck.cpp:144`'s `maximum_resto_iters`). Consumed by
+    /// `pounce_restoration::conv_check::RestoConvCheckAdapter`, which
+    /// returns `MaxIterExceeded` once the count is reached; the value
+    /// used to be the hard-coded `RESTO_MAX_SUCCESSIVE_ITERS` in
+    /// `resto_inner_solver.rs`, so setting the option did nothing
+    /// (#551 / #677). The field is named after the option here, but the
+    /// consumer's field is `maximum_resto_iters` — which is why grepping
+    /// for the option name found nothing (#551 caution 2).
+    ///
+    /// **This default deliberately differs from the registered one.**
+    /// `upstream_options.rs` registers Ipopt's `3000000`; pounce has
+    /// enforced `3000` since the cap landed. Wiring the option must not
+    /// change what an unset option does, so the effective cap stays
+    /// `3000` and only an explicit `max_resto_iter` moves it. Raising
+    /// the default to upstream's number is a trajectory change (it
+    /// lets a restoration that pounce currently cuts off at 3000 keep
+    /// going) and belongs to a change that measures it.
+    pub max_resto_iter: i32,
 }
 
 impl Default for RestoOptions {
@@ -844,6 +863,8 @@ impl Default for RestoOptions {
             evaluate_orig_obj_at_resto_trial: true,
             expect_infeasible_problem: false,
             start_with_resto: false,
+            // NOT the registered default (3000000) — see the field docs.
+            max_resto_iter: 3000,
         }
     }
 }
