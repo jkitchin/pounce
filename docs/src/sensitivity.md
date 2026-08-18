@@ -34,6 +34,40 @@ Related flags:
   Hessian (and its eigendecomposition) over the variables tagged by
   the `red_hessian` integer var-suffix.
 
+### The sIPOPT option names
+
+The same requests can be made by upstream sIPOPT's own option names —
+on the command line as `key=value`, or in an `ipopt.opt` — so a script
+written for sIPOPT keeps working. They are read by the `pounce` driver
+and by the `pounce-sensitivity` builder alike:
+
+| option | effect |
+|---|---|
+| `run_sens=no` | solve, but skip the sensitivity step the `.nl`'s suffixes ask for |
+| `compute_red_hessian=yes` | as `--compute-red-hessian` |
+| `rh_eigendecomp=yes` | as `--rh-eigendecomp` (implies the reduced Hessian) |
+| `sens_boundcheck=yes` | as `--sens-boundcheck` |
+| `sens_bound_eps=EPS` | the margin that refinement measures a bound crossing against (default `1e-3`); it does not enable the refinement on its own |
+| `sens_max_pdpert=P` | refuse to report sensitivity outputs when the converged KKT factor carries an inertia-correction perturbation above `P` |
+
+Two of these deliberately differ from upstream's registered default,
+because honouring that default would change results for anyone who
+never set the option. `run_sens` is registered `no` upstream, but
+pounce runs the step whenever the input declares the suffixes, and only
+an explicit `run_sens=no` turns it off. `sens_max_pdpert` is registered
+`1e-3`, but pounce applies **no** cap unless you set one — an unset
+`sens_max_pdpert` reports the step however hard the factor was
+regularized, as it always has. Check
+[`SensResult::kkt_perturbations`] (Python: `info["kkt_perturbations"]`)
+if you want to see the perturbation without capping on it.
+
+`n_sens_steps` is the one sIPOPT key pounce does not honour: only the
+single `sens_state_1` perturbation tier is implemented, so any value
+other than the default `1` is refused with an explanation rather than
+silently rounded down (gh#677).
+
+[`SensResult::kkt_perturbations`]: https://docs.rs/pounce-sensitivity/latest/pounce_sensitivity/struct.SensResult.html
+
 ## Rust library
 
 Reach the sensitivity path through the `pounce-rs` facade, with the

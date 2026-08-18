@@ -222,6 +222,18 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
                  `pounce.WarmStart.from_info` packages it",
         options: &["warm_start_entire_iterate", "warm_start_same_structure"],
     },
+    UnimplementedFeature {
+        issue: 677,
+        feature: "sensitivity over more than one perturbation tier — upstream \
+                  sIPOPT walks `sens_state_1`, `sens_state_2`, … one tier per \
+                  step and reports a `sens_sol_state_k` for each",
+        advice: "pounce computes the single `sens_state_1` tier, which is what \
+                 `n_sens_steps=1` (the default) asks for; for a multi-step \
+                 parameter path, run one solve per perturbation, or drive \
+                 `pounce_sensitivity::Solver::parametric_step` in a loop \
+                 against the one converged factor",
+        options: &["n_sens_steps"],
+    },
 ];
 
 /// One registered *value* of a string option that pounce does not

@@ -346,6 +346,18 @@ pub fn main() -> ExitCode {
         eprintln!("{warning}");
     }
 
+    // gh#551 / gh#677: the sIPOPT keys (`run_sens`, `compute_red_hessian`,
+    // `rh_eigendecomp`, `sens_boundcheck`, `sens_bound_eps`,
+    // `sens_max_pdpert`) are registered so an sIPOPT `ipopt.opt` parses,
+    // and until this read site existed setting one did nothing at all —
+    // the same post-optimal work was reachable only through the `--*`
+    // flags below. Read once, here, so the option and the flag agree
+    // everywhere the request is consulted. Each option only ADDS to what
+    // the flags asked for, except `run_sens=no` (upstream's spelling of
+    // "do not take the step") — see `SensOptionOverrides` for why the
+    // reader reports "explicitly set" rather than resolved defaults.
+    let sens_options = pounce_sensitivity::SensOptionOverrides::from_options_list(app.options());
+
     // Branded logo + copyright banner, printed up-front — before the
     // problem is even read — so they head the output. `sb yes` suppresses
     // both (mirrors upstream `IpoptApplication::Initialize`).
@@ -535,11 +547,19 @@ pub fn main() -> ExitCode {
     // computation (--compute-red-hessian)? Neither the --minima multistart
     // driver nor the specialized convex solvers run it, so detect it up front
     // and make sure no path silently drops the request.
-    let wants_sens = nl_suffixes
+    let declares_sens_suffixes = nl_suffixes
         .as_ref()
         .map(sens::is_sensitivity_input)
         .unwrap_or(false);
-    let wants_nlp_postopt = wants_sens || args.compute_red_hessian;
+    // `run_sens=no` is the one option that takes work away: it is how
+    // upstream says "solve, but do not take the sensitivity step", and
+    // without it a `.nl` carrying the suffixes has no off switch.
+    let wants_sens = declares_sens_suffixes && !sens_options.suppresses_sens_step();
+    // `compute_red_hessian=yes` reaches the same computation as
+    // `--compute-red-hessian`; `rh_eigendecomp=yes` implies it, exactly
+    // as `--rh-eigendecomp` does.
+    let wants_red_hessian = args.compute_red_hessian || sens_options.wants_reduced_hessian();
+    let wants_nlp_postopt = wants_sens || wants_red_hessian;
     // gh#483: does the run ask for user NLP scaling — `nlp_scaling_method=
     // user-scaling` together with at least one `scaling_factor` suffix in the
     // `.nl` for the solver to read? Only the general NLP path implements the
@@ -593,7 +613,7 @@ pub fn main() -> ExitCode {
     let maximize_via_obj_scaling = negative_obj_scaling_option || negative_obj_scaling_suffix;
     // Human-readable description of the requested post-optimal work, reused in
     // the "not available on this path" messages below.
-    let postopt_what = match (wants_sens, args.compute_red_hessian) {
+    let postopt_what = match (wants_sens, wants_red_hessian) {
         (true, true) => {
             "a parametric sensitivity step (sIPOPT sens_* suffixes) and a \
              reduced-Hessian computation"
@@ -982,10 +1002,25 @@ pub fn main() -> ExitCode {
     // Does the `.nl` ask for a parametric sensitivity step? When it
     // does, the post-optimal step runs inside `on_converged` below and
     // its result is written back as the `sens_sol_state_1` suffix.
-    let sens_active = nl_suffixes
-        .as_ref()
-        .map(sens::is_sensitivity_input)
-        .unwrap_or(false);
+    // `run_sens=no` turns that off (gh#551); `run_sens=yes` cannot turn
+    // it *on* — the perturbation itself is declared by the suffixes and
+    // there is nothing to step without them, so say so rather than
+    // solve and silently report nothing.
+    let sens_active = wants_sens;
+    if sens_options.run_sens == Some(true) && !declares_sens_suffixes {
+        eprintln!(
+            "pounce: warning: `run_sens=yes` asks for a parametric sensitivity \
+             step, but the input declares none of the sIPOPT suffixes \
+             (sens_state_1, sens_state_value_1, sens_init_constr) that say \
+             which parameter to perturb; no step will be computed."
+        );
+    }
+    if sens_options.suppresses_sens_step() && declares_sens_suffixes {
+        eprintln!(
+            "pounce: `run_sens=no` — solving without the parametric \
+             sensitivity step the input's sIPOPT suffixes ask for."
+        );
+    }
 
     // Capture the converged primal / dual into `nominal_capture` so the
     // JSON report and `.sol` below can ship `solution.x` /
@@ -1017,16 +1052,34 @@ pub fn main() -> ExitCode {
     > = Rc::new(RefCell::new(None));
     let red_hessian_capture: Rc<RefCell<Option<sens::RedHessianResult>>> =
         Rc::new(RefCell::new(None));
-    if args.json_output.is_some() || sol_path.is_some() || sens_active || args.compute_red_hessian {
+    if args.json_output.is_some() || sol_path.is_some() || sens_active || wants_red_hessian {
         let cap = Rc::clone(&nominal_capture);
         let sens_cap = Rc::clone(&sens_capture);
         let bmult_cap = Rc::clone(&bound_mult_capture);
         let rh_cap = Rc::clone(&red_hessian_capture);
         let suffixes_cb = nl_suffixes.clone();
         let dims_cb = nl_dims;
-        let compute_rh = args.compute_red_hessian;
-        let rh_eigen = args.rh_eigendecomp;
-        let boundcheck_eps = args.sens_boundcheck.then_some(args.sens_bound_eps);
+        let compute_rh = wants_red_hessian;
+        let rh_eigen = args.rh_eigendecomp || sens_options.wants_eigendecomp();
+        // `--sens-boundcheck` and `sens_boundcheck=yes` both switch the
+        // refinement on. The margin: an explicit `--sens-bound-eps`
+        // (which carries its own value and implies the flag) wins;
+        // otherwise `sens_bound_eps` from the options; otherwise the
+        // registered default, which is the same 1e-3 the flag defaults
+        // to — so reading the option changes nothing for anyone who
+        // does not set it.
+        let boundcheck_eps = {
+            let on = args.sens_boundcheck || sens_options.sens_boundcheck == Some(true);
+            let eps = if args.sens_bound_eps != pounce_sensitivity::DEFAULT_SENS_BOUND_EPS {
+                args.sens_bound_eps
+            } else {
+                sens_options
+                    .sens_bound_eps
+                    .unwrap_or(pounce_sensitivity::DEFAULT_SENS_BOUND_EPS)
+            };
+            on.then_some(eps)
+        };
+        let sens_opts_cb = sens_options;
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
@@ -1121,6 +1174,7 @@ pub fn main() -> ExitCode {
                         m_full,
                         &x_iterate,
                         boundcheck_eps,
+                        &sens_opts_cb,
                     ) {
                         *sens_cap.borrow_mut() = Some(xp);
                     }
@@ -1133,6 +1187,7 @@ pub fn main() -> ExitCode {
                         Rc::clone(&pd),
                         suffixes,
                         rh_eigen,
+                        &sens_opts_cb,
                     ) {
                         Some(r) => *rh_cap.borrow_mut() = Some(r),
                         None => eprintln!(
@@ -1159,7 +1214,7 @@ pub fn main() -> ExitCode {
     // KKT system and indexes it with suffixes defined against the
     // original `.nl`. Presolve tightens bounds and drops rows, which
     // would shift that indexing — so disable it when either is active.
-    if (sens_active || args.compute_red_hessian) && presolve_opts.enabled {
+    if (sens_active || wants_red_hessian) && presolve_opts.enabled {
         eprintln!(
             "pounce: disabling presolve — sensitivity / reduced-Hessian post-processing \
              operates on the original (un-presolved) KKT system"
@@ -1713,7 +1768,7 @@ pub fn main() -> ExitCode {
     // `SensReducedHessianCalculator.cpp`.
     if let Some(rh) = red_hessian_capture.borrow().as_ref() {
         sens::print_red_hessian_to_stderr(rh);
-    } else if args.compute_red_hessian {
+    } else if wants_red_hessian {
         eprintln!(
             "pounce: --compute-red-hessian requested but the reduced Hessian \
              was not produced (see warnings above)."

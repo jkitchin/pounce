@@ -49,18 +49,25 @@ fn run(fixture_name: &str, tag: &str, opts: &[&str]) -> (Option<i32>, String) {
 /// table fails here rather than going quiet again.
 #[test]
 fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
-    for (i, (opt, needle)) in [
-        ("penalty_init_max=42", "CG-penalty"),
+    // (option, a phrase from its feature, the issue its group names)
+    for (i, (opt, needle, issue)) in [
+        ("penalty_init_max=42", "CG-penalty", "483"),
         (
             "gradient_approximation=finite-difference-values",
             "finite differences",
+            "483",
         ),
-        ("dependency_detector=mumps", "linear-dependency detection"),
-        ("check_derivatives_for_naninf=yes", "NaN/Inf"),
-        ("recalc_y=yes", "multiplier recalculation"),
-        ("magic_steps=yes", "magic steps"),
-        ("suppress_all_output=yes", "output controls"),
-        ("hsllib=libcoinhsl.so", "HSL loader"),
+        (
+            "dependency_detector=mumps",
+            "linear-dependency detection",
+            "483",
+        ),
+        ("check_derivatives_for_naninf=yes", "NaN/Inf", "483"),
+        ("recalc_y=yes", "multiplier recalculation", "483"),
+        ("magic_steps=yes", "magic steps", "483"),
+        ("suppress_all_output=yes", "output controls", "483"),
+        ("hsllib=libcoinhsl.so", "HSL loader", "483"),
+        ("n_sens_steps=3", "perturbation tier", "677"),
     ]
     .into_iter()
     .enumerate()
@@ -71,7 +78,7 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
             err.contains(needle),
             "`{opt}` should mention `{needle}`; stderr:\n{err}",
         );
-        assert!(err.contains("483"), "stderr:\n{err}");
+        assert!(err.contains(issue), "stderr:\n{err}");
     }
 }
 

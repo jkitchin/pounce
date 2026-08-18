@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+- **The sIPOPT option names do what they say** (#551, #677).
+
+  `compute_red_hessian`, `rh_eigendecomp`, `run_sens`,
+  `sens_boundcheck`, `sens_bound_eps` and `sens_max_pdpert` were
+  registered so an `ipopt.opt` written for sIPOPT parses unchanged, and
+  every one of them was then ignored: the reduced Hessian, its
+  eigendecomposition and the bound refinement were reachable only
+  through the `pounce` driver's own `--*` flags or the
+  `pounce-sensitivity` builder. Setting the option that names them did
+  nothing at all, silently. They are now read — once, in
+  `pounce_sensitivity::SensOptionOverrides` — and honoured by both the
+  driver and `SensSolve`.
+
+  Two of them do **not** take upstream's registered default, because
+  that default is not what pounce does today and adopting it would
+  change answers for people who never set the option: `run_sens`
+  (registered `no`) only suppresses a step when explicitly set to `no`,
+  since the suffix-driven path runs one by default; and
+  `sens_max_pdpert` (registered `1e-3`) applies no cap at all unless
+  explicitly set, since pounce has always reported the step regardless
+  of how hard the converged KKT factor was regularized. Both
+  discrepancies are documented at the read site and in
+  `docs/src/sensitivity.md`.
+
+  `n_sens_steps` is refused rather than wired: pounce computes the
+  single `sens_state_1` perturbation tier, and upstream's higher tiers
+  do not exist here, so a value above the default now fails with an
+  explanation instead of quietly meaning "one tier". `n_sens_steps=1`
+  still parses.
+
+
 - **The CasADi plugin builds against CasADi master again** (#668).
 
   CasADi renamed the runtime helper `convexify_eval` to
