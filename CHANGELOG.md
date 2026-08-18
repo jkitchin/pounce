@@ -9,6 +9,35 @@ changes.
 
 ## [Unreleased]
 
+- **`tau_min`, `s_max`, `neg_curv_test_tol` and `neg_curv_test_reg` now do
+  something; `fixed_mu_oracle` says it does not** (#551, #677).
+
+  All five were registered with upstream's defaults and read nowhere, so
+  setting one did nothing and reported nothing.
+
+  `tau_min` (the floor on the fraction-to-the-boundary parameter, τ =
+  max(`tau_min`, 1 − μ)) reaches both μ updaters and the restoration
+  sub-solve. `s_max` reaches the `s_d` / `s_c` scaling of the KKT error
+  test. `neg_curv_test_tol` and `neg_curv_test_reg` configure the
+  inertia-free curvature test of Zavala & Chiang (2014), which is now
+  implemented: the previous field only turned the inertia check *off*,
+  with nothing in its place, so honoring the option before this would
+  have been worse than ignoring it.
+
+  **No default changes and the fixture corpus is byte-identical on both
+  legs.** Every struct default already equalled the registered default —
+  0.99, 100, 0.0 and `yes` respectively — which is precisely why the
+  omissions were invisible. What changes is that setting them now works:
+  `tau_min=0.5` moves 15 of 57 fixtures, `neg_curv_test_tol=1e-11` moves
+  10 (some sharply better, some sharply worse — it is a heuristic, and
+  `docs/src/options.md` now says so with the numbers).
+
+  `fixed_mu_oracle` is refused instead. POUNCE seeds μ on the switch out
+  of free mode from the average complementarity, which is exactly the
+  option's default `average_compl`; the probing / LOQO / quality-function
+  oracles exist but are wired only to `mu_oracle`, which drives μ in free
+  mode. Asking for one of them used to silently get `average_compl`.
+
 - **`limited_memory_initialization` and `limited_memory_init_val` now do
   something** (#677).
 

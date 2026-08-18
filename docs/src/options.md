@@ -107,8 +107,9 @@ The features in question: the Chen-Goldfarb (CG-penalty) / inexact-Newton
 line search, derivative approximation by finite differences,
 linear-dependency detection, the per-iteration NaN/Inf derivative check,
 multiplier recalculation by least squares, least-square initialization of
-*all* duals (`least_square_init_duals`), a selectable
-constraint-violation norm, magic steps, bound replacement, the L-BFGS
+*all* duals (`least_square_init_duals`), oracle-driven μ on the switch
+into fixed mode (`fixed_mu_oracle`; POUNCE implements that option's
+default, `average_compl`), a selectable constraint-violation norm, magic steps, bound replacement, the L-BFGS
 augmented-system variants, skipping the finalize callback, the dynamic
 HSL loader, and `suppress_all_output` / `debug_print_level`.
 
@@ -239,6 +240,34 @@ The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
 `pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
 `ipopt.opt`-compatibility reason. They are unreachable now that their
 backend cannot be selected.
+
+### Inertia-free curvature test (`neg_curv_test_tol`)
+
+By default every KKT factorization is checked for the right inertia — as
+many negative eigenvalues as there are constraints — and the primal
+regularization δ_x is escalated until it has it. The inertia-free
+alternative of Zavala & Chiang (2014) factors without that check and
+instead asks whether the direction the system produced actually curves
+upward:
+
+```
+dxᵀ W dx + dxᵀ Σ_x dx + dsᵀ Σ_s ds [+ δ_x‖dx‖² + δ_s‖ds‖²]
+    ≥ neg_curv_test_tol · (‖dx‖² + ‖ds‖²)
+```
+
+| Option              | Default | Meaning                                                                                     |
+|---------------------|---------|---------------------------------------------------------------------------------------------|
+| `neg_curv_test_tol` | `0.0`   | `0` keeps the inertia check. Positive is the test's α_n: the factorization is accepted only if the direction clears the bound above, and otherwise δ_x is escalated exactly as a wrong inertia would. Upstream recommends `1e-12`–`1e-11`. |
+| `neg_curv_test_reg` | `yes`   | Whether the bracketed primal-regularization term counts toward the curvature. `no` is the original Ipopt form that ignores it. Only read when `neg_curv_test_tol > 0`. |
+
+**This is a heuristic, and turning it on is not free.** On POUNCE's
+fixture corpus at the recommended `1e-11`, ten models move: `csfi2`
+improves (`Solved_To_Acceptable_Level` in 35 iterations →
+`Optimal Solution Found` in 27) and `unbounded_cubic` reaches its verdict
+in 61 iterations instead of 290, while `eigena2` goes from 26 iterations
+to 282, `autocorr_bern55-06` from 72 to 1042, and `deb7` stops at
+`Error_In_Step_Computation`. It is off by default, and it is worth
+measuring on your model before leaving it on.
 
 ## Bound relaxation and `honor_original_bounds`
 
@@ -627,6 +656,26 @@ for if you *tighten* `dual_inf_tol` and want that absolute standard
 honoured unconditionally — the floor is a floor, so it can override a
 tightened `dual_inf_tol` on a large-gradient model.
 
+### `s_max` — where `s_d` and `s_c` come from
+
+The two normalising factors above are built from the multipliers
+themselves, capped by `s_max` (default `100`, upstream's):
+
+```
+s_d = max( s_max , (‖y_c‖₁+‖y_d‖₁+‖z‖₁+‖v‖₁) / (their total dimension) ) / s_max
+s_c = max( s_max , (‖z‖₁+‖v‖₁) / (their dimension) ) / s_max
+```
+
+Both are exactly `1` while the multipliers average below the cap — which
+is every well-scaled problem, and why the option is invisible there — and
+grow as `mean / s_max` once the average passes it. Raising `s_max`
+therefore delays the normalisation (the KKT error stays closer to the raw
+residuals); lowering it applies the normalisation sooner and makes the
+scaled error smaller for the same iterate, so the solve certifies
+earlier. The scaled and unscaled numbers are both reported: `--json-output`
+carries `final_kkt_error` and `final_unscaled_kkt_error`, and their ratio
+is exactly what `s_max` controls.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a
@@ -662,6 +711,7 @@ current iterate's complementarity). See
 | `mu_linear_decrease_factor`             | `0.2`              | κ_μ in `μ ← min(κ_μ · μ, μ^θ_μ)`.                                                             |
 | `mu_superlinear_decrease_power`         | `1.5`              | θ_μ in the same formula.                                                                      |
 | `barrier_tol_factor`                    | `10.0`             | Inner-subproblem tolerance scales as `barrier_tol_factor · μ`.                                |
+| `tau_min`                               | `0.99`             | Floor on the fraction-to-the-boundary parameter τ = max(`tau_min`, 1 − μ); a step may cover at most τ of the distance to a bound. Read by both μ strategies (and by the restoration sub-solve). |
 | `sigma_max`                             | `1e2`              | Upper clamp on σ chosen by the quality-function oracle.                                       |
 | `sigma_min`                             | `1e-6`             | Lower clamp on σ (raising this to `1e-2` can break a stair-stepping stall on some problems).  |
 | `adaptive_mu_globalization`             | `obj-constr-filter`| Adaptive-mode globalization: `kkt-error`, `obj-constr-filter`, or `never-monotone-mode`.      |

@@ -293,6 +293,16 @@ pub struct AlgorithmBuilder {
     /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
     /// solve path.
     pub kappa_d: Number,
+    /// `s_max` — cap on the average multiplier magnitude used to build
+    /// the `(s_d, s_c)` scaling factors of the KKT error test
+    /// (`IpIpoptCalculatedQuantities.cpp:ComputeOptimalityErrorScaling`,
+    /// the paragraph after Eqn. (6) of the implementation paper).
+    /// Registered default `100`, which is what
+    /// [`crate::ipopt_cq::IpoptCalculatedQuantities`] already carries as
+    /// its struct default, so forwarding it is behaviour-neutral for a
+    /// run that does not set it (#551 / #677). Baked onto the cq by the
+    /// solve path, next to `kappa_d`.
+    pub s_max: Number,
     /// `tiny_step_tol` — relative primal step size below which the full
     /// step is accepted without line search; repeated tiny steps
     /// terminate the solve. Mirrors `IpBacktrackingLineSearch.cpp`,
@@ -518,6 +528,14 @@ pub struct MuOptions {
     pub mu_superlinear_decrease_power: Number,
     pub mu_allow_fast_monotone_decrease: bool,
     pub barrier_tol_factor: Number,
+    /// `tau_min` — floor on the fraction-to-the-boundary parameter
+    /// τ = max(tau_min, 1 − μ). Registered default 0.99, which is what
+    /// both `MonotoneMuUpdate` and `AdaptiveMuUpdate` already carry as
+    /// their struct default, so forwarding it is behaviour-neutral for
+    /// a run that does not set the option (#551 / #677). Consumed by
+    /// both updaters; the adaptive one also uses it in the monotone
+    /// mode and for the post-oracle τ = max(tau_min, 1 − NLP error).
+    pub tau_min: Number,
     /// `sigma_max` / `sigma_min` — clamp on the centering parameter σ
     /// chosen by `QualityFunctionMuOracle`. Only consumed when
     /// `mu_strategy=adaptive` and `mu_oracle=quality-function`.
@@ -595,6 +613,7 @@ impl Default for MuOptions {
             mu_superlinear_decrease_power: 1.5,
             mu_allow_fast_monotone_decrease: true,
             barrier_tol_factor: 10.0,
+            tau_min: 0.99,
             sigma_max: 1e2,
             sigma_min: 1e-6,
             adaptive_mu_globalization:
@@ -868,6 +887,18 @@ pub struct RefinementOptions {
     /// `residual_improvement_factor` — minimum per-step reduction of the
     /// residual test ratio before refinement is aborted.
     pub residual_improvement_factor: Number,
+    /// `neg_curv_test_tol` — tolerance α_n of the inertia-free curvature
+    /// test of Zavala & Chiang (2014). Zero (the registered default)
+    /// disables the heuristic and keeps the inertia check; positive
+    /// turns the inertia check off and accepts the factorization only
+    /// when the computed direction passes the curvature test in
+    /// `PdFullSpaceSolver::solve_once`.
+    pub neg_curv_test_tol: Number,
+    /// `neg_curv_test_reg` — whether the curvature test includes the
+    /// primal regularization δ_x‖dx‖² + δ_s‖ds‖². Registered default
+    /// `yes`; `no` reproduces the original Ipopt form that ignores it.
+    /// Only consulted when `neg_curv_test_tol > 0`.
+    pub neg_curv_test_reg: bool,
 }
 
 impl Default for RefinementOptions {
@@ -878,6 +909,8 @@ impl Default for RefinementOptions {
             residual_ratio_max: 1e-10,
             residual_ratio_singular: 1e-5,
             residual_improvement_factor: 0.999_999_999,
+            neg_curv_test_tol: 0.0,
+            neg_curv_test_reg: true,
         }
     }
 }
@@ -936,6 +969,7 @@ impl Default for AlgorithmBuilder {
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             kappa_d: 1e-5,
+            s_max: 100.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
@@ -1054,6 +1088,12 @@ impl AlgorithmBuilder {
         pd_solver.residual_ratio_max = self.refinement.residual_ratio_max;
         pd_solver.residual_ratio_singular = self.refinement.residual_ratio_singular;
         pd_solver.residual_improvement_factor = self.refinement.residual_improvement_factor;
+        // Inertia-free curvature test (#551 / #677). Both were registered
+        // and never read; `neg_curv_test_tol` defaults to 0, which leaves
+        // the heuristic off and the inertia check on, so this changes
+        // nothing for a run that does not set it.
+        pd_solver.neg_curv_test_tol = self.refinement.neg_curv_test_tol;
+        pd_solver.neg_curv_test_reg = self.refinement.neg_curv_test_reg;
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         search_dir.fast_step_computation = self.fast_step_computation;
@@ -1100,6 +1140,7 @@ impl AlgorithmBuilder {
                 m.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 m.mu_allow_fast_monotone_decrease = self.mu.mu_allow_fast_monotone_decrease;
                 m.barrier_tol_factor = self.mu.barrier_tol_factor;
+                m.tau_min = self.mu.tau_min;
                 m.compl_inf_tol = self.conv_check.compl_inf_tol;
                 Box::new(m)
             }
@@ -1117,6 +1158,7 @@ impl AlgorithmBuilder {
                 adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 adaptive.barrier_tol_factor = self.mu.barrier_tol_factor;
+                adaptive.tau_min = self.mu.tau_min;
                 adaptive.sigma_min = self.mu.sigma_min;
                 adaptive.sigma_max = self.mu.sigma_max;
                 adaptive.adaptive_mu_globalization = self.mu.adaptive_mu_globalization;
@@ -1377,6 +1419,7 @@ mod tests {
                             recalc_y: false,
                             recalc_y_feas_tol: 1e-6,
                             kappa_d: 1e-5,
+                            s_max: 100.0,
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,

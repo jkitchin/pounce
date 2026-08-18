@@ -52,10 +52,20 @@ pub struct PdFullSpaceSolver {
     pub residual_ratio_max: Number,
     pub residual_ratio_singular: Number,
     pub residual_improvement_factor: Number,
-    /// Negative-curvature test tolerance (`neg_curv_test_tol_`). Zero
-    /// disables the heuristic; matches upstream's `RegisterOptions`
-    /// default. The non-zero branch is not exercised in v1.0.
+    /// Negative-curvature test tolerance (`neg_curv_test_tol_`, α_n in
+    /// Zavala & Chiang 2014). Zero — upstream's `RegisterOptions`
+    /// default — keeps the inertia check and disables the heuristic.
+    /// Positive turns the inertia check off and instead accepts a
+    /// factorization whose inertia is wrong only when the computed
+    /// direction passes the curvature test in [`Self::solve_once`]
+    /// (`IpPDFullSpaceSolver.cpp:592-634`).
     pub neg_curv_test_tol: Number,
+    /// `neg_curv_test_reg_` — include the primal regularization
+    /// δ_x‖dx‖² + δ_s‖ds‖² in the curvature test. Upstream's
+    /// `RegisterOptions` default is `yes`; `no` reproduces the original
+    /// Ipopt form that ignores it. Only read when
+    /// `neg_curv_test_tol > 0`.
+    pub neg_curv_test_reg: bool,
     /// Mirrors `augsys_improved_`. Set by quality-escalation; cleared
     /// each time the cached aug-system data changes.
     augsys_improved: bool,
@@ -115,6 +125,7 @@ impl PdFullSpaceSolver {
             residual_ratio_singular: 1e-5,
             residual_improvement_factor: 0.999_999_999,
             neg_curv_test_tol: 0.0,
+            neg_curv_test_reg: true,
             augsys_improved: false,
             matrix_considered: false,
             last_dep_tags: None,
@@ -1164,7 +1175,14 @@ impl PdFullSpaceSolver {
                 pretend_singular = false;
             } else {
                 count += 1;
-                let check_inertia = self.neg_curv_test_tol <= 0.0;
+                // Stand the inertia check down only when the curvature
+                // test can actually take its place: that test reads the
+                // backend's negative-eigenvalue count, so a backend
+                // without an inertia keeps the check rather than ending
+                // up with neither (`IpPDFullSpaceSolver.cpp:515-518`,
+                // whose DBG_ASSERT states the same requirement).
+                let check_inertia =
+                    self.neg_curv_test_tol <= 0.0 || !self.aug_solver.provides_inertia();
                 let coeffs = AugSysCoeffs {
                     w: Some(b.w),
                     w_factor: 1.0,
@@ -1258,6 +1276,43 @@ impl PdFullSpaceSolver {
                     .perturb_for_wrong_inertia(curr_mu, Some(&IpoptDataSink(data)));
                 let Some(nd) = next else { return false };
                 d = nd;
+            } else if retval == ESymSolverStatus::Success
+                && self.neg_curv_test_tol > 0.0
+                && self.aug_solver.provides_inertia()
+            {
+                // Inertia-free curvature test — `IpPDFullSpaceSolver.cpp:592-634`
+                // (Zavala & Chiang 2014). Reached only on `Success`: the
+                // arms above cover every other status, and the factorization
+                // above ran with `check_inertia = false` precisely because
+                // this tolerance is positive, so a wrong inertia arrives here
+                // as a *successful* solve. Instead of trusting the inertia we
+                // ask whether the direction the system produced actually has
+                // sufficient positive curvature; if it does not, escalate the
+                // primal regularization exactly as a WrongInertia would and
+                // refactor.
+                let neg_values = self.aug_solver.number_of_neg_evals();
+                if neg_values != num_neg_evals {
+                    let x_w_x = Self::curvature_measure(
+                        b,
+                        &sol,
+                        self.neg_curv_test_reg,
+                        d.delta_x,
+                        d.delta_s,
+                    );
+                    let xs_nrmsq = sol.x.nrm2().powi(2) + sol.s.nrm2().powi(2);
+                    tracing::debug!(target: "pounce::kkt",
+                        "inertia heuristic: xWx = {:e} xx = {:e}", x_w_x, xs_nrmsq);
+                    if x_w_x < self.neg_curv_test_tol * xs_nrmsq {
+                        let curr_mu = data.borrow().curr_mu;
+                        let next = self
+                            .perturb
+                            .borrow_mut()
+                            .perturb_for_wrong_inertia(curr_mu, Some(&IpoptDataSink(data)));
+                        let Some(nd) = next else { return false };
+                        d = nd;
+                        retval = ESymSolverStatus::WrongInertia;
+                    }
+                }
             }
 
             if retval == ESymSolverStatus::Success {
@@ -1287,6 +1342,49 @@ impl PdFullSpaceSolver {
         let frozen_sol = sol.freeze();
         res.add_one_vector(alpha, &frozen_sol, beta);
         true
+    }
+
+    /// Curvature of the computed direction in the primal block —
+    /// `xWx` in `IpPDFullSpaceSolver.cpp:600-621`:
+    ///
+    /// ```text
+    ///   dxᵀ W dx + dxᵀ Σ_x dx + dsᵀ Σ_s ds  [+ δ_x dxᵀdx + δ_s dsᵀds]
+    /// ```
+    ///
+    /// The bracketed primal-regularization term is included only when
+    /// `neg_curv_test_reg` is on (upstream's default). The operation
+    /// order mirrors upstream's — copy, scale, dot — so the result is
+    /// bit-comparable rather than merely algebraically equal.
+    fn curvature_measure(
+        b: &SolveBlocks<'_>,
+        sol: &IteratesVectorMut,
+        with_regularization: bool,
+        delta_x: Number,
+        delta_s: Number,
+    ) -> Number {
+        let mut x_tmp = sol.x.make_new();
+        b.w.mult_vector(1.0, &*sol.x, 0.0, &mut *x_tmp);
+        let mut x_w_x = x_tmp.dot(&*sol.x);
+
+        x_tmp.copy(&*sol.x);
+        x_tmp.element_wise_multiply(b.sigma_x);
+        x_w_x += x_tmp.dot(&*sol.x);
+
+        let mut s_tmp = sol.s.make_new_copy();
+        s_tmp.element_wise_multiply(b.sigma_s);
+        x_w_x += s_tmp.dot(&*sol.s);
+
+        if with_regularization {
+            x_tmp.copy(&*sol.x);
+            x_tmp.scal(delta_x);
+            x_w_x += x_tmp.dot(&*sol.x);
+
+            s_tmp.copy(&*sol.s);
+            s_tmp.scal(delta_s);
+            x_w_x += s_tmp.dot(&*sol.s);
+        }
+
+        x_w_x
     }
 
     /// `resid = M · res − rhs` per `ComputeResiduals`. Skips terms

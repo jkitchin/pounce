@@ -2717,6 +2717,11 @@ impl IpoptApplication {
         // other numeric knobs; the default matches the registered
         // default, so only explicit overrides change behavior.
         cq.borrow_mut().kappa_d = builder.kappa_d;
+        // `s_max` — cap on the average multiplier magnitude in the
+        // `(s_d, s_c)` scaling of the KKT error test. Same shape as
+        // `kappa_d`: registered (default 100) and previously never read,
+        // so an override was silently ignored (#551 / #677).
+        cq.borrow_mut().s_max = builder.s_max;
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its
@@ -3589,6 +3594,13 @@ impl IpoptApplication {
         if let Some(v) = read_num("kappa_d") {
             builder.kappa_d = v;
         }
+        // `s_max` — the cap in the `(s_d, s_c)` scaling of the KKT error
+        // test (#551 / #677). `IpoptCalculatedQuantities` carried it as a
+        // hard-coded 100 (the registered default) and nothing read the
+        // option; a run that does not set it is unaffected.
+        if let Some(v) = read_num("s_max") {
+            builder.s_max = v;
+        }
         if let Some(v) = read_num("tiny_step_tol") {
             builder.tiny_step_tol = v;
         }
@@ -3643,6 +3655,15 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("barrier_tol_factor") {
             builder.mu.barrier_tol_factor = v;
+        }
+        // `tau_min` — floor on the fraction-to-the-boundary parameter
+        // (#551 / #677). Both `MonotoneMuUpdate` and `AdaptiveMuUpdate`
+        // carried the field with upstream's 0.99 default and nothing
+        // read the option, so an override was silently dropped. The
+        // default equals the registered default, so this changes
+        // nothing for a run that does not set it.
+        if let Some(v) = read_num("tau_min") {
+            builder.mu.tau_min = v;
         }
         if let Some(v) = read_num("sigma_max") {
             builder.mu.sigma_max = v;
@@ -3881,6 +3902,20 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("residual_improvement_factor") {
             builder.refinement.residual_improvement_factor = v;
+        }
+
+        // Inertia-free curvature test (#551 / #677), also consumed by
+        // `PdFullSpaceSolver`. `neg_curv_test_tol` had a field that only
+        // ever held its 0.0 default, and `neg_curv_test_reg` had none at
+        // all; both are now read, and the curvature test they configure
+        // is implemented in `PdFullSpaceSolver::solve_once`. At the
+        // registered default (`0.0`) the heuristic is off and the
+        // inertia check runs as before.
+        if let Some(v) = read_num("neg_curv_test_tol") {
+            builder.refinement.neg_curv_test_tol = v;
+        }
+        if let Ok((v, true)) = self.options.get_bool_value("neg_curv_test_reg", "") {
+            builder.refinement.neg_curv_test_reg = v;
         }
 
         // Restoration-phase constants (#191). Carried on the outer builder

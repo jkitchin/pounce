@@ -406,15 +406,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     ];
 
     // #551 section 1 — feature runs, read site missing.
-    const BARRIER_KKT: &[&str] = &[
-        "fixed_mu_oracle",
-        "neg_curv_test_reg",
-        "neg_curv_test_tol",
-        "s_max",
-        "tau_min",
-    ];
-
-    // #551 section 1 — feature runs, read site missing.
     const RESTORATION: &[&str] = &[
         "expect_infeasible_problem_ctol",
         "expect_infeasible_problem_ytol",
@@ -454,7 +445,9 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         .iter()
         .chain(LINE_SEARCH)
         .chain(CORRECTOR)
-        .chain(BARRIER_KKT)
+        // The barrier / KKT group is empty: `tau_min`, `s_max`,
+        // `neg_curv_test_tol` and `neg_curv_test_reg` now have read
+        // sites, and `fixed_mu_oracle` is refused (#551 / #677).
         .chain(RESTORATION)
         .chain(SENSITIVITY)
         .chain(NLP_HINTS)

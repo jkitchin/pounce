@@ -207,6 +207,19 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         options: &["point_perturbation_radius"],
     },
     UnimplementedFeature {
+        issue: 551,
+        feature: "choosing the barrier parameter with an *oracle* when the \
+                  adaptive strategy leaves free mode — Ipopt's \
+                  `fix_mu_oracle_`",
+        advice: "pounce implements `fixed_mu_oracle=average_compl` (the \
+                 default): the switch into fixed mode seeds μ with \
+                 `adaptive_mu_monotone_init_factor · avrg_compl`, which \
+                 that factor tunes. The probing / loqo / quality-function \
+                 oracles are implemented, but only for `mu_oracle`, which \
+                 drives μ in free mode",
+        options: &["fixed_mu_oracle"],
+    },
+    UnimplementedFeature {
         issue: 606,
         feature: "reuse of a previously-solved iterate or problem structure \
                   through Ipopt's `TNLP::GetWarmStartIterate` surface",

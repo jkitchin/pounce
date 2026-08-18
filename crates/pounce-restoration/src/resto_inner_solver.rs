@@ -558,12 +558,17 @@ pub fn run_inner_resto(
     let outer_mu_min = inner_alg_builder.mu.mu_min;
     let resto_mu_min = 100.0 * outer_mu_min;
     alg_bundle.mu_update = match inner_alg_builder.mu_strategy {
-        pounce_algorithm::alg_builder::MuStrategyChoice::Monotone => Box::new(
-            MonotoneMuUpdate::new()
+        pounce_algorithm::alg_builder::MuStrategyChoice::Monotone => {
+            let mut monotone = MonotoneMuUpdate::new()
                 .with_first_iter_resto(true)
-                .with_mu_min(resto_mu_min),
-        )
-            as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>,
+                .with_mu_min(resto_mu_min);
+            // `tau_min` governs the fraction-to-the-boundary rule, which
+            // the restoration IPM applies to its own steps too; upstream
+            // reads the same option in the resto sub-algorithm (#551 /
+            // #677). Default 0.99 either way.
+            monotone.tau_min = inner_alg_builder.mu.tau_min;
+            Box::new(monotone) as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>
+        }
         pounce_algorithm::alg_builder::MuStrategyChoice::Adaptive => {
             let mut adaptive = pounce_algorithm::mu::adaptive::AdaptiveMuUpdate::new();
             adaptive.mu_oracle = inner_alg_builder.mu_oracle;
@@ -575,6 +580,7 @@ pub fn run_inner_resto(
             adaptive.mu_superlinear_decrease_power =
                 inner_alg_builder.mu.mu_superlinear_decrease_power;
             adaptive.barrier_tol_factor = inner_alg_builder.mu.barrier_tol_factor;
+            adaptive.tau_min = inner_alg_builder.mu.tau_min;
             adaptive.sigma_min = inner_alg_builder.mu.sigma_min;
             adaptive.sigma_max = inner_alg_builder.mu.sigma_max;
             adaptive.adaptive_mu_globalization = inner_alg_builder.mu.adaptive_mu_globalization;
