@@ -188,6 +188,23 @@ pub struct BacktrackingLineSearch {
     /// `alpha_for_y` policy applied to the equality multipliers `y_c`,
     /// `y_d` when constructing the trial iterate. See [`AlphaForY`].
     pub alpha_for_y: AlphaForY,
+    /// `accept_after_max_steps` — once this many backtracking steps have
+    /// been taken in one line search, the trial point is accepted
+    /// without consulting the acceptor. `-1` (the default, and
+    /// upstream's) disables the escape hatch entirely, so the field is
+    /// inert unless a caller sets it.
+    ///
+    /// Port of `IpBacktrackingLineSearch.cpp:759-770`: upstream
+    /// evaluates the trial barrier objective and constraint violation
+    /// first (so an evaluation error still backtracks — the finiteness
+    /// check in the alpha loop is pounce's equivalent), tags the
+    /// iteration `MaxS`, and calls `Reset()` — leaving the soft
+    /// restoration phase and resetting the acceptor — before accepting.
+    ///
+    /// Like `accept_every_trial_step`, this drops the global
+    /// convergence guarantee: the accepted point satisfies neither the
+    /// filter nor the Armijo condition.
+    pub accept_after_max_steps: i32,
 }
 
 /// Internal alpha-loop outcome. The watchdog wrapper translates this
@@ -249,6 +266,7 @@ impl BacktrackingLineSearch {
             soft_resto_counter: 0,
             accept_every_trial_step: false,
             alpha_for_y: AlphaForY::Primal,
+            accept_after_max_steps: -1,
         }
     }
 
@@ -1004,9 +1022,27 @@ impl BacktrackingLineSearch {
                 continue;
             }
 
-            let decision =
+            // `accept_after_max_steps` (upstream
+            // `IpBacktrackingLineSearch.cpp:759-770`): once this many
+            // backtracking steps have been taken, take the point
+            // whatever the acceptor thinks of it. Upstream evaluates
+            // the trial objective/violation first so an evaluation
+            // error still backtracks — that is the finiteness check
+            // just above — then calls `Reset()` (leave soft resto,
+            // reset the acceptor) and accepts. `-1` disables it, so a
+            // solve that does not set the option never takes this
+            // branch and the acceptor decides as before.
+            let force_accept =
+                self.accept_after_max_steps >= 0 && trial >= self.accept_after_max_steps;
+            let decision = if force_accept {
+                self.in_soft_resto_phase = false;
+                self.soft_resto_counter = 0;
+                self.acceptor.reset();
+                AcceptDecision::Accept
+            } else {
                 self.acceptor
-                    .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial);
+                    .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial)
+            };
             if decision == AcceptDecision::Accept {
                 let mode = self
                     .acceptor

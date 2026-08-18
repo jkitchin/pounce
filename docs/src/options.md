@@ -112,6 +112,16 @@ constraint-violation norm, magic steps, bound replacement, the L-BFGS
 augmented-system variants, skipping the finalize callback, the dynamic
 HSL loader, and `suppress_all_output` / `debug_print_level`.
 
+Two line-search knobs joined that list with
+[#551](https://github.com/jkitchin/pounce/issues/551). `theta_min` is the
+CG-penalty acceptor's threshold, not the filter's — the filter line
+search derives its own `theta_min` from `theta_min_fact * max(1, θ₀)`, as
+upstream does, and never takes it directly, so set `theta_min_fact` if
+that is what you meant. `alpha_for_y_tol` configures only the
+`primal-and-full` / `dual-and-full` multiplier-step rules, which POUNCE
+does not have; `alpha_for_y` supports `primal` (the default),
+`bound-mult`, `min`, `max` and `full`.
+
 The same rule applies one level down, to a single *value* of an option
 that otherwise works. `bound_mult_init_method` is read and honoured, but
 only its default `constant` is implemented; `mu-based` parses (an

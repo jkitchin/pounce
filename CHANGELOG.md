@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+- **Nine line-search options stop being silent no-ops** (#551, #677).
+
+  All nine were registered with upstream's defaults and read nowhere, so
+  setting one did nothing and said nothing. Eight had the behaviour
+  already implemented and were missing only the read site:
+  `alpha_red_factor` (α-loop reduction factor), `delta` (the switching rule's
+  multiplier on the constraint violation, Eqn. (19)), `nu_init`,
+  `nu_inc`, `rho` and `eta_penalty` (the penalty acceptor's ν update and
+  Armijo relaxation, `line_search_method=penalty`), and
+  `filter_margin_fact` / `filter_max_margin` (the adaptive-μ
+  `obj-constr-filter` margin) now reach the objects that consume them.
+
+  The ninth, `accept_after_max_steps`, needed the escape hatch itself:
+  the α-loop now accepts a trial point once that many backtracking steps
+  have been taken, whatever the acceptor makes of it, leaving the soft
+  restoration phase and resetting the acceptor first — a port of
+  `IpBacktrackingLineSearch.cpp:759-770`. `-1`, the registered default,
+  disables it, so nothing takes that branch unless asked.
+
+  **No default moves.** Each struct default already equalled the
+  registered default, so only a solve that sets one of these sees a
+  change; the fixture sweep is identical on both legs.
+
+- **`theta_min` and `alpha_for_y_tol` are refused rather than ignored**
+  (#551).
+
+  Neither names a feature POUNCE has. `theta_min` belongs to Ipopt's
+  CG-penalty acceptor (`IpCGPenaltyLSAcceptor`), which POUNCE does not
+  implement — the filter line search derives its own `theta_min` from
+  `theta_min_fact * max(1, θ₀)` and never takes it directly.
+  `alpha_for_y_tol` is the threshold of the `primal-and-full` /
+  `dual-and-full` multiplier-step rules, which POUNCE does not have.
+  Both now fail with a message naming the missing feature and the option
+  to reach for instead, as the rest of the refusal table does.
+
 - **`limited_memory_initialization` and `limited_memory_init_val` now do
   something** (#677).
 

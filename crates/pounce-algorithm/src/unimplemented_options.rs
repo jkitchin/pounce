@@ -116,6 +116,28 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         ],
     },
     UnimplementedFeature {
+        issue: 551,
+        feature: "the CG-penalty acceptor's `theta_min` — the constraint-violation \
+                  threshold its piecewise-penalty tests switch on. It is \
+                  registered by `IpCGPenaltyLSAcceptor`, not by the filter \
+                  acceptor, and pounce has no CG-penalty acceptor to point it at",
+        advice: "the filter line search has a theta_min of its own, but derives \
+                 it the way upstream does — `theta_min_fact * max(1, theta_0)`, \
+                 never set directly — so set `theta_min_fact` to move it",
+        options: &["theta_min"],
+    },
+    UnimplementedFeature {
+        issue: 551,
+        feature: "the `primal-and-full` / `dual-and-full` equality-multiplier \
+                  step rules, which is all this tolerance configures — under \
+                  them the multiplier step jumps to 1 once the max-norm of the \
+                  primal step drops below it",
+        advice: "pounce implements `alpha_for_y` = `primal` (the default), \
+                 `bound-mult`, `min`, `max` and `full`; `full` takes the unit \
+                 multiplier step unconditionally",
+        options: &["alpha_for_y_tol"],
+    },
+    UnimplementedFeature {
         issue: 483,
         feature: "derivative approximation by finite differences",
         advice: "supply `eval_grad_f` / `eval_jac_g` / `eval_h`, and check them \

@@ -35,6 +35,21 @@ pub trait BacktrackingLsAcceptor {
     ) {
     }
 
+    /// The penalty acceptor's registered constants, in the order
+    /// `(nu_init, nu_inc, rho, eta_penalty)`. `None` for acceptors that
+    /// have no penalty parameter (the filter acceptor).
+    ///
+    /// All four are registered options whose only consumer lives inside
+    /// the acceptor, and until #551 none of them had a read site. With
+    /// the acceptor reachable only as `dyn BacktrackingLsAcceptor`, the
+    /// furthest a test could follow such an option was the builder
+    /// struct — one hop short of the object that uses the value, which
+    /// is exactly the gap that let `limited_memory_initialization` look
+    /// wired while it was not (#677). This closes that hop.
+    fn penalty_parameters(&self) -> Option<(Number, Number, Number, Number)> {
+        None
+    }
+
     /// Compute the minimum primal step length below which the
     /// driver should declare a tiny step / hand off to restoration.
     /// Mirrors `IpFilterLSAcceptor.cpp:CalculateAlphaMin` — the value

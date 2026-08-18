@@ -170,6 +170,10 @@ impl BacktrackingLsAcceptor for PenaltyLsAcceptor {
         PenaltyLsAcceptor::reset(self);
     }
 
+    fn penalty_parameters(&self) -> Option<(Number, Number, Number, Number)> {
+        Some((self.nu_init, self.nu_inc, self.rho, self.eta_penalty))
+    }
+
     /// Snapshot reference state and bump ν once per outer iteration.
     /// Mirrors upstream `IpPenaltyLSAcceptor.cpp:InitThisLineSearch`
     /// lines 87-167 (non-watchdog branch).

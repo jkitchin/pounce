@@ -3740,6 +3740,19 @@ impl IpoptApplication {
         if let Some(v) = read_num("adaptive_mu_kkterror_red_fact") {
             builder.mu.adaptive_mu_kkterror_red_fact = v;
         }
+        // `filter_margin_fact` / `filter_max_margin` (#551) — the margin
+        // an entry must clear in the `obj-constr-filter` globalization
+        // test. `AdaptiveMuUpdate` computes
+        // `filter_margin_fact * min(filter_max_margin, err)` and has
+        // always done so; only these two read sites were missing, so
+        // setting either did nothing. Defaults equal the registered
+        // defaults (1e-5 / 1.0), so an unset run is unchanged.
+        if let Some(v) = read_num("filter_margin_fact") {
+            builder.mu.filter_margin_fact = v;
+        }
+        if let Some(v) = read_num("filter_max_margin") {
+            builder.mu.filter_max_margin = v;
+        }
         if let Ok((v, found)) = self
             .options
             .get_string_value("adaptive_mu_kkt_norm_type", "")
@@ -3770,6 +3783,18 @@ impl IpoptApplication {
         if let Some(v) = read_int("max_soft_resto_iters") {
             builder.line_search.max_soft_resto_iters = v;
         }
+        // `alpha_red_factor` / `accept_after_max_steps` (#551) — both
+        // consumed by the α-loop in `BacktrackingLineSearch`, both
+        // registered without a read site. `alpha_red_factor`'s default
+        // (0.5) equals the registered one, and `accept_after_max_steps`
+        // defaults to `-1`, which disables the escape hatch, so neither
+        // moves a solve that leaves them alone.
+        if let Some(v) = read_num("alpha_red_factor") {
+            builder.line_search.alpha_red_factor = v;
+        }
+        if let Some(v) = read_int("accept_after_max_steps") {
+            builder.line_search.accept_after_max_steps = v;
+        }
 
         // Filter switching / Armijo / margin constants (#191). Consumed
         // by `FilterLsAcceptor` (only on the `Filter` line-search path);
@@ -3777,6 +3802,13 @@ impl IpoptApplication {
         // Defaults equal the registered defaults.
         if let Some(v) = read_num("eta_phi") {
             builder.line_search.eta_phi = v;
+        }
+        // `delta` (#551) — the switching rule's multiplier on the
+        // constraint violation (Eqn. (19)); `FilterLsAcceptor` has
+        // always used it as `delta_armijo`, only the read site was
+        // missing. Default 1.0 equals the registered default.
+        if let Some(v) = read_num("delta") {
+            builder.line_search.delta = v;
         }
         if let Some(v) = read_num("theta_min_fact") {
             builder.line_search.theta_min_fact = v;
@@ -3820,6 +3852,25 @@ impl IpoptApplication {
         if let Some(v) = read_int("filter_reset_trigger") {
             builder.line_search.filter_reset_trigger = v;
         }
+        // Penalty line-search constants (#551), consumed by
+        // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
+        // / `cg-penalty` paths). The acceptor implements ν and the
+        // Armijo test on the penalty merit function already; these four
+        // were registered with no read site, so tuning the penalty
+        // update did nothing. Defaults equal the registered defaults.
+        if let Some(v) = read_num("nu_init") {
+            builder.line_search.nu_init = v;
+        }
+        if let Some(v) = read_num("nu_inc") {
+            builder.line_search.nu_inc = v;
+        }
+        if let Some(v) = read_num("rho") {
+            builder.line_search.rho = v;
+        }
+        if let Some(v) = read_num("eta_penalty") {
+            builder.line_search.eta_penalty = v;
+        }
+
         // Second-order-correction constants (#191), consumed by
         // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
         if let Some(v) = read_int("max_soc") {
