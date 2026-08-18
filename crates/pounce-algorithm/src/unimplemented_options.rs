@@ -39,6 +39,22 @@
 //! the capability, not adding a line. They are left out of this table
 //! until that call is made, and so remain silent for now.
 //!
+//! #551/#677 made that call for the first of them.
+//! `limited_memory_max_skipping` thresholds a *run* of skipped
+//! quasi-Newton updates, after which upstream resets the approximation.
+//! pounce's `LimMemQuasiNewtonUpdater` skips individual curvature pairs
+//! by the same criterion upstream uses, but it never resets, and it
+//! counts nothing — there is no field to read the option into and no
+//! behaviour any value of it would select. Building that reset is a
+//! change to the L-BFGS trajectory, which is a separate, sweepable
+//! piece of work; until then the option is refused rather than accepted
+//! and dropped. Note what the default gate leaves standing: pounce
+//! behaves as if the threshold were infinite, so a caller who spells
+//! out the registered default of 2 still gets no reset. That is the
+//! price of keeping a defaults-only `ipopt.opt` parsing, and it is why
+//! the refusal message says no value changes anything rather than
+//! implying 2 is honoured.
+//!
 //! The clearest case is the penalty line search. pounce implements
 //! `IpPenaltyLSAcceptor` (`line_search_method=penalty`), so its knobs
 //! (`nu_init`, `nu_inc`, `rho`, `eta_penalty`) are read sites to add.
@@ -211,6 +227,18 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
         advice: "pounce's checker tests at the (bound-projected) starting point, \
                  which is where the solve actually begins",
         options: &["point_perturbation_radius"],
+    },
+    UnimplementedFeature {
+        issue: 551,
+        feature: "resetting the quasi-Newton approximation after a run of \
+                  successive skipped updates — there is no skip counter to \
+                  put a threshold on",
+        advice: "pounce applies the same per-pair skip criterion upstream \
+                 does (a curvature pair with `sᵀy <= eps·‖s‖·‖y‖` is \
+                 dropped), but the history is never reset, so no value of \
+                 this option changes anything; `limited_memory_max_history` \
+                 bounds the memory instead",
+        options: &["limited_memory_max_skipping"],
     },
     UnimplementedFeature {
         issue: 606,
@@ -470,15 +498,65 @@ mod tests {
     /// Hints warn instead of failing: the answer is the same either way,
     /// so blocking the solve would cost the user more than the silence
     /// did.
+    ///
+    /// All four are checked, not one representative: they were listed
+    /// together and warned together, but nothing pinned the other three,
+    /// so dropping one from [`UNEXPLOITED_HINTS`] would have taken its
+    /// warning with it and returned it to silence (#677, #551).
     #[test]
     fn caching_hints_warn_but_do_not_refuse() {
+        for name in [
+            "grad_f_constant",
+            "hessian_constant",
+            "jac_c_constant",
+            "jac_d_constant",
+        ] {
+            let (mut opts, reg) = fixture();
+            opts.set_string_value(name, "yes", true, false).unwrap();
+            assert_eq!(
+                refusal(&opts, &reg),
+                None,
+                "`{name}` is a hint and must not block a solve",
+            );
+            let warnings = hint_warnings(&opts, &reg);
+            assert_eq!(warnings.len(), 1, "{name}: {warnings:?}");
+            assert!(warnings[0].contains(name), "{name}: {warnings:?}");
+            // The message has to say what the user loses and what they
+            // keep, or "warning" is just a different flavour of silence.
+            assert!(warnings[0].contains("unaffected"), "{name}: {warnings:?}");
+
+            // …and at the registered default it asks for nothing.
+            let (mut opts, reg) = fixture();
+            opts.set_string_value(name, "no", true, false).unwrap();
+            assert!(
+                hint_warnings(&opts, &reg).is_empty(),
+                "`{name}=no` is the default and must warn nothing",
+            );
+        }
+    }
+
+    /// `limited_memory_max_skipping` is the third shape from the module
+    /// docstring, and #551/#677 called it: L-BFGS runs and skips pairs,
+    /// but nothing counts a *run* of skips and nothing resets the
+    /// approximation, so no value of the option selects any behaviour.
+    /// It is refused rather than accepted and dropped.
+    #[test]
+    fn limited_memory_max_skipping_is_refused_not_silently_dropped() {
         let (mut opts, reg) = fixture();
-        opts.set_string_value("hessian_constant", "yes", true, false)
+        opts.set_integer_value("limited_memory_max_skipping", 4, true, false)
             .unwrap();
-        assert_eq!(refusal(&opts, &reg), None, "a hint must not block a solve");
-        let warnings = hint_warnings(&opts, &reg);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("hessian_constant"));
+        let msg = refusal(&opts, &reg).expect("must refuse");
+        assert!(msg.contains("limited_memory_max_skipping"), "{msg}");
+        assert!(msg.contains("skipped updates"), "{msg}");
+        assert!(msg.contains("551"), "{msg}");
+
+        // The default gate still stands: a generated `ipopt.opt` that
+        // spells out the registered default of 2 asks for nothing it can
+        // observe, and must keep solving.
+        let (mut opts, reg) = fixture();
+        opts.set_integer_value("limited_memory_max_skipping", 2, true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
     }
 
     /// `fast_step_computation` was in the refusal table for one commit,
@@ -658,8 +736,6 @@ mod tests {
             ("max_resto_iter", "17"),
             // the filter line search runs
             ("accept_after_max_steps", "3"),
-            // L-BFGS runs
-            ("limited_memory_max_skipping", "4"),
             // the Mehrotra corrector runs
             ("corrector_type", "affine"),
             // `PdSearchDirCalc` has the flag and consumes it; it was

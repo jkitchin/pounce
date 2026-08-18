@@ -178,6 +178,44 @@ fn names_with_read_sites(sources: &[(PathBuf, String)]) -> BTreeSet<String> {
     out
 }
 
+/// Names the *warning* table declares as hints pounce does not exploit.
+/// Setting one of these prints a warning naming the option and saying
+/// what it does and does not cost, which is as far from silence as a
+/// refusal is — and the established answer for this shape, because
+/// ignoring a caching hint costs evaluations and never correctness, so
+/// blocking the solve would be a worse trade than the silence was.
+///
+/// Parsed from the same source file as the refusal table rather than
+/// listed here, for #551 caution 1: a hand-copied set of four names
+/// would keep passing this test after someone deleted one from
+/// `UNEXPLOITED_HINTS` and took its warning with it.
+fn names_declared_unexploited_hints(src: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    // Anchored on the declaration, not on the name: the name also
+    // appears in doc comments, and starting from one of those would
+    // scan a block that is not the table.
+    let Some(i) = src.find("UNEXPLOITED_HINTS: &[") else {
+        return out;
+    };
+    let rest = &src[i..];
+    // `= &[`, not the first `&[`: that one is the `&[&str]` in the type.
+    let Some(open) = rest.find("= &[") else {
+        return out;
+    };
+    let Some(end) = rest[open..].find(']') else {
+        return out;
+    };
+    let block = &rest[open..open + end];
+    let mut chunks = block.split('"');
+    // Odd-indexed chunks are the literals.
+    let _ = chunks.next();
+    while let Some(name) = chunks.next() {
+        out.insert(name.to_string());
+        let _ = chunks.next();
+    }
+    out
+}
+
 /// Names the refusal table declares unimplemented. Setting one of these
 /// is an error with an explanation, which is the opposite of silence.
 fn names_declared_unimplemented(src: &str) -> BTreeSet<String> {
@@ -214,7 +252,10 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     let sources = read_all_rust_sources(&crates);
     let registered = registered_names(&registry_src);
     let read = names_with_read_sites(&sources);
-    let declared = names_declared_unimplemented(&unimpl_src);
+    let declared: BTreeSet<String> = names_declared_unimplemented(&unimpl_src)
+        .into_iter()
+        .chain(names_declared_unexploited_hints(&unimpl_src))
+        .collect();
 
     // Sanity-check the scan itself before trusting its verdict. If the
     // accessor patterns ever stop matching — a rename, a new helper —
@@ -236,11 +277,27 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "tol",
         "max_iter",
         "limited_memory_initialization",
+        // Wired since #190, but through a loop over an array of names
+        // until #677 — the accessor saw a variable, not a literal, so a
+        // wired option sat in the silent list. The probe keeps the
+        // literal-key form from quietly regressing.
+        "timing_statistics",
+        // Read by `derivative_test_options`, whose numeric helper is
+        // named `read_num` precisely so this scan can see it.
+        "derivative_test_tol",
     ] {
         assert!(
             read.contains(probe),
             "`{probe}` has a read site in the source but the scan missed it — \
              the scan is wrong, so its verdict below cannot be trusted",
+        );
+    }
+    for probe in ["hessian_constant", "limited_memory_max_skipping"] {
+        assert!(
+            declared.contains(probe),
+            "`{probe}` is declared in `unimplemented_options.rs` (refused or \
+             warned) but the declaration scan missed it — the scan is wrong, \
+             so its verdict below cannot be trusted",
         );
     }
 
@@ -434,22 +491,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "sens_max_pdpert",
     ];
 
-    // #551 section 1 — feature runs, read site missing.
-    const NLP_HINTS: &[&str] = &[
-        "grad_f_constant",
-        "hessian_constant",
-        "jac_c_constant",
-        "jac_d_constant",
-    ];
-
-    // #551 section 1 — feature runs, read site missing.
-    const MISC: &[&str] = &[
-        "derivative_test_perturbation",
-        "derivative_test_tol",
-        "limited_memory_max_skipping",
-        "timing_statistics",
-    ];
-
     let known_debt: BTreeSet<&str> = BACKEND_KNOBS
         .iter()
         .chain(LINE_SEARCH)
@@ -457,8 +498,6 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         .chain(BARRIER_KKT)
         .chain(RESTORATION)
         .chain(SENSITIVITY)
-        .chain(NLP_HINTS)
-        .chain(MISC)
         .copied()
         .collect();
 

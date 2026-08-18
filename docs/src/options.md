@@ -112,6 +112,16 @@ constraint-violation norm, magic steps, bound replacement, the L-BFGS
 augmented-system variants, skipping the finalize callback, the dynamic
 HSL loader, and `suppress_all_output` / `debug_print_level`.
 
+`limited_memory_max_skipping` joins them for a subtler reason: the
+feature it belongs to *does* run. POUNCE's limited-memory updater skips
+an unusable curvature pair by the same criterion Ipopt uses — but it
+never resets the approximation after a run of skips, and counts nothing,
+so there is no threshold for the option to set and no value of it that
+selects anything. Refusing it says that; accepting it would not. Note
+what the default rule below leaves standing: POUNCE behaves as if the
+threshold were infinite, so spelling out the registered default of `2`
+still gets you no reset.
+
 The same rule applies one level down, to a single *value* of an option
 that otherwise works. `bound_mult_init_method` is read and honoured, but
 only its default `constant` is implemented; `mu-based` parses (an

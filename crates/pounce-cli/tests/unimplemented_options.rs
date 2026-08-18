@@ -49,18 +49,35 @@ fn run(fixture_name: &str, tag: &str, opts: &[&str]) -> (Option<i32>, String) {
 /// table fails here rather than going quiet again.
 #[test]
 fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
-    for (i, (opt, needle)) in [
-        ("penalty_init_max=42", "CG-penalty"),
+    // The tracking issue is per group, not per table: most of these came
+    // from gh#483, `limited_memory_max_skipping` from #551/#677. Asserting
+    // a single number would have forced a new entry to borrow an issue
+    // that says nothing about it.
+    for (i, (opt, needle, issue)) in [
+        ("penalty_init_max=42", "CG-penalty", "483"),
         (
             "gradient_approximation=finite-difference-values",
             "finite differences",
+            "483",
         ),
-        ("dependency_detector=mumps", "linear-dependency detection"),
-        ("check_derivatives_for_naninf=yes", "NaN/Inf"),
-        ("recalc_y=yes", "multiplier recalculation"),
-        ("magic_steps=yes", "magic steps"),
-        ("suppress_all_output=yes", "output controls"),
-        ("hsllib=libcoinhsl.so", "HSL loader"),
+        (
+            "dependency_detector=mumps",
+            "linear-dependency detection",
+            "483",
+        ),
+        ("check_derivatives_for_naninf=yes", "NaN/Inf", "483"),
+        ("recalc_y=yes", "multiplier recalculation", "483"),
+        ("magic_steps=yes", "magic steps", "483"),
+        ("suppress_all_output=yes", "output controls", "483"),
+        ("hsllib=libcoinhsl.so", "HSL loader", "483"),
+        // L-BFGS runs and skips curvature pairs, but nothing counts a
+        // *run* of skips and nothing resets the approximation, so no
+        // value of this selects any behaviour.
+        (
+            "limited_memory_max_skipping=4",
+            "successive skipped updates",
+            "551",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -71,7 +88,7 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
             err.contains(needle),
             "`{opt}` should mention `{needle}`; stderr:\n{err}",
         );
-        assert!(err.contains("483"), "stderr:\n{err}");
+        assert!(err.contains(issue), "stderr:\n{err}");
     }
 }
 
@@ -106,7 +123,6 @@ fn knobs_on_implemented_features_still_solve() {
     for (i, opt) in [
         "max_resto_iter=17",
         "accept_after_max_steps=3",
-        "limited_memory_max_skipping=4",
         "corrector_type=affine",
     ]
     .into_iter()
@@ -124,12 +140,27 @@ fn knobs_on_implemented_features_still_solve() {
 /// A caching hint warns and solves: ignoring it costs evaluations, never
 /// correctness, so blocking the run would be a worse trade than the
 /// silence was.
+///
+/// All four hints are exercised, not just one: they reach the user
+/// through the same table but only `hessian_constant` was ever pinned
+/// here, so the other three would have gone quiet unnoticed (#677, #551).
 #[test]
 fn a_caching_hint_warns_but_solves() {
-    let (code, err) = run("user_scaling_suffix.nl", "hint", &["hessian_constant=yes"]);
-    assert_eq!(code, Some(0), "stderr:\n{err}");
-    assert!(err.contains("warning"), "stderr:\n{err}");
-    assert!(err.contains("hessian_constant"), "stderr:\n{err}");
+    for (i, name) in [
+        "grad_f_constant",
+        "hessian_constant",
+        "jac_c_constant",
+        "jac_d_constant",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let opt = format!("{name}=yes");
+        let (code, err) = run("user_scaling_suffix.nl", &format!("hint{i}"), &[&opt]);
+        assert_eq!(code, Some(0), "`{name}`; stderr:\n{err}");
+        assert!(err.contains("warning"), "`{name}`; stderr:\n{err}");
+        assert!(err.contains(name), "`{name}`; stderr:\n{err}");
+    }
 }
 
 /// The guard runs before routing: a convex-QP model dispatches to
