@@ -262,125 +262,14 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
     // `unimplemented_options.rs` with a message saying what is missing.
     // Then delete it from here. Never delete an entry without doing one
     // of those two things — this list is the debt, not the fix.
-    // 111 per-backend knobs for linear solvers pounce does not implement
-    // (pounce ships feral and MA57). These need a POLICY decision before a
-    // fix, not a read site: refusing them would break the stated goal that
-    // an `ipopt.opt` written for Ipopt parses unchanged, since such a file
-    // may configure several backends. A warning on first use is the likely
-    // answer. #551 section 2.
-    const BACKEND_KNOBS: &[&str] = &[
-        "ma27_ignore_singularity",
-        "ma27_la_init_factor",
-        "ma27_liw_init_factor",
-        "ma27_meminc_factor",
-        "ma27_pivtol",
-        "ma27_pivtolmax",
-        "ma27_print_level",
-        "ma27_skip_inertia_check",
-        "ma77_buffer_lpage",
-        "ma77_buffer_npage",
-        "ma77_file_size",
-        "ma77_maxstore",
-        "ma77_nemin",
-        "ma77_order",
-        "ma77_print_level",
-        "ma77_small",
-        "ma77_static",
-        "ma77_u",
-        "ma77_umax",
-        "ma86_nemin",
-        "ma86_order",
-        "ma86_print_level",
-        "ma86_scaling",
-        "ma86_small",
-        "ma86_static",
-        "ma86_u",
-        "ma86_umax",
-        "ma97_dump_matrix",
-        "ma97_nemin",
-        "ma97_order",
-        "ma97_print_level",
-        "ma97_scaling",
-        "ma97_scaling1",
-        "ma97_scaling2",
-        "ma97_scaling3",
-        "ma97_small",
-        "ma97_solve_blas3",
-        "ma97_switch1",
-        "ma97_switch2",
-        "ma97_switch3",
-        "ma97_u",
-        "ma97_umax",
-        "mumps_dep_tol",
-        "mumps_mem_percent",
-        "mumps_mpi_communicator",
-        "mumps_permuting_scaling",
-        "mumps_pivot_order",
-        "mumps_pivtol",
-        "mumps_pivtolmax",
-        "mumps_print_level",
-        "mumps_scaling",
-        "pardiso_iter_coarse_size",
-        "pardiso_iter_dropping_factor",
-        "pardiso_iter_dropping_schur",
-        "pardiso_iter_inverse_norm_factor",
-        "pardiso_iter_max_levels",
-        "pardiso_iter_max_row_fill",
-        "pardiso_iter_relative_tol",
-        "pardiso_iterative",
-        "pardiso_matching_strategy",
-        "pardiso_max_droptol_corrections",
-        "pardiso_max_iter",
-        "pardiso_max_iterative_refinement_steps",
-        "pardiso_msglvl",
-        "pardiso_order",
-        "pardiso_redo_symbolic_fact_only_if_inertia_wrong",
-        "pardiso_repeated_perturbation_means_singular",
-        "pardiso_skip_inertia_check",
-        "pardisolib",
-        "pardisomkl_matching_strategy",
-        "pardisomkl_max_iterative_refinement_steps",
-        "pardisomkl_msglvl",
-        "pardisomkl_order",
-        "pardisomkl_redo_symbolic_fact_only_if_inertia_wrong",
-        "pardisomkl_repeated_perturbation_means_singular",
-        "pardisomkl_skip_inertia_check",
-        "spral_cpu_block_size",
-        "spral_gpu_perf_coeff",
-        "spral_ignore_numa",
-        "spral_max_load_inbalance",
-        "spral_min_gpu_work",
-        "spral_nemin",
-        "spral_order",
-        "spral_pivot_method",
-        "spral_print_level",
-        "spral_scaling",
-        "spral_scaling_1",
-        "spral_scaling_2",
-        "spral_scaling_3",
-        "spral_small",
-        "spral_small_subtree_threshold",
-        "spral_switch_1",
-        "spral_switch_2",
-        "spral_switch_3",
-        "spral_u",
-        "spral_umax",
-        "spral_use_gpu",
-        "wsmp_inexact_droptol",
-        "wsmp_inexact_fillin_limit",
-        "wsmp_iterative",
-        "wsmp_max_iter",
-        "wsmp_no_pivoting",
-        "wsmp_num_threads",
-        "wsmp_ordering_option",
-        "wsmp_ordering_option2",
-        "wsmp_pivtol",
-        "wsmp_pivtolmax",
-        "wsmp_scaling",
-        "wsmp_singularity_threshold",
-        "wsmp_skip_inertia_check",
-        "wsmp_write_matrix_iteration",
-    ];
+    // The 111 per-backend knobs — `ma27_*` through `wsmp_*`, plus
+    // `pardisolib` — used to be listed here. They are now declared in
+    // `unimplemented_options.rs` (`UNIMPLEMENTED_BACKENDS`), which is
+    // why they no longer appear: setting one warns, naming the backend,
+    // and solves. Warning rather than refusing was the policy call
+    // #551 section 2 asked for — a portable `ipopt.opt` configures
+    // several backends at once, so refusing would fail a file the
+    // registry exists to accept. See that module's header. #551.
 
     // #551 section 1 — feature runs, read site missing.
     const LINE_SEARCH: &[&str] = &[
@@ -450,9 +339,8 @@ fn every_registered_option_is_read_or_declared_unimplemented() {
         "timing_statistics",
     ];
 
-    let known_debt: BTreeSet<&str> = BACKEND_KNOBS
+    let known_debt: BTreeSet<&str> = LINE_SEARCH
         .iter()
-        .chain(LINE_SEARCH)
         .chain(CORRECTOR)
         .chain(BARRIER_KKT)
         .chain(RESTORATION)

@@ -342,7 +342,21 @@ pub fn main() -> ExitCode {
         eprintln!("{msg}");
         return ExitCode::from(2);
     }
-    for warning in app.unexploited_hint_warnings() {
+    // Knobs for a linear-solver backend pounce does not ship warn here
+    // rather than refusing: an `ipopt.opt` that configures several
+    // backends so one file runs everywhere is the compatibility the
+    // registry exists to provide, and failing it over knobs this run
+    // never touches would cost more than the silence did (gh#551).
+    // `take_*`, not the plain getter: `optimize_tnlp` emits the same
+    // warnings for every frontend that never passes through here, and a
+    // CLI run reaches both sites. Printing the paragraph twice is how a
+    // warning teaches its reader to skip warnings.
+    let backend_warnings = app.take_unimplemented_backend_warnings();
+    for warning in app
+        .unexploited_hint_warnings()
+        .into_iter()
+        .chain(backend_warnings)
+    {
         eprintln!("{warning}");
     }
 

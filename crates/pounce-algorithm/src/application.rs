@@ -209,6 +209,13 @@ pub struct IpoptApplication {
     /// [`Self::unhonored_convex_option`] reads this, on the same
     /// contract as `option_file_resolved` above (gh#604).
     convex_routing_available: bool,
+    /// Whether the backend-knob warnings (gh#551) have already been
+    /// printed for this application. The CLI emits them before routing —
+    /// a convex model never reaches `optimize_tnlp` — and `optimize_tnlp`
+    /// emits them for every other frontend; without this flag a CLI run
+    /// would print each line twice, which is how a warning teaches its
+    /// reader to skip it.
+    backend_warnings_emitted: bool,
     /// Shared sink that the linear-solver backend writes a rolling
     /// [`LinearSolverSummary`] into after every factor. Reset at the
     /// top of every solve (so back-to-back `optimize_tnlp` calls don't
@@ -329,6 +336,7 @@ impl IpoptApplication {
             record_iter_history: false,
             option_file_resolved: false,
             convex_routing_available: false,
+            backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
@@ -847,7 +855,12 @@ impl IpoptApplication {
             );
             return ApplicationReturnStatus::InvalidOption;
         }
-        for warning in self.unexploited_hint_warnings() {
+        let backend_warnings = self.take_unimplemented_backend_warnings();
+        for warning in self
+            .unexploited_hint_warnings()
+            .into_iter()
+            .chain(backend_warnings)
+        {
             eprintln!("{warning}");
         }
 
@@ -1338,6 +1351,34 @@ impl IpoptApplication {
     /// would cost the caller more than the silence did.
     pub fn unexploited_hint_warnings(&self) -> Vec<String> {
         crate::unimplemented_options::hint_warnings(&self.options, &self.reg_options)
+    }
+
+    /// Warnings for knobs of a linear-solver backend pounce does not
+    /// ship (`ma97_*`, `pardiso_*`, …), one line per backend family.
+    ///
+    /// Warnings and not refusals: an `ipopt.opt` carrying settings for
+    /// several backends so that one file runs everywhere is exactly what
+    /// the registry exists to accept, and refusing it would fail a run
+    /// over knobs it never touches. See the "Backend knobs warn, they do
+    /// not refuse" section of [`crate::unimplemented_options`]. gh#551.
+    pub fn unimplemented_backend_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::backend_warnings(&self.options, &self.reg_options)
+    }
+
+    /// The same warnings, but at most once per application: the second
+    /// caller gets nothing.
+    ///
+    /// Two sites emit them — the CLI, before routing, because a convex
+    /// model never reaches [`Self::optimize_tnlp`], and `optimize_tnlp`
+    /// itself, for every frontend that is not the CLI. A CLI run passes
+    /// through both, and printing the identical paragraph twice is how a
+    /// warning teaches its reader to skip warnings.
+    pub fn take_unimplemented_backend_warnings(&mut self) -> Vec<String> {
+        if self.backend_warnings_emitted {
+            return Vec::new();
+        }
+        self.backend_warnings_emitted = true;
+        self.unimplemented_backend_warnings()
     }
 
     /// Resolve the five registered `derivative_test*` knobs. Every one

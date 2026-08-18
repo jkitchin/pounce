@@ -238,7 +238,31 @@ buys.
 The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
 `pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
 `ipopt.opt`-compatibility reason. They are unreachable now that their
-backend cannot be selected.
+backend cannot be selected, so setting one **warns and solves** — it does
+not fail the run:
+
+```
+$ pounce model.nl ma97_order=metis
+pounce: warning: `ma97_order` configures the HSL MA97 sparse symmetric linear
+solver, which pounce does not implement, so it is ignored — as is every other
+`ma97_*` option. pounce factors the KKT system with `feral` (pure Rust, the
+default) or MA57 (`linear_solver=ma57`, in a `--features ma57` build); no
+setting written for another backend transfers to either. The name is registered
+so an `ipopt.opt` written for Ipopt still parses unchanged — which is why this
+is a warning and not an error: the solve runs, and its result is unaffected.
+```
+
+A warning rather than a refusal, unlike the options above, because a
+portable `ipopt.opt` routinely carries settings for several backends at
+once so that one file runs everywhere. Refusing would fail that file over
+knobs the run never touches — for a user who is not using MA97 and never
+asked POUNCE to. One line is printed per backend family, listing the
+options it saw, and only for a value that differs from the registered
+default: a file that spells out defaults asks for nothing and gets
+nothing said about it. `pardisolib` warns with the `pardiso_*` family;
+`hsllib` is still refused, because POUNCE *has* an HSL backend (MA57) and
+the refusal points you at `--features ma57` rather than leaving you to
+believe a library was loaded.
 
 ## Bound relaxation and `honor_original_bounds`
 

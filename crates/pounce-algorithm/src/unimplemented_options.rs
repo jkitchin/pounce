@@ -52,6 +52,59 @@
 //! [`crate::application::IpoptApplication::initialize_with_option_file`]
 //! reads the named file, so the option now configures something.
 //!
+//! # Backend knobs warn, they do not refuse
+//!
+//! The 111 `ma27_*` / `ma77_*` / `ma86_*` / `ma97_*` / `mumps_*` /
+//! `pardiso_*` / `pardisomkl_*` / `spral_*` / `wsmp_*` options, plus
+//! `pardisolib`, tune linear-solver backends pounce does not ship at
+//! all: it factors the KKT system with `feral` or with MA57. They were
+//! silent — #551 section 2 — and they are the one class where the
+//! refusal above is the wrong instrument.
+//!
+//! Refusing them attacks the goal the registry exists to serve. The
+//! rest of this table refuses an option whose *feature* the caller is
+//! plainly asking for; `ma97_order` in a portable `ipopt.opt` is
+//! usually not that. Such a file routinely carries settings for several
+//! backends at once so that one file runs everywhere, and pounce would
+//! reject it wholesale over knobs the run never touches — a hard error
+//! for a user who is not using MA97 and never asked pounce to. That is
+//! strictly worse than the silence: it breaks a working file instead of
+//! under-serving one.
+//!
+//! But silence is what #677 cost, so the answer is the third
+//! disposition this module already carries. The precedent is
+//! [`UNEXPLOITED_HINTS`] — pinned by `a_caching_hint_warns_but_solves`
+//! in `pounce-cli/tests/unimplemented_options.rs` — where the project
+//! chose WARN over REFUSE for exactly this trade: ignoring the option
+//! costs the caller nothing they cannot see, so blocking the solve
+//! would take more from them than the silence did. Backend knobs are a
+//! stronger case for it than the hints are: a hint changes the
+//! evaluation count, whereas a knob for a backend that is not linked
+//! could not have changed anything even in principle.
+//!
+//! Three properties follow from that, and each is pinned by a test:
+//!
+//! 1. **Only when explicitly set to a non-default.** The same gate as
+//!    everything else here (below). A file spelling out `ma97_u 1e-8`
+//!    asks for nothing, and a default run must stay completely silent —
+//!    `a_default_run_is_silent`.
+//! 2. **One line per backend family, not per option.** An MA97-tuned
+//!    file sets a dozen `ma97_*` knobs; a dozen near-identical lines is
+//!    noise a reader learns to skip, which is silence with extra steps.
+//!    The warning names the backend, lists the options it saw, and says
+//!    the rest of the family is inert too.
+//! 3. **The solve runs and its answer is unaffected**, which the
+//!    warning says in as many words — otherwise a warning naming a
+//!    linear solver reads as "your factorization may be wrong".
+//!
+//! `hsllib` stays in the refusal table above rather than moving here,
+//! and the line is deliberate: pounce *has* an HSL backend (MA57), so
+//! `hsllib` is a caller trying to reach a solver pounce can actually
+//! run, by a mechanism it does not have — the refusal tells them to
+//! build with `--features ma57` instead of letting them believe MA57 is
+//! loaded. `pardisolib` has no such other route (there is no Pardiso
+//! here by any means), so it warns with the rest of its family.
+//!
 //! # The default gate
 //!
 //! Only an explicit value **different from the registered default** is
@@ -259,6 +312,248 @@ pub const UNEXPLOITED_HINTS: &[&str] = &[
     "jac_d_constant",
 ];
 
+/// One linear-solver backend pounce does not implement, and the
+/// registered options that tune it.
+///
+/// Separate from [`UnimplementedFeature`] because the disposition is
+/// different: these *warn* and solve, they never refuse. See "Backend
+/// knobs warn, they do not refuse" in the module header for why.
+pub struct UnimplementedBackend {
+    /// Named in the warning, e.g. "the HSL MA97 sparse symmetric linear
+    /// solver".
+    pub backend: &'static str,
+    /// The registered prefix the family shares, quoted in the warning so
+    /// the user learns the whole group is inert, not just the one option
+    /// they happened to set.
+    pub family: &'static str,
+    /// Every registered option of this backend. Complete per family —
+    /// `backend_families_are_complete` fails if the registry grows one
+    /// that is missing here, which would hand it back its silence.
+    pub options: &'static [&'static str],
+}
+
+/// Every linear-solver backend pounce does not implement, with the
+/// options that tune it. Warned about when set; never refused.
+pub const UNIMPLEMENTED_BACKENDS: &[UnimplementedBackend] = &[
+    UnimplementedBackend {
+        backend: "the HSL MA27 sparse symmetric linear solver",
+        family: "ma27_*",
+        options: &[
+            "ma27_ignore_singularity",
+            "ma27_la_init_factor",
+            "ma27_liw_init_factor",
+            "ma27_meminc_factor",
+            "ma27_pivtol",
+            "ma27_pivtolmax",
+            "ma27_print_level",
+            "ma27_skip_inertia_check",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the HSL MA77 out-of-core sparse symmetric linear solver",
+        family: "ma77_*",
+        options: &[
+            "ma77_buffer_lpage",
+            "ma77_buffer_npage",
+            "ma77_file_size",
+            "ma77_maxstore",
+            "ma77_nemin",
+            "ma77_order",
+            "ma77_print_level",
+            "ma77_small",
+            "ma77_static",
+            "ma77_u",
+            "ma77_umax",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the HSL MA86 parallel sparse symmetric linear solver",
+        family: "ma86_*",
+        options: &[
+            "ma86_nemin",
+            "ma86_order",
+            "ma86_print_level",
+            "ma86_scaling",
+            "ma86_small",
+            "ma86_static",
+            "ma86_u",
+            "ma86_umax",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the HSL MA97 sparse symmetric linear solver",
+        family: "ma97_*",
+        options: &[
+            "ma97_dump_matrix",
+            "ma97_nemin",
+            "ma97_order",
+            "ma97_print_level",
+            "ma97_scaling",
+            "ma97_scaling1",
+            "ma97_scaling2",
+            "ma97_scaling3",
+            "ma97_small",
+            "ma97_solve_blas3",
+            "ma97_switch1",
+            "ma97_switch2",
+            "ma97_switch3",
+            "ma97_u",
+            "ma97_umax",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the MUMPS sparse symmetric linear solver",
+        family: "mumps_*",
+        options: &[
+            "mumps_dep_tol",
+            "mumps_mem_percent",
+            "mumps_mpi_communicator",
+            "mumps_permuting_scaling",
+            "mumps_pivot_order",
+            "mumps_pivtol",
+            "mumps_pivtolmax",
+            "mumps_print_level",
+            "mumps_scaling",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the Pardiso linear solver (pardiso-project.org)",
+        family: "pardiso_*",
+        options: &[
+            "pardiso_iter_coarse_size",
+            "pardiso_iter_dropping_factor",
+            "pardiso_iter_dropping_schur",
+            "pardiso_iter_inverse_norm_factor",
+            "pardiso_iter_max_levels",
+            "pardiso_iter_max_row_fill",
+            "pardiso_iter_relative_tol",
+            "pardiso_iterative",
+            "pardiso_matching_strategy",
+            "pardiso_max_droptol_corrections",
+            "pardiso_max_iter",
+            "pardiso_max_iterative_refinement_steps",
+            "pardiso_msglvl",
+            "pardiso_order",
+            "pardiso_redo_symbolic_fact_only_if_inertia_wrong",
+            "pardiso_repeated_perturbation_means_singular",
+            "pardiso_skip_inertia_check",
+            "pardisolib",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the Pardiso linear solver bundled with Intel MKL",
+        family: "pardisomkl_*",
+        options: &[
+            "pardisomkl_matching_strategy",
+            "pardisomkl_max_iterative_refinement_steps",
+            "pardisomkl_msglvl",
+            "pardisomkl_order",
+            "pardisomkl_redo_symbolic_fact_only_if_inertia_wrong",
+            "pardisomkl_repeated_perturbation_means_singular",
+            "pardisomkl_skip_inertia_check",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the SPRAL SSIDS sparse symmetric linear solver",
+        family: "spral_*",
+        options: &[
+            "spral_cpu_block_size",
+            "spral_gpu_perf_coeff",
+            "spral_ignore_numa",
+            "spral_max_load_inbalance",
+            "spral_min_gpu_work",
+            "spral_nemin",
+            "spral_order",
+            "spral_pivot_method",
+            "spral_print_level",
+            "spral_scaling",
+            "spral_scaling_1",
+            "spral_scaling_2",
+            "spral_scaling_3",
+            "spral_small",
+            "spral_small_subtree_threshold",
+            "spral_switch_1",
+            "spral_switch_2",
+            "spral_switch_3",
+            "spral_u",
+            "spral_umax",
+            "spral_use_gpu",
+        ],
+    },
+    UnimplementedBackend {
+        backend: "the WSMP sparse symmetric linear solver",
+        family: "wsmp_*",
+        options: &[
+            "wsmp_inexact_droptol",
+            "wsmp_inexact_fillin_limit",
+            "wsmp_iterative",
+            "wsmp_max_iter",
+            "wsmp_no_pivoting",
+            "wsmp_num_threads",
+            "wsmp_ordering_option",
+            "wsmp_ordering_option2",
+            "wsmp_pivtol",
+            "wsmp_pivtolmax",
+            "wsmp_scaling",
+            "wsmp_singularity_threshold",
+            "wsmp_skip_inertia_check",
+            "wsmp_write_matrix_iteration",
+        ],
+    },
+];
+
+/// Warnings for backend knobs the caller set. Never blocks a solve, and
+/// emits at most one line per backend family: an `ipopt.opt` tuned for
+/// MA97 sets a dozen `ma97_*` knobs at once, and a dozen near-identical
+/// lines would be noise the reader learns to skip.
+///
+/// Same default gate as everything else here — an `ipopt.opt` that
+/// spells out `ma97_u 1e-8` (the registered default) asks for nothing
+/// and gets nothing said about it.
+pub fn backend_warnings(options: &OptionsList, reg: &RegisteredOptions) -> Vec<String> {
+    UNIMPLEMENTED_BACKENDS
+        .iter()
+        .filter_map(|group| {
+            let set: Vec<&str> = group
+                .options
+                .iter()
+                .copied()
+                .filter(|name| set_to_a_non_default(options, reg, name))
+                .collect();
+            if set.is_empty() {
+                return None;
+            }
+            let named = set
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (verb, ignored, registered) = if set.len() == 1 {
+                ("configures", "it is ignored".to_string(), "The name is")
+            } else {
+                (
+                    "configure",
+                    format!("those {} are ignored", set.len()),
+                    "The names are",
+                )
+            };
+            Some(format!(
+                "pounce: warning: {named} {verb} {}, which pounce does not \
+                 implement, so {ignored} — as is every other `{}` option. \
+                 pounce factors the KKT system with `feral` (pure Rust, the \
+                 default) or MA57 (`linear_solver=ma57`, in a `--features \
+                 ma57` build); no setting written for another backend \
+                 transfers to either. {registered} registered so an \
+                 `ipopt.opt` written for Ipopt still parses unchanged — which \
+                 is why this is a warning and not an error: the solve runs, \
+                 and its result is unaffected. Tracking issue: \
+                 https://github.com/jkitchin/pounce/issues/551",
+                group.backend, group.family,
+            ))
+        })
+        .collect()
+}
+
 /// An option set to something the registry says is not its default.
 ///
 /// Both halves matter. `found` alone would fire on an `ipopt.opt` that
@@ -401,6 +696,43 @@ mod tests {
                 "`{name}` is in the hint table but is not registered",
             );
         }
+        for group in UNIMPLEMENTED_BACKENDS {
+            for name in group.options {
+                assert!(
+                    reg.get_option(name).is_some(),
+                    "`{name}` is in the backend table but is not registered",
+                );
+            }
+        }
+    }
+
+    /// The backend groups must cover their families *completely*. A
+    /// `ma97_*` option registered later and not added here would be
+    /// silent again — the exact defect this table removes — and it would
+    /// slip past `no_silent_options.rs` too, which only asks whether a
+    /// name is declared somewhere, not whether the family is whole.
+    #[test]
+    fn backend_families_are_complete() {
+        let (_, reg) = fixture();
+        for group in UNIMPLEMENTED_BACKENDS {
+            let prefix = group
+                .family
+                .strip_suffix('*')
+                .expect("family is a prefix glob, e.g. `ma97_*`");
+            for opt in reg.registered_options_in_order() {
+                if !opt.name.starts_with(prefix) {
+                    continue;
+                }
+                assert!(
+                    group.options.contains(&opt.name.as_str()),
+                    "`{}` is registered and matches `{}` but is missing from \
+                     the {} group, so setting it would still be silent",
+                    opt.name,
+                    group.family,
+                    group.backend,
+                );
+            }
+        }
     }
 
     /// No option may appear twice — once in two feature groups, or in
@@ -413,6 +745,7 @@ mod tests {
             .iter()
             .flat_map(|g| g.options.iter())
             .chain(UNEXPLOITED_HINTS.iter())
+            .chain(UNIMPLEMENTED_BACKENDS.iter().flat_map(|g| g.options.iter()))
         {
             assert!(seen.insert(*name), "`{name}` is listed twice");
         }
@@ -424,6 +757,105 @@ mod tests {
         let (opts, reg) = fixture();
         assert_eq!(refusal(&opts, &reg), None);
         assert!(hint_warnings(&opts, &reg).is_empty());
+        assert!(
+            backend_warnings(&opts, &reg).is_empty(),
+            "a default run must stay silent",
+        );
+    }
+
+    /// A backend knob warns and solves — it never refuses. Refusing
+    /// would fail a portable `ipopt.opt` over a backend the run does not
+    /// use, which is the compatibility the registry exists to provide.
+    #[test]
+    fn a_backend_knob_warns_but_does_not_refuse() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("ma97_order", "metis", true, false)
+            .unwrap();
+        assert_eq!(
+            refusal(&opts, &reg),
+            None,
+            "a backend knob must not block a solve",
+        );
+        let warnings = backend_warnings(&opts, &reg);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("warning:"), "{w}");
+        assert!(w.contains("`ma97_order`"), "{w}");
+        assert!(w.contains("MA97"), "the backend must be named: {w}");
+        assert!(w.contains("`ma97_*`"), "the family must be named: {w}");
+        // The user has to be told the answer is not at risk, or a
+        // warning naming a linear solver reads as "your factorization
+        // may be wrong".
+        assert!(w.contains("result is unaffected"), "{w}");
+        assert!(w.contains("551"), "{w}");
+    }
+
+    /// Explicitly writing a backend knob's registered default asks for
+    /// nothing — the same gate the refusal table uses — so it must not
+    /// even warn. A generated `ipopt.opt` spells defaults out.
+    #[test]
+    fn a_backend_knob_at_its_default_is_silent() {
+        let (mut opts, reg) = fixture();
+        // `ma97_order` defaults to "auto", `pardiso_msglvl` to 0.
+        opts.set_string_value("ma97_order", "auto", true, false)
+            .unwrap();
+        opts.set_integer_value("pardiso_msglvl", 0, true, false)
+            .unwrap();
+        assert!(backend_warnings(&opts, &reg).is_empty());
+    }
+
+    /// One line per backend family, not per option: an MA97-tuned
+    /// `ipopt.opt` sets a dozen `ma97_*` knobs at once, and a dozen
+    /// near-identical lines is noise the reader learns to skip — silence
+    /// with extra steps. The one line names every knob it saw.
+    #[test]
+    fn the_warning_is_grouped_by_backend_family() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("ma97_order", "metis", true, false)
+            .unwrap();
+        opts.set_numeric_value("ma97_u", 1e-4, true, false).unwrap();
+        opts.set_string_value("ma97_scaling", "mc64", true, false)
+            .unwrap();
+        opts.set_integer_value("pardiso_msglvl", 1, true, false)
+            .unwrap();
+
+        let warnings = backend_warnings(&opts, &reg);
+        assert_eq!(
+            warnings.len(),
+            2,
+            "one per family, not per option: {warnings:?}"
+        );
+        let ma97 = warnings.iter().find(|w| w.contains("MA97")).expect("MA97");
+        for name in ["`ma97_order`", "`ma97_u`", "`ma97_scaling`"] {
+            assert!(ma97.contains(name), "{ma97}");
+        }
+        assert!(ma97.contains("those 3 are ignored"), "{ma97}");
+        assert!(
+            warnings.iter().any(|w| w.contains("Pardiso")),
+            "{warnings:?}",
+        );
+    }
+
+    /// `pardisolib` warns with its family rather than being refused like
+    /// `hsllib`. The difference is that pounce *has* an HSL backend, so
+    /// `hsllib` is a caller reaching for a solver pounce can run by a
+    /// mechanism it lacks; there is no Pardiso here by any route.
+    #[test]
+    fn pardisolib_warns_with_the_pardiso_family() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("pardisolib", "libpardiso600.so", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None);
+        let warnings = backend_warnings(&opts, &reg);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("`pardisolib`"), "{:?}", warnings[0]);
+        assert!(warnings[0].contains("Pardiso"), "{:?}", warnings[0]);
+
+        // …while `hsllib` keeps its refusal.
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("hsllib", "libcoinhsl.so", true, false)
+            .unwrap();
+        assert!(refusal(&opts, &reg).is_some());
     }
 
     /// Explicitly writing a default is how a generated `ipopt.opt` looks;

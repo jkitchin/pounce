@@ -85,6 +85,28 @@ changes.
   back to no scaling; it now warns when it does. (`ruiz` is implemented
   and unaffected.)
 
+- **The 111 per-backend linear-solver knobs now warn instead of going
+  silent** (#551, #677).
+
+  `ma27_*`, `ma77_*`, `ma86_*`, `ma97_*`, `mumps_*`, `pardiso_*`,
+  `pardisomkl_*`, `spral_*`, `wsmp_*` and `pardisolib` tune backends
+  POUNCE does not ship — it factors the KKT system with `feral` or MA57 —
+  and were registered, accepted, and ignored without a word. Setting one
+  now prints a warning naming the backend and every knob of that family
+  it saw, and the solve continues.
+
+  **Warning and not refusal, deliberately.** A portable `ipopt.opt`
+  routinely configures several backends at once so one file runs
+  everywhere; refusing would fail that file over knobs the run never
+  touches, breaking the compatibility the registry exists to provide.
+  This follows the precedent set for the caching hints (`hessian_constant`
+  and friends), which warn for the same reason. One line per backend
+  family, not per option, and only for a value that differs from the
+  registered default — a default run is still completely silent.
+  `hsllib` keeps its refusal: POUNCE *has* an HSL backend, so that one is
+  a caller reaching for a solver it can actually run, by a mechanism it
+  does not have.
+
 - **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
 
   Measures per-iteration wall time against `n` over a family of one

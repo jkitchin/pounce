@@ -136,6 +136,61 @@ fn a_caching_hint_warns_but_solves() {
     assert!(err.contains("hessian_constant"), "stderr:\n{err}");
 }
 
+/// A knob for a linear-solver backend pounce does not ship warns and
+/// solves, same trade as the caching hint above: pounce factors with
+/// `feral` or MA57, so an `ma97_*` value could not have changed the
+/// answer even in principle, and refusing it would fail a portable
+/// `ipopt.opt` that configures several backends so one file runs
+/// everywhere — the compatibility the registry exists to provide.
+/// gh#551 section 2.
+#[test]
+fn a_backend_knob_warns_but_solves() {
+    let (code, err) = run("user_scaling_suffix.nl", "backend", &["ma97_order=metis"]);
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert!(err.contains("warning:"), "stderr:\n{err}");
+    assert!(err.contains("`ma97_order`"), "stderr:\n{err}");
+    assert!(err.contains("MA97"), "the backend is named; stderr:\n{err}");
+    assert!(
+        err.contains("result is unaffected"),
+        "the warning must say the answer is not at risk; stderr:\n{err}",
+    );
+    assert!(err.contains("551"), "stderr:\n{err}");
+}
+
+/// One line per backend family — an MA97-tuned file sets a dozen
+/// `ma97_*` knobs, and a dozen near-identical lines is noise a reader
+/// learns to skip, which is silence with extra steps.
+///
+/// The exact-count assertion also pins the *other* way this could
+/// double: the CLI emits before routing (a convex model never reaches
+/// `optimize_tnlp`) and `optimize_tnlp` emits for every other frontend,
+/// so a CLI run passes both sites and must still print once.
+#[test]
+fn backend_knobs_warn_once_per_family() {
+    let (code, err) = run(
+        "user_scaling_suffix.nl",
+        "backendgroup",
+        &["ma97_order=metis", "ma97_u=1e-4", "pardiso_msglvl=1"],
+    );
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(
+        err.matches("ma97_order").count(),
+        1,
+        "one grouped line, not one per option; stderr:\n{err}",
+    );
+    assert!(err.contains("`ma97_u`"), "stderr:\n{err}");
+    assert!(err.contains("Pardiso"), "stderr:\n{err}");
+}
+
+/// A backend knob left at its registered default asks for nothing, so
+/// it must not even warn — the same gate the refusal table uses.
+#[test]
+fn a_backend_knob_at_its_default_is_silent() {
+    let (code, err) = run("user_scaling_suffix.nl", "backenddef", &["ma97_order=auto"]);
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert!(!err.contains("warning:"), "stderr:\n{err}");
+}
+
 /// The guard runs before routing: a convex-QP model dispatches to
 /// `pounce-convex` and never reaches the library-side guard.
 #[test]
