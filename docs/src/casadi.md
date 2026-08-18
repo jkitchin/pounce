@@ -491,6 +491,15 @@ on the issue tracker if you want them.
 
 ## Limited-memory Hessians and nonlinear variables
 
+**You may be on this path without having asked for it.** The plugin sets
+`hessian_approximation=limited-memory` for you whenever an exact
+Lagrangian Hessian is not available — the `!exact_hessian_` branch in
+`casadi_nlpsol_pounce.cpp`. If you did not supply second derivatives,
+every solve is an L-BFGS solve, and the options in this section apply to
+it. That is worth knowing before comparing POUNCE against another
+solver: you are comparing quasi-Newton runs, and quasi-Newton runs are
+much more sensitive to the options below than exact-Hessian ones.
+
 With `hessian_approximation=limited-memory`, POUNCE approximates
 curvature over every variable by default. If your model is mostly linear
 — slacks, balances, flows with constant coefficients — you can tell it
@@ -538,6 +547,83 @@ in `crates/pounce-algorithm/src/hess/lim_mem_quasi_newton.rs`.
 The underlying entry point is `IpoptSetNonlinearVariables` in POUNCE's C
 API, and `num_linear_variables` is the Ipopt-compatible
 contiguous-prefix fallback.
+
+### The initial Hessian scalar, and matching an Ipopt baseline
+
+The L-BFGS model is `B = σI + VVᵀ − UUᵀ`. The rank-2 corrections come
+from the curvature history; `σ` is the diagonal they sit on, and
+`limited_memory_initialization` picks the formula for it. `scalar1`
+(σ = sᵀy/sᵀs, the default, matching Ipopt) and `scalar2` (σ = yᵀy/sᵀy)
+are related by
+
+```
+σ_scalar2 / σ_scalar1 = (yᵀy · sᵀs) / (sᵀy)²   ≥ 1
+```
+
+which is unbounded as the curvature pair becomes ill-conditioned. On a
+well-scaled problem they are close; on a large collocation model they
+need not be within six orders of magnitude. An over-large `σ` makes the
+diagonal swamp the corrections, the model collapses toward a multiple of
+the identity, and the primal step goes with it.
+
+The symptom is recognisable without instrumenting anything:
+
+- primal step sizes (`alpha_pr`) collapsing to `1e-3` or below and
+  staying there,
+- primal infeasibility (`inf_pr`) barely moving,
+- dual infeasibility (`inf_du`) climbing by orders of magnitude,
+- the barrier parameter `lg(mu)` stuck, because the barrier will not
+  descend until the subproblem error comes down.
+
+If you are comparing against an Ipopt run and the two agree for the first
+iteration and then separate, suspect `σ`: it is hard-coded to
+`limited_memory_init_val` (1.0) while the curvature history is empty, so
+iteration 1 cannot differ. The first curvature pair lands at iteration 2,
+and that is where a `σ` disagreement first shows.
+
+`limited_memory_init_val_max` clamps `σ` however it was computed, and is
+the blunt instrument if you suspect it but cannot change the formula:
+
+```python
+"pounce": {"hessian_approximation": "limited-memory",
+           "limited_memory_init_val_max": 10.0}   # default 1e8
+```
+
+> **Changed in #677.** Every release before this used `scalar2` and
+> *ignored* `limited_memory_initialization` entirely — it was registered
+> but never read, so setting it had no effect and no warning. If you are
+> reproducing older POUNCE results, set `limited_memory_initialization
+> scalar2` explicitly.
+
+### When the duals will not converge
+
+A quasi-Newton dual step is computed from an approximate Hessian, so an
+L-BFGS solve can settle a feasible primal, park the objective, and still
+fail to drive dual infeasibility to tolerance — `inf_du` oscillating
+inside a band instead of descending, for hundreds of iterations, while
+`inf_pr` and the objective are already where they should be.
+
+That shape is what `recalc_y` is for. It re-estimates the equality and
+inequality multipliers by least squares on every iteration whose
+constraint violation is under `recalc_y_feas_tol`, side-stepping the
+Hessian approximation:
+
+```python
+"pounce": {"hessian_approximation": "limited-memory",
+           "recalc_y": "yes",
+           "recalc_y_feas_tol": 1e-6}   # the default gate
+```
+
+Each firing costs an extra augmented-system solve.
+
+**POUNCE leaves this off by default and Ipopt does not.** Ipopt's option
+text says it is used by default with a quasi-Newton Hessian; enabling it
+by default here regressed 7 of 57 fixtures from solved to not solved,
+because re-estimating `y` every iteration also discards Newton
+multipliers that were converging perfectly well. So it is opt-in. If you
+are chasing Ipopt parity on an L-BFGS model, this is one of the two
+options — with `limited_memory_initialization` — most likely to explain
+a difference.
 
 ## Examples
 

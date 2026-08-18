@@ -162,12 +162,6 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
     },
     UnimplementedFeature {
         issue: 483,
-        feature: "multiplier recalculation by least squares",
-        advice: "",
-        options: &["recalc_y", "recalc_y_feas_tol"],
-    },
-    UnimplementedFeature {
-        issue: 483,
         feature: "least-square initialization of *all* dual variables \
                   (the first-order-optimality fit)",
         advice: "the equality multipliers are least-square initialized \

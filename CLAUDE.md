@@ -58,6 +58,15 @@ reorders/rescales the steps it takes, is a *trajectory* change. Run
 `scripts/sweep-fixtures.sh` against a baseline binary and diff, **before
 merge**, and be able to explain every line that moves.
 
+The sweep runs **two legs** per fixture — `exact` (the default path) and
+`lbfgs` (`hessian_approximation=limited-memory`) — each line prefixed with the
+leg name. Both run by default; do not diff only one. The L-BFGS leg exists
+because the corpus was exact-Hessian only, and that gap shipped gh#677: the
+initial Hessian scalar used `scalar2` where Ipopt uses `scalar1`, because
+`limited_memory_initialization` was registered and never read. L-BFGS is not
+a rare opt-in — the Python frontend and the CasADi plugin both select it
+automatically when no exact Lagrangian Hessian is available.
+
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
 regression produces the *right* answer, slowly — or a differently-wrong

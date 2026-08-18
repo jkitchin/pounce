@@ -706,6 +706,52 @@ adaptive oracle stops making progress. Defaults mirror upstream
 | `adaptive_mu_kkterror_red_fact`         | `0.9999`| Required relative KKT-error reduction over that window.                                       |
 | `adaptive_mu_kkt_norm_type`             | `2-norm-squared` | Norm used to score the iterate in adaptive globalization decisions.                  |
 
+## Limited-memory Hessian (L-BFGS) initialization
+
+Under `hessian_approximation=limited-memory` the Hessian model is
+`B = σ I + V Vᵀ − U Uᵀ`. The rank-2 corrections come from the curvature
+history; `σ` is the diagonal they are built on, and
+`limited_memory_initialization` chooses the formula for it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `limited_memory_initialization` | `scalar2` | Formula for `σ`: `scalar1` (σ = sᵀy/sᵀs), `scalar2` (σ = yᵀy/sᵀy), `scalar3` (arithmetic mean of the two), `scalar4` (geometric mean), `constant` (σ = `limited_memory_init_val`). |
+| `limited_memory_init_val` | `1.0` | `σ` on the first iteration, before any curvature pair exists — and every iteration under `constant`. |
+| `limited_memory_init_val_min` / `_max` | `1e-8` / `1e8` | Clamp applied to `σ` however it was computed. |
+
+The default matches Ipopt's `scalar1`. Note that it changed in #677:
+every earlier release used `scalar2` and ignored this option entirely —
+it was registered but never read, so setting it had no effect and no
+warning. The two differ by σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)², which
+is ≥ 1 by Cauchy–Schwarz and grows without bound as the curvature pair
+becomes ill-conditioned, so on a badly scaled problem they are far
+apart. If you are reproducing results from an older POUNCE, set
+`limited_memory_initialization scalar2`.
+
+### `recalc_y` under L-BFGS
+
+A quasi-Newton dual step is computed from an approximate Hessian, so an
+L-BFGS solve can settle a feasible primal and still fail to drive dual
+infeasibility to tolerance. `recalc_y yes` re-estimates the equality and
+inequality multipliers by least squares on every iteration whose
+constraint violation is below `recalc_y_feas_tol` (default `1e-6`),
+side-stepping the approximation. Each firing costs one extra
+augmented-system solve.
+
+Ipopt's option text says this is used by default with a quasi-Newton
+Hessian. **POUNCE does not enable it by default**, because doing so
+regressed 7 of 57 fixtures on the L-BFGS leg — re-estimating `y` every
+iteration also overwrites Newton multipliers that were converging
+perfectly well. Reach for it when dual infeasibility oscillates without
+descending while the objective and the primal have already settled; that
+is the shape it fixes.
+
+`σ` cannot be observed directly, but the symptom of a badly chosen one is
+recognisable: a search direction much larger than the problem's scale,
+primal step sizes collapsing to `1e-3` or below, primal infeasibility
+that barely moves, and dual infeasibility climbing by orders of magnitude
+while the objective drifts.
+
 ## ℓ₁ penalty-barrier wrapper options
 
 These tune the degenerate-NLP wrapper described in

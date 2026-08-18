@@ -59,11 +59,24 @@ pub enum UpdateType {
     Sr1,
 }
 
+/// `limited_memory_initialization` — how the diagonal `B0 = σ I` is
+/// chosen before the rank-2 updates. Upstream registers five values
+/// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`); `Identity` has no
+/// upstream keyword and exists for callers constructing the updater
+/// directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialApprox {
     Identity,
+    /// `scalar1` — σ = sᵀy / sᵀs. Upstream's default.
     Scalar1,
+    /// `scalar2` — σ = yᵀy / sᵀy.
     Scalar2,
+    /// `scalar3` — arithmetic mean of `scalar1` and `scalar2`.
+    Scalar3,
+    /// `scalar4` — geometric mean of `scalar1` and `scalar2`.
+    Scalar4,
+    /// `constant` — σ = `limited_memory_init_val`, every iteration.
+    Constant,
 }
 
 pub struct LimMemQuasiNewtonUpdater {
@@ -76,6 +89,15 @@ pub struct LimMemQuasiNewtonUpdater {
     /// the damping coefficient is hard-coded at 0.2 in the BFGS path.
     pub init_val_max: Number,
     pub init_val_min: Number,
+    /// `limited_memory_init_val` — the multiple of the identity `B0`
+    /// takes on the first iteration, before any curvature pair has been
+    /// formed, and on every iteration under
+    /// [`InitialApprox::Constant`]. Upstream default `1.0`
+    /// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`). Was a
+    /// hard-coded `1.0` in the empty-history branch until #677 — the
+    /// same value, but not settable, and `constant` had nowhere to read
+    /// its σ from.
+    pub init_val: Number,
     /// Rolling FIFO of curvature pairs, oldest at index 0. Capped at
     /// `max_history`; insertion drops the front.
     pub history: Vec<CurvaturePair>,
@@ -111,10 +133,11 @@ impl Default for LimMemQuasiNewtonUpdater {
     fn default() -> Self {
         Self {
             update_type: UpdateType::Bfgs,
-            initial_approx: InitialApprox::Scalar2,
+            initial_approx: InitialApprox::Scalar1,
             max_history: 6,
             init_val_max: 1e8,
             init_val_min: 1e-8,
+            init_val: 1.0,
             history: Vec::new(),
             last_x: None,
             last_grad_f: None,
@@ -390,7 +413,9 @@ impl LimMemQuasiNewtonUpdater {
 
     fn compute_sigma_bfgs(&self) -> Number {
         if self.history.is_empty() {
-            return 1.0;
+            // Upstream: `B0 = limited_memory_init_val * I` "in the first
+            // iteration (when no updates have been performed yet)".
+            return self.init_val;
         }
         let last = self.history.last().unwrap();
         let s_dot_s = last.s_norm * last.s_norm;
@@ -400,6 +425,7 @@ impl LimMemQuasiNewtonUpdater {
             s_dot_s,
             last.s_dot_y,
             y_dot_y,
+            self.init_val,
             self.init_val_min,
             self.init_val_max,
         )
@@ -566,13 +592,23 @@ fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
 }
 
 /// Initial Hessian scalar used as the diagonal of `B_0` before the
-/// rank-2 updates are applied. Mirrors upstream's three options
-/// (`limited_memory_initialization` in
-/// `IpLimMemQuasiNewtonUpdater.cpp`):
+/// rank-2 updates are applied. Mirrors upstream's
+/// `limited_memory_initialization` values
+/// (`IpLimMemQuasiNewtonUpdater.cpp:RegisterOptions`):
 ///
-/// * `Identity` → `1.0`
-/// * `Scalar1` → `(s^T y) / (s^T s)`
+/// * `Scalar1` → `(s^T y) / (s^T s)` — upstream's default
 /// * `Scalar2` → `(y^T y) / (s^T y)`
+/// * `Scalar3` → arithmetic mean of `Scalar1` and `Scalar2`
+/// * `Scalar4` → geometric mean of `Scalar1` and `Scalar2`
+/// * `Constant` → `init_val` (`limited_memory_init_val`)
+/// * `Identity` → `1.0` (no upstream keyword; direct callers only)
+///
+/// Each degenerate denominator falls back to `1.0` independently, so
+/// `Scalar3`/`Scalar4` degrade to the mean of whichever term is
+/// well-defined rather than to a single fallback for the pair.
+/// `Scalar4`'s geometric mean is taken on the product of two
+/// non-negative terms; a non-positive product falls back to `1.0`
+/// rather than producing a NaN.
 ///
 /// Result is clamped to `[min_val, max_val]` per upstream's
 /// `limited_memory_init_val_{min,max}` defaults.
@@ -581,25 +617,34 @@ pub fn initial_hessian_scalar(
     s_dot_s: Number,
     s_dot_y: Number,
     y_dot_y: Number,
+    init_val: Number,
     min_val: Number,
     max_val: Number,
 ) -> Number {
+    let scalar1 = || {
+        if s_dot_s > 0.0 {
+            s_dot_y / s_dot_s
+        } else {
+            1.0
+        }
+    };
+    let scalar2 = || {
+        if s_dot_y > 0.0 {
+            y_dot_y / s_dot_y
+        } else {
+            1.0
+        }
+    };
     let raw = match init {
         InitialApprox::Identity => 1.0,
-        InitialApprox::Scalar1 => {
-            if s_dot_s > 0.0 {
-                s_dot_y / s_dot_s
-            } else {
-                1.0
-            }
+        InitialApprox::Scalar1 => scalar1(),
+        InitialApprox::Scalar2 => scalar2(),
+        InitialApprox::Scalar3 => 0.5 * (scalar1() + scalar2()),
+        InitialApprox::Scalar4 => {
+            let prod = scalar1() * scalar2();
+            if prod > 0.0 { prod.sqrt() } else { 1.0 }
         }
-        InitialApprox::Scalar2 => {
-            if s_dot_y > 0.0 {
-                y_dot_y / s_dot_y
-            } else {
-                1.0
-            }
-        }
+        InitialApprox::Constant => init_val,
     };
     raw.clamp(min_val, max_val)
 }
@@ -651,7 +696,7 @@ mod tests {
     #[test]
     fn identity_init_returns_one() {
         assert_eq!(
-            initial_hessian_scalar(InitialApprox::Identity, 1.0, 1.0, 1.0, 1e-8, 1e8),
+            initial_hessian_scalar(InitialApprox::Identity, 1.0, 1.0, 1.0, 1.0, 1e-8, 1e8),
             1.0
         );
     }
@@ -659,26 +704,75 @@ mod tests {
     #[test]
     fn scalar1_init_is_sy_over_ss() {
         // s_dot_s=4, s_dot_y=2 → 2/4 = 0.5.
-        let v = initial_hessian_scalar(InitialApprox::Scalar1, 4.0, 2.0, 0.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar1, 4.0, 2.0, 0.0, 1.0, 1e-8, 1e8);
         assert!((v - 0.5).abs() < 1e-15);
     }
 
     #[test]
     fn scalar2_init_is_yy_over_sy() {
         // y_dot_y=8, s_dot_y=2 → 4.
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 2.0, 8.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
         assert!((v - 4.0).abs() < 1e-15);
     }
 
     #[test]
+    fn scalar3_init_is_arithmetic_mean_of_scalar1_and_scalar2() {
+        // s_dot_s=4, s_dot_y=2 → scalar1 = 0.5; y_dot_y=8 → scalar2 = 4.
+        let v = initial_hessian_scalar(InitialApprox::Scalar3, 4.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!((v - 2.25).abs() < 1e-15, "got {v}");
+    }
+
+    #[test]
+    fn scalar4_init_is_geometric_mean_of_scalar1_and_scalar2() {
+        // scalar1 = 0.5, scalar2 = 4 → sqrt(2).
+        let v = initial_hessian_scalar(InitialApprox::Scalar4, 4.0, 2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!((v - 2.0_f64.sqrt()).abs() < 1e-15, "got {v}");
+    }
+
+    #[test]
+    fn scalar4_falls_back_rather_than_producing_nan() {
+        // s_dot_y < 0 makes scalar1 negative while scalar2 falls back to
+        // 1.0, so the product is negative — sqrt would be NaN. A NaN σ
+        // would propagate silently into the whole `B0` diagonal.
+        let v = initial_hessian_scalar(InitialApprox::Scalar4, 4.0, -2.0, 8.0, 1.0, 1e-8, 1e8);
+        assert!(v.is_finite(), "sigma must stay finite, got {v}");
+        assert_eq!(v, 1.0);
+    }
+
+    #[test]
+    fn constant_init_returns_init_val_not_the_curvature_formula() {
+        // Same (s, y) that gives scalar2 = 4 above; `constant` must
+        // ignore the pair entirely and return `init_val`.
+        let v = initial_hessian_scalar(InitialApprox::Constant, 4.0, 2.0, 8.0, 7.5, 1e-8, 1e8);
+        assert_eq!(v, 7.5);
+    }
+
+    #[test]
+    fn constant_init_is_still_clamped() {
+        let v = initial_hessian_scalar(InitialApprox::Constant, 4.0, 2.0, 8.0, 1e20, 1e-8, 1e8);
+        assert_eq!(v, 1e8);
+    }
+
+    #[test]
+    fn empty_history_sigma_honours_init_val() {
+        // Upstream's "B0 = limited_memory_init_val * I in the first
+        // iteration". This branch returned a hard-coded 1.0 before #677,
+        // which silently matched the default and hid the missing wiring.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.init_val = 3.0;
+        assert!(u.history.is_empty());
+        assert_eq!(u.compute_sigma_bfgs(), 3.0);
+    }
+
+    #[test]
     fn init_clamped_to_max() {
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e-20, 1.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e-20, 1.0, 1.0, 1e-8, 1e8);
         assert_eq!(v, 1e8);
     }
 
     #[test]
     fn init_clamped_to_min() {
-        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e20, 1.0, 1e-8, 1e8);
+        let v = initial_hessian_scalar(InitialApprox::Scalar2, 0.0, 1e20, 1.0, 1.0, 1e-8, 1e8);
         assert_eq!(v, 1e-8);
     }
 

@@ -23,7 +23,7 @@
 use crate::conv_check::opt_error::OptErrorConvCheck;
 use crate::eq_mult::least_square::LeastSquareMults;
 use crate::hess::exact::ExactHessianUpdater;
-use crate::hess::lim_mem_quasi_newton::{LimMemQuasiNewtonUpdater, UpdateType};
+use crate::hess::lim_mem_quasi_newton::{InitialApprox, LimMemQuasiNewtonUpdater, UpdateType};
 use crate::init::default::DefaultIterateInitializer;
 use crate::init::warm_start::WarmStartIterateInitializer;
 use crate::kkt::aug_system_solver::AugSystemSolver;
@@ -231,6 +231,15 @@ pub struct AlgorithmBuilder {
     /// the read sites were missing (gh#483, #191 round 2).
     pub limited_memory_init_val_max: Number,
     pub limited_memory_init_val_min: Number,
+    /// `limited_memory_initialization` — which formula picks the initial
+    /// Hessian scalar σ. Matches upstream's `scalar1` (σ = sᵀy/sᵀs).
+    /// pounce shipped `scalar2` (σ = yᵀy/sᵀy) with no way to change it,
+    /// because the option was registered and never read (#677).
+    pub limited_memory_initialization: InitialApprox,
+    /// `limited_memory_init_val` — σ on the first iteration, before any
+    /// curvature pair exists, and every iteration under
+    /// `InitialApprox::Constant`. Upstream default 1.0.
+    pub limited_memory_init_val: Number,
     /// Positions in the algorithm's compressed `x_var` space that enter
     /// the problem *nonlinearly* (gh#624). `None` — the default —
     /// approximates the Hessian over every variable, which is what the
@@ -270,6 +279,14 @@ pub struct AlgorithmBuilder {
     /// default `1e10`. Baked onto [`crate::ipopt_alg::IpoptAlgorithm`] by
     /// the solve path.
     pub kappa_sigma: Number,
+    /// `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation of
+    /// the equality multipliers once feasible (#677). Registered
+    /// upstream, refused by pounce as unimplemented until now. Default
+    /// `false` matches the registry; the limited-memory path turns it on
+    /// for itself in `application.rs`, as upstream's own option text
+    /// says it does.
+    pub recalc_y: bool,
+    pub recalc_y_feas_tol: Number,
     /// `kappa_d` — weight of the linear damping term added to the barrier
     /// objective/gradient (and dual-infeasibility) to handle one-sided
     /// bounds. Mirrors `IpIpoptCalculatedQuantities.cpp`, default `1e-5`.
@@ -908,12 +925,16 @@ impl Default for AlgorithmBuilder {
             limited_memory_max_history: 6,
             limited_memory_init_val_max: 1e8,
             limited_memory_init_val_min: 1e-8,
+            limited_memory_initialization: InitialApprox::Scalar1,
+            limited_memory_init_val: 1.0,
             limited_memory_nonlinear_vars: None,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
             fast_step_computation: false,
             kappa_sigma: 1e10,
+            recalc_y: false,
+            recalc_y_feas_tol: 1e-6,
             kappa_d: 1e-5,
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
@@ -1230,6 +1251,8 @@ impl AlgorithmBuilder {
                 max_history: self.limited_memory_max_history,
                 init_val_max: self.limited_memory_init_val_max,
                 init_val_min: self.limited_memory_init_val_min,
+                initial_approx: self.limited_memory_initialization,
+                init_val: self.limited_memory_init_val,
                 nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
                 ..LimMemQuasiNewtonUpdater::default()
             }),
@@ -1343,12 +1366,16 @@ mod tests {
                             limited_memory_max_history: 6,
                             limited_memory_init_val_max: 1e8,
                             limited_memory_init_val_min: 1e-8,
+                            limited_memory_initialization: InitialApprox::Scalar1,
+                            limited_memory_init_val: 1.0,
                             limited_memory_nonlinear_vars: None,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
                             fast_step_computation: false,
                             kappa_sigma: 1e10,
+                            recalc_y: false,
+                            recalc_y_feas_tol: 1e-6,
                             kappa_d: 1e-5,
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,

@@ -9,6 +9,92 @@ changes.
 
 ## [Unreleased]
 
+- **`limited_memory_initialization` and `limited_memory_init_val` now do
+  something** (#677).
+
+  Both were registered with upstream's defaults and read nowhere, so
+  setting either was a silent no-op — no effect, and no warning. Every
+  limited-memory solve used `scalar2` (σ = yᵀy/sᵀy) for the initial
+  Hessian scalar, because that is what the updater's own default happened
+  to be. Ipopt uses `scalar1` (σ = sᵀy/sᵀs). The two differ by
+  (yᵀy·sᵀs)/(sᵀy)², which is ≥ 1 and unbounded as conditioning degrades,
+  so on a badly scaled problem an L-BFGS run could not be made to match
+  Ipopt's and there was no option that would fix it. Found while
+  diagnosing a 59,939-variable CasADi model whose duals diverged under
+  POUNCE + L-BFGS but not Ipopt + L-BFGS.
+
+  All five upstream keywords are now honored — `scalar1`, `scalar2`,
+  `scalar3` (arithmetic mean), `scalar4` (geometric mean) and `constant`;
+  the last three were not implemented at all. `limited_memory_init_val`
+  now sets σ on the first iteration, where a hard-coded `1.0` — the same
+  value as the default, which is what kept the omission invisible — used
+  to be.
+
+  **The default is now `scalar1`, matching Ipopt.** The exact-Hessian
+  path is untouched — all 57 fixtures identical — since σ is only
+  reachable under `hessian_approximation=limited-memory`. On the L-BFGS
+  leg 20 of 57 fixtures move, and the movement is one-directional:
+  `jit1`, `jit1_boxed` and `jit1_node` go from three different wrong
+  answers at the 3000-iteration cap to the same objective in ~35
+  iterations; `pooling_rt2stp` goes from `RestorationFailed` to solved;
+  `autocorr_bern55-06` goes from 2924 iterations to 106 with a better
+  objective. `deb7` reaches the right objective (97.5633 against a true
+  97.5599) where `scalar2` was 39% wrong. `cresc4` fails either way
+  under plain L-BFGS, but with the `mu_strategy=adaptive` it is
+  documented to need, `scalar1` solves it in 86 iterations to eight
+  matching digits while `scalar2` still hits the cap. No fixture is
+  worse in outcome.
+
+- **`recalc_y` and `recalc_y_feas_tol` are implemented** (#677).
+
+  Previously refused outright as unimplemented, so an L-BFGS user could
+  not reach Ipopt's behaviour at all. The multipliers are now
+  re-estimated by least squares once the constraint violation drops
+  below `recalc_y_feas_tol`, using the same calculator the initializer
+  uses.
+
+  **Default stays `no`, including under `limited-memory`, and that
+  differs from Ipopt deliberately.** Ipopt's own option text says it is
+  used by default with a quasi-Newton Hessian; auto-enabling it here was
+  implemented and then measured, and it took 7 of 57 fixtures from
+  solved to not solved on the L-BFGS leg with nothing moving the other
+  way. Re-estimating `y` on every feasible iteration overwrites Newton
+  multipliers that were converging, and the solve stalls short of the
+  certificate. It remains the right tool for the case it was built for —
+  a quasi-Newton solve that reaches a feasible primal and cannot drive
+  `inf_du` down — but it has to be asked for.
+
+- **The fixture sweep runs an L-BFGS leg** (#677).
+
+  `scripts/sweep-fixtures.sh` now sweeps every fixture twice, `exact` and
+  `lbfgs`, because the corpus previously ran the exact-Hessian path only
+  — which is why a wrong σ default survived since the option port. Both
+  the Python frontend and the CasADi plugin select `limited-memory` on
+  their own when no exact Hessian is available, so that leg is what an
+  embedder gets by default.
+
+- **`linear_system_scaling=slack-based` now says it is doing nothing**
+  (#677).
+
+  The value is registered, so it was accepted, but it reached the
+  no-scaling fallback through a catch-all arm and emitted no notice —
+  `mc19` warned, `slack-based` did not, though a code comment claimed
+  both did. It is not an obscure setting: it is what Ipopt's recommended
+  configuration for large collocation NLPs uses, so the users most likely
+  to set it were the least likely to learn it was inert. It still falls
+  back to no scaling; it now warns when it does. (`ruiz` is implemented
+  and unaffected.)
+
+- **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
+
+  Measures per-iteration wall time against `n` over a family of one
+  problem at geometrically increasing sizes, solving each size twice at
+  different `max_iter` so fixed setup cost cancels, and reports a log-log
+  slope. Run against the limited-memory path from `n = 2,000` to
+  `n = 128,000`: slope 1.05 (R² 0.993) — linear, as advertised, with no
+  hidden quadratic. The exact-Hessian leg reads 0.96 over the same
+  family.
+
 - **The CasADi plugin builds against CasADi master again** (#668).
 
   CasADi renamed the runtime helper `convexify_eval` to

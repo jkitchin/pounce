@@ -130,6 +130,24 @@ pub struct IpoptAlgorithm {
     /// `kappa_sigma` for the post-AcceptTrialPoint multiplier reset
     /// (`IpIpoptAlg.cpp:correct_bound_multiplier`, line 1055-1134).
     pub kappa_sigma: Number,
+    /// `recalc_y` — recompute `y_c`/`y_d` as least-square estimates
+    /// once the iterate is feasible enough, instead of carrying the
+    /// multipliers the Newton step produced. Upstream registers this
+    /// `no`, but its own option text says "If a limited memory
+    /// quasi-Newton option is chosen, this is used by default", so the
+    /// L-BFGS path auto-enables it (see
+    /// `application.rs`). Costs one extra augmented-system solve on
+    /// every iteration where it fires.
+    ///
+    /// It exists because a quasi-Newton model's multipliers are only as
+    /// good as the Hessian approximation behind them: L-BFGS can reach
+    /// a feasible primal and still fail to drive `inf_du` down, because
+    /// the dual step is computed from an approximate `W`. Re-estimating
+    /// `y` by least squares side-steps the approximation entirely.
+    pub recalc_y: bool,
+    /// `recalc_y_feas_tol` — the constraint-violation threshold below
+    /// which [`Self::recalc_y`] fires. Upstream default `1e-6`.
+    pub recalc_y_feas_tol: Number,
     pub max_iter: Index,
     /// Initial primal step length offered to the line search at the
     /// top of each iteration. Mirrors `IpBacktrackingLineSearch`'s
@@ -420,6 +438,8 @@ impl IpoptAlgorithm {
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
+            recalc_y: false,
+            recalc_y_feas_tol: 1e-6,
             max_iter: 3000,
             alpha_init: 1.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
@@ -2745,6 +2765,23 @@ impl IpoptAlgorithm {
         // 8. Bound multiplier kappa_sigma reset.
         self.correct_bound_multiplier();
 
+        // 8b. `recalc_y` — re-estimate the equality/inequality
+        //     multipliers by least squares once the iterate is feasible
+        //     enough (`IpIpoptAlg.cpp:AcceptTrialPoint`). Off unless the
+        //     user asks; see `application.rs` for why we do not turn it
+        //     on for L-BFGS the way upstream's option text says it does.
+        //
+        //     Ordering: this runs after the kappa_sigma reset. The two
+        //     are not obviously independent — the least-square RHS is
+        //     `−∇f + Pₗz_L − Pᵤz_U` (`IpLeastSquareMults.cpp:54`), so it
+        //     reads the bound multipliers step 8 just corrected — but
+        //     running the sweep with the two swapped produces a
+        //     byte-identical corpus, so the coupling does not bite in
+        //     practice. Kept here on the argument that `y` should be
+        //     estimated against the multipliers the iteration actually
+        //     ends with.
+        self.maybe_recalc_y();
+
         // Sub-iteration checkpoint: the trial point was accepted; α and
         // the new iterate are in place (before the loop's iter bookkeeping
         // and the next `IterStart`).
@@ -3380,6 +3417,83 @@ impl IpoptAlgorithm {
             &*bounds.d_l,
             &*bounds.d_u,
         );
+    }
+
+    /// `recalc_y` — replace `y_c`/`y_d` with least-square estimates once
+    /// the iterate is feasible enough. Port of the `recalc_y_` block in
+    /// `IpIpoptAlg.cpp:AcceptTrialPoint`.
+    ///
+    /// Silently does nothing — leaving the Newton-step multipliers in
+    /// place — when disabled, when the violation is still above
+    /// `recalc_y_feas_tol`, when there is nothing to estimate, or when
+    /// the augmented-system solve fails. A failed estimate is not an
+    /// error: the multipliers we already have are valid, just less
+    /// accurate, so falling back to them costs accuracy and never
+    /// correctness. Same reasoning as the initializer's `y0` fallback in
+    /// `init/default.rs`.
+    fn maybe_recalc_y(&mut self) {
+        if !self.recalc_y {
+            return;
+        }
+        let Some(nlp) = self.nlp.as_ref().map(Rc::clone) else {
+            return;
+        };
+        // Feasibility gate. Upstream compares against the same
+        // `curr_constraint_violation` the convergence check uses.
+        if self.cq.borrow().curr_constraint_violation() >= self.recalc_y_feas_tol {
+            return;
+        }
+        let (n_yc, n_yd) = {
+            let d = self.data.borrow();
+            match d.curr.as_ref() {
+                Some(c) => (c.y_c.dim(), c.y_d.dim()),
+                None => return,
+            }
+        };
+        if n_yc + n_yd == 0 {
+            return;
+        }
+        // The augmented-system solver is owned by the search-direction
+        // calculator, as it is for the initializer's least-square call.
+        let Some(sd) = self.search_dir.as_mut() else {
+            return;
+        };
+        let mut new_y_c = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yc).make_new_dense();
+        let mut new_y_d = pounce_linalg::dense_vector::DenseVectorSpace::new(n_yd).make_new_dense();
+        let mut pd_guard = sd.pd_solver_mut();
+        let ok = self.bundle.eq_mult.calculate_y_eq(
+            &self.data,
+            &self.cq,
+            &nlp,
+            pd_guard.aug_solver_mut(),
+            &mut new_y_c,
+            &mut new_y_d,
+        );
+        drop(pd_guard);
+        if !ok {
+            tracing::debug!(
+                target: "pounce::algorithm",
+                "recalc_y: least-square solve failed at iter {}, keeping Newton multipliers",
+                self.data.borrow().iter_count,
+            );
+            return;
+        }
+        // Share x/s/z/v; swap only the equality/inequality multipliers.
+        let curr = match self.data.borrow().curr.clone() {
+            Some(c) => c,
+            None => return,
+        };
+        let new_iv = crate::iterates_vector::IteratesVector::new(
+            curr.x.clone(),
+            curr.s.clone(),
+            Rc::new(new_y_c),
+            Rc::new(new_y_d),
+            curr.z_l.clone(),
+            curr.z_u.clone(),
+            curr.v_l.clone(),
+            curr.v_u.clone(),
+        );
+        self.data.borrow_mut().set_curr(new_iv);
     }
 
     /// Port of `IpIpoptAlg::correct_bound_multiplier`

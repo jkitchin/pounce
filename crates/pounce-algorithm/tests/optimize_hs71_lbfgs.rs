@@ -218,3 +218,66 @@ fn hs071_solves_with_lbfgs_and_adaptive_mu() {
         stats.final_objective,
     );
 }
+
+/// `recalc_y` must *change the solve*, not merely parse (#677).
+///
+/// The caution this guards against is spelled out in #551: "A read site
+/// that parses a value and discards it is the same silent no-op this
+/// whole line of work exists to kill, and it is indistinguishable from a
+/// real fix by inspection. That test is the deliverable, not the line
+/// that reads the field." `recalc_y` was refused as unimplemented until
+/// #677, so nothing downstream of the option existed to test.
+///
+/// Asserting the *direction* of the change would be asserting a
+/// preference — re-estimating `y` by least squares is not uniformly
+/// better, which is exactly why pounce leaves it off by default. What
+/// must hold is that the switch reaches the algorithm at all, so this
+/// pins the trajectory moving, and pins the answer surviving it.
+#[test]
+fn recalc_y_changes_the_lbfgs_trajectory() {
+    fn run(recalc: bool) -> (usize, Number) {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, true)
+            .unwrap();
+        app.options_mut()
+            .set_string_value("recalc_y", if recalc { "yes" } else { "no" }, true, false)
+            .unwrap();
+        // Default 1e-6 leaves the gate shut on a short HS071 run; open
+        // it so the feature actually fires within the solve.
+        app.options_mut()
+            .set_numeric_value("recalc_y_feas_tol", 1e2, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default())) as _;
+        let status = app.optimize_tnlp(tnlp);
+        let stats = app.statistics();
+        eprintln!(
+            "HS71+LBFGS recalc_y={recalc}: status={status:?} iter={} obj={}",
+            stats.iteration_count, stats.final_objective,
+        );
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "recalc_y={recalc} did not solve: {status:?}",
+        );
+        // Whatever the multipliers do, the primal answer must stand.
+        assert!(
+            (stats.final_objective - 17.014017).abs() < 1e-4,
+            "recalc_y={recalc}: objective {} drifted",
+            stats.final_objective,
+        );
+        (stats.iteration_count as usize, stats.final_objective)
+    }
+
+    let (it_off, _) = run(false);
+    let (it_on, _) = run(true);
+    assert_ne!(
+        it_off, it_on,
+        "recalc_y did not change the trajectory ({it_off} iterations either way) \
+         — the option is parsed but not reaching the algorithm",
+    );
+}
