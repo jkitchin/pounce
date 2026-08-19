@@ -1298,4 +1298,56 @@ mod tests {
         let mut qs = QuadraticStructure::new(0);
         assert!(qs.push_factored_form(&terms, &[], 0.0).is_none());
     }
+
+    /// The other half of `product_lost`: a coefficient product that
+    /// **underflows** out of two nonzero factors.
+    ///
+    /// `(10⁻²⁰⁰·x₀)²` has `2w·b² = 2·10⁻⁴⁰⁰`, which is not representable and
+    /// flushes to zero — so the stored Hessian would claim the row has no
+    /// second derivative in `x₀` while its tape squares a nonzero residual.
+    /// Exactly `underflowing_body` from gh #685's file, reaching the same
+    /// defect through gh #673's door.
+    ///
+    /// gh #711's review found this branch pinned by nothing: disabling both
+    /// early product refusals together failed only the overflow assertion
+    /// above. Same shape as the hole the review opened with, one predicate
+    /// over.
+    #[test]
+    fn a_coefficient_product_that_underflows_is_refused() {
+        let coefs = [(0usize, 1e-200)];
+        let terms = [SquareTerm {
+            weight: 1e-200,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_none(),
+            "a form whose Hessian entry underflowed to zero was admitted",
+        );
+        assert!(qs.is_empty(), "a refused form left state behind");
+    }
+
+    /// The underflow refusal is about a product that *lost* something, not
+    /// about small numbers. A weight and coefficients that stay
+    /// representable are admitted, however small the entry is.
+    #[test]
+    fn a_small_but_representable_hessian_entry_is_still_admitted() {
+        let coefs = [(0usize, 1e-100)];
+        let terms = [SquareTerm {
+            weight: 1e-100,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(&terms, &[], 0.0)
+            .expect("2e-300 is representable and must not be refused");
+        let x = [3.0];
+        // `w·(b·x)²` — the coefficient is inside the square, so this is
+        // `1e-100 · (3e-100)²`, and the Hessian entry `2·1e-100·(1e-100)²`
+        // is `2e-300`: small, representable, nothing lost.
+        let l = 1e-100 * 3.0;
+        assert_eq!(qs.value(f, &x), 1e-100 * (l * l));
+    }
 }
