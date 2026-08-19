@@ -499,7 +499,10 @@ pub struct Presolve {
     /// The reduced problem to hand to the solver.
     pub reduced: QpProblem,
     /// Constant added to the objective by variable substitutions; the
-    /// reduced objective plus this equals the original objective.
+    /// reduced objective plus this equals the original objective. For an
+    /// iterated presolve this is the sum over `chain` — the constant between
+    /// the *final* `reduced` problem and the user's, not one layer's share of
+    /// it (gh #697).
     pub obj_offset: f64,
     /// Original problem dimensions.
     orig_n: usize,
@@ -912,9 +915,18 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> Pre
         return PresolveOutcome::Reduced(only);
     }
     let reduced = chain.last().expect("chain non-empty").reduced.clone();
+    // The constant each layer moved into its own objective, composed (gh
+    // #697). Layer `Lₖ`'s objective is `Lₖ₊₁`'s plus `Lₖ₊₁.obj_offset`, so
+    // telescoping the chain gives the constant between the *final* reduced
+    // problem — the one this wrapper hands the solver — and the user's. Left
+    // at `0.0`, the accessor reported "presolve moved no constant" for every
+    // multi-layer reduction, which is the common case. No double-count in
+    // `postsolve`: with a non-empty chain it folds the layers and never reads
+    // this field.
+    let obj_offset = chain.iter().map(|l| l.obj_offset).sum();
     PresolveOutcome::Reduced(Presolve {
         reduced,
-        obj_offset: 0.0,
+        obj_offset,
         orig_n: prob.n,
         orig_m_eq: prob.m_eq(),
         orig_m_ineq: prob.m_ineq(),

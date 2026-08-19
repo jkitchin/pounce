@@ -105,6 +105,40 @@ changes.
   solver by the reformulation-cost guards, and the members that do route
   conic carry SOC blocks). `POUNCE_DBG_GONDZIO=1` prints the per-solve
   corrector tally so this is checkable rather than assumed.
+- **`Presolve::obj_offset` now reports the whole reduction chain, not
+  `0.0`** (#697).
+
+  The fixpoint wrapper `presolve` returns holds the composed reduction:
+  its per-layer objective offsets live in `chain`, and only `postsolve`
+  walked that chain. The public aggregate accessor was built with a
+  literal `obj_offset: 0.0`, so any reduction that took **two or more
+  layers** — the common case — reported that presolve had moved no
+  constant into the objective however large a constant it had actually
+  moved. It is now the sum over the chain, which telescopes to the
+  constant between the final `reduced` problem and the user's. No
+  double-count: with a non-empty chain `postsolve` folds the layers and
+  never reads this field.
+
+  The reader that made a stale `0.0` matter is #689's `obj_constant`,
+  which the CLI builds from the `.nl` degree-0 term *plus this offset* to
+  normalize the scale-relative stopping test. Where presolve took more
+  than one layer only the `.nl` term survived. Bounded, but not nothing:
+  `obj_constant` is a convergence-test normalizer only — it enters no
+  residual, no direction, no dual, and not `QpSolution::obj` — so it
+  cannot produce a wrong answer, it can only leave the relative gap test
+  too loose. That is a trajectory/accuracy effect, which is the class
+  gh#544 established goes unnoticed, so it is fixed rather than filed as
+  cosmetic.
+
+  Measured over the CLI fixture corpus, three models reach the convex
+  route with a multi-layer presolve and a nonzero offset that was being
+  dropped: `dual_order` (2 layers, `−59` against an `obj_constant` of
+  `909`), `dual_scaled` (2 layers, `−5999` against `9.0e6`) and `tame`
+  (2 layers, `1`). None of them moves: `scripts/sweep-fixtures.sh` is
+  bit-for-bit identical across all four legs — `exact` and `lbfgs`, at
+  the default route and at `qp_hsde=no` — so this corrects the value
+  every future reader gets without rerouting any solve today.
+
 - **HSDE no longer certifies `Optimal` a few hundred short of the optimum
   when the objective carries a large constant** (#689).
 
