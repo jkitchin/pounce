@@ -44,6 +44,46 @@ changes.
   rather than reported. If you solve a least-squares QP whose optimum is near
   zero and see an iteration-limit verdict where 0.10.0 reported success, this
   is why, and a larger `max_iter` is the remedy.
+- **Least-squares models now get the constant-structure fast path too**
+  (#673).
+
+  A degree-2 objective or row is evaluated from its constant matrix instead
+  of from an AD tape (#588, Q4), but only when the `.nl` writer had already
+  expanded it. A model written as a sum of squared residuals — which is
+  every least-squares model, and 41 of `airport.nl`'s 42 rows — kept its
+  tape, because reading `(x − 500000)²` back as `x² − 10⁶x + 2.5·10¹¹`
+  cancels five digits and is not a rewrite anyone should make behind a
+  user's back.
+
+  Such a body is now kept in the shape it was written: `Σ wₖ(bₖᵀx + dₖ)²`,
+  squared at evaluation time the way the tape squares it, so the fast path
+  costs no accuracy — and its terms are summed with the same compensation
+  #702 gave the expanded read-out, so it is not merely as good as the tape
+  but slightly better. The Hessian was never the problem — it is
+  constant either way — and is assembled once as before. `airport.nl` goes
+  from 1 of 42 rows on the fast path to 42 of 42 plus its objective, and 24
+  fixtures in total change how they are evaluated.
+
+  No model changes its answer: the evaluator differential test against the
+  tape passes with every tolerance and ulp pin as it was, and its randomized
+  battery now emits squared affine forms so the new read-out is covered by
+  more than the repository's fixtures. The fixture sweep moves one
+  line of 116 — `airport.nl` under limited-memory takes 57 iterations where
+  it took 59, at the same status and objective — and that is #702's
+  compensated summation reaching 42 rows it could not reach before, not the
+  new read-out: with the compensation left off, those rows evaluate
+  bit-identically to the tape they replace. On a generated 1000-variable
+  least-squares model, Lagrangian Hessian evaluation drops from 6.70 s to
+  0.26 s and the solve from 23.1 s to 15.4 s over an identical 53-iteration
+  trajectory.
+
+  A body mixing a square with a cross term `c·xᵢxⱼ`, one whose sum spine goes
+  through a declared common expression, and one that lost a coefficient to
+  cancellation (#685) all still keep their tapes. That last case covers two
+  routes to the same loss, not one: a lossy body written as a flat sum of
+  monomials is refused for its shape, and a genuinely factored body that
+  loses a Hessian entry while its squares are combined is refused where
+  they are combined. Both fall back to the tape.
 
 - **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
   iterations** (#702).
@@ -481,6 +521,159 @@ changes.
   — a false verdict on a feasible model — to `Solve_Succeeded` at 109,
   objective `0.8718975283` against the exact-Hessian path's
   `0.8718975273`.
+- **Eight more line-search options stop being silent no-ops** (#551, #677).
+
+  All eight were registered with upstream's defaults and read nowhere, so
+  setting one did nothing and said nothing. Seven had the behaviour
+  already implemented and were missing only the read site: `delta` (the
+  switching rule's multiplier on the constraint violation, Eqn. (19)),
+  `nu_init`, `nu_inc`, `rho` and `eta_penalty` (the penalty acceptor's ν
+  update and Armijo relaxation, `line_search_method=penalty`), and
+  `filter_margin_fact` / `filter_max_margin` (the adaptive-μ
+  `obj-constr-filter` margin) now reach the objects that consume them.
+  `alpha_red_factor`, the ninth member of the group, landed separately on
+  #678.
+
+  The eighth, `accept_after_max_steps`, needed the escape hatch itself:
+  the α-loop now accepts a trial point once that many backtracking steps
+  have been taken, whatever the acceptor makes of it, leaving the soft
+  restoration phase and resetting the acceptor first — a port of
+  `IpBacktrackingLineSearch.cpp:759-770`. `-1`, the registered default,
+  disables it, so nothing takes that branch unless asked.
+
+  **No default moves.** Each struct default already equalled the
+  registered default, so only a solve that sets one of these sees a
+  change; the fixture sweep is identical on both legs.
+
+- **`theta_min` and `alpha_for_y_tol` are refused rather than ignored**
+  (#551).
+
+  Neither names a feature POUNCE has. `theta_min` belongs to Ipopt's
+  CG-penalty acceptor (`IpCGPenaltyLSAcceptor`), which POUNCE does not
+  implement — the filter line search derives its own `theta_min` from
+  `theta_min_fact * max(1, θ₀)` and never takes it directly.
+  `alpha_for_y_tol` is the threshold of the `primal-and-full` /
+  `dual-and-full` multiplier-step rules, which POUNCE does not have.
+  Both now fail with a message naming the missing feature and the option
+  to reach for instead, as the rest of the refusal table does.
+
+- **Seven options were on the silent list by mistake — the scan could
+  not see their read sites** (#551, #677).
+
+  `timing_statistics`, `derivative_test_perturbation`,
+  `derivative_test_tol` and the four constant-derivative hints
+  (`grad_f_constant`, `hessian_constant`, `jac_c_constant`,
+  `jac_d_constant`) were all wired and consumed. Each reached its
+  accessor through a loop variable (`["timing_statistics",
+  "print_timing_statistics"].iter().any(…)`,
+  `HINT_OPTIONS.map(|name| …)`) or a local helper named `num` rather than
+  `read_num`, and `no_silent_options.rs` keys on the option name **as it
+  appears at the accessor**, so all seven read as "no key here" and sat
+  in the debt list as if they did nothing.
+
+  This is #551's caution 2 turned inside out — the scan is right to key
+  on the name at the accessor, and the read sites now spell the name out
+  there. No behaviour changed for any of the seven; what changed is that
+  the tool can see them, and probes in the scan's own sanity check keep
+  the literal-key form from regressing and handing any of them its
+  silence back.
+
+  The rewrite is also pinned where it could go wrong:
+  `each_constant_derivative_hint_lights_up_its_own_slot` asserts that
+  setting one hint lights up that hint's slot and no other, since
+  `reconcile` pairs each flag with the model's proof for the same index
+  and a transposed pair would reuse the wrong derivative.
+  `the_derivative_checker_knobs_change_the_verdict` drives an exactly
+  correct gradient through the checker and shows a coarse
+  `derivative_test_perturbation` making it look wrong and
+  `derivative_test_tol` clearing it again.
+
+- **`max_resto_iter` reaches the restoration convergence check** (#551,
+  #677).
+
+  `RestoConvCheckAdapter` has capped *successive* restoration iterations
+  all along — under the field name `maximum_resto_iters`, which is why
+  grepping the option name found only the registry (#551's caution 2).
+  The number it enforced was a constant in `resto_inner_solver.rs`, so
+  setting `max_resto_iter` did nothing. It is now
+  `AlgorithmBuilder::resto::max_resto_iter`, read in
+  `algorithm_builder_from_options`.
+
+  **A registered default that POUNCE does not use, left as it was on
+  purpose.** The registry declares Ipopt's `3000000`; POUNCE has enforced
+  `3000` since the cap landed. Wiring the option must not move what an
+  unset option does, so the effective cap stays `3000` and only an
+  explicit `max_resto_iter` changes it. Adopting upstream's number would
+  let restorations POUNCE currently truncates run on — a trajectory
+  change, and one that needs its own measurement.
+  `max_resto_iter_default_is_pounces_cap_not_the_registered_one` pins
+  both halves so neither side can drift unnoticed.
+
+- **The corrector knobs and three restoration sub-capabilities are
+  refused rather than ignored** (#551).
+
+  `corrector_type`, `skip_corr_if_neg_curv`, `skip_corr_in_monotone_mode`
+  and `corrector_compl_avrg_red_fact` were classified as missing read
+  sites on the strength of POUNCE having *a* corrector. They configure a
+  different one: the registry files them under
+  `FilterLSAcceptor::RegisterOptions`, and what they select is
+  `FilterLSAcceptor::TryCorrector` — a corrector step tried *inside the
+  line search*. POUNCE's corrector is Mehrotra's, in the search-direction
+  right-hand side, reached through `mehrotra_algorithm`, which is read and
+  honoured. No acceptor here takes a corrector trial, so the four are
+  refused, and the message says which corrector POUNCE does have.
+
+  `expect_infeasible_problem_ctol` / `_ytol` steer
+  `IpBacktrackingLineSearch`'s `count_successive_shortened_steps_`
+  machinery, which POUNCE does not have;
+  `resto_failure_feasibility_threshold` asks for a reclassification of a
+  stopped restoration that POUNCE does not perform; and
+  `limited_memory_special_for_resto=yes` asks for the special
+  quasi-Newton update Ipopt dropped in Nov 2010. All three are
+  sub-capabilities of features that *do* run, so each message says what
+  the parent feature still does — restoration runs, L-BFGS runs in the
+  restoration sub-solve — rather than leaving a user to conclude
+  restoration is missing.
+
+  The default gate is unchanged: `corrector_type=none`,
+  `limited_memory_special_for_resto=no` and an `ipopt.opt` that spells
+  out any of these defaults still parse and solve.
+
+- **`tau_min`, `s_max`, `neg_curv_test_tol` and `neg_curv_test_reg` now do
+  something; `fixed_mu_oracle` says it does not** (#551, #677).
+
+  All five were registered with upstream's defaults and read nowhere, so
+  setting one did nothing and reported nothing.
+
+  `tau_min` (the floor on the fraction-to-the-boundary parameter, τ =
+  max(`tau_min`, 1 − μ)) reaches both μ updaters and the restoration
+  sub-solve. `s_max` reaches the `s_d` / `s_c` scaling of the KKT error
+  test. `neg_curv_test_tol` and `neg_curv_test_reg` configure the
+  inertia-free curvature test of Zavala & Chiang (2014), which is now
+  implemented: the previous field only turned the inertia check *off*,
+  with nothing in its place, so honoring the option before this would
+  have been worse than ignoring it.
+
+  **No default changes and the fixture corpus is byte-identical on both
+  legs.** Every struct default already equalled the registered default —
+  0.99, 100, 0.0 and `yes` respectively — which is precisely why the
+  omissions were invisible. What changes is that setting them now works:
+  `tau_min=0.5` moves 33 of 118 fixture-legs (`csfi2` 35 → 28, `deb7`
+  154 → 139, `cresc4` 81 → 1081), and `neg_curv_test_tol=1e-11` moves
+  11 of 59 fixtures — some sharply better
+  (`csfi2` 35 → 27 and to `Solve_Succeeded`), some sharply worse
+  (`eigenb2` 67 → 960), and, on `autocorr_bern55-06` and
+  `pooling_rt2stp`, to a **different, worse objective**. That last case
+  is the one worth naming: accepting a factorization whose inertia is
+  wrong can produce a tolerance-legal wrong answer, not merely a slower
+  one. It stays off by default, and `docs/src/options.md` now carries
+  the measured table rather than an assurance.
+
+  `fixed_mu_oracle` is refused instead. POUNCE seeds μ on the switch out
+  of free mode from the average complementarity, which is exactly the
+  option's default `average_compl`; the probing / LOQO / quality-function
+  oracles exist but are wired only to `mu_oracle`, which drives μ in free
+  mode. Asking for one of them used to silently get `average_compl`.
 
 - **`limited_memory_initialization` and `limited_memory_init_val` now do
   something** (#677).
@@ -709,6 +902,50 @@ changes.
   fixture corpus is identical on both legs. `mc19` remains unimplemented
   and still falls back, now with a test pinning that so the fallback
   stays deliberate.
+
+- **Two warnings print as paragraphs again, not with 18-space gaps mid-sentence.**
+
+  The convex caching-hint warning (gh#588) had its line continuations
+  eaten when it was written, so `hessian_constant` on a convex model
+  printed one 500-character line with ragged holes in it. Text only; the
+  warning says what it always said.
+
+- **The 111 per-backend linear-solver knobs warn instead of going
+  silent, and are refused when they are all a run sets** (#551, #677).
+
+  `ma27_*`, `ma77_*`, `ma86_*`, `ma97_*`, `mumps_*`, `pardiso_*`,
+  `pardisomkl_*`, `spral_*`, `wsmp_*` and `pardisolib` tune backends
+  POUNCE does not ship — it factors the KKT system with `feral` or MA57 —
+  and were registered, accepted, and ignored without a word. Setting one
+  now prints a warning naming the backend and every knob of that family
+  it saw, and the solve continues.
+
+  **Warning and not refusal — except when they are all there is.** A
+  portable `ipopt.opt` routinely configures several backends at once so
+  one file runs everywhere; refusing would fail that file over knobs the
+  run never touches, breaking the compatibility the registry exists to
+  provide. This follows the precedent set for the caching hints
+  (`hessian_constant` and friends), which warn for the same reason. One
+  line per backend family, not per option, and only for a value that
+  differs from the registered default — a default run is still
+  completely silent.
+
+  That argument has a premise, though: the file has other business here.
+  A run whose options are *nothing but* backend knobs is **refused**,
+  because nothing in it survives — warning and solving would answer a
+  request to tune the linear solver by tuning nothing and reporting
+  success, which is the shape of the defect rather than a fix for it.
+  One option POUNCE reads is enough to put the file back on the warning
+  path, and it counts by being *mentioned*: `tol` at its default is
+  still a statement about this solve. `option_file_name` is the one
+  exemption — it says where the options came from, not what to solve, so
+  pointing at a backend-only file is refused just as passing the same
+  knobs on the command line is. A file that names the backend it tunes
+  never gets this far; `linear_solver=ma97` is refused on its own.
+
+  `hsllib` keeps its refusal: POUNCE *has* an HSL backend, so that one is
+  a caller reaching for a solver it can actually run, by a mechanism it
+  does not have.
 
 - **New `scripts/scaling-probe.sh`** (#677) — empirical complexity check.
 
@@ -994,6 +1231,35 @@ changes.
 
   This is one option. The remaining registered names with no located
   consumer are #551's ongoing work.
+- **The sIPOPT option names do what they say** (#551, #677).
+
+  `compute_red_hessian`, `rh_eigendecomp`, `run_sens`,
+  `sens_boundcheck`, `sens_bound_eps` and `sens_max_pdpert` were
+  registered so an `ipopt.opt` written for sIPOPT parses unchanged, and
+  every one of them was then ignored: the reduced Hessian, its
+  eigendecomposition and the bound refinement were reachable only
+  through the `pounce` driver's own `--*` flags or the
+  `pounce-sensitivity` builder. Setting the option that names them did
+  nothing at all, silently. They are now read — once, in
+  `pounce_sensitivity::SensOptionOverrides` — and honoured by both the
+  driver and `SensSolve`.
+
+  Two of them do **not** take upstream's registered default, because
+  that default is not what pounce does today and adopting it would
+  change answers for people who never set the option: `run_sens`
+  (registered `no`) only suppresses a step when explicitly set to `no`,
+  since the suffix-driven path runs one by default; and
+  `sens_max_pdpert` (registered `1e-3`) applies no cap at all unless
+  explicitly set, since pounce has always reported the step regardless
+  of how hard the converged KKT factor was regularized. Both
+  discrepancies are documented at the read site and in
+  `docs/src/sensitivity.md`.
+
+  `n_sens_steps` is refused rather than wired: pounce computes the
+  single `sens_state_1` perturbation tier, and upstream's higher tiers
+  do not exist here, so a value above the default now fails with an
+  explanation instead of quietly meaning "one tier". `n_sens_steps=1`
+  still parses.
 
 - **The CasADi plugin builds against CasADi master again** (#668).
 

@@ -302,6 +302,16 @@ pub struct AlgorithmBuilder {
     /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
     /// solve path.
     pub kappa_d: Number,
+    /// `s_max` — cap on the average multiplier magnitude used to build
+    /// the `(s_d, s_c)` scaling factors of the KKT error test
+    /// (`IpIpoptCalculatedQuantities.cpp:ComputeOptimalityErrorScaling`,
+    /// the paragraph after Eqn. (6) of the implementation paper).
+    /// Registered default `100`, which is what
+    /// [`crate::ipopt_cq::IpoptCalculatedQuantities`] already carries as
+    /// its struct default, so forwarding it is behaviour-neutral for a
+    /// run that does not set it (#551 / #677). Baked onto the cq by the
+    /// solve path, next to `kappa_d`.
+    pub s_max: Number,
     /// `tiny_step_tol` — relative primal step size below which the full
     /// step is accepted without line search; repeated tiny steps
     /// terminate the solve. Mirrors `IpBacktrackingLineSearch.cpp`,
@@ -527,6 +537,14 @@ pub struct MuOptions {
     pub mu_superlinear_decrease_power: Number,
     pub mu_allow_fast_monotone_decrease: bool,
     pub barrier_tol_factor: Number,
+    /// `tau_min` — floor on the fraction-to-the-boundary parameter
+    /// τ = max(tau_min, 1 − μ). Registered default 0.99, which is what
+    /// both `MonotoneMuUpdate` and `AdaptiveMuUpdate` already carry as
+    /// their struct default, so forwarding it is behaviour-neutral for
+    /// a run that does not set the option (#551 / #677). Consumed by
+    /// both updaters; the adaptive one also uses it in the monotone
+    /// mode and for the post-oracle τ = max(tau_min, 1 − NLP error).
+    pub tau_min: Number,
     /// `sigma_max` / `sigma_min` — clamp on the centering parameter σ
     /// chosen by `QualityFunctionMuOracle`. Only consumed when
     /// `mu_strategy=adaptive` and `mu_oracle=quality-function`.
@@ -579,6 +597,16 @@ pub struct MuOptions {
     /// `adaptive_mu_kkt_norm_type` — norm used to score the iterate
     /// in adaptive globalization decisions.
     pub adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm,
+    /// `filter_margin_fact` — width factor of the margin an entry must
+    /// clear in the `obj-constr-filter` adaptive globalization test
+    /// (`margin = filter_margin_fact * min(filter_max_margin, err)`).
+    /// Only consumed when `mu_strategy=adaptive` and
+    /// `adaptive_mu_globalization=obj-constr-filter` (the default).
+    /// Default 1e-5, from `IpAdaptiveMuUpdate.cpp:RegisterOptions`.
+    pub filter_margin_fact: Number,
+    /// `filter_max_margin` — cap on the margin above. Default 1.0,
+    /// from `IpAdaptiveMuUpdate.cpp:RegisterOptions`.
+    pub filter_max_margin: Number,
     /// `probing_iterate_quality_factor` (default 1e4, pounce-specific
     /// — see pounce#58). When the probing (Mehrotra) μ-oracle is
     /// about to read `curr_avrg_compl()` for its `mu_curr` input, a
@@ -604,6 +632,7 @@ impl Default for MuOptions {
             mu_superlinear_decrease_power: 1.5,
             mu_allow_fast_monotone_decrease: true,
             barrier_tol_factor: 10.0,
+            tau_min: 0.99,
             sigma_max: 1e2,
             sigma_min: 1e-6,
             adaptive_mu_globalization:
@@ -622,6 +651,8 @@ impl Default for MuOptions {
             adaptive_mu_kkterror_red_iters: 4,
             adaptive_mu_kkterror_red_fact: 0.9999,
             adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
+            filter_margin_fact: 1e-5,
+            filter_max_margin: 1.0,
             probing_iterate_quality_factor: 1e4,
         }
     }
@@ -657,6 +688,12 @@ pub struct LineSearchOptions {
     /// step length. Upstream default is `Primal`; the Mehrotra cascade
     /// switches to `BoundMult`.
     pub alpha_for_y: crate::line_search::backtracking::AlphaForY,
+    /// `accept_after_max_steps` — accept a trial point once this many
+    /// backtracking steps have been taken, even if it fails the
+    /// acceptor's tests. `-1` (the default) disables it, which is why
+    /// wiring it moves no default trajectory. Mirrors
+    /// `IpBacktrackingLineSearch.cpp:759-770`.
+    pub accept_after_max_steps: Index,
 
     // Filter switching / Armijo / margin constants baked onto the
     // assembled [`crate::line_search::filter_acceptor::FilterLsAcceptor`]
@@ -664,6 +701,11 @@ pub struct LineSearchOptions {
     // never read (#191); defaults mirror `IpFilterLSAcceptor.cpp`.
     /// `eta_phi` — relaxation factor in the Armijo condition (Eqn. (20)).
     pub eta_phi: Number,
+    /// `delta` — multiplier on the constraint violation in the filter's
+    /// switching rule (Eqn. (19)); maps to
+    /// [`FilterLsAcceptor::delta_armijo`]. Default 1.0, from
+    /// `IpFilterLSAcceptor.cpp:RegisterOptions`.
+    pub delta: Number,
     /// `theta_min_fact` — constraint-violation threshold factor in the
     /// switching rule.
     pub theta_min_fact: Number,
@@ -713,6 +755,20 @@ pub struct LineSearchOptions {
     /// trigger a filter reset.
     pub filter_reset_trigger: Index,
 
+    // Penalty-acceptor constants baked onto the assembled
+    // [`crate::line_search::penalty_acceptor::PenaltyLsAcceptor`] (only
+    // when `line_search_method = penalty` / `cg-penalty`). Defaults
+    // mirror `IpPenaltyLSAcceptor.cpp:RegisterOptions`.
+    /// `nu_init` — initial value of the penalty parameter ν.
+    pub nu_init: Number,
+    /// `nu_inc` — increment added when ν is bumped.
+    pub nu_inc: Number,
+    /// `rho` — convex-combination weight in the ν update rule.
+    pub rho: Number,
+    /// `eta_penalty` — relaxation factor in the Armijo condition on the
+    /// penalty merit function.
+    pub eta_penalty: Number,
+
     // Second-order-correction constants baked onto the assembled
     // [`BacktrackingLineSearch`]. Registered but never read (#191);
     // defaults mirror `IpBacktrackingLineSearch.cpp`.
@@ -736,7 +792,9 @@ impl Default for LineSearchOptions {
             max_soft_resto_iters: 10,
             accept_every_trial_step: false,
             alpha_for_y: crate::line_search::backtracking::AlphaForY::Primal,
+            accept_after_max_steps: -1,
             eta_phi: 1e-8,
+            delta: 1.0,
             theta_min_fact: 1e-4,
             theta_max_fact: 1e4,
             theta_max_row_scale_kappa: 0.0,
@@ -751,6 +809,10 @@ impl Default for LineSearchOptions {
             obj_max_inc: 5.0,
             max_filter_resets: 5,
             filter_reset_trigger: 5,
+            nu_init: 1e-6,
+            nu_inc: 1e-4,
+            rho: 0.1,
+            eta_penalty: 1e-8,
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
@@ -846,6 +908,25 @@ pub struct RestoOptions {
     /// `start_with_resto` — switch to restoration in the first iteration.
     /// Upstream default `no`. Same story.
     pub start_with_resto: bool,
+    /// `max_resto_iter` — cap on *successive* restoration iterations
+    /// (`IpRestoConvCheck.cpp:144`'s `maximum_resto_iters`). Consumed by
+    /// `pounce_restoration::conv_check::RestoConvCheckAdapter`, which
+    /// returns `MaxIterExceeded` once the count is reached; the value
+    /// used to be the hard-coded `RESTO_MAX_SUCCESSIVE_ITERS` in
+    /// `resto_inner_solver.rs`, so setting the option did nothing
+    /// (#551 / #677). The field is named after the option here, but the
+    /// consumer's field is `maximum_resto_iters` — which is why grepping
+    /// for the option name found nothing (#551 caution 2).
+    ///
+    /// **This default deliberately differs from the registered one.**
+    /// `upstream_options.rs` registers Ipopt's `3000000`; pounce has
+    /// enforced `3000` since the cap landed. Wiring the option must not
+    /// change what an unset option does, so the effective cap stays
+    /// `3000` and only an explicit `max_resto_iter` moves it. Raising
+    /// the default to upstream's number is a trajectory change (it
+    /// lets a restoration that pounce currently cuts off at 3000 keep
+    /// going) and belongs to a change that measures it.
+    pub max_resto_iter: i32,
 }
 
 impl Default for RestoOptions {
@@ -859,6 +940,8 @@ impl Default for RestoOptions {
             evaluate_orig_obj_at_resto_trial: true,
             expect_infeasible_problem: false,
             start_with_resto: false,
+            // NOT the registered default (3000000) — see the field docs.
+            max_resto_iter: 3000,
         }
     }
 }
@@ -883,6 +966,18 @@ pub struct RefinementOptions {
     /// `residual_improvement_factor` — minimum per-step reduction of the
     /// residual test ratio before refinement is aborted.
     pub residual_improvement_factor: Number,
+    /// `neg_curv_test_tol` — tolerance α_n of the inertia-free curvature
+    /// test of Zavala & Chiang (2014). Zero (the registered default)
+    /// disables the heuristic and keeps the inertia check; positive
+    /// turns the inertia check off and accepts the factorization only
+    /// when the computed direction passes the curvature test in
+    /// `PdFullSpaceSolver::solve_once`.
+    pub neg_curv_test_tol: Number,
+    /// `neg_curv_test_reg` — whether the curvature test includes the
+    /// primal regularization δ_x‖dx‖² + δ_s‖ds‖². Registered default
+    /// `yes`; `no` reproduces the original Ipopt form that ignores it.
+    /// Only consulted when `neg_curv_test_tol > 0`.
+    pub neg_curv_test_reg: bool,
 }
 
 impl Default for RefinementOptions {
@@ -893,6 +988,8 @@ impl Default for RefinementOptions {
             residual_ratio_max: 1e-10,
             residual_ratio_singular: 1e-5,
             residual_improvement_factor: 0.999_999_999,
+            neg_curv_test_tol: 0.0,
+            neg_curv_test_reg: true,
         }
     }
 }
@@ -952,6 +1049,7 @@ impl Default for AlgorithmBuilder {
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             kappa_d: 1e-5,
+            s_max: 100.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
@@ -1073,6 +1171,12 @@ impl AlgorithmBuilder {
         pd_solver.residual_ratio_max = self.refinement.residual_ratio_max;
         pd_solver.residual_ratio_singular = self.refinement.residual_ratio_singular;
         pd_solver.residual_improvement_factor = self.refinement.residual_improvement_factor;
+        // Inertia-free curvature test (#551 / #677). Both were registered
+        // and never read; `neg_curv_test_tol` defaults to 0, which leaves
+        // the heuristic off and the inertia check on, so this changes
+        // nothing for a run that does not set it.
+        pd_solver.neg_curv_test_tol = self.refinement.neg_curv_test_tol;
+        pd_solver.neg_curv_test_reg = self.refinement.neg_curv_test_reg;
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         search_dir.fast_step_computation = self.fast_step_computation;
@@ -1119,6 +1223,7 @@ impl AlgorithmBuilder {
                 m.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 m.mu_allow_fast_monotone_decrease = self.mu.mu_allow_fast_monotone_decrease;
                 m.barrier_tol_factor = self.mu.barrier_tol_factor;
+                m.tau_min = self.mu.tau_min;
                 m.compl_inf_tol = self.conv_check.compl_inf_tol;
                 Box::new(m)
             }
@@ -1136,6 +1241,7 @@ impl AlgorithmBuilder {
                 adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 adaptive.barrier_tol_factor = self.mu.barrier_tol_factor;
+                adaptive.tau_min = self.mu.tau_min;
                 adaptive.sigma_min = self.mu.sigma_min;
                 adaptive.sigma_max = self.mu.sigma_max;
                 adaptive.adaptive_mu_globalization = self.mu.adaptive_mu_globalization;
@@ -1153,6 +1259,8 @@ impl AlgorithmBuilder {
                 adaptive.adaptive_mu_kkterror_red_iters = self.mu.adaptive_mu_kkterror_red_iters;
                 adaptive.adaptive_mu_kkterror_red_fact = self.mu.adaptive_mu_kkterror_red_fact;
                 adaptive.adaptive_mu_kkt_norm = self.mu.adaptive_mu_kkt_norm_type;
+                adaptive.filter_margin_fact = self.mu.filter_margin_fact;
+                adaptive.filter_max_margin = self.mu.filter_max_margin;
                 Box::new(adaptive)
             }
         };
@@ -1166,6 +1274,7 @@ impl AlgorithmBuilder {
                 // unchanged.
                 let mut f = FilterLsAcceptor::default();
                 f.eta_phi = self.line_search.eta_phi;
+                f.delta_armijo = self.line_search.delta;
                 f.theta_min_fact = self.line_search.theta_min_fact;
                 f.theta_max_fact = self.line_search.theta_max_fact;
                 f.theta_max_row_scale_kappa = self.line_search.theta_max_row_scale_kappa;
@@ -1182,11 +1291,22 @@ impl AlgorithmBuilder {
                 f.filter_reset_trigger = self.line_search.filter_reset_trigger;
                 Box::new(f)
             }
-            LineSearchChoice::Penalty => Box::new(PenaltyLsAcceptor::default()),
-            // CG-penalty acceptor lands with the rest of the
-            // CG-penalty path; fall back to the penalty acceptor's
-            // surface for now.
-            LineSearchChoice::CgPenalty => Box::new(PenaltyLsAcceptor::default()),
+            // Penalty-acceptor constants: same direct-field pattern as
+            // the filter arm above. `reset()` re-seeds ν (and `last_nu`)
+            // from the freshly-set `nu_init`, which `default()` had
+            // seeded from the registered default.
+            LineSearchChoice::Penalty | LineSearchChoice::CgPenalty => {
+                // CG-penalty acceptor lands with the rest of the
+                // CG-penalty path; fall back to the penalty acceptor's
+                // surface for now.
+                let mut p = PenaltyLsAcceptor::default();
+                p.nu_init = self.line_search.nu_init;
+                p.nu_inc = self.line_search.nu_inc;
+                p.rho = self.line_search.rho;
+                p.eta_penalty = self.line_search.eta_penalty;
+                p.reset();
+                Box::new(p)
+            }
         };
         let mut line_search = BacktrackingLineSearch::new(acceptor);
         line_search.alpha_red_factor = self.line_search.alpha_red_factor;
@@ -1198,6 +1318,7 @@ impl AlgorithmBuilder {
         line_search.max_soft_resto_iters = self.line_search.max_soft_resto_iters;
         line_search.accept_every_trial_step = self.line_search.accept_every_trial_step;
         line_search.alpha_for_y = self.line_search.alpha_for_y;
+        line_search.accept_after_max_steps = self.line_search.accept_after_max_steps;
         // Second-order-correction constants (#191): registered but
         // previously never read. Same direct-field pattern as the
         // watchdog knobs above.
@@ -1399,6 +1520,7 @@ mod tests {
                             recalc_y: false,
                             recalc_y_feas_tol: 1e-6,
                             kappa_d: 1e-5,
+                            s_max: 100.0,
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,

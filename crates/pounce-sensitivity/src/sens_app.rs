@@ -70,6 +70,13 @@ pub struct SensOptions {
     /// Number of parameter perturbations to step. Mapped from
     /// `n_sens_steps` (default 1, upstream
     /// [`SensApplication.cpp:60-62`](../../../ref/Ipopt/contrib/sIPOPT/src/SensApplication.cpp)).
+    ///
+    /// **Only `1` is implemented**, and nothing reads this field: the
+    /// pipeline below computes the single `sens_state_1` tier. Rather
+    /// than let a larger value round quietly down to one tier, the
+    /// `n_sens_steps` *option* is refused above its default by
+    /// [`pounce_algorithm::unimplemented_options`] (gh#677). The field
+    /// stays for shape-compatibility with upstream's `SensOptions`.
     pub n_sens_steps: i32,
     /// Objective scaling factor to apply when reporting the reduced
     /// Hessian. Default 1.0; pounce's IPM-side scaling lands in

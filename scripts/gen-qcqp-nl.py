@@ -46,6 +46,20 @@ Usage
     gen-qcqp-nl.py --shape qcqp1000-2c --out /tmp/gen1000.nl
     gen-qcqp-nl.py --n 500 --quad-rows 10 --quad-density 1.0 \
                    --linear-rows 110 --eqns 10 --out /tmp/gen500.nl
+
+The other way the same algebra gets written (gh #673)
+-----------------------------------------------------
+`--form factored` writes each nonlinear row and the objective as a sum of
+**squared affine residuals**, `Σ (aᵢᵀx − tᵢ)²`, instead of the expanded
+`½xᵀQx` above. Same degree, same PSD-ness, same evaluation cost on a tape —
+and a completely different answer from the recognizer, because reading a
+factored form back as an expansion about the origin cancels. It is what
+every least-squares model looks like, it is 41 of `airport.nl`'s 42 rows,
+and until gh #673 it kept its tape. This flag is how that regime gets
+measured at a size where the evaluation timers can see it.
+
+    gen-qcqp-nl.py --form factored --n 1000 --quad-rows 7 \
+                   --residuals 400 --residual-nnz 20 --out /tmp/lsq1000.nl
 """
 
 from __future__ import annotations
@@ -108,6 +122,48 @@ def quad_summands(q: dict[int, dict[int, float]]):
             yield i, j, q[i][j]
 
 
+def build_residuals(n: int, count: int, nnz: int, rng: random.Random, x_ref):
+    """`count` sparse affine forms `aᵢᵀx − tᵢ`, as `([(col, coef), …], t)`.
+
+    `tᵢ` is set from `x_ref` plus a small offset, so every residual is small
+    but nonzero there — which is the regime the expansion cancels in and the
+    whole reason this shape is worth generating.
+    """
+    out = []
+    for _ in range(count):
+        cols = sorted(rng.sample(range(n), min(nnz, n)))
+        a = [(c, rng.uniform(-10.0, 10.0)) for c in cols]
+        t = sum(c * x_ref[j] for j, c in a) - rng.uniform(-1e-3, 1e-3)
+        out.append((a, t))
+    return out
+
+
+def residual_cols(residuals) -> list[int]:
+    """The row's structural support: the union of its residuals'."""
+    cols: set[int] = set()
+    for a, _ in residuals:
+        cols.update(j for j, _ in a)
+    return sorted(cols)
+
+
+def residual_value(residuals, x) -> float:
+    return sum((sum(c * x[j] for j, c in a) - t) ** 2 for a, t in residuals)
+
+
+def write_residual_body(w, residuals) -> None:
+    """`o54` over one `o5 (affine) n2` per residual — the factored shape."""
+    w("o54\n")
+    w(f"{len(residuals)}\n")
+    for a, t in residuals:
+        w("o5\n")
+        w("o54\n")
+        w(f"{len(a) + 1}\n")
+        for j, c in a:
+            w(f"o2\nn{c!r}\nv{j}\n")
+        w(f"n{-t!r}\n")
+        w("n2\n")
+
+
 def quad_value(q, x):
     total = 0.0
     for i in q:
@@ -122,12 +178,25 @@ def emit(out, args) -> None:
     m = args.quad_rows + args.linear_rows
     x_ref = [rng.uniform(-1.0, 1.0) for _ in range(n)]
 
-    # --- quadratic rows and objective ---
-    quads = [
-        build_quadratic(n, args.quad_density, args.dominance, rng)
-        for _ in range(args.quad_rows)
-    ]
-    obj_q = build_quadratic(n, args.quad_density, args.dominance, rng)
+    # --- nonlinear rows and objective, in whichever shape was asked for ---
+    factored = args.form == "factored"
+    if factored:
+        quads = [
+            build_residuals(n, args.residuals, args.residual_nnz, rng, x_ref)
+            for _ in range(args.quad_rows)
+        ]
+        obj_q = build_residuals(n, args.residuals, args.residual_nnz, rng, x_ref)
+        nl_cols = [residual_cols(q) for q in quads]
+        body_value = residual_value
+    else:
+        quads = [
+            build_quadratic(n, args.quad_density, args.dominance, rng)
+            for _ in range(args.quad_rows)
+        ]
+        obj_q = build_quadratic(n, args.quad_density, args.dominance, rng)
+        # An expanded row's structural support is every variable.
+        nl_cols = [list(range(n))] * args.quad_rows
+        body_value = quad_value
     obj_g = [rng.uniform(-100.0, 100.0) for _ in range(n)]
 
     # --- linear rows: `linear_nnz` entries each, first `eqns` are equalities ---
@@ -136,7 +205,7 @@ def emit(out, args) -> None:
         cols = sorted(rng.sample(range(n), min(args.linear_nnz, n)))
         lin_rows.append([(c, rng.uniform(-10.0, 10.0)) for c in cols])
 
-    jac_nnz = args.quad_rows * n + sum(len(r) for r in lin_rows)
+    jac_nnz = sum(len(c) for c in nl_cols) + sum(len(r) for r in lin_rows)
 
     w = out.write
     w("g3 0 1 0\t# problem generated-qcqp\n")
@@ -161,7 +230,7 @@ def emit(out, args) -> None:
     # strictly feasible.
     w("r\n")
     for q in quads:
-        w(f"1 {quad_value(q, x_ref) + args.slack!r}\n")
+        w(f"1 {body_value(q, x_ref) + args.slack!r}\n")
     for k, row in enumerate(lin_rows):
         val = sum(c * x_ref[j] for j, c in row)
         if k < args.eqns:
@@ -171,27 +240,33 @@ def emit(out, args) -> None:
 
     # Constraint bodies.
     for k, q in enumerate(quads):
-        terms = list(quad_summands(q))
         w(f"C{k}\n")
-        w("o54\n")
-        w(f"{len(terms)}\n")
-        for i, j, v in terms:
-            w(f"o2\nn0.5\no2\no2\nn{v!r}\nv{i}\nv{j}\n")
+        if factored:
+            write_residual_body(w, q)
+        else:
+            terms = list(quad_summands(q))
+            w("o54\n")
+            w(f"{len(terms)}\n")
+            for i, j, v in terms:
+                w(f"o2\nn0.5\no2\no2\nn{v!r}\nv{i}\nv{j}\n")
     for k in range(len(lin_rows)):
         w(f"C{args.quad_rows + k}\nn0\n")
 
     # Objective (minimize).
-    obj_terms = list(quad_summands(obj_q))
     w("O0 0\n")
-    w("o54\n")
-    w(f"{len(obj_terms)}\n")
-    for i, j, v in obj_terms:
-        w(f"o2\nn0.5\no2\no2\nn{v!r}\nv{i}\nv{j}\n")
+    if factored:
+        write_residual_body(w, obj_q)
+    else:
+        obj_terms = list(quad_summands(obj_q))
+        w("o54\n")
+        w(f"{len(obj_terms)}\n")
+        for i, j, v in obj_terms:
+            w(f"o2\nn0.5\no2\no2\nn{v!r}\nv{i}\nv{j}\n")
 
     # `k` section: cumulative count of Jacobian entries in columns 0..n-2.
     col_counts = [0] * n
-    for _ in range(args.quad_rows):
-        for j in range(n):
+    for cols in nl_cols:
+        for j in cols:
             col_counts[j] += 1
     for row in lin_rows:
         for j, _ in row:
@@ -204,9 +279,9 @@ def emit(out, args) -> None:
 
     # `J` blocks: the quadratic rows carry a dense zero linear part (their
     # whole body is in the tree), the linear rows carry their coefficients.
-    for k in range(args.quad_rows):
-        w(f"J{k} {n}\n")
-        for j in range(n):
+    for k, cols in enumerate(nl_cols):
+        w(f"J{k} {len(cols)}\n")
+        for j in cols:
             w(f"{j} 0\n")
     for k, row in enumerate(lin_rows):
         w(f"J{args.quad_rows + k} {len(row)}\n")
@@ -235,10 +310,37 @@ def main(argv: list[str]) -> int:
     p.add_argument("--eqns", type=int)
     p.add_argument("--linear-nnz", type=int)
     p.add_argument("--dominance", type=float)
+    p.add_argument(
+        "--form",
+        choices=("expanded", "factored"),
+        default="expanded",
+        help="how the nonlinear bodies are written (gh #673); see the module docstring",
+    )
+    p.add_argument("--residuals", type=int, default=400,
+                   help="squared residuals per nonlinear body, --form factored only")
+    p.add_argument("--residual-nnz", type=int, default=20,
+                   help="variables per residual, --form factored only")
     p.add_argument("--slack", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
+
+    # `--residuals` / `--residual-nnz` only mean anything to the factored
+    # writer. Accepting them silently under `--form expanded` reads as
+    # "measured with 400 residuals" in a shell history that produced an
+    # expanded model (gh #711 review).
+    if args.form == "expanded":
+        supplied = [
+            f"--{name.replace('_', '-')}"
+            for name in ("residuals", "residual_nnz")
+            if f"--{name.replace('_', '-')}" in (argv if argv is not None else sys.argv[1:])
+        ]
+        if supplied:
+            p.error(
+                f"{', '.join(supplied)} apply to --form factored only; "
+                f"got --form expanded"
+            )
+
     fallback = dict(
         n=1000, quad_rows=7, quad_density=0.0419, linear_rows=5100,
         eqns=100, linear_nnz=11, dominance=1.02,

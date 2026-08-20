@@ -300,6 +300,29 @@ fn resto_constants_default_match_registered() {
     assert_eq!(r.required_infeasibility_reduction, 0.9);
 }
 
+/// #551 / #677. `max_resto_iter` is the one option in this file whose
+/// builder default deliberately does **not** match the registered one:
+/// the registry declares upstream's `3000000`, pounce has capped
+/// successive restoration iterations at `3000` since the cap landed, and
+/// wiring the option must not change what an unset option does. The
+/// mismatch is asserted rather than described, so adopting upstream's
+/// number is a deliberate act with a failing test attached.
+#[test]
+fn max_resto_iter_default_is_pounces_cap_not_the_registered_one() {
+    assert_eq!(builder_from(|_| {}).resto.max_resto_iter, 3000);
+}
+
+#[test]
+fn max_resto_iter_override_flows_through() {
+    let r = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("max_resto_iter", 17, true, false)
+            .unwrap();
+    })
+    .resto;
+    assert_eq!(r.max_resto_iter, 17);
+}
+
 #[test]
 fn resto_constants_override_flows_through() {
     let r = builder_from(|app| {

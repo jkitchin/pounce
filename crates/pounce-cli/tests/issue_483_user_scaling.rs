@@ -150,11 +150,13 @@ stderr:
 
     assert!(
         (unscaled - unscaled_ref).abs() <= 1e-6 * unscaled_ref.abs().max(1.0),
-        "scaling_factor[x1]=3 must not move the objective in user units;          got {unscaled} with the factor, {unscaled_ref} without",
+        "scaling_factor[x1]=3 must not move the objective in user units; \
+         got {unscaled} with the factor, {unscaled_ref} without",
     );
     assert!(
         (scaled / unscaled - 100.0).abs() < 1e-6,
-        "scaling_factor[obj]=100 should still reach the IPM alongside          the variable factor; got scaled={scaled}, unscaled={unscaled}",
+        "scaling_factor[obj]=100 should still reach the IPM alongside \
+         the variable factor; got scaled={scaled}, unscaled={unscaled}",
     );
 }
 

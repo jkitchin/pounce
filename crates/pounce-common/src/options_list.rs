@@ -72,6 +72,18 @@ impl OptionsList {
         self.options.clear();
     }
 
+    /// Every option name present in the list, lowercased, in sorted
+    /// order.
+    ///
+    /// "Present" means someone called a `set_*_value` for it — an unset
+    /// option is absent here even though it *reads back* as its
+    /// registered default. That distinction is the whole point of the
+    /// accessor: it answers "what did this run actually mention?",
+    /// which is not a question `get_*_value` can answer.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.options.keys().map(String::as_str)
+    }
+
     fn key(name: &str) -> String {
         name.to_ascii_lowercase()
     }

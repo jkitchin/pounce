@@ -50,7 +50,9 @@
 //! `analyze_quadratic_full` already applies that factor in, rather than a
 //! `Quad2`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use pounce_common::exact::{add_is_exact, is_live, mul_is_exact};
 
 /// Index into [`QuadraticStructure`]'s form arrays. `u32` because the count
 /// is bounded by `m + 1` and the row map is one of these per constraint.
@@ -59,6 +61,29 @@ type FormId = u32;
 /// No form: the value in [`QuadraticStructure::form_of_row`] for a row that
 /// is not (recognized as) quadratic and keeps its tape.
 const NO_FORM: FormId = u32::MAX;
+
+/// One `w·(bᵀx + d)²` term on its way into
+/// [`QuadraticStructure::push_factored_form`].
+///
+/// Borrowed rather than owned, and plain tuples rather than a recognizer
+/// type, for the reason the module docs give: this crate never sees an
+/// `Expr`, and `pounce_nl` hands its answer over as numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SquareTerm<'a> {
+    /// `w` — the constant the square is multiplied by.
+    pub weight: f64,
+    /// `b`, **ascending** by variable index and free of zeros. May be
+    /// empty, which makes the term the constant `w·d²`.
+    ///
+    /// Ascending is load-bearing, not tidiness:
+    /// [`QuadraticStructure::push_factored_form`] walks `coefs[a..]` to
+    /// build the Hessian's **upper** triangle, so an out-of-order pair
+    /// would write `(i, j)` with `i > j` into a map every reader takes as
+    /// upper-triangular. Checked by a `debug_assert` there (gh #711).
+    pub coefs: &'a [(usize, f64)],
+    /// `d`.
+    pub constant: f64,
+}
 
 /// The recognized degree-≤2 parts of one model: at most one per constraint
 /// row, plus at most one for the objective.
@@ -104,6 +129,21 @@ pub struct QuadraticStructure {
     grad: Vec<u32>,
     /// Concatenated scatter targets; `u32::MAX` until [`Self::bind_slots`].
     h_slot: Vec<u32>,
+
+    // ---- the factored half ----
+    /// `sq_*[form_sq[f] .. form_sq[f + 1]]` — the squared affine terms of
+    /// form `f`. Empty for an expanded form, which is every form this
+    /// module had before gh #673.
+    form_sq: Vec<u32>,
+    /// `wₖ` and `dₖ` of each stored term.
+    sq_w: Vec<f64>,
+    sq_d: Vec<f64>,
+    /// CSR row pointers over the terms, one per term plus a global
+    /// terminator: term `k` owns `sq_idx[sq_ptr[k] .. sq_ptr[k + 1]]`.
+    sq_ptr: Vec<u32>,
+    /// Concatenated `bₖ`, ascending within a term.
+    sq_idx: Vec<u32>,
+    sq_val: Vec<f64>,
 
     // ---- the map back to the model ----
     /// `form_of_row[i]` is the form evaluating row `i`, or [`NO_FORM`] when
@@ -152,6 +192,106 @@ impl Neumaier {
     }
 }
 
+/// `Σ 2wₖbₖbₖᵀ` as an upper triangle, or `None` if building it **lost a
+/// term** (gh #685, by way of gh #673's review of gh #711).
+///
+/// # Why this refuses rather than just summing
+///
+/// gh #685's gate — `is_expanded_quadratic` in `admitted_factored_form` —
+/// keeps a body out of the fast path when it dropped a coefficient in the
+/// fold. That test is on the *shape* the coefficients came from, and it
+/// covers the lossy bodies that are also flat sums of monomials. It does
+/// not cover a genuinely **factored** body that loses a term here, in this
+/// accumulation, which nothing else looks at:
+///
+/// ```text
+/// (2²⁷x₀)² + (x₀ + x₁)² − (x₀·2²⁷)²
+/// ```
+///
+/// Three honest squares, no monomial spine, so the shape gate has no
+/// opinion. But `(0, 0)` accumulates `2·2⁵⁴ + 2 − 2·2⁵⁴`: the `+ 2` is half
+/// an ulp at `2⁵⁵` and ties back to even, the third term cancels what is
+/// left, and the entry reaches exactly `0.0` and is not stored. The tape
+/// declares `(0, 0)` and evaluates the body to `0.0` at `x = (3, 1)`; the
+/// factored read-out answers `16.0` and offers a Hessian one entry short.
+/// Two routes over the same bytes, disagreeing about a constraint body
+/// against its own bound — which is the whole of gh #685, whichever answer
+/// is nearer the algebra.
+///
+/// The mechanism needs about 2⁵³ of dynamic range across the squared terms.
+/// On the **diagonal** that takes a negative weight, so difference-of-
+/// squares and DC formulations; **off** the diagonal it does not, and
+/// `(10⁹x₀ + 10⁹x₁)² + (x₀ + x₁)² + (10⁹x₀ − 10⁹x₁)²` loses `H(0, 1)` with
+/// every weight positive. Coefficients of `10⁹` are ordinary in a badly
+/// scaled model.
+///
+/// # The rule
+///
+/// [`pounce_common::exact`]'s predicates, and gh #687's rule, unchanged: a
+/// term is lost when an entry is **dropped** and some fold on the way to
+/// dropping it **rounded**. An exact cancellation is not a loss — `x₀² −
+/// x₀²` has a genuinely zero Hessian entry and the tape agrees — so this
+/// admits it, exactly as `Quad2::merge` does on the expanded arm.
+///
+/// The products are checked too, not only the sums: `2·w` overflowing to an
+/// infinity, or `bᵢ·bⱼ` underflowing to zero out of two nonzero factors, is
+/// the same defect arriving by a different route.
+fn factored_hessian(squares: &[SquareTerm<'_>]) -> Option<BTreeMap<(usize, usize), f64>> {
+    // `coefs` ascending ⇒ `(i, j)` with `i ≤ j` falls out of the double
+    // loop. The `bool` is the entry's **carried** inexactness: whether any
+    // fold into it has rounded. It has to be sticky, because the fold that
+    // rounds and the fold that drops are usually not the same one — in the
+    // witness above `(0, 0)` absorbs the `+ 2` on the second term and is
+    // cancelled to zero by the third, and *that* add is exact.
+    let mut hess: BTreeMap<(usize, usize), (f64, bool)> = BTreeMap::new();
+    for t in squares {
+        debug_assert!(
+            t.coefs.windows(2).all(|w| w[0].0 < w[1].0),
+            "SquareTerm::coefs must be ascending and duplicate-free: the \
+             upper-triangle walk below depends on it",
+        );
+        let s = 2.0 * t.weight;
+        if !mul_is_exact(2.0, t.weight, s) {
+            // `2·w` can only round by overflowing to an infinity, which has
+            // swallowed every term it touched.
+            return None;
+        }
+        for (a, &(i, bi)) in t.coefs.iter().enumerate() {
+            for &(j, bj) in &t.coefs[a..] {
+                let p = s * bi;
+                let c = p * bj;
+                // A product is a *loss* when it rounds a nonzero to nothing
+                // — `10⁻²⁰⁰ · 10⁻²⁰⁰` — or overflows. Merely rounding is the
+                // same latitude the squared read-out itself takes.
+                let product_lost =
+                    (is_live(s) && is_live(bi) && is_live(bj) && !is_live(c)) || !c.is_finite();
+                if product_lost {
+                    return None;
+                }
+
+                let slot = hess.entry((i, j)).or_insert((0.0, false));
+                let (was, carried) = *slot;
+                let v = was + c;
+                let inexact = carried || !add_is_exact(was, c, v);
+                if was != 0.0 && !is_live(v) && inexact {
+                    // The entry reached zero, and something on the way to
+                    // zero rounded: the tape will declare an entry this map
+                    // no longer has. gh #687's rule, unchanged — an *exact*
+                    // cancellation is not a loss and falls through.
+                    return None;
+                }
+                *slot = (v, inexact);
+            }
+        }
+    }
+    Some(
+        hess.into_iter()
+            .filter(|(_, (c, _))| is_live(*c))
+            .map(|(k, (c, _))| (k, c))
+            .collect(),
+    )
+}
+
 impl QuadraticStructure {
     /// An empty structure over `m` constraint rows: nothing recognized, so
     /// every caller behaves exactly as it did before this module existed.
@@ -161,7 +301,9 @@ impl QuadraticStructure {
             form_lin: vec![0],
             form_grad: vec![0],
             form_h: vec![0],
+            form_sq: vec![0],
             sup_ptr: vec![0],
+            sq_ptr: vec![0],
             form_of_row: vec![NO_FORM; m],
             obj_form: NO_FORM,
             ..Self::default()
@@ -184,41 +326,8 @@ impl QuadraticStructure {
         lin: &[(usize, f64)],
         constant: f64,
     ) -> FormId {
-        // Scatter the upper triangle into full symmetric rows. A `BTreeMap`
-        // keyed by row keeps the support ascending without a sort, and the
-        // inner `BTreeMap` keeps each row's columns ascending — which is
-        // what makes `lower_triangle` come out in the (row, col) order the
-        // TNLP's `lower_pairs` is sorted in.
-        let mut rows: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
-        for (&(i, j), &v) in hess {
-            debug_assert!(i <= j, "push_form takes the upper triangle, got ({i}, {j})");
-            if v == 0.0 {
-                continue;
-            }
-            rows.entry(i as u32).or_default().insert(j as u32, v);
-            if i != j {
-                rows.entry(j as u32).or_default().insert(i as u32, v);
-            }
-        }
-
-        for (&r, cols) in &rows {
-            self.sup.push(r);
-            for (&c, &v) in cols {
-                self.col.push(c);
-                self.val.push(v);
-            }
-            self.sup_ptr.push(self.col.len() as u32);
-        }
-        self.form_sup.push(self.sup.len() as u32);
-
-        for &(i, c) in lin {
-            if c == 0.0 {
-                continue;
-            }
-            self.lin_idx.push(i as u32);
-            self.lin_val.push(c);
-        }
-        self.form_lin.push(self.lin_idx.len() as u32);
+        self.push_matrix(hess);
+        self.push_linear(lin);
 
         // Gradient support = Hessian support ∪ linear support, ascending.
         // Both sides are already ascending, so this is a merge.
@@ -254,12 +363,127 @@ impl QuadraticStructure {
             self.grad.push(take);
         }
         self.form_grad.push(self.grad.len() as u32);
+        // No squared terms: this is the expanded form, evaluated from `H`.
+        self.form_sq.push(self.sq_w.len() as u32);
+        self.finish_form(constant)
+    }
 
-        // One unbound scatter slot per lower-triangle entry.
+    /// Add a **factored** form — `Σ wₖ(bₖᵀx + dₖ)² + aᵀx + c` — and return
+    /// its id (gh #673).
+    ///
+    /// The difference from [`Self::push_form`] is entirely in how the value
+    /// and the gradient are computed. `(x − 500000)²` expanded to
+    /// `x² − 10⁶x + 2.5·10¹¹` and read back cancels five digits, which is
+    /// why `pounce_nl`'s recognizer refuses to hand a factored body over as
+    /// triplets at all; handed over as *squares* it is the tape's own
+    /// arithmetic, one multiplication for one multiplication.
+    ///
+    /// The **Hessian** is not factored and does not need to be: `Σ 2wₖbₖbₖᵀ`
+    /// is constant, and it is assembled here once from exactly the products
+    /// the tape would accumulate on every call. So
+    /// [`Self::accumulate_hessian`], [`Self::add_hessian_vector`] and
+    /// [`Self::lower_triangle`] are shared with the expanded path and know
+    /// nothing about any of this.
+    ///
+    /// `lin` and `constant` are the degree-≤1 leftovers of the same tree,
+    /// not the row's `.nl` linear section — the same convention
+    /// [`Self::push_form`] takes them on.
+    ///
+    /// ## The gradient support is the terms' support, not the Hessian's
+    ///
+    /// `∂/∂xᵢ Σ wₖ(bₖᵀx + dₖ)²` is nonzero wherever any `bₖ` is, while an
+    /// entry of `Σ 2wₖbₖbₖᵀ` can cancel to exactly zero between two terms
+    /// and be dropped. Taking the gradient pattern from the assembled
+    /// Hessian would then hand `eval_jac_g` a column list short of a column
+    /// the row actually depends on. It is taken from the `bₖ` instead.
+    pub fn push_factored_form(
+        &mut self,
+        squares: &[SquareTerm<'_>],
+        lin: &[(usize, f64)],
+        constant: f64,
+    ) -> Option<FormId> {
+        // Refuses before touching `self`, so a rejected body leaves no
+        // half-built form behind. See `factored_hessian`.
+        let hess = factored_hessian(squares)?;
+        self.push_matrix(&hess);
+        self.push_linear(lin);
+
+        // Gradient support = ⋃ bₖ support ∪ linear support. See the docs:
+        // this is deliberately not read off `hess`.
+        let f = self.constant.len();
+        let mut sup: BTreeSet<u32> = squares
+            .iter()
+            .flat_map(|t| t.coefs.iter().map(|&(i, _)| i as u32))
+            .collect();
+        sup.extend(self.lin_idx[self.form_lin[f] as usize..].iter().copied());
+        self.grad.extend(sup);
+        self.form_grad.push(self.grad.len() as u32);
+
+        for t in squares {
+            self.sq_w.push(t.weight);
+            self.sq_d.push(t.constant);
+            for &(i, c) in t.coefs {
+                self.sq_idx.push(i as u32);
+                self.sq_val.push(c);
+            }
+            self.sq_ptr.push(self.sq_idx.len() as u32);
+        }
+        self.form_sq.push(self.sq_w.len() as u32);
+        Some(self.finish_form(constant))
+    }
+
+    /// Scatter a form's upper-triangular Hessian into the full symmetric
+    /// CSR the value, gradient and Hessian paths all read.
+    fn push_matrix(&mut self, hess: &BTreeMap<(usize, usize), f64>) {
+        // A `BTreeMap` keyed by row keeps the support ascending without a
+        // sort, and the inner `BTreeMap` keeps each row's columns ascending
+        // — which is what makes `lower_triangle` come out in the (row, col)
+        // order the TNLP's `lower_pairs` is sorted in.
+        let mut rows: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
+        for (&(i, j), &v) in hess {
+            debug_assert!(
+                i <= j,
+                "a form's Hessian is the upper triangle, got ({i}, {j})"
+            );
+            if v == 0.0 {
+                continue;
+            }
+            rows.entry(i as u32).or_default().insert(j as u32, v);
+            if i != j {
+                rows.entry(j as u32).or_default().insert(i as u32, v);
+            }
+        }
+
+        for (&r, cols) in &rows {
+            self.sup.push(r);
+            for (&c, &v) in cols {
+                self.col.push(c);
+                self.val.push(v);
+            }
+            self.sup_ptr.push(self.col.len() as u32);
+        }
+        self.form_sup.push(self.sup.len() as u32);
+    }
+
+    /// Append a form's degree-1 coefficients, dropping stored zeros.
+    fn push_linear(&mut self, lin: &[(usize, f64)]) {
+        for &(i, c) in lin {
+            if c == 0.0 {
+                continue;
+            }
+            self.lin_idx.push(i as u32);
+            self.lin_val.push(c);
+        }
+        self.form_lin.push(self.lin_idx.len() as u32);
+    }
+
+    /// Close a form: one unbound scatter slot per lower-triangle entry, and
+    /// the degree-0 term.
+    fn finish_form(&mut self, constant: f64) -> FormId {
+        let f = self.constant.len();
         let n_lower = self.lower_triangle(f as FormId).count();
         self.h_slot.resize(self.h_slot.len() + n_lower, NO_FORM);
         self.form_h.push(self.h_slot.len() as u32);
-
         self.constant.push(constant);
         f as FormId
     }
@@ -342,11 +566,14 @@ impl QuadraticStructure {
         debug_assert_eq!(k, self.h_slot.len(), "every entry gets a slot");
     }
 
-    /// `½xᵀHx + aᵀx + c`.
+    /// `½xᵀHx + aᵀx + c` — or `Σ wₖ(bₖᵀx + dₖ)² + aᵀx + c` for a form
+    /// [`Self::push_factored_form`] built.
     ///
-    /// The `½` is applied once at the end rather than per row. That is
-    /// cheaper and it is exactly equivalent: scaling by `0.5` only decrements
-    /// a binary exponent, so it neither rounds nor reassociates.
+    /// On the expanded arm the `½` is applied once at the end rather than
+    /// per row. That is cheaper and it is exactly equivalent: scaling by
+    /// `0.5` only decrements a binary exponent, so it neither rounds nor
+    /// reassociates. The factored arm has no `½` to apply — it squares the
+    /// writer's own residual, which is the whole point of it (gh #673).
     ///
     /// # Why the outer sums are compensated (gh#702)
     ///
@@ -368,38 +595,101 @@ impl QuadraticStructure {
     /// trajectory in the corpus, on the Mittelmann QCQP family, or on the
     /// `eigen*` fixtures), and it is the O(nnz) loop — compensating it costs
     /// real time. The outer loop is O(rows), so this is close to free.
+    ///
+    /// **Both arms, for one reason.** `Σ wₖlₖ²` is the same outer
+    /// accumulator wearing a different shape, and a least-squares row is
+    /// gh#702's case in its purest form: every term same-signed, hundreds or
+    /// thousands of them, a running total that outgrows each one. Leaving it
+    /// naive would make the compensation a property of which read-out a body
+    /// happened to take. The inner accumulator there is [`Self::affine`] —
+    /// the per-residual dot product, `O(nnz)` — and it stays naive for
+    /// gh#702's reason.
+    ///
+    /// The cost is that the factored arm no longer reproduces the tape's
+    /// summation bit for bit, only its *terms*. That is gh#702's trade and
+    /// not a new one: being less dependent on the association beats matching
+    /// one particular association, and it was measured to be worth 31
+    /// iterations on `qcqp1500-1c`.
     pub fn value(&self, f: FormId, x: &[f64]) -> f64 {
         let fi = f as usize;
-        let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
-        let mut quad = Neumaier::new();
-        for k in lo..hi {
-            let r = self.sup[k] as usize;
-            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
-            let mut t = 0.0;
-            for e in a..b {
-                t += self.val[e] * x[self.col[e] as usize];
+        let quad = match self.squares_of(fi) {
+            Some(terms) => {
+                let mut acc = Neumaier::new();
+                for k in terms {
+                    let l = self.affine(k, x);
+                    // `w · (l · l)`, and the parentheses are load-bearing:
+                    // the tape multiplies the writer's constant into the
+                    // *square*, and `(w · l) · l` is a different rounding.
+                    // On a body whose terms then cancel — `2⁵³x² + x² −
+                    // 2⁵³x²` — that one ulp is the entire answer.
+                    acc.add(self.sq_w[k] * (l * l));
+                }
+                acc.sum()
             }
-            quad.add(x[r] * t);
-        }
+            None => {
+                let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
+                let mut quad = Neumaier::new();
+                for k in lo..hi {
+                    let r = self.sup[k] as usize;
+                    let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+                    let mut t = 0.0;
+                    for e in a..b {
+                        t += self.val[e] * x[self.col[e] as usize];
+                    }
+                    quad.add(x[r] * t);
+                }
+                0.5 * quad.sum()
+            }
+        };
         let mut lin = Neumaier::new();
         for e in self.form_lin[fi] as usize..self.form_lin[fi + 1] as usize {
             lin.add(self.lin_val[e] * x[self.lin_idx[e] as usize]);
         }
-        0.5 * quad.sum() + lin.sum() + self.constant[fi]
+        quad + lin.sum() + self.constant[fi]
     }
 
-    /// `out += w · (Hx + a)`, touching only the form's gradient support.
+    /// The stored squared terms of form `fi`, or `None` when it is an
+    /// expanded form evaluated from `H`.
+    fn squares_of(&self, fi: usize) -> Option<std::ops::Range<usize>> {
+        let (lo, hi) = (self.form_sq[fi] as usize, self.form_sq[fi + 1] as usize);
+        (lo != hi).then_some(lo..hi)
+    }
+
+    /// `dₖ + bₖᵀx` for stored term `k`.
+    fn affine(&self, k: usize, x: &[f64]) -> f64 {
+        let mut l = self.sq_d[k];
+        for e in self.sq_ptr[k] as usize..self.sq_ptr[k + 1] as usize {
+            l += self.sq_val[e] * x[self.sq_idx[e] as usize];
+        }
+        l
+    }
+
+    /// `out += w · (Hx + a)`, touching only the form's gradient support —
+    /// or `out += w · (Σ 2wₖ(bₖᵀx + dₖ)bₖ + a)` for a factored form, which
+    /// differentiates the square rather than its expansion.
     pub fn add_gradient(&self, f: FormId, x: &[f64], w: f64, out: &mut [f64]) {
         let fi = f as usize;
-        let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
-        for k in lo..hi {
-            let r = self.sup[k] as usize;
-            let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
-            let mut t = 0.0;
-            for e in a..b {
-                t += self.val[e] * x[self.col[e] as usize];
+        match self.squares_of(fi) {
+            Some(terms) => {
+                for k in terms {
+                    let d = 2.0 * self.sq_w[k] * self.affine(k, x);
+                    for e in self.sq_ptr[k] as usize..self.sq_ptr[k + 1] as usize {
+                        out[self.sq_idx[e] as usize] += w * d * self.sq_val[e];
+                    }
+                }
             }
-            out[r] += w * t;
+            None => {
+                let (lo, hi) = (self.form_sup[fi] as usize, self.form_sup[fi + 1] as usize);
+                for k in lo..hi {
+                    let r = self.sup[k] as usize;
+                    let (a, b) = (self.sup_ptr[k] as usize, self.sup_ptr[k + 1] as usize);
+                    let mut t = 0.0;
+                    for e in a..b {
+                        t += self.val[e] * x[self.col[e] as usize];
+                    }
+                    out[r] += w * t;
+                }
+            }
         }
         for e in self.form_lin[fi] as usize..self.form_lin[fi + 1] as usize {
             out[self.lin_idx[e] as usize] += w * self.lin_val[e];
@@ -439,6 +729,9 @@ impl QuadraticStructure {
     /// Total stored Hessian entries over all forms, both triangles. Reported
     /// by `POUNCE_DBG_TAPE_STATS`; also the thing the memory claim in the
     /// design note is about.
+    ///
+    /// A factored form's squared terms are **not** counted: this is the
+    /// matrix, and they are the residuals it was assembled from.
     pub fn stored_entries(&self) -> usize {
         self.val.len()
     }
@@ -603,5 +896,453 @@ mod tests {
         assert!(qs.is_empty());
         assert_eq!(qs.row_form(2), None);
         assert_eq!(qs.objective_form(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Factored forms (gh #673)
+    // -----------------------------------------------------------------
+
+    /// `(x₀ − 500000)²` — the form whose *expansion* loses five digits, and
+    /// the reason this arm exists.
+    #[test]
+    fn a_factored_form_squares_the_residual_instead_of_expanding_it() {
+        let coefs = [(0usize, 1.0)];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(
+                &[SquareTerm {
+                    weight: 1.0,
+                    coefs: &coefs,
+                    constant: -500_000.0,
+                }],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        let x = [500_000.0 + 1e-4];
+        let r = x[0] - 500_000.0;
+        // Bit for bit what the tape computes, not "within a tolerance".
+        assert_eq!(qs.value(f, &x), r * r);
+
+        let mut g = [0.0];
+        qs.add_gradient(f, &x, 1.0, &mut g);
+        assert_eq!(g, [2.0 * r]);
+
+        // The Hessian is constant and is the expansion's — nothing is
+        // factored about a second derivative.
+        assert_eq!(qs.lower_triangle(f).collect::<Vec<_>>(), vec![(0, 0, 2.0)]);
+    }
+
+    /// A form with several terms, a linear leftover and a weight, checked
+    /// against the polynomial it is: `2(x₀ − x₁ + 1)² − (x₁ + 3)² + 5x₀ + 7`.
+    #[test]
+    fn a_multi_term_factored_form_agrees_with_its_polynomial() {
+        let a = [(0usize, 1.0), (1usize, -1.0)];
+        let b = [(1usize, 1.0)];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(
+                &[
+                    SquareTerm {
+                        weight: 2.0,
+                        coefs: &a,
+                        constant: 1.0,
+                    },
+                    SquareTerm {
+                        weight: -1.0,
+                        coefs: &b,
+                        constant: 3.0,
+                    },
+                ],
+                &[(0, 5.0)],
+                7.0,
+            )
+            .expect("admitted");
+        let x = [1.5, -0.25];
+        let l1 = x[0] - x[1] + 1.0;
+        let l2 = x[1] + 3.0;
+        assert_eq!(qs.value(f, &x), 2.0 * l1 * l1 - l2 * l2 + 5.0 * x[0] + 7.0);
+
+        let mut g = [0.0; 2];
+        qs.add_gradient(f, &x, 1.0, &mut g);
+        assert_eq!(g[0], 4.0 * l1 + 5.0);
+        assert_eq!(g[1], -4.0 * l1 - 2.0 * l2);
+
+        // ∇² = 2·2·bbᵀ − 2·eeᵀ = [[4, −4], [−4, 4 − 2]]
+        assert_eq!(
+            qs.lower_triangle(f).collect::<Vec<_>>(),
+            vec![(0, 0, 4.0), (1, 0, -4.0), (1, 1, 2.0)]
+        );
+    }
+
+    /// The gradient support has to come from the terms, not from the
+    /// assembled Hessian: `(x₀ + x₁)² − (x₀ − x₁)²` is `4x₀x₁`, whose
+    /// Hessian has **no diagonal at all** — while the gradient depends on
+    /// both variables, and `eval_jac_g` needs a column for each.
+    #[test]
+    fn the_gradient_support_survives_a_cancelling_hessian() {
+        let p = [(0usize, 1.0), (1usize, 1.0)];
+        let m = [(0usize, 1.0), (1usize, -1.0)];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(
+                &[
+                    SquareTerm {
+                        weight: 1.0,
+                        coefs: &p,
+                        constant: 0.0,
+                    },
+                    SquareTerm {
+                        weight: -1.0,
+                        coefs: &m,
+                        constant: 0.0,
+                    },
+                ],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        assert_eq!(qs.gradient_support(f), &[0, 1]);
+        // The diagonal cancelled exactly and is not stored.
+        assert_eq!(qs.lower_triangle(f).collect::<Vec<_>>(), vec![(1, 0, 4.0)]);
+        let x = [2.0, 3.0];
+        assert_eq!(qs.value(f, &x), 4.0 * x[0] * x[1]);
+        let mut g = [0.0; 2];
+        qs.add_gradient(f, &x, 1.0, &mut g);
+        assert_eq!(g, [4.0 * x[1], 4.0 * x[0]]);
+    }
+
+    /// A square of a constant contributes a value and nothing else.
+    #[test]
+    fn a_constant_square_is_value_only() {
+        let mut qs = QuadraticStructure::new(0);
+        let coefs = [(0usize, 1.0)];
+        let f = qs
+            .push_factored_form(
+                &[
+                    SquareTerm {
+                        weight: 3.0,
+                        coefs: &[],
+                        constant: 2.0,
+                    },
+                    SquareTerm {
+                        weight: 1.0,
+                        coefs: &coefs,
+                        constant: 0.0,
+                    },
+                ],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        assert_eq!(qs.gradient_support(f), &[0]);
+        assert_eq!(qs.value(f, &[4.0]), 3.0 * 4.0 + 16.0);
+        let mut g = [0.0];
+        qs.add_gradient(f, &[4.0], 1.0, &mut g);
+        assert_eq!(g, [8.0]);
+    }
+
+    /// Expanded and factored forms coexist in one structure, each read
+    /// back the way it was stored — the per-form offsets have to stay in
+    /// lockstep for that, and an off-by-one here would silently give a
+    /// factored form its neighbour's terms.
+    #[test]
+    fn the_two_kinds_of_form_coexist() {
+        let (mut qs, expanded) = sample();
+        let coefs = [(0usize, 1.0)];
+        let factored = qs
+            .push_factored_form(
+                &[SquareTerm {
+                    weight: 1.0,
+                    coefs: &coefs,
+                    constant: -1.0,
+                }],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        let x = [2.0, -3.0];
+        assert_eq!(qs.value(expanded, &x), -15.0);
+        assert_eq!(qs.value(factored, &x), 1.0);
+        let plain = qs.push_form(&BTreeMap::from([((1, 1), 2.0)]), &[], 0.0);
+        assert_eq!(qs.value(plain, &x), 9.0);
+        assert_eq!(qs.value(factored, &x), 1.0);
+
+        // …and the scatter slots stay attached to the right entries.
+        let pattern = [(0u32, 0u32), (1, 0), (1, 1)];
+        qs.bind_slots(|r, c| {
+            pattern
+                .iter()
+                .position(|&p| p == (r, c))
+                .expect("in pattern")
+        });
+        let mut values = [0.0; 3];
+        qs.accumulate_hessian(factored, 1.0, &mut values);
+        assert_eq!(values, [2.0, 0.0, 0.0]);
+        qs.accumulate_hessian(plain, 1.0, &mut values);
+        assert_eq!(values, [2.0, 0.0, 2.0]);
+    }
+
+    /// The Hessian-vector product reads the assembled matrix, so it is
+    /// shared with the expanded path and must agree with the dense form.
+    #[test]
+    fn a_factored_forms_hessian_vector_product_agrees_with_its_matrix() {
+        let a = [(0usize, 1.0), (1usize, -1.0)];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(
+                &[SquareTerm {
+                    weight: 1.0,
+                    coefs: &a,
+                    constant: 4.0,
+                }],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        // ∇² = 2·[[1, −1], [−1, 1]]
+        let mut out = [0.0; 2];
+        qs.add_hessian_vector(f, &[1.0, 2.0], 1.0, &mut out);
+        assert_eq!(out, [-2.0, 2.0]);
+    }
+
+    /// The weight multiplies the **square**, not the residual: `w·(l·l)`,
+    /// never `(w·l)·l`. The tape associates the first way — a `.nl` body
+    /// `o2 n7 o5 (x) n2` squares first and scales after — and the two
+    /// orders are not the same double.
+    ///
+    /// `7·(1.1)²` is the smallest witness this crate has: `7·(1.1·1.1)` is
+    /// `8.47` and `(7·1.1)·1.1` is `8.470000000000002`. That is one ulp on
+    /// its own, and on a body whose terms then cancel it is not one ulp of
+    /// the answer, it is the answer.
+    #[test]
+    fn the_weight_multiplies_the_square_not_the_residual() {
+        let coefs = [(0usize, 1.0)];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(
+                &[SquareTerm {
+                    weight: 7.0,
+                    coefs: &coefs,
+                    constant: 0.0,
+                }],
+                &[],
+                0.0,
+            )
+            .expect("admitted");
+        let x = [1.1];
+        assert_eq!(qs.value(f, &x), 7.0 * (x[0] * x[0]));
+        // The association this must not have — stated as a number so the
+        // test cannot pass by both sides being computed the same wrong way.
+        assert_eq!(qs.value(f, &x), 8.47);
+        assert_ne!((7.0 * x[0]) * x[0], 8.47);
+    }
+
+    /// gh#702's property, on gh#673's arm — and this is the arm where it is
+    /// least avoidable. A least-squares row is hundreds of same-signed
+    /// `wₖlₖ²`, which is exactly the shape whose naive sum loses its tail.
+    ///
+    /// Same construction as `the_outer_row_sum_does_not_lose_small_terms`,
+    /// written as squares: one term of `1e18`, a hundred of `2`, one of
+    /// `-1e18`. Front-to-back every `2` falls off the bottom of the running
+    /// total and the cancellation leaves zero; the true value is 200.
+    ///
+    /// Without this the compensation would be a property of which read-out a
+    /// body happened to take, and nothing would say so.
+    #[test]
+    fn the_factored_outer_sum_does_not_lose_small_terms_either() {
+        let coefs: Vec<[(usize, f64); 1]> = (0..102).map(|i| [(i, 1.0)]).collect();
+        let mut terms: Vec<SquareTerm<'_>> = Vec::new();
+        for (i, c) in coefs.iter().enumerate() {
+            let weight = match i {
+                0 => 1e18,
+                101 => -1e18,
+                _ => 2.0,
+            };
+            terms.push(SquareTerm {
+                weight,
+                coefs: c,
+                constant: 0.0,
+            });
+        }
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs.push_factored_form(&terms, &[], 0.0).expect("admitted");
+        let x = [1.0; 102];
+        // 1e18 + 100·2 − 1e18. Naive summation answers 0.0 here.
+        assert_eq!(qs.value(f, &x), 200.0);
+    }
+
+    /// gh #711: a factored form whose Hessian loses an entry is refused, so
+    /// the body falls back to its tape instead of being evaluated from a
+    /// matrix the tape does not agree with.
+    ///
+    /// `(2²⁷x₀)² + (x₀ + x₁)² − (x₀·2²⁷)²`. `(0, 0)` accumulates
+    /// `2·2⁵⁴ + 2 − 2·2⁵⁴`: the `+ 2` is under half an ulp at `2⁵⁵` and
+    /// rounds away, then the third term cancels what is left exactly. The
+    /// entry reaches `0.0` and is not stored, while the tape declares it.
+    ///
+    /// The two folds are not the same one — the rounding is on the second
+    /// term and the drop on the third, whose add is *exact* — which is why
+    /// the inexactness has to be carried per entry rather than tested at
+    /// the drop.
+    #[test]
+    fn a_factored_form_that_loses_a_hessian_entry_is_refused() {
+        let big = (1u64 << 27) as f64;
+        let wide = [(0usize, big)];
+        let unit = [(0usize, 1.0), (1usize, 1.0)];
+        let terms = [
+            SquareTerm {
+                weight: 1.0,
+                coefs: &wide,
+                constant: 0.0,
+            },
+            SquareTerm {
+                weight: 1.0,
+                coefs: &unit,
+                constant: 0.0,
+            },
+            SquareTerm {
+                weight: -1.0,
+                coefs: &wide,
+                constant: 0.0,
+            },
+        ];
+
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_none(),
+            "a form that dropped a Hessian entry was admitted",
+        );
+        // Refused *before* mutating: the structure is still empty, so a
+        // caller that falls back to a tape leaves nothing half-built.
+        assert!(qs.is_empty(), "a refused form left state behind");
+    }
+
+    /// The same refusal off the diagonal, with **every weight positive** —
+    /// which is what makes it more than a curiosity. The diagonal mechanism
+    /// needs a negative weight to cancel; here the sign comes from inside a
+    /// square, so an ordinary badly scaled least-squares row reaches it.
+    ///
+    /// `(10⁹x₀ + 10⁹x₁)² + (x₀ + x₁)² + (10⁹x₀ − 10⁹x₁)²` loses `H(0, 1)`.
+    #[test]
+    fn the_refusal_does_not_need_a_negative_weight() {
+        let a = [(0usize, 1e9), (1usize, 1e9)];
+        let b = [(0usize, 1.0), (1usize, 1.0)];
+        let c = [(0usize, 1e9), (1usize, -1e9)];
+        let terms = [
+            SquareTerm {
+                weight: 1.0,
+                coefs: &a,
+                constant: 0.0,
+            },
+            SquareTerm {
+                weight: 1.0,
+                coefs: &b,
+                constant: 0.0,
+            },
+            SquareTerm {
+                weight: 1.0,
+                coefs: &c,
+                constant: 0.0,
+            },
+        ];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(qs.push_factored_form(&terms, &[], 0.0).is_none());
+    }
+
+    /// gh #687's rule holds on this arm: a term that cancels **exactly** did
+    /// not go missing, and refusing it would give up the fast path for
+    /// arithmetic that never rounded.
+    ///
+    /// `(x₀ + x₁)² − (x₀ − x₁)²` cancels both diagonal entries exactly, and
+    /// its true Hessian really is `[[0, 4], [4, 0]]`.
+    #[test]
+    fn an_exactly_cancelling_factored_form_is_still_admitted() {
+        let plus = [(0usize, 1.0), (1usize, 1.0)];
+        let minus = [(0usize, 1.0), (1usize, -1.0)];
+        let terms = [
+            SquareTerm {
+                weight: 1.0,
+                coefs: &plus,
+                constant: 0.0,
+            },
+            SquareTerm {
+                weight: -1.0,
+                coefs: &minus,
+                constant: 0.0,
+            },
+        ];
+        let mut qs = QuadraticStructure::new(0);
+        let f = qs
+            .push_factored_form(&terms, &[], 0.0)
+            .expect("an exact cancellation is not a loss");
+        let x = [2.0, 3.0];
+        // 4·x₀·x₁.
+        assert_eq!(qs.value(f, &x), 24.0);
+        // The cancelled diagonal is genuinely absent, and the gradient
+        // support still carries both variables.
+        assert_eq!(qs.gradient_support(f), &[0, 1]);
+    }
+
+    /// A weight big enough that `2·w` overflows cannot be stored, because
+    /// the infinity has swallowed every term it touched. Suspected by
+    /// gh #711's review and pinned here rather than left as a maybe.
+    #[test]
+    fn a_weight_whose_double_overflows_is_refused() {
+        let coefs = [(0usize, 1.0)];
+        let terms = [SquareTerm {
+            weight: 1e308,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(qs.push_factored_form(&terms, &[], 0.0).is_none());
+    }
+
+    /// The other half of the same guard, and the half gh #711 left
+    /// untested: a product that *underflows* to zero out of two nonzero
+    /// factors. `2·w·b₀·b₁` with `w = 1` and both `b` at `1e-200` is
+    /// `2e-400`, which is not representable, so the off-diagonal entry
+    /// would silently not exist while the tape still reports one.
+    ///
+    /// This is the underflow case the `product_lost` comment names. It
+    /// was verified to be the *only* thing standing behind that branch:
+    /// with `product_lost` disabled and this test absent, the whole
+    /// workspace stays green.
+    #[test]
+    fn a_product_that_underflows_to_zero_is_refused() {
+        let coefs = [(0usize, 1e-200), (1usize, 1e-200)];
+        let terms = [SquareTerm {
+            weight: 1.0,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_none(),
+            "2·1·1e-200·1e-200 underflows to zero out of two nonzero \
+             factors, so the (0,1) entry would be missing from a map the \
+             tape still populates",
+        );
+    }
+
+    /// The bound on the above: an underflow guard that refuses whenever
+    /// a product is merely *small* would push ordinary well-scaled-but-
+    /// tiny models onto the tape. `1e-160` squared is `1e-320`, which is
+    /// subnormal but still nonzero, and must stay on the fast path.
+    #[test]
+    fn a_subnormal_but_nonzero_product_is_still_admitted() {
+        let coefs = [(0usize, 1e-160), (1usize, 1e-160)];
+        let terms = [SquareTerm {
+            weight: 1.0,
+            coefs: &coefs,
+            constant: 0.0,
+        }];
+        let mut qs = QuadraticStructure::new(0);
+        assert!(
+            qs.push_factored_form(&terms, &[], 0.0).is_some(),
+            "a subnormal product is representable; refusing it would send \
+             ordinary tiny-coefficient models to the tape for nothing",
+        );
     }
 }

@@ -209,6 +209,13 @@ pub struct IpoptApplication {
     /// [`Self::unhonored_convex_option`] reads this, on the same
     /// contract as `option_file_resolved` above (gh#604).
     convex_routing_available: bool,
+    /// Whether the backend-knob warnings (gh#551) have already been
+    /// printed for this application. The CLI emits them before routing —
+    /// a convex model never reaches `optimize_tnlp` — and `optimize_tnlp`
+    /// emits them for every other frontend; without this flag a CLI run
+    /// would print each line twice, which is how a warning teaches its
+    /// reader to skip it.
+    backend_warnings_emitted: bool,
     /// Shared sink that the linear-solver backend writes a rolling
     /// [`LinearSolverSummary`] into after every factor. Reset at the
     /// top of every solve (so back-to-back `optimize_tnlp` calls don't
@@ -329,6 +336,7 @@ impl IpoptApplication {
             record_iter_history: false,
             option_file_resolved: false,
             convex_routing_available: false,
+            backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
@@ -847,7 +855,12 @@ impl IpoptApplication {
             );
             return ApplicationReturnStatus::InvalidOption;
         }
-        for warning in self.unexploited_hint_warnings() {
+        let backend_warnings = self.take_unimplemented_backend_warnings();
+        for warning in self
+            .unexploited_hint_warnings()
+            .into_iter()
+            .chain(backend_warnings)
+        {
             eprintln!("{warning}");
         }
 
@@ -1209,8 +1222,18 @@ impl IpoptApplication {
     /// feature pounce does not implement, or `None`. Public so the CLI
     /// can refuse before routing — the convex dispatch never reaches
     /// `optimize_tnlp`. See [`crate::unimplemented_options`].
+    ///
+    /// A run configuring nothing but backends pounce does not ship is
+    /// refused here too, after the per-option table has had its say —
+    /// see [`crate::unimplemented_options::backend_only_refusal`]. It
+    /// is folded in rather than given its own accessor so that every
+    /// surface already refusing on this method refuses on it as well;
+    /// the CLI is not the only frontend, and a condition worth failing
+    /// on is not worth failing on only from the CLI.
     pub fn unimplemented_option_refusal(&self) -> Option<String> {
-        crate::unimplemented_options::refusal(&self.options, &self.reg_options)
+        crate::unimplemented_options::refusal(&self.options, &self.reg_options).or_else(|| {
+            crate::unimplemented_options::backend_only_refusal(&self.options, &self.reg_options)
+        })
     }
 
     /// The message for the first string option the caller set to a
@@ -1351,6 +1374,36 @@ impl IpoptApplication {
         crate::unimplemented_options::convex_hint_warnings(&self.options, &self.reg_options)
     }
 
+    /// Which of the four constant-derivative hints the caller actually
+    /// asserted, in [`pounce_nlp::constant_derivatives::HINT_OPTIONS`]
+    /// order — the order [`reconcile`] pairs against the model's own
+    /// proofs.
+    ///
+    /// Each name is read as a literal rather than through the loop
+    /// variable the caller used to use. The registered-but-unread scan
+    /// (`tests/no_silent_options.rs`) keys on the option name as it
+    /// appears at the accessor, so `get_bool_value(name, "")` over an
+    /// array read as "no key here" and left all four sitting in the
+    /// silent list while they were fully wired and consumed (#551 /
+    /// #677).
+    ///
+    /// Matching over `HINT_OPTIONS` rather than writing a bare array
+    /// keeps the slots right by construction, and a fifth hint added to
+    /// `HINT_OPTIONS` trips the fallback arm instead of silently reading
+    /// as "not asserted" — which is the failure mode this whole line of
+    /// work exists to kill.
+    fn asserted_constant_derivative_hints(&self) -> [bool; 4] {
+        use pounce_nlp::constant_derivatives::HINT_OPTIONS;
+        let read_yes = |key: &str| matches!(self.options.get_bool_value(key, ""), Ok((true, true)));
+        HINT_OPTIONS.map(|name| match name {
+            "grad_f_constant" => read_yes("grad_f_constant"),
+            "hessian_constant" => read_yes("hessian_constant"),
+            "jac_c_constant" => read_yes("jac_c_constant"),
+            "jac_d_constant" => read_yes("jac_d_constant"),
+            other => unreachable!("`{other}` is in HINT_OPTIONS with no read site"),
+        })
+    }
+
     /// Resolve the four constant-derivative hints for this solve and
     /// install the result on the NLP (gh #588, phase Q6).
     ///
@@ -1368,10 +1421,22 @@ impl IpoptApplication {
     /// overriding the caller there would be its own wrong answer.
     fn install_constant_derivative_hints(&self, orig_nlp: &mut OrigIpoptNlp) {
         use pounce_common::journalist::JournalCategory;
-        use pounce_nlp::constant_derivatives::{HINT_OPTIONS, reconcile};
+        use pounce_nlp::constant_derivatives::reconcile;
 
-        let asserted = HINT_OPTIONS
-            .map(|name| matches!(self.options.get_bool_value(name, ""), Ok((true, true))));
+        // Each name is read as a literal rather than through the loop
+        // variable: the registered-but-unread scan
+        // (`tests/no_silent_options.rs`) keys on the option name as it
+        // appears at the accessor, so `get_bool_value(name, "")` read as
+        // "no key here" and left all four of these sitting in the silent
+        // list while they were fully wired and consumed (#551 / #677).
+        //
+        // Matching over `HINT_OPTIONS` rather than writing a bare array
+        // keeps the order right by construction — `reconcile` pairs
+        // `asserted[k]` with `proofs[k]` — and a fifth hint added to
+        // `HINT_OPTIONS` trips the fallback arm instead of silently
+        // reading as "not asserted", which is the failure mode this
+        // whole line of work exists to kill.
+        let asserted = self.asserted_constant_derivative_hints();
         let proofs = orig_nlp.derivative_proofs();
         let (outcomes, enabled) = reconcile(proofs, asserted);
 
@@ -1396,13 +1461,48 @@ impl IpoptApplication {
         orig_nlp.set_constant_derivatives(enabled);
     }
 
+    /// Warnings for knobs of a linear-solver backend pounce does not
+    /// ship (`ma97_*`, `pardiso_*`, …), one line per backend family.
+    ///
+    /// Warnings and not refusals: an `ipopt.opt` carrying settings for
+    /// several backends so that one file runs everywhere is exactly what
+    /// the registry exists to accept, and refusing it would fail a run
+    /// over knobs it never touches. See the "Backend knobs warn, they do
+    /// not refuse" section of [`crate::unimplemented_options`]. gh#551.
+    pub fn unimplemented_backend_warnings(&self) -> Vec<String> {
+        crate::unimplemented_options::backend_warnings(&self.options, &self.reg_options)
+    }
+
+    /// The same warnings, but at most once per application: the second
+    /// caller gets nothing.
+    ///
+    /// Two sites emit them — the CLI, before routing, because a convex
+    /// model never reaches [`Self::optimize_tnlp`], and `optimize_tnlp`
+    /// itself, for every frontend that is not the CLI. A CLI run passes
+    /// through both, and printing the identical paragraph twice is how a
+    /// warning teaches its reader to skip warnings.
+    pub fn take_unimplemented_backend_warnings(&mut self) -> Vec<String> {
+        if self.backend_warnings_emitted {
+            return Vec::new();
+        }
+        self.backend_warnings_emitted = true;
+        self.unimplemented_backend_warnings()
+    }
+
     /// Resolve the five registered `derivative_test*` knobs. Every one
     /// of them was registered and never read, so `derivative_test=
     /// first-order` ran no test and printed nothing — a checker that
     /// silently checks nothing reports success by omission (gh#483
     /// follow-up).
+    ///
+    /// The numeric helper is named `read_num` to match the accessor
+    /// idiom the rest of this file uses: the registered-but-unread scan
+    /// (`tests/no_silent_options.rs`) discovers `read_*` helpers and the
+    /// literal key passed to them, so a differently-named local closure
+    /// made `derivative_test_perturbation` and `derivative_test_tol`
+    /// read as silent when they are wired and consumed (#677, #551).
     fn derivative_test_options(&self) -> DerivativeTestOptions {
-        let num = |key: &str, default: Number| -> Number {
+        let read_num = |key: &str, default: Number| -> Number {
             self.options
                 .get_numeric_value(key, "")
                 .ok()
@@ -1417,8 +1517,8 @@ impl IpoptApplication {
                 .and_then(|(v, f)| f.then_some(v))
                 .map(|v| DerivativeTest::from_option(&v))
                 .unwrap_or_default(),
-            perturbation: num("derivative_test_perturbation", 1e-8),
-            tol: num("derivative_test_tol", 1e-4),
+            perturbation: read_num("derivative_test_perturbation", 1e-8),
+            tol: read_num("derivative_test_tol", 1e-4),
             first_index: self
                 .options
                 .get_integer_value("derivative_test_first_index", "")
@@ -2461,15 +2561,21 @@ impl IpoptApplication {
         // one enables the detailed timers. `overall_alg` is started
         // unconditionally below: it feeds the `max_cpu_time` check and is
         // reported regardless of the option.
-        let timing_enabled = ["timing_statistics", "print_timing_statistics"]
-            .iter()
-            .any(|opt| {
-                self.options
-                    .get_bool_value(opt, "")
-                    .ok()
-                    .and_then(|(v, f)| f.then_some(v))
-                    .unwrap_or(false)
-            });
+        //
+        // Each name is read as a literal rather than looped over an
+        // array: the registered-but-unread scan
+        // (`tests/no_silent_options.rs`) keys on the option name as it
+        // appears at the accessor, so a loop variable reads as "no key
+        // here" and hid `timing_statistics` among the silent options
+        // when it has been wired since #190 (#677, #551).
+        let read_yes = |key: &str| -> bool {
+            self.options
+                .get_bool_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .unwrap_or(false)
+        };
+        let timing_enabled = read_yes("timing_statistics") || read_yes("print_timing_statistics");
         timing.set_detailed_enabled(timing_enabled);
         timing.overall_alg.start();
 
@@ -2779,6 +2885,11 @@ impl IpoptApplication {
         // other numeric knobs; the default matches the registered
         // default, so only explicit overrides change behavior.
         cq.borrow_mut().kappa_d = builder.kappa_d;
+        // `s_max` — cap on the average multiplier magnitude in the
+        // `(s_d, s_c)` scaling of the KKT error test. Same shape as
+        // `kappa_d`: registered (default 100) and previously never read,
+        // so an override was silently ignored (#551 / #677).
+        cq.borrow_mut().s_max = builder.s_max;
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its
@@ -3663,6 +3774,13 @@ impl IpoptApplication {
         if let Some(v) = read_num("kappa_d") {
             builder.kappa_d = v;
         }
+        // `s_max` — the cap in the `(s_d, s_c)` scaling of the KKT error
+        // test (#551 / #677). `IpoptCalculatedQuantities` carried it as a
+        // hard-coded 100 (the registered default) and nothing read the
+        // option; a run that does not set it is unaffected.
+        if let Some(v) = read_num("s_max") {
+            builder.s_max = v;
+        }
         if let Some(v) = read_num("tiny_step_tol") {
             builder.tiny_step_tol = v;
         }
@@ -3717,6 +3835,15 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("barrier_tol_factor") {
             builder.mu.barrier_tol_factor = v;
+        }
+        // `tau_min` — floor on the fraction-to-the-boundary parameter
+        // (#551 / #677). Both `MonotoneMuUpdate` and `AdaptiveMuUpdate`
+        // carried the field with upstream's 0.99 default and nothing
+        // read the option, so an override was silently dropped. The
+        // default equals the registered default, so this changes
+        // nothing for a run that does not set it.
+        if let Some(v) = read_num("tau_min") {
+            builder.mu.tau_min = v;
         }
         if let Some(v) = read_num("sigma_max") {
             builder.mu.sigma_max = v;
@@ -3814,6 +3941,19 @@ impl IpoptApplication {
         if let Some(v) = read_num("adaptive_mu_kkterror_red_fact") {
             builder.mu.adaptive_mu_kkterror_red_fact = v;
         }
+        // `filter_margin_fact` / `filter_max_margin` (#551) — the margin
+        // an entry must clear in the `obj-constr-filter` globalization
+        // test. `AdaptiveMuUpdate` computes
+        // `filter_margin_fact * min(filter_max_margin, err)` and has
+        // always done so; only these two read sites were missing, so
+        // setting either did nothing. Defaults equal the registered
+        // defaults (1e-5 / 1.0), so an unset run is unchanged.
+        if let Some(v) = read_num("filter_margin_fact") {
+            builder.mu.filter_margin_fact = v;
+        }
+        if let Some(v) = read_num("filter_max_margin") {
+            builder.mu.filter_max_margin = v;
+        }
         if let Ok((v, found)) = self
             .options
             .get_string_value("adaptive_mu_kkt_norm_type", "")
@@ -3844,6 +3984,19 @@ impl IpoptApplication {
         if let Some(v) = read_int("max_soft_resto_iters") {
             builder.line_search.max_soft_resto_iters = v;
         }
+        // `alpha_red_factor` (#678) and `accept_after_max_steps` (#551)
+        // — both consumed by the α-loop in `BacktrackingLineSearch`,
+        // both registered without a read site until those issues.
+        // `alpha_red_factor`'s default (0.5) equals the registered one,
+        // and `accept_after_max_steps` defaults to `-1`, which disables
+        // the escape hatch, so neither moves a solve that leaves them
+        // alone.
+        if let Some(v) = read_num("alpha_red_factor") {
+            builder.line_search.alpha_red_factor = v;
+        }
+        if let Some(v) = read_int("accept_after_max_steps") {
+            builder.line_search.accept_after_max_steps = v;
+        }
 
         // Filter switching / Armijo / margin constants (#191). Consumed
         // by `FilterLsAcceptor` (only on the `Filter` line-search path);
@@ -3851,6 +4004,13 @@ impl IpoptApplication {
         // Defaults equal the registered defaults.
         if let Some(v) = read_num("eta_phi") {
             builder.line_search.eta_phi = v;
+        }
+        // `delta` (#551) — the switching rule's multiplier on the
+        // constraint violation (Eqn. (19)); `FilterLsAcceptor` has
+        // always used it as `delta_armijo`, only the read site was
+        // missing. Default 1.0 equals the registered default.
+        if let Some(v) = read_num("delta") {
+            builder.line_search.delta = v;
         }
         if let Some(v) = read_num("theta_min_fact") {
             builder.line_search.theta_min_fact = v;
@@ -3894,11 +4054,25 @@ impl IpoptApplication {
         if let Some(v) = read_int("filter_reset_trigger") {
             builder.line_search.filter_reset_trigger = v;
         }
-        // Backtracking reduction factor (#678), consumed by
-        // `BacktrackingLineSearch` to scale alpha on every trial step.
-        if let Some(v) = read_num("alpha_red_factor") {
-            builder.line_search.alpha_red_factor = v;
+        // Penalty line-search constants (#551), consumed by
+        // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
+        // / `cg-penalty` paths). The acceptor implements ν and the
+        // Armijo test on the penalty merit function already; these four
+        // were registered with no read site, so tuning the penalty
+        // update did nothing. Defaults equal the registered defaults.
+        if let Some(v) = read_num("nu_init") {
+            builder.line_search.nu_init = v;
         }
+        if let Some(v) = read_num("nu_inc") {
+            builder.line_search.nu_inc = v;
+        }
+        if let Some(v) = read_num("rho") {
+            builder.line_search.rho = v;
+        }
+        if let Some(v) = read_num("eta_penalty") {
+            builder.line_search.eta_penalty = v;
+        }
+
         // Second-order-correction constants (#191), consumed by
         // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
         if let Some(v) = read_int("max_soc") {
@@ -3962,6 +4136,20 @@ impl IpoptApplication {
             builder.refinement.residual_improvement_factor = v;
         }
 
+        // Inertia-free curvature test (#551 / #677), also consumed by
+        // `PdFullSpaceSolver`. `neg_curv_test_tol` had a field that only
+        // ever held its 0.0 default, and `neg_curv_test_reg` had none at
+        // all; both are now read, and the curvature test they configure
+        // is implemented in `PdFullSpaceSolver::solve_once`. At the
+        // registered default (`0.0`) the heuristic is off and the
+        // inertia check runs as before.
+        if let Some(v) = read_num("neg_curv_test_tol") {
+            builder.refinement.neg_curv_test_tol = v;
+        }
+        if let Ok((v, true)) = self.options.get_bool_value("neg_curv_test_reg", "") {
+            builder.refinement.neg_curv_test_reg = v;
+        }
+
         // Restoration-phase constants (#191). Carried on the outer builder
         // and copied into the `RestoAlgorithmBuilder` when the restoration
         // factory is minted (the frontends pass this builder in). The
@@ -4004,6 +4192,24 @@ impl IpoptApplication {
         }
         if let Some(v) = read_yes("start_with_resto") {
             builder.resto.start_with_resto = v;
+        }
+        // `max_resto_iter` (#551 / #677) — the cap on *successive*
+        // restoration iterations. `RestoConvCheckAdapter` has enforced a cap
+        // all along (returning `MaxIterExceeded` at the limit); the number
+        // it enforced was a hard-coded constant in `resto_inner_solver.rs`,
+        // so setting the option did nothing. The consumer's field is
+        // `maximum_resto_iters`, not the option name — grepping for
+        // `max_resto_iter` found only the registry (#551 caution 2).
+        //
+        // DEFAULT MISMATCH, LEFT AS IT IS ON PURPOSE: the registry declares
+        // upstream's 3000000, pounce's effective cap is 3000
+        // (`RestoOptions::default`). `read_int` fires only when the user set
+        // the key, so an unset `max_resto_iter` still means 3000 and this
+        // wiring is trajectory-neutral. Adopting upstream's number would let
+        // restorations pounce currently truncates run on, which is a
+        // trajectory change and needs its own measurement.
+        if let Some(v) = read_int("max_resto_iter") {
+            builder.resto.max_resto_iter = v;
         }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
@@ -5490,5 +5696,174 @@ mod tests {
         assert_eq!(info.m, 2);
         assert_eq!(info.nnz_jac_g, 8);
         assert_eq!(info.nnz_h_lag, 10);
+    }
+
+    /// Each of the four constant-derivative hints reaches the algorithm,
+    /// and reaches its *own* slot (#551 / #677).
+    ///
+    /// All four were wired and consumed — gh#588 Q6 made pounce exploit
+    /// them — but the read site looped over
+    /// `constant_derivatives::HINT_OPTIONS`, so the registered-but-unread
+    /// scan saw a loop variable where it needs a literal key and reported
+    /// all four as silent no-ops. They are literals now, and this pins
+    /// what a literal-per-name rewrite can get wrong that a loop could
+    /// not: setting one hint must light up that hint's slot and no other,
+    /// because `reconcile` pairs `asserted[k]` with the model's proof for
+    /// `HINT_OPTIONS[k]` and a transposed pair would reuse the wrong
+    /// derivative.
+    #[test]
+    fn each_constant_derivative_hint_lights_up_its_own_slot() {
+        use pounce_nlp::constant_derivatives::HINT_OPTIONS;
+
+        let app = IpoptApplication::new();
+        assert_eq!(
+            app.asserted_constant_derivative_hints(),
+            [false; 4],
+            "no hint is asserted on a fresh options list",
+        );
+
+        for (k, name) in HINT_OPTIONS.iter().enumerate() {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!("{name} yes\n"))
+                .unwrap();
+            let mut expected = [false; 4];
+            expected[k] = true;
+            assert_eq!(
+                app.asserted_constant_derivative_hints(),
+                expected,
+                "`{name}=yes` must set slot {k} and nothing else",
+            );
+
+            // …and the registered default asks for nothing, so an
+            // `ipopt.opt` that spells it out changes no derivative reuse.
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!("{name} no\n"))
+                .unwrap();
+            assert_eq!(
+                app.asserted_constant_derivative_hints(),
+                [false; 4],
+                "`{name}=no` is the registered default and asserts nothing",
+            );
+        }
+    }
+
+    /// `min x²` on `[-10, 10]` from `x = 1`, with an *exactly correct*
+    /// gradient `2x`. Unconstrained and one-dimensional so the only
+    /// thing the derivative checker can react to is its own step size
+    /// and threshold.
+    ///
+    /// The forward difference at step `h` is `((1+h)² − 1)/h = 2 + h`,
+    /// so the deviation from the analytic `2` is exactly `h`, and the
+    /// relative test flags it when `h > tol·(2 + h)`. That makes the
+    /// verdict a closed-form function of the two knobs under test.
+    struct ExactQuadratic;
+    impl TNLP for ExactQuadratic {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-10.0]);
+            b.x_u.copy_from_slice(&[10.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad[0] = 2.0 * x[0];
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool {
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _obj_factor: Number,
+            _lambda: Option<&[Number]>,
+            _new_lambda: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    fn derivative_test_verdict(extra: &str) -> pounce_nlp::derivative_test::DerivativeTestReport {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(&format!("derivative_test first-order\n{extra}"))
+            .unwrap();
+        let opts = app.derivative_test_options();
+        pounce_nlp::derivative_test::run(&mut ExactQuadratic, &opts).expect("a report")
+    }
+
+    /// `derivative_test_perturbation` and `derivative_test_tol` were
+    /// registered, read into [`DerivativeTestOptions`], and consumed by
+    /// the checker — but nothing proved a *set value* reached it, which
+    /// is the only assertion that distinguishes a read site from a
+    /// parse-and-discard (#677, #551).
+    ///
+    /// Each of the three verdicts below differs from the one above it by
+    /// exactly one option, so a knob that stopped reaching the checker
+    /// would collapse two of them together and fail here.
+    #[test]
+    fn the_derivative_checker_knobs_change_the_verdict() {
+        // Registered defaults (1e-8 / 1e-4), which are also the read
+        // site's fallbacks: a correct gradient looks correct.
+        let clean = derivative_test_verdict("");
+        assert_eq!(clean.checked, 1);
+        assert_eq!(clean.suspicious, 0, "{:#?}", clean.lines);
+
+        // A coarse step makes the *same correct gradient* look wrong:
+        // deviation 0.5 > 1e-4·2.5. Only `derivative_test_perturbation`
+        // changed, so this is that option and nothing else.
+        let coarse = derivative_test_verdict("derivative_test_perturbation 0.5\n");
+        assert_eq!(coarse.checked, 1);
+        assert_eq!(
+            coarse.suspicious, 1,
+            "derivative_test_perturbation never reached the checker: {:#?}",
+            coarse.lines,
+        );
+
+        // …and loosening the threshold at that same coarse step clears
+        // it again: 0.5 < 0.5·2.5. Only `derivative_test_tol` changed.
+        let tolerant =
+            derivative_test_verdict("derivative_test_perturbation 0.5\nderivative_test_tol 0.5\n");
+        assert_eq!(tolerant.checked, 1);
+        assert_eq!(
+            tolerant.suspicious, 0,
+            "derivative_test_tol never reached the checker: {:#?}",
+            tolerant.lines,
+        );
+
+        // The report also prints what it used, so a user reading the
+        // output can tell which step and threshold produced the verdict.
+        assert!(
+            tolerant.lines[0].contains("5.0e-1"),
+            "{:#?}",
+            tolerant.lines,
+        );
     }
 }

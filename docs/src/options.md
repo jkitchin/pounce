@@ -107,10 +107,47 @@ The features in question: the Chen-Goldfarb (CG-penalty) / inexact-Newton
 line search, derivative approximation by finite differences,
 linear-dependency detection, the per-iteration NaN/Inf derivative check,
 multiplier recalculation by least squares, least-square initialization of
-*all* duals (`least_square_init_duals`), a selectable
-constraint-violation norm, magic steps, bound replacement, the L-BFGS
-augmented-system variants, skipping the finalize callback, the dynamic
-HSL loader, and `suppress_all_output` / `debug_print_level`.
+*all* duals (`least_square_init_duals`), oracle-driven μ on the switch
+into fixed mode (`fixed_mu_oracle`; POUNCE implements that option's
+default, `average_compl`), a selectable constraint-violation norm, magic
+steps, bound replacement, the L-BFGS augmented-system variants, skipping
+the finalize callback, the dynamic HSL loader, and `suppress_all_output`
+/ `debug_print_level`.
+
+Two line-search knobs joined that list with
+[#551](https://github.com/jkitchin/pounce/issues/551). `theta_min` is the
+CG-penalty acceptor's threshold, not the filter's — the filter line
+search derives its own `theta_min` from `theta_min_fact * max(1, θ₀)`, as
+upstream does, and never takes it directly, so set `theta_min_fact` if
+that is what you meant. `alpha_for_y_tol` configures only the
+`primal-and-full` / `dual-and-full` multiplier-step rules, which POUNCE
+does not have; `alpha_for_y` supports `primal` (the default),
+`bound-mult`, `min`, `max` and `full`.
+
+Four **corrector** knobs joined it too. `corrector_type` and its
+safeguards `skip_corr_if_neg_curv`, `skip_corr_in_monotone_mode` and
+`corrector_compl_avrg_red_fact` select and gate the corrector step Ipopt
+tries *inside the line search* (`FilterLSAcceptor::TryCorrector`).
+POUNCE's line search takes no corrector trial at all. The
+predictor-corrector POUNCE does implement is Mehrotra's, applied to the
+search-direction right-hand side: `mehrotra_algorithm=yes` is read and
+honoured, and it also selects `mu_strategy=adaptive` and
+`mu_oracle=probing`.
+
+And three **sub-capabilities of features that do run**, where the
+refusal message has to say so or it reads as "restoration is missing":
+`expect_infeasible_problem_ctol` / `_ytol` steer
+`IpBacktrackingLineSearch`'s `count_successive_shortened_steps_`
+machinery, which POUNCE does not have — the restoration phase itself
+runs, and `expect_infeasible_problem` and
+`required_infeasibility_reduction` are read;
+`resto_failure_feasibility_threshold` asks for a threshold below which a
+stopped restoration is reclassified as a failure, and POUNCE has no such
+reclassification (`max_resto_iter`, below, is what bounds a restoration);
+and `limited_memory_special_for_resto=yes` asks for the special
+quasi-Newton update Ipopt dropped in Nov 2010 — L-BFGS runs in the
+restoration sub-solve with the regular update, which is what upstream's
+own default `no` asks for.
 
 The same rule applies one level down, to a single *value* of an option
 that otherwise works. `bound_mult_init_method` is read and honoured, but
@@ -255,7 +292,115 @@ buys.
 The per-backend tuning options (`ma97_scaling`, `mumps_pivtolmax`,
 `pardiso_*`, `wsmp_*`, `spral_*`, …) remain registered for the same
 `ipopt.opt`-compatibility reason. They are unreachable now that their
-backend cannot be selected.
+backend cannot be selected, so setting one alongside options POUNCE does
+read **warns and solves** — it does not fail the run:
+
+```
+$ pounce model.nl ma97_order=metis tol=1e-8
+pounce: warning: `ma97_order` configures the HSL MA97 sparse symmetric linear
+solver, which pounce does not implement, so it is ignored — as is every other
+`ma97_*` option. pounce factors the KKT system with `feral` (pure Rust, the
+default) or MA57 (`linear_solver=ma57`, in a `--features ma57` build); no
+setting written for another backend transfers to either. The name is registered
+so an `ipopt.opt` written for Ipopt still parses unchanged — which is why this
+is a warning and not an error: the solve runs, and its result is unaffected.
+```
+
+A warning rather than a refusal, unlike the options above, because a
+portable `ipopt.opt` routinely carries settings for several backends at
+once so that one file runs everywhere. Refusing would fail that file over
+knobs the run never touches — for a user who is not using MA97 and never
+asked POUNCE to. One line is printed per backend family, listing the
+options it saw, and only for a value that differs from the registered
+default: a file that spells out defaults asks for nothing and gets
+nothing said about it. `pardisolib` warns with the `pardiso_*` family;
+`hsllib` is still refused, because POUNCE *has* an HSL backend (MA57) and
+the refusal points you at `--features ma57` rather than leaving you to
+believe a library was loaded.
+
+#### …unless they are all you set
+
+That reasoning assumes the file has other business here. If the backend
+knobs are *everything* the run sets, nothing in the file survives, and
+warning-then-solving would answer "tune the linear solver" by tuning
+nothing and reporting success. That case is **refused**:
+
+```
+$ pounce model.nl ma97_order=metis
+pounce: error: every option this run sets configures a linear-solver backend
+pounce does not implement, so there is nothing left for it to act on. […] Set
+`linear_solver=feral` (or `ma57`) if the defaults are what you want.
+```
+
+The rule in full:
+
+| what the run sets | result |
+|---|---|
+| backend knobs only | **error**, exit 2 |
+| backend knobs + any option POUNCE reads | warning, solve continues |
+| backend knobs at their registered defaults | silent, solve continues |
+| no backend knobs | silent, solve continues |
+
+Two details worth knowing. The second row counts an option's *presence*,
+not whether you changed it — writing `tol` at its default is still a
+statement about this solve, and it is enough to put you back on the
+warning path. And `option_file_name` does not count as content: it says
+where the options came from, not what to solve, so pointing at a
+backend-only `ipopt.opt` is refused exactly as passing the same knobs on
+the command line would be.
+
+A file that *selects* the backend it tunes never reaches this: `linear_solver=ma97`
+is refused on its own, as [above](#choosing-a-linear-solver).
+
+### Inertia-free curvature test (`neg_curv_test_tol`)
+
+By default every KKT factorization is checked for the right inertia — as
+many negative eigenvalues as there are constraints — and the primal
+regularization δ_x is escalated until it has it. The inertia-free
+alternative of Zavala & Chiang (2014) factors without that check and
+instead asks whether the direction the system produced actually curves
+upward:
+
+```
+dxᵀ W dx + dxᵀ Σ_x dx + dsᵀ Σ_s ds [+ δ_x‖dx‖² + δ_s‖ds‖²]
+    ≥ neg_curv_test_tol · (‖dx‖² + ‖ds‖²)
+```
+
+| Option              | Default | Meaning                                                                                     |
+|---------------------|---------|---------------------------------------------------------------------------------------------|
+| `neg_curv_test_tol` | `0.0`   | `0` keeps the inertia check. Positive is the test's α_n: the factorization is accepted only if the direction clears the bound above, and otherwise δ_x is escalated exactly as a wrong inertia would. Upstream recommends `1e-12`–`1e-11`. |
+| `neg_curv_test_reg` | `yes`   | Whether the bracketed primal-regularization term counts toward the curvature. `no` is the original Ipopt form that ignores it. Only read when `neg_curv_test_tol > 0`. |
+
+**This is a heuristic, and turning it on is not free — it can change
+the answer, not just the path to it.** Measured over POUNCE's fixture
+corpus at the recommended `1e-11` (`scripts/sweep-fixtures.sh`, both
+legs), 11 of 59 models move:
+
+| model | default | `neg_curv_test_tol=1e-11` |
+|---|---|---|
+| `csfi2` | `Solved_To_Acceptable_Level`, 35 it | **`Solve_Succeeded`, 27 it** |
+| `unbounded_cubic` | `Diverging_Iterates`, 290 it | **`Diverging_Iterates`, 61 it** |
+| `cresc4` | 81 it | 90 it |
+| `infeasible_equalities` | `Infeasible_Problem_Detected`, 28 it | same, 37 it |
+| `unbounded_exp` | `Error_In_Step_Computation`, 27 it | same, 32 it |
+| `eigena2` | 26 it | **421 it** |
+| `eigenb2` | 67 it | **960 it** |
+| `autocorr_bern55-06` | `Solve_Succeeded`, 72 it, obj `-2304.000028` | **1042 it, obj `-2288.000022`** |
+| `pooling_rt2stp` | `Solve_Succeeded`, 298 it, obj `-3273.954992` | **`Solved_To_Acceptable_Level`, 537 it, obj `-3085.16078`** |
+| `deb7` | `Solve_Succeeded`, 154 it | **`Error_In_Step_Computation`, 183 it** |
+| `eigenb2` (L-BFGS leg) | `Solve_Succeeded`, 56 it | **`Error_In_Step_Computation`, 76 it** |
+
+The last four rows are the reason to read this before switching it on.
+`deb7` and `eigenb2`-under-L-BFGS stop converging at all;
+`autocorr_bern55-06` and `pooling_rt2stp` still report success but land
+on a **worse objective** — a tolerance-legal wrong answer, which is the
+failure mode that is invisible to a suite asserting status and
+objective-to-a-tolerance. Accepting a factorization whose inertia is
+wrong is exactly the kind of change that produces it.
+
+It is off by default (`neg_curv_test_tol=0` keeps the inertia check),
+and nothing above happens to a solve that leaves it alone. If you turn
+it on, measure your own model.
 
 ## Bound relaxation and `honor_original_bounds`
 
@@ -644,6 +789,26 @@ for if you *tighten* `dual_inf_tol` and want that absolute standard
 honoured unconditionally — the floor is a floor, so it can override a
 tightened `dual_inf_tol` on a large-gradient model.
 
+### `s_max` — where `s_d` and `s_c` come from
+
+The two normalising factors above are built from the multipliers
+themselves, capped by `s_max` (default `100`, upstream's):
+
+```
+s_d = max( s_max , (‖y_c‖₁+‖y_d‖₁+‖z‖₁+‖v‖₁) / (their total dimension) ) / s_max
+s_c = max( s_max , (‖z‖₁+‖v‖₁) / (their dimension) ) / s_max
+```
+
+Both are exactly `1` while the multipliers average below the cap — which
+is every well-scaled problem, and why the option is invisible there — and
+grow as `mean / s_max` once the average passes it. Raising `s_max`
+therefore delays the normalisation (the KKT error stays closer to the raw
+residuals); lowering it applies the normalisation sooner and makes the
+scaled error smaller for the same iterate, so the solve certifies
+earlier. The scaled and unscaled numbers are both reported: `--json-output`
+carries `final_kkt_error` and `final_unscaled_kkt_error`, and their ratio
+is exactly what `s_max` controls.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a
@@ -679,6 +844,7 @@ current iterate's complementarity). See
 | `mu_linear_decrease_factor`             | `0.2`              | κ_μ in `μ ← min(κ_μ · μ, μ^θ_μ)`.                                                             |
 | `mu_superlinear_decrease_power`         | `1.5`              | θ_μ in the same formula.                                                                      |
 | `barrier_tol_factor`                    | `10.0`             | Inner-subproblem tolerance scales as `barrier_tol_factor · μ`.                                |
+| `tau_min`                               | `0.99`             | Floor on the fraction-to-the-boundary parameter τ = max(`tau_min`, 1 − μ); a step may cover at most τ of the distance to a bound. Read by both μ strategies (and by the restoration sub-solve). |
 | `sigma_max`                             | `1e2`              | Upper clamp on σ chosen by the quality-function oracle.                                       |
 | `sigma_min`                             | `1e-6`             | Lower clamp on σ (raising this to `1e-2` can break a stair-stepping stall on some problems).  |
 | `adaptive_mu_globalization`             | `obj-constr-filter`| Adaptive-mode globalization: `kkt-error`, `obj-constr-filter`, or `never-monotone-mode`.      |
@@ -1074,7 +1240,7 @@ of the stable interface, and may change between releases.
 | `POUNCE_DBG_CLASSIFY` | — (stderr) | The detected problem class and the finding that produced it, next to the `.nl` header's own nonlinearity census. This is the line to read when a model routed to a solver you did not expect. No `RUST_LOG` needed. |
 | `POUNCE_DBG_CONSTDERIV` | — (stderr) | Which of the three [constant-derivative](#options-pounce-does-not-implement) cases fired for each of the four `*_constant` hints — the proof, whether you asserted it, and whether the derivative is reused. No `RUST_LOG` needed. |
 | `POUNCE_DBG_GONDZIO` | — (stderr) | One line per convex (LP/QP/conic) solve: which driver ran, its iteration count, and how many Gondzio centrality correctors were attempted, how many accepted, and their mean step-length gain. Read it to tell whether `qp_gondzio_corr` is doing anything on your model — an `attempted=0` line means the cone is not a pure orthant, or the option is `0`. No `RUST_LOG` needed. |
-| `POUNCE_DBG_NO_QUAD` | — (no output) | **Changes what runs, rather than emitting.** Turns off parse-time quadratic recognition, so every `.nl` body keeps its expression tree and is evaluated through the AD tape instead of from constant matrices. This is the A/B switch the quadratic evaluator is measured with: if a model's numbers move when it is set, the evaluator is the difference. Slower by construction, and larger in memory. It is **not** a general "pre-quadratic" switch — in particular the constant-derivative proofs behind the four `*_constant` hints read the same recognizer through the tree, so they resolve identically either way and `POUNCE_DBG_CONSTDERIV=1` prints the same verdicts with it set. |
+| `POUNCE_DBG_NO_QUAD` | — (no output) | **Changes what runs, rather than emitting.** Turns off quadratic recognition, so every `.nl` body keeps its expression tree and is evaluated through the AD tape rather than from stored constant structure — both the expanded read-out `½xᵀHx + aᵀx + c` and, since gh#673, the factored one `Σ wₖ(bₖᵀx + dₖ)²` a sum of squared residuals keeps. This is the A/B switch the quadratic evaluator is measured with: if a model's numbers move when it is set, the evaluator is the difference. Slower by construction, and larger in memory. It is **not** a general "pre-quadratic" switch — in particular the constant-derivative proofs behind the four `*_constant` hints read the same recognizer through the tree, so they resolve identically either way and `POUNCE_DBG_CONSTDERIV=1` prints the same verdicts with it set. |
 | `POUNCE_SIMPLEX_DEBUG` | — (stderr) | Convex/LP-QP simplex pivoting trace. Printed straight to stderr; no `RUST_LOG` needed. |
 
 Two already-documented gates round out the set: `POUNCE_DBG_LLM` and

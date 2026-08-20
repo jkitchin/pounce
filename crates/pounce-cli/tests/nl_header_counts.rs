@@ -55,6 +55,14 @@ const NONCONFORMING_ROWS: &[(&str, &str)] = &[
         "nlc=1, but the nonlinear row is row 1",
     ),
     ("parametric.nl", "nlc=0, but row 1's body is `o2 v4 v0`"),
+    (
+        // `parametric.nl` byte for byte plus a `red_hessian` suffix
+        // block, so it carries the same understated header rather than
+        // a new finding of its own (gh#551 added it for the sIPOPT
+        // option tests).
+        "parametric_red_hessian.nl",
+        "nlc=0, but row 1's body is `o2 v4 v0` — inherited from parametric.nl",
+    ),
 ];
 
 fn fixture_roots() -> Vec<PathBuf> {

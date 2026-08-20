@@ -143,6 +143,44 @@ fn exactly_cancelling_body() -> &'static str {
     "o54\n3\no2\nv0\nv0\no16\no5\nv0\nn2\no5\nv1\nn2\n"
 }
 
+/// `(2²⁷x₀)² + (x₀ + x₁)² − (x₀·2²⁷)²` — the same defect reached through
+/// gh #673's factored door, and the witness gh #711's review built.
+///
+/// Three honest squares. There is no monomial spine here, so
+/// `is_expanded_quadratic` has no opinion and the shape gate in
+/// `admitted_factored_form` lets it through; the loss happens later, when
+/// `Σ 2wₖbₖbₖᵀ` accumulates `(0, 0)` as `2·2⁵⁴ + 2 − 2·2⁵⁴`. The `+ 2` is
+/// half an ulp at `2⁵⁵` and ties back to even, so the entry reaches exactly
+/// `0.0` and is not stored — while the tape declares it.
+///
+/// The two spellings of the same square (`2²⁷·x₀` and `x₀·2²⁷`) keep the
+/// tape from hash-consing the pair into a `Cse`, which would refuse the
+/// body for an unrelated reason and prove nothing.
+fn factored_cancelling_body() -> String {
+    let big = (1u64 << 27) as f64;
+    format!(
+        "o54\n3\n\
+         o5\no2\nn{big:.1}\nv0\nn2\n\
+         o5\no0\nv0\nv1\nn2\n\
+         o16\no5\no2\nv0\nn{big:.1}\nn2\n"
+    )
+}
+
+/// The off-diagonal form of the same thing, and the one that matters more:
+/// `(10⁹x₀ + 10⁹x₁)² + (x₀ + x₁)² + (10⁹x₀ − 10⁹x₁)²`.
+///
+/// Every weight is positive — no difference of squares, nothing anyone
+/// would call contrived — and `H(0, 1)` still folds to exactly zero and
+/// vanishes. The diagonal mechanism needs a negative weight to cancel;
+/// off the diagonal the `−10⁹x₁` inside a *squared* term supplies the sign,
+/// so an ordinary badly scaled least-squares model reaches it.
+fn factored_offdiagonal_body() -> &'static str {
+    "o54\n3\n\
+     o5\no0\no2\nn1e9\nv0\no2\nn1e9\nv1\nn2\n\
+     o5\no0\nv0\nv1\nn2\n\
+     o5\no1\no2\nn1e9\nv0\no2\nn1e9\nv1\nn2\n"
+}
+
 /// Parse with parse-time quadratic recognition on and off — the two arms of
 /// `admitted_quad_form`, which reaches its form from a `Quad` body one way
 /// and re-derives it from a `Tree` the other.
@@ -180,6 +218,49 @@ fn a_row_that_dropped_a_term_is_not_admitted_for_evaluation() {
                 prob.con_nonlinear[0].admitted_quad_form().is_none(),
                 "{what} ({path}): a row with a dropped term was admitted for \
                  constant-structure evaluation",
+            );
+        }
+    }
+}
+
+/// The same gate, against the second door gh #673 opened.
+///
+/// `admitted_factored_form` serves the bodies `admitted_quad_form` refuses
+/// for their *shape*, and these are refused for their *loss* — but they are
+/// also, read structurally, sums of squares: `2⁵³·x₀·x₀ + x₀² − 2⁵³·x₀·x₀`
+/// is three of them. Without the explicit `is_expanded_quadratic` test in
+/// that accessor they walk straight back onto the fast path this file
+/// exists to keep them off.
+///
+/// It is worth knowing what goes wrong when they do, because it is not that
+/// the fast path gets *worse*. Measured, with the gate removed: this row's
+/// tape answers `16.0` at `x₀ = 3` and the factored arm answers `9.0` —
+/// and `9.0` is the right value of `x₀²`, which the compensated outer sum
+/// (gh #702) recovers where the tape's naive fold cannot.
+/// `the_cli_answer_does_not_depend_on_the_dropped_form` below then moves
+/// from `−1.812` to `−2.236`, which is `−√5`: the true optimum of the model
+/// these bytes describe.
+///
+/// That is still the defect. As this file's own doc comment puts it, the
+/// tape is the reference because it is what the row means *to this solver*,
+/// not because it is exact — and two routes over the same bytes answering
+/// `9` and `16` is exactly the divergence gh #685 is about, whichever of
+/// them is closer to the algebra. The Hessian **pattern** parts company
+/// too: `Σ 2wₖbₖbₖᵀ` folds `(0, 0)` to exactly `0.0` (`2⁵⁴ + 2` ties back
+/// to `2⁵⁴`) and a zero entry is not stored, while the tape declares one —
+/// `nnz_h` 2 → 1.
+#[test]
+fn a_row_that_dropped_a_term_is_not_admitted_as_a_factored_form_either() {
+    for (what, txt) in [
+        ("cancellation", model(&cancelling_body())),
+        ("partial cancellation", model(&partially_cancelling_body())),
+        ("underflow", model(underflowing_body())),
+    ] {
+        for (path, prob) in both_paths(&txt) {
+            assert!(
+                prob.con_nonlinear[0].admitted_factored_form().is_none(),
+                "{what} ({path}): a row with a dropped term came back in \
+                 through the factored read-out",
             );
         }
     }
@@ -454,4 +535,108 @@ fn objective(text: &str) -> Option<f64> {
     line.split_whitespace()
         .filter_map(|t| t.parse::<f64>().ok())
         .next_back()
+}
+
+/// gh #711 review, the merge-blocking finding: a **factored** body that
+/// loses a Hessian entry to floating point must not be evaluated from its
+/// structure either.
+///
+/// The gate `admitted_factored_form` carries is `is_expanded_quadratic`,
+/// which answers about the *shape* the coefficients came from. It catches a
+/// lossy flat sum of monomials. It has nothing to say about three honest
+/// squares whose `Σ 2wₖbₖbₖᵀ` cancels — and before the fix, both bodies
+/// below went straight onto the fast path and disagreed with their own
+/// tapes:
+///
+/// | | fast path | tape |
+/// |---|---|---|
+/// | `eval_g[0]` at `x = (3, 1)` | `16.0` | `0.0` |
+/// | `nnz_h` pattern | `[(1,0), (1,1)]` | `[(0,0), (1,0), (1,1)]` |
+///
+/// The fix refuses in `push_factored_form`, where the accumulation is, so
+/// the body keeps its tape. This asserts the property that matters rather
+/// than the mechanism: whatever the routing, the two routes agree.
+#[test]
+fn a_factored_row_that_dropped_a_hessian_entry_keeps_its_tape() {
+    for (what, txt) in [
+        ("diagonal", model(&factored_cancelling_body())),
+        ("off-diagonal", model(factored_offdiagonal_body())),
+    ] {
+        let x = [3.0, 1.0];
+        let mut answers = Vec::new();
+        for quad in [true, false] {
+            let prob = parse_nl_text_with_quadratic(&txt, true).expect("parse");
+            let mut t = NlTnlp::try_new_with_quadratic(prob, quad).expect("tnlp");
+
+            let mut g = [0.0; 2];
+            assert!(t.eval_g(&x, true, &mut g), "{what}: eval_g failed");
+
+            let nnz = t.get_nlp_info().expect("info").nnz_h_lag as usize;
+            let (mut irow, mut jcol) = (vec![0i32; nnz], vec![0i32; nnz]);
+            assert!(
+                t.eval_h(
+                    None,
+                    true,
+                    1.0,
+                    None,
+                    true,
+                    SparsityRequest::Structure {
+                        irow: &mut irow,
+                        jcol: &mut jcol,
+                    },
+                ),
+                "{what}: eval_h structure failed",
+            );
+            let pattern: Vec<(i32, i32)> = irow.iter().copied().zip(jcol.iter().copied()).collect();
+            answers.push((g[0], pattern));
+        }
+
+        let (fast, tape) = (&answers[0], &answers[1]);
+        assert_eq!(
+            fast.0, tape.0,
+            "{what}: the fast path and the tape disagree on the row's value",
+        );
+        assert_eq!(
+            fast.1, tape.1,
+            "{what}: the fast path and the tape disagree on the Hessian pattern",
+        );
+    }
+}
+
+/// The refusal above is about *loss*, not about factored bodies with a
+/// cancelling Hessian in general. gh #687's rule holds on this arm too: a
+/// term that cancels **exactly** did not go missing, and refusing it would
+/// give up the fast path for arithmetic that never rounded.
+///
+/// `(x₀ + x₁)² − (x₀ − x₁)²` has `H(0, 0) = 2 − 2` and `H(1, 1) = 2 − 2`,
+/// both exactly zero by an add that rounded nothing, and its true Hessian
+/// really is `[[0, 4], [4, 0]]`. It stays on the fast path, and the two
+/// routes agree — which is the same assertion as the test above, made
+/// against the opposite expectation.
+#[test]
+fn an_exactly_cancelling_factored_row_is_still_admitted() {
+    // (x0 + x1)^2 - (x0 - x1)^2
+    let body = "o54\n2\n\
+                o5\no0\nv0\nv1\nn2\n\
+                o16\no5\no1\nv0\nv1\nn2\n";
+    let txt = model(body);
+
+    let prob = parse_nl_text_with_quadratic(&txt, true).expect("parse");
+    assert!(
+        prob.con_nonlinear[0].admitted_factored_form().is_some(),
+        "an exactly cancelling factored row should still be recognized",
+    );
+
+    let x = [3.0, 1.0];
+    let mut values = Vec::new();
+    for quad in [true, false] {
+        let prob = parse_nl_text_with_quadratic(&txt, true).expect("parse");
+        let mut t = NlTnlp::try_new_with_quadratic(prob, quad).expect("tnlp");
+        let mut g = [0.0; 2];
+        assert!(t.eval_g(&x, true, &mut g));
+        values.push(g[0]);
+    }
+    // 4·x₀·x₁ = 12.
+    assert_eq!(values[0], 12.0);
+    assert_eq!(values[0], values[1]);
 }

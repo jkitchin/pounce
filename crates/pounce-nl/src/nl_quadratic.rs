@@ -544,66 +544,12 @@ fn accumulate<K: Ord>(map: &mut BTreeMap<K, f64>, key: K, t: f64) -> Merged {
     }
 }
 
-/// Was `a + b`, which came out as `s`, computed **exactly**?
-///
-/// Knuth's two-sum: `err` below is the part of the true sum that `s` could
-/// not represent, and it is itself exact for every finite pair — no
-/// tolerance, no magnitude test. Two extra flops per merge, which is the
-/// whole cost of telling `x − x` (exact, degree really 0) apart from
-/// `2⁵³·x + x − 2⁵³·x` (the `x` was absorbed by the first add, and the
-/// second only made it visible). See gh #687.
-///
-/// A non-finite operand — or a sum that overflowed — makes `err` a `NaN`,
-/// which answers *inexact*: the conservative direction, and the right one,
-/// since an infinity has lost every term it swallowed.
-fn add_is_exact(a: f64, b: f64, s: f64) -> bool {
-    let bb = s - a;
-    let err = (a - (s - bb)) + (b - bb);
-    err == 0.0
-}
-
-/// Was `a · b`, which came out as `p`, computed **exactly**?
-///
-/// `fma(a, b, −p)` is the multiply's rounding error, exactly, and `p` is
-/// exact iff that error is zero. The `±1` shortcut is not micro-optimizing
-/// for its own sake: every variable enters the recognizer with a
-/// coefficient of `1.0` (see [`Quad2::of_var`]), so it is the common case
-/// by a wide margin, and `f64::mul_add` is a libm call on targets without a
-/// hardware FMA.
-///
-/// A product that overflowed to an infinity answers *inexact* for the same
-/// reason a sum that did.
-fn mul_is_exact(a: f64, b: f64, p: f64) -> bool {
-    if a == 1.0 || a == -1.0 || b == 1.0 || b == -1.0 || a == 0.0 || b == 0.0 {
-        // Multiplying by ±1 or by an exact zero cannot round.
-        return true;
-    }
-    // A product that is not *normal* is one the exponent range could not
-    // hold: zero (`10⁻²⁰⁰ · 10⁻²⁰⁰`, from two nonzero factors), a subnormal
-    // that gave up bits at the bottom, or an infinity from overflow. The
-    // `fma` below cannot be asked about those — it rounds onto the same
-    // grid, and answers `0` for the underflowed product as readily as for
-    // an exact one — so they are answered here, inexact.
-    p.is_normal() && a.mul_add(b, -p) == 0.0
-}
-
-/// Is this coefficient worth **storing**? Exact zeros are dropped so that
-/// [`Quad2::degree`] and [`Quad2::as_constant`] stay `O(1)`, and so that a
-/// term that cancelled cannot make a later product look like degree 3.
-/// `NaN` is dropped for the same reason its predecessor's `c.abs() > 0.0`
-/// retention dropped it.
-///
-/// This is the *storage* question only. It used to be documented as making
-/// "has a quadratic term" a structural question, and it does not: it is
-/// applied to a **sum** of coefficients, so a degree-2 body whose
-/// coefficients cancel — or whose one coefficient underflows — stores
-/// nothing and looks affine. That is gh #683, and it is why every caller
-/// weighs the drop against the arithmetic that led to it and records the
-/// verdict in [`Quad2::lost_terms`]; the degree question is answered from
-/// *that*, not from this predicate.
-fn is_live(c: f64) -> bool {
-    c.abs() > 0.0
-}
+/// The exactness predicates this recognizer's fold is decided from live in
+/// `pounce-common` since gh #673, because the `.nl` pipeline grew a second
+/// fold — `Σ 2wₖbₖbₖᵀ` in `QuadraticStructure::push_factored_form` — in a
+/// crate that cannot name this one. See [`pounce_common::exact`] for what
+/// they answer and why it is an exact question rather than a tolerance.
+use pounce_common::exact::{add_is_exact, is_live, mul_is_exact};
 
 /// One entry on the recognizer's explicit work stack.
 enum Step<'a> {
@@ -864,11 +810,16 @@ pub fn quad_form_readout(q: &Quad2) -> QuadForm {
 /// of the phase is unaffected — and a `Pow` or a `Mul` over a non-atomic
 /// operand does not.
 ///
-/// The consequence is worth stating plainly rather than discovering later:
-/// a model written in factored form keeps its tape and gains nothing from
-/// Q4. Evaluating such a form stably from its stored coefficients means
-/// carrying a shift (a vertex, or the writer's own grouping), which is a
-/// larger change than this phase.
+/// What this predicate is **not** is a verdict on whether a body can be
+/// evaluated from constant structure at all. It is a verdict on one
+/// *representation*. Q4 shipped as though the two were the same, and the
+/// consequence was that a model written in factored form kept its tape and
+/// gained nothing — 41 of `airport.nl`'s 42 rows, and every sum of squared
+/// residuals ever written. gh #673 is that gap, and
+/// [`recognize_factored_quadratic`] closes it by keeping the writer's own
+/// grouping instead of expanding it: same constant structure, no algebra
+/// the tape did not do. A body this predicate refuses is offered to that
+/// one before it falls back to a tape.
 ///
 /// ## A re-referenced `Cse` body is *skipped*, not refused
 ///
@@ -982,6 +933,288 @@ fn is_monomial(e: &Expr, seen: &mut BTreeSet<(*const Expr, bool)>) -> bool {
 /// uses for "no nonlinear part".
 pub fn is_trivially_zero(e: &Expr) -> bool {
     matches!(e, Expr::Const(c) if *c == 0.0)
+}
+
+// ---------------------------------------------------------------------
+// Factored forms — the writer's own grouping, kept
+// ---------------------------------------------------------------------
+
+/// One `w·(bᵀx + d)²` term of a [`FactoredQuadratic`].
+///
+/// `coefs` is `b`, ascending by variable index and free of stored zeros —
+/// the same convention [`Quad2::linear`] keeps, because that is where it
+/// comes from. It may be **empty**, which is a square of a constant: the
+/// term is then `w·d²`, contributes nothing to the gradient or the
+/// Hessian, and is kept rather than folded so that the value is still
+/// computed the way it was written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SquaredAffine {
+    /// The constant the square is multiplied by, sign of the sum spine
+    /// already folded in.
+    pub weight: f64,
+    /// `b`, ascending by variable index.
+    pub coefs: Vec<(usize, f64)>,
+    /// `d`.
+    pub constant: f64,
+}
+
+/// A degree-2 form kept as `Σ wₖ(bₖᵀx + dₖ)² + aᵀx + c` — the shape the
+/// `.nl` writer wrote, rather than its expansion about the origin.
+///
+/// This is the representation gh #673 asks for and
+/// [`is_expanded_quadratic`] exists to refuse the alternative to. Reading
+/// `(x − 500000)²` back as `x² − 10⁶x + 2.5·10¹¹` cancels five digits;
+/// reading it back as one squared residual repeats exactly the
+/// multiplication the tape performs, so admitting it costs no accuracy at
+/// all.
+///
+/// The degree-≤1 leftovers (`linear`, `constant`) are the monomials the
+/// writer folded into the same tree — the `+ 3y` of `(x − 1)² + 3y`. They
+/// are summed as coefficients rather than kept term by term, which is the
+/// same reassociation the expanded path already makes and is gated the
+/// same way (see [`Quad2::lost_terms`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactoredQuadratic {
+    /// The squared affine terms, in the order the spine walk met them.
+    pub squares: Vec<SquaredAffine>,
+    /// `a`, ascending by variable index.
+    pub linear: Vec<(usize, f64)>,
+    /// `c`.
+    pub constant: f64,
+}
+
+/// Recognize a degree-2 body as a sum of **squared affine forms** plus
+/// degree-≤1 leftovers, keeping the squares factored (gh #673).
+///
+/// This is the second half of the gate [`is_expanded_quadratic`] opens.
+/// That predicate admits a body whose read-out repeats the additions the
+/// writer wrote; a factored body fails it, and used to keep its AD tape for
+/// good reason — expanding it to the origin cancels. What this returns is
+/// the *third* option: a read-out that is not an expansion either, because
+/// it stores the writer's own linear forms and squares them at evaluation
+/// time exactly as the tape does.
+///
+/// ## What is admitted
+///
+/// The sum spine (`Add`/`Sub`/`Neg`/`Sum`) may nest freely. Every leaf of
+/// it must be one of:
+///
+/// * a **square**: a product of constants with exactly one `Pow(base, 2)`,
+///   where `base` is itself an [`is_expanded_quadratic`] body of degree
+///   ≤ 1 — `(xᵢ − xⱼ)²`, `0.5·(2x − y + 3)²`, `x²`;
+/// * a **degree-2 monomial on the diagonal**, `c·xᵢ²`, which is the same
+///   term wearing a different opcode and is stored as `c·(xᵢ)²`;
+/// * a **degree-≤1 monomial**, which folds into `a` and `c`.
+///
+/// Anything else — a cross monomial `c·xᵢxⱼ`, a product of two *different*
+/// affine forms, a transcendental — refuses the whole body, which then
+/// keeps its tape exactly as it did before this function existed. The
+/// refusal is deliberate rather than incidental: a mixed form would need
+/// both an expanded and a factored quadratic part stored side by side, and
+/// nothing in the corpus asks for one.
+///
+/// At least one square with a variable in it is required. Without that the
+/// body is affine or already expanded, and [`is_expanded_quadratic`] is
+/// the path that serves it.
+///
+/// ## Exactness
+///
+/// Each admitted square evaluates as `w·(d + Σbᵢxᵢ)²`. Against the tape
+/// that is a reassociation of an affine sum and a folding of the writer's
+/// own constants into `w` — the same latitude [`Quad2::add`] and
+/// [`Quad2::scale`] already take on the expanded path — and *not* an
+/// algebraic expansion. The `2.4e-5` disagreement gh #673 records for
+/// `(x − 500000)²` comes from the expansion; there is none here. Measured
+/// end to end: with the outer sum left naive, `airport.nl`'s 42 rows
+/// evaluate bit-identically to the 42 tapes they replace.
+///
+/// The *terms* are the tape's; the sum over them is not, because
+/// `QuadraticStructure::value` compensates it (gh #702). That makes the
+/// read-out slightly better than the tape rather than equal to it, which is
+/// gh #702's deliberate trade and the one line the fixture sweep moves.
+///
+/// The degree-≤1 leftovers are held to the same [`Quad2::lost_terms`] gate
+/// the expanded path uses (gh #685), so a leftover that cancelled inexactly
+/// refuses the body rather than dropping a term out of it.
+///
+/// ## A `Cse` on the sum spine refuses the body
+///
+/// [`is_expanded_quadratic`] may *skip* a re-referenced body because it
+/// answers yes/no and the first visit already decided it. This one
+/// accumulates terms, so skipping would silently drop them and visiting
+/// every reference is `Θ(2^depth)` on a shared DAG — the shape
+/// `nl_reader`'s `shared_dag_walks_are_memoized_not_exponential` builds.
+/// So a `Cse` reached on the spine ends the walk, and the body keeps its
+/// tape, which is what `ConHybrid` is for. Inside a square's base or a
+/// monomial there is no such problem: [`recognize_expr`] memoizes on `Arc`
+/// identity and the two predicates answer yes/no.
+///
+/// Iterative, for the reason the module docs give.
+pub fn recognize_factored_quadratic(e: &Expr) -> Option<FactoredQuadratic> {
+    let mut seen: BTreeSet<(*const Expr, bool)> = BTreeSet::new();
+    // The spine, each entry carrying the sign the enclosing `Sub`/`Neg`
+    // chain gives it. `±1` exactly, so folding it into a weight or negating
+    // a form is not arithmetic.
+    let mut spine: Vec<(&Expr, f64)> = vec![(e, 1.0)];
+    let mut squares: Vec<SquaredAffine> = Vec::new();
+    let mut rest = Quad2::default();
+
+    while let Some((e, sign)) = spine.pop() {
+        match e {
+            // Pushed back to front so the leaves *pop* in source order.
+            // The degree-≤1 leftovers are folded into one `Quad2` by
+            // floating-point addition, and source order is the order a
+            // reader can reason about — not, to be exact about what this
+            // buys, the same association `recognize_expr` uses: that folds
+            // the *tree*, and `Quad2::add` additionally swaps its operands
+            // by map width. So the two can still differ in the last ulp on
+            // a leaning spine. What keeps that from mattering is
+            // `lost_terms`, which refuses any body where the difference
+            // could be a dropped term rather than a rounded one.
+            Expr::Sum(items) => spine.extend(items.iter().rev().map(|it| (it, sign))),
+            Expr::Binary(BinOp::Add, a, b) => {
+                spine.push((b, sign));
+                spine.push((a, sign));
+            }
+            Expr::Binary(BinOp::Sub, a, b) => {
+                spine.push((b, -sign));
+                spine.push((a, sign));
+            }
+            Expr::Unary(UnaryOp::Neg, a) => spine.push((a, -sign)),
+            // See the docs: accumulating terms is what makes skipping
+            // unsound here, and visiting is what makes it exponential.
+            Expr::Cse(_) => return None,
+            leaf => {
+                if let Some((weight, base)) = peel_square(leaf) {
+                    squares.push(admit_square(sign * weight, base)?);
+                    continue;
+                }
+                if !is_monomial(leaf, &mut seen) {
+                    return None;
+                }
+                let q = recognize_expr(leaf)?;
+                match diagonal_square(&q) {
+                    Some((i, c)) => squares.push(SquaredAffine {
+                        weight: sign * c,
+                        coefs: vec![(i, 1.0)],
+                        constant: 0.0,
+                    }),
+                    // A cross term `c·xᵢxⱼ` lands here and refuses: it is
+                    // not a square, and storing it expanded alongside the
+                    // squares is the mixed representation this refuses.
+                    None if !q.quadratic().is_empty() => return None,
+                    None => rest = Quad2::add(rest, if sign < 0.0 { q.neg() } else { q }),
+                }
+            }
+        }
+    }
+
+    // Nothing factored to keep ⇒ this is not our case. `is_expanded_quadratic`
+    // serves an expanded body and an affine one needs no form at all.
+    if !squares.iter().any(|t| !t.coefs.is_empty()) {
+        return None;
+    }
+    // The leftovers are held to the expanded path's gate, for its reasons
+    // (gh #685): a term that went missing inexactly is a term the form no
+    // longer evaluates.
+    if !rest.quadratic().is_empty() || rest.lost_terms() {
+        return None;
+    }
+    Some(FactoredQuadratic {
+        squares,
+        linear: rest.linear().iter().map(|(&i, &c)| (i, c)).collect(),
+        // `0.0 +` normalizes `-0.0`, which is how a `Quad2` spells "absent".
+        constant: 0.0 + rest.constant(),
+    })
+}
+
+/// `c·xᵢ²` read off a recognized monomial: the one degree-2 shape that is
+/// a square without being written as one. `None` for anything else,
+/// including a cross term and anything carrying a linear or constant part.
+///
+/// The coefficient is the **polynomial** one — `Quad2::quadratic` is not
+/// the Hessian — so `c·xᵢ²` is stored with weight `c` and not `2c`.
+fn diagonal_square(q: &Quad2) -> Option<(usize, f64)> {
+    if q.lost_terms() || !q.linear().is_empty() || q.constant() != 0.0 {
+        return None;
+    }
+    match q.quadratic().iter().next() {
+        Some((&(i, j), &c)) if i == j && q.quadratic().len() == 1 => Some((i, c)),
+        _ => None,
+    }
+}
+
+/// Turn `weight · base²` into a stored term, or refuse the body.
+///
+/// The base has to clear both of the expanded path's gates — the shape gate
+/// [`is_expanded_quadratic`] (so reading its coefficients back repeats the
+/// writer's own additions) and the [`Quad2::lost_terms`] gate (so none of
+/// them went missing) — and be degree ≤ 1, which is what makes the product
+/// a square rather than a quartic.
+fn admit_square(weight: f64, base: &Expr) -> Option<SquaredAffine> {
+    if !is_expanded_quadratic(base) {
+        return None;
+    }
+    let q = recognize_expr(base)?;
+    if !q.quadratic().is_empty() || q.lost_terms() {
+        return None;
+    }
+    Some(SquaredAffine {
+        weight,
+        coefs: q.linear().iter().map(|(&i, &c)| (i, c)).collect(),
+        constant: 0.0 + q.constant(),
+    })
+}
+
+/// Split a leaf into `(constant weight, squared base)`, or `None` when it
+/// is not a constant multiple of exactly one square.
+///
+/// The product tree may nest `Mul`, `Div` and `Neg` freely; every leaf of
+/// it must be a constant except for the single `Pow(base, 2)`, which may
+/// not sit under a division. Folding several constants into one `weight`
+/// reassociates the writer's own constants and nothing else.
+///
+/// The order is worth stating precisely, because it is not source order:
+/// this pops an explicit stack, so `a·(b·(c·s))` folds as `((1·c)·b)·a`.
+/// One multiply's worth of rounding either way, on constants the writer
+/// wrote next to each other — the same latitude `Quad2::scale` takes on the
+/// expanded arm — but a reader reconstructing a last-ulp difference by hand
+/// needs the real order, not the written one.
+fn peel_square(e: &Expr) -> Option<(f64, &Expr)> {
+    let mut work: Vec<(&Expr, bool)> = vec![(e, false)];
+    let mut weight = 1.0f64;
+    let mut base: Option<&Expr> = None;
+    while let Some((e, recip)) = work.pop() {
+        match e {
+            Expr::Const(c) => weight = if recip { weight / c } else { weight * c },
+            Expr::Unary(UnaryOp::Neg, a) => {
+                weight = -weight;
+                work.push((a, recip));
+            }
+            Expr::Binary(BinOp::Mul, a, b) => {
+                work.push((a, recip));
+                work.push((b, recip));
+            }
+            Expr::Binary(BinOp::Div, a, b) => {
+                work.push((a, recip));
+                work.push((b, !recip));
+            }
+            Expr::Binary(BinOp::Pow, a, b) if matches!(b.as_ref(), Expr::Const(c) if *c == 2.0) => {
+                // A square under a division is `1/(…)²`, which is not one.
+                // A second square makes the leaf degree 4.
+                if recip || base.is_some() {
+                    return None;
+                }
+                base = Some(a);
+            }
+            _ => return None,
+        }
+    }
+    // A weight that is not finite (`x²/0`) is not a form anyone should
+    // evaluate from stored coefficients, and one that is exactly zero has
+    // annihilated a term the tape still computes.
+    let base = base?;
+    (weight.is_finite() && weight != 0.0).then_some((weight, base))
 }
 
 #[cfg(test)]
@@ -1526,6 +1759,312 @@ mod tests {
             e = Expr::Binary(BinOp::Add, Box::new(e), Box::new(sq(i)));
         }
         assert!(analyze_quadratic(&e).is_none());
+        std::mem::forget(e);
+    }
+
+    // -----------------------------------------------------------------
+    // Factored forms (gh #673)
+    // -----------------------------------------------------------------
+
+    /// `(base)^2`.
+    fn sq_of(base: Expr) -> Expr {
+        Expr::Binary(BinOp::Pow, Box::new(base), Box::new(Expr::Const(2.0)))
+    }
+
+    fn var_minus(i: usize, c: f64) -> Expr {
+        Expr::Binary(BinOp::Sub, Box::new(Expr::Var(i)), Box::new(Expr::Const(c)))
+    }
+
+    /// The motivating case. `(x − 500000)²` is exactly what
+    /// `feasible_x0_extreme_row.nl` writes, and expanding it is the 2.4e-5
+    /// disagreement gh #673 is named after.
+    #[test]
+    fn a_shifted_square_is_kept_factored() {
+        let e = sq_of(var_minus(0, 500_000.0));
+        assert!(
+            !is_expanded_quadratic(&e),
+            "the expanded gate must refuse it"
+        );
+        let f = recognize_factored_quadratic(&e).expect("a square of an affine form");
+        assert_eq!(f.squares.len(), 1);
+        assert_eq!(f.squares[0].weight, 1.0);
+        assert_eq!(f.squares[0].coefs, vec![(0, 1.0)]);
+        assert_eq!(f.squares[0].constant, -500_000.0);
+        assert!(f.linear.is_empty());
+        assert_eq!(f.constant, 0.0);
+    }
+
+    /// The accuracy claim, stated as a number rather than as prose: at
+    /// `x = 500000 + 1e-4` the expansion loses five digits and the factored
+    /// read-out loses nothing.
+    #[test]
+    fn the_factored_read_out_does_not_cancel_where_the_expansion_does() {
+        let e = sq_of(var_minus(0, 500_000.0));
+        let x = 500_000.0 + 1e-4;
+        // What the tape computes: square the residual as written.
+        let r = x - 500_000.0;
+        let taped = r * r;
+
+        let (h, lin, c) = analyze_quadratic_full(&e).expect("degree 2");
+        let expanded = 0.5 * h[&(0, 0)] * x * x + lin[0].1 * x + c;
+        assert!(
+            (expanded - taped).abs() / taped > 1e-6,
+            "the expansion is supposed to cancel here, got {expanded} for {taped}"
+        );
+
+        let f = recognize_factored_quadratic(&e).expect("a square");
+        let t = &f.squares[0];
+        let l = t.constant + t.coefs[0].1 * x;
+        // Bit for bit, not within a tolerance.
+        assert_eq!(t.weight * l * l, taped);
+    }
+
+    /// `airport.nl`'s shape: a row that is a sum of squared coordinate
+    /// differences, with the writer's grouping kept term by term.
+    #[test]
+    fn a_sum_of_squared_differences_is_admitted() {
+        let diff = |i: usize, j: usize| {
+            Expr::Binary(BinOp::Sub, Box::new(Expr::Var(i)), Box::new(Expr::Var(j)))
+        };
+        let e = Expr::Binary(
+            BinOp::Add,
+            Box::new(sq_of(diff(0, 1))),
+            Box::new(sq_of(diff(2, 3))),
+        );
+        let f = recognize_factored_quadratic(&e).expect("two squares");
+        assert_eq!(f.squares.len(), 2);
+        let mut sup: Vec<Vec<(usize, f64)>> = f.squares.iter().map(|t| t.coefs.clone()).collect();
+        sup.sort_by_key(|c| c[0].0);
+        assert_eq!(
+            sup,
+            vec![vec![(0, 1.0), (1, -1.0)], vec![(2, 1.0), (3, -1.0)]]
+        );
+        assert!(
+            f.squares
+                .iter()
+                .all(|t| t.weight == 1.0 && t.constant == 0.0)
+        );
+    }
+
+    /// The sign of the sum spine reaches the weight, and a constant factor
+    /// folds into it.
+    #[test]
+    fn spine_signs_and_constant_factors_fold_into_the_weight() {
+        // 3·(x₀ − 1)² − 0.5·(x₁ + 2)²
+        let a = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(3.0)),
+            Box::new(sq_of(var_minus(0, 1.0))),
+        );
+        let b = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(0.5)),
+            Box::new(sq_of(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Const(2.0)),
+            ))),
+        );
+        let f = recognize_factored_quadratic(&Expr::Binary(BinOp::Sub, Box::new(a), Box::new(b)))
+            .expect("two squares");
+        let mut got: Vec<(f64, f64)> = f.squares.iter().map(|t| (t.weight, t.constant)).collect();
+        got.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(got, vec![(-0.5, 2.0), (3.0, -1.0)]);
+    }
+
+    /// A degree-≤1 leftover in the same tree is not a reason to refuse the
+    /// row; it folds into `a`/`c` and is evaluated there.
+    #[test]
+    fn degree_one_leftovers_fold_into_the_linear_part() {
+        // (x₀ − 1)² + 3·x₁ + 7
+        let e = Expr::Sum(vec![
+            sq_of(var_minus(0, 1.0)),
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(3.0)),
+                Box::new(Expr::Var(1)),
+            ),
+            Expr::Const(7.0),
+        ]);
+        let f = recognize_factored_quadratic(&e).expect("a square plus leftovers");
+        assert_eq!(f.squares.len(), 1);
+        assert_eq!(f.linear, vec![(1, 3.0)]);
+        assert_eq!(f.constant, 7.0);
+    }
+
+    /// A bare `c·xᵢ²` monomial is the same term wearing a different opcode,
+    /// and is stored as `c·(xᵢ)²` so that a row mixing the two shapes is
+    /// still served.
+    #[test]
+    fn a_diagonal_monomial_is_stored_as_a_square() {
+        let e = Expr::Binary(
+            BinOp::Add,
+            Box::new(sq_of(var_minus(0, 1.0))),
+            Box::new(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(4.0)),
+                Box::new(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Var(1)),
+                    Box::new(Expr::Var(1)),
+                )),
+            )),
+        );
+        let f = recognize_factored_quadratic(&e).expect("square + diagonal monomial");
+        assert_eq!(f.squares.len(), 2);
+        let diag = f
+            .squares
+            .iter()
+            .find(|t| t.coefs == vec![(1, 1.0)])
+            .unwrap();
+        // The *polynomial* coefficient, so `4x₁²` and not `8x₁²` —
+        // `push_factored_form` is what doubles it into a Hessian entry.
+        assert_eq!((diag.weight, diag.constant), (4.0, 0.0));
+    }
+
+    /// A cross monomial has no square to be stored as, and storing it
+    /// expanded next to the squares is the mixed representation this
+    /// deliberately does not have. The row keeps its tape.
+    #[test]
+    fn a_cross_monomial_alongside_a_square_is_refused() {
+        let e = Expr::Binary(
+            BinOp::Add,
+            Box::new(sq_of(var_minus(0, 1.0))),
+            Box::new(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Var(2)),
+            )),
+        );
+        assert!(recognize_factored_quadratic(&e).is_none());
+    }
+
+    /// An already-expanded body is `is_expanded_quadratic`'s to serve, and
+    /// this must not offer a second, slower answer for it.
+    #[test]
+    fn an_expanded_body_is_not_claimed_here() {
+        let e = Expr::Binary(BinOp::Add, Box::new(sq(0)), Box::new(sq(1)));
+        assert!(is_expanded_quadratic(&e));
+        // `x²` *is* a square, so this one is genuinely recognized — the
+        // caller's ordering is what keeps it on the cheaper path.
+        assert!(recognize_factored_quadratic(&e).is_some());
+        // A body with no square at all is refused outright.
+        let cross = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
+        assert!(recognize_factored_quadratic(&cross).is_none());
+        assert!(recognize_factored_quadratic(&Expr::Var(0)).is_none());
+    }
+
+    /// The product of two *different* affine forms is degree 2 and is not a
+    /// square. Admitting it would mean storing `l₁·l₂`, which this
+    /// representation cannot express.
+    #[test]
+    fn a_product_of_two_different_affine_forms_is_refused() {
+        let e = Expr::Binary(
+            BinOp::Mul,
+            Box::new(var_minus(0, 1.0)),
+            Box::new(var_minus(1, 2.0)),
+        );
+        assert!(recognize_factored_quadratic(&e).is_none());
+    }
+
+    /// A square of a *quadratic* is degree 4, and a transcendental is not a
+    /// polynomial at all.
+    #[test]
+    fn quartics_and_transcendentals_are_refused() {
+        assert!(recognize_factored_quadratic(&sq_of(sq(0))).is_none());
+        let s = Expr::Unary(UnaryOp::Sin, Box::new(Expr::Var(0)));
+        assert!(recognize_factored_quadratic(&sq_of(s)).is_none());
+    }
+
+    /// A base that is not itself a flat sum of monomials is refused: the
+    /// coefficients read out of `2·(x + 1)` are not the additions the
+    /// writer wrote, which is the same rule `is_expanded_quadratic` states.
+    #[test]
+    fn a_base_the_expanded_gate_refuses_is_refused_here_too() {
+        let inner = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(2.0)),
+            Box::new(Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(1.0)),
+            )),
+        );
+        assert!(!is_expanded_quadratic(&inner));
+        assert!(recognize_factored_quadratic(&sq_of(inner)).is_none());
+    }
+
+    /// A leftover that lost a term inexactly refuses the body, for the
+    /// reason gh #685 gives: the form would evaluate a row its own tape
+    /// does not agree with.
+    #[test]
+    fn a_lost_leftover_refuses_the_body() {
+        let big = 9_007_199_254_740_992.0f64; // 2⁵³
+        let scaled = |c: f64, i: usize| {
+            Expr::Binary(BinOp::Mul, Box::new(Expr::Const(c)), Box::new(Expr::Var(i)))
+        };
+        // (x₀ − 1)² + 2⁵³·x₁ + x₁ − 2⁵³·x₁ — the `x₁` is folded away.
+        let e = Expr::Sum(vec![
+            sq_of(var_minus(0, 1.0)),
+            scaled(big, 1),
+            Expr::Var(1),
+            scaled(-big, 1),
+        ]);
+        assert!(recognize_factored_quadratic(&e).is_none());
+    }
+
+    /// A `Cse` on the sum spine ends the walk: skipping a second reference
+    /// would drop its terms and visiting every reference is exponential.
+    #[test]
+    fn a_shared_body_on_the_spine_is_refused() {
+        let shared = std::sync::Arc::new(sq_of(var_minus(0, 1.0)));
+        let e = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Cse(shared.clone())),
+            Box::new(Expr::Cse(shared)),
+        );
+        assert!(recognize_factored_quadratic(&e).is_none());
+    }
+
+    /// A weight that annihilates or overflows is not evaluated from stored
+    /// coefficients: `0·(x−1)²` has dropped a term the tape still walks,
+    /// and `(x−1)²/0` is not a number.
+    #[test]
+    fn degenerate_weights_are_refused() {
+        let zero = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(0.0)),
+            Box::new(sq_of(var_minus(0, 1.0))),
+        );
+        assert!(recognize_factored_quadratic(&zero).is_none());
+        let div0 = Expr::Binary(
+            BinOp::Div,
+            Box::new(sq_of(var_minus(0, 1.0))),
+            Box::new(Expr::Const(0.0)),
+        );
+        assert!(recognize_factored_quadratic(&div0).is_none());
+    }
+
+    /// Deep, on a default-sized test thread, for the reason every walk in
+    /// this module is iterative: a least-squares model is a long `o0` chain
+    /// of squared residuals, which is exactly the shape that aborts a
+    /// recursive walk — and now exactly the shape this recognizer is for.
+    ///
+    /// Leaked rather than dropped: `Expr`'s derived `Drop` is still
+    /// recursive. See `deep_add_chain_does_not_overflow_the_stack`.
+    #[test]
+    fn a_deep_chain_of_squares_does_not_overflow_the_stack() {
+        const K: usize = 250_000;
+        let mut e = sq_of(var_minus(0, 1.0));
+        for i in 1..K {
+            e = Expr::Binary(
+                BinOp::Add,
+                Box::new(e),
+                Box::new(sq_of(var_minus(i, i as f64))),
+            );
+        }
+        let f = recognize_factored_quadratic(&e).expect("K squares");
+        assert_eq!(f.squares.len(), K);
         std::mem::forget(e);
     }
 }

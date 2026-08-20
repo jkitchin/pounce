@@ -288,13 +288,26 @@ impl SensSolve {
                 n_params,
             );
         }
-        let want_dx = self.deltas.is_some();
-        let want_rh = self.compute_reduced_hessian;
-        let want_eigen = self.rh_eigendecomp;
+        // gh#551 / gh#677: the sIPOPT option *names* reach this builder
+        // too, not just the `with_*` methods. An options list is the
+        // only channel a caller who configures pounce from an
+        // `ipopt.opt` (or the Python `Problem`'s options) has, and
+        // until this read site existed `compute_red_hessian=yes` there
+        // did nothing at all. Options can only ADD to what the builder
+        // asked for — except `run_sens=no`, which is the one spelling
+        // of "do not take the step" upstream offers.
+        let overrides = crate::options::SensOptionOverrides::from_options_list(app.options());
+        let deltas = if overrides.suppresses_sens_step() {
+            None
+        } else {
+            self.deltas.clone()
+        };
+        let want_dx = deltas.is_some();
+        let want_rh = self.compute_reduced_hessian || overrides.wants_reduced_hessian();
+        let want_eigen = self.rh_eigendecomp || overrides.wants_eigendecomp();
         let pin_indices = self.pin_constraint_indices.clone();
-        let deltas = self.deltas.clone();
         let obj_scal = self.obj_scal;
-        let boundcheck_eps = self.boundcheck_eps;
+        let boundcheck_eps = self.boundcheck_eps.or_else(|| overrides.boundcheck_eps());
 
         // Side channel: the callback writes here, the outer caller
         // reads after optimize_tnlp returns. RefCell + Rc because the
@@ -420,7 +433,20 @@ impl SensSolve {
             let df = backsolver.obj_scaling_factor();
             outbox_cb.borrow_mut().obj_scaling_factor = Some(df);
             outbox_cb.borrow_mut().pin_g_scaling = Some(pin_scales.clone());
-            outbox_cb.borrow_mut().kkt_perturbations = Some(backsolver.kkt_perturbations());
+            let perturbations = backsolver.kkt_perturbations();
+            outbox_cb.borrow_mut().kkt_perturbations = Some(perturbations);
+            // `sens_max_pdpert`: the step and the reduced Hessian both
+            // invert the converged factor, so a factor the inertia
+            // correction had to perturb answers for a nearby problem,
+            // not this one. Only checked when something was actually
+            // requested — an unset cap, or a caller who asked for
+            // neither output, must see no error.
+            if (want_dx || want_rh)
+                && let Some(msg) = overrides.pdpert_refusal(&perturbations)
+            {
+                outbox_cb.borrow_mut().error = Some(msg);
+                return;
+            }
             let signs = vec![1; n_params];
 
             let a_data = match IndexSchurData::from_parts(param_rows, signs) {

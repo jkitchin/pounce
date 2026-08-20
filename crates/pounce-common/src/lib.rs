@@ -9,6 +9,7 @@
 pub mod cached;
 pub mod debug;
 pub mod diagnostics;
+pub mod exact;
 pub mod exception;
 pub mod journalist;
 pub mod options_list;
@@ -23,6 +24,7 @@ pub mod utils;
 
 pub use cached::Cache;
 pub use diagnostics::{DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec};
+pub use exact::{add_is_exact, is_live, mul_is_exact};
 pub use exception::{ExceptionKind, SolverException};
 pub use journalist::{
     FileJournal, Journal, JournalCategory, JournalLevel, Journalist, StringJournal,

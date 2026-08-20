@@ -618,25 +618,105 @@ fn battery_monomial(rng: &mut Rng2) -> Expr {
     }
 }
 
-/// A flat sum of monomials — the shape `is_expanded_quadratic` admits, and
-/// therefore the only shape that reaches the fast path at all. The spine
-/// itself is randomized over `Sum`, `Add`, `Sub` and `Neg`, because the gate
-/// admits all four and a battery that only ever emitted one would test the
-/// gate rather than the arithmetic.
+/// `w·(bᵀx + d)²` — a **squared affine form**, the leaf gh #673 taught the
+/// fast path to keep factored rather than expand.
+///
+/// This battery predates that arm and emitted only flat sums of monomials,
+/// so nothing random ever reached the factored read-out: all of its
+/// coverage was the repo's 24 fixtures, which are real-writer models with
+/// unit weights and well-scaled residuals. That is the same hole gh #683
+/// sat in, and gh #711's review found a witness straight through it.
+///
+/// The base is `battery_affine`, so the forms inside a square are as varied
+/// as the flat sums are: `Add`/`Sub`/`Neg` spines, constants on either
+/// side, repeated variables.
+fn battery_square(rng: &mut Rng2) -> Expr {
+    const WEIGHTS: [f64; 6] = [1.0, -1.0, 2.0, -0.5, 3.0, 0.25];
+    let terms = 1 + rng_below(rng, 3) as usize;
+    let base = battery_affine(rng, terms);
+    let square = Expr::Binary(BinOp::Pow, Box::new(base), Box::new(Expr::Const(2.0)));
+    match rng_below(rng, 3) {
+        // A bare `(…)²`, weight 1.
+        0 => square,
+        // `w · (…)²` — the weight on the left, where `peel_square` meets it
+        // in a writer's output.
+        1 => Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Const(WEIGHTS[rng_below(rng, 6) as usize])),
+            Box::new(square),
+        ),
+        // `(…)² · w`, the other association, which folds in reverse order.
+        _ => Expr::Binary(
+            BinOp::Mul,
+            Box::new(square),
+            Box::new(Expr::Const(WEIGHTS[rng_below(rng, 6) as usize])),
+        ),
+    }
+}
+
+/// A degree-≤1 body, for use as the base of a square. Leaves that cannot
+/// raise the degree only — a squared base of degree 2 would make the body
+/// quartic and neither read-out would take it.
+fn battery_affine(rng: &mut Rng2, terms: usize) -> Expr {
+    fn leaf(rng: &mut Rng2) -> Expr {
+        const COEFS: [f64; 6] = [1.0, -1.0, 2.0, -3.0, 0.5, 4.0];
+        let c = Expr::Const(COEFS[rng_below(rng, 6) as usize]);
+        let v = Expr::Var(rng_below(rng, BATTERY_VARS as u64) as usize);
+        match rng_below(rng, 3) {
+            0 => c,
+            1 => v,
+            _ => Expr::Binary(BinOp::Mul, Box::new(c), Box::new(v)),
+        }
+    }
+    let mut acc = leaf(rng);
+    for _ in 1..terms {
+        acc = match rng_below(rng, 3) {
+            0 => Expr::Binary(BinOp::Add, Box::new(acc), Box::new(leaf(rng))),
+            1 => Expr::Binary(BinOp::Sub, Box::new(acc), Box::new(leaf(rng))),
+            _ => Expr::Unary(
+                UnaryOp::Neg,
+                Box::new(Expr::Binary(BinOp::Add, Box::new(acc), Box::new(leaf(rng)))),
+            ),
+        };
+    }
+    acc
+}
+
+/// A sum whose leaves are monomials, squared affine forms, or both.
+///
+/// A body of pure monomials reaches the **expanded** read-out; one with a
+/// square in it reaches the **factored** one (gh #673); one that mixes a
+/// square with a cross term reaches neither and keeps its tape. All three
+/// are the point — the assertion is that whatever route a body takes, it
+/// agrees with its own tape.
+///
+/// The spine is randomized over `Sum`, `Add`, `Sub` and `Neg`, because both
+/// gates admit all four and a battery that only ever emitted one would test
+/// the gate rather than the arithmetic.
 fn battery_body(rng: &mut Rng2, terms: usize) -> Expr {
-    let mut acc = battery_monomial(rng);
+    // One body in four may contain squares. Kept a minority so the expanded
+    // arm — still the common case in real models — does not lose coverage.
+    let squares = rng_below(rng, 4) == 0;
+    fn leaf(rng: &mut Rng2, squares: bool) -> Expr {
+        if squares && rng_below(rng, 2) == 0 {
+            battery_square(rng)
+        } else {
+            battery_monomial(rng)
+        }
+    }
+    let mut acc = leaf(rng, squares);
     let mut left = terms.saturating_sub(1);
     while left > 0 {
         acc = match rng_below(rng, 4) {
-            0 => Expr::Sum(vec![acc, battery_monomial(rng), battery_monomial(rng)]),
-            1 => Expr::Binary(BinOp::Add, Box::new(acc), Box::new(battery_monomial(rng))),
-            2 => Expr::Binary(BinOp::Sub, Box::new(acc), Box::new(battery_monomial(rng))),
+            0 => Expr::Sum(vec![acc, leaf(rng, squares), leaf(rng, squares)]),
+            1 => Expr::Binary(BinOp::Add, Box::new(acc), Box::new(leaf(rng, squares))),
+            2 => Expr::Binary(BinOp::Sub, Box::new(acc), Box::new(leaf(rng, squares))),
             _ => Expr::Unary(
                 UnaryOp::Neg,
                 Box::new(Expr::Binary(
                     BinOp::Add,
                     Box::new(acc),
-                    Box::new(battery_monomial(rng)),
+                    Box::new(leaf(rng, squares)),
                 )),
             ),
         };
@@ -683,6 +763,7 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
     let mut skipped = 0usize;
     let mut seeds_used = 0usize;
 
+    let mut factored_bodies = 0usize;
     for seed in 1..=1_500u64 {
         let mut rng = Rng2(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let terms = 1 + rng_below(&mut rng, 5) as usize;
@@ -715,6 +796,17 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
             con_names: Vec::new(),
         })
         .expect("assemble battery problem");
+        // Coverage, asserted below rather than assumed: how many bodies
+        // actually reached the factored read-out. A generator change that
+        // stopped emitting squares would otherwise leave gh #673's arm
+        // silently uncovered again, which is the state gh #711's review
+        // found it in.
+        for b in std::iter::once(&prob.obj_nonlinear).chain(prob.con_nonlinear.iter()) {
+            if b.admitted_quad_form().is_none() && b.admitted_factored_form().is_some() {
+                factored_bodies += 1;
+            }
+        }
+
         seeds_used += 1;
         compare_problem(&format!("battery seed {seed}"), prob, 1.0, &mut rep);
     }
@@ -730,6 +822,19 @@ fn a_synthetic_battery_evaluates_the_same_both_ways() {
         rep.worst_hess_ulps,
         rep.worst_hess_where,
         rep.worst_rel,
+    );
+
+    // gh #711: the battery must actually reach gh #673's arm. Before the
+    // squared-affine leaf was added this counted **zero** — every factored
+    // body the suite ever saw came from the 24 repo fixtures, which are
+    // real-writer models with unit weights and well-scaled residuals. The
+    // bound is loose on purpose: it pins that the arm is exercised, not how
+    // often.
+    eprintln!("[quad differential] battery: {factored_bodies} bodies took the factored arm");
+    assert!(
+        factored_bodies >= 100,
+        "the battery stopped covering the factored read-out: only {factored_bodies} bodies \
+         reached it (gh #673, gh #711)",
     );
 
     // Reach floors: a generator that stopped producing recognizable bodies

@@ -111,6 +111,14 @@ pub struct Args {
     /// `--sens-bound-eps <eps>` — tolerance for `--sens-boundcheck`
     /// (default `1e-3`). Setting it also enables `--sens-boundcheck`.
     pub sens_bound_eps: f64,
+    /// Whether `--sens-bound-eps` was actually passed, as opposed to
+    /// left at its default. The `sens_bound_eps` *option* (gh#551) sets
+    /// the same margin, and the flag wins when both are given — but
+    /// only when the flag was really typed. Inferring that from
+    /// `sens_bound_eps != 1e-3` would silently hand the option priority
+    /// over an explicit `--sens-bound-eps 1e-3`, which is the one value
+    /// the inference cannot distinguish.
+    pub sens_bound_eps_explicit: bool,
     /// `--compute-red-hessian` — after the solve, compute the reduced
     /// Hessian over the variables tagged by the `red_hessian` integer
     /// var-suffix in the input `.nl`. Mirrors upstream sIPOPT's
@@ -461,6 +469,7 @@ Multistart / find-minima (search for several local minima, not one):
         let mut dump_format: Option<String> = None;
         let mut sens_boundcheck = false;
         let mut sens_bound_eps: f64 = 1e-3;
+        let mut sens_bound_eps_explicit = false;
         let mut compute_red_hessian = false;
         let mut rh_eigendecomp = false;
         let mut debug: Option<DebugMode> = None;
@@ -594,6 +603,7 @@ Multistart / find-minima (search for several local minima, not one):
                     sens_bound_eps = v
                         .parse::<f64>()
                         .map_err(|e| format!("--sens-bound-eps: {e}"))?;
+                    sens_bound_eps_explicit = true;
                     sens_boundcheck = true;
                 }
                 "--debug" => debug = Some(DebugMode::Repl),
@@ -727,6 +737,7 @@ Multistart / find-minima (search for several local minima, not one):
                 dump_format,
                 sens_boundcheck,
                 sens_bound_eps,
+                sens_bound_eps_explicit,
                 compute_red_hessian,
                 rh_eigendecomp,
                 debug,
@@ -758,6 +769,7 @@ Multistart / find-minima (search for several local minima, not one):
             dump_format,
             sens_boundcheck,
             sens_bound_eps,
+            sens_bound_eps_explicit,
             compute_red_hessian,
             rh_eigendecomp,
             debug,
@@ -1231,6 +1243,26 @@ mod tests {
         let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--sens-bound-eps", "1e-6"])).unwrap();
         assert_eq!(a.sens_bound_eps, 1e-6);
         assert!(a.sens_boundcheck);
+        assert!(a.sens_bound_eps_explicit);
+    }
+
+    /// `--sens-bound-eps 1e-3` is a real request even though it names
+    /// the default. `main` gives the flag priority over the
+    /// `sens_bound_eps` *option* (gh#551), and it decides which was
+    /// given from this flag rather than by comparing against `1e-3` —
+    /// the one value such a comparison cannot tell apart.
+    #[test]
+    fn sens_bound_eps_at_the_default_still_counts_as_given() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--sens-bound-eps", "1e-3"])).unwrap();
+        assert_eq!(a.sens_bound_eps, 1e-3);
+        assert!(
+            a.sens_bound_eps_explicit,
+            "typing the default is still typing it",
+        );
+
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert_eq!(a.sens_bound_eps, 1e-3);
+        assert!(!a.sens_bound_eps_explicit);
     }
 
     #[test]

@@ -222,11 +222,14 @@ fn both_modes_reproduce_the_resolve_across_two_interacting_crossings() {
     let err_fixed = (fixed[0] - truth[0]).abs().max((fixed[1] - truth[1]).abs());
     assert!(
         err_walk < 1e-6,
-        "the walk should reproduce the re-solve on a QP, off by {err_walk}          (walk {walked:?} against {truth:?})",
+        "the walk should reproduce the re-solve on a QP, off by {err_walk} \
+         (walk {walked:?} against {truth:?})",
     );
     assert!(
         err_fixed < 1e-6,
-        "the base-point repair lands on the same final active set here,          so it should also reproduce the re-solve, off by {err_fixed}          (fixed {fixed:?} against {truth:?})",
+        "the base-point repair lands on the same final active set here, \
+         so it should also reproduce the re-solve, off by {err_fixed} \
+         (fixed {fixed:?} against {truth:?})",
     );
 }
 

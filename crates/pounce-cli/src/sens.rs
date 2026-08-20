@@ -36,7 +36,8 @@ use std::rc::Rc;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_sensitivity::{
-    IndexSchurData, PdSensBacksolver, SchurData, SensApplication, SensBacksolver, SensOptions,
+    IndexSchurData, PdSensBacksolver, SchurData, SensApplication, SensBacksolver,
+    SensOptionOverrides, SensOptions,
 };
 
 use crate::nl_reader::NlSuffixes;
@@ -89,6 +90,7 @@ pub fn compute_sens_perturbed_x(
     m_full: usize,
     x_full: &[Number],
     boundcheck_eps: Option<Number>,
+    sens_options: &SensOptionOverrides,
 ) -> Option<Vec<Number>> {
     let dx = try_compute_sens_step(
         data,
@@ -100,6 +102,7 @@ pub fn compute_sens_perturbed_x(
         m_full,
         x_full,
         boundcheck_eps,
+        sens_options,
     )?;
     let curr = data.borrow().curr.clone()?;
     let n_x = curr.x.dim() as usize;
@@ -180,6 +183,7 @@ pub fn try_compute_red_hessian(
     pd: Rc<RefCell<pounce_algorithm::kkt::pd_full_space_solver::PdFullSpaceSolver>>,
     suffixes: &NlSuffixes,
     compute_eigen: bool,
+    sens_options: &SensOptionOverrides,
 ) -> Option<RedHessianResult> {
     let red_hessian_tags = suffixes.var_int.get("red_hessian")?;
     let max_slot = red_hessian_tags.iter().copied().max().unwrap_or(0);
@@ -231,6 +235,13 @@ pub fn try_compute_red_hessian(
     let a_data = IndexSchurData::from_parts(rows, signs).ok()?;
 
     let backsolver = PdSensBacksolver::new(data, cq, nlp, pd).ok()?;
+    // `sens_max_pdpert`: the reduced Hessian is a block of the inverse
+    // of the converged factor, so a factor the inertia correction had
+    // to perturb describes a nearby problem, not this one.
+    if let Some(msg) = sens_options.pdpert_refusal(&backsolver.kkt_perturbations()) {
+        eprintln!("pounce: reduced Hessian: {msg}");
+        return None;
+    }
     let opts = SensOptions {
         compute_red_hessian: true,
         rh_eigendecomp: compute_eigen,
@@ -278,6 +289,7 @@ fn try_compute_sens_step(
     _m_full: usize,
     x_nominal: &[Number],
     boundcheck_eps: Option<Number>,
+    sens_options: &SensOptionOverrides,
 ) -> Option<Vec<Number>> {
     // Required suffixes. The "_1" suffix tier corresponds to upstream
     // sIPOPT's `n_sens_steps=1` mode. Higher tiers (sens_state_2 etc.)
@@ -341,6 +353,13 @@ fn try_compute_sens_step(
     let backsolver = PdSensBacksolver::new(data, cq, nlp, pd)
         .map_err(|e| eprintln!("pounce: could not capture the KKT factor: {e}"))
         .ok()?;
+    // `sens_max_pdpert`: the step inverts the converged factor, so
+    // refuse to report one taken through a factor the caller declared
+    // too heavily perturbed to be this problem's KKT matrix.
+    if let Some(msg) = sens_options.pdpert_refusal(&backsolver.kkt_perturbations()) {
+        eprintln!("pounce: {msg}");
+        return None;
+    }
     let pin_g: Vec<Index> = param_con_idx
         .iter()
         .map(|ci| ci.unwrap() as Index)
