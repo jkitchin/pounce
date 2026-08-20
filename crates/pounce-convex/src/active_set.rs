@@ -825,8 +825,11 @@ fn reverify_after_unscale(
     ) {
         return scaled_status;
     }
-    solved_band(adjudicated_kkt_error(prob, sol, opts.tol, opts.obj_constant), opts.tol)
-        .unwrap_or(QpStatus::NumericalFailure)
+    solved_band(
+        adjudicated_kkt_error(prob, sol, opts.tol, opts.obj_constant),
+        opts.tol,
+    )
+    .unwrap_or(QpStatus::NumericalFailure)
 }
 
 /// Multiple of `tol` inside which a solve is downgraded to "acceptable" rather
@@ -932,12 +935,7 @@ fn natural_scale(prob: &QpProblem, sol: &QpSolution) -> f64 {
 /// blindness certifies a badly wrong point as optimal. Equilibration is the
 /// diagonal change of variables that removes the spread, so no column can mask
 /// another's violation.
-fn adjudicated_kkt_error(
-    prob: &QpProblem,
-    sol: &QpSolution,
-    tol: f64,
-    obj_constant: f64,
-) -> f64 {
+fn adjudicated_kkt_error(prob: &QpProblem, sol: &QpSolution, tol: f64, obj_constant: f64) -> f64 {
     let res = sol.kkt_residuals(prob);
     let err = res.kkt_error();
     if !err.is_finite() || err <= tol {
@@ -1904,7 +1902,8 @@ mod tests {
         // stationary. Its *relative* residual is O(1), not merely above `tol`.
         let sol = scaled_projection_point(k, [1.0, 1.0]);
         assert!(
-            adjudicated_kkt_error(&prob, &sol, opts.tol, opts.obj_constant) > ACCEPTABLE_FACTOR * opts.tol,
+            adjudicated_kkt_error(&prob, &sol, opts.tol, opts.obj_constant)
+                > ACCEPTABLE_FACTOR * opts.tol,
             "a non-optimal point must not be rescued by the scale-relative arm"
         );
         assert_eq!(
@@ -1970,7 +1969,9 @@ mod tests {
         );
         // The trap: measured relatively, this violation looks converged.
         assert!(
-            crate::ipm::equilibrated_kkt_rel_parts(&prob, &sol, opts.obj_constant).primal_infeasibility <= opts.tol,
+            crate::ipm::equilibrated_kkt_rel_parts(&prob, &sol, opts.obj_constant)
+                .primal_infeasibility
+                <= opts.tol,
             "test setup: a relative primal residual would accept this point"
         );
 

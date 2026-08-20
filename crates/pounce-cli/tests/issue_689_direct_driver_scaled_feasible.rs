@@ -129,18 +129,28 @@ fn direct_driver_solves_the_scaled_feasible_pair() {
 /// `QpOptions::obj_constant` supplied it normalizes by the caller's objective
 /// and runs on to `0`.
 ///
+/// **The objective is asserted on both models and is the point of the test.**
+/// The *verdict* is not the same on both, and gh #712 is why. `_b` certifies at
+/// the default budget in 47 iterations. `_a` does not: reaching a point this
+/// solver will genuinely certify takes it ~3596 iterations, and the default cap
+/// is 200. Until #712 that was invisible, because the gh#293 Ruiz retry
+/// returned `Optimal` at iteration 123 on a point whose absolute KKT error is
+/// `2.3e3` — the same false-success shape as the `236.85` this test was written
+/// for, one layer further down. So `_a` at defaults is an honest
+/// `MaximumIterationsExceeded` carrying the right objective, and it certifies
+/// once given the budget it actually needs.
+///
+/// Asserting the budget explicitly rather than deleting the status check: if a
+/// future change makes `_a` certify at 200 iterations again, this test must say
+/// whether that is a real speed-up or gh #712 regressing, and it cannot do that
+/// without recording which budget the certificate needs.
+///
 /// Kept separate from the `qp_hsde=no` test above because the two are fixed by
 /// different changes and can regress independently.
 #[test]
 fn the_default_route_reaches_the_same_optimum() {
     for model in ["scaled_feasible_a.nl", "scaled_feasible_b.nl"] {
         let report = solve(model, &[]);
-        let code = report.solution.solve_result_num;
-        assert!(
-            (0..100).contains(&code),
-            "{model} at defaults: solve_result_num={code} (status {:?})",
-            report.solution.status,
-        );
         assert!(
             report.solution.objective.abs() <= OPTIMUM_TOL,
             "{model} at defaults: objective {:e}, want 0 ± {OPTIMUM_TOL:e}. This \
@@ -150,4 +160,43 @@ fn the_default_route_reaches_the_same_optimum() {
             report.solution.objective,
         );
     }
+
+    // `_b` certifies inside the default budget.
+    let b = solve("scaled_feasible_b.nl", &[]);
+    let code = b.solution.solve_result_num;
+    assert!(
+        (0..100).contains(&code),
+        "scaled_feasible_b at defaults: solve_result_num={code} (status {:?})",
+        b.solution.status,
+    );
+
+    // `_a` needs ~3596 iterations, so the default 200 is an honest budget
+    // exhaustion — never a success verdict on the gh #712 point.
+    let a = solve("scaled_feasible_a.nl", &[]);
+    let code = a.solution.solve_result_num;
+    assert!(
+        (400..500).contains(&code),
+        "scaled_feasible_a at defaults: solve_result_num={code} (status {:?}). \
+         Expected an iteration-limit verdict: this model needs ~3596 iterations \
+         to reach a certifiable point, and a success code here means the gh #712 \
+         false certificate is back — the gh#293 Ruiz retry accepting `Optimal` on \
+         a point whose absolute KKT error is 2.3e3.",
+        a.solution.status,
+    );
+
+    // ...and it does certify once the budget is the one it needs.
+    let a_big = solve("scaled_feasible_a.nl", &["max_iter=4000"]);
+    let code = a_big.solution.solve_result_num;
+    assert!(
+        (0..100).contains(&code),
+        "scaled_feasible_a at max_iter=4000: solve_result_num={code} (status {:?}) \
+         — the model is solvable, so the iteration-limit verdict above must be a \
+         budget statement and not a failure to converge at all.",
+        a_big.solution.status,
+    );
+    assert!(
+        a_big.solution.objective.abs() <= OPTIMUM_TOL,
+        "scaled_feasible_a at max_iter=4000: objective {:e}, want 0 ± {OPTIMUM_TOL:e}",
+        a_big.solution.objective,
+    );
 }

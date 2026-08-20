@@ -664,6 +664,43 @@ fn demote_false_equilibrated_optimum(prob: &QpProblem, sol: QpSolution, tol: f64
 /// genuine solve and four below every observed failure.
 const FALSE_OPTIMUM_REL_TOL: f64 = 1e-3;
 
+/// Cancellation floor for the complementarity normalizer: the objective is
+/// never trusted as a *scale* below this fraction of the terms that produced
+/// it (gh #712).
+///
+/// The normalizer is the objective the caller reads, which is
+/// `½xᵀPx + cᵀx` plus [`QpOptions::obj_constant`]. On a least-squares model
+/// whose optimum is zero those two are equal and opposite — `-5.0e11` and
+/// `+5.0e11` on `scaled_feasible_a` — so their sum carries no scale at all and
+/// the `max(1.0)` floor takes over, silently turning the relative test into an
+/// absolute one. That is right for a model whose data really is `O(1)` and
+/// wrong for one whose magnitudes are enormous: it rejects
+/// `feasible_x0_wide_scale`, whose certified point matches the NLP oracle to 13
+/// digits and whose absolute KKT error of `1.3e-1` is `5e-13` of its own
+/// objective terms.
+///
+/// So the floor is *relative to the terms*, not absolute. Measured over the
+/// gh #414, gh #286 and gh #712 points, the models that cancel admit any φ in
+/// `(2.7e-10, 2.3e-6)`; `√ε` sits 56× above that floor and 153× below its
+/// ceiling, and is the classical cancellation threshold — the relative accuracy
+/// a difference of same-magnitude terms still carries.
+///
+/// A model that does *not* cancel is untouched: `|objective|` exceeds
+/// `φ·max|term|` by construction whenever the sum retains any of its terms'
+/// magnitude, which is every gh #414 and gh #286 instance. The whole family
+/// keeps the numbers [`FALSE_OPTIMUM_REL_TOL`] was calibrated against, so the
+/// cut does not move.
+///
+/// The floor is deliberately *not* conditioned on a constant being supplied.
+/// Cancellation is a property of the arithmetic, not of who supplied which
+/// term, so an objective that cancels on its own (`½xᵀPx ≈ −cᵀx` with huge
+/// terms) gets the same treatment — there the effect is to *raise* `cscale`
+/// off a sum that carries no scale, which relaxes the test rather than
+/// tightening it. No fixture in the corpus is in that regime, so it is
+/// reasoned rather than measured; a model that lands there and is wrongly
+/// certified belongs on this issue.
+const OBJ_CANCELLATION_FLOOR: f64 = 1.4901161193847656e-8; // √ε, 2⁻²⁶
+
 /// `sol`'s KKT residual relative to the scale of its own terms, measured **in
 /// the Ruiz-equilibrated metric** — the scale-invariant answer to "is this
 /// actually a KKT point of `prob`?".
@@ -761,16 +798,18 @@ pub(crate) fn equilibrated_kkt_rel_parts(
     // the tightest choice and leaves this bit-for-bit unchanged, which is what
     // keeps the gh #286 huge-magnitude optima (genuine large objectives, no
     // constant) certified by the only arm that can certify them.
-    let cscale = (ssol
+    let quad: f64 = ssol
         .x
         .iter()
         .zip(&px)
-        .zip(&scaled.c)
-        .map(|((&xi, &pxi), &ci)| 0.5 * xi * pxi + ci * xi)
-        .sum::<f64>()
-        + obj_constant * scaling.sigma())
-    .abs()
-    .max(1.0);
+        .map(|(&xi, &pxi)| 0.5 * xi * pxi)
+        .sum();
+    let lin: f64 = ssol.x.iter().zip(&scaled.c).map(|(&xi, &ci)| ci * xi).sum();
+    let konst = obj_constant * scaling.sigma();
+    let cscale = (quad + lin + konst)
+        .abs()
+        .max(OBJ_CANCELLATION_FLOOR * quad.abs().max(lin.abs()).max(konst.abs()))
+        .max(1.0);
     QpResiduals {
         primal_infeasibility: res.primal_infeasibility / pscale,
         dual_infeasibility: res.dual_infeasibility / gscale,
