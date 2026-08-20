@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+- **A convex QP could report `Solve_Succeeded` on a point whose KKT error is
+  `2.3e3`**, when its objective carries a large constant term (#712).
+
+  On a least-squares model whose optimum is zero — `min Σ(xᵢ − aᵢ)²` with `a`
+  feasible, so the objective is displaced by `Σaᵢ² ≈ 5e11` — the convex driver
+  returned success at a point that is nowhere near optimal. The AMPL/Pyomo/GAMS
+  drivers and `solve_qp` all report that as solved, so the wrong point is
+  consumed as an answer.
+
+  Two things had to be true at once. The Ruiz-equilibrated retry that runs when
+  the first solve exhausts its budget accepted `Optimal` on the status alone,
+  and it was the one success verdict in the convex entry point that reached a
+  caller without the gh#414 genuineness check. And that check would have passed
+  the point anyway: it normalizes the duality gap by the objective POUNCE
+  models, `½xᵀPx + cᵀx`, which on such a model is the caller's objective
+  displaced by the constant — so a gap of `2.3e3` over `5e11` read `4.6e-9`
+  against a `1e-3` cut. This is the second of the two sites #689 identified;
+  0.10.0 corrected the first (HSDE's stopping test) and left this one.
+
+  The gap normalizer now includes the objective constant, floored relative to
+  the terms that produced it: on these models the two parts are equal and
+  opposite, so their sum carries no scale at all, and normalizing by it would
+  turn the relative test absolute and reject genuinely-converged solves on
+  large-magnitude data. Any model whose objective does not catastrophically
+  cancel is unaffected, and the acceptance threshold is unchanged.
+
+  **One model in the fixture corpus changes verdict**, and it is the one this
+  is about: `scaled_feasible_a` now reports `Maximum_Iterations_Exceeded` at
+  the default budget, carrying the correct objective, instead of success on the
+  bad point. It needs roughly 3600 iterations to reach a point POUNCE will
+  genuinely certify, against a default cap of 200, and it solves at
+  `max_iter=4000`. That cost was always being paid; it was previously skipped
+  rather than reported. If you solve a least-squares QP whose optimum is near
+  zero and see an iteration-limit verdict where 0.10.0 reported success, this
+  is why, and a larger `max_iter` is the remedy.
+
 - **The quadratic evaluator's summation order cost `qcqp1500-1c` 28
   iterations** (#702).
 
