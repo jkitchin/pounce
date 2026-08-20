@@ -38,7 +38,8 @@ use crate::cones::{CompositeCone, Cone};
 use crate::correctors;
 use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{
-    QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step,
+    QpOptions, adaptive_tau, build_factorization, build_rhs, detect_infeasibility_cone, dot,
+    inf_norm, split_step,
 };
 use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
@@ -225,6 +226,45 @@ fn true_kkt_error(
             .kkt_residuals_conic(prob, &cone.specs())
             .kkt_error(),
     )
+}
+
+/// gh#690 STUDY SCAFFOLD -- NOT FOR MERGE. Selects an adaptive-tau tail on the
+/// HSDE *corrector* step (never the predictor), off unless the environment
+/// variable `POUNCE_HSDE_TAU_STUDY` is set to `orthant`, `ray`, or `both`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TauStudy {
+    /// Shipped behaviour: static `opts.tau` everywhere.
+    Off,
+    /// Adaptive tau on the orthant cone blocks; the tau/kappa ray stays static.
+    Orthant,
+    /// Adaptive tau on the tau/kappa ray only; the cone blocks stay static.
+    Ray,
+    /// Adaptive tau on the orthant blocks *and* the tau/kappa ray.
+    Both,
+}
+
+impl TauStudy {
+    fn from_env() -> Self {
+        match std::env::var("POUNCE_HSDE_TAU_STUDY").as_deref() {
+            Ok("orthant") => Self::Orthant,
+            Ok("ray") => Self::Ray,
+            Ok("both") => Self::Both,
+            _ => Self::Off,
+        }
+    }
+
+    /// `(tau_orthant, tau_ray)` for the corrector step at this mu.
+    fn taus(self, mu: f64, opts: &QpOptions) -> (f64, f64) {
+        match self {
+            Self::Off => (opts.tau, opts.tau),
+            Self::Orthant => (adaptive_tau(mu, opts), opts.tau),
+            Self::Ray => (opts.tau, adaptive_tau(mu, opts)),
+            Self::Both => {
+                let t = adaptive_tau(mu, opts);
+                (t, t)
+            }
+        }
+    }
 }
 
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
@@ -416,6 +456,7 @@ where
     // record at the converged iterate (α = 0).
     let mut trace: Vec<QpIterate> = Vec::new();
 
+    let tau_study = TauStudy::from_env();
     for it in 0..opts.max_iter {
         iters = it;
         if crate::deadline::expired() {
@@ -850,11 +891,12 @@ where
             // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
             // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
             // (1−α) residual decrease.
-            alpha = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
+            let (tau_orthant, tau_ray) = tau_study.taus(mu, opts);
+            alpha = ray_step(tau, dtau, tau_ray).min(ray_step(kappa, dkappa, tau_ray));
             if m_ineq > 0 {
                 alpha = alpha
-                    .min(cone.max_step(&s, &ds, opts.tau))
-                    .min(cone.max_step(&z, &dz, opts.tau));
+                    .min(cone.max_step_split(&s, &ds, tau_orthant, opts.tau))
+                    .min(cone.max_step_split(&z, &dz, tau_orthant, opts.tau));
             }
 
             if alpha >= CENTERING_MIN_STEP
@@ -939,10 +981,11 @@ where
                     step_s[i] = ds[i] + cds[i];
                     step_z[i] = dz[i] + cdz[i];
                 }
-                let a_new = ray_step(tau, dtau + dtau_c, opts.tau)
-                    .min(ray_step(kappa, dkappa + dkappa_c, opts.tau))
-                    .min(cone.max_step(&s, &step_s, opts.tau))
-                    .min(cone.max_step(&z, &step_z, opts.tau));
+                let (tau_orthant, tau_ray) = tau_study.taus(mu, opts);
+                let a_new = ray_step(tau, dtau + dtau_c, tau_ray)
+                    .min(ray_step(kappa, dkappa + dkappa_c, tau_ray))
+                    .min(cone.max_step_split(&s, &step_s, tau_orthant, opts.tau))
+                    .min(cone.max_step_split(&z, &step_z, tau_orthant, opts.tau));
                 let keep = correctors::accepts(a_new, alpha);
                 tally.record(keep, a_new - alpha);
                 if keep {

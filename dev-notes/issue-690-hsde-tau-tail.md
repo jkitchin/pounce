@@ -1,143 +1,265 @@
-# gh#690 — the adaptive τ tail in the HSDE driver, re-measured after #696
+# gh#690 — the adaptive τ tail in the HSDE driver
 
-**Status: still not shipped, for a different reason than the one #690 was
-filed with.** The original objection dissolved; a stronger one appeared in its
-place.
+**Status: the blocker is gone, and it was never real.** Re-measured a third
+time, on `8b5d5217` (main, post-#712/PR#719), 60 CLI fixtures, both sweep legs.
+Against the *honest* baseline the "20× trajectory regression" that this issue
+was held open for is a **31% improvement**, and there are no status changes and
+no objective regressions anywhere in the corpus on either leg.
 
-Measured on `ac18ba6` (main, 2026-08-19), 58 CLI fixtures, **both sweep legs**.
-The scaffold that produced it is reproduced verbatim at the end of this note so
-the next reader does not have to reconstruct it — the first run of this study
-(#588 Q9a) was a throwaway that was reverted, and it is not recoverable from
-any branch.
+The study has been run three times because the first two were measured through
+defects that were later removed. The history is kept below, because the reason
+this took three passes is itself the lesson.
 
-## Why it had to be re-measured
-
-#690 reported `−3.0%` corpus-wide against a baseline of 2082 iterations, and
-declined to ship on the grounds that three fixtures moved their reported
-objective by ~2× while still returning `SolveSucceeded`. It named the fork
-itself: either those fixtures have flat optima, or "the τ tail is letting the
-HSDE step reach iterates the success test should not be accepting", and said
-the second "outranks the τ question entirely".
-
-It was the second. #689 / PR #696 found HSDE normalizing the duality gap by an
-objective displaced by the model's degree-0 term (`Σaᵢ² ≈ 5e11` on this pair),
-which bought a blanket `tol·|Σaᵢ²| ≈ 5e3` of absolute gap slack. All three
-fixtures in #690's table now report their true optimum of 0. The corpus
-baseline moved with the fix: 2082 → 2280 on the same 57 fixtures, and the +198
-is exactly the four models #696 made do the work they had been skipping
-(`scaled_feasible_a` 16→123, `scaled_feasible_b` 21→47,
-`feasible_x0_wide_scale` 16→80, `feasible_x0_extreme_row` 32→33). The two
-totals reconcile to the iteration, which is the evidence that nothing else in
-the corpus moved — #690 published only a total, so this is an inference from
-it rather than a per-fixture check.
-
-So every number in #690 was measured through the defect #696 removed, and the
-study is worth nothing until re-run.
-
-## Result
+## Result (post-#712)
 
 Control first: with `POUNCE_HSDE_TAU_STUDY` unset the scaffold sweeps
-bit-identical to `main` on both legs, so the numbers below are the τ rule and
-nothing else.
+bit-identical to `main` on both legs — verified by `diff`, empty — so the
+tables below are the τ rule and nothing else.
 
-| variant | exact leg | lbfgs leg | status changes | objectives moved |
+### Corpus, default `max_iter = 200`
+
+| variant | exact leg | lbfgs leg | status changes | objective regressions |
 |---|---|---|---|---|
-| off (today) | 2292 | 5438 | — | — |
-| orthant | 2369 (+3.4%) | 5515 (+1.4%) | 1 | 2 |
-| both | 2278 (−0.6%) | 5424 (−0.3%) | 1 | 7 |
+| off | 2163 | 5272 | — | — |
+| orthant | 2164 (+0.0%) | 5273 (+0.0%) | 0 | 0 |
+| ray | 2145 (−0.8%) | 5254 (−0.3%) | 0 | 0 |
+| **both** | **2073 (−4.2%)** | **5182 (−1.7%)** | **0** | **0** |
 
-`scaled_feasible_a` is the single status change in both variants and it
-dominates the totals. Excluding it:
+### Corpus, `max_iter = 5000`
+
+`scaled_feasible_a` is the only fixture in the corpus that reaches the default
+cap, so it is the only line that moves between the two tables. Lifting the cap
+is what puts it on the same footing as everything else.
 
 | variant | exact leg | lbfgs leg |
 |---|---|---|
-| orthant | +0.0% | +0.0% |
-| both | **−4.1%** | **−1.7%** |
+| off | 5560 | 8669 |
+| ray | 5542 (−0.3%) | 8651 (−0.2%) |
+| **both** | **4348 (−21.8%)** | **7457 (−14.0%)** |
 
-### 1. The objection #690 was filed on is gone
+### `scaled_feasible_a` alone, `max_iter = 5000`
 
-Every objective that moves under `both` moves *toward* the exact optimum:
+| variant | status | iters | objective | final_kkt_error |
+|---|---|---|---|---|
+| off | `SolveSucceeded` | 3596 | 0 | 1.88e-10 |
+| orthant | `SolveSucceeded` | 3181 | 0 | 3.91e-03 |
+| ray | `SolveSucceeded` | 3596 | 0 | 1.88e-10 |
+| **both** | `SolveSucceeded` | **2474** | 0 | 1.22e-10 |
+
+## 1. The blocker was an artefact of the baseline, not of the τ rule
+
+#690's second measurement recorded `scaled_feasible_a` at 123 → 2474 iterations
+and called it a 20× regression with the gh#544 signature. #712 then found that
+the 123-iteration point was never converged: the gh#293 Ruiz retry was returning
+an uncertified `Optimal`, and the genuineness guard's relative arm normalized
+complementarity by the objective displaced by its degree-0 term, so an absolute
+KKT error of `2.28e+03` read as `4.57e-09` and passed.
+
+With that removed, the baseline for this fixture is **3596** iterations. The τ
+tail's 2474 is unchanged from the previous measurement — it was always a real
+convergence — so the comparison flips sign entirely:
+
+    123  → 2474    "20× regression"   (against a point that did not exist)
+    3596 → 2474    "31% improvement"  (against the point the solver certifies)
+
+At the default cap both the baseline and every variant report
+`MaximumIterationsExceeded` at 199, so on today's `main` this fixture is not a
+status change under any variant. The single status change that blocked this
+issue is gone.
+
+This is the second time a number in this study was invalidated by a defect in
+what it was measured against, and the pattern is worth naming: an iteration
+count is only as trustworthy as the stopping test that produced it. A
+"regression" measured against an early-stopped baseline is not a weak result,
+it is not a result at all.
+
+## 2. `orthant` and `ray` are each worth nothing; the gain is the interaction
+
+The previous note inferred, from `orthant` at +0.0% and `both` at −4.1%, that
+"the τ/κ ray isn't merely where the gain is, it's where *all* of it is", and
+recommended studying the ray variant alone. **That inference was wrong, and the
+`ray` variant was added to this study to test it.** Measured directly:
+
+| variant | exact | lbfgs |
+|---|---|---|
+| orthant only | +0.0% | +0.0% |
+| ray only | −0.8% | −0.3% |
+| both | −4.2% | −1.7% |
+
+Neither half delivers alone. The mechanism is the `min`:
+
+    α = min( ray_step(τ, dτ), ray_step(κ, dκ), cone.max_step(s, ds), cone.max_step(z, dz) )
+
+Relaxing the fraction-to-boundary parameter on one group leaves the other group
+binding, and α does not move. `scaled_feasible_a` shows this in its cleanest
+form: under `ray` it is **bit-identical to the baseline** — same 3596
+iterations, same `final_kkt_error` to every digit — because the cone block is
+what limits the step there, and the ray is merely slack. Under `orthant` the
+cone block relaxes and the ray becomes binding, which buys 3596 → 3181. Only
+`both` releases the actual constraint: 2474.
+
+So the answer to the question `QpOptions::tau_max`'s doc comment asked —
+
+> **direct driver only** — the HSDE loop's step is also limited by the τ/κ ray,
+> so the same idea needs its own study there.
+
+— is that the doc comment was right to refuse the port, and right about why.
+gh#417's rule applied verbatim to HSDE's orthant blocks buys **exactly zero**,
+because HSDE's step, unlike the direct driver's, is additionally capped by the
+homogenizing pair. The rule has to be extended to the ray to do anything at
+all. That is a substantive difference between the two drivers and not a
+parameter-tuning detail.
+
+## 3. The accuracy moves are all in the right direction
+
+17 fixture-legs move under `both` on each leg, and every objective that changes
+moves *toward* the exact optimum:
 
 | fixture | off | both |
 |---|---|---|
 | `bound_active_qp` | 5.000000002 | **5** |
-| `lp_row_constant` | −5.999999998 | **−6** |
-| `lp_row_constant_expr` | −5.999999998 | **−6** |
+| `lp_row_constant` / `_expr` | −5.999999998 | **−6** |
 | `presolve_overflow_feasible` | 1.000000001 | **1** |
 | `lp_afiro` | −464.7531428 | −464.7531429 |
-| `tame` | 2.366582716e-30 | 3.056836008e-30 (both are 0, same `x`) |
+| `tame` | 2.366582716e-30 | 3.056836008e-30 (both 0, same `x`) |
 
-No fixture returns a materially different answer, and the three that used to
-move ~2× (`scaled_feasible_a`, `scaled_feasible_b`, `feasible_x0_extreme_row`)
-now hold at 0. The reason not to ship, as written in #690, no longer exists.
+The rest hold their objective exactly and cut iterations (`8 → 5` on the small
+LP/QP family, `feasible_x0_wide_scale` `80 → 37`, `feasible_x0_extreme_row`
+`33 → 29`, `scaled_feasible_b` `47 → 46`). Both legs move the identical set, so
+L-BFGS again surfaced no exposure the exact leg missed — which is a result, not
+a reason to have run one leg.
 
-### 2. A harder objection replaced it
+## 4. The suite under `both`: two calibrated literals and one real gap
 
-`scaled_feasible_a` is a **20× trajectory regression**:
+Full workspace suite (`--no-fail-fast`, `pounce-hsl` excluded — it fails to
+link locally for want of the proprietary HSL sources, unrelated to this study)
+under `POUNCE_HSDE_TAU_STUDY=both`: **6 tests fail across 2 targets, everything
+else passes.** They are not one kind of failure, and the difference matters.
 
-| max_iter | status | iters | objective | final_kkt_error |
-|---|---|---|---|---|
-| 200 (default) | `MaximumIterationsExceeded` | 199 | 6.10e-05 | 3.18e-07 |
-| 400 | `MaximumIterationsExceeded` | 399 | 0 | 4.10e-03 |
-| 1000 | `MaximumIterationsExceeded` | 999 | 6.10e-05 | 4.84e-08 |
-| 3000 | `SolveSucceeded` | **2474** | 0 | 1.22e-10 |
+### 4a. A real defect, exposed rather than caused (gh#535 reroute gate)
 
-against 123 iterations on `main`. It is a stall, not a divergence, and the
-shape of the stall is the interesting part: by iteration 199 the τ tail has
-already reached `final_kkt_error` 3.2e-07 — four orders of magnitude *better*
-than the 4.6e-03 point the baseline certifies at 123 — and then wanders
-non-monotonically (4.1e-03 at 399, 4.8e-08 at 999) for another two thousand
-iterations before the stopping test accepts it.
+Five of the six are `crates/pounce-cli/tests/issue_535_lp_falls_back_to_nlp.rs`.
+The cause is worth stating carefully, because the τ tail is not the defect.
 
-This is the gh#544 signature exactly: the right answer, slowly, with status and
-objective both intact, and it would have been invisible to a suite that asserts
-those two. It is a hard blocker under CLAUDE.md, and it is a *better* reason
-than the one #690 was holding out for.
+`lp_declines_to_nlp` (`crates/pounce-cli/src/main.rs:2208`) gates the gh#535
+LP → NLP reroute on
 
-The near-certification at 199 also says the blocker is not purely the step
-rule. `scaled_feasible_a` is the model whose objective constant is `Σaᵢ² ≈
-5e11`, i.e. the one that stresses the post-#696 stopping test hardest, and the
-τ tail is producing points that test will not accept while accepting worse
-ones. Whether that is the τ rule's fault or a remaining gap in the stopping
-test is the question a follow-up has to answer, and it should be answered
-before the −4.1% is taken.
+    QpStatus::OptimalInaccurate | QpStatus::IterationLimit
 
-### 3. `orthant` alone is now worthless
+`QpStatus::NumericalFailure` is **not** in that list, and never has been. So an
+LP whose convex solve ends in a numerical failure is reported as the last word
+— which is precisely the shape gh#535 was filed to prevent ("a specialized fast
+path displaced a general one, and when the fast path failed there was no
+fallback left").
 
-+0.0% on both legs excluding the regression, i.e. it buys nothing and still
-breaks `scaled_feasible_a`. #690 read the split as "the τ/κ ray is where the
-gain is"; post-#696 it is where *all* of it is. Any follow-up should study the
-ray variant only, and the doc comment on `QpOptions::tau_max` — which scopes
-the rule away from HSDE because "the HSDE loop's step is also limited by the
-τ/κ ray, so the same idea needs its own study there" — is pointing at exactly
-the right thing.
+That hole is on `main` today; nothing in this study touches `main.rs`. What the
+τ tail does is make a fixture *reach* it. On `lp_afiro` at the test's
+deliberately unreachable `tol=1e-20`:
 
-### 4. On the second leg
+| | convex verdict | reroute fires? |
+|---|---|---|
+| off | `Maximum iterations exceeded`, 199 iters | yes → NLP path |
+| both | `Numerical failure (no verified KKT point)`, 85 iters | **no** |
 
-Both legs move the identical 17-model set, so the L-BFGS leg surfaced no
-exposure the exact leg missed. That is a result and not a reason to have run
-one leg: #690 reported a single total, and there was no way to know which of
-the two it was until both were run. The gain is also materially smaller on the
-L-BFGS leg (−1.7% vs −4.1%), because that leg's iteration count is dominated
-by fixtures the convex driver never sees.
+The mechanism is unsurprising: at an unreachable tolerance the τ tail drives
+iterates harder against the boundary, so the KKT system goes singular at 85
+iterations instead of the budget running out at 199. Same non-certification,
+different status, and only one of the two statuses reroutes.
+
+**Verified fix:** adding `QpStatus::NumericalFailure` to the gate turns 5
+failures into 1, and — checked explicitly — does not change the suite with the
+scaffold off (8/8 pass on `main` behaviour, unchanged). It is arguably the
+correct gate independently of this study, and it should land as its own change
+with its own issue rather than riding along inside a τ-rule PR.
+
+### 4b. Two literals calibrated to today's step rule
+
+The remaining two failures are threshold literals, not contracts. In both cases
+every assertion carrying the test's actual claim still passes under `both`;
+only a number tuned to the point the current step rule happens to land on does
+not.
+
+1. `ipm::false_optimum_metric_tests::the_false_optimum_is_invisible_unscaled_and_obvious_equilibrated`
+   — fails on its **premise** assertion:
+
+       premise: the certified point's own KKT error is huge
+       (got 2.301e2, the issue reports 8.3e3)
+
+   With that one threshold instrumented out, the substantive assertions all
+   still hold under `both`: the point is still certified by the un-repaired
+   embedding, still invisible to the unscaled relative test, still `O(1)` or
+   worse in the equilibrated metric, and the true optimum still sits below
+   `1e-6`. The τ tail simply lands the un-repaired solve on a *less bad* false
+   optimum — `2.30e2` where the control gives `8.28e3`. The separation the test
+   exists to assert is `2.3e2` against `<1e-6`, nine orders, so the claim
+   survives comfortably; only the `> 1e3` literal does not.
+
+   This test keeps #712's extra machinery explained, so re-tuning its threshold
+   is a decision to make out loud in the PR, not a number to quietly adjust.
+
+2. `an_explicitly_selected_convex_solve_is_not_rerouted` — the sixth failure,
+   and the one the 4a fix does not resolve. It asserts
+   `stdout.contains("Maximum iterations exceeded")`, the same status literal
+   4a is about. Its two load-bearing assertions — exactly one convex verdict
+   line, and no reroute for a named engine — both pass under `both`. Only the
+   hard-coded failure mode does not.
+
+### 4c. The scaffold is not the implementation
+
+It reads an environment variable per solve. Shipping means the rule applies
+unconditionally to the HSDE corrector (never the predictor), driven by the
+existing `tau` / `tau_max` pair, plus the doc comment on `QpOptions::tau_max`
+rewritten to record the answer instead of the question — including §2's
+finding, which a future reader will otherwise re-derive.
 
 ## Verdict
 
-Keep #690 open. The τ/κ ray is worth −4.1% on the exact leg and the accuracy
-moves are all in the right direction, but `scaled_feasible_a` at 20× is not
-shippable, and diagnosing it is a phase of its own — plausibly a stopping-test
-phase rather than a τ phase.
+**Ship `both`, behind one companion change.** −4.2% exact / −1.7% lbfgs at the
+default cap, −21.8% / −14.0% with the cap lifted, zero status changes and zero
+objective regressions across 60 fixtures on both legs, and accuracy
+improvements on six. The fixture that held this issue open for two rounds is
+31% faster than the baseline that can actually certify it.
+
+Order of work:
+
+1. **First, independently:** widen the gh#535 reroute gate to include
+   `QpStatus::NumericalFailure` (§4a). This is a hole in `main` today, it needs
+   its own issue and its own reasoning, and it should not be discovered inside
+   a τ-rule PR.
+2. **Then:** implement the τ tail unconditionally on the HSDE corrector, adjust
+   the two calibrated literals in §4b with the reasoning stated in the PR body,
+   and rewrite the `QpOptions::tau_max` doc comment to carry §2's answer.
+
+## History — why this took three passes
+
+| pass | measured on | headline | invalidated by |
+|---|---|---|---|
+| #588 Q9a (2026-08-18) | `feat/588-q9-correctors` | −3.0%, blocked on ~2× objective moves | #696: HSDE normalized the duality gap by an objective displaced by its degree-0 term (`Σaᵢ² ≈ 5e11`), buying `tol·|Σaᵢ²| ≈ 5e3` of gap slack |
+| re-run (2026-08-19) | `ac18ba6` | −4.1% excl. a 20× regression on `scaled_feasible_a` | #712: the same fixture's 123-iteration baseline was an uncertified `Optimal` from the gh#293 Ruiz retry, absolute KKT error `2.28e+03` |
+| this note (2026-08-20) | `8b5d5217` | −4.2% / −1.7%, no blocker | — |
+
+Each pass's objection dissolved when the thing it was measured against was
+fixed, and in both cases the τ rule was never the defect. Both passes were also
+correct to refuse to ship: neither had the evidence to, and the second's
+objection was strictly better-founded than the first's.
 
 ## The scaffold
 
-Applies to `ac18ba6`. Off unless `POUNCE_HSDE_TAU_STUDY` is set to `orthant`
-or `both`; with it unset the sweep is bit-identical to `main`, which is the
-control that makes the table above mean anything. **Not for merge** — it reads
-an environment variable per solve and exists only to be measured.
+Applies to `8b5d5217`. Off unless `POUNCE_HSDE_TAU_STUDY` is set to `orthant`,
+`ray`, or `both`; with it unset the sweep is bit-identical to `main`, which is
+the control that makes the tables above mean anything. **Not for merge** — it
+reads an environment variable per solve and exists only to be measured. The
+`ray` arm is new in this pass and is what disproved §2's earlier inference.
+
+Reproduce with:
+
+    scripts/sweep-fixtures.sh <bin> /tmp/off.txt                     # env unset
+    POUNCE_HSDE_TAU_STUDY=both scripts/sweep-fixtures.sh <bin> /tmp/both.txt
+    diff /tmp/off.txt /tmp/both.txt
 
 ```diff
 diff --git a/crates/pounce-convex/src/hsde.rs b/crates/pounce-convex/src/hsde.rs
-index e917f21..0e8144b 100644
+index e917f215..8de56626 100644
 --- a/crates/pounce-convex/src/hsde.rs
 +++ b/crates/pounce-convex/src/hsde.rs
 @@ -38,7 +38,8 @@ use crate::cones::{CompositeCone, Cone};
@@ -150,19 +272,21 @@ index e917f21..0e8144b 100644
  };
  use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
  use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
-@@ -228,6 +229,41 @@ fn true_kkt_error(
+@@ -227,6 +228,45 @@ fn true_kkt_error(
+     )
  }
  
- /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
 +/// gh#690 STUDY SCAFFOLD -- NOT FOR MERGE. Selects an adaptive-tau tail on the
 +/// HSDE *corrector* step (never the predictor), off unless the environment
-+/// variable `POUNCE_HSDE_TAU_STUDY` is set to `orthant` or `both`.
++/// variable `POUNCE_HSDE_TAU_STUDY` is set to `orthant`, `ray`, or `both`.
 +#[derive(Clone, Copy, PartialEq, Eq)]
 +enum TauStudy {
 +    /// Shipped behaviour: static `opts.tau` everywhere.
 +    Off,
 +    /// Adaptive tau on the orthant cone blocks; the tau/kappa ray stays static.
 +    Orthant,
++    /// Adaptive tau on the tau/kappa ray only; the cone blocks stay static.
++    Ray,
 +    /// Adaptive tau on the orthant blocks *and* the tau/kappa ray.
 +    Both,
 +}
@@ -171,6 +295,7 @@ index e917f21..0e8144b 100644
 +    fn from_env() -> Self {
 +        match std::env::var("POUNCE_HSDE_TAU_STUDY").as_deref() {
 +            Ok("orthant") => Self::Orthant,
++            Ok("ray") => Self::Ray,
 +            Ok("both") => Self::Both,
 +            _ => Self::Off,
 +        }
@@ -181,6 +306,7 @@ index e917f21..0e8144b 100644
 +        match self {
 +            Self::Off => (opts.tau, opts.tau),
 +            Self::Orthant => (adaptive_tau(mu, opts), opts.tau),
++            Self::Ray => (opts.tau, adaptive_tau(mu, opts)),
 +            Self::Both => {
 +                let t = adaptive_tau(mu, opts);
 +                (t, t)
@@ -189,10 +315,10 @@ index e917f21..0e8144b 100644
 +    }
 +}
 +
+ /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
  /// scaled by `tau` and capped at 1 (the scalar analogue of `Cone::max_step`
  /// for the homogenizing variables `τ`, `κ`).
- fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
-@@ -416,6 +452,7 @@ where
+@@ -416,6 +456,7 @@ where
      // record at the converged iterate (α = 0).
      let mut trace: Vec<QpIterate> = Vec::new();
  
@@ -200,7 +326,7 @@ index e917f21..0e8144b 100644
      for it in 0..opts.max_iter {
          iters = it;
          if crate::deadline::expired() {
-@@ -850,11 +887,12 @@ where
+@@ -850,11 +891,12 @@ where
              // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
              // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
              // (1−α) residual decrease.
@@ -216,7 +342,7 @@ index e917f21..0e8144b 100644
              }
  
              if alpha >= CENTERING_MIN_STEP
-@@ -939,10 +977,11 @@ where
+@@ -939,10 +981,11 @@ where
                      step_s[i] = ds[i] + cds[i];
                      step_z[i] = dz[i] + cdz[i];
                  }
@@ -233,7 +359,7 @@ index e917f21..0e8144b 100644
                  tally.record(keep, a_new - alpha);
                  if keep {
 diff --git a/crates/pounce-convex/src/ipm.rs b/crates/pounce-convex/src/ipm.rs
-index 635885b..0ba8583 100644
+index 97a3ee63..dc0209f1 100644
 --- a/crates/pounce-convex/src/ipm.rs
 +++ b/crates/pounce-convex/src/ipm.rs
 @@ -112,7 +112,7 @@ const TAU_CEIL: f64 = 1.0 - 1e-12;

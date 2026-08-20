@@ -112,7 +112,7 @@ const TAU_CEIL: f64 = 1.0 - 1e-12;
 /// rather than in a logarithm of the perturbation (gh #417). Far from the
 /// solution (μ ≥ 1 − `tau`, and on badly-scaled data where μ is large) it
 /// reduces to the static `opts.tau`, so early iterations are unchanged.
-fn adaptive_tau(mu: f64, opts: &QpOptions) -> f64 {
+pub(crate) fn adaptive_tau(mu: f64, opts: &QpOptions) -> f64 {
     // `tau` wins if a caller sets an inverted pair (`tau_max < tau`), which is
     // how the static behaviour is requested (`tau_max == tau`).
     let hi = opts.tau_max.min(TAU_CEIL).max(opts.tau);
