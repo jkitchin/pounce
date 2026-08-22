@@ -310,6 +310,7 @@ mod tests {
             &[],
             &[0.0, 0.0],
             1e-9,
+            1e-9,
             1,
         )
         .expect("refinement");
@@ -334,6 +335,7 @@ mod tests {
             &[Number::INFINITY, Number::INFINITY],
             &[],
             &[0.0, 0.0],
+            1e-9,
             1e-9,
             8,
         )
@@ -449,12 +451,86 @@ mod tests {
             &mults,
             &[0.0; 4],
             1e-9,
+            1e-9,
             8,
         )
         .expect("refinement");
         assert_eq!(rows, vec![2], "the most negative one, alone");
         assert_eq!(stop, RefineStop::Settled);
         assert_eq!(dx, vec![0.0, 0.0, -1.0, 0.0], "and its multiplier is zero");
+    }
+
+    /// The primal margin and the release threshold are two numbers.
+    /// A caller who says ten is on the bound has said nothing about
+    /// whether a multiplier at minus one has changed sign, and with one
+    /// number a wide `bound_eps` would stop every release on the model.
+    #[test]
+    fn a_wide_primal_margin_does_not_stop_a_release() {
+        let make = || ScriptedRelease {
+            base: crate::backsolver::DenseLuBacksolver::from_dense(4, &lever_matrix(4, 0.0))
+                .expect("nonsingular"),
+            rows: vec![
+                crate::backsolver::BoundRow {
+                    row: 2,
+                    var_row: 0,
+                    lower: true,
+                },
+                crate::backsolver::BoundRow {
+                    row: 3,
+                    var_row: 1,
+                    lower: true,
+                },
+            ],
+            steps: [
+                (2usize, vec![-5.0, 0.0, 0.0, 0.0]),
+                (1usize, vec![0.0, 0.0, 0.0, 0.0]),
+            ]
+            .into_iter()
+            .collect(),
+            calls: Rc::new(std::cell::Cell::new(0)),
+        };
+        let mults = [
+            BoundMultiplier { row: 2, base: 1.0 },
+            BoundMultiplier { row: 3, base: 1.0 },
+        ];
+        // z2 = 1 - 2 = -1 and z3 = -0.5 both want out. A primal margin
+        // of ten is wider than anything here, and both releases still
+        // happen. Both, rather than the one the sibling test above
+        // settles on: the accept guard compares overshoot against the
+        // primal margin, and five below a bound is inside ten, so the
+        // batch stands. That is the guard reading the caller's margin,
+        // which is the one number a caller who widens it has changed.
+        let (_, rows, stop) = refine_step_onto_bounds(
+            &make(),
+            &[0.0, 0.0, -2.0, -1.5],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+            &[Number::INFINITY, Number::INFINITY],
+            &mults,
+            &[0.0; 4],
+            10.0,
+            1e-9,
+            8,
+        )
+        .expect("refinement");
+        assert_eq!(rows, vec![2, 3], "the release reads its own threshold");
+        assert_eq!(stop, RefineStop::Settled);
+        // And the other way: a release threshold of ten is the one
+        // thing that stops it, with the primal margin back at its floor.
+        let (_, rows, _) = refine_step_onto_bounds(
+            &make(),
+            &[0.0, 0.0, -2.0, -1.5],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+            &[Number::INFINITY, Number::INFINITY],
+            &mults,
+            &[0.0; 4],
+            1e-9,
+            10.0,
+            8,
+        )
+        .expect("refinement");
+        assert!(rows.is_empty(), "nothing is negative past ten");
     }
 
     #[test]
@@ -488,6 +564,7 @@ mod tests {
             &[Number::INFINITY, Number::INFINITY],
             &mults,
             &[0.0; 4],
+            1e-9,
             1e-9,
             8,
         )
@@ -647,6 +724,20 @@ const WORSE_THAN_PLAIN_FACTOR: Number = 10.0;
 /// [`SensBacksolver::natural_units_factor`], so they agree with the `z`
 /// rows of `dx_plain` before either is used.
 ///
+/// # Two margins
+///
+/// `eps` is the primal margin: how far outside a bound a coordinate has
+/// to end to count as having left it, which decides what a pass pins
+/// and what the two guards below compare overshoot against.
+/// `release_eps` is the dual one: how far negative the step has to
+/// drive a bound multiplier before the bound is released. They are two
+/// numbers because a caller who widens the primal margin is saying
+/// what counts as on the bound, and that says nothing about whether a
+/// multiplier at `-5e-3` has changed sign. With one number, a
+/// `bound_eps` of `1e-2` would stop every release on a model whose
+/// multipliers are of order `1e-3`, and return the wrong active set
+/// without saying so.
+///
 /// # Two guards, independent of the loop
 ///
 /// A pass is refused when its correction is out of scale with the step
@@ -670,6 +761,7 @@ pub fn refine_step_onto_bounds<B>(
     multipliers: &[BoundMultiplier],
     rhs_plain: &[Number],
     eps: Number,
+    release_eps: Number,
     max_iter: usize,
 ) -> Result<(Vec<Number>, Vec<usize>, RefineStop), String>
 where
@@ -721,7 +813,7 @@ where
             .filter(|m| !released.contains(&m.row) && !refused.contains(&m.row))
             .filter(|m| bound_rows.is_some_and(|br| br.iter().any(|b| b.row == m.row)))
             .map(|m| (m.row, m.base + dx[m.row]))
-            .filter(|&(_, v)| v < -eps)
+            .filter(|&(_, v)| v < -release_eps)
             .collect();
         v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         v.into_iter().map(|(r, _)| r).collect()

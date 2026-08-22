@@ -8,7 +8,8 @@ import pyomo.environ as pyo
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (active_set_changes, declare_sens_param, estimate,
                           estimate_report)
-from pyomo_pounce.sens import _NO_BOUND, _ratio_test
+from pyomo_pounce.sens import (_NO_BOUND, _perturbation_deltas, _ratio_test,
+                               _session_for)
 
 
 # ── the ratio test on its own ────────────────────────────────────────────────
@@ -814,3 +815,243 @@ def test_settled_means_nothing_is_left_outside_a_bound(mk, target):
     assert r.refine_stop == "settled"
     assert list(r.crossed) == [], (
         f"settled but {[v.name for v in r.crossed]} is outside its bound")
+
+
+# ── the two sIPOPT margins, on the pyomo surface ─────────────────────────────
+#
+# Both are settable through the CLI and the SensSolve builder and were
+# unreachable from here (gh#736).
+
+def test_bound_eps_sets_what_counts_as_leaving_a_bound():
+    """The refinement pins a coordinate only once it is outside by more
+    than the margin, so a margin wider than the crossing pins nothing
+    and the step stays where the plain predictor put it. To solver
+    tolerance rather than bit for bit: the release test runs at the
+    solve's own margin whatever the primal one is, and the bounds it
+    releases here are inactive ones, which moves the step by the
+    multiplier's own size."""
+    m = coupled()
+    plain = estimate(m, [(m.p, -1.2)], mode="linear", clamp=False)
+    tight = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    slack = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
+
+    moved = max(abs(tight[v] - plain[v]) for v in plain)
+    assert moved > 1e-3, (
+        f"a tight margin should repair the crossing, moved {moved:g}")
+    for v in plain:
+        assert slack[v] == pytest.approx(plain[v], abs=1e-6), (
+            f"a margin wider than the crossing should leave {v.name} alone")
+
+
+def test_a_wide_primal_margin_does_not_stop_a_release():
+    """`bound_eps` is a primal margin and says nothing about whether a
+    multiplier has changed sign. With one number for both, a margin of
+    ten stopped every release, so the refinement returned a different
+    active set from the one the step asked for. Rows below `n_x` are
+    pins and rows above are releases."""
+    m = coupled()
+    sess = _session_for(m)
+    pin_idx, deltas = _perturbation_deltas(sess, [(m.p, -1.2)])
+    n_x = len(sess.solver.parametric_step(pin_idx, deltas))
+
+    _, rows, stop = sess.solver.parametric_step_bounded(
+        pin_idx, deltas, 16, 10.0)
+    assert stop == "settled"
+    assert rows, "the step drives bound multipliers negative here"
+    assert all(r >= n_x for r in rows), (
+        f"a margin of ten pins nothing, got rows {list(rows)}")
+
+    _, rows, _ = sess.solver.parametric_step_bounded(
+        pin_idx, deltas, 16, 1e-9)
+    assert any(r < n_x for r in rows), "the floor pins the crossing"
+    assert any(r >= n_x for r in rows), "and releases what both do"
+
+
+def test_bound_eps_decides_crossed_and_the_stop_reason_together():
+    """`refine_stop` and `crossed` have to keep agreeing under the new
+    argument. The refinement decides "outside a bound" against the
+    margin and `crossed` used to decide it against a fixed 1e-9, so a
+    margin wider than the crossing reported `settled` beside a
+    coordinate 2.0 outside its bound."""
+    m = coupled()
+    for eps in (1e-9, 1e-2, 1.0, 10.0):
+        r = estimate_report(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=eps)
+        assert r.refine_stop == "settled"
+        assert list(r.crossed) == [], (
+            f"settled at bound_eps={eps:g} but "
+            f"{[v.name for v in r.crossed]} is reported outside its bound")
+
+
+def test_bound_eps_leaves_constraint_rows_alone():
+    """The refinement pins variable bounds only, so the margin has no
+    say over a constraint row the step carries past its limit. A margin
+    wider than everything on the model still reports the row, and the
+    row is still what `alpha` reaches first."""
+    m = with_row()
+    r = estimate_report(m, [(m.p, 3.0)], mode="fix_relax", bound_eps=10.0)
+    assert m.c in r.crossed_rows, "a margin on variables hid a row"
+    assert r.crossed_rows[m.c] == pytest.approx(3.0, abs=1e-6)
+    assert r.alpha == pytest.approx(0.5, abs=1e-6)
+    assert r.first_kind == "constraint"
+
+
+def large_coordinate():
+    """One variable of order 1e4 with its bound at 1e4. A relative
+    tolerance scaled by the coordinate is 1e-5 here, where the
+    refinement's own test is absolute at 1e-9."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=9999.0, mutable=True)
+    m.x = pyo.Var(bounds=(0.0, 1e4), initialize=9999.0)
+    m.obj = pyo.Objective(expr=(m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_the_margin_is_absolute_as_the_refinement_is():
+    """`crossed` and the clamp compare the same way the refinement
+    does. Scaling the tolerance by the coordinate gave a variable of
+    order 1e4 a margin of 1e-5 that the refinement never gave it, so a
+    step 1e-6 past the bound was pinned and refined against while the
+    report said nothing had crossed."""
+    m = large_coordinate()
+    target = 1e4 + 1e-6
+
+    r = estimate_report(m, [(m.p, target)], mode="linear")
+    assert m.x in r.crossed, "the linear step leaves the bound by 1e-6"
+    over = r.crossed[m.x]
+    assert 1e-9 < over < 1e-9 * 1e4, (
+        f"overshoot {over:g} is the case a relative tolerance hides")
+    with pytest.warns(UserWarning, match="clamped"):
+        estimate(m, [(m.p, target)], mode="linear")
+
+    r = estimate_report(m, [(m.p, target)], mode="fix_relax")
+    assert r.refine_stop == "settled"
+    assert list(r.crossed) == []
+
+
+def test_bound_eps_unset_is_the_solves_own_margin():
+    """Unset is `bound_relax_factor` floored at 1e-9. pyomo-pounce
+    solves with the relaxation off, so unset IS the floor here, and
+    naming both numbers is what keeps this from comparing a value
+    against itself."""
+    m = coupled()
+    assert _session_for(m).solver.bound_relax_factor == 0.0, (
+        "this test reads the floor, which only shows through an "
+        "unrelaxed solve")
+
+    unset = estimate(m, [(m.p, -1.2)], mode="fix_relax")
+    floor = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=1e-9)
+    wide = estimate(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=10.0)
+
+    for v in unset:
+        assert unset[v] == pytest.approx(floor[v], abs=1e-12), (
+            f"unset should resolve to the 1e-9 floor, {v.name} differs")
+    moved = max(abs(wide[v] - unset[v]) for v in unset)
+    assert moved > 1e-3, (
+        f"a margin that covers the crossing should move the answer, "
+        f"moved {moved:g}")
+
+
+def test_bound_eps_warns_where_no_refinement_reads_it():
+    """Only the fix_relax refinement pins against the margin. Passing it
+    under another mode changes nothing, and a registered argument that
+    looks wired and is not is what gh#677 was."""
+    m = coupled()
+    for mode in ("linear", "path"):
+        with pytest.warns(UserWarning, match="bound_eps"):
+            estimate(m, [(m.p, -1.2)], mode=mode, bound_eps=1e-3)
+        with pytest.warns(UserWarning, match="bound_eps"):
+            estimate_report(m, [(m.p, -1.2)], mode=mode, bound_eps=1e-3)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_bound_eps_takes_the_option_surfaces_bounds(bad):
+    """`sens_bound_eps` is registered strictly above zero, so the CLI
+    turns these down. Zero reinstates the roundoff pinning the floor
+    prevents, and NaN makes every comparison against it false, so the
+    refinement pins nothing and still reports settled."""
+    m = coupled()
+    for call in (estimate, estimate_report):
+        with pytest.raises(ValueError,
+                           match="bound_eps must be a positive number"):
+            call(m, [(m.p, -1.2)], mode="fix_relax", bound_eps=bad)
+
+
+def test_arguments_are_checked_before_the_factor_is():
+    """A typo'd mode plus a tight cap should name the typo. The cap
+    reads the factor, which is a fact about the solve rather than about
+    the call, so it cannot be what a malformed call reports."""
+    m = regularized()
+    worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
+    with pytest.raises(ValueError, match="mode"):
+        estimate(m, [(m.p, 0.5)], mode="relax_fix", max_pdpert=worst / 10.0)
+    with pytest.raises(ValueError, match="mode"):
+        estimate_report(m, [(m.p, 0.5)], mode="relax_fix",
+                        max_pdpert=worst / 10.0)
+    with pytest.raises(ValueError, match="degeneracy"):
+        active_set_changes(m, [(m.p, 0.5)], degeneracy="one-sided",
+                           max_pdpert=worst / 10.0)
+
+
+def regularized():
+    """Two constraints stating the same row, so the factor carries an
+    inertia correction and there is something for the cap to refuse."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.25, mutable=True)
+    m.x = pyo.Var(range(3), bounds=(-10.0, 10.0), initialize=0.3)
+    m.c1 = pyo.Constraint(expr=sum(m.x[i] for i in range(3)) == 1.0 - m.p)
+    m.c2 = pyo.Constraint(expr=1.0 * sum(m.x[i] for i in range(3)) == 1.0 - m.p)
+    m.obj = pyo.Objective(expr=sum(m.x[i] ** 2 for i in range(3)))
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_max_pdpert_refuses_a_factor_the_correction_perturbed():
+    """Every sensitivity output inverts the converged factor, so a
+    factor the inertia correction had to perturb answers for a nearby
+    problem. The cap is the caller declining to accept that."""
+    m = regularized()
+    worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
+    assert worst > 0.0, "this fixture is meant to be regularized"
+
+    from pyomo_pounce import gradient
+    for call in (lambda cap: gradient(m.x[0], wrt=m.p, max_pdpert=cap),
+                 lambda cap: estimate(m, [(m.p, 0.5)], max_pdpert=cap),
+                 lambda cap: estimate_report(m, [(m.p, 0.5)], max_pdpert=cap),
+                 lambda cap: active_set_changes(m, [(m.p, 0.5)],
+                                                max_pdpert=cap)):
+        call(None)
+        call(worst * 10.0)
+        with pytest.raises(ValueError, match="max_pdpert"):
+            call(worst / 10.0)
+
+
+def test_max_pdpert_reads_the_same_comparison_the_option_reads():
+    """`_refuse_on_pdpert` asks the solver rather than recomputing the
+    threshold, so the pyomo argument and the CLI's sens_max_pdpert
+    cannot drift apart on what counts as too perturbed. The boundary is
+    where that shows: the comparison is strictly above, so a cap at the
+    correction accepts it and a cap a hair below refuses."""
+    m = regularized()
+    refuse, worst = _session_for(m).solver.pdpert_verdict(0.0)
+    assert refuse and worst > 0.0, "this fixture is meant to be regularized"
+
+    estimate(m, [(m.p, 0.5)], max_pdpert=worst)
+    with pytest.raises(ValueError, match="max_pdpert"):
+        estimate(m, [(m.p, 0.5)], max_pdpert=worst * (1.0 - 1e-12))
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_max_pdpert_takes_the_option_surfaces_bounds(bad):
+    """`sens_max_pdpert` is registered strictly above zero. A negative
+    cap refuses on every model, with a message that reads as though the
+    factor were bad."""
+    m = regularized()
+    # matched on the validation wording, not on "max_pdpert": the
+    # refusal message carries that too, so a cap of 0.0 or -1.0 raises
+    # either way and only the message says which check fired
+    with pytest.raises(ValueError,
+                       match="max_pdpert must be a positive number"):
+        estimate(m, [(m.p, 0.5)], max_pdpert=bad)

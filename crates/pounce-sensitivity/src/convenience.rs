@@ -308,6 +308,13 @@ impl SensSolve {
         let pin_indices = self.pin_constraint_indices.clone();
         let obj_scal = self.obj_scal;
         let boundcheck_eps = self.boundcheck_eps.or_else(|| overrides.boundcheck_eps());
+        // The refinement's release test keeps the solve's own margin,
+        // whatever `sens_bound_eps` says: that option is a primal
+        // margin and a multiplier changing sign is not a primal event.
+        let release_eps = app
+            .options()
+            .get_numeric_value("bound_relax_factor", "")
+            .map_or(1e-9, |(v, _)| v.abs().max(1e-9));
 
         // Side channel: the callback writes here, the outer caller
         // reads after optimize_tnlp returns. RefCell + Rc because the
@@ -571,6 +578,7 @@ impl SensSolve {
                         &mults,
                         &rhs_plain,
                         eps,
+                        release_eps,
                         16,
                     ) {
                         Ok((refined, _rows, _stop)) => dx_full = refined,

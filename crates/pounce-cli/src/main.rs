@@ -1226,6 +1226,13 @@ pub fn main() -> ExitCode {
             };
             on.then_some(eps)
         };
+        // The refinement releases a bound whose multiplier the step
+        // drives negative past the solve's own margin, not past
+        // `sens_bound_eps`, which is a primal margin.
+        let release_eps = app
+            .options()
+            .get_numeric_value("bound_relax_factor", "")
+            .map_or(1e-9, |(v, _)| v.abs().max(1e-9));
         let sens_opts_cb = sens_options;
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
@@ -1321,6 +1328,7 @@ pub fn main() -> ExitCode {
                         m_full,
                         &x_iterate,
                         boundcheck_eps,
+                        release_eps,
                         &sens_opts_cb,
                     ) {
                         *sens_cap.borrow_mut() = Some(xp);

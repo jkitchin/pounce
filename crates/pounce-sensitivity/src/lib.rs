@@ -89,7 +89,7 @@ pub use convenience::{SensResult, SensSolve};
 pub use diff_handoff::{DEFAULT_ACTIVE_TOL, DiffHandoff};
 // Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
 // re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
-pub use options::{DEFAULT_SENS_BOUND_EPS, SensOptionOverrides};
+pub use options::{DEFAULT_SENS_BOUND_EPS, SensOptionOverrides, pdpert_verdict};
 pub use p_calculator::{IndexPCalculator, PCalculator};
 pub use pounce_linalg::symmetric_eigen;
 pub use reduced_hessian::compute_reduced_hessian;

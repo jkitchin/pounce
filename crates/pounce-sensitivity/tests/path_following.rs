@@ -192,7 +192,7 @@ fn both_steps(p0: Number, dp: Number) -> ([Number; 2], [Number; 2], usize) {
     );
     let base = solver.converged().expect("converged state").x.clone();
     let (fixed, _, _) = solver
-        .parametric_step_bounded(&[0], &[dp], 8)
+        .parametric_step_bounded(&[0], &[dp], 8, None)
         .expect("parametric_step_bounded");
     let (walked, segs) = solver
         .parametric_step_path(&[0], &[dp], 8)

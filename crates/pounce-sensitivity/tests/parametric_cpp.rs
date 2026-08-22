@@ -514,7 +514,7 @@ fn run_bounded_step_with_stop(
     );
 
     let (dx, pinned, stop) = solver
-        .parametric_step_bounded(&[2, 3], &delta_p, max_iter)
+        .parametric_step_bounded(&[2, 3], &delta_p, max_iter, None)
         .expect("parametric_step_bounded");
     (std::array::from_fn(|i| dx[i]), pinned, stop)
 }
@@ -792,7 +792,7 @@ fn fix_relax_pins_three_crossings_at_once() {
     let exact = three_free_solve_at(-1.0);
     let plain = solver.parametric_step(&[0], &[-2.0]).expect("plain step");
     let (fixed, pinned, stop) = solver
-        .parametric_step_bounded(&[0], &[-2.0], 8)
+        .parametric_step_bounded(&[0], &[-2.0], 8, None)
         .expect("bounded step");
     assert_eq!(
         stop,
@@ -839,7 +839,7 @@ fn the_pass_limit_no_longer_picks_the_answer() {
     let solver = three_free_solver();
     let at = |k| {
         solver
-            .parametric_step_bounded(&[0], &[-2.0], k)
+            .parametric_step_bounded(&[0], &[-2.0], k, None)
             .expect("bounded step")
     };
     let (one, pins_one, stop_one) = at(1);

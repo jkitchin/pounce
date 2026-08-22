@@ -286,8 +286,8 @@ impl PySolver {
     /// factorization is never rebuilt for a pin, but the Schur
     /// complement is, so a pass carrying `k` pins costs one dense
     /// `k × k` solve and `k + 1` back-solves. What counts as outside a
-    /// bound comes from the solve's own `bound_relax_factor` rather
-    /// than from an argument.
+    /// bound is `bound_eps` when one is given, and the solve's own
+    /// `bound_relax_factor`, floored, when it is `None`.
     ///
     /// `max_iter` is a safety limit rather than a budget. It was a
     /// budget while a pass took one pin, which needed as many passes as
@@ -308,13 +308,14 @@ impl PySolver {
     ///   with an empty `pinned`.
     ///
     /// None is an error, and `pinned` says how far the refinement got.
-    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16))]
+    #[pyo3(signature = (pin_constraint_indices, deltas, max_iter=16, bound_eps=None))]
     fn parametric_step_bounded<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
         deltas: Vec<Number>,
         max_iter: usize,
+        bound_eps: Option<Number>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -331,7 +332,7 @@ impl PySolver {
         }
         let (dx, pinned, stop) = s
             .inner
-            .parametric_step_bounded(&pins, &deltas, max_iter)
+            .parametric_step_bounded(&pins, &deltas, max_iter, bound_eps)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
@@ -416,7 +417,7 @@ impl PySolver {
     /// supplied by the caller (var-x rows the direction holds) instead
     /// of searched for, as `(dx, pinned, stop)`. Study surface for an
     /// externally solved eq. 14 QP.
-    #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16))]
+    #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16, bound_eps=None))]
     fn parametric_step_bounded_decided<'py>(
         &self,
         py: Python<'py>,
@@ -424,6 +425,7 @@ impl PySolver {
         deltas: Vec<Number>,
         held_var_rows: Vec<i64>,
         max_iter: usize,
+        bound_eps: Option<Number>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Vec<i64>, &'static str)> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -451,7 +453,7 @@ impl PySolver {
         let held: Vec<Index> = validate_var_rows(&held_var_rows, n_x)?;
         let (dx, pinned, stop) = s
             .inner
-            .parametric_step_bounded_decided(&pins, &deltas, max_iter, &held)
+            .parametric_step_bounded_decided(&pins, &deltas, max_iter, &held, bound_eps)
             .map_err(solver_error_to_py)?;
         Ok((
             dx.into_pyarray_bound(py),
@@ -759,6 +761,26 @@ impl PySolver {
         })?;
         let p = s.inner.kkt_perturbations().map_err(solver_error_to_py)?;
         Ok(p.to_vec().into_pyarray_bound(py))
+    }
+
+    /// Whether a `max_pdpert` of `limit` turns this factor down, and
+    /// the worst correction it read, as `(refuse, worst)`.
+    ///
+    /// The comparison is `pounce_sensitivity::pdpert_verdict`, which
+    /// the CLI's `sens_max_pdpert` reads too, so the two surfaces
+    /// cannot drift apart on what counts as too perturbed. The caller
+    /// words its own message from `worst`, since the option's message
+    /// names an option and says the sensitivity was skipped, and
+    /// neither is true of a call that raises.
+    ///
+    /// `kkt_perturbations` reports the same four numbers for a caller
+    /// who would rather read them than stop on them.
+    fn pdpert_verdict(&self, limit: Number) -> PyResult<(bool, Number)> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("pdpert_verdict: no converged factor (call solve() first)")
+        })?;
+        let p = s.inner.kkt_perturbations().map_err(solver_error_to_py)?;
+        Ok(pounce_sensitivity::pdpert_verdict(&p, limit))
     }
 
     /// Dimension of the full compound KKT vector. `None` if no

@@ -79,6 +79,9 @@ struct BoundContext {
     x_curr: Vec<Number>,
     /// How far outside a bound still counts as on it.
     eps: Number,
+    /// How far negative a bound multiplier has to go before its bound
+    /// is released. Always the solve's own margin, whatever `eps` is.
+    release_eps: Number,
     /// Bound multipliers at the base point, in the solve's own
     /// coordinates, with the compound row each occupies.
     mults: Vec<crate::boundcheck::BoundMultiplier>,
@@ -647,8 +650,9 @@ impl Solver {
     /// costs one dense `k × k` solve and `k + 1` back-solves; the
     /// factorization itself is never rebuilt for a pin.
     ///
-    /// What counts as outside a bound is taken from the solve rather
-    /// than from the caller: it was willing to leave a converged point
+    /// What counts as outside a bound is the `eps` argument when the
+    /// caller passes one, and the solve's own margin when it passes
+    /// `None`: the solve was willing to leave a converged point
     /// `bound_relax_factor` outside its bound, so anything within that
     /// is on the bound. An unrelaxed solve gets a roundoff floor.
     ///
@@ -665,10 +669,11 @@ impl Solver {
         pin_constraint_indices: &[Index],
         deltas: &[Number],
         max_iter: usize,
+        bound_eps: Option<Number>,
     ) -> Result<(Vec<Number>, Vec<Index>, crate::boundcheck::RefineStop), SolverError> {
         let dx_full = self.parametric_step_full(pin_constraint_indices, deltas)?;
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(bound_eps)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let (dx, pinned, stop) = crate::boundcheck::refine_step_onto_bounds(
@@ -680,6 +685,7 @@ impl Solver {
             &ctx.mults,
             &rhs_plain,
             ctx.eps,
+            ctx.release_eps,
             max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
@@ -712,7 +718,7 @@ impl Solver {
         max_iter: usize,
     ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>), SolverError> {
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let (dx, segments) = crate::boundcheck::step_along_path(
@@ -753,7 +759,7 @@ impl Solver {
         }
         let held: std::collections::HashSet<usize> =
             held_var_rows.iter().map(|&r| r as usize).collect();
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let holds: Vec<(usize, bool)> = weak
@@ -812,7 +818,7 @@ impl Solver {
         step: &[Number],
         max_iter: usize,
     ) -> Result<(Vec<Number>, crate::corrector::CorrectorReport), SolverError> {
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let bs = &state.backsolver;
@@ -888,13 +894,19 @@ impl Solver {
         deltas: &[Number],
         max_iter: usize,
         held_var_rows: &[Index],
+        bound_eps: Option<Number>,
     ) -> Result<(Vec<Number>, Vec<Index>, crate::boundcheck::RefineStop), SolverError> {
         let weak = self.weakly_active_bounds()?;
         if weak.is_empty() {
-            return self.parametric_step_bounded(pin_constraint_indices, deltas, max_iter);
+            return self.parametric_step_bounded(
+                pin_constraint_indices,
+                deltas,
+                max_iter,
+                bound_eps,
+            );
         }
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(bound_eps)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
@@ -915,6 +927,7 @@ impl Solver {
             &ctx.mults,
             &rhs_plain,
             ctx.eps,
+            ctx.release_eps,
             max_iter,
         )
         .map_err(SolverError::SensComputationFailed)?;
@@ -975,7 +988,7 @@ impl Solver {
 
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
         let weak = self.weakly_active_bounds()?;
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let bs = &state.backsolver;
@@ -1281,7 +1294,7 @@ impl Solver {
             Err(SolverError::BadOptions(_)) => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let ctx = self.bound_context()?;
+        let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let Some(rows) = state.backsolver.bound_rows() else {
@@ -1328,7 +1341,11 @@ impl Solver {
     /// agree on all of it, and the unit and index-space conversions
     /// below are exactly what went wrong when a second caller wrote its
     /// own.
-    fn bound_context(&self) -> Result<BoundContext, SolverError> {
+    ///
+    /// `bound_eps` overrides the margin. `None` keeps how far outside
+    /// the solve itself was willing to settle, floored so an unrelaxed
+    /// solve does not pin on roundoff.
+    fn bound_context(&self, bound_eps: Option<Number>) -> Result<BoundContext, SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let n_x = state.backsolver.block_dims()[0];
@@ -1366,7 +1383,12 @@ impl Solver {
         // outside, so anything within that is on the bound, not past
         // it. A floor keeps an unrelaxed solve from pinning on
         // roundoff.
-        let eps = state.bound_relax_factor.abs().max(1e-9);
+        let floor = state.bound_relax_factor.abs().max(1e-9);
+        let eps = bound_eps.unwrap_or(floor);
+        // A caller's `bound_eps` is a primal margin and says nothing
+        // about when a multiplier has changed sign, so the release test
+        // keeps the solve's own margin.
+        let release_eps = floor;
         // The bound multipliers at the base point, with the compound
         // row each one occupies, so a step that drives one negative can
         // release that bound.
@@ -1393,6 +1415,7 @@ impl Solver {
             hi,
             x_curr: state.x[..n_x].to_vec(),
             eps,
+            release_eps,
             mults,
         })
     }

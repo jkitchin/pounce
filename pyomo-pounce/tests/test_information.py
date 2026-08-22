@@ -18,6 +18,7 @@ from pyomo_pounce import (
     declare_residual,
     information,
 )
+from pyomo_pounce.sens import _session_for
 
 N_LIN = 25
 SIGMA_LIN = 0.3
@@ -216,13 +217,10 @@ def test_all_pinned_returns_the_full_block_as_s():
     np.testing.assert_allclose(gn.matrix, R, rtol=1e-9)
 
 
-def test_singular_free_block_refuses_s():
-    # two collinear intercepts fitted alongside a pinned slope: the
-    # exact-Hessian free block is singular, so the pinned parameter's
-    # conditional information S is undefined and information() must
-    # refuse rather than return a garbage Schur complement. The flat
-    # direction also forces inertia corrections into the held factor,
-    # which is the honest trigger for the kkt_perturbations warning.
+def singular_free_block():
+    """Two collinear intercepts fitted alongside a pinned slope. The
+    flat direction forces inertia corrections into the held factor, so
+    this is the fixture for anything that reads them."""
     x, y, X = linear_data()
     beta = np.linalg.solve(X.T @ X, X.T @ y)
     m = pyo.ConcreteModel()
@@ -241,6 +239,16 @@ def test_singular_free_block_refuses_s():
     declare_fitted(m.b)
     declare_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_singular_free_block_refuses_s():
+    # the exact-Hessian free block is singular, so the pinned
+    # parameter's conditional information S is undefined and
+    # information() must refuse rather than return a garbage Schur
+    # complement. The same flat direction is the honest trigger for the
+    # kkt_perturbations warning.
+    m = singular_free_block()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         with pytest.raises(
@@ -248,6 +256,36 @@ def test_singular_free_block_refuses_s():
                 match="conditional information S is not defined"):
             information(m)
     assert any("inertia-correction" in str(x_.message) for x_ in w)
+
+
+def test_max_pdpert_refuses_the_same_factor_covariance_inverts():
+    """covariance() and information() invert the factor the sensitivity
+    step inverts, and warned about the inertia correction without
+    letting a caller stop on it. The cap is that caller declining."""
+    m = singular_free_block()
+    worst = max(abs(v) for v in _session_for(m).solver.kkt_perturbations)
+    assert worst > 0.0, "this fixture is meant to be regularized"
+
+    for call in (covariance, information):
+        with pytest.raises(ValueError, match="max_pdpert"):
+            call(m, max_pdpert=worst / 10.0)
+
+    # a cap above it gets out of the way, and each call then does what
+    # it does on this model for its own reasons: covariance returns the
+    # regularized matrix with its warning, and information refuses
+    # because the free block is singular
+    covariance(m, max_pdpert=worst * 10.0)
+    with pytest.raises(RuntimeError,
+                       match="conditional information S is not defined"):
+        information(m, max_pdpert=worst * 10.0)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_covariance_max_pdpert_takes_the_option_surfaces_bounds(bad):
+    m = singular_free_block()
+    with pytest.raises(ValueError,
+                       match="max_pdpert must be a positive number"):
+        covariance(m, max_pdpert=bad)
 
 
 def _non_square_model(x, y, cap=None):

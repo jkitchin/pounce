@@ -9,6 +9,70 @@ changes.
 
 ## [Unreleased]
 
+- **The pyomo surface takes `bound_eps` and `max_pdpert`.** Both are
+  settable through the CLI and the `SensSolve` builder and were
+  unreachable from pyomo (gh#736). Both are rejected at or below zero,
+  and NaN with them, matching the strict lower bound the CLI registers
+  each option with.
+
+  `bound_eps` sets how far outside a variable bound a step has to end
+  to count as having left it, which decides what `mode="fix_relax"`
+  pins, what `estimate()` clamps, and what `EstimateReport.crossed`
+  reports. Unset, it is how far outside the solve itself was willing to
+  settle, floored so an unrelaxed solve does not pin on roundoff, so
+  nothing moves for a caller who does not set it. Only the `fix_relax`
+  refinement reads it, and passing it under `mode="linear"` or
+  `mode="path"` warns and changes nothing. It is on `estimate()` and
+  `estimate_report()`.
+
+  The margin is absolute, as the refinement's own test is. The python
+  side used to scale it by the coordinate, which gave a variable of
+  order 1e4 a tolerance the refinement never gave it, so a step the
+  refinement pinned could come back with `crossed` empty. A constraint
+  row keeps its own floor whatever the margin, since the refinement pins
+  variable bounds only and the margin has no say over a row the step
+  carries past its limit.
+
+  **The refinement's release test has its own threshold.** It used to
+  read the same number as the primal margin, so a caller's `bound_eps`
+  of `1e-2` on a model with bound multipliers of order `1e-3` silently
+  stopped every release and returned the wrong active set. A bound is
+  released when the step drives its multiplier negative past the solve's
+  own margin, whatever the primal margin is. On the CLI this changes
+  `sens_bound_eps`, which gated release too: a multiplier the step
+  drives to between `-sens_bound_eps` and the solve's margin now
+  releases its bound, where before it was pinned.
+
+  A margin wide enough to cover the crossing leaves the step where the
+  predictor put it, so `alpha` comes back below one there, where under
+  `fix_relax` it is otherwise 1.0.
+
+  `max_pdpert` refuses rather than answering when the converged KKT
+  factor carries an inertia correction larger than the value given.
+  Every sensitivity output inverts that factor, so a perturbed one
+  answers for a nearby problem rather than this one.
+  `EstimateReport.perturbations` already reported the same numbers,
+  which let a caller read them but not stop on them. It is on every
+  surface that inverts the factor: `gradient()`, `estimate()`,
+  `estimate_report()`, `active_set_changes()`, `covariance()` and
+  `information()`. The last two warned about the same perturbations
+  already and go on warning when no cap is set.
+
+  The comparison behind it is `pounce_sensitivity::pdpert_verdict`,
+  which `sens_max_pdpert` reads too and which the `Solver.pdpert_verdict`
+  binding exposes, so the two surfaces cannot drift apart on what counts
+  as too perturbed. Each words its own message, since the option's names
+  an option and says the sensitivity was skipped, and neither is true of
+  a call that raises.
+
+  *Breaking (Rust API):* `Solver::parametric_step_bounded` and
+  `Solver::parametric_step_bounded_decided` take the margin as a
+  trailing `Option<Number>`, so an out-of-tree caller passing the old
+  argument list stops compiling. Passing `None` reproduces the previous
+  behaviour exactly. Their Python bindings take `bound_eps=None`.
+  `boundcheck::refine_step_onto_bounds` takes `release_eps` after `eps`,
+  and passing the same value for both reproduces the previous
+  behaviour.
 - **Sparse PSD certification is now a reusable Rust API.**
 
   `pounce_convex::certify_psd_lower_triangle` (also available through

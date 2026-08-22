@@ -78,7 +78,10 @@ pub struct RedHessianResult {
 ///
 /// `boundcheck_eps` enables the bound refinement of `x* + Δx` onto the
 /// declared `[x_l, x_u]` box (mirrors sIPOPT's `sens_boundcheck`); pass
-/// `None` to skip it.
+/// `None` to skip it. `release_eps` is the refinement's own margin for
+/// releasing a bound whose multiplier the step drives negative, which
+/// is the solve's `bound_relax_factor` floored and not the primal
+/// margin above.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_sens_perturbed_x(
     data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
@@ -90,6 +93,7 @@ pub fn compute_sens_perturbed_x(
     m_full: usize,
     x_full: &[Number],
     boundcheck_eps: Option<Number>,
+    release_eps: Number,
     sens_options: &SensOptionOverrides,
 ) -> Option<Vec<Number>> {
     let dx = try_compute_sens_step(
@@ -102,6 +106,7 @@ pub fn compute_sens_perturbed_x(
         m_full,
         x_full,
         boundcheck_eps,
+        release_eps,
         sens_options,
     )?;
     let curr = data.borrow().curr.clone()?;
@@ -289,6 +294,7 @@ fn try_compute_sens_step(
     _m_full: usize,
     x_nominal: &[Number],
     boundcheck_eps: Option<Number>,
+    release_eps: Number,
     sens_options: &SensOptionOverrides,
 ) -> Option<Vec<Number>> {
     // Required suffixes. The "_1" suffix tier corresponds to upstream
@@ -474,6 +480,7 @@ fn try_compute_sens_step(
             // release re-solves the system it started in
             &rhs_full,
             eps,
+            release_eps,
             16,
         ) {
             Ok((refined, rows, stop)) => {

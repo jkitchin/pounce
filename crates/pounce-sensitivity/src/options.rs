@@ -161,12 +161,16 @@ impl SensOptionOverrides {
     /// system solved is not the KKT system of the problem, so the step
     /// and the reduced Hessian describe a nearby, perturbed problem —
     /// which is what upstream's cap exists to catch.
+    ///
+    /// The comparison itself is [`pdpert_verdict`], which the pyomo
+    /// surface reads through `Solver.pdpert_verdict` for its own
+    /// `max_pdpert` argument. Only the message is written twice, since
+    /// this one names an option and says the sensitivity was skipped,
+    /// and neither is true of a call that raises.
     pub fn pdpert_refusal(&self, perturbations: &[Number; 4]) -> Option<String> {
         let limit = self.sens_max_pdpert?;
-        let worst = perturbations
-            .iter()
-            .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-        (worst > limit).then(|| {
+        let (refuse, worst) = pdpert_verdict(perturbations, limit);
+        refuse.then(|| {
             format!(
                 "sensitivity skipped: the converged KKT factor carries a \
                  perturbation of {worst:.3e} (δ_x={:.3e}, δ_s={:.3e}, \
@@ -178,6 +182,27 @@ impl SensOptionOverrides {
             )
         })
     }
+}
+
+/// Whether a `sens_max_pdpert` of `limit` turns this factor down, and
+/// the worst correction it read, as `(refuse, worst)`.
+///
+/// `perturbations` is `(δ_x, δ_s, δ_c, δ_d)` as
+/// [`crate::PdSensBacksolver::kkt_perturbations`] reports it. `worst`
+/// is the largest of them in absolute value, and the factor is turned
+/// down when it is strictly above `limit`.
+///
+/// Two surfaces make this comparison and it has to come out the same
+/// on both. The CLI reaches it through
+/// [`SensOptionOverrides::pdpert_refusal`] and the pyomo interface
+/// through the `Solver.pdpert_verdict` binding, which
+/// `pyomo_pounce.sens._refuse_on_pdpert` calls. Each of them words its
+/// own message from `worst`.
+pub fn pdpert_verdict(perturbations: &[Number; 4], limit: Number) -> (bool, Number) {
+    let worst = perturbations
+        .iter()
+        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    (worst > limit, worst)
 }
 
 #[cfg(test)]
@@ -263,5 +288,18 @@ mod tests {
             .pdpert_refusal(&[0.0, 0.0, 1e-4, 0.0])
             .expect("1e-4 is above the 1e-6 cap");
         assert!(msg.contains("sens_max_pdpert"), "{msg}");
+    }
+
+    /// The comparison two surfaces share, on its own. Strictly above,
+    /// the largest of the four, and by absolute value: an inertia
+    /// correction is reported signed and a cap is a magnitude.
+    #[test]
+    fn the_verdict_reads_the_largest_correction_by_magnitude() {
+        assert_eq!(pdpert_verdict(&[0.0, 0.0, 0.0, 0.0], 1e-6), (false, 0.0));
+        assert_eq!(pdpert_verdict(&[1e-9, 1e-4, 0.0, 1e-7], 1e-6).1, 1e-4);
+        assert!(pdpert_verdict(&[0.0, 0.0, -1e-4, 0.0], 1e-6).0);
+        // strictly above, so a cap AT the correction accepts it
+        assert!(!pdpert_verdict(&[1e-6, 0.0, 0.0, 0.0], 1e-6).0);
+        assert!(pdpert_verdict(&[1.0000001e-6, 0.0, 0.0, 0.0], 1e-6).0);
     }
 }

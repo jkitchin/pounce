@@ -58,6 +58,13 @@ struct ParamQp {
     /// equality block, so the perturbation has to carry the same
     /// factor, and only a non-unit one shows whether it does.
     g_scaling: Option<[Number; 1]>,
+    /// A factor written into the constraint itself, `row_scale * x3 = 0`
+    /// rather than `x3 = 0`, so `nlp_scaling_method=gradient-based` --
+    /// the default -- derives the row factor from the Jacobian instead
+    /// of being handed one. Same `dc` in the end, reached the other way,
+    /// and the two routes are far enough apart that exercising only the
+    /// supplied one leaves the default method uncovered.
+    row_scale: Number,
 }
 
 impl TNLP for ParamQp {
@@ -128,7 +135,7 @@ impl TNLP for ParamQp {
     }
 
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-        g[0] = x[2];
+        g[0] = self.row_scale * x[2];
         true
     }
 
@@ -138,7 +145,7 @@ impl TNLP for ParamQp {
                 irow[0] = 0;
                 jcol[0] = 2;
             }
-            SparsityRequest::Values { values } => values[0] = 1.0,
+            SparsityRequest::Values { values } => values[0] = self.row_scale,
         }
         true
     }
@@ -181,7 +188,26 @@ fn solved_scaled(x_scaling: Option<[Number; 3]>) -> Solver {
     solved_with(x_scaling, None)
 }
 
+/// The QP with its constraint written `row_scale * x3 = 0`, solved
+/// under the default `gradient-based` method so the row factor is
+/// derived rather than supplied. `nlp_scaling_max_gradient` is 100, so
+/// a row_scale above it puts `dc` at `100 / row_scale`.
+fn solved_gradient_based(row_scale: Number) -> Solver {
+    solved_inner(None, None, row_scale, Some("gradient-based"))
+}
+
 fn solved_with(x_scaling: Option<[Number; 3]>, g_scaling: Option<[Number; 1]>) -> Solver {
+    // `None` leaves the option unset, the way this fixture always ran.
+    let method = (x_scaling.is_some() || g_scaling.is_some()).then_some("user-scaling");
+    solved_inner(x_scaling, g_scaling, 1.0, method)
+}
+
+fn solved_inner(
+    x_scaling: Option<[Number; 3]>,
+    g_scaling: Option<[Number; 1]>,
+    row_scale: Number,
+    method: Option<&str>,
+) -> Solver {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -195,15 +221,23 @@ fn solved_with(x_scaling: Option<[Number; 3]>, g_scaling: Option<[Number; 1]>) -
     app.options_mut()
         .set_numeric_value("bound_relax_factor", 0.0, true, false)
         .unwrap();
-    if x_scaling.is_some() || g_scaling.is_some() {
+    if let Some(m) = method {
         app.options_mut()
-            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .set_string_value("nlp_scaling_method", m, true, false)
+            .unwrap();
+        // set rather than assumed: the derived row factor is
+        // `nlp_scaling_max_gradient / row_scale`, so a changed default
+        // would move the number this fixture reasons about without
+        // failing.
+        app.options_mut()
+            .set_numeric_value("nlp_scaling_max_gradient", 100.0, true, false)
             .unwrap();
     }
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp {
         x_scaling,
         g_scaling,
+        row_scale,
     }));
     let mut solver = Solver::new(app, tnlp);
     let status = solver.solve();
@@ -235,7 +269,7 @@ fn fix_relax_step(solver: &Solver, dp: Number) -> Vec<Number> {
         .parametric_step_full(&[0], &[dp])
         .expect("parametric step");
     let (primal, _, _) = solver
-        .parametric_step_bounded(&[0], &[dp], 16)
+        .parametric_step_bounded(&[0], &[dp], 16, None)
         .expect("fix_relax step");
     full[..primal.len()].copy_from_slice(&primal);
     full
@@ -517,6 +551,70 @@ fn the_correction_is_the_same_under_constraint_scaling() {
         assert!(
             report.residual < report.initial_residual * 1e-6,
             "row scale {c}: the residual has to fall by orders, {:.4e} -> {:.4e};              {report:?}",
+            report.initial_residual,
+            report.residual,
+        );
+    }
+}
+
+/// The derived route to a row factor: `gradient-based`, the default
+/// method, computing `dc` from the Jacobian instead of being handed it.
+///
+/// [`the_correction_is_the_same_under_constraint_scaling`] supplies
+/// `g_scaling` under `user-scaling`. Both end at a non-unit `dc`, but
+/// they reach it by different code, and the default method is the one
+/// almost every solve runs under. Exercising only the supplied route is
+/// the same shape of gap as the three this fixture already covers: a
+/// dimension no fixture varies (gh#733 review, reproducer B).
+///
+/// The perturbation is a move in the constraint's right-hand side, so
+/// it carries the row factor: pinning `row_scale * x3 = 0` and asking
+/// for `RELEASE_DP * row_scale` moves `x3` by `RELEASE_DP`, the same
+/// perturbation the unscaled case takes.
+#[test]
+fn the_correction_is_the_same_under_derived_constraint_scaling() {
+    let (x1, x2) = exact_at(RELEASE_DP);
+    for row_scale in [1.0, 1.0e3, 1.0e4] {
+        let solver = solved_gradient_based(row_scale);
+        // Without this the test can go vacuous in silence: if the
+        // derived factor came back 1.0 the fixture would be the
+        // unscaled one under a different name, which is the failure
+        // mode that left `g_scaling` unexercised in the first place.
+        let dc = solver.pin_g_scaling(&[0]).expect("pin scaling")[0];
+        let expected = if row_scale > 100.0 {
+            100.0 / row_scale
+        } else {
+            1.0
+        };
+        assert!(
+            (dc - expected).abs() < 1e-9 * expected,
+            "row scale {row_scale}: gradient-based should derive dc = \
+             {expected}, got {dc}",
+        );
+        let base = solver.converged().expect("converged").x.clone();
+        let delta = RELEASE_DP * row_scale;
+        let mut step = solver
+            .parametric_step_full(&[0], &[delta])
+            .expect("parametric step");
+        let (primal, _, _) = solver
+            .parametric_step_bounded(&[0], &[delta], 16, None)
+            .expect("fix_relax step");
+        step[..primal.len()].copy_from_slice(&primal);
+        let (out, report) = solver
+            .correct_step(&[0], &[delta], &step, 12)
+            .expect("corrector");
+        assert!(
+            (base[0] + out[0] - x1).abs() < 1e-7 && (base[1] + out[1] - x2).abs() < 1e-7,
+            "row scale {row_scale}: corrected to ({}, {}), exact is ({x1}, {x2}); {report:?}",
+            base[0] + out[0],
+            base[1] + out[1],
+        );
+        // The answer alone is not evidence the direction was right, the
+        // same reason the other two scaling tests assert this.
+        assert!(
+            report.residual < report.initial_residual * 1e-6,
+            "row scale {row_scale}: the residual has to fall by orders, \
+             {:.4e} -> {:.4e}; {report:?}",
             report.initial_residual,
             report.residual,
         );
