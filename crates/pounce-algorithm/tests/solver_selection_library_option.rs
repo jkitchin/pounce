@@ -264,7 +264,15 @@ fn a_convex_knob_is_refused_on_a_library_solve() {
         .unhonored_convex_option()
         .expect("a non-default convex knob must be refused");
     assert!(msg.contains("qp_crossover"), "{msg}");
-    assert!(msg.contains("604"), "message should name the issue: {msg}");
+    // The message used to point at gh#604, which is closed and was about
+    // cold-start initialization options — it never covered this gap, and no
+    // issue tracks it yet. What has to survive is the way out: the routes
+    // that *do* reach the convex engine, and the nearest thing on this one.
+    assert!(!msg.contains("604"), "stale gh#604 pointer is back: {msg}");
+    assert!(
+        msg.contains("solve_qp") && msg.contains("qp-active-set"),
+        "message must name a route that works: {msg}"
+    );
 
     let mut app = IpoptApplication::new();
     app.initialize().unwrap();

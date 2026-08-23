@@ -181,6 +181,16 @@ load-bearing part and must be ported with it.
 
 This one wants its own PR and its own review, not a slot in a batch.
 
+**Scoped.** `dev-notes/tnlp-convex-classifier-scope.md` carries the plan:
+the three tiers of evidence a TNLP admits (declared structure via
+`get_constraints_linearity` / `derivative_proofs().hessian == Constant`, then
+probe-and-validate, then refuse), the `eval_h`-absent trap under
+`hessian_approximation=limited-memory`, and the placement answer —
+`pounce-rs` behind its existing `convex` feature, the only crate that already
+sees both `pounce-nlp` and `pounce-convex`, so no new crate and no new
+dependency edge. The refusal in `application.rs` stays correct and stays put:
+routing is a frontend concern, and that entry point is not the frontend.
+
 ## Finding 4 — `verify.rs` is CLI-only, which undercuts its own rationale
 
 `crates/pounce-cli/src/verify.rs` argues in its header that independent

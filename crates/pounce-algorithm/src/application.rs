@@ -1715,8 +1715,7 @@ impl IpoptApplication {
              `pounce.solve_cone` drive it directly and take the same knobs as \
              typed arguments. On this path, `solver_selection=qp-active-set` \
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
-             `sqp_qp_*` options. Tracking issue: \
-             https://github.com/jkitchin/pounce/issues/604"
+             `sqp_qp_*` options."
         ))
     }
 
