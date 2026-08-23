@@ -9,6 +9,22 @@ changes.
 
 ## [Unreleased]
 
+- **Convex `OptionsList` parsing is now a reusable library API.**
+
+  `pounce_convex::QpOptions::try_from_options_list`,
+  `ConvexPresolveOptions::try_from_options_list`, and
+  `ActiveSetOverrides::try_from_options_list` now own the names, conversions,
+  validation, and precedence rules for the convex `qp_*` and `sqp_qp_*`
+  controls. The CLI delegates to those typed readers instead of maintaining
+  private copies, so another frontend can materialize the same configuration
+  without reproducing CLI logic. Existing explicit-only handling for shared
+  `tol` / iteration / wall-time controls, `qp_tau_max` precedence, and the
+  `qp_presolve`-over-`presolve` rule is unchanged.
+
+  `qp_gondzio_corr` is also covered by the core library guard that refuses a
+  non-default convex-only option on an entry point unable to run the convex
+  solver, closing the one remaining silent-ignore case in that option family.
+
 - **`pounce.minimize`: `jac=True` no longer defeats convex structure
   detection** (#750).
 
