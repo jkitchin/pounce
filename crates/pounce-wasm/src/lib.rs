@@ -433,6 +433,11 @@ pub unsafe extern "C" fn pounce_solve(opts_ptr: *const u8, opts_len: usize) -> *
 
 fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
     let mut app = IpoptApplication::new();
+    // The restoration phase, wired the way every other frontend wires it.
+    // Without it the filter line search has nowhere to fall back to and a
+    // solve that needs restoration stops at `Restoration_Failed` instead of
+    // reaching a verdict.
+    pounce_restoration::install::install_default_restoration(&mut app);
     if let Err(e) = app.initialize_with_options_str(opts) {
         return serde_json::json!({ "error": format!("bad options: {}", e.message) });
     }

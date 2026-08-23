@@ -15,10 +15,7 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::TNLP;
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-};
+use pounce_restoration::install::install_default_restoration;
 use pounce_sensitivity::SensSolve;
 use pounce_solve_report::{
     InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num, write_report_file,
@@ -1016,17 +1013,7 @@ impl PyProblem {
             app.set_kkt_schur_block(indices.clone());
         }
 
-        let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-        let bff_mint = move || -> InnerBackendFactoryFactory {
-            let feral_cfg = feral_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone()))
-        };
-        let resto_provider = make_default_restoration_factory_provider(
-            RestoAlgorithmBuilder::new(),
-            app.algorithm_builder_from_options(),
-            bff_mint,
-        );
-        app.set_restoration_factory_provider(resto_provider);
+        install_default_restoration(&mut app);
 
         let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
         Ok((app, bridge))

@@ -19,7 +19,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pounce_rs::pounce_algorithm;
 use pounce_rs::prelude::*;
 use pounce_rs::{ApplicationReturnStatus, IpoptApplication};
 
@@ -119,42 +118,11 @@ impl TNLP for Infeasible {
     fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
-/// Install the restoration phase, the way the CLI, the C interface and the
-/// Python extension all do.
-///
-/// `pounce-rs` does not depend on `pounce-restoration`, so a bare
-/// `IpoptApplication` has no restoration provider and a solve that needs one
-/// stops at `Restoration_Failed` instead of reaching a local-infeasibility
-/// verdict — which is what this ladder is about. Injecting it here keeps these
-/// tests about the ladder rather than about that separate gap.
-fn install_restoration(app: &mut IpoptApplication) {
-    use pounce_algorithm::application::{
-        algorithm_builder_from_option_list, default_backend_factory, feral_config_from_options,
-    };
-    use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-    use pounce_restoration::resto_inner_solver::{
-        InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-    };
-
-    let mint = |options: &pounce_common::options_list::OptionsList| {
-        let feral_cfg = feral_config_from_options(options);
-        let bff_mint = move || -> InnerBackendFactoryFactory {
-            let feral_cfg = feral_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone()))
-        };
-        make_default_restoration_factory_provider(
-            RestoAlgorithmBuilder::new(),
-            algorithm_builder_from_option_list(options),
-            bff_mint,
-        )
-    };
-    let provider = mint(app.options());
-    app.set_restoration_factory_provider(provider);
-    app.set_restoration_provider_mint(std::rc::Rc::new(mint));
-}
-
 fn app(extra: &str) -> IpoptApplication {
-    let mut app = IpoptApplication::new();
+    // `pounce_rs::application()` installs the restoration phase; a bare
+    // `IpoptApplication::new()` has none, and this model would stop at
+    // `Restoration_Failed` before ever reaching a local-infeasibility verdict.
+    let mut app = pounce_rs::application();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
@@ -164,7 +132,6 @@ fn app(extra: &str) -> IpoptApplication {
     if !extra.is_empty() {
         app.options_mut().read_from_str(extra, true).unwrap();
     }
-    install_restoration(&mut app);
     app
 }
 

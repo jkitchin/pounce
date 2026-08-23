@@ -99,6 +99,42 @@ CLI-only-ness is unmeasured, because the corpus contains no model on which
 the ladder changes anything for *anyone*. Do not describe library callers as
 getting wrong verdicts today. The structural gap below stands on its own.
 
+## Finding 0 (found while fixing Finding 1): the facade had no restoration phase
+
+`pounce-rs` did not depend on `pounce-restoration` at all. Neither did
+`pounce-wasm`. The CLI, `pounce-cinterface` and `pounce-py` all did.
+
+`IpoptApplication` runs a restoration phase only if a caller installed one —
+`pounce-algorithm` cannot build the provider itself, because
+`pounce-restoration` depends on *it* rather than the reverse. So the wiring
+lived as the same ten lines pasted into four frontends, and the two that
+never pasted it silently solved worse: a model needing restoration stopped at
+`Restoration_Failed` where the CLI returned a real verdict.
+
+This is the sharpest form of the pattern this audit is about, and it was
+invisible from the option registry — there is no option to grep for, only a
+missing dependency edge.
+
+**Measured.** 10 of the 71 `.nl` fixtures in the CLI corpus invoke
+restoration, and most of them *succeed* through it: `cresc4`, `deb7`,
+`eigena2`, `eigmaxa`, `pooling_rt2stp`. Reduced to one line:
+`min x s.t. x² = 2` from `x₀ = 1e-8` — where `∇g = 2x ≈ 0` makes the
+linearised constraint useless — solves through the wired application and
+returns `Restoration_Failed` through a bare one.
+
+**Fixed** by removing the duplication that caused it.
+`pounce_restoration::install::install_default_restoration` is the whole
+wiring behind one call; all six call sites use it, including the two that
+had none. `pounce-rs` gained `pounce_rs::application()`, a constructor
+returning a wired application, and its own doc examples now use it. A
+`_configured` variant carries the batch path's `parallel = false` override
+through provider re-mints.
+
+The residual is deliberate and documented: a bare `IpoptApplication::new()`
+still has no restoration, because `pounce-algorithm` genuinely cannot install
+it. `restoration_surface.rs` pins both halves, so the facade can never
+silently hand back the unwired application again.
+
 ## Finding 2 — `check_x0::check_tnlp` is library-shaped and stuck in the CLI
 
 `crates/pounce-cli/src/check_x0.rs:616` is generic over `&mut dyn TNLP`,

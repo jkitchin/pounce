@@ -33,10 +33,7 @@ use pounce_algorithm::batch::{
     solve_nlp_batch_warm as solve_batch_seq_warm,
 };
 use pounce_common::types::{Index, Number};
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-};
+use pounce_restoration::install::install_default_restoration_configured;
 use std::sync::Arc;
 
 use crate::nl_problem::PyNlProblem;
@@ -140,16 +137,18 @@ fn configure_worker(
         app.set_linear_backend_factory(default_backend_factory(cfg));
     }
     // Restoration phase, including for the inner solves it runs.
-    let bff_mint = move || -> InnerBackendFactoryFactory {
-        let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
-    };
-    let resto_provider = make_default_restoration_factory_provider(
-        RestoAlgorithmBuilder::new(),
-        app.algorithm_builder_from_options(),
-        bff_mint,
-    );
-    app.set_restoration_factory_provider(resto_provider);
+    //
+    // The `parallel` override is applied through the configure hook rather
+    // than to a one-off snapshot, so it survives a second-opinion rung
+    // re-minting the provider: this batch drives its own thread pool, and a
+    // parallel inner solve would nest parallelism inside an already-parallel
+    // batch.
+    let force_serial = feral_cfg.parallel == Some(false);
+    install_default_restoration_configured(app, move |cfg| {
+        if force_serial {
+            cfg.parallel = Some(false);
+        }
+    });
 }
 
 /// Per-instance `(x, info)` pairs, one per input, in input order.

@@ -21,7 +21,7 @@
 //! use std::rc::Rc;
 //!
 //! # fn demo(tnlp: Rc<RefCell<dyn TNLP>>) {
-//! let mut app = IpoptApplication::new();
+//! let mut app = pounce_rs::application();
 //! app.initialize().unwrap();
 //!
 //! let result = SensSolve::new(vec![2, 3])          // pinned constraint rows

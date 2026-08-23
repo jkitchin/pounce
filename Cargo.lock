@@ -1160,6 +1160,7 @@ dependencies = [
  "pounce-nl",
  "pounce-nlp",
  "pounce-presolve",
+ "pounce-restoration",
  "pounce-solve-report",
  "serde_json",
 ]

@@ -16,6 +16,9 @@ pounce-linalg.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-linsol.workspace = true
+# Names `FeralConfig` in `install::install_default_restoration_configured`'s
+# adjust hook; already in the tree via pounce-algorithm.
+pounce-feral.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

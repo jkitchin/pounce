@@ -20,15 +20,10 @@
 //! becomes the sole owner. Calling [`crate::FreeIpoptProblem`] on the
 //! now-null handle is safe (it null-checks).
 
-use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options,
-};
+use pounce_algorithm::application::IpoptApplication;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-};
+use pounce_restoration::install::install_default_restoration;
 use pounce_sensitivity::Solver as RustSolver;
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -209,21 +204,10 @@ pub unsafe extern "C" fn IpoptSolverSolve(
             }));
 
             // Re-wire restoration fresh for this solve (same pattern as
-            // IpoptSolve). Multi-pass provider so the ℓ₁ wrapper / auto-fallback
-            // don't panic on the second inner solve (pounce#10 / pounce#24).
-            let feral_cfg = feral_config_from_options(info.problem.app.options());
-            let bff_mint = move || -> InnerBackendFactoryFactory {
-                let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
-            };
-            let resto_provider = make_default_restoration_factory_provider(
-                RestoAlgorithmBuilder::new(),
-                info.problem.app.algorithm_builder_from_options(),
-                bff_mint,
-            );
-            info.problem
-                .app
-                .set_restoration_factory_provider(resto_provider);
+            // IpoptSolve). The helper installs the multi-pass provider, so the
+            // ℓ₁ wrapper / auto-fallback / second-opinion ladder don't panic on
+            // the second inner solve (pounce#10 / pounce#24).
+            install_default_restoration(&mut info.problem.app);
 
             // Move the app out of the problem and into a fresh RustSolver. The
             // app carries the user's options (set via AddIpopt{Str,Num,Int}Option),

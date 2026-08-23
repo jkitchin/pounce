@@ -34,9 +34,7 @@
 pub mod fortran;
 pub mod solver;
 
-use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options,
-};
+use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
@@ -46,10 +44,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-};
+use pounce_restoration::install::install_default_restoration;
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::rc::Rc;
@@ -731,20 +726,11 @@ pub unsafe extern "C" fn IpoptSolve(
             // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
             // repeated solves on the same `IpoptProblem`. The feral config is
             // snapshot from the now-fully-populated options so `feral_*`
-            // overrides flow into the restoration sub-IPM too. Use the multi-pass
-            // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
-            // second inner solve (pounce#10 Phase 3 / pounce#24).
-            let feral_cfg = feral_config_from_options(info.app.options());
-            let bff_mint = move || -> InnerBackendFactoryFactory {
-                let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
-            };
-            let resto_provider = make_default_restoration_factory_provider(
-                RestoAlgorithmBuilder::new(),
-                info.app.algorithm_builder_from_options(),
-                bff_mint,
-            );
-            info.app.set_restoration_factory_provider(resto_provider);
+            // overrides flow into the restoration sub-IPM too. The helper
+            // installs the multi-pass provider (so the ℓ₁ wrapper /
+            // auto-fallback / second-opinion ladder don't panic on the second
+            // inner solve — pounce#10 Phase 3 / pounce#24) and the mint.
+            install_default_restoration(&mut info.app);
 
             let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
             let status = info.app.optimize_tnlp(bridge_for_solve);

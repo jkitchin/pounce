@@ -34,10 +34,7 @@ use pounce_nlp::counting_tnlp::CountingTnlp;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::{InfeasibilityProof, TNLP};
-use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
-use pounce_restoration::resto_inner_solver::{
-    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
-};
+use pounce_restoration::install::install_default_restoration;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -308,54 +305,19 @@ pub fn main() -> ExitCode {
 
     // Wire the restoration phase. Without this, any line-search failure
     // surfaces as `RestorationFailure` instead of falling back into the
-    // ℓ1-feasibility sub-IPM. Mirrors what upstream's `IpAlgBuilder`
-    // does unconditionally for every solve.
+    // ℓ1-feasibility sub-IPM. Mirrors what upstream's `IpAlgBuilder` does
+    // unconditionally for every solve.
     //
-    // Capture the feral config off the now-fully-loaded options so the
-    // restoration sub-IPM honors the same `feral_*` overrides (e.g.
-    // `feral_cascade_break yes` from an `--options-file`) as the main
-    // IPM. Snapshot, not borrow: the BFF outlives the option-mutation
-    // window we cleanly own here.
-    let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-    // Use the multi-pass provider so the ℓ₁ wrapper (`l1_exact_penalty_barrier`)
-    // and the auto-fallback (`l1_fallback_on_restoration_failure`) don't
-    // panic with "restoration factory invoked more than once" on their
-    // second inner solve — see pounce#10 Phase 3 / pounce#24.
-    let bff_mint = move || -> InnerBackendFactoryFactory {
-        let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
-    };
-    // Hand the inner IPM a builder mirroring the outer options so its
-    // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
-    // matches upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`.
-    let resto_provider = make_default_restoration_factory_provider(
-        RestoAlgorithmBuilder::new(),
-        app.algorithm_builder_from_options(),
-        bff_mint,
-    );
-    app.set_restoration_factory_provider(resto_provider);
-
-    // The second-opinion ladder changes `feral_scaling` on rung 1, and the
-    // provider above captured the configuration it was built with — so hand
-    // the application a way to rebuild it against the rung's options, or the
-    // restoration sub-IPM would keep running on the settings that just failed.
-    // Without this the ladder still runs, varying the main IPM alone.
-    app.set_restoration_provider_mint(std::rc::Rc::new(
-        |options: &pounce_common::options_list::OptionsList| {
-            let feral_cfg = pounce_algorithm::application::feral_config_from_options(options);
-            let bff_mint = move || -> InnerBackendFactoryFactory {
-                let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
-            };
-            make_default_restoration_factory_provider(
-                RestoAlgorithmBuilder::new(),
-                // Mirrors the rung's options, so the inner IPM inherits the
-                // `mu_strategy` rung 2 just set rather than the baseline's.
-                pounce_algorithm::application::algorithm_builder_from_option_list(options),
-                bff_mint,
-            )
-        },
-    ));
+    // The helper resolves the FERAL config off the now-fully-loaded options,
+    // so the restoration sub-IPM honours the same `feral_*` overrides (e.g.
+    // `feral_cascade_break yes` from an `--options-file`) as the main IPM; it
+    // installs the multi-pass provider, so the ℓ₁ wrapper, the
+    // ℓ₁-on-restoration-failure retry and the second-opinion ladder do not
+    // hit "restoration factory invoked more than once" on their second inner
+    // solve; and it installs the mint, so a ladder rung that changes
+    // `feral_scaling` rebuilds the sub-IPM instead of leaving it on the
+    // settings that just failed.
+    install_default_restoration(&mut app);
 
     // gh#483 follow-up: refuse a `linear_solver` pounce does not
     // implement. Checked here — before the banner, and before the routing

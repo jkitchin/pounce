@@ -15,6 +15,11 @@ pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-observability.workspace = true
+# The restoration phase. Not optional: a solve that needs restoration and does
+# not have it returns `Restoration_Failed` instead of a real verdict, which is
+# the CLI/facade divergence this crate exists to avoid. 10 of the 71 `.nl`
+# fixtures in the CLI corpus invoke it, most of them successfully.
+pounce-restoration.workspace = true
 
 # Feature-gated facets (gh #561). Every one of these is already in the
 # dependency graph of the default build — pounce-algorithm pulls
@@ -48,14 +53,6 @@ qp = ["dep:pounce-qp", "dep:pounce-linalg", "dep:pounce-linsol", "dep:pounce-fer
 sensitivity = ["dep:pounce-sensitivity"]
 # Everything the facade curates.
 full = ["convex", "qp", "sensitivity"]
-
-[dev-dependencies]
-# Restoration is not a facade dependency (see the crate docs on
-# `IpoptApplication::set_restoration_factory_provider`), but a solve that has
-# to reach a local-infeasibility verdict needs the restoration phase to get
-# there — so the second-opinion tests inject a provider the way the CLI and
-# the Python extension do.
-pounce-restoration.workspace = true
 
 [package.metadata.docs.rs]
 # docs.rs must render the feature-gated modules; otherwise the published

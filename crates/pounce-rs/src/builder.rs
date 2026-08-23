@@ -39,7 +39,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    ApplicationReturnStatus, BoundsInfo, IndexStyle, IpoptApplication, IpoptCq, IpoptData, NlpInfo,
+    ApplicationReturnStatus, BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo,
     Solution as TnlpSolution, SolveStatistics, SparsityRequest, StartingPoint, TNLP,
 };
 
@@ -326,7 +326,7 @@ impl<P: Problem + 'static> Nlp<P> {
             sol_z_u: Vec::new(),
         }));
 
-        let mut app = IpoptApplication::new();
+        let mut app = crate::application();
         app.initialize()
             .map_err(|e| NlpError::Initialize(e.message))?;
         // No analytic Hessian is required from `Problem`, so default to L-BFGS.

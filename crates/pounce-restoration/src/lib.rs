@@ -17,6 +17,7 @@
 pub mod aug_resto_system_solver;
 pub mod conv_check;
 pub mod init;
+pub mod install;
 pub mod min_c_1nrm;
 pub mod output;
 pub mod resto_alg_builder;

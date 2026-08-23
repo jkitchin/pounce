@@ -143,7 +143,7 @@
 //!     }
 //! }
 //!
-//! let mut app = IpoptApplication::new();
+//! let mut app = pounce_rs::application();
 //! app.initialize().unwrap();
 //! let prob = Rc::new(RefCell::new(Hs071::default()));
 //! let status = app.optimize_tnlp(Rc::clone(&prob) as Rc<RefCell<dyn TNLP>>);
@@ -239,6 +239,43 @@ pub use pounce_nlp::{CountingTnlp, SeededTnlp};
 // --- the solver driver ------------------------------------------------------
 pub use pounce_algorithm::application::IpoptApplication;
 
+/// A solver application with the restoration phase already installed.
+///
+/// **Prefer this over `IpoptApplication::new()`.** The restoration phase is
+/// part of the NLP path — when the filter line search cannot make progress,
+/// the solver drops into an ℓ₁-feasibility sub-IPM and continues from what it
+/// finds. `pounce-algorithm` cannot install it itself (`pounce-restoration`
+/// depends on *it*, not the reverse), so a bare `IpoptApplication` has none,
+/// and a solve that needs one stops at
+/// [`ApplicationReturnStatus::RestorationFailed`] instead of reaching a real
+/// verdict. In the CLI's own fixture corpus that is 10 models out of 71, most
+/// of which *succeed* through restoration.
+///
+/// This constructor is the facade's answer: it returns an application wired
+/// the way the CLI, the C interface and the Python extension all wire theirs,
+/// so the default path here matches the default path there.
+///
+/// ```
+/// use pounce_rs::prelude::*;
+///
+/// let mut app = pounce_rs::application();
+/// app.initialize();
+/// ```
+pub fn application() -> IpoptApplication {
+    let mut app = IpoptApplication::new();
+    install_default_restoration(&mut app);
+    app
+}
+
+/// Install the restoration phase on an application built some other way.
+///
+/// [`application()`] is the shorter path; reach for this when you already hold
+/// an `IpoptApplication` — one handed to you, or one you configured before
+/// deciding to solve with it.
+pub use pounce_restoration::install::{
+    install_default_restoration, install_default_restoration_configured,
+};
+
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
@@ -253,6 +290,7 @@ pub use pounce_algorithm;
 pub use pounce_common;
 pub use pounce_nlp;
 pub use pounce_observability;
+pub use pounce_restoration;
 
 // --- ergonomic builder API (argmin-style small trait + builder; #168) -------
 pub mod builder;
