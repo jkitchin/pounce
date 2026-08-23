@@ -46,7 +46,7 @@ pub mod sensitivity;
 pub(crate) mod simplex;
 pub mod sos;
 
-pub use active_set::{ActiveSetOverrides, solve_qp_active_set};
+pub use active_set::solve_qp_active_set;
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,
@@ -57,6 +57,10 @@ pub use ipm::{
     solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
 pub use options::ConvexPresolveOptions;
+// Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared
+// with the SQP subproblem reader there; re-exported so the public path is
+// unchanged for callers who reach it through this crate.
+pub use pounce_qp::ActiveSetOverrides;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};

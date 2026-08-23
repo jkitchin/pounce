@@ -7,22 +7,20 @@
 
 use std::time::Duration;
 
-use pounce_common::{ExceptionKind, Index, OptionsList, SolverException};
-use pounce_qp::AntiCyclingChoice;
+use pounce_common::{OptionsList, SolverException, option_invalid};
 
-use crate::{ActiveSetOverrides, QpOptions};
-
-fn invalid(name: &str, message: impl std::fmt::Display) -> SolverException {
-    SolverException::new(
-        ExceptionKind::OPTION_INVALID,
-        format!("Option \"{name}\": {message}."),
-        file!(),
-        line!() as Index,
-    )
-}
+use crate::QpOptions;
 
 impl QpOptions {
     /// Build convex-IPM options from a registered [`OptionsList`].
+    ///
+    /// The bounds re-checked here duplicate the ones
+    /// `pounce_algorithm::upstream_options` registers, so on any path that
+    /// went through the registry they are unreachable — the registry rejects
+    /// the value at *set* time. They exist for the caller who builds an
+    /// `OptionsList` with no registry attached, where nothing else would.
+    /// `pounce-cli`'s `convex_option_readers_match_the_registry` test pins the
+    /// two sets of bounds together so the pair cannot drift.
     ///
     /// Shared NLP controls (`tol`, `max_iter`, and `max_wall_time`) are applied
     /// only when explicitly set, so their registry defaults do not replace the
@@ -34,13 +32,13 @@ impl QpOptions {
         let (max_iter, explicitly_set) = options.get_integer_value("max_iter", "")?;
         if explicitly_set {
             parsed.max_iter = usize::try_from(max_iter)
-                .map_err(|_| invalid("max_iter", "must be nonnegative and fit in usize"))?;
+                .map_err(|_| option_invalid("max_iter", "must be nonnegative and fit in usize"))?;
         }
 
         let (tol, explicitly_set) = options.get_numeric_value("tol", "")?;
         if explicitly_set {
             if tol <= 0.0 || tol.is_nan() {
-                return Err(invalid("tol", "must be greater than zero"));
+                return Err(option_invalid("tol", "must be greater than zero"));
             }
             parsed.tol = tol;
         }
@@ -48,7 +46,7 @@ impl QpOptions {
         let (wall_time, explicitly_set) = options.get_numeric_value("max_wall_time", "")?;
         if explicitly_set {
             if wall_time.is_nan() || wall_time < 0.0 {
-                return Err(invalid("max_wall_time", "must be nonnegative"));
+                return Err(option_invalid("max_wall_time", "must be nonnegative"));
             }
             // Values outside Duration's honest range, including Ipopt's 1e20
             // sentinel and infinity, mean "no deadline" rather than an
@@ -59,7 +57,10 @@ impl QpOptions {
         let (tau, explicitly_set) = options.get_numeric_value("qp_tau", "")?;
         if explicitly_set {
             if !(tau > 0.0 && tau < 1.0) {
-                return Err(invalid("qp_tau", "must lie strictly between zero and one"));
+                return Err(option_invalid(
+                    "qp_tau",
+                    "must lie strictly between zero and one",
+                ));
             }
             parsed.tau = tau;
             // A raised floor lifts the default ceiling; an explicit
@@ -70,7 +71,7 @@ impl QpOptions {
         let (tau_max, explicitly_set) = options.get_numeric_value("qp_tau_max", "")?;
         if explicitly_set {
             if !(tau_max > 0.0 && tau_max < 1.0) {
-                return Err(invalid(
+                return Err(option_invalid(
                     "qp_tau_max",
                     "must lie strictly between zero and one",
                 ));
@@ -81,7 +82,7 @@ impl QpOptions {
         let (reg, explicitly_set) = options.get_numeric_value("qp_reg", "")?;
         if explicitly_set {
             if reg < 0.0 || reg.is_nan() {
-                return Err(invalid("qp_reg", "must be nonnegative"));
+                return Err(option_invalid("qp_reg", "must be nonnegative"));
             }
             parsed.reg = reg;
         }
@@ -89,7 +90,10 @@ impl QpOptions {
         let (correctors, explicitly_set) = options.get_integer_value("qp_gondzio_corr", "")?;
         if explicitly_set {
             if !(0..=10).contains(&correctors) {
-                return Err(invalid("qp_gondzio_corr", "must be between 0 and 10"));
+                return Err(option_invalid(
+                    "qp_gondzio_corr",
+                    "must be between 0 and 10",
+                ));
             }
             parsed.gondzio_max_corr = correctors as usize;
         }
@@ -97,11 +101,16 @@ impl QpOptions {
         let (infeas_tol, explicitly_set) = options.get_numeric_value("qp_infeas_tol", "")?;
         if explicitly_set {
             if infeas_tol <= 0.0 || infeas_tol.is_nan() {
-                return Err(invalid("qp_infeas_tol", "must be greater than zero"));
+                return Err(option_invalid("qp_infeas_tol", "must be greater than zero"));
             }
             parsed.infeas_tol = infeas_tol;
         }
 
+        // Two lookups rather than a bare `get_bool_value`, and deliberately
+        // so: with no registry attached `get_string_value` answers "" /
+        // not-found for an unset name, and `get_bool_value` would reject that
+        // "" as a non-boolean instead of reporting it unset. Read the presence
+        // flag first, and only decode a value that is actually there.
         let (_, explicitly_set) = options.get_string_value("qp_hsde", "")?;
         if explicitly_set {
             parsed.use_hsde = options.get_bool_value("qp_hsde", "")?.0;
@@ -139,6 +148,8 @@ impl ConvexPresolveOptions {
     /// `presolve` setting is honored; when neither is set, convex presolve
     /// keeps its default-on behavior.
     pub fn try_from_options_list(options: &OptionsList) -> Result<Self, SolverException> {
+        // Two lookups per name, for the reason given in
+        // [`QpOptions::try_from_options_list`].
         let (_, qp_explicit) = options.get_string_value("qp_presolve", "")?;
         let qp_presolve = if qp_explicit {
             Some(options.get_bool_value("qp_presolve", "")?.0)
@@ -156,102 +167,10 @@ impl ConvexPresolveOptions {
         })
     }
 }
-
-impl ActiveSetOverrides {
-    /// Read explicitly set `sqp_qp_*` controls for the direct convex
-    /// active-set driver.
-    ///
-    /// Unset values remain `None`, allowing the driver to retain its tuned,
-    /// size-dependent defaults rather than inheriting the SQP subproblem
-    /// defaults from the option registry.
-    pub fn try_from_options_list(options: &OptionsList) -> Result<Self, SolverException> {
-        let mut parsed = Self::default();
-
-        let (max_iter, explicitly_set) = options.get_integer_value("sqp_qp_max_iter", "")?;
-        if explicitly_set {
-            let value = u32::try_from(max_iter)
-                .map_err(|_| invalid("sqp_qp_max_iter", "must be positive and fit in u32"))?;
-            if value == 0 {
-                return Err(invalid("sqp_qp_max_iter", "must be positive"));
-            }
-            parsed.max_iter = Some(value);
-        }
-
-        let (anti_cycling, explicitly_set) = options.get_string_value("sqp_qp_anti_cycling", "")?;
-        if explicitly_set {
-            parsed.anti_cycling = Some(match anti_cycling.as_str() {
-                "bland" => AntiCyclingChoice::Bland,
-                "expand" => AntiCyclingChoice::Expand,
-                "none" => AntiCyclingChoice::None,
-                _ => {
-                    return Err(invalid(
-                        "sqp_qp_anti_cycling",
-                        format_args!("unknown value \"{anti_cycling}\""),
-                    ));
-                }
-            });
-        }
-
-        let (feas_tol, explicitly_set) = options.get_numeric_value("sqp_qp_feas_tol", "")?;
-        if explicitly_set {
-            if feas_tol <= 0.0 || feas_tol.is_nan() {
-                return Err(invalid("sqp_qp_feas_tol", "must be greater than zero"));
-            }
-            parsed.feas_tol = Some(feas_tol);
-        }
-
-        let (opt_tol, explicitly_set) = options.get_numeric_value("sqp_qp_opt_tol", "")?;
-        if explicitly_set {
-            if opt_tol <= 0.0 || opt_tol.is_nan() {
-                return Err(invalid("sqp_qp_opt_tol", "must be greater than zero"));
-            }
-            parsed.opt_tol = Some(opt_tol);
-        }
-
-        let (elastic_gamma, explicitly_set) =
-            options.get_numeric_value("sqp_qp_elastic_gamma", "")?;
-        if explicitly_set {
-            if elastic_gamma <= 0.0 || elastic_gamma.is_nan() {
-                return Err(invalid("sqp_qp_elastic_gamma", "must be greater than zero"));
-            }
-            parsed.elastic_gamma = Some(elastic_gamma);
-        }
-
-        let (_, explicitly_set) = options.get_string_value("sqp_qp_use_schur_updates", "")?;
-        if explicitly_set {
-            parsed.use_schur_updates =
-                Some(options.get_bool_value("sqp_qp_use_schur_updates", "")?.0);
-        }
-        let (_, explicitly_set) = options.get_string_value("sqp_qp_use_homotopy", "")?;
-        if explicitly_set {
-            parsed.use_homotopy = Some(options.get_bool_value("sqp_qp_use_homotopy", "")?.0);
-        }
-
-        let (updates, explicitly_set) =
-            options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")?;
-        if explicitly_set {
-            let value = u32::try_from(updates).map_err(|_| {
-                invalid(
-                    "sqp_qp_max_schur_updates_before_refactor",
-                    "must be positive and fit in u32",
-                )
-            })?;
-            if value == 0 {
-                return Err(invalid(
-                    "sqp_qp_max_schur_updates_before_refactor",
-                    "must be positive",
-                ));
-            }
-            parsed.max_schur_updates_before_refactor = Some(value);
-        }
-
-        Ok(parsed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pounce_common::Index;
 
     fn set_num(options: &mut OptionsList, name: &str, value: f64) {
         options.set_numeric_value(name, value, true, true).unwrap();
@@ -373,32 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn active_set_controls_materialize_only_explicit_overrides() {
-        let defaults = ActiveSetOverrides::try_from_options_list(&OptionsList::new()).unwrap();
-        assert!(defaults.is_empty());
-
-        let mut options = OptionsList::new();
-        set_int(&mut options, "sqp_qp_max_iter", 37);
-        set_str(&mut options, "sqp_qp_anti_cycling", "bland");
-        set_num(&mut options, "sqp_qp_feas_tol", 1e-7);
-        set_num(&mut options, "sqp_qp_opt_tol", 2e-7);
-        set_num(&mut options, "sqp_qp_elastic_gamma", 1e4);
-        set_str(&mut options, "sqp_qp_use_schur_updates", "yes");
-        set_str(&mut options, "sqp_qp_use_homotopy", "no");
-        set_int(&mut options, "sqp_qp_max_schur_updates_before_refactor", 12);
-
-        let parsed = ActiveSetOverrides::try_from_options_list(&options).unwrap();
-        assert_eq!(parsed.max_iter, Some(37));
-        assert_eq!(parsed.anti_cycling, Some(AntiCyclingChoice::Bland));
-        assert_eq!(parsed.feas_tol, Some(1e-7));
-        assert_eq!(parsed.opt_tol, Some(2e-7));
-        assert_eq!(parsed.elastic_gamma, Some(1e4));
-        assert_eq!(parsed.use_schur_updates, Some(true));
-        assert_eq!(parsed.use_homotopy, Some(false));
-        assert_eq!(parsed.max_schur_updates_before_refactor, Some(12));
-    }
-
-    #[test]
     fn malformed_unregistered_values_are_rejected() {
         let mut options = OptionsList::new();
         set_num(&mut options, "qp_tau", 1.0);
@@ -407,9 +300,5 @@ mod tests {
         let mut options = OptionsList::new();
         set_str(&mut options, "qp_hsde", "maybe");
         assert!(QpOptions::try_from_options_list(&options).is_err());
-
-        let mut options = OptionsList::new();
-        set_int(&mut options, "sqp_qp_max_iter", 0);
-        assert!(ActiveSetOverrides::try_from_options_list(&options).is_err());
     }
 }

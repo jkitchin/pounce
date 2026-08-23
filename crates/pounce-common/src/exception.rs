@@ -152,6 +152,29 @@ impl fmt::Display for SolverException {
 
 impl std::error::Error for SolverException {}
 
+/// Build an `OPTION_INVALID` exception rejecting `name`'s value,
+/// attributed to the **caller's** source location.
+///
+/// Every option reader that validates a value it read out of an
+/// [`crate::OptionsList`] wants the same shape of error, but a shared
+/// constructor that captured `file!()`/`line!()` of its own body would
+/// point every such message at one line in this file — and that pair is
+/// what [`SolverException`]'s `Display` prints to the user. `#[track_caller]`
+/// keeps the attribution on the read site that actually rejected the value.
+///
+/// The message reads `Option "<name>": <message>.` — the trailing period is
+/// supplied here, so `message` should not carry one.
+#[track_caller]
+pub fn option_invalid(name: &str, message: impl fmt::Display) -> SolverException {
+    let loc = std::panic::Location::caller();
+    SolverException::new(
+        ExceptionKind::OPTION_INVALID,
+        format!("Option \"{name}\": {message}."),
+        loc.file(),
+        loc.line() as Index,
+    )
+}
+
 /// Macro replacement for Ipopt's `THROW_EXCEPTION(kind, msg)`. Produces
 /// a `Result::Err(SolverException)` using `file!()`/`line!()`.
 #[macro_export]

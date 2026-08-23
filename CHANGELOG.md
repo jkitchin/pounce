@@ -551,14 +551,27 @@ changes.
 - **Convex `OptionsList` parsing is now a reusable library API.**
 
   `pounce_convex::QpOptions::try_from_options_list`,
-  `ConvexPresolveOptions::try_from_options_list`, and
-  `ActiveSetOverrides::try_from_options_list` now own the names, conversions,
-  validation, and precedence rules for the convex `qp_*` and `sqp_qp_*`
-  controls. The CLI delegates to those typed readers instead of maintaining
-  private copies, so another frontend can materialize the same configuration
-  without reproducing CLI logic. Existing explicit-only handling for shared
-  `tol` / iteration / wall-time controls, `qp_tau_max` precedence, and the
-  `qp_presolve`-over-`presolve` rule is unchanged.
+  `pounce_convex::ConvexPresolveOptions::try_from_options_list`, and
+  `pounce_qp::ActiveSetOverrides::try_from_options_list` now own the names,
+  conversions, validation, and precedence rules for the convex `qp_*` and
+  `sqp_qp_*` controls. The CLI delegates to those typed readers instead of
+  maintaining private copies, so another frontend can materialize the same
+  configuration without reproducing CLI logic. Existing explicit-only handling
+  for shared `tol` / iteration / wall-time controls, `qp_tau_max` precedence,
+  and the `qp_presolve`-over-`presolve` rule is unchanged.
+
+  `ActiveSetOverrides` lives in `pounce-qp`, beside the `QpOptions` it
+  overlays, so that it is genuinely the only reader of the `sqp_qp_*` family:
+  the SQP subproblem path in `pounce-algorithm` — which has no `pounce-convex`
+  dependency, and until now kept a second copy of the same eight names —
+  reads through it too. `pounce_convex::ActiveSetOverrides` is unchanged as a
+  public path; it re-exports the type.
+
+  The bounds these readers re-check duplicate the registered ones on purpose,
+  for callers who build an `OptionsList` with no registry attached. A new test,
+  `pounce-cli`'s `convex_option_readers_match_the_registry`, derives the
+  registry's verdict at run time and fails if a reader is narrower than the
+  registration it mirrors, so the two copies cannot drift apart silently.
 
   `qp_gondzio_corr` is also covered by the core library guard that refuses a
   non-default convex-only option on an entry point unable to run the convex

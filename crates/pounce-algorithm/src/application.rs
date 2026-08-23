@@ -4999,50 +4999,33 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
 /// options ([`crate::sqp::SqpOptions`]); this one feeds the inner QP
 /// solver that `SqpAlgorithm` delegates each subproblem to. Consulted
 /// only on the `ActiveSetSqp` path. Each knob is forwarded only when
-/// the user explicitly set it (the `true` flag), so the `pounce_qp`
-/// defaults stand otherwise.
+/// the user explicitly set it, so the `pounce_qp` defaults stand
+/// otherwise.
+///
+/// The reading itself is [`pounce_qp::ActiveSetOverrides`], shared with
+/// `pounce_convex`'s direct active-set driver, which overlays the same
+/// eight names onto the same `QpOptions` type. This function had its own
+/// copy until then, and the two had drifted: this one silently ignored a
+/// `sqp_qp_max_iter` of 0 and an unknown `sqp_qp_anti_cycling` value where
+/// the other rejected them. Neither divergence was reachable — the
+/// registry bounds `sqp_qp_max_iter` at 1 and restricts `anti_cycling` to
+/// three values — but two readers of one option family is how a
+/// reachable one starts.
 fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOptions) {
-    use pounce_qp::AntiCyclingChoice;
-
-    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_iter", "") {
-        if v >= 0 {
-            opts.max_iter = v as u32;
-        }
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_feas_tol", "") {
-        opts.feas_tol = v;
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_opt_tol", "") {
-        opts.opt_tol = v;
-    }
-    if let Ok((v, true)) = options.get_numeric_value("sqp_qp_elastic_gamma", "") {
-        opts.elastic_gamma = v;
-    }
-    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_schur_updates", "") {
-        opts.use_schur_updates = v;
-    }
-    // Registered by the homotopy work but never read here, so the knob was a
-    // no-op on the SQP path: `pounce_qp`'s own default is `false`, and only
-    // `pounce_convex::active_set` set it (in Rust, not through options). The
-    // inverse of gh #360 — registered-but-unread rather than
-    // read-but-unregistered — and invisible to that issue's guard test, which
-    // only checked one direction.
-    if let Ok((v, true)) = options.get_bool_value("sqp_qp_use_homotopy", "") {
-        opts.use_homotopy = v;
-    }
-    if let Ok((v, true)) = options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")
-    {
-        if v >= 1 {
-            opts.max_schur_updates_before_refactor = v as u32;
-        }
-    }
-    if let Ok((s, true)) = options.get_string_value("sqp_qp_anti_cycling", "") {
-        opts.anti_cycling = match s.as_str() {
-            "expand" => AntiCyclingChoice::Expand,
-            "bland" => AntiCyclingChoice::Bland,
-            "none" => AntiCyclingChoice::None,
-            _ => opts.anti_cycling,
-        };
+    match pounce_qp::ActiveSetOverrides::try_from_options_list(options) {
+        Ok(overrides) => overrides.apply(opts),
+        // Unreachable from here: this runs after `initialize()`, so every
+        // value present has already been validated against the registered
+        // bound that the reader re-checks. Say so out loud anyway rather
+        // than solving with a configuration the user did not ask for —
+        // silently dropping the whole family is exactly the failure mode
+        // `tests/no_silent_options.rs` exists to prevent.
+        Err(error) => tracing::error!(
+            target: "pounce::options",
+            %error,
+            "sqp_qp_* options were rejected after the registry accepted them; \
+             the QP subproblem is running on pounce-qp defaults"
+        ),
     }
 }
 

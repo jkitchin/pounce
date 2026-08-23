@@ -25,7 +25,7 @@ pub mod utils;
 pub use cached::Cache;
 pub use diagnostics::{DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec};
 pub use exact::{add_is_exact, is_live, mul_is_exact};
-pub use exception::{ExceptionKind, SolverException};
+pub use exception::{ExceptionKind, SolverException, option_invalid};
 pub use journalist::{
     FileJournal, Journal, JournalCategory, JournalLevel, Journalist, StringJournal,
 };

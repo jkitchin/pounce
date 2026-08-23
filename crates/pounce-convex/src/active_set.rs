@@ -64,78 +64,19 @@
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
+// `ActiveSetOverrides` is `pounce-qp`'s: it overlays the `sqp_qp_*` family
+// onto a `QpOptions` base, which the SQP subproblem path in
+// `pounce-algorithm` needs too, and `pounce-qp` is the only crate both of
+// them depend on. Re-exported from this crate's root, so the public path
+// callers already use is unchanged.
 use pounce_qp::{
-    AntiCyclingChoice, BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver,
+    ActiveSetOverrides, BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver,
     QpOptions as ActiveSetOptions, QpProblem as ActiveSetProblem, QpSolver,
     QpStatus as ActiveSetStatus, QpWarmStart, WorkingSet,
 };
 
 use crate::ipm::{FARKAS_RESID_TOL, QpOptions, dot, finite_or_failed, inf_norm};
 use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
-
-/// Caller-supplied overrides for the inner `pounce-qp` engine.
-///
-/// Every field is `None` unless the user set the corresponding option
-/// explicitly, so this driver can tell "left at the default" from "asked for
-/// the default value" — a distinction it needs, because it deliberately
-/// overrides two of these itself (a size-scaled `max_iter` and
-/// `use_schur_updates: true`) and an explicit request must win over that.
-///
-/// Exists because these knobs became unreachable when `qp-active-set` moved off
-/// the SQP outer loop: the `sqp_qp_*` option family fed the SQP's QP
-/// subproblem, and with no SQP in the picture all seven silently became no-ops.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ActiveSetOverrides {
-    pub max_iter: Option<u32>,
-    pub anti_cycling: Option<AntiCyclingChoice>,
-    pub feas_tol: Option<f64>,
-    pub opt_tol: Option<f64>,
-    pub elastic_gamma: Option<f64>,
-    pub use_schur_updates: Option<bool>,
-    pub use_homotopy: Option<bool>,
-    pub max_schur_updates_before_refactor: Option<u32>,
-}
-
-impl ActiveSetOverrides {
-    /// True when the caller set nothing.
-    pub fn is_empty(&self) -> bool {
-        self.max_iter.is_none()
-            && self.anti_cycling.is_none()
-            && self.feas_tol.is_none()
-            && self.opt_tol.is_none()
-            && self.elastic_gamma.is_none()
-            && self.use_schur_updates.is_none()
-            && self.use_homotopy.is_none()
-            && self.max_schur_updates_before_refactor.is_none()
-    }
-
-    fn apply(&self, o: &mut ActiveSetOptions) {
-        if let Some(v) = self.max_iter {
-            o.max_iter = v;
-        }
-        if let Some(v) = self.anti_cycling {
-            o.anti_cycling = v;
-        }
-        if let Some(v) = self.feas_tol {
-            o.feas_tol = v;
-        }
-        if let Some(v) = self.opt_tol {
-            o.opt_tol = v;
-        }
-        if let Some(v) = self.elastic_gamma {
-            o.elastic_gamma = v;
-        }
-        if let Some(v) = self.use_schur_updates {
-            o.use_schur_updates = v;
-        }
-        if let Some(v) = self.use_homotopy {
-            o.use_homotopy = v;
-        }
-        if let Some(v) = self.max_schur_updates_before_refactor {
-            o.max_schur_updates_before_refactor = v;
-        }
-    }
-}
 
 /// Clamp a convex lower-bound value to pounce-qp's `±1e19` free convention.
 fn to_qp_lower(lb: f64) -> f64 {

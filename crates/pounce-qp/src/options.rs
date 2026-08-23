@@ -2,7 +2,7 @@
 //! values from the design note so the SQP-side wiring can forward
 //! `OptionsList` entries straight through without translation.
 
-use pounce_common::Number;
+use pounce_common::{Number, OptionsList, SolverException, option_invalid};
 use std::time::Duration;
 
 /// Active-set QP algorithm variant. Phase 5a ships only the sparse
@@ -196,5 +196,294 @@ impl Default for QpOptions {
             expand_tol_max: 1e-7,
             certify_recession_ray: true,
         }
+    }
+}
+
+/// Explicitly-set `sqp_qp_*` overrides for a [`QpOptions`] base.
+///
+/// Every field is `None` unless the user set the corresponding option
+/// *explicitly*, so a caller can tell "left at the default" from "asked for
+/// the default value". Both consumers need that distinction, and for the same
+/// reason: each starts from a base that is not [`QpOptions::default`] and an
+/// explicit request has to win over it. `pounce-convex`'s direct active-set
+/// driver picks a size-scaled `max_iter` and turns Schur updates on;
+/// `pounce-algorithm`'s SQP path starts from the plain defaults but must not
+/// overwrite them with zeros for options nobody set.
+///
+/// The type exists because these knobs became unreachable when
+/// `solver_selection=qp-active-set` moved off the SQP outer loop: the
+/// `sqp_qp_*` family was introduced for the QP subproblem *of that loop*, and
+/// with no SQP in the picture every one of them silently became a no-op on the
+/// direct convex route. The spelling is kept because it is the documented,
+/// already-in-use name; only the delivery route changed.
+///
+/// This lives in `pounce-qp` because [`QpOptions`] does: it is the one crate
+/// both readers already depend on (`pounce-algorithm` has no `pounce-convex`
+/// dependency), so it is the only place a single copy can serve both. It was
+/// two copies until then — `pounce_convex::ActiveSetOverrides` for the direct
+/// driver and `pounce_algorithm::application::apply_qp_subproblem_options` for
+/// the SQP subproblem — reading the same eight registered names into the same
+/// struct, and they had already drifted apart on how they treat a value the
+/// registry would have rejected.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ActiveSetOverrides {
+    pub max_iter: Option<u32>,
+    pub anti_cycling: Option<AntiCyclingChoice>,
+    pub feas_tol: Option<Number>,
+    pub opt_tol: Option<Number>,
+    pub elastic_gamma: Option<Number>,
+    pub use_schur_updates: Option<bool>,
+    pub use_homotopy: Option<bool>,
+    pub max_schur_updates_before_refactor: Option<u32>,
+}
+
+impl ActiveSetOverrides {
+    /// True when the caller set nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Overlay the explicitly-set values onto `o`, leaving the rest alone.
+    pub fn apply(&self, o: &mut QpOptions) {
+        if let Some(v) = self.max_iter {
+            o.max_iter = v;
+        }
+        if let Some(v) = self.anti_cycling {
+            o.anti_cycling = v;
+        }
+        if let Some(v) = self.feas_tol {
+            o.feas_tol = v;
+        }
+        if let Some(v) = self.opt_tol {
+            o.opt_tol = v;
+        }
+        if let Some(v) = self.elastic_gamma {
+            o.elastic_gamma = v;
+        }
+        if let Some(v) = self.use_schur_updates {
+            o.use_schur_updates = v;
+        }
+        if let Some(v) = self.use_homotopy {
+            o.use_homotopy = v;
+        }
+        if let Some(v) = self.max_schur_updates_before_refactor {
+            o.max_schur_updates_before_refactor = v;
+        }
+    }
+
+    /// Read the explicitly-set `sqp_qp_*` controls out of a registered
+    /// [`OptionsList`].
+    ///
+    /// The bounds re-checked here duplicate the ones
+    /// `pounce_algorithm::upstream_options` registers, so on any path that
+    /// went through the registry they are unreachable — the registry rejects
+    /// the value at *set* time. They exist for the caller who builds an
+    /// `OptionsList` with no registry attached, where nothing else would.
+    /// `pounce-cli`'s `convex_option_readers_match_the_registry` test pins the
+    /// two sets of bounds together so the pair cannot drift.
+    pub fn try_from_options_list(options: &OptionsList) -> Result<Self, SolverException> {
+        let mut parsed = Self::default();
+
+        let (max_iter, explicitly_set) = options.get_integer_value("sqp_qp_max_iter", "")?;
+        if explicitly_set {
+            let value = u32::try_from(max_iter).map_err(|_| {
+                option_invalid("sqp_qp_max_iter", "must be positive and fit in u32")
+            })?;
+            if value == 0 {
+                return Err(option_invalid("sqp_qp_max_iter", "must be positive"));
+            }
+            parsed.max_iter = Some(value);
+        }
+
+        let (anti_cycling, explicitly_set) = options.get_string_value("sqp_qp_anti_cycling", "")?;
+        if explicitly_set {
+            parsed.anti_cycling = Some(match anti_cycling.as_str() {
+                "bland" => AntiCyclingChoice::Bland,
+                "expand" => AntiCyclingChoice::Expand,
+                "none" => AntiCyclingChoice::None,
+                _ => {
+                    return Err(option_invalid(
+                        "sqp_qp_anti_cycling",
+                        format_args!("unknown value \"{anti_cycling}\""),
+                    ));
+                }
+            });
+        }
+
+        let (feas_tol, explicitly_set) = options.get_numeric_value("sqp_qp_feas_tol", "")?;
+        if explicitly_set {
+            if feas_tol <= 0.0 || feas_tol.is_nan() {
+                return Err(option_invalid(
+                    "sqp_qp_feas_tol",
+                    "must be greater than zero",
+                ));
+            }
+            parsed.feas_tol = Some(feas_tol);
+        }
+
+        let (opt_tol, explicitly_set) = options.get_numeric_value("sqp_qp_opt_tol", "")?;
+        if explicitly_set {
+            if opt_tol <= 0.0 || opt_tol.is_nan() {
+                return Err(option_invalid(
+                    "sqp_qp_opt_tol",
+                    "must be greater than zero",
+                ));
+            }
+            parsed.opt_tol = Some(opt_tol);
+        }
+
+        let (elastic_gamma, explicitly_set) =
+            options.get_numeric_value("sqp_qp_elastic_gamma", "")?;
+        if explicitly_set {
+            if elastic_gamma <= 0.0 || elastic_gamma.is_nan() {
+                return Err(option_invalid(
+                    "sqp_qp_elastic_gamma",
+                    "must be greater than zero",
+                ));
+            }
+            parsed.elastic_gamma = Some(elastic_gamma);
+        }
+
+        // Two lookups rather than a bare `get_bool_value`, and deliberately so:
+        // with no registry attached `get_string_value` answers "" / not-found
+        // for an unset name, and `get_bool_value` would reject that "" as a
+        // non-boolean instead of reporting it unset. Read the presence flag
+        // first, and only decode a value that is actually there.
+        let (_, explicitly_set) = options.get_string_value("sqp_qp_use_schur_updates", "")?;
+        if explicitly_set {
+            parsed.use_schur_updates =
+                Some(options.get_bool_value("sqp_qp_use_schur_updates", "")?.0);
+        }
+        let (_, explicitly_set) = options.get_string_value("sqp_qp_use_homotopy", "")?;
+        if explicitly_set {
+            parsed.use_homotopy = Some(options.get_bool_value("sqp_qp_use_homotopy", "")?.0);
+        }
+
+        let (updates, explicitly_set) =
+            options.get_integer_value("sqp_qp_max_schur_updates_before_refactor", "")?;
+        if explicitly_set {
+            let value = u32::try_from(updates).map_err(|_| {
+                option_invalid(
+                    "sqp_qp_max_schur_updates_before_refactor",
+                    "must be positive and fit in u32",
+                )
+            })?;
+            if value == 0 {
+                return Err(option_invalid(
+                    "sqp_qp_max_schur_updates_before_refactor",
+                    "must be positive",
+                ));
+            }
+            parsed.max_schur_updates_before_refactor = Some(value);
+        }
+
+        Ok(parsed)
+    }
+}
+
+#[cfg(test)]
+mod option_reader_tests {
+    use super::*;
+    use pounce_common::Index;
+
+    fn set_num(options: &mut OptionsList, name: &str, value: Number) {
+        options.set_numeric_value(name, value, true, true).unwrap();
+    }
+
+    fn set_int(options: &mut OptionsList, name: &str, value: Index) {
+        options.set_integer_value(name, value, true, true).unwrap();
+    }
+
+    fn set_str(options: &mut OptionsList, name: &str, value: &str) {
+        options.set_string_value(name, value, true, true).unwrap();
+    }
+
+    #[test]
+    fn active_set_controls_materialize_only_explicit_overrides() {
+        let defaults = ActiveSetOverrides::try_from_options_list(&OptionsList::new()).unwrap();
+        assert!(defaults.is_empty());
+
+        let mut options = OptionsList::new();
+        set_int(&mut options, "sqp_qp_max_iter", 37);
+        set_str(&mut options, "sqp_qp_anti_cycling", "bland");
+        set_num(&mut options, "sqp_qp_feas_tol", 1e-7);
+        set_num(&mut options, "sqp_qp_opt_tol", 2e-7);
+        set_num(&mut options, "sqp_qp_elastic_gamma", 1e4);
+        set_str(&mut options, "sqp_qp_use_schur_updates", "yes");
+        set_str(&mut options, "sqp_qp_use_homotopy", "no");
+        set_int(&mut options, "sqp_qp_max_schur_updates_before_refactor", 12);
+
+        let parsed = ActiveSetOverrides::try_from_options_list(&options).unwrap();
+        assert_eq!(parsed.max_iter, Some(37));
+        assert_eq!(parsed.anti_cycling, Some(AntiCyclingChoice::Bland));
+        assert_eq!(parsed.feas_tol, Some(1e-7));
+        assert_eq!(parsed.opt_tol, Some(2e-7));
+        assert_eq!(parsed.elastic_gamma, Some(1e4));
+        assert_eq!(parsed.use_schur_updates, Some(true));
+        assert_eq!(parsed.use_homotopy, Some(false));
+        assert_eq!(parsed.max_schur_updates_before_refactor, Some(12));
+    }
+
+    /// `apply` is the half both consumers share: an empty set must leave a
+    /// non-default base untouched, and an explicit value must beat it. That
+    /// is the whole reason the type carries `Option`s — the direct convex
+    /// driver seeds a size-scaled `max_iter` and turns Schur updates on, and
+    /// a user who asked for neither must keep the seed.
+    #[test]
+    fn apply_overlays_only_what_was_set() {
+        let seeded = QpOptions {
+            max_iter: 4242,
+            use_schur_updates: true,
+            ..QpOptions::default()
+        };
+
+        let mut untouched = seeded.clone();
+        ActiveSetOverrides::default().apply(&mut untouched);
+        assert_eq!(untouched.max_iter, 4242);
+        assert!(untouched.use_schur_updates);
+
+        let mut overridden = seeded.clone();
+        ActiveSetOverrides {
+            max_iter: Some(9),
+            ..ActiveSetOverrides::default()
+        }
+        .apply(&mut overridden);
+        assert_eq!(overridden.max_iter, 9);
+        // Untouched fields keep the seed, not `QpOptions::default()`.
+        assert!(overridden.use_schur_updates);
+    }
+
+    /// Without a registry attached nothing validates at set time, so the
+    /// reader is the only thing standing between a bad value and the solver.
+    #[test]
+    fn malformed_unregistered_values_are_rejected() {
+        let mut options = OptionsList::new();
+        set_int(&mut options, "sqp_qp_max_iter", 0);
+        assert!(ActiveSetOverrides::try_from_options_list(&options).is_err());
+
+        let mut options = OptionsList::new();
+        set_str(&mut options, "sqp_qp_anti_cycling", "maybe");
+        assert!(ActiveSetOverrides::try_from_options_list(&options).is_err());
+
+        let mut options = OptionsList::new();
+        set_num(&mut options, "sqp_qp_feas_tol", 0.0);
+        assert!(ActiveSetOverrides::try_from_options_list(&options).is_err());
+
+        let mut options = OptionsList::new();
+        set_int(&mut options, "sqp_qp_max_schur_updates_before_refactor", 0);
+        assert!(ActiveSetOverrides::try_from_options_list(&options).is_err());
+    }
+
+    /// The shared constructor is `#[track_caller]`, so a rejection points at
+    /// the read site rather than at one line inside `pounce-common`.
+    #[test]
+    fn a_rejection_is_attributed_to_this_reader() {
+        let mut options = OptionsList::new();
+        set_int(&mut options, "sqp_qp_max_iter", 0);
+        let err = ActiveSetOverrides::try_from_options_list(&options).unwrap_err();
+        assert!(
+            err.to_string().contains("options.rs"),
+            "expected the reader's own file, got: {err}"
+        );
     }
 }
