@@ -197,9 +197,23 @@ reach it. The core check is `g_l <= g(x*) <= g_u` over a TNLP.
 - `seeded_tnlp.rs` (134 lines) — primal warm-start-from-iterate wrapper,
   generic over TNLP.
 - `builtin.rs` (818 lines) — self-contained `impl TNLP` test problems; would
-  serve library consumers testing their own integration.
+  serve library consumers testing their own integration. **Moved** to
+  `pounce-nlp` (`pounce_nlp::builtin`). Its problems are known-good models
+  with known answers, which is what someone wiring up their first `TNLP`
+  wants to check their plumbing against before trusting it with a real model.
 - `cbf.rs` (867 lines) — a self-contained Conic Benchmark Format parser with
   no CLI or `.nl` coupling at all. Niche, but it is pure library code.
+  **Moved** to `pounce-convex` (`pounce_convex::cbf`) — not `pounce-nlp`,
+  because it builds `QpProblem` / `ConeSpec` and belongs beside the conic
+  solver that consumes them.
+
+Both were pure relocations: the only edits were `pounce_nlp::tnlp` → `crate::tnlp`
+and `pounce_convex::` → `crate::`. Their 6 and 10 inline tests travelled with
+them (the CLI suite drops 606 → 590 by exactly that 16). Following the
+precedent already set when the `.nl` pipeline moved to `pounce-nl`,
+`pounce-cli` re-exports both under their historical names, so every existing
+`crate::builtin::…` / `pounce_cli::cbf::…` path resolves unchanged — the move
+cost zero call-site churn.
 
 ## Finding 6 — a stale pointer in a user-facing message
 

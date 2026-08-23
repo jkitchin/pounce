@@ -1,6 +1,14 @@
-//! Built-in TNLP test problems for the CLI. Each problem is a
-//! self-contained `impl TNLP` so the CLI can run end-to-end without
-//! parsing an `.nl` file.
+//! Built-in TNLP test problems. Each is a self-contained `impl TNLP`, so a
+//! frontend can run end-to-end without parsing an `.nl` file — and so can
+//! anyone integrating against this crate.
+//!
+//! These were written for the `pounce` CLI's `--builtin` flag, which is why
+//! they cover the shapes a solver integration tends to get wrong rather than
+//! the shapes a textbook starts with: an unconstrained bowl, bound and
+//! equality constraints, a nonlinear equality, a genuinely infeasible model,
+//! and the Wächter–Biegler counterexample. If you are wiring up a `TNLP` for
+//! the first time, [`lookup`] gives you a known-good problem with a known
+//! answer to check your plumbing against before you trust it with your own.
 //!
 //! Currently shipped:
 //!
@@ -9,11 +17,11 @@
 //! * `rosenbrock` — `min 100*(x[1]-x[0]^2)^2 + (1-x[0])^2`,
 //!   unconstrained, exact Hessian. Optimum at `(1, 1)`, `f* = 0`.
 
-use pounce_common::types::{Index, Number};
-use pounce_nlp::tnlp::{
+use crate::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
+use pounce_common::types::{Index, Number};
 use std::cell::RefCell;
 use std::rc::Rc;
 

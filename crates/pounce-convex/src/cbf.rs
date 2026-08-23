@@ -31,7 +31,7 @@
 //! therefore **reverses**: pounce `(x,y,z) = (u₂, u₁, u₀)`. See
 //! `dev-notes/hsde.md` (the CBLIB benchmark-tier plan).
 
-use pounce_convex::{ConeSpec, QpProblem, Triplet};
+use crate::{ConeSpec, QpProblem, Triplet};
 use std::fmt;
 
 /// A parsed CBF cone declaration: a kind and the number of scalar rows it

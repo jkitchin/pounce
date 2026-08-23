@@ -15,6 +15,9 @@
 //! * [`diagnostics`]: model checks that need only a TNLP — starting-point
 //!   preflight and solution verification — so an embedder gets what the
 //!   `pounce` CLI's `check-x0` / `verify` subcommands report.
+//! * [`builtin`]: self-contained `impl TNLP` test problems with known
+//!   answers, for checking an integration's plumbing before trusting it
+//!   with a real model.
 //! * Transparent TNLP decorators every frontend can stack:
 //!   [`counting_tnlp::CountingTnlp`] (evaluation counts) and
 //!   [`seeded_tnlp::SeededTnlp`] (primal warm start from a chosen
@@ -29,6 +32,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod alg_types;
+pub mod builtin;
 pub mod constant_derivatives;
 pub mod counting_tnlp;
 pub mod derivative_test;

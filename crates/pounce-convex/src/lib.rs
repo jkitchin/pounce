@@ -29,6 +29,7 @@
 pub mod active_set;
 pub(crate) mod aggregate;
 pub mod batch;
+pub mod cbf;
 pub mod cones;
 pub(crate) mod correctors;
 pub mod crossover;

@@ -3,8 +3,15 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod builtin;
-pub mod cbf;
+// The built-in TNLP test problems moved to `pounce-nlp`: they are
+// self-contained `impl TNLP`s with no CLI or `.nl` coupling, and an embedder
+// wiring up their own TNLP wants a known-good problem to check against just
+// as much as this CLI does. The CBF reader moved to `pounce-convex`, next to
+// the `QpProblem` / `ConeSpec` types it builds and the conic solver that
+// consumes them. Re-exported under their historical names so existing
+// `crate::builtin::…` / `pounce_cli::cbf::…` paths keep resolving unchanged.
+pub use pounce_convex::cbf;
+pub use pounce_nlp::builtin;
 pub mod check_x0;
 pub mod citations;
 pub mod cli;
