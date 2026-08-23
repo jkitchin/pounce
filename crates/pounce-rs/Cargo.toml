@@ -49,6 +49,14 @@ sensitivity = ["dep:pounce-sensitivity"]
 # Everything the facade curates.
 full = ["convex", "qp", "sensitivity"]
 
+[dev-dependencies]
+# Restoration is not a facade dependency (see the crate docs on
+# `IpoptApplication::set_restoration_factory_provider`), but a solve that has
+# to reach a local-infeasibility verdict needs the restoration phase to get
+# there — so the second-opinion tests inject a provider the way the CLI and
+# the Python extension do.
+pounce-restoration.workspace = true
+
 [package.metadata.docs.rs]
 # docs.rs must render the feature-gated modules; otherwise the published
 # documentation shows only the NLP path and the gap #561 reported looks

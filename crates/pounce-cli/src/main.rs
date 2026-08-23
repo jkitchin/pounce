@@ -279,6 +279,9 @@ pub fn main() -> ExitCode {
             restart_cell.clone(),
         )));
         app.set_debug_hook(hook.clone());
+        // The ladder runs whole solves the user did not step into, so it stays
+        // out of the way while the interactive debugger is driving.
+        app.set_second_opinion_suppressed(true);
         debug_hook = Some(hook);
         // Install the Ctrl-C → break-into-debugger handler. All debug
         // modes are interruptible; this only changes Ctrl-C behavior
@@ -331,6 +334,28 @@ pub fn main() -> ExitCode {
         bff_mint,
     );
     app.set_restoration_factory_provider(resto_provider);
+
+    // The second-opinion ladder changes `feral_scaling` on rung 1, and the
+    // provider above captured the configuration it was built with — so hand
+    // the application a way to rebuild it against the rung's options, or the
+    // restoration sub-IPM would keep running on the settings that just failed.
+    // Without this the ladder still runs, varying the main IPM alone.
+    app.set_restoration_provider_mint(std::rc::Rc::new(
+        |options: &pounce_common::options_list::OptionsList| {
+            let feral_cfg = pounce_algorithm::application::feral_config_from_options(options);
+            let bff_mint = move || -> InnerBackendFactoryFactory {
+                let feral_cfg = feral_cfg.clone();
+                Box::new(move || default_backend_factory(feral_cfg.clone()))
+            };
+            make_default_restoration_factory_provider(
+                RestoAlgorithmBuilder::new(),
+                // Mirrors the rung's options, so the inner IPM inherits the
+                // `mu_strategy` rung 2 just set rather than the baseline's.
+                pounce_algorithm::application::algorithm_builder_from_option_list(options),
+                bff_mint,
+            )
+        },
+    ));
 
     // gh#483 follow-up: refuse a `linear_solver` pounce does not
     // implement. Checked here — before the banner, and before the routing
@@ -1577,191 +1602,53 @@ pub fn main() -> ExitCode {
     // adopt the retry's stats only when the retry is actually promoted (below).
     let mut solve_stats = app.statistics();
 
-    // Local-infeasibility second-opinion ladder. A local-infeasibility verdict
-    // is a *local* statement about a nonconvex problem — the IPM found a
-    // stationary point of the constraint violation, not a proof that none of
-    // the feasible set is reachable. Before shipping that verdict, re-solve
-    // along a genuinely different trajectory and promote only if the re-solve
-    // actually converges. Two rungs, in order, each varying exactly one knob
-    // from the baseline options:
+    // Local-infeasibility second-opinion ladder.
     //
-    //  1. `feral_scaling=mc64` — *numerical* diversity
-    //     (`feral_infeasibility_scaling_retry`, on by default). Some KKT
-    //     trajectories are chaotic: under two equally backward-stable
-    //     linear-solver scalings the iterates stay bit-identical for many
-    //     iterations, then diverge by ~1 ULP and fall into different basins —
-    //     one optimal, the other a spurious stationary point of the constraint
-    //     violation (discs.nl: InfNorm → infeasible, MC64/Identity/MA57/IPOPT →
-    //     optimal). Sensitive dependence, not a bad solve, so the a-priori
-    //     scaling router can't tell the two apart and no per-factor residual
-    //     flags it; the only reliable signal is the whole-solve verdict.
+    // The ladder itself now lives in `IpoptApplication::with_second_opinion`,
+    // so every frontend gets the same verdict rather than only this one; see
+    // that method for the two rungs and why each exists. What stays here is
+    // the console reconciliation the CLI owns.
     //
-    //  2. `mu_strategy=adaptive` — *algorithmic* diversity
-    //     (`infeasibility_mu_strategy_retry`, on by default). Rung 1 perturbs
-    //     only the linear algebra, so it is evidence *only* when the trajectory
-    //     is ULP-hypersensitive. When it isn't, MC64 retraces the same iterates
-    //     and agrees for the same reason the first solve was wrong — on gh #524
-    //     (`cresc4`, 6 vars / 8 constraints, feasible, Ipopt solves it in 71
-    //     iterations) the MC64 re-solve reproduced the original trajectory
-    //     bit-identically and "corroborated" the false verdict. A different
-    //     barrier strategy changes the iterate sequence itself, which is what
-    //     the monotone-µ default gets wrong here: adaptive µ walks to the known
-    //     optimum. This is also the remedy IPOPT's own documentation gives a
-    //     user who gets an infeasibility verdict on a problem they believe is
-    //     feasible; running it automatically just spares them the round trip.
+    // A presolve-*certified* infeasibility needs no suppression flag:
+    // `optimize_tnlp` short-circuits on the proof before it ever reaches
+    // dispatch, so the ladder is never entered for one. The handle is still
+    // read here for the verdict text below.
     //
-    // Rungs are *not* cumulative — rung 2 restores the baseline scaling first.
-    // On gh #524's `cresc4`, `mu_strategy=adaptive` alone solves the problem and
-    // `mu_strategy=adaptive` + `feral_scaling=mc64` does not, so stacking the
-    // knobs would have thrown the fix away.
-    let scaling_retry_enabled = app
-        .options()
-        .get_bool_value("feral_infeasibility_scaling_retry", "")
-        .map(|(v, _found)| v)
-        .unwrap_or(true);
-    let mu_retry_enabled = app
-        .options()
-        .get_bool_value("infeasibility_mu_strategy_retry", "")
-        .map(|(v, _found)| v)
-        .unwrap_or(true);
-    let already_mc64 = matches!(
-        pounce_algorithm::application::feral_config_from_options(app.options()).scaling,
-        pounce_feral::ScalingStrategy::Mc64Symmetric
-    );
-    // The tag the barrier rung must restore. Read the *resolved* strategy, not
-    // the option string: `feral_scaling` is applied only when set explicitly,
-    // and otherwise `FeralConfig::from_env()` governs via `POUNCE_FERAL_SCALING`
-    // — so the option string reads "auto" for an env-configured run, and
-    // writing that back would silently override the environment on the retry
-    // instead of restoring it. `External` is unreachable from the string option;
-    // if it ever arrives here there is no tag to write, so the barrier rung is
-    // dropped rather than guessed at.
-    let baseline_scaling =
-        match pounce_algorithm::application::feral_config_from_options(app.options()).scaling {
-            pounce_feral::ScalingStrategy::Auto => Some("auto"),
-            pounce_feral::ScalingStrategy::InfNorm => Some("infnorm"),
-            pounce_feral::ScalingStrategy::Mc64Symmetric => Some("mc64"),
-            pounce_feral::ScalingStrategy::Identity => Some("identity"),
-            pounce_feral::ScalingStrategy::External(_) => None,
-        };
-    let already_adaptive = app
-        .options()
-        .get_string_value("mu_strategy", "")
-        .map(|(v, _found)| v == "adaptive")
-        .unwrap_or(false);
-    // A presolve-*certified* infeasibility is exempt. This ladder exists to
-    // second-guess a numerical local-infeasibility verdict that a bad scaling
-    // or an unlucky barrier trajectory may have manufactured; re-solving to
-    // double-check an exact proof would burn whole solves to re-derive
-    // something neither knob can affect.
+    // gh #508: both solves print their own end-of-run banner, which is
+    // expected and announced — but when the retry is not promoted the last
+    // banner on the terminal is the retry's, while the `.sol`, the summary and
+    // the JSON report all carry the original verdict. Two banners disagreeing
+    // about one solve misleads a human reading the tail of the log and a
+    // machine reading it the same way: `validation/p3_control.py` keeps the
+    // last `EXIT:` line it sees and pairs it with the `.sol`, so it recorded a
+    // status the `.sol` never held. Measured on `min (x-5)² s.t. x²+δ = 0` at
+    // `tol=1e-4`: the console ended `Error in step computation.` (δ=1e-9) and
+    // `Maximum Number of Iterations Exceeded.` (δ=1e-1) over a `.sol` that said
+    // locally infeasible in both. Re-emitting the verdict that actually shipped
+    // makes the terminal's final word the true one.
+    //
+    // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
+    // which is what printed the two banners this one arbitrates; at
+    // `print_level 0` there are none to disagree.
     let presolve_certified = presolve_handle
         .as_ref()
         .and_then(|p| p.borrow().certified_infeasible());
-    let rungs = second_opinion_rungs(SecondOpinionAvailability {
-        scaling_retry_enabled,
-        mu_retry_enabled,
-        already_mc64,
-        already_adaptive,
-        baseline_scaling,
-    });
-    if !rungs.is_empty()
-        && debug_hook.is_none()
-        && presolve_certified.is_none()
-        && status == ApplicationReturnStatus::InfeasibleProblemDetected
-    {
-        eprintln!(
-            "pounce: local infeasibility — re-solving along {} different trajector{} before \
-             believing it (second-opinion ladder: {}).",
-            rungs.len(),
-            if rungs.len() == 1 { "y" } else { "ies" },
-            rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
-        );
-        let mut retry_status = status;
-        let mut retry_stats = solve_stats.clone();
-        let mut tried: Vec<&'static str> = Vec::new();
-        for rung in &rungs {
-            eprintln!("pounce: second opinion — re-solving with {}…", rung.label);
-            // Apply this rung's option assignments. The main IPM rereads its
-            // options fresh each solve, but the restoration sub-IPM uses the
-            // provider snapshotted above at the *original* options — so rebuild
-            // it too, or the restoration leg would stay on the failing settings.
-            for assignment in &rung.assignments {
-                let _ = app.options_mut().read_from_str(assignment, true);
-            }
-            let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-            let bff_mint = move || -> InnerBackendFactoryFactory {
-                let feral_cfg = feral_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone()))
-            };
-            let resto_provider = make_default_restoration_factory_provider(
-                RestoAlgorithmBuilder::new(),
-                app.algorithm_builder_from_options(),
-                bff_mint,
-            );
-            app.set_restoration_factory_provider(resto_provider);
 
-            retry_status = app.optimize_tnlp(Rc::clone(&tnlp));
-            retry_stats = app.statistics();
-            tried.push(rung.label);
-            if scaling_retry_promoted(retry_status) {
-                eprintln!(
-                    "pounce: {} re-solve recovered the problem — promoting ({retry_status:?}).",
-                    rung.label
-                );
-                break;
-            }
-            eprintln!(
-                "pounce: {} re-solve did not recover ({retry_status:?}).",
-                rung.label
-            );
-        }
-        if !scaling_retry_promoted(retry_status) {
-            eprintln!(
-                "pounce: keeping the original local-infeasibility verdict; it survived {} \
-                 independent re-solve(s) ({}).",
-                tried.len(),
-                tried.join(", "),
-            );
-        }
-        // Keep `status` and `solve_stats` in lockstep: on promotion the retry
-        // is authoritative (its verdict + its statistics); otherwise both stay
-        // the original local-infeasibility verdict and the original solve's
-        // statistics. See `resolve_scaling_retry_outcome` (code review L23).
-        (status, solve_stats) =
-            resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
-        // …and keep the *console* in lockstep with them too (gh #508). Both
-        // solves print their own end-of-run summary, which is expected and
-        // announced — but when the retry is not promoted the last banner on the
-        // terminal is the retry's, while the `.sol`, the summary and the JSON
-        // report all carry the original verdict. Two banners disagreeing about
-        // one solve misleads a human reading the tail of the log and a machine
-        // reading it the same way: `validation/p3_control.py` keeps the last
-        // `EXIT:` line it sees and pairs it with the `.sol`, so it recorded a
-        // status the `.sol` never held. Measured on `min (x-5)² s.t. x²+δ = 0`
-        // at `tol=1e-4`: the console ended `Error in step computation.`
-        // (δ=1e-9) and `Maximum Number of Iterations Exceeded.` (δ=1e-1) over a
-        // `.sol` that said locally infeasible in both. Re-emitting the verdict
-        // that actually shipped makes the terminal's final word the true one.
-        //
-        // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
-        // which is what printed the two banners this one arbitrates; at
-        // `print_level 0` there are none to disagree.
-        if !scaling_retry_promoted(retry_status)
-            && app
-                .options()
-                .get_integer_value("print_level", "")
-                .map(|(v, _found)| v >= 1)
-                .unwrap_or(true)
-        {
-            println!();
-            println!("EXIT: {}", print::status_message(status));
-            println!();
-            println!(
-                "POUNCE {}: {}",
-                env!("CARGO_PKG_VERSION"),
-                print::status_message(status)
-            );
-        }
+    if app.last_second_opinion_unpromoted()
+        && app
+            .options()
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true)
+    {
+        println!();
+        println!("EXIT: {}", print::status_message(status));
+        println!();
+        println!(
+            "POUNCE {}: {}",
+            env!("CARGO_PKG_VERSION"),
+            print::status_message(status)
+        );
     }
 
     // The machine-readable verdict, printed exactly once per run, after every
@@ -3721,205 +3608,6 @@ mod lp_nlp_fallback_tests {
                     "{class:?}/{status:?} must not reroute when the caller declines"
                 );
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod scaling_retry_tests {
-    use super::{
-        SecondOpinionAvailability, resolve_scaling_retry_outcome, scaling_retry_promoted,
-        second_opinion_rungs,
-    };
-    use pounce_nlp::SolveStatistics;
-    use pounce_nlp::return_codes::ApplicationReturnStatus;
-
-    fn avail() -> SecondOpinionAvailability {
-        SecondOpinionAvailability {
-            scaling_retry_enabled: true,
-            mu_retry_enabled: true,
-            already_mc64: false,
-            already_adaptive: false,
-            baseline_scaling: Some("auto"),
-        }
-    }
-
-    /// The default ladder is two rungs, scaling first (it is the cheaper and
-    /// longer-standing one), barrier strategy second.
-    #[test]
-    fn default_ladder_is_scaling_then_barrier_strategy() {
-        let rungs = second_opinion_rungs(avail());
-        let labels: Vec<_> = rungs.iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["feral_scaling=mc64", "mu_strategy=adaptive"]);
-    }
-
-    /// gh #524: the rungs are applied to the *baseline*, not stacked. The
-    /// barrier rung re-asserts the baseline scaling, because on `cresc4`
-    /// `mu_strategy=adaptive` recovers the optimum while `mu_strategy=adaptive`
-    /// together with `feral_scaling=mc64` still reports local infeasibility —
-    /// a cumulative ladder would throw the fix away.
-    #[test]
-    fn barrier_rung_restores_the_baseline_scaling() {
-        for baseline in ["auto", "infnorm"] {
-            let rungs = second_opinion_rungs(SecondOpinionAvailability {
-                baseline_scaling: Some(baseline),
-                ..avail()
-            });
-            let barrier = rungs
-                .iter()
-                .find(|r| r.label == "mu_strategy=adaptive")
-                .expect("barrier rung present");
-            assert!(
-                barrier
-                    .assignments
-                    .iter()
-                    .any(|a| a.trim() == format!("feral_scaling {baseline}")),
-                "barrier rung must reset the scaling to the baseline {baseline}, \
-                 got {:?}",
-                barrier.assignments,
-            );
-        }
-    }
-
-    /// A rung that cannot change anything is dropped rather than burning a
-    /// whole solve to re-derive the same answer.
-    #[test]
-    fn rungs_already_satisfied_at_baseline_are_dropped() {
-        let only_barrier = second_opinion_rungs(SecondOpinionAvailability {
-            already_mc64: true,
-            ..avail()
-        });
-        assert_eq!(
-            only_barrier.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
-        );
-
-        let only_scaling = second_opinion_rungs(SecondOpinionAvailability {
-            already_adaptive: true,
-            ..avail()
-        });
-        assert_eq!(
-            only_scaling.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-
-        assert!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                already_mc64: true,
-                already_adaptive: true,
-                ..avail()
-            })
-            .is_empty(),
-            "nothing left to vary means no ladder at all",
-        );
-    }
-
-    /// A resolved scaling with no `feral_scaling` tag to write back
-    /// (`ScalingStrategy::External`) drops the barrier rung rather than run it
-    /// under a scaling the baseline never used. The scaling rung is unaffected
-    /// — it does not need to restore anything.
-    #[test]
-    fn barrier_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
-        let rungs = second_opinion_rungs(SecondOpinionAvailability {
-            baseline_scaling: None,
-            ..avail()
-        });
-        assert_eq!(
-            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-    }
-
-    /// Each rung has its own opt-out, and turning both off restores upstream
-    /// IPOPT's behaviour of shipping the first verdict.
-    #[test]
-    fn each_rung_can_be_disabled_independently() {
-        assert_eq!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                scaling_retry_enabled: false,
-                ..avail()
-            })
-            .iter()
-            .map(|r| r.label)
-            .collect::<Vec<_>>(),
-            ["mu_strategy=adaptive"],
-        );
-        assert_eq!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                mu_retry_enabled: false,
-                ..avail()
-            })
-            .iter()
-            .map(|r| r.label)
-            .collect::<Vec<_>>(),
-            ["feral_scaling=mc64"],
-        );
-        assert!(
-            second_opinion_rungs(SecondOpinionAvailability {
-                scaling_retry_enabled: false,
-                mu_retry_enabled: false,
-                ..avail()
-            })
-            .is_empty(),
-        );
-    }
-
-    fn stats_with_iters(n: i32) -> SolveStatistics {
-        SolveStatistics {
-            iteration_count: n,
-            final_objective: n as f64,
-            ..SolveStatistics::default()
-        }
-    }
-
-    /// Code review L23: when the MC64 hypersensitivity re-solve does **not**
-    /// recover, the verdict reverts to the original local-infeasibility status
-    /// — and the reported statistics must revert with it, not leak the failed
-    /// retry's iteration count / objective.
-    #[test]
-    fn failed_retry_keeps_original_status_and_stats() {
-        let original = stats_with_iters(7);
-        let retry = stats_with_iters(42);
-        for retry_status in [
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            ApplicationReturnStatus::MaximumIterationsExceeded,
-            ApplicationReturnStatus::RestorationFailed,
-        ] {
-            assert!(!scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
-            assert_eq!(
-                status,
-                ApplicationReturnStatus::InfeasibleProblemDetected,
-                "a non-promoting retry ({retry_status:?}) keeps the original verdict"
-            );
-            assert_eq!(
-                stats.iteration_count, 7,
-                "stats must stay the original solve's, not the failed retry's"
-            );
-            assert_eq!(stats.final_objective, 7.0);
-        }
-    }
-
-    /// On promotion the retry is authoritative: its status AND its statistics
-    /// are reported together.
-    #[test]
-    fn promoted_retry_adopts_retry_status_and_stats() {
-        let original = stats_with_iters(7);
-        let retry = stats_with_iters(42);
-        for retry_status in [
-            ApplicationReturnStatus::SolveSucceeded,
-            ApplicationReturnStatus::SolvedToAcceptableLevel,
-        ] {
-            assert!(scaling_retry_promoted(retry_status));
-            let (status, stats) =
-                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
-            assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
-            assert_eq!(
-                stats.iteration_count, 42,
-                "promoted: stats must be the retry solve's"
-            );
-            assert_eq!(stats.final_objective, 42.0);
         }
     }
 }

@@ -72,6 +72,24 @@ pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
 /// this via [`IpoptApplication::set_restoration_factory_provider`].
 pub type RestorationFactoryProvider = Box<dyn FnMut() -> RestorationFactory>;
 
+/// Rebuilds a [`RestorationFactoryProvider`] against the *current* options.
+///
+/// A provider closure captures the linear-solver configuration it was built
+/// with, so when the second-opinion ladder changes `feral_scaling` the main
+/// IPM picks the new scaling up but the restoration sub-IPM does not — it
+/// would keep running on the settings that just failed. `pounce-algorithm`
+/// cannot rebuild the provider itself (the restoration solver lives in
+/// `pounce-restoration`, which depends on this crate, not the other way
+/// round), so a frontend that wants the full-strength ladder injects one of
+/// these via
+/// [`IpoptApplication::set_restoration_provider_mint`].
+///
+/// Without a mint the ladder still runs; rung 1 then varies the main IPM
+/// alone. That is a weaker second opinion, never a wrong one: promotion
+/// requires `Solve_Succeeded` / `Solved_To_Acceptable_Level`, so a weaker
+/// retry can only fail to recover.
+pub type RestorationProviderMint = Rc<dyn Fn(&OptionsList) -> RestorationFactoryProvider>;
+
 /// Callback fired by [`IpoptApplication::optimize_constrained`] once
 /// the IPM has converged (status `SolveSucceeded` or
 /// `SolvedToAcceptableLevel`) and before the user TNLP's
@@ -183,6 +201,22 @@ pub struct IpoptApplication {
     /// multi-pass drivers can run the inner IPM repeatedly without
     /// tripping the default factory's one-shot guard.
     restoration_factory_provider: Option<RestorationFactoryProvider>,
+    /// Rebuilds the restoration provider when the second-opinion ladder
+    /// changes an option the provider captured. See
+    /// [`RestorationProviderMint`].
+    restoration_provider_mint: Option<RestorationProviderMint>,
+    /// Suppress the local-infeasibility second-opinion ladder for this
+    /// application. Set by callers that already hold a better answer than a
+    /// re-solve could produce — an exact presolve infeasibility proof — or
+    /// that must not have solves run behind their back, like the interactive
+    /// debugger.
+    second_opinion_suppressed: bool,
+    /// Re-entrancy guard: the ladder's own re-solves must not ladder.
+    in_second_opinion: bool,
+    /// Did the most recent solve run a second-opinion ladder that failed to
+    /// promote? Read by frontends that must reconcile console output with the
+    /// verdict that actually shipped (gh #508).
+    last_second_opinion_unpromoted: bool,
     /// Optional hook fired once per `optimize_*` call on convergence,
     /// before the user TNLP's `finalize_solution`. See
     /// [`ConvergedCallback`].
@@ -332,6 +366,10 @@ impl IpoptApplication {
             diagnostics: None,
             debug_hook: None,
             restoration_factory_provider: None,
+            restoration_provider_mint: None,
+            second_opinion_suppressed: false,
+            in_second_opinion: false,
+            last_second_opinion_unpromoted: false,
             on_converged: None,
             record_iter_history: false,
             option_file_resolved: false,
@@ -448,6 +486,42 @@ impl IpoptApplication {
     /// and this are configured, the provider wins.
     pub fn set_restoration_factory_provider(&mut self, provider: RestorationFactoryProvider) {
         self.restoration_factory_provider = Some(provider);
+    }
+
+    /// Supply a rebuild hook for the restoration provider, so the
+    /// second-opinion ladder can vary the linear algebra for the restoration
+    /// sub-IPM as well as the main IPM. See [`RestorationProviderMint`] for
+    /// why this is injected rather than built here, and for what the ladder
+    /// does without one.
+    pub fn set_restoration_provider_mint(&mut self, mint: RestorationProviderMint) {
+        self.restoration_provider_mint = Some(mint);
+    }
+
+    /// Suppress the local-infeasibility second-opinion ladder.
+    ///
+    /// Two callers need this. An **exact presolve infeasibility proof**
+    /// outranks anything a re-solve could say — the ladder probes whether a
+    /// different trajectory reaches a feasible point, and a proof has already
+    /// settled that no such point exists, so re-deriving it would burn whole
+    /// solves on a question that is closed. The **interactive debugger** needs
+    /// it because the ladder runs solves the user did not step into.
+    pub fn set_second_opinion_suppressed(&mut self, suppressed: bool) {
+        self.second_opinion_suppressed = suppressed;
+    }
+
+    /// Did the most recent solve run a second-opinion ladder that failed to
+    /// promote?
+    ///
+    /// gh #508: both solves print their own end-of-run banner, which is
+    /// expected and announced — but when the retry is not promoted the last
+    /// banner on the terminal is the retry's, while the `.sol`, the summary and
+    /// the JSON report all carry the original verdict. Two banners disagreeing
+    /// about one solve mislead a human reading the tail of the log and a
+    /// machine reading it the same way. A frontend that prints banners uses
+    /// this to re-emit the verdict that actually shipped, so the terminal's
+    /// final word is the true one.
+    pub fn last_second_opinion_unpromoted(&self) -> bool {
+        self.last_second_opinion_unpromoted
     }
 
     /// Register a callback to run once the IPM has converged (status
@@ -981,7 +1055,8 @@ impl IpoptApplication {
         // same IPM). Independent of, and lower priority than, the ℓ₁
         // fallback above.
         if self.is_mu_strategy_fallback_enabled() {
-            return self.run_with_mu_strategy_fallback(tnlp);
+            return self
+                .with_second_opinion(|me| me.run_with_mu_strategy_fallback(Rc::clone(&tnlp)));
         }
         // Every problem — constrained or not — goes through the same
         // primal-dual IPM, exactly as upstream Ipopt does. There is no
@@ -989,7 +1064,234 @@ impl IpoptApplication {
         // backend (FERAL/MA57) handles the augmented system, so the
         // sparse IPM covers `m == 0` at any `n` without a dense-Hessian
         // blowup.
-        self.optimize_constrained(tnlp)
+        self.with_second_opinion(|me| me.optimize_constrained(Rc::clone(&tnlp)))
+    }
+
+    /// Run `solve`, and if it comes back `Infeasible_Problem_Detected`, ask
+    /// for a second opinion before shipping that verdict.
+    ///
+    /// A local-infeasibility verdict is a *local* statement about a nonconvex
+    /// problem — the IPM found a stationary point of the constraint violation,
+    /// not a proof that none of the feasible set is reachable. Before shipping
+    /// it, re-solve along a genuinely different trajectory and promote only if
+    /// the re-solve actually converges. Two rungs, each varying exactly one
+    /// knob from the baseline (see [`second_opinion_rungs`]):
+    ///
+    ///  1. `feral_scaling=mc64` — *numerical* diversity. Some KKT trajectories
+    ///     are chaotic: under two equally backward-stable linear-solver
+    ///     scalings the iterates stay bit-identical for many iterations, then
+    ///     diverge by ~1 ULP and fall into different basins — one optimal, the
+    ///     other a spurious stationary point of the constraint violation
+    ///     (`discs.nl`: InfNorm → infeasible, MC64/Identity/MA57/IPOPT →
+    ///     optimal). Sensitive dependence, not a bad solve, so the a-priori
+    ///     scaling router cannot tell the two apart and no per-factor residual
+    ///     flags it; the only reliable signal is the whole-solve verdict.
+    ///  2. `mu_strategy=adaptive` — *algorithmic* diversity. Rung 1 perturbs
+    ///     only the linear algebra, so it is evidence *only* when the
+    ///     trajectory is ULP-hypersensitive. When it isn't, MC64 retraces the
+    ///     same iterates and agrees for the same reason the first solve was
+    ///     wrong — on gh #524 (`cresc4`) the MC64 re-solve reproduced the
+    ///     original trajectory bit-identically and "corroborated" the false
+    ///     verdict. A different barrier strategy changes the iterate sequence
+    ///     itself. This is also the remedy IPOPT's own documentation gives a
+    ///     user who gets an infeasibility verdict on a problem they believe is
+    ///     feasible; running it automatically just spares them the round trip.
+    ///
+    /// This used to live in the `pounce` CLI, which meant the CLI and every
+    /// in-process frontend (`pounce-rs`, the Python `Problem` API,
+    /// `pounce-cinterface`, `pounce-wasm`) could return *different verdicts*
+    /// for the same model — and a false `Infeasible_Problem_Detected` is the
+    /// dangerous direction for a branch-and-bound driver, which silently prunes
+    /// a node that may contain the optimum. It runs here so every entry point
+    /// gets the same answer.
+    fn with_second_opinion(
+        &mut self,
+        solve: impl Fn(&mut Self) -> ApplicationReturnStatus,
+    ) -> ApplicationReturnStatus {
+        self.last_second_opinion_unpromoted = false;
+        let status = solve(self);
+        if status != ApplicationReturnStatus::InfeasibleProblemDetected
+            || self.second_opinion_suppressed
+            || self.in_second_opinion
+        {
+            return status;
+        }
+        // A caller that installed the legacy one-shot restoration factory
+        // (`set_restoration_factory`) rather than a provider has declared
+        // single-run semantics: `make_default_restoration_factory` panics with
+        // "restoration factory invoked more than once" on a second inner solve,
+        // which is exactly what a ladder rung would ask for. The ℓ₁ outer loop
+        // and the ℓ₁-on-restoration-failure retry carry the same restriction —
+        // the ladder is simply another multi-run caller, so it honours the same
+        // boundary instead of turning an infeasibility verdict into a panic.
+        // Callers who want the ladder use `set_restoration_factory_provider`,
+        // which mints a fresh factory per solve.
+        if self.restoration_factory.is_some() && self.restoration_factory_provider.is_none() {
+            return status;
+        }
+        let avail = SecondOpinionAvailability {
+            scaling_retry_enabled: self
+                .options
+                .get_bool_value("feral_infeasibility_scaling_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true),
+            mu_retry_enabled: self
+                .options
+                .get_bool_value("infeasibility_mu_strategy_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true),
+            already_mc64: matches!(
+                feral_config_from_options(&self.options).scaling,
+                pounce_feral::ScalingStrategy::Mc64Symmetric
+            ),
+            already_adaptive: self
+                .options
+                .get_string_value("mu_strategy", "")
+                .map(|(v, _found)| v == "adaptive")
+                .unwrap_or(false),
+            // Read the *resolved* strategy, not the option string:
+            // `feral_scaling` is applied only when set explicitly, and
+            // otherwise `FeralConfig::from_env()` governs via
+            // `POUNCE_FERAL_SCALING` — so the option string reads "auto" for an
+            // env-configured run, and writing that back would silently override
+            // the environment on the retry instead of restoring it. `External`
+            // is unreachable from the string option; if it ever arrives here
+            // there is no tag to write, so the barrier rung is dropped rather
+            // than guessed at.
+            baseline_scaling: match feral_config_from_options(&self.options).scaling {
+                pounce_feral::ScalingStrategy::Auto => Some("auto"),
+                pounce_feral::ScalingStrategy::InfNorm => Some("infnorm"),
+                pounce_feral::ScalingStrategy::Mc64Symmetric => Some("mc64"),
+                pounce_feral::ScalingStrategy::Identity => Some("identity"),
+                pounce_feral::ScalingStrategy::External(_) => None,
+            },
+        };
+        let rungs = second_opinion_rungs(avail);
+        if rungs.is_empty() {
+            return status;
+        }
+
+        let announce = self
+            .options
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true);
+        if announce {
+            eprintln!(
+                "pounce: local infeasibility — re-solving along {} different trajector{} before \
+                 believing it (second-opinion ladder: {}).",
+                rungs.len(),
+                if rungs.len() == 1 { "y" } else { "ies" },
+                rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
+            );
+        }
+
+        // Snapshot the baseline option text so each rung starts from it rather
+        // than from the previous rung, and so the caller's option table is
+        // handed back exactly as they left it.
+        let baseline_assignments = Self::second_opinion_baseline_assignments(&self.options);
+        let original_stats = self.statistics();
+        let mut retry_status = status;
+        let mut retry_stats = original_stats.clone();
+        let mut tried: Vec<&'static str> = Vec::new();
+
+        self.in_second_opinion = true;
+        for rung in &rungs {
+            if announce {
+                eprintln!("pounce: second opinion — re-solving with {}…", rung.label);
+            }
+            for assignment in &rung.assignments {
+                let _ = self.options.read_from_str(assignment, true);
+            }
+            // The main IPM rereads its options fresh each solve, but a
+            // restoration provider captured the configuration it was built
+            // with — rebuild it, or the restoration leg stays on the settings
+            // that just failed. Absent a mint the rung still runs; see
+            // `RestorationProviderMint`.
+            if let Some(mint) = self.restoration_provider_mint.clone() {
+                let provider = mint(&self.options);
+                self.restoration_factory_provider = Some(provider);
+            }
+            retry_status = solve(self);
+            retry_stats = self.statistics();
+            tried.push(rung.label);
+            if second_opinion_promoted(retry_status) {
+                if announce {
+                    eprintln!(
+                        "pounce: {} re-solve recovered the problem — promoting ({retry_status:?}).",
+                        rung.label
+                    );
+                }
+                break;
+            }
+            if announce {
+                eprintln!(
+                    "pounce: {} re-solve did not recover ({retry_status:?}).",
+                    rung.label
+                );
+            }
+        }
+        self.in_second_opinion = false;
+
+        if !second_opinion_promoted(retry_status) {
+            self.last_second_opinion_unpromoted = true;
+            if announce {
+                eprintln!(
+                    "pounce: keeping the original local-infeasibility verdict; it survived {} \
+                     independent re-solve(s) ({}).",
+                    tried.len(),
+                    tried.join(", "),
+                );
+            }
+            // Put the caller's options back the way they were. On promotion
+            // the winning rung's settings are the ones that produced the
+            // reported answer, so they stay.
+            for assignment in &baseline_assignments {
+                let _ = self.options.read_from_str(assignment, true);
+            }
+            if let Some(mint) = self.restoration_provider_mint.clone() {
+                let provider = mint(&self.options);
+                self.restoration_factory_provider = Some(provider);
+            }
+        }
+
+        // Keep status and statistics in lockstep: on promotion the retry is
+        // authoritative (its verdict *and* its statistics); otherwise both stay
+        // the original verdict and the original solve's numbers, so a report
+        // never pairs the original verdict with the failed retry's iteration
+        // count or objective (code review L23).
+        let (final_status, final_stats) =
+            resolve_second_opinion_outcome(retry_status, original_stats, retry_stats);
+        *self.statistics.borrow_mut() = final_stats;
+        final_status
+    }
+
+    /// The option assignments that restore the ladder's baseline: the resolved
+    /// `feral_scaling` tag and the `mu_strategy` the caller actually had set.
+    ///
+    /// `mu_strategy` is restored to its *explicit* value, or to the registry
+    /// default when the caller never set it — writing back a resolved value the
+    /// caller did not choose would turn an unset option into a set one and
+    /// change what `mu_strategy_was_set` reports on the next solve.
+    fn second_opinion_baseline_assignments(options: &OptionsList) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(tag) = match feral_config_from_options(options).scaling {
+            pounce_feral::ScalingStrategy::Auto => Some("auto"),
+            pounce_feral::ScalingStrategy::InfNorm => Some("infnorm"),
+            pounce_feral::ScalingStrategy::Mc64Symmetric => Some("mc64"),
+            pounce_feral::ScalingStrategy::Identity => Some("identity"),
+            pounce_feral::ScalingStrategy::External(_) => None,
+        } {
+            out.push(format!("feral_scaling {tag}\n"));
+        }
+        if let Ok((v, found)) = options.get_string_value("mu_strategy", "")
+            && found
+        {
+            out.push(format!("mu_strategy {v}\n"));
+        } else {
+            out.push("mu_strategy monotone\n".to_string());
+        }
+        out
     }
 
     /// Read the ℓ₁ wrapper master switch from the OptionsList.
@@ -3411,1037 +3713,13 @@ impl IpoptApplication {
         app_status
     }
 
-    /// Build an [`AlgorithmBuilder`] populated from the app's
-    /// [`OptionsList`]. Public so callers wiring the restoration
-    /// factory can hand the *inner* IPM a builder that mirrors the
-    /// outer's `mu_strategy`/`mu_oracle`/line-search choices —
-    /// matching upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`,
-    /// which reads the same `mu_strategy` option with prefix `"resto."
-    /// + prefix` and falls back to the outer setting.
+    /// The instance method: builds against this application's own options.
+    /// Delegates to [`algorithm_builder_from_option_list`], which is the free
+    /// function a caller reaches for when it holds an `OptionsList` but not
+    /// (or not exclusively) the application — the second-opinion ladder's
+    /// restoration-provider mint is the case that forced the split.
     pub fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
-        let mut builder = AlgorithmBuilder::new();
-
-        // `mehrotra_algorithm` is parsed first so its cascading
-        // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
-        // overridden by an explicit user setting of those keys
-        // below. Mirrors `IpAlgBuilder.cpp:Mehrotra`.
-        // `fast_step_computation` — skip the search-direction residual
-        // check and allow an inexact linear solve. `PdSearchDirCalc` has
-        // consumed this flag since it landed, hard-coded to `false`; the
-        // option's read site was simply missing, so setting it did
-        // nothing at all (gh#483 follow-up, #191 round 2).
-        if let Ok((v, true)) = self.options.get_string_value("fast_step_computation", "") {
-            builder.fast_step_computation = v.eq_ignore_ascii_case("yes");
-        }
-
-        let mut mehrotra_on = false;
-        if let Ok((v, found)) = self.options.get_string_value("mehrotra_algorithm", "") {
-            if found && v == "yes" {
-                mehrotra_on = true;
-                builder.mehrotra_algorithm = true;
-                builder.mu_strategy = MuStrategyChoice::Adaptive;
-                builder.mu_oracle = crate::mu::adaptive::MuOracleKind::Probing;
-                // `accept_every_trial_step` short-circuits the alpha
-                // loop / filter — Mehrotra steps would otherwise be
-                // rejected by the filter on LP-shaped problems because
-                // the barrier objective is non-monotone along the
-                // corrector. Mirrors upstream `IpAlgBuilder.cpp:Mehrotra`.
-                builder.line_search.accept_every_trial_step = true;
-                // Aggressive iterate-push defaults (`SetNumericValueIfUnset`
-                // in upstream). The explicit user parses below will
-                // overwrite these if the user set them explicitly.
-                builder.init.bound_push = 10.0;
-                builder.init.bound_frac = 0.2;
-                builder.init.slack_bound_push = 10.0;
-                builder.init.slack_bound_frac = 0.2;
-                builder.init.bound_mult_init_val = 10.0;
-                builder.init.constr_mult_init_max = 0.0;
-                // `alpha_for_y=bound_mult` — Mehrotra wants the
-                // equality multipliers to advance with the dual
-                // alpha so they stay in step with z/v. Mirrors
-                // upstream `IpIpoptAlg.cpp:InitializeImpl`.
-                builder.line_search.alpha_for_y =
-                    crate::line_search::backtracking::AlphaForY::BoundMult;
-                // `adaptive_mu_globalization=never-monotone-mode` —
-                // upstream `IpIpoptAlg.cpp:148-154` enforces this:
-                // Mehrotra disables the globalization switch entirely
-                // (no fallback to monotone mode when convergence
-                // stalls). Required for the unsafeguarded Mehrotra
-                // path to function.
-                builder.mu.adaptive_mu_globalization =
-                    crate::mu::adaptive::AdaptiveMuGlobalization::NeverMonotoneMode;
-                // `least_square_init_primal=yes` — upstream
-                // `IpIpoptAlg.cpp:182` enables this for the Mehrotra
-                // cascade. Replaces the user's starting `x` with the
-                // min-norm primal that satisfies the linearized
-                // equality+inequality constraints. Critical on
-                // LP-shaped problems where the user's starting point
-                // can be wildly infeasible (e.g. nuffield2_trap).
-                builder.init.least_square_init_primal = true;
-            }
-        }
-
-        if let Ok((v, found)) = self.options.get_string_value("mu_strategy", "") {
-            if found {
-                let parsed = match v.as_str() {
-                    "adaptive" => MuStrategyChoice::Adaptive,
-                    _ => MuStrategyChoice::Monotone,
-                };
-                if mehrotra_on && matches!(parsed, MuStrategyChoice::Monotone) {
-                    // Upstream Ipopt refuses this combination: Mehrotra
-                    // needs an affine step every iter, which only the
-                    // adaptive path computes. Keep adaptive and warn.
-                    tracing::warn!(target: "pounce::algorithm",
-                        "pounce: mehrotra_algorithm=yes requires \
-                         mu_strategy=adaptive; ignoring \
-                         mu_strategy=monotone."
-                    );
-                } else {
-                    builder.mu_strategy = parsed;
-                }
-            }
-        }
-        if let Ok((v, found)) = self.options.get_string_value("mu_oracle", "") {
-            if found {
-                builder.mu_oracle = match v.as_str() {
-                    "loqo" => crate::mu::adaptive::MuOracleKind::Loqo,
-                    "probing" => crate::mu::adaptive::MuOracleKind::Probing,
-                    _ => crate::mu::adaptive::MuOracleKind::QualityFunction,
-                };
-            }
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("adaptive_mu_globalization", "")
-        {
-            if found {
-                use crate::mu::adaptive::AdaptiveMuGlobalization;
-                builder.mu.adaptive_mu_globalization = match v.as_str() {
-                    "kkt-error" => AdaptiveMuGlobalization::KktError,
-                    "never-monotone-mode" => AdaptiveMuGlobalization::NeverMonotoneMode,
-                    _ => AdaptiveMuGlobalization::ObjConstrFilter,
-                };
-            }
-        }
-        if let Ok((v, found)) = self.options.get_string_value("hessian_approximation", "") {
-            if found {
-                builder.hessian_approximation = match v.as_str() {
-                    "limited-memory" => HessianApproxChoice::LimitedMemory,
-                    _ => HessianApproxChoice::Exact,
-                };
-            }
-        }
-        // **Upstream changes the `mu_strategy` default for a
-        // limited-memory Hessian.** `IpAlgBuilder.cpp:1059`:
-        //
-        //     if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
-        //     {
-        //        // Change default for quasi-Newton option (then we use adaptive)
-        //        ... if( hessian_approximation == LIMITED_MEMORY )
-        //               smuupdate = "adaptive";
-        //     }
-        //
-        // and again at `:920` for the restoration-phase algorithm.
-        // Registered default is `monotone`; the quasi-Newton path takes
-        // `adaptive` unless the caller says otherwise. pounce read the
-        // registered default unconditionally, so every L-BFGS solve ran
-        // a barrier schedule Ipopt does not use on that path — a
-        // trajectory divergence on the arm the Python frontend and the
-        // CasADi plugin select automatically (gh#746).
-        //
-        // The restoration sub-IPM inherits this: `run_inner_resto`
-        // clones the configured `inner_alg_builder`, so the flag set
-        // here is what the resto algorithm gets, matching `:920`.
-        //
-        // Only when unset — an explicit `mu_strategy` still wins, and
-        // `mehrotra_algorithm` (parsed above) has already forced
-        // adaptive on its own terms.
-        if builder.hessian_approximation == HessianApproxChoice::LimitedMemory
-            && !self.mu_strategy_was_set()
-        {
-            builder.mu_strategy = MuStrategyChoice::Adaptive;
-        }
-        // Limited-memory quasi-Newton update formula. Registered upstream
-        // (`limited_memory_update_type`, IpLimMemQuasiNewtonUpdater.cpp) but
-        // until now read nowhere on the IPM path — the updater was hard-wired
-        // to Powell-damped BFGS. SR1 is honored too (the updater and the
-        // low-rank/inertia path already handle its indefinite models).
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("limited_memory_update_type", "")
-        {
-            if found {
-                builder.limited_memory_update_type = match v.as_str() {
-                    "sr1" => UpdateType::Sr1,
-                    _ => UpdateType::Bfgs,
-                };
-            }
-        }
-        // Limited-memory history length (`limited_memory_max_history`).
-        if let Ok((v, found)) = self
-            .options
-            .get_integer_value("limited_memory_max_history", "")
-        {
-            if found && v >= 0 {
-                builder.limited_memory_max_history = v as Index;
-            }
-        }
-        // `limited_memory_initialization` — which formula picks the
-        // initial Hessian scalar σ. Registered since the option port with
-        // upstream's `scalar1` default and read nowhere until #677, so
-        // the updater's own `Scalar2` default was the only value any
-        // solve ever used: setting the option did nothing, and it warned
-        // nothing. Same miss as gh#483 / #191 round 2 (which wired
-        // `limited_memory_init_val_max`/`_min`) — this is the third
-        // argument to that same `initial_hessian_scalar` call.
-        //
-        // The effective default now follows the registry (`scalar1`),
-        // matching Ipopt. σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)² ≥ 1 and
-        // is unbounded as the curvature pair degrades, so on an
-        // ill-conditioned problem `scalar2` inflates `B0 = σI` until it
-        // swamps the rank-2 corrections and the step collapses.
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("limited_memory_initialization", "")
-        {
-            if found {
-                use crate::hess::lim_mem_quasi_newton::InitialApprox;
-                // Every registered value is named explicitly. #551 §3
-                // held this option back precisely because wiring only
-                // the values that mapped would leave the rest falling
-                // back silently — a new no-op created by the fix — so a
-                // catch-all standing in for a real value is the one
-                // shape to avoid here. `OptionsList` rejects any
-                // unregistered value before this runs (`options_list.rs`
-                // `OPTION_INVALID`), so the final arm is unreachable
-                // rather than a fallback.
-                builder.limited_memory_initialization = match v.as_str() {
-                    "scalar1" => InitialApprox::Scalar1,
-                    "scalar2" => InitialApprox::Scalar2,
-                    "scalar3" => InitialApprox::Scalar3,
-                    "scalar4" => InitialApprox::Scalar4,
-                    "constant" => InitialApprox::Constant,
-                    _ => InitialApprox::Scalar2,
-                };
-            }
-        }
-        // `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation
-        // of the equality multipliers once feasible (#677).
-        //
-        // Upstream registers `recalc_y` as `no`, but its own option text
-        // ends "If a limited memory quasi-Newton option is chosen, this
-        // is used by default", so upstream's effective default is
-        // conditional on the Hessian approximation.
-        //
-        // **pounce does not follow that, and the discrepancy is
-        // deliberate.** Auto-enabling it for the limited-memory path was
-        // implemented and measured against the fixture corpus first: it
-        // moved 16 of 57 fixtures on the L-BFGS leg and took **7 from
-        // solved to not solved, with nothing moving the other way** —
-        // `airport` 56 it → `SearchDirectionBecomesTooSmall` at 541,
-        // `pooling_rt2stp` 413 it → the same at 1775, all three `jit1`
-        // variants, `linear_eq_collapsed_box`, and `hs13_bigstart` to
-        // the iteration cap. The signature is consistent: re-estimating
-        // `y` on every feasible iteration overwrites Newton multipliers
-        // that were converging, the dual never settles, and the step
-        // vanishes short of the certificate.
-        //
-        // So the feature is available and off by default. That still
-        // closes the gap that mattered — until #677 the option was
-        // refused outright as unimplemented, so an L-BFGS user could not
-        // reach Ipopt's behaviour at all. They can now, by asking.
-        //
-        // Why it is worth having: a quasi-Newton model's dual step is
-        // computed from an approximate `W`, so L-BFGS can settle a
-        // feasible primal and still not drive `inf_du` to tolerance —
-        // the failure a 59,939-variable CasADi model hit, oscillating
-        // `inf_du` between 3.6e-3 and 1.8e+01 for 300 iterations with
-        // the objective already settled. On that shape it is the fix;
-        // on a corpus of small well-conditioned models it is a
-        // pessimisation. Matching upstream's conditional default needs
-        // to explain the 7 regressions first.
-        if let Ok((v, true)) = self.options.get_string_value("recalc_y", "") {
-            builder.recalc_y = v == "yes";
-        }
-        if let Ok((v, true)) = self.options.get_numeric_value("recalc_y_feas_tol", "") {
-            builder.recalc_y_feas_tol = v;
-        }
-        // `limited_memory_init_val` — σ before any curvature pair exists,
-        // and every iteration under `constant`. Also unread until #677;
-        // the empty-history branch hard-coded the same `1.0`.
-        if let Ok((v, true)) = self
-            .options
-            .get_numeric_value("limited_memory_init_val", "")
-        {
-            builder.limited_memory_init_val = v;
-        }
-        // `limited_memory_max_skipping` (#686) — registered and unread,
-        // and the feature behind it did not exist either: the updater
-        // counted nothing and never discarded its history.
-        if let Ok((v, true)) = self
-            .options
-            .get_integer_value("limited_memory_max_skipping", "")
-        {
-            if v >= 0 {
-                builder.limited_memory_max_skipping = v as Index;
-            }
-        }
-        if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
-            if found {
-                builder.line_search_method = match v.as_str() {
-                    "cg-penalty" => LineSearchChoice::CgPenalty,
-                    "penalty" => LineSearchChoice::Penalty,
-                    _ => LineSearchChoice::Filter,
-                };
-            }
-        }
-        // `accept_every_trial_step` — direct user override. Parsed
-        // after the Mehrotra cascade so an explicit `no` still wins.
-        if let Ok((v, found)) = self.options.get_string_value("accept_every_trial_step", "") {
-            if found {
-                builder.line_search.accept_every_trial_step = v == "yes";
-            }
-        }
-        // `alpha_for_y` — direct user override. Parsed after the
-        // Mehrotra cascade so an explicit value still wins.
-        if let Ok((v, found)) = self.options.get_string_value("alpha_for_y", "") {
-            if found {
-                use crate::line_search::backtracking::AlphaForY;
-                builder.line_search.alpha_for_y = match v.as_str() {
-                    "primal" => AlphaForY::Primal,
-                    "bound-mult" | "bound_mult" => AlphaForY::BoundMult,
-                    "full" => AlphaForY::Full,
-                    "min" => AlphaForY::Min,
-                    "max" => AlphaForY::Max,
-                    "primal-and-full" | "dual-and-full" => AlphaForY::Primal,
-                    _ => AlphaForY::Primal,
-                };
-            }
-        }
-        // `nlp_scaling_method` is consumed NLP-side in
-        // `OrigIpoptNlp::determine_scaling_from_starting_point` (see the
-        // `determine_scaling_from_starting_point` call earlier in this
-        // method); there is no algorithm-side scaling strategy to wire.
-        // `limited_memory_init_val_max` / `_min` — the clamp on the
-        // initial Hessian scalar. `LimMemQuasiNewtonUpdater` consumes
-        // both in `initial_hessian_scalar`; only the read sites were
-        // missing, so setting either did nothing (gh#483, #191 round 2).
-        if let Ok((v, true)) = self
-            .options
-            .get_numeric_value("limited_memory_init_val_max", "")
-        {
-            builder.limited_memory_init_val_max = v;
-        }
-        if let Ok((v, true)) = self
-            .options
-            .get_numeric_value("limited_memory_init_val_min", "")
-        {
-            builder.limited_memory_init_val_min = v;
-        }
-
-        // Unlike the other options here, we always honor the registry
-        // value (not just when the user set it explicitly): the option
-        // registry default is "ma57" but `AlgorithmBuilder::default`
-        // has `linear_solver: Feral`, so gating on `found` would
-        // silently route default runs through Feral while the banner
-        // (and ipopt-compatible behavior) advertises MA57.
-        //
-        // Record the **effective** backend, not the requested one. MA57 lives
-        // behind the optional `ma57` cargo feature (HSL is licensed and needs a
-        // Fortran toolchain); without it `default_backend_factory` silently
-        // substitutes FERAL. Storing `Ma57` here therefore made
-        // `builder.linear_solver` disagree with the backend actually built, and
-        // consumers acted on the lie: the Schur KKT gate in
-        // `alg_builder::build_with_backend` tests `== Feral`, so on the
-        // pure-Rust default build — where the registry default (then upstream's
-        // "ma57") resolved to FERAL anyway — `set_kkt_schur_block()` silently
-        // never engaged for ANY user. Resolving here keeps the field truthful
-        // for every consumer.
-        //
-        // The `_ =>` arm is now only reachable for `feral`: every other name
-        // is refused up front by `unimplemented_linear_solver`. It used to
-        // swallow `mumps`, `pardiso`, `ma97`, … and run FERAL instead.
-        if let Ok((v, _found)) = self.options.get_string_value("linear_solver", "") {
-            let requested = if v.eq_ignore_ascii_case("ma57") {
-                LinearSolverChoice::Ma57
-            } else {
-                LinearSolverChoice::Feral
-            };
-            builder.linear_solver =
-                if matches!(requested, LinearSolverChoice::Ma57) && !cfg!(feature = "ma57") {
-                    LinearSolverChoice::Feral
-                } else {
-                    requested
-                };
-        }
-
-        // `linear_system_scaling` — symmetric scaling of the augmented
-        // KKT matrix before factorization. Port of
-        // `IpTSymLinearSolver.cpp:RegisterOptions` plumbing. Default
-        // "none"; "ruiz" invokes the Ruiz-2001 symmetric ∞-norm
-        // equilibration in `RuizTSymScalingMethod`. "mc19" and
-        // "slack-based" are accepted by the registry but not yet
-        // implemented at this layer; they fall back to no scaling
-        // with a one-line notice.
-        //
-        // `slack-based` is implemented as of #677. It used to reach the
-        // no-scaling fallback through the catch-all arm, which meant it
-        // fell back **silently** — the comment above promised a notice
-        // that only `mc19` actually emitted. It is not a hypothetical
-        // value: it is what Ipopt's own recommended configuration for
-        // large collocation NLPs uses, so the users most likely to set
-        // it were the least likely to be told it did nothing. The
-        // catch-all is left for genuinely unreachable input —
-        // `OptionsList` rejects anything the registry does not list.
-        if let Ok((v, found)) = self.options.get_string_value("linear_system_scaling", "") {
-            if found {
-                builder.linear_system_scaling = match v.as_str() {
-                    "ruiz" => crate::alg_builder::LinearSystemScalingChoice::Ruiz,
-                    "mc19" => crate::alg_builder::LinearSystemScalingChoice::Mc19,
-                    "slack-based" => crate::alg_builder::LinearSystemScalingChoice::SlackBased,
-                    _ => crate::alg_builder::LinearSystemScalingChoice::None,
-                };
-            }
-        }
-        if let Ok((v, found)) = self.options.get_bool_value("linear_scaling_on_demand", "") {
-            if found {
-                builder.linear_scaling_on_demand = v;
-            }
-        }
-
-        // Convergence tolerances (port of `IpOptErrorConvCheck.cpp`'s
-        // `RegisterOptions` consumers). Defaults already match upstream
-        // — only override when the user set the key explicitly.
-        let read_num = |key: &str| -> Option<f64> {
-            self.options
-                .get_numeric_value(key, "")
-                .ok()
-                .and_then(|(v, f)| f.then_some(v))
-        };
-        let read_int = |key: &str| -> Option<i32> {
-            self.options
-                .get_integer_value(key, "")
-                .ok()
-                .and_then(|(v, f)| f.then_some(v))
-        };
-        if let Some(v) = read_num("tol") {
-            builder.conv_check.tol = v;
-        }
-        if let Some(v) = read_num("obj_scale_certificate_threshold") {
-            builder.conv_check.obj_scale_certificate_threshold = v;
-        }
-        if let Some(v) = read_num("primal_noise_floor_kappa") {
-            builder.conv_check.primal_noise_floor_kappa = v;
-        }
-        if let Some(v) = read_num("acceptable_progress_kappa") {
-            builder.conv_check.acceptable_progress_kappa = v;
-        }
-        if let Some(v) = read_num("dual_inf_scale_kappa") {
-            builder.conv_check.dual_inf_scale_kappa = v;
-        }
-        if let Some(v) = read_num("kkt_fidelity_tol") {
-            builder.kkt_fidelity_tol = v;
-        }
-        if let Some(v) = read_num("dual_inf_tol") {
-            builder.conv_check.dual_inf_tol = v;
-        }
-        if let Some(v) = read_num("constr_viol_tol") {
-            builder.conv_check.constr_viol_tol = v;
-        }
-        if let Some(v) = read_num("compl_inf_tol") {
-            builder.conv_check.compl_inf_tol = v;
-        }
-        if let Some(v) = read_int("max_iter") {
-            builder.conv_check.max_iter = v;
-        }
-        if let Some(v) = read_num("max_cpu_time") {
-            builder.conv_check.max_cpu_time = v;
-        }
-        if let Some(v) = read_num("max_wall_time") {
-            builder.conv_check.max_wall_time = v;
-        }
-        if let Some(v) = read_num("acceptable_tol") {
-            builder.conv_check.acceptable_tol = v;
-        }
-        if let Some(v) = read_num("acceptable_dual_inf_tol") {
-            builder.conv_check.acceptable_dual_inf_tol = v;
-        }
-        if let Some(v) = read_num("acceptable_constr_viol_tol") {
-            builder.conv_check.acceptable_constr_viol_tol = v;
-        }
-        if let Some(v) = read_num("acceptable_compl_inf_tol") {
-            builder.conv_check.acceptable_compl_inf_tol = v;
-        }
-        if let Some(v) = read_num("acceptable_obj_change_tol") {
-            builder.conv_check.acceptable_obj_change_tol = v;
-        }
-        if let Some(v) = read_int("acceptable_iter") {
-            builder.conv_check.acceptable_iter = v;
-        }
-        if let Some(v) = read_num("infeas_stationarity_tol") {
-            builder.conv_check.infeas_stationarity_tol = v;
-        }
-        if let Some(v) = read_num("infeas_viol_kappa") {
-            builder.conv_check.infeas_viol_kappa = v;
-        }
-        if let Some(v) = read_int("infeas_max_streak") {
-            builder.conv_check.infeas_max_streak = v;
-        }
-
-        // Bound-multiplier / barrier damping constants (#191). Both were
-        // registered but never read, so user overrides were silently
-        // dropped; the algorithm ran with the hard-coded struct defaults.
-        // Defaults equal the registered defaults, so this changes nothing
-        // for a run that doesn't set them.
-        if let Some(v) = read_num("kappa_sigma") {
-            builder.kappa_sigma = v;
-        }
-        if let Some(v) = read_num("kappa_d") {
-            builder.kappa_d = v;
-        }
-        // `s_max` — the cap in the `(s_d, s_c)` scaling of the KKT error
-        // test (#551 / #677). `IpoptCalculatedQuantities` carried it as a
-        // hard-coded 100 (the registered default) and nothing read the
-        // option; a run that does not set it is unaffected.
-        if let Some(v) = read_num("s_max") {
-            builder.s_max = v;
-        }
-        if let Some(v) = read_num("tiny_step_tol") {
-            builder.tiny_step_tol = v;
-        }
-        if let Some(v) = read_num("tiny_step_y_tol") {
-            builder.tiny_step_y_tol = v;
-        }
-        if let Some(v) = read_num("diverging_iterates_tol") {
-            builder.diverging_iterates_tol = v;
-        }
-        if let Some(v) = read_int("dual_diverging_streak") {
-            builder.dual_diverging_streak = v;
-        }
-        if let Some(v) = read_int("resto_decline_deferrals") {
-            builder.resto_decline_deferrals = v;
-        }
-        if let Some(v) = read_num("resto_decline_progress_ratio") {
-            builder.resto_decline_progress_ratio = v;
-        }
-
-        // Barrier-parameter (μ) options — consumers in
-        // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both
-        // updaters share the same option names; the builder forwards
-        // each into whichever strategy is assembled.
-        if let Some(v) = read_num("mu_init") {
-            builder.mu.mu_init = v;
-        }
-        if let Some(v) = read_num("mu_max") {
-            builder.mu.mu_max = v;
-        }
-        if let Some(v) = read_num("mu_max_fact") {
-            builder.mu.mu_max_fact = v;
-        }
-        if let Some(v) = read_num("mu_min") {
-            builder.mu.mu_min = v;
-        }
-        if let Some(v) = read_num("mu_target") {
-            builder.mu.mu_target = v;
-        }
-        if let Some(v) = read_num("mu_linear_decrease_factor") {
-            builder.mu.mu_linear_decrease_factor = v;
-        }
-        if let Some(v) = read_num("mu_superlinear_decrease_power") {
-            builder.mu.mu_superlinear_decrease_power = v;
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("mu_allow_fast_monotone_decrease", "")
-        {
-            if found {
-                builder.mu.mu_allow_fast_monotone_decrease = v == "yes";
-            }
-        }
-        if let Some(v) = read_num("barrier_tol_factor") {
-            builder.mu.barrier_tol_factor = v;
-        }
-        // `tau_min` — floor on the fraction-to-the-boundary parameter
-        // (#551 / #677). Both `MonotoneMuUpdate` and `AdaptiveMuUpdate`
-        // carried the field with upstream's 0.99 default and nothing
-        // read the option, so an override was silently dropped. The
-        // default equals the registered default, so this changes
-        // nothing for a run that does not set it.
-        if let Some(v) = read_num("tau_min") {
-            builder.mu.tau_min = v;
-        }
-        if let Some(v) = read_num("sigma_max") {
-            builder.mu.sigma_max = v;
-        }
-        if let Some(v) = read_num("sigma_min") {
-            builder.mu.sigma_min = v;
-        }
-
-        // Quality-function oracle knobs — consumers in
-        // `IpQualityFunctionMuOracle.cpp:RegisterOptions`. Forwarded
-        // to the oracle on every free-mode call.
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("quality_function_norm_type", "")
-        {
-            if found {
-                use crate::mu::oracle::quality_function::NormType;
-                builder.mu.quality_function_norm_type = match v.as_str() {
-                    "1-norm" => NormType::OneNorm,
-                    "2-norm" => NormType::TwoNorm,
-                    "max-norm" => NormType::MaxNorm,
-                    _ => NormType::TwoNormSquared,
-                };
-            }
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("quality_function_centrality", "")
-        {
-            if found {
-                use crate::mu::oracle::quality_function::CentralityType;
-                builder.mu.quality_function_centrality = match v.as_str() {
-                    "log" => CentralityType::LogCenter,
-                    "reciprocal" => CentralityType::ReciprocalCenter,
-                    "cubed-reciprocal" => CentralityType::CubedReciprocalCenter,
-                    _ => CentralityType::None,
-                };
-            }
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("quality_function_balancing_term", "")
-        {
-            if found {
-                use crate::mu::oracle::quality_function::BalancingTermType;
-                builder.mu.quality_function_balancing_term = match v.as_str() {
-                    "cubic" => BalancingTermType::CubicTerm,
-                    _ => BalancingTermType::None,
-                };
-            }
-        }
-        if let Some(v) = read_int("quality_function_max_section_steps") {
-            builder.mu.quality_function_max_section_steps = v;
-        }
-        if let Some(v) = read_num("quality_function_section_sigma_tol") {
-            builder.mu.quality_function_section_sigma_tol = v;
-        }
-        if let Some(v) = read_num("quality_function_section_qf_tol") {
-            builder.mu.quality_function_section_qf_tol = v;
-        }
-
-        // `probing_iterate_quality_factor` — pounce-specific guard
-        // (pounce#58) on the probing μ-oracle's input iterate. When
-        // `curr_avrg_compl / curr_mu` exceeds this factor, the
-        // μ-update layer signals restoration via
-        // `IpoptData::request_resto` instead of letting probing
-        // return `σ · mu_curr` ≫ previous μ. Default 1e4; set to ≤ 0
-        // to disable. No upstream Ipopt counterpart.
-        if let Some(v) = read_num("probing_iterate_quality_factor") {
-            builder.mu.probing_iterate_quality_factor = v;
-        }
-
-        // Adaptive-μ extras — consumers in
-        // `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Only active when
-        // `mu_strategy=adaptive`.
-        if let Some(v) = read_num("adaptive_mu_safeguard_factor") {
-            builder.mu.adaptive_mu_safeguard_factor = v;
-        }
-        if let Some(v) = read_num("adaptive_mu_monotone_init_factor") {
-            builder.mu.adaptive_mu_monotone_init_factor = v;
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_bool_value("adaptive_mu_restore_previous_iterate", "")
-        {
-            if found {
-                builder.mu.adaptive_mu_restore_previous_iterate = v;
-            }
-        }
-        if let Some(v) = read_int("adaptive_mu_max_free_returns") {
-            builder.mu.adaptive_mu_max_free_returns = v;
-        }
-        if let Some(v) = read_num("adaptive_mu_budget_pin_fraction") {
-            builder.mu.adaptive_mu_budget_pin_fraction = v;
-        }
-        if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
-            if v >= 0 {
-                builder.mu.adaptive_mu_kkterror_red_iters = v as usize;
-            }
-        }
-        if let Some(v) = read_num("adaptive_mu_kkterror_red_fact") {
-            builder.mu.adaptive_mu_kkterror_red_fact = v;
-        }
-        // `filter_margin_fact` / `filter_max_margin` (#551) — the margin
-        // an entry must clear in the `obj-constr-filter` globalization
-        // test. `AdaptiveMuUpdate` computes
-        // `filter_margin_fact * min(filter_max_margin, err)` and has
-        // always done so; only these two read sites were missing, so
-        // setting either did nothing. Defaults equal the registered
-        // defaults (1e-5 / 1.0), so an unset run is unchanged.
-        if let Some(v) = read_num("filter_margin_fact") {
-            builder.mu.filter_margin_fact = v;
-        }
-        if let Some(v) = read_num("filter_max_margin") {
-            builder.mu.filter_max_margin = v;
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("adaptive_mu_kkt_norm_type", "")
-        {
-            if found {
-                use crate::mu::adaptive::AdaptiveMuKktNorm;
-                builder.mu.adaptive_mu_kkt_norm_type = match v.as_str() {
-                    "1-norm" => AdaptiveMuKktNorm::OneNorm,
-                    "2-norm" => AdaptiveMuKktNorm::TwoNorm,
-                    "max-norm" => AdaptiveMuKktNorm::MaxNorm,
-                    _ => AdaptiveMuKktNorm::TwoNormSquared,
-                };
-            }
-        }
-
-        // Watchdog options — consumers in
-        // `IpBacktrackingLineSearch.cpp:RegisterOptions`. Baked into
-        // the `BacktrackingLineSearch` at build time.
-        if let Some(v) = read_int("watchdog_shortened_iter_trigger") {
-            builder.line_search.watchdog_shortened_iter_trigger = v;
-        }
-        if let Some(v) = read_int("watchdog_trial_iter_max") {
-            builder.line_search.watchdog_trial_iter_max = v;
-        }
-        if let Some(v) = read_num("soft_resto_pderror_reduction_factor") {
-            builder.line_search.soft_resto_pderror_reduction_factor = v;
-        }
-        if let Some(v) = read_int("max_soft_resto_iters") {
-            builder.line_search.max_soft_resto_iters = v;
-        }
-        // `alpha_red_factor` (#678) and `accept_after_max_steps` (#551)
-        // — both consumed by the α-loop in `BacktrackingLineSearch`,
-        // both registered without a read site until those issues.
-        // `alpha_red_factor`'s default (0.5) equals the registered one,
-        // and `accept_after_max_steps` defaults to `-1`, which disables
-        // the escape hatch, so neither moves a solve that leaves them
-        // alone.
-        if let Some(v) = read_num("alpha_red_factor") {
-            builder.line_search.alpha_red_factor = v;
-        }
-        if let Some(v) = read_int("accept_after_max_steps") {
-            builder.line_search.accept_after_max_steps = v;
-        }
-
-        // Filter switching / Armijo / margin constants (#191). Consumed
-        // by `FilterLsAcceptor` (only on the `Filter` line-search path);
-        // registered but never read, so overrides were silently dropped.
-        // Defaults equal the registered defaults.
-        if let Some(v) = read_num("eta_phi") {
-            builder.line_search.eta_phi = v;
-        }
-        // `delta` (#551) — the switching rule's multiplier on the
-        // constraint violation (Eqn. (19)); `FilterLsAcceptor` has
-        // always used it as `delta_armijo`, only the read site was
-        // missing. Default 1.0 equals the registered default.
-        if let Some(v) = read_num("delta") {
-            builder.line_search.delta = v;
-        }
-        if let Some(v) = read_num("theta_min_fact") {
-            builder.line_search.theta_min_fact = v;
-        }
-        if let Some(v) = read_num("theta_max_row_scale_kappa") {
-            builder.line_search.theta_max_row_scale_kappa = v;
-        }
-        if let Some(v) = read_int("theta_max_adaptive_trigger") {
-            builder.line_search.theta_max_adaptive_trigger = v.max(0) as u32;
-        }
-        if let Some(v) = read_num("theta_max_adaptive_factor") {
-            builder.line_search.theta_max_adaptive_factor = v;
-        }
-        if let Some(v) = read_int("theta_max_adaptive_max_raises") {
-            builder.line_search.theta_max_adaptive_max_raises = v.max(0) as u32;
-        }
-        if let Some(v) = read_num("theta_max_fact") {
-            builder.line_search.theta_max_fact = v;
-        }
-        if let Some(v) = read_num("gamma_phi") {
-            builder.line_search.gamma_phi = v;
-        }
-        if let Some(v) = read_num("gamma_theta") {
-            builder.line_search.gamma_theta = v;
-        }
-        if let Some(v) = read_num("s_phi") {
-            builder.line_search.s_phi = v;
-        }
-        if let Some(v) = read_num("s_theta") {
-            builder.line_search.s_theta = v;
-        }
-        if let Some(v) = read_num("alpha_min_frac") {
-            builder.line_search.alpha_min_frac = v;
-        }
-        if let Some(v) = read_num("obj_max_inc") {
-            builder.line_search.obj_max_inc = v;
-        }
-        if let Some(v) = read_int("max_filter_resets") {
-            builder.line_search.max_filter_resets = v;
-        }
-        if let Some(v) = read_int("filter_reset_trigger") {
-            builder.line_search.filter_reset_trigger = v;
-        }
-        // Penalty line-search constants (#551), consumed by
-        // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
-        // / `cg-penalty` paths). The acceptor implements ν and the
-        // Armijo test on the penalty merit function already; these four
-        // were registered with no read site, so tuning the penalty
-        // update did nothing. Defaults equal the registered defaults.
-        if let Some(v) = read_num("nu_init") {
-            builder.line_search.nu_init = v;
-        }
-        if let Some(v) = read_num("nu_inc") {
-            builder.line_search.nu_inc = v;
-        }
-        if let Some(v) = read_num("rho") {
-            builder.line_search.rho = v;
-        }
-        if let Some(v) = read_num("eta_penalty") {
-            builder.line_search.eta_penalty = v;
-        }
-
-        // Second-order-correction constants (#191), consumed by
-        // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
-        if let Some(v) = read_int("max_soc") {
-            builder.line_search.max_soc = v;
-        }
-        if let Some(v) = read_num("kappa_soc") {
-            builder.line_search.kappa_soc = v;
-        }
-        if let Some(v) = read_int("soc_method") {
-            builder.line_search.soc_method = v;
-        }
-
-        // Inertia-correction / Jacobian-regularization constants (#191),
-        // consumed by `PdPerturbationHandler`. Registered but never read.
-        if let Some(v) = read_num("max_hessian_perturbation") {
-            builder.perturbation.max_hessian_perturbation = v;
-        }
-        if let Some(v) = read_num("min_hessian_perturbation") {
-            builder.perturbation.min_hessian_perturbation = v;
-        }
-        if let Some(v) = read_num("perturb_inc_fact_first") {
-            builder.perturbation.perturb_inc_fact_first = v;
-        }
-        if let Some(v) = read_num("perturb_inc_fact") {
-            builder.perturbation.perturb_inc_fact = v;
-        }
-        if let Some(v) = read_num("perturb_dec_fact") {
-            builder.perturbation.perturb_dec_fact = v;
-        }
-        if let Some(v) = read_num("first_hessian_perturbation") {
-            builder.perturbation.first_hessian_perturbation = v;
-        }
-        if let Some(v) = read_num("jacobian_regularization_value") {
-            builder.perturbation.jacobian_regularization_value = v;
-        }
-        if let Some(v) = read_num("jacobian_regularization_exponent") {
-            builder.perturbation.jacobian_regularization_exponent = v;
-        }
-        if let Ok((v, true)) = self.options.get_bool_value("perturb_always_cd", "") {
-            builder.perturbation.perturb_always_cd = v;
-        }
-        if let Some(v) = read_int("perturb_delta_c_max_rungs") {
-            builder.perturbation.perturb_delta_c_max_rungs = v;
-        }
-
-        // Iterative-refinement constants (#191), consumed by
-        // `PdFullSpaceSolver`. Registered but never read.
-        if let Some(v) = read_int("min_refinement_steps") {
-            builder.refinement.min_refinement_steps = v;
-        }
-        if let Some(v) = read_int("max_refinement_steps") {
-            builder.refinement.max_refinement_steps = v;
-        }
-        if let Some(v) = read_num("residual_ratio_max") {
-            builder.refinement.residual_ratio_max = v;
-        }
-        if let Some(v) = read_num("residual_ratio_singular") {
-            builder.refinement.residual_ratio_singular = v;
-        }
-        if let Some(v) = read_num("residual_improvement_factor") {
-            builder.refinement.residual_improvement_factor = v;
-        }
-
-        // Inertia-free curvature test (#551 / #677), also consumed by
-        // `PdFullSpaceSolver`. `neg_curv_test_tol` had a field that only
-        // ever held its 0.0 default, and `neg_curv_test_reg` had none at
-        // all; both are now read, and the curvature test they configure
-        // is implemented in `PdFullSpaceSolver::solve_once`. At the
-        // registered default (`0.0`) the heuristic is off and the
-        // inertia check runs as before.
-        if let Some(v) = read_num("neg_curv_test_tol") {
-            builder.refinement.neg_curv_test_tol = v;
-        }
-        if let Ok((v, true)) = self.options.get_bool_value("neg_curv_test_reg", "") {
-            builder.refinement.neg_curv_test_reg = v;
-        }
-
-        // Restoration-phase constants (#191). Carried on the outer builder
-        // and copied into the `RestoAlgorithmBuilder` when the restoration
-        // factory is minted (the frontends pass this builder in). The
-        // restoration builder was never options-configured, so these were
-        // registered but never read. Defaults equal the registered
-        // defaults.
-        if let Some(v) = read_num("bound_mult_reset_threshold") {
-            builder.resto.bound_mult_reset_threshold = v;
-        }
-        if let Some(v) = read_num("constr_mult_reset_threshold") {
-            builder.resto.constr_mult_reset_threshold = v;
-        }
-        if let Some(v) = read_num("resto_penalty_parameter") {
-            builder.resto.resto_penalty_parameter = v;
-        }
-        if let Some(v) = read_num("resto_proximity_weight") {
-            builder.resto.resto_proximity_weight = v;
-        }
-        // `required_infeasibility_reduction` (#439) — the κ_resto guard the
-        // restoration sub-solve exits on. Registered since #191 but the
-        // value was hardcoded at the callsite, so setting it was a silent
-        // no-op.
-        if let Some(v) = read_num("required_infeasibility_reduction") {
-            builder.resto.required_infeasibility_reduction = v;
-        }
-        // gh#483 / #191 round 2: three restoration switches whose fields
-        // `RestoAlgorithmBuilder` has consumed all along — the read site
-        // was the only missing piece, so setting them did nothing.
-        let read_yes = |key: &str| -> Option<bool> {
-            match self.options.get_string_value(key, "") {
-                Ok((v, true)) => Some(v.eq_ignore_ascii_case("yes")),
-                _ => None,
-            }
-        };
-        if let Some(v) = read_yes("evaluate_orig_obj_at_resto_trial") {
-            builder.resto.evaluate_orig_obj_at_resto_trial = v;
-        }
-        if let Some(v) = read_yes("expect_infeasible_problem") {
-            builder.resto.expect_infeasible_problem = v;
-        }
-        if let Some(v) = read_yes("start_with_resto") {
-            builder.resto.start_with_resto = v;
-        }
-        // `max_resto_iter` (#551 / #677) — the cap on *successive*
-        // restoration iterations. `RestoConvCheckAdapter` has enforced a cap
-        // all along (returning `MaxIterExceeded` at the limit); the number
-        // it enforced was a hard-coded constant in `resto_inner_solver.rs`,
-        // so setting the option did nothing. The consumer's field is
-        // `maximum_resto_iters`, not the option name — grepping for
-        // `max_resto_iter` found only the registry (#551 caution 2).
-        //
-        // DEFAULT MISMATCH, LEFT AS IT IS ON PURPOSE: the registry declares
-        // upstream's 3000000, pounce's effective cap is 3000
-        // (`RestoOptions::default`). `read_int` fires only when the user set
-        // the key, so an unset `max_resto_iter` still means 3000 and this
-        // wiring is trajectory-neutral. Adopting upstream's number would let
-        // restorations pounce currently truncates run on, which is a
-        // trajectory change and needs its own measurement.
-        if let Some(v) = read_int("max_resto_iter") {
-            builder.resto.max_resto_iter = v;
-        }
-
-        // Iteration-output options — consumed by `OrigIterationOutput`.
-        if let Some(v) = read_int("print_frequency_iter") {
-            builder.output.print_frequency_iter = v;
-        }
-        if let Some(v) = read_num("print_frequency_time") {
-            builder.output.print_frequency_time = v;
-        }
-        if let Ok((v, found)) = self.options.get_bool_value("print_info_string", "") {
-            if found {
-                builder.output.print_info_string = v;
-            }
-        }
-        if let Ok((v, found)) = self.options.get_string_value("inf_pr_output", "") {
-            if found {
-                builder.output.inf_pr_output_internal = v == "internal";
-            }
-        }
-
-        // Warm-start options — consumed by `WarmStartIterateInitializer`
-        // (port of `IpWarmStartIterateInitializer.cpp:RegisterOptions`).
-        // `warm_start_init_point` is the toggle that picks between the
-        // default (cold) and warm-start initializers; the remaining
-        // knobs are baked onto the chosen initializer at build time.
-        if let Ok((v, found)) = self.options.get_bool_value("warm_start_init_point", "") {
-            if found {
-                builder.warm_start_init_point = v;
-            }
-        }
-        if let Some(v) = read_num("warm_start_bound_push") {
-            builder.warm.bound_push = v;
-        }
-        if let Some(v) = read_num("warm_start_bound_frac") {
-            builder.warm.bound_frac = v;
-        }
-        if let Some(v) = read_num("warm_start_slack_bound_push") {
-            builder.warm.slack_bound_push = v;
-        }
-        if let Some(v) = read_num("warm_start_slack_bound_frac") {
-            builder.warm.slack_bound_frac = v;
-        }
-        if let Some(v) = read_num("warm_start_mult_bound_push") {
-            builder.warm.mult_bound_push = v;
-        }
-        if let Some(v) = read_num("warm_start_mult_init_max") {
-            builder.warm.mult_init_max = v;
-        }
-        if let Some(v) = read_num("warm_start_target_mu") {
-            builder.warm.target_mu = v;
-        }
-        // gh#606: residual-adaptive recentering. `warm_start_entire_iterate`
-        // and `warm_start_same_structure` used to be parsed here into
-        // fields nothing read; they are refused by
-        // `unimplemented_options` instead (they name the
-        // `GetWarmStartIterate` TNLP surface pounce does not expose).
-        if let Ok((v, found)) = self.options.get_string_value("warm_start_recentering", "") {
-            if found {
-                builder.warm.recentering = if v.eq_ignore_ascii_case("none") {
-                    crate::alg_builder::WarmStartRecentering::None
-                } else {
-                    crate::alg_builder::WarmStartRecentering::Residual
-                };
-            }
-        }
-
-        // `DefaultIterateInitializer` knobs — parsed after the Mehrotra
-        // cascade so explicit user values win
-        // (mirrors upstream's `SetNumericValueIfUnset` semantics).
-        if let Some(v) = read_num("bound_push") {
-            builder.init.bound_push = v;
-        }
-        if let Some(v) = read_num("bound_frac") {
-            builder.init.bound_frac = v;
-        }
-        if let Some(v) = read_num("slack_bound_push") {
-            builder.init.slack_bound_push = v;
-        }
-        if let Some(v) = read_num("slack_bound_frac") {
-            builder.init.slack_bound_frac = v;
-        }
-        if let Some(v) = read_num("constr_mult_init_max") {
-            builder.init.constr_mult_init_max = v;
-        }
-        if let Some(v) = read_num("bound_mult_init_val") {
-            builder.init.bound_mult_init_val = v;
-        }
-        if let Ok((v, found)) = self.options.get_string_value("bound_mult_init_method", "") {
-            if found {
-                builder.init.bound_mult_init_method = v;
-            }
-        }
-        if let Ok((v, found)) = self
-            .options
-            .get_string_value("least_square_init_primal", "")
-        {
-            if found {
-                builder.init.least_square_init_primal = v == "yes";
-            }
-        }
-        builder
+        algorithm_builder_from_option_list(&self.options)
     }
 }
 
@@ -4490,6 +3768,1095 @@ fn journal_level_from_int(v: i32) -> JournalLevel {
 /// available when the `ma57` cargo feature is enabled; without it,
 /// requesting `linear_solver = ma57` falls back to FERAL with a
 /// warning printed by the journalist (see [`AlgorithmBuilder`]).
+/// Build an [`AlgorithmBuilder`] populated from the app's
+/// [`OptionsList`]. Public so callers wiring the restoration
+/// factory can hand the *inner* IPM a builder that mirrors the
+/// outer's `mu_strategy`/`mu_oracle`/line-search choices —
+/// matching upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`,
+/// which reads the same `mu_strategy` option with prefix `"resto."
+/// + prefix` and falls back to the outer setting.
+pub fn algorithm_builder_from_option_list(options: &OptionsList) -> AlgorithmBuilder {
+    let mut builder = AlgorithmBuilder::new();
+
+    // `mehrotra_algorithm` is parsed first so its cascading
+    // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
+    // overridden by an explicit user setting of those keys
+    // below. Mirrors `IpAlgBuilder.cpp:Mehrotra`.
+    // `fast_step_computation` — skip the search-direction residual
+    // check and allow an inexact linear solve. `PdSearchDirCalc` has
+    // consumed this flag since it landed, hard-coded to `false`; the
+    // option's read site was simply missing, so setting it did
+    // nothing at all (gh#483 follow-up, #191 round 2).
+    if let Ok((v, true)) = options.get_string_value("fast_step_computation", "") {
+        builder.fast_step_computation = v.eq_ignore_ascii_case("yes");
+    }
+
+    let mut mehrotra_on = false;
+    if let Ok((v, found)) = options.get_string_value("mehrotra_algorithm", "") {
+        if found && v == "yes" {
+            mehrotra_on = true;
+            builder.mehrotra_algorithm = true;
+            builder.mu_strategy = MuStrategyChoice::Adaptive;
+            builder.mu_oracle = crate::mu::adaptive::MuOracleKind::Probing;
+            // `accept_every_trial_step` short-circuits the alpha
+            // loop / filter — Mehrotra steps would otherwise be
+            // rejected by the filter on LP-shaped problems because
+            // the barrier objective is non-monotone along the
+            // corrector. Mirrors upstream `IpAlgBuilder.cpp:Mehrotra`.
+            builder.line_search.accept_every_trial_step = true;
+            // Aggressive iterate-push defaults (`SetNumericValueIfUnset`
+            // in upstream). The explicit user parses below will
+            // overwrite these if the user set them explicitly.
+            builder.init.bound_push = 10.0;
+            builder.init.bound_frac = 0.2;
+            builder.init.slack_bound_push = 10.0;
+            builder.init.slack_bound_frac = 0.2;
+            builder.init.bound_mult_init_val = 10.0;
+            builder.init.constr_mult_init_max = 0.0;
+            // `alpha_for_y=bound_mult` — Mehrotra wants the
+            // equality multipliers to advance with the dual
+            // alpha so they stay in step with z/v. Mirrors
+            // upstream `IpIpoptAlg.cpp:InitializeImpl`.
+            builder.line_search.alpha_for_y =
+                crate::line_search::backtracking::AlphaForY::BoundMult;
+            // `adaptive_mu_globalization=never-monotone-mode` —
+            // upstream `IpIpoptAlg.cpp:148-154` enforces this:
+            // Mehrotra disables the globalization switch entirely
+            // (no fallback to monotone mode when convergence
+            // stalls). Required for the unsafeguarded Mehrotra
+            // path to function.
+            builder.mu.adaptive_mu_globalization =
+                crate::mu::adaptive::AdaptiveMuGlobalization::NeverMonotoneMode;
+            // `least_square_init_primal=yes` — upstream
+            // `IpIpoptAlg.cpp:182` enables this for the Mehrotra
+            // cascade. Replaces the user's starting `x` with the
+            // min-norm primal that satisfies the linearized
+            // equality+inequality constraints. Critical on
+            // LP-shaped problems where the user's starting point
+            // can be wildly infeasible (e.g. nuffield2_trap).
+            builder.init.least_square_init_primal = true;
+        }
+    }
+
+    if let Ok((v, found)) = options.get_string_value("mu_strategy", "") {
+        if found {
+            let parsed = match v.as_str() {
+                "adaptive" => MuStrategyChoice::Adaptive,
+                _ => MuStrategyChoice::Monotone,
+            };
+            if mehrotra_on && matches!(parsed, MuStrategyChoice::Monotone) {
+                // Upstream Ipopt refuses this combination: Mehrotra
+                // needs an affine step every iter, which only the
+                // adaptive path computes. Keep adaptive and warn.
+                tracing::warn!(target: "pounce::algorithm",
+                    "pounce: mehrotra_algorithm=yes requires \
+                     mu_strategy=adaptive; ignoring \
+                     mu_strategy=monotone."
+                );
+            } else {
+                builder.mu_strategy = parsed;
+            }
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("mu_oracle", "") {
+        if found {
+            builder.mu_oracle = match v.as_str() {
+                "loqo" => crate::mu::adaptive::MuOracleKind::Loqo,
+                "probing" => crate::mu::adaptive::MuOracleKind::Probing,
+                _ => crate::mu::adaptive::MuOracleKind::QualityFunction,
+            };
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("adaptive_mu_globalization", "") {
+        if found {
+            use crate::mu::adaptive::AdaptiveMuGlobalization;
+            builder.mu.adaptive_mu_globalization = match v.as_str() {
+                "kkt-error" => AdaptiveMuGlobalization::KktError,
+                "never-monotone-mode" => AdaptiveMuGlobalization::NeverMonotoneMode,
+                _ => AdaptiveMuGlobalization::ObjConstrFilter,
+            };
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("hessian_approximation", "") {
+        if found {
+            builder.hessian_approximation = match v.as_str() {
+                "limited-memory" => HessianApproxChoice::LimitedMemory,
+                _ => HessianApproxChoice::Exact,
+            };
+        }
+    }
+    // **Upstream changes the `mu_strategy` default for a
+    // limited-memory Hessian.** `IpAlgBuilder.cpp:1059`:
+    //
+    //     if( !options.GetStringValue("mu_strategy", smuupdate, prefix) )
+    //     {
+    //        // Change default for quasi-Newton option (then we use adaptive)
+    //        ... if( hessian_approximation == LIMITED_MEMORY )
+    //               smuupdate = "adaptive";
+    //     }
+    //
+    // and again at `:920` for the restoration-phase algorithm.
+    // Registered default is `monotone`; the quasi-Newton path takes
+    // `adaptive` unless the caller says otherwise. pounce read the
+    // registered default unconditionally, so every L-BFGS solve ran
+    // a barrier schedule Ipopt does not use on that path — a
+    // trajectory divergence on the arm the Python frontend and the
+    // CasADi plugin select automatically (gh#746).
+    //
+    // The restoration sub-IPM inherits this: `run_inner_resto`
+    // clones the configured `inner_alg_builder`, so the flag set
+    // here is what the resto algorithm gets, matching `:920`.
+    //
+    // Only when unset — an explicit `mu_strategy` still wins, and
+    // `mehrotra_algorithm` (parsed above) has already forced
+    // adaptive on its own terms.
+    if builder.hessian_approximation == HessianApproxChoice::LimitedMemory
+        && !matches!(options.get_string_value("mu_strategy", ""), Ok((_, true)))
+    {
+        builder.mu_strategy = MuStrategyChoice::Adaptive;
+    }
+    // Limited-memory quasi-Newton update formula. Registered upstream
+    // (`limited_memory_update_type`, IpLimMemQuasiNewtonUpdater.cpp) but
+    // until now read nowhere on the IPM path — the updater was hard-wired
+    // to Powell-damped BFGS. SR1 is honored too (the updater and the
+    // low-rank/inertia path already handle its indefinite models).
+    if let Ok((v, found)) = options.get_string_value("limited_memory_update_type", "") {
+        if found {
+            builder.limited_memory_update_type = match v.as_str() {
+                "sr1" => UpdateType::Sr1,
+                _ => UpdateType::Bfgs,
+            };
+        }
+    }
+    // Limited-memory history length (`limited_memory_max_history`).
+    if let Ok((v, found)) = options.get_integer_value("limited_memory_max_history", "") {
+        if found && v >= 0 {
+            builder.limited_memory_max_history = v as Index;
+        }
+    }
+    // `limited_memory_initialization` — which formula picks the
+    // initial Hessian scalar σ. Registered since the option port with
+    // upstream's `scalar1` default and read nowhere until #677, so
+    // the updater's own `Scalar2` default was the only value any
+    // solve ever used: setting the option did nothing, and it warned
+    // nothing. Same miss as gh#483 / #191 round 2 (which wired
+    // `limited_memory_init_val_max`/`_min`) — this is the third
+    // argument to that same `initial_hessian_scalar` call.
+    //
+    // The effective default now follows the registry (`scalar1`),
+    // matching Ipopt. σ_scalar2/σ_scalar1 = (yᵀy·sᵀs)/(sᵀy)² ≥ 1 and
+    // is unbounded as the curvature pair degrades, so on an
+    // ill-conditioned problem `scalar2` inflates `B0 = σI` until it
+    // swamps the rank-2 corrections and the step collapses.
+    if let Ok((v, found)) = options.get_string_value("limited_memory_initialization", "") {
+        if found {
+            use crate::hess::lim_mem_quasi_newton::InitialApprox;
+            // Every registered value is named explicitly. #551 §3
+            // held this option back precisely because wiring only
+            // the values that mapped would leave the rest falling
+            // back silently — a new no-op created by the fix — so a
+            // catch-all standing in for a real value is the one
+            // shape to avoid here. `OptionsList` rejects any
+            // unregistered value before this runs (`options_list.rs`
+            // `OPTION_INVALID`), so the final arm is unreachable
+            // rather than a fallback.
+            builder.limited_memory_initialization = match v.as_str() {
+                "scalar1" => InitialApprox::Scalar1,
+                "scalar2" => InitialApprox::Scalar2,
+                "scalar3" => InitialApprox::Scalar3,
+                "scalar4" => InitialApprox::Scalar4,
+                "constant" => InitialApprox::Constant,
+                _ => InitialApprox::Scalar2,
+            };
+        }
+    }
+    // `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation
+    // of the equality multipliers once feasible (#677).
+    //
+    // Upstream registers `recalc_y` as `no`, but its own option text
+    // ends "If a limited memory quasi-Newton option is chosen, this
+    // is used by default", so upstream's effective default is
+    // conditional on the Hessian approximation.
+    //
+    // **pounce does not follow that, and the discrepancy is
+    // deliberate.** Auto-enabling it for the limited-memory path was
+    // implemented and measured against the fixture corpus first: it
+    // moved 16 of 57 fixtures on the L-BFGS leg and took **7 from
+    // solved to not solved, with nothing moving the other way** —
+    // `airport` 56 it → `SearchDirectionBecomesTooSmall` at 541,
+    // `pooling_rt2stp` 413 it → the same at 1775, all three `jit1`
+    // variants, `linear_eq_collapsed_box`, and `hs13_bigstart` to
+    // the iteration cap. The signature is consistent: re-estimating
+    // `y` on every feasible iteration overwrites Newton multipliers
+    // that were converging, the dual never settles, and the step
+    // vanishes short of the certificate.
+    //
+    // So the feature is available and off by default. That still
+    // closes the gap that mattered — until #677 the option was
+    // refused outright as unimplemented, so an L-BFGS user could not
+    // reach Ipopt's behaviour at all. They can now, by asking.
+    //
+    // Why it is worth having: a quasi-Newton model's dual step is
+    // computed from an approximate `W`, so L-BFGS can settle a
+    // feasible primal and still not drive `inf_du` to tolerance —
+    // the failure a 59,939-variable CasADi model hit, oscillating
+    // `inf_du` between 3.6e-3 and 1.8e+01 for 300 iterations with
+    // the objective already settled. On that shape it is the fix;
+    // on a corpus of small well-conditioned models it is a
+    // pessimisation. Matching upstream's conditional default needs
+    // to explain the 7 regressions first.
+    if let Ok((v, true)) = options.get_string_value("recalc_y", "") {
+        builder.recalc_y = v == "yes";
+    }
+    if let Ok((v, true)) = options.get_numeric_value("recalc_y_feas_tol", "") {
+        builder.recalc_y_feas_tol = v;
+    }
+    // `limited_memory_init_val` — σ before any curvature pair exists,
+    // and every iteration under `constant`. Also unread until #677;
+    // the empty-history branch hard-coded the same `1.0`.
+    if let Ok((v, true)) = options.get_numeric_value("limited_memory_init_val", "") {
+        builder.limited_memory_init_val = v;
+    }
+    // `limited_memory_max_skipping` (#686) — registered and unread,
+    // and the feature behind it did not exist either: the updater
+    // counted nothing and never discarded its history.
+    if let Ok((v, true)) = options.get_integer_value("limited_memory_max_skipping", "") {
+        if v >= 0 {
+            builder.limited_memory_max_skipping = v as Index;
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("line_search_method", "") {
+        if found {
+            builder.line_search_method = match v.as_str() {
+                "cg-penalty" => LineSearchChoice::CgPenalty,
+                "penalty" => LineSearchChoice::Penalty,
+                _ => LineSearchChoice::Filter,
+            };
+        }
+    }
+    // `accept_every_trial_step` — direct user override. Parsed
+    // after the Mehrotra cascade so an explicit `no` still wins.
+    if let Ok((v, found)) = options.get_string_value("accept_every_trial_step", "") {
+        if found {
+            builder.line_search.accept_every_trial_step = v == "yes";
+        }
+    }
+    // `alpha_for_y` — direct user override. Parsed after the
+    // Mehrotra cascade so an explicit value still wins.
+    if let Ok((v, found)) = options.get_string_value("alpha_for_y", "") {
+        if found {
+            use crate::line_search::backtracking::AlphaForY;
+            builder.line_search.alpha_for_y = match v.as_str() {
+                "primal" => AlphaForY::Primal,
+                "bound-mult" | "bound_mult" => AlphaForY::BoundMult,
+                "full" => AlphaForY::Full,
+                "min" => AlphaForY::Min,
+                "max" => AlphaForY::Max,
+                "primal-and-full" | "dual-and-full" => AlphaForY::Primal,
+                _ => AlphaForY::Primal,
+            };
+        }
+    }
+    // `nlp_scaling_method` is consumed NLP-side in
+    // `OrigIpoptNlp::determine_scaling_from_starting_point` (see the
+    // `determine_scaling_from_starting_point` call earlier in this
+    // method); there is no algorithm-side scaling strategy to wire.
+    // `limited_memory_init_val_max` / `_min` — the clamp on the
+    // initial Hessian scalar. `LimMemQuasiNewtonUpdater` consumes
+    // both in `initial_hessian_scalar`; only the read sites were
+    // missing, so setting either did nothing (gh#483, #191 round 2).
+    if let Ok((v, true)) = options.get_numeric_value("limited_memory_init_val_max", "") {
+        builder.limited_memory_init_val_max = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("limited_memory_init_val_min", "") {
+        builder.limited_memory_init_val_min = v;
+    }
+
+    // Unlike the other options here, we always honor the registry
+    // value (not just when the user set it explicitly): the option
+    // registry default is "ma57" but `AlgorithmBuilder::default`
+    // has `linear_solver: Feral`, so gating on `found` would
+    // silently route default runs through Feral while the banner
+    // (and ipopt-compatible behavior) advertises MA57.
+    //
+    // Record the **effective** backend, not the requested one. MA57 lives
+    // behind the optional `ma57` cargo feature (HSL is licensed and needs a
+    // Fortran toolchain); without it `default_backend_factory` silently
+    // substitutes FERAL. Storing `Ma57` here therefore made
+    // `builder.linear_solver` disagree with the backend actually built, and
+    // consumers acted on the lie: the Schur KKT gate in
+    // `alg_builder::build_with_backend` tests `== Feral`, so on the
+    // pure-Rust default build — where the registry default (then upstream's
+    // "ma57") resolved to FERAL anyway — `set_kkt_schur_block()` silently
+    // never engaged for ANY user. Resolving here keeps the field truthful
+    // for every consumer.
+    //
+    // The `_ =>` arm is now only reachable for `feral`: every other name
+    // is refused up front by `unimplemented_linear_solver`. It used to
+    // swallow `mumps`, `pardiso`, `ma97`, … and run FERAL instead.
+    if let Ok((v, _found)) = options.get_string_value("linear_solver", "") {
+        let requested = if v.eq_ignore_ascii_case("ma57") {
+            LinearSolverChoice::Ma57
+        } else {
+            LinearSolverChoice::Feral
+        };
+        builder.linear_solver =
+            if matches!(requested, LinearSolverChoice::Ma57) && !cfg!(feature = "ma57") {
+                LinearSolverChoice::Feral
+            } else {
+                requested
+            };
+    }
+
+    // `linear_system_scaling` — symmetric scaling of the augmented
+    // KKT matrix before factorization. Port of
+    // `IpTSymLinearSolver.cpp:RegisterOptions` plumbing. Default
+    // "none"; "ruiz" invokes the Ruiz-2001 symmetric ∞-norm
+    // equilibration in `RuizTSymScalingMethod`. "mc19" and
+    // "slack-based" are accepted by the registry but not yet
+    // implemented at this layer; they fall back to no scaling
+    // with a one-line notice.
+    //
+    // `slack-based` is implemented as of #677. It used to reach the
+    // no-scaling fallback through the catch-all arm, which meant it
+    // fell back **silently** — the comment above promised a notice
+    // that only `mc19` actually emitted. It is not a hypothetical
+    // value: it is what Ipopt's own recommended configuration for
+    // large collocation NLPs uses, so the users most likely to set
+    // it were the least likely to be told it did nothing. The
+    // catch-all is left for genuinely unreachable input —
+    // `OptionsList` rejects anything the registry does not list.
+    if let Ok((v, found)) = options.get_string_value("linear_system_scaling", "") {
+        if found {
+            builder.linear_system_scaling = match v.as_str() {
+                "ruiz" => crate::alg_builder::LinearSystemScalingChoice::Ruiz,
+                "mc19" => crate::alg_builder::LinearSystemScalingChoice::Mc19,
+                "slack-based" => crate::alg_builder::LinearSystemScalingChoice::SlackBased,
+                _ => crate::alg_builder::LinearSystemScalingChoice::None,
+            };
+        }
+    }
+    if let Ok((v, found)) = options.get_bool_value("linear_scaling_on_demand", "") {
+        if found {
+            builder.linear_scaling_on_demand = v;
+        }
+    }
+
+    // Convergence tolerances (port of `IpOptErrorConvCheck.cpp`'s
+    // `RegisterOptions` consumers). Defaults already match upstream
+    // — only override when the user set the key explicitly.
+    let read_num = |key: &str| -> Option<f64> {
+        options
+            .get_numeric_value(key, "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+    };
+    let read_int = |key: &str| -> Option<i32> {
+        options
+            .get_integer_value(key, "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+    };
+    if let Some(v) = read_num("tol") {
+        builder.conv_check.tol = v;
+    }
+    if let Some(v) = read_num("obj_scale_certificate_threshold") {
+        builder.conv_check.obj_scale_certificate_threshold = v;
+    }
+    if let Some(v) = read_num("primal_noise_floor_kappa") {
+        builder.conv_check.primal_noise_floor_kappa = v;
+    }
+    if let Some(v) = read_num("acceptable_progress_kappa") {
+        builder.conv_check.acceptable_progress_kappa = v;
+    }
+    if let Some(v) = read_num("dual_inf_scale_kappa") {
+        builder.conv_check.dual_inf_scale_kappa = v;
+    }
+    if let Some(v) = read_num("kkt_fidelity_tol") {
+        builder.kkt_fidelity_tol = v;
+    }
+    if let Some(v) = read_num("dual_inf_tol") {
+        builder.conv_check.dual_inf_tol = v;
+    }
+    if let Some(v) = read_num("constr_viol_tol") {
+        builder.conv_check.constr_viol_tol = v;
+    }
+    if let Some(v) = read_num("compl_inf_tol") {
+        builder.conv_check.compl_inf_tol = v;
+    }
+    if let Some(v) = read_int("max_iter") {
+        builder.conv_check.max_iter = v;
+    }
+    if let Some(v) = read_num("max_cpu_time") {
+        builder.conv_check.max_cpu_time = v;
+    }
+    if let Some(v) = read_num("max_wall_time") {
+        builder.conv_check.max_wall_time = v;
+    }
+    if let Some(v) = read_num("acceptable_tol") {
+        builder.conv_check.acceptable_tol = v;
+    }
+    if let Some(v) = read_num("acceptable_dual_inf_tol") {
+        builder.conv_check.acceptable_dual_inf_tol = v;
+    }
+    if let Some(v) = read_num("acceptable_constr_viol_tol") {
+        builder.conv_check.acceptable_constr_viol_tol = v;
+    }
+    if let Some(v) = read_num("acceptable_compl_inf_tol") {
+        builder.conv_check.acceptable_compl_inf_tol = v;
+    }
+    if let Some(v) = read_num("acceptable_obj_change_tol") {
+        builder.conv_check.acceptable_obj_change_tol = v;
+    }
+    if let Some(v) = read_int("acceptable_iter") {
+        builder.conv_check.acceptable_iter = v;
+    }
+    if let Some(v) = read_num("infeas_stationarity_tol") {
+        builder.conv_check.infeas_stationarity_tol = v;
+    }
+    if let Some(v) = read_num("infeas_viol_kappa") {
+        builder.conv_check.infeas_viol_kappa = v;
+    }
+    if let Some(v) = read_int("infeas_max_streak") {
+        builder.conv_check.infeas_max_streak = v;
+    }
+
+    // Bound-multiplier / barrier damping constants (#191). Both were
+    // registered but never read, so user overrides were silently
+    // dropped; the algorithm ran with the hard-coded struct defaults.
+    // Defaults equal the registered defaults, so this changes nothing
+    // for a run that doesn't set them.
+    if let Some(v) = read_num("kappa_sigma") {
+        builder.kappa_sigma = v;
+    }
+    if let Some(v) = read_num("kappa_d") {
+        builder.kappa_d = v;
+    }
+    // `s_max` — the cap in the `(s_d, s_c)` scaling of the KKT error
+    // test (#551 / #677). `IpoptCalculatedQuantities` carried it as a
+    // hard-coded 100 (the registered default) and nothing read the
+    // option; a run that does not set it is unaffected.
+    if let Some(v) = read_num("s_max") {
+        builder.s_max = v;
+    }
+    if let Some(v) = read_num("tiny_step_tol") {
+        builder.tiny_step_tol = v;
+    }
+    if let Some(v) = read_num("tiny_step_y_tol") {
+        builder.tiny_step_y_tol = v;
+    }
+    if let Some(v) = read_num("diverging_iterates_tol") {
+        builder.diverging_iterates_tol = v;
+    }
+    if let Some(v) = read_int("dual_diverging_streak") {
+        builder.dual_diverging_streak = v;
+    }
+    if let Some(v) = read_int("resto_decline_deferrals") {
+        builder.resto_decline_deferrals = v;
+    }
+    if let Some(v) = read_num("resto_decline_progress_ratio") {
+        builder.resto_decline_progress_ratio = v;
+    }
+
+    // Barrier-parameter (μ) options — consumers in
+    // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both
+    // updaters share the same option names; the builder forwards
+    // each into whichever strategy is assembled.
+    if let Some(v) = read_num("mu_init") {
+        builder.mu.mu_init = v;
+    }
+    if let Some(v) = read_num("mu_max") {
+        builder.mu.mu_max = v;
+    }
+    if let Some(v) = read_num("mu_max_fact") {
+        builder.mu.mu_max_fact = v;
+    }
+    if let Some(v) = read_num("mu_min") {
+        builder.mu.mu_min = v;
+    }
+    if let Some(v) = read_num("mu_target") {
+        builder.mu.mu_target = v;
+    }
+    if let Some(v) = read_num("mu_linear_decrease_factor") {
+        builder.mu.mu_linear_decrease_factor = v;
+    }
+    if let Some(v) = read_num("mu_superlinear_decrease_power") {
+        builder.mu.mu_superlinear_decrease_power = v;
+    }
+    if let Ok((v, found)) = options.get_string_value("mu_allow_fast_monotone_decrease", "") {
+        if found {
+            builder.mu.mu_allow_fast_monotone_decrease = v == "yes";
+        }
+    }
+    if let Some(v) = read_num("barrier_tol_factor") {
+        builder.mu.barrier_tol_factor = v;
+    }
+    // `tau_min` — floor on the fraction-to-the-boundary parameter
+    // (#551 / #677). Both `MonotoneMuUpdate` and `AdaptiveMuUpdate`
+    // carried the field with upstream's 0.99 default and nothing
+    // read the option, so an override was silently dropped. The
+    // default equals the registered default, so this changes
+    // nothing for a run that does not set it.
+    if let Some(v) = read_num("tau_min") {
+        builder.mu.tau_min = v;
+    }
+    if let Some(v) = read_num("sigma_max") {
+        builder.mu.sigma_max = v;
+    }
+    if let Some(v) = read_num("sigma_min") {
+        builder.mu.sigma_min = v;
+    }
+
+    // Quality-function oracle knobs — consumers in
+    // `IpQualityFunctionMuOracle.cpp:RegisterOptions`. Forwarded
+    // to the oracle on every free-mode call.
+    if let Ok((v, found)) = options.get_string_value("quality_function_norm_type", "") {
+        if found {
+            use crate::mu::oracle::quality_function::NormType;
+            builder.mu.quality_function_norm_type = match v.as_str() {
+                "1-norm" => NormType::OneNorm,
+                "2-norm" => NormType::TwoNorm,
+                "max-norm" => NormType::MaxNorm,
+                _ => NormType::TwoNormSquared,
+            };
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("quality_function_centrality", "") {
+        if found {
+            use crate::mu::oracle::quality_function::CentralityType;
+            builder.mu.quality_function_centrality = match v.as_str() {
+                "log" => CentralityType::LogCenter,
+                "reciprocal" => CentralityType::ReciprocalCenter,
+                "cubed-reciprocal" => CentralityType::CubedReciprocalCenter,
+                _ => CentralityType::None,
+            };
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("quality_function_balancing_term", "") {
+        if found {
+            use crate::mu::oracle::quality_function::BalancingTermType;
+            builder.mu.quality_function_balancing_term = match v.as_str() {
+                "cubic" => BalancingTermType::CubicTerm,
+                _ => BalancingTermType::None,
+            };
+        }
+    }
+    if let Some(v) = read_int("quality_function_max_section_steps") {
+        builder.mu.quality_function_max_section_steps = v;
+    }
+    if let Some(v) = read_num("quality_function_section_sigma_tol") {
+        builder.mu.quality_function_section_sigma_tol = v;
+    }
+    if let Some(v) = read_num("quality_function_section_qf_tol") {
+        builder.mu.quality_function_section_qf_tol = v;
+    }
+
+    // `probing_iterate_quality_factor` — pounce-specific guard
+    // (pounce#58) on the probing μ-oracle's input iterate. When
+    // `curr_avrg_compl / curr_mu` exceeds this factor, the
+    // μ-update layer signals restoration via
+    // `IpoptData::request_resto` instead of letting probing
+    // return `σ · mu_curr` ≫ previous μ. Default 1e4; set to ≤ 0
+    // to disable. No upstream Ipopt counterpart.
+    if let Some(v) = read_num("probing_iterate_quality_factor") {
+        builder.mu.probing_iterate_quality_factor = v;
+    }
+
+    // Adaptive-μ extras — consumers in
+    // `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Only active when
+    // `mu_strategy=adaptive`.
+    if let Some(v) = read_num("adaptive_mu_safeguard_factor") {
+        builder.mu.adaptive_mu_safeguard_factor = v;
+    }
+    if let Some(v) = read_num("adaptive_mu_monotone_init_factor") {
+        builder.mu.adaptive_mu_monotone_init_factor = v;
+    }
+    if let Ok((v, found)) = options.get_bool_value("adaptive_mu_restore_previous_iterate", "") {
+        if found {
+            builder.mu.adaptive_mu_restore_previous_iterate = v;
+        }
+    }
+    if let Some(v) = read_int("adaptive_mu_max_free_returns") {
+        builder.mu.adaptive_mu_max_free_returns = v;
+    }
+    if let Some(v) = read_num("adaptive_mu_budget_pin_fraction") {
+        builder.mu.adaptive_mu_budget_pin_fraction = v;
+    }
+    if let Some(v) = read_int("adaptive_mu_kkterror_red_iters") {
+        if v >= 0 {
+            builder.mu.adaptive_mu_kkterror_red_iters = v as usize;
+        }
+    }
+    if let Some(v) = read_num("adaptive_mu_kkterror_red_fact") {
+        builder.mu.adaptive_mu_kkterror_red_fact = v;
+    }
+    // `filter_margin_fact` / `filter_max_margin` (#551) — the margin
+    // an entry must clear in the `obj-constr-filter` globalization
+    // test. `AdaptiveMuUpdate` computes
+    // `filter_margin_fact * min(filter_max_margin, err)` and has
+    // always done so; only these two read sites were missing, so
+    // setting either did nothing. Defaults equal the registered
+    // defaults (1e-5 / 1.0), so an unset run is unchanged.
+    if let Some(v) = read_num("filter_margin_fact") {
+        builder.mu.filter_margin_fact = v;
+    }
+    if let Some(v) = read_num("filter_max_margin") {
+        builder.mu.filter_max_margin = v;
+    }
+    if let Ok((v, found)) = options.get_string_value("adaptive_mu_kkt_norm_type", "") {
+        if found {
+            use crate::mu::adaptive::AdaptiveMuKktNorm;
+            builder.mu.adaptive_mu_kkt_norm_type = match v.as_str() {
+                "1-norm" => AdaptiveMuKktNorm::OneNorm,
+                "2-norm" => AdaptiveMuKktNorm::TwoNorm,
+                "max-norm" => AdaptiveMuKktNorm::MaxNorm,
+                _ => AdaptiveMuKktNorm::TwoNormSquared,
+            };
+        }
+    }
+
+    // Watchdog options — consumers in
+    // `IpBacktrackingLineSearch.cpp:RegisterOptions`. Baked into
+    // the `BacktrackingLineSearch` at build time.
+    if let Some(v) = read_int("watchdog_shortened_iter_trigger") {
+        builder.line_search.watchdog_shortened_iter_trigger = v;
+    }
+    if let Some(v) = read_int("watchdog_trial_iter_max") {
+        builder.line_search.watchdog_trial_iter_max = v;
+    }
+    if let Some(v) = read_num("soft_resto_pderror_reduction_factor") {
+        builder.line_search.soft_resto_pderror_reduction_factor = v;
+    }
+    if let Some(v) = read_int("max_soft_resto_iters") {
+        builder.line_search.max_soft_resto_iters = v;
+    }
+    // `alpha_red_factor` (#678) and `accept_after_max_steps` (#551)
+    // — both consumed by the α-loop in `BacktrackingLineSearch`,
+    // both registered without a read site until those issues.
+    // `alpha_red_factor`'s default (0.5) equals the registered one,
+    // and `accept_after_max_steps` defaults to `-1`, which disables
+    // the escape hatch, so neither moves a solve that leaves them
+    // alone.
+    if let Some(v) = read_num("alpha_red_factor") {
+        builder.line_search.alpha_red_factor = v;
+    }
+    if let Some(v) = read_int("accept_after_max_steps") {
+        builder.line_search.accept_after_max_steps = v;
+    }
+
+    // Filter switching / Armijo / margin constants (#191). Consumed
+    // by `FilterLsAcceptor` (only on the `Filter` line-search path);
+    // registered but never read, so overrides were silently dropped.
+    // Defaults equal the registered defaults.
+    if let Some(v) = read_num("eta_phi") {
+        builder.line_search.eta_phi = v;
+    }
+    // `delta` (#551) — the switching rule's multiplier on the
+    // constraint violation (Eqn. (19)); `FilterLsAcceptor` has
+    // always used it as `delta_armijo`, only the read site was
+    // missing. Default 1.0 equals the registered default.
+    if let Some(v) = read_num("delta") {
+        builder.line_search.delta = v;
+    }
+    if let Some(v) = read_num("theta_min_fact") {
+        builder.line_search.theta_min_fact = v;
+    }
+    if let Some(v) = read_num("theta_max_row_scale_kappa") {
+        builder.line_search.theta_max_row_scale_kappa = v;
+    }
+    if let Some(v) = read_int("theta_max_adaptive_trigger") {
+        builder.line_search.theta_max_adaptive_trigger = v.max(0) as u32;
+    }
+    if let Some(v) = read_num("theta_max_adaptive_factor") {
+        builder.line_search.theta_max_adaptive_factor = v;
+    }
+    if let Some(v) = read_int("theta_max_adaptive_max_raises") {
+        builder.line_search.theta_max_adaptive_max_raises = v.max(0) as u32;
+    }
+    if let Some(v) = read_num("theta_max_fact") {
+        builder.line_search.theta_max_fact = v;
+    }
+    if let Some(v) = read_num("gamma_phi") {
+        builder.line_search.gamma_phi = v;
+    }
+    if let Some(v) = read_num("gamma_theta") {
+        builder.line_search.gamma_theta = v;
+    }
+    if let Some(v) = read_num("s_phi") {
+        builder.line_search.s_phi = v;
+    }
+    if let Some(v) = read_num("s_theta") {
+        builder.line_search.s_theta = v;
+    }
+    if let Some(v) = read_num("alpha_min_frac") {
+        builder.line_search.alpha_min_frac = v;
+    }
+    if let Some(v) = read_num("obj_max_inc") {
+        builder.line_search.obj_max_inc = v;
+    }
+    if let Some(v) = read_int("max_filter_resets") {
+        builder.line_search.max_filter_resets = v;
+    }
+    if let Some(v) = read_int("filter_reset_trigger") {
+        builder.line_search.filter_reset_trigger = v;
+    }
+    // Penalty line-search constants (#551), consumed by
+    // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
+    // / `cg-penalty` paths). The acceptor implements ν and the
+    // Armijo test on the penalty merit function already; these four
+    // were registered with no read site, so tuning the penalty
+    // update did nothing. Defaults equal the registered defaults.
+    if let Some(v) = read_num("nu_init") {
+        builder.line_search.nu_init = v;
+    }
+    if let Some(v) = read_num("nu_inc") {
+        builder.line_search.nu_inc = v;
+    }
+    if let Some(v) = read_num("rho") {
+        builder.line_search.rho = v;
+    }
+    if let Some(v) = read_num("eta_penalty") {
+        builder.line_search.eta_penalty = v;
+    }
+
+    // Second-order-correction constants (#191), consumed by
+    // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
+    if let Some(v) = read_int("max_soc") {
+        builder.line_search.max_soc = v;
+    }
+    if let Some(v) = read_num("kappa_soc") {
+        builder.line_search.kappa_soc = v;
+    }
+    if let Some(v) = read_int("soc_method") {
+        builder.line_search.soc_method = v;
+    }
+
+    // Inertia-correction / Jacobian-regularization constants (#191),
+    // consumed by `PdPerturbationHandler`. Registered but never read.
+    if let Some(v) = read_num("max_hessian_perturbation") {
+        builder.perturbation.max_hessian_perturbation = v;
+    }
+    if let Some(v) = read_num("min_hessian_perturbation") {
+        builder.perturbation.min_hessian_perturbation = v;
+    }
+    if let Some(v) = read_num("perturb_inc_fact_first") {
+        builder.perturbation.perturb_inc_fact_first = v;
+    }
+    if let Some(v) = read_num("perturb_inc_fact") {
+        builder.perturbation.perturb_inc_fact = v;
+    }
+    if let Some(v) = read_num("perturb_dec_fact") {
+        builder.perturbation.perturb_dec_fact = v;
+    }
+    if let Some(v) = read_num("first_hessian_perturbation") {
+        builder.perturbation.first_hessian_perturbation = v;
+    }
+    if let Some(v) = read_num("jacobian_regularization_value") {
+        builder.perturbation.jacobian_regularization_value = v;
+    }
+    if let Some(v) = read_num("jacobian_regularization_exponent") {
+        builder.perturbation.jacobian_regularization_exponent = v;
+    }
+    if let Ok((v, true)) = options.get_bool_value("perturb_always_cd", "") {
+        builder.perturbation.perturb_always_cd = v;
+    }
+    if let Some(v) = read_int("perturb_delta_c_max_rungs") {
+        builder.perturbation.perturb_delta_c_max_rungs = v;
+    }
+
+    // Iterative-refinement constants (#191), consumed by
+    // `PdFullSpaceSolver`. Registered but never read.
+    if let Some(v) = read_int("min_refinement_steps") {
+        builder.refinement.min_refinement_steps = v;
+    }
+    if let Some(v) = read_int("max_refinement_steps") {
+        builder.refinement.max_refinement_steps = v;
+    }
+    if let Some(v) = read_num("residual_ratio_max") {
+        builder.refinement.residual_ratio_max = v;
+    }
+    if let Some(v) = read_num("residual_ratio_singular") {
+        builder.refinement.residual_ratio_singular = v;
+    }
+    if let Some(v) = read_num("residual_improvement_factor") {
+        builder.refinement.residual_improvement_factor = v;
+    }
+
+    // Inertia-free curvature test (#551 / #677), also consumed by
+    // `PdFullSpaceSolver`. `neg_curv_test_tol` had a field that only
+    // ever held its 0.0 default, and `neg_curv_test_reg` had none at
+    // all; both are now read, and the curvature test they configure
+    // is implemented in `PdFullSpaceSolver::solve_once`. At the
+    // registered default (`0.0`) the heuristic is off and the
+    // inertia check runs as before.
+    if let Some(v) = read_num("neg_curv_test_tol") {
+        builder.refinement.neg_curv_test_tol = v;
+    }
+    if let Ok((v, true)) = options.get_bool_value("neg_curv_test_reg", "") {
+        builder.refinement.neg_curv_test_reg = v;
+    }
+
+    // Restoration-phase constants (#191). Carried on the outer builder
+    // and copied into the `RestoAlgorithmBuilder` when the restoration
+    // factory is minted (the frontends pass this builder in). The
+    // restoration builder was never options-configured, so these were
+    // registered but never read. Defaults equal the registered
+    // defaults.
+    if let Some(v) = read_num("bound_mult_reset_threshold") {
+        builder.resto.bound_mult_reset_threshold = v;
+    }
+    if let Some(v) = read_num("constr_mult_reset_threshold") {
+        builder.resto.constr_mult_reset_threshold = v;
+    }
+    if let Some(v) = read_num("resto_penalty_parameter") {
+        builder.resto.resto_penalty_parameter = v;
+    }
+    if let Some(v) = read_num("resto_proximity_weight") {
+        builder.resto.resto_proximity_weight = v;
+    }
+    // `required_infeasibility_reduction` (#439) — the κ_resto guard the
+    // restoration sub-solve exits on. Registered since #191 but the
+    // value was hardcoded at the callsite, so setting it was a silent
+    // no-op.
+    if let Some(v) = read_num("required_infeasibility_reduction") {
+        builder.resto.required_infeasibility_reduction = v;
+    }
+    // gh#483 / #191 round 2: three restoration switches whose fields
+    // `RestoAlgorithmBuilder` has consumed all along — the read site
+    // was the only missing piece, so setting them did nothing.
+    let read_yes = |key: &str| -> Option<bool> {
+        match options.get_string_value(key, "") {
+            Ok((v, true)) => Some(v.eq_ignore_ascii_case("yes")),
+            _ => None,
+        }
+    };
+    if let Some(v) = read_yes("evaluate_orig_obj_at_resto_trial") {
+        builder.resto.evaluate_orig_obj_at_resto_trial = v;
+    }
+    if let Some(v) = read_yes("expect_infeasible_problem") {
+        builder.resto.expect_infeasible_problem = v;
+    }
+    if let Some(v) = read_yes("start_with_resto") {
+        builder.resto.start_with_resto = v;
+    }
+    // `max_resto_iter` (#551 / #677) — the cap on *successive*
+    // restoration iterations. `RestoConvCheckAdapter` has enforced a cap
+    // all along (returning `MaxIterExceeded` at the limit); the number
+    // it enforced was a hard-coded constant in `resto_inner_solver.rs`,
+    // so setting the option did nothing. The consumer's field is
+    // `maximum_resto_iters`, not the option name — grepping for
+    // `max_resto_iter` found only the registry (#551 caution 2).
+    //
+    // DEFAULT MISMATCH, LEFT AS IT IS ON PURPOSE: the registry declares
+    // upstream's 3000000, pounce's effective cap is 3000
+    // (`RestoOptions::default`). `read_int` fires only when the user set
+    // the key, so an unset `max_resto_iter` still means 3000 and this
+    // wiring is trajectory-neutral. Adopting upstream's number would let
+    // restorations pounce currently truncates run on, which is a
+    // trajectory change and needs its own measurement.
+    if let Some(v) = read_int("max_resto_iter") {
+        builder.resto.max_resto_iter = v;
+    }
+
+    // Iteration-output options — consumed by `OrigIterationOutput`.
+    if let Some(v) = read_int("print_frequency_iter") {
+        builder.output.print_frequency_iter = v;
+    }
+    if let Some(v) = read_num("print_frequency_time") {
+        builder.output.print_frequency_time = v;
+    }
+    if let Ok((v, found)) = options.get_bool_value("print_info_string", "") {
+        if found {
+            builder.output.print_info_string = v;
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("inf_pr_output", "") {
+        if found {
+            builder.output.inf_pr_output_internal = v == "internal";
+        }
+    }
+
+    // Warm-start options — consumed by `WarmStartIterateInitializer`
+    // (port of `IpWarmStartIterateInitializer.cpp:RegisterOptions`).
+    // `warm_start_init_point` is the toggle that picks between the
+    // default (cold) and warm-start initializers; the remaining
+    // knobs are baked onto the chosen initializer at build time.
+    if let Ok((v, found)) = options.get_bool_value("warm_start_init_point", "") {
+        if found {
+            builder.warm_start_init_point = v;
+        }
+    }
+    if let Some(v) = read_num("warm_start_bound_push") {
+        builder.warm.bound_push = v;
+    }
+    if let Some(v) = read_num("warm_start_bound_frac") {
+        builder.warm.bound_frac = v;
+    }
+    if let Some(v) = read_num("warm_start_slack_bound_push") {
+        builder.warm.slack_bound_push = v;
+    }
+    if let Some(v) = read_num("warm_start_slack_bound_frac") {
+        builder.warm.slack_bound_frac = v;
+    }
+    if let Some(v) = read_num("warm_start_mult_bound_push") {
+        builder.warm.mult_bound_push = v;
+    }
+    if let Some(v) = read_num("warm_start_mult_init_max") {
+        builder.warm.mult_init_max = v;
+    }
+    if let Some(v) = read_num("warm_start_target_mu") {
+        builder.warm.target_mu = v;
+    }
+    // gh#606: residual-adaptive recentering. `warm_start_entire_iterate`
+    // and `warm_start_same_structure` used to be parsed here into
+    // fields nothing read; they are refused by
+    // `unimplemented_options` instead (they name the
+    // `GetWarmStartIterate` TNLP surface pounce does not expose).
+    if let Ok((v, found)) = options.get_string_value("warm_start_recentering", "") {
+        if found {
+            builder.warm.recentering = if v.eq_ignore_ascii_case("none") {
+                crate::alg_builder::WarmStartRecentering::None
+            } else {
+                crate::alg_builder::WarmStartRecentering::Residual
+            };
+        }
+    }
+
+    // `DefaultIterateInitializer` knobs — parsed after the Mehrotra
+    // cascade so explicit user values win
+    // (mirrors upstream's `SetNumericValueIfUnset` semantics).
+    if let Some(v) = read_num("bound_push") {
+        builder.init.bound_push = v;
+    }
+    if let Some(v) = read_num("bound_frac") {
+        builder.init.bound_frac = v;
+    }
+    if let Some(v) = read_num("slack_bound_push") {
+        builder.init.slack_bound_push = v;
+    }
+    if let Some(v) = read_num("slack_bound_frac") {
+        builder.init.slack_bound_frac = v;
+    }
+    if let Some(v) = read_num("constr_mult_init_max") {
+        builder.init.constr_mult_init_max = v;
+    }
+    if let Some(v) = read_num("bound_mult_init_val") {
+        builder.init.bound_mult_init_val = v;
+    }
+    if let Ok((v, found)) = options.get_string_value("bound_mult_init_method", "") {
+        if found {
+            builder.init.bound_mult_init_method = v;
+        }
+    }
+    if let Ok((v, found)) = options.get_string_value("least_square_init_primal", "") {
+        if found {
+            builder.init.least_square_init_primal = v == "yes";
+        }
+    }
+    builder
+}
+
+// ---------------------------------------------------------------------------
+// Local-infeasibility second-opinion ladder.
+// ---------------------------------------------------------------------------
+
+/// One rung of the local-infeasibility second-opinion ladder: a label for the
+/// console plus the option assignments that define this re-solve's trajectory.
+///
+/// Assignments are applied on top of the *baseline* options, not on top of the
+/// previous rung — see [`second_opinion_rungs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondOpinionRung {
+    pub label: &'static str,
+    pub assignments: Vec<String>,
+}
+
+/// What the baseline options already provide, so a rung that would be a no-op
+/// can be dropped instead of burning a solve to re-derive the same answer.
+#[derive(Debug, Clone, Copy)]
+pub struct SecondOpinionAvailability {
+    pub scaling_retry_enabled: bool,
+    pub mu_retry_enabled: bool,
+    pub already_mc64: bool,
+    pub already_adaptive: bool,
+    /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy,
+    /// which the barrier rung re-asserts so it varies exactly one knob.
+    /// `None` when the resolved strategy has no tag to write back
+    /// (`ScalingStrategy::External`), which drops the barrier rung rather than
+    /// let it run under a scaling the baseline never used.
+    pub baseline_scaling: Option<&'static str>,
+}
+
+/// Build the ladder of second-opinion re-solves for a local-infeasibility
+/// verdict, in the order they should be tried.
+///
+/// Rung 1 (`feral_scaling=mc64`) perturbs the linear algebra only. Rung 2
+/// (`mu_strategy=adaptive`) perturbs the barrier trajectory, and **restores the
+/// baseline scaling first** so it varies exactly one knob from the original
+/// solve. That reset is load-bearing, not tidiness: on gh #524's `cresc4`,
+/// `mu_strategy=adaptive` recovers the optimum but `mu_strategy=adaptive` with
+/// `feral_scaling=mc64` still reports local infeasibility, so a cumulative
+/// ladder would have discarded the fix.
+pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpinionRung> {
+    let mut rungs = Vec::new();
+    if avail.scaling_retry_enabled && !avail.already_mc64 {
+        rungs.push(SecondOpinionRung {
+            label: "feral_scaling=mc64",
+            assignments: vec!["feral_scaling mc64\n".to_string()],
+        });
+    }
+    if let Some(baseline_scaling) = avail.baseline_scaling
+        && avail.mu_retry_enabled
+        && !avail.already_adaptive
+    {
+        rungs.push(SecondOpinionRung {
+            label: "mu_strategy=adaptive",
+            assignments: vec![
+                format!("feral_scaling {baseline_scaling}\n"),
+                "mu_strategy adaptive\n".to_string(),
+            ],
+        });
+    }
+    rungs
+}
+
+/// Did a second-opinion re-solve converge well enough to overturn the original
+/// local-infeasibility verdict? Only a clean or acceptable-level solve
+/// promotes; everything else (including a second infeasibility verdict) leaves
+/// the original verdict standing.
+pub fn second_opinion_promoted(retry_status: ApplicationReturnStatus) -> bool {
+    matches!(
+        retry_status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
+}
+
+/// Resolve the final `(status, statistics)` after a second-opinion re-solve
+/// (code review L23).
+///
+/// On promotion the retry is the authoritative solve, so its status **and** its
+/// statistics are reported together. Otherwise the original local-infeasibility
+/// verdict is kept — and so are the *original* solve's statistics, so the
+/// summary / JSON report never pair the original verdict with the failed
+/// retry's iteration count or objective. The pre-fix code reverted `status` to
+/// `InfeasibleProblemDetected` but read `app.statistics()` *after* the retry,
+/// leaking the retry solve's stats into a report labeled with the original
+/// verdict.
+pub fn resolve_second_opinion_outcome(
+    retry_status: ApplicationReturnStatus,
+    original_stats: SolveStatistics,
+    retry_stats: SolveStatistics,
+) -> (ApplicationReturnStatus, SolveStatistics) {
+    if second_opinion_promoted(retry_status) {
+        (retry_status, retry_stats)
+    } else {
+        (
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            original_stats,
+        )
+    }
+}
+
 pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
@@ -6167,5 +6534,204 @@ mod tests {
             "{:#?}",
             tolerant.lines,
         );
+    }
+}
+
+#[cfg(test)]
+mod second_opinion_tests {
+    use super::{
+        SecondOpinionAvailability, resolve_second_opinion_outcome, second_opinion_promoted,
+        second_opinion_rungs,
+    };
+    use pounce_nlp::SolveStatistics;
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+
+    fn avail() -> SecondOpinionAvailability {
+        SecondOpinionAvailability {
+            scaling_retry_enabled: true,
+            mu_retry_enabled: true,
+            already_mc64: false,
+            already_adaptive: false,
+            baseline_scaling: Some("auto"),
+        }
+    }
+
+    /// The default ladder is two rungs, scaling first (it is the cheaper and
+    /// longer-standing one), barrier strategy second.
+    #[test]
+    fn default_ladder_is_scaling_then_barrier_strategy() {
+        let rungs = second_opinion_rungs(avail());
+        let labels: Vec<_> = rungs.iter().map(|r| r.label).collect();
+        assert_eq!(labels, ["feral_scaling=mc64", "mu_strategy=adaptive"]);
+    }
+
+    /// gh #524: the rungs are applied to the *baseline*, not stacked. The
+    /// barrier rung re-asserts the baseline scaling, because on `cresc4`
+    /// `mu_strategy=adaptive` recovers the optimum while `mu_strategy=adaptive`
+    /// together with `feral_scaling=mc64` still reports local infeasibility —
+    /// a cumulative ladder would throw the fix away.
+    #[test]
+    fn barrier_rung_restores_the_baseline_scaling() {
+        for baseline in ["auto", "infnorm"] {
+            let rungs = second_opinion_rungs(SecondOpinionAvailability {
+                baseline_scaling: Some(baseline),
+                ..avail()
+            });
+            let barrier = rungs
+                .iter()
+                .find(|r| r.label == "mu_strategy=adaptive")
+                .expect("barrier rung present");
+            assert!(
+                barrier
+                    .assignments
+                    .iter()
+                    .any(|a| a.trim() == format!("feral_scaling {baseline}")),
+                "barrier rung must reset the scaling to the baseline {baseline}, \
+                 got {:?}",
+                barrier.assignments,
+            );
+        }
+    }
+
+    /// A rung that cannot change anything is dropped rather than burning a
+    /// whole solve to re-derive the same answer.
+    #[test]
+    fn rungs_already_satisfied_at_baseline_are_dropped() {
+        let only_barrier = second_opinion_rungs(SecondOpinionAvailability {
+            already_mc64: true,
+            ..avail()
+        });
+        assert_eq!(
+            only_barrier.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["mu_strategy=adaptive"],
+        );
+
+        let only_scaling = second_opinion_rungs(SecondOpinionAvailability {
+            already_adaptive: true,
+            ..avail()
+        });
+        assert_eq!(
+            only_scaling.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["feral_scaling=mc64"],
+        );
+
+        assert!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                already_mc64: true,
+                already_adaptive: true,
+                ..avail()
+            })
+            .is_empty(),
+            "nothing left to vary means no ladder at all",
+        );
+    }
+
+    /// A resolved scaling with no `feral_scaling` tag to write back
+    /// (`ScalingStrategy::External`) drops the barrier rung rather than run it
+    /// under a scaling the baseline never used. The scaling rung is unaffected
+    /// — it does not need to restore anything.
+    #[test]
+    fn barrier_rung_is_dropped_when_the_baseline_scaling_has_no_tag() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            baseline_scaling: None,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["feral_scaling=mc64"],
+        );
+    }
+
+    /// Each rung has its own opt-out, and turning both off restores upstream
+    /// IPOPT's behaviour of shipping the first verdict.
+    #[test]
+    fn each_rung_can_be_disabled_independently() {
+        assert_eq!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                scaling_retry_enabled: false,
+                ..avail()
+            })
+            .iter()
+            .map(|r| r.label)
+            .collect::<Vec<_>>(),
+            ["mu_strategy=adaptive"],
+        );
+        assert_eq!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                mu_retry_enabled: false,
+                ..avail()
+            })
+            .iter()
+            .map(|r| r.label)
+            .collect::<Vec<_>>(),
+            ["feral_scaling=mc64"],
+        );
+        assert!(
+            second_opinion_rungs(SecondOpinionAvailability {
+                scaling_retry_enabled: false,
+                mu_retry_enabled: false,
+                ..avail()
+            })
+            .is_empty(),
+        );
+    }
+
+    fn stats_with_iters(n: i32) -> SolveStatistics {
+        SolveStatistics {
+            iteration_count: n,
+            final_objective: n as f64,
+            ..SolveStatistics::default()
+        }
+    }
+
+    /// Code review L23: when the MC64 hypersensitivity re-solve does **not**
+    /// recover, the verdict reverts to the original local-infeasibility status
+    /// — and the reported statistics must revert with it, not leak the failed
+    /// retry's iteration count / objective.
+    #[test]
+    fn failed_retry_keeps_original_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            ApplicationReturnStatus::MaximumIterationsExceeded,
+            ApplicationReturnStatus::RestorationFailed,
+        ] {
+            assert!(!second_opinion_promoted(retry_status));
+            let (status, stats) =
+                resolve_second_opinion_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(
+                status,
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                "a non-promoting retry ({retry_status:?}) keeps the original verdict"
+            );
+            assert_eq!(
+                stats.iteration_count, 7,
+                "stats must stay the original solve's, not the failed retry's"
+            );
+            assert_eq!(stats.final_objective, 7.0);
+        }
+    }
+
+    /// On promotion the retry is authoritative: its status AND its statistics
+    /// are reported together.
+    #[test]
+    fn promoted_retry_adopts_retry_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::SolveSucceeded,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+        ] {
+            assert!(second_opinion_promoted(retry_status));
+            let (status, stats) =
+                resolve_second_opinion_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
+            assert_eq!(
+                stats.iteration_count, 42,
+                "promoted: stats must be the retry solve's"
+            );
+            assert_eq!(stats.final_objective, 42.0);
+        }
     }
 }
