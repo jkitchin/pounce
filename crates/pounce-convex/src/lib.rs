@@ -38,6 +38,7 @@ pub(crate) mod equilibrate;
 pub mod hsde;
 pub mod hsde_nonsym;
 pub mod ipm;
+mod options;
 pub mod presolve;
 mod psd_certificate;
 pub mod qp;
@@ -55,6 +56,7 @@ pub use ipm::{
     QpFactorization, QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
     solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
+pub use options::ConvexPresolveOptions;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};

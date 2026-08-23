@@ -201,7 +201,7 @@ fn solver_selection_and_qp_presolve_are_registered() {
 // that reads them (gh#604).
 // ---------------------------------------------------------------------
 
-/// All eight convex knobs live in the core registry, so every frontend
+/// All convex knobs live in the core registry, so every frontend
 /// *parses* them. Until gh#604 the seven `qp_tau`-family names were
 /// registered by `pounce-cli` at startup instead, which made setting one
 /// from Python or the C interface fail with `Unknown option "qp_tau"` —
@@ -222,6 +222,11 @@ fn every_convex_knob_is_registered_core_side() {
             "`{name}` should be a registered library option"
         );
     }
+    assert!(
+        o.set_integer_value("qp_gondzio_corr", 2, true, true)
+            .is_ok(),
+        "`qp_gondzio_corr` should be a registered library option"
+    );
     for name in ["qp_hsde", "qp_equilibrate", "qp_crossover", "qp_presolve"] {
         assert!(
             o.set_string_value(name, "no", true, true).is_ok(),
@@ -231,6 +236,10 @@ fn every_convex_knob_is_registered_core_side() {
     // The registered ranges still bite: τ ∈ (0,1) open at both ends.
     assert!(o.set_numeric_value("qp_tau", 1.0, true, true).is_err());
     assert!(o.set_numeric_value("qp_reg", -1.0, true, true).is_err());
+    assert!(
+        o.set_integer_value("qp_gondzio_corr", 11, true, true)
+            .is_err()
+    );
     assert!(o.set_string_value("qp_hsde", "maybe", true, true).is_err());
 }
 
@@ -256,6 +265,16 @@ fn a_convex_knob_is_refused_on_a_library_solve() {
         .expect("a non-default convex knob must be refused");
     assert!(msg.contains("qp_crossover"), "{msg}");
     assert!(msg.contains("604"), "message should name the issue: {msg}");
+
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.options_mut()
+        .set_integer_value("qp_gondzio_corr", 2, true, true)
+        .unwrap();
+    let msg = app
+        .unhonored_convex_option()
+        .expect("qp_gondzio_corr must be guarded like every convex-only knob");
+    assert!(msg.contains("qp_gondzio_corr"), "{msg}");
 }
 
 /// The same default gate the rest of the refusals use: an `ipopt.opt`
