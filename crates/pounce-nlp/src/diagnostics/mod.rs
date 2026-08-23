@@ -23,6 +23,7 @@ use pounce_common::tolerance::is_negligible;
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 
 pub mod preflight;
+pub mod verify;
 
 /// One row (a variable or a constraint) reported against its declared box.
 #[derive(Debug, Clone)]
@@ -115,5 +116,87 @@ pub fn name_at(names: &[String], i: usize, kind: char) -> String {
     match names.get(i) {
         Some(s) if !s.is_empty() => s.clone(),
         _ => format!("{kind}[{i}]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+
+    #[test]
+    fn box_violation_basic() {
+        // inside
+        assert_eq!(box_violation(5.0, 0.0, 10.0), 0.0);
+        // below lower
+        assert!((box_violation(-2.0, 0.0, 10.0) - 2.0).abs() < 1e-15);
+        // above upper
+        assert!((box_violation(13.0, 0.0, 10.0) - 3.0).abs() < 1e-15);
+        // one-sided (no upper)
+        assert_eq!(box_violation(1e30, 0.0, NLP_UPPER_BOUND_INF), 0.0);
+    }
+
+    #[test]
+    fn box_violation_rejects_non_finite() {
+        // Regression: a fabricated `.sol` carrying NaN must register an
+        // infinite violation, not slip through as feasible. Before the
+        // `is_finite` guard, `NaN.max(_).max(0.0)` collapsed to `0.0`
+        // (f64::max drops NaN operands) and the checker reported VERIFIED.
+        assert_eq!(box_violation(Number::NAN, 0.0, 10.0), Number::INFINITY);
+        // ±∞ pinned at an unbounded variable is not a real point either.
+        assert_eq!(
+            box_violation(Number::INFINITY, 0.0, NLP_UPPER_BOUND_INF),
+            Number::INFINITY
+        );
+        assert_eq!(
+            box_violation(Number::NEG_INFINITY, NLP_LOWER_BOUND_INF, 10.0),
+            Number::INFINITY
+        );
+    }
+
+    /// **gh #403.** `verify` exists to be the independent check on a `.sol`.
+    /// A checker that under-reports is worse than its blast radius suggests.
+    ///
+    /// `is_finite_bound` was a *band* membership test —
+    /// `b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF` — applied to `lo`
+    /// and `hi` alike. A real upper bound of `-5e20` failed it, so `above`
+    /// became `-inf` and the violation read `0.0`: **ACCEPTED for a `.sol` that
+    /// violates a declared bound.**
+    #[test]
+    fn a_bound_past_the_opposite_sentinel_still_scores_a_violation() {
+        // x <= -5e20, no lower bound. The point 0.0 violates it by 5e20.
+        let v = box_violation(0.0, NLP_LOWER_BOUND_INF, -5.0e20);
+        assert_eq!(
+            v, 5.0e20,
+            "0 is 5e20 above an upper bound of -5e20; scoring it 0.0 lets a \
+             fabricated .sol past the feasibility gate"
+        );
+        // Mirror: x >= 5e20, no upper bound.
+        assert_eq!(box_violation(0.0, 5.0e20, NLP_UPPER_BOUND_INF), 5.0e20);
+        // A point that does satisfy the same bound still scores zero.
+        assert_eq!(box_violation(-6.0e20, NLP_LOWER_BOUND_INF, -5.0e20), 0.0);
+        // And the sentinels themselves still mean "no bound".
+        assert_eq!(
+            box_violation(1e30, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF),
+            0.0
+        );
+    }
+
+    /// The same predicate sizes a row's magnitude for the scale-relative
+    /// feasibility test. A row written at `5e20` must report that magnitude,
+    /// not fall back to its evaluated value alone.
+    #[test]
+    fn row_magnitude_counts_a_bound_past_the_opposite_sentinel() {
+        assert_eq!(
+            row_magnitude(1.0, NLP_LOWER_BOUND_INF, -5.0e20),
+            5.0e20,
+            "the row's own upper bound is its magnitude"
+        );
+        assert_eq!(row_magnitude(1.0, 5.0e20, NLP_UPPER_BOUND_INF), 5.0e20);
+        // Absent on both sides: only the evaluated value carries magnitude.
+        assert_eq!(
+            row_magnitude(3.0, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF),
+            3.0
+        );
     }
 }

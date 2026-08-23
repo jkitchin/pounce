@@ -220,6 +220,12 @@ pub mod diagnostics {
     pub use pounce_nlp::diagnostics::{
         RowReport, box_violation, name_at, row_is_violated, row_magnitude,
     };
+    // Independent solution checking: re-derive feasibility (and, when the
+    // claim carries duals, first-order optimality) from the model rather than
+    // trusting a solver's exit string. This is what `pounce verify` reports.
+    pub use pounce_nlp::diagnostics::verify::{
+        SolutionClaim, VerifyOptions, VerifyOutcome, VerifyProvenance, verify_tnlp,
+    };
 }
 
 // --- transparent TNLP decorators --------------------------------------------
