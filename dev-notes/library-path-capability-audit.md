@@ -64,22 +64,40 @@ node that may contain the optimum. `oximo` is exactly such a driver.
 `main.rs`, so not even `pounce_cli`-the-library can reach them. Only the
 "apply the assignments and re-run" driver is orchestration.
 
-### Caveat, measured: it does not currently diverge on any repo fixture
+### Caveat, measured: it does not currently change an outcome in-tree
 
 Running all **71** `.nl` fixtures in `crates/pounce-cli/tests/fixtures/`
 twice — once at defaults, once with both retries disabled, which is exactly
 what an in-process frontend gets — produced **zero** status differences.
 
-Two consequences, and the second is arguably a finding of its own:
+**That result is expected, and the repo already says so.** An earlier draft
+of this note read it as "the ladder has no end-to-end coverage". That is
+wrong on both halves, and the correction matters:
 
-1. The practical impact of the gap is currently unmeasured, not "known bad".
-   Do not describe library callers as getting wrong verdicts today.
-2. **The ladder has no end-to-end coverage.** Its unit tests exercise
-   `second_opinion_rungs` and `resolve_scaling_retry_outcome` in isolation;
-   no fixture makes the retry actually fire. `cresc4.nl` (gh#524's case) now
-   solves at baseline — the conditioning fix in `linear_system_scaling.rs`
-   overtook it — and `discs.nl`, the canonical motivating model, is not in
-   the repo at all. A ladder that never runs in CI can rot silently.
+- The ladder *is* exercised end-to-end, on the CLI path, by
+  `issue_508_infeasibility_gap_status.rs` (a re-solve runs and is not
+  promoted; the `.sol` keeps the original verdict),
+  `issue_693_relative_infeasibility_stash.rs` (reached through the
+  `feral_scaling=mc64` rung), and `presolve_certified_infeasibility.rs`
+  (the ladder is correctly suppressed when presolve has already certified
+  infeasibility).
+- The sweep's null result is the *asserted* state.
+  `false_local_infeasibility.rs::cresc4_no_longer_needs_either_rung_of_the_ladder`
+  pins it deliberately: gh#693 removed the damped `y0` that put cresc4's
+  base trajectory in the wrong basin, so the monotone-mu path now reaches
+  the optimum unaided and the test fails if the ladder starts carrying
+  gh#524 again.
+
+What is genuinely missing is narrower, and that test states it plainly in
+its own docstring: nothing in-tree demonstrates that the ladder *changes an
+outcome* on a real model. Rung 2's diversity property has no witness here,
+and `discs.nl` — rung 1's canonical case — is not a fixture. The repo
+records that as a known, tracked gap rather than shrugging it off.
+
+So the honest reading of the sweep is: the practical impact of the
+CLI-only-ness is unmeasured, because the corpus contains no model on which
+the ladder changes anything for *anyone*. Do not describe library callers as
+getting wrong verdicts today. The structural gap below stands on its own.
 
 ## Finding 2 — `check_x0::check_tnlp` is library-shaped and stuck in the CLI
 
