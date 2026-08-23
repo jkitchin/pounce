@@ -1,66 +1,101 @@
-//! TNLP wrapper that overrides the starting point with a seed captured
-//! by the interactive debugger, so `resolve` can re-run the solve from
-//! the current iterate with new options (a primal warm start).
+//! TNLP wrapper that counts evaluation calls, so a frontend can report
+//! Ipopt's end-of-run "Number of … evaluations = N" summary block.
 //!
-//! Every method forwards to the inner TNLP exactly like
-//! [`crate::counting_tnlp::CountingTnlp`]; only [`TNLP::get_starting_point`]
-//! is overridden. The seed is applied **only when its length matches the
-//! starting-point buffer** — if presolve or fixed-variable elimination
-//! changed the coordinate count, we fall back to the problem's own start
-//! rather than seed into the wrong space.
+//! All eight required TNLP methods (and `intermediate_callback`) are
+//! forwarded transparently to the inner TNLP. The counters live in
+//! `Cell<i32>`s on the wrapper itself, so a caller can read them via
+//! `Rc<RefCell<CountingTnlp>>::borrow()` after the solve completes.
+//!
+//! The wrapper does not count *every* call — calls that pass an
+//! `irow/jcol`-only `SparsityRequest::Structure` (the symbolic
+//! sparsity-pattern call, not the values call) don't represent a real
+//! Jacobian / Hessian evaluation, mirroring the way Ipopt reports
+//! these numbers.
+//!
+//! This lives here rather than in `pounce-cli` because it is generic over
+//! `dyn TNLP` and has no CLI or `.nl` coupling: an embedder asking "how
+//! many evaluations did that solve cost" needs the same wrapper the CLI
+//! needs, and the CLI was the only thing that could reach it.
 
-use pounce_common::types::{Index, Number};
-use pounce_nlp::tnlp::{
+use crate::tnlp::{
     BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
-use std::cell::RefCell;
+use pounce_common::types::{Index, Number};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub struct SeededTnlp {
+pub struct CountingTnlp {
     inner: Rc<RefCell<dyn TNLP>>,
-    seed_x: Vec<Number>,
+    pub n_obj: Cell<i32>,
+    pub n_grad_f: Cell<i32>,
+    pub n_g: Cell<i32>,
+    pub n_jac_g: Cell<i32>,
+    pub n_h: Cell<i32>,
+    /// Primal `x` and constraint duals `lambda` captured at
+    /// `finalize_solution`, in the original-problem space the inner TNLP
+    /// presents. The CLI uses this as a fallback solution source for the
+    /// active-set SQP route, whose solve bypasses the IPM-only
+    /// `on_converged` hook the `.sol` / JSON writers normally read.
+    captured_solution: RefCell<Option<(Vec<Number>, Vec<Number>)>>,
 }
 
-impl SeededTnlp {
-    pub fn new(inner: Rc<RefCell<dyn TNLP>>, seed_x: Vec<Number>) -> Self {
-        Self { inner, seed_x }
+impl CountingTnlp {
+    pub fn new(inner: Rc<RefCell<dyn TNLP>>) -> Self {
+        Self {
+            inner,
+            n_obj: Cell::new(0),
+            n_grad_f: Cell::new(0),
+            n_g: Cell::new(0),
+            n_jac_g: Cell::new(0),
+            n_h: Cell::new(0),
+            captured_solution: RefCell::new(None),
+        }
+    }
+
+    /// The `(x, lambda)` captured at the last `finalize_solution`, if any.
+    pub fn captured_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        self.captured_solution.borrow().clone()
     }
 }
 
-impl TNLP for SeededTnlp {
+impl TNLP for CountingTnlp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         self.inner.borrow_mut().get_nlp_info()
     }
+
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
         self.inner.borrow_mut().get_bounds_info(b)
     }
+
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-        if self.seed_x.len() == sp.x.len() {
-            // `init_x` / `init_z` / `init_lambda` are inputs (which
-            // buffers the solver wants); for the initial point the solver
-            // always reads `x`, so writing the primal seed here suffices.
-            // We don't have warm duals, so we leave z/lambda untouched.
-            sp.x.copy_from_slice(&self.seed_x);
-            true
-        } else {
-            // Coordinate count changed (presolve / fixed-variable
-            // elimination); fall back to the problem's own start.
-            self.inner.borrow_mut().get_starting_point(sp)
-        }
+        self.inner.borrow_mut().get_starting_point(sp)
     }
+
     fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+        self.n_obj.set(self.n_obj.get() + 1);
         self.inner.borrow_mut().eval_f(x, new_x)
     }
+
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
+        self.n_grad_f.set(self.n_grad_f.get() + 1);
         self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f)
     }
+
     fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+        self.n_g.set(self.n_g.get() + 1);
         self.inner.borrow_mut().eval_g(x, new_x, g)
     }
+
     fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
+        // Only the values call counts as a real Jacobian evaluation;
+        // the symbolic Structure call is bookkeeping.
+        if matches!(mode, SparsityRequest::Values { .. }) {
+            self.n_jac_g.set(self.n_jac_g.get() + 1);
+        }
         self.inner.borrow_mut().eval_jac_g(x, new_x, mode)
     }
+
     fn eval_h(
         &mut self,
         x: Option<&[Number]>,
@@ -70,32 +105,47 @@ impl TNLP for SeededTnlp {
         new_lambda: bool,
         mode: SparsityRequest<'_>,
     ) -> bool {
+        if matches!(mode, SparsityRequest::Values { .. }) {
+            self.n_h.set(self.n_h.get() + 1);
+        }
         self.inner
             .borrow_mut()
             .eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
     }
+
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
+        *self.captured_solution.borrow_mut() = Some((sol.x.to_vec(), sol.lambda.to_vec()));
         self.inner
             .borrow_mut()
-            .finalize_solution(sol, ip_data, ip_cq)
+            .finalize_solution(sol, ip_data, ip_cq);
     }
+
     fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
         self.inner.borrow_mut().get_var_con_metadata(var, con)
     }
+
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
         self.inner.borrow_mut().get_scaling_parameters(req)
     }
+
     fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.borrow_mut().get_variables_linearity(types)
     }
+
     fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner
             .borrow_mut()
             .get_objective_variables_linearity(types)
     }
+
+    // Without this forward, anything stacked above the counter (the
+    // application's DOF-gate infeasibility probe, a presolve wrapper) sees
+    // the trait default `false` and treats every row as nonlinear, silently
+    // disabling linear-row bound propagation (gh#387).
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.borrow_mut().get_constraints_linearity(types)
     }
+
     fn get_number_of_nonlinear_variables(&mut self) -> Index {
         self.inner.borrow_mut().get_number_of_nonlinear_variables()
     }
@@ -106,12 +156,14 @@ impl TNLP for SeededTnlp {
     /// any model the CLI solves. Neither wrapper changes a row, a
     /// variable or a derivative's value, so both directions of the proof
     /// carry through unchanged.
-    fn derivative_proofs(&mut self) -> pounce_nlp::constant_derivatives::DerivativeProofs {
+    fn derivative_proofs(&mut self) -> crate::constant_derivatives::DerivativeProofs {
         self.inner.borrow_mut().derivative_proofs()
     }
+
     fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
         self.inner.borrow_mut().get_list_of_nonlinear_variables(pos)
     }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
@@ -122,12 +174,15 @@ impl TNLP for SeededTnlp {
             .borrow_mut()
             .intermediate_callback(stats, ip_data, ip_cq)
     }
+
     fn finalize_metadata(&mut self, var: &MetaData, con: &MetaData) {
         self.inner.borrow_mut().finalize_metadata(var, con)
     }
 
-    /// Transparent decorator: forward the presolve infeasibility proof so a
-    /// certified-empty feasible region is not swallowed on the way up.
+    /// Transparent decorator: forward the presolve infeasibility proof, or the
+    /// application never sees it. The CLI stacks this counter *above* the
+    /// presolve wrapper, so without this the proof is swallowed here and the
+    /// solve runs anyway.
     fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
         self.inner.borrow().presolve_infeasibility_proof()
     }

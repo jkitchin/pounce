@@ -8,7 +8,6 @@ pub mod cbf;
 pub mod check_x0;
 pub mod citations;
 pub mod cli;
-pub mod counting_tnlp;
 pub mod debug_repl;
 // The `.nl` pipeline (reader, AD tape, external functions, FBBT lowering)
 // now lives in the leaf `pounce-nl` crate so the Python bindings can reuse
@@ -24,7 +23,6 @@ pub mod minima;
 pub mod nl_hessian_program;
 pub mod print;
 pub mod qp_extract;
-pub mod seeded_tnlp;
 pub mod sens;
 pub mod solve_report;
 pub mod verify;

@@ -23,13 +23,13 @@ pub mod penalty_tnlp;
 pub mod sampling;
 
 use crate::cli::{Args, MinimaArgs, MinimaMethod, ProblemSource};
-use crate::seeded_tnlp::SeededTnlp;
 use crate::solve_report::{InputDescriptor, ReportBuilder, status_to_solve_result_num};
 use archive::{Archive, scaled_distance};
 use penalty_tnlp::{Kernel, PenaltyTnlp, TunnelTnlp};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::seeded_tnlp::SeededTnlp;
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, StartingPoint, TNLP};
 use sampling::{Sampler, clip};
 use std::cell::RefCell;

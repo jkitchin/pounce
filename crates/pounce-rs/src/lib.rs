@@ -205,6 +205,14 @@ pub use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
+// --- transparent TNLP decorators --------------------------------------------
+// Stackable wrappers that used to live in the CLI binary, so only the CLI
+// could reach them: `CountingTnlp` reports how many objective / gradient /
+// constraint / Jacobian / Hessian evaluations a solve actually cost, and
+// `SeededTnlp` overrides the starting point to warm-start a re-solve from a
+// chosen iterate. Both forward every other method to the inner TNLP.
+pub use pounce_nlp::{CountingTnlp, SeededTnlp};
+
 // --- the solver driver ------------------------------------------------------
 pub use pounce_algorithm::application::IpoptApplication;
 

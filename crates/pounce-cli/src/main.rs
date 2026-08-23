@@ -17,7 +17,6 @@ use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_cli::builtin;
 use pounce_cli::cli::{Args, ProblemSource};
-use pounce_cli::counting_tnlp::CountingTnlp;
 use pounce_cli::nl_reader;
 use pounce_cli::nl_writer;
 use pounce_cli::print;
@@ -31,6 +30,7 @@ use pounce_common::diagnostics::{
 };
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::SolveStatistics;
+use pounce_nlp::counting_tnlp::CountingTnlp;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::{InfeasibilityProof, TNLP};
@@ -1551,7 +1551,7 @@ pub fn main() -> ExitCode {
                     .read_from_str(&format!("warm_start_target_mu {mu}\n"), true);
             }
         }
-        solve_tnlp = Rc::new(RefCell::new(pounce_cli::seeded_tnlp::SeededTnlp::new(
+        solve_tnlp = Rc::new(RefCell::new(pounce_nlp::seeded_tnlp::SeededTnlp::new(
             Rc::clone(&tnlp),
             req.seed_x,
         )));
