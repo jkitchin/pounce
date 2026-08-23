@@ -106,18 +106,13 @@ const SCALE_HI: Number = 1e8;
 /// stage 2's `eᵢ` is built from. It is an upper bound on the curvature,
 /// not the curvature, so a mismatch measured against it **understates**
 /// the one measured against `λ_max`.
-#[derive(Debug, Clone)]
-pub struct QuadRowCoef {
-    pub index: usize,
-    /// `‖Q‖_∞` — see the type docs.
-    pub curvature: Number,
-    /// `‖a‖_∞` over the `.nl` linear section plus the degree-1 terms the
-    /// writer folded into the nonlinear tree.
-    pub linear: Number,
-    /// `|b|` — the finite bound the row is written against, shifted by the
-    /// folded constant. A range row reports the larger magnitude.
-    pub rhs: Number,
-}
+///
+/// Defined in `pounce-nlp` alongside the starting-point preflight that
+/// consumes it, so a frontend can hold the census without depending on the
+/// `.nl` reader. [`quad_row_coefs`] below is the `.nl`-specific producer,
+/// and stays here: reading these coefficients needs the model's linear
+/// section and nonlinear tree, which a bare TNLP does not expose.
+pub use pounce_nlp::diagnostics::preflight::QuadRowCoef;
 
 /// Read every constraint row's quadratic coefficients out of an
 /// [`NlProblem`].

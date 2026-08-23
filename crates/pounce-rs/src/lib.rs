@@ -205,6 +205,23 @@ pub use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
+// --- model diagnostics ------------------------------------------------------
+// Starting-point preflight: evaluate the model once at x0, before any solve,
+// and see what iteration 0 will see — NaN/inf in f/∇f/g/J/H (fatal), x0
+// against its bounds, how far the bound_push interior clamp will move the
+// point, initial constraint violation, derivative scale spread, and the
+// factors automatic scaling will pick. This is what `pounce check-x0`
+// reports; it used to be reachable only by being the CLI.
+pub mod diagnostics {
+    pub use pounce_nlp::diagnostics::preflight::{
+        PreflightOptions, PreflightOutcome, X0Override, check_tnlp, check_tnlp_with_quadratics,
+        clamp_to_interior,
+    };
+    pub use pounce_nlp::diagnostics::{
+        RowReport, box_violation, name_at, row_is_violated, row_magnitude,
+    };
+}
+
 // --- transparent TNLP decorators --------------------------------------------
 // Stackable wrappers that used to live in the CLI binary, so only the CLI
 // could reach them: `CountingTnlp` reports how many objective / gradient /

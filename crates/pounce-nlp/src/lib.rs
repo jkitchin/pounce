@@ -12,6 +12,9 @@
 //!   `IpSolveStatistics.{hpp,cpp}`).
 //! * `TNLPAdapter` and `OrigIpoptNlp`, the bound/constraint splitter
 //!   chain feeding the algorithm-side IPM.
+//! * [`diagnostics`]: model checks that need only a TNLP — starting-point
+//!   preflight and solution verification — so an embedder gets what the
+//!   `pounce` CLI's `check-x0` / `verify` subcommands report.
 //! * Transparent TNLP decorators every frontend can stack:
 //!   [`counting_tnlp::CountingTnlp`] (evaluation counts) and
 //!   [`seeded_tnlp::SeededTnlp`] (primal warm start from a chosen
@@ -29,6 +32,7 @@ pub mod alg_types;
 pub mod constant_derivatives;
 pub mod counting_tnlp;
 pub mod derivative_test;
+pub mod diagnostics;
 pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod orig_ipopt_nlp;
