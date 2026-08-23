@@ -92,16 +92,40 @@ displacement, scaling spread.
 
 Same one-move extraction as #743 and #754. Best effort-to-value ratio here.
 
-## Finding 3 — convex routing exists twice, and is missing from the third frontend
+## Finding 3 — convex routing is unreachable from every in-process frontend
 
-`crates/pounce-cli/src/qp_extract.rs` (2,169 lines, `&NlProblem`-coupled)
-and `python/pounce/_route.py` (617 lines, callable-coupled) independently
-implement the same classify-and-extract decision. `pounce-rs` has neither:
-`application.rs:1241` refuses `lp-ipm`/`qp-ipm`/`socp` outright.
+`application.rs:1241` refuses `lp-ipm` / `qp-ipm` / `socp` outside the CLI,
+and `unhonored_convex_option` refuses the `qp_*` knobs on the same paths.
 
-Two implementations of one numerical decision in two languages is the #755
-drift shape at ~20x the scale. A TNLP-based classifier in Rust would serve
-`pounce-rs` and could back the Python one.
+**Correction to an earlier reading of this gap.** It is tempting to describe
+`crates/pounce-cli/src/qp_extract.rs` (2,169 lines, Rust) and
+`python/pounce/_route.py` (617 lines, Python) as two implementations of one
+decision, i.e. the #755 drift shape at scale. They are not, and treating
+them that way would send someone off to "extract the Rust one and delete the
+Python one", which cannot work:
+
+- `qp_extract` calls `prob.obj_nonlinear.analyze_quadratic_full()`. It reads
+  the **symbolic** `.nl` expression tree, so its routing is *certain*.
+- `_route.py` says in its own header that it cannot read structure, because
+  `minimize` takes opaque Python callables. It **probes** the callables,
+  fits a linear/quadratic model, and validates that model at held-out points
+  before trusting it.
+
+Two different algorithms, because they have different information. A TNLP is
+opaque in exactly the way a Python callable is: it exposes `eval_f`,
+`eval_grad_f`, `eval_jac_g`, `eval_h` — numerical callbacks — and no
+expression tree. You cannot symbolically certify a degree-<=2 objective from
+numerical evaluations.
+
+So closing this gap means **porting the probe-and-validate router to Rust**
+over `dyn TNLP` — new numerical code, not a move. That is buildable and it
+would serve `pounce-rs`, `pounce-cinterface` and `pounce-wasm` at once, but
+it carries the asymmetric risk `_route.py` documents: a convex problem sent
+to the NLP solver is merely slower, while a nonconvex problem sent to a
+convex solver is **silently wrong**. The held-out validation gate is the
+load-bearing part and must be ported with it.
+
+This one wants its own PR and its own review, not a slot in a batch.
 
 ## Finding 4 — `verify.rs` is CLI-only, which undercuts its own rationale
 
