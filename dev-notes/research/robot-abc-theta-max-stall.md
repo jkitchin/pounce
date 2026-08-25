@@ -172,6 +172,12 @@ Transfers: `robot_b` 43.4 → 35.3 s (metis), `robot_c` 28.8 → 24.5 s (kahip).
 Symbolic cost is one-time (`n_pattern_changes = 1` over the run): AMD 0.56 s,
 METIS 1.19 s, KaHIP 1.87 s, `auto_race` 4.06 s.
 
+Item 3 of §7 below asked for this to be measured "before `feral_ordering` gets
+recommended anywhere user-facing". It was recommended first; the suite-wide
+measurement landed as [gh#768](https://github.com/jkitchin/pounce/issues/768)
+and agrees with this table — `auto_race` loses on 27 of 42 Mittelmann
+instances, median 0.82×. See `feral-ordering-auto-race-mittelmann.md`.
+
 Forcing FERAL's parallel dispatch (`POUNCE_FERAL_MIN_PAR_FLOPS=0`) buys 11 % for
 16 % more CPU on 4 cores — threading is not hiding anything here.
 

@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+- **`feral_ordering=auto_race` is no longer recommended as "the safe
+  choice"** (#768). Docs only — no behaviour changes, and nothing routes to
+  the race by default. Measured across the Mittelmann NLP suite (POUNCE
+  `5dc835f5`, release, threads pinned to 1), `auto_race` is slower than the
+  `auto` default on 27 of 42 comparable instances and faster on 1, median
+  **0.82×** — the worst of the ten options screened, on a population where
+  `LinearSystemFactorization` is 44–98 % of `OverallAlgorithm` on 36 of 47
+  instances, i.e. exactly the symptom the troubleshooting page pointed at it.
+
+  Two structural reasons, not tuning. It often re-derives the ordering
+  `auto` already picked and charges ~4× a symbolic pass for it (`ex8_2_2`:
+  `last_nnz_l` 85662 either way, 0.32 s → 0.56 s). And smallest `factor_nnz`
+  is not the same objective as smallest wall clock: on `robot_a` METIS and
+  KaHIP carry ~1.9 % *more* nonzeros in `L` and factor 25–31 % faster, so
+  the race keeps AMD — the loser — for 4.06 s of symbolic against AMD's own 0.56 s. Even where the
+  ordering pays enormously the race is beaten by a pin: `qssp180` 45.06 s
+  default → 14.63 s `amd` (3.08×), against `auto_race`'s 28.7 s (1.57×).
+
+  `docs/src/options.md`, `docs/src/troubleshooting.md`, the registered
+  `feral_ordering` option help and `FeralConfig::ordering`'s doc comment now
+  say so, and route a linear-solver-bound problem to a sweep of the concrete
+  variants gated on two cheap checks — factorization share, and
+  `max_fill_ratio` / `last_nnz_l` from `--json-output` — rather than to the
+  race. The selection criterion itself lives in `feral` (pinned to a
+  published release); racing on estimated factor flops or one timed numeric
+  factorization is the upstream ask. Full record:
+  `dev-notes/research/feral-ordering-auto-race-mittelmann.md`.
+
 - **`jacobianstructure` is optional again on the Python `Problem`, as
   cyipopt documents it** (#765). A constrained `problem_obj` that omits the
   callback declares a dense `(m, n)` Jacobian; `Problem.solve()` and

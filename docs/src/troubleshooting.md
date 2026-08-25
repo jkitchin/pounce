@@ -31,7 +31,7 @@ walks through adding it.
 | Restoration phase fires repeatedly | [ℓ₁ exact-penalty wrapper](#l1-exact-penalty-barrier-wrapper) |
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
-| Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
+| Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [sweep `feral_ordering`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) (check the factorization share first — the wins are rarer than the symptom) |
 | `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
 
 ---
@@ -456,29 +456,65 @@ pounce-level Ruiz pass should not be stacked.
 When `linear_solver=feral` (the default) and per-iter wall time is
 dominated by the linear solve — typical on dense / quadratically-
 coupled KKT systems where iteration counts look reasonable but
-seconds-per-iter are high — the fill-reducing ordering choice often
-matters more than any other knob. By default, `feral_ordering=auto`
+seconds-per-iter are high — the fill-reducing ordering choice can
+matter more than any other knob. By default, `feral_ordering=auto`
 picks AMD / AMF / METIS from cheap pattern features. This is right
 in the common case but can miss badly on a single hard problem.
 
-The safe recipe is to *measure* the right ordering rather than guess:
+**"The linear solve dominates" is not by itself the trigger.** On the
+Mittelmann NLP suite `LinearSystemFactorization` is 44–98 % of
+`OverallAlgorithm` on 36 of 47 instances, and on almost all of them
+every ordering is within the noise of `auto`
+([gh#768](https://github.com/jkitchin/pounce/issues/768)). The wins are
+concentrated where the share is *extreme* and the fill is *bad*, so
+spend two cheap checks before the sweep:
 
 ```
-pounce problem.nl feral_ordering=auto_race
+pounce problem.nl print_timing_statistics=yes --json-output run.json
 ```
 
-This runs symbolic factorization on AMD, METIS, SCOTCH and KaHIP and
-keeps the one with the smallest `factor_nnz`. Costs ~4× a single
-symbolic pass — paid once per problem because symbolic factorization
-is cached across numeric refactorizations with the same pattern, so
-the overhead is invisible to the per-iter cost on anything but a
-one-iter problem.
+1. **Factorization share**, from the timing block:
+   `LinearSystemFactorization` against `OverallAlgorithm`. Merely
+   dominant (say 50–80 %) rarely pays; the instance that gave 3.08×
+   below sits at 96 %.
+2. **How bad `auto`'s ordering actually is**, from
+   `linear_solver.max_fill_ratio` and `linear_solver.last_nnz_l` in
+   `run.json`. A fill ratio near 2 means there is very little to win —
+   the same instance that gave 3.08× has a ratio of 33.9 and 63.8 M
+   nonzeros in `L`.
 
-`feral_ordering=amd` (concrete pin) is the right escalation when the
-race itself is showing AMD winning consistently — pinning skips the
-race entirely on subsequent runs. See the full
-[`feral_ordering` table](options.md#feral_ordering-variants) for the
-other variants.
+If both point the right way, sweep the **concrete** variants and pin the
+winner — a capped `max_iter` is enough to rank them, because the
+ordering is chosen once per pattern:
+
+```
+for o in auto amd amf metis scotch kahip; do
+  pounce problem.nl max_iter=50 feral_ordering=$o \
+    print_timing_statistics=yes --no-sol
+done
+```
+
+On `qssp180` (96 % factorization, fill ratio 33.9) that ranking holds up
+on the full solve: 45.06 s for the default against 14.63 s for
+`feral_ordering=amd` — 3.08× — and 23.6 s for `metis`. Confirm the
+winner with one uncapped run before pinning it in a script.
+
+**Why the sweep and not `feral_ordering=auto_race`.** The race runs
+symbolic factorization on AMD, METIS, SCOTCH and KaHIP and keeps the
+smallest `factor_nnz`, for ~4× a single symbolic pass. That reads like
+the safe way to measure, and it is not: *fill is a proxy for wall clock
+that fails on exactly the structured problems where the ordering
+matters*. On `robot_a`, METIS and KaHIP carry ~1.9 % more nonzeros in
+`L` and factor 25–31 % faster, so the race keeps AMD — the loser — and
+spends 4.06 s of symbolic — against AMD's 0.56 s — to get there. On `qssp180` it lands at 1.57×
+where the `amd` pin gives 3.08×. And on the whole Mittelmann suite it is
+the worst of the ten options screened: 27 of 42 instances slower, 1
+faster, median 0.82×. It is useful once, as a diagnostic that reports
+how much the four methods disagree about fill — not as a setting to
+leave on.
+
+See the full [`feral_ordering` table](options.md#feral_ordering-variants)
+for the per-variant regimes.
 
 ### `feral_singular_pivot_floor`: a reduced Hessian that collapses to singular
 

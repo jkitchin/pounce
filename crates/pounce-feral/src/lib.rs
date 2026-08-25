@@ -482,6 +482,15 @@ pub struct FeralConfig {
     /// the symbolic-time race (`auto_race`) is wanted. See
     /// `feral/src/symbolic/mod.rs::OrderingMethod` for the
     /// per-variant rationale.
+    ///
+    /// [`OrderingMethod::AutoRace`] selects on `factor_nnz`, which is
+    /// not the same objective as wall clock: on the Mittelmann NLP
+    /// suite it is slower than `Auto` on 27 of 42 instances (median
+    /// 0.82x), and on `robot_a` it keeps AMD while MetisND / KahipND
+    /// factor 25-31 % faster with ~1.9 % *more* nonzeros in `L`
+    /// (pounce gh#768,
+    /// `dev-notes/research/feral-ordering-auto-race-mittelmann.md`).
+    /// Pin a concrete method rather than leaving the race on.
     pub ordering: OrderingMethod,
     /// Diagonal scaling strategy passed to
     /// [`feral::Solver::with_scaling`]. Default
