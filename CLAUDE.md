@@ -90,8 +90,8 @@ automatically when no exact Lagrangian Hessian is available.
 
 **The convex arm is covered — do not skip the sweep for a convex-path
 change.** Both legs run at the default `solver_selection=auto`, which routes
-to the most specialized engine available, so 40 of the 71 fixtures never touch
-the NLP arm at all: 35 reach the convex QP interior-point and 5 the convex
+to the most specialized engine available, so 41 of the 77 fixtures never touch
+the NLP arm at all: 36 reach the convex QP interior-point and 5 the convex
 QCQP conic one. gh#760 is the case for saying so explicitly — `4c02817d`
 skipped the sweep on the reasoning that "this is a trajectory change on the
 convex path, not the NLP path, so `scripts/sweep-fixtures.sh` does not cover
@@ -202,6 +202,23 @@ of an *inverse*, so classifying every bounded variable that way is `n`
 back-solves — so the refinement is on demand, over the ambiguous entries,
 never the default.
 
+**This holds for constraint rows too, and the row denominator being
+better is not the same as it being right** (gh#804). A row's `q` is
+`|∇dᵀH∇d|/‖∇d‖²`, a genuine curvature along the row's own gradient
+rather than a bare diagonal — which is exactly why gh#763 left it
+alone, and exactly the reasoning that would have left it wrong. It is
+still un-reduced: the other free coordinates re-optimize, so a row's
+ratio is `reduced/directional` and a coupled row kink reads `AMBIGUOUS`
+at any tolerance, same as a variable's. `Solver::reduced_row_activity` /
+`solver.reduced_row_activity` answers it, one back-solve per row against
+a unit right-hand side in the `s` block — the row's own value IS a KKT
+coordinate, the slack tied to the model by `dⱼ(x) = sⱼ`, so it is the
+variable accessor one block over. Unlike the variable path, the row
+frame conversion has real arithmetic in it (three `dg` factors meet in
+one ratio), which is what
+`leg_scaling_the_reduced_row_curvature_is_unmoved_by_a_row_scaling`
+exists to pin.
+
 ## The re-solve oracle: the only guard that reads an outside number
 
 `crates/pounce-sensitivity/tests/sens_resolve_oracle.rs` (gh#764 item 1)
@@ -267,6 +284,49 @@ branch (unexercised by this corpus), and anything that only appears at
 62k. Add a row to the oracle for a change that reroutes which
 correction a mode reaches for; check first which branch the fixture you
 are leaning on actually takes.
+
+## Index spaces: the newtype covers the typed path, leg 3 the rest
+
+`crates/pounce-sensitivity/src/index.rs` (gh#764 item 3) is `VarX` /
+`FullX` / `VarToFull` / `FullXSlice`, and it is deliberately **not** the
+342-site sweep the issue costed out — that would break `SensBacksolver`
+(re-exported from the crate root) and reach 31 `pounce-py` sites where
+indices cross into Python as `i64`. What survived the measurement is the
+rule **table lookup fails loudly; direct array indexing fails silently**,
+and the newtype earns its cost at one shape only: a conversion feeding a
+direct array index in a scope where the other space is also live. Across
+the crate that is two sites, both in `solver.rs` — the kappa `var_sigma`
+read and `weakly_active_bounds`. The other nine conversions are scatter
+loops, checked `get_mut`s, or index *producers*, and are left alone.
+
+`FullX` has **no public constructor**: it is obtainable only by putting a
+`VarX` through `VarToFull`, so "this number is in full-x" is asserted
+once per map instead of once per read. That is load-bearing — the first
+draft made it `pub` and `FullX::new(var_row.get())` typechecked, which
+the module's own mutation table now records.
+
+The type covers the typed path; it does **not** close the public `Vec`
+fields on `ActivityReport`, which must stay. `report.var_status.get(row.get())`
+still compiles, and `sens_invariance_legs.rs` leg 3 is what catches it —
+three legs go red. Neither guard alone covers the site, so do not retire
+leg 3 on the strength of the newtype.
+
+## Reviewing a sensitivity change: `/sens-review`
+
+`.claude/commands/sens-review.md` (gh#764 item 2) is the checklist form of
+everything above, plus the classes that do not have a leg of their own. It is a
+companion to `/adversary`: that one hunts wrong answers from the outside, this
+one reads a diff. Eight entries, ordered by how *silently* the class fails —
+index space, frame and scaling, absolute thresholds on scale-dependent
+quantities, doc drift, silently-wrong-while-reporting-success, which branch the
+fixture takes, naming the measured populations behind a new threshold, and
+which binary the harness loaded.
+
+Every entry carries a worked example from this repo with a file and symbol,
+never a maxim, because a checklist whose examples cannot be checked rots into a
+ritual — which is entry 4's own subject. It approves nothing: it emits
+PASS/RISK/N-A per entry with the evidence attached, and a RISK is a question
+for the author.
 
 ## Working GitHub issues
 

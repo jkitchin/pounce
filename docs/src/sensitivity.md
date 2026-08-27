@@ -976,7 +976,9 @@ barrier curvature well above the `O(μ)` an inactive bound should have
 — typically a bound that sits close enough to the optimum to bend it).
 
 Inequality rows classify through the same rule, via the curvature
-along the constraint normal. That is the point of classifying rows at
+along the constraint normal — which is not a reduced curvature either,
+so `ambiguous` means the same not-necessarily-a-kink thing there; see
+[the same holds for a constraint row](#the-same-holds-for-a-constraint-row). That is the point of classifying rows at
 all: move a bound off a variable and onto a row and the activity
 disappears from the bound-multiplier view entirely, while any
 covariance or identifiability heuristic keyed on `z` alone silently
@@ -1031,8 +1033,45 @@ The default stays the diagonal because the reduced normalizer is the
 reciprocal diagonal of an *inverse*, and there is no
 diagonal-of-the-inverse shortcut: classifying every bounded variable
 that way costs `n` back-solves, which on a 62k-variable model is no
-longer a post-solve diagnostic. Variable bounds only — rows are not
-re-measured.
+longer a post-solve diagnostic.
+
+#### The same holds for a constraint row
+
+A row's ratio does not divide by a diagonal — it divides by the
+curvature along the row's own gradient,
+`|∇dᵀH∇d| / ‖∇d‖²`. That is a genuine directional curvature, strictly
+better than a bare `H_ii`, which is why it was not the one #763 fixed.
+But it is not a *reduced* curvature either: the other free coordinates
+still re-optimize, and what is left after they do is what generates
+the row's multiplier. So a row's ratio is `reduced / directional`, `1`
+only where the row's direction is decoupled from the remaining free
+space, and a coupled row kink reads `ambiguous` at any tolerance for
+the same `μ`-independent reason
+([#804](https://github.com/jkitchin/pounce/issues/804)).
+
+`reduced_row_activity()` is the row half of the answer, same shape and
+same cost — one back-solve per row, so call it over the rows in
+question:
+
+```python
+rep = solver.classify_activity()
+ask = [j for j, st in enumerate(rep["row_status"]) if st == "ambiguous"]
+red = solver.reduced_row_activity(ask)
+
+red["status"]      # ["weakly_active", ...] — the same rule, reduced denominator
+red["ratio"]       # Σ‖∇d‖²/|q_reduced|; 1 at a kink whatever it is coupled to
+red["q_reduced"]   # the reduced curvature along the UNIT normal, natural units
+red["row"]         # the user constraint index each entry answers about
+```
+
+The row's own value is a coordinate of the KKT system — the slack the
+barrier acts on, tied to the model by `dⱼ(x) = sⱼ` — so the back-solve
+is the same one the variable accessor makes, one block over: a unit
+right-hand side in the `s` block, `1/(K⁻¹)_{sⱼsⱼ} - Σⱼ`, then
+`·‖∇dⱼ‖²` to put the answer along the unit normal where
+`classify_activity()`'s `q` lives. Equality rows report `equality`,
+as in the report; there is no slack and no barrier multiplier pair to
+classify.
 
 `weakly_active_bounds()` and everything built on it (the degeneracy
 warnings, the directional step) already treat `ambiguous` as weak for
@@ -1214,6 +1253,12 @@ report never shows them. `reduced_activity()` is invariant on the same
 terms: its `q_reduced` is a natural-units curvature, and both sides of
 `1/(K⁻¹)_ii - Σ_i` carry the same `d²/df`, so the subtraction meets in
 one frame and the ratio comes out where `classify_activity()`'s does.
+`reduced_row_activity()` reaches the same place with more arithmetic
+in the way: three `dg` factors meet in one ratio — the exported `Σ`
+carries `dg²`, the back-solved `(K⁻¹)_{ss}` carries `dg⁻²` through the
+natural-units conjugation, and `‖∇d‖²` is gathered in a frame that
+still has `dg` in it — and the row-scaling leg in
+`tests/reduced_row_activity.rs` sweeps six decades of `dg` to pin it.
 
 **Variable indices are user-space, factor rows are not.** Everything
 the sensitivity API reports or accepts — the `.col` file's order, the

@@ -36,9 +36,9 @@
 #
 # THE CONVEX ARM IS COVERED. DO NOT SKIP THIS SWEEP FOR A CONVEX-PATH CHANGE.
 # Both legs run at the default `solver_selection=auto`, and `auto` routes to
-# the most specialized engine it can, so the corpus splits three ways: 35
+# the most specialized engine it can, so the corpus splits three ways: 36
 # fixtures reach the convex QP interior-point, 5 the convex QCQP conic
-# interior-point, and 31 the NLP filter line-search. Forty of seventy-one
+# interior-point, and 36 the NLP filter line-search. Forty-one of seventy-seven
 # fixtures never touch the NLP arm at all.
 #
 # This is written in capitals because the reasoning it refutes has already

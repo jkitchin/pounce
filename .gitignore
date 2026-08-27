@@ -125,8 +125,12 @@ python/*.egg-info/
 # Local virtualenvs (e.g. for building the extension + running notebooks)
 .venv/
 
-# Claude Code local state
-.claude/
+# Claude Code local state (settings.local.json, caches, transcripts).
+# Shared slash commands under .claude/commands/ ARE version-controlled --
+# adversary.md has been tracked all along, but only because it was force-added
+# past this rule, so the next command added here silently failed to commit.
+.claude/*
+!.claude/commands/
 
 # Crucible knowledge base — kept entirely local. The distilled sources
 # include extracted text of copyrighted papers, so the whole directory

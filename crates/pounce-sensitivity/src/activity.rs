@@ -67,9 +67,18 @@
 //! over the entries in question.
 //!
 //! The row path normalizes by a directional curvature rather than a
-//! diagonal, but `∇dᵀH∇d` is not reduced either, so the same
-//! distinction applies to a row's `r`. [`reduced_activity`] covers
-//! variable bounds only.
+//! diagonal, and `∇dᵀH∇d/‖∇d‖²` is a genuine curvature along the
+//! row's own gradient — strictly better than a bare `H_ii`, which is
+//! why it was not the one gh#763 fixed. But it is not *reduced*
+//! either: the other free coordinates still re-optimize. So a row's
+//! `r` is `reduced/directional` by the same algebra, `1` only where
+//! the row's direction is decoupled from the remaining free space,
+//! and a coupled row kink reads [`AMBIGUOUS`] at any tolerance for
+//! the same `μ`-independent reason (gh#804).
+//! [`reduced_row_activity`] is the row half of the answer, one
+//! back-solve per row: the row's own value IS a coordinate of the KKT
+//! system — the slack the barrier acts on, tied to the model by
+//! `dⱼ(x) = sⱼ` — so it is the same back-solve one block over.
 //!
 //! `r` is `O(μ)` when the bound is inactive, `O(1)` when weakly active
 //! (slack and multiplier vanish together), and `O(1/μ)` when strongly
@@ -122,7 +131,9 @@ pub const STRONGLY_ACTIVE: i8 = 2;
 /// only the reduced curvature generates the multiplier — and that `r`
 /// is `μ`-independent, so re-solving does NOT separate that case. See
 /// the module docs and [`reduced_activity`], which answers it
-/// (gh#763).
+/// (gh#763). A row lands here on the same terms, its `r` being
+/// `reduced/directional`; [`reduced_row_activity`] answers that one
+/// (gh#804).
 pub const AMBIGUOUS: i8 = 3;
 /// The curvature `q` is below noise scale: the bound question does not
 /// arise, and the direction is poorly identified.
@@ -184,9 +195,22 @@ pub struct ActivityReport {
     /// reduced Hessian.
     pub var_sigma: Vec<Number>,
     /// Status per user constraint row.
+    ///
+    /// [`AMBIGUOUS`] here includes genuine kinks whose direction is
+    /// coupled to the remaining free space: `q` is the curvature
+    /// along the row's own gradient, not the reduced curvature that
+    /// generates the multiplier, so the ratio is
+    /// `reduced/directional` (gh#804). Do not read the class as an
+    /// answer to "is this row at a kink" — [`reduced_row_activity`]
+    /// answers that, one back-solve per row.
     pub row_status: Vec<i8>,
     /// `Σ_j / q_j` per user row; `NaN` where not classified.
     /// [`UNIDENTIFIED`] entries hold `Σ/floor` as for variables.
+    ///
+    /// `q` is the directional curvature `|∇dᵀH∇d|/‖∇d‖²`, so at a
+    /// kink this ratio is `reduced/directional` — `1` only where the
+    /// row's direction is decoupled, and `μ`-independent, so a
+    /// tighter solve does not move it. See [`Self::row_status`].
     pub row_ratio: Vec<Number>,
     /// Sign of the signed row curvature `∇dⱼᵀ H ∇dⱼ`.
     pub row_q_sign: Vec<i8>,
@@ -839,10 +863,9 @@ pub(crate) enum ReducedActivityError {
 ///   the objective-scale-positive orientation [`compute`] classifies
 ///   in, so a status here means the same thing at either sign of `df`.
 ///
-/// Variable bounds only. The row path normalizes by a directional
-/// curvature `∇dᵀH∇d / ‖∇d‖²`, which carries the same un-reduced
-/// distinction, but gh#763 is about the variable path and rows are not
-/// re-measured here.
+/// Variable bounds only. The row path carries the same un-reduced
+/// distinction — see [`reduced_row_activity`], which is this function
+/// one KKT block over (gh#804).
 pub(crate) fn reduced_activity(
     bs: &PdSensBacksolver,
     user_vars: &[usize],
@@ -970,6 +993,409 @@ pub(crate) fn reduced_activity(
         out.sigma.push(sigma);
     }
     debug_assert_eq!(next, kinv.len(), "every free row consumed its solve");
+    Ok(out)
+}
+
+/// One constraint row's activity re-measured against the curvature
+/// that actually generates its multiplier, rather than against the
+/// directional curvature along its own gradient (gh#804).
+///
+/// Parallel arrays, one entry per requested row, in the order they
+/// were requested. See [`reduced_row_activity`] for what the
+/// quantities mean.
+#[derive(Debug, Clone)]
+pub struct ReducedRowActivityReport {
+    /// Barrier parameter of the converged iterate, as
+    /// [`ActivityReport::mu`].
+    pub mu: Number,
+    /// The user-space constraint index each entry answers about.
+    pub row: Vec<usize>,
+    /// Status from the same rule [`ActivityReport::row_status`] uses,
+    /// applied to [`Self::ratio`].
+    pub status: Vec<i8>,
+    /// `Σ_j‖∇dⱼ‖² / |q_j^red|`. `NaN` where nothing was classified.
+    ///
+    /// The numerator is the geometric barrier weight, not the raw
+    /// `Σ_j` [`Self::sigma`] reports — the same pairing
+    /// [`ActivityReport::row_ratio`] uses, so the two ratios are
+    /// directly comparable and agree on a decoupled row.
+    pub ratio: Vec<Number>,
+    /// The reduced curvature `q_j^red` itself, signed, along the
+    /// **unit** normal `∇dⱼ/‖∇dⱼ‖` and in **natural (unscaled)
+    /// units** — the same quantity and units
+    /// [`ActivityReport::row_q_sign`] takes the sign of, so it is what
+    /// `|∇dⱼᵀH∇dⱼ|/‖∇dⱼ‖²` would have been had the curvature been
+    /// reduced. `NaN` for an [`EQUALITY`] row and where the back-solve
+    /// offers no reduced curvature (see [`reduced_row_activity`]).
+    pub q_reduced: Vec<Number>,
+    /// Sign of [`Self::q_reduced`] (−1, 0, +1); the absolute value is
+    /// what the ratio divides by.
+    pub q_sign: Vec<i8>,
+    /// `Σ_j`, RAW (not the geometric weight the ratio uses) and in
+    /// natural units, identical to the same row's entry in
+    /// [`ActivityReport::row_sigma`].
+    pub sigma: Vec<Number>,
+}
+
+/// Why a [`reduced_row_activity`] call could not be answered.
+pub(crate) enum ReducedRowActivityError {
+    /// A requested index is not a user constraint. Carries the
+    /// offending index and the user TNLP's `m`.
+    OutOfRange { got: usize, n_full_g: usize },
+    /// The back-solve against the held factor failed.
+    Backsolve,
+}
+
+/// `‖∇dⱼ‖²` for the requested internal inequality rows, in the frame
+/// [`compute`] classifies in: `a = ã ⊙ d`, so the change of variables
+/// is divided out and the row's own `d_scale` is still in. The caller
+/// divides that `dg²` out to reach natural units.
+///
+/// One pass over the Jacobian triplets for the whole batch, with the
+/// mat-vec loop kept as the fallback for any future non-triplet
+/// matrix type — the same two paths, and the same duplicate-summing
+/// convention, [`compute`] uses.
+fn row_norm2(
+    jac_d: &Rc<dyn Matrix>,
+    d_var: Option<&[Number]>,
+    wanted: &[Option<usize>],
+    n: usize,
+    m_d: usize,
+    out_len: usize,
+) -> Vec<Number> {
+    let dv = |i: usize| -> Number { d_var.map_or(1.0, |d| d[i]) };
+    let mut norm2 = vec![0.0; out_len];
+    if let Some(jt) = jac_d.as_any().downcast_ref::<GenTMatrix>() {
+        let mut support: Vec<Vec<(usize, Number)>> = vec![Vec::new(); out_len];
+        for ((&r, &c), &v) in jt.irows().iter().zip(jt.jcols()).zip(jt.values()) {
+            let Some(slot) = wanted[(r - 1) as usize] else {
+                continue;
+            };
+            let col = (c - 1) as usize;
+            support[slot].push((col, v * dv(col)));
+        }
+        for (slot, sup) in support.iter_mut().enumerate() {
+            // triplet duplicates sum before the square, matching
+            // `mult_vector` and `compute`'s own gather
+            sup.sort_unstable_by_key(|&(c, _)| c);
+            sup.dedup_by(|a, b| {
+                if a.0 == b.0 {
+                    b.1 += a.1;
+                    true
+                } else {
+                    false
+                }
+            });
+            norm2[slot] = sup.iter().map(|&(_, g)| g * g).sum();
+        }
+        return norm2;
+    }
+    let mspace = DenseVectorSpace::new(m_d as i32);
+    let mut e_row = DenseVector::new(mspace);
+    let nspace = DenseVectorSpace::new(n as i32);
+    let mut grad = DenseVector::new(nspace);
+    for (j, slot) in wanted.iter().enumerate() {
+        let Some(slot) = *slot else { continue };
+        // values_mut throughout: a zero product may leave the output
+        // homogeneous (empty backing slice)
+        e_row.values_mut().fill(0.0);
+        e_row.values_mut()[j] = 1.0;
+        grad.values_mut().fill(0.0);
+        jac_d.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
+        norm2[slot] = grad
+            .values_mut()
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (*g * dv(i)) * (*g * dv(i)))
+            .sum();
+    }
+    norm2
+}
+
+/// [`compute`]'s per-row classification, re-normalized by the
+/// **reduced** curvature along each requested row's gradient instead
+/// of the directional curvature `∇dᵀH∇d/‖∇d‖²` — one back-solve
+/// against the held factor per row asked about (gh#804).
+///
+/// The row counterpart of [`reduced_activity`], and the same defect:
+/// gh#763 for rows.
+///
+/// # What is different
+///
+/// [`compute`] forms a row's ratio as `Σ_j‖∇d‖⁴/|∇dᵀH∇d|`. That
+/// denominator is a genuine curvature along the row's own gradient
+/// direction — strictly better than the variable path's bare `H_ii`,
+/// which is why gh#763 fixed the variables first — but it is not a
+/// *reduced* curvature: it does not account for the other free
+/// coordinates re-optimizing. The quantity that generates a row's
+/// multiplier is what is left after that elimination, exactly as for
+/// a variable, so a row's `r` is `reduced/directional` and equals `1`
+/// only where the row's direction is decoupled from the remaining
+/// free space. Couple it and a genuine row kink falls out of the
+/// `[1e-1, 1e1]` band and reads [`AMBIGUOUS`] — at any tolerance,
+/// because that ratio is `μ`-independent, so re-solving tighter
+/// reports the same thing.
+///
+/// # How it is computed
+///
+/// The row's own value IS a coordinate of the KKT system: the slack
+/// `s_j` the barrier acts on, tied to the model by `dⱼ(x) = s_j`. So
+/// the reduced curvature the barrier subproblem sees along the row is
+/// the reciprocal of that coordinate's diagonal entry of the inverse
+/// — one back-solve against a unit right-hand side in the `s` block —
+/// with the row's own barrier contribution taken back off:
+///
+/// ```text
+/// q_j^raw = 1 / (K⁻¹)_{sⱼsⱼ} − Σ_j        (per unit of dⱼ)
+/// q_j^red = q_j^raw · ‖∇dⱼ‖²              (per unit of x, reported)
+/// ```
+///
+/// Driving the `x` block with the row's gradient `∇dⱼ` instead gives
+/// the identical number — `∇dⱼᵀK⁻¹∇dⱼ = (K⁻¹)_{sⱼsⱼ}` for every `j`,
+/// since `∇dⱼ` reaches the system only through the row it defines —
+/// so the slack unit vector is used: it needs no gradient assembled
+/// into the right-hand side, and it is the same call
+/// [`reduced_activity`] makes one block over.
+///
+/// Everything the elimination weights is what makes this the
+/// curvature the multiplier is generated against, exactly as in
+/// [`reduced_activity`]: a strongly active neighbour carries
+/// `Σ = O(1/μ)` and does not re-optimize, an inactive one carries
+/// `O(μ)` and re-optimizes freely.
+///
+/// The `‖∇dⱼ‖²` puts the answer along the **unit** normal, which is
+/// where [`compute`]'s `q` lives and what the shared identification
+/// floor is scaled for. Paired with the geometric weight
+/// `Σ_j‖∇dⱼ‖²` in the numerator — [`compute`]'s pairing — the ratio
+/// is invariant to rescaling the row, so `d → c·d` does not change a
+/// status here any more than it does there.
+///
+/// `K` is the natural-units KKT matrix, so the ratio is also
+/// invariant to `nlp_scaling_method` and to a `user-scaling` change
+/// of variables.
+///
+/// # Cost, and why this is not the default
+///
+/// One back-solve per row, for the same reason [`reduced_activity`]
+/// costs one per variable: the correct normalizer is a diagonal entry
+/// of an *inverse*, and there is no shortcut to it. So [`compute`]
+/// keeps the `O(nnz)` directional curvature and this is the on-demand
+/// refinement — the natural call is over the [`AMBIGUOUS`] rows of a
+/// report. Pass them in ONE call: the back-solves batch, and the
+/// per-call fixed cost (one pass over the Hessian for the shared
+/// identification floor, one over the Jacobian for the norms) is paid
+/// once rather than per row.
+///
+/// # Edge cases
+///
+/// * An equality row has no slack and no barrier multiplier pair:
+///   status [`EQUALITY`], `NaN` curvature and ratio, as in the report.
+/// * An inequality row with no finite bound gets its `q_j^red` but
+///   status [`UNBOUNDED`] and a `NaN` ratio: no bound question to
+///   answer.
+/// * A row whose gradient vanishes at the iterate has no direction to
+///   measure curvature along: [`UNIDENTIFIED`] with the raw
+///   `Σ/floor` lower bound, exactly as [`compute`] reports it.
+/// * A row the constraints determine outright has `(K⁻¹)_{sⱼsⱼ} = 0`:
+///   no direction left to reduce along, so `q_j^red` is infinite and
+///   the ratio is `0`, i.e. [`INACTIVE`] — whatever holds that row, it
+///   is not its own bound.
+/// * A `NaN` from the back-solve reports [`UNIDENTIFIED`] with a `NaN`
+///   curvature and ratio.
+/// * `|q_j^red|` below the same identification floor [`compute`] uses
+///   reports [`UNIDENTIFIED`], as there.
+/// * Under `obj_scaling_factor < 0` — the documented way to maximize —
+///   `Σ` and `q_j^red` are both reported with the sign the
+///   natural-units contract gives them, but the CLASSIFICATION runs on
+///   the objective-scale-positive orientation [`compute`] classifies
+///   in, so a status here means the same thing at either sign of `df`.
+pub(crate) fn reduced_row_activity(
+    bs: &PdSensBacksolver,
+    user_rows: &[usize],
+) -> Result<ReducedRowActivityReport, ReducedRowActivityError> {
+    let (data, cq, nlp) = bs.activity_handles();
+    let mu = bs.barrier_mu();
+    let (n, m_d) = {
+        let d = data.borrow();
+        let curr = d.curr.as_ref().expect("converged state has an iterate");
+        (curr.x.dim() as usize, curr.s.dim() as usize)
+    };
+
+    // full-g in, d-block rows out, through the same ascending scan the
+    // report's scatter uses: reading the user index as an inequality
+    // position returns a NEIGHBORING row's answer wherever an equality
+    // precedes it (the gh#450 hazard, one block over).
+    let n_full_g = bs.n_full_g() as usize;
+    let d_index: Vec<Option<usize>> = {
+        let nl = nlp.borrow();
+        let mut d_pos = 0usize;
+        let map = (0..n_full_g)
+            .map(|g| {
+                if nl.full_g_to_c_block(g as Index).is_some() {
+                    None
+                } else {
+                    let p = d_pos;
+                    d_pos += 1;
+                    Some(p)
+                }
+            })
+            .collect();
+        // the same invariant [`compute`] asserts after its own scan,
+        // restated here because every `sigma_s` / `d_scale` index
+        // below rests on it
+        assert_eq!(d_pos, m_d, "inequality count disagrees with the c/d split");
+        map
+    };
+    let mut rows: Vec<Option<usize>> = Vec::with_capacity(user_rows.len());
+    for &j in user_rows {
+        if j >= n_full_g {
+            return Err(ReducedRowActivityError::OutOfRange { got: j, n_full_g });
+        }
+        rows.push(d_index[j]);
+    }
+
+    let (pd_l, pd_u, obj_scale, d_scale) = {
+        let nl = nlp.borrow();
+        (
+            nl.pd_l(),
+            nl.pd_u(),
+            nl.obj_scaling_factor(),
+            nl.d_scale_vec(),
+        )
+    };
+    let rhas_l = present(&pd_l, m_d);
+    let rhas_u = present(&pd_u, m_d);
+    let sigma_s = dense_to_vec(bs.barrier_sigma_s().as_ref());
+
+    // Which internal rows the batch asks about, and where each one's
+    // norm lands. A row requested twice shares one slot and one gather.
+    let mut slot_of: Vec<Option<usize>> = vec![None; m_d];
+    let mut n_slots = 0usize;
+    for row in rows.iter().flatten() {
+        if slot_of[*row].is_none() {
+            slot_of[*row] = Some(n_slots);
+            n_slots += 1;
+        }
+    }
+
+    // the NLP borrow above is dropped: the Cq getters re-borrow it
+    // mutably for lazy evaluation
+    let (floor, norm2) = {
+        let cq = cq.borrow();
+        let hess = cq.curr_exact_hessian();
+        // only the shared identification floor is wanted from the
+        // frame; it is the one number a per-entry ratio cannot supply
+        let floor = var_frame(bs, &hess, n).floor;
+        let jac_d = cq.curr_jac_d();
+        let norm2 = row_norm2(&jac_d, bs.variable_scaling(), &slot_of, n, m_d, n_slots);
+        (floor, norm2)
+    };
+    // the floor comes out of `var_frame` with the objective scale
+    // still in; the reciprocal `(K⁻¹)_{ss}` below is natural units
+    // already, so both sides of the comparison meet there.
+    let floor = floor / obj_scale.abs();
+
+    // One unit RHS per requested row, in the `s` block, batched
+    // against the held factor. Chunked so the buffers stay bounded
+    // when a caller hands over a long list rather than the report's
+    // ambiguous rows.
+    const CHUNK: usize = 64;
+    let dim = bs.dim();
+    let s_offset = bs.block_dims()[0];
+    let solve_rows: Vec<usize> = rows.iter().flatten().map(|&r| s_offset + r).collect();
+    let mut kinv: Vec<Number> = Vec::with_capacity(solve_rows.len());
+    for chunk in solve_rows.chunks(CHUNK) {
+        let k = chunk.len();
+        let mut rhs = vec![0.0; k * dim];
+        let mut lhs = vec![0.0; k * dim];
+        for (c, &r) in chunk.iter().enumerate() {
+            rhs[c * dim + r] = 1.0;
+        }
+        if !bs.solve_many(&rhs, &mut lhs, k) {
+            return Err(ReducedRowActivityError::Backsolve);
+        }
+        for (c, &r) in chunk.iter().enumerate() {
+            kinv.push(lhs[c * dim + r]);
+        }
+    }
+
+    let mut out = ReducedRowActivityReport {
+        mu,
+        row: user_rows.to_vec(),
+        status: Vec::with_capacity(user_rows.len()),
+        ratio: Vec::with_capacity(user_rows.len()),
+        q_reduced: Vec::with_capacity(user_rows.len()),
+        q_sign: Vec::with_capacity(user_rows.len()),
+        sigma: Vec::with_capacity(user_rows.len()),
+    };
+    // `compute` runs the rule on the df-in `Sigma` (internal `v/s`,
+    // non-negative), dividing the objective scale out only on export.
+    // Here every quantity is already natural, so a NEGATIVE df -- the
+    // documented way to maximize -- would otherwise hand the rule a
+    // negative ratio and read a pinned row as INACTIVE.
+    let sgn = if obj_scale < 0.0 { -1.0 } else { 1.0 };
+    let mut next = 0usize;
+    for &row in &rows {
+        let Some(row) = row else {
+            out.status.push(EQUALITY);
+            out.ratio.push(Number::NAN);
+            out.q_reduced.push(Number::NAN);
+            out.q_sign.push(0);
+            out.sigma.push(0.0);
+            continue;
+        };
+        let d = kinv[next];
+        next += 1;
+        // natural units, as `compute` exports them: the scaled row
+        // multiplier carries df/dg and the scaled slack dg
+        let dg = d_scale.as_ref().map_or(1.0, |v| v[row]);
+        let sigma = sigma_s[row] * dg * dg / obj_scale;
+        // `a = ã ⊙ d` leaves the row's own `dg` in, and the reported
+        // curvature is natural, so it comes back out here
+        let norm2 = norm2[slot_of[row].expect("every solved row has a norm slot")] / (dg * dg);
+        if norm2 <= 0.0 {
+            // no direction to measure curvature along, exactly as in
+            // the report -- and the geometric weight is degenerate at
+            // zero gradient, so the raw `Σ/floor` lower bound stands
+            let e = zero_gradient_row(sigma * sgn, floor);
+            out.status.push(e.status);
+            out.ratio.push(e.ratio);
+            out.q_reduced.push(Number::NAN);
+            out.q_sign.push(0);
+            out.sigma.push(sigma);
+            continue;
+        }
+        if !d.is_finite() {
+            out.status.push(UNIDENTIFIED);
+            out.ratio.push(Number::NAN);
+            out.q_reduced.push(Number::NAN);
+            out.q_sign.push(0);
+            out.sigma.push(sigma);
+            continue;
+        }
+        // `(K⁻¹)_{ss} = 0` -- the rest of the model determines the
+        // row's value outright, so there is no direction left to
+        // reduce along -- sends `q` to an infinity the ratio divides
+        // to zero, i.e. INACTIVE: whatever holds the row there, it is
+        // not its own bound. A `(K⁻¹)_{ss}` at roundoff level lands in
+        // the same class from either side of zero, which is why no
+        // guard branches on its sign; a genuinely negative reduced
+        // curvature is modest in magnitude and reports through
+        // `q_sign`, exactly as an indefinite `∇dᵀH∇d` does in the
+        // report.
+        let q = (1.0 / d - sigma) * norm2;
+        // the geometric weight against the curvature along the unit
+        // normal: `compute`'s pairing, so a decoupled row's ratio here
+        // IS the report's
+        let e = classify_entry(sigma * norm2 * sgn, q * sgn, floor, mu);
+        let bounded = rhas_l[row] || rhas_u[row];
+        out.status.push(if bounded { e.status } else { UNBOUNDED });
+        out.ratio.push(if bounded { e.ratio } else { Number::NAN });
+        out.q_reduced.push(q);
+        out.q_sign.push(sign_of(q));
+        out.sigma.push(sigma);
+    }
+    debug_assert_eq!(next, kinv.len(), "every inequality row consumed its solve");
     Ok(out)
 }
 

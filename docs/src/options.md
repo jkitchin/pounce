@@ -451,7 +451,12 @@ stationary point is snapshotted before the step and is restored and
 reported unless the continuation comes back with a certificate of its own
 at a better point — the same floor-and-deadline accounting as
 `resto_decline_deferrals`, and the continuation is cut after 30 iterations
-either way. On `nonconvex_qp.nl` — and on `nonconvex_qp_ineq.nl`, the same
+either way. Raising the option above `1` does not weaken that (gh #805):
+the floor holds the **best** certificate the escapes have left, not the
+most recent one, so every bet is placed against the same baseline the
+first one was — the point a `neg_curv_escapes = 0` build reports. Each
+escape does buy its continuation its own 30 iterations, so the *cost*
+scales with the option and the guarantee does not. On `nonconvex_qp.nl` — and on `nonconvex_qp_ineq.nl`, the same
 model with its row relaxed to `x₀ + x₁ ≥ 2` — it turns `Solve_Succeeded` at
 `obj = 1` into `Solve_Succeeded` at `obj = 0`; across the rest of the
 fixture corpus (`scripts/sweep-fixtures.sh`, both legs, 152 fixture-legs) it

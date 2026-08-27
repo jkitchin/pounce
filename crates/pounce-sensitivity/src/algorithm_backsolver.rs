@@ -1196,6 +1196,15 @@ impl PdSensBacksolver {
         self.nlp.borrow().n_full_x()
     }
 
+    /// The user TNLP's constraint count, the `g` counterpart of
+    /// [`Self::n_full_x`]: the length of a full-g report and the
+    /// domain of [`Self::full_g_to_c_block`]. Distinct from either
+    /// KKT row block's width, since the c/d split sends equalities to
+    /// `y_c` and inequalities to `s`/`y_d`.
+    pub fn n_full_g(&self) -> Index {
+        self.nlp.borrow().n_full_g()
+    }
+
     /// `E` itself, the vector [`Self::solve`] pre-multiplies its
     /// right-hand side by.
     ///

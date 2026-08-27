@@ -887,7 +887,8 @@ impl PySolver {
     ///   holds `Σ/floor`, a lower bound on any honest ratio rather
     ///   than the ratio itself. Rows classify on the scale-invariant
     ///   form `Σ‖∇d‖⁴/|∇dᵀH∇d|`, so rescaling a constraint row
-    ///   does not change its status.
+    ///   does not change its status — but that denominator is not a
+    ///   reduced curvature, so see `reduced_row_activity`.
     /// - `"var_q_sign"`, `"row_q_sign"`: ndarray of the sign of the
     ///   signed curvature, so an indefinite direction is visible.
     /// - `"var_off_central_path"`, `"row_off_central_path"`: list of
@@ -916,6 +917,12 @@ impl PySolver {
     /// any tolerance, since that ratio does not move with `μ`
     /// (pounce#763). `"ambiguous"` is therefore NOT "probably not a
     /// kink"; `reduced_activity` answers that question.
+    ///
+    /// A row's `q` is the curvature along the row's own gradient — a
+    /// genuine directional curvature, but not a reduced one either, so
+    /// `"row_ratio"` is `reduced/directional` and `"ambiguous"` means
+    /// the same not-necessarily-a-kink thing there.
+    /// `reduced_row_activity` answers it (pounce#804).
     ///
     /// Requires the **held solve** to have run with
     /// `bound_relax_factor=0` (raises `ValueError` otherwise; the
@@ -1014,8 +1021,9 @@ impl PySolver {
     /// infinite and it reports `"inactive"` — whatever holds it, it is
     /// not its bound.
     ///
-    /// Variable bounds only: constraint rows are not re-measured.
-    /// Requires `bound_relax_factor=0` on the held solve, like
+    /// Variable bounds only; `reduced_row_activity` is the same
+    /// refinement for constraint rows. Requires
+    /// `bound_relax_factor=0` on the held solve, like
     /// `classify_activity`.
     fn reduced_activity<'py>(
         &self,
@@ -1046,6 +1054,123 @@ impl PySolver {
         out.set_item(
             "var",
             red.var
+                .iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py),
+        )?;
+        out.set_item("status", status_str(&red.status))?;
+        out.set_item("ratio", red.ratio.into_pyarray_bound(py))?;
+        out.set_item("q_reduced", red.q_reduced.into_pyarray_bound(py))?;
+        out.set_item(
+            "q_sign",
+            red.q_sign
+                .iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py),
+        )?;
+        out.set_item("sigma", red.sigma.into_pyarray_bound(py))?;
+        Ok(out)
+    }
+
+    /// `classify_activity`'s per-ROW verdict for the given 0-based
+    /// **user-space** constraint indices, re-measured against the
+    /// curvature **reduced** along each row's gradient instead of the
+    /// directional curvature `∇dᵀH∇d/‖∇d‖²` — one back-solve against
+    /// the held factor per index (pounce#804).
+    ///
+    /// The row counterpart of `reduced_activity`, and the same defect
+    /// one block over. A row's directional denominator is a genuine
+    /// curvature along the row's own gradient — strictly better than
+    /// the variable path's bare `H_ii`, which is why pounce#763 fixed
+    /// the variables first — but it is still not *reduced*: the other
+    /// free coordinates re-optimize, and what is left after they do is
+    /// what generates the row's multiplier. So a row's ratio there is
+    /// `reduced/directional`, equal to 1 only where the row's
+    /// direction is decoupled from the remaining free space, and a
+    /// genuine row kink that is coupled reports `"ambiguous"` at any
+    /// tolerance — the ratio does not move with `μ`, so a tighter
+    /// solve reports the same thing. Ask here and the same kink
+    /// reports `"weakly_active"`.
+    ///
+    /// The intended call is over the ambiguous rows of a report, not
+    /// over every bounded row — the cost is a back-solve each. Pass
+    /// them in one call rather than looping: the back-solves batch,
+    /// and the per-call fixed cost is paid once.
+    ///
+    /// ```python
+    /// rep = solver.classify_activity()
+    /// ask = [j for j, st in enumerate(rep["row_status"]) if st == "ambiguous"]
+    /// red = solver.reduced_row_activity(ask)
+    /// kinks = [r for r, st in zip(red["row"], red["status"]) if st == "weakly_active"]
+    /// ```
+    ///
+    /// Returns a dict of parallel arrays, one entry per requested
+    /// index in the order requested:
+    ///
+    /// - `"mu"`: the converged barrier parameter, as
+    ///   `classify_activity`'s.
+    /// - `"row"`: ndarray of the user constraint index each entry
+    ///   answers about.
+    /// - `"status"`: list of str, from the same vocabulary
+    ///   `classify_activity` uses.
+    /// - `"ratio"`: ndarray of `Σ_j‖∇d‖² / |q_j|` on the reduced `q`;
+    ///   NaN where nothing was classified. The numerator is the
+    ///   geometric weight, not the raw `"sigma"` below — the same
+    ///   pairing `row_ratio` uses, so the two ratios are directly
+    ///   comparable and agree on a decoupled row.
+    /// - `"q_reduced"`: ndarray of the reduced curvature itself,
+    ///   signed, along the **unit** normal and in **natural
+    ///   (unscaled) units** — what `|∇dᵀH∇d|/‖∇d‖²` would have been
+    ///   had the curvature been reduced.
+    /// - `"q_sign"`: ndarray of its sign, so an indefinite direction
+    ///   is visible rather than hidden by the absolute value.
+    /// - `"sigma"`: ndarray of `Σ_j`, RAW and identical to the same
+    ///   row's `row_sigma` entry.
+    ///
+    /// Edge cases: an equality row reports `"equality"` with NaN
+    /// curvature (it has no slack and no barrier multiplier pair); a
+    /// row with no finite bound reports its curvature but
+    /// `"unbounded"` and a NaN ratio; a row whose gradient vanishes
+    /// reports `"unidentified"`; a row the rest of the model
+    /// determines outright has no direction left to reduce along, so
+    /// its curvature is infinite and it reports `"inactive"` —
+    /// whatever holds it, it is not its own bound.
+    ///
+    /// Requires `bound_relax_factor=0` on the held solve, like
+    /// `classify_activity`.
+    fn reduced_row_activity<'py>(
+        &self,
+        py: Python<'py>,
+        indices: Vec<i64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "reduced_row_activity: no converged factor (call solve() first)",
+            )
+        })?;
+        let n_full = s.inner.n_full_g().map_err(solver_error_to_py)?;
+        let mut rows = Vec::with_capacity(indices.len());
+        for &j in &indices {
+            // negative indices reach a raw `usize` cast inside, so they
+            // are checked here rather than surfacing as a huge index
+            if j < 0 || (j as usize) >= n_full {
+                return Err(PyValueError::new_err(format!(
+                    "reduced_row_activity: constraint index {j} out of range [0, m={n_full})"
+                )));
+            }
+            rows.push(j as usize);
+        }
+        let red = s
+            .inner
+            .reduced_row_activity(&rows)
+            .map_err(solver_error_to_py)?;
+        let out = PyDict::new_bound(py);
+        out.set_item("mu", red.mu)?;
+        out.set_item(
+            "row",
+            red.row
                 .iter()
                 .map(|&v| v as i64)
                 .collect::<Vec<_>>()

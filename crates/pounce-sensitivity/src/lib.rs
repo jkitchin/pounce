@@ -73,6 +73,7 @@ pub mod boundcheck;
 pub mod convenience;
 pub mod corrector;
 pub mod diff_handoff;
+pub mod index;
 pub mod options;
 pub mod p_calculator;
 pub mod reduced_hessian;

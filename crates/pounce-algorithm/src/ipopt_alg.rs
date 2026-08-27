@@ -355,6 +355,12 @@ pub struct IpoptAlgorithm {
     /// gh #797 — the certified stationary point the escape left. It is a strict
     /// certificate, so it is the floor the continuation must beat *with a
     /// certificate of its own* to be preferred.
+    ///
+    /// With more than one escape available this holds the **best** of the
+    /// certificates left so far, not the most recent (gh #805). The first entry
+    /// is the answer a `neg_curv_escapes = 0` build returns, and it is only
+    /// ever displaced by a point that outranks it, so the guarantee holds at
+    /// any number of escapes and the floor never moves backwards.
     neg_curv_floor: Option<VetoSnapshot>,
     /// gh #797 — outer iteration by which the escape's continuation must have
     /// produced a certificate. Past it the continuation is cut and the floor
@@ -1648,6 +1654,11 @@ impl IpoptAlgorithm {
     /// both outranks it and carries a certificate of its own. So the escape
     /// costs a bounded number of iterations and can only trade the stationary
     /// point for a strictly better one.
+    ///
+    /// That holds however many escapes are spent, not only at the default of
+    /// one: a later escape displaces the floor only with a certificate that
+    /// outranks the one already held (gh #805), so the floor is always at
+    /// least as good as the point a `neg_curv_escapes = 0` build reports.
     fn try_neg_curv_escape(&mut self, iter_count: Index) -> bool {
         if self.neg_curv_escapes_used >= self.neg_curv_escapes {
             return false;
@@ -1779,7 +1790,36 @@ impl IpoptAlgorithm {
         );
 
         self.neg_curv_escapes_used += 1;
-        self.neg_curv_floor = Some(floor);
+        // gh #805 — the floor is the *best* certificate the escapes have left,
+        // never simply the most recent one. Replacing it unconditionally is
+        // what broke the guarantee above at `neg_curv_escapes >= 2`: escape 1
+        // floors at A, the continuation certifies a different indefinite point
+        // B, escape 2 overwrites the floor with B, and if that bet is lost the
+        // run reports B — which nothing has ever compared against A. With
+        // `f(B) > f(A)` that is worse than `neg_curv_escapes = 0` returns, the
+        // one outcome the mechanism promises cannot happen. The filter method's
+        // barrier objective is not monotone across μ updates, so the escape's
+        // own accounting does not exclude it.
+        //
+        // Ranked rather than merely kept (gh #805's suggested fix), because
+        // keeping A unconditionally has the mirror-image flaw: where B *is* the
+        // better certificate, a lost second bet would hand back A and make
+        // `neg_curv_escapes = 2` worse than `= 1`, which returns B. Both points
+        // are strict certificates — the escape only fires on
+        // `ConvergenceStatus::Converged` — so the same status-dominant ranking
+        // [`Self::honour_neg_curv_floor`] uses on the way out decides between
+        // them, and the floor is monotone in the number of escapes spent.
+        //
+        // A provable no-op at the default: the branch is only reachable with a
+        // floor already held, which takes a second escape, which takes
+        // `neg_curv_escapes >= 2`.
+        let replace_floor = match self.neg_curv_floor.as_ref() {
+            None => true,
+            Some(held) => self.current_outranks_neg_curv_floor(held, true),
+        };
+        if replace_floor {
+            self.neg_curv_floor = Some(floor);
+        }
         self.neg_curv_deadline_iter = Some(
             iter_count
                 .saturating_add(NEG_CURV_CONTINUATION_BUDGET)
@@ -1801,6 +1841,44 @@ impl IpoptAlgorithm {
         self.bundle.line_search.reset();
         self.bundle.line_search.reset_after_restoration();
         true
+    }
+
+    /// Rank the current iterate against a held negative-curvature floor
+    /// (gh #797, gh #805).
+    ///
+    /// Rank by the status each point will actually be *reported* under, and
+    /// only then by objective — the status-dominant order gh #200 arrived at
+    /// the hard way. `apply_kkt_fidelity_gate` re-grades a `Success` on the
+    /// unscaled KKT error after the driver loop returns, so with
+    /// `kkt_fidelity_tol` set a lower objective at a coarser point is a status
+    /// regression dressed up as a win.
+    ///
+    /// `current_certifies` is whether the current point comes with a
+    /// certificate of its own: at the exit hook that is the driver's status,
+    /// and at an escape site it is true by construction, since the escape only
+    /// fires on `ConvergenceStatus::Converged`.
+    ///
+    /// Shared by the two sites that have to answer this question — the exit
+    /// hook [`Self::honour_neg_curv_floor`], and the point at which a second
+    /// escape decides which of two certificates to hold (gh #805) — so the two
+    /// cannot drift into disagreeing about which point is the better answer.
+    fn current_outranks_neg_curv_floor(
+        &self,
+        floor: &VetoSnapshot,
+        current_certifies: bool,
+    ) -> bool {
+        let (_, curr_kkt) = self.curr_obj_and_unscaled_kkt();
+        let current_success = current_certifies && self.survives_fidelity_gate(curr_kkt);
+        let floor_success = self.survives_fidelity_gate(floor.unscaled_kkt);
+        match (current_success, floor_success) {
+            (true, true) => self.continuation_outranks(floor),
+            // The current point reports `Solve_Succeeded` where the floor would
+            // be re-graded down. A better status wins outright.
+            (true, false) => true,
+            // No certificate of its own — the escape was a bet placed *from*
+            // one, so anything short of that loses it.
+            (false, _) => false,
+        }
     }
 
     /// Make a negative-curvature escape non-destructive (gh #797).
@@ -1828,25 +1906,8 @@ impl IpoptAlgorithm {
             return result;
         };
         self.assert_comparable_scale(&floor);
-        // Rank by the status each point will actually be *reported* under, and
-        // only then by objective — the status-dominant order gh #200 arrived at
-        // the hard way. `apply_kkt_fidelity_gate` re-grades a `Success` on the
-        // unscaled KKT error after the driver loop returns, so with
-        // `kkt_fidelity_tol` set a lower objective at a coarser point is a
-        // status regression dressed up as a win.
-        let (_, curr_kkt) = self.curr_obj_and_unscaled_kkt();
-        let continued_success =
-            matches!(result, SolverReturn::Success) && self.survives_fidelity_gate(curr_kkt);
-        let floor_success = self.survives_fidelity_gate(floor.unscaled_kkt);
-        let keep_continuation = match (continued_success, floor_success) {
-            (true, true) => self.continuation_outranks(&floor),
-            // The continuation reports `Solve_Succeeded` where the floor would
-            // be re-graded down. A better status wins outright.
-            (true, false) => true,
-            // No certificate of its own — the escape was a bet placed *from*
-            // one, so anything short of that loses it.
-            (false, _) => false,
-        };
+        let keep_continuation =
+            self.current_outranks_neg_curv_floor(&floor, matches!(result, SolverReturn::Success));
         if keep_continuation {
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] the negative-curvature escape paid off: the continuation \

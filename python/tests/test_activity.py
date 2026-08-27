@@ -615,3 +615,152 @@ def test_reduced_activity_refuses_a_relaxed_solve():
     assert info["status_msg"] == "Solve_Succeeded"
     with pytest.raises(ValueError, match="bound_relax_factor"):
         solver.reduced_activity([0])
+
+
+# ---------------------------------------------------------------
+# `reduced_row_activity`: the same question for a constraint row
+# ---------------------------------------------------------------
+
+
+class CoupledKinkRow:
+    """min ½k² + c·k·y + ½y² − A·p·k  s.t. p = 0, 2k ≥ 0, all x free.
+
+    The row analogue of `CoupledKink`: the same kink, held by an
+    inequality ROW instead of a bound on `k`. `classify_activity`
+    divides a row's geometric weight by the curvature along the row's
+    own gradient, which is a real directional curvature but still not
+    a *reduced* one, so its ratio is `reduced/directional` — exactly
+    `rho` here — and the kink drops out of the [1e-1, 1e1] band once
+    `rho < 1e-1`. gh #804.
+
+    The row's gradient is `2·e_k`, not a unit vector, so the geometric
+    weight and the unit-normal curvature both have a factor to carry.
+    The equality sits at g0, ahead of the inequality, so a full-g index
+    read as an inequality position would answer about the wrong row.
+    """
+
+    A = 1.10
+    K_SCALE = 2.0
+
+    def __init__(self, rho):
+        self.rho = rho
+        self.c = np.sqrt(1.0 - rho)
+
+    def objective(self, x):
+        k, y, p = x
+        return 0.5 * k * k + self.c * k * y + 0.5 * y * y - self.A * p * k
+
+    def gradient(self, x):
+        k, y, p = x
+        return np.array([k + self.c * y - self.A * p, self.c * k + y, -self.A * k])
+
+    def constraints(self, x):
+        return np.array([x[2], self.K_SCALE * x[0]])
+
+    def jacobianstructure(self):
+        return np.array([0, 1], dtype=np.int64), np.array([2, 0], dtype=np.int64)
+
+    def jacobian(self, x):
+        return np.array([1.0, self.K_SCALE])
+
+    def hessianstructure(self):
+        return (np.array([0, 1, 1, 2], dtype=np.int64),
+                np.array([0, 0, 1, 0], dtype=np.int64))
+
+    def hessian(self, x, lagrange, obj_factor):
+        return obj_factor * np.array([1.0, self.c, 1.0, -self.A])
+
+
+def _solve_coupled_row(rho):
+    prob = _options(pounce.Problem(
+        n=3, m=2, problem_obj=CoupledKinkRow(rho),
+        lb=[-1e19] * 3, ub=[1e19] * 3,
+        cl=[0.0, 0.0], cu=[0.0, 1e19],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.3, 0.0, 0.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    return solver
+
+
+@pytest.mark.parametrize("rho, directional_class", [
+    (1.0, "weakly_active"),
+    (1e-1, "weakly_active"),
+    (1e-2, "ambiguous"),
+    (1e-3, "ambiguous"),
+])
+def test_reduced_row_activity_certifies_a_coupled_row_kink(rho, directional_class):
+    # gh #763's table, on the row path. All four are the SAME row kink;
+    # only how strongly the row's direction couples to `y` changes. The
+    # directional normalizer's ratio tracks the coupling and the bottom
+    # two fall out of the band — at any tolerance, since that ratio
+    # does not move with μ. The reduced one is 1 at every coupling.
+    solver = _solve_coupled_row(rho)
+    rep = solver.classify_activity()
+    assert rep["row_ratio"][1] == pytest.approx(rho, rel=1e-3)
+    assert rep["row_status"][1] == directional_class
+
+    red = solver.reduced_row_activity([1])
+    assert red["status"] == ["weakly_active"]
+    assert red["ratio"][0] == pytest.approx(1.0, rel=1e-3)
+    assert red["q_reduced"][0] == pytest.approx(rho, rel=1e-3)
+    assert red["q_sign"][0] == 1
+    assert red["row"][0] == 1
+    assert red["sigma"][0] == pytest.approx(rep["row_sigma"][1], rel=1e-12)
+    assert red["mu"] == pytest.approx(rep["mu"], rel=1e-12)
+
+
+def test_reduced_row_activity_agrees_where_the_row_is_decoupled():
+    # The refinement must not move a verdict it has no reason to move.
+    # MixedModel is diagonal and its rows point along coordinate
+    # directions, so every reduced curvature IS the directional one and
+    # every class has to come back unchanged — the equality row's
+    # placeholder included.
+    solver = _mixed_solver()
+    rep = solver.classify_activity()
+    m = len(rep["row_status"])
+    red = solver.reduced_row_activity(list(range(m)))
+
+    assert red["status"] == rep["row_status"]
+    assert list(red["row"]) == list(range(m))
+    for j in range(m):
+        if np.isnan(rep["row_ratio"][j]):
+            assert np.isnan(red["ratio"][j])
+        else:
+            assert red["ratio"][j] == pytest.approx(rep["row_ratio"][j], rel=1e-5)
+
+
+def test_reduced_row_activity_rejects_indices_outside_the_users_constraints():
+    solver = _mixed_solver()
+    with pytest.raises(ValueError, match="out of range"):
+        solver.reduced_row_activity([2])
+    with pytest.raises(ValueError, match="out of range"):
+        solver.reduced_row_activity([-1])
+    empty = solver.reduced_row_activity([])
+    assert empty["status"] == [] and len(empty["ratio"]) == 0
+
+
+def test_reduced_row_activity_before_solve_raises():
+    prob = _options(pounce.Problem(
+        n=1, m=1, problem_obj=ScalarRow(1.0),
+        lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+    ))
+    with pytest.raises(RuntimeError, match="no converged factor"):
+        pounce.Solver(prob).reduced_row_activity([0])
+
+
+def test_reduced_row_activity_refuses_a_relaxed_solve():
+    # Same guard as classify_activity, for the same reason: relaxed
+    # bounds shift the slacks Σ is read from.
+    prob = pounce.Problem(
+        n=1, m=1, problem_obj=ScalarRow(1.0),
+        lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+    )
+    prob.add_option("tol", 1e-10)
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    with pytest.raises(ValueError, match="bound_relax_factor"):
+        solver.reduced_row_activity([0])

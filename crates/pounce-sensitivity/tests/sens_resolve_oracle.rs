@@ -99,6 +99,23 @@
 //!   paths that only appear at 62k (gh#672 f2's `2^n` masks, gh#708
 //!   f4's full-length basis columns) are out of reach by construction,
 //!   as gh#764 says explicitly.
+//! * **O1 at the fine end of its span, taken alone.** The budget is
+//!   flat -- `4 · max(floor, width)`, or `2.17e-4` -- while the step
+//!   being predicted shrinks with `delta`, so the two entries at
+//!   `delta = ±1e-4` do not by themselves establish that the step is
+//!   right: the whole exact displacement there is `1.0e-4`, inside the
+//!   budget, so a predictor that returned the base point unmoved would
+//!   pass them. It is only those two: at `±1e-3` a null step misses by
+//!   `1.0e-3`, five budgets out, and the margin grows from there.
+//!   O1's power at the fine end therefore comes from the coarse
+//!   entries and from
+//!   [`leg_oracle_the_plain_step_is_the_two_sided_average_at_a_kink`],
+//!   which separates a correct step from the nearest wrong one at the
+//!   same magnitudes. Tightening the budget to make `1e-4` bite on its
+//!   own would mean squeezing it between the measured error `6.3e-5`
+//!   and the null step's `1.0e-4` -- at most `1.58×` of headroom,
+//!   trading a robust leg for a flaky one to duplicate power the file
+//!   already has.
 //!
 //! # Mutation evidence
 //!
@@ -667,10 +684,16 @@ fn the_resolve_is_an_independent_oracle() {
 /// The kink fixture's base point sits `5.4e-5` off the oracle -- that
 /// is the `floor` every leg budgets against, and it is a distance
 /// between two barrier solutions, not from the exact one (the base
-/// point is `6.4e-5` from exact, the oracle `9.4e-6`). The oracle is
-/// three orders finer than that floor at every step size the leg uses. If that
-/// margin ever closes, the legs stop being able to tell a correct step
-/// from a wrong one and this test says so first.
+/// point is `6.4e-5` from exact, the oracle `9.4e-6`).
+///
+/// The oracle stays at least **two** orders finer than that floor
+/// across the span, which is what the assert enforces. The margin is
+/// not uniform and the fine end is the binding one: measured
+/// `floor / err` runs `6.0e5` at `delta = 1e-1`, `4.4e4` at `1e-2`,
+/// `2.5e3` at `1e-3`, and `5.4e2` at `1e-4` -- the re-solve has less
+/// parameter distance to work with as `delta` shrinks. If that margin
+/// ever closes, the legs stop being able to tell a correct step from a
+/// wrong one and this test says so first.
 #[test]
 fn the_oracle_out_resolves_the_base_offset() {
     let (s, seed) = base(Fx::Kink);

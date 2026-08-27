@@ -55,6 +55,110 @@ changes.
   One caveat it states about itself: `ci.yml` excludes `pounce-hsl` from
   build/test/clippy and only `cargo check`s it, so this guard runs under a
   local `COINHSL_DIR=... cargo test -p pounce-hsl` and nowhere else.
+- **`neg_curv_escapes` above `1` could report a worse answer than turning it
+  off (gh #805).** The option's help text and `docs/src/options.md` both state
+  the guarantee without qualification — the escape "cannot return a worse
+  answer than leaving it off would have", because the certified stationary
+  point is snapshotted as a floor before the step and handed back unless the
+  continuation comes back with a certificate of its own at a better point.
+  That was enforced at the default `neg_curv_escapes = 1` and nowhere above
+  it: `try_neg_curv_escape` *replaced* `neg_curv_floor` on every escape, so a
+  second escape dropped the point the first one had floored, and no code path
+  held a reference to it any more. If the continuation's own certificate `B`
+  was worse than the certificate `A` the first bet was placed from, a lost
+  second bet restored and reported `B` — worse than `neg_curv_escapes = 0`
+  returns, with nothing left to compare it against. The IPM is a filter method
+  and the barrier objective is not monotone across μ updates, so the escape's
+  own accounting did not exclude that ordering.
+
+  The floor now holds the **best** certificate the escapes have left rather
+  than the most recent one, ranked by the same status-dominant order
+  `honour_neg_curv_floor` already used on the way out (the fidelity gate
+  first, then objective-against-violation) and shared with it, so the two
+  sites cannot drift apart. Both points are strict certificates — the escape
+  only fires on `ConvergenceStatus::Converged` — so the comparison is
+  well-posed. Ranking rather than simply *keeping the first* floor matters in
+  the reachable direction: the continuation descends, so `f(B) < f(A)` on
+  every case a fixture can construct, and keeping `A` would have made
+  `neg_curv_escapes = 2` come back worse than `= 1` — measured, on the new
+  fixture below, `obj = 0` where `= 1` returns `-0.225`. The deadline is
+  unchanged: each escape still buys its continuation its own 30 iterations, as
+  the `DEFAULT_NEG_CURV_ESCAPES` doc comment already said it does, so the
+  *cost* scales with the option and the guarantee does not.
+
+  This is a provable no-op at the default — the new branch is only reachable
+  with a floor already held, which takes a second escape — and the fixture
+  sweep (`scripts/sweep-fixtures.sh`, both legs) is unmoved.
+
+  New fixture `nonconvex_two_escapes.nl` (generator committed beside it), the
+  first in the corpus that places **two** escapes and so the first that
+  reaches any of the multi-escape accounting at all:
+  `min 0.225x₀⁴ − 0.45x₀² + (1000 − 1000.45x₀²)x₁²` over a box, whose evenness
+  in `x₁` holds the solve on the ridge `x₁ = 0` long enough to certify two
+  points on it. It walks `obj = 0` (the maximum along `x₀`) → `−0.225` (a
+  saddle whose negative direction is the *other* coordinate) → `−6752.25` (the
+  global minimum) as the budget goes `0 → 1 → 2`, and a third escape is
+  declined. What it cannot do is discriminate the fix from the defect: that
+  needs `f(B) > f(A)`, which within one solve takes something non-monotone in
+  `f`, and gh #805 records that no such witness could be constructed. The
+  defect was latent, and the fix keeps both orders correct rather than only
+  the one a fixture can reach.
+
+- **A constraint row's activity ratio is not normalized by a reduced
+  curvature either, and now there is an accessor for rows too** (#804).
+  #763 fixed the variable path and left the row path with a docs note.
+  `classify_activity` divides a row's geometric barrier weight `Σ‖∇d‖²` by
+  `|∇dᵀH∇d|/‖∇d‖²`, the curvature along the row's own gradient. That IS a
+  genuine directional curvature — strictly better than the variable path's
+  bare `H_ii`, which is why it was not the one #763 fixed, and exactly the
+  argument that would have left it wrong. It is still not a *reduced*
+  curvature: it does not account for the other free coordinates
+  re-optimizing, and what is left after they do is what generates the row's
+  multiplier. So a row's ratio is `reduced/directional`, equal to 1 only
+  where the row's direction is decoupled from the remaining free space, and
+  a coupled row kink falls out of the `[1e-1, 1e1]` band and reads
+  `ambiguous` — at any tolerance, because that ratio is `μ`-independent.
+
+  New `Solver::reduced_row_activity(&[j, …])` (Rust) /
+  `solver.reduced_row_activity([j, …])` (Python) re-measures the same rule
+  against the reduced curvature. The row's own value is a coordinate of the
+  KKT system — the slack the barrier acts on, tied to the model by
+  `dⱼ(x) = sⱼ` — so the back-solve is the variable accessor's, one block
+  over: a unit right-hand side in the `s` block gives
+  `qⱼ = (1/(K⁻¹)_{sⱼsⱼ} − Σⱼ)·‖∇dⱼ‖²`, the `‖∇dⱼ‖²` putting the answer
+  along the unit normal where `classify_activity`'s `q` lives. Driving the
+  `x` block with `∇dⱼ` gives the identical number
+  (`∇dⱼᵀK⁻¹∇dⱼ = (K⁻¹)_{sⱼsⱼ}` for every `j`), so the slack unit vector is
+  used: nothing to assemble into the right-hand side. Equality rows report
+  `equality` as the report does; indices are user-space full-g, so an
+  equality ahead of an inequality shifts nothing.
+
+  As with #763 the default classification is **unchanged** and nothing in
+  the step path moves — `weakly_active_bounds()` already counts `ambiguous`
+  as weak. What was wrong was the public *answer*, and the same inference
+  that shipped #756's first-order wrong derivative reads just as naturally
+  off a row. `classify_activity`'s docs, `row_status`, `row_ratio`, the
+  `AMBIGUOUS` constant, `CLAUDE.md` and `docs/src/sensitivity.md` now all
+  say so for rows as well.
+
+  Tests: `tests/reduced_row_activity.rs` runs both branches the rule can
+  take, per the `CLAUDE.md` branch rule. A decoupled fixture where the two
+  normalizers must *agree* — two regimes at once, including the
+  strongly-active row where the `1/(K⁻¹)_ss − Σ` cancellation is hardest —
+  and a coupled row kink where they must *disagree* by exactly the
+  coupling, over four couplings, which is the test rather than a duplicate
+  of the first. Both fixtures carry an equality ahead of the inequalities
+  and rows whose gradients are not unit length, so the full-g→d-block map
+  and every `‖∇d‖²` conversion have somewhere to go wrong. A row-scaling
+  leg sweeps six decades of `dg`: unlike the variable accessor's row-scale
+  invariance, which holds by construction, this one has three `dg` factors
+  meeting in one ratio (`Σ` exported with `dg²`, `(K⁻¹)_ss` conjugated with
+  `dg⁻²`, `‖∇d‖²` gathered with `dg²`), and each is mutation-checked to
+  trip its own leg and only its own. The equivalence of the two
+  back-solve routes is checked numerically rather than left as prose:
+  `the_slack_unit_vector_and_the_row_gradient_give_the_same_back_solve`
+  drives the `x` block with the row's gradient, the way the issue
+  proposed, and gets the same number.
 
 - **Step-size invariance for the phase-envelope example is asserted again,
   at the trace level** (#798). #793 halved
