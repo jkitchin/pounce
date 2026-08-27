@@ -9,6 +9,53 @@ changes.
 
 ## [Unreleased]
 
+- **MA57 now declines the gh#729 batching gate explicitly, with the
+  measurement attached** (#810). `Ma57SolverInterface` inherited
+  `multi_solve_matches_single_solve`'s `false` default. That is the right
+  answer, but inheriting it says nothing, and a bare default reads as an
+  omission waiting to be tidied up. It cost a review cycle: the merged
+  low-rank SMW arm is gated on this predicate, so under
+  `linear_solver=ma57` the entire mechanism is dead code — confirmed from
+  source, from a runtime probe reporting `gate=false` at every width, and
+  from before/after timings identical to the printed digit.
+
+  The predicate is now written out on the MA57 impl with the numbers that
+  justify it, and `multi_solve_reassociates_from_two_columns_up` is the
+  guard. Against **one shared factor** — so the comparison cannot be
+  blamed on a nondeterministic analyse/factor — `ma57cd` at `nrhs = 2`
+  disagrees with two `nrhs = 1` calls in 648 of 1152 entries, at a maximum
+  relative difference of 1.3e-14, rising to 1.1e-10 by `nrhs = 14`.
+  Tolerance-legal and trajectory-moving is precisely the dangerous
+  combination gh#729 named.
+
+  The useful negative result: **there is no safe narrow window for MA57.**
+  feral can honestly return `true` below its BLAS-3 threshold, so an
+  `nrhs`-capped override was the obvious repair. MA57 has no such arm — it
+  reassociates from the second column on, below its own `ICNTL(13) = 10`
+  level-3 BLAS threshold, and nothing observable changes as that threshold
+  is crossed. The test brackets widths 2/9/10/16 to record that.
+
+  Also recorded, because it is the natural thing to assume and it is
+  wrong here: feral's guard needs a wide separator or its blocked panel
+  degenerates and agrees bit-for-bit at every width. MA57 has no such
+  degenerate case — replacing the 2-D Laplacian with a plain tridiagonal
+  band still shows reassociation. The Laplacian is kept for comparability
+  with feral's guard, not because the test depends on it.
+
+  What this does **not** do is recover the speed. The batching is worth
+  about 10% of `OverallAlgorithm` under MA57 on a large limited-memory
+  model (back-solve −43.4%, measured with the gate forced on as a
+  diagnostic), and with the gate forced on the trajectory does move —
+  objective 78.21 split against 65.30 merged on the same model at the same
+  iteration cap. That remains open on #810 as a deliberate opt-in, needing
+  a full `scripts/sweep-fixtures.sh` diff and a benchmark pass; it is not a
+  matter of flipping the predicate.
+
+  Both assertions are mutation-checked, and the test carries the table.
+  One caveat it states about itself: `ci.yml` excludes `pounce-hsl` from
+  build/test/clippy and only `cargo check`s it, so this guard runs under a
+  local `COINHSL_DIR=... cargo test -p pounce-hsl` and nowhere else.
+
 - **Step-size invariance for the phase-envelope example is asserted again,
   at the trace level** (#798). #793 halved
   `test_published_binary_fold_and_inverse_design_regression` partly by

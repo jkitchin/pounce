@@ -140,6 +140,17 @@ pub trait SparseSymLinearSolverInterface {
     /// bit-identical rank-1 cascade for narrow blocks and switch to a
     /// reassociating BLAS-3 panel kernel once the block is wide enough
     /// to pay for it. feral does exactly that.
+    ///
+    /// It is not guaranteed that such a narrow window exists. MA57 has
+    /// none — measured, `ma57cd` reassociates from the second column on,
+    /// below its own `ICNTL(13)` level-3 BLAS threshold — so
+    /// `pounce-hsl` returns `false` at every width and spells that out
+    /// rather than inheriting this default silently (gh#810). A backend
+    /// author reaching for an `nrhs`-capped override should measure
+    /// first; the guards to copy are
+    /// `Ma57SolverInterface::multi_solve_reassociates_from_two_columns_up`
+    /// and feral's
+    /// `multi_solve_bitwise_matches_single_solve_at_the_documented_ceiling`.
     fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
         false
     }

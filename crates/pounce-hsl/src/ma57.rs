@@ -525,6 +525,46 @@ impl Default for Ma57SolverInterface {
 }
 
 impl SparseSymLinearSolverInterface for Ma57SolverInterface {
+    /// MA57 **declines** the gh#729 bit-identity contract, at every width.
+    ///
+    /// This is the trait default, but it is spelled out here on purpose.
+    /// Inheriting it silently reads as "nobody got round to MA57 yet",
+    /// and that reading cost a review cycle (gh#810): the merged
+    /// low-rank SMW arm added for gh#729 is gated on this predicate, so
+    /// under `linear_solver=ma57` the whole mechanism is dead code, and
+    /// a changelog claimed the opposite.
+    ///
+    /// The measurement is
+    /// `multi_solve_reassociates_from_two_columns_up`: against one
+    /// shared factor, `ma57cd` with `nrhs = 2` already disagrees with two
+    /// `nrhs = 1` calls in **648 of 1152** entries. The disagreement is
+    /// tolerance-legal (max relative difference 1.3e-14 at `nrhs = 2`,
+    /// growing to 1.1e-10 by `nrhs = 14`), which is exactly the shape
+    /// that makes it dangerous: a batched solve inside an iteration
+    /// whose trajectory must not move can select a different local
+    /// optimum on a nonconvex problem while every printed status still
+    /// says the solve succeeded.
+    ///
+    /// Two things are worth knowing before anyone tries to raise this.
+    ///
+    /// * There is **no safe narrow window**. feral is bit-identical
+    ///   below its BLAS-3 threshold, so it can honestly return `true`
+    ///   for `nrhs <= 16`. MA57 has no such arm: it reassociates from
+    ///   the second column on, well below its own `ICNTL(13) = 10`
+    ///   level-3 BLAS threshold, and nothing observable changes as that
+    ///   threshold is crossed. So an `nrhs`-capped override is not
+    ///   available here — it was the obvious repair for gh#810 and it
+    ///   is empirically dead.
+    /// * The batching is worth roughly **10% of `OverallAlgorithm`**
+    ///   under MA57 on a large limited-memory model, so this is a real
+    ///   cost, not a theoretical one. Recovering it means accepting a
+    ///   trajectory change deliberately, behind an opt-in, with a full
+    ///   `scripts/sweep-fixtures.sh` diff and a benchmark pass —
+    ///   see gh#810. It is not a matter of flipping this to `true`.
+    fn multi_solve_matches_single_solve(&self, _nrhs: usize) -> bool {
+        false
+    }
+
     fn initialize_structure(
         &mut self,
         dim: Index,
@@ -910,5 +950,177 @@ mod tests {
         opts.pivtolmax = 1e-4;
         let mut s = Ma57SolverInterface::with_options(opts);
         assert!(!s.increase_quality());
+    }
+
+    /// Guard for [`Ma57SolverInterface::multi_solve_matches_single_solve`],
+    /// and the counterpart to feral's
+    /// `multi_solve_bitwise_matches_single_solve_at_the_documented_ceiling`.
+    ///
+    /// feral's guard exists to catch its ceiling drifting *down* into
+    /// unsound territory. This one exists for the opposite reason: MA57
+    /// has no sound width at all, and the predicate that says so is a
+    /// bare `false` that looks exactly like an omission. Without a
+    /// measurement attached, the next reader's obvious move is to "fix"
+    /// the omission and pick up the ~10% that gh#810 measured — which
+    /// would silently reintroduce the gh#729 trajectory defect under
+    /// every MA57 solve.
+    ///
+    /// So this test asserts the *disagreement*, and it is expected to
+    /// fail if a future CoinHSL ever makes `ma57cd` column-order
+    /// independent. That is the intended signal: go and re-measure,
+    /// then raise the predicate deliberately. It is not a test that
+    /// should be deleted to make a green build.
+    ///
+    /// Note this file's tests need a real `libcoinhsl` and CI only
+    /// `cargo check`s `pounce-hsl` (`ci.yml` excludes it from
+    /// build/test/clippy), so this guard runs locally, under
+    /// `COINHSL_DIR=... cargo test -p pounce-hsl`, and nowhere else.
+    ///
+    /// Mutation-checked — each row is a change that makes the test fail,
+    /// so neither assertion is decoration:
+    ///
+    /// | mutation | result |
+    /// |---|---|
+    /// | `multi_solve_matches_single_solve` returns `true` | fails at `nrhs=1`, "must decline the gh#729 batching gate" |
+    /// | compare the looped arm against itself instead of the batched one | fails at `nrhs=2`, "now bit-identical to looping single-RHS" |
+    ///
+    /// And one that does **not** fail, recorded because it is the
+    /// obvious thing to assume: replacing the Laplacian with a plain
+    /// tridiagonal band still shows reassociation. See the comment on
+    /// the matrix below.
+    #[test]
+    fn multi_solve_reassociates_from_two_columns_up() {
+        // A 2-D 5-point Laplacian, matching feral's guard so the two
+        // measurements are directly comparable. Note the bandwidth
+        // argument feral's guard depends on does *not* transfer: feral
+        // needs a wide separator or its blocked panel degenerates to the
+        // same scalar operations as the rank-1 cascade and agrees
+        // bit-for-bit at every width. MA57 has no such degenerate case —
+        // dropping the `i + K` coupling for a plain tridiagonal band and
+        // rerunning still shows reassociation at every width here. The
+        // Laplacian is kept for comparability and because it is the more
+        // representative KKT-ish structure, not because the test needs it.
+        const K: usize = 24;
+        const N: usize = K * K;
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        {
+            let mut push = |i: usize, j: usize, v: Number| {
+                irn.push((i + 1) as Index);
+                jcn.push((j + 1) as Index);
+                vals.push(v);
+            };
+            for r in 0..K {
+                for c in 0..K {
+                    let i = r * K + c;
+                    push(i, i, 4.0 + ((r + c) % 5) as Number * 0.25);
+                    if c + 1 < K {
+                        push(i + 1, i, -1.0 - (r % 3) as Number * 0.125);
+                    }
+                    if r + 1 < K {
+                        push(i + K, i, -1.0 - (c % 3) as Number * 0.125);
+                    }
+                }
+            }
+        }
+
+        // Widths bracketing MA57's `ICNTL(13)` level-3 BLAS threshold
+        // (default 10), so the test also records that nothing changes as
+        // that threshold is crossed — there is no narrow arm to exploit.
+        const WIDTHS: [usize; 4] = [2, 9, 10, 16];
+        const MAXW: usize = 16;
+        // Irrational-ish, non-repeating entries: a right-hand side of
+        // small integers can be reassociation-insensitive by luck and pass
+        // a bit-identity check that a real RHS would fail.
+        let rhs_all: Vec<Number> = (0..N * MAXW)
+            .map(|k| ((k as Number) * 0.7390851332151607).sin() * 3.0 + 0.5)
+            .collect();
+
+        // ONE factorization, reused by both arms. The batched solve and
+        // the per-column loop run against literally the same factor, so a
+        // difference is the substitution kernel and cannot be a
+        // nondeterministic analyse/factor.
+        let mut s = Ma57SolverInterface::new();
+        assert_eq!(
+            s.initialize_structure(N as Index, vals.len() as Index, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&vals);
+        {
+            let mut warm = rhs_all[..N].to_vec();
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut warm, false, 0),
+                ESymSolverStatus::Success,
+                "the shared factorization must succeed before either arm runs"
+            );
+        }
+        let mut solve = |nrhs: usize, rhs: &[Number]| -> Vec<Number> {
+            let mut buf = rhs.to_vec();
+            assert_eq!(
+                s.multi_solve(false, &irn, &jcn, nrhs as Index, &mut buf, false, 0),
+                ESymSolverStatus::Success
+            );
+            buf
+        };
+
+        // Self-consistency first. If repeating the same `nrhs = 1` solve
+        // did not reproduce itself bit-for-bit — stale MA57C scratch, say
+        // — then every "difference" below would be noise and this test
+        // would be measuring nothing.
+        let once = solve(1, &rhs_all[..N]);
+        let twice = solve(1, &rhs_all[..N]);
+        assert_eq!(
+            once, twice,
+            "a repeated single-RHS solve against one factor is not \
+             reproducible, so this test cannot attribute anything to batching"
+        );
+
+        for nrhs in WIDTHS {
+            let rhs = &rhs_all[..N * nrhs];
+            let batched = solve(nrhs, rhs);
+            let looped: Vec<Number> = (0..nrhs)
+                .flat_map(|c| solve(1, &rhs[c * N..(c + 1) * N]))
+                .collect();
+
+            let n_bit_diff = batched
+                .iter()
+                .zip(&looped)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert!(
+                n_bit_diff > 0,
+                "nrhs={nrhs}: MA57's batched solve is now bit-identical to \
+                 looping single-RHS. If CoinHSL really has become \
+                 column-order independent, re-measure across widths and \
+                 raise `multi_solve_matches_single_solve` deliberately \
+                 (gh#810) — do not delete this assertion to get green"
+            );
+
+            // The disagreement must also be *small*. A large one would be
+            // a broken solve, not reassociation, and the danger this gate
+            // guards against is specifically the tolerance-legal kind:
+            // an answer good enough to pass every check and still move the
+            // trajectory.
+            let max_rel = batched
+                .iter()
+                .zip(&looped)
+                .map(|(a, b)| (a - b).abs() / b.abs().max(1e-300))
+                .fold(0.0_f64, f64::max);
+            assert!(
+                max_rel < 1e-6,
+                "nrhs={nrhs}: batched and looped answers differ by {max_rel:.3e} \
+                 relative — too large to be reassociation; MA57's multi-RHS \
+                 solve looks wrong, not just reordered"
+            );
+        }
+
+        // The predicate must actually decline at every width the SMW arm
+        // could ask about, or the doc comment above is decoration.
+        let s = Ma57SolverInterface::new();
+        for nrhs in [1usize, 2, 9, 10, 16, 32, 64] {
+            assert!(
+                !s.multi_solve_matches_single_solve(nrhs),
+                "nrhs={nrhs}: MA57 must decline the gh#729 batching gate"
+            );
+        }
     }
 }
