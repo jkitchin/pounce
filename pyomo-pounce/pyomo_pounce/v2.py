@@ -206,13 +206,25 @@ _V2_STATUS = {
         TerminationCondition.convergenceCriteriaSatisfied,
         SolutionStatus.optimal,
     ),
-    # A feasible point that did not meet the convergence criteria: the
-    # point is usable, the run is not a success. `unknown` is the honest
-    # termination condition here -- none of the v2 members says "stopped
-    # with a feasible point".
+    # A square problem solved to feasibility. This is a success, and the
+    # row must say so: POUNCE emits this status only when
+    # `is_square_problem` holds (`resto_inner_solver.rs`, the status's one
+    # gate), which is Ipopt's own condition, and on a square problem the
+    # objective is constant -- a feasible point is the solution. The row
+    # used to read `(unknown, feasible)` on the theory that POUNCE used the
+    # status more loosely than Ipopt does; it does not.
+    #
+    # These values are exactly what the `.sol` route now produces for the
+    # same solve: POUNCE writes AMPL code 2 (Ipopt's own), and Pyomo's v2
+    # reader maps the 0..99 band to
+    # `(convergenceCriteriaSatisfied, optimal)`. Keeping the two routes in
+    # agreement is the same rule that governs `Solved_To_Acceptable_Level`
+    # above (gh #591); disagreeing here is what gh #815 was -- an IDAES
+    # square flowsheet solved to a 2.2e-06 constraint violation and
+    # reported to the caller as a failure.
     "Feasible_Point_Found": (
-        TerminationCondition.unknown,
-        SolutionStatus.feasible,
+        TerminationCondition.convergenceCriteriaSatisfied,
+        SolutionStatus.optimal,
     ),
     "Infeasible_Problem_Detected": (
         TerminationCondition.locallyInfeasible,

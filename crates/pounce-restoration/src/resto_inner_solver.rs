@@ -915,11 +915,13 @@ pub fn run_inner_resto(
     } else {
         eval_orig_rel_c_inf_pr_at_inner_curr(&*final_iv.x, outer_nlp)
     };
-    let feasible_point_found = is_square_problem
-        && matches!(status, SolverReturn::StopAtAcceptablePoint)
-        && orig_inf_pr_at_final.is_finite()
-        && orig_inf_pr_at_final < outer_constr_viol_tol
-        && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD;
+    let feasible_point_found = square_feasible_point_found(
+        is_square_problem,
+        status,
+        orig_inf_pr_at_final,
+        outer_constr_viol_tol,
+        orig_rel_inf_pr_at_final,
+    );
 
     let inner_kkt_err = alg.cq.borrow().curr_nlp_error();
     let inner_stationarity_converged = inner_kkt_err <= 10.0 * outer_tol;
@@ -1290,6 +1292,39 @@ fn eval_orig_inf_pr_at_inner_curr(
 /// the outer side: one band, so a model cannot be judged feasible by one of
 /// the three and infeasible by another.
 const SQUARE_FEASIBLE_REL_VIOL_THRESHOLD: f64 = 1e-2;
+
+/// The square-problem arm's gate: may this recovered point be reported as
+/// `FeasiblePointFound`?
+///
+/// Extracted from the caller so the first conjunct can be held by a test.
+/// `is_square_problem` is not one condition among five — it is what the
+/// status *means*, and two things downstream are built on it:
+///
+/// * `pounce_solve_report::status_to_solve_result_num` writes AMPL code
+///   `2` for `FeasiblePointFound`, in the `0..=99` solved band, because on
+///   a square problem the objective is constant and a feasible point is
+///   the solution. That reasoning is void for a non-square problem, where
+///   a feasible point says nothing about optimality.
+/// * `pyomo_pounce.v2._V2_STATUS` and `pyomo_pounce.sens._STATUS_RESULT`
+///   report the status as a success for the same reason.
+///
+/// This is the crate's only producer of the status, so widening this gate
+/// past square problems would silently turn those three surfaces into
+/// wrong answers rather than merely optimistic ones (gh #815 is what the
+/// opposite error cost: the band said failure and the answer was right).
+fn square_feasible_point_found(
+    is_square_problem: bool,
+    status: SolverReturn,
+    orig_inf_pr_at_final: f64,
+    outer_constr_viol_tol: f64,
+    orig_rel_inf_pr_at_final: f64,
+) -> bool {
+    is_square_problem
+        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && orig_inf_pr_at_final.is_finite()
+        && orig_inf_pr_at_final < outer_constr_viol_tol
+        && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD
+}
 
 /// The orig NLP's equality-block violation at the inner IPM's converged
 /// iterate, as a fraction of each row's **declared** right-hand side:
@@ -1732,6 +1767,85 @@ mod tests {
             ConvergenceStatus::MaxIterExceeded,
             "`max_resto_iter=2` must stop the restoration sub-solve at 2",
         );
+    }
+
+    /// The conjunct the reported status *means*, held here because three
+    /// surfaces outside this crate are built on it — see
+    /// `square_feasible_point_found`'s doc comment. Every other input is
+    /// held at a value that would pass, so this asserts squareness alone
+    /// decides, not that some other guard happens to also refuse.
+    #[test]
+    fn only_a_square_problem_yields_a_feasible_point_verdict() {
+        let pass = |sq| {
+            square_feasible_point_found(
+                sq,
+                SolverReturn::StopAtAcceptablePoint,
+                1.0e-6, // orig violation, under the tol below
+                1.0e-4, // outer constr_viol_tol
+                1.0e-4, // relative violation, under the 1e-2 band
+            )
+        };
+        assert!(
+            pass(true),
+            "a square problem at these residuals is the verdict"
+        );
+        assert!(
+            !pass(false),
+            "a non-square problem must never reach FeasiblePointFound: the \
+             solved-band `.sol` code and both pyomo_pounce success rows are \
+             justified only by squareness",
+        );
+    }
+
+    /// The remaining conjuncts, each refused on its own from the same
+    /// passing baseline — so a future rewrite cannot drop one silently and
+    /// still be caught only by the squareness test above.
+    #[test]
+    fn each_residual_guard_refuses_on_its_own() {
+        let g =
+            |status, inf_pr, tol, rel| square_feasible_point_found(true, status, inf_pr, tol, rel);
+        assert!(g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.0e-4
+        ));
+        // Not an acceptable-point stop.
+        assert!(!g(SolverReturn::Success, 1.0e-6, 1.0e-4, 1.0e-4));
+        assert!(!g(SolverReturn::MaxiterExceeded, 1.0e-6, 1.0e-4, 1.0e-4));
+        // Violation not finite, or not under the outer tolerance.
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            f64::NAN,
+            1.0e-4,
+            1.0e-4
+        ));
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            f64::INFINITY,
+            1.0e-4,
+            1.0e-4
+        ));
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-3,
+            1.0e-4,
+            1.0e-4
+        ));
+        // Absolutely tiny but large against the row's own magnitude — the
+        // scale-free companion guard, at 101% of the 1e-2 band.
+        assert!(!g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.01e-2
+        ));
+        assert!(g(
+            SolverReturn::StopAtAcceptablePoint,
+            1.0e-6,
+            1.0e-4,
+            1.0e-2
+        ));
     }
 
     #[test]

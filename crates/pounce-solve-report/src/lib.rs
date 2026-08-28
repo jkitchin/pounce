@@ -597,19 +597,56 @@ fn empty_stats() -> StatisticsInfo {
 /// stays visible in the status name and the `.sol` message line; it just
 /// no longer reads as a warning.
 ///
-/// `FeasiblePointFound` deliberately stays in the 100 "solved, with a
-/// warning" band even though Ipopt emits `2` for it. The two statuses do
-/// not mean the same thing: Ipopt returns `FEASIBLE_POINT_FOUND` only for
-/// a square problem, where a feasible point *is* the solution, while
-/// POUNCE uses it for a usable feasible point that did not meet the
-/// convergence criteria — a run its own interfaces do not call a success
-/// (`pyomo_pounce.v2._V2_STATUS`, `pyomo_pounce.sens._STATUS_RESULT`).
+/// `FeasiblePointFound` is `2`, Ipopt's own code, and therefore in the
+/// `0..=99` solved band. It used to be `100`, justified by the claim that
+/// the two statuses do not mean the same thing — that Ipopt returns
+/// `FEASIBLE_POINT_FOUND` only for a square problem, where a feasible
+/// point *is* the solution, while POUNCE used it more loosely for any
+/// usable feasible point that missed the convergence criteria.
+///
+/// That claim was false about POUNCE's own code. The status has exactly
+/// one production site: `min_c_1nrm.rs` returns
+/// `RestorationOutcome::FeasiblePointFound`, reached only through the
+/// gate at `resto_inner_solver.rs`, which is `is_square_problem && ...`.
+/// `is_square_problem()` (`ipopt_alg.rs`) is `c.x.dim() == c.y_c.dim()`,
+/// a port of `IpoptCalculatedQuantities::IsSquareProblem` — the same
+/// condition Ipopt uses. So POUNCE emits this status *only* for square
+/// problems, carrying Ipopt's meaning precisely, and on a square problem
+/// there is no further convergence criterion to miss: the objective is
+/// constant, so a feasible point is the solution.
+///
+/// The band is what consumers key on, and `100` was not a softer way of
+/// saying the same thing — it inverted the answer. Pyomo's v2 reader
+/// (`pyomo/contrib/solver/solvers/asl_sol_reader.py`) maps `100..=199` to
+/// `TerminationCondition.error`, so a correct square-problem solve
+/// reached the caller as a *solver error*; the legacy reader
+/// (`pyomo/opt/plugins/sol.py`) maps it to `optimal` + `status=warning`,
+/// the same gh #591 warning `SolvedToAcceptableLevel` was moved out of the
+/// band to escape. Ipopt on the identical solve loads clean in both. This
+/// is what gh #815 surfaced: an IDAES square flowsheet that POUNCE solves
+/// to a constraint violation of 2.2e-06 was reported as a failure.
+///
+/// This crate is not the only place that had to agree. `python/pounce/gams/link.py`
+/// already mapped the status to `(MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL)`
+/// and listed it as a success, and
+/// `crates/pounce-algorithm/tests/issue_390_nonlinear_equality_scale.rs`
+/// already called it "a success-band answer — AMPL `objno` code 2, which
+/// every band table reads as SOLVED". The two Pyomo tables
+/// (`pyomo_pounce.v2._V2_STATUS`, `pyomo_pounce.sens._STATUS_RESULT`) were
+/// the dissenters and moved with this change.
+///
+/// Being in the solved band is *not* a claim that any feasible point is
+/// acceptable. `issue_390_nonlinear_equality_scale.rs` is the guard that a
+/// model with no solution is never reported feasible at any row scale; the
+/// relative-violation threshold at `resto_inner_solver.rs` is what keeps
+/// that true. This mapping decides how a verdict is reported, not when it
+/// is reached.
 pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
     use ApplicationReturnStatus::*;
     match status {
         SolveSucceeded => 0,
         SolvedToAcceptableLevel => 1,
-        FeasiblePointFound => 100,
+        FeasiblePointFound => 2,
         InfeasibleProblemDetected => 200,
         DivergingIterates => 300,
         SearchDirectionBecomesTooSmall => 400,
@@ -920,9 +957,40 @@ mod tests {
         // the `.sol` message line.
         assert_ne!(code, status_to_solve_result_num(SolveSucceeded));
 
-        // A feasible-but-unconverged point is a different claim and keeps
-        // the warning band — see the mapping's doc comment.
-        assert_eq!(status_to_solve_result_num(FeasiblePointFound), 100);
+        // `FeasiblePointFound` is also in the solved band, for its own
+        // reason — see `a_square_problem_feasible_point_is_in_the_solved_band`.
+        assert_ne!(code, status_to_solve_result_num(FeasiblePointFound));
+    }
+
+    /// POUNCE emits `FeasiblePointFound` only for square problems — the
+    /// status has one production site (`min_c_1nrm.rs`) behind one gate
+    /// (`resto_inner_solver.rs`), and that gate is `is_square_problem &&
+    /// ...`. That is exactly Ipopt's meaning, and on a square problem a
+    /// feasible point *is* the solution, so the code is Ipopt's own `2`.
+    ///
+    /// The band, not the number, is what breaks: at `100` Pyomo's v2 ASL
+    /// reader returns `TerminationCondition.error` for a correct solve
+    /// (gh #815 — an IDAES flowsheet solved to a 2.2e-06 constraint
+    /// violation and reported as a solver error), and the legacy reader
+    /// returns `status=warning`, the same gh #591 complaint that moved
+    /// `SolvedToAcceptableLevel` out of the band.
+    #[test]
+    fn a_square_problem_feasible_point_is_in_the_solved_band() {
+        use ApplicationReturnStatus::*;
+        let code = status_to_solve_result_num(FeasiblePointFound);
+        assert_eq!(
+            code, 2,
+            "Ipopt's ASL driver emits 2 for FEASIBLE_POINT_FOUND"
+        );
+        assert!(
+            (0..=99).contains(&code),
+            "must be in the solved band both Pyomo readers accept, got {code}",
+        );
+        // Still its own verdict: distinguishable from both other members of
+        // the band, with the distinction carried verbatim in the status name
+        // and the `.sol` message line.
+        assert_ne!(code, status_to_solve_result_num(SolveSucceeded));
+        assert_ne!(code, status_to_solve_result_num(SolvedToAcceptableLevel));
     }
 
     #[test]

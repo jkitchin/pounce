@@ -451,8 +451,25 @@ _STATUS_RESULT = {
         (TerminationCondition.optimal, SolverStatus.ok),
     "Solved_To_Acceptable_Level":
         (TerminationCondition.optimal, SolverStatus.ok),
+    # `ok`, not `warning`, for the reason `Solved_To_Acceptable_Level`
+    # above is `ok`: POUNCE emits this status only for a square problem
+    # (`resto_inner_solver.rs` gates it on `is_square_problem`), where the
+    # objective is constant and a feasible point is the solution, and the
+    # AMPL code it emits for it (2, Ipopt's own) puts the `.sol` route in
+    # the 0..99 band both Pyomo readers load as a success. `warning` here
+    # would make this route disagree with the `.sol` route and with
+    # `v2._V2_STATUS` on the same solve (gh #815).
+    #
+    # The session asymmetry below is unchanged and deliberate: the engine's
+    # `on_converged` callback still fires only for Solve_Succeeded /
+    # Solved_To_Acceptable_Level, so this solve arrives with `converged =
+    # False` and no retained factorization. That is not a reporting gap to
+    # close by widening the callback gate -- a square feasible point is
+    # reached through the restoration phase, whose factorization is not the
+    # original problem's KKT matrix, so a session built from it would answer
+    # sensitivity queries from the wrong system.
     "Feasible_Point_Found":
-        (TerminationCondition.feasible, SolverStatus.warning),
+        (TerminationCondition.optimal, SolverStatus.ok),
     "Infeasible_Problem_Detected":
         (TerminationCondition.infeasible, SolverStatus.warning),
     "Diverging_Iterates":
@@ -872,10 +889,12 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # the stale solve. With the session cleared they raise their
         # usual "no sensitivity session" error. Note the Feasible_Point_Found
         # asymmetry: the engine's on_converged callback fires only for
-        # Solve_Succeeded / Solved_To_Acceptable_Level, so a feasible-point
-        # solve reports termination_condition=feasible yet has converged=False
-        # and lands here -- no KKT factorization is retained, so its session
-        # is dropped even though the status is not a hard failure.
+        # Solve_Succeeded / Solved_To_Acceptable_Level, so a square-problem
+        # feasible point reports termination_condition=optimal, status=ok yet
+        # has converged=False and lands here -- no KKT factorization is
+        # retained, so its session is dropped even though the solve succeeded.
+        # See `_STATUS_RESULT` for why widening the callback gate is the wrong
+        # way to close that gap.
         reg.session = None
         for name, val in zip(var_names, np.asarray(x)):
             ov = model.find_component(name)

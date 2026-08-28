@@ -9,6 +9,92 @@ changes.
 
 ## [Unreleased]
 
+- **A square problem solved to feasibility is now reported as a success
+  (gh #815).** `Feasible_Point_Found` wrote AMPL `solve_result_num = 100`.
+  Pyomo's contrib v2 `.sol` reader maps `100..=199` to
+  `TerminationCondition.error`, so a correct answer reached the caller as a
+  *solver error*; the legacy reader maps it to `optimal` with
+  `status=warning`, the same complaint that moved `Solved_To_Acceptable_Level`
+  out of that band in gh #591. It is now `2`, Ipopt's own code, in the
+  `0..=99` solved band. `pounce`'s process exit code follows (0, not 1), and
+  the two `pyomo_pounce` status tables (`v2._V2_STATUS`,
+  `sens._STATUS_RESULT`) report the status as a success rather than as
+  `unknown` / `warning`.
+
+  **The reason the band was `100` had stopped being true of the code.** The
+  doc comment defending it said the two statuses do not mean the same thing:
+  that Ipopt returns `FEASIBLE_POINT_FOUND` only for a square problem, where a
+  feasible point *is* the solution, while POUNCE used it more loosely for any
+  usable feasible point that missed the convergence criteria. POUNCE does not.
+  The status has one producer — `min_c_1nrm.rs` returning
+  `RestorationOutcome::FeasiblePointFound` — behind one gate, now
+  `square_feasible_point_found` in `resto_inner_solver.rs`, whose first
+  conjunct is `is_square_problem`: `c.x.dim() == c.y_c.dim()`, a port of
+  `IpoptCalculatedQuantities::IsSquareProblem`. Same condition as Ipopt, hence
+  the same meaning, and on a square problem there is no further criterion to
+  miss because the objective is constant. Two other surfaces had already
+  written the correct reading down —
+  `python/pounce/gams/link.py` maps the status to
+  `(MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL)`, and
+  `issue_390_nonlinear_equality_scale.rs` calls it "a success-band answer —
+  AMPL `objno` code 2, which every band table reads as SOLVED" — so the repo
+  had been contradicting itself in comments for as long as the divergence
+  existed.
+
+  **What it cost, measured.** gh #815 is a 536x536 IDAES naphtha-hydrotreater
+  flowsheet, zero degrees of freedom. Written the way IDAES writes it for
+  Ipopt (`writer_config={"scale_model": True}`), POUNCE reaches a constraint
+  violation of **2.208e-06 in the model's original units in 1.0 s**, 18
+  iterations; adding `linear_presolve=True` gives a 468x468 model, 2.899e-06
+  in 0.8 s, 7 iterations. The two configurations agree on the flowsheet's
+  thiophene conversion to six digits (0.3918770, 0.3918766). Before this
+  change that solve loaded as `termination_condition=optimal, status=warning`
+  through the legacy reader and as `TerminationCondition.error` through the
+  v2 reader; it now loads `optimal` / `ok`, and the `.sol` line moved from
+  `objno 0 100` to `objno 0 2`.
+
+  **This does not make the model as filed solvable, and the issue's premise
+  did not survive measurement.** On the raw unscaled `.nl`, POUNCE stalls at a
+  constraint violation of ~4.97e+03; so does Ipopt 3.13.2/ma27, which exits
+  `Restoration Failed` at 2418 iterations from a stall at `inf_pr = 1.56e+01`
+  against POUNCE's 1.60e+01, the two trajectories being bit-identical over
+  iterations 0-3. An 18-configuration option sweep — linear solver, `mu`
+  strategy, scaling method, `nlp_scaling_max_gradient`, `mu_init`,
+  `start_with_resto`, `expect_infeasible_problem`, bound handling, `mc64`
+  equilibration, iteration cap — moved none of it: every configuration ended
+  `Restoration_Failed` or `Infeasible_Problem_Detected` at that same
+  violation. What makes the model tractable is IDAES's own per-variable
+  scaling factors applied by the NL writer, which is a frontend
+  configuration and not reachable from any solver option; no
+  `nlp_scaling_method` substitutes for it. Ipopt did not solve this model in
+  any configuration tried here, including through the reporter's own script.
+
+  **What the new tests are and are not evidence about.**
+  `the_exit_code_and_the_sol_band_never_disagree` states the guard as an `iff`
+  over all twenty statuses, so a status added to the exit-code success set but
+  not the solved band, or the reverse, fails it — gh #815 is that predicate
+  failing on `FeasiblePointFound` and gh #591 was the same shape one status
+  over. `only_a_square_problem_yields_a_feasible_point_verdict` holds the
+  conjunct the whole band argument rests on, with every other input at a value
+  that would pass, so squareness alone decides it. None of this is end-to-end:
+  **no fixture in the CLI corpus reaches this exit**, and 72 generated square
+  models — three nonlinearity families, three start points, three row-scale
+  spreads — under five option sets failed to reach it too. It needs a model
+  larger than the corpus carries, and the end-to-end evidence is gh #815's own
+  536x536 model, cited above. `scripts/sweep-fixtures.sh` moved 0 of 154
+  fixture-legs, which is a control rather than evidence: the sweep does not
+  read `solve_result_num`, and the only non-reporting edit here is the
+  extraction of an unchanged five-term conjunction into a named function.
+
+  Three Python success sets still count the status as a failure —
+  `_minimize._NLP_SUCCESS_STATUS` (shared by `_curve_fit`),
+  `jax._path._OK_STATUS` and `torch._path._OK_STATUS`. They are left split on
+  purpose: unlike the CLI, they are a scipy-style `success` flag on a library
+  call that writes no `.sol`, so they were not put in contradiction with a
+  file the same process had just written, and widening a public return value
+  deserves its own decision. Tracked as gh #820 so the split has an owner
+  rather than reading as an oversight.
+
 - **Both Lagrangian gradients are now cached, and the cache key carries `mu`
   (gh #812).** `curr_grad_lag_x` and `curr_grad_lag_s` had no entry among the
   caches in `ipopt_cq.rs`, so every read reassembled

@@ -36,7 +36,7 @@ Solver to AMPL* §5). Consumers key on the **band**, not the exact number:
 Pyomo maps each band to a `TerminationCondition`, so anything in `200`–`299`
 arrives as `TerminationCondition.infeasible`.
 
-### Solved: strict vs. acceptable
+### Solved: strict, acceptable, and square
 
 POUNCE writes the same codes IPOPT's AMPL driver writes, so a model can be
 moved between the two solvers without a reader change:
@@ -45,8 +45,9 @@ moved between the two solvers without a reader change:
 |---|---|---|
 | `0` | `Solve_Succeeded` | The convergence criteria (`tol` and friends) were met. |
 | `1` | `Solved_To_Acceptable_Level` | The [acceptable-level fallback](options.md#solved_to_acceptable_level-and-acceptable_progress_kappa): the strict tolerances were not met, but `acceptable_tol` was, for `acceptable_iter` consecutive iterations. |
+| `2` | `Feasible_Point_Found` | A **square** problem — as many equality rows as variables — recovered to feasibility. |
 
-Both are accepted solves and both sit in the `0`–`99` band. That matters
+All three are accepted solves and all three sit in the `0`–`99` band. That matters
 beyond tidiness: Pyomo's legacy `.sol` reader loads the `0`–`99` band as
 `SolverStatus.ok` and the `100`–`199` band as `SolverStatus.warning`, with
 `TerminationCondition.optimal` either way. POUNCE reported acceptable-level
@@ -63,6 +64,23 @@ on a solve IPOPT loads clean
 between strict and acceptable convergence is still there — in the code itself
 (`1`, not `0`), in the `.sol` message line, and in the JSON report's `status`
 field — it simply no longer reads as a warning.
+
+`Feasible_Point_Found` was `100` up to and including 0.10.0 for the same
+reason and was fixed the same way
+([#815](https://github.com/jkitchin/pounce/issues/815)). It is worth being
+precise about why a feasible point counts as *solved* here, because in general
+it would not: POUNCE emits this status only when the problem is square, which
+is the condition IPOPT uses for its own `2`. On a square problem there is
+nothing to optimise — the objective is constant over a feasible set the
+equalities have already pinned — so a point that satisfies the constraints is
+the solution, and there is no further criterion it could be said to have
+missed. For a non-square problem the status is never produced.
+
+The stakes were higher than a logged warning. Pyomo's newer `.sol` reader
+(`pyomo.contrib.solver`) maps the `100`–`199` band to
+`TerminationCondition.error`, not to `optimal`-with-a-warning, so on that route
+a square flowsheet that POUNCE had solved to a constraint violation of
+2.2e-06 was delivered to the caller as a solver error.
 
 ### Infeasible: proved vs. local
 

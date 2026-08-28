@@ -123,7 +123,12 @@ expect them to differ by a sign — that is by design, not a bug.
 
 ## Exit codes
 
-- `0` — `Solve_Succeeded` (or `Solved_To_Acceptable_Level`).
+- `0` — `Solve_Succeeded`, `Solved_To_Acceptable_Level`, or
+  `Feasible_Point_Found`. These are exactly the statuses whose
+  [`solve_result_num`](solution-output.md#reading-solve_result_num) falls in
+  the `0`–`99` solved band, and the two channels are held to that by a test:
+  the exit code and the `.sol` a run writes can never disagree about whether
+  the solve succeeded.
 - non-zero — any other `ApplicationReturnStatus`.
 
 In AMPL solver mode (`-AMPL`) the exit code instead follows the AMPL

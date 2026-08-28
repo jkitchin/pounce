@@ -2126,12 +2126,32 @@ fn nlp_exit_code(status: ApplicationReturnStatus, ampl: bool) -> ExitCode {
 }
 
 /// Whether an NLP solve outcome counts as a "success" for the (non-AMPL) exit
-/// code: `SolveSucceeded` or the reduced-accuracy `SolvedToAcceptableLevel`,
-/// matching Ipopt and the `minimize()` success set (#119).
+/// code: `SolveSucceeded`, the reduced-accuracy `SolvedToAcceptableLevel`
+/// (#119), or `FeasiblePointFound`.
+///
+/// The third member is not a widening of what counts as solved — it is the
+/// same solve this process just wrote a solved-band `.sol` for.
+/// `FeasiblePointFound` is emitted only for square problems
+/// (`pounce_restoration`'s `square_feasible_point_found`, gated on
+/// `is_square_problem`), where the objective is constant and a feasible
+/// point is the solution, and `status_to_solve_result_num` writes Ipopt's
+/// own AMPL code `2` for it. Leaving this set at two members would have
+/// this binary exit 1 while the `.sol` beside it reads solved — a
+/// disagreement between two channels of the same process, which is the
+/// shape of the defect gh #815 was.
+///
+/// Three Python surfaces still exclude the status from their success sets:
+/// `_minimize._NLP_SUCCESS_STATUS` (shared by `_curve_fit`),
+/// `jax._path._OK_STATUS` and `torch._path._OK_STATUS`. They are a separate
+/// contract — a scipy-style `success` flag on a library call that never
+/// produces a `.sol` — and are tracked on their own rather than changed
+/// here.
 fn nlp_solve_succeeded(status: ApplicationReturnStatus) -> bool {
     matches!(
         status,
-        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ApplicationReturnStatus::SolveSucceeded
+            | ApplicationReturnStatus::SolvedToAcceptableLevel
+            | ApplicationReturnStatus::FeasiblePointFound
     )
 }
 
@@ -3750,6 +3770,7 @@ mod nlp_exit_code_tests {
     //! The doc was corrected; these tests lock the actual behavior so the doc
     //! and code can't drift again.
     use super::nlp_solve_succeeded;
+    use super::status_to_solve_result_num;
     use pounce_nlp::return_codes::ApplicationReturnStatus as A;
 
     #[test]
@@ -3758,6 +3779,66 @@ mod nlp_exit_code_tests {
         assert!(nlp_solve_succeeded(A::SolvedToAcceptableLevel));
         assert!(nlp_solve_succeeded(A::SolveSucceeded));
     }
+
+    /// gh #815. A square problem solved to feasibility is a success on this
+    /// channel too, and the failure mode this pins is a *disagreement*: the
+    /// same process writes a `.sol` whose `solve_result_num` is Ipopt's `2`,
+    /// in the solved band, so exiting 1 would have the two channels of one
+    /// run contradict each other.
+    #[test]
+    fn a_square_problem_feasible_point_counts_as_success() {
+        assert!(nlp_solve_succeeded(A::FeasiblePointFound));
+    }
+
+    /// The invariant behind the test above, over the whole enum: this
+    /// binary's exit code and the `.sol` it writes must never disagree
+    /// about whether the solve was a success. Stated as an `iff` so it
+    /// catches a future status added to one channel and not the other, in
+    /// either direction — gh #815 was this predicate failing on
+    /// `FeasiblePointFound`, and gh #591 was the same shape one status
+    /// over.
+    #[test]
+    fn the_exit_code_and_the_sol_band_never_disagree() {
+        for s in ALL_STATUSES {
+            let code = status_to_solve_result_num(s);
+            let solved_band = (0..=99).contains(&code);
+            assert_eq!(
+                nlp_solve_succeeded(s),
+                solved_band,
+                "{s:?}: exit-code success is {} but solve_result_num {code} \
+                 puts the `.sol` {} the solved band",
+                nlp_solve_succeeded(s),
+                if solved_band { "inside" } else { "outside" },
+            );
+        }
+    }
+
+    /// Spelled out rather than imported: `pounce_nlp`'s copy lives in its
+    /// own `#[cfg(test)]` module. `return_codes.rs` is the source of truth
+    /// for membership, and the `_ =>` arm in `status_to_solve_result_num`
+    /// does not exist, so a new variant fails that match first.
+    const ALL_STATUSES: [A; 20] = [
+        A::SolveSucceeded,
+        A::SolvedToAcceptableLevel,
+        A::InfeasibleProblemDetected,
+        A::SearchDirectionBecomesTooSmall,
+        A::DivergingIterates,
+        A::UserRequestedStop,
+        A::FeasiblePointFound,
+        A::MaximumIterationsExceeded,
+        A::RestorationFailed,
+        A::ErrorInStepComputation,
+        A::MaximumCpuTimeExceeded,
+        A::MaximumWallTimeExceeded,
+        A::NotEnoughDegreesOfFreedom,
+        A::InvalidProblemDefinition,
+        A::InvalidOption,
+        A::InvalidNumberDetected,
+        A::UnrecoverableException,
+        A::NonIpoptExceptionThrown,
+        A::InsufficientMemory,
+        A::InternalError,
+    ];
 
     #[test]
     fn non_convergent_statuses_are_not_success() {
