@@ -69,6 +69,25 @@
 # `convex_qp_qscfxm1` is QSCFXM1 itself and moves 131 -> 30 on both legs, so
 # the magnitude class is now IN the diff a reviewer reads (gh#760).
 #
+# THE SECOND-OPINION COLUMN (gh#850). Each line records what the
+# second-opinion ladder did: `-` for the ordinary case where the verdict
+# opened no ladder, `kept(n),tot=N` when n rungs ran and the original verdict
+# survived them all, and `<rung>@<base status>/<base iters>,tot=N` when a rung
+# was promoted. `tot` is always the whole cost -- base solve plus every rung.
+#
+# It is here because without it a *lost* solve reads as a large speed-up.
+# When the base solve fails and a rung recovers it, the JSON's `status` and
+# `iteration_count` both become the promoted rung's, and nothing else says the
+# base solver failed. `square_flowsheet_resto` is the case: `v0.10.0`'s base
+# solver converged in 116 iterations, HEAD's does not converge at all
+# (`RestorationFailed` at 131), and the answer comes from a rung added in the
+# same release that promotes at 54 -- so this sweep reported `116 -> 54`, a 2x
+# win, for a fixture that had lost its baseline solve. Bisected to `2c4f25f1`.
+#
+# The cost is understated on the same line: `it=` is the promoted rung's count
+# alone, so the fixture's true cost is `131 + 54`, 3.4x what `it=` says. The
+# `2nd=` column carries both halves.
+#
 # THE ENGINE COLUMN (gh#760). Each line records which engine solved the model.
 # Status, objective and iteration count can all three be unchanged while a
 # model silently changes arms -- the JSON report does not name the engine, so
@@ -136,12 +155,37 @@ d = json.load(open(sys.argv[1]))
 s = d.get("solution", {})
 st = d.get("statistics", {})
 obj = s.get("objective")
-print("%-6s %-40s %-9s %-32s it=%-6s obj=%s" % (
+# What the second-opinion ladder did (gh#850). `it=` below is the verdict's
+# own iteration count, which on a promotion is the promoted RUNG's alone --
+# so without this column a fixture that lost its baseline solve and is now
+# only rescued by a retry reads as a large improvement.
+so = d.get("second_opinion")
+if not so:
+    second = "-"
+elif so.get("promoted_by"):
+    # `<rung>@<what the base solve said>/<what it cost>,tot=<true total>`.
+    # `it=` above is the promoted rung's alone, so both other numbers are
+    # invisible without this.
+    second = "%s@%s/%d,tot=%d" % (
+        so["promoted_by"],
+        so.get("base_status", "?"),
+        so.get("base_iteration_count", -1),
+        so.get("total_iteration_count", 0),
+    )
+else:
+    # Nothing promoted, so `it=` is the base solve's -- but the rungs still
+    # ran, and what they cost is invisible without `tot=`.
+    second = "kept(%d),tot=%d" % (
+        len(so.get("tried", [])),
+        so.get("total_iteration_count", 0),
+    )
+print("%-6s %-40s %-9s %-32s it=%-6s 2nd=%-46s obj=%s" % (
     sys.argv[3],
     sys.argv[2],
     sys.argv[4],
     s.get("status"),
     st.get("iteration_count", "?"),
+    second,
     "%.10g" % obj if obj is not None else "none",
 ))
 PY

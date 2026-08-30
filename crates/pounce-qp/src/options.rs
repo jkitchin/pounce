@@ -172,6 +172,77 @@ pub struct QpOptions {
     /// Leave this `true` for a standalone `solve_qp`: the *whole point*
     /// of solving a QP is to learn whether it has a minimizer.
     pub certify_recession_ray: bool,
+
+    /// Check the **second-order** conditions before returning
+    /// [`QpStatus::Optimal`](crate::QpStatus::Optimal) on a problem whose
+    /// `H` is not claimed PSD, and escape along negative curvature when the
+    /// check produces a witness (gh #848).
+    ///
+    /// Every `Optimal` exit in the engine is first-order: the projected
+    /// gradient vanishes and the working set's multipliers carry admissible
+    /// signs. On an indefinite `H` a *saddle point* satisfies exactly that,
+    /// and the box-constrained path starts from the projection of the origin
+    /// — which on `½xᵀ[[1,5];[5,1]]x` over `[−1,1]²` *is* the saddle, so the
+    /// solve certified `obj = 0` against a true minimum of `−4`. See
+    /// [`crate::negcurv`] for the test and its deliberate asymmetry: a
+    /// rejection always carries a direction, an inconclusive probe always
+    /// leaves the first-order verdict standing.
+    ///
+    /// `false` restores the pre-#848 behaviour exactly, including on the
+    /// indefinite arm. It is not a performance knob: with
+    /// `HessianInertia::Psd` the whole path is skipped anyway, so the convex
+    /// arm pays nothing either way.
+    ///
+    /// `true` in [`QpOptions::default`], which is what every standalone entry
+    /// point uses — `solver_selection=qp-active-set`,
+    /// `pounce.qp.solve_qp(method="active-set")`, `ParametricActiveSetSolver`
+    /// called directly. Those are the entry points gh #848 reports, and there
+    /// the QP *is* the question being asked. `false` in
+    /// [`QpOptions::sqp_subproblem`], which is a different question — see
+    /// there.
+    pub certify_second_order: bool,
+    /// How many negative-curvature escapes one `solve` may take before it
+    /// gives up and reports the budget rather than the point.
+    ///
+    /// Each escape adds a blocking row or bound to the working set, so a
+    /// monotone run terminates in at most `n + m` of them; the cap is what
+    /// bounds the non-monotone case, where the re-solve drops back out of the
+    /// set it was just pushed into. Exhausting it downgrades the solve to
+    /// `MaxIter` — never to `Optimal`, which is the defect this exists to
+    /// prevent.
+    pub neg_curv_max_escapes: u32,
+    /// Inverse-iteration steps allowed per second-order probe.
+    ///
+    /// Each is one back-substitution against a factor that already exists
+    /// plus one `H·d` product. The iteration converges at the ratio of the
+    /// two smallest eigenvalues of `Zᵀ(H + δI)Z`, and `δ` comes off the §4.5
+    /// ladder, so it overshoots `|λ_min|` by at most `inertia_shift_factor`;
+    /// the worst-case ratio that leaves is about
+    /// `(λ_max + 100|λ_min|)/(99|λ_min|)`. Termination is on the *sign* of
+    /// `dᵀHd`, not on convergence, which is reached long before the
+    /// eigenvector is.
+    pub neg_curv_probe_iters: u32,
+    /// Geometric bisections used to tighten the inertia shift before the
+    /// probe iterates.
+    ///
+    /// The §4.5 ladder brackets `|λ_min|` between the rung that worked and
+    /// the one before it, a factor of `inertia_shift_factor` apart. Each
+    /// refinement halves that bracket on a log scale at the cost of one
+    /// factorization, leaving an overshoot of `100^(2^−r)` — 1.8% at the
+    /// default 8. The overshoot is what sets the inverse iteration's
+    /// convergence rate, so paying here is what keeps `neg_curv_probe_iters`
+    /// small: reusing the ladder's own shift instead leaves rates as bad as
+    /// 1.02 per step on `H = diag(1, −1)`, where the ladder stops at `δ = 100`.
+    pub neg_curv_shift_refinements: u32,
+    /// Relative margin a curvature must clear to count as negative:
+    /// `dᵀHd < −neg_curv_tol · ‖H‖∞` at `‖d‖₂ = 1`.
+    ///
+    /// Relative because the verdict must not depend on the units of the
+    /// objective. The margin is a *rejection* threshold, so erring large is
+    /// the safe direction: it declines to reject a curvature that could be
+    /// rounding noise, and an unrejected point keeps the status the engine
+    /// already assigned it.
+    pub neg_curv_tol: Number,
 }
 
 impl Default for QpOptions {
@@ -195,6 +266,50 @@ impl Default for QpOptions {
             expand_tol_growth: 1e-11,
             expand_tol_max: 1e-7,
             certify_recession_ray: true,
+            certify_second_order: true,
+            neg_curv_max_escapes: 20,
+            neg_curv_probe_iters: 20,
+            neg_curv_shift_refinements: 8,
+            neg_curv_tol: 1e-8,
+        }
+    }
+}
+
+impl QpOptions {
+    /// The defaults for a QP solved as an SQP *step subproblem*, rather than
+    /// as a question in its own right.
+    ///
+    /// Identical to [`QpOptions::default`] except that
+    /// [`certify_second_order`](Self::certify_second_order) is off, and the
+    /// reason is not caution — it is that the two callers are asking different
+    /// questions of the same engine.
+    ///
+    /// A standalone `solve_qp` asks *where is this QP's minimum*, and a
+    /// first-order point that is not one is a wrong answer (gh #848). An SQP
+    /// step QP asks *give me a step*, about a local model built at the current
+    /// iterate from the current multiplier estimates — and that model's
+    /// second-order verdict is not the NLP's. HS071 is the counterexample and
+    /// it is not exotic: at iteration 0 the multipliers are still zero, so
+    /// `∇²L` is `∇²f`, whose reduced Hessian on the working set's null space
+    /// is negative (`dᵀHd = -4.05e-2`) at a point that *is* a local minimum of
+    /// the NLP. Started at `x*`, certification sends the engine chasing that
+    /// curvature to a box bound and back — five outer iterations where one
+    /// sufficed, and `QpIterationLimit` at iteration 0 from `x* + 1e-8·e₀`,
+    /// which is every warm start (gh #484). Modifying the Hessian, not
+    /// following the curvature, is the textbook answer for an SQP step
+    /// (Nocedal-Wright §18.4), and §4.5's δ already is that modification.
+    ///
+    /// Turning it on for the SQP is a supported experiment —
+    /// `sqp_qp_certify_second_order=yes` — and it does fix real wrong answers
+    /// there: `algorithm=active-set-sqp` on `nonconvex_qp.nl` stops reporting
+    /// the constrained *maximum* as `Solve_Succeeded`. Making it the default
+    /// needs the Hessian-modification path first; that is gh #856, not this
+    /// change.
+    #[must_use]
+    pub fn sqp_subproblem() -> Self {
+        Self {
+            certify_second_order: false,
+            ..Self::default()
         }
     }
 }
@@ -235,6 +350,7 @@ pub struct ActiveSetOverrides {
     pub use_schur_updates: Option<bool>,
     pub use_homotopy: Option<bool>,
     pub max_schur_updates_before_refactor: Option<u32>,
+    pub certify_second_order: Option<bool>,
 }
 
 impl ActiveSetOverrides {
@@ -268,6 +384,9 @@ impl ActiveSetOverrides {
         }
         if let Some(v) = self.max_schur_updates_before_refactor {
             o.max_schur_updates_before_refactor = v;
+        }
+        if let Some(v) = self.certify_second_order {
+            o.certify_second_order = v;
         }
     }
 
@@ -375,6 +494,12 @@ impl ActiveSetOverrides {
                 ));
             }
             parsed.max_schur_updates_before_refactor = Some(value);
+        }
+
+        let (_, explicitly_set) = options.get_string_value("sqp_qp_certify_second_order", "")?;
+        if explicitly_set {
+            parsed.certify_second_order =
+                Some(options.get_bool_value("sqp_qp_certify_second_order", "")?.0);
         }
 
         Ok(parsed)

@@ -184,6 +184,43 @@ pub struct QpStats {
     ///
     /// [`QpSolver::solve_parametric`]: crate::QpSolver::solve_parametric
     pub parametric_source: Option<ParametricSource>,
+    /// What the **second-order** test found at the returned point (gh #848).
+    ///
+    /// A summary of [`crate::negcurv::SecondOrder`] without its witness — the
+    /// direction belongs to the escape that consumed it, and when it survives
+    /// as a certificate it survives in [`QpSolution::unbounded_ray`].
+    ///
+    /// Callers that re-derive a status from the returned point need this: a
+    /// saddle point of an indefinite QP satisfies the first-order KKT
+    /// conditions exactly, so *any* verifier built on the KKT residual will
+    /// promote it to `Optimal` no matter what status the engine assigned.
+    /// [`pounce-convex`'s `verify_status`] did precisely that. The field is
+    /// the only channel through which a second-order finding reaches such a
+    /// verifier.
+    ///
+    /// [`pounce-convex`'s `verify_status`]: https://github.com/jkitchin/pounce
+    pub second_order: SecondOrderVerdict,
+}
+
+/// [`crate::negcurv::SecondOrder`] reduced to a verdict, for
+/// [`QpStats::second_order`].
+///
+/// `Default` is [`NotChecked`](SecondOrderVerdict::NotChecked) — the honest
+/// value for every solve that did not run the test, and the reason adding this
+/// field did not have to touch the ~135 `QpSolution` literals in the
+/// workspace: they all build their stats with `..Default::default()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SecondOrderVerdict {
+    /// The test did not run, or ran without reaching a conclusion. Never a
+    /// claim that the point is a minimum.
+    #[default]
+    NotChecked,
+    /// The reduced Hessian on the working set's null space is positive
+    /// definite: the point is a local minimum.
+    Certified,
+    /// A feasible direction of strictly negative curvature exists at the
+    /// returned point. It is not a local minimum, at any tolerance.
+    NegativeCurvature,
 }
 
 /// What a [`QpSolver::solve_parametric`](crate::QpSolver::solve_parametric)

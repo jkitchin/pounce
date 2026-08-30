@@ -472,19 +472,22 @@ and the three differ. Measured on the coupled kink of
 | mode | `x` | `y` |
 |---|---|---|
 | `fix_relax` | 0 | 1 |
+| `path` | 0 | 1 |
 | `linear` | 0 (clamped) | -3/7 |
-| `path` | 0 | 2/7 |
 
-`fix_relax` pins the crossing and re-solves, so it repairs the
-neighbour too. `linear` clamps the crossing coordinate only, and the
-neighbour keeps the released coupling -- that is the documented trade.
-`path` returns the crossing coordinate to its bound but leaves the
-neighbour at the one-sided value, which is **not** the trade the option
-advertises: `step_along_path` seeds its state from a *decided* working
-set, and `"release_all"` hands it an undecided one, so a row the
-perturbation actually holds still enters the walk as a row that leaves.
-Prefer `fix_relax` with `"release_all"` on a coupled model until that
-is resolved.
+`fix_relax` pins the crossing and re-solves, and `path` walks the
+bound back and holds it, so both repair the neighbour. `linear` clamps
+the crossing coordinate only, and the neighbour keeps the released
+coupling -- that is the trade the option makes, and the reason
+`"release_all"` under `mode="linear"` is the one combination that
+degrades on a coupled model.
+
+`path` reached the same wrong answer as `linear` here until gh#852:
+the walk had no breakpoint for a weakly active bound the perturbation
+pressed into, so the variable left its box and only the clamp brought
+it back, moving the crossing coordinate and nothing tied to it. That
+was never specific to `"release_all"` -- `degeneracy="one_sided"` hit
+it through the plain walk too.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
@@ -494,6 +497,23 @@ puts the thresholds on the wrong side: `linear` and `path` miss by
 at 0.0018, and `fix_relax` reaches 0.0018 either way because its own
 release test happens to read the right sign there, a favorable read
 that `directional` replaces with a guarantee.
+
+Undecided is not the same as unenforced, though. Whichever side the
+thresholds lean toward, `path` under `"one_sided"` keeps every
+weakly active bound inside the box: a perturbation that presses into
+one is a breakpoint like any other, the walk takes the bound back
+there, and the coordinates coupled to it re-optimize behind the hold.
+Before that (gh#852) the walk saw no breakpoint at all on such a
+perturbation, and the variable left its box for a caller's clamp to
+put back — which moves the crossing coordinate and nothing else, so
+on `min (x - p)^2 + 0.1 (y - 1)^2` with `y = 2x + 1` and `x >= 0`,
+held at the kink `p = 0`, a step to `p = -1` came back with `x = 0`
+against a `y` of 2/7 where the answer is 1. What `"one_sided"` gives
+up at a kink is the choice of side, not feasibility; on that model
+`path` and `fix_relax` now both reproduce the re-solve, and `linear`
+is the one that still cannot, since a clamp is all it has. The CSTR
+figures above are unchanged by it: there the thresholds' bound is one
+the step leaves, not one it presses into.
 
 The cost is gated by the condition, and budgeted by
 `degeneracy_iter` (default 16): the released solve, one further

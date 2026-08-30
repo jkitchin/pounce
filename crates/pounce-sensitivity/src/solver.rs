@@ -892,6 +892,15 @@ impl Solver {
         max_iter: usize,
     ) -> Result<(Vec<Number>, Vec<crate::boundcheck::PathSegment>), SolverError> {
         let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        // Nothing here decides the weak rows -- that is what the
+        // "decided" variant below is for -- but the walk still has to
+        // be told which they are, or it reads their order-one sigma as
+        // a bound the factorization enforces and lets the variable
+        // walk out of its box (gh#852). A relaxed solve shifts the
+        // slacks the classifier reads, so this comes back empty there
+        // and the walk behaves as it did before -- the same silence
+        // `weakly_active_bounds` hands every other caller.
+        let weak_rows: Vec<usize> = self.weakly_active_bounds()?.iter().map(|w| w.row).collect();
         let ctx = self.bound_context(None)?;
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
@@ -905,6 +914,7 @@ impl Solver {
             max_iter,
             &[],
             &[],
+            &weak_rows,
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((dx[..ctx.n_x].to_vec(), segments))
@@ -915,7 +925,12 @@ impl Solver {
     /// `held_var_rows` names the var-x rows of the weakly active
     /// bounds the direction holds; every other weakly active bound is
     /// forced into the walk's base-activity table as a leaving row.
-    /// Study surface for an externally solved eq. 14 QP.
+    /// A row left there is still reachable, so a caller that hands in
+    /// an empty held list — every weak row declared a leaver, which is
+    /// what an undecided study of the all-released step does — gets
+    /// the bound back at the fraction the walk finds the direction
+    /// pressing into it, rather than an answer outside the box
+    /// (gh#852). Study surface for an externally solved eq. 14 QP.
     pub fn parametric_step_path_decided(
         &self,
         pin_constraint_indices: &[Index],
@@ -946,6 +961,13 @@ impl Solver {
             .filter(|w| !held.contains(&w.var_row))
             .map(|w| w.row)
             .collect();
+        // Every weak row, held or leaving. For a held one the flag is
+        // inert -- it arrives released and pinned already -- and for a
+        // leaving one it is what lets the walk take the bound back
+        // when the direction turns out to press into it, which is the
+        // whole of an empty held list on a holding perturbation
+        // (gh#852).
+        let weak_rows: Vec<usize> = weak.iter().map(|w| w.row).collect();
         let (dx, segments) = crate::boundcheck::step_along_path(
             &state.backsolver,
             &rhs_plain,
@@ -956,6 +978,7 @@ impl Solver {
             max_iter,
             &forced_active,
             &holds,
+            &weak_rows,
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((dx[..ctx.n_x].to_vec(), segments))
@@ -1006,6 +1029,18 @@ impl Solver {
     /// no-op: it costs the derivative evaluation and the residual
     /// evaluation, no back-solve, and reports the residual the
     /// caller's step leaves.
+    ///
+    /// Errors with [`SolverError::SensComputationFailed`] when the
+    /// barrier residual at that starting point is not finite, which is
+    /// what a predicted point outside the domain of one of the model's
+    /// functions gives (gh#845). A *declared bound* is protection here,
+    /// since the clamp above puts the coordinate back inside it; a
+    /// variable held in a function's domain by a **constraint** has no
+    /// bound to be put back inside, and an ordinary `log`, `sqrt` or
+    /// reciprocal is then reachable by a large enough perturbation.
+    /// There is no correction to make from such a point, so it is an
+    /// error rather than a report -- and never a step full of NaN
+    /// carrying `residual = 0.0` and `converged = true`.
     pub fn correct_step(
         &self,
         pin_constraint_indices: &[Index],

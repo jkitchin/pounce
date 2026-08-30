@@ -66,17 +66,51 @@ pub struct SecondOpinionOutcome {
     pub tried: Vec<&'static str>,
     /// The rung whose re-solve was promoted, if any.
     pub promoted_by: Option<&'static str>,
+    /// The verdict the ladder was opened on — the *base* solve's, before any
+    /// rung ran. Equal to [`Self::status`] whenever nothing was promoted.
+    ///
+    /// Kept because on a promotion it is the only trace left that the base
+    /// solver did not converge, and its absence is gh #850: the reported
+    /// status and iteration count both become the promoted rung's, so a
+    /// fixture that **lost** its baseline solve and is now only rescued by a
+    /// retry reads in `scripts/sweep-fixtures.sh` as a large *improvement*.
+    /// `square_flowsheet_resto` went `SolveSucceeded`/116 at `v0.10.0` to
+    /// `RestorationFailed`/131 at the base solver plus a promoted 54, and the
+    /// sweep showed `116 -> 54`, a 2× win.
+    pub base_status: ApplicationReturnStatus,
+    /// Iterations the base solve spent before the ladder opened.
+    ///
+    /// [`Self::statistics`] carries the **promoted rung's** count alone, so
+    /// this is what the reported number is missing: on the fixture above the
+    /// true cost is `131 + 54`, 3.4× what the report says.
+    pub base_iteration_count: usize,
+    /// Iterations spent by every rung the ladder ran, in the order of
+    /// [`Self::tried`]. With [`Self::base_iteration_count`] this is the whole
+    /// cost of the solve.
+    pub rung_iteration_counts: Vec<usize>,
+}
+
+impl SecondOpinionOutcome {
+    /// Every iteration the solve actually spent: the base solve's plus each
+    /// rung's. [`Self::statistics`]'s count is one rung's.
+    pub fn total_iteration_count(&self) -> usize {
+        self.base_iteration_count + self.rung_iteration_counts.iter().sum::<usize>()
+    }
 }
 
 impl SecondOpinionOutcome {
     /// The no-op outcome: no rung applied, nothing changed. For a caller that
     /// skips the ladder on its own grounds and still wants one type back.
     pub fn unchanged(status: ApplicationReturnStatus, statistics: SolveStatistics) -> Self {
+        let base_iteration_count = statistics.iteration_count.max(0) as usize;
         Self {
             status,
             statistics,
             tried: Vec::new(),
             promoted_by: None,
+            base_status: status,
+            base_iteration_count,
+            rung_iteration_counts: Vec::new(),
         }
     }
 
@@ -136,7 +170,10 @@ pub fn run_second_opinion_ladder(
     let mut retry_status = status;
     let mut retry_stats = statistics.clone();
     let mut tried: Vec<&'static str> = Vec::new();
+    let mut rung_iteration_counts: Vec<usize> = Vec::new();
     let mut promoted_by = None;
+    let base_status = status;
+    let base_iteration_count = statistics.iteration_count.max(0) as usize;
     for rung in &rungs {
         report(&format!(
             "pounce: second opinion — re-solving with {}…",
@@ -175,6 +212,7 @@ pub fn run_second_opinion_ladder(
         retry_status = app.optimize_tnlp(Rc::clone(&gated));
         retry_stats = app.statistics();
         tried.push(rung.label);
+        rung_iteration_counts.push(retry_stats.iteration_count.max(0) as usize);
         if scaling_retry_promoted(retry_status) {
             report(&format!(
                 "pounce: {} re-solve recovered the problem — promoting ({retry_status:?}).",
@@ -206,6 +244,9 @@ pub fn run_second_opinion_ladder(
         statistics,
         tried,
         promoted_by,
+        base_status,
+        base_iteration_count,
+        rung_iteration_counts,
     }
 }
 

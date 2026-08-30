@@ -851,6 +851,40 @@ impl NlProblem {
             check("con_names", con_names.len(), m)?;
         }
 
+        // Numeric validation, the same screen the `.nl` reader applies
+        // (gh #847). `lower_bound_present` / `upper_bound_present` are
+        // `is_finite() && ...`, so a caller that builds a model here and hands
+        // in a non-finite bound gets it silently dropped -- read as "no bound
+        // declared" -- exactly as a file containing `1e400` was. `-inf` on a
+        // lower side and `+inf` on an upper one are the sentinel said a
+        // different way and are normalized; everything else, `NaN` included,
+        // is refused.
+        let mut x_l = x_l;
+        let mut x_u = x_u;
+        let mut g_l = g_l;
+        let mut g_u = g_u;
+        for (i, v) in x_l.iter_mut().enumerate() {
+            *v = finite_bound_or_err(&format!("x_l[{i}]"), *v, true)
+                .map_err(|e| format!("from_expressions: {e}"))?;
+        }
+        for (i, v) in x_u.iter_mut().enumerate() {
+            *v = finite_bound_or_err(&format!("x_u[{i}]"), *v, false)
+                .map_err(|e| format!("from_expressions: {e}"))?;
+        }
+        for (i, v) in g_l.iter_mut().enumerate() {
+            *v = finite_bound_or_err(&format!("g_l[{i}]"), *v, true)
+                .map_err(|e| format!("from_expressions: {e}"))?;
+        }
+        for (i, v) in g_u.iter_mut().enumerate() {
+            *v = finite_bound_or_err(&format!("g_u[{i}]"), *v, false)
+                .map_err(|e| format!("from_expressions: {e}"))?;
+        }
+        for (i, v) in x0.iter().enumerate() {
+            finite_or_err(&format!("x0[{i}]"), *v).map_err(|e| format!("from_expressions: {e}"))?;
+        }
+        finite_or_err("obj_constant", obj_constant)
+            .map_err(|e| format!("from_expressions: {e}"))?;
+
         // Structural validation. Memoized on `Cse` pointer identity so a
         // heavily-shared DAG costs O(nodes) rather than O(inlined tree).
         let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
@@ -1652,6 +1686,64 @@ fn parse_segment_index(s: &str, tag: char) -> Result<usize, String> {
 // directly instead of collecting a `Vec<&str>` first — that collect was
 // a heap allocation per line on top of the one the reader used to make
 // handing the line over.
+/// Refuse a non-finite number read out of a `.nl` file (gh #847).
+///
+/// `str::parse::<f64>()` accepts `inf`, `-inf` and `nan`, and it also *returns*
+/// `inf` for any literal that overflows the type — `1e400` is a plausible thing
+/// for a model generator to write. Nothing downstream treats such a value as an
+/// error, and in one place it is actively misread: `lower_bound_present` /
+/// `upper_bound_present` are `is_finite() && ...`, so a non-finite bound is
+/// indistinguishable from a bound that was never declared, and is silently
+/// dropped. On a model that a lower bound of `1e300` makes infeasible, the same
+/// bound written `1e400` returned `EXIT: Optimal Solution Found.` with exit code
+/// 0. A `nan` is worse: it propagates into the answer, and the solve reports
+/// `Objective: nan` under `Solve_Succeeded`.
+///
+/// Ipopt refuses this input ("Invalid number"), POUNCE's own NLP arm refuses it,
+/// and `pounce.solve_qp` refuses a non-finite bound with a bespoke `ValueError`.
+/// There is no reading on which `Optimal` is the intended answer, so the reader
+/// refuses it too.
+fn finite_or_err(what: &str, v: Number) -> Result<Number, String> {
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!(
+            "invalid number: {what} is {v}, which is not finite"
+        ))
+    }
+}
+
+/// The same screen for a *bound* slot, where one non-finite value has an
+/// unambiguous meaning and is normalized instead of refused.
+///
+/// `.nl` states "no bound" with a bound **kind** (1 = upper only, 2 = lower
+/// only, 3 = free), so a non-finite number in a bound slot is a corrupt value
+/// rather than a notation — with one exception per side. `-inf` in a *lower*
+/// slot and `+inf` in an *upper* slot say precisely what the `±1e19` sentinel
+/// says, and a writer that emits them means it, so they map to the sentinel.
+///
+/// Everything else is refused, and the asymmetry is the whole point: `+inf` as
+/// a *lower* bound is the gh #847 case. It is not "unbounded below" — it is an
+/// empty box, and reading it as "absent" is what turned an infeasible model
+/// into an `Optimal` one. `NaN` is refused on either side, having no meaning at
+/// all.
+fn finite_bound_or_err(what: &str, v: Number, lower: bool) -> Result<Number, String> {
+    if v.is_finite() {
+        return Ok(v);
+    }
+    if lower && v == Number::NEG_INFINITY {
+        return Ok(-1e19);
+    }
+    if !lower && v == Number::INFINITY {
+        return Ok(1e19);
+    }
+    Err(format!(
+        "invalid number: {what} is {v}, which is not finite (a `.nl` file \
+         states an absent bound with a bound kind of 1, 2 or 3, not with a \
+         non-finite value)"
+    ))
+}
+
 fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
     let mut parts = line.split_whitespace();
     let kind: i32 = parts
@@ -1668,8 +1760,8 @@ fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
             let (Some(l), Some(h)) = (l, h) else {
                 return Err(format!("bound kind 0 needs 2 values: '{line}'"));
             };
-            lo = l.parse().map_err(|e| format!("lo: {e}"))?;
-            hi = h.parse().map_err(|e| format!("hi: {e}"))?;
+            lo = finite_bound_or_err("lo", l.parse().map_err(|e| format!("lo: {e}"))?, true)?;
+            hi = finite_bound_or_err("hi", h.parse().map_err(|e| format!("hi: {e}"))?, false)?;
         }
         1 => {
             // 1  hi
@@ -1677,14 +1769,14 @@ fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
                 return Err(format!("bound kind 1 needs 1 value: '{line}'"));
             };
             lo = -1e19;
-            hi = h.parse().map_err(|e| format!("hi: {e}"))?;
+            hi = finite_bound_or_err("hi", h.parse().map_err(|e| format!("hi: {e}"))?, false)?;
         }
         2 => {
             // 2  lo
             let Some(l) = parts.next() else {
                 return Err(format!("bound kind 2 needs 1 value: '{line}'"));
             };
-            lo = l.parse().map_err(|e| format!("lo: {e}"))?;
+            lo = finite_bound_or_err("lo", l.parse().map_err(|e| format!("lo: {e}"))?, true)?;
             hi = 1e19;
         }
         3 => {
@@ -1697,7 +1789,9 @@ fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
             let Some(v) = parts.next() else {
                 return Err(format!("bound kind 4 needs 1 value: '{line}'"));
             };
-            let v: Number = v.parse().map_err(|e| format!("eq: {e}"))?;
+            // An equality has no "absent" side, so neither infinity is a
+            // notation here and both are refused.
+            let v: Number = finite_or_err("eq bound", v.parse().map_err(|e| format!("eq: {e}"))?)?;
             lo = v;
             hi = v;
         }
@@ -1713,7 +1807,7 @@ fn parse_var_coef(line: &str) -> Result<(usize, Number), String> {
         return Err(format!("malformed var/coef line: '{line}'"));
     };
     let v: usize = v.parse().map_err(|e| format!("var idx: {e}"))?;
-    let c: Number = c.parse().map_err(|e| format!("coef: {e}"))?;
+    let c: Number = finite_or_err("coefficient", c.parse().map_err(|e| format!("coef: {e}"))?)?;
     Ok((v, c))
 }
 
@@ -2080,7 +2174,14 @@ impl<'a> Parser<'a> {
             match first {
                 'n' => {
                     // A constant base is atomic; `is_monomial` accepts it.
-                    let v: Number = tok[1..].trim().parse().ok()?;
+                    // A non-finite literal bails out of the fast path so the
+                    // general parser reaches it and reports the error rather
+                    // than folding it into a quadratic (gh #847).
+                    let v: Number = tok[1..]
+                        .trim()
+                        .parse()
+                        .ok()
+                        .filter(|v: &Number| v.is_finite())?;
                     note_leaf(&frames, &mut depth, 0);
                     vals.push(Quad2::of_constant(v));
                 }
@@ -2197,7 +2298,10 @@ impl<'a> Parser<'a> {
                     .trim()
                     .parse()
                     .map_err(|e| format!("n value: {e}"))?;
-                Ok(Expr::Const(v))
+                // A `nan` literal in the objective body reached the answer
+                // itself: `Objective: nan` under `Solve_Succeeded` and exit
+                // code 0 (gh #847).
+                Ok(Expr::Const(finite_or_err("numeric literal", v)?))
             }
             'v' => {
                 let i: usize = tok[1..]

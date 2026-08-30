@@ -179,6 +179,10 @@ const PROBES: &[(&str, &[Probe])] = &[
         "sqp_qp_use_homotopy",
         &[Probe::Str("yes"), Probe::Str("no")],
     ),
+    (
+        "sqp_qp_certify_second_order",
+        &[Probe::Str("yes"), Probe::Str("no")],
+    ),
 ];
 
 #[test]

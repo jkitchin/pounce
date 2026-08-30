@@ -116,7 +116,7 @@ matches cyipopt and satisfies the stationarity identity above directly.
 If you are comparing a `mult_g` against a `model.dual` for the same solve,
 expect them to differ by a sign — that is by design, not a bug.
 
-> Before v0.9.1 the `.sol` writer emitted the Lagrange multiplier without
+> Before v0.9.0 the `.sol` writer emitted the Lagrange multiplier without
 > converting it, so every AMPL/Pyomo dual came back negated relative to
 > every other solver ([#271](https://github.com/jkitchin/pounce/issues/271)).
 > Objectives and primal solutions were never affected.

@@ -103,7 +103,7 @@ the matching block in `gams/gams_pounce.c`).
 Variable marginals (`.M` on variables, i.e. reduced costs) are
 `z_L − z_U`, carrying the same `obj_sign` factor.
 
-> Before v0.9.1 the conversion omitted the `obj_sign` factor, so equation
+> Before v0.9.0 the conversion omitted the `obj_sign` factor, so equation
 > marginals on `maximizing` models came back with the wrong sign
 > ([#272](https://github.com/jkitchin/pounce/issues/272)). `minimizing`
 > models, objective values, variable marginals and status mapping were
@@ -117,7 +117,7 @@ from the same table, and both report `x.l` and the marginals for every exit —
 the engine always fills them. The objective row is set only where the exit
 leaves a point whose objective is a finite number.
 
-> Before v0.10.1 a restoration failure (`Restoration_Failed`) published its
+> Before v0.11.0 a restoration failure (`Restoration_Failed`) published its
 > iterate as `x.l` with the objective row left at `0`, and three exits
 > (`Insufficient_Memory`, `Unrecoverable_Exception`, `NonIpopt_Exception_Thrown`)
 > were reported as internal errors because they were missing from the table

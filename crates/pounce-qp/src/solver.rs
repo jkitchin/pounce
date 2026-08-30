@@ -16,9 +16,11 @@ use crate::kkt::{
     assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,
     is_pure_equality_no_bounds, rhs_equality_only,
 };
+use crate::negcurv::SecondOrder;
 use crate::options::{AntiCyclingChoice, QpOptions};
 use crate::problem::{
     HessianInertia, ParametricSource, QpProblem, QpSolution, QpStats, QpWarmStart,
+    SecondOrderVerdict,
 };
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
@@ -3681,7 +3683,16 @@ impl QpSolver for ParametricActiveSetSolver {
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
         let _deadline = crate::deadline::enter(opts.time_limit);
-        let out = self.solve_scoped(qp, ws, opts);
+        // The second-order pass sits *here*, outside `solve_scoped`, for two
+        // reasons. It is the one place every route through the engine — box,
+        // equality-only, equality-plus-bounds, general, Schur, elastic,
+        // homotopy — is guaranteed to pass through exactly once, so no inner
+        // loop has to remember it. And its own re-solves call `solve_scoped`
+        // directly, which is what stops an escape from recursing into another
+        // escape (gh #848).
+        let out = self
+            .solve_scoped(qp, ws, opts)
+            .and_then(|sol| self.escape_negative_curvature(qp, sol, opts));
         soften_deadline(qp, ws.map(|w| w.x.as_slice()), out)
     }
 
@@ -4086,6 +4097,317 @@ impl ParametricActiveSetSolver {
         };
         self.solve(qp, Some(&ws), opts)
     }
+
+    /// Refuse to certify a saddle point as a solution, and get off it when
+    /// there is somewhere to go (gh #848).
+    ///
+    /// Runs after the engine has produced its verdict, at the choke point
+    /// every public entry funnels through, so no individual exit in the
+    /// engine's five inner loops has to remember to call it. Only
+    /// `QpStatus::Optimal` is examined: that is the one status whose meaning
+    /// is a *claim about the model* rather than about the solve, and the only
+    /// one a second-order finding can falsify.
+    ///
+    /// The loop is the classical nonconvex active-set move (Nocedal-Wright
+    /// §16.4, "if the reduced Hessian is indefinite … a direction of negative
+    /// curvature is followed to a new constraint"): at a first-order point
+    /// with a witness `d` satisfying `A_W d = 0` and `dᵀHd < 0`,
+    ///
+    /// * `∇q(x)ᵀd = 0`, because at a first-order point the gradient is a
+    ///   combination of the working set's rows and `d` is orthogonal to all of
+    ///   them. So `q(x + αd) = q(x) + ½α²·dᵀHd` **decreases in both
+    ///   directions**. Neither sign is privileged, and the one taken is
+    ///   whichever the feasible set lets travel further — a longer step is
+    ///   strictly more objective decrease, since the decrease is quadratic in
+    ///   `α` with no linear term to trade against.
+    /// * If nothing blocks either sign, `x + αd` is feasible for every `α` and
+    ///   the objective falls without bound: a certified recession ray, which
+    ///   is the `dᵀPd < 0` branch of `pounce-convex`'s `ray_certifies_unbounded`
+    ///   (gh #791) — a branch that had no reachable producer before this.
+    ///   That exit alone answers to
+    ///   [`QpOptions::certify_recession_ray`](crate::QpOptions::certify_recession_ray):
+    ///   a caller that has declined recession verdicts keeps its point and
+    ///   its `Optimal`, and reads the refutation off `stats.second_order`.
+    /// * Otherwise the step ends on a new row or bound, which joins the
+    ///   working set, and the solve resumes from there.
+    ///
+    /// The resume is a full solve, so it may drop what the escape pinned and
+    /// return to where it started; the loop therefore terminates on *measured
+    /// objective progress*, not on the working set growing. Without that it
+    /// spins the budget on one fixed point — see the guard below, and the
+    /// HS071 measurement in it.
+    ///
+    /// Exhausting the budget, or stalling, with a live witness downgrades to
+    /// `QpStatus::MaxIter`. It must not stay `Optimal`: that would be the
+    /// original defect with extra steps. `MaxIter` here is the honest reading
+    /// — the engine refuted the point and did not reach one it can certify.
+    fn escape_negative_curvature(
+        &mut self,
+        qp: &QpProblem<'_>,
+        mut sol: QpSolution,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        if !opts.certify_second_order
+            || qp.hessian_inertia == HessianInertia::Psd
+            || sol.status != QpStatus::Optimal
+        {
+            return Ok(sol);
+        }
+
+        for _ in 0..opts.neg_curv_max_escapes {
+            let d = match self.second_order_verdict(qp, &sol.working, opts)? {
+                SecondOrder::Certified => {
+                    sol.stats.second_order = SecondOrderVerdict::Certified;
+                    return Ok(sol);
+                }
+                SecondOrder::NotChecked => return Ok(sol),
+                SecondOrder::NegativeCurvature(d) => d,
+            };
+
+            // Both signs descend; take the one with more room. `partial_cmp`
+            // is not needed — an infinite α on either side is unboundedness
+            // and is caught before the comparison matters.
+            let neg: Vec<Number> = d.iter().map(|v| -v).collect();
+            let fwd = feasible_step_along(qp, &sol.x, &d, &sol.working, opts.feas_tol);
+            let bwd = feasible_step_along(qp, &sol.x, &neg, &sol.working, opts.feas_tol);
+            let (dir, alpha, blocker) = if bwd.0 > fwd.0 {
+                (neg, bwd.0, bwd.1)
+            } else {
+                (d, fwd.0, fwd.1)
+            };
+
+            if !alpha.is_finite() {
+                if !opts.certify_recession_ray {
+                    // The caller wants a point, not a verdict (gh #423) —
+                    // the same opt-out the box path honours at its own
+                    // unblocked-negative-curvature exit, and it has to be
+                    // honoured here for the same reason. The SQP's
+                    // unbounded-model fallback sets this flag and re-solves
+                    // precisely because the *unblocked* case is a statement
+                    // about the linearization: the δ-shifted proximal step
+                    // is a real step and certifying recession instead leaves
+                    // the outer loop with none at all. Without this arm the
+                    // fallback re-solve comes straight back `Unbounded`,
+                    // `sol` never becomes `Optimal`, and the SQP exits
+                    // `QpStepFailed` at iteration 1 — which is gh #419
+                    // verbatim, reached through a door gh #423 did not
+                    // close. Measured on `eigenb2` (110 free variables, 55
+                    // equalities, nothing that can ever block a direction):
+                    // 200 iterations at f = 1.6013 became 1 iteration at
+                    // f = 24.026.
+                    //
+                    // The finding is still reported. It is the *action* that
+                    // is declined, not the fact, and a caller that reads
+                    // `stats.second_order` (`pounce-convex`'s
+                    // `verify_status`) still sees the point refuted. Only
+                    // the unblocked branch is gated: a blocked escape ends
+                    // on a new row with a strictly lower objective and no
+                    // certificate is involved, so it runs either way.
+                    sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
+                    return Ok(sol);
+                }
+                // Feasible for every step length along a direction the
+                // objective curves *down* along: the QP is unbounded below,
+                // and `dir` is the witness. `obj` follows the convention the
+                // engine's other unbounded exits use.
+                sol.obj = Number::NEG_INFINITY;
+                sol.status = QpStatus::Unbounded;
+                sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
+                sol.unbounded_ray = Some(dir);
+                return Ok(sol);
+            }
+
+            // Step to the blocker and pin it. A degenerate `α = 0` still
+            // makes progress: the working set grows, so the next probe sees a
+            // strictly smaller null space.
+            let mut x = sol.x.clone();
+            for (xi, di) in x.iter_mut().zip(dir.iter()) {
+                *xi += alpha * di;
+            }
+            let mut working = sol.working.clone();
+            match blocker {
+                Some(Blocker::Bound(i, status)) => {
+                    // Snap to the bound rather than trusting `α·dᵢ`, the same
+                    // drift guard the box path applies to its own ratio test.
+                    match status {
+                        BoundStatus::AtLower => x[i] = qp.xl[i],
+                        BoundStatus::AtUpper => x[i] = qp.xu[i],
+                        _ => {}
+                    }
+                    working.bounds[i] = status;
+                }
+                Some(Blocker::Cons(i, status)) => working.constraints[i] = status,
+                // `α` finite with no blocker is not reachable: `α` starts at
+                // infinity and only a blocker lowers it.
+                None => return Ok(sol),
+            }
+
+            if crate::deadline::expired() {
+                // Keep the point — it is feasible and its objective is no
+                // worse than the one we arrived with — but not the status.
+                // Returning `Optimal` here is exactly the claim the witness
+                // just refuted.
+                sol.x = x;
+                sol.obj = quad_objective(qp, &sol.x);
+                sol.working = working;
+                sol.status = QpStatus::TimeLimit;
+                sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
+                return Ok(sol);
+            }
+
+            // Resume from the escaped point. `solve_scoped`, not `solve`:
+            // this call must not re-enter the escape, and the deadline scope
+            // is already open.
+            let escaped_obj = quad_objective(qp, &x);
+            let prev_obj = sol.obj;
+            let escaped = (x.clone(), working.clone(), escaped_obj);
+            let ws = QpWarmStart {
+                x,
+                lambda_g: vec![0.0; qp.m],
+                lambda_x: vec![0.0; qp.n],
+                working,
+            };
+            let stats_so_far = sol.stats.clone();
+            let mut next = self.solve_scoped(qp, Some(&ws), opts)?;
+            next.stats.n_working_set_changes += stats_so_far.n_working_set_changes + 1;
+            next.stats.n_refactor += stats_so_far.n_refactor;
+            next.stats.n_schur_updates += stats_so_far.n_schur_updates;
+            next.stats.used_phase1 |= stats_so_far.used_phase1;
+            sol = next;
+
+            if sol.status != QpStatus::Optimal {
+                // The re-solve reached a conclusion of its own — unbounded,
+                // out of iterations, out of time. It is not a first-order
+                // point being passed off as an optimum, so there is nothing
+                // left for the second-order test to falsify.
+                return Ok(sol);
+            }
+
+            // The escape must not be undone by the solve that follows it.
+            //
+            // The loop's termination argument is that the working set grows by
+            // one per escape, so a run ends within `n + m` of them. The resume
+            // is free to *drop* rows again, and on an indefinite `H` it does
+            // more than that: the inner loop's steps come from the δ-shifted
+            // KKT of §4.5, whose model has the saddle as its *minimum*, so the
+            // re-solve walks back uphill to the very point the escape left.
+            // That is the same attraction gh #848 reports from the outside
+            // ("the start point is ignored entirely — all three starts land on
+            // `[0, 0]`"), met here from the inside, and left alone it spins the
+            // whole budget on one fixed point: measured on HS071's first step
+            // QP, all 20 escapes reported an identical working set, an
+            // identical direction, `alpha = 1.4935` and `obj = -1.4116e-7`,
+            // having each stepped to `obj = -4.52e-2` and been walked back.
+            //
+            // So require strict progress, and when there is none stop at the
+            // better of the two points rather than re-deriving it 19 more
+            // times. The status is not `Optimal` either way — the witness
+            // refuted that, and getting off the saddle is what failed here,
+            // not the finding.
+            if sol.obj >= prev_obj - opts.opt_tol * (1.0 + prev_obj.abs()) {
+                let (x_esc, working_esc, obj_esc) = escaped;
+                if obj_esc < sol.obj {
+                    sol.x = x_esc;
+                    sol.obj = obj_esc;
+                    sol.working = working_esc;
+                }
+                sol.status = QpStatus::MaxIter;
+                sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
+                return Ok(sol);
+            }
+        }
+
+        // Out of escapes with the point still un-certified. Report the budget.
+        sol.status = QpStatus::MaxIter;
+        sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
+        Ok(sol)
+    }
+}
+
+/// What stopped a step along a negative-curvature direction.
+#[derive(Debug, Clone, Copy)]
+enum Blocker {
+    Bound(usize, BoundStatus),
+    Cons(usize, ConsStatus),
+}
+
+/// The largest `α ≥ 0` keeping `x + α d` feasible, and what stops it.
+///
+/// `INFINITY` with `None` means nothing blocks: `d` is a recession direction
+/// of the feasible set. Rows and bounds already in `working` are skipped —
+/// the witness satisfies `A_W d = 0`, so they neither block nor move, and
+/// including them would let floating-point residual in `A_W d` manufacture a
+/// spurious zero step.
+fn feasible_step_along(
+    qp: &QpProblem<'_>,
+    x: &[Number],
+    d: &[Number],
+    working: &WorkingSet,
+    feas_tol: Number,
+) -> (Number, Option<Blocker>) {
+    let mut alpha = Number::INFINITY;
+    let mut blocker = None;
+    let take = |r: Number, b: Blocker, alpha: &mut Number, blocker: &mut Option<Blocker>| {
+        let r = if r.is_finite() { r.max(0.0) } else { r };
+        if r < *alpha {
+            *alpha = r;
+            *blocker = Some(b);
+        }
+    };
+
+    for i in 0..qp.n {
+        if working.bounds[i].is_active() {
+            continue;
+        }
+        if d[i] < -feas_tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
+            let r = (x[i] - qp.xl[i]) / -d[i];
+            take(
+                r,
+                Blocker::Bound(i, BoundStatus::AtLower),
+                &mut alpha,
+                &mut blocker,
+            );
+        }
+        if d[i] > feas_tol && qp.xu[i] < NLP_UPPER_BOUND_INF {
+            let r = (qp.xu[i] - x[i]) / d[i];
+            take(
+                r,
+                Blocker::Bound(i, BoundStatus::AtUpper),
+                &mut alpha,
+                &mut blocker,
+            );
+        }
+    }
+
+    if qp.m > 0 {
+        let ax = a_times_x(qp.a, x, qp.m);
+        let ad = a_times_x(qp.a, d, qp.m);
+        for i in 0..qp.m {
+            if working.constraints[i].is_active() {
+                continue;
+            }
+            if ad[i] < -feas_tol && qp.bl[i] > NLP_LOWER_BOUND_INF {
+                let r = (ax[i] - qp.bl[i]) / -ad[i];
+                let status = if qp.bl[i] == qp.bu[i] {
+                    ConsStatus::Equality
+                } else {
+                    ConsStatus::AtLower
+                };
+                take(r, Blocker::Cons(i, status), &mut alpha, &mut blocker);
+            }
+            if ad[i] > feas_tol && qp.bu[i] < NLP_UPPER_BOUND_INF {
+                let r = (qp.bu[i] - ax[i]) / ad[i];
+                let status = if qp.bl[i] == qp.bu[i] {
+                    ConsStatus::Equality
+                } else {
+                    ConsStatus::AtUpper
+                };
+                take(r, Blocker::Cons(i, status), &mut alpha, &mut blocker);
+            }
+        }
+    }
+
+    (alpha, blocker)
 }
 
 /// The soft outcome for a cancelled solve: the best point we have, clamped

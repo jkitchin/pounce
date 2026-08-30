@@ -1272,8 +1272,9 @@ def minimize(
 
     if selection in ("auto", "lp-ipm", "qp-ipm", "qp-active-set"):
         # `qp-active-set` is the one selector with an engine for a nonconvex
-        # QP: `pounce-qp` controls the inertia of the reduced Hessian and
-        # returns a local solution (gh #786). Every other route here requires a
+        # QP: `pounce-qp` controls the inertia of the reduced Hessian (gh #786)
+        # and second-order-certifies the point before calling it optimal
+        # (gh #848). Every other route here requires a
         # PSD Hessian, and `auto` deliberately keeps sending a nonconvex QP to
         # the NLP solver — the detection is our inference, so the general path
         # is the safer default for it.

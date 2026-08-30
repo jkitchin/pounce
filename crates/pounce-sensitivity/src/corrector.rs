@@ -63,6 +63,14 @@ pub struct CorrectorReport {
     /// True when the loop stopped because an iteration failed to
     /// improve on the best residual seen, rather than because it ran
     /// out of budget.
+    ///
+    /// An iteration whose residual is not finite -- the Newton
+    /// direction stepped a variable out of the domain of one of the
+    /// model's functions -- fails to improve by construction, since a
+    /// non-finite residual norms to infinity (gh#845). So it ends the
+    /// loop here, and the point handed back is the best *finite* one
+    /// seen. It is not reported as a converged correction: `residual`
+    /// then equals `initial_residual` and [`Self::improved`] is false.
     pub converged: bool,
     /// Bounds the step took out of the active set, which the corrector
     /// removed from the operator once before iterating.
@@ -104,6 +112,30 @@ impl CorrectorReport {
 /// parametric shift applied to the equality rows the caller pinned:
 /// the corrector is aiming at the perturbed problem, whose equality
 /// constraints sit at the shifted right-hand side.
+/// Sup-norm of a residual block, where a non-finite entry norms to
+/// infinity rather than being skipped.
+///
+/// `f64::max` returns the *other* operand when one of the two is NaN,
+/// so a plain fold over it *swallows* NaN: an all-NaN vector norms to
+/// `0.0`, the smallest number the stopping rule can see. That is
+/// gh#845 -- the NaN iterate was accepted as the best point yet and
+/// reported with `residual = 0.0`, all three split residuals `0.0`,
+/// `converged = true` and `improved() = true`, while the step handed
+/// back was all NaN. A residual that is not a number is not a *small*
+/// residual; it is the absence of one, so it norms to the largest
+/// value instead of the smallest and can never win the comparison
+/// against the best seen.
+fn residual_norm(v: &[Number]) -> Number {
+    let mut worst = 0.0_f64;
+    for &b in v {
+        if !b.is_finite() {
+            return Number::INFINITY;
+        }
+        worst = worst.max(b.abs());
+    }
+    worst
+}
+
 pub(crate) fn residual_at(
     bs: &crate::algorithm_backsolver::PdSensBacksolver,
     flat: &[Number],
@@ -519,8 +551,21 @@ pub(crate) fn run(
     let mut resid = vec![0.0; dim];
     residual_at(bs, &iterate, pin_rows, deltas, mu, &mut resid)?;
     clear(&mut resid);
-    let norm = |v: &[Number]| v.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    let norm = residual_norm;
     let initial_residual = norm(&resid);
+    if !initial_residual.is_finite() {
+        // The starting point itself is outside the domain of the
+        // model's own functions, so there is no residual to reduce and
+        // nothing to hand back. Say so rather than iterate on NaN.
+        return Err(SolverError::SensComputationFailed(
+            "corrector: the barrier residual is not finite at the point the \
+             iterations start from, so the predicted point is outside the \
+             domain of the model's functions (an unbounded variable driven \
+             into a log, a sqrt or a reciprocal, say). Bound the variable or \
+             take a smaller perturbation."
+                .into(),
+        ));
+    }
 
     let mut best = iterate.clone();
     let mut best_residual = initial_residual;
@@ -604,6 +649,21 @@ pub(crate) fn run(
     let (stationarity, feasibility, complementarity) = (part(0, 2), part(2, 4), part(4, 8));
 
     let step: Vec<Number> = best.iter().zip(base).map(|(&v, &b)| v - b).collect();
+    // Stated as a promise rather than inferred from the residual: the
+    // point handed back is finite. With `residual_norm` in place a NaN
+    // iterate can no longer win the `now < best_residual` comparison,
+    // so `best` is the caller's own clamped step at worst -- but the
+    // whole of gh#845 was a NaN reaching a caller wearing a report that
+    // said it had not, and a screen here is one pass over `dim`.
+    if !step.iter().all(|v| v.is_finite()) {
+        return Err(SolverError::SensComputationFailed(
+            "corrector: the corrected step is not finite. The predicted \
+             point is outside the domain of the model's functions (an \
+             unbounded variable driven into a log, a sqrt or a reciprocal, \
+             say). Bound the variable or take a smaller perturbation."
+                .into(),
+        ));
+    }
     Ok((
         step,
         CorrectorReport {
@@ -626,6 +686,35 @@ mod tests {
     use crate::backsolver::BoundRow;
 
     const MU: Number = 1e-8;
+
+    /// gh#845 at the arithmetic. `residual_at` produces the residual
+    /// this norms, and a fixture that goes non-finite only *inside* the
+    /// loop -- rather than at the point the iterations start from, which
+    /// `tests/issue_845_nonfinite_residual.rs` reaches -- is hard to
+    /// build on purpose, since the models that leave a domain leave it
+    /// at the predicted point. The branch is one line either way, so it
+    /// is pinned here instead of through a model.
+    #[test]
+    fn a_non_finite_entry_norms_to_infinity_rather_than_being_swallowed() {
+        // The historical defect: `fold(0.0, f64::max)` returns the other
+        // operand at a NaN, so this vector normed to 0.0 and beat every
+        // finite residual the loop had seen.
+        assert_eq!(residual_norm(&[Number::NAN; 4]), Number::INFINITY);
+        assert_eq!(
+            residual_norm(&[1e-3, Number::NAN, 2e-3]),
+            Number::INFINITY,
+            "one NaN among finite entries is still no residual"
+        );
+        assert_eq!(residual_norm(&[Number::INFINITY, 0.0]), Number::INFINITY);
+        assert_eq!(residual_norm(&[Number::NEG_INFINITY]), Number::INFINITY);
+        // and the ordinary case is unchanged.
+        assert_eq!(residual_norm(&[]), 0.0);
+        assert_eq!(residual_norm(&[-3.0, 1.0, 2.0]), 3.0);
+        // The consequence the stopping rule cares about: infinity never
+        // wins `now < best_residual`, where 0.0 always did.
+        let beats_the_best_seen = residual_norm(&[Number::NAN]) < 1e-30;
+        assert!(!beats_the_best_seen);
+    }
 
     /// Two variables, one bound row each: a lower bound on `x0` and an
     /// upper bound on `x1`. The compound layout puts the multipliers

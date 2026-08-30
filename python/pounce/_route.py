@@ -249,7 +249,8 @@ def _fit_objective(fun, grad, hess, probes, rtol, allow_indefinite: bool = False
 
     ``allow_indefinite`` is for the one caller that has an engine for a
     nonconvex QP: `pounce-qp`'s active-set method controls the inertia of the
-    reduced Hessian and returns a local solution (gh #786). It relaxes *only*
+    reduced Hessian (gh #786) and certifies the point it reaches against
+    second-order optimality before reporting it (gh #848). It relaxes *only*
     the curvature test — the model-fit validation above it is what proves the
     problem is a QP at all, and no caller may skip that."""
     P, c, d = _objective_model(fun, grad, hess, probes)

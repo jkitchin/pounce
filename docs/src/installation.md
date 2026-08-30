@@ -54,8 +54,12 @@ pounce/bin/pounce: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not fou
 ```
 
 `import pounce` still works; only the CLI (and therefore Pyomo, which
-shells out to it) is affected. This is fixed for releases after 0.9.0. If
-you hit it, use the [container](docker.md) or build from source below.
+shells out to it) is affected. **This is fixed from 0.10.0 on** — the CLI
+is now built inside the manylinux container, and the published 0.10.0
+wheel's binary references nothing above `GLIBC_2.16`, under the
+manylinux2014 floor the wheel advertises. `scripts/check-cli-portability.sh`
+asserts that on every build. If you are pinned to 0.9.0 or earlier and hit
+this, upgrade, or use the [container](docker.md) or a source build below.
 
 ## With a container
 
@@ -63,7 +67,7 @@ No toolchain and nothing installed on the host:
 
 ```sh
 docker run --rm -v "$PWD:/work" ghcr.io/jkitchin/pounce:latest problem.nl
-apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.9.0
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.10.0
 ```
 
 Both images carry the CLI, the Python API, and the Pyomo plugin. See

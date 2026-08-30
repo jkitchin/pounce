@@ -31,6 +31,11 @@ feral.workspace = true
 # Data-parallel presolve (duplicate-row hashing); already a transitive
 # workspace dependency via feral, so no new external crate is pulled in.
 rayon = "1"
+# Structured logging for the cost-normalization (`σ`) decisions. Until gh #846
+# this file emitted nothing at all, so an accepted normalized optimum and a
+# rejected one were indistinguishable from outside — see `solve_qp_core`.
+# Already a workspace dependency of nine other crates; no new external crate.
+tracing.workspace = true
 
 [dev-dependencies]
 # FERAL backs the in-tree unit tests so the IPM runs end-to-end against

@@ -191,11 +191,15 @@ version number, so they need their own attention.
   `variant=source`, `dry_run=false` if a bug report needs an image of an
   unreleased commit; otherwise `make docker` builds it locally.
 - **After the release, check the base image pin.** `docker/Dockerfile.release`
-  is pinned to Debian trixie because the wheels published through 0.9.0
-  bundled a CLI needing glibc 2.39 (#452, fixed in #456). Once a release
-  after 0.9.0 is on PyPI, drop that pin to bookworm or lower and delete the
-  note — `scripts/check-cli-portability.sh` in CI is what makes lowering it
-  safe. This is the one item here with an expiry date.
+  was pinned to Debian trixie because the wheels published through 0.9.0
+  bundled a CLI needing glibc 2.39 (#452, fixed in #456).  **Discharged for
+  0.11.0**: 0.10.0 is on PyPI and its bundled CLI floors at `GLIBC_2.16`
+  (`objdump -T pounce/bin/pounce` on the published manylinux wheel), so the
+  base is now bookworm. The general rule survives the specific pin — the
+  image installs a *published* wheel, so what constrains the base is that
+  wheel's binary, not the tree's. If a release ever raises the CLI's floor,
+  `scripts/check-cli-portability.sh` fails in CI first; if one somehow ships,
+  re-measure on the artifact before trusting this base.
 - **Verify the published image, do not assume.** The images smoke-test
   themselves at build time, but that proves the build, not the publish:
 

@@ -69,6 +69,8 @@ pub struct FeralSolverInterface {
     pivtol_changed: bool,
     refactorize: bool,
     refine: bool,
+    /// See [`FeralConfig::increase_quality`].
+    increase_quality: bool,
     /// See [`FeralConfig::refine_max_steps`].
     refine_max_steps: usize,
     /// See [`FeralConfig::refine_target`]. `0.0` disables the pre-check.
@@ -284,6 +286,15 @@ pub struct FeralConfig {
     ///
     /// Tracked as gh#710, which carries the acceptance criteria.
     pub refine: bool,
+
+    /// Whether [`FeralSolverInterface::increase_quality`] may escalate the
+    /// factorization, or must decline the rung (gh #850).
+    ///
+    /// `true` here — the library default — because a caller that has no other
+    /// recourse when a factorization cannot deliver wants the ladder. The NLP
+    /// binding sets it `false`; `feral_config_from_options` explains why, and
+    /// `feral_increase_quality` is the option that turns it back on.
+    pub increase_quality: bool,
     /// How many correction steps feral's inner refinement may take per
     /// back-solve, when [`Self::refine`] is on. Passed straight through
     /// as `feral::RefineOptions::with_max_steps`.
@@ -552,6 +563,7 @@ impl Default for FeralConfig {
             // `increase_quality`; a caller doing only the first still
             // needs this.
             refine: true,
+            increase_quality: true,
             refine_max_steps: feral::DEFAULT_REFINE_MAX_STEPS,
             // Disabled: every back-solve refines, as it always has.
             refine_target: 0.0,
@@ -620,6 +632,12 @@ impl FeralConfig {
             fma: parse_bool_env(std::env::var("POUNCE_FERAL_FMA").ok().as_deref()).unwrap_or(false),
             refine: parse_bool_env(std::env::var("POUNCE_FERAL_REFINE").ok().as_deref())
                 .unwrap_or(true),
+            increase_quality: parse_bool_env(
+                std::env::var("POUNCE_FERAL_INCREASE_QUALITY")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or(true),
             // `feral::env` rather than a local parse: see the
             // `min_par_flops` note below for why every numeric knob here
             // goes through it now.
@@ -868,6 +886,7 @@ impl FeralSolverInterface {
             pivtol_changed: false,
             refactorize: false,
             refine: cfg.refine,
+            increase_quality: cfg.increase_quality,
             refine_max_steps: cfg.refine_max_steps,
             refine_target: cfg.refine_target,
             x_scratch: Vec::new(),
@@ -1422,6 +1441,14 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         // `false` and succeeds with it wired; on the 126028-dimension
         // `laptime` KKT (L-BFGS leg) the pair is 68.9s -> 18.8s against
         // MA57's 10.7s.
+        // gh #850: declined unless the caller asked for it. See
+        // `FeralConfig::increase_quality` and the option's own help text --
+        // the rung is a *lateral* move in trajectory terms, not a monotone
+        // one, and on the models where it costs a verdict it costs the whole
+        // solve.
+        if !self.increase_quality {
+            return false;
+        }
         if self.solver.increase_quality() {
             self.pivtol_changed = true;
             true

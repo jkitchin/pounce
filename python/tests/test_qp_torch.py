@@ -209,17 +209,22 @@ def test_check_psd_false_bypasses_batch_and_layer():
 
 
 def test_check_psd_true_forces_guard_above_auto_cap():
-    # Above the auto cap (n > 1500) the default skips the eigvalsh check;
-    # check_psd=True must force it. The guard runs before any solve, so the
-    # indefinite problem never reaches the IPM and the test stays cheap.
-    from pounce.qp import _PSD_CHECK_AUTO_MAX_N
+    # Above the dense-check ceiling (n > 1500) the guard used to be skipped
+    # entirely at the default, which was gh #849; it now runs at every size by
+    # an inertia count instead, and check_psd=True has always forced it. Both
+    # settings must refuse. The guard runs before any solve, so the indefinite
+    # problem never reaches the IPM and the test stays cheap.
+    from pounce.qp import _PSD_CHECK_DENSE_MAX_N
 
-    n = _PSD_CHECK_AUTO_MAX_N + 1
+    n = _PSD_CHECK_DENSE_MAX_N + 1
     diag = np.ones(n)
     diag[-1] = -1.0
     P_big = torch.diag(torch.tensor(diag))
     with pytest.raises(ValueError, match="semidefinite"):
         solve_qp(P=P_big, c=torch.zeros(n), check_psd=True)
+    # gh #849: and at the default, which used to sail straight past.
+    with pytest.raises(ValueError, match="semidefinite"):
+        solve_qp(P=P_big, c=torch.zeros(n))
 
 
 def test_check_psd_true_on_psd_p_solves_normally():

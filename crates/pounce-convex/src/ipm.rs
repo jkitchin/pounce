@@ -968,14 +968,62 @@ where
         return sol;
     }
     let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend);
-    if retry.status == QpStatus::Optimal
-        && optimum_is_genuine(prob, &retry, opts.tol, opts.obj_constant)
-    {
+    let genuine = |c: &QpSolution| {
+        c.status == QpStatus::Optimal && optimum_is_genuine(prob, c, opts.tol, opts.obj_constant)
+    };
+    let err = |c: &QpSolution| c.kkt_residuals(prob).kkt_error();
+    // A retry accurate to `tol` in the caller's own coordinates is
+    // unimpeachable -- this function's own first test says so -- so stop here
+    // and pay nothing more. This is the common repair.
+    if genuine(&retry) && err(&retry) <= opts.tol {
         return retry;
     }
-    QpSolution {
-        status: QpStatus::NumericalFailure,
-        ..sol
+    // gh #846: otherwise the equilibrated *embedding* is not obviously the
+    // best answer available, and on an ill-conditioned box QP it measurably is
+    // not. Measured on a 9-variable diagonal box QP with `eig = [1e7 .. 1e13]`,
+    // where the closed form is `clamp(t, -1, 1)` and needs no solver:
+    //
+    // | candidate                  | kkt_error | equil. rel | genuine | ‖x−x*‖∞ |
+    // |----------------------------|-----------|------------|---------|---------|
+    // | the point handed in        | 1.30e2    | 4.77e-3    | no      | 9.5e-7  |
+    // | equilibrated HSDE retry    | 1.26e2    | 1.96e-10   | yes     | 1.1e-5  |
+    // | equilibrated DIRECT driver | 1.22e-4   | 7.58e-24   | yes     | 1.1e-16 |
+    //
+    // The retry is genuine, so it used to be returned unconditionally -- and
+    // it is *twelve times worse in x* than the point it replaced, while a
+    // third candidate that is better on every measure at once (six orders of
+    // absolute KKT, fourteen of equilibrated relative, eleven of `x`) was
+    // never asked for. The embedding's stopping test normalizes its gap by the
+    // objective's magnitude, which on data of this scale buys slack the direct
+    // driver's absolute test does not.
+    //
+    // So both are asked, and the choice is made on **absolute `kkt_error` in
+    // the caller's own coordinates** -- the caller's own definition of the
+    // thing, and a ranking rather than another threshold to calibrate. Only
+    // genuine candidates are eligible, so this cannot promote a point gh #414
+    // exists to reject; it only stops that guard from settling for the first
+    // acceptable answer when a better one is one solve away.
+    //
+    // The extra solve is on the repair path only, which is reached solely when
+    // a claimed optimum has already failed [`optimum_is_genuine`].
+    // `equilibrated_solve(.., use_hsde = false, ..)` is the same call this
+    // function's neighbour already makes to refute a spurious unboundedness
+    // certificate, on the same LP/QP-only entry point, so it carries no new
+    // exposure to cone-carrying problems.
+    let direct = equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend);
+    let best = [retry, direct]
+        .into_iter()
+        .filter(genuine)
+        .min_by(|a, b| err(a).total_cmp(&err(b)));
+    match best {
+        Some(c) => c,
+        // Neither could certify. The original verdict is demoted rather than
+        // upgraded: the solver has no certified answer, and saying so is the
+        // floor this function guarantees.
+        None => QpSolution {
+            status: QpStatus::NumericalFailure,
+            ..sol
+        },
     }
 }
 
@@ -2309,7 +2357,12 @@ fn hsde_cost_scale(prob: &QpProblem, tol: f64) -> f64 {
 /// A `false` costs one un-normalized re-solve, which then faces this same test;
 /// it never costs an answer. That is why this door can be strict where
 /// [`normalized_optimum_is_genuine_relative`]'s cannot.
-fn normalized_optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64) -> bool {
+fn normalized_optimum_is_genuine(
+    prob: &QpProblem,
+    cone: &CompositeCone,
+    sol: &QpSolution,
+    tol: f64,
+) -> bool {
     // Absolute arm, asked first and unconditionally: a point already accurate
     // to `tol` in the caller's own coordinates is optimal by the definition the
     // caller was given, whatever `σ` was. Every well- and moderately-scaled
@@ -2321,8 +2374,174 @@ fn normalized_optimum_is_genuine(prob: &QpProblem, sol: &QpSolution, tol: f64) -
     // would be — and asked at the scale that actually governs the caller's
     // residual. This gate is the gh #414-reopened fix; see the doc comment.
     let (gscale, pscale) = unscaled_residual_scales(prob, sol);
+    let cut = sigma_path_rel_tol(tol);
     crate::hsde::relative_stop_permitted(gscale.max(pscale), tol)
-        && unscaled_relative_kkt(prob, sol) <= sigma_path_rel_tol(tol)
+        && unscaled_relative_kkt(prob, sol) <= cut
+        // ... and the same question asked one row at a time, because
+        // `gscale` and `pscale` are aggregates and an aggregate cannot see a
+        // flat direction (gh #846). Strictly a further conjunct: it can only
+        // turn an accept into a reject, and a reject costs one un-normalized
+        // re-solve.
+        && sigma_complementarity_is_genuine(prob, cone, sol, tol, cut)
+}
+
+/// The `σ` path's genuineness test, asked **one orthant row at a time**
+/// instead of over an aggregate scale (gh #846).
+///
+/// # Why an aggregate scale is not enough
+///
+/// [`normalized_optimum_is_genuine`]'s relative arm divides each residual by
+/// one number for the whole problem — `gscale = ‖Px‖∞ ∨ ‖c‖∞` for
+/// stationarity and complementarity, `pscale` for feasibility. On an
+/// ill-conditioned separable QP that number belongs to the *stiffest*
+/// coordinate, and it is then the denominator for every other one. The flat
+/// directions — the ones whose optimum a solver is most likely to get wrong,
+/// because moving them barely changes the objective — are measured against a
+/// scale that has nothing to do with them.
+///
+/// The reported instance is a 6-variable diagonal box QP with
+/// `eig = [1e3 ‥ 1e11]` on `[-1, 1]`, separable, so `x* = clamp(t, -1, 1)`
+/// with no solver in the loop. At the default `tol = 1e-8` the `σ` path
+/// returned `x₀ = 0.837` against a true `1.0` — off by `0.17` on a unit box.
+/// The objective could not see it either: `-1.17834000816e10` against
+/// `-1.17834002580e10`, a **relative objective error of 1.5e-8 for a 17%
+/// error in x₀**, which is the objective-parity blind spot CLAUDE.md names,
+/// one level down from the fixture corpus.
+///
+/// # Complementarity is the binding half, and that is measured
+///
+/// A companion arm asking the same question of the **stationarity** rows
+/// (`|rᵢ|` against the largest term that built row `i`) was written, kept
+/// through the whole investigation, and then removed, because on this family
+/// it rejects nothing the test below does not already reject. Removing it
+/// turned no test red; removing the test below turns four red. Nor is that an
+/// accident of the fixtures: the same spectrum *unconstrained*, in a wide box
+/// it never reaches, and under an equality row all come back exact to
+/// `3e-16`. The failure needs an **active bound**, because what buys the slack
+/// is the embedding's objective-relative gap test (`gap / (1 + |obj|)`) and a
+/// gap is spent on the bound multipliers. So this is where the guard belongs.
+///
+/// # The test
+///
+/// Complementarity says one of the two factors is at zero, so it is asked as
+/// exactly that, each factor against the scale it lives in:
+///
+/// - the slack is negligible — `|sⱼ| ≤ cut·max(|hⱼ|, |(Gx)ⱼ|)`, the largest
+///   term that built it; **or**
+/// - the multiplier is negligible — `|Gⱼᵢ·zⱼ| ≤ cut·dᵢ` at *every* variable
+///   row `i` this row feeds, `dᵢ` being the largest term in that row's
+///   stationarity equation. A multiplier that changes no stationarity row it
+///   touches is a bound out of the active set, and its slack may then be
+///   anything.
+///
+/// Neither factor needs a floor and neither is a product of unlike units,
+/// which is what the aggregate `|zⱼsⱼ| / (gscale ∨ pscale)` was. On the
+/// reported instance the un-normalized re-solve — the point a `σ` reject
+/// routes to — comes back with `‖Px+c+Aᵀy+Gᵀz‖∞ = 7.6e-6`, genuinely small,
+/// and `max |zⱼsⱼ| = 18.2`, which over `gscale = 4.0e10` reads `4.5e-10` and
+/// sails through. Componentwise the two ratios are `2.9e-3` and `1.0`, so the
+/// row is rejected — and `2.9e-3` is not an abstraction, it *is* the returned
+/// `x`'s error, because `zs/z = s` is the distance from the bound.
+///
+/// **Nonnegative-orthant rows only, on purpose.** An orthant row is
+/// complementary one row at a time; an SOC or PSD block is complementary as a
+/// *block*, and reading its rows individually is pounce#209 — a feasible,
+/// optimal QCQP made to look badly infeasible. Non-orthant blocks are skipped
+/// and keep the aggregate test, which
+/// [`QpSolution::kkt_residuals_conic`] already measures per block.
+///
+/// The variable-bound arrays are covered as well as `G`, because both shapes
+/// reach here: [`solve_qp_ipm`] expands `lb`/`ub` into trailing orthant rows
+/// before [`solve_qp_core`] ever sees them, but a caller that hands the core a
+/// problem with bounds still in place gets the same test.
+fn sigma_complementarity_is_genuine(
+    prob: &QpProblem,
+    cone: &CompositeCone,
+    sol: &QpSolution,
+    tol: f64,
+    cut: f64,
+) -> bool {
+    let n = prob.n;
+    let mut px = vec![0.0; n];
+    prob.p_mul(&sol.x, &mut px);
+    let mut aty = vec![0.0; n];
+    prob.at_mul(&sol.y, &mut aty);
+    let mut gtz = vec![0.0; n];
+    prob.gt_mul(&sol.z, &mut gtz);
+    // Each variable row's stationarity denominator, the scale a multiplier
+    // landing in it has to be significant against.
+    let dscale: Vec<f64> = (0..n)
+        .map(|i| {
+            [px[i], prob.c[i], -sol.z_lb[i], sol.z_ub[i], aty[i], gtz[i]]
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+        })
+        .collect();
+
+    // Which inequality rows are orthant rows, and what each one's `Gx` is.
+    let mut orthant = vec![false; prob.m_ineq()];
+    for (off, kind) in cone.blocks() {
+        if let crate::cones::ConeKind::Nonneg(c) = kind {
+            let dim = crate::cones::Cone::dim(c);
+            for f in orthant.iter_mut().skip(*off).take(dim) {
+                *f = true;
+            }
+        }
+    }
+    let mut gx = vec![0.0; prob.m_ineq()];
+    prob.g_mul(&sol.x, &mut gx);
+    // `max |Gⱼᵢ|`-weighted view of each row, built once: for row `j` the test
+    // needs every `(i, Gⱼᵢ)` it touches.
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); prob.m_ineq()];
+    for t in &prob.g {
+        rows[t.row].push((t.col, t.val));
+    }
+
+    let negligible = |v: f64, scale: f64| v.abs() <= cut * scale;
+    for j in 0..prob.m_ineq() {
+        if !orthant[j] {
+            continue;
+        }
+        let (z, slack) = (sol.z[j], prob.h[j] - gx[j]);
+        // Absolute, in the caller's own coordinates: a `tol`-small product is
+        // complementary by the definition the caller was given. A non-finite
+        // product compares false here and so falls through to the two ratio
+        // tests rather than being waved past as "small" -- the gh #845 shape,
+        // one crate over.
+        let complementary_absolutely = (z * slack).abs() <= tol;
+        if complementary_absolutely {
+            continue;
+        }
+        if negligible(slack, prob.h[j].abs().max(gx[j].abs())) {
+            continue;
+        }
+        if rows[j]
+            .iter()
+            .all(|&(i, gji)| negligible(gji * z, dscale[i]))
+        {
+            continue;
+        }
+        return false;
+    }
+
+    // The same two questions for bounds still carried on `prob` itself.
+    for i in 0..n {
+        let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
+        for (z, slack, bound, finite) in [
+            (sol.z_lb[i], sol.x[i] - lb, lb, lb > -1e19),
+            (sol.z_ub[i], ub - sol.x[i], ub, ub < 1e19),
+        ] {
+            let complementary_absolutely = (z * slack).abs() <= tol;
+            if !finite || complementary_absolutely {
+                continue;
+            }
+            if negligible(slack, bound.abs().max(sol.x[i].abs())) || negligible(z, dscale[i]) {
+                continue;
+            }
+            return false;
+        }
+    }
+    true
 }
 
 /// The relative-KKT cut the `σ` path holds a claimed optimum to: `tol`-level
@@ -2422,6 +2641,35 @@ fn normalized_optimum_is_genuine_relative(prob: &QpProblem, sol: &QpSolution) ->
     unscaled_relative_kkt(prob, sol) <= FALSE_OPTIMUM_REL_TOL
 }
 
+/// Solve `prob` the way `qp_hsde=no` would — the direct driver, Ruiz-
+/// equilibrated — as the `σ` path's last resort (gh #846).
+///
+/// **Not generic, on purpose.** [`solve_qp_core`] cannot simply call itself or
+/// [`equilibrated_solve`] with `use_hsde: false`: those are generic in the
+/// backend factory, so a self-call monomorphizes `F`, `&mut F`, `&mut &mut F`,
+/// … without end, and the compiler says so (`overflow evaluating the
+/// requirement`). Taking `&mut dyn FnMut()` erases the parameter and the
+/// instantiation graph closes.
+///
+/// It enters at [`solve_qp_ipm_core`] rather than [`solve_qp_direct`] because
+/// the equilibration is the point. Measured on gh #846's family across
+/// `mag = 1e7 ‥ 1e14`, the raw direct driver returns `NumericalFailure` at
+/// `1e12` and `IterationLimit` at `1e13`, while the same driver behind Ruiz
+/// returns `‖x − x*‖∞ ≤ 1e-6` at every magnitude. `prob` arrives with its
+/// bounds already expanded into orthant rows, so `solve_qp_ipm_core` re-enters
+/// [`solve_qp_core`] with `use_hsde` off and this branch is not reached again.
+fn direct_driver_fallback(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    make_backend: &mut dyn FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+) -> QpSolution {
+    let direct = QpOptions {
+        use_hsde: false,
+        ..*opts
+    };
+    solve_qp_ipm_core(prob, &direct, make_backend)
+}
+
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
 /// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
 fn solve_qp_core<F>(
@@ -2488,12 +2736,128 @@ where
             // actually collapsed τ, which is exactly the ‖c‖ ≪ σ regime — reaches
             // the real optimum; if that solve cannot converge either, its honest
             // non-`Optimal` status stands (never a false `Optimal`).
-            if sol.status == QpStatus::Optimal
-                && !normalized_optimum_is_genuine(prob, &sol, opts.tol)
+            if sol.status != QpStatus::Optimal
+                || normalized_optimum_is_genuine(prob, cone, &sol, opts.tol)
             {
-                return crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None);
+                tracing::debug!(
+                    sigma,
+                    status = ?sol.status,
+                    "convex sigma: normalized solve accepted"
+                );
+                return sol;
             }
-            return sol;
+            tracing::debug!(
+                sigma,
+                kkt_error = sol.kkt_residuals(prob).kkt_error(),
+                "convex sigma: normalized optimum rejected, re-solving un-normalized"
+            );
+            let plain = crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None);
+            if plain.status == QpStatus::Optimal
+                && normalized_optimum_is_genuine(prob, cone, &plain, opts.tol)
+            {
+                tracing::debug!("convex sigma: un-normalized re-solve accepted");
+                return plain;
+            }
+            // An infeasibility / unboundedness certificate is not this guard's
+            // to overturn — it is positive evidence about the problem rather
+            // than a claimed optimum, and the historical code returned it here
+            // unconditionally. Only a *claimed optimum* (or a non-convergence,
+            // which claims nothing) goes on to the third driver.
+            if matches!(
+                plain.status,
+                QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
+            ) {
+                return plain;
+            }
+            // gh #846: the un-normalized re-solve is still the *embedding*, and
+            // the embedding's own stopping test normalizes the duality gap by
+            // the objective's magnitude (`gap / (1 + |obj|)`, see
+            // `hsde::solve_conic_hsde`). On data whose coefficients reach `1e11`
+            // that licenses an absolute gap of `tol·|obj|`, which on the
+            // flattest curvature in the spectrum is a large distance in `x`:
+            // measured on the reported 6-variable box QP, `|obj| = 1.18e10` and
+            // the returned `x₀` sits `2.9e-3` off its bound. So `σ` is an
+            // amplifier here, not the origin, and rejecting its certificate
+            // only moves the caller from `1.6e-1` wrong to `2.9e-3` wrong.
+            //
+            // The direct driver below applies its stopping test in the caller's
+            // own coordinates and has no objective-relative gap arm, so it is
+            // untouched by that. Measured across `mag = 1e7 ‥ 1e14` on the
+            // reported family it returns `‖x − x*‖∞ ≤ 1e-6` at every magnitude
+            // while the embedding degrades from `1e9` up. Its answer is taken
+            // only when it passes the same test the two embedding answers just
+            // failed, so this can substitute a *certified* point for an
+            // uncertified one and nothing else.
+            //
+            // Reached only after two `Optimal` answers have both been judged
+            // false, which on the corpora is never: 1 of 79 CLI fixtures
+            // reaches `σ` at all and 0 of 138 Maros-Meszaros problems do.
+            // The direct driver is an **orthant-only** entry point: Ruiz is a
+            // row scaling and `solve_qp_ipm_core`'s own comment says
+            // cone-carrying problems never reach it, since SOC/exp/power solve
+            // through `solve_socp_ipm`. Handing it a QCQP silently drops the
+            // cone structure and returns the answer to a different problem —
+            // measured on `qcqp_columns_illcond`, `-210.53` against the
+            // `-364.2102` that `solver_selection=nlp` and `qp_hsde=no` both
+            // agree on. So on anything but a pure orthant this fallback does
+            // not exist, and the un-normalized re-solve stands exactly as it
+            // did before gh #846.
+            if !cone
+                .blocks()
+                .iter()
+                .all(|(_, k)| matches!(k, crate::cones::ConeKind::Nonneg(_)))
+            {
+                tracing::debug!(
+                    "convex sigma: non-orthant cone, keeping the un-normalized \
+                     re-solve"
+                );
+                return plain;
+            }
+            let direct = direct_driver_fallback(prob, opts, &mut make_backend);
+            if direct.status == QpStatus::Optimal
+                && normalized_optimum_is_genuine(prob, cone, &direct, opts.tol)
+            {
+                tracing::debug!("convex sigma: direct-driver fallback accepted");
+                return direct;
+            }
+            // Nothing was certified. Rather than default to any one driver,
+            // hand back whichever claimed optimum is closest to optimality in
+            // the **caller's own coordinates** — `kkt_error` is absolute and
+            // un-normalized, so this is the caller's own definition of the
+            // thing, and it is a ranking rather than another threshold to
+            // calibrate. It cannot promote a non-converged iterate over a
+            // converged one: only `Optimal` candidates are eligible, and if
+            // none is, the un-normalized re-solve's honest status stands as it
+            // always did.
+            //
+            // Measured on gh #846's family this is what closes the last two
+            // gaps. At `‖P‖ ~ 1e23` the embedding reaches its iteration cap
+            // both times while the direct driver converges in 22 iterations to
+            // `1e-17`; on a spectrum reaching down to `1e-2` no candidate is
+            // certifiable at all, and the direct driver's `1.3e-5` is returned
+            // instead of the embedding's `9.9e-1`.
+            // Index 1 is the un-normalized re-solve, whose honest status is
+            // what a caller got before this fallback existed and is therefore
+            // the default when nothing claims an optimum at all.
+            let mut candidates = vec![sol, plain, direct];
+            let pick = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.status == QpStatus::Optimal)
+                .min_by(|(_, a), (_, b)| {
+                    a.kkt_residuals(prob)
+                        .kkt_error()
+                        .total_cmp(&b.kkt_residuals(prob).kkt_error())
+                })
+                .map_or(1, |(i, _)| i);
+            tracing::debug!(
+                pick,
+                kkt_error = candidates[pick].kkt_residuals(prob).kkt_error(),
+                status = ?candidates[pick].status,
+                "convex sigma: nothing certified, returning the closest \
+                 claimed optimum"
+            );
+            return candidates.swap_remove(pick);
         }
         return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, None);
     }
@@ -4831,7 +5195,12 @@ mod false_optimum_metric_tests {
         );
         // The gh #414-reopened gate rejects it anyway, on the absolute arm.
         assert!(
-            !normalized_optimum_is_genuine(&prob, &bad, opts.tol),
+            !normalized_optimum_is_genuine(
+                &prob,
+                &CompositeCone::single_nonneg(prob.m_ineq()),
+                &bad,
+                opts.tol
+            ),
             "the gated test must reject a point whose own KKT error is {abs:.3e}"
         );
 

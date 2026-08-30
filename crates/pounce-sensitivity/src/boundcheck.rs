@@ -1164,6 +1164,13 @@ pub struct PathSegment {
     /// from this fraction on, `false` when it left it: either a bound
     /// active at the base whose multiplier reached zero, or a hold
     /// this path added earlier whose multiplier crossed zero.
+    ///
+    /// A weakly active bound can be recorded `true` at a fraction of
+    /// essentially zero, and that does not contradict the variable
+    /// having been on it at the base point: what the working set
+    /// gained there is the HOLD. Undecided, the bound sat in the
+    /// factorization as an order-one penalty that does not enforce it
+    /// (gh#852).
     pub pinned: bool,
 }
 
@@ -1213,6 +1220,15 @@ struct PathHold {
 /// Dropping a hold needs no re-factorization at all, since the hold is
 /// a Schur row rather than a term in the held factor.
 ///
+/// `weak_rows` names the bound-multiplier rows the activity
+/// classifier could not certify as strongly active. Those rows sit in
+/// the factorization with an order-one sigma that bends the direction
+/// without enforcing the bound, so the walk is allowed to reach one
+/// and hold it, releasing the row as it does. Every other base-active
+/// bound stays unreachable: its sigma is order `1/mu`, its variable
+/// cannot move off the bound, and a Schur hold there would enforce
+/// the same bound twice through a near-singular complement.
+///
 /// Returns the accumulated step and the breakpoints crossed. When
 /// `max_iter` segments are used before the target is reached, the
 /// remainder is taken in one step under the active set reached, since
@@ -1230,6 +1246,7 @@ pub fn step_along_path<B>(
     max_iter: usize,
     forced_active: &[usize],
     initial_holds: &[(usize, bool)],
+    weak_rows: &[usize],
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
@@ -1332,7 +1349,10 @@ where
     // bound is genuinely active for the first stretch. Deciding those
     // rows at fraction zero released them a sixth of a step early on
     // the CSTR held at 75% of the breakpoint fraction, and overshot
-    // tenfold against the walk's own release.
+    // tenfold against the walk's own release. A leaver is not a
+    // one-way door, though: `weak_rows` keeps it reachable, so a
+    // direction that turns out to press into it is a breakpoint and
+    // the walk takes the bound back there (gh#852).
     let mut holds: Vec<PathHold> = initial_holds
         .iter()
         .map(|&(row, lower)| PathHold {
@@ -1393,12 +1413,15 @@ where
             }
         };
 
-        // A free variable reaching a bound. A bound the held
-        // factorization still enforces is not reachable this way: its
-        // variable sits essentially on it already, and holding it AGAIN
-        // through a Schur row would enforce the same bound twice. Such
-        // a bound leaves the active set only through its own
-        // multiplier's release below.
+        // A free variable reaching a bound, or a weakly active one
+        // reaching it again. A bound the held factorization actually
+        // enforces is not reachable this way: its variable sits
+        // essentially on it already, and holding it AGAIN through a
+        // Schur row would enforce the same bound twice. Such a bound
+        // leaves the active set only through its own multiplier's
+        // release below. "Actually enforces" is the distinction the
+        // `factor_holds` comment below draws, and it is narrower than
+        // "active at the base".
         for i in 0..n_x {
             if holds.iter().any(|h| h.row == i) || changed_here.contains(&i) {
                 continue;
@@ -1406,9 +1429,22 @@ where
             // Base activity was decided once, at the table above; only
             // the released exclusion is live, since a released bound
             // left the factorization mid-path.
+            //
+            // A weakly active row is the exception, and gh#852 is what
+            // it costs to leave it out. Its sigma is order ONE, not
+            // order 1/mu: the factorization carries the bound as a
+            // finite penalty that bends the direction and does not
+            // enforce anything, so a direction that drives the
+            // variable outside its bound does exactly that, with no
+            // breakpoint to stop it. Excluding it here left the
+            // coupled kink's walk with nothing to report and the
+            // crossing coordinate outside its box, repaired downstream
+            // only by a clamp, which moves that coordinate and leaves
+            // every neighbour at the one-sided value.
             let factor_holds = |lower_side: bool| -> bool {
                 let side = if lower_side { 0 } else { 1 };
-                base_active_row[i][side].is_some_and(|r| !released.contains(&r))
+                base_active_row[i][side]
+                    .is_some_and(|r| !released.contains(&r) && !weak_rows.contains(&r))
             };
             let v = x_curr[i] + acc[i];
             if d[i] < 0.0 && lo[i] > NO_BOUND_LO && !factor_holds(true) {
@@ -1475,6 +1511,35 @@ where
         let (var_row, lower) = match ev {
             Event::ReachLower | Event::ReachUpper => {
                 let lower = ev == Event::ReachLower;
+                // A weakly active bound the walk reaches leaves the
+                // factorization at the same fraction, which is the
+                // treatment `initial_holds` already gets and for the
+                // same reason: from here on the Schur hold is what
+                // enforces the bound, and the row's order-one sigma is
+                // a second, softer copy of it built at a base point
+                // whose direction no longer applies. While the hold
+                // stands the two are indistinguishable -- the hold
+                // takes the coordinate's movement to zero and sigma
+                // multiplies exactly that -- so what the release is
+                // for is the fraction AFTER the hold drops, where the
+                // coordinate moves again and a stale order-one sigma
+                // damps it. The base-activity table is not the test
+                // here: sigma is in the factor for every bound, and a
+                // weak row lands on either side of that table's
+                // multiplier-against-slack comparison.
+                let reached_row = bound_rows.as_ref().and_then(|rows| {
+                    rows.iter()
+                        .find(|b| b.var_row == row && b.lower == lower)
+                        .map(|b| b.row)
+                });
+                if can_release
+                    && let Some(r) = reached_row
+                    && weak_rows.contains(&r)
+                    && !released.contains(&r)
+                {
+                    released.push(r);
+                    changed_here.push(r);
+                }
                 holds.push(PathHold {
                     row,
                     lower,

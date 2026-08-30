@@ -5066,6 +5066,47 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }
+    // gh #850: `feral_increase_quality` exists because this rung is a genuine
+    // two-sided trade, and the option is the lever — the default is left ON,
+    // which is the 0.11 behaviour.
+    //
+    // Ipopt's `IncreaseQuality` contract assumes a *monotone* escalation: MA57
+    // raises `pivtol` toward `pivtolmax`, strictly more conservative each time,
+    // so keeping it raised for the rest of the solve can only make the
+    // factorization safer. FERAL's ladder changes which pivots are taken, which
+    // is lateral in trajectory terms, and it persists the same way. So it
+    // reroutes solves, and the reroute goes both ways:
+    //
+    //   it COSTS two whole solves, both `square_flowsheet_resto`:
+    //     exact  Optimal/99  -> RestorationFailed/131 (a second-opinion rung
+    //                          rescues it, at 185 iterations total)
+    //     lbfgs  Optimal/178 -> 3000 iterations at the cap, rescued by nothing
+    //   it BUYS accuracy where nothing else does:
+    //     `watchdog_trial_is_not_a_divergence_verdict`'s 12-variable model ends
+    //     `SolvedToAcceptableLevel` at obj 3.7e-6 with the rung and at obj 3.42
+    //     against `f* = 0` without it — a wrong-ish answer under a
+    //     success-shaped status, which is worse than an honest failure.
+    //   and it buys iterations on five more fixture-legs (15-25%).
+    //
+    // There is no scoping that separates those. Measured with a process-global
+    // firing cap on `square_flowsheet_resto`: the rung fires twice, once in the
+    // main solve at iteration 25 and once inside restoration at `76r`, and
+    // allowing only the first still loses the leg — so declining it just for
+    // the restoration sub-solve would not help. Nor does a count separate them:
+    // `deb7` and `square_flowsheet_resto` each fire it exactly twice on their
+    // exact legs, one gaining 16% of its iterations and the other losing its
+    // verdict.
+    //
+    // So the default stands and `feral_increase_quality=no` is the documented
+    // recovery for a model this rung costs. Resolving it properly needs a
+    // *revertible* escalation — one that does not govern every later
+    // factorization — which FERAL's ladder cannot express today (`quality_level`
+    // only ratchets up) -- filed upstream as jkitchin/feral#192 and tracked as
+    // gh#857, which is also where this option should be retired if the reset
+    // makes it moot. See `dev-notes/second-opinion-promotions-in-the-sweep.md`.
+    if let Ok((v, true)) = options.get_bool_value("feral_increase_quality", "") {
+        cfg.increase_quality = v;
+    }
     // Only consulted when `refine` is on; see `FeralConfig::refine_max_steps`
     // (gh#710). Registered as an integer option with lower bound 0, so the
     // cast cannot go negative.
@@ -5961,7 +6002,8 @@ mod tests {
              sqp_qp_anti_cycling bland\n\
              sqp_qp_use_schur_updates yes\n\
              sqp_qp_max_schur_updates_before_refactor 12\n\
-             sqp_qp_use_homotopy yes\n",
+             sqp_qp_use_homotopy yes\n\
+             sqp_qp_certify_second_order yes\n",
         )
         .expect("every sqp_qp_* option must be registered (gh #360)");
 
@@ -5978,9 +6020,16 @@ mod tests {
         assert!(qp.use_schur_updates);
         assert_eq!(qp.max_schur_updates_before_refactor, 12);
         assert!(qp.use_homotopy);
+        // gh #848. Off by default on this path (see
+        // `QpOptions::sqp_subproblem`), so the value that proves the wire is
+        // live is `yes` — asserting the default would pass on a reader that
+        // never ran.
+        assert!(qp.certify_second_order);
 
-        // Untouched options must keep the pounce-qp defaults, not be
-        // overwritten with zeros by the "explicitly set" gate.
+        // Untouched options must keep the SQP subproblem base, not be
+        // overwritten with zeros by the "explicitly set" gate. That base is
+        // `QpOptions::default()` in every field but one; the exception is
+        // asserted below.
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
         app.initialize_with_options_str("algorithm active-set-sqp\n")
@@ -5999,6 +6048,11 @@ mod tests {
             qp.max_schur_updates_before_refactor,
             defaults.max_schur_updates_before_refactor
         );
+        // Off by default *on the SQP path*, and deliberately different from
+        // `QpOptions::default()` — which is what a standalone `solve_qp`
+        // gets, and where it is on. gh #848 / gh #856.
+        assert!(!qp.certify_second_order);
+        assert!(pounce_qp::QpOptions::default().certify_second_order);
     }
 
     /// The other direction of the gh #360 guard: every **registered**
@@ -6035,6 +6089,7 @@ mod tests {
         // round-trip assertions in the sister test.
         let mut read_by_the_reader = vec![
             "sqp_qp_anti_cycling".to_string(),
+            "sqp_qp_certify_second_order".to_string(),
             "sqp_qp_elastic_gamma".to_string(),
             "sqp_qp_feas_tol".to_string(),
             "sqp_qp_max_iter".to_string(),

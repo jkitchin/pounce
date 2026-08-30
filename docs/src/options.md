@@ -352,6 +352,41 @@ the command line would be.
 A file that *selects* the backend it tunes never reaches this: `linear_solver=ma97`
 is refused on its own, as [above](#choosing-a-linear-solver).
 
+### MA57 backend knobs
+
+Only relevant in a `--features ma57` build running `linear_solver=ma57`;
+see [Installation](installation.md#hsl-ma57-backend-optional). All of them
+are the upstream Ipopt names with the upstream meanings, so an
+`ipopt.opt` written for Ipopt-MA57 transfers unchanged.
+
+| option | default | MA57 control | what it does |
+|---|---|---|---|
+| `ma57_pivtol`            | `1e-8` | `CNTL(1)`   | Relative pivot threshold. Smaller pivots for sparsity, larger for stability. |
+| `ma57_pivtolmax`         | `1e-4` | —           | Ceiling the solver may raise `ma57_pivtol` to when it needs a more accurate solve. Must be ≥ `ma57_pivtol`. |
+| `ma57_pre_alloc`         | `1.05` | —           | Safety factor on the work-space MA57 suggests. Larger avoids a reallocation when the suggestion falls short. |
+| `ma57_pivot_order`       | `5`    | `ICNTL(6)`  | Pivot-ordering strategy (`0`–`5`). |
+| `ma57_automatic_scaling` | `no`   | `ICNTL(15)` | Let MA57 scale the matrix itself. See [Scaling](scaling.md). |
+| `ma57_block_size`        | `16`   | `ICNTL(11)` | Block size for the Level-3 BLAS in `MA57BD`. |
+| `ma57_node_amalgamation` | `16`   | `ICNTL(12)` | Node amalgamation parameter. |
+| `ma57_small_pivot_flag`  | `0`    | `ICNTL(16)` | `1` moves small pivots to the end of the factorization instead of using them — efficient on a highly rank-deficient matrix. |
+| `ma57_print_level`       | `0`    | —           | MA57's own printing: `0` silent, `1` errors, `2` +warnings, `3` +terse monitoring, `≥4` everything. |
+| `ma57_batched_backsolve` | `no`   | —           | POUNCE extension, not an Ipopt option — see [below](#ma57-batched-back-substitution-ma57_batched_backsolve). |
+
+Each can be scoped to the restoration sub-solve with a `resto.` prefix,
+e.g. `resto.ma57_pivtol=0.5`, which leaves the main solve's value alone.
+
+> Up to and including 0.10.0 **none of the nine reached the backend**.
+> They were registered, documented, parsed and validated — and then
+> discarded: `Ma57Options::from_options_list` was a correct reader with
+> no callers, because every construction site went through
+> `Ma57SolverInterface::new()`, which hard-codes the defaults. Set to any
+> value, the factorization behaved as though you had set nothing
+> ([#825](https://github.com/jkitchin/pounce/issues/825)). They are wired
+> from 0.11.0 on, which means a build that was tuning MA57 through these
+> knobs will now actually be tuned by them — expect the trajectory to
+> move. `ma57_pivtolmax` also now refuses a value below `ma57_pivtol`
+> rather than accepting an empty escalation range.
+
 ### MA57 batched back-substitution (`ma57_batched_backsolve`)
 
 Only relevant in a `--features ma57` build running `linear_solver=ma57`.
@@ -403,6 +438,45 @@ iterations, and the fastest arm was luck, not throughput.
 
 Full write-up, including why the option has no width ceiling the way
 the FERAL backend's equivalent does: `dev-notes/ma57-batched-backsolve.md`.
+
+### Withdrawing the constraint perturbation (`perturb_delta_c_max_rungs`)
+
+POUNCE extension; not an upstream Ipopt option. Default `3`; `0`
+restores the pre-[#592](https://github.com/jkitchin/pounce/issues/592)
+escalation exactly.
+
+When the KKT factorization does not deliver the requested inertia, the
+solver climbs a ladder of perturbations: `delta_w` on the Hessian block,
+and `delta_c` on the constraint block. `delta_c` is the remedy for a
+*rank-deficient constraint Jacobian*, and it is reached for when the
+factorization reports `Singular`.
+
+Since [#540](https://github.com/jkitchin/pounce/issues/540) a
+factorization also reports `Singular` when its inertia is
+**unmeasurable** — the count disagrees and the smallest pivot sits at the
+noise floor. That is evidence about the measurement, not about the
+Jacobian's rank. When the Jacobian in fact has full rank `delta_c`
+cannot help, and because it stays switched on for the rest of that
+augmented system, the `delta_w` ladder then has to climb against a
+matrix `delta_c` has made *harder* to hit the requested inertia on. On
+the #592 model that cost five rungs, ending at `delta_w = 1e2` where
+Ipopt accepted the step at `1e-4`; the over-damped step froze the
+objective for eight iterations and the solver exited at a point a
+restart improved by 0.08%.
+
+Rather than predict which kind of `Singular` a report was — the counts
+are the very thing #540 established are noise — the ladder answers it
+empirically. After this many rungs with `delta_c` on and still no
+acceptable inertia, `delta_c` is withdrawn, the `delta_w` ladder
+restarts, and `delta_c` is latched off for the remainder of that
+augmented system; the next iterate starts clean. Lower values withdraw
+sooner.
+
+Where `delta_c` is the right remedy this never fires: on `eigena2` and
+`eigenb2` it is followed by at most one rung. See
+`crates/pounce-common/src/pd_perturbation.rs`
+(`maybe_withdraw_delta_c`) and
+`dev-notes/issue-592-restart-non-idempotence.md`.
 
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 
@@ -1037,6 +1111,139 @@ adaptive oracle stops making progress. Defaults mirror upstream
 | `adaptive_mu_kkt_norm_type`             | `2-norm-squared` | Norm used to score the iterate in adaptive globalization decisions.                  |
 | `adaptive_mu_max_free_returns`          | `-1`    | Cap on returns to free-μ mode after entering monotone mode; `-1` is unlimited (upstream). POUNCE extension (#749). |
 | `adaptive_mu_budget_pin_fraction`       | `0.75`  | Fraction of an explicitly set `max_cpu_time`/`max_wall_time` after which the strategy finishes monotone; `1` disables. Inert without a time budget. POUNCE extension (#753). |
+
+## Hessian approximation (`hessian_approximation`)
+
+Which second-derivative information the algorithm works from. Four
+values; the first two are Ipopt's, the last two are POUNCE extensions
+with no upstream counterpart.
+
+| value | needs from the model | when |
+|---|---|---|
+| `exact` (default)  | `eval_h` — real second derivatives | the fast path whenever they exist |
+| `limited-memory`   | nothing beyond the gradient        | no second derivatives available |
+| `finite-difference`| the **analytic Jacobian** plus a sparsity pattern | no `eval_h`, but the Jacobian is exact and sparse |
+| `partitioned`      | the declared Jacobian sparsity     | structured models, above all direct collocation |
+
+`exact` and `limited-memory` are documented under
+[L-BFGS initialization](#limited-memory-hessian-l-bfgs-initialization)
+and throughout this page. The other two are below.
+
+### `finite-difference`
+
+Recovers the exact Lagrangian Hessian by differencing the analytic
+Jacobian along a set of probe directions, rather than approximating it
+from step/gradient pairs. Where L-BFGS presents the linear solver a
+dense low-rank correction over a diagonal, this hands it the model's
+real sparse Hessian, so a structured problem factors like one.
+
+The cost is one Jacobian evaluation per probe *group*, per rebuild. Three
+options control how many groups there are and how often you pay for them:
+
+| option | default | values | what it does |
+|---|---|---|---|
+| `fd_hessian_pattern`   | `declared` | `declared`, `jacobian` | where the sparsity pattern comes from |
+| `fd_hessian_coloring`  | `cpr`      | `cpr`, `star`          | how columns are grouped into probes |
+| `fd_hessian_reuse_tol` | `0`        | ≥ 0                    | relative movement below which the previous Hessian is reused |
+
+**`fd_hessian_pattern`.** `declared` uses the TNLP's declared Hessian
+*structure* — the structure call only, never the values, so it is
+available to any model that cannot evaluate second derivatives; every
+`.nl` declares one through AMPL's AD. `jacobian` derives it from the
+Jacobian pattern alone, as the union over rows of
+`supp(∇g) ⊗ supp(∇g)`. That is a strict *superset* of the true pattern,
+so it is safe — a superset costs extra probe groups, never a wrong
+answer — but it is not free: on `benchmarks/large_scale` `laptime` it is
+146 267 nonzeros against the true 28 000. There is deliberately no mode
+that guesses a *subset*, which would silently drop curvature.
+
+**`fd_hessian_coloring`.** A star colouring needs fewer groups than
+Curtis-Powell-Reid — on the Jacobian-derived `laptime` pattern, 42 where
+CPR needs 76 — and its recovery is algebraically exact, so it looks like
+the better default and is not. A forward difference is not an exact
+Hessian-vector product: it carries a third-derivative cross term into
+each row, and CPR's distance-2 property forbids the two columns that
+term needs from sharing a group, while a star colouring does not.
+Measured on `laptime`, star over the Jacobian pattern takes 404
+iterations to a *wrong* objective where CPR takes 38 to the right one;
+over the sparser declared pattern both take 30. Group size is not the
+cause — declared/star has the largest groups of the four and is fine.
+Use `star` only on a sparse declared pattern, and measure.
+
+**`fd_hessian_reuse_tol`.** A rebuild costs one Jacobian evaluation per
+group, so skipping it when nothing has moved is the cheapest saving
+available. Both the primal iterate *and* the multipliers are tested, not
+just `x`: the Lagrangian Hessian is `∇²f + Σⱼ yⱼ ∇²cⱼ`, so a cached
+Hessian is stale the moment `y` moves even if `x` has not — and the
+endgame of an interior-point solve is full of short steps with moving
+duals. `0`, the default, rebuilds every iteration.
+
+> `finite-difference` will produce a Hessian for a model whose second
+> derivatives do not exist, because it never asks for them.
+> `hessian_approximation=exact` refuses such a model; this one does not.
+> That is the point of it, and also the risk: the answer is only as good
+> as the Jacobian is differentiable.
+
+### `partitioned`
+
+Keeps one small dense quasi-Newton block per *element function* — the
+objective, and each constraint row, whose support is a row of the
+Jacobian — and assembles them into a genuine sparse Hessian. The linear
+solver then sees the model's real block structure instead of the
+diagonal the limited-memory low-rank path presents. Intended for
+structured problems where second derivatives are unavailable but the
+Jacobian sparsity is declared; direct-collocation trajectory
+optimization above all.
+
+| option | default | values | what it does |
+|---|---|---|---|
+| `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
+| `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
+| `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
+| `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
+| `partitioned_curvature_cap` | off (`inf`)      | > 0                        | cap on one update's movement. **Leave off** |
+
+**`partitioned_elements`.** `per-constraint` gives each block a
+multiplier-independent target and assumes nothing about variable
+ordering, at the cost of as many blocks as there are constraints.
+`blocks` is the partition of Asprion, Chinellato and Guzzella: a direct
+collocation transcription orders its variables by stage, so the
+Lagrangian Hessian is close to block diagonal in contiguous blocks and
+the block count is the *stage* count. Set `partitioned_block_size` to
+what one stage contributes (states × collocation points, plus controls)
+— too small and the block misses genuine intra-stage coupling, too large
+and each block carries more parameters than its one curvature pair per
+iteration can determine. The ordering assumption is reported rather than
+trusted: `POUNCE_PARTITIONED_ORACLE` prints the fraction of the exact
+Hessian's Frobenius mass that falls inside the block pattern.
+
+**`partitioned_update_type`.** SR1 is the default because an individual
+constraint is not convex. Damped BFGS would force every element model
+PSD, the solve would then scale it by a multiplier of either sign, and
+the indefiniteness would never reach the inertia correction.
+`elements=blocks` defaults to damped BFGS instead, since there the
+element *is* the Lagrangian restricted to a block, which is the object
+an interior-point method wants a positive-definite model of.
+
+**`partitioned_max_element`.** An element with `k` nonzeros costs
+`k(k+1)/2` stored reals, so one wide constraint row would dominate the
+memory. Elements wider than this degrade to a diagonal approximation
+satisfying the weak secant condition rather than being *dropped*, so a
+separable objective is still represented exactly and a coupled one
+approximately.
+
+**`partitioned_curvature_cap` — off, and every finite value measured was
+worse than off**, non-monotonically so. On `benchmarks/large_scale`
+`laptime` at `N=80` with `max_iter=1200` (true optimum 65.462928):
+`cap=1e1` exits `ErrorInStepComputation` at 1071 iterations and
+65.518586; `cap=1e2` hits the iteration limit at 67.202124; `cap=1e6`
+hits it at 80.398129; off converges in 559 iterations at 65.462802.
+Rejecting an update is *selective* — it drops exactly the elements whose
+curvature is moving fastest and leaves those blocks stale while their
+neighbours update, and the resulting inconsistent Hessian costs more
+than a uniformly noisy but coherent one. Kept as a knob so the effect
+can be re-measured against a different element decomposition. Do not
+enable it without measuring.
 
 ## Limited-memory Hessian (L-BFGS) initialization
 

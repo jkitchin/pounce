@@ -45,6 +45,7 @@ pub mod error;
 pub mod factor;
 pub(crate) mod homotopy;
 pub mod kkt;
+pub mod negcurv;
 pub mod options;
 pub mod problem;
 pub mod qps;
@@ -63,8 +64,12 @@ pub use kkt::{
     assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,
     is_pure_equality_no_bounds, rhs_equality_only,
 };
+pub use negcurv::SecondOrder;
 pub use options::{ActiveSetOverrides, AntiCyclingChoice, QpAlgorithm, QpOptions};
-pub use problem::{HessianInertia, ParametricSource, QpProblem, QpSolution, QpStats, QpWarmStart};
+pub use problem::{
+    HessianInertia, ParametricSource, QpProblem, QpSolution, QpStats, QpWarmStart,
+    SecondOrderVerdict,
+};
 pub use qps::{QpsModel, parse_qps};
 pub use solver::{ParametricActiveSetSolver, QpSolver};
 pub use working_set::{BoundStatus, ConsStatus, WorkingSet};

@@ -648,7 +648,7 @@ choice — mirroring the CLI option of the same name:
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
-| `"qp-active-set"` | Run the `pounce-qp` active-set engine on a detected LP/QP — the **same engine and route the CLI uses**. Alone among these, it accepts an **indefinite** objective Hessian (a nonconvex QP), for a *local* solution. Raises `ValueError` if the problem is not a detected LP/QP with linear constraints; for the active-set *SQP outer loop* on a general NLP, pass `algorithm="active-set-sqp"`. |
+| `"qp-active-set"` | Run the `pounce-qp` active-set engine on a detected LP/QP — the **same engine and route the CLI uses**. Alone among these, it accepts an **indefinite** objective Hessian (a nonconvex QP), for a *local* solution. Two second-order guards stand behind `optimal` since gh #848 — the engine certifies its working set's null space and escapes any negative curvature it finds there, and the driver refuses a verdict it can beat by exhibiting a better feasible point — so the reported saddles are gone. Neither makes it global, and see [Choosing a solver](choosing-a-solver.md) for the case neither concludes. Raises `ValueError` if the problem is not a detected LP/QP with linear constraints; for the active-set *SQP outer loop* on a general NLP, pass `algorithm="active-set-sqp"`. |
 
 Any other value raises `ValueError`. These are the same six selectors the CLI
 accepts, and matching is case-insensitive, as on the CLI.

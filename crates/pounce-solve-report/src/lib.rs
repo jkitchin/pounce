@@ -97,6 +97,57 @@ pub struct SolveReport {
     /// field deserializes unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub linear_solver: Option<LinearSolverSummaryInfo>,
+    /// What the second-opinion ladder did, when it ran at all. `None` when the
+    /// verdict opened no ladder — which is every ordinary solve.
+    ///
+    /// Additive; older `pounce.solve-report/v1` JSON without this field
+    /// deserializes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub second_opinion: Option<SecondOpinionInfo>,
+}
+
+/// The second-opinion ladder's record: which rungs ran, which (if any) was
+/// promoted, and **what the base solve did before any of it** (gh #850).
+///
+/// # Why the base solve's numbers are the point
+///
+/// On a promotion the reported `status` and `statistics.iteration_count` both
+/// become the promoted rung's, and nothing else in the report says the base
+/// solver failed. That makes a *lost* solve indistinguishable from a faster
+/// one, and it is worse than a gap in the evidence: it produces positive
+/// evidence for the wrong conclusion.
+///
+/// The case that exposed it is `square_flowsheet_resto`, where `v0.10.0`'s
+/// base solver converged in 116 iterations and HEAD's does not converge at all
+/// — `RestorationFailed` at 131 — with the answer coming from a ladder rung
+/// (`start_point_perturbation=1e-2`) added in the same release, which promotes
+/// at 54. `scripts/sweep-fixtures.sh` read that as `116 -> 54`, **a 2× win**.
+///
+/// The cost is understated on top of that: `statistics.iteration_count` is the
+/// promoted rung's alone, so the fixture's true cost is `131 + 54`, 3.4× what
+/// the report says. [`Self::total_iteration_count`] is the honest number.
+///
+/// This is the same shape of invisibility the sweep's engine column was added
+/// to close, and CLAUDE.md's rule applies verbatim: a line whose only moving
+/// field is "solved directly" → "promoted from a rung" is a trajectory change,
+/// and is as reportable as a moved iteration count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondOpinionInfo {
+    /// Rung labels actually run, in order.
+    pub tried: Vec<String>,
+    /// The rung whose re-solve was promoted, or `None` when the original
+    /// verdict survived every rung and shipped unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub promoted_by: Option<String>,
+    /// The verdict the ladder was opened on, before any rung ran.
+    pub base_status: String,
+    /// Iterations the base solve spent. Not included in
+    /// `statistics.iteration_count` when a rung was promoted.
+    pub base_iteration_count: usize,
+    /// Iterations each rung in `tried` spent, in the same order.
+    pub rung_iteration_counts: Vec<usize>,
+    /// Base plus every rung: what the solve actually cost.
+    pub total_iteration_count: usize,
 }
 
 /// Serializable mirror of [`pounce_linsol::summary::LinearSolverSummary`].
@@ -415,6 +466,7 @@ pub struct ReportBuilder {
     pub stats: StatisticsInfo,
     pub iterations: Vec<IterRecord>,
     pub linear_solver: Option<LinearSolverSummaryInfo>,
+    pub second_opinion: Option<SecondOpinionInfo>,
 }
 
 impl ReportBuilder {
@@ -453,7 +505,15 @@ impl ReportBuilder {
             stats: empty_stats(),
             iterations: Vec::new(),
             linear_solver: None,
+            second_opinion: None,
         }
+    }
+
+    /// Record what the second-opinion ladder did. Called only when it ran; a
+    /// verdict that opens no ladder leaves this `None` and the field out of
+    /// the JSON entirely (gh #850).
+    pub fn set_second_opinion(&mut self, info: SecondOpinionInfo) {
+        self.second_opinion = Some(info);
     }
 
     /// Attach a linear-solver post-mortem. Called once per solve after
@@ -527,6 +587,7 @@ impl ReportBuilder {
             statistics: self.stats,
             iterations: self.iterations,
             linear_solver: self.linear_solver,
+            second_opinion: self.second_opinion,
         }
     }
 }

@@ -110,6 +110,7 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-feral`](crates/pounce-feral)             | Pure-Rust sparse symmetric LDLᵀ backend. Default.                                                                             |
 | [`pounce-hsl`](crates/pounce-hsl)                 | MA57 backend via `libcoinhsl` (optional, behind `ma57` feature).                                                              |
 | [`pounce-nlp`](crates/pounce-nlp)                 | TNLP trait, TNLPAdapter, `IpoptApplication` entry point (Ipopt `src/Interfaces`).                                             |
+| [`pounce-nl`](crates/pounce-nl)                   | AMPL `.nl` reader and AD tape — parses the model and evaluates its derivatives; what `pounce-cli` reads a problem with.        |
 | [`pounce-algorithm`](crates/pounce-algorithm)     | IteratesVector, IpoptData, calculated quantities, KKT, line search, mu update, conv check, main loop (Ipopt `src/Algorithm`). |
 | [`pounce-restoration`](crates/pounce-restoration) | Restoration phase (Ipopt `Algorithm/Resto*`).                                                                                 |
 | [`pounce-presolve`](crates/pounce-presolve)       | NLP preprocessing — auxiliary-equality elimination, FBBT, bound tightening, redundant-row removal.                            |
@@ -122,8 +123,10 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`.                              |
 | [`pounce-py`](crates/pounce-py)                   | PyO3 bindings — the cyipopt-compatible `pounce` Python package (the `pounce-solver` wheel).                                  |
 | [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
+| [`pounce-rs`](crates/pounce-rs)                   | Single-crate Rust facade — re-exports the TNLP trait and the solver driver, so a Rust caller depends on one crate, not eight.  |
 | [`pounce-studio-core`](crates/pounce-studio-core) | Solve-report / iter-dump parsers and diagnostic analysis (foundation for the `pounce-studio` GUI / MCP server).               |
 | [`pounce-studio-pyo3`](crates/pounce-studio-pyo3) | PyO3 `_native` extension exposing `pounce-studio-core` to the `pounce-studio-mcp` Python MCP server.                          |
+| [`pounce-wasm`](crates/pounce-wasm)               | WebAssembly build behind the in-browser demo (`docs/` → `/demo/`). Not published to crates.io.                                 |
 
 ## Install
 

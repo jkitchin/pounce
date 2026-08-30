@@ -1192,7 +1192,7 @@ impl Default for AlgorithmBuilder {
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
             sqp: crate::sqp::SqpOptions::default(),
-            sqp_qp: pounce_qp::QpOptions::default(),
+            sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
             init: InitOptions::default(),
             kkt_schur: None,
         }
@@ -1765,7 +1765,7 @@ mod tests {
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
                             sqp: crate::sqp::SqpOptions::default(),
-                            sqp_qp: pounce_qp::QpOptions::default(),
+                            sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
                             init: InitOptions::default(),
                             kkt_schur: None,
                         }

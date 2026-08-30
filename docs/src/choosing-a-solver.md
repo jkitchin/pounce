@@ -149,7 +149,23 @@ pounce model.nl solver_selection=qp-active-set   # class: nonconvex QP
 
 Two things to hold onto about the answer. It is **local**: a nonconvex QP can
 have many KKT points, and what you get is the one the active set walked to,
-the same guarantee `minimize` gives on a nonconvex NLP. And the constraints
+the same guarantee `minimize` gives on a nonconvex NLP. It is at least a
+*minimum*, though, which took a fix — inertia control leaves the first-order
+conditions satisfied at a **saddle**, and until
+[issue #848](https://github.com/jkitchin/pounce/issues/848) the engine
+reported one as `optimal` (`min ½xᵀ[[1,5],[5,1]]x` over `[−1,1]²` came back at
+objective `0` against a true minimum of `−4`). From 0.11.0 two guards stand behind an
+`optimal` here. The engine tests the reduced Hessian on its working set's null
+space, and when it finds a feasible direction of negative curvature it follows
+it — to a better point, to an `unbounded` verdict if nothing blocks it, or to
+an honest non-`optimal` status if it runs out of budget. The driver then
+screens the result by *exhibition*, refusing a verdict only where it can walk a
+direction and hand you a strictly better feasible point; that one is not
+confined to the working set's null space, so it reaches negative curvature
+hidden behind a bound whose multiplier is exactly zero, which the first cannot
+see. What you do **not** get is a global minimum, or a guarantee in the case
+where neither guard concludes — the first-order verdict stands there, as it
+always did. And the constraints
 must be **linear** — the curvature this engine controls is the objective's, so
 an indefinite objective over any quadratic *row*, convex row or not, is a
 nonconvex QCQP and goes to the NLP filter-IPM instead (see

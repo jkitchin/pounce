@@ -47,15 +47,17 @@ impl SqpAlgorithm {
     pub fn new(qp_solver: ParametricActiveSetSolver, opts: SqpOptions) -> Self {
         Self {
             qp_solver,
-            qp_opts: QpOptions::default(),
+            qp_opts: QpOptions::sqp_subproblem(),
             opts,
             iterates: None,
             filter: SqpFilter::new(),
         }
     }
 
-    /// Override the per-call QP-solver options. Defaults are the
-    /// `pounce_qp::QpOptions::default()` (which include the
+    /// Override the per-call QP-solver options. Defaults are
+    /// `pounce_qp::QpOptions::sqp_subproblem()` — `QpOptions::default()`
+    /// with second-order certification off, for the reason given there
+    /// (which include the
     /// `use_schur_updates = false` and `anti_cycling = Expand`
     /// from Phase 5a.2). Callers can pin tighter tolerances or
     /// flip `use_schur_updates = true` for warm-started workloads.
@@ -275,6 +277,12 @@ impl SqpAlgorithm {
             }
         }
 
+        // Bounded so a curvature escape that keeps returning to the same
+        // neighbourhood cannot spin: each one costs a fresh descent, and a
+        // handful is far more than any of the measured models needs (one).
+        const MAX_SECOND_ORDER_ESCAPES: u32 = 8;
+        let mut escapes: u32 = 0;
+
         for outer in 0..self.opts.max_iter {
             let grad_f = nlp.eval_grad_f(&iter.x);
             let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
@@ -338,6 +346,87 @@ impl SqpAlgorithm {
             let stationarity_tol = self.opts.tol.min(self.opts.dual_inf_tol);
             if kkt.stationarity <= stationarity_tol && kkt.constr_viol <= self.opts.constr_viol_tol
             {
+                // First-order KKT is necessary and not sufficient. Before
+                // reporting success on an indefinite Lagrangian, look for a
+                // feasible direction of negative curvature *at the converged
+                // multipliers* and, where one is found, step along it and keep
+                // going (gh #856).
+                //
+                // `nonconvex_qp.nl` under `algorithm=active-set-sqp` is the
+                // case: `min x₀x₁ s.t. x₀+x₁ = 2, 0 ≤ x ≤ 4`, on whose
+                // feasible segment `f(x₀) = x₀(2−x₀)` is concave, so the
+                // `(1, 1)` this converges to at `f = 1` is the constrained
+                // **maximum** and the minimum is `0` at either endpoint. It was
+                // reported `Solve_Succeeded`. The escape below moves to
+                // `(2, 0)`, where a bound joins the active set, the null space
+                // closes and `f = 0` certifies.
+                //
+                // Refuted **by exhibition**, exactly as gh #848 does one layer
+                // down: the direction is only acted on after stepping along it
+                // and finding the true objective lower, so the curvature search
+                // is free to be approximate and a direction it gets wrong
+                // costs an evaluation rather than a wrong answer.
+                //
+                // The Hessian is the **exact** `∇²L`, taken here even when the
+                // steps were driven by a quasi-Newton one. That is not an
+                // optimization detail, it is what makes the check exist at all
+                // under `limited-memory`: a damped-BFGS or L-BFGS matrix is
+                // positive definite by construction, so searching it for
+                // negative curvature can only ever find none, and gating the
+                // check on `SqpHessianSource::Exact` left the L-BFGS leg
+                // certifying the same constrained maximum. `eval_hess_lag` is
+                // a required method of `SqpProblemSpec`, so it is always
+                // callable; this costs one Hessian evaluation per converged
+                // solve, and an implementation that has none to give returns
+                // an empty triplet, which finds no curvature and changes
+                // nothing.
+                //
+                // The L-BFGS leg is not exotic coverage: the Python frontend
+                // and the CasADi plugin both select `limited-memory` on their
+                // own whenever no exact Lagrangian Hessian is available.
+                let exact_hess = if matches!(self.opts.hessian, SqpHessianSource::Exact) {
+                    None
+                } else {
+                    Some(nlp.eval_hess_lag(&iter.x, &iter.lambda_g))
+                };
+                if escapes < MAX_SECOND_ORDER_ESCAPES
+                    && let Some(d) = negative_curvature_at_kkt_point(
+                        n,
+                        m,
+                        &iter.x,
+                        exact_hess.as_ref().unwrap_or(&hess_lag),
+                        &jac_c,
+                        &c_vals,
+                        &bl_c,
+                        &bu_c,
+                        &xl,
+                        &xu,
+                        self.opts.constr_viol_tol,
+                    )
+                    && let Some(next) = exhibit_better_point(
+                        nlp,
+                        &iter.x,
+                        &d,
+                        f_curr,
+                        &xl,
+                        &xu,
+                        &bl_c,
+                        &bu_c,
+                        self.opts.constr_viol_tol,
+                    )
+                {
+                    tracing::debug!(target: "pounce::sqp",
+                        "first-order KKT point refuted at second order; stepping \
+                         along negative curvature to a strictly better feasible \
+                         point (gh #856)");
+                    escapes += 1;
+                    iter.x = next;
+                    iter.working = None;
+                    f_cached = None;
+                    c_cached = None;
+                    prev_point = None;
+                    continue;
+                }
                 self.iterates = Some(iter.clone());
                 return Ok(SqpResult {
                     x: iter.x,
@@ -422,8 +511,45 @@ impl SqpAlgorithm {
             // carry over even when the active set does.
             let warm_started = iter.working.is_some();
             let mut sol = if let Some(prev_w) = iter.working.as_ref() {
-                self.qp_solver
-                    .solve_with_working_set(&qp, prev_w, &self.qp_opts)?
+                // A warm solve that *errors* falls back to cold rather than
+                // aborting the SQP (gh #855). The cold-start fallback below
+                // already exists for a warm solve that comes back `MaxIter` /
+                // `NumericalError`, on the reasoning that the carried-over
+                // working set can be a poor guess; a hard `Err` from the same
+                // call is the **stronger** form of that signal and was the one
+                // case the fallback could not see, because `?` propagated out
+                // of the whole algorithm first.
+                //
+                // The error that motivates this says so itself: `eigena2`
+                // under `algorithm=active-set-sqp` reaches outer iteration 17
+                // and the warm solve fails with "pinned KKT constraint block
+                // is rank-deficient (inertia shift masked a singular
+                // constraint block); prune to a linearly-independent subset".
+                // That is a statement about the *pinned set*, which is exactly
+                // what a warm start supplies and a cold start rebuilds. The
+                // SQP exited `Internal_Error` / `solve_result_num=500` -- "the
+                // solver broke, retry" -- on a model whose objective it can
+                // report; with the cold re-solve it ends
+                // `Maximum_Iterations_Exceeded` at `obj = 82.5177`, against
+                // the NLP arm's 82.5 on the same file.
+                //
+                // The cold error is still propagated: if a clean start fails
+                // too, the failure is not about the working set and there is
+                // nothing further to try here.
+                match self
+                    .qp_solver
+                    .solve_with_working_set(&qp, prev_w, &self.qp_opts)
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(target: "pounce::sqp",
+                            "warm-started step QP failed hard ({e:?}); re-solving \
+                             from cold, since the carried working set is what a \
+                             cold start rebuilds (gh #855)");
+                        n_qp_solves += 1;
+                        self.qp_solver.solve(&qp, None, &self.qp_opts)?
+                    }
+                }
             } else {
                 self.qp_solver.solve(&qp, None, &self.qp_opts)?
             };
@@ -445,7 +571,41 @@ impl SqpAlgorithm {
                 let cold = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += cold.stats.n_working_set_changes;
-                if cold.status == QpStatus::Optimal {
+                // `Unbounded` is accepted as well as `Optimal`, and it is
+                // the point of gh #855. A cold re-solve that comes back
+                // `Unbounded` has *found something* — an unblocked direction
+                // of negative curvature in the null space of its working set
+                // — and taking only `Optimal` threw that away, leaving `sol`
+                // on the original `MaxIter`. The unbounded-model fallback
+                // below is gated on `sol.status == Unbounded`, so the
+                // δ-shifted proximal step written for exactly this situation
+                // was unreachable from a retry.
+                //
+                // Accepting it is safe because the fallback does not trust it
+                // either: it re-tests the ray against the true NLP (gh #388)
+                // and only takes the proximal branch when the certificate
+                // does *not* survive. A spurious `Unbounded` therefore costs
+                // one re-test, not a wrong verdict.
+                //
+                // Nothing else can be accepted here: `Infeasible` from a cold
+                // solve would contradict the warm one on the same subproblem
+                // without a tie-breaker, and `MaxIter` / `NumericalError` are
+                // what we already have.
+                //
+                // COVERAGE, stated because it matters: no fixture in the CLI
+                // corpus reaches this branch. Swept under
+                // `algorithm=active-set-sqp`, the retries fire on three
+                // fixtures (`cresc4`, `eigena2`, `jit1_boxed`) and return only
+                // `MaxIter` or `Optimal`, including under `sqp_qp_max_iter`
+                // forced down to 2. gh #855 observed the `Unbounded` return on
+                // `eigena2` in a build carrying second-order certification for
+                // the step subproblem, which is gh #856's subject and does not
+                // exist here yet. It is kept rather than dropped because it is
+                // not redundant -- nothing else makes the unbounded-model
+                // fallback reachable from a retry -- which is the opposite of
+                // the gh #846 case, where a second arm already rejected
+                // everything the removed one would have.
+                if matches!(cold.status, QpStatus::Optimal | QpStatus::Unbounded) {
                     sol = cold;
                 }
             }
@@ -486,7 +646,17 @@ impl SqpAlgorithm {
                     .solve(&qp_data.as_qp(), None, &self.qp_opts)?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += retry.stats.n_working_set_changes;
-                if retry.status == QpStatus::Optimal {
+                // Same as the cold retry above (gh #855): an `Unbounded`
+                // verdict is a finding, not a failure, and discarding it hid
+                // the proximal fallback from this branch too.
+                //
+                // The subproblem stays consistent: this branch runs only
+                // while `sol.status` is `MaxIter`/`NumericalError`, so it
+                // cannot fire after the cold retry has been accepted, and
+                // `qp_data` is rebound above — so the fallback below re-solves
+                // the *reset-Hessian* subproblem that produced this verdict,
+                // not the discarded one.
+                if matches!(retry.status, QpStatus::Optimal | QpStatus::Unbounded) {
                     sol = retry;
                 }
             }
@@ -1101,6 +1271,258 @@ fn compute_grad_lag(
         out[col_j] += jac_c.vals[k] * lambda_g[row_i];
     }
     out
+}
+/// Walk `d` from `x` and return a strictly better feasible point, or `None`.
+///
+/// This is what turns a curvature *direction* into a refutation. gh #848
+/// established the shape one layer down: a feasible point with a strictly
+/// lower objective is proof needing no theory, so the search that produced
+/// `d` may be as approximate as it likes — a direction it gets wrong costs
+/// the evaluations below and nothing else.
+///
+/// The step length is the distance to the first blocking variable bound,
+/// halved back until the *nonlinear* constraints are satisfied to
+/// `constr_viol_tol`. That backtrack is the difference between this and the
+/// QP-level version: `d` lies in the null space of the *linearized* active
+/// constraints, which holds them exactly only where they are linear.
+/// `nonconvex_qp`'s equality is linear, so the first trial is accepted there;
+/// a curved constraint gives up its step rather than trading feasibility for
+/// objective, which the SQP's own merit function would then have to undo.
+#[allow(clippy::too_many_arguments)]
+fn exhibit_better_point<N: SqpProblemSpec>(
+    nlp: &mut N,
+    x: &[Number],
+    d: &[Number],
+    f_curr: Number,
+    xl: &[Number],
+    xu: &[Number],
+    bl_c: &[Number],
+    bu_c: &[Number],
+    constr_viol_tol: Number,
+) -> Option<Vec<Number>> {
+    let n = x.len();
+    let dn = d.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    if !(dn > 0.0) || !dn.is_finite() {
+        return None;
+    }
+    // Both signs: curvature is even, so `-d` descends wherever `d` does, and
+    // only one of them may have room before a bound.
+    for sign in [1.0_f64, -1.0] {
+        let mut alpha = f64::INFINITY;
+        for i in 0..n {
+            let di = sign * d[i];
+            if di > 1e-12 * dn && xu[i] < f64::INFINITY {
+                alpha = alpha.min((xu[i] - x[i]) / di);
+            }
+            if di < -1e-12 * dn && xl[i] > f64::NEG_INFINITY {
+                alpha = alpha.min((x[i] - xl[i]) / -di);
+            }
+        }
+        // Unbounded in this direction is not this function's business -- the
+        // unbounded-model fallback owns that -- so cap and keep going.
+        if !alpha.is_finite() {
+            alpha = 1.0 / dn;
+        }
+        for _ in 0..24 {
+            if !(alpha > 0.0) {
+                break;
+            }
+            let trial: Vec<Number> = (0..n)
+                .map(|i| (x[i] + sign * alpha * d[i]).clamp(xl[i], xu[i]))
+                .collect();
+            let viol = nlp
+                .eval_c(&trial)
+                .iter()
+                .enumerate()
+                .fold(0.0_f64, |a, (j, &cj)| {
+                    a.max((bl_c[j] - cj).max(0.0)).max((cj - bu_c[j]).max(0.0))
+                });
+            if viol <= constr_viol_tol {
+                let f_trial = nlp.eval_f(&trial);
+                // Strictly better by more than the objective's own scale can
+                // round, so this cannot fire on noise at a genuine optimum.
+                if f_trial.is_finite() && f_trial < f_curr - 1e-10 * (1.0 + f_curr.abs()) {
+                    return Some(trial);
+                }
+                break;
+            }
+            alpha *= 0.5;
+        }
+    }
+    None
+}
+
+/// A feasible direction of negative curvature at a *converged* first-order
+/// point, or `None` when the point survives the second-order test (gh #856).
+///
+/// # Why this runs at convergence and not at each step
+///
+/// gh #848 gave standalone QP solves a second-order screen. Applying the same
+/// screen to the SQP's **step** subproblem is wrong, and gh #856 has the
+/// counterexample: that QP is a local model built from the *current*
+/// multiplier estimates, and its second-order verdict is not the NLP's. At
+/// SQP iteration 0 the multipliers are still zero, so the exact Lagrangian
+/// Hessian is `∇²f`; started at HS071's own `x*` the step QP's working set
+/// leaves a one-dimensional null space on which `dᵀHd = -4.05e-2`, and the
+/// point is refuted — correctly for that model, wrongly for the NLP, whose
+/// reduced Hessian at `x*` is positive once the multipliers have converged.
+///
+/// At *convergence* that objection disappears: the multipliers are the
+/// converged ones, so `∇²L` is the Hessian the second-order condition is
+/// actually about. This is the same distinction gh #856 draws when it says
+/// "with the converged multipliers the reduced Hessian is positive" — the
+/// check is meaningful exactly where it is run.
+///
+/// # What it computes
+///
+/// `Z` is an orthonormal basis for the null space of the active constraint
+/// normals — equality rows, active inequality rows and active bounds — taken
+/// from the eigenvectors of `BᵀB` whose eigenvalue is negligible against the
+/// largest. The reduced Hessian `ZᵀHZ` is then eigen-decomposed, and a
+/// sufficiently negative eigenvalue yields `d = Z v`: a direction that holds
+/// every active constraint to first order and along which the objective
+/// curves down.
+///
+/// Returns `None` when there is no negative curvature, when the active set
+/// leaves no degrees of freedom, or when either eigensolve fails to converge
+/// — never a direction it is unsure of, since the caller acts on it.
+#[allow(clippy::too_many_arguments)]
+fn negative_curvature_at_kkt_point(
+    n: usize,
+    m: usize,
+    x: &[Number],
+    hess_lag: &Triplet,
+    jac_c: &Triplet,
+    c_vals: &[Number],
+    bl_c: &[Number],
+    bu_c: &[Number],
+    xl: &[Number],
+    xu: &[Number],
+    tol: Number,
+) -> Option<Vec<Number>> {
+    // Dense and `O(n³)`, so it is bounded rather than let loose on a large
+    // model. It runs once, at convergence, on the way to reporting success —
+    // and skipping it returns exactly today's answer, so the ceiling costs
+    // coverage and never correctness. (Contrast gh #849, where the analogous
+    // ceiling silently withdrew a *guarantee*.)
+    const MAX_N: usize = 512;
+    if n == 0 || n > MAX_N {
+        return None;
+    }
+
+    // The active set. A bound or row counts as active when the iterate sits
+    // on it to within the same tolerance the convergence test just used, so
+    // this is the set the verdict was issued about.
+    let mut rows: Vec<Vec<Number>> = Vec::new();
+    for j in 0..m {
+        let lo_active = bl_c[j] > f64::NEG_INFINITY && (c_vals[j] - bl_c[j]).abs() <= tol;
+        let hi_active = bu_c[j] < f64::INFINITY && (bu_c[j] - c_vals[j]).abs() <= tol;
+        if lo_active || hi_active {
+            let mut r = vec![0.0; n];
+            // `pounce_linalg` triplets are **1-based** (see `triplet.rs`).
+            for k in 0..jac_c.vals.len() {
+                if jac_c.irow[k] as usize == j + 1 {
+                    r[jac_c.jcol[k] as usize - 1] += jac_c.vals[k];
+                }
+            }
+            rows.push(r);
+        }
+    }
+    for i in 0..n {
+        let on_lo = xl[i] > f64::NEG_INFINITY && (x[i] - xl[i]).abs() <= tol;
+        let on_hi = xu[i] < f64::INFINITY && (xu[i] - x[i]).abs() <= tol;
+        if on_lo || on_hi {
+            let mut r = vec![0.0; n];
+            r[i] = 1.0;
+            rows.push(r);
+        }
+    }
+
+    // Null space of the active normals, from the eigenvectors of `BᵀB`.
+    let mut z: Vec<Number> = Vec::new();
+    let n_dof;
+    if rows.is_empty() {
+        n_dof = n;
+        z = vec![0.0; n * n];
+        for i in 0..n {
+            z[i * n + i] = 1.0;
+        }
+    } else {
+        let mut btb = vec![0.0; n * n];
+        for r in &rows {
+            for a in 0..n {
+                if r[a] == 0.0 {
+                    continue;
+                }
+                for c in 0..n {
+                    btb[c * n + a] += r[a] * r[c];
+                }
+            }
+        }
+        let (mut ev, mut evec) = (vec![0.0; n], vec![0.0; n * n]);
+        if !pounce_linalg::symmetric_eigen(&btb, n, &mut ev, &mut evec) {
+            return None;
+        }
+        let lam_max = ev.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let cut = 1e-9 * lam_max.max(1.0);
+        for (j, &lam) in ev.iter().enumerate() {
+            if lam.abs() <= cut {
+                z.extend_from_slice(&evec[j * n..(j + 1) * n]);
+            }
+        }
+        n_dof = z.len() / n;
+    }
+    if n_dof == 0 {
+        return None;
+    }
+
+    // `H Z`, then `Zᵀ (H Z)`.
+    let mut hz = vec![0.0; n * n_dof];
+    for k in 0..n_dof {
+        let (zc, out) = (&z[k * n..(k + 1) * n], &mut hz[k * n..(k + 1) * n]);
+        // Stored as one triangle, so an off-diagonal entry contributes to
+        // both of its rows.
+        for e in 0..hess_lag.vals.len() {
+            let (r, c, v) = (
+                hess_lag.irow[e] as usize - 1,
+                hess_lag.jcol[e] as usize - 1,
+                hess_lag.vals[e],
+            );
+            out[r] += v * zc[c];
+            if r != c {
+                out[c] += v * zc[r];
+            }
+        }
+    }
+    let mut rh = vec![0.0; n_dof * n_dof];
+    for a in 0..n_dof {
+        for b in 0..n_dof {
+            rh[b * n_dof + a] = (0..n).map(|i| z[a * n + i] * hz[b * n + i]).sum();
+        }
+    }
+
+    let (mut ev, mut evec) = (vec![0.0; n_dof], vec![0.0; n_dof * n_dof]);
+    if !pounce_linalg::symmetric_eigen(&rh, n_dof, &mut ev, &mut evec) {
+        return None;
+    }
+    // Relative to the Hessian's own scale, so this cannot fire on the
+    // rounding noise of a genuinely positive-semidefinite reduced Hessian.
+    let h_scale = hess_lag
+        .vals
+        .iter()
+        .fold(0.0_f64, |a, v| a.max(v.abs()))
+        .max(1.0);
+    if ev[0] >= -1e-8 * h_scale {
+        return None;
+    }
+    // `d = Z v` with `v` the eigenvector of the most negative eigenvalue --
+    // column 0 of the column-major `evec`, since the eigensolver returns them
+    // in ascending order.
+    let mut d = vec![0.0; n];
+    for (i, di) in d.iter_mut().enumerate() {
+        *di = (0..n_dof).map(|k| z[k * n + i] * evec[k]).sum();
+    }
+    Some(d)
 }
 
 pub(crate) fn check_kkt(

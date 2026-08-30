@@ -118,8 +118,20 @@ pub enum ProblemClass {
     /// Quadratic objective with an indefinite (sense-adjusted) Hessian and
     /// **linear** constraints. `auto` falls through to the NLP solver for a
     /// local minimum; `solver_selection=qp-active-set` solves it directly with
-    /// the `pounce-qp` active-set engine, which controls the inertia of the
-    /// reduced Hessian and is documented to take an indefinite `H` (gh #786).
+    /// the `pounce-qp` active-set engine, which takes an indefinite `H`
+    /// (gh #786) and returns a *local* minimum.
+    ///
+    /// What "local minimum" means on that path is narrower than it reads, and
+    /// was narrower still before gh #848. The §4.5 inertia control shifts
+    /// `H -> H + delta*I` so the *local model* is convex; it does not move the
+    /// iterate, and at a saddle `g = 0` makes the shifted step zero. So the
+    /// engine used to stop there and certify `Optimal` on the first-order
+    /// evidence alone — vanishing projected gradient, sign-admissible
+    /// working-set multipliers — which a saddle, and the constrained *maximum*
+    /// of `min x0*x1` on `x0 + x1 = 2`, satisfy exactly. The engine now
+    /// exhibits a direction `d` with `A_W d = 0` and `d'Hd < 0` and follows it
+    /// before certifying, so an `Optimal` here is second-order. It is still
+    /// only local: nothing on this path rules out a better minimum elsewhere.
     ///
     /// The linear-constraints half of that is load-bearing, not descriptive:
     /// both consumers reach the model through
@@ -660,9 +672,33 @@ fn classify_inner(prob: &NlProblem) -> (ProblemClass, ClassReason) {
 /// convex classes: `pounce-qp` handles an indefinite Hessian by construction
 /// (§4.5 inertia control), which is what `docs/src/choosing-a-solver.md` has
 /// always advertised, so a `NonconvexQp` is accepted here and dispatched to it
-/// for a *local* solution (gh #786). `auto` still sends that class to the NLP
-/// filter-IPM — the class is our inference, and the general path is the safer
-/// default for it — so this is reachable only by asking for the engine by name.
+/// (gh #786). `auto` still sends that class to the NLP filter-IPM — the class
+/// is our inference, and the general path is the safer default for it — so
+/// this is reachable only by asking for the engine by name.
+///
+/// **What the verdict on an indefinite QP does and does not mean (gh #848).**
+/// This comment used to say the engine returns "a *local* solution", reading
+/// §4.5 inertia control as a second-order guarantee. It is not one: inertia
+/// control shifts the KKT diagonal so each *factorization* has the right
+/// inertia, which makes the linear algebra work and says nothing about the
+/// curvature of `P` on the feasible directions at the point finally returned.
+/// On `P = [[1, 5], [5, 1]]` over `[-1, 1]²` the engine reported `Optimal` at
+/// the strict saddle `x = 0`, `f = 0`, where `x = (1, -1)` is feasible at
+/// `f = -4`.
+///
+/// Second-order evidence is now part of the verdict, from two guards that
+/// cover different classes (both described on
+/// [`pounce_convex::solve_qp_active_set_inertia`]). The engine certifies the
+/// reduced Hessian on its working set's null space and, where it finds a
+/// witness of negative curvature, escapes along it and returns the *better
+/// point* — so the fix is usually a better answer rather than a worse status.
+/// The driver then screens what comes back by exhibition, which reaches the
+/// degenerate-active-bound class the first cannot, and refuses a verdict only
+/// where it holds a strictly better feasible point in hand.
+///
+/// Local, still, and not even that in general: seeing past every working set
+/// is the NP-hard part of nonconvex QP. `sqp_qp_certify_second_order` turns
+/// the engine-side check off.
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,

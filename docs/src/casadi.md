@@ -717,6 +717,15 @@ describe, so the feasibility phase uses the limited-memory updater — the
 same scoping the partitioned Hessian has. You do not need to configure
 this, and `stats()["restoration"]` reports the phase as usual.
 
+**The mode is not CasADi-specific.** Everything above is about how the
+*plugin* supplies the pattern; the mode itself is reachable from the CLI,
+Python and Pyomo too. Its two other knobs — `fd_hessian_coloring` (why
+the fewer-groups star colouring is not the default) and
+`fd_hessian_reuse_tol` (skipping a rebuild when neither `x` nor `y` has
+moved) — and the sibling `hessian_approximation=partitioned` are
+documented under
+[Hessian approximation](options.md#hessian-approximation-hessian_approximation).
+
 ## Examples
 
 All runnable from

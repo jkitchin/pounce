@@ -82,7 +82,7 @@ no GAMS bindings. Add what you need in a derived image:
 ```dockerfile
 FROM ghcr.io/jkitchin/pounce:0.10.0
 USER root
-RUN pip install --no-cache-dir "pounce-solver[jax]==0.9.0"
+RUN pip install --no-cache-dir "pounce-solver[jax]==0.10.0"
 USER pounce
 ```
 

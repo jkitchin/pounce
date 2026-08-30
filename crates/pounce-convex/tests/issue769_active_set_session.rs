@@ -499,6 +499,7 @@ fn an_external_caller_can_translate_solve_and_read_back() {
     by_hand.status = verify_status(
         qsol.status,
         qsol.unbounded_ray.as_deref(),
+        qsol.stats.second_order,
         &by_hand,
         &prob,
         &opts,

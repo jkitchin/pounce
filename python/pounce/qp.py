@@ -303,11 +303,29 @@ def _lower_triangle_coo(P, n: int):
     return out_r, out_c, out_v
 
 
-# Largest n for which the default (auto) PSD check runs a dense O(n³)
-# eigenvalue solve. Above this the check is skipped unless ``check_psd=True``
-# is passed explicitly, so a large sparse QP is not silently slowed down by an
-# O(n³) densify-and-eig (see the dense-input scaling concern, issue #116).
-_PSD_CHECK_AUTO_MAX_N = 1500
+# Largest n for which the PSD check densifies and calls ``eigvalsh``. Above
+# this the *same question* is answered by an inertia count on a sparse
+# factorization instead (:func:`_psd_verdict_sparse`); the check is no longer
+# skipped.
+#
+# It used to be skipped, and that was gh #849. The ceiling encoded a real
+# trade-off — the dense check is an O(n³) densify-and-eig, and a large sparse
+# QP should not silently pay it (issue #116) — but it paid for it with a hard
+# cliff above which the guarantee changed with no option named and no warning:
+#
+#     P = I with P[0,0] = -3, c = 0, box [-1, 1], true infimum -1.5
+#     n = 1400, check_psd=None  ->  ValueError: P is not positive semidefinite
+#     n = 1600, check_psd=None  ->  status='optimal', obj = 0.0
+#
+# The only thing that changed is `n` crossing 1500. One sparse factorization
+# answers the same question exactly -- 0.6 ms on a 5000-variable Laplacian,
+# against 9.3 s for the Lanczos alternative -- so there is no longer a size at
+# which the default guarantee quietly weakens.
+_PSD_CHECK_DENSE_MAX_N = 1500
+
+# Backwards-compatible alias: the ceiling is now dense-vs-sparse rather than
+# check-vs-no-check, but the old name is public enough to be pinned against.
+_PSD_CHECK_AUTO_MAX_N = _PSD_CHECK_DENSE_MAX_N
 
 
 def _min_eig_lower_coo(pr, pc, pv, n: int) -> float:
@@ -334,18 +352,155 @@ def _min_eig_lower_coo(pr, pc, pv, n: int) -> float:
     return float(np.linalg.eigvalsh(M)[0]) if n else 0.0
 
 
+def _sym_csc_lower_coo(pr, pc, pv, n: int):
+    """The same symmetric matrix :func:`_min_eig_lower_coo` densifies, as CSC.
+
+    Each stored entry contributes at ``(r, c)`` and, when off-diagonal, also at
+    ``(c, r)``; duplicate coordinates **accumulate**, which is the COO
+    convention and what the solver does with them (gh #279). Built with numpy
+    rather than Python lists so a large ``P`` does not pay per-entry
+    interpreter cost."""
+    import scipy.sparse as sp
+
+    r = np.asarray(pr, dtype=np.int64)
+    c = np.asarray(pc, dtype=np.int64)
+    v = np.asarray(pv, dtype=np.float64)
+    off = r != c
+    rows = np.concatenate([r, c[off]])
+    cols = np.concatenate([c, r[off]])
+    vals = np.concatenate([v, v[off]])
+    return sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsc()
+
+
+def _count_eigenvalues_below(a, n: int, shift: float):
+    """Number of eigenvalues of ``a`` strictly below ``shift``, or ``None``
+    when the factorization cannot answer.
+
+    **Sylvester's law of inertia.** ``a − shift·I = L D Lᵀ`` has as many
+    negative diagonal entries as ``a`` has eigenvalues below ``shift``,
+    whatever ``L`` is, provided the congruence is genuine — which is why the
+    row and column permutations are checked for equality below. SuperLU is
+    asked for a symmetric ordering with the diagonal forced as pivot
+    (``diag_pivot_thresh=0``), which makes its ``U`` the ``D Lᵀ`` of that
+    factorization.
+
+    This is the same question the Rust side answers with
+    ``Factorization::number_of_neg_evals``, and it is one factorization rather
+    than an iteration, so it neither converges nor fails to. That matters:
+    the obvious alternative here is Lanczos, and measured on this exact
+    problem Lanczos is both slower and *wrong* in a way that is hard to
+    notice. A 5000-variable 1-D Laplacian takes **9.3 s** to reach its
+    smallest eigenvalue (a spectrum clustered near zero is its worst case)
+    against **0.6 ms** here, and under any bounded iteration budget it fails to
+    refute ``Laplacian − 4I`` — a matrix whose eigenvalues are *all* negative —
+    because that matrix's extreme eigenvalues are clustered too. A guard that
+    misses a negative-definite Hessian is not a guard.
+
+    ``None`` means *undecided*, never *positive semidefinite*: a caller that
+    reads a failure as a pass has reinvented gh #849.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import splu
+
+    try:
+        lu = splu(
+            (a - shift * sp.eye(n, format="csc")).tocsc(),
+            diag_pivot_thresh=0.0,
+            permc_spec="MMD_AT_PLUS_A",
+            options=dict(SymmetricMode=True),
+        )
+    except Exception:
+        return None
+    # A row permutation that differs from the column one is not a congruence,
+    # so its pivot signs are not an inertia. SuperLU may still swap for
+    # stability despite the threshold, and silently reading the count anyway
+    # is how this kind of test goes quietly wrong.
+    if not np.array_equal(lu.perm_r, lu.perm_c):
+        return None
+    du = lu.U.diagonal()
+    if du.shape[0] != n or not np.all(np.isfinite(du)) or np.any(du == 0.0):
+        return None
+    return int((du < 0).sum())
+
+
+def _psd_verdict_sparse(pr, pc, pv, n: int, tol_abs: float):
+    """``(is_psd, lam_min)`` for a large ``P`` without densifying it, or
+    ``None`` when the factorization could not decide.
+
+    The verdict is exact: one inertia count at the same threshold the dense
+    path compares against, so "is ``P`` PSD to tolerance" is answered by
+    Sylvester's law rather than estimated. Validated against
+    :func:`_min_eig_lower_coo` on twenty spectra — random indefinite, ``AᵀA``,
+    rank-deficient, rank-1, the zero matrix, ``λ_min`` at ``±1e-10`` either
+    side of the threshold, a 1-D Laplacian and that Laplacian shifted
+    negative-definite, and the same shapes at a ``1e12`` scale — agreeing on
+    every one, in 2 ms or less.
+
+    ``lam_min`` is then only needed for the error message, and only on the
+    failing branch, so it is bisected to the three digits that message prints
+    rather than solved for exactly. Each bisection step is another inertia
+    count.
+    """
+    a = _sym_csc_lower_coo(pr, pc, pv, n)
+    below = _count_eigenvalues_below(a, n, tol_abs)
+    if below is None:
+        return None
+    if below == 0:
+        # PSD to tolerance. No eigenvalue is computed, and none is needed —
+        # `lam_min` is reported only to explain a rejection. `tol_abs` is the
+        # true lower bound the count establishes.
+        return True, tol_abs
+    # Indefinite. Bracket `lam_min` in `[-‖a‖∞·(1+ε), tol_abs]` — Gershgorin
+    # bounds every eigenvalue by the largest absolute row sum — and bisect on
+    # "how many eigenvalues lie below this shift", which is the same primitive.
+    hi = tol_abs
+    row_sum = abs(a).sum(axis=1)
+    lo = -float(np.max(np.asarray(row_sum).ravel())) * (1.0 + 1e-9) - 1.0
+    width = hi - lo
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if not (lo < mid < hi):
+            break
+        k = _count_eigenvalues_below(a, n, mid)
+        if k is None:
+            break
+        if k > 0:
+            hi = mid
+        else:
+            lo = mid
+        # Relative to the bracket's own magnitude, not to 1.0: a floor of 1.0
+        # stops after an *absolute* 1e-4, which is the whole answer when
+        # `lam_min` is itself ~1e-4 (it reported -9.156e-05 for a true -1e-4).
+        # The second term is the point past which more bisection is noise.
+        if abs(hi - lo) <= max(1e-4 * abs(hi), 1e-15 * width):
+            break
+    return False, 0.5 * (lo + hi)
+
+
 def _psd_verdict_coo(pr, pc, pv, n: int):
-    """``(is_psd, lam_min)`` for the Hessian in lower-triangle COO form.
+    """``(is_psd, lam_min)`` for the Hessian in lower-triangle COO form, or
+    ``None`` when no method could decide.
 
     An empty ``P`` is an LP — trivially PSD, and reported as ``(True, 0.0)``
     without an eigenvalue solve. The tolerance is relative to the spectral
     scale so genuine PSD matrices with round-off-level negative eigenvalues
-    pass."""
+    pass.
+
+    Small matrices are densified and solved exactly; past
+    ``_PSD_CHECK_DENSE_MAX_N`` the same verdict comes from an inertia count on
+    a sparse factorization instead (gh #849), so the check scales rather than
+    being skipped. ``None`` is *undecided* — the factorization could not be
+    read as a congruence — and a caller must not read it as a pass;
+    :func:`_psd_verdict` turns it into a warning, which is the whole point of
+    the distinction."""
     if not pr:  # no Hessian entries → LP, trivially PSD
         return True, 0.0
-    lam_min = _min_eig_lower_coo(pr, pc, pv, n)
     scale = max(abs(v) for v in pv)
-    return lam_min >= -1e-8 * max(scale, 1.0), lam_min
+    tol_abs = -1e-8 * max(scale, 1.0)
+    if n <= _PSD_CHECK_DENSE_MAX_N:
+        lam_min = _min_eig_lower_coo(pr, pc, pv, n)
+        return lam_min >= tol_abs, lam_min
+    return _psd_verdict_sparse(pr, pc, pv, n, tol_abs)
 
 
 def _indefinite_error(lam_min: float) -> ValueError:
@@ -366,9 +521,13 @@ def _indefinite_error(lam_min: float) -> ValueError:
         "Hessian and reports a silently-wrong 'optimal' at a saddle point "
         "without one. To solve an indefinite QP, pass method='active-set' — "
         "the pounce-qp parametric active-set engine handles indefinite "
-        "Hessians and returns a local solution. Pass check_psd=False to skip "
-        "this check (e.g. if you know P is PSD and want to avoid the O(n^3) "
-        "eigenvalue cost)."
+        "Hessians. Note what its 'optimal' means there: first-order KKT holds, "
+        "and where the second-order check concludes, the reduced Hessian on the "
+        "working set's null space is positive definite (gh #848). The check looks "
+        "within that working set, not across working sets, so it is weaker than "
+        "the local-minimum guarantee the NLP path (pounce.minimize) gives on the "
+        "same model. Pass check_psd=False to skip this check (e.g. if you know P "
+        "is PSD and want to avoid the O(n^3) eigenvalue cost)."
     )
 
 
@@ -380,7 +539,25 @@ def _check_psd(pr, pc, pv, n: int) -> None:
     the per-forward guards in :mod:`pounce.jax` and :mod:`pounce.torch`, whose
     layers are IPM-only by construction (a non-KKT iterate makes the
     implicit-function gradient meaningless)."""
-    is_psd, lam_min = _psd_verdict_coo(pr, pc, pv, n)
+    verdict = _psd_verdict_coo(pr, pc, pv, n)
+    if verdict is None:
+        # Undecided is not a pass. The layers that call this are IPM-only by
+        # construction, so there is no engine to fall back to and the caller
+        # has to be told the precondition went unverified (gh #849).
+        warnings.warn(
+            f"could not determine whether P is positive semidefinite "
+            f"(n={n}: the sparse factorization could not be read as a "
+            f"congruence), so the interior-point engine's PSD precondition "
+            f"is UNCHECKED for this call rather than satisfied. On an "
+            f"indefinite P it reports a silently-wrong 'optimal' at a saddle "
+            f"point, and the implicit-function gradient taken through such a "
+            f"point is meaningless. Pass check_psd=False to accept that "
+            f"deliberately.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    is_psd, lam_min = verdict
     if not is_psd:
         raise _indefinite_error(lam_min)
 
@@ -388,9 +565,20 @@ def _check_psd(pr, pc, pv, n: int) -> None:
 def _psd_verdict(P, c, check_psd):
     """``(is_psd, lam_min)`` when the issue-#112 guard runs, else ``None``.
 
-    ``check_psd=False`` skips it; ``True`` forces it; ``None`` (the default)
-    runs it only when ``n <= _PSD_CHECK_AUTO_MAX_N`` so a large QP is not
-    slowed by the O(n^3) eigenvalue solve. ``c`` fixes ``n``.
+    ``check_psd=False`` skips it; ``True`` and ``None`` (the default) both run
+    it. ``c`` fixes ``n``.
+
+    The default used to skip the check above ``n = 1500``, which is gh #849:
+    the convex IPM — the *guarded* engine — then returned a silently-wrong
+    ``optimal`` on an indefinite ``P`` at default settings, with no option
+    named and no warning, and the only thing that had changed was ``n``
+    crossing a constant. The check now scales instead
+    (:func:`_psd_verdict_coo`), so the size of the problem no longer decides
+    whether the guarantee holds.
+
+    A check that runs and cannot decide warns rather than passing quietly:
+    "no check was run" and "the check passed" must not be the same observable,
+    which is exactly what the old cliff made them.
 
     Separated from :func:`_maybe_check_psd` because the *verdict* and what to
     do about it are two different questions once ``method=`` exists: the
@@ -399,9 +587,21 @@ def _psd_verdict(P, c, check_psd):
     if check_psd is False:
         return None
     n = np.asarray(c, dtype=np.float64).ravel().shape[0]
-    if not (check_psd or n <= _PSD_CHECK_AUTO_MAX_N):
-        return None
-    return _psd_verdict_coo(*_lower_triangle_coo(P, n), n)
+    verdict = _psd_verdict_coo(*_lower_triangle_coo(P, n), n)
+    if verdict is None:
+        warnings.warn(
+            f"solve_qp: could not determine whether P is positive "
+            f"semidefinite (n={n}: the sparse factorization could not be read "
+            f"as a congruence), so the convex engine's PSD precondition is "
+            f"UNCHECKED for this solve rather than satisfied. On an "
+            f"indefinite P the interior-point engine reports a "
+            f"silently-wrong 'optimal' at a saddle point. Pass "
+            f"check_psd=False to accept that deliberately, or use "
+            f"pounce.minimize / method='active-set' for a nonconvex QP.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return verdict
 
 
 def _maybe_check_psd(P, c, check_psd) -> None:
@@ -724,9 +924,16 @@ def solve_qp(
 
     The guard is scoped to ``method="ipm"``. Under ``method="active-set"`` an
     indefinite ``P`` is **solved**, not refused — the active-set engine
-    controls the inertia of the reduced Hessian and returns a *local*
-    solution, the same guarantee the NLP filter-IPM gives on a nonconvex NLP
-    (gh #786). The check still runs there when enabled, and its finding is
+    controls the inertia of the reduced Hessian, and then tests the point it
+    reaches for second-order optimality before reporting it (gh #848). That
+    test is what makes ``"optimal"`` mean something here: inertia control
+    alone leaves the first-order conditions satisfied at a *saddle*, which is
+    the same failure this guard refuses on the IPM's behalf. An ``"optimal"``
+    from the active-set engine is a point with no feasible direction of
+    negative curvature on its working set's null space — a local minimum, not
+    a global one, and not proof against the degenerate case where a
+    zero-multiplier bound keeps a direction out of the null space that is
+    searched. The check still runs there when enabled, and its finding is
     what tells the engine to drive an indefinite Hessian; it just does not
     raise. Where it does *not* run — ``check_psd=False``, or the default
     ``None`` above the ``n <= 1500`` cap — the engine is driven exactly as it
@@ -770,9 +977,11 @@ def solve_qp(
     # engine as a fact about `P` instead of raised.
     verdict = _psd_verdict(P, c, check_psd)
     if verdict is None:
-        # The guard did not run (``check_psd=False``, or ``None`` above the
-        # auto cap), so nothing here knows the inertia of ``P``. Say so rather
-        # than assert PSD. ``"unknown"`` and ``"psd"`` drive the engine
+        # The guard did not run (``check_psd=False``) or ran and could not
+        # decide (the sparse factorization was not readable as a congruence,
+        # which warns), so nothing here knows the inertia of ``P``. Say so
+        # rather than assert PSD. It is no longer reachable by ``P`` merely
+        # being large: that was the gh #849 cliff, and the check now scales. ``"unknown"`` and ``"psd"`` drive the engine
         # identically today — ``pounce-qp`` reads the claim only to decide how
         # its l1-elastic reformulation marks the augmented Hessian, and
         # collapses the two there — so this changes no solve; it just stops the

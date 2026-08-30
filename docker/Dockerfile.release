@@ -24,8 +24,8 @@
 # backend is the default and needs no external libraries.
 
 ARG PYTHON_VERSION=3.12
-# trixie (glibc 2.41), not bookworm (2.36), and not by preference — the
-# ALREADY-PUBLISHED wheels force it, and only until the next release.
+# bookworm (glibc 2.36). This was pinned to trixie (2.41) through 0.10.0,
+# and the pin is now discharged:
 #
 # #452: through 0.9.0, the Linux wheels were tagged manylinux2014 (glibc
 # 2.17) but bundled a `pounce` CLI built on the release runner's host
@@ -35,17 +35,21 @@ ARG PYTHON_VERSION=3.12
 #   pounce/bin/pounce: /lib/x86_64-linux-gnu/libc.so.6:
 #     version `GLIBC_2.39' not found
 #
-# on bookworm, on both amd64 and arm64.
+# on bookworm, on both amd64 and arm64. #456 fixed it by building the CLI in
+# the container, and `scripts/check-cli-portability.sh` in CI keeps it fixed.
 #
-# That is FIXED in main (#456) — the CLI is now built in the container and
-# CI asserts the floor stays within manylinux2014 — but the fix reaches PyPI
-# only when a `python-v*` tag rebuilds the wheels. This image installs from
-# PyPI, so until that release it must run on glibc >= 2.39.
+# The fix reached PyPI in 0.10.0, which is what this image installs. Measured
+# on the published artifact rather than inferred from the build:
 #
-# WHEN THE NEXT RELEASE SHIPS: drop this to bookworm (or lower — the floor
-# is now 2.16) and delete this comment. `scripts/check-cli-portability.sh`
-# in CI is what keeps that safe.
-ARG DEBIAN_RELEASE=trixie
+#   pounce_solver-0.10.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+#   objdump -T pounce/bin/pounce | grep GLIBC | sort -uV | tail -1
+#   -> GLIBC_2.16
+#
+# So the floor is 2.16 — under manylinux2014's own 2.17, and well under
+# bookworm's 2.36. Re-run that check against the release being built before
+# lowering this further; the binary's floor, not the wheel's tag, is what
+# decides.
+ARG DEBIAN_RELEASE=bookworm
 
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE}
 

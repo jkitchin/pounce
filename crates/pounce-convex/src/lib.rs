@@ -77,6 +77,11 @@ pub use pounce_qp::ActiveSetOverrides;
 // `QpProblem` field it fills; re-exported so a caller reaching the active-set
 // driver through this crate does not have to depend on `pounce-qp` directly.
 pub use pounce_qp::HessianInertia;
+// The engine's second-order finding, the third argument [`verify_status`]
+// needs and the one thing about the returned point that cannot be re-derived
+// from it (gh #848). Defined in `pounce-qp` next to the `QpStats` field it
+// fills; re-exported for the same reason `HessianInertia` is.
+pub use pounce_qp::SecondOrderVerdict;
 pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
 pub use qp::{
     BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,

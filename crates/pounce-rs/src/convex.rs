@@ -171,14 +171,14 @@ pub use pounce_convex::{
     ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, ConeSpec, HessianInertia,
     NEG_INF, POS_INF, PolyProblem, Polynomial, PresolveNote, PsdCertificateError, QpFactorization,
     QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution, QpStatus, QpWarmStart,
-    ReducedHessian, Reuse, SensError, SessionStats, SosBound, SosSolution, Triplet, back_translate,
-    back_translate_verified, certify_psd_lower_triangle, engine_options, screen_variable_box,
-    solve_qp_active_set, solve_qp_active_set_inertia, solve_qp_batch, solve_qp_batch_parallel,
-    solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
-    solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug,
-    solve_socp_ipm_warm, sos_constrained_lower_bound, sos_constrained_lower_bound_opts,
-    sos_lower_bound, sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
-    verify_status,
+    ReducedHessian, Reuse, SecondOrderVerdict, SensError, SessionStats, SosBound, SosSolution,
+    Triplet, back_translate, back_translate_verified, certify_psd_lower_triangle, engine_options,
+    screen_variable_box, solve_qp_active_set, solve_qp_active_set_inertia, solve_qp_batch,
+    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug,
+    solve_qp_ipm_warm, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm,
+    solve_socp_ipm_debug, solve_socp_ipm_warm, sos_constrained_lower_bound,
+    sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,
+    sos_minimize_opts, sos_opts, verify_status,
 };
 
 /// The underlying crate, for anything not surfaced above.

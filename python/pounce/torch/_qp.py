@@ -36,7 +36,7 @@ import numpy as np
 import torch
 
 from .. import _pounce
-from ..qp import _PSD_CHECK_AUTO_MAX_N, _check_psd
+from ..qp import _check_psd
 from ._build import _DT
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
@@ -50,14 +50,20 @@ def _guard_psd(P, n, check_psd=None):
     feed that garbage into the OptNet backward pass.
 
     ``check_psd`` has the same semantics as :func:`pounce.qp.solve_qp`'s
-    (M31): ``None`` (default) checks only when ``n <= 1500`` so a large QP is
-    not slowed by the O(n^3) eigenvalue solve, ``True`` always checks, and
-    ``False`` skips the check (e.g. a layer whose ``P`` is PSD by
-    construction, where the per-forward ``eigvalsh`` is pure overhead)."""
+    (M31): ``None`` (the default) and ``True`` both check; ``False`` skips it
+    (e.g. a layer whose ``P`` is PSD by construction, where the per-forward
+    check is pure overhead).
+
+    The default used to check only when ``n <= 1500``, which is gh #849: above
+    that the layer silently had no guard at all, on the engine that most needs
+    one — an indefinite ``P`` gives the IPM a saddle point, and the
+    implicit-function gradient taken through a non-KKT point is meaningless.
+    The check now scales (:func:`pounce.qp._psd_verdict_coo` answers it by an
+    inertia count rather than a dense ``eigvalsh`` once ``n`` is large), so
+    size no longer decides whether the precondition is verified."""
     if check_psd is False:
         return
-    if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
-        _check_psd(*_to_coo_lower(np.asarray(P)), n)
+    _check_psd(*_to_coo_lower(np.asarray(P)), n)
 
 
 # Note: unlike the NLP backward, the QP/SOCP backward reads the converged
