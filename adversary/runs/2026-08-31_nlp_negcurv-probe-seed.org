@@ -1,0 +1,92 @@
+#+TITLE: Adversary Run: Negative-curvature escape declines on a coordinate-aligned saddle
+#+DATE: <2026-08-31>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: nonconvex / second-order certification
+:SOURCE: analytic — min 0.5*(p*x0^2 - q*x1^2) on [-2,2]^2 from (0,0); minimum -2q at (0,±2)
+:KNOWN_OPTIMAL: -2q  (e.g. -2.1 for q = 1.05)
+:N_VARIABLES: 2 (and 3–6 in the prevalence sweep)
+:N_CONSTRAINTS: bounds only
+:SELECTED_BY: PR review — PRs #802 (gh#797) and #807 (gh#805), merged 2026-08-27
+:COVERAGE_TARGET: crates/pounce-algorithm/src/kkt/pd_full_space_solver.rs (negative_curvature_direction, added by #802)
+:END:
+
+Minimize \(f(x) = \tfrac12 (p x_0^2 - q x_1^2)\) on \([-2,2]^2\) from \(x^{(0)}=0\).
+The origin is a first-order KKT point with an indefinite Hessian; the true
+minimum is \(-2q\) at \((0,\pm2)\). This is the model class ~neg_curv_escapes~
+exists to handle.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver                       | Status                 | Objective | Known | Notes                    |
+|------------------------------+------------------------+-----------+-------+--------------------------|
+| pounce (defaults, NLP arm)   | Optimal Solution Found |       0.0 |  -2.1 | saddle certified         |
+| pounce (solver_selection=qp-active-set) | Optimal Solution Found | -2.1 | -2.1 | correct                  |
+| multistart SLSQP (oracle)    | —                      |      -2.1 |  -2.1 | independent              |
+| pounce verify                | VERIFIED               | —         | —     | consistent: a saddle IS a KKT point |
+
+Prevalence at DEFAULT options over diagonal indefinite models with one negative
+eigenvalue: n=2 35%, n=3 28%, n=4 45%, n=5 42%, n=6 40% — 114 of 300 models
+returned ~Solve_Succeeded~ at the saddle.
+
+The same model with the two variables RENAMED gives different answers:
+- ~f = 0.5( x0^2 - 1.05 x1^2)~ → obj ~+0.0~ at (0,0)   [wrong]
+- ~f = 0.5(-1.05 x0^2 +  x1^2)~ → obj ~-2.1~ at (2,0)  [right]
+
+Raising ~neg_curv_escapes~ to 2, 5 or 20 does not help. Perturbing the start by
+~1e-8~ does (obj → -2.1), so the answer is discontinuous in the start at a point
+the solver is routinely handed.
+
+* Cross-check / Verification
+- Reproduced on the pure CLI ~.nl~ path at all defaults, so it is not a Python
+  wrapper artifact.
+- ~pounce verify~ returns VERIFIED (exit 0) on the saddle. That is *correct* —
+  verify checks feasibility and first-order KKT, and a saddle satisfies both —
+  and it is why no existing guard sees this.
+- The same binary solves both variable orderings correctly through the
+  ~qp-active-set~ engine (PR #860), so the disagreement is internal to POUNCE.
+- Mechanism confirmed by independent reimplementation: simulating the δ-ladder
+  and the 3-step inverse iteration with POUNCE's own ~fill_probe_seed~ constants
+  predicts fire/decline correctly on **10 of 10** models from the randomized
+  corpus.
+
+* Mechanism
+~negative_curvature_direction~ (pd_full_space_solver.rs:263) picks the smallest
+rung of a ×10 ladder (~NEG_CURV_DELTA_MIN=1e-8~, ~NEG_CURV_DELTA_FACTOR=10~)
+whose inertia is correct, then runs ~NEG_CURV_INVERSE_ITERS = 3~ steps of
+inverse iteration from a fixed deterministic seed.
+
+The decade ladder can overshoot \(|\lambda_{\min}|\) by up to 10×. For
+\(\lambda(P) = (1, -1.05)\) the ladder rejects δ=1 and takes δ=10, so the shifted
+spectrum is \((11, 8.95)\) — a ratio of 0.81. Three inverse iterations amplify the
+negative direction by only \(1/0.81^3 \approx 1.9\), which is not enough to make
+the Rayleigh quotient negative when the fixed seed's component along it is small.
+The routine then hits ~if !(best_curvature < 0.0) { return None; }~ and declines
+**silently** — there is a debug line for "positive definite here" but none for
+"could not find a witness", and no status distinguishes "certified second-order"
+from "could not check".
+
+The sibling implementation merged the same week, ~crates/pounce-qp/src/negcurv.rs~
+(PR #860, gh#848), already solves both halves of this: it *bisects* the shift
+after the ladder brackets it (~neg_curv_shift_refinements~, ~mid = sqrt(lo*hi)~),
+uses ~neg_curv_probe_iters = 20~ instead of 3, and reports
+~SecondOrder::NotChecked~ rather than silently implying certification.
+
+* Verdict
+SOLVER_BUG — at default options POUNCE reports ~Optimal Solution Found~ at a
+point that is not a local minimum, on 28–45% of a simple model class, with the
+outcome depending on which coordinate carries the negative curvature. This is
+the gh#797 defect that PR #802 was written to fix, surviving because the escape's
+witness search declines on models whose eigenbasis is unfavourable to a fixed
+seed. gh#848 fixed the identical failure for the ~qp-active-set~ engine; the
+default NLP arm still has it.
+
+Not in scope of this verdict: the gh#805 guarantee itself. The "escaping cannot
+return a worse answer" invariant was swept separately over 18 saddle-reaching
+models × {1,2,3,5} escapes and holds (0 monotonicity, feasibility or floor
+violations) — the escape never makes things worse, it just declines too often.

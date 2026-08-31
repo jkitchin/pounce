@@ -1,0 +1,61 @@
+#+TITLE: Adversary Run: neg_curv_escapes monotonicity, feasibility and floor
+#+DATE: <2026-08-31>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: nonconvex / second-order certification
+:SOURCE: the guarantee stated in the `neg_curv_escapes` option doc (gh#797, gh#805)
+:KNOWN_OPTIMAL: n/a — this is an oracle-free internal invariant
+:N_VARIABLES: 2–6
+:N_CONSTRAINTS: bounds, plus a symmetric equality row on 3 of the 18 models
+:SELECTED_BY: PR review — #802 and #807, merged 2026-08-27
+:COVERAGE_TARGET: crates/pounce-algorithm/src/ipopt_alg.rs (try_neg_curv_escape)
+:END:
+
+The option doc promises that escaping "CANNOT return a worse answer than
+reporting the stationary point immediately would have", and that above 1 the
+floor keeps the *best* certificate rather than the most recent (gh#805).
+Three contracts follow, none of which needs an oracle:
+
+- C1 monotonicity: obj(k) <= obj(0) for every escape budget k
+- C2 feasibility: the escaped point still respects the equality rows and bounds
+- C3 floor: obj(k) <= obj(1) for k >= 2
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+18 models, 4 escape budgets each (k ∈ {1,2,3,5}):
+
+| contract              | violations |
+|-----------------------+------------|
+| C1 monotonicity       |          0 |
+| C2 feasibility        |          0 |
+| C3 best-certificate   |          0 |
+
+The escape changed the answer on 16 of 18 models, so the sweep is not vacuous.
+On the 8 models spot-checked against a multistart oracle, 7 matched the global
+minimum and 1 (=spec_n6_t2=) landed on a local one — legitimate, since the
+option doc is explicit that this is a local method.
+
+* Cross-check / Verification
+Engagement is asserted rather than assumed. **A first version of this probe
+reported a clean PASS on 40 random indefinite models and 160 comparisons while
+the escape fired on exactly zero of them**: a random start on a nonconvex box
+converges to a genuine local minimum, and there is nothing to escape. Reaching
+the branch needs a barrier subproblem that is symmetric about the start, so the
+symmetric inertia correction cannot break the tie — which is the mechanism the
+option doc itself describes. The corpus here is built that way, and the run
+fails loudly if the escape stops changing enough answers.
+
+* Verdict
+PASS — the gh#805 guarantee holds at every budget tested. The escape never
+returns a worse answer, never returns an infeasible one, and never lets a later
+escape overwrite a better earlier certificate.
+
+Note the complement: the escape's failure mode is *declining too often*, not
+returning something worse. See
+[[file:2026-08-31_nlp_negcurv-probe-seed.org]], which is the same feature failing
+to fire at all on 28–45% of a simple model class.

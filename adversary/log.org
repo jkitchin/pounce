@@ -5755,3 +5755,69 @@ two-clause #328 contract: build-time estimate accurate when well-scaled P
 catches that exact blind spot (build-time estimate 6.6 orders of magnitude
 low in the near-singular case, but ill_conditioned=True after a step, per
 the documented design). No defect -- positive confirmation of #328's fix.
+
+** [2026-08-31] Negative-curvature escape declines on a coordinate-aligned saddle (nlp/nonconvex second-order) - FAIL
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: analytic — min 0.5*(p*x0^2 - q*x1^2) on [-2,2]^2 from origin; min = -2q at (0,+-2)
+:KNOWN_OPTIMAL: -2.1 (p=1, q=1.05)
+:POUNCE_OBJECTIVE: 0.0
+:POUNCE_STATUS: Solve_Succeeded (Optimal Solution Found)
+:POUNCE_TIME: <0.01
+:ORACLE: multistart SLSQP + closed form + pounce's own qp-active-set engine
+:ORACLE_OBJECTIVE: -2.1
+:ORACLE_TIME: <0.1
+:VERDICT: SOLVER_BUG
+:REPORT: [[file:runs/2026-08-31_nlp_negcurv-probe-seed.org]]
+:COVERAGE_TARGET: crates/pounce-algorithm/src/kkt/pd_full_space_solver.rs (negative_curvature_direction, PR #802)
+:END:
+
+** [2026-08-31] neg_curv_escapes monotonicity / feasibility / best-certificate floor (nlp/nonconvex) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: option doc guarantee for neg_curv_escapes (gh#797, gh#805)
+:KNOWN_OPTIMAL: n/a (oracle-free invariant)
+:POUNCE_STATUS: 0 violations over 18 saddle-reaching models x {1,2,3,5} escapes
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-31_nlp_negcurv-escape-monotonicity.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-31] Frontend guards: P-shape, truncated .nl, jax jit bounds (qp/lp frontend) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: PRs #865, #790, #796
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-31_frontend_guards.py]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-31] Sensitivity steps vs warm re-solve oracle, 4 branch-disjoint fixtures (sensitivity/kink+release) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: PRs #859, #842, #832, #829/#830/#837
+:ORACLE: re-solve at the perturbed parameter, tol 1e-12
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-31_sensitivity_resolve_oracle.py]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-31] Convex cost-normalization (sigma) verdict honesty to scale 1e14 (qp/huge-scale) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: PRs #835 (gh#414), #781
+:ORACLE: closed form (P = s*M, c = -s*M*x_star) + cvxpy/Clarabel
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-31_qp_cost-normalization-verdict.py]]
+:COVERAGE_TARGET: crates/pounce-convex/src/ipm.rs (sigma path)
+:END:
+
+** [2026-08-31] Kill-switch ablation over the options merged 2026-08-24..31 (option-space) - PASS/REVIEW
+:PROPERTIES:
+:FAMILY: option-space
+:SOURCE: PRs #867, #822, #802, #860, #784, #836
+:ORACLE: none needed — internal consistency against a per-family baseline
+:VERDICT: PASS for 6 of 8 switches; 2 opt-in costs unrecorded in their option docs
+:REPORT: [[file:runs/2026-08-31_optionsweep_kill_switches.py]]
+:COVERAGE_TARGET: -
+:END:
