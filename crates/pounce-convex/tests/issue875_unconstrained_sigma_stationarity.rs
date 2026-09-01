@@ -59,11 +59,14 @@
 //! quantity: `sigma_forward_error_is_small` measures the affine-scaling Newton
 //! step `‖Δ‖∞` — a norm of a vector, so basis-free, where any per-row ratio
 //! (this file's included) is not. Over the same 72-instance census the two
-//! fixes together take claimed-optimal-but-wrong from **32/72 → 17/72 → 9/72**,
-//! and the remaining 9 all sit at `cond ≥ 1e10`, where the census's own
-//! reference is only good to `ε·cond·‖t‖` — eight of the nine are at or under
-//! that floor, so the count there is mostly the ruler and not the solver
-//! (gh #882).
+//! fixes together take claimed-optimal-but-wrong from **32/72 → 17/72 → 9/72**
+//! (the first arrow is against the census's original `x* = t` reference; the
+//! second is against the exact rational one gh #882 replaced it with, under
+//! which this file's own result still reads 17/72). The remaining 9 are all at
+//! `cond ≥ 1e10` and all real — but eight of them are smaller than `ε·cond`,
+//! the arithmetic floor of the `f64` estimator that would have to reject them,
+//! so what is left is out of reach of a double-precision guard rather than
+//! out of reach of a tighter threshold.
 //!
 //! So a green run of *this* file still does not cover the coupled arm, for the
 //! same reason it never did — every fixture below is separable, and the

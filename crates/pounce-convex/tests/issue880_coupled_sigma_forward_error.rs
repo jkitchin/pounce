@@ -73,59 +73,64 @@
 //!
 //! # Measured
 //!
-//! Over the same 72-instance unconstrained census gh #875 used (`cond`
-//! `1e2 ‥ 1e12` × magnitude `1e-3 ‥ 1e3` × `n` ∈ {2, 5} × rotated or not),
-//! claimed-optimal-but-wrong goes **17/72 → 9/72** against the census's fixed
-//! `1e-6` threshold:
+//! Over the 72-instance unconstrained census gh #875 used (`cond` `1e2 ‥ 1e12`
+//! × magnitude `1e-3 ‥ 1e3` × `n` ∈ {2, 5} × rotated or not), rebuilt under
+//! gh #882 so its reference is the **exact** optimum of the realised problem —
+//! `x* = −P⁻¹c` computed in `fractions.Fraction`, verified by an exactly-zero
+//! residual on all 72 — rather than the `t` each instance was designed around.
+//! That distinction is not pedantry: `c = −Pt` is rounded, so `t` sits up to
+//! `2.8e-07` (`cond = 1e10`) and `4.3e-05` (`1e12`) away from the optimum the
+//! solver is actually handed, which is the same order as the errors being
+//! judged. Claimed-optimal-but-wrong (relative error `> 1e-6`) goes
+//! **17/72 → 9/72**:
 //!
 //! | `cond` | wrong before | wrong after | worst rel. err before | after |
 //! |---|---|---|---|---|
-//! | `1e6`  | 2 | 0 | — | — |
-//! | `1e8`  | 3 | 0 | — | — |
-//! | `1e10` | 6 | 3 | 3.208e-01 | 1.969e-06 |
-//! | `1e12` | 6 | 6 | 7.051e-01 | 4.479e-04 |
+//! | `1e2`  | 0 | 0 | 6.405e-08 | 6.405e-08 |
+//! | `1e4`  | 0 | 0 | 6.275e-08 | 6.275e-08 |
+//! | `1e6`  | 2 | 0 | 2.287e-04 | 3.828e-09 |
+//! | `1e8`  | 3 | 0 | 1.091e-02 | 1.405e-08 |
+//! | `1e10` | 6 | 3 | 3.208e-01 | 2.026e-06 |
+//! | `1e12` | 6 | 6 | 7.050e-01 | 4.908e-04 |
 //!
-//! **That fixed `1e-6` threshold is below the measurement's own noise floor at
-//! the bottom two rows, so read the last column, not the count.** `x* = t` is
-//! exact by construction but `P = Q diag(e) Qᵀ` is formed in floating point, so
-//! the census can only resolve an error down to `ε·cond·‖t‖` — `1.3e-6 ‥ 2.2e-6`
-//! at `cond = 1e10` and `1.9e-4 ‥ 2.2e-4` at `1e12`. gh #880 says so itself,
-//! in the `ref acc` column of its table; the rows it reported were three or
-//! more orders above their floor, and these are not. Per instance, `err/floor`
-//! for the nine survivors is
+//! **The nine survivors are real, and they begin exactly where double
+//! precision ends.** `‖Δ‖` is accumulated in `f64`, so this guard cannot
+//! resolve a relative error below `ε·cond`, and cannot reject what it cannot
+//! see. A `1e-6` verdict is therefore meaningful only while `ε·cond < 1e-6`,
+//! i.e. `cond < 1e-6/ε ≈ 4.5e9` — every conditioning below that boundary is
+//! now clean, and every survivor is above it. Per instance, `err/(ε·cond)`:
 //!
 //! ```text
-//!   k=49 1.05   k=51 0.63   k=57 0.89     (cond 1e10)
-//!   k=61 0.21   k=63 0.09   k=65 2.02
-//!   k=67 0.05   k=69 0.13   k=71 0.02     (cond 1e12)
+//!   k=49 0.58   k=51 0.51   k=57 0.91              (cond 1e10)
+//!   k=61 0.15   k=63 0.03   k=65 2.21
+//!   k=67 0.08   k=69 0.11   k=71 0.01              (cond 1e12)
 //! ```
 //!
-//! so **eight of the nine are at or under the floor** and only `k=65` is
-//! outside it, by 2×. The other signature is gone outright: every failing
-//! coupled row in gh #880's table reported `Optimal Solution Found` in **one**
-//! iteration, which is what an inert guard looks like. After this change all 72
-//! take 3–13, i.e. the arm fires everywhere and the residue is the destination's
-//! accuracy, not a certificate that was never checked.
+//! — eight of the nine *below* the estimator's own arithmetic floor, one at
+//! 2.2×. The boundary is soft rather than sharp: of the two instances this
+//! change fixed at `cond ≤ 1e8`, one sat at 17.2× of its floor and the other
+//! at 0.63×, so the arm can reject just under the line but not dependably. The
+//! statement that survives is the weaker one — this guard works over the range
+//! a double-precision forward-error test can act on at all, and closing the
+//! residue needs a differently-conditioned estimator rather than a tighter cut.
+//! That residue is gh #880, still open; this file does not claim it.
 //!
-//! What that buys is a bound on the claim, not a stronger claim: the census can
-//! no longer tell a correct answer from a wrong one above `cond = 1e10`, so it
-//! is evidence of a fix through `1e8` and evidence of *nothing* above it in
-//! either direction. Resolving that needs a reference built in extended
-//! precision rather than a tighter guard — gh #882.
+//! The other signature is gone outright, and that one is not a matter of
+//! resolution: every failing coupled row in gh #880's table reported `Optimal
+//! Solution Found` in **one** iteration, which is what a certificate accepted
+//! without being tested looks like. After this change the survivors take 5–13.
+//! The arm fires everywhere; what is left is accuracy, not an unchecked claim.
 //!
 //! # What this file is NOT evidence about
 //!
-//! **`cond ≥ 1e10`, in either direction.** Three things are simultaneously
-//! true up there and none of them is "six instances stay wrong". The estimator
-//! `‖Δ‖` is itself computed in double precision, so its own arithmetic floor is
-//! `ε·cond ≈ 1e-4` at `1e12` and it can under-report by ~30×. The census
-//! reference is no better, per the section above. And `qp_hsde=no` — the
-//! destination a `σ` reject routes to — was *itself* wrong at that conditioning
-//! in gh #880's table (`1.39` and `1.04` relative), so rejecting harder had
-//! nowhere correct to route to; after this change those two rows read `2.96e-05`
-//! and `4.68e-06`, but that improvement is measured with the same blunt ruler.
-//! The honest statement is that this file demonstrates the fix through
-//! `cond = 1e8` and demonstrates no regression above it.
+//! **`cond ≳ 4.5e9`.** Nine instances stay wrong, this file does not fix
+//! them, and the section above says why a `f64` estimator cannot. One further
+//! thing is true up there and is not addressed here either: `qp_hsde=no` — the
+//! destination a `σ` reject routes to — was *itself* wrong at that
+//! conditioning in gh #880's table (`1.39` and `1.04` relative), so rejecting
+//! harder had nowhere correct to route to. The honest statement is that this
+//! file demonstrates the fix through `cond = 1e8`, and above it demonstrates a
+//! large improvement in magnitude with no regression.
 //! `the_cond_1e12_floor_is_a_carve_out`
 //! pins the improvement as a number so the carve-out cannot quietly widen.
 //!
@@ -677,13 +682,13 @@ fn a_large_magnitude_coupled_answer_survives_sigma() {
 // ---------------------------------------------------------------------------
 
 /// **`cond = 1e12` is improved, not repaired, and this is where that is
-/// written down.** The estimator's own arithmetic floor is `ε·cond ≈ 1e-4`, so
-/// at this conditioning it under-reports `‖Δ‖` by ~30× and cannot be relied on
-/// to reject; and independently, `qp_hsde=no` — where a reject routes — is
-/// itself wrong here, so rejecting harder has nowhere correct to go. That is
-/// sub-problem 2 of gh #880.
+/// written down.** `‖Δ‖` is accumulated in `f64`, so the estimator's own
+/// arithmetic floor is `ε·cond ≈ 2e-4` here — larger than every error it is
+/// being asked to reject — and independently, `qp_hsde=no`, where a reject
+/// routes, is itself wrong at this conditioning, so rejecting harder has
+/// nowhere correct to go. That is sub-problem 2 of gh #880.
 ///
-/// The census worst case moves `7.051e-01 → 4.479e-04`, ~1500×. The bar below
+/// The census worst case moves `7.050e-01 → 4.908e-04`, ~1400×. The bar below
 /// is that measured number with headroom, not a target: it exists so the
 /// carve-out cannot quietly widen back toward `O(1)` without a test going red,
 /// and it is deliberately *far* looser than every other bar in this file.
@@ -696,7 +701,7 @@ fn the_cond_1e12_floor_is_a_carve_out() {
     assert!(
         err < 1e-2,
         "cond 1e12: x off by {err:.3e} relative — the census worst case is \
-         4.479e-04 after this fix and 7.051e-01 before it, so anything near \
+         4.908e-04 after this fix and 7.050e-01 before it, so anything near \
          O(1) means the arm stopped firing here"
     );
 }

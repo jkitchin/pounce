@@ -94,35 +94,35 @@ changes.
   for stiffness (`Σ`) and never for complementarity.
 
   Measured on a 72-instance census (`cond` `1e2 ‥ 1e12` × magnitude
-  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not),
-  claimed-optimal-but-wrong falls **17/72 → 9/72** against the census's fixed
-  `1e-6` threshold:
+  `1e-3 ‥ 1e3` × `n ∈ {2, 5}` × rotated or not), scored against the **exact**
+  optimum of each realised problem (gh #882), claimed-optimal-but-wrong falls
+  **17/72 → 9/72** at a `1e-6` relative-error threshold:
 
-  | `cond` | before | after | worst relative error after | census can resolve |
+  | `cond` | before | after | worst relative error after | `ε·cond` |
   |---|---|---|---|---|
   | `1e2`  | 0/12 | 0/12 | 6.4e-08 | 2.2e-14 |
   | `1e4`  | 0/12 | 0/12 | 6.3e-08 | 2.2e-12 |
   | `1e6`  | 2/12 | 0/12 | 3.8e-09 | 2.2e-10 |
-  | `1e8`  | 3/12 | 0/12 | 1.1e-08 | 2.2e-08 |
+  | `1e8`  | 3/12 | 0/12 | 1.4e-08 | 2.2e-08 |
   | `1e10` | 6/12 | 3/12 | 2.0e-06 (was 3.2e-01) | 2.2e-06 |
-  | `1e12` | 6/12 | 6/12 | 4.5e-04 (was 7.1e-01) | 2.2e-04 |
+  | `1e12` | 6/12 | 6/12 | 4.9e-04 (was 7.1e-01) | 2.2e-04 |
 
-  **Read the error column, not the count.** The last column is the census's own
-  resolution: `x* = t` is exact by construction but `P = Q diag(e) Qᵀ` is formed
-  in floating point, so the realised optimum sits `ε·cond·‖t‖` from `t`. At the
-  bottom two rows the `1e-6` threshold is *below* that, so the count there
-  reports the reference's error as the solver's. Per instance, eight of the nine
-  survivors are at or under their own floor (`err/floor` `0.02 ‥ 1.05`) and only
-  one is outside it, by 2×. The signature the issue actually described is gone
-  outright: every failing coupled row in gh #880's table reported `Optimal` in
-  **one** iteration — an inert certificate — and after this change all 72 take
-  3–13. So this is evidence of a fix through `cond = 1e8` and evidence of no
-  regression above it; sharpening the reference so the top of the range means
-  something is gh #882.
+  **The nine survivors are real, and they begin where double precision ends.**
+  `‖Δ‖` is accumulated in `f64`, so this guard cannot resolve a relative error
+  below `ε·cond` — the last column — and cannot reject what it cannot see. A
+  `1e-6` verdict therefore means something only while `ε·cond < 1e-6`, i.e.
+  `cond ≲ 4.5e9`; every conditioning below that boundary is now clean and every
+  survivor is above it, eight of the nine *smaller* than their own floor
+  (`err/(ε·cond)` `0.01 ‥ 0.91`) and one at 2.2×. Closing the residue needs a
+  differently-conditioned estimator, not a tighter cut; it stays open as
+  gh #880.
 
-  Two limits, stated rather than papered over. The estimator computes `‖Δ‖` in
-  double precision, so its own arithmetic floor is `ε·cond` too and at `1e12` it
-  cannot distinguish a small error from zero. And under an equality row the
+  The signature the issue actually described is gone outright, and that one is
+  not a matter of resolution: every failing coupled row in gh #880's table
+  reported `Optimal` in **one** iteration — a certificate accepted without being
+  tested — and after this change the survivors take 5–13.
+
+  One further limit, stated rather than papered over: under an equality row the
   operator above is the wrong one (`A` has no barrier diagonal; the honest form
   is the full saddle system), so the arm declines rather than guessing.
 

@@ -1,0 +1,143 @@
+#+TITLE: Adversary Run: The sigma-Path Census Could Not Resolve Its Own Top Two Rows (gh#882)
+#+DATE: <2026-08-31>
+
+* Problem
+:PROPERTIES:
+:FAMILY: convex
+:CLASS: unconstrained ill-conditioned QP, cond x magnitude x n x rotated-or-not
+:SOURCE: no published instance; the randomized family gh#875 and gh#880 were both measured on, regenerated from SEED=875
+:KNOWN_OPTIMAL: yes, and that is the whole subject of this run
+:N_VARIABLES: 2 and 5
+:N_CONSTRAINTS: 0
+:SELECTED_BY: a measurement defect found while writing up gh#880
+:COVERAGE_TARGET: the measurement itself, not the solver -- crates/pounce-convex/src/ipm.rs's sigma path is what it measures
+:END:
+
+The census generates
+
+\[ \min \tfrac12 x^\top P x + c^\top x, \quad P = Q\,\mathrm{diag}(e)\,Q^\top,
+   \quad c = -P t \]
+
+and scores a solver's answer against $x^* = t$, on the stated grounds that
+this is exact "by construction, with no solver in the loop and no reliance on
+an oracle."
+
+It is not. $t$ is the optimum in *exact* arithmetic. The problem actually
+handed to the solver is the one whose coefficients are the float64 values $P$
+and $c$ hold, and $c = -Pt$ is rounded on the way in. Its optimum is a
+different point, and the gap grows with the conditioning -- which is precisely
+the axis the census exists to sweep.
+
+* Method
+
+Not higher precision: *exact* arithmetic. Every float64 is a rational, so the
+realised problem $(P_{fl}, c_{fl})$ is an exactly-specified rational linear
+system and $x^* = -P_{fl}^{-1} c_{fl}$ can be computed with =fractions.Fraction=
+Gaussian elimination with partial pivoting, rounding nowhere. Errors are then
+compared in =Fraction= as well, so the printed number is the solver's error and
+nothing else.
+
+Two things make that the *solver's* problem and not a neighbouring one, and
+both are checked rather than assumed:
+
+- =assert_nl_roundtrip= re-reads each =.nl= after writing it and requires the
+  objective literals (as a multiset) and the =G0= gradient block to be exactly
+  the float64 values the generator intended. Pyomo emits shortest-round-trip
+  =repr= today; if that ever becomes a fixed =%g= the census fails loudly here
+  instead of quietly reacquiring this bug.
+- Pyomo drops coefficients equal to =0.0= and =1.0= from the expression tree,
+  so the comparison is against written values, not all $n^2$. Both exclusions
+  were confirmed to be expression-tree simplification, not precision loss.
+
+Three independent confirmations that the reference is right: the exact residual
+$P x^* + c$ is identically zero on all 72 instances; the =.sol= files carry 18
+significant digits, so the solver's answer round-trips in full; and a numpy
+cross-check at =cond=1e2= agrees to ~1e-15.
+
+* Result
+
+How far the old reference sat from the realised optimum, in the census's own
+relative-error units, against its fixed =1e-6= threshold:
+
+| cond | 1e2 | 1e4 | 1e6 | 1e8 | 1e10 | 1e12 |
+| drift | 2.6e-15 | 4.0e-13 | 4.2e-11 | 2.6e-09 | 2.8e-07 | 4.3e-05 |
+
+At =1e12= the reference is wrong by more than the threshold outright. At
+=1e10= it is within a factor of a few of the errors being judged.
+
+Rescoring the two gh#880 binaries against the exact reference:
+
+| cond | wrong before | wrong after | worst rel err before | after |
+|------+--------------+-------------+----------------------+-------|
+| 1e2  | 0/12 | 0/12 | 6.405e-08 | 6.405e-08 |
+| 1e4  | 0/12 | 0/12 | 6.275e-08 | 6.275e-08 |
+| 1e6  | 2/12 | 0/12 | 2.287e-04 | 3.828e-09 |
+| 1e8  | 3/12 | 0/12 | 1.091e-02 | 1.405e-08 |
+| 1e10 | 6/12 | 3/12 | 3.208e-01 | 2.026e-06 |
+| 1e12 | 6/12 | 6/12 | 7.050e-01 | 4.908e-04 |
+
+17/72 -> 9/72, and every survivor is =rot=True=.
+
+* What it overturned
+
+This run reversed a conclusion that was already written down. Read against
+$t$, eight of the nine survivors looked like they sat at or under the
+measurement floor, so "9/72" read as mostly ruler and gh#880 read as closed.
+Read against the exact optimum, all nine are real solver errors above the
+threshold. The =err/drift= column in the score script is that correction as a
+number, per instance: several 1e12 rows come in at 0.5, meaning the old
+reference contributed more than the solver did.
+
+The right explanation for the residue turned out to be a *different* floor, and
+one that belongs to the guard rather than to the census. =sigma_forward_error_is_small=
+accumulates $\lVert\Delta\rVert$ in float64, so it cannot resolve a relative
+error below $\varepsilon\cdot\mathrm{cond}$ and cannot reject what it cannot
+see. A =1e-6= verdict is meaningful only while $\varepsilon\cdot\mathrm{cond} < 10^{-6}$,
+i.e. $\mathrm{cond} \lesssim 4.5\times10^9$ -- and every conditioning below
+that boundary is now clean while every survivor is above it:
+
+|    k |  cond | rel err | err/eps.cond | iters |
+|------+-------+---------+--------------+-------|
+|   49 |  1e10 | 1.288e-06 | 0.58 |  5 |
+|   51 |  1e10 | 1.122e-06 | 0.51 |  7 |
+|   57 |  1e10 | 2.026e-06 | 0.91 | 11 |
+|   61 |  1e12 | 3.277e-05 | 0.15 |  8 |
+|   63 |  1e12 | 6.631e-06 | 0.03 |  7 |
+|   65 |  1e12 | 4.908e-04 | 2.21 | 10 |
+|   67 |  1e12 | 1.781e-05 | 0.08 | 11 |
+|   69 |  1e12 | 2.523e-05 | 0.11 | 13 |
+|   71 |  1e12 | 1.631e-06 | 0.01 | 13 |
+
+Eight of nine below the guard's own arithmetic floor, one at 2.2x. The
+boundary is soft rather than sharp -- of the two instances gh#880's fix
+repaired at =cond <= 1e8=, one sat at 17.2x of its floor and the other at
+0.63x -- so the claim that survives is the weaker one: the guard works over
+the range a double-precision forward-error test can act on at all, and closing
+the residue needs a differently-conditioned estimator, not a tighter cut.
+
+The unrelated signature is gone outright and is not a matter of resolution:
+every failing coupled row in gh#880's table reported =Optimal Solution Found=
+in *one* iteration, which is what a certificate accepted without being tested
+looks like. The survivors take 5-13.
+
+* Lesson
+
+A reference that is exact in the model is not exact in the problem the solver
+receives. Wherever an oracle is constructed by *inverting* a generator --
+"pick $x^*$, then derive the data that makes it optimal" -- the derivation
+itself rounds, and the resulting error scales with exactly the quantity the
+sweep is varying. The census swept conditioning; the reference degraded with
+conditioning; the two were indistinguishable in the region that mattered.
+
+The tell was available before this run and was misread: gh#880's own table
+carried a =ref acc= column. It was read as a caveat on the top rows rather
+than as a statement that the top rows could not be read at all.
+
+* Reproduce
+
+: python3 2026-08-31_convex_sigma-census_gen.py
+: python3 2026-08-31_convex_sigma-census_score.py <path-to-pounce>
+
+Instances land in the ignored sibling =2026-08-31_convex_sigma-census/= and are
+regenerable from =SEED = 875= by construction, so they are not published here --
+the rule =adversary/.gitignore= already applies to =fuzz/instances.jsonl=.
