@@ -6228,15 +6228,58 @@ pub fn feral_config_from_options(
     // trajectory-neutral next to either (`deb7` 146 -> 147,
     // `pooling_rt2stp` 107 -> 109).
     //
-    // Ordered env-then-option so `POUNCE_FERAL_REFINE` still reaches
-    // this path and an explicit `feral_refine` still beats both.
+    // Ordered env-then-registry-then-option so `POUNCE_FERAL_REFINE`
+    // still reaches this path and an explicit `feral_refine` still beats
+    // both.
+    //
+    // gh#909: the registry read below takes the value and IGNORES the
+    // found flag, which is the whole point. Reading it as `Ok((v, true))`
+    // — the tri-state shape every other option in this function uses —
+    // consults the user's setting and never the *registered default*, so
+    // an unset option left `cfg.refine` at `FeralConfig::default()`'s
+    // `true` while `pounce --print-options` reported the registry's.
+    // Registered `no`, ran `yes`: the gh#677 shape, one option family
+    // over. It is fixed by making the registry authoritative here rather
+    // than by changing what runs — see below for why — so the registered
+    // default moved to `yes` in the same commit and this read is what
+    // keeps the two from drifting apart again.
+    //
+    // The scoping stays. There is no single default that is right on both
+    // paths, and this is a two-sided trade of the same shape as
+    // `feral_increase_quality` above: the option is the lever, and the
+    // default is a choice rather than a fact. Measured on `e5f5830b`,
+    // one binary, `feral_refine=no` against the default:
+    //
+    //   fixture corpus, exact leg: 10 legs move, NO status flips, and
+    //     the net is favourable -- `issue_508_infeasible_gap_1em4`
+    //     441 -> 245, `square_flowsheet_resto` 54 -> 47 (tot 185 -> 176),
+    //     `issue_508_infeasible_gap_1em2` 114 -> 112, `deb7` 147 -> 146,
+    //     `pooling_rt2stp` 109 -> 107, against one loss
+    //     (`mu_fallback_point_floor` 31 -> 32).
+    //   fixture corpus, lbfgs leg: identical, refine is already off there.
+    //   `NARX_CFy` (Mittelmann): 400 -> 630 iterations, 208.7 s -> 254.2 s.
+    //   `eigena2` final dual infeasibility: 3.43e-10 -> 5.20e-09, both
+    //     inside `tol`, and see `issue_540_eigena2_superlinear_tail.rs`.
+    //   AC-OPF (PGLib), gh#909: 10-18% faster, iteration counts
+    //     unchanged, solution identical to ~13 significant figures.
+    //
+    // So the corpus and the AC-OPF benchmarks both prefer `no` and
+    // `NARX_CFy` pays 57% more iterations for it. Nothing here separates
+    // those, which is why the default is scoped rather than flipped.
     let limited_memory = matches!(
         options.get_string_value("hessian_approximation", ""),
         Ok((ref s, true)) if s == "limited-memory"
     );
-    if limited_memory && std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
-        cfg.refine = false;
+    if std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
+        // Deliberately `_`, not `true`: see above.
+        if let Ok((v, _)) = options.get_bool_value("feral_refine", "") {
+            cfg.refine = v;
+        }
+        if limited_memory {
+            cfg.refine = false;
+        }
     }
+    // An explicit setting beats both the carve-out and the environment.
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }

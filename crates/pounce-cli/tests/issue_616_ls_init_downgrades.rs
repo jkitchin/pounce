@@ -818,7 +818,8 @@ fn no_fixture_stops_solving_when_the_option_is_turned_on() {
 /// option. `deb7` sits on a knife edge here, and which side a binary
 /// lands on is set by last-bit arithmetic rather than by anything the
 /// option means. POUNCE reproduces that sensitivity: on x86-64, with
-/// the `feral_refine = false` default (gh#735), the `yes` route reaches
+/// `feral_refine` off (gh#735 measured it that way; it is not the
+/// exact-Hessian default, which is `yes` — gh#909), the `yes` route reaches
 /// `ErrorInStepComputation` at it=358 where `no` succeeds at it=131 —
 /// while on aarch64 both succeed. `main` is not immune, it is merely on
 /// the other side: perturbing `obj_scaling_factor` or `max_soc` flips

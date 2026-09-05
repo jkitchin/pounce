@@ -250,6 +250,52 @@ changes.
 
 ### Fixed
 
+- **`feral_refine` was documented as `no` and ran as `yes`
+  ([#909](https://github.com/jkitchin/pounce/issues/909)).** `pounce
+  --print-options` reported the default as `no`, the book said `no`, and on
+  the default (exact-Hessian) path the solver ran it as `yes`. The registry
+  and the backend had been disagreeing since the option was registered.
+
+  Same shape as [#677](https://github.com/jkitchin/pounce/issues/677): an
+  option registered with one default and read with another. The reader took
+  `feral_config_from_options`'s house style, `if let Ok((v, true))`, which
+  fires only when the *user* set the option — so an unset `feral_refine` never
+  reached `FeralConfig`'s field at all and kept the library's own `true`,
+  while `--print-options` printed the registry's `false`. The two routes to a
+  value never met.
+
+  **The behaviour is kept and the reporting is fixed**, and the reason is in
+  gh#710 itself. That issue turned refinement off for the NLP solver, and its
+  headline measurement — the 126 028-dimension `laptime` KKT, 68.9 s on
+  against 18.8 s off — was taken **under limited-memory**. The carve-out
+  `feral_config_from_options` already applies is exactly that path, so the
+  intent gh#710 measured is intact; what silently never happened is the
+  exact-Hessian half, which was never measured. Measured now, refinement is
+  the better default there. Swept
+  across all 79 fixtures on both legs, default versus `feral_refine=no`: ten
+  fixture-legs move, all on the exact leg, no status flips, and the balance
+  favours refinement — `issue_508_infeasible_gap_1em4` 441 → 245 iterations,
+  `square_flowsheet_resto` 54 → 47, `pooling_rt2stp` 109 → 107, against one
+  loss (`mu_fallback_point_floor` 31 → 32). Off-corpus, `NARX_CFy` goes
+  400 → 630 iterations and 208.65 s → 254.24 s without it. On `eigena2`,
+  refinement is what makes the superlinear tail robust: with the inertia pivot
+  floor on it reaches `3.4e-10` versus `5.4e-09` without, a 16× difference that
+  collapses to 1.04× once refinement is off, so the two features are not
+  independent.
+
+  So the registered default is now `true`, matching what the solver does on
+  the path that default describes, and both the help text and
+  `docs/src/options.md` say outright that the default is *conditional* and a
+  single flag cannot express it: `feral_config_from_options` still forces `refine = false`
+  under `hessian_approximation=limited-memory`, where the sweep shows
+  refinement buying nothing. An explicit setting continues to beat both the
+  carve-out and `POUNCE_FERAL_REFINE`.
+
+  `crates/pounce-cli/tests/issue_540_eigena2_superlinear_tail.rs` was
+  asserting a contrast that did not exist — its "refinement off" arm was the
+  default path, i.e. refinement *on*, so the two arms were bit-identical. It
+  now runs the measured 2×2.
+
 - **The browser demo booted only from a built tree.** `web-python/worker.js`
   had a top-level `import` of `./wasi.js`, which `crates/pounce-wasm/build.sh`
   stages and `.gitignore` excludes. In a checkout that had not been built —

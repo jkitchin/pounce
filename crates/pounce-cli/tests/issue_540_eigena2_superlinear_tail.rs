@@ -153,15 +153,33 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// converges in 27 iterations; with `feral_inertia_pivot_floor=0` it takes
 /// 29. Deterministic across runs and independent of `feral_refine`.
 ///
-/// **Dual residual, under `feral_refine=yes`.** 3.43e-10 with the trigger
-/// against 5.45e-09 without — 16x, deterministic. That margin used to be
-/// the default-path measurement, and is not any more: turning `feral_refine`
-/// off by default (gh#710) moved the trigger-on dual from 3.43e-10 to
-/// 5.20e-09 while leaving trigger-off at 5.41e-09, so at the default the two
-/// configurations are now indistinguishable. The residual assertion is
-/// therefore made where the effect still exists rather than dropped, and
-/// `feral_refine=yes` is not an artificial setting here — it is what every
-/// release through 0.10.0 shipped.
+/// **Dual residual, at the default.** 3.43e-10 with the trigger against
+/// 5.45e-09 without — 16x, deterministic.
+///
+/// That sentence used to read "under `feral_refine=yes`", and said the
+/// margin had been lost at the default when gh#710 turned backend
+/// refinement off. **It had not been, because the default never moved on
+/// this path** (gh#909): `feral_config_from_options` clears `feral_refine`
+/// only under `hessian_approximation=limited-memory`, and this fixture runs
+/// with an exact Hessian. So the old test's contrast arm — a second solve
+/// passing `feral_refine=yes` — was setting the option to the value it
+/// already had, and its two halves measured the same configuration. It
+/// passed, and it was pinning one number twice.
+///
+/// The 2x2 it should have been, measured on `e5f5830b`:
+///
+/// ```text
+///                          trigger ON        trigger OFF     ratio
+///   default (refine yes)   3.4317e-10        5.4473e-09      16x
+///   feral_refine=no        5.2021e-09        5.4096e-09      1.04x
+/// ```
+///
+/// Iteration counts are 27 and 29 in both rows, so the trigger's two
+/// iterations really are independent of refinement. The residual margin is
+/// not: it exists at the default and is gone with refinement off. Both
+/// rows are asserted below, because the second is the one that makes the
+/// first say something — a 16x margin with no configuration that lacks it
+/// is not evidence that refinement is what supplies it.
 ///
 /// Both halves of that shift are worth reading. The certificate `eigena2`
 /// earns at the default is still strict and still clears `tol = 1e-8`, but
@@ -169,12 +187,12 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// two iterations, not the last order of magnitude.
 ///
 /// **Two caveats a reader has to have, or this test reads stronger than it
-/// is.** First, the margin was always narrow to one configuration: it was
-/// already gone under `POUNCE_DBG_NO_QUAD=1` before `feral_refine` moved,
-/// where the two land at 5.21e-09 and 5.27e-09. Second, the *ordering* is
-/// newly true. On 0.10.0 the trigger made this model's dual residual
-/// slightly **worse** — 2.21e-09 with it on against 5.95e-10 with it off,
-/// both clearing `tol`:
+/// is.** First, the margin is narrow to one configuration: it is gone under
+/// `POUNCE_DBG_NO_QUAD=1`, where the two land at 5.21e-09 and 5.27e-09, and
+/// gone again under `feral_refine=no` per the table above. Second, the
+/// *ordering* is newly true. On 0.10.0 the trigger made this model's dual
+/// residual slightly **worse** — 2.21e-09 with it on against 5.95e-10 with
+/// it off, both clearing `tol`:
 ///
 /// ```text
 ///                          trigger ON        trigger OFF
@@ -193,8 +211,8 @@ fn eigena2_dual_infeasibility_clears_the_strict_tolerance() {
 /// the module header.
 #[test]
 fn the_trigger_still_improves_the_certificate() {
-    // At the default (`feral_refine=no` since gh#710): the trigger is worth
-    // two iterations, and the dual residuals are indistinguishable.
+    // The trigger is worth two iterations, at the default and with
+    // backend refinement off alike.
     let on = solve(&[]).statistics;
     let off = solve(&NO_TRIGGER).statistics;
     assert!(
@@ -206,20 +224,39 @@ fn the_trigger_still_improves_the_certificate() {
         off.iteration_count,
     );
 
-    // Under `feral_refine=yes` — every release through 0.10.0 — the
-    // certificate margin is still there and still 16x.
-    let with_trigger = solve(&["feral_refine=yes"]).statistics.final_dual_inf;
-    let without = solve(&["feral_refine=yes", NO_TRIGGER[0]])
-        .statistics
-        .final_dual_inf;
+    // Row 1 of the table in the module doc: at the default -- which is
+    // `feral_refine=yes` on this exact-Hessian path, gh#909 -- the
+    // certificate margin is 16x.
+    let with_trigger = on.final_dual_inf;
+    let without = off.final_dual_inf;
     assert!(
         without > with_trigger * 5.0,
-        "the inertia trigger no longer improves eigena2's dual residual under \
-         feral_refine=yes (with {with_trigger:e}, without {without:e}), so the \
+        "the inertia trigger no longer improves eigena2's dual residual at \
+         the default (with {with_trigger:e}, without {without:e}), so the \
          tests above are no longer pinning the fix they describe",
     );
     assert!(
         with_trigger < 1e-9,
         "expected the trigger to reach ~3.4e-10, got {with_trigger:e}",
+    );
+
+    // Row 2, and the reason row 1 says anything. With the backend loop
+    // off the margin collapses to ~1.04x, so it is refinement that
+    // supplies those digits and not the trigger alone. This arm is also
+    // what keeps the assertion honest if the default ever moves: were
+    // `feral_refine` to become `no` on this path, row 1 would degrade to
+    // this row's numbers and fail loudly rather than quietly measure the
+    // same thing twice, which is exactly what the pre-gh#909 version of
+    // this test did.
+    let unrefined_on = solve(&["feral_refine=no"]).statistics.final_dual_inf;
+    let unrefined_off = solve(&["feral_refine=no", NO_TRIGGER[0]])
+        .statistics
+        .final_dual_inf;
+    assert!(
+        unrefined_off < unrefined_on * 2.0,
+        "with feral_refine=no the trigger's residual margin is supposed to \
+         be gone (with {unrefined_on:e}, without {unrefined_off:e}); if it \
+         is back, the margin above is no longer attributable to backend \
+         refinement and the module doc's 2x2 is stale",
     );
 }

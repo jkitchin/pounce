@@ -2295,8 +2295,13 @@ impl PdSensBacksolver {
         // unrefined substitution was accurate enough only because the
         // *backend* was refining underneath (`feral_refine` defaulted
         // on); with MA57 — whose `icntl[9] = 0` disables its own
-        // refinement — the hole was already open, and turning the
-        // feral default off opened it for everyone.
+        // refinement — the hole was already open, and turning the feral
+        // default off opened it for everyone on that path. "That path"
+        // is the qualifier gh#909 added: the turn-off is scoped to
+        // `hessian_approximation=limited-memory`, so on the exact
+        // Hessian path the backend is still refining underneath. This
+        // layer refines regardless, which is the point — it must not
+        // depend on which path the base solve took.
         //
         // The cost the original comment was avoiding is not there to
         // avoid: measured on `kkt_solve_many` with 32 RHS against

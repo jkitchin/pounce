@@ -229,9 +229,19 @@ pub struct FeralConfig {
     /// Measured on a 118 276-dimension KKT (gh#698): `feral_refine = no`
     /// cut back-solve time 60% and wall time 20% and still converged.
     ///
-    /// **This default is `true`, and the NLP solver's is `false`
-    /// (gh#710, reported as gh#698 observation 5). The split is
-    /// deliberate.** Turning the loop off is
+    /// **This default is `true`, and the NLP solver's is `false` on the
+    /// limited-memory path only (gh#710, reported as gh#698 observation
+    /// 5; scoped by gh#909). The split is deliberate.** An earlier
+    /// revision of this paragraph said the NLP solver's default was
+    /// `false` full stop, which was true of the intent and never of the
+    /// binary: `feral_config_from_options` clears the flag only under
+    /// `hessian_approximation=limited-memory`, so the exact-Hessian path
+    /// — the default path — has always run with the loop **on**. That is
+    /// now what the registry reports, and it is a deliberate choice
+    /// rather than an accident: turning it off on the exact path is a
+    /// two-sided trade (favourable across the CLI fixture corpus and
+    /// AC-OPF, and worth 400 -> 630 iterations on `NARX_CFy`), measured
+    /// in `feral_config_from_options`. Turning the loop off is
     /// only safe for a caller that does two things Ipopt's architecture
     /// assumes of one: refine the *unreduced* system itself, and ask the
     /// backend for a better factorization when that stalls. Refinement
@@ -244,9 +254,11 @@ pub struct FeralConfig {
     /// is `IncreaseQuality` (`IpPDFullSpaceSolver.cpp:296`), which
     /// [`FeralSolverInterface::increase_quality`] now implements. So
     /// `pounce_algorithm::application::feral_config_from_options` turns
-    /// this off for the IPM — `PdFullSpaceSolver` does both halves —
-    /// and on the 126 028-dimension `laptime` KKT under limited-memory
-    /// the pair is 68.9 s -> 18.8 s, against MA57's 10.7 s.
+    /// this off for the IPM's **limited-memory** path — `PdFullSpaceSolver`
+    /// does both halves — and on the 126 028-dimension `laptime` KKT
+    /// under limited-memory the pair is 68.9 s -> 18.8 s, against MA57's
+    /// 10.7 s. That measurement is a limited-memory one throughout, which
+    /// is why the carve-out it justifies is scoped to that path.
     ///
     /// It stays `true` here because every other caller of
     /// [`FeralSolverInterface::new`] — `pounce-convex`'s HSDE / SOS /
@@ -568,10 +580,13 @@ impl Default for FeralConfig {
             cascade_break: None,
             fma: false,
             // On -- see the field doc. The NLP solver turns it off in
-            // `feral_config_from_options` because it refines the
-            // unreduced system itself *and* escalates through
-            // `increase_quality`; a caller doing only the first still
-            // needs this.
+            // `feral_config_from_options` on the LIMITED-MEMORY path,
+            // because it refines the unreduced system itself *and*
+            // escalates through `increase_quality`; a caller doing only
+            // the first still needs this. The qualifier is load-bearing
+            // and was missing until gh#909: the exact-Hessian path
+            // inherits this `true`, which is the shipped behaviour and
+            // now also the registered default.
             refine: true,
             increase_quality: true,
             refine_max_steps: feral::DEFAULT_REFINE_MAX_STEPS,
