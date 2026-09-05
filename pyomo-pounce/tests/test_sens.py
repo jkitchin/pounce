@@ -68,6 +68,85 @@ def test_sens_jacobian_multiplier_matches_finite_difference(solved):
         "and pyomo duals")
 
 
+# ── an inequality's shadow price (gh#910) ────────────────────────────────────
+#
+# The shadow price a user wants an error bar on is usually a *cap* -- a
+# safety limit, a capacity, a purity spec -- and those are written as
+# inequalities. `sens_jacobian(of=<Constraint>)` used to refuse every
+# one of them, so the only route was to rewrite the row as an equality
+# before solving, which changes the model and is correct only if the row
+# really does stay active across the perturbation being asked about.
+
+
+CAP_H = 1e-3
+
+
+def build_cap(p=0.0):
+    """min .5(u-5)^2 + .5(w-2)^2  s.t.  2(u - p) <= 2,  3w <= 30.
+
+    The cap is strictly active and moves with `p`: `u = 1 + p` at the
+    solution, and stationarity in `u` gives `lambda_cap = (5 - u)/2`, so
+    `d lambda_cap/dp = -1/2` and `d(dual)/dp = +1/2` in the AMPL
+    marginal convention pyomo reports. The decoy row is decades slack.
+    """
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.u = pyo.Var(initialize=0.5)
+    m.w = pyo.Var(initialize=0.5)
+    m.cap = pyo.Constraint(expr=2.0 * (m.u - m.p) <= 2.0)
+    m.decoy = pyo.Constraint(expr=3.0 * m.w <= 30.0)
+    m.obj = pyo.Objective(
+        expr=0.5 * (m.u - 5.0) ** 2 + 0.5 * (m.w - 2.0) ** 2)
+    return m
+
+
+@pytest.fixture(scope="module")
+def solved_cap():
+    m = build_cap()
+    declare_sens_param(m.p)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_a_strictly_active_inequalitys_shadow_price_has_a_derivative(
+        solved_cap):
+    """gh#910, end to end and against an outside number.
+
+    The closed form is `+1/2`, and the finite difference of
+    `m.dual[m.cap]` across a re-solve is what says the SIGN convention
+    survived the trip through the `y_d` block -- `pack_lambda_for_user`
+    scatters `y_c` and `y_d` into one `lambda` array with no sign change
+    between them, so an inequality's dual is on the same footing as an
+    equality's, and this is the assertion that would catch it if it
+    were not.
+    """
+    m = solved_cap
+    g = sens_jacobian(m.cap, wrt=m.p)
+    assert g == pytest.approx(0.5, abs=1e-6)
+
+    hi = solve_plain(build_cap(p=CAP_H))
+    lo = solve_plain(build_cap(p=-CAP_H))
+    fd = (hi.dual[hi.cap] - lo.dual[lo.cap]) / (2 * CAP_H)
+    assert g == pytest.approx(fd, abs=1e-4), (
+        "sign convention mismatch between parametric_step_full's y_d "
+        "block and pyomo duals")
+
+
+def test_an_inactive_inequality_is_refused_by_naming_its_regime(solved_cap):
+    """Refused, not answered `0`.
+
+    The derivative IS zero over a neighbourhood, but it is a structural
+    zero rather than something the KKT row carries -- and the caller who
+    asked is the one who has to decide whether the row stays inactive
+    across the perturbation they mean. So the refusal names the regime
+    instead of handing back a number that looks measured.
+    """
+    with pytest.raises(ValueError, match="inactive at the solved point"):
+        sens_jacobian(solved_cap.decoy, wrt=solved_cap.p)
+
+
 def test_sens_solution_matches_resolve(solved):
     m = solved
     est = sens_solution(m, [(m.p, 2.2), (m.q, 0.9)])
@@ -534,12 +613,26 @@ def test_both_bounds_rewritten_are_both_recorded():
 # without needing the solver. The value-correctness of the fan-out path is
 # already covered by test_sens_jacobian_object_for_containers.
 
-def _fake_session(names, cons, row_offset=1000, **kw):
+def _fake_session(names, cons, row_offset=1000, d_offset=None,
+                  row_class="strongly_active", **kw):
+    """A `_Session` over a stub solver, for the row-map contract alone.
+
+    `row_offset=None` makes every row an inequality, which sends
+    `mult_entry` down the `y_d` half added by gh#910: `d_offset` is
+    then the row it reports and `row_class` the regime the gate reads
+    off `reduced_row_activity`.
+    """
     from pyomo_pounce.sens import _Session
 
     class _Solver:
         def multiplier_rows(self, gs):
             return [None if row_offset is None else gs[0] + row_offset]
+
+        def inequality_multiplier_rows(self, gs):
+            return [None if d_offset is None else gs[0] + d_offset]
+
+        def reduced_row_activity(self, gs):
+            return {"status": [row_class] * len(gs)}
 
     return _Session(None, None, _Solver(), names, cons, {},
                     {"orig.c": cons[-1]}, **kw)
@@ -575,9 +668,26 @@ def test_unknown_name_raises_value_error_not_key_error():
         s.mult_entry("nope")
 
 
-def test_inequality_multiplier_error_is_unchanged():
-    s = _fake_session(["a"], ["c"], row_offset=None)
-    with pytest.raises(ValueError, match="equality constraints"):
+def test_a_strictly_active_inequality_is_answered_from_the_y_d_block():
+    """gh#910: the row exists, and the gate lets a strict one through."""
+    s = _fake_session(["a"], ["c"], row_offset=None, d_offset=2000)
+    assert s.mult_entry("c") == 2000
+
+
+@pytest.mark.parametrize("row_class,message", [
+    ("inactive", "inactive at the solved point"),
+    ("weakly_active", "weakly active at the solved point"),
+    ("ambiguous", "could not be resolved"),
+])
+def test_a_non_strict_inequality_is_refused_by_naming_its_regime(
+        row_class, message):
+    """The other two regimes hold a `y_d` entry and no derivative, and
+    the refusal names which -- an inactive row's answer really is zero,
+    while a kink needs a direction, so they call for different things
+    from the caller."""
+    s = _fake_session(["a"], ["c"], row_offset=None, d_offset=2000,
+                      row_class=row_class)
+    with pytest.raises(ValueError, match=message):
         s.mult_entry("c")
 
 

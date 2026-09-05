@@ -91,6 +91,14 @@ pub struct BoundClassification {
     /// Maps full-g index → c-block position, with `-1` for inequality
     /// rows: the O(1) inverse of `c_map`, mirroring `full_to_var`.
     pub full_to_c: Vec<Index>,
+    /// Maps full-g index → d-block position, with `-1` for equality
+    /// rows: the O(1) inverse of `d_map`, and the exact complement of
+    /// [`Self::full_to_c`] — every row is `-1` in exactly one of the
+    /// two (gh#910). Wanted for the same reason `full_to_c` is: an
+    /// inequality's multiplier lives in `y_d` at THIS position, not at
+    /// its user-space `g` index, and the two coincide only on a model
+    /// with no equalities ahead of it.
+    pub full_to_d: Vec<Index>,
 }
 
 impl BoundClassification {
@@ -560,6 +568,7 @@ fn classify_bounds(
     let mut d_l_map: Vec<Index> = Vec::new();
     let mut d_u_map: Vec<Index> = Vec::new();
     let mut full_to_c: Vec<Index> = vec![-1; ng];
+    let mut full_to_d: Vec<Index> = vec![-1; ng];
 
     for i in 0..ng {
         let lo = g_l[i];
@@ -589,6 +598,7 @@ fn classify_bounds(
             }
         }
         let d_idx = d_map.len() as Index;
+        full_to_d[i] = d_idx;
         d_map.push(i as Index);
         if lo_present {
             d_l_map.push(d_idx);
@@ -618,6 +628,7 @@ fn classify_bounds(
         d_l_map,
         d_u_map,
         full_to_c,
+        full_to_d,
     })
 }
 
@@ -699,6 +710,13 @@ mod tests {
         assert_eq!(c.c_map, vec![1]);
         assert_eq!(c.n_d, 1);
         assert_eq!(c.d_map, vec![0]);
+        // The two inverse maps are exact complements: every row is
+        // -1 in exactly one of them (gh#910). This model is where a
+        // g index and a block position genuinely differ -- the
+        // equality is g1 but c-block 0, the inequality g0 but d-block
+        // 0 -- so neither map can pass by being an identity.
+        assert_eq!(c.full_to_c, vec![-1, 0]);
+        assert_eq!(c.full_to_d, vec![0, -1]);
         // The single inequality has a finite lower bound (25) and an
         // infinite upper bound (2e19 == nlp_upper_bound_inf).
         assert_eq!(c.d_l_map, vec![0]);
@@ -781,6 +799,10 @@ mod tests {
         // d[1] is fully free — neither bound finite.
         assert_eq!(c.d_l_map, vec![0]);
         assert_eq!(c.d_u_map, vec![0]);
+        // No equalities, so full_to_d is the identity here and
+        // full_to_c is empty of positions -- the complement again.
+        assert_eq!(c.full_to_c, vec![-1, -1]);
+        assert_eq!(c.full_to_d, vec![0, 1]);
     }
 
     /// Inconsistent bounds (lo > hi) should error.

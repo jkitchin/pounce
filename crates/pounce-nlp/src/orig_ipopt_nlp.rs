@@ -2780,6 +2780,17 @@ impl IpoptNlp for OrigIpoptNlp {
         if c < 0 { None } else { Some(c) }
     }
 
+    fn full_g_to_d_block(&self, full_idx: Index) -> Option<Index> {
+        let cls = self.adapter.borrow();
+        let cls = cls.classification();
+        let f = full_idx as usize;
+        if f >= cls.full_to_d.len() {
+            return None;
+        }
+        let d = cls.full_to_d[f];
+        if d < 0 { None } else { Some(d) }
+    }
+
     fn var_x_to_full_x(&self, var_idx: Index) -> Index {
         let cls = self.adapter.borrow();
         let cls = cls.classification();
@@ -3471,6 +3482,12 @@ mod tests {
 
         // full_g_to_c_block: the one g is an equality → c-block 0.
         assert_eq!(nlp_dyn.full_g_to_c_block(0), Some(0));
+
+        // full_g_to_d_block is its complement: an equality has no
+        // d-block position, and an index past `m` is None in both
+        // (gh#910).
+        assert_eq!(nlp_dyn.full_g_to_d_block(0), None);
+        assert_eq!(nlp_dyn.full_g_to_d_block(1), None);
 
         // lift_x_to_full inflates a compressed [v_0] back to [7.0, v_0].
         let mut x_var = nlp.x_space().make_new_dense();

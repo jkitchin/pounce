@@ -293,12 +293,98 @@ below. There is one exception to the warning, a bound written on a declared Para
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `sens_solution_report()` measures the same step and reports where the
 active set changes along it, covered in
-[What the step did about the bounds](#what-the-step-did-about-the-bounds-sens_solution_report). Multiplier sensitivities are available for equality constraints.
+[What the step did about the bounds](#what-the-step-did-about-the-bounds-sens_solution_report). Multiplier
+sensitivities are available for every equality constraint, and for an
+inequality that is strictly active at the solved point, covered in
+[The shadow price of a cap](#the-shadow-price-of-a-cap) below.
 Models without declarations solve through the ordinary AMPL/CLI path,
 unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### The shadow price of a cap
+
+`of=` a **Constraint** gives `d(dual)/dp`: how the row's shadow price
+moves with a declared parameter. Every equality has one. So does an
+inequality — but only where the row is **strictly active** at the
+solved point
+([#910](https://github.com/jkitchin/pounce/issues/910)).
+
+That restriction is the interesting half, because the shadow price a
+user actually wants an error bar on is usually a *cap*: a safety limit,
+a capacity, a purity spec. Those are written as inequalities.
+
+```python
+m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+declare_sens_param(m.theta)
+SolverFactory("pounce").solve(m)
+
+m.dual[m.cap]                       # the shadow price
+sens_jacobian(m.cap, wrt=m.theta)   # ...and how it moves with theta
+```
+
+An inequality multiplier is differentiable only where the row is
+strictly complementary, and there are three regimes:
+
+| regime | slack, multiplier | `dλ/dp` |
+|---|---|---|
+| strictly active | `s ≈ 0`, `λ > 0` | behaves as an equality over a neighbourhood; well defined, and it is the same back-solve an equality gets |
+| inactive | `s > 0`, `λ ≈ 0` | zero over a neighbourhood — but there is no KKT row to differentiate |
+| weakly active (a kink) | `s ≈ 0` *and* `λ ≈ 0` | two one-sided derivatives that differ; no two-sided value exists |
+
+The compound KKT vector holds a `y_d` entry in all three cases. In the
+third it is whichever side the factorization happened to land on. So
+the other two regimes are refused, and the message **names the
+regime**, because they call for different things from you: an inactive
+row's answer really is zero — but whether it stays inactive across the
+perturbation you mean is your question, not the factor's — and a kink
+needs a direction, which `sens_solution()` and
+`parametric_step_directional` take and `sens_jacobian` does not.
+
+Before #910 the only route to a cap's `dλ/dp` was to rewrite the row as
+an equality `g(x) == b` before solving. That changes the model, and is
+correct only if the row really does stay active over the perturbation
+being asked about — the assumption the gate above makes you state.
+
+#### Which classifier gates it
+
+`reduced_row_activity()`, not `classify_activity()`, and the reason is
+not the obvious one.
+
+Neither classifier can *admit* a kink. A row's reduced curvature is
+never larger than its directional one, so the reduced ratio is never
+below the directional ratio, and `strongly_active` is the high-ratio
+tail of both. What the directional normalizer gets wrong is the
+**refusal reason**. Its ratio for a genuine kink is
+`reduced / directional`
+([#804](https://github.com/jkitchin/pounce/issues/804)), so as the
+row's coordinate couples to the rest of the free space at strength
+`rho` the class slides. Measured, on a fixture whose row is a kink at
+every `rho`:
+
+| `rho` | `classify_activity()` | `reduced_row_activity()` |
+|---|---|---|
+| `1e-2` | `ambiguous` | `weakly_active` |
+| `1e-4` | `ambiguous` | `weakly_active` |
+| `1e-6` | **`inactive`** | `weakly_active` |
+
+`inactive` is the one class whose derivative you may legitimately read
+as a structural zero. So gating on the directional ratio would not
+decline to answer about a tight cap's shadow price — it would answer
+"it does not move", which is a wrong answer wearing a refusal's
+clothes. Coupling that strong is routine on a collocation model, and
+reading an activity class as a proxy for kink-ness is the inference
+that shipped
+[#756](https://github.com/jkitchin/pounce/issues/756). See
+[`ambiguous` is not "probably not a kink"](#ambiguous-is-not-probably-not-a-kink)
+below.
+
+The Rust and Python layers underneath expose the map itself, ungated,
+since a caller asking for a one-sided answer still needs the row:
+`Solver::d_multiplier_rows` / `solver.inequality_multiplier_rows()`,
+the `y_d` counterpart of `g_multiplier_rows` /
+`solver.multiplier_rows()`.
 
 ### Bending the estimate around a bound: `mode="fix_relax"`
 
@@ -1811,7 +1897,7 @@ replaces constraints even if they don't contain the parameters."*
 | Cost per query | model clone + full constraint rebuild + subprocess + file parse | declare once; the KKT factor is retained and each query is one backsolve |
 | Perturbation values | required **before** the solve | not required; ask for any `Δp` afterwards |
 | `dx*/dp` | ✅ `get_dsdp`, whole matrix | ✅ `sens_jacobian(of, wrt=…)`, scalar or `Jacobian` / DataFrame |
-| `dλ/dp`, multiplier sensitivity | ❌ | ✅ pass an equality `Constraint` as `of=` |
+| `dλ/dp`, multiplier sensitivity | ❌ | ✅ pass a `Constraint` as `of=` — every equality, and a strictly active inequality, gated on the regime ([The shadow price of a cap](#the-shadow-price-of-a-cap)) |
 | Total `df/dp` | ❌ | ✅ `sens_jacobian(m.obj, wrt=p)`, explicit partial plus the path through `x*` |
 | Declared `Param` in a variable **bound** | ❌ substitution walks constraints and the objective only, so the derivative reads exactly `0.0` | ✅ rewritten to a row at declaration — see [Declared Params in variable bounds](#declared-params-in-variable-bounds) |
 | Bound crossing (fix-relax) | sIPOPT implements `sens_boundcheck`, but the toolbox never sets it — only `run_sens=yes` | ✅ `mode="fix_relax"`, both the pin and the release half |

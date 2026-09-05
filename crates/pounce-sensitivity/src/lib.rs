@@ -26,8 +26,9 @@
 //!
 //! * **Fixed-variable lifting** ✔ — `pounce_sens` handles `n_x != n_full`
 //!   via the `IpoptNlp::full_x_to_var_x` / `var_x_to_full_x` /
-//!   `full_g_to_c_block` trait methods (which delegate to
-//!   `BoundClassification.x_not_fixed_map` / `c_map`).
+//!   `full_g_to_c_block` / `full_g_to_d_block` trait methods (which
+//!   delegate to `BoundClassification.x_not_fixed_map` / `full_to_c` /
+//!   `full_to_d`).
 //! * **Reduced-Hessian eigendecomposition** ✔ — pure-Rust cyclic Jacobi
 //!   in [`pounce_linalg::symmetric_eigen`] (shared with the convex QP
 //!   sensitivity path); surfaced via

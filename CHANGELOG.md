@@ -11,6 +11,61 @@ changes.
 
 ### Added
 
+- **`dλ/dp` for a strictly active inequality
+  ([#910](https://github.com/jkitchin/pounce/issues/910)).**
+  `sens_jacobian(of=<Constraint>)` gave multiplier sensitivities for
+  equality rows only; an inequality was refused outright, even where the
+  row is strictly active at the solved point and its multiplier is a
+  perfectly ordinary differentiable function of the parameters. The
+  shadow price a user wants an error bar on is usually a *cap* — a
+  safety limit, a capacity, a purity spec — and those are written as
+  inequalities, so the only route was to rewrite the row as an equality
+  before solving, which changes the model and is correct only if the row
+  really does stay active over the perturbation being asked about.
+
+  The restriction was API surface, not mathematics: the compound KKT
+  vector is `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` and
+  `parametric_step_full` already returned `y_d`; what was missing was the
+  map to it. Added as `BoundClassification::full_to_d`,
+  `IpoptNlp::full_g_to_d_block`, `Solver::d_multiplier_rows` and
+  `solver.inequality_multiplier_rows()` — the exact complement of the
+  existing `full_to_c` / `full_g_to_c_block` / `g_multiplier_rows` /
+  `multiplier_rows` chain.
+
+  The map is ungated, because a caller asking for a one-sided answer
+  still needs the row. `pounce.sensitivity`'s `mult_entry` is where the
+  gate lives: an inequality is answered only where the row is strictly
+  active, and the other two regimes are refused with messages that *name*
+  the regime, since they call for different things from the caller — an
+  inactive row's answer really is zero, and a kink needs a direction.
+
+  The gate reads `reduced_row_activity()`, not `classify_activity()`, and
+  the reason is not the obvious one: neither classifier can *admit* a
+  kink, but the directional normalizer gets the refusal REASON wrong. Its
+  ratio for a genuine kink is `reduced/directional`
+  ([#804](https://github.com/jkitchin/pounce/issues/804)), so the class
+  slides with the coupling — measured on a row that is a kink at every
+  coupling, `ambiguous` at `rho = 1e-2` and **`inactive`** by `1e-6`.
+  `inactive` is the one class whose derivative a caller may legitimately
+  read as a structural zero, so gating there would answer a tight cap's
+  kinked shadow price with a confident zero rather than declining it — a
+  wrong answer wearing a refusal's clothes. Coupling that strong is
+  routine on a collocation model, and reading an activity class as a
+  proxy for kink-ness is the inference that shipped
+  [#756](https://github.com/jkitchin/pounce/issues/756).
+
+  `sens_invariance_legs.rs` grows a third fixture, per CLAUDE.md's "a new
+  public accessor gets a row in each leg" rule: the pin equality first
+  and an inactive decoy second, so the active row's `g` index, its
+  d-block position and its flat KKT row are three different numbers, plus
+  a kink row so all three regimes are present. Mutation-checked — a
+  `y_c`-shaped offset, a `g`-index-as-d-position map, and an offset built
+  from the user's `n` instead of the factor's `x` width each turn legs
+  red, and the last of those turns *only* leg 3 red, which is what leg 3
+  is for.
+
+  Book page: `docs/src/sensitivity.md`, "The shadow price of a cap".
+
 - **A phase-changing flash as a complementarity problem
   (`pounce.examples.flash_mpcc`, notebook 38).** A single vapour–liquid
   equilibrium stage solved across a temperature path that crosses

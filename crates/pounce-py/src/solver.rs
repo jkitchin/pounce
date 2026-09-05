@@ -706,13 +706,47 @@ impl PySolver {
 
     /// Rows of the compound KKT vector holding the equality
     /// multipliers for the given 0-based constraint (`g`) indices;
-    /// `None` for inequality constraints.
+    /// `None` for inequality constraints (see
+    /// `inequality_multiplier_rows`).
     fn multiplier_rows(&self, g_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("multiplier_rows: no converged factor (call solve() first)")
         })?;
         let gs = validate_pins(&g_indices, s.m)?;
         let rows = s.inner.g_multiplier_rows(&gs).map_err(solver_error_to_py)?;
+        Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
+    }
+
+    /// Rows of the compound KKT vector holding the **inequality**
+    /// multipliers (`y_d`) for the given 0-based constraint (`g`)
+    /// indices; `None` for equality constraints, which are
+    /// `multiplier_rows`'. The complement of that accessor
+    /// (pounce#910).
+    ///
+    /// The row exists for every inequality. The **derivative** does
+    /// not: `y_d` holds a number in all three activity regimes, and
+    /// only a strictly active row (`s ≈ 0`, `λ > 0`) has a two-sided
+    /// `dλ/dp`. An inactive row's derivative is a structural zero the
+    /// KKT row does not carry, and a weakly active row — a kink, `s ≈
+    /// 0` *and* `λ ≈ 0` — has two one-sided derivatives that differ,
+    /// with the entry holding whichever side the factorization landed
+    /// on. Gate on the regime before reading these as sensitivities.
+    ///
+    /// The classifier that gates it is `reduced_row_activity`, NOT
+    /// `classify_activity`: on the directional normalizer a genuine
+    /// kink whose row couples to the remaining free space reports
+    /// `"inactive"` at strong enough coupling (pounce#804), and
+    /// `"inactive"` is the one verdict a caller may legitimately read
+    /// as "this shadow price does not move". Gating there would answer
+    /// a kink with a confident zero rather than declining it.
+    fn inequality_multiplier_rows(&self, g_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "inequality_multiplier_rows: no converged factor (call solve() first)",
+            )
+        })?;
+        let gs = validate_pins(&g_indices, s.m)?;
+        let rows = s.inner.d_multiplier_rows(&gs).map_err(solver_error_to_py)?;
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 

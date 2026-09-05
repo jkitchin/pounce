@@ -582,3 +582,221 @@ def test_refinement_can_only_lengthen_alpha_never_shorten_it():
     assert (a_amb, first_amb) == (2.0, "r")
     assert (a_ref, first_ref) == (float("inf"), None)
     assert a_ref >= a_amb, "refining a coordinate onto its bound cannot shorten alpha"
+
+
+# ── an inequality's shadow price (gh#910) ────────────────────────────────────
+#
+# `mult_entry` used to refuse every inequality outright, which made the
+# one shadow price a user most often wants an error bar on -- a cap: a
+# safety limit, a capacity, a purity spec -- reachable only by rewriting
+# the row as an equality before solving. That rewrite changes the model,
+# and is correct only if the row really does stay active across the
+# perturbation being asked about.
+#
+# The restriction was API surface, not mathematics: `parametric_step_full`
+# has always returned the `y_d` block, and what was missing was the map
+# from a user row to its position in it. But the lift needs a gate, since
+# `y_d` holds a number in all three activity regimes and only one of them
+# has a two-sided derivative.
+
+U0, W_STAR, CAP_SCALE, CAP, A_KINK = 5.0, 2.0, 2.0, 2.0, 0.6
+
+
+def cap_model():
+    """min .5(u-U0)^2 + .5(w-W_STAR)^2 + .5 z^2 - A_KINK p z
+
+        s.t.  pin_p:            p == 0
+              decoy:      3 * w <= 30      (inactive)
+              cap:   2 * (u - p) <= 2      (strictly active)
+              kink:            z >= 0      (weakly active)
+
+    One row in each of the three regimes, with the pin equality first
+    and the inactive decoy second -- so the cap's `g` index (2), its
+    d-block position (1) and its flat KKT row are three different
+    numbers and no index confusion can pass by coincidence.
+
+    Every variable is free: the only activity in the model is in the
+    rows, so a variable-bound answer cannot stand in for a row one.
+
+    At the solution `2(u - p) = 2`, so `u = 1 + p`, and stationarity in
+    `u` gives `lambda_cap = (U0 - u)/2`. Hence `d lambda_cap/dp = -1/2`
+    exactly, on both sides.
+    """
+    v = pounce.NlExpr.vars(4)                       # u, w, z, p
+    return pounce.build_nl_problem(
+        n=4,
+        objective=(0.5 * (v[0] - U0) ** 2 + 0.5 * (v[1] - W_STAR) ** 2
+                   + 0.5 * v[2] ** 2 - A_KINK * v[3] * v[2]),
+        constraints=[v[3], 3.0 * v[1], CAP_SCALE * (v[0] - v[3]), v[2]],
+        g_l=[0.0, -1e19, -1e19, 0.0],
+        g_u=[0.0, 30.0, CAP, 1e19],
+        x_l=[-1e19] * 4, x_u=[1e19] * 4,
+        x0=[0.5, 0.5, 0.5, 0.0],
+        var_names=["u", "w", "z", "p"],
+        con_names=["pin_p", "decoy", "cap", "kink"],
+    )
+
+
+def cap_session():
+    return solve_for_sensitivity(cap_model(), pins={"p": 0},
+                                 options={"print_level": 0})
+
+
+def test_the_cap_fixture_puts_one_row_in_each_activity_regime():
+    """Precondition: without this every assertion below is vacuous."""
+    sess = cap_session()
+    np.testing.assert_allclose(sess.base_x[:2], [CAP / CAP_SCALE, W_STAR],
+                               atol=1e-6)
+    assert abs(sess.base_x[2]) < 1e-3, "z sits at its kink row"
+
+    status = sess.solver.reduced_row_activity([0, 1, 2, 3])["status"]
+    assert status == ["equality", "inactive", "strongly_active",
+                      "weakly_active"]
+
+
+def test_a_strictly_active_inequality_gets_the_derivative_an_equality_gets():
+    """The whole point of gh#910: `d lambda_cap/dp = -1/CAP_SCALE`.
+
+    Read off the `y_d` block, which needs the row map the layer did not
+    have. `-0.5` and not `-1`, because the row's gradient scale is 2 --
+    a right answer here cannot be a coincidence of unit coefficients.
+    """
+    sess = cap_session()
+    row = sess.mult_entry("cap")
+    assert sess.column(0)[row] == pytest.approx(-1.0 / CAP_SCALE, abs=1e-7)
+
+
+def test_the_cap_row_is_not_its_g_index_nor_its_c_block_position():
+    """The map is the feature; addressing the wrong row is how it fails.
+
+    The cap is `g` index 2, d-block position 1, and has no c-block
+    position at all. An equality-blind scan, a `full_to_c`-shaped
+    confusion, and a raw `g` index each land somewhere else.
+    """
+    sess = cap_session()
+    s = sess.solver
+    assert s.multiplier_rows([0, 1, 2, 3]) == [
+        s.multiplier_rows([0])[0], None, None, None], "only the pin is y_c"
+
+    d_rows = s.inequality_multiplier_rows([0, 1, 2, 3])
+    assert d_rows[0] is None, "the pin is an equality, not in y_d"
+    # the three inequalities are consecutive in g order, and the cap is
+    # the SECOND of them -- not the third, which its g index would make it
+    assert d_rows[2] - d_rows[1] == 1 and d_rows[3] - d_rows[2] == 1
+    assert sess.mult_entry("cap") == d_rows[2]
+    assert d_rows[2] != 2, "a raw g index must not pass as a KKT row"
+
+
+def test_an_inactive_row_is_refused_by_naming_its_regime():
+    """Its derivative is a structural zero, not this row's to report.
+
+    Refused rather than answered `0`, and the message says which of the
+    three regimes it is, because the two refusals want different things
+    from the caller: an inactive row's answer really is zero, and a
+    kink needs a direction.
+    """
+    sess = cap_session()
+    with pytest.raises(ValueError, match="inactive at the solved point"):
+        sess.mult_entry("decoy")
+
+
+def test_a_weakly_active_row_is_refused_by_naming_its_regime():
+    sess = cap_session()
+    with pytest.raises(ValueError, match="weakly active at the solved point"):
+        sess.mult_entry("kink")
+    # ...and the row IS addressable: the map does not gate, so a caller
+    # asking for a one-sided answer can still reach it
+    assert sess.solver.inequality_multiplier_rows([3])[0] is not None
+
+
+def test_an_equality_is_still_answered_from_the_y_c_block():
+    """The lift must not reroute the case that already worked."""
+    sess = cap_session()
+    assert sess.mult_entry("pin_p") == sess.solver.multiplier_rows([0])[0]
+
+
+def test_an_unknown_constraint_name_still_raises_before_any_classification():
+    sess = cap_session()
+    with pytest.raises(ValueError, match="not a constraint"):
+        sess.mult_entry("no_such_row")
+
+
+def test_a_relaxed_solve_is_refused_by_naming_the_constraint():
+    """The classifier's own refusals reach the caller as this question.
+
+    `reduced_row_activity` declines a solve with `bound_relax_factor != 0`
+    -- relaxed bounds shift the slacks it reads -- and its message names
+    the option, not the thing that asked. An equality is unaffected: it
+    never reaches the classifier at all.
+    """
+    sess = solve_for_sensitivity(cap_model(), pins={"p": 0},
+                                 options={"print_level": 0,
+                                          "bound_relax_factor": 1e-8})
+    assert sess.mult_entry("pin_p") is not None, "the y_c half is ungated"
+    with pytest.raises(ValueError, match="cap: an inequality's multiplier"):
+        sess.mult_entry("cap")
+
+
+# ── which classifier gates it, and why it is not the cheap one ───────────────
+
+def coupled_kink_model(rho):
+    """min .5 k^2 + c k y + .5 y^2 - A p k  s.t.  p == 0,  2k >= 0.
+
+    `c = sqrt(1 - rho)` makes the curvature REDUCED along the row's
+    direction exactly `rho`, while the curvature along the row's own
+    gradient stays 1. The row is a genuine kink at every `rho`: at
+    `p = 0` both its slack and its multiplier vanish.
+
+    `classify_activity` normalizes by the directional curvature, so its
+    ratio here is `rho/1` and its verdict slides with the coupling --
+    "ambiguous" at `1e-2`, and "inactive" by `1e-6` (gh#804).
+    `reduced_row_activity` divides by `rho` itself and says
+    "weakly_active" throughout.
+    """
+    import math
+    c = math.sqrt(1.0 - rho)
+    v = pounce.NlExpr.vars(3)                       # k, y, p
+    return pounce.build_nl_problem(
+        n=3,
+        objective=(0.5 * v[0] ** 2 + c * v[0] * v[1] + 0.5 * v[1] ** 2
+                   - 0.25 * v[2] * v[0]),
+        constraints=[v[2], 2.0 * v[0]],
+        g_l=[0.0, 0.0], g_u=[0.0, 1e19],
+        x_l=[-1e19] * 3, x_u=[1e19] * 3,
+        x0=[0.3, 0.0, 0.0],
+        var_names=["k", "y", "p"], con_names=["pin_p", "kink"],
+    )
+
+
+@pytest.mark.parametrize("rho,cheap", [(1e-2, "ambiguous"),
+                                       (1e-4, "ambiguous"),
+                                       (1e-6, "inactive")])
+def test_the_gate_reads_the_reduced_classifier_not_the_cheap_one(rho, cheap):
+    """The refusal REASON is what the cheap classifier gets wrong.
+
+    Neither classifier can *admit* a kink -- a row's reduced curvature
+    is never larger than its directional one, so the reduced ratio is
+    never below the directional one and `strongly_active` is the
+    high-ratio tail of both. What slides with the coupling is the
+    class the kink lands in when it is turned away, and by `rho = 1e-6`
+    the cheap classifier calls it **inactive**.
+
+    "inactive" is the one verdict a caller may legitimately read as
+    "this shadow price does not move". So gating there would not
+    decline to answer about a tight cap's kinked shadow price -- it
+    would answer "it does not move", which is a wrong answer wearing a
+    refusal's clothes. Coupling that strong is routine on a collocation
+    model, and reading an activity class as a proxy for kink-ness is
+    the inference that shipped gh#756.
+
+    This is a three-`rho` sweep and not one case because the cheap
+    classifier's verdict is the thing that moves: a single `rho` cannot
+    distinguish "the gate reads the reduced classifier" from "the two
+    classifiers happen to agree here".
+    """
+    sess = solve_for_sensitivity(coupled_kink_model(rho), pins={"p": 0},
+                                 options={"print_level": 0})
+    assert sess.solver.classify_activity()["row_status"][1] == cheap
+    assert sess.solver.reduced_row_activity([1])["status"][0] == "weakly_active"
+    with pytest.raises(ValueError, match="weakly active at the solved point"):
+        sess.mult_entry("kink")

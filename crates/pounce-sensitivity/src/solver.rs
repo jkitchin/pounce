@@ -1876,9 +1876,10 @@ impl Solver {
 
     /// Flat rows of the compound KKT vector holding the equality
     /// multipliers `y_c` for the given 0-based **full-g** constraint
-    /// indices. `None` for inequalities (their multipliers live in the
-    /// `y_d` block; mapping those is not exposed here). Row `r` of a
-    /// [`Self::parametric_step_full`] result is then `∂λ_g/∂p · Δp`.
+    /// indices. `None` for inequalities — their multipliers live in
+    /// the `y_d` block, which [`Self::d_multiplier_rows`] addresses.
+    /// Row `r` of a [`Self::parametric_step_full`] result is then
+    /// `∂λ_g/∂p · Δp`.
     pub fn g_multiplier_rows(
         &self,
         g_indices: &[Index],
@@ -1894,6 +1895,63 @@ impl Solver {
                     .backsolver
                     .full_g_to_c_block(g)
                     .map(|pos| y_c_offset + pos)
+            })
+            .collect())
+    }
+
+    /// Flat rows of the compound KKT vector holding the **inequality**
+    /// multipliers `y_d` for the given 0-based **full-g** constraint
+    /// indices. `None` for equalities (those are
+    /// [`Self::g_multiplier_rows`]'s). The `y_d` counterpart of that
+    /// accessor, added by gh#910: `parametric_step_full` already
+    /// returned the `y_d` block, and this is the map that says which
+    /// row of it belongs to which user constraint.
+    ///
+    /// **Reading the row is not the same as the row being a
+    /// derivative.** `y_d` holds a number for every inequality, in all
+    /// three activity regimes, and only one of them has a two-sided
+    /// `∂λ/∂p` at all:
+    ///
+    /// * **strictly active** (`s ≈ 0`, `λ > 0`): the row behaves as an
+    ///   equality over a neighbourhood of the solved point, and this
+    ///   row is the same back-solve an equality gets. Well defined.
+    /// * **inactive** (`s > 0`, `λ ≈ 0`): the derivative is a
+    ///   structural zero over a neighbourhood; the KKT row carries the
+    ///   barrier's residue rather than a derivative of anything.
+    /// * **weakly active** (a kink: `s ≈ 0` *and* `λ ≈ 0`): the two
+    ///   one-sided derivatives differ and no two-sided value exists.
+    ///   The entry holds whichever side the factorization landed on —
+    ///   the silently-wrong-while-reporting-success class.
+    ///   [`Self::parametric_step_directional`] is what answers a kink,
+    ///   and it needs a direction.
+    ///
+    /// So a caller reading these rows as `∂λ/∂p` must gate on the
+    /// regime first, and the classifier that answers it is
+    /// [`Self::reduced_row_activity`], **not**
+    /// [`Self::classify_activity`]: a genuine kink whose row couples
+    /// to the remaining free space reports `INACTIVE` on the
+    /// directional normalizer at strong enough coupling (gh#804), and
+    /// `INACTIVE` is the one class whose derivative a caller may
+    /// legitimately read as a structural zero. Gating on the cheap
+    /// classifier would therefore answer "it does not move" about a
+    /// kink — a wrong answer wearing a refusal's clothes. That
+    /// inference, reading an activity class as a proxy for kink-ness,
+    /// is what shipped gh#756.
+    pub fn d_multiplier_rows(
+        &self,
+        g_indices: &[Index],
+    ) -> Result<Vec<Option<Index>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let dims = state.backsolver.block_dims();
+        let y_d_offset = (dims[0] + dims[1] + dims[2]) as Index;
+        Ok(g_indices
+            .iter()
+            .map(|&g| {
+                state
+                    .backsolver
+                    .full_g_to_d_block(g)
+                    .map(|pos| y_d_offset + pos)
             })
             .collect())
     }
