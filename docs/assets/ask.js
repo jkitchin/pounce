@@ -120,8 +120,8 @@
   // solve fails because of where it started") is mostly stopwords, and
   // without this list the short passages that happen to contain several of
   // them outrank the passage that contains the one term that matters.
-  // Measured on the 20-query eval set: removing these took top-1 from 11/20
-  // to 15/20 on its own.
+  // Ablated against the final system on the 20-query eval set, this list is
+  // worth top-1 17/20 -> 14/20 (book-only).
   //
   // Deliberately *not* included: "no", "not", "off", "on", "up", "down",
   // "over", "under" — each is load-bearing somewhere in this corpus
@@ -146,8 +146,8 @@
   // identifiers and proper nouns, and every extra rule is another chance to
   // collide two terms that a solver manual distinguishes.
   //
-  // Step 1 alone is what a reader's phrasing needs. Measured on the eval set,
-  // it is what connects "why does *relaxing* the bounds…" to the passages
+  // Step 1 alone is what a reader's phrasing needs. Ablated to an identity
+  // stem, top-1 falls 17/20 -> 14/20 (book-only); it is what connects "why does *relaxing* the bounds…" to the passages
   // about bound *relaxation*, and "my solve fails because of where it
   // *started*" to "*starting* point". The +e restoration in 1b matters as
   // much as the stripping: without it "scaling" stems to `scal` and no longer
@@ -304,12 +304,10 @@
   var HEAD_BONUS = 0.6;
   // The page title is the coarsest and most reliable topic signal in the
   // corpus: a reader asking about scaling wants the page called "Scaling"
-  // before a subsection of "Sensitivity Analysis" that mentions it.
+  // before a subsection of "Sensitivity Analysis" that mentions it. Ablated,
+  // this and HEAD_BONUS together are the largest single contributor to
+  // ranking quality: dropping both takes top-1 17/20 -> 13/20 (book-only).
   var TITLE_BONUS = 0.5;
-  // Weight of a passage that matched only one of several query terms,
-  // relative to one that matched them all. 0 would make coverage the whole
-  // ranking and drop legitimate single-rare-term hits ("bound_relax_factor").
-  var COORD_FLOOR = 0.3;
 
   // Query-side terms, deduplicated (a word repeated in the question must not
   // multiply its own idf).
@@ -358,12 +356,10 @@
     for (var i = 0; i < idx.N; i++) {
       var doc = idx.docs[i];
       var score = 0;
-      var matched = 0;
       for (var q = 0; q < qterms.length; q++) {
         var term = qterms[q];
         var f = doc.tf[term];
         if (!f) continue;
-        matched++;
         var n = idx.df[term] || 0;
         var idf = Math.log(1 + (idx.N - n + 0.5) / (n + 0.5));
         var denom = f + K1 * (1 - B + (B * doc.len) / idx.avgdl);
@@ -371,14 +367,13 @@
         if (doc.head[term]) score += HEAD_BONUS * idf;
         if (doc.title[term]) score += TITLE_BONUS * idf;
       }
-      if (score > 0) {
-        // Coordination: BM25 sums independently over terms, so a passage
-        // matching one term very well outranks one matching every term
-        // decently. On a question the second is nearly always what the
-        // reader meant, so scale by how much of the question was covered.
-        score *= COORD_FLOOR + (1 - COORD_FLOOR) * (matched / qterms.length);
-        scored.push({ i: i, score: score });
-      }
+      // A coordination factor (scaling by the fraction of query terms a
+      // passage matched) was tried here and removed: ablated, it moved
+      // neither configuration of the eval set — 17/20 book-only and 18/20
+      // with the wiki, either way. Once stopwords stopped inflating the term
+      // count and the heading bonus stopped rewarding nesting depth, it had
+      // nothing left to correct.
+      if (score > 0) scored.push({ i: i, score: score });
     }
 
     scored.sort(function (a, b) {

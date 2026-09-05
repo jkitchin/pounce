@@ -47,12 +47,20 @@ changes.
   runs the *shipped* `ask.js` — not a copy of the scoring — against a labelled
   query set. Retrieval has no exception to throw: it returns the wrong passage
   silently, and the only symptom is a reader not finding the page. Four
-  ranking defects were found and fixed by measuring against that set rather
-  than by inspection: unstemmed function words swamping natural-language
-  questions (top-1 11/20 → 15/20), a compound identifier being split so that
-  `fix_relax` outranked the documentation of `bound_relax_factor`, the heading
-  bonus rewarding nesting depth, and the wiki's link-farm `Home` page winning
-  multi-term queries. Now 18/20 top-1 and 20/20 top-5.
+  ranking defects were found by measuring against that set rather than by
+  inspection, every one of which looked fine on the page: function words
+  swamping natural-language questions, a compound identifier being split so
+  that `fix_relax` outranked the documentation of `bound_relax_factor`, the
+  heading bonus rewarding nesting *depth* rather than specificity, and the
+  wiki's link-farm `Home` page winning multi-term queries. Final score 18/20
+  top-1 with the wiki, 17/20 book-only (as CI builds it), 20/20 top-5 in both.
+
+  Ablated against the final system, book-only top-1 of 17/20 falls to 13/20
+  without the heading and title bonuses, 14/20 without the stopword list, and
+  14/20 without stemming. A fifth component — a coordination factor scaling by
+  the fraction of query terms matched — measured *no* difference in either
+  configuration once the other four were right, and was removed rather than
+  kept on the strength of the argument for it.
 
   Book page: `docs/src/ask.md`. Index builder:
   `scripts/build-docs-index.py`.
