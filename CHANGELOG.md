@@ -12,13 +12,14 @@ changes.
 ### Added
 
 - **An in-browser docs assistant on the rendered site (`Ask`).** A question
-  box in the menu bar of every page of <https://jkitchin.github.io/pounce/>,
-  built from two halves that work independently. Retrieval is BM25 over an
-  index of the whole book *and* the GitHub wiki, deep-linked to the heading
-  that answers; generation is optional, a small instruct model
-  ([WebLLM](https://github.com/mlc-ai/web-llm) on WebGPU) that is handed only
-  the retrieved passages. Nothing leaves the browser: no API key, no server,
-  no telemetry, and no download at all until the reader clicks "Load model".
+  box behind a floating button in the lower-right corner of every page of
+  <https://jkitchin.github.io/pounce/>, built from two halves that work
+  independently. Retrieval is BM25 over an index of the whole book *and* the
+  GitHub wiki, deep-linked to the heading that answers; generation is
+  optional, a small instruct model ([WebLLM](https://github.com/mlc-ai/web-llm)
+  on WebGPU) that is handed only the retrieved passages. Nothing leaves the
+  browser: no API key, no server, no telemetry, and no download at all until
+  the reader clicks "Load model".
 
   **The wiki is the reason it exists as much as the model is.** The four
   long-form wiki pages carry the measured guidance — which of the 441 options
