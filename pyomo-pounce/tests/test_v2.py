@@ -375,13 +375,29 @@ def test_sens_route_matches_the_ordinary_route_on_a_maximization(v2):
     pytest.importorskip("pounce")
 
     plain = _model(sense=maximize)
-    v2.solve(plain)
+    plain_results = v2.solve(plain)
     sens = _model(sense=maximize)
     from pyomo_pounce import declare_sens_param
     declare_sens_param(sens.p)
-    v2.solve(sens)
+    sens_results = v2.solve(sens)
 
     assert value(sens.x) == pytest.approx(value(plain.x), rel=1e-6, abs=1e-8)
+    # the same field the minimize parity test above asserts. It is listed
+    # here too because that one cannot see a sense conversion: the
+    # ordinary route sets it from `value(nl_info.objectives[0])`, the
+    # objective as the model states it, while this route reads
+    # `info["obj_val"]`, which is a value of the negated objective the
+    # engine was handed. The two agree on a minimization whether or not
+    # anything converts (gh#906).
+    assert sens_results.incumbent_objective == pytest.approx(
+        plain_results.incumbent_objective, rel=1e-6, abs=1e-8)
+    # ...and it is the value the model states, not its negation: this is
+    # a maximization of a negated sum of squares, so the optimum is
+    # strictly negative and a missing factor is a sign flip, not a small
+    # error
+    assert sens_results.incumbent_objective == pytest.approx(
+        value(sens.o), rel=1e-6, abs=1e-8)
+    assert sens_results.incumbent_objective < 0.0
     assert sens.dual[sens.c] == pytest.approx(
         plain.dual[plain.c], rel=1e-5, abs=1e-7)
     assert sens.rc[sens.x] == pytest.approx(
@@ -390,10 +406,12 @@ def test_sens_route_matches_the_ordinary_route_on_a_maximization(v2):
     # holds whatever the arithmetic is: `max -f` and `min f` reach one
     # point and every marginal negates
     lo = _model()
-    v2.solve(lo)
+    lo_results = v2.solve(lo)
     assert sens.dual[sens.c] == pytest.approx(-lo.dual[lo.c], rel=1e-5,
                                               abs=1e-7)
     assert sens.rc[sens.x] == pytest.approx(-lo.rc[lo.x], rel=1e-5, abs=1e-7)
+    assert sens_results.incumbent_objective == pytest.approx(
+        -lo_results.incumbent_objective, rel=1e-6, abs=1e-8)
 
 
 def test_sens_route_honours_load_solutions_false(v2):
