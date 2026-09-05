@@ -393,6 +393,14 @@ class PounceSensSolutionLoader(SolutionLoader):
       positive in both. The reduced cost is then combined from the two
       bound multipliers exactly as `IpoptSolutionLoader` combines the
       `.sol` suffixes, so `rc` means the same thing on both routes.
+
+    A third crosses on a `maximize` model and multiplies both. A
+    multiplier is a coefficient of the objective it was generated
+    against, and `pounce.read_nl` negates a maximization before the
+    engine ever sees it, so ``mult_g`` and ``mult_x_*`` are stated
+    against ``-f``. ``capture['obj_sign']`` is the conversion back to
+    the objective the caller wrote; it is +1 on every minimization,
+    which is why its absence was invisible until a maximization asked.
     """
 
     def __init__(self, model, capture, has_solution=True):
@@ -402,6 +410,9 @@ class PounceSensSolutionLoader(SolutionLoader):
         self._var_row = {n: i for i, n in enumerate(capture["var_names"])}
         self._con_row = {n: i for i, n in enumerate(capture["con_names"])}
         self._con_alias = capture.get("con_alias") or {}
+        # +1 minimize / -1 maximize; a capture from before this key
+        # existed can only have come from a minimization
+        self._obj_sign = float(capture.get("obj_sign", 1.0))
         self._warned_unresolved = False
 
     def get_number_of_solutions(self) -> int:
@@ -514,9 +525,10 @@ class PounceSensSolutionLoader(SolutionLoader):
                 # reporting.
                 missing.append(cd.name)
             else:
-                # engine's internal +lambda -> the AMPL marginal Pyomo's
-                # `dual` suffix carries
-                out[cd] = -float(lam[row])
+                # engine's internal +lambda, against the objective it
+                # minimized -> the AMPL marginal Pyomo's `dual` suffix
+                # carries, against the objective the model states
+                out[cd] = -self._obj_sign * float(lam[row])
         if missing and report_missing:
             self._warn_unresolved("constraints", missing)
         return out
@@ -544,10 +556,10 @@ class PounceSensSolutionLoader(SolutionLoader):
             row = self._var_row.get(vd.name)
             if row is None:
                 continue
-            lo = float(zl[row])
+            lo = self._obj_sign * float(zl[row])
             # Ipopt's `ipopt_zU_out` convention, so that the combination
             # below is the same arithmetic IpoptSolutionLoader does
-            hi = -float(zu[row])
+            hi = -self._obj_sign * float(zu[row])
             out[vd] = hi if abs(hi) > abs(lo) else lo
         return out
 

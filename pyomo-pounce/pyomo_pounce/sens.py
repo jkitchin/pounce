@@ -90,6 +90,7 @@ from pounce.sensitivity import (
     check_margins as _check_margins,
     covariance as _core_covariance,
     information as _core_information,
+    objective_sign as _objective_sign,
     refuse_on_pdpert as _refuse_on_pdpert,
     row_index as _row_index,
     solution as _core_solution,
@@ -895,6 +896,15 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
     active upper bound (gh #296), while the session wants the internal
     non-negative `z_u`, so it negates too; `zL` is positive in both.
 
+    A third crosses on a `maximize` model, and it multiplies all three.
+    A suffix the user holds is stated against the objective they wrote;
+    `read_nl` negates that objective before the engine ever sees it, so
+    the multipliers the engine wants are the negation of the ones the
+    suffix carries. `objective_sign` is that factor, +1 on every
+    minimization -- which is why seeding a maximization used to hand the
+    engine a certificate of the wrong sign, a worse starting point than
+    the default it displaced.
+
     Entries the user did not supply are seeded NaN, the session's
     "unseeded" marker: the warm-start initializer substitutes its own
     resolved defaults (`bound_mult_init_val` for bound multipliers, 0
@@ -904,6 +914,7 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
     `warm_start_mult_bound_push` exactly as a round-tripped inactive
     multiplier is.
     """
+    sense = _objective_sign(nl)
     y = np.full(int(nl.m), np.nan)
     zl = np.full(int(nl.n), np.nan)
     zu = np.full(int(nl.n), np.nan)
@@ -916,7 +927,9 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
             # con_names is trimmed to the constraint rows at the read
             # site, so a hit here is always a row of the dual vector
             if r is not None:
-                y[r] = -float(val)      # AMPL marginal -> internal lambda
+                # AMPL marginal -> the internal lambda of the objective
+                # the engine minimizes
+                y[r] = -sense * float(val)
     for sfx_name, arr, sign in (("ipopt_zL_in", zl, 1.0),
                                 ("ipopt_zU_in", zu, -1.0)):
         sfx = model.component(sfx_name)
@@ -924,8 +937,100 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
             for vd, val in sfx.items():
                 r = var_row.get(vd.name)
                 if r is not None:
-                    arr[r] = sign * float(val)
+                    arr[r] = sense * sign * float(val)
     return {"lagrange": y, "zl": zl, "zu": zu}
+
+
+#: The import suffixes this route fills, in the spelling Pyomo, AMPL and
+#: Ipopt share. `rc` is deliberately absent: the `.sol` route does not
+#: populate it either (measured), and a reduced cost is the combination
+#: of the two bound multipliers, which `v2.get_reduced_costs` forms.
+_RESULT_SUFFIXES = ("dual", "ipopt_zL_out", "ipopt_zU_out")
+
+
+def _load_result_suffixes(model, info, nl, var_data, con_names, con_alias):
+    """Fill the model's IMPORT suffixes from an in-process solve.
+
+    Without this, `declare_sens_param` silently costs the caller their
+    duals: the ordinary `.sol` route goes through Pyomo's own solution
+    loader, which populates every active import suffix, while this route
+    reads the engine's vectors directly and used to load primals only.
+    A model that declared `m.dual = Suffix(IMPORT)` and then declared a
+    sensitivity parameter got an *empty* suffix back and a `KeyError` on
+    the first lookup -- no warning, and nothing about the declaration
+    suggests it should touch duals.
+
+    The three sign conventions are the ones `_warm_start_from_suffixes`
+    crosses on the way in, run backwards, and they are pinned by
+    `tests/test_result_suffixes.py` against the `.sol` route on the same
+    models:
+
+    * `dual` is the AMPL marginal ``d obj / d b = -lambda`` (gh #271)
+      against the engine's internal ``+lambda`` in ``info['mult_g']``;
+    * `ipopt_zU_out` is negative at an active upper bound (gh #296)
+      against the engine's non-negative ``mult_x_U``; ``zL`` agrees in
+      sign with ``mult_x_L``;
+    * all three flip once more on a `maximize` model, because `read_nl`
+      negated the objective before the engine saw it and a multiplier is
+      a coefficient of the objective it was generated against.
+
+    Two deliberate differences from the `.sol` route, neither of which
+    changes a value:
+
+    * **Membership.** The `.sol` writer emits one entry per variable --
+      the combined reduced cost, routed to `zL` when positive and to
+      `zU` when negative -- so a variable appears in exactly one of the
+      two and a bound whose multiplier lost the comparison is not
+      reported at all. Here every finite lower bound gets a `zL` entry
+      and every finite upper bound a `zU` entry, which is the question
+      the suffix name asks. Values agree wherever both routes report.
+    * **Coverage.** A component the declared-parameter surgery created
+      exists only on the clone and has no counterpart to key an entry
+      by, so it is skipped, exactly as the primal load-back skips it.
+
+    Every active import suffix is cleared first, including ones left
+    unfilled -- that is what `Model.solutions.load_from` does, and
+    leaving a previous solve's entries standing under a new solution is
+    the more dangerous of the two failure modes.
+    """
+    from pyomo.core.base.suffix import active_import_suffix_generator
+
+    suffixes = dict(active_import_suffix_generator(model))
+    if not suffixes:
+        return
+    for sfx in suffixes.values():
+        sfx.clear_all_values()
+
+    sense = _objective_sign(nl)
+
+    lam = info.get("mult_g")
+    dual = suffixes.get("dual")
+    if dual is not None and lam is not None:
+        con_row = _row_index(con_names)
+        for cd in model.component_data_objects(Constraint, active=True,
+                                               descend_into=True):
+            # the model's constraint, reached in the solve under its
+            # clone's name when the surgery replaced it -- the same
+            # indirection the warm-start reader and v2's `_row_of` apply
+            row = con_row.get(con_alias.get(cd.name, cd.name))
+            if row is not None:
+                dual[cd] = -sense * float(lam[row])
+
+    zl, zu = info.get("mult_x_L"), info.get("mult_x_U")
+    pairs = [(suffixes.get("ipopt_zL_out"), zl, 1.0, "lb"),
+             (suffixes.get("ipopt_zU_out"), zu, -1.0, "ub")]
+    pairs = [p for p in pairs if p[0] is not None and p[1] is not None]
+    if not pairs:
+        return
+    for row, vd in enumerate(var_data):
+        if vd is None:
+            continue
+        for sfx, vec, sign, bound in pairs:
+            # an infinite bound has no multiplier to report; the engine
+            # carries a zero there and reporting it would read as a
+            # bound that exists and is inactive
+            if getattr(vd, bound) is not None:
+                sfx[vd] = sense * sign * float(vec[row])
 
 
 def _stream_solve(solver, x0, **solve_kwargs):
@@ -1193,7 +1298,11 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         capture.update(
             x=np.asarray(x), info=info, status_msg=status_msg,
             var_names=var_names, con_names=con_names, con_alias=con_alias,
-            n=int(nl.n), m=int(nl.m), solve_secs=solve_secs)
+            n=int(nl.n), m=int(nl.m), solve_secs=solve_secs,
+            # +1 / -1: the loader reports multipliers against the
+            # objective the model states, and `read_nl` handed the
+            # engine the negation of a maximization
+            obj_sign=_objective_sign(nl))
 
     # Return a Pyomo SolverResults indistinguishable from an ordinary
     # solve's: same fields (counts, time, Id/Error rc, emptied Solution
@@ -1218,11 +1327,14 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         results.problem.number_of_objectives = 1
         results.problem.number_of_constraints = int(nl.m)
         results.problem.number_of_variables = int(nl.n)
-        # objective bounds, like the .sol path: both set to the final value
+        # objective bounds, like the .sol path: both set to the final
+        # value, in the sense the model states it (`read_nl` negated a
+        # maximization before the engine reported `obj_val`)
         obj_val = info.get("obj_val")
         if obj_val is not None:
-            results.problem.upper_bound = float(obj_val)
-            results.problem.lower_bound = float(obj_val)
+            val = _objective_sign(nl) * float(obj_val)
+            results.problem.upper_bound = val
+            results.problem.lower_bound = val
         # the ordinary path's repr carries an emptied Solution block
         # (the parsed solution is loaded into the model, then cleared)
         results.solution.add()
@@ -1246,10 +1358,19 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # See `_STATUS_RESULT` for why widening the callback gate is the wrong
         # way to close that gap.
         reg.session = None
+        failed_var_data = []
         for name, val in zip(var_names, np.asarray(x)):
             ov = model.find_component(name)
+            failed_var_data.append(ov)
             if ov is not None:
                 ov.set_value(float(val), skip_validation=True)
+        # the final iterate's multipliers, on the same terms as the
+        # primals beside them: the .sol route loads a non-converged
+        # solution's suffixes too, and a caller reading `m.dual` after a
+        # maxIterations exit should see the iterate, not the previous
+        # solve's answer left standing
+        _load_result_suffixes(model, info, nl, failed_var_data, con_names,
+                              con_alias)
         return build_results()
 
     # name -> row maps, built once here and handed to the session below.
@@ -1292,9 +1413,11 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     session.base_x = np.asarray(x)
     # the engine always reports obj_val (NaN when it evaluated nothing),
     # and it is eval_f on this model's own bridge at the final iterate --
-    # unscaled, in the model's objective units, i.e. exactly what
-    # pyo.value(objective) returns an instant after the solve
-    session.base_obj = float(info.get("obj_val", float("nan")))
+    # unscaled, in the model's objective units. `read_nl` negates a
+    # `maximize` objective, so the sign is what makes this equal to
+    # pyo.value(objective) an instant after the solve on BOTH senses.
+    session.base_obj = session.obj_sign * float(
+        info.get("obj_val", float("nan")))
     session.moved_bounds = moved_bounds
     session.pin_coefs = pin_coefs
     session.pin_bases = pin_bases
@@ -1324,6 +1447,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         if ov is not None:
             ov.set_value(float(val), skip_validation=True)
     session.var_data = var_data
+    _load_result_suffixes(model, info, nl, var_data, con_names, con_alias)
 
     reg.session = session
 
@@ -1331,12 +1455,12 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     if session.res_rows:
         ssr = sum(float(session.base_x[r]) ** 2
                   for rows in session.res_rows.values() for r in rows)
-        obj_val = info.get("obj_val")
-        if obj_val is not None and abs(ssr - float(obj_val)) > 1e-6 * max(
-                1.0, abs(float(obj_val))):
+        obj_val = session.base_obj
+        if np.isfinite(obj_val) and abs(ssr - obj_val) > 1e-6 * max(
+                1.0, abs(obj_val)):
             warnings.warn(
                 "sens_solve: the declared residuals give SSR = "
-                f"{ssr:.6g} but the objective value is {float(obj_val):.6g}."
+                f"{ssr:.6g} but the objective value is {obj_val:.6g}."
                 " sens_covariance() assumes the objective is the plain sum of "
                 "squares of the declared residuals; extra terms (weights, "
                 "regularization) will make the noise-variance estimate "
