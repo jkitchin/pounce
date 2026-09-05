@@ -792,10 +792,19 @@ class Pounce(Ipopt):
         # route disagreement in the direction of over-claiming: the
         # number is the objective at whatever iterate the solve stopped
         # on, not at a solution.
+        # In the model's own sense, like every other quantity this route
+        # hands back: `read_nl` negates a `maximize` objective before the
+        # engine sees it, so `info["obj_val"]` is a value of `-f`, while
+        # the ordinary route sets this field from
+        # `value(nl_info.objectives[0])` -- the objective expression as
+        # the model states it. Without the factor a declaration flips the
+        # sign of this one field on a maximization, and does it on a
+        # Results object whose `dual` and `rc` are correct (gh#906).
         if ss in (SolutionStatus.feasible, SolutionStatus.optimal):
             obj = info.get("obj_val")
             if obj is not None:
-                results.incumbent_objective = float(obj)
+                results.incumbent_objective = (
+                    float(capture.get("obj_sign", 1.0)) * float(obj))
 
         results.solver_config = config
         results.timing_info.wall_time = default_timer() - start_time

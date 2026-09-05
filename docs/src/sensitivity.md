@@ -1008,7 +1008,13 @@ changes a value:
 * **Coverage.** A component the declared-parameter surgery created
   exists only on the solve's clone and has nothing on your model to key
   an entry by, so it is skipped -- the same components the primal
-  load-back skips.
+  load-back skips. A bound a call-time `sens_params=` moved into a row
+  (see [Declared Params in variable
+  bounds](#declared-params-in-variable-bounds), gh#356) is skipped for
+  the same reason: its marginal is on the added row. The alternative is
+  worse than an absent entry -- the solved problem has no such bound, so
+  the engine's zero would read as a bound of yours that exists and is
+  not binding.
 
 Every active IMPORT suffix is cleared before the load, including ones
 left unfilled, which is what `Model.solutions.load_from` does: a

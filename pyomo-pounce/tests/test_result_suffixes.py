@@ -306,3 +306,96 @@ def test_the_sense_is_the_whole_difference_between_the_two_spellings():
     assert out[True] == pytest.approx([-x for x in out[False]])
     # and the minimize arm is the convention the docstrings state
     assert out[True] == pytest.approx([-2.5, 0.75, -1.25])
+
+
+# -- the bound the surgery moved out from under the gate --------------
+#
+# The bound gate in `_load_result_suffixes` reads the MODEL's variable
+# while the multiplier beside it comes from the SOLVED problem, and on a
+# call-time `sens_params=` clone those two disagree about exactly one
+# thing: `_reformulate_param_bounds` moves a bound that mentions a
+# declared Param into a row over the substitute (gh#356), calling
+# `setlb`/`setub(None)` on the CLONE.  The model keeps its bound, which
+# still evaluates to a number, so the gate passes and the engine reports
+# the zero it carries for a variable that has no such bound any more.
+#
+# Every fixture above takes the OTHER branch: `declare_sens_param` runs
+# the same surgery on the model itself, so `vd.lb` is already None there
+# and the gate skips correctly.  These two reach the branch that needs
+# `moved_bounds`.
+
+
+def test_a_moved_bound_is_absent_rather_than_a_fabricated_zero():
+    """The unit, with no solver in the room, so it fails for exactly one
+    reason.
+
+    A moved bound's marginal lives on the row the surgery added, which
+    has no counterpart on the model to key an entry by -- so the honest
+    answer is no entry.  A zero is the one answer that is worse than
+    silence: it reads as a bound that exists and is not binding.
+    """
+    def load(moved_bounds):
+        m = pyo.ConcreteModel()
+        m.u = pyo.Var(bounds=(None, 3.0), initialize=3.0)
+        m.w = pyo.Var(bounds=(12.0, None), initialize=12.0)
+        m.c = pyo.Constraint(expr=m.u + m.w == 15.0)
+        m.obj = pyo.Objective(expr=m.u + m.w)
+        for n in OUT:
+            setattr(m, n, pyo.Suffix(direction=pyo.Suffix.IMPORT))
+        # the engine's vectors for a problem in which `u` has NO upper
+        # bound: a structural zero, not a measured one
+        info = {"mult_g": np.array([1.0]),
+                "mult_x_L": np.array([0.0, 2.0]),
+                "mult_x_U": np.array([0.0, 0.0])}
+        _load_result_suffixes(m, info, _FakeNl(2, 1, True), [m.u, m.w],
+                              ["c"], {}, moved_bounds)
+        return m
+
+    # without the map the gate reads the model's own bound and reports
+    # the structural zero -- the defect, kept here so the fix is pinned
+    # against the behaviour it replaced rather than against nothing
+    unguarded = load(None)
+    assert unguarded.ipopt_zU_out[unguarded.u] == 0.0
+
+    m = load({"u": (None, 3.0)})
+    assert m.u not in m.ipopt_zU_out, (
+        "a bound the surgery moved into a row was reported as an "
+        "inactive bound of the model")
+    # targeted, not blanket: the untouched lower bound still reports
+    assert m.ipopt_zL_out[m.w] == pytest.approx(2.0)
+
+
+def test_a_call_time_sens_param_does_not_fabricate_a_moved_bound_entry():
+    """The same thing end to end, on the route that actually performs
+    the clone surgery.
+
+    `declare_sens_param` solves the model as written; a call-time
+    `sens_params=` builds a clone and moves the bound there, so this is
+    the branch every other fixture in this file misses.  `u`'s upper
+    bound is `b`, which is the declared parameter, and it binds.
+    """
+    m = pyo.ConcreteModel()
+    m.b = pyo.Param(initialize=3.0, mutable=True)
+    m.x = pyo.Var(initialize=0.0)
+    m.u = pyo.Var(bounds=(None, m.b), initialize=0.0)
+    m.w = pyo.Var(bounds=(12.0, None), initialize=12.0)
+    m.c = pyo.Constraint(expr=m.x == m.b)
+    m.obj = pyo.Objective(
+        expr=sum((v - 10) ** 2 for v in (m.x, m.u, m.w)))
+    for n in OUT:
+        setattr(m, n, pyo.Suffix(direction=pyo.Suffix.IMPORT))
+
+    pyo.SolverFactory("pounce").solve(m, sens_params=[m.b],
+                                      options={"tol": 1e-10})
+
+    # guard on the guard: the bound must actually bind, or the assertion
+    # below is satisfied by an inactive bound and says nothing
+    assert pyo.value(m.u) == pytest.approx(3.0, abs=1e-6)
+    assert m.u not in m.ipopt_zU_out, (
+        f"u's moved upper bound was reported as "
+        f"{m.ipopt_zU_out[m.u]:+.6g}; it is active, and its marginal is "
+        "on the row the surgery added")
+    # the bound that was not moved is unaffected: d obj/d lb = 2(12-10)
+    assert m.ipopt_zL_out[m.w] == pytest.approx(4.0, abs=1e-6)
+    # and the ordinary row marginal still comes back
+    assert m.dual[m.c] == pytest.approx(2.0 * (3.0 - 10.0), abs=1e-6)

@@ -117,18 +117,6 @@ changes.
   is usually what explains the failure. The `curve_fit` example now plots its
   data, fit, and both the confidence and prediction bands.
 
-### Fixed
-
-- **The browser demo booted only from a built tree.** `web-python/worker.js`
-  had a top-level `import` of `./wasi.js`, which `crates/pounce-wasm/build.sh`
-  stages and `.gitignore` excludes. In a checkout that had not been built —
-  serving the tracked files, which include the `pounce-solver` wheel — the
-  worker module failed to load outright, and a worker that fails to load
-  reports nothing: the page sat on `starting…` with no error, and no route
-  worked, including the one that needs no build at all. The shim is now
-  imported where the Pyomo route loads the module, so `import pounce` works
-  from a bare checkout and a missing build costs that one route a sentence
-  saying which script to run.
 - **Notebook 39, `39_design_under_kinetic_uncertainty.ipynb`: error bars on an
   optimal design.** The two sensitivity capabilities POUNCE already had were
   never chained in a notebook — `sens_covariance` gives `Σ_θ` from a fit
@@ -153,6 +141,17 @@ changes.
 
 ### Fixed
 
+- **The browser demo booted only from a built tree.** `web-python/worker.js`
+  had a top-level `import` of `./wasi.js`, which `crates/pounce-wasm/build.sh`
+  stages and `.gitignore` excludes. In a checkout that had not been built —
+  serving the tracked files, which include the `pounce-solver` wheel — the
+  worker module failed to load outright, and a worker that fails to load
+  reports nothing: the page sat on `starting…` with no error, and no route
+  worked, including the one that needs no build at all. The shim is now
+  imported where the Pyomo route loads the module, so `import pounce` works
+  from a bare checkout and a missing build costs that one route a sentence
+  saying which script to run.
+
 - **`sens_jacobian(of=<Objective>)` returned the wrong sign on a `maximize`
   model** (gh#906). `pounce.read_nl` does not hand a maximization to the engine
   as written: it negates the objective callbacks and records what it did in
@@ -162,8 +161,13 @@ changes.
   nothing converted between the two. The new `pounce.sensitivity.objective_sign`
   is that conversion, read once per session, and everything crossing back to the
   caller's units goes through it: the objective gradient, `session.base_obj`,
-  the `results.problem` bounds, the v2 solution loader's duals and reduced
-  costs, and the suffix warm-start reader.
+  the `results.problem` bounds, the v2 `Results`' `incumbent_objective`, the v2
+  solution loader's duals and reduced costs, and the suffix warm-start reader.
+  `incumbent_objective` is the one the v2 parity test could not see: the
+  ordinary route sets it from `value(nl_info.objectives[0])` — the objective
+  expression as the model states it — while the sensitivity route reads
+  `info["obj_val"]`, and the two agree on a minimization whether or not
+  anything converts.
 
   Variable Jacobians `dx*/dθ` are unaffected and are tested on purpose —
   POUNCE reaches the same stationary point either way, so those are
@@ -198,6 +202,19 @@ changes.
   — while the in-process route emits one per *finite bound*, so it reports
   strictly more; values agree wherever both report. `rc` is populated by
   neither.
+
+  One entry is deliberately *absent* rather than zero. The bound gate reads the
+  model's variable while the multiplier beside it comes from the solved
+  problem, and a call-time `sens_params=` clone moves a bound that mentions the
+  declared Param into a row over the substitute (gh#356) — on the clone only.
+  The model keeps a bound that still evaluates, so the gate would pass and
+  report the structural zero the engine carries for a variable that no longer
+  has that bound: `ipopt_zL_out[v] == 0.0`, which reads as a bound that exists
+  and is not binding, for a bound that may be firmly active. A moved side is
+  skipped instead; its marginal lives on the added row, which has no model
+  component to key an entry by. `declare_sens_param` runs the same surgery on
+  the model itself, so it was already correct there — which is why every
+  fixture but the two new ones takes the other branch.
 
 - **Two readers of the objective value that assume it is a sum of squares**
   were left behind by the sense conversion above, and were found by asking what

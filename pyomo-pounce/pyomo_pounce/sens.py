@@ -948,7 +948,8 @@ def _warm_start_from_suffixes(model, var_names, con_names, nl, con_alias):
 _RESULT_SUFFIXES = ("dual", "ipopt_zL_out", "ipopt_zU_out")
 
 
-def _load_result_suffixes(model, info, nl, var_data, con_names, con_alias):
+def _load_result_suffixes(model, info, nl, var_data, con_names, con_alias,
+                          moved_bounds=None):
     """Fill the model's IMPORT suffixes from an in-process solve.
 
     Without this, `declare_sens_param` silently costs the caller their
@@ -988,6 +989,22 @@ def _load_result_suffixes(model, info, nl, var_data, con_names, con_alias):
       exists only on the clone and has no counterpart to key an entry
       by, so it is skipped, exactly as the primal load-back skips it.
 
+    `moved_bounds` is the third, and it is a correction rather than a
+    difference. The bound gate below reads `vd`, which is the MODEL's
+    variable, while the multiplier beside it comes from the SOLVED
+    problem -- and on a call-time `sens_params=` clone those two disagree
+    about exactly one thing. `_reformulate_param_bounds` moves a bound
+    that mentions a declared Param into a row over the substitute
+    (gh#356), doing `setlb(None)` on the CLONE; the model keeps its
+    bound, which still evaluates to a number. So the gate passes, the
+    engine reports the zero it carries for a variable that has no such
+    bound, and the caller reads `ipopt_zL_out[v] == 0.0` -- "this bound
+    is inactive" -- for a bound whose marginal is alive on the row the
+    surgery added. Skipping the moved side is what keeps the entry
+    absent instead of fabricated. The declared route strips the bound
+    from the model itself, so `vd.lb` is already None there and this is
+    a no-op; the clone route is the one that needs it.
+
     Every active import suffix is cleared first, including ones left
     unfilled -- that is what `Model.solutions.load_from` does, and
     leaving a previous solve's entries standing under a new solution is
@@ -1017,15 +1034,24 @@ def _load_result_suffixes(model, info, nl, var_data, con_names, con_alias):
                 dual[cd] = -sense * float(lam[row])
 
     zl, zu = info.get("mult_x_L"), info.get("mult_x_U")
-    pairs = [(suffixes.get("ipopt_zL_out"), zl, 1.0, "lb"),
-             (suffixes.get("ipopt_zU_out"), zu, -1.0, "ub")]
+    # `side` indexes the (lb, ub) pair `moved_bounds` records
+    pairs = [(suffixes.get("ipopt_zL_out"), zl, 1.0, "lb", 0),
+             (suffixes.get("ipopt_zU_out"), zu, -1.0, "ub", 1)]
     pairs = [p for p in pairs if p[0] is not None and p[1] is not None]
     if not pairs:
         return
+    moved_bounds = moved_bounds or {}
     for row, vd in enumerate(var_data):
         if vd is None:
             continue
-        for sfx, vec, sign, bound in pairs:
+        moved = moved_bounds.get(vd.name)
+        for sfx, vec, sign, bound, side in pairs:
+            # the bound the SOLVE saw, not the one the model still
+            # carries: a bound the surgery moved into a row is gone from
+            # the solved problem, so the engine's zero is the absence of
+            # a bound rather than an inactive one (see above)
+            if moved is not None and moved[side] is not None:
+                continue
             # an infinite bound has no multiplier to report; the engine
             # carries a zero there and reporting it would read as a
             # bound that exists and is inactive
@@ -1370,7 +1396,7 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         # maxIterations exit should see the iterate, not the previous
         # solve's answer left standing
         _load_result_suffixes(model, info, nl, failed_var_data, con_names,
-                              con_alias)
+                              con_alias, moved_bounds)
         return build_results()
 
     # name -> row maps, built once here and handed to the session below.
@@ -1447,7 +1473,8 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         if ov is not None:
             ov.set_value(float(val), skip_validation=True)
     session.var_data = var_data
-    _load_result_suffixes(model, info, nl, var_data, con_names, con_alias)
+    _load_result_suffixes(model, info, nl, var_data, con_names, con_alias,
+                          moved_bounds)
 
     reg.session = session
 
