@@ -129,7 +129,7 @@ changes.
   imported where the Pyomo route loads the module, so `import pounce` works
   from a bare checkout and a missing build costs that one route a sentence
   saying which script to run.
-- **Notebook 38, `38_design_under_kinetic_uncertainty.ipynb`: error bars on an
+- **Notebook 39, `39_design_under_kinetic_uncertainty.ipynb`: error bars on an
   optimal design.** The two sensitivity capabilities POUNCE already had were
   never chained in a notebook — `sens_covariance` gives `Σ_θ` from a fit
   (notebooks 26/31/32) and `sens_jacobian` gives `J = dx*/dθ` from a solved

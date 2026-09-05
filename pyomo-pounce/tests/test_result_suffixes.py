@@ -11,9 +11,9 @@ The failure mode is the quiet kind.  Nothing about declaring a sensitivity
 parameter suggests it should touch duals, and the two solves differ in no
 visible way -- same call, same status, same objective, same primals.  The
 suffix simply comes back empty and the first `m.dual[c]` is a `KeyError` on a
-constraint that is plainly right there in the model.  It cost notebook 38 a
-whole extra solve: section 10 takes the multiplier from a separate ordinary
-solve and only `dlambda/dtheta` from the declared one.
+constraint that is plainly right there in the model.  It cost notebook 39 a
+whole extra solve: section 10 used to take the multiplier from a separate
+ordinary solve and only `dlambda/dtheta` from the declared one.
 
 THE CLOSED FORM, which is the same one three times.  All three suffixes are
 the derivative of the objective with respect to relaxing something:

@@ -1288,7 +1288,7 @@ Arrhenius pair correlates above 0.999, and ignoring it inflated `sd(profit)`
 57× in the worked example), and an active-set change makes `x*(θ)`
 non-differentiable so that no ellipse describes it — which
 `sens_solution_report` detects from the base factorization. See
-[`python/notebooks/38_design_under_kinetic_uncertainty.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/38_design_under_kinetic_uncertainty.ipynb).
+[`python/notebooks/39_design_under_kinetic_uncertainty.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/39_design_under_kinetic_uncertainty.ipynb).
 
 ## Activity classification
 
