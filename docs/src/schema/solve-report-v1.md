@@ -258,6 +258,38 @@ table. Fields:
 | `alpha_primal` | float | Primal step length. |
 | `alpha_primal_char` | string (1 char) | Single-character tag (`f`, `h`, `r`, etc.) matching the alpha-primal column of upstream's iter table. |
 | `ls_trials` | integer | Number of backtracking line-search trials this iter. |
+| `active_bounds` | integer, optional | Bound and slack indices the barrier currently treats as active. Omitted on paths that do not measure it (the convex IPM rows). |
+| `active_set_changes` | integer, optional | How many of those indices changed class since the previous row. Omitted on the first row — there is no predecessor, which is not the same statement as a measured zero — and on paths that do not measure it. |
+
+#### The phase profile
+
+`active_bounds` and `active_set_changes` exist to answer one question:
+how much of a run is spent *finding* the active set versus *converging*
+on one. `active_set_changes` is large while the solve is still deciding
+which constraints bind and falls to zero once it has decided; where that
+happens divides a run into an approach and an endgame, which is what
+decides whether a staged solve — coarse-to-fine, or a cheap approach
+phase handed off to a more accurate endgame — can pay at all.
+
+An interior-point iterate never sits *on* a constraint, so "active" here
+is an inference: index `i` is counted active when its bound multiplier
+exceeds its slack, the split of `s_i · z_i ≈ mu` between its two
+factors. The barrier drives a strongly active bound to `s = O(mu)`
+against `z = O(1)` and an inactive one to the reverse, so the comparison
+separates them by the method's own geometry rather than by a tolerance.
+
+**Read it within one run only.** The partition is frame-dependent: a
+per-variable rescaling carries the slack by `d` and the multiplier by
+`d⁻¹`, so the boundary moves while the product does not, and no
+classifier built from `(s_i, z_i, mu)` alone can be scale-free — their
+only dimensionless combination is `s_i z_i / mu ≈ 1`. The comparison is
+taken in the solver's internal scaled frame, the one in which
+`kappa_sigma` and the fraction-to-boundary rule already compare these
+quantities. Do not compare counts across models or across scalings, and
+do not read them as the scale-invariant activity classification: that is
+`sens_covariance()`'s `classify_activity`, which normalizes by curvature
+and costs a back-solve per index in its reduced form
+(see [Sensitivity Analysis](../sensitivity.md)).
 
 ### `linear_solver` (object, optional)
 
@@ -337,7 +369,7 @@ Levels map to verbosity in the same spirit as upstream's `print_level`
   "iterations": [
     { "iter": 0, "objective": 0.0451, "inf_pr": 5.0, "inf_du": 0.407, "mu": 0.1,
       "d_norm": 0.0, "regularization": 0.0, "alpha_dual": 0.0, "alpha_primal": 0.0,
-      "alpha_primal_char": " ", "ls_trials": 0 },
+      "alpha_primal_char": " ", "ls_trials": 0, "active_bounds": 2 },
     { "iter": 1, "objective": 0.957, "inf_pr": 0.212, "...": "..." }
   ]
 }

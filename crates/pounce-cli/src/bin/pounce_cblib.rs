@@ -200,6 +200,10 @@ fn main() -> ExitCode {
                     alpha_primal: it.alpha_primal,
                     alpha_primal_char: ' ',
                     ls_trials: 0,
+                    // The convex IPM does not produce a bound-activity
+                    // fingerprint; `None` says "not measured", which is
+                    // not the same claim as a settled active set.
+                    ..IterRecord::default()
                 })
                 .collect();
         }

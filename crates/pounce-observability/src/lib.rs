@@ -188,6 +188,13 @@ impl Visit for IterVisitor {
         match field.name() {
             "iter" => self.rec.iter = value as Index,
             "ls_trials" => self.rec.ls_trials = value as Index,
+            // Phase-profile fields. `active_set_changes` is
+            // emitted as an `Option`, and `tracing` drops a `None`
+            // rather than recording it, so an absent field leaves the
+            // record's `None` in place -- which is what the first
+            // captured iteration means.
+            "active_bounds" => self.rec.active_bounds = Some(value as Index),
+            "active_set_changes" => self.rec.active_set_changes = Some(value as Index),
             _ => {}
         }
     }
@@ -200,6 +207,8 @@ impl Visit for IterVisitor {
         match field.name() {
             "iter" => self.rec.iter = value as Index,
             "ls_trials" => self.rec.ls_trials = value as Index,
+            "active_bounds" => self.rec.active_bounds = Some(value as Index),
+            "active_set_changes" => self.rec.active_set_changes = Some(value as Index),
             _ => {}
         }
     }
@@ -530,6 +539,8 @@ mod tests {
             alpha_primal: alpha,
             alpha_primal_char: c,
             ls_trials: 1,
+            active_bounds: None,
+            active_set_changes: None,
         }
     }
 

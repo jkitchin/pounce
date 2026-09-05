@@ -180,6 +180,61 @@ const NEG_CURV_BACKTRACK_FACTOR: Number = 0.5;
 /// first-order model's.
 const NEG_CURV_ARMIJO: Number = 0.1;
 
+/// Number of `+1` entries across an activity-sign fingerprint — the
+/// bounds the barrier currently treats as active.
+///
+/// `element_wise_max` against zero maps `{-1, 0, +1}` to `{0, 0, 1}`, so
+/// the sum is an exact integer count and an exact tie (`z_i == s_i`,
+/// sign `0`) reads as inactive rather than as half a bound.
+///
+/// A non-finite slack or multiplier propagates to a non-finite sum,
+/// which the saturating cast reports as `0`. That is not guarded: the
+/// event is emitted just ahead of the convergence check that rejects a
+/// non-finite iterate outright, so the only run it can mislabel is one
+/// about to exit `InvalidNumberDetected`.
+fn count_active(signs: &[Box<dyn Vector>]) -> Index {
+    let mut total = 0.0;
+    for block in signs {
+        let mut hit = block.make_new();
+        hit.set(0.0);
+        hit.element_wise_max(&**block);
+        total += hit.sum();
+    }
+    total as Index
+}
+
+/// Number of indices whose activity sign differs between two
+/// fingerprints, or `None` when the two do not describe the same
+/// index space.
+///
+/// `|now − prev|` is `0`, `1` or `2` per index, so clamping it at one
+/// before summing counts each moved index exactly once — including the
+/// tie-crossing `0 → ±1`, which a plain `sum / 2` would have counted as
+/// a half. The shape check is not defensive dressing: a fingerprint
+/// carried across a problem whose bound blocks changed length would
+/// otherwise compare two different index spaces and report a number
+/// that means nothing, which is the failure mode this crate's index
+/// work exists to make loud rather than silent.
+fn count_activity_changes(now: &[Box<dyn Vector>], prev: &[Box<dyn Vector>]) -> Option<Index> {
+    if now.len() != prev.len() {
+        return None;
+    }
+    let mut total = 0.0;
+    for (a, b) in now.iter().zip(prev.iter()) {
+        if a.dim() != b.dim() {
+            return None;
+        }
+        let mut diff = a.make_new_copy();
+        diff.axpy(-1.0, &**b);
+        diff.element_wise_abs();
+        let mut ones = a.make_new();
+        ones.set(1.0);
+        diff.element_wise_min(&*ones);
+        total += diff.sum();
+    }
+    Some(total as Index)
+}
+
 pub struct IpoptAlgorithm {
     pub data: IpoptDataHandle,
     pub cq: IpoptCqHandle,
@@ -218,6 +273,20 @@ pub struct IpoptAlgorithm {
     ///    truth: there is no current iterate of the user's problem
     ///    while the subproblem is being solved.
     pub fires_as_restoration: bool,
+    /// Previous iteration's bound-activity fingerprint, for the phase
+    /// profile emitted on the per-iteration event.
+    ///
+    /// Held on the algorithm rather than in `IpoptData` because it is
+    /// pure telemetry: nothing in the step computation reads it, and a
+    /// restoration sub-solve runs its own `IpoptAlgorithm` with its own
+    /// fingerprint, which is the scoping the collector already applies
+    /// when it drops iterations nested in a `restoration` span.
+    ///
+    /// `None` until the first iteration that computes one — and note
+    /// that the first *captured* iteration therefore reports no change
+    /// count at all rather than a zero, since "nothing to compare
+    /// against" and "nothing changed" are different readings.
+    prev_activity: Option<Vec<Box<dyn Vector>>>,
     /// Search-direction calculator (`PdSearchDirCalc`). Lands once a
     /// concrete `SymLinearSolver` backend (MUMPS / FERAL) is wired
     /// through `AlgBuilder` in Phase 7's tail.
@@ -637,6 +706,7 @@ impl IpoptAlgorithm {
             nlp: None,
             tnlp: None,
             fires_as_restoration: false,
+            prev_activity: None,
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
@@ -2477,8 +2547,30 @@ impl IpoptAlgorithm {
         // capture active and JSON logging off) so the default run pays
         // no per-iteration field-evaluation / allocation cost.
         if pounce_observability::iteration_event_wanted() {
-            let d = self.data.borrow();
-            let c = self.cq.borrow();
+            // Clone the handles before borrowing so the fingerprint can
+            // be moved onto `self.prev_activity` below without the data
+            // and cq borrows keeping `self` frozen.
+            let data = std::rc::Rc::clone(&self.data);
+            let cq = std::rc::Rc::clone(&self.cq);
+            let d = data.borrow();
+            let c = cq.borrow();
+
+            // Phase profile: how many bounds the barrier
+            // currently treats as active, and how many changed class
+            // since the previous captured iteration. Computed here
+            // rather than in the step so it is paid for only when a
+            // consumer is attached, and read as a within-run shape --
+            // churn large while the solve is still deciding which
+            // constraints bind, falling to zero once it has decided.
+            // See `IterRecord::active_bounds` for what the numbers are
+            // not evidence about.
+            let signs = c.bound_activity_signs();
+            let active_bounds = count_active(&signs);
+            let active_set_changes = self
+                .prev_activity
+                .as_ref()
+                .and_then(|prev| count_activity_changes(&signs, prev));
+
             let alpha_char = d.info_alpha_primal_char;
             let alpha_char_s = alpha_char.to_string();
             let d_norm = match &d.delta {
@@ -2499,7 +2591,15 @@ impl IpoptAlgorithm {
                 ls_trials = d.info_ls_count,
                 alpha_char = alpha_char_s.as_str(),
                 resto_kind = pounce_common::style::resto_kind_str(alpha_char),
+                active_bounds = active_bounds,
+                // Absent on the first captured iteration: there is no
+                // predecessor, which the record distinguishes from a
+                // measured zero.
+                active_set_changes = active_set_changes,
             );
+            drop(d);
+            drop(c);
+            self.prev_activity = Some(signs);
         }
 
         // Reset per-iteration info on data (after printing previous
@@ -5359,6 +5459,75 @@ pub fn kappa_sigma_clamp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- phase-profile counting ----
+
+    fn signs(vals: &[&[Number]]) -> Vec<Box<dyn Vector>> {
+        use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+        vals.iter()
+            .map(|block| {
+                let mut v = DenseVector::new(DenseVectorSpace::new(block.len() as Index));
+                v.set_values(block);
+                Box::new(v) as Box<dyn Vector>
+            })
+            .collect()
+    }
+
+    #[test]
+    fn active_count_takes_the_positive_signs_across_every_block() {
+        // Two positives in the first block, none in the second, an
+        // empty third block, one in the fourth.
+        let f = signs(&[&[1.0, -1.0, 1.0], &[-1.0], &[], &[1.0]]);
+        assert_eq!(count_active(&f), 3);
+    }
+
+    #[test]
+    fn an_exact_tie_counts_as_inactive_not_as_half_a_bound() {
+        // `z_i == s_i` gives sign 0. It has to land on one side or the
+        // other of an integer count; inactive is the conservative read,
+        // and the alternative -- letting it contribute a fraction --
+        // would make the count non-integral for a measure-zero event.
+        let f = signs(&[&[0.0, 0.0, 1.0]]);
+        assert_eq!(count_active(&f), 1);
+    }
+
+    #[test]
+    fn changes_count_each_moved_index_exactly_once() {
+        let now = signs(&[&[1.0, -1.0, 1.0, -1.0]]);
+        let prev = signs(&[&[-1.0, -1.0, 1.0, 1.0]]);
+        assert_eq!(count_activity_changes(&now, &prev), Some(2));
+    }
+
+    #[test]
+    fn a_tie_crossing_counts_as_one_move_not_a_half() {
+        // |now - prev| is 1 here and 2 for a full sign flip; clamping at
+        // one before summing is what keeps both worth exactly one index.
+        // A plain `sum / 2` would report 0.5 for this row.
+        let now = signs(&[&[1.0, -1.0]]);
+        let prev = signs(&[&[0.0, 0.0]]);
+        assert_eq!(count_activity_changes(&now, &prev), Some(2));
+    }
+
+    #[test]
+    fn an_unmoved_fingerprint_reports_zero_changes() {
+        let now = signs(&[&[1.0, -1.0], &[1.0]]);
+        let prev = signs(&[&[1.0, -1.0], &[1.0]]);
+        assert_eq!(count_activity_changes(&now, &prev), Some(0));
+    }
+
+    #[test]
+    fn a_fingerprint_from_a_different_index_space_is_refused() {
+        // Comparing two different index spaces would produce a number
+        // that reads like a measurement and is not one. `None` -- the
+        // same value the first iteration reports -- says "not measured"
+        // instead.
+        let now = signs(&[&[1.0, -1.0, 1.0]]);
+        assert_eq!(count_activity_changes(&now, &signs(&[&[1.0, -1.0]])), None);
+        assert_eq!(
+            count_activity_changes(&now, &signs(&[&[1.0, -1.0, 1.0], &[1.0]])),
+            None
+        );
+    }
 
     #[test]
     fn kappa_sigma_below_one_is_identity() {

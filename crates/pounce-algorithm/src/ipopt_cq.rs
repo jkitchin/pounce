@@ -2797,6 +2797,52 @@ impl IpoptCalculatedQuantities {
             .min(iv.v_u.frac_to_bound(&*delta_aff.v_u, tau))
     }
 
+    /// Per-index activity signs for the four bound blocks, in the fixed
+    /// order `(x_L, x_U, s_L, s_U)` — the raw material of the
+    /// **phase profile** telemetry.
+    ///
+    /// Entry `i` is `+1` where the bound multiplier exceeds its slack
+    /// and `-1` where it does not. That comparison is the split of
+    /// `s_i · z_i ≈ mu` between its two factors: the barrier drives a
+    /// strongly active bound to `s = O(mu)` against `z = O(1)` and an
+    /// inactive one to the reverse, so the sign separates them by the
+    /// method's own geometry rather than by a tolerance anyone chose.
+    ///
+    /// **Not scale-invariant, deliberately.** A per-variable rescaling
+    /// carries the slack by `d` and the multiplier by `d⁻¹`, so the
+    /// boundary moves while the product does not; no classifier built
+    /// from `(s_i, z_i, mu)` alone can be scale-free, since their only
+    /// dimensionless combination is `s_i z_i / mu ≈ 1`. The comparison
+    /// is taken in the solver's internal scaled frame — the one in
+    /// which `kappa_sigma` and the fraction-to-boundary rule already
+    /// compare these quantities — and what it supports is a *within-run*
+    /// reading of when the active set stops moving. See
+    /// [`pounce_nlp::solve_statistics::IterRecord::active_bounds`] for
+    /// the full caveat, and `pounce-sensitivity`'s `classify_activity`
+    /// for the scale-invariant question and what it costs.
+    ///
+    /// Built from `Vector` trait operations alone — no downcast, a
+    /// handful of `O(n)` passes — so a caller can afford it per
+    /// iteration, but only pays when something consumes the result.
+    pub fn bound_activity_signs(&self) -> Vec<Box<dyn Vector>> {
+        let iv = self.curr_iv();
+        let blocks: [(Rc<dyn Vector>, Rc<dyn Vector>); 4] = [
+            (self.curr_slack_x_l(), Rc::clone(&iv.z_l)),
+            (self.curr_slack_x_u(), Rc::clone(&iv.z_u)),
+            (self.curr_slack_s_l(), Rc::clone(&iv.v_l)),
+            (self.curr_slack_s_u(), Rc::clone(&iv.v_u)),
+        ];
+        blocks
+            .iter()
+            .map(|(slack, mult)| {
+                let mut sign = mult.make_new_copy();
+                sign.axpy(-1.0, &**slack);
+                sign.element_wise_sgn();
+                sign
+            })
+            .collect()
+    }
+
     /// Predicted average complementarity after the affine step:
     /// `(1/N) · Σ (s + α_pri · Δs) · (z + α_du · Δz)` summed over the
     /// four bound blocks. Returns `0` when there are no bounds.

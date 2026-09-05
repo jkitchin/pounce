@@ -44,6 +44,61 @@ pub struct IterRecord {
     pub alpha_primal_char: char,
     /// Number of backtracking line-search trials this iter.
     pub ls_trials: Index,
+    /// How many bound and slack indices the barrier currently treats as
+    /// active — the **phase profile** telemetry.
+    ///
+    /// An interior-point iterate never sits *on* a constraint, so
+    /// "active" here is an inference, not a fact the solve established:
+    /// index `i` is counted active when its bound multiplier exceeds its
+    /// slack (`z_i > s_i`), which is the split of `s_i · z_i ≈ mu`
+    /// between its two factors. A strongly active bound drives
+    /// `s = O(mu)` against `z = O(1)`, an inactive one the reverse, so
+    /// the comparison separates them by the barrier's own geometry.
+    ///
+    /// **The partition is frame-dependent and the count is therefore a
+    /// within-run diagnostic only.** Under a per-variable rescaling the
+    /// slack carries `d` and the multiplier `d⁻¹`, so the boundary moves
+    /// while `s · z` does not; no test built from `(s_i, z_i, mu)` alone
+    /// can be scale-free, because their only dimensionless combination
+    /// is `s_i z_i / mu ≈ 1`. The comparison is taken in the solver's
+    /// internal scaled frame — the one in which `kappa_sigma` and the
+    /// fraction-to-boundary rule already compare these same quantities.
+    /// Do not compare the count across models, across scalings, or
+    /// against a scale-invariant classifier: `pounce-sensitivity`'s
+    /// `classify_activity` normalizes `Sigma` by curvature instead and
+    /// answers a different, more expensive question (one back-solve per
+    /// index for the reduced form).
+    ///
+    /// `None` when the solver path does not measure it (the convex IPM
+    /// report rows, and any record built by a consumer rather than the
+    /// NLP iteration loop).
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub active_bounds: Option<Index>,
+    /// How many indices changed activity class since the previous
+    /// captured iteration — the number the phase profile is actually
+    /// read off.
+    ///
+    /// Large while the solve is still deciding which constraints bind,
+    /// falling to zero once the active set has settled. The split
+    /// between "iterations spent finding the active set" and
+    /// "iterations spent converging on it" is what decides whether a
+    /// staged solve (coarse-to-fine, a cheap approach phase handed to a
+    /// more accurate endgame) can pay at all.
+    ///
+    /// `None` on the first captured iteration — there is no predecessor
+    /// to compare against, which is a different statement from "nothing
+    /// changed" — and `None` on paths that do not measure it. Carries
+    /// the same frame caveat as [`Self::active_bounds`]: a rescaling
+    /// moves the boundary, so indices that sit near it can be counted
+    /// differently, and the count is comparable only within one run.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub active_set_changes: Option<Index>,
 }
 
 #[derive(Debug, Clone)]
