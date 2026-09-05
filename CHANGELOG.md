@@ -117,6 +117,28 @@ changes.
   is usually what explains the failure. The `curve_fit` example now plots its
   data, fit, and both the confidence and prediction bands.
 
+- **Notebook 39, `39_design_under_kinetic_uncertainty.ipynb`: error bars on an
+  optimal design.** The two sensitivity capabilities POUNCE already had were
+  never chained in a notebook — `sens_covariance` gives `Σ_θ` from a fit
+  (notebooks 26/31/32) and `sens_jacobian` gives `J = dx*/dθ` from a solved
+  optimum (04/25/36), and the chemical-engineering question sits at the join:
+  *my kinetics came from noisy data, so how uncertain is the reactor I designed
+  with them?* An Arrhenius fit feeds a CSTR design solve, and `J Σ Jᵀ` turns
+  parameter uncertainty into a confidence region on the design, validated
+  against a 400-solve Monte Carlo.
+
+  The thesis is that the answer is dominated by the parameter *combination* the
+  data determine worst: propagating standard errors alone — discarding an
+  off-diagonal correlation of 0.9995 — inflates `sd(T*)` 11× and
+  `sd(profit)` 57×. The four contributions to `Var(profit)` are each 5.6–7.5×
+  the total and nearly cancel, so knowing any single parameter exactly buys
+  2–4 % while knowing the waste reaction's *pair* buys 24 %; that is a
+  design-of-experiments answer with no further solves. Section 9 is where it
+  stops: with a temperature cap that binds for 32 % of the draws, the true
+  distribution has an atom at the bound and no ellipse describes it —
+  `sens_solution_report` and `sens_active_set_changes` say so from the base
+  factorization.
+
 ### Fixed
 
 - **The browser demo booted only from a built tree.** `web-python/worker.js`
@@ -129,6 +151,83 @@ changes.
   imported where the Pyomo route loads the module, so `import pounce` works
   from a bare checkout and a missing build costs that one route a sentence
   saying which script to run.
+
+- **`sens_jacobian(of=<Objective>)` returned the wrong sign on a `maximize`
+  model** (gh#906). `pounce.read_nl` does not hand a maximization to the engine
+  as written: it negates the objective callbacks and records what it did in
+  `nl.minimize`. So `info["obj_val"]`, `nl.gradient()` and every multiplier are
+  quantities of `-f`, while everything the caller reads off the model
+  (`pyo.value(obj)`, `m.dual[c]`) is a quantity of the `f` they wrote — and
+  nothing converted between the two. The new `pounce.sensitivity.objective_sign`
+  is that conversion, read once per session, and everything crossing back to the
+  caller's units goes through it: the objective gradient, `session.base_obj`,
+  the `results.problem` bounds, the v2 `Results`' `incumbent_objective`, the v2
+  solution loader's duals and reduced costs, and the suffix warm-start reader.
+  `incumbent_objective` is the one the v2 parity test could not see: the
+  ordinary route sets it from `value(nl_info.objectives[0])` — the objective
+  expression as the model states it — while the sensitivity route reads
+  `info["obj_val"]`, and the two agree on a minimization whether or not
+  anything converts.
+
+  Variable Jacobians `dx*/dθ` are unaffected and are tested on purpose —
+  POUNCE reaches the same stationary point either way, so those are
+  sense-independent and are the neighbour that must not move.
+
+  The factor is `+1` on every minimization, which is why its absence went
+  unnoticed: `maximize` appeared zero times in the sensitivity tests, so the
+  corpus was uniform in exactly the dimension the sign acts on. The same shape
+  as the trajectory blind spots in CLAUDE.md, one level down.
+
+- **`declare_sens_param` suppressed the `dual`, `ipopt_zL_out` and
+  `ipopt_zU_out` suffixes** (gh#907). The declared path solves in process and
+  never exchanges a `.sol` file, and the suffix loading lived only in the `.sol`
+  reader — so declaring a parameter, the thing you do to ask a sensitivity
+  question, silently cost you the ordinary duals (measured: 6 keys undeclared,
+  0 declared, order irrelevant). Anything needing a multiplier *and* its
+  derivative needed two solves of the same model, one purely to read a number
+  the declared solve had already computed.
+
+  A declared solve now loads all three, in the model's own sense per gh#906:
+  `dual = -s·mult_g`, `ipopt_zL_out = +s·mult_x_L`, `ipopt_zU_out = -s·mult_x_U`.
+  They are one convention, not three — each suffix is `d obj / d(the thing
+  relaxed)`, which is also why gh#271 (the AMPL marginal `-λ`) and gh#296 (`zU`
+  negative at an active upper bound) are the same rule. A limit-stopped solve
+  reports its iterate's multipliers, and every active import suffix is cleared
+  before loading, matching Pyomo's own `_load_solution` so a re-solve leaves no
+  stale entries.
+
+  Two deliberate differences from the `.sol` route, documented in
+  `docs/src/sensitivity.md`: the `.sol` writer emits one entry per *variable* —
+  the combined reduced cost, routed to `zL` when positive and `zU` when negative
+  — while the in-process route emits one per *finite bound*, so it reports
+  strictly more; values agree wherever both report. `rc` is populated by
+  neither.
+
+  One entry is deliberately *absent* rather than zero. The bound gate reads the
+  model's variable while the multiplier beside it comes from the solved
+  problem, and a call-time `sens_params=` clone moves a bound that mentions the
+  declared Param into a row over the substitute (gh#356) — on the clone only.
+  The model keeps a bound that still evaluates, so the gate would pass and
+  report the structural zero the engine carries for a variable that no longer
+  has that bound: `ipopt_zL_out[v] == 0.0`, which reads as a bound that exists
+  and is not binding, for a bound that may be firmly active. A moved side is
+  skipped instead; its marginal lives on the added row, which has no model
+  component to key an entry by. `declare_sens_param` runs the same surgery on
+  the model itself, so it was already correct there — which is why every
+  fixture but the two new ones takes the other branch.
+
+- **Two readers of the objective value that assume it is a sum of squares**
+  were left behind by the sense conversion above, and were found by asking what
+  else reads `session.base_obj` rather than by any test. `sens_covariance`'s
+  `n_data=` fallback divided a *negative* SSR by `n_data - n_fit` and returned
+  NaN standard errors on a `maximize` spelling of a fit; the residuals-vs-
+  objective consistency check warned that the objective carried "extra terms
+  (weights, regularization)" on a maximize spelling that had none. Both now
+  read the objective in the sense the solver minimized, which is the sense the
+  sum-of-squares claim is about — `max -SSR` is the same least-squares problem
+  written the other way round. Both branches of the consistency check are
+  covered, so a check that stops warning fails as loudly as one that warns
+  spuriously.
 
 
 ## [0.11.0] - 2026-09-03

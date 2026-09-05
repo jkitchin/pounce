@@ -264,6 +264,19 @@ Only the **active** objective of the solved model is accepted; a
 deactivated one left on the model from another formulation is refused by
 name rather than answered with the solved objective's gradient.
 
+The derivative is of the objective **as you wrote it**, so on a
+`maximize` model it is `d/dp` of `pyo.value(m.obj)` and not of the
+minimization POUNCE performed. This is worth stating because it was
+wrong until recently and in a way nothing could see (gh#906):
+`pounce.read_nl`
+negates a `maximize` objective before the engine is given it, and the
+conversion back was missing, so `df/dp` came back at the right magnitude
+with the wrong sign, silently. `of=` a **Var** was never affected --
+POUNCE reaches the same stationary point either way, so `dx*/dp` does
+not depend on the sense. `pyomo-pounce/tests/test_objective_sense.py`
+and the maximize legs in `python/tests/test_sensitivity_core.py` pin
+both halves, including the neighbour that must *not* move.
+
 `sens_jacobian` returns exact first-order derivatives (unit-perturbation
 backsolves, no finite differencing); `sens_solution` combines the stored
 derivative columns for arbitrary perturbed values after the fact. Its
@@ -944,7 +957,9 @@ directly; only a call-time `sens_params` clone still goes through an
 internal alias). Sign conventions are
 handled: `dual` holds the AMPL marginal and `ipopt_zU_in` Ipopt's
 negative-at-upper value, and both are translated to the solver's
-internal conventions on the way in.
+internal conventions on the way in. A `maximize` model flips all three
+once more, because a multiplier is a coefficient of the objective it was
+generated against and the engine was handed the negation.
 
 One deliberate improvement over the ASL path: entries you do not
 supply take the solver's own default initialization rather than zero.
@@ -959,6 +974,60 @@ multipliers, and for equality duals the warm path's 0, which is not
 the cold path's least-squares estimate. Seed everything from a prior
 solve and the two paths behave identically; seed partially and the
 in-process path degrades gracefully.
+
+### Duals and reduced costs come back too
+
+The in-process route fills the model's IMPORT suffixes after the solve,
+exactly as an ordinary `.sol` solve does: `dual` for constraint
+multipliers, `ipopt_zL_out` / `ipopt_zU_out` for bound multipliers.
+
+```python
+m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+declare_sens_param(m.theta)
+SolverFactory("pounce").solve(m)
+
+m.dual[m.cap]                       # the shadow price, as usual
+sens_jacobian(m.cap, wrt=m.theta)   # ...and how it moves with theta
+```
+
+All three suffixes are the derivative of the objective with respect to
+relaxing something -- `dual[c] = d obj / d(rhs of c)`, `ipopt_zL_out[v]
+= d obj / d(lower bound of v)`, `ipopt_zU_out[v] = d obj / d(upper bound
+of v)` -- which is why `ipopt_zL_out` is positive and `ipopt_zU_out`
+negative at an active bound of a minimization, and why all three negate
+on a `maximize` model.
+
+Two deliberate differences from the `.sol` route, neither of which
+changes a value:
+
+* **Membership.** The `.sol` writer emits one entry per variable -- the
+  combined reduced cost, routed to `zL` when positive and `zU` when
+  negative -- so a bound whose multiplier lost that comparison is not
+  reported at all. This route reports one entry per finite bound, which
+  is the question the suffix name asks.
+* **Coverage.** A component the declared-parameter surgery created
+  exists only on the solve's clone and has nothing on your model to key
+  an entry by, so it is skipped -- the same components the primal
+  load-back skips. A bound a call-time `sens_params=` moved into a row
+  (see [Declared Params in variable
+  bounds](#declared-params-in-variable-bounds), gh#356) is skipped for
+  the same reason: its marginal is on the added row. The alternative is
+  worse than an absent entry -- the solved problem has no such bound, so
+  the engine's zero would read as a bound of yours that exists and is
+  not binding.
+
+Every active IMPORT suffix is cleared before the load, including ones
+left unfilled, which is what `Model.solutions.load_from` does: a
+previous solve's multipliers must not be left standing under a new
+solution.
+
+This route used to load **primals only**, so declaring a sensitivity
+parameter silently cost you your duals -- an empty suffix and a
+`KeyError` on a constraint plainly present in the model, with no warning
+and nothing about the declaration to suggest it should touch duals
+(gh#907). The workaround it forced was a second, ordinary solve of the
+same model just to read the multiplier; one solve now answers both
+halves.
 
 ### Watching the solve (`tee=True`)
 
@@ -1212,6 +1281,20 @@ See
 [`python/notebooks/26_parameter_covariance.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/26_parameter_covariance.ipynb)
 for a worked example with a Monte Carlo validated confidence ellipse
 and an identifiability diagnosis.
+
+**Propagating `Σ` into a downstream optimization.** The covariance answers a
+question about the *fit*; the question usually asked next is what it implies
+for a design built on those parameters. Chain it with the parametric Jacobian
+of section [`sens_jacobian`](#the-objective-dfdp): with
+`J = ∂x*/∂θ` and `g = df*/dθ` from the design solve, the delta method
+gives `Var(x*) = J Σ Jᵀ` and `Var(f*) = gᵀ Σ g` — error bars on the optimum
+itself, from two solves and no re-solves. Two traps make this worth reading
+rather than deriving: dropping `Σ`'s off-diagonal is not conservative (an
+Arrhenius pair correlates above 0.999, and ignoring it inflated `sd(profit)`
+57× in the worked example), and an active-set change makes `x*(θ)`
+non-differentiable so that no ellipse describes it — which
+`sens_solution_report` detects from the base factorization. See
+[`python/notebooks/39_design_under_kinetic_uncertainty.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/39_design_under_kinetic_uncertainty.ipynb).
 
 ## Activity classification
 

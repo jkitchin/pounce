@@ -43,6 +43,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 31 | [`31_information_identifiability.ipynb`](31_information_identifiability.ipynb) | The information matrix as the un-inverted view of the covariance: eigen() naming a poorly identified combination, the duality check, and zero variance versus finite information at a bound. |
 | 32 | [`32_wrt_blocks_and_retain_kkt.ipynb`](32_wrt_blocks_and_retain_kkt.ipynb) | One solve, many questions: of= sub-block marginals, confidence and prediction bands on undeclared prediction variables, conditioned_on, sens_retain_kkt() with nothing declared, and sens_release_kkt() to give the factor's memory back. |
 | 36 | [`36_active_set_parametric_sensitivity.ipynb`](36_active_set_parametric_sensitivity.ipynb) | Closed-loop advanced-step NMPC for a constrained CSTR: six update policies, independent plant mismatch, active-set timelines, full-point fallback guards, degeneracy at a control kink, and stamped latency/quality metrics (needs `pyomo-cvp`). |
+| 39 | [`39_design_under_kinetic_uncertainty.ipynb`](39_design_under_kinetic_uncertainty.ipynb) | Error bars on an optimal design: chain `sens_covariance` from an Arrhenius fit with `sens_jacobian` from a CSTR design solve, and the delta method turns parameter uncertainty into a confidence region on the optimum. Why dropping the correlation inflates `sd(profit)` 57x, which measurement is worth making (a *pair*, not a parameter), where an active bound ends the linearization, and an error bar on a shadow price. |
 
 ## Performance & sparsity
 

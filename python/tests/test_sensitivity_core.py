@@ -26,7 +26,7 @@ from pounce.sensitivity import (
 P0 = 2.0
 
 
-def parametric_model(fixed_variable=False):
+def parametric_model(fixed_variable=False, maximize=False):
     """min (x - p)^2 + 3 p^2  s.t.  x + y == 5,  p == P0.
 
     With `p` held at P0 the optimum is x = P0, y = 5 - P0, so
@@ -37,12 +37,23 @@ def parametric_model(fixed_variable=False):
     `fixed_variable` inserts an equal-bounds variable AHEAD of `p`, so
     the solve removes it and full-x stops agreeing with the factor's
     var-x from that column on (gh#450).
+
+    `maximize` states the SAME model the other way round -- maximize the
+    negation -- which reaches the same point and negates every objective
+    quantity and nothing else. `build_nl_problem(minimize=False)` does
+    to the callbacks exactly what `read_nl` does to a `maximize`
+    objective: it negates them and records the fact in `nl.minimize`,
+    so this is the sense conversion's fixture and not a special case of
+    its own.
     """
+    sgn = -1.0 if maximize else 1.0
     if fixed_variable:
         v = pounce.NlExpr.vars(4)                   # x, y, z, p
         return pounce.build_nl_problem(
             n=4,
-            objective=(v[0] - v[3]) ** 2 + 3.0 * v[3] ** 2 + v[2] ** 2,
+            objective=sgn * ((v[0] - v[3]) ** 2 + 3.0 * v[3] ** 2
+                             + v[2] ** 2),
+            minimize=not maximize,
             constraints=[v[0] + v[1], v[3]],
             g_l=[5.0, P0], g_u=[5.0, P0],
             x_l=[-50.0, -50.0, 1.0, -100.0],
@@ -54,7 +65,8 @@ def parametric_model(fixed_variable=False):
     v = pounce.NlExpr.vars(3)                       # x, y, p
     return pounce.build_nl_problem(
         n=3,
-        objective=(v[0] - v[2]) ** 2 + 3.0 * v[2] ** 2,
+        objective=sgn * ((v[0] - v[2]) ** 2 + 3.0 * v[2] ** 2),
+        minimize=not maximize,
         constraints=[v[0] + v[1], v[2]],
         g_l=[5.0, P0], g_u=[5.0, P0],
         x_l=[-50.0, -50.0, -100.0], x_u=[10.0, 50.0, 100.0],
@@ -91,6 +103,53 @@ def test_the_total_objective_derivative_carries_the_explicit_partial():
         pounce.Solver.parametric_step(sess.solver, [1], [1.0])))
     assert sess.objective_gradient()[:2] @ step[:2] == pytest.approx(0.0,
                                                                     abs=1e-7)
+
+
+@pytest.mark.parametrize("maximize,sgn", [(False, 1.0), (True, -1.0)])
+def test_the_objective_quantities_are_stated_in_the_models_own_sense(
+        maximize, sgn):
+    """`objective_gradient`, `total_objective_derivative` and
+    `base_obj` describe the objective the MODEL states, not the one the
+    engine minimized.
+
+    `build_nl_problem(minimize=False)` -- like `read_nl` on a `maximize`
+    objective -- negates the callbacks before the engine sees them, so
+    everything the engine reports about the objective is stated against
+    `-f`. `objective_sign` is the conversion back, and until it existed
+    nothing applied it: `df/dp` came back at the right magnitude and the
+    wrong sign, silently, on every maximization.
+
+    The factor is +1 on a minimization, which is the whole reason this
+    sat undetected -- a corpus with no maximization in it cannot tell a
+    right sign from no sign at all.
+
+    Closed form on this model, both spellings: f* = sgn * 3 p^2 = 12 sgn
+    and df*/dp = sgn * 6 p = 12 sgn at p = P0 = 2.
+    """
+    sess = solve_for_sensitivity(parametric_model(maximize=maximize),
+                                 pins={"p": 1}, options={"print_level": 0})
+    assert sess.base_obj == pytest.approx(sgn * 3.0 * P0 ** 2, abs=1e-7)
+    assert sess.total_objective_derivative(sess.column(1)) == pytest.approx(
+        sgn * 6.0 * P0, abs=1e-7)
+    # the same point either way: a maximization does not move the
+    # optimum, so dx/dp knows nothing about the sense
+    np.testing.assert_allclose(sess.base_x, [P0, 5.0 - P0, P0], atol=1e-8)
+
+
+def test_the_two_spellings_of_one_model_agree_up_to_the_sense():
+    """The paired form, which holds whatever the closed form is: `min f`
+    and `max -f` are one model, so their optima coincide exactly and
+    every objective quantity negates."""
+    lo = solve_for_sensitivity(parametric_model(), pins={"p": 1},
+                               options={"print_level": 0})
+    hi = solve_for_sensitivity(parametric_model(maximize=True),
+                               pins={"p": 1}, options={"print_level": 0})
+    np.testing.assert_allclose(lo.base_x, hi.base_x, atol=1e-8)
+    assert lo.base_obj == pytest.approx(-hi.base_obj, abs=1e-7)
+    np.testing.assert_allclose(lo.objective_gradient(),
+                               -np.asarray(hi.objective_gradient()), atol=1e-7)
+    assert lo.total_objective_derivative(lo.column(1)) == pytest.approx(
+        -hi.total_objective_derivative(hi.column(1)), abs=1e-7)
 
 
 def test_results_are_keyed_by_variable_name_with_no_modelling_layer():
@@ -142,16 +201,24 @@ T = np.array([1.0, 2.0, 3.0])
 Y = np.array([2.1, 3.9, 6.2])
 
 
-def estimation_session():
+def estimation_session(maximize=False, declare_residuals=True):
     """Fit y = a t to three points, residuals carried as variables.
 
     Ordinary linear least squares, so a-hat, the residual variance and
     var(a) all have closed forms to check against.
+
+    `maximize` spells the same fit as `max -SSR`, which is what a
+    maximum-likelihood formulation looks like written directly.
+    `declare_residuals=False` withholds `res_rows`, which is the only
+    way to reach `covariance`'s `n_data=` fallback: declared residuals
+    take precedence over it.
     """
+    sgn = -1.0 if maximize else 1.0
     v = pounce.NlExpr.vars(4)                        # a, r0, r1, r2
     nl = pounce.build_nl_problem(
         n=4,
-        objective=pounce.NlExpr.sum([v[1] ** 2, v[2] ** 2, v[3] ** 2]),
+        objective=sgn * pounce.NlExpr.sum([v[1] ** 2, v[2] ** 2, v[3] ** 2]),
+        minimize=not maximize,
         constraints=[v[1 + i] - v[0] * float(T[i]) for i in range(3)],
         g_l=[-y for y in Y], g_u=[-y for y in Y],
         x_l=[-50.0] * 4, x_u=[50.0] * 4,
@@ -159,9 +226,10 @@ def estimation_session():
         var_names=["a", "r[0]", "r[1]", "r[2]"],
         con_names=["res0", "res1", "res2"],
     )
-    return solve_for_sensitivity(nl, fit_rows={"a": 0},
-                                 res_rows={None: [1, 2, 3]},
-                                 options={"print_level": 0})
+    return solve_for_sensitivity(
+        nl, fit_rows={"a": 0},
+        res_rows={None: [1, 2, 3]} if declare_residuals else None,
+        options={"print_level": 0})
 
 
 def test_covariance_matches_the_least_squares_closed_form():
@@ -175,6 +243,35 @@ def test_covariance_matches_the_least_squares_closed_form():
     assert cov["a"] == pytest.approx(sigma_sq / float(T @ T), rel=1e-9)
     assert cov.std_err["a"] == pytest.approx(np.sqrt(cov["a"]), rel=1e-12)
     assert cov.sigma_sq == pytest.approx(sigma_sq, rel=1e-9)
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_the_n_data_noise_estimate_reads_the_objective_as_a_sum_of_squares(
+        maximize):
+    """The `n_data=` fallback takes SSR from the solve-time objective,
+    and "the objective is a sum of squares" is a claim about the
+    objective the solver MINIMIZED. `max -SSR` is the same fit spelled
+    the other way round, so it must give the same answer.
+
+    This is the neighbour the sense conversion could have broken, and
+    did: making `base_obj` state the model's own sense moved this read
+    out from under the assumption it depends on, and a maximize spelling
+    divided a negative SSR by `n_data - n_fit` and returned NaN standard
+    errors. Loud rather than silent, but wrong, and nothing in the
+    corpus reached it -- `n_data=` and `maximize` had never met.
+
+    Oracle: with n_data = 3 and one fitted parameter the fallback's
+    SSR/(n - p) is exactly the declared-residual estimate, so the two
+    routes to sigma^2 must agree to the last digit on the minimize arm,
+    and both arms to each other.
+    """
+    declared = covariance(estimation_session())
+    fallback = covariance(estimation_session(maximize=maximize,
+                                             declare_residuals=False),
+                          n_data=len(T))
+    assert np.isfinite(fallback["a"])
+    assert fallback.sigma_sq == pytest.approx(declared.sigma_sq, rel=1e-9)
+    assert fallback["a"] == pytest.approx(declared["a"], rel=1e-9)
 
 
 def test_information_is_the_hessian_the_covariance_inverts():

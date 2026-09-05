@@ -13,6 +13,30 @@ against either, because each reads only the attributes declared here.
 import numpy as np
 
 
+def objective_sign(nl):
+    """+1 if the model was written as a minimization, -1 for a maximization.
+
+    `pounce.read_nl` does not hand a maximization to the engine as
+    written: it negates the objective callbacks and records what it did
+    in `nl.minimize`. So every objective quantity the engine reports --
+    `info["obj_val"]`, `nl.gradient()`, and the multipliers, which are
+    stationarity coefficients of the objective it minimized -- is in the
+    MINIMIZED sense, while everything the caller reads off the model
+    (`pyo.value(obj)`, `m.dual[c]`) is in the sense they wrote.
+
+    This factor is the conversion, and it is the one thing standing
+    between the two. It is +1 for every minimization, which is why its
+    absence went unnoticed: a maximization is the only model that can
+    tell the difference, and a sign that is right on every model in the
+    corpus is indistinguishable from no sign at all.
+
+    `getattr` with a default, because a session may be built over a
+    problem that is not a `read_nl` result; those are minimizations by
+    construction, since there is no other way to state them.
+    """
+    return 1.0 if getattr(nl, "minimize", True) else -1.0
+
+
 def row_index(names):
     """{name: position} for a `.col` / `.row` name list.
 
@@ -94,6 +118,10 @@ class SensSession:
         # most once per session; a total derivative over an indexed
         # parameter would otherwise re-evaluate it per column.
         self._obj_grad = None
+        # +1 / -1; see `objective_sign`. Read once here rather than per
+        # query so that everything crossing back to the caller's units
+        # goes through one value.
+        self.obj_sign = objective_sign(nl)
         self._columns = {}            # pin row -> full KKT-space column
         self._primal_rows = None      # full-x -> KKT row, lazily fetched
         self._row_data = None         # user row name -> data, on demand
@@ -185,14 +213,22 @@ class SensSession:
     # ── derived quantities ───────────────────────────────────────────
 
     def objective_gradient(self):
-        """`grad_x f` at the solved point, in full-x (`.col`) order."""
+        """`grad_x f` at the solved point, in full-x (`.col`) order.
+
+        `f` is the objective **as the model states it**, so this is
+        `-grad_x` of what the engine minimized on a maximization; see
+        `objective_sign`. Everything derived from it -- the total
+        derivative below, and so `sens_jacobian(of=<Objective>)` --
+        inherits that, which is what makes them agree with a finite
+        difference of `pyo.value(obj)` across a re-solve.
+        """
         if self._obj_grad is None:
             if self.base_x is None:
                 raise ValueError(
                     "objective gradient: the solve recorded no primal "
                     "point, so it cannot be evaluated")
-            self._obj_grad = np.asarray(self.nl.gradient(self.base_x),
-                                        dtype=float)
+            self._obj_grad = self.obj_sign * np.asarray(
+                self.nl.gradient(self.base_x), dtype=float)
         return self._obj_grad
 
     def total_objective_derivative(self, col):
@@ -332,5 +368,8 @@ def solve_for_sensitivity(nl, x0=None, options=None, var_names=None,
     rows = list(con_names if con_names is not None else nl.con_names)
     session = SensSession(nl, solver, names, rows, **session_kwargs)
     session.base_x = np.asarray(x, dtype=float)
-    session.base_obj = float(info.get("obj_val", float("nan")))
+    # in the model's own sense, so that a maximization's `base_obj` is
+    # the value it states rather than the negation the engine minimized
+    session.base_obj = session.obj_sign * float(
+        info.get("obj_val", float("nan")))
     return session

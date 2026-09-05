@@ -26,6 +26,7 @@ See `docs/src/sensitivity.md`.
 from ._session import (
     NlBridge,
     SensSession,
+    objective_sign,
     row_index,
     solve_for_sensitivity,
     user_row_names,
@@ -53,6 +54,7 @@ __all__ = [
     "solve_for_sensitivity",
     "NlBridge",
     "row_index",
+    "objective_sign",
     "user_row_names",
     "solution",
     "solution_report",

@@ -1039,7 +1039,13 @@ def covariance(session, params=None, rows=None, sigma_sq=None,
                 f"({session.base_obj}), so n_data= cannot estimate the "
                 "noise variance. Pass sigma_sq= (known variance), or "
                 f"declare the residual container with {hints['residual']}.")
-        ssr = session.base_obj
+        # in the MINIMIZED sense: `n_data=` reads the objective as a sum
+        # of squares, and `maximize -SSR` is the same least-squares
+        # problem spelled the other way round.  `base_obj` is in the
+        # model's own sense (see `objective_sign`), so undo that here or
+        # a maximize spelling divides a negative by `n_data - n_fit` and
+        # every standard error comes back NaN.
+        ssr = session.obj_sign * session.base_obj
         group_sigma = {None: ssr / (n_data - n_fit)}
     else:
         raise ValueError(
