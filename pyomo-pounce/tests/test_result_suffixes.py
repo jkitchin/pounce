@@ -38,6 +38,8 @@ even if the hand derivation were wrong.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pyomo.environ as pyo
 import pytest
@@ -71,7 +73,7 @@ OUT = ("dual", "ipopt_zL_out", "ipopt_zU_out")
 MARGINALS = {"c": -14.0, "z_ub": -14.0, "w_lb": +4.0}
 
 
-def build(b=6.0, sense=pyo.minimize, suffixes=OUT):
+def build(b=6.0, sense=pyo.minimize, suffixes=OUT, scale=False):
     m = pyo.ConcreteModel()
     m.b = pyo.Param(initialize=b, mutable=True)
     m.bv = pyo.Var(initialize=b)
@@ -84,20 +86,36 @@ def build(b=6.0, sense=pyo.minimize, suffixes=OUT):
     f = sum((v - 10) ** 2 for v in (m.x, m.y, m.z, m.w))
     m.obj = pyo.Objective(expr=-f if sense == pyo.maximize else f,
                           sense=sense)
+    if scale:
+        # A change of variables and a row rescaling, both engaged: the
+        # objective, the row `c`, and two of the four columns. Mild
+        # enough that both routes converge -- an unsolvable conditioning
+        # is not what this leg is about.
+        m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+        m.scaling_factor[m.obj] = 1e-3
+        m.scaling_factor[m.c] = 50.0
+        m.scaling_factor[m.z] = 4.0
+        m.scaling_factor[m.w] = 1e-2
     for n in suffixes:
         setattr(m, n, pyo.Suffix(direction=pyo.Suffix.IMPORT))
     return m
 
 
-def _solve(m):
-    pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
+USER_SCALING = {"nlp_scaling_method": "user-scaling"}
+
+
+def _solve(m, scaled=False):
+    opts = {"tol": 1e-10}
+    if scaled:
+        opts.update(USER_SCALING)
+    pyo.SolverFactory("pounce").solve(m, options=opts)
     return m
 
 
 def declared(**kw):
     m = build(**kw)
     declare_sens_param(m.b)
-    return _solve(m)
+    return _solve(m, scaled=kw.get("scale", False))
 
 
 def grab(m):
@@ -399,3 +417,86 @@ def test_a_call_time_sens_param_does_not_fabricate_a_moved_bound_entry():
     assert m.ipopt_zL_out[m.w] == pytest.approx(4.0, abs=1e-6)
     # and the ordinary row marginal still comes back
     assert m.dual[m.c] == pytest.approx(2.0 * (3.0 - 10.0), abs=1e-6)
+
+
+# -- the frame the suffixes are stated in ----------------------------
+#
+# Everything above solves unscaled, and so does every other fixture in
+# this file -- which left a gap exactly the width of what this route
+# newly populates.  A `scaling_factor` Suffix with
+# `nlp_scaling_method=user-scaling` hands the engine a different problem:
+# rows multiplied by their factor, columns changed by theirs.  The
+# multipliers of THAT problem are not the model's.  A row scaled by 50
+# has a multiplier 50x the model's, and a column changed by `d` carries
+# `d^-1` on its bound multiplier, so a route that reports the engine's
+# vectors without converting is wrong by a factor that is 1.0 on every
+# unscaled fixture -- the same shape as the objective sense this file's
+# other half exists for, one frame over.
+#
+# Measured, and it is a coverage gap rather than a defect: the engine
+# hands these back already in the model's frame, so all three suffixes
+# are unmoved.  The leg is here to keep it that way, since nothing else
+# in the corpus would notice if the conversion moved.
+
+@pytest.mark.parametrize("sense", [pyo.minimize, pyo.maximize])
+def test_user_scaling_does_not_move_any_of_the_three_suffixes(sense):
+    """Scaling changes conditioning, never the answer -- and never a
+    marginal, which is a property of the model and not of the frame it
+    was solved in.  Asserted against the hand-derived MARGINALS, so the
+    leg holds even if both arms were to move together."""
+    sgn = 1.0 if sense == pyo.minimize else -1.0
+    plain = grab(declared(sense=sense))
+    scaled = grab(declared(sense=sense, scale=True))
+
+    for name, expect in (("dual", {"c": MARGINALS["c"]}),
+                         ("ipopt_zL_out", {"w": MARGINALS["w_lb"]}),
+                         ("ipopt_zU_out", {"z": MARGINALS["z_ub"]})):
+        for key, want in expect.items():
+            assert scaled[name][key] == pytest.approx(sgn * want, abs=1e-5), (
+                f"{name}[{key}] moved under user scaling")
+            assert scaled[name][key] == pytest.approx(
+                plain[name][key], abs=1e-5)
+
+    # and the membership is the same set of keys, not merely the same
+    # values on the keys that survived
+    for name in OUT:
+        assert set(scaled[name]) == set(plain[name]), name
+
+
+def test_a_scaled_declared_solve_still_matches_the_sol_route():
+    """The independent second opinion, under scaling too: the `.sol`
+    route is the code path that was already right, and it reads the same
+    model through Pyomo's own loader.  Only the keys both report are
+    compared -- the membership difference between the routes is
+    pre-existing and `test_the_only_extra_entries_...` owns it."""
+    ordinary = grab(_solve(build(scale=True), scaled=True))
+    dec = grab(declared(scale=True))
+    shared = 0
+    for name in OUT:
+        for key in set(ordinary[name]) & set(dec[name]):
+            assert dec[name][key] == pytest.approx(
+                ordinary[name][key], abs=1e-5), f"{name}[{key}]"
+            shared += 1
+    assert shared >= 3, f"only {shared} entries compared; the leg went inert"
+
+
+def test_the_scaled_arm_of_those_legs_is_actually_scaled():
+    """The liveness guard the two legs above need.
+
+    They assert that scaling moves nothing, which is exactly what a leg
+    whose factors never reached the solver would also report.  POUNCE
+    warns when `user-scaling` finds no export-enabled `scaling_factor`
+    Suffix, so silence on the scaled arm and a warning on the control is
+    a positive check that the factors were read -- without it, deleting
+    `build`'s Suffix block would leave both legs green."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        declared(scale=True)
+    assert not [w for w in caught if "no export-enabled" in str(w.message)], (
+        "the scaled arm's factors never reached the solver")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _solve(build(scale=False), scaled=True)
+    assert [w for w in caught if "no export-enabled" in str(w.message)], (
+        "the control did not warn, so the check above proves nothing")
