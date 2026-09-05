@@ -1084,29 +1084,30 @@ pub(crate) fn reduced_row_activity(
         (curr.x.dim() as usize, curr.s.dim() as usize)
     };
 
-    // full-g in, d-block rows out, through the same ascending scan the
-    // report's scatter uses: reading the user index as an inequality
-    // position returns a NEIGHBORING row's answer wherever an equality
-    // precedes it (the gh#450 hazard, one block over).
+    // full-g in, d-block rows out, through the NLP's own c/d map:
+    // reading the user index as an inequality position returns a
+    // NEIGHBORING row's answer wherever an equality precedes it (the
+    // gh#450 hazard, one block over). It is the same map
+    // `Solver::d_multiplier_rows` addresses the `y_d` block with
+    // (gh#910), deliberately rather than a second ascending scan that
+    // agrees with it today: the gate that accepts a strictly active
+    // inequality's `dλ/dp` classifies with THIS function and then
+    // reads THAT row, so a disagreement between the two would classify
+    // one row and answer about another.
     let n_full_g = bs.n_full_g() as usize;
     let d_index: Vec<Option<usize>> = {
         let nl = nlp.borrow();
-        let mut d_pos = 0usize;
-        let map = (0..n_full_g)
-            .map(|g| {
-                if nl.full_g_to_c_block(g as Index).is_some() {
-                    None
-                } else {
-                    let p = d_pos;
-                    d_pos += 1;
-                    Some(p)
-                }
-            })
+        let map: Vec<Option<usize>> = (0..n_full_g)
+            .map(|g| nl.full_g_to_d_block(g as Index).map(|p| p as usize))
             .collect();
         // the same invariant [`compute`] asserts after its own scan,
         // restated here because every `sigma_s` / `d_scale` index
         // below rests on it
-        assert_eq!(d_pos, m_d, "inequality count disagrees with the c/d split");
+        assert_eq!(
+            map.iter().filter(|p| p.is_some()).count(),
+            m_d,
+            "inequality count disagrees with the c/d split"
+        );
         map
     };
     let mut rows: Vec<Option<usize>> = Vec::with_capacity(user_rows.len());

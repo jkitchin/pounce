@@ -275,7 +275,37 @@ class SensSession:
                 f"{name}: not a variable of the solved model") from None
 
     def mult_entry(self, con_name):
-        """The KKT row of constraint `con_name`'s multiplier."""
+        """The KKT row of constraint `con_name`'s multiplier.
+
+        An equality is answered from the `y_c` block unconditionally:
+        its multiplier is a differentiable function of the parameters
+        wherever the solve is regular, and the row is the whole answer.
+
+        An inequality is answered from `y_d`, but only where the row is
+        **strictly active** (gh#910). That is the regime in which the
+        row behaves as an equality over a neighbourhood of the solved
+        point, so `dlambda/dp` is the same back-solve an equality gets.
+        The other two regimes hold a number in `y_d` and no derivative:
+        an inactive row's answer is a structural zero the KKT row does
+        not carry, and a kink -- slack AND multiplier both vanishing --
+        has two one-sided derivatives that differ, with the entry
+        holding whichever side the factorization landed on. Both are
+        refused, and the message names the regime, because they call
+        for different things from the caller.
+
+        The gate reads `reduced_row_activity`, not the `row_status` of
+        `classify_activity`. The cheap classifier normalizes a row by
+        the curvature along its own gradient rather than by the reduced
+        curvature that generates its multiplier, so its ratio for a
+        genuine kink is `reduced/directional` and slides with the
+        coupling: at coupling `1e-6` a row that is a kink at every
+        coupling reports "inactive" there (gh#804). "inactive" is the
+        one verdict this method may pass through as "the shadow price
+        does not move", so gating on it would answer a tight cap's
+        kinked shadow price with a confident zero -- a wrong answer
+        wearing a refusal's clothes. Reading an activity class as a
+        proxy for kink-ness is the inference that shipped gh#756.
+        """
         # a caller whose solve ran on a rewritten copy translates the
         # original name to the copy's row
         con_name = self.con_alias.get(con_name, con_name)
@@ -285,11 +315,70 @@ class SensSession:
             raise ValueError(
                 f"{con_name}: not a constraint of the solved model") from None
         row = self.solver.multiplier_rows([g])[0]
+        if row is not None:
+            return row
+        return self._inequality_mult_entry(con_name, g)
+
+    #: What the strictly-active gate says about each regime it turns
+    #: away. Keyed by `reduced_row_activity` status; the value is the
+    #: sentence after the refusal, and it names the regime rather than
+    #: restating the rule, since the two regimes want different things.
+    _INEQUALITY_REFUSAL = {
+        "inactive": (
+            "the row is inactive at the solved point (slack > 0, "
+            "multiplier ~ 0), so its multiplier is zero over a "
+            "neighbourhood of the parameters and d(dual)/dp is a "
+            "structural zero -- there is no KKT row to differentiate"),
+        "weakly_active": (
+            "the row is weakly active at the solved point -- a kink, "
+            "with slack AND multiplier both vanishing -- so the "
+            "multiplier has two one-sided derivatives that differ and "
+            "no two-sided value exists. Ask for a direction instead: "
+            "`solution()` / `parametric_step_directional` report the "
+            "one-sided step for a signed perturbation"),
+        "ambiguous": (
+            "the row's activity regime could not be resolved: its "
+            "barrier-to-curvature ratio sits between the strictly "
+            "active and the inactive thresholds, so whether its "
+            "multiplier is differentiable here is undecided. A tighter "
+            "solve (smaller `tol`) is what moves this ratio"),
+        "unidentified": (
+            "the row's reduced curvature is below the identification "
+            "floor, so its activity regime cannot be measured"),
+        "unbounded": (
+            "the row has no finite bound, so it has no multiplier to "
+            "differentiate"),
+    }
+
+    def _inequality_mult_entry(self, con_name, g):
+        """`mult_entry`'s `y_d` half: the strictly-active gate."""
+        row = self.solver.inequality_multiplier_rows([g])[0]
         if row is None:
+            # neither block claims it, which the c/d split makes
+            # impossible for a row of the solved model -- so this is a
+            # map disagreement, not a user error
             raise ValueError(
-                f"{con_name}: multiplier sensitivities are only available "
-                "for equality constraints")
-        return row
+                f"{con_name}: constraint row {g} is in neither the "
+                "equality nor the inequality multiplier block")
+        try:
+            status = self.solver.reduced_row_activity([g])["status"][0]
+        except Exception as exc:
+            # the classifier's own refusals name the option they are
+            # about -- a relaxed solve is the one a caller actually
+            # meets -- and not the question that reached it, so the
+            # constraint gets attached here
+            raise ValueError(
+                f"{con_name}: an inequality's multiplier sensitivity is "
+                "gated on the row's activity regime, which could not be "
+                f"classified: {exc}") from exc
+        if status == "strongly_active":
+            return row
+        why = self._INEQUALITY_REFUSAL.get(
+            status, f"the row classified as {status!r}")
+        raise ValueError(
+            f"{con_name}: multiplier sensitivities for an inequality "
+            f"are available only where the row is strictly active, and "
+            f"{why}.")
 
 
 def user_row_names(session):

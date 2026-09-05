@@ -1525,9 +1525,10 @@ def _param_pin(session, param_data):
 
 class Jacobian:
     """Derivatives d(target*)/d(param) for one or more targets/parameters.
-    Targets are variables (primal sensitivities), equality constraints
-    (multiplier sensitivities), or the objective (the total derivative
-    df/dp).
+    Targets are variables (primal sensitivities), constraints
+    (multiplier sensitivities -- every equality, and an inequality
+    that is strictly active at the solved point, gh#910), or the
+    objective (the total derivative df/dp).
 
     Access with g[target_data, param_data] (either order); when one side is
     a single component, g[data] works. to_dataframe() gives the full
@@ -1579,12 +1580,18 @@ class Jacobian:
         derivatives of primal values, which is what `m.x.value` holds.
 
         Constraint targets do. `mult_entry` rows come from
-        `parametric_step_full`'s y_c block, i.e. derivatives of POUNCE's
-        internal Lagrange multiplier, whereas `m.dual[con]` holds the AMPL
-        *marginal* `d obj / d b = -lambda` (gh #271). So d(dual)/d(param)
-        is the negation of the raw row -- without this, `sens_jacobian(m.con,
-        wrt=m.p)` disagrees in sign with a finite difference of
-        `m.dual[m.con]` taken across a re-solve.
+        `parametric_step_full`'s y_c block -- or, for a strictly active
+        inequality, its y_d block (gh#910) -- i.e. derivatives of
+        POUNCE's internal Lagrange multiplier, whereas `m.dual[con]`
+        holds the AMPL *marginal* `d obj / d b = -lambda` (gh #271). So
+        d(dual)/d(param) is the negation of the raw row -- without
+        this, `sens_jacobian(m.con, wrt=m.p)` disagrees in sign with a
+        finite difference of `m.dual[m.con]` taken across a re-solve.
+
+        The same sign serves both multiplier blocks: `pack_lambda_for_user`
+        scatters y_c and y_d into the one `lambda` array with no sign
+        change between them, so an inequality's dual is on the same
+        footing as an equality's.
         """
         return -1.0 if td.ctype is Constraint else 1.0
 
