@@ -59,12 +59,49 @@ jobs:
         with:
           mdbook-version: ${{ env.MDBOOK_VERSION }}
 
+      # The docs assistant (docs/src/ask.md) searches the wiki as well as the
+      # book, so the wiki — a separate repository, jkitchin/pounce.wiki — has
+      # to be on disk when the index is built. Depth 1: only the current text
+      # is indexed, never the history.
+      #
+      # `continue-on-error` is deliberate and is the whole reason this is its
+      # own step. A wiki that is unreachable, renamed, or emptied must not
+      # take the docs site down with it; build-versioned-docs.sh then sees no
+      # POUNCE_WIKI_DIR (the `if` on the env below), builds a book-only index,
+      # and the assistant loses the wiki passages but nothing else. The step
+      # shows up amber in the run, so the degradation is visible rather than
+      # silent.
+      - name: Clone the wiki (assistant corpus)
+        id: wiki
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/jkitchin/pounce.wiki.git \
+            "$GITHUB_WORKSPACE/wiki"
+          ls -1 "$GITHUB_WORKSPACE/wiki"/*.md | wc -l
+
       # Builds stable (latest tag) -> site root, main -> site/dev/, and each
-      # v* tag -> site/<tag>/, then injects the version selector into every
-      # page. Strict: any version failing to build fails the job, so the last
-      # good site stays live.
+      # v* tag -> site/<tag>/, then builds the assistant's retrieval index and
+      # injects the version selector and the assistant into every page.
+      # Strict: any version failing to build fails the job, so the last good
+      # site stays live.
       - name: Build versioned site
+        env:
+          POUNCE_WIKI_DIR: ${{ steps.wiki.outcome == 'success' && format('{0}/wiki', github.workspace) || '' }}
         run: scripts/build-versioned-docs.sh "$GITHUB_WORKSPACE/site"
+
+      # The assistant fails soft in the browser — no index means it shows an
+      # error in its own panel and the rest of the page is fine — so a
+      # mis-staged index would only ever be found by a reader. Assert here
+      # instead: the index exists at the site root, and the injected tag
+      # actually reached a nested page (the depth case `data-index` exists to
+      # get right).
+      - name: Assert the assistant was staged
+        run: |
+          test -s "$GITHUB_WORKSPACE/site/ask-index.json"
+          test -s "$GITHUB_WORKSPACE/site/ask.js"
+          test -s "$GITHUB_WORKSPACE/site/ask.css"
+          grep -q 'data-index="../../ask-index.json"' \
+            "$GITHUB_WORKSPACE/site/dev/schema/solve-report-v1.html"
 
       # The in-browser solvers (docs/src/wasm.md) ride the same Pages
       # deployment: the drag-and-drop `.nl` app at <site>/demo/ and the

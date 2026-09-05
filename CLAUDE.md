@@ -72,6 +72,45 @@ does not read ~0% (it can only be reached through the `.so`). Requires the
 `CODECOV_TOKEN` repository secret. Full rationale: CONTRIBUTING.md,
 "Measuring coverage".
 
+## The docs site has a fourth input: the wiki
+
+`.github/workflows/docs.yml` clones **jkitchin/pounce.wiki** — a separate
+repository — and `scripts/build-versioned-docs.sh` indexes it alongside
+`docs/src` into `ask-index.json`, the corpus the in-browser docs assistant
+(`docs/src/ask.md`) searches. So the deployed site now depends on a repo that
+is not this one. The clone step is `continue-on-error` and the build treats a
+missing `POUNCE_WIKI_DIR` as book-only, deliberately: an unreachable wiki must
+degrade the assistant, never take the docs site down. A run where that step is
+amber is a real signal — the wiki pages stopped being answerable — not noise.
+
+Two things about the assistant that are easy to get wrong:
+
+* **It is injected per page, not listed in `book.toml`.** `additional-js`
+  would reach `dev/` and nothing else until the next release, because the
+  site root is built from the newest *tag*, whose source predates any change
+  you just made. It rides the version selector's injection instead, so
+  editing `docs/assets/ask.js` changes every version's pages on the next
+  deploy. The corollary is that a plain `mdbook build docs` (`make book`) has
+  no **Ask** button at all — use `make book-site`, and serve it under the real
+  base path, or relative-path bugs stay invisible above the top level.
+* **One index, built from `main`, shared by every version.** Citations
+  therefore resolve against the *site root*, not the current version
+  (`data-root`, distinct from `data-p2r`). Resolving them against an archived
+  book 404s on every page and anchor added since that tag — measured, four of
+  six hits on one v0.2.0 page.
+
+Retrieval fails silently by construction: a broken ranker returns the wrong
+passage and the only symptom is a reader not finding the page. `make
+ask-check` (`docs/tests/ask_retrieval.mjs`, also in `ci.yml`) runs the
+**shipped** `ask.js` through a test seam against a labelled query set — a test
+of a reimplemented scorer would stay green while the real one regressed. Its
+thresholds sit deliberately below the measured score because it is a corpus
+test and honest doc edits move rankings; it exists to catch a scoring change
+that drops several queries at once. Change anything in the tokenizer, the
+stemmer, or the scorer and re-measure rather than reasoning about it — every
+one of the four ranking defects fixed while building it looked fine on
+inspection.
+
 ## Trajectory changes need the fixture sweep
 
 A change that reroutes **which** correction the solver reaches for, or that

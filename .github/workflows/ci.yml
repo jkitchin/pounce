@@ -57,6 +57,16 @@ jobs:
       - name: Docs consistency check
         run: scripts/check-docs-consistency.sh
 
+      # The docs assistant's retrieval half (docs/src/ask.md). It has no
+      # exception to throw: a broken ranker returns the wrong passage,
+      # silently, and the only symptom is a reader not finding the page. This
+      # builds the real index from docs/src and runs the shipped ask.js
+      # against a labelled query set. `ubuntu-latest` has node preinstalled.
+      - name: Docs assistant retrieval check
+        run: |
+          python3 scripts/build-docs-index.py -o "$RUNNER_TEMP/ask-index.json" --quiet
+          node docs/tests/ask_retrieval.mjs "$RUNNER_TEMP/ask-index.json"
+
       - name: Format check
         run: cargo fmt --all -- --check
 
