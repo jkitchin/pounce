@@ -1,0 +1,264 @@
+/* ==========================================================================
+   POUNCE docs assistant (docs/assets/ask.js) — panel styling.
+
+   Ships as its own stylesheet rather than as part of pounce.css because
+   ask.js is injected into EVERY built book by scripts/build-versioned-docs.sh,
+   including archived tag builds whose own pounce.css predates the assistant.
+   ask.js therefore links this file itself, from alongside its own <script src>.
+
+   For the same reason every color here falls back to a literal: an archived
+   book's theme defines mdBook's variables (--bg, --fg, --links, …) but not
+   necessarily POUNCE's brand tokens (--pounce-tiger), which were added later.
+   ========================================================================== */
+
+/* ---- Menu-bar toggle, sitting with the version selector ----------------- */
+.pounce-ask-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  color: var(--icons, #a88a5e);
+  border: 1px solid var(--icons, #a88a5e);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  padding: 0.15em 0.7em;
+  margin-right: 0.4rem;
+  cursor: pointer;
+}
+.pounce-ask-toggle:hover {
+  color: var(--pounce-tiger, #e87a1e);
+  border-color: var(--pounce-tiger, #e87a1e);
+}
+
+/* ---- Panel -------------------------------------------------------------- */
+.pounce-ask-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 1000;
+  width: min(30rem, 100vw);
+  height: 100vh;
+  /* Keeps the answer and the sources scrollable independently of the page. */
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1rem 1.1rem 1.2rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  background: var(--bg, #1a1411);
+  color: var(--fg, #f1e4cb);
+  border-left: 1px solid var(--table-border-color, #3a2c20);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+  font-size: 0.9rem;
+}
+.pounce-ask-panel[hidden] {
+  display: none;
+}
+
+.pounce-ask-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.pounce-ask-title {
+  margin: 0;
+  font-size: 1.15rem;
+  border-bottom: none;
+  color: var(--pounce-tiger, #e87a1e);
+}
+.pounce-ask-close {
+  background: none;
+  border: none;
+  color: var(--icons, #a88a5e);
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0 0.2em;
+  cursor: pointer;
+}
+.pounce-ask-close:hover {
+  color: var(--pounce-tiger, #e87a1e);
+}
+
+/* ---- Status line -------------------------------------------------------- */
+.pounce-ask-status {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  min-height: 1.2em;
+}
+.pounce-ask-status-busy {
+  color: var(--pounce-amber, #b56a12);
+  opacity: 1;
+}
+.pounce-ask-status-ok {
+  color: var(--pounce-tiger, #e87a1e);
+  opacity: 1;
+}
+.pounce-ask-status-error {
+  color: var(--pounce-hot, #cc2200);
+  opacity: 1;
+}
+
+/* ---- Question ----------------------------------------------------------- */
+.pounce-ask-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.pounce-ask-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  padding: 0.5em 0.6em;
+  border-radius: 5px;
+  border: 1px solid var(--searchbar-border-color, #3a2c20);
+  background: var(--searchbar-bg, #1f1813);
+  color: var(--searchbar-fg, #f1e4cb);
+}
+.pounce-ask-input:focus {
+  outline: none;
+  border-color: var(--pounce-tiger, #e87a1e);
+}
+.pounce-ask-submit {
+  align-self: flex-start;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.35em 1.2em;
+  border-radius: 5px;
+  border: 1px solid var(--pounce-tiger, #e87a1e);
+  background: var(--pounce-tiger, #e87a1e);
+  color: #1a1411;
+  cursor: pointer;
+}
+.pounce-ask-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Model row ---------------------------------------------------------- */
+.pounce-ask-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  border-radius: 5px;
+  border: 1px solid var(--table-border-color, #3a2c20);
+  background: var(--quote-bg, #221a13);
+}
+.pounce-ask-select,
+.pounce-ask-load {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25em 0.6em;
+  border-radius: 4px;
+  border: 1px solid var(--icons, #a88a5e);
+  background: transparent;
+  color: var(--fg, #f1e4cb);
+  cursor: pointer;
+}
+.pounce-ask-select option {
+  color: var(--fg, #f1e4cb);
+  background: var(--bg, #1a1411);
+}
+.pounce-ask-load:hover:not(:disabled) {
+  border-color: var(--pounce-tiger, #e87a1e);
+  color: var(--pounce-tiger, #e87a1e);
+}
+.pounce-ask-load:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.pounce-ask-note {
+  flex: 1 1 100%;
+  font-size: 0.78rem;
+  opacity: 0.75;
+  line-height: 1.35;
+}
+
+/* ---- Answer ------------------------------------------------------------- */
+.pounce-ask-answer:empty {
+  display: none;
+}
+.pounce-ask-answer-body {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.pounce-ask-answer-body code {
+  font-size: 0.85em;
+  color: var(--inline-code-color, #ffcf8f);
+}
+
+/* ---- Sources ------------------------------------------------------------ */
+.pounce-ask-sources:empty {
+  display: none;
+}
+.pounce-ask-sources-title {
+  margin: 0.4rem 0 0.3rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+  border-bottom: none;
+}
+.pounce-ask-source-list {
+  margin: 0;
+  padding-left: 1.4em;
+}
+.pounce-ask-source-list li {
+  margin-bottom: 0.7rem;
+}
+.pounce-ask-source-link {
+  font-weight: 600;
+  color: var(--links, #ffb262);
+}
+.pounce-ask-badge {
+  margin-left: 0.45em;
+  padding: 0.05em 0.4em;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: 0.1em;
+  color: var(--bg, #1a1411);
+  background: var(--pounce-tan, #8a6d3b);
+}
+.pounce-ask-excerpt {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  opacity: 0.78;
+}
+
+/* ---- Footer ------------------------------------------------------------- */
+.pounce-ask-foot {
+  margin-top: auto;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--table-border-color, #3a2c20);
+  font-size: 0.75rem;
+  opacity: 0.7;
+  line-height: 1.45;
+}
+.pounce-ask-foot a {
+  color: var(--links, #ffb262);
+}
+
+/* ---- Narrow screens ----------------------------------------------------- */
+@media (max-width: 700px) {
+  .pounce-ask-panel {
+    width: 100vw;
+    border-left: none;
+  }
+}
+
+/* Printing a page should not print the assistant. */
+@media print {
+  .pounce-ask-panel,
+  .pounce-ask-toggle {
+    display: none !important;
+  }
+}

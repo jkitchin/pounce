@@ -12,6 +12,8 @@
 #   make fmt              # rustfmt the workspace
 #   make doc              # build rustdoc
 #   make book             # build the mdbook documentation (docs/)
+#   make book-site        # build the full multi-version site + docs assistant
+#   make ask-check        # test the docs assistant's retrieval (needs node)
 #   make wasm             # build the browser (WebAssembly) solver + demo page
 #   make wasm-serve       # ...and serve it on http://localhost:8000
 #   make install          # install pounce CLI + cinterface cdylib under $(PREFIX)
@@ -80,7 +82,7 @@ endif
         test-ma57 \
         dev python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
-        docker docker-release
+        docker docker-release book-site ask-check
 
 all: build
 
@@ -139,6 +141,27 @@ wasm-serve:
 
 book:
 	mdbook build docs
+
+# The full deployed site: stable at the root, dev/ and every archived v* tag,
+# plus the docs assistant (docs/src/ask.md) and its retrieval index. `make
+# book` deliberately does NOT include the assistant — it is injected per page
+# by this script, not configured in book.toml — so this is the target to use
+# when changing docs/assets/ask.{js,css}. Needs the release tags present
+# (`git fetch --tags`). Set POUNCE_WIKI_DIR to a pounce.wiki clone to index
+# the wiki as CI does; without it the index is book-only.
+book-site:
+	scripts/build-versioned-docs.sh ./site
+	@echo
+	@echo "Serve it under the real base path (the assistant resolves relative"
+	@echo "paths, and a bad one only shows up below the top level):"
+	@echo "  mkdir -p _serve/pounce && cp -a site/. _serve/pounce/"
+	@echo "  python3 -m http.server -d _serve 8000   # http://localhost:8000/pounce/"
+
+# Retrieval guard for the docs assistant: builds the index from docs/src and
+# runs the shipped ask.js against a labelled query set. Same two lines CI runs.
+ask-check:
+	python3 scripts/build-docs-index.py -o /tmp/pounce-ask-index.json --quiet
+	node docs/tests/ask_retrieval.mjs /tmp/pounce-ask-index.json
 
 # Record asciinema screencasts of `pounce --debug` (one per scenario in
 # scripts/demo/scenarios/) into docs/demo/*.{cast,gif}. Requires asciinema,
