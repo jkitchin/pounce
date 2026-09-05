@@ -11,6 +11,52 @@ changes.
 
 ### Added
 
+- **An in-browser docs assistant on the rendered site (`Ask`).** A question
+  box in the menu bar of every page of <https://jkitchin.github.io/pounce/>,
+  built from two halves that work independently. Retrieval is BM25 over an
+  index of the whole book *and* the GitHub wiki, deep-linked to the heading
+  that answers; generation is optional, a small instruct model
+  ([WebLLM](https://github.com/mlc-ai/web-llm) on WebGPU) that is handed only
+  the retrieved passages. Nothing leaves the browser: no API key, no server,
+  no telemetry, and no download at all until the reader clicks "Load model".
+
+  **The wiki is the reason it exists as much as the model is.** The four
+  long-form wiki pages carry the measured guidance — which of the 441 options
+  are worth setting, what to do when a solve dies at its starting point, why
+  bound relaxation costs what it costs — and they are what a reader asking
+  "why is my solve slow" actually wants. They are indexed and cited (marked
+  `wiki`, linking out to GitHub) but not rendered into the book, which stays
+  the reference manual.
+
+  The retrieval half degrades to something still useful rather than to a blank
+  panel: without WebGPU, without a model, or on a phone, a reader gets ranked
+  linked passages, and the panel says which of those it is. `navigator.gpu`
+  existing is not treated as WebGPU working — the adapter is queried up front,
+  because it resolves *null* on machines with no usable GPU and offering the
+  button there just buys a wait and an error from inside WebLLM.
+
+  Delivery rides the version selector's mechanism (`scripts/build-versioned-
+  docs.sh` injects it per page), so it reaches the site root and every
+  archived tag immediately rather than only `dev/` until the next release.
+  There is one index, built from `main` and shared by every version, so
+  citations resolve against the site root: an archived book's assistant
+  answers about current docs, and a passage naming a page that did not exist
+  at v0.2.0 still links somewhere real.
+
+  Guarded by `docs/tests/ask_retrieval.mjs` (`make ask-check`, and CI), which
+  runs the *shipped* `ask.js` — not a copy of the scoring — against a labelled
+  query set. Retrieval has no exception to throw: it returns the wrong passage
+  silently, and the only symptom is a reader not finding the page. Four
+  ranking defects were found and fixed by measuring against that set rather
+  than by inspection: unstemmed function words swamping natural-language
+  questions (top-1 11/20 → 15/20), a compound identifier being split so that
+  `fix_relax` outranked the documentation of `bound_relax_factor`, the heading
+  bonus rewarding nesting depth, and the wiki's link-farm `Home` page winning
+  multi-term queries. Now 18/20 top-1 and 20/20 top-5.
+
+  Book page: `docs/src/ask.md`. Index builder:
+  `scripts/build-docs-index.py`.
+
 - **A phase-changing flash as a complementarity problem
   (`pounce.examples.flash_mpcc`, notebook 38).** A single vapour–liquid
   equilibrium stage solved across a temperature path that crosses

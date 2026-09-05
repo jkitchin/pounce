@@ -65,6 +65,7 @@
 
 # Appendix
 
+- [Ask POUNCE: the Docs Assistant](ask.md)
 - [Color Theme](color-theme.md)
 
 ---
