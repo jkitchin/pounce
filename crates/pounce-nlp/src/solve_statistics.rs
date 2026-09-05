@@ -69,6 +69,16 @@ pub struct IterRecord {
     /// answers a different, more expensive question (one back-solve per
     /// index for the reduced form).
     ///
+    /// **Iteration 0 of a cold start measures the initializer, not the
+    /// problem.** The bound multipliers there are `bound_mult_init_val`
+    /// — one constant for every index — rather than a dual estimate, so
+    /// almost every index with a small starting slack classifies active
+    /// and collapses on the first real dual update. On `laptime` at
+    /// `N = 320` row 0 reads 22110 against 563 at the solution, and the
+    /// change count on row 1 is that collapse rather than a measured
+    /// move. Skip both rows when reading a cold run's profile; under a
+    /// warm start that supplies bound duals the row is meaningful.
+    ///
     /// `None` when the solver path does not measure it (the convex IPM
     /// report rows, and any record built by a consumer rather than the
     /// NLP iteration loop).

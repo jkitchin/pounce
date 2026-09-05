@@ -278,6 +278,16 @@ factors. The barrier drives a strongly active bound to `s = O(mu)`
 against `z = O(1)` and an inactive one to the reverse, so the comparison
 separates them by the method's own geometry rather than by a tolerance.
 
+**Iteration 0 of a cold start measures the initializer.** Its bound
+multipliers are `bound_mult_init_val` — one constant for every index —
+rather than a dual estimate, so nearly every index with a small starting
+slack classifies active and collapses on the first real dual update. On
+`benchmarks/large_scale` `laptime` at `N = 320`, row 0 reads 22110
+against 563 at the solution, and row 1's change count is that collapse
+rather than a measured move. Skip both rows when reading a cold run's
+profile; under a warm start that supplies bound duals, row 0 is
+meaningful.
+
 **Read it within one run only.** The partition is frame-dependent: a
 per-variable rescaling carries the slack by `d` and the multiplier by
 `d⁻¹`, so the boundary moves while the product does not, and no
