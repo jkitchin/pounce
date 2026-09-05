@@ -199,6 +199,19 @@ changes.
   strictly more; values agree wherever both report. `rc` is populated by
   neither.
 
+- **Two readers of the objective value that assume it is a sum of squares**
+  were left behind by the sense conversion above, and were found by asking what
+  else reads `session.base_obj` rather than by any test. `sens_covariance`'s
+  `n_data=` fallback divided a *negative* SSR by `n_data - n_fit` and returned
+  NaN standard errors on a `maximize` spelling of a fit; the residuals-vs-
+  objective consistency check warned that the objective carried "extra terms
+  (weights, regularization)" on a maximize spelling that had none. Both now
+  read the objective in the sense the solver minimized, which is the sense the
+  sum-of-squares claim is about — `max -SSR` is the same least-squares problem
+  written the other way round. Both branches of the consistency check are
+  covered, so a check that stops warning fails as loudly as one that warns
+  spuriously.
+
 
 ## [0.11.0] - 2026-09-03
 

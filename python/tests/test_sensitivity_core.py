@@ -201,16 +201,24 @@ T = np.array([1.0, 2.0, 3.0])
 Y = np.array([2.1, 3.9, 6.2])
 
 
-def estimation_session():
+def estimation_session(maximize=False, declare_residuals=True):
     """Fit y = a t to three points, residuals carried as variables.
 
     Ordinary linear least squares, so a-hat, the residual variance and
     var(a) all have closed forms to check against.
+
+    `maximize` spells the same fit as `max -SSR`, which is what a
+    maximum-likelihood formulation looks like written directly.
+    `declare_residuals=False` withholds `res_rows`, which is the only
+    way to reach `covariance`'s `n_data=` fallback: declared residuals
+    take precedence over it.
     """
+    sgn = -1.0 if maximize else 1.0
     v = pounce.NlExpr.vars(4)                        # a, r0, r1, r2
     nl = pounce.build_nl_problem(
         n=4,
-        objective=pounce.NlExpr.sum([v[1] ** 2, v[2] ** 2, v[3] ** 2]),
+        objective=sgn * pounce.NlExpr.sum([v[1] ** 2, v[2] ** 2, v[3] ** 2]),
+        minimize=not maximize,
         constraints=[v[1 + i] - v[0] * float(T[i]) for i in range(3)],
         g_l=[-y for y in Y], g_u=[-y for y in Y],
         x_l=[-50.0] * 4, x_u=[50.0] * 4,
@@ -218,9 +226,10 @@ def estimation_session():
         var_names=["a", "r[0]", "r[1]", "r[2]"],
         con_names=["res0", "res1", "res2"],
     )
-    return solve_for_sensitivity(nl, fit_rows={"a": 0},
-                                 res_rows={None: [1, 2, 3]},
-                                 options={"print_level": 0})
+    return solve_for_sensitivity(
+        nl, fit_rows={"a": 0},
+        res_rows={None: [1, 2, 3]} if declare_residuals else None,
+        options={"print_level": 0})
 
 
 def test_covariance_matches_the_least_squares_closed_form():
@@ -234,6 +243,35 @@ def test_covariance_matches_the_least_squares_closed_form():
     assert cov["a"] == pytest.approx(sigma_sq / float(T @ T), rel=1e-9)
     assert cov.std_err["a"] == pytest.approx(np.sqrt(cov["a"]), rel=1e-12)
     assert cov.sigma_sq == pytest.approx(sigma_sq, rel=1e-9)
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_the_n_data_noise_estimate_reads_the_objective_as_a_sum_of_squares(
+        maximize):
+    """The `n_data=` fallback takes SSR from the solve-time objective,
+    and "the objective is a sum of squares" is a claim about the
+    objective the solver MINIMIZED. `max -SSR` is the same fit spelled
+    the other way round, so it must give the same answer.
+
+    This is the neighbour the sense conversion could have broken, and
+    did: making `base_obj` state the model's own sense moved this read
+    out from under the assumption it depends on, and a maximize spelling
+    divided a negative SSR by `n_data - n_fit` and returned NaN standard
+    errors. Loud rather than silent, but wrong, and nothing in the
+    corpus reached it -- `n_data=` and `maximize` had never met.
+
+    Oracle: with n_data = 3 and one fitted parameter the fallback's
+    SSR/(n - p) is exactly the declared-residual estimate, so the two
+    routes to sigma^2 must agree to the last digit on the minimize arm,
+    and both arms to each other.
+    """
+    declared = covariance(estimation_session())
+    fallback = covariance(estimation_session(maximize=maximize,
+                                             declare_residuals=False),
+                          n_data=len(T))
+    assert np.isfinite(fallback["a"])
+    assert fallback.sigma_sq == pytest.approx(declared.sigma_sq, rel=1e-9)
+    assert fallback["a"] == pytest.approx(declared["a"], rel=1e-9)
 
 
 def test_information_is_the_hessian_the_covariance_inverts():

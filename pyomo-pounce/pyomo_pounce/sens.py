@@ -1451,16 +1451,24 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
 
     reg.session = session
 
-    # consistency check: declared residuals should reproduce the objective
+    # consistency check: declared residuals should reproduce the objective.
+    # Against the objective the solver MINIMIZED, not the one the model
+    # states -- "the objective is the plain sum of squares" is a claim
+    # about a quantity being driven down, and `maximize -SSR` is the same
+    # least-squares problem spelled the other way. `session.base_obj` is in
+    # the model's own sense (see `objective_sign`), so undo that here;
+    # comparing a signed SSR against it would warn on every maximize
+    # spelling of a fit that has nothing wrong with it.
     if session.res_rows:
         ssr = sum(float(session.base_x[r]) ** 2
                   for rows in session.res_rows.values() for r in rows)
-        obj_val = session.base_obj
+        obj_val = session.obj_sign * session.base_obj
         if np.isfinite(obj_val) and abs(ssr - obj_val) > 1e-6 * max(
                 1.0, abs(obj_val)):
             warnings.warn(
                 "sens_solve: the declared residuals give SSR = "
-                f"{ssr:.6g} but the objective value is {obj_val:.6g}."
+                f"{ssr:.6g} but the objective value is {obj_val:.6g}"
+                f"{' (minimized sense)' if session.obj_sign < 0 else ''}."
                 " sens_covariance() assumes the objective is the plain sum of "
                 "squares of the declared residuals; extra terms (weights, "
                 "regularization) will make the noise-variance estimate "

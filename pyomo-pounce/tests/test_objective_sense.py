@@ -171,3 +171,86 @@ def test_the_objective_gradient_is_the_gradient_of_the_stated_objective():
         grads[sense] = np.asarray(session.objective_gradient(), dtype=float)
     assert np.allclose(grads[pyo.maximize], -grads[pyo.minimize], atol=1e-7)
     assert np.abs(grads[pyo.maximize]).max() == pytest.approx(3.0, abs=1e-6)
+
+
+# ── the neighbour the sense fix could have broken ────────────────────────────
+#
+# `sens_solve` warns when the declared residuals do not reproduce the
+# objective, because `sens_covariance` reads the objective as SSR to estimate
+# the noise variance.  That check compares against the objective the solver
+# MINIMIZED: "the objective is the plain sum of squares" is a claim about a
+# quantity being driven down, and `maximize -SSR` is the same least-squares
+# problem spelled the other way round.
+#
+# Making `base_obj` sense-correct moved that comparison out from under the
+# check, which then warned on every maximize spelling of a perfectly ordinary
+# fit -- a false alarm on the exact models the sense fix exists to serve.  It
+# was found by asking what else reads `base_obj`, not by any test, which is
+# why there is one now.
+
+_X = np.linspace(0.0, 1.0, 12)
+_Y = 2.0 + 3.0 * _X + np.array(
+    [0.041, -0.012, 0.055, 0.010, -0.038, 0.023,
+     -0.005, 0.031, -0.047, 0.019, 0.007, -0.026])
+
+
+def _fit(sense, weighted=False):
+    """A straight-line least-squares fit, spelled either way.
+
+    `minimize SSR` and `maximize -SSR` are the same problem: same optimum,
+    same residuals, same covariance.  With `weighted=True` the objective is
+    no longer the plain sum of squares and the warning is correct.
+    """
+    from pyomo_pounce import declare_sens_fitted, declare_sens_residual
+
+    m = pyo.ConcreteModel()
+    m.a = pyo.Var(initialize=1.0)
+    m.b = pyo.Var(initialize=1.0)
+    m.I = pyo.RangeSet(0, _X.size - 1)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(
+        m.I, rule=lambda mm, i: mm.r[i] == _Y[i] - (mm.a + mm.b * _X[i]))
+    ssr = sum((3.0 if weighted else 1.0) * m.r[i] ** 2 for i in m.I)
+    m.o = pyo.Objective(expr=-ssr if sense == pyo.maximize else ssr,
+                        sense=sense)
+    declare_sens_fitted(m.a, m.b)
+    declare_sens_residual(m.r)
+    return m
+
+
+def test_a_maximize_spelling_of_a_least_squares_fit_does_not_warn():
+    """Both spellings are the same fit, so neither warns and both give
+    the same covariance.  The equality is the real assertion: it holds
+    whatever the data are."""
+    import warnings
+
+    from pyomo_pounce import sens_covariance
+
+    ses = {}
+    for sense in (pyo.minimize, pyo.maximize):
+        m = _fit(sense)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-10})
+        ssr_warnings = [w for w in caught
+                        if "declared residuals give SSR" in str(w.message)]
+        assert not ssr_warnings, (
+            f"{sense} spelling warned: {ssr_warnings[0].message}")
+        ses[sense] = np.sqrt(np.diag(sens_covariance(m).matrix))
+
+    assert np.allclose(ses[pyo.minimize], ses[pyo.maximize], rtol=1e-9)
+
+
+@pytest.mark.parametrize("sense", [pyo.minimize, pyo.maximize])
+def test_the_ssr_check_still_fires_when_the_objective_is_not_the_ssr(sense):
+    """The other branch.  A weighted objective is a real mismatch and
+    must warn in BOTH senses -- a check that stops warning is as broken
+    as one that warns spuriously, and only a fixture that reaches this
+    branch says which one this is."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pyo.SolverFactory("pounce").solve(_fit(sense, weighted=True),
+                                          options={"tol": 1e-10})
+    assert [w for w in caught if "declared residuals give SSR" in str(w.message)]
