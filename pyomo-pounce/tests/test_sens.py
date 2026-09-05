@@ -134,6 +134,66 @@ def test_a_strictly_active_inequalitys_shadow_price_has_a_derivative(
         "block and pyomo duals")
 
 
+def build_floor(p=0.0):
+    """The mirror of [`build_cap`], with the active row a floor.
+
+    `min .5(u+5)^2 + .5(w-2)^2  s.t.  2(u - p) >= 2,  3w <= 30.`
+
+    The objective centre moves to -5 so the unconstrained optimum sits
+    BELOW the row and the `>=` binds; `u = 1 + p` at the solution and
+    stationarity in `u` gives `lambda_floor = (u + 5)/2`, so
+    `d lambda_floor/dp = +1/2` and the AMPL marginal pyomo reports moves
+    by `+1/2` as well.
+    """
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.u = pyo.Var(initialize=0.5)
+    m.w = pyo.Var(initialize=0.5)
+    m.floor = pyo.Constraint(expr=2.0 * (m.u - m.p) >= 2.0)
+    m.decoy = pyo.Constraint(expr=3.0 * m.w <= 30.0)
+    m.obj = pyo.Objective(
+        expr=0.5 * (m.u + 5.0) ** 2 + 0.5 * (m.w - 2.0) ** 2)
+    return m
+
+
+@pytest.fixture(scope="module")
+def solved_floor():
+    m = build_floor()
+    declare_sens_param(m.p)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_a_lower_bounded_rows_shadow_price_has_a_derivative_too(solved_floor):
+    """The other branch of the c/d split, against the same outside number.
+
+    Every strictly-active fixture that arrived with gh#910 is a `<=`
+    row, and a row's finite bounds land in `d_l_map` or `d_u_map` — so
+    `>=` is a branch nothing reached, and CLAUDE.md's rule about that is
+    blunt. `full_to_d` is bound-side-agnostic, but the GATE is not: it
+    wants `strongly_active` out of `reduced_row_activity`, which reads
+    `v_l/(s - d_l)` on this side rather than `v_u/(d_u - s)`.
+
+    The finite difference is the part that matters. A sign convention
+    that happened to be right for a ceiling and wrong for a floor would
+    pass every internal check in the crate and show up only here.
+    """
+    m = solved_floor
+    assert pyo.value(m.u) == pytest.approx(1.0, abs=1e-6), (
+        "precondition: the floor must bind, or this is the inactive case")
+
+    g = sens_jacobian(m.floor, wrt=m.p)
+
+    hi = solve_plain(build_floor(p=CAP_H))
+    lo = solve_plain(build_floor(p=-CAP_H))
+    fd = (hi.dual[hi.floor] - lo.dual[lo.floor]) / (2 * CAP_H)
+    assert g == pytest.approx(fd, abs=1e-4), (
+        "sign convention differs between an active floor and an active "
+        "ceiling in the y_d block")
+
+
 def test_an_inactive_inequality_is_refused_by_naming_its_regime(solved_cap):
     """Refused, not answered `0`.
 

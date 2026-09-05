@@ -800,3 +800,118 @@ def test_the_gate_reads_the_reduced_classifier_not_the_cheap_one(rho, cheap):
     assert sess.solver.reduced_row_activity([1])["status"][0] == "weakly_active"
     with pytest.raises(ValueError, match="weakly active at the solved point"):
         sess.mult_entry("kink")
+
+
+# ── the same cap, bound on the other side ────────────────────────────────────
+#
+# Every strictly-active fixture that arrived with gh#910 -- here, in
+# `sens_invariance_legs.rs`, and in `pyomo-pounce` -- is a `<=` row. The
+# c/d split puts a row's finite bounds in `d_l_map` or `d_u_map`, so
+# `>=` is the other branch of that split, and CLAUDE.md's rule about it
+# is blunt: a fixture that always takes one branch says nothing about
+# the other, and stays green while the other is broken.
+#
+# It is not an idle branch either. `full_to_d` is bound-side-agnostic
+# (set unconditionally for every inequality), but the GATE is not: it
+# asks `reduced_row_activity` for `strongly_active`, and that
+# classifier reads the barrier term of the row's slack, which is
+# `v_l/(s - d_l)` on this side and `v_u/(d_u - s)` on the other. A
+# strictly active `>=` row is a combination no fixture reached.
+#
+# Measured, and it is fine -- which is the point of writing it down
+# rather than assuming it. Recorded here so a future change to the
+# classifier or to the split cannot quietly break the half of the
+# feature users reach with a floor rather than a ceiling.
+
+U0_GE = -5.0            # pulls u DOWN, so a `>=` floor is what binds
+
+
+def floor_model():
+    """The mirror of [`cap_model`]: the active row is a floor, not a cap.
+
+        min .5(u-U0_GE)^2 + .5(w-W_STAR)^2 + .5 z^2 - A_KINK p z
+
+        s.t.  pin_p:            p == 0
+              decoy:      3 * w <= 30      (inactive, still `<=`)
+              floor: 2 * (u - p) >= 2      (strictly active, `>=`)
+              kink:            z >= 0      (weakly active)
+
+    Same shape, same index shifts, one bound moved from `g_u` to `g_l`.
+    The objective's centre moves to -5 so that the unconstrained
+    optimum sits BELOW the floor and the row binds; at the solution
+    `2(u - p) = 2` again, so `u = 1 + p`, and stationarity in `u` gives
+    `|d lambda_floor/dp| = 1/2` exactly, as on the `<=` side.
+    """
+    v = pounce.NlExpr.vars(4)                       # u, w, z, p
+    return pounce.build_nl_problem(
+        n=4,
+        objective=(0.5 * (v[0] - U0_GE) ** 2 + 0.5 * (v[1] - W_STAR) ** 2
+                   + 0.5 * v[2] ** 2 - A_KINK * v[3] * v[2]),
+        constraints=[v[3], 3.0 * v[1], CAP_SCALE * (v[0] - v[3]), v[2]],
+        g_l=[0.0, -1e19, CAP, 0.0],
+        g_u=[0.0, 30.0, 1e19, 1e19],
+        x_l=[-1e19] * 4, x_u=[1e19] * 4,
+        x0=[0.5, 0.5, 0.5, 0.0],
+        var_names=["u", "w", "z", "p"],
+        con_names=["pin_p", "decoy", "floor", "kink"],
+    )
+
+
+def floor_session():
+    return solve_for_sensitivity(floor_model(), pins={"p": 0},
+                                 options={"print_level": 0})
+
+
+def test_the_floor_fixture_binds_from_below():
+    """Precondition: without this the assertions below are vacuous.
+
+    A `>=` row that does not bind is just `cap_model`'s decoy, and
+    would exercise the inactive branch it already covers.
+    """
+    sess = floor_session()
+    np.testing.assert_allclose(sess.base_x[:2], [CAP / CAP_SCALE, W_STAR],
+                               atol=1e-6)
+
+
+def test_a_strictly_active_lower_bounded_row_classifies_the_same():
+    """The gate's branch: `v_l/(s - d_l)`, not `v_u/(d_u - s)`.
+
+    If `reduced_row_activity` read only the upper side of a row's
+    barrier term, a binding floor would come back `inactive` -- the one
+    verdict `mult_entry` passes through as "this shadow price does not
+    move" -- and the feature would answer a live constraint with a
+    confident zero.
+    """
+    sess = floor_session()
+    assert sess.solver.reduced_row_activity([0, 1, 2, 3])["status"] == [
+        "equality", "inactive", "strongly_active", "weakly_active"]
+
+
+def test_a_floors_shadow_price_has_the_same_derivative_a_caps_does():
+    """`|d lambda/dp| = 1/CAP_SCALE`, read off `y_d` as on the other side.
+
+    The magnitude matches `cap_model`'s because the two models differ
+    only in which side of the row is finite; the internal `y_d` entry
+    is signed by the active side, and both come back `-1/CAP_SCALE`
+    here because the objective centre moved with the bound.
+    """
+    sess = floor_session()
+    row = sess.mult_entry("floor")
+    assert sess.column(0)[row] == pytest.approx(-1.0 / CAP_SCALE, abs=1e-7)
+
+
+def test_the_floor_row_is_addressed_through_the_same_d_block_map():
+    """Index shifts are unchanged by which bound is finite.
+
+    `full_to_d` is set for every inequality regardless of side, and
+    this is the assertion that would fail if it were ever made
+    conditional on a bound being present -- a free row (neither bound
+    finite) still takes a `d` slot, which `classify_bounds`' own unit
+    tests pin one layer down.
+    """
+    sess = floor_session()
+    d_rows = sess.solver.inequality_multiplier_rows([0, 1, 2, 3])
+    assert d_rows[0] is None, "the pin is an equality, not in y_d"
+    assert d_rows[2] - d_rows[1] == 1 and d_rows[3] - d_rows[2] == 1
+    assert sess.mult_entry("floor") == d_rows[2]
+    assert d_rows[2] != 2, "a raw g index must not pass as a KKT row"
