@@ -481,19 +481,39 @@
     ui.toggle.focus();
   }
 
+  // A speech bubble, inline rather than a font glyph or an image: the button is
+  // injected into archived books whose CSS has no icon font, and an <img>
+  // would be a second request resolved against a path this file would have to
+  // compute. 16x16 viewBox, currentColor fill, so it inherits the pill.
+  var TOGGLE_ICON =
+    '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" ' +
+    'aria-hidden="true" focusable="false">' +
+    '<path d="M8 1.5c-3.9 0-7 2.4-7 5.4 0 1.7 1 3.2 2.6 4.2-.1.8-.5 1.8-1.3 2.6' +
+    '-.2.2 0 .5.2.5 1.6-.1 3-.7 4-1.5.5.1 1 .1 1.5.1 3.9 0 7-2.4 7-5.4S11.9 1.5 8 1.5z"/>' +
+    "</svg>";
+
   function buildToggle() {
-    var bar = document.querySelector(".right-buttons");
-    if (!bar || document.getElementById("pounce-ask-toggle")) return false;
-    var btn = el("button", "pounce-ask-toggle", "Ask");
+    // .right-buttons is not the mount point any more — the button is fixed to
+    // the viewport — but it stays the test for "this page has mdBook chrome".
+    // A 404 or print view has none, and there the panel is unreachable, so
+    // init() drops it rather than leaving a dialog in the DOM.
+    var chrome = document.querySelector(".right-buttons");
+    if (!chrome || document.getElementById("pounce-ask-toggle")) return false;
+    var btn = el("button", "pounce-ask-toggle");
     btn.id = "pounce-ask-toggle";
     btn.type = "button";
     btn.title = "Ask a question about the POUNCE docs (runs in your browser)";
     btn.setAttribute("aria-label", "Ask the docs assistant");
+    var icon = el("span", "pounce-ask-toggle-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = TOGGLE_ICON;
+    btn.appendChild(icon);
+    btn.appendChild(el("span", "pounce-ask-toggle-label", "Ask"));
     btn.addEventListener("click", function () {
       if (ui.panel.hidden) openPanel();
       else closePanel();
     });
-    bar.insertBefore(btn, bar.firstChild);
+    document.body.appendChild(btn);
     ui.toggle = btn;
     return true;
   }

@@ -11,24 +11,82 @@
    necessarily POUNCE's brand tokens (--pounce-tiger), which were added later.
    ========================================================================== */
 
-/* ---- Menu-bar toggle, sitting with the version selector ----------------- */
+/* ---- Floating toggle, lower-right ---------------------------------------
+   It used to sit inline in the menu bar's .right-buttons, next to the print /
+   repo / edit icons. At 0.8rem, transparent, in the --icons colour, between
+   the version selector and a row of glyphs, it read as one more piece of
+   chrome and readers did not find it. A filled pill pinned to the viewport is
+   the shape a reader already recognises as "ask something here", and it stays
+   on screen when the menu bar scrolls away.
+
+   z-index sits just under .pounce-ask-panel (1000) and above mdBook's menu bar
+   and sidebar, so the panel covers the button rather than the reverse; the
+   button is hidden outright while the panel is open (see below), because the
+   panel is right-aligned and would otherwise swallow the click target.
+   ------------------------------------------------------------------------ */
 .pounce-ask-toggle {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 999;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
   appearance: none;
   -webkit-appearance: none;
-  background: transparent;
-  color: var(--icons, #a88a5e);
-  border: 1px solid var(--icons, #a88a5e);
-  border-radius: 4px;
+  background: var(--pounce-tiger, #e87a1e);
+  color: #1a1411;
+  border: 1px solid var(--pounce-tiger, #e87a1e);
+  border-radius: 999px;
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
+  font-weight: 600;
   line-height: 1.2;
-  padding: 0.15em 0.7em;
-  margin-right: 0.4rem;
+  padding: 0.6em 1.15em;
   cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.22);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 .pounce-ask-toggle:hover {
-  color: var(--pounce-tiger, #e87a1e);
-  border-color: var(--pounce-tiger, #e87a1e);
+  background: var(--pounce-amber, #b56a12);
+  border-color: var(--pounce-amber, #b56a12);
+  color: #fdf6e8;
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.34), 0 10px 32px rgba(0, 0, 0, 0.26);
+}
+.pounce-ask-toggle:active {
+  transform: translateY(0);
+}
+.pounce-ask-toggle:focus-visible {
+  outline: 2px solid var(--fg, #f1e4cb);
+  outline-offset: 2px;
+}
+.pounce-ask-toggle-icon {
+  display: block;
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+}
+.pounce-ask-toggle-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+/* Open panel is right-aligned and full height: it lies over the button, so
+   take the button out rather than leave an unclickable one underneath. */
+body.pounce-ask-open .pounce-ask-toggle {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pounce-ask-toggle {
+    transition: none;
+  }
+  .pounce-ask-toggle:hover {
+    transform: none;
+  }
 }
 
 /* ---- Panel -------------------------------------------------------------- */
@@ -252,6 +310,30 @@
   .pounce-ask-panel {
     width: 100vw;
     border-left: none;
+  }
+  /* Icon-only circle: at this width the label costs more page than it buys,
+     and the button still carries its aria-label and title. */
+  .pounce-ask-toggle {
+    right: 1rem;
+    bottom: 1rem;
+    padding: 0;
+    width: 2.9rem;
+    height: 2.9rem;
+    justify-content: center;
+  }
+  .pounce-ask-toggle-label {
+    display: none;
+  }
+  .pounce-ask-toggle-icon {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+  /* mdBook stacks its previous/next chapter buttons at the foot of the page at
+     this width (the wide layout uses .nav-wide-wrapper outside the content and
+     hides this one), and the circle lands on the "next" one at the bottom of
+     the scroll. Give them room. */
+  .nav-wrapper {
+    margin-bottom: 3.25rem;
   }
 }
 

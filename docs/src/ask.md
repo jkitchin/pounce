@@ -1,7 +1,7 @@
 # Ask POUNCE: the in-browser docs assistant
 
-The **Ask** button in the menu bar opens a question box for these docs. It has
-two halves, and they work independently:
+The floating **Ask** button in the lower-right corner of every page opens a
+question box for these docs. It has two halves, and they work independently:
 
 | | What it does | What it costs |
 |---|---|---|
