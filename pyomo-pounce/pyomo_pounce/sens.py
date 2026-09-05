@@ -1366,9 +1366,10 @@ def _param_pin(session, param_data):
 
 class Jacobian:
     """Derivatives d(target*)/d(param) for one or more targets/parameters.
-    Targets are variables (primal sensitivities), equality constraints
-    (multiplier sensitivities), or the objective (the total derivative
-    df/dp).
+    Targets are variables (primal sensitivities), constraints
+    (multiplier sensitivities -- an equality unconditionally, an
+    inequality only where it is STRICTLY active), or the objective
+    (the total derivative df/dp).
 
     Access with g[target_data, param_data] (either order); when one side is
     a single component, g[data] works. to_dataframe() gives the full
@@ -1469,11 +1470,20 @@ def sens_jacobian(of=None, *, wrt, max_pdpert=None):
     """d(of*)/d(wrt).
 
     of: what the derivative is about (the target rows) -- a Var
-    (primal sensitivity), an equality Constraint (its multiplier's
+    (primal sensitivity), a Constraint (its multiplier's
     sensitivity), or the model's Objective (the TOTAL derivative
     df/dp, gh#878); data object or container; omit for all model
     variables. wrt: the differentiation variable, a declared Param
     (data or container).
+
+    An INEQUALITY constraint target answers only where its multiplier
+    is a differentiable function of the parameters, which is where the
+    row is strictly complementary -- active with a multiplier bounded
+    away from zero (gh#910). An inactive row is refused (its
+    multiplier is zero over a neighbourhood, so every derivative of it
+    is structurally zero and there is no KKT row to differentiate) and
+    so is a kink, where the two one-sided derivatives differ. Both
+    refusals name the regime. Equality targets are unconditional.
 
     The objective target answers
 

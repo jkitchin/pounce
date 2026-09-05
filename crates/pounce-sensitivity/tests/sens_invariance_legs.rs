@@ -68,8 +68,8 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution, SparsityRequest,
     StartingPoint,
 };
-use pounce_sensitivity::Solver;
-use pounce_sensitivity::activity::{AMBIGUOUS, FIXED, INACTIVE, WEAKLY_ACTIVE};
+use pounce_sensitivity::activity::{AMBIGUOUS, FIXED, INACTIVE, STRONGLY_ACTIVE, WEAKLY_ACTIVE};
+use pounce_sensitivity::{Solver, SolverError};
 
 /// Coupling between the pin and the kink variable. The one-sided
 /// derivative on the leaving side is exactly this.
@@ -1281,4 +1281,658 @@ fn leg_release_all_is_the_releasing_sides_map_in_every_frame() {
             1e-6,
         );
     }
+}
+
+// ===================================================================
+// Fixture 3 -- a strictly active INEQUALITY row, for
+// `d_multiplier_rows` (pounce#910)
+// ===================================================================
+//
+// The two fixtures above have `m = 1`, and that one row is the pin
+// equality: neither of them has an inequality row at all, so neither
+// says anything about the `y_d` block. `d_multiplier_rows` maps a
+// user-space row to the KKT row of its inequality multiplier, and it
+// has a dimension in all three legs:
+//
+// 1. it is read through the frame conversions -- the multiplier it
+//    points at is scaled by the row's own factor and by the
+//    objective's, and the pin's delta is scaled too, so three factors
+//    meet in one number (the same shape as
+//    `leg_scaling_the_reduced_row_curvature_is_unmoved_by_a_row_scaling`);
+// 2. the step it is read out of is affine in `delta` like every other
+//    block, so the invariant is a slope;
+// 3. it is an index map, and the space it maps out of is not the space
+//    it maps into. `full_to_c` and `full_to_d` are complements, so the
+//    d-block position of a row is its g index MINUS the equalities
+//    ahead of it -- which is exactly the shape of the full-x/var-x
+//    hazard leg 3 exists for, one block over. The fixture puts the pin
+//    equality FIRST and an inactive inequality SECOND so that the
+//    active row's g index (2), its d-block position (1) and its
+//    c-block position (which does not exist) are three different
+//    things.
+//
+// ```text
+// min  0.5 x^2 + 0.5 y^2 - x - y     [+ 0.5 (xf - 0.7)^2]
+// s.t. g0:  p == 0                   (the pin)
+//      g1:  x - y <= SLACK_UB        (never active)
+//      g2:  x + y - p <= P_CAP       (strictly active)
+// ```
+//
+// With `p = delta` the cap reads `x + y <= P_CAP + delta`, and the
+// unconstrained optimum `x = y = 1` violates it for `P_CAP < 2`. On
+// the cap, `x = y = (P_CAP + delta)/2` and the multiplier is
+//
+//     lambda = 1 - (P_CAP + delta)/2,   d lambda / d delta = -1/2
+//
+// at `P_CAP = 1`, i.e. `lambda = 1/2`: bounded away from zero on both
+// sides, which is what makes the derivative two-sided and the row
+// answerable at all. `SLACK_UB` keeps `g1` slack by a wide margin so
+// its own multiplier stays at the barrier floor.
+//
+// Mutation table -- each row was introduced, the suite run, and the
+// mutation reverted:
+//
+// | mutation                                            | result |
+// |-----------------------------------------------------|--------|
+// | `full_g_to_d_block` returns `Some(full_idx)` instead | 18 passed, 6 failed |
+// | `d_multiplier_rows`' `y_d_offset` drops `dims[2]`    | 18 passed, 6 failed -- the same six |
+//
+// The six are every test in this section except
+// `the_scaled_arm_of_the_multiplier_leg_is_actually_scaled`, which is
+// the liveness witness and stays green under both.
+//
+// It stays green by construction: it reads `nlp_scaling()` and
+// `variable_scaling()`, which do not go through `full_to_d` at all, so
+// it can still testify that the scaled arm really was scaled while the
+// map under test is broken. A leg asserting "this number did not move"
+// passes identically when the mechanism never engaged, which is what
+// that separation is for.
+//
+// What this fixture is NOT evidence about, so that the next reader does
+// not over-read a green run:
+//
+// * **the gate.** Nothing here is weakly active, by design -- the cap's
+//   multiplier is `1/2`. The three-regime refusal lives in
+//   `python/pounce/sensitivity/_session.py`'s `mult_entry` and is
+//   covered by `pyomo-pounce/tests/test_sens.py`, including a coupled
+//   row kink that `classify_activity` misreads as INACTIVE. Per the
+//   branch rule in CLAUDE.md, a leg is evidence only about the branch
+//   its fixture reaches, and this one reaches the strictly complementary
+//   branch only.
+// * **more than one active inequality.** `m = 3` with exactly one
+//   active cap, so no leg here compares two live multiplier
+//   derivatives against each other. The ordering half of that gap is
+//   closed by hand -- the precondition test pins both d rows to their
+//   exact flat positions, so a permuted `d_map` fails even though only
+//   one of the two rows is active -- but a defect that needs two
+//   *simultaneously active* rows to appear would not show.
+// * **magnitude.** Three variables and three rows; nothing here says
+//   anything about the cost of the extra map at benchmark scale (it is
+//   an `O(1)` vector read, but that is an argument, not a measurement).
+
+/// The active cap's right-hand side. Below 2 so the cap binds, and far
+/// enough below that the multiplier `1 - P_CAP/2` is nowhere near the
+/// barrier floor: this fixture is the STRICTLY complementary branch,
+/// deliberately, since the kink branch is what the two fixtures above
+/// already carry.
+const P_CAP: Number = 1.0;
+/// Upper bound on the decoy inequality `x - y`. The solution has
+/// `x = y`, so the row sits this far inside its bound.
+const SLACK_UB: Number = 5.0;
+/// `d lambda / d delta` for the active cap, exactly.
+const EXACT_DLAMBDA: Number = -0.5;
+
+/// User-space g index of each row of [`IneqMultTnlp`]. Named because
+/// the whole point of the fixture is that these are not the block
+/// positions.
+const G_PIN: Index = 0;
+const G_SLACK: Index = 1;
+const G_CAP: Index = 2;
+
+struct IneqMultTnlp {
+    /// Per-variable factors under `user-scaling`, or `None` to decline
+    /// scaling. Length `3 + off`.
+    x_scaling: Option<Vec<Number>>,
+    /// Per-row factors, same convention. Length 3.
+    g_scaling: Option<Vec<Number>>,
+    leading_fixed: bool,
+}
+
+impl IneqMultTnlp {
+    fn off(&self) -> usize {
+        usize::from(self.leading_fixed)
+    }
+}
+
+impl TNLP for IneqMultTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: (3 + self.off()) as Index,
+            m: 3,
+            nnz_jac_g: 6,
+            nnz_h_lag: (2 + self.off()) as Index,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        if self.x_scaling.is_none() && self.g_scaling.is_none() {
+            return false;
+        }
+        *req.obj_scaling = 1.0;
+        if let Some(d) = self.x_scaling.as_ref() {
+            *req.use_x_scaling = true;
+            req.x_scaling.copy_from_slice(d);
+        } else {
+            *req.use_x_scaling = false;
+        }
+        if let Some(d) = self.g_scaling.as_ref() {
+            *req.use_g_scaling = true;
+            req.g_scaling.copy_from_slice(d);
+        } else {
+            *req.use_g_scaling = false;
+        }
+        true
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        let o = self.off();
+        if self.leading_fixed {
+            b.x_l[0] = FIXED_AT;
+            b.x_u[0] = FIXED_AT;
+        }
+        for j in 0..3 {
+            b.x_l[o + j] = -1.0e19;
+            b.x_u[o + j] = 1.0e19;
+        }
+        b.g_l[0] = 0.0;
+        b.g_u[0] = 0.0;
+        b.g_l[1] = -1.0e19;
+        b.g_u[1] = SLACK_UB;
+        b.g_l[2] = -1.0e19;
+        b.g_u[2] = P_CAP;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        let o = self.off();
+        if self.leading_fixed {
+            sp.x[0] = FIXED_AT;
+        }
+        sp.x[o] = 0.2;
+        sp.x[o + 1] = 0.2;
+        sp.x[o + 2] = 0.0;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let o = self.off();
+        let (a, b) = (x[o], x[o + 1]);
+        let mut f = 0.5 * a * a + 0.5 * b * b - a - b;
+        if self.leading_fixed {
+            f += 0.5 * (x[0] - 0.7) * (x[0] - 0.7);
+        }
+        Some(f)
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let o = self.off();
+        if self.leading_fixed {
+            g[0] = x[0] - 0.7;
+        }
+        g[o] = x[o] - 1.0;
+        g[o + 1] = x[o + 1] - 1.0;
+        g[o + 2] = 0.0;
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let o = self.off();
+        g[0] = x[o + 2];
+        g[1] = x[o] - x[o + 1];
+        g[2] = x[o] + x[o + 1] - x[o + 2];
+        true
+    }
+
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _nx: bool, mode: SparsityRequest<'_>) -> bool {
+        let o = self.off() as Index;
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0 as Index, 1, 1, 2, 2, 2]);
+                jcol.copy_from_slice(&[o + 2, o, o + 1, o, o + 1, o + 2]);
+            }
+            SparsityRequest::Values { values } => {
+                values.copy_from_slice(&[1.0, 1.0, -1.0, 1.0, 1.0, -1.0]);
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        let o = self.off() as Index;
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                // lower triangle: (x,x), (y,y) [, (xf,xf)]. Both
+                // constraints are linear and `p` carries no curvature,
+                // so nothing else is nonzero.
+                let mut rs: Vec<Index> = vec![o, o + 1];
+                let mut cs: Vec<Index> = vec![o, o + 1];
+                if self.leading_fixed {
+                    rs.push(0);
+                    cs.push(0);
+                }
+                irow.copy_from_slice(&rs);
+                jcol.copy_from_slice(&cs);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = obj_factor;
+                values[1] = obj_factor;
+                if self.leading_fixed {
+                    values[2] = obj_factor;
+                }
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// As [`solved`], for [`IneqMultTnlp`]. Both arms of leg 1 run under
+/// `user-scaling`; only whether the TNLP hands factors back differs.
+fn solved_ineq(
+    x_scaling: Option<Vec<Number>>,
+    g_scaling: Option<Vec<Number>>,
+    leading_fixed: bool,
+) -> Solver {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-10, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(IneqMultTnlp {
+        x_scaling,
+        g_scaling,
+        leading_fixed,
+    }));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "inequality-multiplier base solve failed: {status:?}",
+    );
+    solver
+}
+
+/// The KKT row `d_multiplier_rows` gives for user row `g`, or a panic
+/// naming the row if it refuses.
+fn d_row(s: &Solver, g: Index) -> usize {
+    s.d_multiplier_rows(&[g])
+        .expect("d_multiplier_rows")
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap_or_else(|| panic!("row {g} has no inequality multiplier")) as usize
+}
+
+/// `d lambda / d delta` for user row `g`, as a slope between two
+/// perturbations on the same side -- see the module docs on why this
+/// is not `step / delta`.
+fn mult_slope(s: &Solver, g: Index, d_hi: Number, d_lo: Number) -> Number {
+    let row = d_row(s, g);
+    let hi = s
+        .parametric_step_full(&[G_PIN], &[d_hi])
+        .unwrap_or_else(|e| panic!("full step at {d_hi:e}: {e:?}"));
+    let lo = s
+        .parametric_step_full(&[G_PIN], &[d_lo])
+        .unwrap_or_else(|e| panic!("full step at {d_lo:e}: {e:?}"));
+    (hi[row] - lo[row]) / (d_hi - d_lo)
+}
+
+// ---------------------------------------------------------------
+// Preconditions -- without these the three legs below are vacuous
+// ---------------------------------------------------------------
+
+/// The fixture has to carry a STRICTLY active inequality, an INACTIVE
+/// one, and an equality ahead of both. A leg that asserts "the row's
+/// multiplier derivative is unmoved" passes identically when the row
+/// stopped being active, so the branch each leg runs on is asserted
+/// here and named, exactly as
+/// [`the_fixture_carries_a_kink_and_an_untouchable_interior_variable`]
+/// does for fixture 1.
+#[test]
+fn the_ineq_fixture_carries_one_strictly_active_and_one_inactive_row() {
+    let s = solved_ineq(None, None, false);
+
+    // the pin is an equality: in the c block, not the d block
+    assert_eq!(
+        s.d_multiplier_rows(&[G_PIN]).unwrap()[0],
+        None,
+        "the pin row must have no inequality multiplier",
+    );
+    assert!(
+        s.g_multiplier_rows(&[G_PIN]).unwrap()[0].is_some(),
+        "the pin row must have an equality multiplier",
+    );
+    // and the two inequalities are the other way round
+    for g in [G_SLACK, G_CAP] {
+        assert_eq!(
+            s.g_multiplier_rows(&[g]).unwrap()[0],
+            None,
+            "row {g} must have no equality multiplier",
+        );
+        assert!(
+            s.d_multiplier_rows(&[g]).unwrap()[0].is_some(),
+            "row {g} must have an inequality multiplier",
+        );
+    }
+
+    // The two d rows must come back in g order, and adjacent: the
+    // fixture has n_x = 3, n_s = 2 and n_c = 1, so the `y_d` block
+    // starts at flat row 6 and the slack row (d position 0) precedes
+    // the cap row (d position 1). Spelled out rather than derived so a
+    // permuted `d_map` -- which every other test in this section would
+    // survive, since only one row is ever active -- fails here.
+    assert_eq!(
+        (d_row(&s, G_SLACK), d_row(&s, G_CAP)),
+        (6, 7),
+        "the d block must start at n_x + n_s + n_c = 6 and hold the          two inequalities in g order",
+    );
+
+    // the classifier -- the same gate `pounce.sensitivity`'s
+    // `mult_entry` uses -- has to agree about which is which
+    let rep = s
+        .reduced_row_activity(&[G_SLACK as usize, G_CAP as usize])
+        .unwrap();
+    assert_eq!(
+        rep.status[0], INACTIVE,
+        "g1 must be inactive, got status {}",
+        rep.status[0],
+    );
+    assert_eq!(
+        rep.status[1], STRONGLY_ACTIVE,
+        "g2 must be strictly active, got status {}",
+        rep.status[1],
+    );
+
+    // ... and the exact answer must be the one the legs then compare
+    // against, at unit scaling and with no fixed variable in front
+    let got = mult_slope(&s, G_CAP, 1.0e-3, 1.0e-6);
+    assert!(
+        (got - EXACT_DLAMBDA).abs() < 1e-6,
+        "d lambda/d delta = {got:e}, want {EXACT_DLAMBDA:e}",
+    );
+}
+
+/// An out-of-range g index is an ERROR from `d_multiplier_rows`, not a
+/// `None`.
+///
+/// With both accessors present, `None` from `g_multiplier_rows` means
+/// "ask the other one" -- which is exactly the fall-through
+/// `pounce.sensitivity`'s `mult_entry` performs. If the second call
+/// also answered `None` for a row that does not exist, a caller could
+/// not tell "no multiplier row" from "no such row", and the message it
+/// would print names the wrong reason. `g_multiplier_rows` keeps its
+/// historical `None` (nothing reads it as a complement), so the pair is
+/// asymmetric on purpose and the asymmetry is what closes the case.
+///
+/// The same shape as `x_primal_rows`, whose comment says it directly:
+/// out of range must not masquerade as "removed as fixed".
+#[test]
+fn an_out_of_range_row_is_an_error_not_an_equality() {
+    let s = solved_ineq(None, None, false);
+    let past_the_end = 3 as Index; // m = 3, so 0..=2 are the rows
+    assert_eq!(
+        s.g_multiplier_rows(&[past_the_end]).unwrap()[0],
+        None,
+        "g_multiplier_rows keeps its historical None for an unknown row",
+    );
+    let err = s
+        .d_multiplier_rows(&[past_the_end])
+        .expect_err("d_multiplier_rows must refuse an out-of-range row");
+    match err {
+        SolverError::BadShape { got, expected, .. } => {
+            assert_eq!((got, expected), (3, 3), "wrong BadShape payload: {err:?}");
+        }
+        other => panic!("wrong error for an out-of-range row: {other:?}"),
+    }
+    // and a negative index, which reaches the same guard by the other
+    // side of the comparison rather than by the `as usize` wrap
+    assert!(
+        s.d_multiplier_rows(&[-1]).is_err(),
+        "a negative row index must refuse too",
+    );
+}
+
+/// The `y_d` block is affine in `delta` for the same reason the primal
+/// block is, and by the same order of constant. The companion of
+/// [`the_step_is_affine_in_delta`] for the multiplier row: if the
+/// base-point term ever stops being negligible or stops being
+/// constant, this says so rather than leg 2 failing under a name that
+/// does not describe it.
+#[test]
+fn the_multiplier_step_is_affine_in_delta() {
+    let s = solved_ineq(None, None, false);
+    let row = d_row(&s, G_CAP);
+    let mut consts = Vec::new();
+    for d in [1.0e-3, 1.0e-5, 1.0e-7] {
+        let step = s.parametric_step_full(&[G_PIN], &[d]).unwrap();
+        consts.push(step[row] - EXACT_DLAMBDA * d);
+    }
+    let spread = consts.iter().fold(Number::NEG_INFINITY, |a, &b| a.max(b))
+        - consts.iter().fold(Number::INFINITY, |a, &b| a.min(b));
+    assert!(
+        consts.iter().all(|c| c.abs() < 1e-6),
+        "base-point term is not negligible: {consts:?}",
+    );
+    assert!(
+        spread < 1e-9,
+        "base-point term is not constant across delta: {consts:?}",
+    );
+}
+
+// ---------------------------------------------------------------
+// Leg 1 -- scaling
+// ---------------------------------------------------------------
+
+/// Leg 1 for `d_multiplier_rows`. The multiplier this row points at
+/// lives in the algorithm's frame: the row's own factor `dg` divides
+/// it, the objective factor multiplies it, and the pin's `delta` is
+/// scaled by the PIN row's factor -- three factors meeting in one
+/// ratio, the same shape as
+/// [`leg_scaling_the_reduced_row_curvature_is_unmoved_by_a_row_scaling`].
+/// The model's `d lambda / d delta` is a property of the model, so it
+/// must come out the same in either frame.
+///
+/// The factors are deliberately unequal across the three rows and the
+/// three columns: a conversion that used the wrong row's factor, or
+/// the pin's where the cap's belongs, is invisible when they agree.
+#[test]
+fn leg_scaling_the_multiplier_derivative_is_unmoved_by_the_change_of_variables() {
+    let base = solved_ineq(None, None, false);
+    let scaled = solved_ineq(
+        Some(vec![4.0, 0.25, 1.0e2]),
+        Some(vec![1.0e-1, 8.0, 5.0e1]),
+        false,
+    );
+
+    for (what, s) in [("base", &base), ("scaled", &scaled)] {
+        let got = mult_slope(s, G_CAP, 1.0e-3, 1.0e-6);
+        assert!(
+            (got - EXACT_DLAMBDA).abs() < 1e-6,
+            "{what}: d lambda/d delta = {got:e}, want {EXACT_DLAMBDA:e}",
+        );
+    }
+}
+
+/// The scaled arm has to be genuinely scaled, or the leg above is two
+/// runs of the same solve -- and nothing the sensitivity layer returns
+/// can show that, because every accessor on `Solver` already reports
+/// natural units. That is the property leg 1 asserts, so it cannot
+/// also be the evidence that leg 1 is live. Measured: `row_sigma`,
+/// documented as RAW, differs between the two arms by 4e-6 relative,
+/// which is floating-point divergence and not a factor of 50.
+///
+/// [`Solver::nlp_scaling`] is the honest witness: it reports the
+/// factors the IPM actually applied. It also cross-checks
+/// `full_to_d`'s ordering against a source that does not go through
+/// it -- the cap's factor has to land in the SECOND `d_scale` slot,
+/// the same position [`Solver::d_multiplier_rows`] claims for it.
+#[test]
+fn the_scaled_arm_of_the_multiplier_leg_is_actually_scaled() {
+    let base = solved_ineq(None, None, false);
+    let scaled = solved_ineq(
+        Some(vec![4.0, 0.25, 1.0e2]),
+        Some(vec![1.0e-1, 8.0, 5.0e1]),
+        false,
+    );
+
+    let (_, cb, db) = base.nlp_scaling().expect("nlp scaling");
+    assert!(
+        cb.is_none() && db.is_none() && base.variable_scaling().unwrap().is_none(),
+        "the base arm must run unscaled, got c={cb:?} d={db:?}",
+    );
+
+    let (_, cs, ds) = scaled.nlp_scaling().expect("nlp scaling");
+    let cs = cs.expect("scaled arm must carry equality row factors");
+    let ds = ds.expect("scaled arm must carry inequality row factors");
+    assert_eq!(cs, vec![1.0e-1], "the pin's factor, in the c block");
+    assert_eq!(
+        ds,
+        vec![8.0, 5.0e1],
+        "the two inequality factors in d-block order: the slack row \
+         first, the CAP second -- the position d_multiplier_rows claims \
+         for it, reached without going through full_to_d",
+    );
+    assert_eq!(
+        scaled.variable_scaling().unwrap(),
+        Some(vec![4.0, 0.25, 1.0e2]),
+        "the column factors must reach the algorithm too",
+    );
+}
+
+// ---------------------------------------------------------------
+// Leg 2 -- perturbation magnitude
+// ---------------------------------------------------------------
+
+/// Leg 2 for `d_multiplier_rows`, over eight orders on both sides.
+/// The cap is strictly active, so unlike a kink the two sides agree --
+/// which is the property that makes the row answerable at all, and is
+/// therefore the thing to assert rather than to assume.
+#[test]
+fn leg_magnitude_the_multiplier_derivative_does_not_depend_on_the_step_size() {
+    let s = solved_ineq(None, None, false);
+    for sign in [1.0, -1.0] {
+        for (hi, lo) in [
+            (1.0e-2, 1.0e-3),
+            (1.0e-4, 1.0e-5),
+            (1.0e-6, 1.0e-7),
+            (1.0e-8, 1.0e-9),
+        ] {
+            let got = mult_slope(&s, G_CAP, sign * hi, sign * lo);
+            assert!(
+                (got - EXACT_DLAMBDA).abs() < 1e-5,
+                "sign {sign:+}, delta {hi:e}..{lo:e}: d lambda/d delta = \
+                 {got:e}, want {EXACT_DLAMBDA:e}",
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Leg 3 -- a fixed variable ahead of the row
+// ---------------------------------------------------------------
+
+/// Leg 3 for `d_multiplier_rows`, and the leg the accessor is most
+/// exposed to. Its answer is `n_x + n_s + n_c + full_to_d[g]`, so it
+/// reads THREE block dimensions and one index map, and a fixed
+/// variable removed by `make_parameter` moves `n_x` under it. Getting
+/// `n_x` from the wrong place -- the user's variable count rather than
+/// the factor's -- returns a neighbouring block's row, which is
+/// gh#450's hazard one block over.
+///
+/// The map itself is checked in the same breath: `full_to_d` is the
+/// complement of `full_to_c`, so the cap's d-block position is its g
+/// index minus the one equality ahead of it. Asserting the row's
+/// numeric VALUE rather than its index is what makes that check bite
+/// -- an off-by-one lands in the slack row's multiplier, whose
+/// derivative is zero, not in an out-of-range panic.
+#[test]
+fn leg_fixed_the_multiplier_derivative_is_unmoved_by_a_fixed_variable_ahead() {
+    let plain = solved_ineq(None, None, false);
+    let fixed = solved_ineq(None, None, true);
+
+    // the index spaces really do diverge, or the leg is two runs of
+    // the same solve
+    let dims_plain = plain.block_dims().expect("block dims");
+    let dims_fixed = fixed.block_dims().expect("block dims");
+    assert_eq!(
+        dims_plain[0] + 1,
+        dims_fixed[0] + 1,
+        "sanity: both solves keep three free columns",
+    );
+    assert_eq!(
+        dims_plain[0], dims_fixed[0],
+        "make_parameter must remove the fixed column, leaving n_x equal",
+    );
+
+    for (what, s) in [("plain", &plain), ("fixed", &fixed)] {
+        // the cap's d-block position is 1, not its g index 2
+        let row = d_row(s, G_CAP);
+        let dims = s.block_dims().expect("block dims");
+        assert_eq!(
+            row,
+            dims[0] + dims[1] + dims[2] + 1,
+            "{what}: the cap's row must be the SECOND entry of the y_d \
+             block (one equality is ahead of it in g)",
+        );
+        let got = mult_slope(s, G_CAP, 1.0e-3, 1.0e-6);
+        assert!(
+            (got - EXACT_DLAMBDA).abs() < 1e-6,
+            "{what}: d lambda/d delta = {got:e}, want {EXACT_DLAMBDA:e}",
+        );
+    }
+}
+
+/// The three legs compose: scaled AND with a fixed variable in front.
+/// Each leg alone can pass while the two conversions cancel only in
+/// isolation; fixture 1 has [`the_legs_compose_at_the_fixed_and_scaled_corner`]
+/// for the same reason.
+#[test]
+fn the_multiplier_legs_compose_at_the_fixed_and_scaled_corner() {
+    let s = solved_ineq(
+        Some(vec![2.0, 4.0, 0.25, 1.0e2]),
+        Some(vec![1.0e-1, 8.0, 5.0e1]),
+        true,
+    );
+    let got = mult_slope(&s, G_CAP, 1.0e-3, 1.0e-6);
+    assert!(
+        (got - EXACT_DLAMBDA).abs() < 1e-6,
+        "corner: d lambda/d delta = {got:e}, want {EXACT_DLAMBDA:e}",
+    );
 }

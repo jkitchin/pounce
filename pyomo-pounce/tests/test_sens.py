@@ -68,6 +68,179 @@ def test_sens_jacobian_multiplier_matches_finite_difference(solved):
         "and pyomo duals")
 
 
+# ── inequality multipliers (jkitchin/pounce#910) ─────────────────────────────
+#
+# A multiplier sensitivity used to be equality-only, which forced a
+# user who knew a cap was active to rewrite it as an equality to get an
+# error bar on its shadow price. The mathematics never needed that: a
+# strictly active inequality behaves exactly like an equality over a
+# neighbourhood of the solved point, and its multiplier's derivative is
+# the same KKT back-solve. What was missing was the map from a
+# user-space row to the `y_d` block, and a gate saying when the number
+# means anything.
+#
+#     min 0.5 x^2 + 0.5 y^2 - x - y   s.t.   x + y <= cap
+#
+# has its unconstrained optimum at (1, 1), so the cap binds below 2.
+# On it, x = y = cap/2 and the multiplier is `1 - cap/2`, exactly:
+#
+#     d lambda / d cap = -1/2
+#
+# and Pyomo's `dual` is the AMPL marginal `-lambda` (gh#271), so the
+# number `sens_jacobian` reports is `+1/2`. At cap = 2 the multiplier
+# is zero with the row still tight -- a kink -- and above 2 the row is
+# inactive.
+
+CAP_EXACT = 0.5
+
+
+def build_cap(cap=1.0):
+    m = pyo.ConcreteModel()
+    m.cap = pyo.Param(initialize=cap, mutable=True)
+    m.x = pyo.Var(initialize=0.2)
+    m.y = pyo.Var(initialize=0.2)
+    m.c = pyo.Constraint(expr=m.x + m.y <= m.cap)
+    m.obj = pyo.Objective(expr=0.5 * m.x**2 + 0.5 * m.y**2 - m.x - m.y)
+    return m
+
+
+def solve_declared(m, **opts):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        declare_sens_param(m.cap)
+        pyo.SolverFactory("pounce").solve(
+            m, options=dict({"tol": 1e-10}, **opts))
+    return m
+
+
+def test_a_strictly_active_inequality_multiplier_matches_finite_difference():
+    m = solve_declared(build_cap(1.0))
+    g = sens_jacobian(m.c, wrt=m.cap)
+    assert g == pytest.approx(CAP_EXACT, abs=1e-6)
+
+    hi = solve_plain(build_cap(1.0 + FD_H))
+    lo = solve_plain(build_cap(1.0 - FD_H))
+    fd = (hi.dual[hi.c] - lo.dual[lo.c]) / (2 * FD_H)
+    assert g == pytest.approx(fd, abs=1e-4), (
+        "sign convention mismatch between parametric_step_full's y_d block "
+        "and pyomo duals -- the y_c block's convention has to carry over")
+
+
+def test_the_inequality_answer_is_the_one_the_equality_rewrite_gives():
+    """The workaround this replaces has to agree with it.
+
+    Rewriting a known-active cap as `x + y == cap` is what a user had
+    to do before, and it is a different KKT block reached by a
+    different map. Same model, same number.
+    """
+    mi = solve_declared(build_cap(1.0))
+    ineq = sens_jacobian(mi.c, wrt=mi.cap)
+
+    m = build_cap(1.0)
+    m.del_component(m.c)
+    m.c = pyo.Constraint(expr=m.x + m.y == m.cap)
+    me = solve_declared(m)
+    eq = sens_jacobian(me.c, wrt=me.cap)
+
+    assert ineq == pytest.approx(eq, abs=1e-6)
+
+
+def test_an_inactive_inequality_is_refused_as_structurally_zero():
+    """`lambda` is pinned at zero over a neighbourhood, so there is no
+    KKT row to differentiate -- the refusal has to say which of the
+    three regimes it is, not just that it declined."""
+    m = solve_declared(build_cap(9.0))
+    with pytest.raises(ValueError, match="structurally"):
+        sens_jacobian(m.c, wrt=m.cap)
+
+
+def test_a_row_kink_is_refused_because_no_two_sided_derivative_exists():
+    """cap = 2 puts the row exactly at the unconstrained optimum:
+    tight, with a multiplier at the barrier floor. Raising the cap
+    leaves `lambda` at zero, lowering it moves at -1/2, so the two
+    one-sided derivatives differ and no two-sided one exists."""
+    m = solve_declared(build_cap(2.0))
+    with pytest.raises(ValueError, match="two-sided"):
+        sens_jacobian(m.c, wrt=m.cap)
+
+
+def build_coupled_kink(rho):
+    """A row kink whose coordinate is coupled to the free space.
+
+    ``min 0.5 x^2 + c x y + 0.5 y^2 - p x / 2   s.t.  x <= 0`` with
+    ``c = sqrt(1 - rho)``. At ``p = 0`` the row is tight with a
+    vanishing multiplier -- a kink by construction -- and `rho` is the
+    curvature along the row's normal AFTER `y` re-optimizes, i.e. how
+    strongly the coordinate is coupled.
+    """
+    import math
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.0, mutable=True)
+    m.x = pyo.Var(initialize=0.3)
+    m.y = pyo.Var(initialize=0.0)
+    m.c = pyo.Constraint(expr=m.x <= 0.0)
+    m.obj = pyo.Objective(
+        expr=0.5 * m.x**2 + math.sqrt(1.0 - rho) * m.x * m.y
+        + 0.5 * m.y**2 - 0.5 * m.p * m.x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        declare_sens_param(m.p)
+        pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-9})
+    return m
+
+
+def _row_and_session(m):
+    session = m.__dict__["_pounce_sens"].session
+    name = session.con_alias.get("c", "c")
+    return session, session._con_row[name]
+
+
+def test_a_coupled_row_kink_is_refused_where_classify_reads_it_INACTIVE():
+    """Why the gate is `reduced_row_activity` and not `classify_activity`.
+
+    Neither can *admit* a kink: a row's reduced curvature is no larger
+    than the directional one `classify_activity` divides by, so the
+    reduced ratio is the larger of the two and STRONGLY_ACTIVE is the
+    high-ratio tail. What the directional normalizer gets wrong is the
+    refusal. A genuine kink's ratio there is `reduced/directional`,
+    which slides down as the row couples to the remaining free space:
+    AMBIGUOUS by `rho = 1e-2`, and INACTIVE by `1e-6`. Measured on this
+    fixture, both verdicts on the same solve.
+
+    INACTIVE is the one class whose derivative genuinely is zero, so
+    reading it off the directional normalizer would tell a user the
+    shadow price of a *tight* cap does not move -- a wrong answer, not
+    a refusal. The reduced normalizer puts a kink at ratio 1 whatever
+    the coupling.
+    """
+    m = build_coupled_kink(1e-6)
+    session, g = _row_and_session(m)
+
+    assert session.solver.classify_activity()["row_status"][g] == "inactive"
+    assert (session.solver.reduced_row_activity([g])["status"][0]
+            == "weakly_active")
+
+    with pytest.raises(ValueError, match="two-sided"):
+        sens_jacobian(m.c, wrt=m.p)
+
+
+def test_the_coupled_fixture_is_a_kink_at_every_coupling_it_is_asked_at():
+    """The premise of the test above, swept: `reduced_row_activity`
+    certifies the same kink at four couplings while
+    `classify_activity`'s verdict walks from WEAKLY_ACTIVE to INACTIVE.
+    Without this the test above could pass on a fixture that stopped
+    being a kink at all."""
+    seen = []
+    for rho in (1.0, 1e-2, 1e-4, 1e-6):
+        m = build_coupled_kink(rho)
+        session, g = _row_and_session(m)
+        assert (session.solver.reduced_row_activity([g])["status"][0]
+                == "weakly_active"), f"rho={rho:g} stopped being a kink"
+        seen.append(session.solver.classify_activity()["row_status"][g])
+    assert seen == ["weakly_active", "ambiguous", "ambiguous", "inactive"], (
+        f"the directional normalizer's walk moved: {seen}")
+
+
 def test_sens_solution_matches_resolve(solved):
     m = solved
     est = sens_solution(m, [(m.p, 2.2), (m.q, 0.9)])
@@ -534,12 +707,26 @@ def test_both_bounds_rewritten_are_both_recorded():
 # without needing the solver. The value-correctness of the fan-out path is
 # already covered by test_sens_jacobian_object_for_containers.
 
-def _fake_session(names, cons, row_offset=1000, **kw):
+def _fake_session(names, cons, row_offset=1000, d_row=None, status=None,
+                  **kw):
+    """A _Session over a stub solver.
+
+    `row_offset=None` makes every row read as an inequality, i.e. the
+    equality lookup refuses; `d_row` and `status` then say what the
+    inequality path finds -- the KKT row and the
+    `reduced_row_activity` verdict `mult_entry` gates on.
+    """
     from pyomo_pounce.sens import _Session
 
     class _Solver:
         def multiplier_rows(self, gs):
             return [None if row_offset is None else gs[0] + row_offset]
+
+        def d_multiplier_rows(self, gs):
+            return [None if d_row is None else gs[0] + d_row]
+
+        def reduced_row_activity(self, gs):
+            return {"status": [status], "ratio": [0.5]}
 
     return _Session(None, None, _Solver(), names, cons, {},
                     {"orig.c": cons[-1]}, **kw)
@@ -575,9 +762,87 @@ def test_unknown_name_raises_value_error_not_key_error():
         s.mult_entry("nope")
 
 
-def test_inequality_multiplier_error_is_unchanged():
-    s = _fake_session(["a"], ["c"], row_offset=None)
-    with pytest.raises(ValueError, match="equality constraints"):
+# ── the inequality multiplier gate (jkitchin/pounce#910) ─────────────────────
+#
+# An inequality's multiplier is differentiable only where the row is
+# STRICTLY active. `mult_entry` answers there and refuses in the other
+# two regimes, and the refusal has to name which one -- "inactive" and
+# "kink" are different facts about the model and a caller does
+# different things with them.
+#
+# The gate reads `reduced_row_activity`, not `classify_activity`, and
+# the reason is not the one it looks like. Neither classifier can
+# ADMIT a kink: a row's reduced curvature is never larger than its
+# directional one, so the reduced ratio is never below the directional
+# ratio, and `strongly_active` is the high-ratio tail of both. What
+# the directional normalizer gets wrong is the REFUSAL REASON. Its
+# ratio for a genuine kink is reduced/directional (gh#804), so as the
+# row couples to the rest of the free space at strength rho the class
+# slides -- measured, in
+# `test_a_coupled_row_kink_is_refused_where_classify_reads_it_INACTIVE`:
+#
+#     rho     classify_activity()   reduced_row_activity()
+#     1       weakly_active         weakly_active
+#     1e-2    ambiguous             weakly_active
+#     1e-4    ambiguous             weakly_active
+#     1e-6    INACTIVE              weakly_active
+#
+# `inactive` is the one class a caller may read as a structural zero,
+# so the directional gate would not decline to answer about a tight
+# cap -- it would answer "it does not move". Reading an activity class
+# as a proxy for kink-ness is the inference that shipped gh#756.
+
+def test_a_strictly_active_inequality_gets_its_multiplier_row():
+    s = _fake_session(["a"], ["c"], row_offset=None, d_row=500,
+                      status="strongly_active")
+    assert s.mult_entry("c") == 500
+
+
+def test_an_inactive_inequality_is_refused_as_structurally_zero():
+    s = _fake_session(["a"], ["c"], row_offset=None, d_row=500,
+                      status="inactive")
+    with pytest.raises(ValueError, match="structurally"):
+        s.mult_entry("c")
+
+
+@pytest.mark.parametrize("status", ["weakly_active", "ambiguous"])
+def test_a_kink_is_refused_because_no_two_sided_derivative_exists(status):
+    """AMBIGUOUS refuses too: it is not "probably not a kink"."""
+    s = _fake_session(["a"], ["c"], row_offset=None, d_row=500,
+                      status=status)
+    with pytest.raises(ValueError, match="two-sided"):
+        s.mult_entry("c")
+
+
+def test_a_row_in_neither_block_asserts_rather_than_indexing_a_None():
+    """Both accessors answering None is unreachable, and says so.
+
+    This test used to assert that such a row is "a free row, which has
+    no multiplier at all". That was false, and the message it pinned
+    said so out loud. `classify_bounds` puts every row in exactly one
+    of the two blocks -- a `-inf <= g <= inf` row included, which lands
+    in `d` with empty bound lists and is then refused by the gate below
+    as inactive, which is the truth: a free row's multiplier is zero
+    always. So there is no model that reaches this branch, and the stub
+    has to fabricate it.
+
+    It is kept because the two accessors are separately maintained: a
+    future split that grows a third case should land here loudly rather
+    than index the step vector with a None.
+
+    The premise -- that the split really is a partition -- cannot be
+    checked from here: Pyomo refuses to construct a free constraint at
+    all (`pyo.inequality(None, x, None)` raises), so no end-to-end
+    model reaches this branch to be tested against. It is pinned where
+    it is decided instead, in `crates/pounce-nlp/src/tnlp_adapter.rs`:
+    `every_constraint_row_lands_in_exactly_one_of_c_and_d`,
+    `a_free_row_gets_a_d_slot_with_no_bound_on_either_side`, and
+    `full_to_d_is_the_positional_inverse_of_d_map`. Without those this
+    stub is unfalsifiable -- it can only show what happens IF both
+    accessors answer None, never that nothing makes them.
+    """
+    s = _fake_session(["a"], ["c"], row_offset=None, d_row=None)
+    with pytest.raises(ValueError, match="should be impossible"):
         s.mult_entry("c")
 
 

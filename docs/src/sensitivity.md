@@ -280,12 +280,81 @@ below. There is one exception to the warning, a bound written on a declared Para
 [Declared Params in variable bounds](#declared-params-in-variable-bounds)
 below. `sens_solution_report()` measures the same step and reports where the
 active set changes along it, covered in
-[What the step did about the bounds](#what-the-step-did-about-the-bounds-sens_solution_report). Multiplier sensitivities are available for equality constraints.
+[What the step did about the bounds](#what-the-step-did-about-the-bounds-sens_solution_report). Multiplier sensitivities are available for equality constraints unconditionally and for
+strictly active inequalities, covered in
+[Multipliers](#multipliers-an-error-bar-on-a-shadow-price) below.
 Models without declarations solve through the ordinary AMPL/CLI path,
 unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
+
+### Multipliers: an error bar on a shadow price
+
+`of=` a `Constraint` gives the derivative of that row's Lagrange
+multiplier — the error bar on a shadow price, once `Σ_θ` is in hand.
+
+An **equality** row answers unconditionally: its multiplier is a
+coordinate of the KKT system being differentiated, so `dλ/dp` is the
+same backsolve as `dx*/dp`, one block over.
+
+An **inequality** row answers only where its multiplier is a
+differentiable function of the parameters, which is where the row is
+*strictly complementary* — active with a multiplier bounded away from
+zero. There are three regimes and only one of them has a two-sided
+answer to give:
+
+| regime | slack, multiplier | `dλ/dp` |
+|---|---|---|
+| strictly active | `s ≈ 0`, `λ > 0` | the row behaves as an equality over a neighbourhood; **answered** |
+| inactive | `s > 0`, `λ ≈ 0` | `λ` is pinned at zero over a neighbourhood, so the derivative exists and is zero — but there is no KKT row to return, and returning `0.0` would be indistinguishable from a computed answer; **refused, naming the regime** |
+| weakly active (a kink) | `s ≈ 0` *and* `λ ≈ 0` | the two one-sided derivatives differ, so no two-sided `dλ/dp` exists; **refused** |
+
+```python
+sens_jacobian(m.cap, wrt=m.p)     # dλ_cap/dp, if the cap is strictly active
+```
+
+The refusal messages name which regime the row is in, because the three
+call for different things from the caller: an inactive row's answer is
+genuinely zero, a kink needs a *direction* (`sens_solution()` /
+`Solver.parametric_step_full` still report a one-sided step for a chosen
+perturbation), and only the strictly active case has an unqualified
+number.
+
+Before this (gh#910), an inequality target was refused outright, and the
+workaround was to rewrite a known-active cap as an equality `g(x) == b`. That still
+works and is still the right move when you *want* the row held; it is no
+longer necessary to get the derivative.
+
+**Which classifier gates it.** The gate is `Solver.reduced_row_activity()`,
+not `classify_activity()`. Not because the directional classifier could
+*admit* a kink — it cannot: a row's reduced curvature is never larger than
+its directional one, so the reduced ratio is never below the directional
+ratio, and `strongly_active` is the high-ratio tail of both. What the
+directional normalizer gets wrong is the *refusal reason*. The ratio it
+reports for a genuine kink is `reduced / directional`
+([`ambiguous` is not "probably not a kink"](#ambiguous-is-not-probably-not-a-kink)),
+so as the row's coordinate couples to the rest of the free space at
+strength `ρ` the class slides:
+
+| `ρ` | `classify_activity()` | `reduced_row_activity()` |
+|---|---|---|
+| `1` | `weakly_active` | `weakly_active` |
+| `1e-2` | `ambiguous` | `weakly_active` |
+| `1e-4` | `ambiguous` | `weakly_active` |
+| `1e-6` | **`inactive`** | `weakly_active` |
+
+`inactive` is the one class whose derivative a caller may legitimately
+read as a structural zero. Gating on the directional ratio would
+therefore not *decline* to answer about a tight cap's shadow price — it
+would answer "it does not move", which is wrong. Coupling this strong is
+routine on a collocation model.
+`reduced_row_activity()` costs one backsolve per row asked about and needs
+`bound_relax_factor = 0`, which the sensitivity session already sets.
+
+Sign convention is unchanged: Pyomo's `m.dual` holds the AMPL marginal
+`−λ`, and `sens_jacobian` negates so its answer finite-differences against
+`m.dual` (gh#271) — for inequality rows the same way as for equalities.
 
 ### Bending the estimate around a bound: `mode="fix_relax"`
 
@@ -1728,7 +1797,7 @@ replaces constraints even if they don't contain the parameters."*
 | Cost per query | model clone + full constraint rebuild + subprocess + file parse | declare once; the KKT factor is retained and each query is one backsolve |
 | Perturbation values | required **before** the solve | not required; ask for any `Δp` afterwards |
 | `dx*/dp` | ✅ `get_dsdp`, whole matrix | ✅ `sens_jacobian(of, wrt=…)`, scalar or `Jacobian` / DataFrame |
-| `dλ/dp`, multiplier sensitivity | ❌ | ✅ pass an equality `Constraint` as `of=` |
+| `dλ/dp`, multiplier sensitivity | ❌ | ✅ pass a `Constraint` as `of=` (equalities unconditionally; inequalities where strictly active) |
 | Total `df/dp` | ❌ | ✅ `sens_jacobian(m.obj, wrt=p)`, explicit partial plus the path through `x*` |
 | Declared `Param` in a variable **bound** | ❌ substitution walks constraints and the objective only, so the derivative reads exactly `0.0` | ✅ rewritten to a row at declaration — see [Declared Params in variable bounds](#declared-params-in-variable-bounds) |
 | Bound crossing (fix-relax) | sIPOPT implements `sens_boundcheck`, but the toolbox never sets it — only `run_sens=yes` | ✅ `mode="fix_relax"`, both the pin and the release half |

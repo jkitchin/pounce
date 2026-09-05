@@ -91,6 +91,15 @@ pub struct BoundClassification {
     /// Maps full-g index → c-block position, with `-1` for inequality
     /// rows: the O(1) inverse of `c_map`, mirroring `full_to_var`.
     pub full_to_c: Vec<Index>,
+    /// Maps full-g index → d-block position, with `-1` for equality
+    /// rows: the O(1) inverse of `d_map`, and the exact complement of
+    /// `full_to_c` — every row is in one block or the other, so
+    /// `(full_to_c[i] < 0) == (full_to_d[i] >= 0)` for every `i`.
+    ///
+    /// Added so a caller holding a user-space row index can find the
+    /// inequality multiplier `y_d` in the compound KKT vector, which
+    /// `full_to_c` alone could only refuse to do (pounce#910).
+    pub full_to_d: Vec<Index>,
 }
 
 impl BoundClassification {
@@ -560,6 +569,7 @@ fn classify_bounds(
     let mut d_l_map: Vec<Index> = Vec::new();
     let mut d_u_map: Vec<Index> = Vec::new();
     let mut full_to_c: Vec<Index> = vec![-1; ng];
+    let mut full_to_d: Vec<Index> = vec![-1; ng];
 
     for i in 0..ng {
         let lo = g_l[i];
@@ -589,6 +599,7 @@ fn classify_bounds(
             }
         }
         let d_idx = d_map.len() as Index;
+        full_to_d[i] = d_idx;
         d_map.push(i as Index);
         if lo_present {
             d_l_map.push(d_idx);
@@ -618,6 +629,7 @@ fn classify_bounds(
         d_l_map,
         d_u_map,
         full_to_c,
+        full_to_d,
     })
 }
 
@@ -1298,5 +1310,84 @@ mod tests {
 
         let adapter = adapter_for(NonlinVars::silent());
         assert!(adapter.quasi_newton_nonlinear_vars(99).is_err());
+    }
+
+    // ── the c/d split is a partition (jkitchin/pounce#910) ──────────
+    //
+    // `full_to_d` is documented as the exact complement of
+    // `full_to_c`, and `python/pounce/sensitivity/_session.py`'s
+    // `mult_entry` leans on it: it asks the equality block, then the
+    // inequality block, and treats both answering `None` as
+    // unreachable. That claim is about THIS function, so it is pinned
+    // here rather than asserted downstream.
+    //
+    // The row worth naming is the free one. A `-inf <= g <= inf` row
+    // is the shape a reader expects to fall through both blocks, and
+    // Pyomo cannot even construct one, so no end-to-end test can
+    // reach it -- which is exactly why the premise belongs at this
+    // level. It lands in `d` with empty bound-map entries, and the
+    // gate downstream then refuses it as inactive, which is the
+    // truth: a free row's multiplier is zero always.
+
+    fn split_of(g_l: &[Number], g_u: &[Number]) -> BoundClassification {
+        classify_bounds(
+            1,
+            g_l.len() as Index,
+            &[-1e19],
+            &[1e19],
+            g_l,
+            g_u,
+            -1e19,
+            1e19,
+            FixedVarTreatment::MakeParameter,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_constraint_row_lands_in_exactly_one_of_c_and_d() {
+        // equality, <=-only, >=-only, two-sided range, and free.
+        let cls = split_of(
+            &[2.0, -1e19, 0.0, -1.0, -1e19],
+            &[2.0, 5.0, 1e19, 1.0, 1e19],
+        );
+        for i in 0..5usize {
+            let in_c = cls.full_to_c[i] >= 0;
+            let in_d = cls.full_to_d[i] >= 0;
+            assert!(
+                in_c != in_d,
+                "row {i} is in c={in_c} and d={in_d}; the split must be a \
+                 partition, so `mult_entry`'s both-None branch stays \
+                 unreachable",
+            );
+        }
+        assert_eq!(cls.full_to_c, vec![0, -1, -1, -1, -1]);
+        assert_eq!(cls.full_to_d, vec![-1, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_free_row_gets_a_d_slot_with_no_bound_on_either_side() {
+        let cls = split_of(&[-1e19], &[1e19]);
+        assert_eq!(cls.full_to_c, vec![-1], "a free row is not an equality");
+        assert_eq!(cls.full_to_d[0], 0, "but it does get a d slot");
+        assert_eq!(cls.d_map, vec![0]);
+        assert!(
+            cls.d_l_map.is_empty() && cls.d_u_map.is_empty(),
+            "and no bound on either side, so nothing can be active",
+        );
+    }
+
+    #[test]
+    fn full_to_d_is_the_positional_inverse_of_d_map() {
+        // The accessor indexes the `y_d` block directly, so an
+        // off-by-one here is a neighbouring row's multiplier -- the
+        // silent failure the newtype work (gh#764 item 3) is about.
+        let cls = split_of(&[0.0, 1.0, 1.0, -1e19, 3.0], &[0.0, 2.0, 1.0, 4.0, 3.0]);
+        for (pos, &full) in cls.d_map.iter().enumerate() {
+            assert_eq!(cls.full_to_d[full as usize], pos as Index);
+        }
+        for (pos, &full) in cls.c_map.iter().enumerate() {
+            assert_eq!(cls.full_to_c[full as usize], pos as Index);
+        }
     }
 }

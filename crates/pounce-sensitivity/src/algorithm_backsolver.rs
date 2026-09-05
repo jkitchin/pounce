@@ -1488,6 +1488,18 @@ impl PdSensBacksolver {
         self.nlp.borrow().full_g_to_c_block(full_idx)
     }
 
+    /// `None` when the constraint is an equality (it lives in the `c`
+    /// block, not `y_d`). Delegates to the held NLP's c/d-split map,
+    /// and is the exact complement of [`Self::full_g_to_c_block`].
+    ///
+    /// The flat KKT row of an inequality's multiplier is
+    /// `n_x + n_s + n_c + full_g_to_d_block(g)`; the same warning
+    /// applies as for the `c` side — it is NOT `n_x + n_s + n_c + g`,
+    /// which differs whenever any equality precedes the row in `g(x)`.
+    pub fn full_g_to_d_block(&self, full_idx: Index) -> Option<Index> {
+        self.nlp.borrow().full_g_to_d_block(full_idx)
+    }
+
     /// Map a 0-based **full-x** index (user-TNLP variable order) to its
     /// 0-based position in the algorithm-side `x` block, or `None` when
     /// the solve removed the column because `x_l == x_u` under
