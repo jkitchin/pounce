@@ -716,6 +716,39 @@ impl PySolver {
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 
+    /// Rows of the compound KKT vector holding the **inequality**
+    /// multipliers for the given 0-based constraint (`g`) indices;
+    /// `None` for equality constraints, whose multipliers
+    /// `multiplier_rows` finds instead. Between them the two cover
+    /// every row, and exactly one returns a row for any given index.
+    ///
+    /// This is a mapping and not a verdict: an inequality multiplier is
+    /// differentiable only where the row is STRICTLY active. On an
+    /// inactive row the derivative is structurally zero, and at a kink
+    /// (`lambda ~ 0` and slack `~ 0` together) the two-sided
+    /// derivative does not exist -- the entry then holds whichever
+    /// one-sided answer the factorization landed on. Gate on
+    /// `reduced_row_activity()` before showing a user a number from
+    /// here; `classify_activity()` is NOT sufficient for a row.
+    /// Neither classifier can *admit* a kink -- the reduced ratio is
+    /// never below the directional one and STRONGLY_ACTIVE is the
+    /// high-ratio tail of both -- but the directional ratio for a
+    /// genuine kink is `reduced/directional` (pounce#804), so a kink
+    /// whose coordinate is coupled to the rest of the free space
+    /// slides WEAKLY_ACTIVE -> AMBIGUOUS -> INACTIVE there while
+    /// `reduced_row_activity()` holds WEAKLY_ACTIVE. INACTIVE is the
+    /// one class a caller may legitimately read as a structural zero,
+    /// so the directional gate does not refuse a tight cap's shadow
+    /// price, it answers "it does not move" (pounce#910).
+    fn d_multiplier_rows(&self, g_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("d_multiplier_rows: no converged factor (call solve() first)")
+        })?;
+        let gs = validate_pins(&g_indices, s.m)?;
+        let rows = s.inner.d_multiplier_rows(&gs).map_err(solver_error_to_py)?;
+        Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
+    }
+
     /// Rows of the compound KKT vector holding the primal values for
     /// the given 0-based **user-space** variable (`x`) indices; `None`
     /// where the solve removed the column as a fixed variable

@@ -389,6 +389,21 @@ pub trait IpoptNlp: Nlp {
         Some(full_idx)
     }
 
+    /// Map a 0-based **full-g** index to a 0-based position in the
+    /// d-block (algorithm-side inequality multiplier vector `y_d`,
+    /// length `m_ineq()`). Returns `None` when the constraint is an
+    /// equality (lives in `c`, not `d`).
+    ///
+    /// The exact complement of [`Self::full_g_to_c_block`]: every row
+    /// is in one block or the other, so exactly one of the two returns
+    /// `Some` for an in-range index. Default impl matches
+    /// `full_g_to_c_block`'s (which assumes every row is an equality)
+    /// by returning `None` for all of them; `OrigIpoptNlp` overrides
+    /// via `BoundClassification::full_to_d`.
+    fn full_g_to_d_block(&self, _full_idx: Index) -> Option<Index> {
+        None
+    }
+
     /// Inverse of [`Self::full_x_to_var_x`]: map a 0-based var-x index
     /// (length `n()`) to the corresponding full-x index (length
     /// `n_full_x()`). Used when scattering a compressed step or

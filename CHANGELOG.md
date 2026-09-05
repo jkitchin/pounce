@@ -11,6 +11,53 @@ changes.
 
 ### Added
 
+- **Multiplier sensitivities on inequality constraints
+  (`sens_jacobian(of=<inequality Constraint>)`, gh#910).** `dλ/dp` was
+  equality-only:
+  an inequality target raised, and the workaround was to rewrite a
+  known-active cap as an equality. It now answers wherever the row is
+  *strictly complementary* — active with a multiplier bounded away from
+  zero — which is the whole region where the multiplier is a
+  differentiable function of the parameters. New plumbing:
+  `Solver::d_multiplier_rows` (Rust and Python), backed by a `full_to_d`
+  map on `BoundClassification` that is the exact complement of the
+  existing `full_to_c`.
+
+  The other two regimes are **refused, each naming itself**, because they
+  need different things from the caller. An *inactive* row's multiplier is
+  pinned at zero over a neighbourhood, so its derivative genuinely is zero
+  — but there is no KKT row to differentiate, and a returned `0.0` would
+  be indistinguishable from a computed one. At a *kink* (`λ ≈ 0` and slack
+  `≈ 0` together) the two one-sided derivatives differ, so no two-sided
+  `dλ/dp` exists; `sens_solution()` and `Solver.parametric_step_full` still
+  give a one-sided step for a chosen direction.
+
+  The gate is `reduced_row_activity()`, not `classify_activity()`, and the
+  reason is not the one it looks like. Neither classifier can *admit* a
+  kink: a row's reduced curvature is never larger than its directional
+  one, so the reduced ratio is never below the directional ratio, and
+  `strongly_active` is the high-ratio tail of both. What the directional
+  normalizer gets wrong is the **refusal reason**. Swept over a genuine row
+  kink coupled to the rest of the free space at strength `ρ`,
+  `classify_activity()` reads `weakly_active` at `ρ = 1`, `ambiguous` by
+  `1e-2`, and `inactive` by `1e-6`, while `reduced_row_activity()` holds
+  `weakly_active` throughout. `inactive` is the one class a caller may
+  legitimately read as a structural zero — so the directional gate would
+  not decline to answer about a tight cap's shadow price, it would answer
+  "it does not move". Coupling that strong is routine on a collocation
+  model.
+
+  Covered by a third fixture in
+  `crates/pounce-sensitivity/tests/sens_invariance_legs.rs` — a strictly
+  active cap behind an equality pin and an inactive decoy, so the row's g
+  index, its d-block position and its (nonexistent) c-block position are
+  three different numbers — with a row in each of the three legs, its own
+  mutation table, and a liveness witness that does not go through the map
+  under test. Two mutations of the new map each fail exactly the six
+  multiplier tests and leave the witness green. End-to-end regime coverage,
+  including a coupled kink that `classify_activity` misreads as `inactive`,
+  is in `pyomo-pounce/tests/test_sens.py`.
+
 - **A phase-changing flash as a complementarity problem
   (`pounce.examples.flash_mpcc`, notebook 38).** A single vapour–liquid
   equilibrium stage solved across a temperature path that crosses

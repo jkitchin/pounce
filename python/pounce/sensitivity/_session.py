@@ -275,7 +275,46 @@ class SensSession:
                 f"{name}: not a variable of the solved model") from None
 
     def mult_entry(self, con_name):
-        """The KKT row of constraint `con_name`'s multiplier."""
+        """The KKT row of constraint `con_name`'s multiplier.
+
+        Equality rows answer unconditionally. An **inequality** row
+        (pounce#910) answers only where its multiplier is a
+        differentiable function of the parameters, which is where the
+        row is *strictly* complementary — active with a multiplier bounded away from
+        zero. The three regimes and why only one of them has an answer
+        to give:
+
+        * **strictly active** (`s ≈ 0`, `λ > 0`) — the row behaves
+          exactly like an equality over a neighbourhood of the solved
+          point, and `dλ/dp` is the same KKT back-solve. Answered.
+        * **inactive** (`s > 0`, `λ ≈ 0`) — `λ` is pinned at zero over
+          a neighbourhood, so the derivative exists and is *zero*.
+          Refused rather than returned as a row, because there is no
+          KKT row to return: an inactive row's multiplier is not a
+          free coordinate of the system being differentiated.
+        * **weakly active / kink** (`s ≈ 0` *and* `λ ≈ 0`) — the two
+          one-sided derivatives differ, so no two-sided `dλ/dp`
+          exists. Refused.
+
+        The gate is :meth:`Solver.reduced_row_activity`, not
+        `classify_activity`. Neither of them can *admit* a kink: a
+        row's reduced curvature is never larger than its directional
+        one, so the reduced ratio is never smaller than the
+        directional ratio, and `"strongly_active"` is the high-ratio
+        tail of both. What the directional normalizer gets wrong is
+        the **refusal reason**. Swept over a genuine row kink whose
+        coordinate is coupled to the rest of the free space at
+        strength `rho`, `classify_activity` reads it
+        `"weakly_active"` at `rho = 1`, `"ambiguous"` by `1e-2`, and
+        `"inactive"` by `1e-6`, while `reduced_row_activity` holds
+        `"weakly_active"` throughout (pounce#804). `"inactive"` is
+        the one class whose derivative a caller may legitimately
+        treat as a structural zero, so gating on the directional
+        ratio would tell the holder of a *tight* cap that its shadow
+        price does not move -- a wrong answer wearing a refusal's
+        clothes. Reading an activity class as a proxy for kink-ness
+        is the inference that shipped pounce#756.
+        """
         # a caller whose solve ran on a rewritten copy translates the
         # original name to the copy's row
         con_name = self.con_alias.get(con_name, con_name)
@@ -285,11 +324,64 @@ class SensSession:
             raise ValueError(
                 f"{con_name}: not a constraint of the solved model") from None
         row = self.solver.multiplier_rows([g])[0]
+        if row is not None:
+            return row
+        row = self.solver.d_multiplier_rows([g])[0]
         if row is None:
+            # Unreachable: the c/d split puts every row in exactly one
+            # block, a row with no finite bound on either side included
+            # (it lands in `d` with an empty bound list, and the gate
+            # below then refuses it as inactive, which is the truth --
+            # a free row's multiplier is zero always). Kept because the
+            # two accessors are separately maintained and a future
+            # split that grows a third case should say so here rather
+            # than index the step with a None.
             raise ValueError(
-                f"{con_name}: multiplier sensitivities are only available "
-                "for equality constraints")
+                f"{con_name}: neither the equality nor the inequality "
+                "multiplier block claims constraint row "
+                f"{g}, which should be impossible; please report this.")
+        self._require_strict_complementarity(con_name, g)
         return row
+
+    def _require_strict_complementarity(self, con_name, g):
+        """Raise unless inequality row `g` is strictly active.
+
+        Split out of :meth:`mult_entry` so the regime message is one
+        thing and the row lookup another; see that method for why the
+        gate reads the *reduced* classification.
+        """
+        try:
+            rep = self.solver.reduced_row_activity([g])
+        except Exception as exc:  # BadOptions, a failed back-solve
+            raise ValueError(
+                f"{con_name}: multiplier sensitivities on an inequality "
+                "need its activity classified, and that failed: "
+                f"{exc}") from None
+        status = rep["status"][0]
+        if status == "strongly_active":
+            return
+        if status == "inactive":
+            raise ValueError(
+                f"{con_name}: the constraint is inactive at the solved "
+                "point, so its multiplier is zero over a neighbourhood "
+                "and every parameter derivative of it is structurally "
+                "zero. There is no KKT row to differentiate.")
+        if status in ("weakly_active", "ambiguous"):
+            ratio = float(rep["ratio"][0])
+            what = ("a kink" if status == "weakly_active"
+                    else "possibly a kink")
+            raise ValueError(
+                f"{con_name}: the constraint is {what} at the solved point "
+                f"(reduced_row_activity says {status!r}, ratio {ratio:.3g}) "
+                "— active with a multiplier at the barrier floor. The two "
+                "one-sided derivatives of its multiplier differ, so no "
+                "two-sided dlambda/dp exists. Solver.parametric_step_full "
+                "still reports a one-sided step for a chosen "
+                "perturbation direction if that is the question.")
+        raise ValueError(
+            f"{con_name}: multiplier sensitivities on an inequality need "
+            "the row strictly active, and reduced_row_activity reports "
+            f"{status!r}.")
 
 
 def user_row_names(session):

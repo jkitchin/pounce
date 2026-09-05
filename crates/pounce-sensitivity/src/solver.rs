@@ -1876,9 +1876,10 @@ impl Solver {
 
     /// Flat rows of the compound KKT vector holding the equality
     /// multipliers `y_c` for the given 0-based **full-g** constraint
-    /// indices. `None` for inequalities (their multipliers live in the
-    /// `y_d` block; mapping those is not exposed here). Row `r` of a
-    /// [`Self::parametric_step_full`] result is then `∂λ_g/∂p · Δp`.
+    /// indices. `None` for inequalities, whose multipliers live in the
+    /// `y_d` block — [`Self::d_multiplier_rows`] maps those. Row `r`
+    /// of a [`Self::parametric_step_full`] result is then
+    /// `∂λ_g/∂p · Δp`.
     pub fn g_multiplier_rows(
         &self,
         g_indices: &[Index],
@@ -1894,6 +1895,89 @@ impl Solver {
                     .backsolver
                     .full_g_to_c_block(g)
                     .map(|pos| y_c_offset + pos)
+            })
+            .collect())
+    }
+
+    /// Flat rows of the compound KKT vector holding the **inequality**
+    /// multipliers `y_d` for the given 0-based full-g indices. `None`
+    /// for equalities, whose multipliers are in `y_c` — so this is the
+    /// exact complement of [`Self::g_multiplier_rows`] and the two
+    /// together cover every row. Row `r` of a
+    /// [`Self::parametric_step_full`] result is then `∂λ_d/∂p · Δp`.
+    ///
+    /// **This is a mapping, not a verdict, and `∂λ_d/∂p` is not always
+    /// a derivative.** An inequality's multiplier is only
+    /// differentiable where the row is *strictly* active, and the row
+    /// lands in one of three regimes:
+    ///
+    /// * strictly active (`λ > 0`, slack `0`) — well defined, and the
+    ///   same quantity an equality in that position would report;
+    /// * inactive (`λ = 0`, slack `> 0`) — `λ` stays `0` under a small
+    ///   perturbation, so the derivative is `0` for a structural
+    ///   reason rather than a measured one;
+    /// * weakly active — a kink, `λ ≈ 0` *and* slack `≈ 0`, where the
+    ///   two-sided derivative does not exist at all. Only one-sided
+    ///   ones do, and they differ; the number this row holds is
+    ///   whichever side the factorization happened to land on.
+    ///
+    /// Nothing here distinguishes them. A caller putting this in front
+    /// of a user must gate on the activity class first, and for a
+    /// *row* that means [`Self::reduced_row_activity`] rather than
+    /// [`Self::classify_activity`].
+    ///
+    /// Not because the directional classifier can *admit* a kink — it
+    /// cannot. A row's reduced curvature is never larger than its
+    /// directional one, so the reduced ratio is never smaller than the
+    /// directional ratio, and
+    /// [`STRONGLY_ACTIVE`](crate::activity::STRONGLY_ACTIVE) is the
+    /// high-ratio tail of both. What the directional normalizer gets
+    /// wrong is the *refusal reason*: the ratio it reports for a
+    /// genuine kink is `reduced/directional` (gh#804), so as the row's
+    /// coordinate couples to the remaining free space the class slides
+    /// [`WEAKLY_ACTIVE`](crate::activity::WEAKLY_ACTIVE) →
+    /// [`AMBIGUOUS`](crate::activity::AMBIGUOUS) →
+    /// [`INACTIVE`](crate::activity::INACTIVE) while
+    /// [`Self::reduced_row_activity`] holds `WEAKLY_ACTIVE`
+    /// throughout. `INACTIVE` is the one class whose derivative a
+    /// caller may legitimately treat as a structural zero, so the
+    /// directional gate does not decline to answer about a tight cap's
+    /// shadow price — it answers "it does not move", which is wrong.
+    /// `pounce.sensitivity`'s `mult_entry` is the gated caller
+    /// (pounce#910).
+    ///
+    /// An out-of-range index is an **error** here, where
+    /// [`Self::g_multiplier_rows`] returns `None` for it. The
+    /// asymmetry is deliberate and is what makes the fall-through
+    /// pattern — ask `g_multiplier_rows`, then ask this — safe: with
+    /// both accessors returning `None` a caller cannot tell "that row
+    /// is an equality" from "that row does not exist", and the second
+    /// call is where the question is finally settled. Same reasoning
+    /// as [`Self::x_primal_rows`], whose `None` means "removed as
+    /// fixed" and must not double as "out of range".
+    pub fn d_multiplier_rows(
+        &self,
+        g_indices: &[Index],
+    ) -> Result<Vec<Option<Index>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let n_full_g = state.backsolver.n_full_g();
+        if let Some(&bad) = g_indices.iter().find(|&&g| g < 0 || g >= n_full_g) {
+            return Err(SolverError::BadShape {
+                what: "d_multiplier_rows constraint index",
+                got: bad as usize,
+                expected: n_full_g as usize,
+            });
+        }
+        let dims = state.backsolver.block_dims();
+        let y_d_offset = (dims[0] + dims[1] + dims[2]) as Index;
+        Ok(g_indices
+            .iter()
+            .map(|&g| {
+                state
+                    .backsolver
+                    .full_g_to_d_block(g)
+                    .map(|pos| y_d_offset + pos)
             })
             .collect())
     }

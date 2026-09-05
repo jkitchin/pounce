@@ -2780,6 +2780,17 @@ impl IpoptNlp for OrigIpoptNlp {
         if c < 0 { None } else { Some(c) }
     }
 
+    fn full_g_to_d_block(&self, full_idx: Index) -> Option<Index> {
+        let cls = self.adapter.borrow();
+        let cls = cls.classification();
+        let f = full_idx as usize;
+        if f >= cls.full_to_d.len() {
+            return None;
+        }
+        let d = cls.full_to_d[f];
+        if d < 0 { None } else { Some(d) }
+    }
+
     fn var_x_to_full_x(&self, var_idx: Index) -> Index {
         let cls = self.adapter.borrow();
         let cls = cls.classification();
