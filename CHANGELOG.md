@@ -312,6 +312,25 @@ changes.
 
 ### Fixed
 
+- **The notebooks' LaTeX did not survive GitHub's markdown pass.** GitHub
+  strips CommonMark backslash escapes *before* the math renderer sees the
+  source, so every `\,` `\;` `\|` `\{` `\\` inside a `$…$` span reached KaTeX
+  without its backslash: spacing macros became literal commas and semicolons
+  (`95,P ;-; 52,F`), norms `\|x\|` became absolute values, set braces
+  vanished, and `\\` row separators in `aligned`/`array` blocks broke the
+  environment outright. Currency written as `\$` compounded it by colliding
+  with the math delimiters in the same cell. Measured with a harness that
+  renders every math span twice — as authored, and after simulating the
+  escape pass — and compares the KaTeX output: **121 of 935 spans across 28
+  notebooks rendered differently on GitHub, or failed to parse at all**
+  (seven, `x^\*`, were already failing in Jupyter too). Spacing macros are
+  dropped, `\|`/`\{`/`\}` become `\Vert`/`\lbrace`/`\rbrace`, `\\` becomes
+  `\cr`, and every currency amount is a code span, which both MathJax and
+  KaTeX skip by default. All 906 remaining spans now render identically on
+  both paths, and the 783 that could be compared position-for-position render
+  the same as before the change. Markdown only: no notebook was re-executed
+  and no saved output changed.
+
 - **`feral_refine` was documented as `no` and ran as `yes`
   ([#909](https://github.com/jkitchin/pounce/issues/909)).** `pounce
   --print-options` reported the default as `no`, the book said `no`, and on
