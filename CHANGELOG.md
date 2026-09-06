@@ -33,6 +33,38 @@ changes.
   Wrapping by hand needs
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
+- **Notebook 41, `python/notebooks/41_delta_planning_vectors.ipynb`.** The
+  sequel to 40, and the other half of the question: a shadow price says what
+  a disruption *costs*, and `dx*/dp` says what to *change*. A nonlinear
+  reactor–separator–recycle train with four exogenous parameters (supply
+  contract, condenser duty, product specification, feed impurity); the
+  Jacobian is four back-solves against the held KKT factorization, checked
+  against central finite differences, and every disruption after that is a
+  matrix–vector product. Tightening the specification from 98.5% to 99.0%
+  costs 0.86% of margin — and the plan that defends it moves the purge valve
+  +72% and the recycle compressor −39%, a machine the specification never
+  mentions. A cooling de-rate *closes* the purge valve, which is not a move
+  an operator reaches for.
+
+  The half that matters is that **the delta is sometimes a lie, and it lies
+  while reporting success**: the specification plan returns a state vector
+  whose purity entry reads exactly 0.990000 and whose setpoints deliver
+  0.988844 through an independent simulation of the loop, and a winter plan
+  books \$40/h on 3.31 kmol/h of feed the contract forbids. `solution_report`'s
+  `alpha` is the same back-solve and says so first (0.578 and 0.212), and the
+  notebook measures what it separates: inside `alpha >= 1`, `corrector_iter=2`
+  takes the median profit error from \$13.51/h to \$0.02/h; outside it, the
+  same two back-solves take \$23.93/h to \$23.44/h, because the active set
+  moved and the corrector's KKT matrix is the wrong matrix — `fix_relax` and
+  `path` do not rescue it either. Also: deltas do not compose (two plans that
+  superpose exactly as vectors sum to a request 2.96 K above the reactor's
+  metallurgical wall, and the joint `alpha` of 0.372 is shorter than either
+  disruption's own), and the plan that gets executed is rounded to DCS
+  increments — nearest-increment rounding lands 0.021 MW over the condenser
+  while reporting a *higher* profit, where rounding each knob toward the
+  binding rows' gradients costs \$5.79/h against the continuous optimum and
+  the experienced operator's heuristic costs \$13.59/h.
+
 
 - **Notebook 40, `python/notebooks/40_shadow_prices_expire.ipynb`.** A
   shadow price is a derivative, and the decision-relevant quantity is its
