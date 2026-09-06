@@ -34,6 +34,51 @@ changes.
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
 
+- **Notebook 42, `python/notebooks/42_mixing_equations_and_jax.ipynb`.** One
+  model, two front ends. POUNCE's equation surface (`NlExpr` /
+  `build_nl_problem`) has exact tape AD and exact sparsity but no callback
+  node, so a trained network has nowhere to live; the JAX surface takes the
+  network but pays a Python round trip and, by default, probes for sparsity.
+  Real models want both — a flowsheet that is algebra except for one unit, a
+  reactor train that is mass balances except for the rate law. The notebook
+  builds exactly that (three CSTRs in series; balances as `NlExpr`, kinetics
+  as a tanh network fitted in-notebook to sampled data) and shows the mixing
+  needs no changes to POUNCE: `pounce.Problem` accepts any object carrying the
+  cyipopt method set, and both surfaces already produce one, so the work is
+  stacking rather than bridging.
+
+  The recipe is to give the black box's output its own variable and one
+  residual row, which keeps the balances pure algebra. Stacking is then four
+  rules — objectives add, constraint rows stack, Jacobian rows offset, and
+  Hessian triplets simply *concatenate*, because the triplet→CSR converter is
+  a port of Ipopt's and compresses repeated `(row, col)` entries "with
+  repeated entries summed" (`crates/pounce-linalg/src/triplet_convert.rs`).
+  Two blocks' second derivatives at a shared entry should add, so the
+  duplicate is the wanted behaviour rather than a hazard. The one piece of
+  friction is naming: `NlProblem` spells its structure methods
+  `jacobian_structure` / `hessian_structure` where the bridge wants cyipopt's
+  `jacobianstructure` / `hessianstructure`, which is a six-line adapter.
+
+  Verified against an all-JAX twin of the same model — `max |dx*| = 1.8e-14`,
+  and the gradient and full Lagrangian Hessian at an *off-solution* probe
+  point (`6.2e-15` / `5.7e-14`), which is where an index-scatter bug shows
+  even when both solves happen to land in the same place. A second check
+  substitutes the withheld truth kinetics into the converged balances and
+  recovers residuals at the ~1% level the fit itself carries, isolating
+  surrogate error from solver error. `pounce.Solver` takes a `Problem`, so
+  the sensitivity layer needs no plumbing to work on the result: a feed-rate
+  `parametric_step` reproduces a re-solve and moves `T` by 0.199 (re-solve
+  0.198) even though the perturbed balance rows never mention `T` — the
+  coupling arrives through the JAX block's rows, which is the argument for
+  mixing rather than solving the halves separately.
+
+  Also records where stacking is the wrong tool: `trf_minimize` (notebook 29)
+  when the non-equation half is genuinely expensive or has no usable
+  derivatives, `pounce.jax.solve` needing a fully traced `f(x, p)` / `g(x, p)`
+  so a mixed model cannot ride it directly, `pyomo-pounce`'s `.nl` round trip
+  admitting no Python callback at all, and the AMPL imported-function route
+  that does reach inside an expression but wants a compiled shared library.
+
 - **Notebook 41, `python/notebooks/41_delta_planning_vectors.ipynb`.** The
   sequel to 40, and the other half of the question: a shadow price says what
   a disruption *costs*, and `dx*/dp` says what to *change*. A nonlinear
