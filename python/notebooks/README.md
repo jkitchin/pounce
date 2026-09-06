@@ -28,6 +28,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 05 | [`05_pyomo.ipynb`](05_pyomo.ipynb) | Drive POUNCE from a Pyomo model. |
 | 35 | [`35_casadi.ipynb`](35_casadi.ipynb) | POUNCE as a CasADi `nlpsol` plugin: MX models with parameters, `Opti`, warm-started MPC, differentiating through the solve (with the bounded-variable trap that silently zeroes NMPC feedback gains), L-BFGS restricted to the nonlinear variables, timings against CasADi's bundled Ipopt, and a cart-pole worked example — swing-up, then balancing against a control deadline. |
+| 42 | [`42_mixing_equations_and_jax.ipynb`](42_mixing_equations_and_jax.ipynb) | One model, two front ends: `NlExpr` balances and a fitted JAX rate law stacked into a single `pounce.Problem` on a three-CSTR train. Why the meeting point is the cyipopt method set that both surfaces already produce, the four stacking rules (objectives add, rows offset, Hessian triplets concatenate because repeated entries are summed by contract), the six-line rename `NlProblem` needs, machine-precision agreement with an all-JAX twin, and a feed-rate sensitivity that moves a variable the perturbed rows never mention. Also where *not* to stack: `trf_minimize`, `pounce.jax.solve`, Pyomo, and the callback an `NlExpr` tree cannot hold. |
 
 ## Differentiating through the solver
 
