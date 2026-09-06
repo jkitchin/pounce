@@ -11,6 +11,29 @@ changes.
 
 ### Added
 
+- **`pounce_rs::presolve` and `pounce_rs::restoration`
+  ([#905](https://github.com/jkitchin/pounce/pull/905)).** Two surfaces the
+  Rust facade did not carry. `presolve` exposes the preprocessing wrapper and
+  the reports that make it legible — the bound tightening Phase 1 found, the
+  structural LICQ verdict, the auxiliary-elimination diagnostics, the cached
+  box, and an infeasibility certificate produced before the first iteration —
+  with every report *type* named, so a verdict can be bound and matched
+  instead of only `{:?}`-printed. `restoration` exposes
+  `run_second_opinion_ladder`, which re-solves a failing verdict along up to
+  four different trajectories and promotes one only if it converges; the
+  builder (`Nlp::solve`) already runs it, so this is for callers driving
+  `IpoptApplication` directly, which otherwise get the bare verdict.
+
+  Both modules re-export the crate behind them, matching the escape hatch the
+  feature modules have offered since [#561](https://github.com/jkitchin/pounce/issues/561).
+  The composition entry point `wrap_with_presolve` ships alongside
+  `PresolveTnlp::new`, and it is the one to reach for: `PresolveTnlp::new`
+  alone does not stack the Phase-6 linear-equality elimination, so under it
+  `presolve_linear_eq_reduction=yes` reads the option and removes no column.
+  Wrapping by hand needs
+  `IpoptApplication::set_presolve_already_applied(true)`, because
+  `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
+
 - **Notebook 41, `python/notebooks/41_delta_planning_vectors.ipynb`.** The
   sequel to 40, and the other half of the question: a shadow price says what
   a disruption *costs*, and `dx*/dp` says what to *change*. A nonlinear

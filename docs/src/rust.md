@@ -178,6 +178,10 @@ sparse symmetric factorization those solvers take as an argument —
 `backend()` for the default parallel FERAL factor, `serial_backend()` for the
 inner-serial one used under an outer-parallel batch.
 
+`pounce_rs::presolve` and `pounce_rs::restoration` are modules too, but they
+are **not** feature-gated — the default NLP path already compiles both crates.
+See [Presolve and restoration](#presolve-and-restoration).
+
 ### Convex: LP, QP, and conic
 
 ```rust
@@ -338,12 +342,90 @@ A sensitivity-stage failure is reported through `result.error`, **not**
 fails. See [Sensitivity Analysis](sensitivity.md) and
 [Sessions](sessions.md).
 
+## Presolve and restoration
+
+Two modules that are **not** behind a feature — the NLP path already compiles
+both crates — and that most callers never need, because the ordinary paths run
+them already. Reach for these when you want the *reports*, or when you drive
+`IpoptApplication` directly.
+
+### `pounce_rs::presolve`
+
+`optimize_tnlp` applies presolve itself when `presolve=yes`, so setting the
+option is the whole of the common case. This module is for reading what
+preprocessing found, which means holding the concrete wrapper — the accessors
+hang off `PresolveTnlp`, not off `dyn TNLP`:
+
+```rust
+use pounce_rs::presolve::{LicqVerdict, PresolveOptions, PresolveTnlp, wrap_with_presolve};
+
+let wrapped = wrap_with_presolve(inner, PresolveOptions::defaults())?;
+
+let mut app = IpoptApplication::new();
+app.initialize()?;
+app.set_presolve_already_applied(true);   // or the problem is presolved twice
+let status = app.optimize_tnlp(wrapped);
+```
+
+| accessor | returns |
+|---|---|
+| `licq_verdict()` | `Option<&LicqVerdict>` — structural rank of the equality rows |
+| `tighten_report()` | `TightenReport` — how many bounds Phase 1 moved |
+| `cached_bounds()` | `Option<&CachedBounds>` — the box after tightening |
+| `auxiliary_diagnostics()` | `AuxiliaryPreprocessingDiagnostics` — Phase 0 blocks, timings, rejections |
+| `fbbt_report()` | `Option<FbbtReport>` — nonlinear bound propagation |
+| `certified_infeasible()` | `Option<InfeasibilityProof>` — infeasibility proved before iteration 1 |
+
+Every one of those types is exported here too, so a report can be bound,
+matched and stored rather than only `{:?}`-printed.
+
+Two things to get right:
+
+- **`wrap_with_presolve`, not `PresolveTnlp::new`.** The linear-equality
+  elimination (`presolve_linear_eq_reduction`) is a *separate* wrapper stacked
+  outside `PresolveTnlp`, so `PresolveTnlp::new` on its own reads the option
+  and removes no column. `wrap_with_presolve` stacks both;
+  `wrap_from_options` does the same from an `OptionsList`, which is what
+  `app.options()` hands you.
+- **`set_presolve_already_applied(true)` after wrapping by hand**, since
+  `optimize_tnlp` would otherwise wrap again.
+
+### `pounce_rs::restoration`
+
+`run_second_opinion_ladder` re-solves a failing verdict along up to four
+deliberately different trajectories — different scaling, a different barrier
+strategy, a displaced start — and promotes one only if it converges. A
+converged solve pays nothing: the ladder reads the status and returns.
+
+The builder runs it already, and reports what it did on
+`Solution::second_opinion`; so do the CLI and the Python and C frontends. The
+`IpoptApplication` path does not, so call it yourself there:
+
+```rust
+use pounce_rs::restoration::run_second_opinion_ladder;
+
+let status = app.optimize_tnlp(Rc::clone(&tnlp));
+let outcome = run_second_opinion_ladder(
+    &mut app, tnlp, status, app.statistics(), &mut |_line| {},
+);
+```
+
+`outcome.statistics` is the **shipped** solve's alone, so the true cost of a
+promotion is `outcome.total_iteration_count()`, and `outcome.base_status` is
+the only remaining trace that the base solver did not converge. Each rung
+writes solver options and the driver restores them, so an application that
+solves twice does not inherit a rung's settings.
+
+Not for multi-start drivers: a failed start is routine there, and four extra
+solves per failure buy nothing.
+
 ## Escape hatch
 
 Each feature module also re-exports the crate behind it — `pounce_rs::convex`
-re-exports `pounce_convex`, and so on — so anything outside the curated
-surface stays reachable without adding a dependency. Reaching for it is a
-signal the facade is missing something; those are worth
+re-exports `pounce_convex`, `pounce_rs::presolve` re-exports
+`pounce_presolve`, and so on — so anything outside the curated surface stays
+reachable without adding a dependency. Reaching for it is a signal the facade
+is missing something; those are worth
 [filing](https://github.com/jkitchin/pounce/issues).
 
 ## See also
