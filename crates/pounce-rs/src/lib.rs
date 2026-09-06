@@ -214,30 +214,12 @@ pub use pounce_presolve::{
     AuxiliaryPreprocessingDiagnostics, CachedBounds, LicqVerdict, TightenReport, fbbt::FbbtReport,
 };
 
-/// Low-level presolve APIs for callers that drive a [`TNLP`] directly.
-/// [`IpoptApplication::optimize_tnlp`] applies `wrap_from_options` itself when
-/// `presolve=yes`; after wrapping manually, call
-/// [`IpoptApplication::set_presolve_already_applied`] with `true` to avoid a
-/// second wrapper.
-pub mod presolve {
-    pub use pounce_nlp::expression_provider::ExpressionProvider;
-    pub use pounce_presolve::{
-        AuxiliaryPreprocessingDiagnostics, CachedBounds, LicqVerdict, PresolveError,
-        PresolveOptions, PresolveTnlp, TightenReport, wrap_from_options, wrap_with_presolve,
-        wrap_with_presolve_provider,
-    };
-
-    pub use pounce_presolve;
-}
-
-/// Second-opinion recovery for callers that manage the low-level solve loop.
-pub mod restoration {
-    pub use pounce_restoration::second_opinion_driver::{
-        SecondOpinionOutcome, run_second_opinion_ladder,
-    };
-
-    pub use pounce_restoration;
-}
+// Both get a module of their own rather than a flat re-export, matching the
+// feature-gated facets below: the accessors that make preprocessing legible
+// hang off a concrete wrapper, and which construction path you take decides
+// whether Phase 6 runs at all — neither fits in a re-export list.
+pub mod presolve;
+pub mod restoration;
 
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
