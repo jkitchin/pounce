@@ -33,6 +33,7 @@ changes.
   Wrapping by hand needs
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
+
 - **Notebook 41, `python/notebooks/41_delta_planning_vectors.ipynb`.** The
   sequel to 40, and the other half of the question: a shadow price says what
   a disruption *costs*, and `dx*/dp` says what to *change*. A nonlinear
