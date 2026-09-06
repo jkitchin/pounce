@@ -11,6 +11,35 @@ changes.
 
 ### Added
 
+- **Notebook 40, `python/notebooks/40_shadow_prices_expire.ipynb`.** A
+  shadow price is a derivative, and the decision-relevant quantity is its
+  *validity range*, which no solver prints. A wholesale bakery prices its
+  three binding resources at \$18.00/oven-hr, \$11.00/labor-hr and
+  \$6.00/kg of flour; ranking a \$5,000 expansion budget by those prices
+  loses \$3,476, where stopping each resource at its own breakpoint makes
+  \$4,702 and the joint solve makes \$7,187 — the realized ranking is
+  exactly the reverse of the shadow-price ranking. The range comes out of
+  the same held KKT factorization as the price, by `solution_report`'s
+  ratio test and no re-solve, so three complete marginal-value staircases
+  over the whole budget cost 11 solves between them (checked against 117
+  re-solved prices per resource).
+
+  Also covers three things that are easy to get wrong: marginal values do
+  not compose, because the resources are complements (oven time is worth
+  \$18.00/hr for 84.7 hours given the flour on hand, and for 130 hours if
+  you buy 1,000 kg more); the free range is a *primal* ratio test, so it
+  is silent about an active row that **releases**, which makes the
+  reported range 21% too long on the smooth variant — the remedy being a
+  dual ratio test over the cross terms `column(pin)` already carries; and
+  `mult_entry` correctly **refuses** an LP, whose zero reduced curvature
+  leaves the activity regime unmeasurable, because for an LP dλ/db is
+  zero within a segment and undefined at every breakpoint. This is the
+  first notebook to drive the pure-Python `pounce.sensitivity` layer
+  (`SensSession`, `solve_for_sensitivity`, `solution_report`,
+  `active_set_changes`, `column`/`mult_entry`) directly rather than
+  through Pyomo, and it is the worked example for the `mult_entry` gate
+  added in [#910](https://github.com/jkitchin/pounce/issues/910).
+
 - **`dλ/dp` for a strictly active inequality
   ([#910](https://github.com/jkitchin/pounce/issues/910)).**
   `sens_jacobian(of=<Constraint>)` gave multiplier sensitivities for
