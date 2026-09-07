@@ -929,6 +929,7 @@ impl Solver {
             &[],
             &[],
             &weak_rows,
+            ctx.eps,
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((dx[..ctx.n_x].to_vec(), segments))
@@ -993,6 +994,7 @@ impl Solver {
             &forced_active,
             &holds,
             &weak_rows,
+            ctx.eps,
         )
         .map_err(SolverError::SensComputationFailed)?;
         Ok((dx[..ctx.n_x].to_vec(), segments))

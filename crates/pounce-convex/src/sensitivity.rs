@@ -2642,6 +2642,11 @@ impl QpSensitivity {
             &[],
             &[],
             &[],
+            // How far outside its box the answer has to land before the
+            // walk treats a base-active bound as one the factorization
+            // never enforced. The same floor the release decision uses;
+            // this arm has no bound relaxation to widen it.
+            RELEASE_FLOOR,
         )
         .map_err(SensError::Refinement)?;
         self.last_residual = Some(bs.last_residual());

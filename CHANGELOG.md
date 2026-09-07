@@ -662,6 +662,63 @@ changes.
   covered, so a check that stops warning fails as loudly as one that warns
   spuriously.
 
+### Fixed
+
+- **`parametric_step_path` could return a point outside a variable's box
+  ([#928](https://github.com/jkitchin/pounce/issues/928)).** With no
+  breakpoint recorded and no warning, on any model whose Hessian diagonal is
+  below the activity classifier's identification floor — which is every LP,
+  and every model whose cost is linear in the coordinate that reaches the
+  bound.
+
+  This is gh#852 reached through the other door. That fix taught the walk to
+  keep watching a bound the factorization carries as a finite penalty rather
+  than enforces, and it learns which those are from `weakly_active_bounds`.
+  Where there is no curvature to divide by, every bound classifies
+  `UNIDENTIFIED`, that list comes back empty, and the walk's own
+  base-activity test — which is exactly `Σ > 1` — bars the bound from the
+  reach scan anyway. The bound is then neither held by the factorization nor
+  watched by the path, and the direction carries the variable straight
+  through it.
+
+  Measured on a five-bus AC-OPF at the load where a generator reaches its
+  rating: at linear generation cost — the normal case in dispatch — the walk
+  predicted **202.98 MW against a 170 MW nameplate**, with zero segments.
+  Adding a quadratic cost term worth 0.1% of the linear one at that output
+  changes nothing physical and fixes it, by lifting the diagonal over the
+  floor. On a three-variable LP reproducer, 11 of 37 base points returned a
+  point outside the box, relative violation up to 0.9999, and the violating
+  band begins at the first point above `Σ = 1`.
+
+  Widening the classifier is not the fix and was rejected: admitting
+  `UNIDENTIFIED` wholesale also admits genuinely enforced bounds
+  (`Σ = 1.1e11` on the same LP) and makes the augmented system singular. The
+  quantity that would discriminate inside the class is the curvature that is
+  by hypothesis unmeasurable there. So `step_along_path` no longer relies on
+  being told: it checks its own answer against the box and treats a
+  base-active bound the answer *crossed* as measured proof the factorization
+  did not enforce it, adds it to the watch list, and re-walks. Threshold-free
+  — no `μ`, no curvature, no units — and a no-op whenever the first walk
+  already lands inside the box, which is the whole existing corpus: the
+  fixture sweep diffs empty across all 194 fixture-legs on both the `exact`
+  and `lbfgs` legs.
+
+  A repair that cannot reach the box is now reported rather than returning
+  the out-of-box point silently — returning it is gh#928's own signature, a
+  violation with nothing in the record naming it. The exception is a walk the
+  caller capped: `max_iter` bounds segments, so `max_iter = 0` asks for the
+  plain linear step, which is outside the box whenever the bound binds and
+  was legal to ask for before the repair existed.
+
+  Measured on a second reproducer with **two** soft bounds coupled through
+  the equality, over 48 base points either side of both kinks and four
+  perturbations each: 48 of 192 cases returned a point outside the box
+  before, **192 of 192 now reproduce the re-solve exactly**, and the new
+  report never fires. On that corpus no case is wrong while staying inside
+  the box, on either version — the defect and the box violation coincide
+  there, which is what makes an endpoint check sufficient for it rather than
+  a patch over the symptom.
+
 
 ## [0.11.0] - 2026-09-03
 

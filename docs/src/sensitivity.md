@@ -440,8 +440,10 @@ refinement's own test is. Unset, it is how far outside the solve itself
 was willing to settle, so nothing moves for a caller who does not set
 it. A constraint row keeps its own floor, and a bound is released when
 the step drives its multiplier negative past the solve's own margin,
-whatever `bound_eps` is. `mode="path"` reads no such margin, and
-passing it under `linear` or `path` warns.
+whatever `bound_eps` is. `mode="path"` does not take one — it uses the
+solve's own margin internally, to decide when its answer has ended up
+outside the box (gh#928) — and passing `bound_eps` under `linear` or
+`path` warns.
 
 `max_pdpert` refuses rather than answering when the converged factor
 carries an inertia correction above the value given, since every
@@ -694,6 +696,28 @@ breakpoint to stop it, and only a downstream clamp put it back --
 moving the crossing coordinate and nothing coupled to it. The repair
 landed in the walk itself, which both the decided and the undecided
 callers go through, so `"release_all"` inherited it.
+
+That repair learns which bounds are weak from the activity classifier,
+which leaves the case the classifier cannot see. `classify` needs a
+curvature to divide by, so where the Hessian diagonal falls below the
+identification floor every bound comes back `unidentified`,
+`weakly_active_bounds()` returns nothing, and the walk is told nothing
+— while its own base-activity test still bars the bound from the reach
+scan. That is not a corner: it is every LP, and every model whose cost
+is linear in the coordinate that reaches the bound. On a five-bus
+AC-OPF at the load where a generator reaches its rating, with the
+linear generation cost that dispatch normally uses, `path` predicted
+202.98 MW against a 170 MW nameplate and recorded no breakpoint at all;
+a quadratic cost term worth 0.1% of the linear one changes nothing
+physical and fixes it, by lifting the diagonal over the floor.
+
+So since gh#928 the walk does not rely on being told. It compares its
+own answer against the box and treats a base-active bound the answer
+crossed as evidence the factorization never enforced it, then walks
+again with a breakpoint available there. The two mechanisms are
+complementary rather than redundant: the classifier's list catches a
+stale barrier diagonal that damps a coordinate at a later breakpoint
+without ever pushing it out of its box, which a box check cannot see.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held

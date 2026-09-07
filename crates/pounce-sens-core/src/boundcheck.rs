@@ -1147,6 +1147,15 @@ const NO_BOUND_HI: Number = 1e19;
 /// rows changed at its start stay barred from changing back.
 const PATH_MIN_SEGMENT: Number = 1e-12;
 
+/// How many times the walk may re-run after finding its own answer
+/// outside the box. Each pass adds at least one bound row to the
+/// watch list and costs a fresh walk, so this is a budget on
+/// factorizations; termination comes from the list growing, not
+/// from the cap. Simultaneous unheld bounds are what consume it,
+/// and a degenerate vertex of a few coordinates is the realistic
+/// case.
+const PATH_MAX_BOX_REPAIRS: usize = 8;
+
 /// One breakpoint the path stopped at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathSegment {
@@ -1248,6 +1257,7 @@ pub fn step_along_path<B>(
     forced_active: &[usize],
     initial_holds: &[(usize, bool)],
     weak_rows: &[usize],
+    eps: Number,
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
@@ -1333,6 +1343,197 @@ where
         .flatten()
         .filter_map(|slot| *slot)
         .collect();
+
+    // The walk owes its caller a point inside the box, and the reach
+    // scan above is the only thing that keeps that promise. A bound the
+    // factorization enforces only SOFTLY -- sigma of order one rather
+    // than order 1/mu -- is skipped by that scan as though it were
+    // held, and then holds nothing, so the direction carries the
+    // variable straight through it and no breakpoint is recorded
+    // (gh#852). `weak_rows` is the caller's list of exactly those
+    // bounds, and it is only ever as good as the activity classifier
+    // that built it: where the Hessian diagonal falls below the
+    // identification floor every bound classifies UNIDENTIFIED,
+    // `weakly_active_bounds` returns an empty list, and the scan skips
+    // a bound nothing is holding. That is not an exotic model -- it is
+    // every LP, and every model whose cost is linear in the coordinate
+    // that reaches the bound.
+    //
+    // So the walk does not rely on being told. It runs, compares its
+    // own answer against the box, and treats a base-active bound the
+    // answer CROSSED as proof that the factorization did not enforce
+    // it -- measured on the result rather than inferred from a
+    // curvature that, in this regime, is precisely what cannot be
+    // measured. Such a bound joins the watch list and the walk repeats
+    // with a breakpoint available there.
+    //
+    // Seeded from `weak_rows` rather than replacing it. Measured: the
+    // box check below rediscovers most of what the seed supplies, but
+    // not all -- a stale sigma that damps a coordinate at a later
+    // breakpoint is a RATE error, and the coordinate never leaves its
+    // box, so there is nothing for a box check to observe. The seed
+    // catches what the classifier can name and the check catches what
+    // it cannot.
+    //
+    // The watch list only grows and is bounded by the number of bound
+    // rows, so this terminates; the cap is a budget on factorizations,
+    // not the termination argument.
+    //
+    // A re-walk that FAILS is reported, not swallowed. The tempting
+    // thing is to keep the answer already in hand, but that answer is
+    // out of the box -- being out of the box is why there was a second
+    // walk at all -- and handing it back silently is precisely the
+    // defect this loop exists to remove. A caller told the repair
+    // failed can re-solve; a caller handed a point past a generator's
+    // rating with no breakpoint and no error cannot even know to ask.
+    //
+    // A pass that cannot GROW the list is a different matter and keeps
+    // its answer. There the violated coordinate has no base-active
+    // bound row on the side it left, so the reach scan was already
+    // watching that bound and the walk stopped where it could: the
+    // overshoot is some other condition -- an exhausted `max_iter`,
+    // most likely -- and not the one this loop claims to fix. Erroring
+    // there would change behaviour on a condition the fix has no
+    // evidence about.
+    let setup = WalkSetup {
+        rhs_plain,
+        x_curr,
+        lo,
+        hi,
+        n_x,
+        n_full,
+        max_iter,
+        mult_nat,
+        bound_rows,
+        can_release,
+        base_active_row,
+        base_active_rows,
+        initial_holds,
+    };
+    let mut watch: Vec<usize> = weak_rows.to_vec();
+    let mut best = walk_once(backsolver, &setup, &watch)?;
+    for _ in 0..PATH_MAX_BOX_REPAIRS {
+        let mut grew = false;
+        for (i, _, _) in bound_violations(
+            setup.x_curr,
+            &best.0[..setup.n_x],
+            setup.lo,
+            setup.hi,
+            eps,
+            &[],
+        ) {
+            // Which side it left, read off the answer rather than the
+            // base point: the base point is ON the bound here, so its
+            // slack cannot say which way the walk went.
+            let side = usize::from(setup.x_curr[i] + best.0[i] > setup.hi[i]);
+            if let Some(r) = setup.base_active_row[i][side]
+                && !watch.contains(&r)
+            {
+                watch.push(r);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+        best = walk_once(backsolver, &setup, &watch).map_err(|e| {
+            format!(
+                "step_along_path: the walk left the box and the repair failed \
+                 (watching {watch:?}): {e}"
+            )
+        })?;
+    }
+
+    // The walk owes its caller a point inside the box, so an answer
+    // still outside one here is wrong however it got there -- the
+    // repair ran out of budget, or the crossing was at a bound the
+    // base-point split did not call active and so there was no row to
+    // add. Returning it is exactly gh#928's own failure mode, a
+    // violation with nothing in the record naming it, so say so
+    // instead. Neither arm is reachable from any fixture in the
+    // corpus; that is the reason to report rather than to trust them.
+    //
+    // Except when the caller capped the walk. `max_iter` is a cap on
+    // segments, and a walk that spent it stopped early BY REQUEST:
+    // `max_iter = 0` is the plain linear step, which is outside the
+    // box whenever the bound binds, and was a legal thing to ask for
+    // before this repair existed. Measured, not reasoned: on the
+    // gh#928 LP reproducer `max_iter = 0` returns a point 1e-2 past
+    // the bound, and turning that into an error would blame the
+    // repair for the caller's own budget. A truncated walk keeps the
+    // old contract; only an untruncated one makes the promise.
+    if best.1.len() >= max_iter {
+        return Ok(best);
+    }
+    let left = bound_violations(
+        setup.x_curr,
+        &best.0[..setup.n_x],
+        setup.lo,
+        setup.hi,
+        eps,
+        &[],
+    );
+    if let Some((i, bnd, past)) = left.first() {
+        return Err(format!(
+            "step_along_path: the walk ended outside variable {i}'s bound \
+             {bnd} by {past:e} and the repair could not reach it \
+             (watched {} rows over at most {PATH_MAX_BOX_REPAIRS} passes, \
+             {} segments of a {max_iter} cap)",
+            watch.len(),
+            best.1.len()
+        ));
+    }
+    Ok(best)
+}
+
+/// Everything [`walk_once`] reads that a repair pass does not change:
+/// the base point, its box, and the base-activity split decided once
+/// above. Bundled rather than passed loose because the walk runs more
+/// than once and the argument list is the part that would drift.
+struct WalkSetup<'a> {
+    rhs_plain: &'a [Number],
+    x_curr: &'a [Number],
+    lo: &'a [Number],
+    hi: &'a [Number],
+    n_x: usize,
+    n_full: usize,
+    max_iter: usize,
+    mult_nat: Vec<BoundMultiplier>,
+    bound_rows: Option<Vec<crate::backsolver::BoundRow>>,
+    can_release: bool,
+    base_active_row: Vec<[Option<usize>; 2]>,
+    base_active_rows: Vec<usize>,
+    initial_holds: &'a [(usize, bool)],
+}
+
+/// One pass of the walk, under the weak-row set it is given.
+///
+/// Split out of [`step_along_path`] so the box check there can run it
+/// again with a bound the first pass proved unheld. Every pass starts
+/// from the base point: the accumulated step, the holds and the
+/// released list are all local, so a repair pass is a fresh walk and
+/// not a continuation of the one that missed the crossing.
+fn walk_once<B>(
+    backsolver: &B,
+    su: &WalkSetup<'_>,
+    weak_rows: &[usize],
+) -> Result<(Vec<Number>, Vec<PathSegment>), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    let rhs_plain = su.rhs_plain;
+    let x_curr = su.x_curr;
+    let lo = su.lo;
+    let hi = su.hi;
+    let n_x = su.n_x;
+    let n_full = su.n_full;
+    let max_iter = su.max_iter;
+    let mult_nat = &su.mult_nat;
+    let bound_rows = &su.bound_rows;
+    let can_release = su.can_release;
+    let base_active_row = &su.base_active_row;
+    let base_active_rows = &su.base_active_rows;
+    let initial_holds = su.initial_holds;
 
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
@@ -1459,7 +1660,7 @@ where
         // Base activity comes from the table above; which rows have
         // since been released stays a live check.
         if can_release {
-            for m in &mult_nat {
+            for m in mult_nat {
                 if released.contains(&m.row)
                     || changed_here.contains(&m.row)
                     || !base_active_rows.contains(&m.row)
