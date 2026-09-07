@@ -460,6 +460,74 @@ changes.
 
 ### Fixed
 
+- **`curve_fit(sensitivity="exact")`, and two accuracy defects in
+  `dpopt_ddata` ([#923](https://github.com/jkitchin/pounce/issues/923),
+  [#925](https://github.com/jkitchin/pounce/issues/925)).** The influence
+  matrix was built from the **Gauss-Newton** Hessian, so it dropped the
+  residual-curvature term `Σ rₖ ∇²fₖ`. Measured against re-solving at a
+  perturbed datum (FD-stable across `h`), that is worth 0.6–10% on an interior
+  fit and 27–67% where a bound or constraint holds the fit away from its
+  unconstrained optimum — a wide spread, because the dropped term scales with
+  the residuals, so it is a property of the fit and not only of the model.
+  `sensitivity="exact"` rebuilds it from the exact
+  objective Hessian — central differences of the objective gradient at the
+  optimum, `2n` extra gradient evaluations, once — and takes every one of
+  those cases to ≤ 0.2%. It cannot reuse the held factor, which was built
+  from the Gauss-Newton matrix, so it goes through a dense `n × n` inverse;
+  `True` / `"gn"` keeps the old free back-solve. Rank points with `True`,
+  ask `"exact"` when a specific number matters.
+
+  `sensitivity` is now validated. It was a bare `bool`, so a truthy typo like
+  `sensitivity="exakt"` would have silently delivered the Gauss-Newton answer
+  under an exact-sounding request; it now raises.
+
+  The second defect (#925) was found while implementing the first, and is
+  larger. Under a **robust** `loss` the influence right-hand side is
+  `-2 wᵢ² (ρ′ᵢ + 2 zᵢ ρ″ᵢ) gᵢ`, and the bracket — exactly the per-point weight
+  `gn_hessian` already applies — was missing, so the two sides of the same
+  solve disagreed about which loss was in use. It is identically 1 for `sse`,
+  which is the only loss any `sensitivity=True` test used: the corpus was
+  uniform in exactly the dimension the code was wrong in, the same shape as
+  #922 one setting over. On a fit with real outliers this was 86% for `cauchy`
+  and 73% for `soft_l1`, and worse than the magnitude, the factor reaches
+  `-0.12` on a strongly downweighted outlier — so an outlier's reported
+  influence pointed the **wrong way**, on precisely the points a robust loss
+  exists to handle. Now 0.68% and 0.37%.
+
+  Worth recording that the exact Hessian does **not** repair #925 on its own:
+  it is the left-hand side and #925 is the right. The exact Hessian alone
+  moves `cauchy` from 85.50% to 85.71% — no improvement. Shipping #923 without
+  #925 would have put an exact-sounding label on an 86%-wrong answer.
+
+  Six tests added, mutation-checked independently: disabling the exact Hessian
+  fails only the three `exact_beats_gauss_newton` cases, and restoring
+  `lw = np.ones(m)` fails only the two robust-loss cases. The #922 active-set
+  invariants are re-asserted on the new dense branch rather than assumed —
+  a pinned parameter's row is still exactly zero and `A · ∂p*/∂yᵢ = 0` still
+  holds to `1e-12` under `"exact"`.
+
+- **`curve_fit(sensitivity=True)` ignored the active set
+  ([#922](https://github.com/jkitchin/pounce/issues/922)).**
+  `CurveFitResult.dpopt_ddata` returned `pinv(J)` — the unweighted,
+  unconstrained, Gauss-Newton influence — for *every* fit, including ones with
+  active bounds or active general constraints, where that answer is
+  inadmissible. A parameter pinned at a bound was reported as having nonzero
+  influence when it cannot move at all; free parameters came back with the
+  wrong sign; and with `a + c ≤ 2.6` binding, the returned columns gave
+  `da + dc = 0.78` instead of 0, violating the constraint the fit was solved
+  under. Measured against leave-one-out re-solves, the general-constraint case
+  was off by 4× the scale of the true influence. The influence is now projected
+  onto the joint active-constraint nullspace via the same reduced-Hessian
+  recipe `pcov` already used — pinned rows are exactly zero and
+  `A · ∂p*/∂y = 0` holds by construction. `_data_sensitivity` was never passed
+  `active_mask`, so it could not apply the guard its sibling `_covariance` had
+  carried since the feature landed; the one existing test requested
+  `sensitivity=True` on an unconstrained fit only, and asserted equality to
+  `pinv(J)` — pinning the special case as the general contract. Three tests now
+  cover the branches: bound-pinned, active-constraint nullspace, and an
+  inactive constraint that must *not* project.
+
+
 - **`feral_refine` was documented as `no` and ran as `yes`
   ([#909](https://github.com/jkitchin/pounce/issues/909)).** `pounce
   --print-options` reported the default as `no`, the book said `no`, and on

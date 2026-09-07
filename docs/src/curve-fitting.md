@@ -128,6 +128,56 @@ matrix whose entry `[j, i]` is how fitted parameter `j` moves when data point
 `∂p*/∂y_i = 2 wᵢ² · H_S⁻¹ gᵢ`, computed as a single batched back-solve against
 the converged factor (`Solver.kkt_solve_many`).
 
+By default `H_S` is the **Gauss-Newton** Hessian, the same one `curve_fit`
+hands the solver as its search Hessian and the same one behind `pcov` — so this
+is the first-order influence, not the exact derivative of the re-solve. The two
+differ by the neglected residual-curvature term `Σ rₖ ∇²fₖ`, which grows with
+the residuals: measured on a 3-parameter exponential, 0.6–10% on an interior
+fit and 27–67% where a bound or constraint holds the fit away from its
+unconstrained optimum.
+
+`sensitivity="exact"` removes that gap. It rebuilds the influence from the
+**exact** objective Hessian, obtained by central-differencing the objective
+gradient at the optimum — `2n` extra gradient evaluations, once. On the same
+three cases the error drops to ≤ 0.2%. It cannot reuse the held factor (that
+was built from the Gauss-Newton matrix), so it goes through a dense `n × n`
+inverse; on a large-`n` fit that is the trade.
+
+| `sensitivity=` | cost | error vs. re-solve |
+|---|---|---|
+| `True` / `"gn"` | one back-solve per point, effectively free | 0.6–67% |
+| `"exact"` | `+2n` gradient evaluations, dense inverse | ≤ 0.2% |
+
+The Gauss-Newton spread is wide because the dropped term scales with the
+residuals, so it depends on the fit and not just the model: the same
+three-parameter exponential gives 0.6% interior / 67% bound-active on one
+dataset and 10% / 27% on another. Do not carry a number across from one fit to
+the next — if it matters, measure it, which is one `sensitivity="exact"` call.
+
+Use `True` to **rank** points by influence — the ranking is stable well before
+the magnitude is — and `"exact"` when a specific number matters
+([#923](https://github.com/jkitchin/pounce/issues/923)).
+
+Under a **robust** `loss` the right-hand side additionally carries the weight
+`ρ′ + 2zρ″`, the same per-point factor the Gauss-Newton Hessian applies. It is
+identically 1 for `sse`. It matters a great deal otherwise: on a fit with real
+outliers it reaches `-0.12` under `cauchy`, so before
+[#925](https://github.com/jkitchin/pounce/issues/925) a downweighted outlier's
+influence was not merely mis-scaled (86% for `cauchy`, 73% for `soft_l1`) but
+pointed the **wrong way**. Note that `sensitivity="exact"` does not repair
+this on its own — the exact Hessian is the left-hand side, and this is the
+right.
+
+When bounds or general constraints are **active**, the influence is projected
+onto the joint active-constraint nullspace — the same reduced-Hessian recipe
+`pcov` uses. A parameter pinned at a bound gets a row of exactly zero, since it
+cannot move at all, and the columns satisfy `A · ∂p*/∂y_i = 0` so a perturbation
+leaves the active constraints satisfied. Before
+[#922](https://github.com/jkitchin/pounce/issues/922) the unconstrained formula
+was returned regardless, which reported nonzero influence for pinned
+parameters, sign errors on the free ones, and columns that violated the very
+constraint the fit was solved under.
+
 ```python
 res = pounce.curve_fit(model, x, y, p0=[1, 1, 0], sensitivity=True)
 db = res.dpopt_ddata[1]              # sensitivity of parameter b

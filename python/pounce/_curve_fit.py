@@ -695,6 +695,11 @@ def _solve_fit(
 ) -> CurveFitResult:
     """Run one pounce solve from ``p0`` against a built ``_FitProblem`` and
     assemble the full :class:`CurveFitResult` (covariance, CIs, sensitivity)."""
+    # Validate here rather than at each public entry point: every surface that
+    # produces a CurveFitResult funnels through this function. A typo like
+    # ``sensitivity="exakt"`` is *truthy*, so without this it would silently
+    # deliver the Gauss-Newton answer under an exact-sounding request.
+    sens_mode = _resolve_sensitivity(sensitivity)
     pr = prob
     problem_obj = _make_problem_obj(
         pr.objective, pr.gradient, pr.gn_hessian, pr.n, pr.m_con,
@@ -871,9 +876,27 @@ def _solve_fit(
     # dpopt/ddata is (n_params x n_data) -- the size of the data -- so it is not
     # offered in streaming mode (see ``curve_fit_streaming``).
     dpopt = None
-    if sensitivity and not pr.streaming:
+    if sens_mode and not pr.streaming:
+        hess = None
+        if sens_mode == "exact":
+            if not pr.jac_exact:
+                import warnings
+
+                warnings.warn(
+                    "pounce.curve_fit: sensitivity='exact' differentiates the "
+                    "objective gradient, which here is built from a "
+                    "finite-difference model Jacobian -- the resulting Hessian "
+                    "carries that error squared and may be worse than the "
+                    "Gauss-Newton default. Supply `jac=` or use a "
+                    "JAX-traceable model.",
+                    stacklevel=2,
+                )
+            hess = _exact_objective_hessian(pr.gradient, popt)
         dpopt = _data_sensitivity(
-            solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok
+            solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok,
+            active_mask=active_mask, jac_combined=pr.jac_combined,
+            g_combined=pr.g_combined, cl=pr.cl, cu=pr.cu,
+            residual=pr.residual, loss_fn=pr.loss_fn, fs2=pr.fs2, hess=hess,
         )
 
     return CurveFitResult(
@@ -954,14 +977,16 @@ def curve_fit(
     f_scale: float = 1.0,
     jac: Callable | str | None = None,
     alpha: float = 0.05,
-    sensitivity: bool = False,
+    sensitivity: bool | str = False,
     options: Mapping[str, Any] | None = None,
 ) -> CurveFitResult:
     """Fit ``f(x, *params)`` to ``(xdata, ydata)`` using pounce.
 
     Parameters mirror :func:`scipy.optimize.curve_fit` where they overlap.
     Extras: ``loss`` (smooth/robust loss family), ``constraints`` (general
-    relations between parameters), ``sensitivity`` (compute ``dpopt/ddata``),
+    relations between parameters), ``sensitivity`` (compute ``dpopt/ddata``;
+    ``True``/``"gn"`` for the Gauss-Newton influence, ``"exact"`` to build it
+    from the exact objective Hessian instead -- see below),
     and ``alpha`` (confidence level for the returned intervals).
 
     ``p0`` is optional: when omitted, the number of parameters is read from the
@@ -1001,6 +1026,28 @@ def curve_fit(
     (the exact Hessian) whereas ``curve_fit`` reports the Gauss-Newton
     ``2 s^2 (J^T J)^-1`` (the scipy convention; identical for linear models
     and in the small-residual limit, a few percent apart otherwise).
+
+    ``sensitivity`` selects how ``dpopt/ddata`` is built, and the same
+    Gauss-Newton caveat applies to it:
+
+    ``True`` (or ``"gn"``)
+        The Gauss-Newton influence, read off the factor the solve already
+        holds. One back-solve per data point and effectively free.
+    ``"exact"``
+        Rebuilds the influence from the **exact** objective Hessian,
+        recovering the residual-curvature term Gauss-Newton drops, at ``2n``
+        extra gradient evaluations. It cannot reuse the held factor (that was
+        built from the Gauss-Newton matrix), so it goes through a dense
+        ``n x n`` inverse.
+
+    Measured against re-solving at a perturbed datum, on a 3-parameter
+    exponential, ``True`` is off by 0.6-10% on an interior fit and 27-67%
+    where a bound or constraint is active -- a wide spread, because the term
+    Gauss-Newton drops scales with the residuals, so it is a property of the
+    fit and not only of the model. ``"exact"`` reduces all of those to
+    <=0.2%. Prefer
+    ``True`` to *rank* points by influence and ``"exact"`` when a specific
+    number matters (pounce#923).
 
     Returns
     -------
@@ -1403,7 +1450,7 @@ def curve_fit_minima(
     f_scale: float = 1.0,
     jac: Callable | str | None = None,
     alpha: float = 0.05,
-    sensitivity: bool = False,
+    sensitivity: bool | str = False,
     options: Mapping[str, Any] | None = None,
     method: str = "multistart",
     n_minima: int = 10,
@@ -1849,7 +1896,58 @@ def _covariance(
     return s2 * np.linalg.pinv(M), "jacobian"
 
 
-def _data_sensitivity(solver, model_jac, xdata, w, m_con, popt, factor_ok):
+_SENS_MODES = {"gn", "exact"}
+
+
+def _resolve_sensitivity(sensitivity):
+    """Normalize the ``sensitivity`` argument to ``None`` | ``"gn"`` | ``"exact"``."""
+    if sensitivity is None or sensitivity is False:
+        return None
+    if sensitivity is True:
+        return "gn"
+    mode = str(sensitivity).lower()
+    if mode not in _SENS_MODES:
+        raise ValueError(
+            f"sensitivity must be True, False, 'gn' or 'exact'; got {sensitivity!r}"
+        )
+    return mode
+
+
+def _exact_objective_hessian(gradient, popt):
+    """Central-difference the objective gradient into the **exact** Hessian.
+
+    ``curve_fit`` hands the solver the *Gauss-Newton* matrix as its search
+    Hessian, so the factor it converges holding omits the residual-curvature
+    term ``sum_k r_k d2f_k``. This recovers it in ``2n`` gradient evaluations,
+    once, after the solve -- the object is only wanted at ``popt``.
+
+    The step ``eps**(1/3)`` is the optimum for a central difference of a
+    quantity that is itself computed to machine precision (truncation
+    ``O(h^2)`` against round-off ``O(eps/h)``); it is scaled per coordinate so
+    a large parameter is not differenced with a step below its own ulp. The
+    result is symmetrized because finite differences do not preserve symmetry
+    exactly, and the caller inverts it (pounce#923).
+    """
+    p = np.asarray(popt, dtype=float)
+    n = p.size
+    H = np.empty((n, n))
+    step = np.finfo(float).eps ** (1.0 / 3.0)
+    for j in range(n):
+        h = step * max(1.0, abs(p[j]))
+        e = np.zeros(n)
+        e[j] = h
+        H[:, j] = (
+            np.asarray(gradient(p + e), dtype=float)
+            - np.asarray(gradient(p - e), dtype=float)
+        ) / (2.0 * h)
+    return 0.5 * (H + H.T)
+
+
+def _data_sensitivity(
+    solver, model_jac, xdata, w, m_con, popt, factor_ok,
+    active_mask=None, jac_combined=None, g_combined=None, cl=None, cu=None,
+    residual=None, loss_fn=None, fs2=1.0, hess=None,
+):
     """``dpopt/ddata`` (n_params x n_data).
 
     For a (weighted) least-squares fit the implicit-function theorem gives
@@ -1858,21 +1956,85 @@ def _data_sensitivity(solver, model_jac, xdata, w, m_con, popt, factor_ok):
     trustworthy each ``inv(H_S) g_i`` is a back-solve against pounce's
     converged factor, fanned out in one ``kkt_solve_many`` call; otherwise the
     same value is formed from the dense Gauss-Newton Hessian.
+
+    That formula is only admissible with **nothing active**. A parameter
+    pinned at a bound cannot move at all, and a data perturbation must leave
+    the active constraints satisfied -- so where bounds or general constraint
+    rows bind, the influence is projected onto the joint active-constraint
+    nullspace, exactly as the covariance is (:func:`_projected_covariance`).
+    Differentiating the KKT system of the constrained fit w.r.t. ``y_i``::
+
+        [ H_S  A^T ] [ dp   ]   [ 2 w_i^2 g_i ]
+        [ A    0   ] [ dlam ] = [      0      ]
+
+    gives ``dp = Z (Z^T M Z)^-1 Z^T w_i^2 g_i`` with ``M = H_S / 2`` the
+    Gauss-Newton Hessian and ``Z`` an orthonormal basis of ``null(A)``. Rows
+    for bound-pinned parameters come out exactly zero and ``A dp = 0`` holds
+    by construction; the unconstrained branch is recovered when ``Z = I``.
+    As with the covariance, ``A`` is the linearization at ``popt``, so for
+    nonlinear constraints this is the first-order influence (pounce#922).
+
+    Two refinements on top of that (pounce#923):
+
+    ``hess`` overrides ``H_S``. Passed the exact objective Hessian from
+    :func:`_exact_objective_hessian`, this drops the Gauss-Newton truncation
+    -- worth 10% on an interior fit and 67% on a bound-active one here. It
+    also forces the dense path: the factor ``solver`` holds was built from the
+    Gauss-Newton matrix, so it cannot answer for a different ``H_S``.
+
+    The right-hand side carries the robust-loss weight. Differentiating
+    ``dobj/dp = 2 J^T (rho' r w)`` w.r.t. ``y_i`` gives
+    ``-2 w_i^2 (rho'_i + 2 z_i rho''_i) g_i``, and that bracket is exactly the
+    per-point weight :func:`gn_hessian` already applies. It is identically 1
+    for ``sse``, which is why omitting it went unseen; under ``cauchy`` it
+    reaches ``-0.12`` on a downweighted outlier, so the influence of an
+    outlier was not merely mis-scaled but pointed the wrong way.
     """
     J = model_jac(xdata, popt)            # (m, n) dmodel/dp at the optimum
     n = popt.size
     m = J.shape[0]
+
+    # --- right-hand side: -d2obj/dp dy_i, per data point ---------------
+    lw = np.ones(m)
+    if residual is not None and loss_fn is not None:
+        r = np.asarray(residual(popt), dtype=float)
+        z = (r * r) / fs2
+        _, rho1, rho2 = loss_fn(z)
+        lw = np.asarray(rho1 + 2.0 * z * rho2, dtype=float)   # 1 for `sse`
+    rhs_w = 2.0 * (w ** 2) * lw
+
+    def _dense(H):
+        return rhs_w[None, :] * (np.linalg.pinv(H) @ J.T)
+
+    # --- anything binding? project onto its nullspace ------------------
+    A_gen = _active_constraint_jac(popt, jac_combined, g_combined, cl, cu)
+    if _n_active(active_mask, A_gen) > 0:
+        rows = []
+        if active_mask is not None and active_mask.any():
+            rows.append(np.eye(n)[active_mask])       # unit row per pinned bound
+        if A_gen is not None and A_gen.shape[0] > 0:
+            rows.append(np.atleast_2d(A_gen))
+        Z = _nullspace(np.vstack(rows))               # (n, n - rank)
+        if Z.shape[1] == 0:                           # active set pins popt fully
+            return np.zeros((n, m))
+        H = hess if hess is not None else 2.0 * ((J * w[:, None]).T @ (J * w[:, None]))
+        reduced = Z @ np.linalg.pinv(Z.T @ H @ Z) @ Z.T
+        return rhs_w[None, :] * (reduced @ J.T)
+
+    # An explicit ``hess`` is not the matrix the held factor was built from,
+    # so the ``kkt_solve_many`` fast path cannot answer for it.
     dim = solver.kkt_dim
+    if hess is not None:
+        return _dense(hess)
     if not factor_ok or dim is None or m_con != 0:
         Jw = J * w[:, None]
-        inv_hs = np.linalg.pinv(2.0 * (Jw.T @ Jw))
-        return (2.0 * (w ** 2))[None, :] * (inv_hs @ J.T)
+        return _dense(2.0 * (Jw.T @ Jw))
 
     rhs = np.zeros((m, dim))
     rhs[:, :n] = J                         # pack each g_i into the x-block
     lhs = solver.kkt_solve_many(rhs.reshape(-1), m).reshape(m, dim)
     inv_hs_g = lhs[:, :n].T                 # (n, m): column i = inv(H_S) g_i
-    return (2.0 * (w ** 2))[None, :] * inv_hs_g
+    return rhs_w[None, :] * inv_hs_g
 
 
 # --------------------------------------------------------------------------

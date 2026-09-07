@@ -158,6 +158,215 @@ def test_sensitivity_matches_pinv_and_finite_difference():
         np.testing.assert_allclose(r.dpopt_ddata[:, i], fd, rtol=8e-2, atol=2e-2)
 
 
+def _refit_influence(fit_kw, x, y, p0, i, h=1e-4):
+    """Ground-truth ``dpopt/dy_i``: perturb one datum, re-solve, difference."""
+    yp = y.copy(); yp[i] += h
+    ym = y.copy(); ym[i] -= h
+    fp = pounce.curve_fit(expdecay, x, yp, p0=p0, **fit_kw)
+    fm = pounce.curve_fit(expdecay, x, ym, p0=p0, **fit_kw)
+    return (fp.popt - fm.popt) / (2.0 * h)
+
+
+def test_sensitivity_zero_for_bound_pinned_parameter():
+    """A parameter pinned at a bound cannot move, so its influence is 0.
+
+    pounce#922: this returned ``pinv(J)`` -- a nonzero row for the pinned
+    parameter, and *sign errors* on the free ones.
+    """
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    kw = dict(bounds=[(0, np.inf), (None, None), (1.0, 2.0)])
+
+    r = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+    assert r.active_mask[2] and not r.active_mask[0] and not r.active_mask[1]
+
+    # the pinned row is exactly zero, not merely small
+    np.testing.assert_array_equal(r.dpopt_ddata[2], np.zeros(x.size))
+
+    # and the free rows now agree with a re-solve in sign and rough size
+    # (the residual gap is the documented Gauss-Newton linearization)
+    for i in (0, 12):
+        fd = _refit_influence(kw, x, y, p0, i)
+        got = r.dpopt_ddata[:, i]
+        assert np.all(np.sign(got[:2]) == np.sign(fd[:2]))
+        np.testing.assert_allclose(got[:2], fd[:2], rtol=0.75, atol=1e-3)
+
+    # the old answer is emphatically not this one
+    J = np.column_stack(
+        [np.exp(-r.popt[1] * x), -r.popt[0] * x * np.exp(-r.popt[1] * x), np.ones_like(x)]
+    )
+    assert np.abs(r.dpopt_ddata - np.linalg.pinv(J)).max() > 0.1
+
+
+def test_sensitivity_lies_in_active_constraint_nullspace():
+    """With ``a + c <= K`` binding, every column satisfies ``da + dc = 0``.
+
+    pounce#922: the returned matrix violated the constraint it was fitted
+    under, by ``da + dc = 0.77`` on the most influential point.
+    """
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    con = [{"type": "ineq", "fun": lambda p: 2.6 - (p[0] + p[2])}]
+    kw = dict(constraints=con)
+
+    r = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+    assert abs((r.popt[0] + r.popt[2]) - 2.6) < 1e-6      # constraint is active
+
+    # the perturbation stays on the constraint surface
+    np.testing.assert_allclose(
+        r.dpopt_ddata[0] + r.dpopt_ddata[2], 0.0, atol=1e-9
+    )
+
+    for i in (0, 12):
+        fd = _refit_influence(kw, x, y, p0, i)
+        np.testing.assert_allclose(r.dpopt_ddata[:, i], fd, rtol=0.75, atol=1e-2)
+
+
+def test_sensitivity_unaffected_by_an_inactive_constraint():
+    """An inactive constraint constrains nothing, so do not project on it."""
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    slack = [{"type": "ineq", "fun": lambda p: 50.0 - (p[0] + p[2])}]
+
+    free = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True)
+    lax = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, constraints=slack)
+    np.testing.assert_allclose(lax.dpopt_ddata, free.dpopt_ddata, rtol=1e-6, atol=1e-8)
+
+
+# --- pounce#923: Gauss-Newton vs. the exact Hessian, and the robust RHS ----
+
+def _outlier_fixture():
+    """Exponential decay with three genuine outliers -- the robust-loss case."""
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.1, 5.0, 30)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    y[[5, 17, 26]] += [1.4, -1.1, 0.9]
+    return x, y, [2.0, 1.0, 0.0]
+
+
+def _influence_error(r, fit_kw, x, y, p0):
+    """Max abs error of ``r.dpopt_ddata`` vs. re-solve, relative to its scale."""
+    truth = np.column_stack(
+        [_refit_influence(fit_kw, x, y, p0, i, h=1e-5) for i in range(x.size)]
+    )
+    return np.abs(r.dpopt_ddata - truth).max() / np.abs(truth).max()
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {},
+        {"bounds": [(0, np.inf), (None, None), (1.0, 2.0)]},
+        {"constraints": [{"type": "ineq", "fun": lambda p: 2.6 - (p[0] + p[2])}]},
+    ],
+    ids=["interior", "bound-active", "constraint-active"],
+)
+def test_sensitivity_exact_beats_gauss_newton_against_a_resolve(kw):
+    """``sensitivity='exact'`` drops the Gauss-Newton truncation (pounce#923).
+
+    The default influence is built from the Gauss-Newton Hessian, so it omits
+    the residual-curvature term ``sum_k r_k d2f_k``. Measured against
+    re-solving at a perturbed datum that is worth 10% on an interior fit and
+    25-27% where a bound or a constraint holds the fit away from its
+    unconstrained optimum (the residuals are larger there, and the dropped
+    term scales with them).
+    """
+    x, y, p0 = _outlier_fixture()
+    gn = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+    ex = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity="exact", **kw)
+
+    # the mode must change only the reported influence, never the fit itself
+    np.testing.assert_allclose(gn.popt, ex.popt, rtol=1e-9)
+
+    err_gn = _influence_error(gn, kw, x, y, p0)
+    err_ex = _influence_error(ex, kw, x, y, p0)
+    assert err_ex < 0.01, f"exact influence off by {err_ex:.1%}"
+    # ... and it is a real improvement, not a wash. This is the assertion that
+    # fails if 'exact' silently returns the Gauss-Newton answer.
+    assert err_ex < err_gn / 5.0, f"gn {err_gn:.1%} vs exact {err_ex:.1%}"
+
+
+def test_sensitivity_exact_preserves_the_active_set_invariants():
+    """pounce#922's guarantees must survive the pounce#923 path.
+
+    The exact Hessian cannot reuse the held factor, so it takes a different
+    branch. The projection is re-checked on that branch rather than assumed.
+    """
+    x, y, p0 = _outlier_fixture()
+
+    bnd = pounce.curve_fit(
+        expdecay, x, y, p0=p0, sensitivity="exact",
+        bounds=[(0, np.inf), (None, None), (1.0, 2.0)],
+    )
+    assert bnd.active_mask[2]
+    np.testing.assert_array_equal(bnd.dpopt_ddata[2], np.zeros(x.size))
+
+    con = pounce.curve_fit(
+        expdecay, x, y, p0=p0, sensitivity="exact",
+        constraints=[{"type": "ineq", "fun": lambda p: 2.6 - (p[0] + p[2])}],
+    )
+    np.testing.assert_allclose(
+        con.dpopt_ddata[0] + con.dpopt_ddata[2], np.zeros(x.size), atol=1e-9
+    )
+
+
+@pytest.mark.parametrize("loss", ["cauchy", "soft_l1"])
+def test_sensitivity_carries_the_robust_loss_curvature_weight(loss):
+    """The influence RHS needs the robust-loss weight ``rho' + 2 z rho''``.
+
+    ``d2obj/dp dy_i = -2 w_i^2 (rho'_i + 2 z_i rho''_i) g_i``. That bracket is
+    exactly the per-point weight ``gn_hessian`` already applies, and it is
+    identically 1 for ``sse`` -- which is why omitting it went unseen for as
+    long as it did. On a fit with real outliers it reaches -0.12 under
+    ``cauchy``, so a downweighted outlier's influence was not merely
+    mis-scaled but pointed the wrong way (measured: 86% for cauchy, 73% for
+    soft_l1). Found while fixing pounce#923; it is a separate defect, and note
+    that the exact Hessian alone does *not* repair it.
+    """
+    x, y, p0 = _outlier_fixture()
+    kw = {"loss": loss, "f_scale": 0.1}
+    r = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+
+    truth = np.column_stack(
+        [_refit_influence(kw, x, y, p0, i, h=1e-5) for i in range(x.size)]
+    )
+    err = np.abs(r.dpopt_ddata - truth).max() / np.abs(truth).max()
+    assert err < 0.05, f"robust influence off by {err:.1%}"
+
+    # the outliers are the entries the weight acts on, so pin their sign too
+    out = [5, 17, 26]
+    assert np.array_equal(
+        np.sign(r.dpopt_ddata[:, out]), np.sign(truth[:, out])
+    ), "sign disagreement on the downweighted outliers"
+
+
+def test_sensitivity_mode_is_validated():
+    """A truthy typo must not silently deliver the Gauss-Newton answer."""
+    x, y, p0 = _outlier_fixture()
+    for bad in ("exakt", "GN2", 0.5, [1]):
+        with pytest.raises(ValueError, match="sensitivity must be"):
+            pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=bad)
+
+    assert pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=False).dpopt_ddata is None
+    np.testing.assert_array_equal(
+        pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity="gn").dpopt_ddata,
+        pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True).dpopt_ddata,
+    )
+
+
+def test_sensitivity_exact_warns_when_the_jacobian_is_finite_difference():
+    """Differentiating an FD gradient squares the error -- say so."""
+    x, y, p0 = _outlier_fixture()
+    with pytest.warns(UserWarning, match="finite-difference model Jacobian"):
+        pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity="exact", jac="fd")
+
+
 # --------------------------------------------------------------------------
 # 6. Parameter constraints: positivity, range, general relation.
 # --------------------------------------------------------------------------
