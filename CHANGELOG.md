@@ -54,12 +54,28 @@ changes.
   p-values; a null calibration (mean 0, sd 0.94-1.00) is what earns the
   z-score label.
 
-  The sequential-modular comparison is measured rather than asserted, and the
-  expected argument **fails**: central differences across a Wegstein-accelerated
-  tear loop got the ranking right in all 18 tolerance-by-step cells, because a
-  converged tear loop makes smooth error that cancels centrally. What survives
-  is cost, an undiagnosable step window, and the structural point that a
-  modular flowsheet has no multipliers to read.
+  The sequential-modular comparison is measured rather than asserted, and it
+  does not go the way the pitch wants. What a good modular shop runs is a
+  one-parameter-at-a-time refit — a case study per parameter, driven by golden
+  section on the profile SSE inside the tear loop — which is the
+  likelihood-ratio row of Buse's table and had been quoted three times in this
+  repository's notebooks without ever being measured. It is **right**: over 60
+  randomized injections it reaches 92%/100%, ties the free ranking, and names
+  the same parameter first in 100% of trials. That is not luck. `z_j^2` is the
+  second-order expansion of the SSE drop from refitting parameter j alone, and
+  the measured ratio `z_j^2 / dSSE` has median 1.00 with a 10-90% range of
+  0.87-1.02 — the free statistic *is* the modular engineer's own diagnostic,
+  evaluated in one step instead of a search. The disagreement is entirely
+  price: 414 000 tear sweeps, 3.73 million single-run flowsheet convergences,
+  104 s, against one already-paid-for solve per campaign.
+
+  The expected argument against the modular route fails too: central
+  differences across a Wegstein-accelerated tear loop got the ranking right in
+  all 18 tolerance-by-step cells, because a converged tear loop makes smooth
+  error that cancels centrally. What survives is cost, an undiagnosable step
+  window, and the structural point that a tear loop solves nothing constrained
+  and so leaves no multiplier — LR and Wald are reachable from a modular
+  flowsheet, the score is not.
 
   The cost claim is then swept over the dimension it was measured in, because
   one 68-variable model is a corpus uniform in smallness: campaigns from 9 runs
@@ -67,10 +83,11 @@ changes.
   diagnosis costs 800 tear sweeps — 7 200 single-run flowsheet convergences at
   the small end, 230 400 at the large — against p back-solves through a
   factorization the monitoring solve already produced. The wall-clock ratio
-  falls (517x to 39x) against a comparator that converges the whole campaign in
-  one vectorised sweep and rises (3 411x to about 6 400x) against one that
-  converges a flowsheet at a time; the separation never closes and never drops
-  below 39x, and which way it moves is a fact about the modular tool. Also: an
+  falls (707x to 41x) against a comparator that converges the whole campaign in
+  one vectorised sweep and stays in the thousands (5 270x at nine runs, peaking
+  at 7 909x, easing to 5 660x at 288) against one that converges a flowsheet at
+  a time; the separation never closes and never drops below 39x, and which way
+  it moves is a fact about the modular tool. Also: an
   analyzer bias masquerading as separator drift, its confounding shown in the
   scaled information spectrum, and a design-of-experiments fix that lifts both
   discrimination rates from 67%/75% to 100%.
