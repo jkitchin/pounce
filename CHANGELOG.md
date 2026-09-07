@@ -58,12 +58,22 @@ changes.
   expected argument **fails**: central differences across a Wegstein-accelerated
   tear loop got the ranking right in all 18 tolerance-by-step cells, because a
   converged tear loop makes smooth error that cancels centrally. What survives
-  is cost (900 flowsheet solves against one solve plus p back-solves), an
-  undiagnosable step window, and the structural point that a modular flowsheet
-  has no multipliers to read. Also: an analyzer bias masquerading as separator
-  drift, its confounding shown in the scaled information spectrum, and a
-  design-of-experiments fix that lifts both discrimination rates from 67%/75%
-  to 100%.
+  is cost, an undiagnosable step window, and the structural point that a
+  modular flowsheet has no multipliers to read.
+
+  The cost claim is then swept over the dimension it was measured in, because
+  one 68-variable model is a corpus uniform in smallness: campaigns from 9 runs
+  to 288 (67 variables to 2020), parameter blocks from 4 to 7. The modular
+  diagnosis costs 800 tear sweeps — 7 200 single-run flowsheet convergences at
+  the small end, 230 400 at the large — against p back-solves through a
+  factorization the monitoring solve already produced. The wall-clock ratio
+  falls (517x to 39x) against a comparator that converges the whole campaign in
+  one vectorised sweep and rises (3 411x to about 6 400x) against one that
+  converges a flowsheet at a time; the separation never closes and never drops
+  below 39x, and which way it moves is a fact about the modular tool. Also: an
+  analyzer bias masquerading as separator drift, its confounding shown in the
+  scaled information spectrum, and a design-of-experiments fix that lifts both
+  discrimination rates from 67%/75% to 100%.
 
 - **Notebook 42, `python/notebooks/42_mixing_equations_and_jax.ipynb`.** One
   model, two front ends. POUNCE's equation surface (`NlExpr` /
