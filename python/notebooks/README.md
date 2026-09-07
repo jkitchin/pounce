@@ -106,6 +106,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 22 | [`22_curve_fit.ipynb`](22_curve_fit.ipynb) | `pounce.curve_fit` — SciPy-style nonlinear least squares with exact Jacobians, covariance, and confidence intervals. |
 | 23 | [`23_curve_fit_minima.ipynb`](23_curve_fit_minima.ipynb) | `pounce.curve_fit_minima` — find *every* parameter set that explains the data, each a full `CurveFitResult`. |
+| 44 | [`44_leverage_and_influence.ipynb`](44_leverage_and_influence.ipynb) | `res.dpopt_ddata` — which data points made the fit. Leverage and the hat matrix generalized past the linear/unweighted/unconstrained case, Cook's distance and DFBETA validated against leave-one-out re-fits, and the two cases where the textbook `pinv(J)` is not merely imprecise but inadmissible: a parameter at a bound has *zero* influence, and under an active constraint the influence lies in its null space. |
 
 ## Boundary value problems
 
