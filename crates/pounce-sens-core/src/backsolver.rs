@@ -119,15 +119,29 @@ pub trait SensBacksolver {
 }
 
 /// One bound-multiplier row of the compound KKT vector, resolved to
-/// the variable it constrains.
+/// the primal quantity it constrains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundRow {
     /// Row of the compound KKT vector holding the multiplier.
     pub row: usize,
-    /// Var-x row of the variable that bound constrains.
+    /// **Primal KKT row** of the quantity that bound constrains: a
+    /// row of the `x` block for a variable bound (`z_l` / `z_u`), and
+    /// a row of the `s` block for a constraint's limit (`v_l` /
+    /// `v_u`), which bounds the slack rather than a variable.
+    ///
+    /// The field is named for the case it had when only variable
+    /// bounds were reported, and below `dims[0]` the two spaces
+    /// coincide, so a var-x reader that never sees a slack row is
+    /// still correct. That is not an accident to rely on quietly:
+    /// **a consumer that indexes a var-x-length vector with this must
+    /// first check `var_row < dims[0]`**, because a slack row's value
+    /// is a valid index into nothing. `Solver::weakly_active_bounds`
+    /// and `step_along_path`'s base-activity table both carry that
+    /// check explicitly.
     pub var_row: usize,
-    /// `true` for a lower bound (`z_l`), `false` for an upper (`z_u`).
-    /// The x row carries the two with opposite signs.
+    /// `true` for a lower bound (`z_l` / `v_l`), `false` for an upper
+    /// (`z_u` / `v_u`). The primal row carries the two with opposite
+    /// signs.
     pub lower: bool,
 }
 

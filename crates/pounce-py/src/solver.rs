@@ -291,10 +291,19 @@ impl PySolver {
     ///
     /// * a row below `dims[0]` is a variable pinned at its bound, and
     ///   the row is its var-x index;
+    /// * a row in `[dims[0], dims[0] + dims[1])` is a **constraint's
+    ///   own limit** held -- a limit written as `g(x) <= cap` bounds
+    ///   the row's slack, not any variable, so the pin lands in the
+    ///   `s` block and subtracting `dims[0]` gives the inequality's
+    ///   position there (gh#928). Indexing a variable vector with it
+    ///   returns a neighbouring variable's answer, which is why the
+    ///   block has to be decided before the value is used;
     /// * a row at or above `dims[0] + dims[1] + dims[2] + dims[3]` is a
     ///   bound multiplier driven to zero, which releases that bound and
     ///   is the opposite action. Subtracting that offset gives its
-    ///   position in the `z_l` block, or in `z_u` past `dims[4]`.
+    ///   position in the `z_l` block, then `z_u`, `v_l`, `v_u` in
+    ///   turn past `dims[4]`, `dims[5]`, `dims[6]` -- the `v` halves
+    ///   being the release of a constraint's own limit.
     ///
     /// No other block appears. The list is empty when the plain step
     /// already respects every bound, and the step is then the plain
@@ -372,11 +381,22 @@ impl PySolver {
     ///
     /// `segments` is one tuple per breakpoint crossed, in the order
     /// crossed, as `(fraction, var_row, lower, pinned)`. `fraction` is
-    /// how far along the perturbation the change happened, `var_row`
-    /// is the variable's row in the factor's x block for every kind of
-    /// change, `lower` is `True` when the bound involved is the lower
-    /// one, and `pinned` is `True` for a variable reaching a bound and
-    /// `False` for a variable leaving one.
+    /// how far along the perturbation the change happened, `lower` is
+    /// `True` when the bound involved is the lower one, and `pinned`
+    /// is `True` for a quantity reaching a bound and `False` for one
+    /// leaving it.
+    ///
+    /// `var_row` names the bounded quantity as a **primal KKT row**,
+    /// the same for a hold and for a release, and the primal blocks
+    /// are `x` then `s`. So read it against `block_dims()`: below
+    /// `dims[0]` it is a variable's var-x index; at or above it, the
+    /// event is on a **constraint's own limit** -- a `g(x) <= cap`
+    /// bounds the row's slack rather than any variable -- and
+    /// `var_row - dims[0]` is that inequality's position in the `s`
+    /// block (gh#928). A consumer that indexes a variable-length
+    /// vector with `var_row` must check the block first; doing it by
+    /// value alone returns a neighbouring variable's answer, which is
+    /// the gh#450 hazard.
     ///
     /// `max_iter` caps the breakpoints crossed, and is in practice a
     /// budget on factorizations, since a pin is a back-solve against
@@ -494,6 +514,13 @@ impl PySolver {
     /// the caller (var-x rows the direction holds) instead of searched
     /// for, as `(dx, segments)`. Study surface for an externally
     /// solved eq. 14 QP.
+    ///
+    /// `held_var_rows` is var-x and stays var-x: this surface decides
+    /// the *directional* question, which is posed over variables. The
+    /// returned `segments` carry the wider domain the walk itself
+    /// uses -- see `parametric_step_path` for how to read `var_row`
+    /// against `block_dims()`, since a breakpoint here can still land
+    /// on a constraint's own limit.
     #[pyo3(signature = (pin_constraint_indices, deltas, held_var_rows, max_iter=16))]
     fn parametric_step_path_decided<'py>(
         &self,
@@ -747,6 +774,26 @@ impl PySolver {
         })?;
         let gs = validate_pins(&g_indices, s.m)?;
         let rows = s.inner.d_multiplier_rows(&gs).map_err(solver_error_to_py)?;
+        Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
+    }
+
+    /// Rows of the compound KKT vector holding each inequality's
+    /// **slack**, for the given 0-based constraint (`g`) indices;
+    /// `None` for a row that is not an inequality.
+    ///
+    /// The primal counterpart of `inequality_multiplier_rows`, and the
+    /// discriminator for a `parametric_step_path` segment whose
+    /// `var_row` is at or above `block_dims()[0]`: a limit written as
+    /// `g(x) <= cap` bounds this slack rather than any variable, so
+    /// the breakpoint carries an `s`-block row (gh#928). Indexing a
+    /// variable-length vector with it returns a neighbouring
+    /// variable's answer.
+    fn slack_rows(&self, g_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("slack_rows: no converged factor (call solve() first)")
+        })?;
+        let gs = validate_pins(&g_indices, s.m)?;
+        let rows = s.inner.d_slack_rows(&gs).map_err(solver_error_to_py)?;
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 

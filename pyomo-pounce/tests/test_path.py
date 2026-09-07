@@ -259,3 +259,93 @@ def test_the_record_requires_a_session():
     m = linked()
     with pytest.raises(RuntimeError, match="no sensitivity session"):
         sens_active_set_changes(m, [(m.p, 2.0)])
+
+
+# ---------------------------------------------------------------------
+# gh#928: the same limit written as a constraint row.
+#
+# `x <= 1` as a bound and `cap: x <= 1` as a row describe the same
+# feasible set, but the second bounds the row's SLACK rather than any
+# variable, so its multiplier is in `v_u` and its primal KKT row is in
+# the `s` block. Before gh#928 the row form was in no bound row and in
+# no box: the walk could not reach it, could not release it, and
+# recorded nothing when it walked past. These tests are the Python end
+# of that, and they are also what pins the record's own widening -- the
+# entry names a Constraint, not a Var, and resolving the row against
+# the variable map would return a neighbouring variable (gh#450).
+# ---------------------------------------------------------------------
+
+
+def capped(p=0.8):
+    """`x` tracks `p` with the limit stated as a ROW, not a bound.
+
+    Strictly convex in `x` and unbounded as a variable, so the limit is
+    reachable only through `cap` and the answer is `min(p, 1)`.
+    """
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.x = pyo.Var(initialize=0.5)
+    m.cap = pyo.Constraint(expr=m.x <= 1.0)
+    m.obj = pyo.Objective(expr=0.5 * (m.x - m.p) ** 2)
+    declare_sens_param(m.p)
+    return m
+
+
+def capped_solved(p=0.8):
+    m = capped(p)
+    pyo.SolverFactory("pounce").solve(m)
+    return m
+
+
+def test_a_row_limit_the_step_reaches_is_named_by_its_constraint():
+    """Pre-fix: x walked to 1.3 against a truth of 1.0, silently."""
+    m = capped_solved(0.8)
+    est = sens_solution(m, [(m.p, 1.3)], mode="path")
+    assert est[m.x] == pytest.approx(1.0, abs=1e-6)
+    rec = sens_active_set_changes(m, [(m.p, 1.3)])
+    assert len(rec) == 1
+    c = rec[0]
+    # The record must name the CONSTRAINT. Resolving an `s`-block row
+    # against the variable map is the gh#450 neighbouring-entry bug,
+    # and here it would name `x` -- a plausible, wrong answer.
+    assert c.var is m.cap
+    assert c.bound == "upper"
+    assert c.action == "reaches"
+    assert c.fraction == pytest.approx(0.4, abs=1e-6)
+
+
+def test_a_row_limit_the_step_leaves_is_released():
+    """Pre-fix: x stayed pinned at 1.0 against a truth of 0.8, because
+    nothing took the cap's stiffness out of the operator."""
+    m = capped_solved(1.3)
+    est = sens_solution(m, [(m.p, 0.8)], mode="path")
+    assert est[m.x] == pytest.approx(0.8, abs=1e-6)
+    rec = sens_active_set_changes(m, [(m.p, 0.8)])
+    assert len(rec) == 1
+    c = rec[0]
+    assert c.var is m.cap
+    assert c.bound == "upper"
+    assert c.action == "leaves"
+    assert c.fraction == pytest.approx(0.6, abs=1e-6)
+
+
+def test_a_step_that_does_not_touch_the_row_limit_records_nothing():
+    """The control: exact before the fix too, so a test that only
+    checked answers would pass here while both cases above were broken."""
+    m = capped_solved(0.8)
+    est = sens_solution(m, [(m.p, 0.6)], mode="path")
+    assert est[m.x] == pytest.approx(0.6, abs=1e-6)
+    assert sens_active_set_changes(m, [(m.p, 0.6)]) == []
+
+
+def test_slack_rows_is_the_discriminator_for_a_row_limit():
+    """The accessor that tells a consumer which block a segment's row
+    is in, checked against the segment the walk actually emits."""
+    m = capped_solved(0.8)
+    sess = m._pounce_sens.session
+    n_x = sess.solver.block_dims[0]
+    slack = sess.solver.slack_rows(list(range(len(sess.con_names))))
+    rows = [r for r in slack if r is not None]
+    assert rows, "the model has an inequality, so some row has a slack"
+    assert all(r >= n_x for r in rows), (
+        f"a slack row must be in the `s` block, past n_x={n_x}: {rows}")

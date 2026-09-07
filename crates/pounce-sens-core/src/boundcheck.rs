@@ -1148,13 +1148,27 @@ const NO_BOUND_HI: Number = 1e19;
 const PATH_MIN_SEGMENT: Number = 1e-12;
 
 /// How many times the walk may re-run after finding its own answer
-/// outside the box. Each pass adds at least one bound row to the
-/// watch list and costs a fresh walk, so this is a budget on
-/// factorizations; termination comes from the list growing, not
-/// from the cap. Simultaneous unheld bounds are what consume it,
-/// and a degenerate vertex of a few coordinates is the realistic
-/// case.
-const PATH_MAX_BOX_REPAIRS: usize = 8;
+/// outside the box.
+///
+/// This is not a tuned number. A pass that adds nothing stops the
+/// loop, the only rows it can add are entries of the base-activity
+/// table, and a row already watched is never added twice -- so the
+/// loop cannot run more times than that table has entries, and
+/// passing the table's length as the budget makes the exhausted arm
+/// unreachable by construction rather than unreached by luck. That
+/// matters because the exhausted arm returns an error, and an error
+/// on a correct model would be a regression the corpus could not see.
+///
+/// Measured for the record, by capping this to `.min(1)` and
+/// re-running: a budget of **1** clears every Rust test in
+/// `pounce-sens-core`, `pounce-sensitivity` and `pounce-py`, both
+/// gh#928 files included -- 0 failures. The bound below is therefore
+/// slack over that population; it is here so that "the budget ran
+/// out" is a statement about the model rather than about this
+/// constant.
+fn path_box_repair_budget(base_active_rows: usize) -> usize {
+    base_active_rows
+}
 
 /// One breakpoint the path stopped at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1263,7 +1277,14 @@ where
     B: crate::backsolver::SensBacksolver + Clone,
 {
     let n_full = backsolver.dim();
-    let n_x = x_curr.len().min(lo.len()).min(hi.len());
+    // The PRIMAL PREFIX, not the `x` block. `bound_context` hands over
+    // a box spanning `x` then `s`, which are contiguous in the
+    // compound vector, because a limit written as a constraint row is
+    // a bound on the slack and has to be watched like any other
+    // (gh#928). Everything below indexes the box, the base point and
+    // the step by the same primal KKT row, so one length covers all
+    // three and the walk needs no second index space.
+    let n_p = x_curr.len().min(lo.len()).min(hi.len());
     if rhs_plain.len() != n_full {
         return Err("step_along_path: rhs length is not the KKT dimension".into());
     }
@@ -1314,10 +1335,14 @@ where
     // What stays live at every consumer is the released list: a
     // base-active bound whose row has been released is no longer in
     // the factorization, from that fraction on.
-    let mut base_active_row: Vec<[Option<usize>; 2]> = vec![[None, None]; n_x];
+    let mut base_active_row: Vec<[Option<usize>; 2]> = vec![[None, None]; n_p];
     if let Some(rows) = bound_rows.as_ref() {
         for br in rows {
-            if br.var_row >= n_x {
+            // `var_row` is a primal KKT row, so this is a range check
+            // against the box the caller supplied, not a block filter.
+            // A caller that hands over an `x`-only box still gets the
+            // old behaviour: its constraint-row bounds fall out here.
+            if br.var_row >= n_p {
                 continue;
             }
             let slack_base = if br.lower {
@@ -1400,7 +1425,7 @@ where
         x_curr,
         lo,
         hi,
-        n_x,
+        n_p,
         n_full,
         max_iter,
         mult_nat,
@@ -1411,12 +1436,13 @@ where
         initial_holds,
     };
     let mut watch: Vec<usize> = weak_rows.to_vec();
+    let budget = path_box_repair_budget(setup.base_active_rows.len());
     let mut best = walk_once(backsolver, &setup, &watch)?;
-    for _ in 0..PATH_MAX_BOX_REPAIRS {
+    for _ in 0..budget {
         let mut grew = false;
         for (i, _, _) in bound_violations(
             setup.x_curr,
-            &best.0[..setup.n_x],
+            &best.0[..setup.n_p],
             setup.lo,
             setup.hi,
             eps,
@@ -1450,8 +1476,10 @@ where
     // base-point split did not call active and so there was no row to
     // add. Returning it is exactly gh#928's own failure mode, a
     // violation with nothing in the record naming it, so say so
-    // instead. Neither arm is reachable from any fixture in the
-    // corpus; that is the reason to report rather than to trust them.
+    // instead. The budget arm is unreachable by construction (see
+    // `path_box_repair_budget`); the no-row-to-add arm is reachable in
+    // principle and is not reached by any fixture in the corpus. That
+    // is the reason to report rather than to trust them.
     //
     // Except when the caller capped the walk. `max_iter` is a cap on
     // segments, and a walk that spent it stopped early BY REQUEST:
@@ -1467,18 +1495,24 @@ where
     }
     let left = bound_violations(
         setup.x_curr,
-        &best.0[..setup.n_x],
+        &best.0[..setup.n_p],
         setup.lo,
         setup.hi,
         eps,
         &[],
     );
     if let Some((i, bnd, past)) = left.first() {
+        // `i` is a primal KKT row, so it names a variable only while
+        // it is inside the `x` block; past that it is a constraint's
+        // own slack. Saying which costs nothing and saves the reader
+        // from reading a slack index as a variable index (gh#450).
         return Err(format!(
-            "step_along_path: the walk ended outside variable {i}'s bound \
+            "step_along_path: the walk ended outside primal row {i}'s bound \
              {bnd} by {past:e} and the repair could not reach it \
-             (watched {} rows over at most {PATH_MAX_BOX_REPAIRS} passes, \
-             {} segments of a {max_iter} cap)",
+             (watched {} rows over at most {budget} passes, \
+             {} segments of a {max_iter} cap). Rows below the `x` block's \
+             length are variables; at or above it they are constraint \
+             slacks, so read the row against `block_dims()`.",
             watch.len(),
             best.1.len()
         ));
@@ -1495,7 +1529,8 @@ struct WalkSetup<'a> {
     x_curr: &'a [Number],
     lo: &'a [Number],
     hi: &'a [Number],
-    n_x: usize,
+    /// Length of the primal prefix (`x` then `s`) the box covers.
+    n_p: usize,
     n_full: usize,
     max_iter: usize,
     mult_nat: Vec<BoundMultiplier>,
@@ -1525,7 +1560,7 @@ where
     let x_curr = su.x_curr;
     let lo = su.lo;
     let hi = su.hi;
-    let n_x = su.n_x;
+    let n_p = su.n_p;
     let n_full = su.n_full;
     let max_iter = su.max_iter;
     let mult_nat = &su.mult_nat;
@@ -1624,7 +1659,7 @@ where
         // release below. "Actually enforces" is the distinction the
         // `factor_holds` comment below draws, and it is narrower than
         // "active at the base".
-        for i in 0..n_x {
+        for i in 0..n_p {
             if holds.iter().any(|h| h.row == i) || changed_here.contains(&i) {
                 continue;
             }

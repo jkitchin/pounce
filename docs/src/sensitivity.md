@@ -550,10 +550,38 @@ for c in sens_active_set_changes(m, [(m.setpoint, 3.0)]):
 ```
 
 Each entry holds the fraction of the perturbation at which the change
-happens, the variable, which bound (`"lower"` or `"upper"`), and
-whether the variable `"reaches"` it or `"leaves"` it. The first
-entry's fraction is how much of the perturbation the held solve's
+happens, the quantity whose limit it is, which bound (`"lower"` or
+`"upper"`), and whether it `"reaches"` the limit or `"leaves"` it. The
+first entry's fraction is how much of the perturbation the held solve's
 active set survives unchanged.
+
+The `.var` field is not always a `Var`. A limit written as a
+constraint row — `m.cap = Constraint(expr=m.x <= 1.0)`, which is how a
+capacity, a ramp or a nameplate is normally stated — bounds that row's
+**slack** rather than any variable, so the entry names the
+`Constraint`:
+
+```python
+c = sens_active_set_changes(m, [(m.p, 1.3)])[0]
+c.var is m.cap      # True, a Constraint, not a Var
+c.bound             # "upper"
+c.action            # "reaches"
+```
+
+Both forms produce the same `bound` and `action` values, and both are
+walked the same way, so a caller that only prints the record needs no
+change; one that looks the entry up in a map of variables must check
+what it got. Before gh#928 a row limit was in no bound row at all: the
+walk could not reach it, could not release it, and recorded nothing
+when it walked past — on the model above, `x` went to 1.3 against a
+true 1.0 with an empty record. That was independent of degeneracy;
+any model stating a limit as a row was exposed. The Rust and Python
+APIs report the same thing one level down, where a segment's `var_row`
+is a **primal KKT row**: below `block_dims()[0]` it is a variable's
+var-x index, at or above it the limit is a row's and
+`slack_rows()` is what resolves it back to a constraint. Indexing a
+variable-length vector by that number instead returns a neighbouring
+variable's answer, which is the gh#450 hazard.
 
 Where the two modes settle the same active set they give the same
 prediction. Where the changes are spread out along the perturbation

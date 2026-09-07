@@ -70,13 +70,24 @@ pub const BARRIER_SIGN: Number = -1.0;
 /// The bound geometry the bound-aware parametric steps share. See
 /// [`Solver::bound_context`].
 struct BoundContext {
-    /// Length of the primal block.
+    /// Length of the `x` block: how much of the box below is
+    /// variables, and how much of a step is the caller's answer.
     n_x: usize,
-    /// Lower bounds over the primal block, in the model's own units.
+    /// Lower bounds over the `(x, s)` prefix of the compound KKT
+    /// vector, in the model's own units.
+    ///
+    /// The `s` half is the limits of the inequality rows, `d_l`. A
+    /// limit written as a constraint — `g(x) <= cap` — is a bound like
+    /// any other, on the row's slack instead of on a variable, and
+    /// leaving it out of the box is what let a step walk straight
+    /// through a cap with no breakpoint and no warning (gh#928). The
+    /// two blocks are adjacent in the compound vector, so the box is
+    /// one contiguous slice and a consumer needs no second index
+    /// space; `n_x` is where it changes meaning.
     lo: Vec<Number>,
-    /// Upper bounds, likewise.
+    /// Upper bounds, likewise: variable `x_u` then row `d_u`.
     hi: Vec<Number>,
-    /// The converged primal point, truncated to the primal block.
+    /// The converged point over that same `(x, s)` prefix.
     x_curr: Vec<Number>,
     /// How far outside a bound still counts as on it.
     eps: Number,
@@ -84,7 +95,10 @@ struct BoundContext {
     /// is released. Always the solve's own margin, whatever `eps` is.
     release_eps: Number,
     /// Bound multipliers at the base point, in the solve's own
-    /// coordinates, with the compound row each occupies.
+    /// coordinates, with the compound row each occupies: `z_l`, `z_u`,
+    /// then `v_l`, `v_u`. The `v` half is what lets an active
+    /// constraint limit be *released* when a step drives its
+    /// multiplier through zero, the mirror of the `s` half of the box.
     mults: Vec<crate::boundcheck::BoundMultiplier>,
 }
 
@@ -92,9 +106,12 @@ impl BoundContext {
     /// Distance from the base point to each bound, for one var-x row.
     ///
     /// Typed because the callers read a full-x `ActivityReport` in the
-    /// same scope: `lo`, `hi` and `x_curr` are all primal-block length,
-    /// and indexing them with a full-x value is the swap `crate::index`
-    /// exists to prevent.
+    /// same scope: indexing `lo` / `hi` / `x_curr` with a full-x value
+    /// is the swap `crate::index` exists to prevent. Those three now
+    /// run past the `x` block into `s`, so the type is doing more work
+    /// than it was: a var-x row is in range for the whole box and a
+    /// full-x row that overshoots `n_x` no longer runs off the end,
+    /// it silently reads a slack.
     fn slacks_at(&self, row: VarX) -> (Number, Number) {
         let i = row.get();
         (self.x_curr[i] - self.lo[i], self.hi[i] - self.x_curr[i])
@@ -1352,9 +1369,28 @@ impl Solver {
         };
 
         let released: Vec<usize> = weak.iter().map(|w| w.row).collect();
-        let sigma = bs
-            .released_sigma_x(&released)
+        // `weak` comes from `weakly_active_bounds`, which is keyed by
+        // a var-x row and so can only ever name a bound in the `x`
+        // block. Constraint-row limits (gh#928) live in the `s` block
+        // and would need the second diagonal below; releasing one here
+        // with the `s` diagonal left at its base value would solve a
+        // system that still enforces the bound it claims to have
+        // released, silently. Asked for rather than assumed: the
+        // second slot is `None` exactly when nothing in `released`
+        // touched the `s` block, so a non-`None` here means the
+        // premise this arm rests on has stopped holding.
+        let (sigma, sigma_s) = bs
+            .released_sigmas(&released)
             .ok_or_else(|| fail("released sigma unavailable"))?;
+        if sigma_s.is_some() {
+            return Err(fail(
+                "a released bound reached the `s` block. The directional \
+                 decision is built on `weakly_active_bounds`, whose rows are \
+                 var-x, so this cannot happen without that contract having \
+                 changed -- and releasing an `s`-block bound needs the slack \
+                 diagonal this arm does not carry.",
+            ));
+        }
         if work + 1 > max_iter {
             // Nothing is engaged before the all-released solve, so
             // this fires only at a budget of zero, and the floor is
@@ -1708,8 +1744,18 @@ impl Solver {
             let lower = s_lo <= s_hi;
             // a table lookup, so a space-swap here would fail loudly
             let var_row = row.get();
+            // `rows` now carries constraint-row limits too, whose
+            // `var_row` is an `s`-block row (gh#928). They can never
+            // match here -- `map.rows()` runs over the `x` block, so
+            // `var_row < ctx.n_x`, and every `s` row is at or above it
+            // -- but that is a property of two index ranges not
+            // overlapping, which is exactly the kind of thing that
+            // silently stops being true. Said out loud so it is a
+            // filter rather than a coincidence.
+            debug_assert!(var_row < ctx.n_x);
             if let Some(br) = rows
                 .iter()
+                .filter(|b| b.var_row < ctx.n_x)
                 .find(|b| b.var_row == var_row && b.lower == lower)
             {
                 out.push(crate::boundcheck::WeakBound {
@@ -1738,15 +1784,28 @@ impl Solver {
     fn bound_context(&self, bound_eps: Option<Number>) -> Result<BoundContext, SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let n_x = state.backsolver.block_dims()[0];
+        let dims = state.backsolver.block_dims();
+        let n_x = dims[0];
+        let n_s = dims[1];
 
         // Expanded once, before any re-solve: reading the compressed
         // form means borrowing the NLP, and the solves below re-borrow
         // it.
-        let (mut lo, mut hi) = {
+        //
+        // Both primal blocks, in one pass over the same borrow: `x`
+        // against `x_l` / `x_u` through `px_l` / `px_u`, and `s`
+        // against `d_l` / `d_u` through `pd_l` / `pd_u`. The second
+        // half is gh#928's subject — an inequality row's limit is a
+        // bound on its slack, and a box that stopped at `n_x` left
+        // every such limit unwatched.
+        let (mut lo, mut hi, s_lo, s_hi) = {
             let (_, _, nlp) = state.backsolver.activity_handles();
             let nl = nlp.borrow();
-            crate::boundcheck::expand_bounds(n_x, &nl.px_l(), &nl.px_u(), nl.x_l(), nl.x_u())
+            let (lo, hi) =
+                crate::boundcheck::expand_bounds(n_x, &nl.px_l(), &nl.px_u(), nl.x_l(), nl.x_u());
+            let (s_lo, s_hi) =
+                crate::boundcheck::expand_bounds(n_s, &nl.pd_l(), &nl.pd_u(), nl.d_l(), nl.d_u());
+            (lo, hi, s_lo, s_hi)
         };
         // Those bounds bound the algorithm's `x̃ = d ⊙ x`, while
         // `state.x` and the step are both in the model's own units
@@ -1765,6 +1824,49 @@ impl Solver {
                 let (a, b) = (lo[i] / di, hi[i] / di);
                 lo[i] = a.min(b);
                 hi[i] = a.max(b);
+            }
+        }
+
+        // The `s` block gets the same treatment for the row scaling it
+        // was solved under. `F` — the vector every back-solve
+        // post-multiplies its answer by — is `1/dd_r` on the `s` rows,
+        // so a scaled quantity times `F` is the natural one, which is
+        // exactly the conversion the `x` block just made by dividing
+        // by `d`. Using `F` rather than re-reading `d_scale` keeps
+        // this pinned to the same numbers the step arrives in: the
+        // point of the conversion is that `x_curr`, the box and the
+        // step agree, not that the arithmetic matches a formula.
+        //
+        // The base slack `s* - d_l` is scale-invariant in sign but not
+        // in size, and it is compared against a multiplier that gets
+        // the same treatment inside the walk, so both sides move
+        // together. `variable_scaling_sensitivity.rs` is the general
+        // statement of why that has to be checked rather than assumed.
+        let mut s_curr: Vec<Number> = {
+            let (data, _, _) = state.backsolver.activity_handles();
+            let d = data.borrow();
+            let curr = d.curr.as_ref().ok_or(SolverError::NotConverged)?;
+            crate::vec_util::dense_to_vec(&*curr.s)
+        };
+        let mut s_lo = s_lo;
+        let mut s_hi = s_hi;
+        if s_curr.len() != n_s {
+            return Err(SolverError::BadShape {
+                what: "slack block of the converged iterate",
+                got: s_curr.len(),
+                expected: n_s,
+            });
+        }
+        if let Some(f) = state.backsolver.natural_units_factor() {
+            for i in 0..n_s {
+                let fi = f[n_x + i];
+                if fi == 1.0 {
+                    continue;
+                }
+                s_curr[i] *= fi;
+                let (a, b) = (s_lo[i] * fi, s_hi[i] * fi);
+                s_lo[i] = a.min(b);
+                s_hi[i] = a.max(b);
             }
         }
 
@@ -1799,7 +1901,6 @@ impl Solver {
         // row each one occupies, so a step that drives one negative can
         // release that bound.
         let mults = {
-            let dims = state.backsolver.block_dims();
             let (z_l_off, z_u_off) = (
                 dims[0] + dims[1] + dims[2] + dims[3],
                 dims[0] + dims[1] + dims[2] + dims[3] + dims[4],
@@ -1807,19 +1908,29 @@ impl Solver {
             let (data, _, _) = state.backsolver.activity_handles();
             let d = data.borrow();
             let curr = d.curr.as_ref().ok_or(SolverError::NotConverged)?;
+            let (v_l_off, v_u_off) = (z_u_off + dims[5], z_u_off + dims[5] + dims[6]);
             let mut out = Vec::new();
-            for (off, v) in [(z_l_off, &curr.z_l), (z_u_off, &curr.z_u)] {
+            for (off, v) in [
+                (z_l_off, &curr.z_l),
+                (z_u_off, &curr.z_u),
+                (v_l_off, &curr.v_l),
+                (v_u_off, &curr.v_u),
+            ] {
                 for (k, &base) in crate::vec_util::dense_to_vec(&**v).iter().enumerate() {
                     out.push(crate::boundcheck::BoundMultiplier { row: off + k, base });
                 }
             }
             out
         };
+        lo.extend_from_slice(&s_lo);
+        hi.extend_from_slice(&s_hi);
+        let mut x_curr = state.x[..n_x].to_vec();
+        x_curr.extend_from_slice(&s_curr);
         Ok(BoundContext {
             n_x,
             lo,
             hi,
-            x_curr: state.x[..n_x].to_vec(),
+            x_curr,
             eps,
             release_eps,
             mults,
@@ -1954,6 +2065,38 @@ impl Solver {
                     .backsolver
                     .full_g_to_d_block(g)
                     .map(|pos| y_d_offset + pos)
+            })
+            .collect())
+    }
+
+    /// Flat rows of the compound KKT vector holding an inequality's
+    /// **slack** `s`, for the given 0-based full-g row indices; `None`
+    /// for a row that is not an inequality.
+    ///
+    /// The primal counterpart of [`Self::d_multiplier_rows`], and the
+    /// discriminator a consumer of [`Self::parametric_step_path`]
+    /// needs. A limit written as `g(x) <= cap` bounds this slack
+    /// rather than any variable, so a breakpoint on it carries a
+    /// primal KKT row in the `s` block (gh#928). Reading such a row as
+    /// a var-x index returns a neighbouring variable's answer, the
+    /// gh#450 hazard, so a caller that maps rows back to model objects
+    /// resolves them here.
+    ///
+    /// The `s` block sits immediately after `x`, and is indexed by
+    /// d-block position exactly as `y_d` is, so this row and
+    /// [`Self::d_multiplier_rows`]'s row name the same inequality from
+    /// the two sides of its complementarity pair.
+    pub fn d_slack_rows(&self, g_indices: &[Index]) -> Result<Vec<Option<Index>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let s_offset = state.backsolver.block_dims()[0] as Index;
+        Ok(g_indices
+            .iter()
+            .map(|&g| {
+                state
+                    .backsolver
+                    .full_g_to_d_block(g)
+                    .map(|pos| s_offset + pos)
             })
             .collect())
     }

@@ -719,6 +719,77 @@ changes.
   there, which is what makes an endpoint check sufficient for it rather than
   a patch over the symptom.
 
+- **A limit written as a constraint row was watched by nothing
+  ([#928](https://github.com/jkitchin/pounce/issues/928)).** The second half
+  of the same issue, and the broader one: it needs no degeneracy at all.
+
+  `x <= 1` as a variable bound and `cap: g(x) <= 1` as a row describe the
+  same feasible set. They were not the same thing to the sensitivity layer.
+  A variable bound's multiplier is in `z_l` / `z_u` and the quantity it
+  constrains is a row of the `x` block; a row's limit bounds the **slack**,
+  so its multiplier is in `v_l` / `v_u` and the quantity it constrains is a
+  row of the `s` block. `bound_variable_rows` emitted only the `z` half and
+  `bound_context`'s box covered only the `x` block, so a row limit had no
+  entry in the reach scan, no entry in the base-activity table, no breakpoint
+  it could appear as, and nothing for the box repair above to add to its
+  watch list.
+
+  Measured on `min ½(x − p)²` subject to `x ≤ 1` stated as a row, with `x`
+  carrying no bound of its own: from `p = 0.8` a step to `p = 1.3` walked `x`
+  to **1.300000000 against a true 1.000000000**, three tenths past a stated
+  cap, with an empty segment list. The reverse is worse than a lost record —
+  from `p = 1.3` a step to `p = 0.8` left `x` **pinned at 1.0 against a true
+  0.8**, because nothing took the cap's stiffness out of the operator. At the
+  kink itself both directions were wrong by half the perturbation, which is
+  the two-sided average a degenerate base point returns when nothing watches
+  the bound. Every one of those is now exact to about `1e-10` and carries a
+  segment naming the cap.
+
+  What made the repair small is that blocks `x` and `s` are **contiguous** in
+  the compound KKT vector, so the `(x, s)` prefix is one box and the walk
+  needs no second index space; `path_direction` already pins a generic Schur
+  unit row on any KKT row, so the reach half needed no backsolver arithmetic
+  at all. The release half did: the barrier's `s`-block diagonal is now
+  rebuilt with the released entry's `v / s` taken out, and stays `None` when
+  no slack bound is released, because the factorization cache keys on the
+  diagonal object's identity.
+
+  `BoundRow.var_row` — and so a `PathSegment.var_row`, and a `pinned` row
+  from `parametric_step_bounded` — is therefore a **primal KKT row** rather
+  than a var-x index: below `block_dims()[0]` it is a variable, at or above
+  it the limit is a constraint's own. The new `slack_rows()` accessor
+  (`Solver::d_slack_rows` in Rust) resolves such a row back to its
+  inequality, the primal counterpart of `inequality_multiplier_rows`.
+  Indexing a variable-length vector by the number instead returns a
+  neighbouring variable's answer, the gh#450 hazard, so every consumer inside
+  the crate now decides the block before it uses the value.
+
+  In `pyomo-pounce` the record follows: a `sens_active_set_changes()` entry
+  for a row limit has `.var` naming the `Constraint`, not a `Var`, with the
+  same `bound` and `action` values a variable bound produces.
+
+  The convex arm is **not** covered — `G` rows carry no bound metadata there
+  either, and that is [#929](https://github.com/jkitchin/pounce/issues/929).
+
+### Changed
+
+- **The path walk's box-repair budget is the base-activity table's length**
+  ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a
+  fixed constant. Each pass adds at least one bound to the watch list and
+  never removes one, so a budget of that size cannot be exhausted before the
+  list is, which makes the exhausted arm unreachable by construction instead
+  of by argument. Measured, no fixture in the corpus reaches even a second
+  pass.
+
+- **A walk that releases two bounds at once with no curvature in the released
+  coordinates is refused rather than answered**, and the gap now has an open
+  issue ([#930](https://github.com/jkitchin/pounce/issues/930)). Holding a
+  bound the path reached is a Schur pin on the already-factored released
+  system, which must be invertible before the pins go on; two curvature-free
+  releases sharing a constraint make it singular. Refusing is an improvement
+  on the pre-#928 behaviour, which was to return a point outside the box in
+  silence, but it is not the right final answer.
+
 
 ## [0.11.0] - 2026-09-03
 

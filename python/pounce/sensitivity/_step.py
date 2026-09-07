@@ -1089,6 +1089,16 @@ def solution_report(session, pin_rows, deltas, max_iter=None,
 #: an order-one penalty that bends the step without enforcing anything,
 #: so a perturbation pressing into it is a breakpoint like any other
 #: (gh#852).
+#:
+#: `var` names the quantity the bound is on, and it is not always a
+#: variable: a limit written as a constraint row, `g(x) <= cap`, bounds
+#: that row's SLACK, and its entry names the constraint instead
+#: (gh#928). The two are told apart by what the object is -- a
+#: `Constraint` rather than a `Var` under `pyomo_pounce`, a row name
+#: rather than a column name in the base session -- and both kinds of
+#: limit produce the same `bound` and `action` values. The field keeps
+#: its name so that unpacking a record written before row limits were
+#: reachable still works.
 ActiveSetChange = namedtuple(
     "ActiveSetChange", ["fraction", "var", "bound", "action"])
 
@@ -1164,19 +1174,40 @@ def active_set_changes(session, pin_rows, deltas, predictor_iter=16,
         _, segments = session.solver.parametric_step_path(
             pin_idx, deltas, predictor_iter)
 
-    # segments carry var-x rows (the factor's x block); var_names is
-    # full-x, so invert the same map scatter_x applies
+    # A segment names its bounded quantity by PRIMAL KKT row, and the
+    # primal blocks are x then s. Below n_x it is a variable, in var-x
+    # (var_names is full-x, so invert the map scatter_x applies). At or
+    # above it the limit is a constraint's own -- g(x) <= cap bounds
+    # the row's slack, not any variable -- and resolving it against the
+    # variable map would return a NEIGHBOURING variable, the gh#450
+    # hazard. gh#928 is what made the second case reachable.
+    n_x = session.solver.block_dims[0]
     full_of = {row: full
                for full, row in enumerate(session._primal_row_map())
                if row is not None}
+    slack_of = None
     out = []
-    for frac, var_row, lower, pinned in segments:
-        full = full_of[var_row]
-        name = session.var_names[full]
-        comp = session.var_key(full)
+    for frac, row, lower, pinned in segments:
+        if row < n_x:
+            full = full_of[row]
+            key = session.var_key(full)
+            if key is None:
+                key = session.var_names[full]
+        else:
+            if slack_of is None:
+                # Built only when a row limit actually moves, so the
+                # common all-variables path costs no extra call.
+                slack_of = {
+                    r: g
+                    for g, r in enumerate(session.solver.slack_rows(
+                        list(range(len(session.con_names)))))
+                    if r is not None}
+            key = session.row_key(slack_of[row])
+            if key is None:
+                key = session.con_names[slack_of[row]]
         out.append(ActiveSetChange(
             fraction=float(frac),
-            var=comp if comp is not None else name,
+            var=key,
             bound="lower" if lower else "upper",
             action="reaches" if pinned else "leaves",
         ))
