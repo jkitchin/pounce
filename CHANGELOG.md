@@ -34,6 +34,37 @@ changes.
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
 
+- **Notebook 45, `python/notebooks/45_which_parameter_stopped_fitting.ipynb`.**
+  A plant model calibrated at commissioning stops matching new data. Which
+  *parameter* drifted? Reusing notebook 41's recycle flowsheet as a
+  data-reconciliation fit, each parameter is a variable held by an equality
+  row, so the score is that row's Lagrange multiplier —
+  `s = -info["mult_g"][pins]`, verified against central differences to 1.5e-8 —
+  and the information matrix is `-solver.reduced_hessian(pins)`, verified to
+  1.1e-6. Both come off the monitoring solve the engineer already ran, which is
+  Buse's point about the score test: Wald needs the unrestricted fit, the
+  likelihood ratio needs both, the score needs only the restricted one.
+
+  Measured over 600 randomized fault injections, the free marginal ranking
+  `|s_j| / sqrt(2 H_jj)` names the drifted parameter first 94% of the time and
+  in its top two 99%, against 84%/89% for a Wald ranking that costs an extra
+  solve and is defined on only two-thirds of campaigns (the reduced Hessian at
+  the pinned point is indefinite on the rest). The raw score reaches 46%/75%
+  and scores 0% on two parameters. Rates are empirical, never nominal
+  p-values; a null calibration (mean 0, sd 0.94-1.00) is what earns the
+  z-score label.
+
+  The sequential-modular comparison is measured rather than asserted, and the
+  expected argument **fails**: central differences across a Wegstein-accelerated
+  tear loop got the ranking right in all 18 tolerance-by-step cells, because a
+  converged tear loop makes smooth error that cancels centrally. What survives
+  is cost (900 flowsheet solves against one solve plus p back-solves), an
+  undiagnosable step window, and the structural point that a modular flowsheet
+  has no multipliers to read. Also: an analyzer bias masquerading as separator
+  drift, its confounding shown in the scaled information spectrum, and a
+  design-of-experiments fix that lifts both discrimination rates from 67%/75%
+  to 100%.
+
 - **Notebook 42, `python/notebooks/42_mixing_equations_and_jax.ipynb`.** One
   model, two front ends. POUNCE's equation surface (`NlExpr` /
   `build_nl_problem`) has exact tape AD and exact sparsity but no callback
