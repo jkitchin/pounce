@@ -67,7 +67,7 @@ changes.
   0.87-1.02 — the free statistic *is* the modular engineer's own diagnostic,
   evaluated in one step instead of a search. The disagreement is entirely
   price: 414 000 tear sweeps, 3.73 million single-run flowsheet convergences,
-  104 s, against one already-paid-for solve per campaign.
+  99 s, against one already-paid-for solve per campaign.
 
   The expected argument against the modular route fails too: central
   differences across a Wegstein-accelerated tear loop got the ranking right in
@@ -77,16 +77,33 @@ changes.
   and so leaves no multiplier — LR and Wald are reachable from a modular
   flowsheet, the score is not.
 
+  A ledger prices all four routes in solve counts rather than seconds, since
+  seconds are a fact about one machine: 69 profile-SSE evaluations for the
+  one-parameter-at-a-time regression, 9 for central differences on the profile
+  SSE, 1 extra nonlinear solve for Wald, 0 for the score. Finite differencing
+  is therefore *cheaper* than the regression it replaces, not more expensive —
+  the honest direction, and not the one the pitch wanted. Code volume is a
+  wash: 10, 3, 17 and 10 executable lines for the four diagnostics, 46 to 62
+  once the model each stands on is carried, because both models are the same
+  nine steady states written down twice. What separates them is tuning knobs —
+  none on the simultaneous routes, five across the modular ones (bracket, tear
+  tolerance, search tolerance, step h), no right default and no way to check
+  themselves from inside. Demonstrated by making one fail: a golden-section
+  bracket whose upper wall falls 14% short of the truth still ranks correctly,
+  and returns a fitted value 0.04% below that wall at an SSE of 2525 against
+  25.3 for the simultaneous refit of the same single parameter — with nothing
+  in the search reporting that it stopped at the wall.
+
   The cost claim is then swept over the dimension it was measured in, because
   one 68-variable model is a corpus uniform in smallness: campaigns from 9 runs
   to 288 (67 variables to 2020), parameter blocks from 4 to 7. The modular
   diagnosis costs 800 tear sweeps — 7 200 single-run flowsheet convergences at
   the small end, 230 400 at the large — against p back-solves through a
   factorization the monitoring solve already produced. The wall-clock ratio
-  falls (707x to 41x) against a comparator that converges the whole campaign in
-  one vectorised sweep and stays in the thousands (5 270x at nine runs, peaking
-  at 7 909x, easing to 5 660x at 288) against one that converges a flowsheet at
-  a time; the separation never closes and never drops below 39x, and which way
+  falls (643x to 40x) against a comparator that converges the whole campaign in
+  one vectorised sweep and stays in the thousands (4 431x at nine runs, peaking
+  at 7 271x, easing to 5 655x at 288) against one that converges a flowsheet at
+  a time; the separation never closes and never drops below 38x, and which way
   it moves is a fact about the modular tool. Also: an
   analyzer bias masquerading as separator drift, its confounding shown in the
   scaled information spectrum, and a design-of-experiments fix that lifts both
