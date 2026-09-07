@@ -873,7 +873,9 @@ def _solve_fit(
     dpopt = None
     if sensitivity and not pr.streaming:
         dpopt = _data_sensitivity(
-            solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok
+            solver, pr.model_jac, pr.xdata, pr.w, pr.m_con, popt, factor_ok,
+            active_mask=active_mask, jac_combined=pr.jac_combined,
+            g_combined=pr.g_combined, cl=pr.cl, cu=pr.cu,
         )
 
     return CurveFitResult(
@@ -1849,7 +1851,10 @@ def _covariance(
     return s2 * np.linalg.pinv(M), "jacobian"
 
 
-def _data_sensitivity(solver, model_jac, xdata, w, m_con, popt, factor_ok):
+def _data_sensitivity(
+    solver, model_jac, xdata, w, m_con, popt, factor_ok,
+    active_mask=None, jac_combined=None, g_combined=None, cl=None, cu=None,
+):
     """``dpopt/ddata`` (n_params x n_data).
 
     For a (weighted) least-squares fit the implicit-function theorem gives
@@ -1858,10 +1863,44 @@ def _data_sensitivity(solver, model_jac, xdata, w, m_con, popt, factor_ok):
     trustworthy each ``inv(H_S) g_i`` is a back-solve against pounce's
     converged factor, fanned out in one ``kkt_solve_many`` call; otherwise the
     same value is formed from the dense Gauss-Newton Hessian.
+
+    That formula is only admissible with **nothing active**. A parameter
+    pinned at a bound cannot move at all, and a data perturbation must leave
+    the active constraints satisfied -- so where bounds or general constraint
+    rows bind, the influence is projected onto the joint active-constraint
+    nullspace, exactly as the covariance is (:func:`_projected_covariance`).
+    Differentiating the KKT system of the constrained fit w.r.t. ``y_i``::
+
+        [ H_S  A^T ] [ dp   ]   [ 2 w_i^2 g_i ]
+        [ A    0   ] [ dlam ] = [      0      ]
+
+    gives ``dp = Z (Z^T M Z)^-1 Z^T w_i^2 g_i`` with ``M = H_S / 2`` the
+    Gauss-Newton Hessian and ``Z`` an orthonormal basis of ``null(A)``. Rows
+    for bound-pinned parameters come out exactly zero and ``A dp = 0`` holds
+    by construction; the unconstrained branch is recovered when ``Z = I``.
+    As with the covariance, ``A`` is the linearization at ``popt``, so for
+    nonlinear constraints this is the first-order influence (pounce#922).
     """
     J = model_jac(xdata, popt)            # (m, n) dmodel/dp at the optimum
     n = popt.size
     m = J.shape[0]
+
+    # --- anything binding? project onto its nullspace ------------------
+    A_gen = _active_constraint_jac(popt, jac_combined, g_combined, cl, cu)
+    if _n_active(active_mask, A_gen) > 0:
+        rows = []
+        if active_mask is not None and active_mask.any():
+            rows.append(np.eye(n)[active_mask])       # unit row per pinned bound
+        if A_gen is not None and A_gen.shape[0] > 0:
+            rows.append(np.atleast_2d(A_gen))
+        Z = _nullspace(np.vstack(rows))               # (n, n - rank)
+        if Z.shape[1] == 0:                           # active set pins popt fully
+            return np.zeros((n, m))
+        Jw = J * w[:, None]
+        M = Jw.T @ Jw                                 # = H_S / 2
+        reduced = Z @ np.linalg.pinv(Z.T @ M @ Z) @ Z.T
+        return (w ** 2)[None, :] * (reduced @ J.T)
+
     dim = solver.kkt_dim
     if not factor_ok or dim is None or m_con != 0:
         Jw = J * w[:, None]

@@ -158,6 +158,87 @@ def test_sensitivity_matches_pinv_and_finite_difference():
         np.testing.assert_allclose(r.dpopt_ddata[:, i], fd, rtol=8e-2, atol=2e-2)
 
 
+def _refit_influence(fit_kw, x, y, p0, i, h=1e-4):
+    """Ground-truth ``dpopt/dy_i``: perturb one datum, re-solve, difference."""
+    yp = y.copy(); yp[i] += h
+    ym = y.copy(); ym[i] -= h
+    fp = pounce.curve_fit(expdecay, x, yp, p0=p0, **fit_kw)
+    fm = pounce.curve_fit(expdecay, x, ym, p0=p0, **fit_kw)
+    return (fp.popt - fm.popt) / (2.0 * h)
+
+
+def test_sensitivity_zero_for_bound_pinned_parameter():
+    """A parameter pinned at a bound cannot move, so its influence is 0.
+
+    pounce#922: this returned ``pinv(J)`` -- a nonzero row for the pinned
+    parameter, and *sign errors* on the free ones.
+    """
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    kw = dict(bounds=[(0, np.inf), (None, None), (1.0, 2.0)])
+
+    r = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+    assert r.active_mask[2] and not r.active_mask[0] and not r.active_mask[1]
+
+    # the pinned row is exactly zero, not merely small
+    np.testing.assert_array_equal(r.dpopt_ddata[2], np.zeros(x.size))
+
+    # and the free rows now agree with a re-solve in sign and rough size
+    # (the residual gap is the documented Gauss-Newton linearization)
+    for i in (0, 12):
+        fd = _refit_influence(kw, x, y, p0, i)
+        got = r.dpopt_ddata[:, i]
+        assert np.all(np.sign(got[:2]) == np.sign(fd[:2]))
+        np.testing.assert_allclose(got[:2], fd[:2], rtol=0.75, atol=1e-3)
+
+    # the old answer is emphatically not this one
+    J = np.column_stack(
+        [np.exp(-r.popt[1] * x), -r.popt[0] * x * np.exp(-r.popt[1] * x), np.ones_like(x)]
+    )
+    assert np.abs(r.dpopt_ddata - np.linalg.pinv(J)).max() > 0.1
+
+
+def test_sensitivity_lies_in_active_constraint_nullspace():
+    """With ``a + c <= K`` binding, every column satisfies ``da + dc = 0``.
+
+    pounce#922: the returned matrix violated the constraint it was fitted
+    under, by ``da + dc = 0.77`` on the most influential point.
+    """
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    con = [{"type": "ineq", "fun": lambda p: 2.6 - (p[0] + p[2])}]
+    kw = dict(constraints=con)
+
+    r = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, **kw)
+    assert abs((r.popt[0] + r.popt[2]) - 2.6) < 1e-6      # constraint is active
+
+    # the perturbation stays on the constraint surface
+    np.testing.assert_allclose(
+        r.dpopt_ddata[0] + r.dpopt_ddata[2], 0.0, atol=1e-9
+    )
+
+    for i in (0, 12):
+        fd = _refit_influence(kw, x, y, p0, i)
+        np.testing.assert_allclose(r.dpopt_ddata[:, i], fd, rtol=0.75, atol=1e-2)
+
+
+def test_sensitivity_unaffected_by_an_inactive_constraint():
+    """An inactive constraint constrains nothing, so do not project on it."""
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.2, 5.0, 25)
+    y = expdecay_np(x, 3.0, 1.2, 0.5) + rng.normal(0, 0.05, x.size)
+    p0 = [3.0, 1.0, 0.5]
+    slack = [{"type": "ineq", "fun": lambda p: 50.0 - (p[0] + p[2])}]
+
+    free = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True)
+    lax = pounce.curve_fit(expdecay, x, y, p0=p0, sensitivity=True, constraints=slack)
+    np.testing.assert_allclose(lax.dpopt_ddata, free.dpopt_ddata, rtol=1e-6, atol=1e-8)
+
+
 # --------------------------------------------------------------------------
 # 6. Parameter constraints: positivity, range, general relation.
 # --------------------------------------------------------------------------

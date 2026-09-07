@@ -128,6 +128,24 @@ matrix whose entry `[j, i]` is how fitted parameter `j` moves when data point
 `∂p*/∂y_i = 2 wᵢ² · H_S⁻¹ gᵢ`, computed as a single batched back-solve against
 the converged factor (`Solver.kkt_solve_many`).
 
+`H_S` is the **Gauss-Newton** Hessian, the same one `curve_fit` hands the
+solver as its search Hessian and the same one behind `pcov` — so this is the
+first-order influence, not the exact derivative of the re-solve. The two differ
+by the neglected residual-curvature term `Σ rₖ ∇²fₖ`, which grows with the
+residuals: a few percent on a well-fit interior problem, but tens of percent
+where a bound or constraint holds the fit away from its unconstrained optimum.
+Take it as a ranking of points, and re-solve if you need the number itself.
+
+When bounds or general constraints are **active**, the influence is projected
+onto the joint active-constraint nullspace — the same reduced-Hessian recipe
+`pcov` uses. A parameter pinned at a bound gets a row of exactly zero, since it
+cannot move at all, and the columns satisfy `A · ∂p*/∂y_i = 0` so a perturbation
+leaves the active constraints satisfied. Before
+[#922](https://github.com/jkitchin/pounce/issues/922) the unconstrained formula
+was returned regardless, which reported nonzero influence for pinned
+parameters, sign errors on the free ones, and columns that violated the very
+constraint the fit was solved under.
+
 ```python
 res = pounce.curve_fit(model, x, y, p0=[1, 1, 0], sensitivity=True)
 db = res.dpopt_ddata[1]              # sensitivity of parameter b

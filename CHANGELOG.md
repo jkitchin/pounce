@@ -380,6 +380,28 @@ changes.
 
 ### Fixed
 
+- **`curve_fit(sensitivity=True)` ignored the active set
+  ([#922](https://github.com/jkitchin/pounce/issues/922)).**
+  `CurveFitResult.dpopt_ddata` returned `pinv(J)` — the unweighted,
+  unconstrained, Gauss-Newton influence — for *every* fit, including ones with
+  active bounds or active general constraints, where that answer is
+  inadmissible. A parameter pinned at a bound was reported as having nonzero
+  influence when it cannot move at all; free parameters came back with the
+  wrong sign; and with `a + c ≤ 2.6` binding, the returned columns gave
+  `da + dc = 0.78` instead of 0, violating the constraint the fit was solved
+  under. Measured against leave-one-out re-solves, the general-constraint case
+  was off by 4× the scale of the true influence. The influence is now projected
+  onto the joint active-constraint nullspace via the same reduced-Hessian
+  recipe `pcov` already used — pinned rows are exactly zero and
+  `A · ∂p*/∂y = 0` holds by construction. `_data_sensitivity` was never passed
+  `active_mask`, so it could not apply the guard its sibling `_covariance` had
+  carried since the feature landed; the one existing test requested
+  `sensitivity=True` on an unconstrained fit only, and asserted equality to
+  `pinv(J)` — pinning the special case as the general contract. Three tests now
+  cover the branches: bound-pinned, active-constraint nullspace, and an
+  inactive constraint that must *not* project.
+
+
 - **`feral_refine` was documented as `no` and ran as `yes`
   ([#909](https://github.com/jkitchin/pounce/issues/909)).** `pounce
   --print-options` reported the default as `no`, the book said `no`, and on
