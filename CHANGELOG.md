@@ -34,6 +34,86 @@ changes.
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
 
+- **Notebook 45, `python/notebooks/45_which_parameter_stopped_fitting.ipynb`.**
+  A plant model calibrated at commissioning stops matching new data. Which
+  *parameter* drifted? Reusing notebook 41's recycle flowsheet as a
+  data-reconciliation fit, each parameter is a variable held by an equality
+  row, so the score is that row's Lagrange multiplier —
+  `s = -info["mult_g"][pins]`, verified against central differences to 1.5e-8 —
+  and the information matrix is `-solver.reduced_hessian(pins)`, verified to
+  1.1e-6. Both come off the monitoring solve the engineer already ran, which is
+  Buse's point about the score test: Wald needs the unrestricted fit, the
+  likelihood ratio needs both, the score needs only the restricted one.
+
+  Measured over 600 randomized fault injections, the free marginal ranking
+  `|s_j| / sqrt(2 H_jj)` names the drifted parameter first 94% of the time and
+  in its top two 99%, against 84%/89% for a Wald ranking that costs an extra
+  solve and is defined on only two-thirds of campaigns (the reduced Hessian at
+  the pinned point is indefinite on the rest). The raw score reaches 46%/75%
+  and scores 0% on two parameters. Rates are empirical, never nominal
+  p-values; a null calibration (mean 0, sd 0.94-1.00) is what earns the
+  z-score label.
+
+  The sequential-modular comparison is measured rather than asserted, and it
+  does not go the way the pitch wants. What a good modular shop runs is a
+  one-parameter-at-a-time refit — a case study per parameter, driven by golden
+  section on the profile SSE inside the tear loop — which is the
+  likelihood-ratio row of Buse's table and had been quoted three times in this
+  repository's notebooks without ever being measured. It is **right**: over 60
+  randomized injections it reaches 92%/100%, ties the free ranking, and names
+  the same parameter first in 100% of trials. That is not luck. `z_j^2` is the
+  second-order expansion of the SSE drop from refitting parameter j alone, and
+  the measured ratio `z_j^2 / dSSE` has median 1.00 with a 10-90% range of
+  0.87-1.02 — the free statistic *is* the modular engineer's own diagnostic,
+  evaluated in one step instead of a search. The disagreement is entirely
+  price: 414 000 tear sweeps, 3.73 million single-run flowsheet convergences,
+  99 s, against one already-paid-for solve per campaign. Price and accuracy are
+  not separate arguments there, and the notebook says so: 62 100 flowsheet
+  convergences per diagnosis is why the modular procedure that ties is a
+  scheduled exercise rather than an alarm response, and the two things that do
+  run when an alarm fires — the residual sort and refit-everything — are the
+  46%/75% and 84%/89% rows.
+
+  The expected argument against the modular route fails too: central
+  differences across a Wegstein-accelerated tear loop got the ranking right in
+  all 18 tolerance-by-step cells, because a converged tear loop makes smooth
+  error that cancels centrally. What survives is cost, an undiagnosable step
+  window, and the structural point that a tear loop solves nothing constrained
+  and so leaves no multiplier — LR and Wald are reachable from a modular
+  flowsheet, the score is not.
+
+  A ledger prices all four routes in solve counts rather than seconds, since
+  seconds are a fact about one machine: 69 profile-SSE evaluations for the
+  one-parameter-at-a-time regression, 9 for central differences on the profile
+  SSE, 1 extra nonlinear solve for Wald, 0 for the score. Finite differencing
+  is therefore *cheaper* than the regression it replaces, not more expensive —
+  the honest direction, and not the one the pitch wanted. Code volume is a
+  wash: 10, 3, 17 and 10 executable lines for the four diagnostics, 46 to 62
+  once the model each stands on is carried, because both models are the same
+  nine steady states written down twice. What separates them is tuning knobs —
+  none on the simultaneous routes, five across the modular ones (bracket, tear
+  tolerance, search tolerance, step h), no right default and no way to check
+  themselves from inside. Demonstrated by making one fail: a golden-section
+  bracket whose upper wall falls 14% short of the truth still ranks correctly,
+  and returns a fitted value 0.04% below that wall at an SSE of 2525 against
+  25.3 for the simultaneous refit of the same single parameter — with nothing
+  in the search reporting that it stopped at the wall.
+
+  The cost claim is then swept over the dimension it was measured in, because
+  one 68-variable model is a corpus uniform in smallness: campaigns from 9 runs
+  to 288 (67 variables to 2020), parameter blocks from 4 to 7. The modular
+  diagnosis costs 800 tear sweeps — 7 200 single-run flowsheet convergences at
+  the small end, 230 400 at the large — against p back-solves through a
+  factorization the monitoring solve already produced. The wall-clock ratio
+  falls (643x to 40x) against a comparator that converges the whole campaign in
+  one vectorised sweep and stays in the thousands (4 431x at nine runs, peaking
+  at 7 271x, easing to 5 655x at 288) against one that converges a flowsheet at
+  a time; the separation never closes and never drops below 38x, and which way
+  it moves is a fact about the modular tool. Also: an
+  analyzer bias masquerading as separator drift, its confounding shown in the
+  scaled information spectrum, and a design-of-experiments fix that lifts both
+  discrimination rates from 67%/75% to 100%.
+
 - **Notebook 42, `python/notebooks/42_mixing_equations_and_jax.ipynb`.** One
   model, two front ends. POUNCE's equation surface (`NlExpr` /
   `build_nl_problem`) has exact tape AD and exact sparsity but no callback

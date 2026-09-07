@@ -65,6 +65,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 34 | [`34_phase_envelope_peng_robinson.ipynb`](34_phase_envelope_peng_robinson.ipynb) | Peng–Robinson phase envelopes through cricondenbar/cricondentherm folds; augmented fold refinement, published-mixture validation, composition/`k_ij` sensitivities checked by complete retraces, and inverse composition design. |
+| 45 | [`45_which_parameter_stopped_fitting.ipynb`](45_which_parameter_stopped_fitting.ipynb) | A calibrated flowsheet stops matching new plant data — which parameter drifted? The score test reads `-mult_g[pin]` and `-reduced_hessian(pins)` off the monitoring solve that already ran, and ranks the culprit first in 94% of 600 randomized fault injections against 84% for a Wald statistic costing an extra solve. Includes the measured sequential-modular comparison (whose expected accuracy argument does *not* hold), sensor-bias-vs-drift confounding and its design-of-experiments fix, and where the linearization breaks. |
 
 ## Convex & conic (`pounce.qp`)
 
