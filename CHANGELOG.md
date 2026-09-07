@@ -67,7 +67,12 @@ changes.
   0.87-1.02 — the free statistic *is* the modular engineer's own diagnostic,
   evaluated in one step instead of a search. The disagreement is entirely
   price: 414 000 tear sweeps, 3.73 million single-run flowsheet convergences,
-  99 s, against one already-paid-for solve per campaign.
+  99 s, against one already-paid-for solve per campaign. Price and accuracy are
+  not separate arguments there, and the notebook says so: 62 100 flowsheet
+  convergences per diagnosis is why the modular procedure that ties is a
+  scheduled exercise rather than an alarm response, and the two things that do
+  run when an alarm fires — the residual sort and refit-everything — are the
+  46%/75% and 84%/89% rows.
 
   The expected argument against the modular route fails too: central
   differences across a Wegstein-accelerated tear loop got the ranking right in
