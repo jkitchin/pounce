@@ -481,11 +481,22 @@ changes.
   gets the same message from both spellings of `check_psd`. One site covers
   the seven entry points that check the Hessian before they build:
   `solve_qp` (both `method=`), `solve_qp_batch`, `solve_qp_multi_rhs`,
-  `solve_socp`, `QpFactorization`, `QpSensitivity`. The same call lands in
-  `_guard_psd` on the `jax` and `torch` layers, where `P` is concrete on the
-  host forward — gh #874's lesson applied before the report rather than
-  after. It is deliberately **not** folded into `_validate_p_shape`, which
-  those two frontends call at trace time on a tracer: a shape is known there
+  `solve_socp`, `QpFactorization`, `QpSensitivity`.
+
+  The same call lands in `_guard_psd` on the `jax` and `torch` layers, where
+  `P` is concrete on the host forward — gh #874's lesson applied before the
+  report rather than after. There it runs **unconditionally**, above the
+  `check_psd is False` early return, exactly where gh #874 put the shape
+  check and for the same reason: `check_psd` says whether the caller wants
+  the *definiteness* precondition verified, and is not permission to solve a
+  different model. A `NaN` in `P`'s **upper** triangle is that different
+  model — `_to_coo_lower` drops it, so those two layers *solved the matrix
+  without it*: measured on `2·I₄` with `P[0, 3] = nan`, no exception and
+  `x = [-0.5, -0.5, -0.5, -0.5]`, the optimum of a model the caller never
+  passed, with `_kkt_backward`'s gradients taken through it. Unlike `qp.py`,
+  there is no `_validate` behind those layers to catch it a moment later.
+  The check is deliberately **not** folded into `_validate_p_shape`, which
+  both frontends also call at trace time on a tracer: a shape is known there
   and a value is not.
 
   Reproducing it turned up a fourth symptom the report does not name, and a
@@ -517,6 +528,19 @@ changes.
   behaviour — fails 92 of 161. The 69 survivors are the upper-triangle
   placement, the sibling arguments, the `±inf`-bounds control and the two
   positive controls, which is the pattern a correct fix has to produce.
+
+  `python/tests/test_issue932_ad_frontends_nonfinite_p.py` (19 cases) owns
+  the two differentiable layers, which neither guard above reaches — the
+  backstop reads the lower triangle and `_validate` is not on their path.
+  Deleting the check from `pounce/jax/_qp.py` fails 4 jax rows and from
+  `pounce/torch/_qp.py` 4 torch rows; moving it back below the
+  `check_psd is False` return fails the 4 `check_psd=False` rows. The `qp`
+  rows never move under any of the three, and the lower-triangle rows survive
+  deleting the frontend check outright — the backstop covers those — so the
+  file measures exactly what each guard owns. Both AD files are now listed in
+  ci.yml's `python-test-torch` job: it is the only job with torch installed,
+  and gh #874's file, whose `importorskip("torch")` is module-level, was
+  running in no job at all.
 
 - **`curve_fit(sensitivity="exact")`, and two accuracy defects in
   `dpopt_ddata` ([#923](https://github.com/jkitchin/pounce/issues/923),

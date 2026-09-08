@@ -49,6 +49,32 @@ both (the parent's behaviour)        92
 Neither guard alone covers the site, which is why both are here: the frontend
 check owns the *order* (and reads the dense ``P``, so it sees an entry the
 lower-triangle filter drops), the backstop owns the *verdict*.
+
+What this file is **not** evidence about
+----------------------------------------
+
+* **A non-finite *sibling* against a mis-shaped ``P``.** The two spellings
+  still disagree there, and identically on the parent::
+
+      P = np.eye(7, 5), c = [1, nan, 1, 1, 1]
+        default          -> ValueError: solve_qp: `P` has shape (7, 5) but must be (5, 5)
+        check_psd=False  -> ValueError: solve_qp: `c` contains NaN or Inf
+
+  It is the same class of disagreement this file exists to close, and it is
+  deliberately left open: the pre-check is handed ``P`` and ``c`` and nothing
+  else, so making it agree here means running the whole of ``_validate``
+  above the guard — a different change, on a path where the current
+  disagreement costs an accurate message about a *different* argument rather
+  than an opaque one. ``test_a_P_that_is_both_mis_shaped_and_nonfinite_
+  agrees_with_validate`` covers the ``P``-only case and must not be read as
+  covering this one.
+
+* **The differentiable frontends.** ``pounce.jax`` and ``pounce.torch`` run
+  their own ``_guard_psd`` and never reach either guard tested here — the
+  backstop reads the lower triangle, and ``_validate`` is not on their path
+  at all. ``test_issue932_ad_frontends_nonfinite_p.py`` owns them, and the
+  case that separates them (a ``NaN`` in the upper triangle, which those
+  layers silently *solved without*) has no analogue on this path.
 """
 
 import numpy as np
@@ -66,9 +92,17 @@ from pounce import (
 EXPECTED = r"`P` contains NaN or Inf"
 
 # Every way a non-finite entry can sit in `P`, including one the pre-check
-# never reads: the guard takes the *lower* triangle, so `nan-upper` is a
-# control -- it reached `_validate` intact before the fix and must keep the
-# same message after it, the way gh #862's `np.eye(7, 5)` did on shape.
+# never reads: the guard takes the *lower* triangle, so `nan-upper` is the
+# control -- the message is the same before and after, the way gh #862's
+# `np.eye(7, 5)` was on shape.
+#
+# Its *mechanism* is not the same, which is worth stating in a file about
+# guards that stop describing what they do. Before the fix it reached
+# `_validate`, the pre-check having found nothing to object to. After it, it
+# raises from `_psd_verdict` -> `_reject_nonfinite` (traced), because that
+# check reads the dense `P` rather than the lower-triangle COO. So this row
+# passes on the parent for one reason and here for another, and it is the
+# only row in the file of which that is true.
 PLACEMENTS = ("inf-diag", "nan-diag", "inf-lower", "nan-upper")
 
 
