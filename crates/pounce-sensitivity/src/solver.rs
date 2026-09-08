@@ -58,6 +58,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use crate::PdSensBacksolver;
 use crate::activity::{ActivityReport, ReducedActivityReport, ReducedRowActivityReport};
 use crate::backsolver::SensBacksolver;
+use crate::boundcheck::PathOperator;
 use crate::index::{FullXSlice, VarToFull, VarX};
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
@@ -1200,6 +1201,59 @@ impl Solver {
             pinned.into_iter().map(|p| p as Index).collect(),
             stop,
         ))
+    }
+
+    /// [`crate::boundcheck::path_direction`] for a working set the
+    /// caller names, and the force each held row carries under it.
+    /// Study surface, and the seam the two pins are measured against
+    /// each other through.
+    ///
+    /// `released_bound_rows` are compound bound-multiplier rows, as
+    /// [`Self::weakly_active_bounds`] reports them;
+    /// `held_primal_rows` are primal rows -- `x` block for a
+    /// variable, `s` block for a constraint's own limit (gh#928).
+    ///
+    /// `operator` picks which *operator* the walk's (single, exact)
+    /// Schur pin is applied to.
+    /// [`Plain`](PathOperator::Plain) is the released system as the
+    /// factorization already holds it -- one factorization for the
+    /// whole segment, and no inverse at all when releasing two
+    /// curvature-free variables that share a row leaves the
+    /// stationarity rows dependent (gh#930).
+    /// [`Regularized`](PathOperator::Regularized) raises the pinned
+    /// diagonals until it is invertible, at the cost of rebuilding
+    /// the diagonal per solve, so the factorization cache misses.
+    /// [`Preferred`](PathOperator::Preferred) is what the walk itself
+    /// runs: the plain one, falling back when it fails *or when its
+    /// pins do not take*, which is not the same test -- see
+    /// [`crate::boundcheck::path_direction`].
+    ///
+    /// Both operators give the same answer: the Schur row enforces
+    /// `Eᵀ w = 0`, which annihilates the added diagonal, so the
+    /// system solved is the released one either way and both return
+    /// values agree in value, frame and units.
+    /// `issue_930_two_curvature_free_releases.rs` measures that.
+    pub fn path_direction_decided(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+        released_bound_rows: &[Index],
+        held_primal_rows: &[Index],
+        operator: PathOperator,
+    ) -> Result<(Vec<Number>, Vec<Number>), SolverError> {
+        let rhs_plain = self.parametric_rhs_full(pin_constraint_indices, deltas)?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let released: Vec<usize> = released_bound_rows.iter().map(|&r| r as usize).collect();
+        let held: Vec<usize> = held_primal_rows.iter().map(|&r| r as usize).collect();
+        crate::boundcheck::path_direction_with(
+            &state.backsolver,
+            &rhs_plain,
+            &released,
+            &held,
+            operator,
+        )
+        .map_err(SolverError::SensComputationFailed)
     }
 
     /// The all-released step: the plain parametric step solved with

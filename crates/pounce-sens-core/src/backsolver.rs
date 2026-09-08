@@ -112,6 +112,40 @@ pub trait SensBacksolver {
         false
     }
 
+    /// [`Self::solve_released`] with each **primal** KKT row in
+    /// `pinned` carrying an extra diagonal stiff enough to hold that
+    /// coordinate in place.
+    ///
+    /// This is not the pin the walk applies -- that one is a Schur row
+    /// on top of the factored system, and it is exact. This is the
+    /// *operator* that pin is applied to, for the case where the
+    /// released system on its own has no inverse for a Schur
+    /// complement to be built from: releasing a bound takes its
+    /// `Sigma` off the diagonal, and on a model with no curvature two
+    /// released variables sharing a constraint are left with linearly
+    /// dependent stationarity rows (gh#930).
+    ///
+    /// Adding the diagonal back regularizes exactly those rows, and
+    /// costs nothing in accuracy, because the Schur pin then holds the
+    /// same coordinates at zero: `Eᵀw = 0` annihilates the term that
+    /// was added, so the pinned system solved is the released one
+    /// after all. The diagonal has to be *reachable* -- large enough
+    /// that the regularized operator is invertible, small enough that
+    /// the row's own couplings survive it, which is the gh#737
+    /// ceiling.
+    ///
+    /// `false` by default, which leaves the caller reporting the
+    /// Schur pin's failure.
+    fn solve_released_pinned(
+        &self,
+        _released: &[usize],
+        _pinned: &[usize],
+        _rhs: &[Number],
+        _lhs: &mut [Number],
+    ) -> bool {
+        false
+    }
+
     /// Whether [`Self::solve_released`] is implemented.
     fn supports_release(&self) -> bool {
         false

@@ -833,17 +833,38 @@ changes.
   own. The NLP arm has no matching gap, because gh#928 widened its box
   globally rather than through a view.
 
-### Changed
-
 - **A walk that releases two bounds at once with no curvature in the released
-  coordinates is refused rather than answered**, and the gap now has an open
-  issue ([#930](https://github.com/jkitchin/pounce/issues/930)). Holding a
-  bound the path reached is a Schur pin on the already-factored released
-  system, which must be invertible before the pins go on; two curvature-free
-  releases sharing a constraint make it singular. Refusing is an improvement
-  on the pre-#928 behaviour, which was to return a point outside the box in
-  silence, but it is not the right final answer.
+  coordinates is answered, not refused
+  ([#930](https://github.com/jkitchin/pounce/issues/930)).** Holding a bound
+  the path reached is a Schur pin on the already-factored released system, so
+  `K⁻¹` has to exist before a single pin goes on. Releasing a bound takes its
+  `Sigma` off the diagonal; with no curvature there the diagonal is exactly
+  zero, and two released variables sharing a constraint row are left with
+  linearly dependent stationarity rows. The walk reported `augmented solve
+  failed`.
 
+  The pin did not change — the *operator* it rides on did. On failure the walk
+  retries against `K_released + Σ_pin E Eᵀ`, whose pinned diagonals are raised
+  until it inverts, and the same Schur row goes on top. `Eᵀw = 0` annihilates
+  exactly the term that was added, so the system actually solved is the
+  released one, in the identical frame and units; a walk that takes the plain
+  operator on one segment and the regularized one on the next still
+  accumulates a single `h.mult` per hold. `Σ_pin` is the gh#737 ceiling — the
+  stiffest diagonal the row's own couplings survive — so the held coordinate
+  creeps by roundoff rather than being infinitely stiff, which is bounded by a
+  test rather than asserted.
+
+  The fallback is triggered on the **pinned rows' residual**, not on the
+  factorization returning an error, and referenced to the pin's own
+  right-hand side rather than to `max|d|`. Both choices are load-bearing and
+  both were measured: at rank deficiency one the plain factorization absorbs
+  the singularity, returns `Ok`, and hands back a held row carrying a fifth of
+  the step — while the multiplier rows run at `3e11`, so a 200% miss reads
+  `3e-12` against `max|d|`. The answer is checked against a re-solve at the
+  perturbed parameter, which is the only guard in the layer that reads a
+  number the sensitivity code did not produce.
+
+### Changed
 
 - **The path walk's box-repair budget is the base-activity table's length**
   ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a

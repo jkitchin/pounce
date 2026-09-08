@@ -881,6 +881,7 @@ where
         let view = ReleasedView {
             base: backsolver.clone(),
             rows: released.to_vec(),
+            pinned: Vec::new(),
         };
         let mut pin_app = SensApplication::new(mk(rows.clone())?, view, opts);
         let mut du = vec![0.0; rows.len()];
@@ -1103,6 +1104,12 @@ where
 struct ReleasedView<B: crate::backsolver::SensBacksolver + Clone> {
     base: B,
     rows: Vec<usize>,
+    /// Primal rows whose diagonal the *operator* stiffens, empty for
+    /// the ordinary released view. See
+    /// [`crate::backsolver::SensBacksolver::solve_released_pinned`]:
+    /// this is not the pin, it is the regularization that lets the pin
+    /// be applied at all (gh#930).
+    pinned: Vec<usize>,
 }
 
 impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBacksolver
@@ -1112,6 +1119,11 @@ impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBackso
         self.base.dim()
     }
     fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        if !self.pinned.is_empty() {
+            return self
+                .base
+                .solve_released_pinned(&self.rows, &self.pinned, rhs, lhs);
+        }
         // Nothing released is the converged system, so ask for it
         // directly: routing an empty set through `solve_released` asks
         // a backsolver that cannot release for something it does not
@@ -1857,6 +1869,108 @@ pub struct WeakBound {
     pub lower: bool,
 }
 
+/// Which operator a caller wants the walk's Schur pin applied to.
+///
+/// The pin is the same in all three cases: solve `K w - E du = r`
+/// subject to `Eᵀ w = 0`. What varies is the `K` it rides on, and
+/// [`Preferred`](PathOperator::Preferred) is the only one a solver
+/// should use -- the other two exist so a test can name the operator
+/// it is measuring instead of inferring which one ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathOperator {
+    /// The plain released system, falling back to the regularized one
+    /// when it fails or does not hold the pins. What the walk uses.
+    Preferred,
+    /// The plain released system, and nothing else. Fails outright on
+    /// a working set that leaves it singular.
+    Plain,
+    /// The released system with the pinned rows' diagonals raised
+    /// until it is invertible. Always answers where the plain one
+    /// does, with the same answer, at the cost of a refactorization
+    /// per solve.
+    Regularized,
+}
+
+/// Pin residual (see [`pin_residual`]) below which the plain operator
+/// is taken without trying the regularized one.
+///
+/// It is a **shortcut threshold, not a correctness one**: above it
+/// both operators are run and the one that holds the pins better is
+/// returned, so setting it too low costs a refactorization and never
+/// costs an answer. Its job is to keep the common case -- a walk whose
+/// Schur pin works -- on the cached factorization.
+///
+/// The two populations it sits between were measured on the gh#928
+/// two-soft-bounds model, over the pinned solves its three curvature
+/// arms take:
+///
+/// ```text
+/// pin took     0, 1.4e-16, 1.5e-16, 1.8e-16, 1.9e-16   (n = 14)
+/// pin missed   8.1e-9, 1.0e-1, 1.0e0   (n = 3, plus one outright refusal)
+/// ```
+///
+/// `1e-11` is five orders above the worst residual a pin that took
+/// leaves and three below the smallest one it misses by. An earlier
+/// draft used `1e-8` and let the `8.1e-9` case through -- which is how
+/// that row came to be measured rather than assumed.
+const PIN_TAKE_RTOL: Number = 1e-11;
+
+/// How much of the pinned rows' motion the correction failed to
+/// remove, as a fraction of the motion it was asked to remove.
+///
+/// `want` is what those rows read *before* the correction, which is
+/// the pin's own right-hand side. Referencing the residual to it, and
+/// not to the step as a whole, is the whole point: the compound
+/// vector's multiplier rows run at `Sigma` scale -- `1e11` on the
+/// gh#930 fixture -- so a residual divided by `max |d|` reads `3e-12`
+/// on a pin that missed its target by 200%.
+fn pin_residual(d: &[Number], pinned: &[usize], want: &[Number]) -> Number {
+    let after = pinned
+        .iter()
+        .filter_map(|&i| d.get(i))
+        .fold(0.0, |a: Number, v| a.max(v.abs()));
+    if after == 0.0 {
+        return 0.0;
+    }
+    let before = want.iter().fold(0.0, |a: Number, v| a.max(v.abs()));
+    after / before.max(after)
+}
+
+/// The step for the whole perturbation under the active set the path
+/// has reached, taking whichever of the two operators actually holds
+/// the pins.
+///
+/// The Schur complement is `-Eᵀ K⁻¹ E` on the *released* system, so
+/// `K⁻¹` has to exist before a single hold is applied. Releasing a
+/// bound takes that bound's `Sigma` off the diagonal, and on a model
+/// with no curvature there two released variables sharing a constraint
+/// are left with linearly dependent stationarity rows (gh#930).
+/// Putting the diagonal back where the holds sit regularizes exactly
+/// those rows and changes no answer, since the pin the Schur
+/// complement then applies holds those coordinates at zero and
+/// annihilates the term that was added.
+///
+/// **The plain operator does not always announce that it was
+/// singular.** How loudly it fails depends on how rank-deficient it
+/// is, which is a property of the model rather than of the defect: on
+/// the gh#930 fixture two zero-curvature released rows coincide and
+/// the augmented solve refuses outright, while adding curvature to a
+/// *third* variable leaves the deficiency at one, the factorization
+/// absorbs it, and the answer comes back `Ok` with the held variable
+/// `1e-5` off its bound -- the silent half of the same defect. So the
+/// choice between the operators is made on the pinned rows'
+/// **residual**, not on whether the solve returned an error.
+///
+/// The regularized operator is second because it is not free: its
+/// diagonal is rebuilt per solve, so the factorization cache misses
+/// and every back-solve in the segment re-factors. A walk whose Schur
+/// pin works must keep taking the plain one.
+///
+/// The last two arms never return less than the old contract did: a
+/// direction the plain operator produced is still returned when
+/// neither operator holds the pins, so a caller that used to get an
+/// answer and let [`step_along_path`]'s box repair judge it still
+/// does.
 pub fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
@@ -1866,20 +1980,56 @@ pub fn path_direction<B>(
 where
     B: crate::backsolver::SensBacksolver + Clone,
 {
+    let plain = path_direction_on(backsolver, rhs_plain, released, pinned, false);
+    if matches!(&plain, Ok((_, _, res)) if *res <= PIN_TAKE_RTOL) {
+        return plain.map(|(d, du, _)| (d, du));
+    }
+    let reg = path_direction_on(backsolver, rhs_plain, released, pinned, true);
+    match (plain, reg) {
+        (Ok(p), Ok(r)) => Ok(if r.2 < p.2 { (r.0, r.1) } else { (p.0, p.1) }),
+        (Ok(p), Err(_)) => Ok((p.0, p.1)),
+        (Err(_), Ok(r)) => Ok((r.0, r.1)),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// [`path_direction`] against one of the two operators the pin can be
+/// applied to: the plain released system, or that system with the
+/// pinned rows' diagonals raised enough to make it invertible.
+///
+/// Both take the *same* Schur pin afterwards, so both answer the same
+/// question and report the hold forces in the same units -- which is
+/// what lets a walk that switches between them mid-path keep
+/// accumulating one multiplier per hold.
+fn path_direction_on<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    released: &[usize],
+    pinned: &[usize],
+    regularized: bool,
+) -> Result<(Vec<Number>, Vec<Number>, Number), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    use crate::backsolver::SensBacksolver;
     use crate::sens_app::{SensApplication, SensOptions};
 
     let n_full = backsolver.dim();
-    let mut d = vec![0.0; n_full];
-    let ok = if released.is_empty() {
-        backsolver.solve(rhs_plain, &mut d)
-    } else {
-        backsolver.solve_released(released, rhs_plain, &mut d)
+    let view = ReleasedView {
+        base: backsolver.clone(),
+        rows: released.to_vec(),
+        pinned: if regularized {
+            pinned.to_vec()
+        } else {
+            Vec::new()
+        },
     };
-    if !ok {
+    let mut d = vec![0.0; n_full];
+    if !view.solve(rhs_plain, &mut d) {
         return Err("step_along_path: back-solve failed".into());
     }
     if pinned.is_empty() {
-        return Ok((d, Vec::new()));
+        return Ok((d, Vec::new(), 0.0));
     }
     // Hold each variable where the path left it, on its bound, by
     // asking the augmented system for the correction that takes its
@@ -1891,10 +2041,6 @@ where
     let opts = SensOptions {
         run_sens: true,
         ..SensOptions::default()
-    };
-    let view = ReleasedView {
-        base: backsolver.clone(),
-        rows: released.to_vec(),
     };
     let mut app = SensApplication::new(mk(rows.clone())?, view, opts);
     let rhs: Vec<Number> = pinned.iter().map(|&i| d[i]).collect();
@@ -1908,5 +2054,32 @@ where
     for (k, v) in d.iter_mut().enumerate() {
         *v += corr[k];
     }
-    Ok((d, du))
+    let res = pin_residual(&d, pinned, &rhs);
+    Ok((d, du, res))
+}
+
+/// [`path_direction`] against an operator the caller names.
+///
+/// [`PathOperator::Preferred`] is exactly [`path_direction`]; the
+/// other two skip the choice. The walk itself always takes
+/// `Preferred`.
+pub fn path_direction_with<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    released: &[usize],
+    pinned: &[usize],
+    operator: PathOperator,
+) -> Result<(Vec<Number>, Vec<Number>), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    match operator {
+        PathOperator::Preferred => path_direction(backsolver, rhs_plain, released, pinned),
+        PathOperator::Plain => path_direction_on(backsolver, rhs_plain, released, pinned, false)
+            .map(|(d, du, _)| (d, du)),
+        PathOperator::Regularized => {
+            path_direction_on(backsolver, rhs_plain, released, pinned, true)
+                .map(|(d, du, _)| (d, du))
+        }
+    }
 }

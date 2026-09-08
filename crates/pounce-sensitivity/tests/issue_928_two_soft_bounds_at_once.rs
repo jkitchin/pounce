@@ -404,7 +404,7 @@ fn crossing_two_kinks_is_exact_when_one_bound_is_released() {
     );
 }
 
-/// The walk's released system, and why two releases can kill it.
+/// The walk's released system, and what two releases do to it.
 ///
 /// Holding a bound the path reached is a Schur pin applied to the
 /// factored released system `K`, so `K` itself has to be invertible
@@ -413,68 +413,85 @@ fn crossing_two_kinks_is_exact_when_one_bound_is_released() {
 /// diagonal is then exactly zero, and the stationarity rows of two
 /// such released variables that share a constraint become linearly
 /// dependent -- for the model here, both read `y_c0 = rhs`. `K` is
-/// singular, the Schur solve cannot run, and the walk reports.
+/// singular and the Schur solve cannot run.
 ///
-/// That is a limit of the hold-and-release architecture (gh#852,
-/// tracked open as gh#930), not
-/// of the box repair: pre-fix this same step returned a point outside
-/// the box in silence, which is worse. The repair turned a wrong
-/// answer into a refusal, and the refusal is what this test pins --
-/// together with the measurement that says the cause is what the
-/// paragraph above claims.
+/// Three answers have stood here in turn, and the order is the point.
+/// Pre-gh#928 the step returned a point outside the box in silence.
+/// gh#928's box repair turned that into a refusal -- better, and what
+/// this test used to pin. gh#930 turns the refusal into the answer,
+/// by putting the same exact Schur pin on a *regularized* operator:
+/// `Eᵀ w = 0` annihilates the diagonal that was added to make `K`
+/// invertible, so the system solved is the released one after all.
+///
+/// So this is now an equality assertion against the re-solve, which
+/// is what the file's own "not evidence about" section said a change
+/// that answered this walk would owe. The curvature arms stay,
+/// because they are the measurement that says what the obstruction
+/// *was*: they are the two regularizations that were available
+/// before, and the answer has to be continuous across them.
+/// `issue_930_two_curvature_free_releases.rs` owns the rest.
 #[test]
-fn two_releases_without_curvature_are_refused_not_answered() {
+fn two_releases_without_curvature_are_answered_not_refused() {
     // Below the first kink, stepping past the second. The walk has to
     // release BOTH x's upper (reached and held) and y's lower (its
     // multiplier hits zero), and neither variable has curvature.
     let (lam0, dp) = (1.0 - 1e-6, 1.2);
+    let truth = resolve_at(lam0 + dp);
     let solver = solved_at(lam0);
-    let err = solver.parametric_step_path(&[PIN], &[dp], 64).expect_err(
-        "two curvature-free releases must be refused; returning an \
-             answer here means either the architecture changed -- in \
-             which case assert the answer instead -- or the box check \
-             stopped firing, which is gh#928 back again",
+    let base = solver.converged().expect("converged").x.clone();
+    let (dx, segs) = solver.parametric_step_path(&[PIN], &[dp], 64).expect(
+        "two curvature-free releases must be answered; a refusal here \
+         means the regularized operator gh#930 falls back to stopped \
+         being reachable",
     );
-    let err = format!("{err:?}");
+    let got = [base[0] + dx[0], base[1] + dx[1], base[2] + dx[2]];
+    let err = (0..3)
+        .map(|i| (got[i] - truth[i]).abs())
+        .fold(0.0, Number::max);
     assert!(
-        err.contains("step_along_path"),
-        "the refusal must name the walk that produced it: {err}",
+        err < 1e-9,
+        "walk {got:?} vs re-solve {truth:?}, off by {err:e} over {} segments",
+        segs.len(),
+    );
+    // The pin is stiff, not infinite, so the held coordinate creeps by
+    // the roundoff of its own couplings. That has to stay inside the
+    // box, which is the property gh#928 exists to defend.
+    for (i, &v) in got.iter().enumerate().take(2) {
+        assert!(
+            v <= 1.0 + 1e-12 && v >= -1e-12,
+            "coordinate {i} left the box at {v}",
+        );
+    }
+    assert!(
+        segs.len() >= 2,
+        "the walk crosses two kinks, so it must record breakpoints: {}",
+        segs.len(),
     );
 
-    // The cause, measured rather than argued: curvature on exactly the
-    // two RELEASED variables makes the same step exact, and the same
-    // amount of curvature on the third variable does not. If only the
-    // first of these held, "the released system is singular" would be
-    // indistinguishable from "any regularization helps".
-    let truth = resolve_at(lam0 + dp);
-    for (label, curv, want_ok) in [
-        ("on the two released variables", [1e-3, 1e-3, 0.0], true),
-        ("on the third variable only", [0.0, 0.0, 1e-3], false),
+    // The obstruction, measured rather than argued: curvature on
+    // exactly the two RELEASED variables is what used to rescue this
+    // step, and the same amount on the third variable did not. Both
+    // now answer -- the regularization is no longer the model's job --
+    // and all three agree, which is the continuity claim.
+    for (label, curv) in [
+        ("on the two released variables", [1e-3, 1e-3, 0.0]),
+        ("on the third variable only", [0.0, 0.0, 1e-3]),
     ] {
         let s = solved_curved_at(lam0, curv);
-        let base = s.converged().expect("converged").x.clone();
-        let got = s.parametric_step_path(&[PIN], &[dp], 64);
-        match (got, want_ok) {
-            (Ok((dx, segs)), true) => {
-                let xyw = [base[0] + dx[0], base[1] + dx[1], base[2] + dx[2]];
-                let e = (0..3)
-                    .map(|i| (xyw[i] - truth[i]).abs())
-                    .fold(0.0, Number::max);
-                assert!(
-                    e < 1e-5,
-                    "curvature {label} should make the step exact, got \
-                     {xyw:?} vs {truth:?} (off by {e:e}, {} segments)",
-                    segs.len(),
-                );
-            }
-            (Err(_), false) => {}
-            (Ok(_), false) => panic!(
-                "curvature {label} should NOT rescue the step -- if it \
-                 does, the released system's singularity is not what \
-                 refuses this walk and the doc comment above is wrong",
-            ),
-            (Err(e), true) => panic!("curvature {label} should rescue the step: {e:?}"),
-        }
+        let b = s.converged().expect("converged").x.clone();
+        let (dx, segs) = s
+            .parametric_step_path(&[PIN], &[dp], 64)
+            .unwrap_or_else(|e| panic!("curvature {label} must still answer: {e:?}"));
+        let xyw = [b[0] + dx[0], b[1] + dx[1], b[2] + dx[2]];
+        let e = (0..3)
+            .map(|i| (xyw[i] - got[i]).abs())
+            .fold(0.0, Number::max);
+        assert!(
+            e < 1e-5,
+            "curvature {label} must agree with the curvature-free walk, \
+             got {xyw:?} vs {got:?} (off by {e:e}, {} segments)",
+            segs.len(),
+        );
     }
 }
 
@@ -535,8 +552,9 @@ fn a_firmly_held_bound_is_not_released_alongside_a_soft_one() {
 // | budget the repair loop at zero passes                          | grid (both)                |
 // | seed the watch list empty instead of from `weak_rows`          | nothing here; gh#852 test 4 |
 // | read the crossed side off the base point, not the answer       | grid (both)                |
-// | let the singular released system return its garbage answer     | `two_releases_...`         |
-// | regularize the released system on every walk                   | `two_releases_...` (the third-variable arm passes, so the "on the two released variables" arm is what pins the cause) |
+// | let the singular released system return its garbage answer     | `two_releases_...` (box)   |
+// | make `solve_released_pinned` return `false` (gh#930 fallback off) | `two_releases_...`       |
+// | drop the `Eᵀw = 0` Schur row and keep only the raised diagonal  | `two_releases_...` (equality) |
 // | drop the closed-form check inside `resolve_at`                 | nothing; it guards the oracle, not the walk |
 //
 // `crossing_two_kinks_is_exact_when_one_bound_is_released` stays
@@ -556,12 +574,13 @@ fn a_firmly_held_bound_is_not_released_alongside_a_soft_one() {
 //   bound, so nothing here exercises the `v_l` / `v_u` half of the
 //   bound rows or the `s`-block release diagonal.
 //   `issue_928_a_limit_written_as_a_row.rs` owns that arm.
-// * **The refusal's blast radius.** `two_releases_...` pins that the
-//   walk refuses rather than answers, not that refusing is the best
-//   possible behaviour; gh#930 tracks answering it. Pre-fix this step returned a point outside the
-//   box in silence; a later change that makes the walk *answer* it
-//   correctly should replace that test with an equality assertion, not
-//   delete it.
+// * **The regularized operator's own properties.**
+//   `two_releases_...` pins that the walk answers this step and that
+//   the answer is the re-solve. It says nothing about *how far* the
+//   fallback stretches -- how singular an operator the gh#737 ceiling
+//   can still lift, what the two operators cost against each other,
+//   or that they agree on a step where both run.
+//   `issue_930_two_curvature_free_releases.rs` owns all of that.
 // * **Scaling.** Everything here runs unit-scaled. Leg 1 of
 //   `sens_invariance_legs.rs` owns that dimension.
 // * **Magnitude.** Four variables. The largest convex fixture in the

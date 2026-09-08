@@ -803,6 +803,96 @@ impl PdSensBacksolver {
         true
     }
 
+    /// The diagonal a *path* pin puts on one primal KKT row: the
+    /// stiffest entry the row's own couplings still survive, which is
+    /// [`sigma_pin_cap`] of the largest constraint coefficient the row
+    /// carries.
+    ///
+    /// A variable in no constraint row reports no ceiling at all
+    /// (gh#653), and `INFINITY` here is not a stiffer pin but a `NaN`
+    /// in the factorization. Those get the scalar the `s` diagonal is
+    /// built under, `sigma_pin_cap(1.0)` -- unit coupling, and a pin
+    /// the coordinate moves under by `eps * SIGMA_PIN_HEADROOM` per
+    /// unit of force, which is roundoff.
+    ///
+    /// The addend is the ceiling itself rather than something under
+    /// it, so [`pinned_entry`] returns the ceiling exactly and the
+    /// capped diagonal differs from the uncapped one by the factor
+    /// `cap / (had + cap)`. On a bound the walk *reaches* -- the only
+    /// kind it pins -- `had` is the base point's barrier term for a
+    /// bound that was inactive there, order one against a ceiling of
+    /// order `1e13`, so that factor is `1 - 1e-13` and the multiplier
+    /// rows need no [`Self::rescale_bound_multipliers`] pass.
+    fn path_pin_add(&self, row: usize) -> Number {
+        let cap = if row < self.dims[0] {
+            self.sigma
+                .cap_x
+                .get(row)
+                .copied()
+                .unwrap_or(Number::INFINITY)
+        } else {
+            sigma_pin_cap(1.0)
+        };
+        if cap.is_finite() {
+            cap
+        } else {
+            sigma_pin_cap(1.0)
+        }
+    }
+
+    /// Body of [`SensBacksolver::solve_released_pinned`]: the
+    /// released solve, with each pinned primal row's diagonal raised
+    /// to [`Self::path_pin_add`].
+    ///
+    /// # Why raising the diagonal costs nothing in accuracy
+    ///
+    /// This is the *operator*, not the pin. The caller applies the
+    /// same exact Schur row on top of it -- `K w - E du = r`,
+    /// `Eᵀ w = 0` -- and `Eᵀ w = 0` says every pinned coordinate of
+    /// `w` is zero, so the term this function added,
+    /// `Σ_pin E Eᵀ w`, is identically zero at the solution. The
+    /// system actually solved is the released one, and `du` comes back
+    /// in the very same frame and units the unregularized pin reports
+    /// it in. Nothing has to be converted, and a walk that takes the
+    /// plain operator on one segment and this one on the next keeps
+    /// accumulating a single `h.mult`.
+    ///
+    /// What the added diagonal buys is that `K⁻¹` exists at all.
+    /// Releasing a bound takes its `Sigma` off the diagonal; on a
+    /// model with no curvature two released variables sharing a
+    /// constraint row are left with linearly dependent stationarity
+    /// rows, and a Schur complement `-Eᵀ K⁻¹ E` cannot be built from a
+    /// singular `K` (gh#930). The diagonal has to be reachable, not
+    /// merely large -- [`Self::path_pin_add`] is the gh#737 ceiling,
+    /// the stiffest entry the row's own couplings survive.
+    ///
+    /// `issue_930_two_curvature_free_releases.rs` measures the two
+    /// operators against each other on a fixture where both run, and
+    /// the answer against a re-solve at the perturbed parameter.
+    fn solve_released_pinned_inner(
+        &self,
+        released: &[usize],
+        pinned: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        if pinned.is_empty() {
+            return false;
+        }
+        let n_p = self.dims[0] + self.dims[1];
+        // A pin is a primal row by contract; anything past the `s`
+        // block is a multiplier row and has no diagonal to raise.
+        if pinned.iter().any(|&r| r >= n_p) {
+            return false;
+        }
+        let pins: Vec<(usize, Number)> =
+            pinned.iter().map(|&r| (r, self.path_pin_add(r))).collect();
+        let Some((sigma_x, sigma_s)) = self.active_set_sigmas(released, &pins) else {
+            return false;
+        };
+        self.solve_released_prebuilt(released, sigma_x, sigma_s, None, rhs, lhs, false)
+    }
+
     /// The barrier's **primal** diagonals with each released bound's
     /// own `z / s` taken off the quantity it constrains -- rebuilt
     /// rather than subtracted, since a quantity bounded on both sides
@@ -882,10 +972,13 @@ impl PdSensBacksolver {
     /// which is every call this had before constraint rows were
     /// reported and every call on a model with no inequality limits.
     ///
-    /// `pinned` stays var-x: a pin is a Schur row for the path and the
-    /// corrector's own bound check, neither of which pins a slack, and
-    /// a slack row arriving here would land on the wrong diagonal
-    /// silently. The guard below rejects it instead.
+    /// `pinned` is a **primal** KKT row, not a var-x row, and the two
+    /// spaces coincide only below `dims[0]`. A constraint's own limit
+    /// is a bound on its slack (gh#928), so its pin belongs on the `s`
+    /// diagonal; writing it into the `x` diagonal at whatever index it
+    /// happens to equal is the gh#450 neighbouring-variable hazard one
+    /// block over. The loop below decides the block rather than
+    /// assuming it.
     fn active_set_sigmas(
         &self,
         released: &[usize],
@@ -2561,6 +2654,16 @@ impl SensBacksolver for PdSensBacksolver {
 
     fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
         self.solve_released_inner(released, rhs, lhs, true)
+    }
+
+    fn solve_released_pinned(
+        &self,
+        released: &[usize],
+        pinned: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        self.bound_vars.is_some() && self.solve_released_pinned_inner(released, pinned, rhs, lhs)
     }
 
     /// Solve `K · lhs = rhs` against the converged factor, in
