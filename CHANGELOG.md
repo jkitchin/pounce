@@ -34,6 +34,55 @@ changes.
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
 
+- **Notebook 46, `python/notebooks/46_second_order_shadow_prices.ipynb`.** The
+  sequel to notebooks 40 and 41 on the dual side. First order says a shadow
+  price is locally constant, so the second-order term is the *rate the price
+  moves*, `dlambda/dp` — and unlike the price itself it goes **discontinuous**
+  at every active-set change. A 5-bus AC-OPF in polar coordinates, with
+  apparent-power limits written as constraint rows, exhibits four breakpoints
+  of three kinds as one bus's load sweeps 40 -> 300 MW: a generator's lower
+  bound *releasing* (G3 starting up, the rate falls 0.68x), a generator
+  *reaching* its 170 MW nameplate (1.32x), a line reaching its 120 MVA limit
+  (2.20x), and a voltage *leaving* its 1.05 ceiling (0.97x).
+
+  `dLMP/dP` is read as `-column(pin)[mult_entry("pbal5")] / BASE**2` and
+  matches central differences at all five buses to ~1e-8. Quoting a +250 MW
+  interconnection first-order gives $10,446.8/h against a true $12,646.1/h —
+  off by 17.4%, $19.3M/yr; the second-order quote is $12,730.8/h, +0.7%,
+  removing 96.1% of the error from the *same* back-solve notebook 41 reads the
+  primal half of. At the line's limit the network splits into two pricing
+  regions: bus 5's rate more than doubles while bus 1's collapses to 0.0036 and
+  the congestion spread reaches $6.05/MWh.
+
+  Two of the four breakpoints sit **1.9 MW apart**, with a three-marginal-unit
+  regime between them in which the price moves 32% slower than on either side.
+  No practical sweep grid puts a sample inside a window that wide;
+  `active_set_changes` returns both of its edges from one held factorization,
+  and lands within 0.029 MW of a 50-solve bisection where a single
+  `solution_report` ratio test is 0.404 MW short — because a primal ratio test
+  extrapolates *through* the release that happens on the way, which is what the
+  path walk re-forms its direction at. The line's own event reads
+  `kind='constraint'` (gh#928), and the voltage release reads
+  `action='leaves'`, 1.8% off from 25 MW away.
+
+  Section 5 is the full-x/var-x index trap every AC-OPF walks into: the
+  slack-bus angle has `lb == ub` and `fixed_variable_treatment=make_parameter`
+  removes it, after which `column(pin)[var_entry(name)]` returns a
+  *neighbouring* variable's sensitivity for 6 of 6 spot-checked variables — a
+  plausible number with nothing wrong-looking about it (gh#450). The notebook
+  names which variable each wrong number actually belongs to, and shows
+  `primal_row` reproducing the finite difference on all six.
+
+  Section 11 answers "how is this better than a delta planning vector" by
+  declining the framing: it is not a rival, it is the other half of the same
+  cached `column()` — the x block is notebook 41's `dx*/dp`, the multiplier
+  block is this one's `dlambda/dp`, 93 entries from one factorization. The
+  scorecard against a grid of re-solves is deliberately honest about where the
+  grid does fine: a central difference of the LMP here is good to eight digits
+  and even one straddling the first breakpoint is off by under 2%. What the
+  grid cannot do is name what ends the price, distinguish a row limit from a
+  bound, see a release at all, or sample a regime 1.9 MW wide.
+
 - **Notebook 45, `python/notebooks/45_which_parameter_stopped_fitting.ipynb`.**
   A plant model calibrated at commissioning stops matching new data. Which
   *parameter* drifted? Reusing notebook 41's recycle flowsheet as a
