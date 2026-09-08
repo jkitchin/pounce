@@ -74,6 +74,7 @@ use pounce_sens_core::backsolver::{BoundRow, SensBacksolver};
 use pounce_sens_core::boundcheck::{
     BoundMultiplier, PathSegment, RefineStop, refine_step_onto_bounds, step_along_path,
 };
+use pounce_sens_core::rowlimit::{RowLimitView, WatchedRow};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -1372,6 +1373,19 @@ fn soc_boundary_curvature(
 /// from a [`QpProblem`] and its [`QpSolution`], then call
 /// [`parametric_step`](Self::parametric_step) for each parameter
 /// perturbation — the factorization is reused across queries.
+/// What a [`PathSegment`] of a convex parametric walk is about.
+///
+/// The walk reports a primal KKT row, and this arm's primal prefix is the `x`
+/// block followed by one observer coordinate per inequality row (gh#929).
+/// [`QpSensitivity::path_segment_target`] is the only conversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathTarget {
+    /// Variable `x[j]` reached or left one of its own bounds.
+    Variable(usize),
+    /// Inequality row `Gᵢx ≤ hᵢ` became binding, or stopped being.
+    InequalityRow(usize),
+}
+
 pub struct QpSensitivity {
     n: usize,
     m_eq: usize,
@@ -1450,8 +1464,9 @@ pub struct QpSensitivity {
     ir_scratch: IrScratch,
     /// Factored (regularized) KKT values; a release starts from these.
     kkt_vals_reg: Rc<Vec<f64>>,
-    /// Per active bound, the value slots a release neutralizes.
-    release_slots: Rc<Vec<(usize, usize)>>,
+    /// Per active row (inequality rows then bound rows), the value slots a
+    /// release neutralizes.
+    release_slots: Rc<Vec<(Vec<usize>, usize)>>,
     /// One spare linear-solver instance, drawn from the caller's factory at
     /// build, reserved for the released system.
     ///
@@ -1802,36 +1817,56 @@ fn assemble_kkt(
     }
 }
 
-/// For each active bound, the two value-array slots a release has to touch:
-/// the `±1` coupling the multiplier row to its variable, and that row's own
-/// diagonal.
+/// For each **active row** — the inequality rows first, then the bound rows,
+/// the order [`assemble_kkt`] emits them in — the value-array slots a release
+/// has to touch: every coupling from the multiplier row into the `x` block,
+/// and that row's own diagonal.
 ///
 /// Precomputed once at build so a release is an array rewrite plus a
 /// [`Factorization::refactor`] — the sparsity pattern is unchanged by
 /// neutralizing a row, so the symbolic factorization is reused.
+///
+/// # Why the couplings are a `Vec`
+///
+/// A bound row has exactly one, its `±1` against the variable. A general
+/// inequality row has one per nonzero of `Gⱼ`, and releasing it means zeroing
+/// all of them: leaving any behind leaves the row still coupled to `x` while
+/// its diagonal says it is free, which is not a system anybody wrote down.
+/// The bound case was the only one that existed until gh#929 gave the walk a
+/// way to *reach* an inequality row's limit, at which point releasing one
+/// became reachable too.
 fn release_slots(
     pat: &KktPattern,
     abase: usize,
-    n_ineq_active: usize,
+    active_rows: &[Vec<(usize, f64)>],
     active_bounds: &[(usize, bool)],
-) -> Vec<(usize, usize)> {
-    let mut out = Vec::with_capacity(active_bounds.len());
-    for (k, &(j, _)) in active_bounds.iter().enumerate() {
-        let row = abase + n_ineq_active + k;
+) -> Vec<(Vec<usize>, usize)> {
+    // Column sets, in the same order the rows are emitted.
+    let cols: Vec<Vec<usize>> = active_rows
+        .iter()
+        .map(|row| row.iter().map(|&(c, _)| c).collect())
+        .chain(active_bounds.iter().map(|&(j, _)| vec![j]))
+        .collect();
+    let mut out = Vec::with_capacity(cols.len());
+    for (k, wanted) in cols.iter().enumerate() {
+        let row = abase + k;
         // 1-based in the pattern arrays.
-        let (r1, j1) = ((row + 1) as Index, (j + 1) as Index);
-        let mut coupling = usize::MAX;
+        let r1 = (row + 1) as Index;
+        let mut coupling = Vec::with_capacity(wanted.len());
         let mut diagonal = usize::MAX;
         for (idx, (&a, &b)) in pat.airn.iter().zip(pat.ajcn.iter()).enumerate() {
-            if a == r1 && b == j1 {
-                coupling = idx;
-            } else if a == r1 && b == r1 {
+            if a != r1 {
+                continue;
+            }
+            if b == r1 {
                 diagonal = idx;
+            } else if wanted.contains(&((b as usize) - 1)) {
+                coupling.push(idx);
             }
         }
         debug_assert!(
-            coupling != usize::MAX && diagonal != usize::MAX,
-            "every active bound row has a coupling entry and a diagonal"
+            diagonal != usize::MAX,
+            "every active row has a diagonal entry"
         );
         out.push((coupling, diagonal));
     }
@@ -2176,7 +2211,7 @@ impl QpSensitivity {
             pat.dim, dim,
             "assemble_kkt and finish must agree on the KKT dimension"
         );
-        let release_slots = release_slots(&pat, n + m_eq, active_rows.len(), &active_bounds);
+        let release_slots = release_slots(&pat, n + m_eq, &active_rows, &active_bounds);
         let KktPattern {
             airn: kkt_airn,
             ajcn: kkt_ajcn,
@@ -2541,6 +2576,7 @@ impl QpSensitivity {
             last_residual: Rc::new(Cell::new(f64::NAN)),
             vals_reg: Rc::clone(&self.kkt_vals_reg),
             slots: Rc::clone(&self.release_slots),
+            abase: self.n + self.m_eq,
             base_mult: Rc::new(self.bound_base_mult.clone()),
             released: Rc::new(RefCell::new(None)),
             release_backend: Rc::clone(&self.release_backend),
@@ -2631,6 +2667,42 @@ impl QpSensitivity {
         let (rhs_plain, x_curr, lo, hi, multipliers) =
             self.path_inputs(pin_constraint_indices, deltas);
         let bs = self.backsolver();
+        // How far outside its box the answer has to land before the walk
+        // treats a base-active bound as one the factorization never
+        // enforced. The same floor the release decision uses; this arm has
+        // no bound relaxation to widen it.
+        let eps = RELEASE_FLOOR;
+        if let Some(view) = self.row_limit_view(&bs) {
+            let n_t = view.n_observers();
+            let (Some(rhs_lift), Some((x_aug, lo_aug, hi_aug)), Some(mult_aug)) = (
+                view.lift_rhs(&rhs_plain),
+                view.primal_box(&x_curr, &lo, &hi),
+                view.lift_multipliers(&multipliers),
+            ) else {
+                // Unreachable given `row_limit_view`'s own checks; refusing
+                // beats walking a half-built augmented system.
+                return Err(SensError::Refinement(
+                    "row-limit observers could not be lifted into the walk's inputs".to_string(),
+                ));
+            };
+            debug_assert_eq!(x_aug.len(), self.n + n_t);
+            let (dx, segments) = step_along_path(
+                &view,
+                &rhs_lift,
+                &x_aug,
+                &lo_aug,
+                &hi_aug,
+                &mult_aug,
+                max_iter,
+                &[],
+                &[],
+                &[],
+                eps,
+            )
+            .map_err(SensError::Refinement)?;
+            self.last_residual = Some(bs.last_residual());
+            return Ok((dx[..self.n].to_vec(), segments));
+        }
         let (dx, segments) = step_along_path(
             &bs,
             &rhs_plain,
@@ -2642,15 +2714,78 @@ impl QpSensitivity {
             &[],
             &[],
             &[],
-            // How far outside its box the answer has to land before the
-            // walk treats a base-active bound as one the factorization
-            // never enforced. The same floor the release decision uses;
-            // this arm has no bound relaxation to widen it.
-            RELEASE_FLOOR,
+            eps,
         )
         .map_err(SensError::Refinement)?;
         self.last_residual = Some(bs.last_residual());
         Ok((dx[..self.n].to_vec(), segments))
+    }
+
+    /// What a [`PathSegment`] returned by
+    /// [`parametric_step_path`](Self::parametric_step_path) refers to.
+    ///
+    /// `PathSegment::var_row` is a primal KKT row, and on this arm the primal
+    /// prefix is the `x` block followed by one **observer** coordinate per
+    /// inequality row (gh#929). Reading a segment without this conversion
+    /// silently turns "inequality row 2 became binding" into "variable
+    /// `n + 2`", which is the index-space failure `/sens-review` entry 1 is
+    /// about — so the mapping is a method rather than a note in the docs.
+    pub fn path_segment_target(&self, seg: &PathSegment) -> PathTarget {
+        if seg.var_row < self.n {
+            PathTarget::Variable(seg.var_row)
+        } else {
+            PathTarget::InequalityRow(seg.var_row - self.n)
+        }
+    }
+
+    /// The inequality rows of this problem as watched limits, wrapped around
+    /// `bs`, or `None` when the augmentation does not apply.
+    ///
+    /// `None` in three cases, each of them a real answer rather than a
+    /// shortcut:
+    ///
+    /// * **no inequality rows**, so there is nothing a row limit could add;
+    /// * **a conic block is present.** `active_rows` is then not a set of `G`
+    ///   rows at all — it is the cone's normal at the boundary point, or the
+    ///   whole block at an apex — so `active_ineq` names provenance and not
+    ///   the active object. An observer on `Gⱼ x ≤ hⱼ` would be watching a
+    ///   limit the solve is not enforcing that way, and its "release" would
+    ///   neutralize a row that is a combination of several. The conic arm
+    ///   keeps the unaugmented walk it had.
+    /// * **[`RowLimitView::new`] refuses**, which on this arm can only mean
+    ///   the base reported a `natural_units_factor` it does not have. Falling
+    ///   back rather than erroring keeps a shape nobody has produced from
+    ///   turning a working call into a failure.
+    fn row_limit_view(&self, bs: &QpKktBacksolver) -> Option<RowLimitView<QpKktBacksolver>> {
+        if !self.cone_kinds.is_empty() {
+            return None;
+        }
+        let m_ineq = self.prob.m_ineq();
+        if m_ineq == 0 {
+            return None;
+        }
+        let mut coefs: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m_ineq];
+        for t in &self.prob.g {
+            coefs[t.row].push((t.col, t.val));
+        }
+        let mut gx = vec![0.0; m_ineq];
+        self.prob.g_mul(&self.base_x, &mut gx);
+        // `active_rows` is emitted first in the active block, so the k-th
+        // active inequality row's multiplier sits at `n + m_eq + k`.
+        let abase = self.n + self.m_eq;
+        let rows: Vec<WatchedRow> = (0..m_ineq)
+            .map(|i| WatchedRow {
+                coefficients: std::mem::take(&mut coefs[i]),
+                limit: self.prob.h[i],
+                base_value: gx[i],
+                active: self
+                    .active_ineq
+                    .iter()
+                    .position(|&a| a == i)
+                    .map(|k| (abase + k, self.base_z[i])),
+            })
+            .collect();
+        RowLimitView::new(bs.clone(), self.n, rows)
     }
 
     /// The shared inputs the path and bounded modes both need: the compound
@@ -4282,8 +4417,13 @@ pub struct QpKktBacksolver {
     /// The factored (regularized) values of the *unreleased* system; a release
     /// starts from these and neutralizes the released rows.
     vals_reg: Rc<Vec<f64>>,
-    /// Per active bound, the `(coupling, diagonal)` value slots to neutralize.
-    slots: Rc<Vec<(usize, usize)>>,
+    /// Per active row (inequality rows then bound rows), the
+    /// `(couplings, diagonal)` value slots to neutralize. Indexed by
+    /// `row - abase`.
+    slots: Rc<Vec<(Vec<usize>, usize)>>,
+    /// First compound row of the active block, `n + m_eq`. The offset that
+    /// turns a released multiplier row into an index into [`Self::slots`].
+    abase: usize,
     /// Per active bound, its oriented base multiplier — what
     /// `solve_released_step` moves onto the variable's `x` row.
     base_mult: Rc<Vec<f64>>,
@@ -4351,14 +4491,14 @@ impl SensBacksolver for QpKktBacksolver {
     /// and every pin and release would read a mis-scaled multiplier against a
     /// natural-units step.
     ///
-    /// **And it is currently unguarded, measured rather than assumed.** Making
-    /// this return a non-identity vector turns *nothing* in the crate red,
-    /// because the only consumer is the release half of `refine_step_onto_bounds`
-    /// and [`supports_release`](Self::supports_release) is `false` here. So the
-    /// value is correct and untested at the same time. The phase that turns
-    /// release on is the phase that makes it load-bearing, and it owes this a
-    /// guard — a leg comparing a released step against a re-solve, which cannot
-    /// pass with a mis-scaled `F`.
+    /// **And it was unguarded for as long as nothing read it.** While
+    /// [`supports_release`](Self::supports_release) was `false` here, making
+    /// this return a non-identity vector turned *nothing* in the crate red:
+    /// the value was correct and untested at the same time. Release is on now,
+    /// so the release half of `refine_step_onto_bounds` and the path walk both
+    /// read it, and `convex_sens_release.rs` compares a released step against a
+    /// re-solve — which cannot pass with a mis-scaled `F`. Keep that shape of
+    /// guard for anything that later reads this.
     ///
     /// `the_step_is_unmoved_by_internal_equilibration` guards the neighbouring
     /// and weaker claim that `dx/db` itself does not depend on whether the
@@ -4420,14 +4560,19 @@ impl QpKktBacksolver {
         let mut vals_reg = (*self.vals_reg).clone();
         let mut vals_true = (*self.vals_true).clone();
         for &row in key {
-            let Some(k) = self.bound_at(row) else {
+            let Some(k) = row
+                .checked_sub(self.abase)
+                .filter(|&k| k < self.slots.len())
+            else {
                 return false;
             };
-            let (coupling, diagonal) = self.slots[k];
-            vals_reg[coupling] = 0.0;
-            vals_true[coupling] = 0.0;
-            vals_reg[diagonal] = -1.0;
-            vals_true[diagonal] = -1.0;
+            let (coupling, diagonal) = &self.slots[k];
+            for &c in coupling {
+                vals_reg[c] = 0.0;
+                vals_true[c] = 0.0;
+            }
+            vals_reg[*diagonal] = -1.0;
+            vals_true[*diagonal] = -1.0;
         }
         let mut slot = self.released.borrow_mut();
         match slot.as_mut() {
@@ -4491,9 +4636,20 @@ impl QpKktBacksolver {
             // row carries the bound's side with — `−z` for a lower bound,
             // `+z` for an upper one. Mirrors the NLP arm's
             // `shift_released_rhs`, which is the reference for this convention.
+            //
+            // A released *inequality* row is skipped, not refused: it has no
+            // variable of its own in this space to move its force onto. The
+            // caller that can release one is
+            // [`RowLimitView`](pounce_sens_core::rowlimit::RowLimitView),
+            // which adjoins the observer coordinate `t = Gⱼx` that *is* that
+            // variable and adds the shift there, in its own frame, before
+            // this solve ever sees the right-hand side. Refusing here instead
+            // would make a correct caller fail; the row set itself is already
+            // validated by `ensure_released`, so a row that reaches this loop
+            // and is not a bound is an active inequality row and nothing else.
             for &row in &key {
                 let Some(k) = self.bound_at(row) else {
-                    return false;
+                    continue;
                 };
                 let b = &self.bound_rows[k];
                 if b.var_row >= self.dim {

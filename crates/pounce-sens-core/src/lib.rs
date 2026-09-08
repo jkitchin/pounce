@@ -9,6 +9,9 @@
 //!
 //! * [`boundcheck`] — fix-relax refinement, path following through
 //!   active-set breakpoints, and the directional derivative at a kink.
+//! * [`rowlimit`] — an observer block that gives a limit written as a
+//!   *constraint row* the primal coordinate `boundcheck` decides in,
+//!   for engines whose KKT has no slack block (gh#929).
 //! * [`sens_app`] — the sIPOPT `SensApplication` driver, the reduced-Hessian
 //!   entry point, and the option registrations.
 //! * [`p_calculator`], [`schur_data`], [`schur_driver`], [`step_calc`],
@@ -54,6 +57,7 @@ pub mod backsolver;
 pub mod boundcheck;
 pub mod p_calculator;
 pub mod reduced_hessian;
+pub mod rowlimit;
 pub mod schur_data;
 pub mod schur_driver;
 pub mod sens_app;

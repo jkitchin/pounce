@@ -768,18 +768,72 @@ changes.
   for a row limit has `.var` naming the `Constraint`, not a `Var`, with the
   same `bound` and `action` values a variable bound produces.
 
-  The convex arm is **not** covered — `G` rows carry no bound metadata there
-  either, and that is [#929](https://github.com/jkitchin/pounce/issues/929).
+  The convex arm needed a different repair, because its KKT has no `s` block
+  to make contiguous with `x` — see the next entry.
+
+- **The same limit, on the convex arm, needed a block that was not there
+  ([#929](https://github.com/jkitchin/pounce/issues/929)).** The fix above
+  works because the NLP KKT already carries `dⱼ(x) = sⱼ`, so every constraint
+  has a primal coordinate for the walk to index. The convex active-set KKT
+
+  ```text
+  [ H   Aᵀ  B_aᵀ ] [ dx ]
+  [ A   0   0    ] [ dy ]
+  [ B_a 0   0    ] [ dz ]
+  ```
+
+  has none. An **inactive** `Gⱼx ≤ hⱼ` appears in it nowhere at all, so a step
+  driving it past its limit was silent and the answer came back infeasible; an
+  **active** one has a multiplier row but no primal coordinate, so a
+  perturbation driving that multiplier negative went on holding a row the
+  solution had left.
+
+  `pounce_sens_core::rowlimit::RowLimitView` adjoins an observer `t = G_w x`
+  through a multiplier, immediately after the `x` block so it lands inside the
+  primal prefix the walk indexes. The adjoined block is triangular — `dmu =
+  r_t`, one base back-solve on `r_x + G_wᵀ r_t`, then `dt = G_w dx + r_mu` —
+  so **the base factorization is untouched and the fix costs no
+  factorization**. Releasing an active row generalizes the arm's existing row
+  neutralization from a single `±1` coupling to a whole `G` row, which reuses
+  the symbolic factor.
+
+  Measured on `min ½‖x‖²` subject to `Σx = b`, `x₀ + x₂ ≤ 1` and `x₁ ≤ 0.8`,
+  a fixture whose closed form is known on all three of its branches. Walking
+  `b: 0 → 4`, the row reached `x₀ + x₂ = 2.133` — **1.133 past a stated cap**,
+  with an empty segment list; it is now `1.000`, with breakpoints naming the
+  row at fraction `0.5` and the variable bound at `0.65`. Coming back,
+  `b: 4 → 0` left `(0.5, −0.5, 0.5, −0.5)` with the row still pinned at `1.0`;
+  it is now the origin to `2.1e-14`. A third base reaches the *other* branch —
+  the row already active with a multiplier of `4.1e-5`, released at fraction
+  `8.2e-5` rather than mid-walk — which is a distinct branch of the same rule
+  and had to be measured separately.
+
+  Two things the augmentation deliberately does not do. It is skipped whenever
+  any cone block is present, because there `active_rows` is a cone normal (or,
+  at an apex, the whole block) and `active_ineq` is provenance rather than a
+  `G` row — pinned by a leg that walks a boundary SOC far enough to drive a
+  coordinate the cone does not sign-constrain through zero. And a released
+  *variable bound* is still the base's own business: `RowLimitView` lifts the
+  base's `BoundRow`s and multipliers itself rather than leaving the caller to
+  concatenate two lists, since the walk releases a row only when it finds it
+  in both.
+
+  `QpSensitivity::path_segment_target` resolves a segment to
+  `PathTarget::Variable` or `PathTarget::InequalityRow`, the convex arm's
+  counterpart of `slack_rows()` above, so a consumer cannot read a row index
+  as a column index — the gh#450 hazard in this arm's own index space.
+
+  **`QpSensitivity::parametric_step_bounded` is not covered** and still
+  carries the whole defect: on the same fixture it returns `x₀ + x₂ = 2.1333`
+  against a cap of `1.0`, and in reverse leaves the row pinned at `1.0` where
+  the truth is the origin. It is a different edit rather than the same one —
+  that entry point returns `refine_step_onto_bounds`'s mixed list of released
+  multiplier rows and pinned primal rows, so adjoining observers shifts the
+  meaning of half that list and needs an API decision and a fixture of its
+  own. The NLP arm has no matching gap, because gh#928 widened its box
+  globally rather than through a view.
 
 ### Changed
-
-- **The path walk's box-repair budget is the base-activity table's length**
-  ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a
-  fixed constant. Each pass adds at least one bound to the watch list and
-  never removes one, so a budget of that size cannot be exhausted before the
-  list is, which makes the exhausted arm unreachable by construction instead
-  of by argument. Measured, no fixture in the corpus reaches even a second
-  pass.
 
 - **A walk that releases two bounds at once with no curvature in the released
   coordinates is refused rather than answered**, and the gap now has an open
@@ -789,6 +843,15 @@ changes.
   releases sharing a constraint make it singular. Refusing is an improvement
   on the pre-#928 behaviour, which was to return a point outside the box in
   silence, but it is not the right final answer.
+
+
+- **The path walk's box-repair budget is the base-activity table's length**
+  ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a
+  fixed constant. Each pass adds at least one bound to the watch list and
+  never removes one, so a budget of that size cannot be exhausted before the
+  list is, which makes the exhausted arm unreachable by construction instead
+  of by argument. Measured, no fixture in the corpus reaches even a second
+  pass.
 
 
 ## [0.11.0] - 2026-09-03

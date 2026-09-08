@@ -76,11 +76,14 @@
 //!
 //! - **The conic arm.** Second-order-cone blocks are not `BoundRow`s;
 //!   `convex_sens_release.rs` owns what release means there.
-//! - **Constraint rows.** `G` rows carry no bound metadata here, so a
-//!   limit written as a row is watched by nothing on this arm --
-//!   gh#929. The NLP arm's half of that is fixed;
-//!   `pounce-sensitivity/tests/issue_928_a_limit_written_as_a_row.rs`
-//!   is the map a convex fix would follow.
+//! - **Constraint rows.** This fixture's only limits are variable
+//!   bounds, so nothing here reaches the observer coordinates
+//!   `rowlimit::RowLimitView` adjoins for a limit written as a `G`
+//!   row. That is gh#929, fixed, and
+//!   `issue_929_row_limit_on_the_convex_arm.rs` owns it -- including
+//!   the measurement that the augmentation is inert when no row limit
+//!   is reached, which is what says this file's numbers are unmoved
+//!   by it.
 //! - **Scaling.** Unscaled, like every other convex sensitivity test.
 //! - **Magnitude.** Two variables. The largest convex fixture in the
 //!   corpus is 534 columns and `benchmarks/qp` reaches 93 263.

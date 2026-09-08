@@ -94,8 +94,8 @@ pub use pounce_sens_core;
 // `crate::backsolver::SensBacksolver` spellings in `solver.rs`, `activity.rs`
 // and `corrector.rs` needed no edit at all.
 pub use pounce_sens_core::{
-    backsolver, boundcheck, p_calculator, reduced_hessian, schur_data, schur_driver, sens_app,
-    step_calc,
+    backsolver, boundcheck, p_calculator, reduced_hessian, rowlimit, schur_data, schur_driver,
+    sens_app, step_calc,
 };
 
 pub use algorithm_backsolver::PdSensBacksolver;
