@@ -1367,17 +1367,12 @@ fn soc_boundary_curvature(
         .collect()
 }
 
-/// Post-optimal sensitivity for a solved convex QP.
+/// What a condition reported by a convex parametric query is about.
 ///
-/// Holds the factored active-set KKT system at the optimum. Build it once
-/// from a [`QpProblem`] and its [`QpSolution`], then call
-/// [`parametric_step`](Self::parametric_step) for each parameter
-/// perturbation — the factorization is reused across queries.
-/// What a [`PathSegment`] of a convex parametric walk is about.
-///
-/// The walk reports a primal KKT row, and this arm's primal prefix is the `x`
-/// block followed by one observer coordinate per inequality row (gh#929).
-/// [`QpSensitivity::path_segment_target`] is the only conversion.
+/// Both the walk and the refinement report a primal KKT row, and this arm's
+/// primal prefix is the `x` block followed by one observer coordinate per
+/// inequality row (gh#929). [`QpSensitivity::path_segment_target`] and
+/// [`QpSensitivity::refined_row_target`] are the only conversions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathTarget {
     /// Variable `x[j]` reached or left one of its own bounds.
@@ -1386,6 +1381,33 @@ pub enum PathTarget {
     InequalityRow(usize),
 }
 
+/// One entry of the row list
+/// [`parametric_step_bounded`](QpSensitivity::parametric_step_bounded)
+/// returns, resolved.
+///
+/// That list is **mixed**: `refine_step_onto_bounds` reports a release by its
+/// *multiplier* row and a pin by its *primal* row, in one `Vec<usize>`. The
+/// two spaces do not overlap, so the number alone is decodable — but only by
+/// code that knows the layout, which is exactly the shape `/sens-review`
+/// entry 1 is about. [`QpSensitivity::refined_row_target`] does the decoding
+/// once and hands back both halves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefinedRow {
+    /// The variable or inequality row the condition belongs to.
+    pub target: PathTarget,
+    /// `true` when the refinement **released** this limit — the base solve
+    /// held it and the perturbation drove its multiplier negative — and
+    /// `false` when it **pinned** it, holding a coordinate the plain step
+    /// would have carried past its limit.
+    pub released: bool,
+}
+
+/// Post-optimal sensitivity for a solved convex QP.
+///
+/// Holds the factored active-set KKT system at the optimum. Build it once
+/// from a [`QpProblem`] and its [`QpSolution`], then call
+/// [`parametric_step`](Self::parametric_step) for each parameter
+/// perturbation — the factorization is reused across queries.
 pub struct QpSensitivity {
     n: usize,
     m_eq: usize,
@@ -2592,15 +2614,34 @@ impl QpSensitivity {
     /// satisfies the constraints. This instead pins the crossing coordinate at
     /// its bound and re-solves, so the others move with it.
     ///
-    /// Returns `(dx, pinned_variables, stop_reason)`. The computation is
+    /// Returns `(dx, rows, stop_reason)`. The computation is
     /// `pounce_sens_core::boundcheck::refine_step_onto_bounds` — the same code
     /// the NLP arm runs, reached through [`backsolver`](Self::backsolver)
     /// rather than reimplemented.
     ///
-    /// In this phase the refinement **pins only**: a bound whose multiplier the
-    /// step drives negative is not released (see
-    /// [`QpKktBacksolver::supports_release`]), so a perturbation pulling a
-    /// variable off a bound is still held there.
+    /// It **pins and releases**: a bound whose multiplier the step drives
+    /// negative is taken out of the active set, because
+    /// [`QpKktBacksolver::supports_release`] answers `true`.
+    ///
+    /// **A limit written as a constraint row is refined too** (gh#929, and its
+    /// follow-up on this entry point).
+    /// A row `Gⱼ x ≤ hⱼ` has no primal coordinate in this arm's KKT — an
+    /// inactive one appears nowhere at all — so the refinement had nothing to
+    /// pin and nothing to release, and a step that crossed such a row came back
+    /// past it in silence. The same [`RowLimitView`] the walk uses adjoins an
+    /// observer `tⱼ = Gⱼ x` with box `(−∞, hⱼ]`, at the cost of two sparse
+    /// mat-vecs and no extra factorization. The augmentation is skipped, and
+    /// the plain unaugmented refinement kept, exactly where
+    /// [`row_limit_view`](Self::row_limit_view) says so — notably on the conic
+    /// arm.
+    ///
+    /// `rows` is therefore **mixed and in the augmented index space**: a
+    /// released limit is named by its multiplier row and a pinned one by its
+    /// primal row, and a primal row at or past `n` is an observer rather than a
+    /// variable. Do not index a variable-length vector by one of these numbers
+    /// — that is the gh#450 hazard, and it returns a neighbouring variable's
+    /// answer. [`refined_row_target`](Self::refined_row_target) is the only
+    /// conversion.
     pub fn parametric_step_bounded(
         &mut self,
         pin_constraint_indices: &[usize],
@@ -2625,7 +2666,38 @@ impl QpSensitivity {
         let n = self.n;
         let (_, x_curr, lo, hi, multipliers) = self.path_inputs(pin_constraint_indices, deltas);
         let bs = self.backsolver();
-        let (dx, pinned, stop) = refine_step_onto_bounds(
+        if let Some(view) = self.row_limit_view(&bs) {
+            let (Some(dx_lift), Some(rhs_lift), Some((x_aug, lo_aug, hi_aug)), Some(mult_aug)) = (
+                view.lift_step(&dx_full),
+                view.lift_rhs(&rhs_plain),
+                view.primal_box(&x_curr, &lo, &hi),
+                view.lift_multipliers(&multipliers),
+            ) else {
+                // Unreachable given `row_limit_view`'s own checks; refusing
+                // beats refining against a half-built augmented system.
+                return Err(SensError::Refinement(
+                    "row-limit observers could not be lifted into the refinement's inputs"
+                        .to_string(),
+                ));
+            };
+            debug_assert_eq!(x_aug.len(), n + view.n_observers());
+            let (dx, rows, stop) = refine_step_onto_bounds(
+                &view,
+                &dx_lift,
+                &x_aug,
+                &lo_aug,
+                &hi_aug,
+                &mult_aug,
+                &rhs_lift,
+                bound_eps,
+                RELEASE_FLOOR,
+                max_iter,
+            )
+            .map_err(SensError::Refinement)?;
+            self.last_residual = Some(bs.last_residual());
+            return Ok((dx[..n].to_vec(), rows, stop));
+        }
+        let (dx, rows, stop) = refine_step_onto_bounds(
             &bs,
             &dx_full,
             &x_curr,
@@ -2639,7 +2711,7 @@ impl QpSensitivity {
         )
         .map_err(SensError::Refinement)?;
         self.last_residual = Some(bs.last_residual());
-        Ok((dx[..n].to_vec(), pinned, stop))
+        Ok((dx[..n].to_vec(), rows, stop))
     }
 
     /// The perturbation applied **a little at a time**, stopping at each point
@@ -2736,6 +2808,45 @@ impl QpSensitivity {
         } else {
             PathTarget::InequalityRow(seg.var_row - self.n)
         }
+    }
+
+    /// What one entry of the row list from
+    /// [`parametric_step_bounded`](Self::parametric_step_bounded) refers to,
+    /// and whether the refinement pinned it or released it.
+    ///
+    /// That list carries **two index spaces at once**: a release is reported
+    /// by the limit's *multiplier* row and a pin by its *primal* row. This is
+    /// the only decoder, for the same reason
+    /// [`path_segment_target`](Self::path_segment_target) is the walk's — a
+    /// caller doing it inline turns "inequality row 2 was released" into
+    /// "variable `n + 2` was pinned", plausibly and silently.
+    ///
+    /// The view is rebuilt here rather than cached so the mapping cannot drift
+    /// from the one the refinement actually ran against; when the augmentation
+    /// was skipped, the base's own bound rows answer instead, so a conic
+    /// result decodes through this method too.
+    ///
+    /// `None` for a row that is neither a primal row of the query nor a
+    /// releasable limit — which no result of `parametric_step_bounded`
+    /// contains, so it means the caller passed a number from somewhere else.
+    pub fn refined_row_target(&self, row: usize) -> Option<RefinedRow> {
+        let bs = self.backsolver();
+        let (n_t, bound_rows): (usize, Vec<BoundRow>) = match self.row_limit_view(&bs) {
+            Some(view) => (view.n_observers(), view.all_bound_rows().to_vec()),
+            None => (0, bs.bound_rows().unwrap_or(&[]).to_vec()),
+        };
+        let released = row >= self.n + n_t;
+        let primal = if released {
+            bound_rows.iter().find(|b| b.row == row)?.var_row
+        } else {
+            row
+        };
+        let target = if primal < self.n {
+            PathTarget::Variable(primal)
+        } else {
+            PathTarget::InequalityRow(primal - self.n)
+        };
+        Some(RefinedRow { target, released })
     }
 
     /// The inequality rows of this problem as watched limits, wrapped around

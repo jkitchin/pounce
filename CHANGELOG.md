@@ -34,6 +34,55 @@ changes.
   `IpoptApplication::set_presolve_already_applied(true)`, because
   `optimize_tnlp` applies `wrap_from_options` itself when `presolve=yes`.
 
+- **Notebook 46, `python/notebooks/46_second_order_shadow_prices.ipynb`.** The
+  sequel to notebooks 40 and 41 on the dual side. First order says a shadow
+  price is locally constant, so the second-order term is the *rate the price
+  moves*, `dlambda/dp` — and unlike the price itself it goes **discontinuous**
+  at every active-set change. A 5-bus AC-OPF in polar coordinates, with
+  apparent-power limits written as constraint rows, exhibits four breakpoints
+  of three kinds as one bus's load sweeps 40 -> 300 MW: a generator's lower
+  bound *releasing* (G3 starting up, the rate falls 0.68x), a generator
+  *reaching* its 170 MW nameplate (1.32x), a line reaching its 120 MVA limit
+  (2.20x), and a voltage *leaving* its 1.05 ceiling (0.97x).
+
+  `dLMP/dP` is read as `-column(pin)[mult_entry("pbal5")] / BASE**2` and
+  matches central differences at all five buses to ~1e-8. Quoting a +250 MW
+  interconnection first-order gives $10,446.8/h against a true $12,646.1/h —
+  off by 17.4%, $19.3M/yr; the second-order quote is $12,730.8/h, +0.7%,
+  removing 96.1% of the error from the *same* back-solve notebook 41 reads the
+  primal half of. At the line's limit the network splits into two pricing
+  regions: bus 5's rate more than doubles while bus 1's collapses to 0.0036 and
+  the congestion spread reaches $6.05/MWh.
+
+  Two of the four breakpoints sit **1.9 MW apart**, with a three-marginal-unit
+  regime between them in which the price moves 32% slower than on either side.
+  No practical sweep grid puts a sample inside a window that wide;
+  `active_set_changes` returns both of its edges from one held factorization,
+  and lands within 0.029 MW of a 50-solve bisection where a single
+  `solution_report` ratio test is 0.404 MW short — because a primal ratio test
+  extrapolates *through* the release that happens on the way, which is what the
+  path walk re-forms its direction at. The line's own event reads
+  `kind='constraint'` (gh#928), and the voltage release reads
+  `action='leaves'`, 1.8% off from 25 MW away.
+
+  Section 5 is the full-x/var-x index trap every AC-OPF walks into: the
+  slack-bus angle has `lb == ub` and `fixed_variable_treatment=make_parameter`
+  removes it, after which `column(pin)[var_entry(name)]` returns a
+  *neighbouring* variable's sensitivity for 6 of 6 spot-checked variables — a
+  plausible number with nothing wrong-looking about it (gh#450). The notebook
+  names which variable each wrong number actually belongs to, and shows
+  `primal_row` reproducing the finite difference on all six.
+
+  Section 11 answers "how is this better than a delta planning vector" by
+  declining the framing: it is not a rival, it is the other half of the same
+  cached `column()` — the x block is notebook 41's `dx*/dp`, the multiplier
+  block is this one's `dlambda/dp`, 93 entries from one factorization. The
+  scorecard against a grid of re-solves is deliberately honest about where the
+  grid does fine: a central difference of the LMP here is good to eight digits
+  and even one straddling the first breakpoint is off by under 2%. What the
+  grid cannot do is name what ends the price, distinguish a row limit from a
+  bound, see a release at all, or sample a regime 1.9 MW wide.
+
 - **Notebook 45, `python/notebooks/45_which_parameter_stopped_fitting.ipynb`.**
   A plant model calibrated at commissioning stops matching new data. Which
   *parameter* drifted? Reusing notebook 41's recycle flowsheet as a
@@ -541,6 +590,42 @@ changes.
   ci.yml's `python-test-torch` job: it is the only job with torch installed,
   and gh #874's file, whose `importorskip("torch")` is module-level, was
   running in no job at all.
+- **A limit written as a constraint row is refined too, on the convex arm**
+  ([#929](https://github.com/jkitchin/pounce/issues/929) follow-up).
+  gh#929 taught `QpSensitivity::parametric_step_path` — the walk — about
+  limits written as `Gⱼ x ≤ hⱼ` rather than as variable bounds, and left
+  `parametric_step_bounded` — the one-shot fix-relax — carrying the whole
+  defect. An active-set KKT has no primal coordinate for a constraint row,
+  and an *inactive* row appears in it nowhere at all, so the refinement had
+  nothing to pin and nothing to release.
+
+  Measured on a four-variable QP whose cap `x₀ + x₂ ≤ 1` is a row: stepping
+  the right-hand side `0 → 4` the refinement returned `x₀ + x₂ = 2.133`,
+  **1.133 past the stated cap**, having correctly pinned the *variable*
+  bound it crossed on the way — which is what made the answer plausible.
+  Coming back, `4 → 0`, it left `(0.5, −0.5, 0.5, −0.5)` with the row still
+  reported binding where the truth is the origin: wrong answer *and* wrong
+  record. Both directions now reproduce a re-solve at the perturbed
+  right-hand side to `< 1e-8`, exactly rather than approximately — the whole
+  active set of the target is reached in one shot, and for a QP fix-relax
+  with the right active set *is* the re-solve.
+
+  The fix reuses gh#929's `RowLimitView` rather than adding machinery: the
+  observer block is triangular in the adjoined variables, so it costs two
+  sparse mat-vecs and **no extra factorization**. `RowLimitView::lift_step`
+  is new — the plain step is already in hand at that point, so lifting it
+  beats a second back-solve. The augmentation is skipped, and the plain
+  refinement kept, wherever the walk skips it, notably on the conic arm.
+
+  The row list `parametric_step_bounded` returns is **mixed**: a released
+  limit is named by its multiplier row, a pinned one by its primal row, and
+  a primal row at or past `n` is now an *observer* rather than a variable.
+  Indexing a variable-length vector by one of these numbers returns a
+  neighbouring variable's answer — the gh#450 hazard — so
+  `QpSensitivity::refined_row_target` is the single decoder, returning the
+  new `RefinedRow { target: PathTarget, released: bool }`. The method has no
+  callers outside this crate's tests and no Python binding, so nothing
+  downstream changes.
 
 - **`curve_fit(sensitivity="exact")`, and two accuracy defects in
   `dpopt_ddata` ([#923](https://github.com/jkitchin/pounce/issues/923),
