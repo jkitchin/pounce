@@ -460,6 +460,64 @@ changes.
 
 ### Fixed
 
+- **`solve_qp`'s PSD pre-check no longer masks the `P` non-finite guard
+  ([#932](https://github.com/jkitchin/pounce/issues/932)).** Sibling of
+  gh #862 — same ordering, different trigger. With a `NaN`/`Inf` anywhere in
+  `P`, the default path reached `np.linalg.eigvalsh` inside
+  `_min_eig_lower_coo` before `_validate` ever ran, and what came back
+  depended on `n`: at `n ≥ 3` a raw `numpy.linalg.LinAlgError: Eigenvalues
+  did not converge`, and at `n = 2` the *indefinite* error — "P is not
+  positive semidefinite (min eigenvalue nan) … pass `method='active-set'`" —
+  blaming nonconvexity for a matrix that is not indefinite and naming a
+  remedy that does not help. The message the frontend already contains,
+  ``solve_qp: `P` contains NaN or Inf``, was reachable only with
+  `check_psd=False`, which skips the pre-check and lets `_validate` run.
+  Every sibling argument (`c`, `A`, `b`, `h`, `lb`, `ub`) produced it on the
+  default path; only `P` did not.
+
+  The finite check is now `_reject_nonfinite`, called from `_psd_verdict`
+  before it reads `P` as well as from `_validate`, and in `_validate`'s own
+  order — finite first, then shape — so an input that is malformed both ways
+  gets the same message from both spellings of `check_psd`. One site covers
+  the seven entry points that check the Hessian before they build:
+  `solve_qp` (both `method=`), `solve_qp_batch`, `solve_qp_multi_rhs`,
+  `solve_socp`, `QpFactorization`, `QpSensitivity`. The same call lands in
+  `_guard_psd` on the `jax` and `torch` layers, where `P` is concrete on the
+  host forward — gh #874's lesson applied before the report rather than
+  after. It is deliberately **not** folded into `_validate_p_shape`, which
+  those two frontends call at trace time on a tracer: a shape is known there
+  and a value is not.
+
+  Reproducing it turned up a fourth symptom the report does not name, and a
+  worse one: `_psd_verdict_coo` did not only raise the wrong exception, it
+  **returned** on a non-finite `P`, differently depending on where the bad
+  entry sat. `diag(1, 1, 1, nan)` returned `(True, 0.0)` — the guard
+  affirming the PSD precondition about a matrix that is not finite — while
+  `diag(nan, 1, 1, 1)` returned `(False, 0.0)`, an indefinite verdict whose
+  own `lam_min` contradicts it. `max(abs(v) for v in pv)` is order-dependent
+  under `NaN` (`nan > x` and `x > nan` are both False), so the tolerance came
+  out `nan` in one order and `1.0` in the other. On the `qp.py` entry points
+  that pass was harmless — `_validate` rejects the model a moment later — but
+  it is the guard answering a question it cannot answer, so the verdict
+  itself now rejects a non-finite triplet as a backstop under the frontend
+  checks.
+
+  No solve changes: this only decides which exception a rejected input gets.
+  Severity is low by construction — it rejected rather than returning a wrong
+  answer; the rejection was opaque and inconsistent.
+  `python/tests/test_issue932_psd_precheck_masks_nonfinite_p.py` asserts the
+  message across all seven entry points, over `n ∈ {2, 3, 4, 5}` because the
+  size split is what gave one input two different diagnoses, and over four
+  placements of the bad entry including one the pre-check never reads (the
+  upper triangle, which reached `_validate` intact and must keep doing so).
+  The two guards are separately mutation-checked: removing the frontend check
+  alone leaves 4 failures (the doubly-malformed ordering case — the backstop
+  catches the rest, with the same message), removing the backstop alone
+  leaves 3 (the verdict-level cases), and removing both — the parent's
+  behaviour — fails 92 of 161. The 69 survivors are the upper-triangle
+  placement, the sibling arguments, the `±inf`-bounds control and the two
+  positive controls, which is the pattern a correct fix has to produce.
+
 - **`curve_fit(sensitivity="exact")`, and two accuracy defects in
   `dpopt_ddata` ([#923](https://github.com/jkitchin/pounce/issues/923),
   [#925](https://github.com/jkitchin/pounce/issues/925)).** The influence

@@ -62,7 +62,7 @@ import numpy as np
 from jax.scipy.linalg import block_diag
 
 from .. import _pounce
-from ..qp import _check_psd, _validate_p_shape
+from ..qp import _check_psd, _reject_nonfinite, _validate_p_shape
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
@@ -116,6 +116,16 @@ def _guard_psd(P, n, check_psd=None):
     _validate_p_shape(P, n)
     if check_psd is False:
         return
+    # `P` is concrete here (the host forward), so its *values* can be checked
+    # too — and have to be, before `eigvalsh` sees them: a non-finite `P`
+    # otherwise comes back as `LinAlgError: Eigenvalues did not converge`, or
+    # as the indefinite error blaming nonconvexity for a matrix that is not
+    # indefinite. That is gh #932, and it is gh #874's lesson applied before
+    # the report rather than after: the shared check lands on all three
+    # frontends at once. It sits *after* the `check_psd is False` return,
+    # unlike the shape check above, because the trace-time path reaches this
+    # line only when the guard runs, and this check reads values.
+    _reject_nonfinite("P", P)
     _check_psd(*_to_coo_lower(np.asarray(P)), n)
 
 

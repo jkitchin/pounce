@@ -502,9 +502,29 @@ def _psd_verdict_coo(pr, pc, pv, n: int):
     being skipped. ``None`` is *undecided* — the factorization could not be
     read as a congruence — and a caller must not read it as a pass;
     :func:`_psd_verdict` turns it into a warning, which is the whole point of
-    the distinction."""
+    the distinction.
+
+    A non-finite entry is rejected here rather than measured, because on such
+    a matrix this function returned an *answer* and the answer was not
+    trustworthy in either direction (gh #932). Measured on the parent commit,
+    ``diag(1, 1, 1, nan)`` returned ``(True, 0.0)`` — the guard affirming the
+    PSD precondition about a matrix that is not even finite — while
+    ``diag(nan, 1, 1, 1)`` returned ``(False, 0.0)``, an indefinite verdict
+    with a ``lam_min`` that contradicts it: ``max(abs(v) for v in pv)`` is
+    order-dependent in the presence of ``NaN`` (``nan > x`` and ``x > nan``
+    are both False), so the tolerance itself came out ``nan`` in one order and
+    ``1.0`` in the other, and ``eigvalsh`` fails to converge on a third
+    (``Inf``). Three inputs of one kind, three unrelated outcomes.
+
+    The frontends check ``P`` before it reaches here (:func:`_psd_verdict`,
+    and ``_guard_psd`` in :mod:`pounce.jax` / :mod:`pounce.torch`), on the
+    dense array rather than the triplet — which is strictly stronger, since
+    the lower-triangle filter drops an entry sitting only in the upper
+    triangle. This is the backstop under them: no caller of the *verdict*
+    can be told "PSD" about a matrix whose entries are not numbers."""
     if not pr:  # no Hessian entries → LP, trivially PSD
         return True, 0.0
+    _reject_nonfinite("P", pv)
     scale = max(abs(v) for v in pv)
     # Relative to ``P``'s own scale, with no absolute floor under it. The
     # ``max(scale, 1.0)`` this carried was gh#872's fourth stacked floor: it
@@ -606,11 +626,19 @@ def _psd_verdict(P, c, check_psd):
         return None
     n = np.asarray(c, dtype=np.float64).ravel().shape[0]
     # Before reading `P`, not after: the guard builds an (n, n) workspace out
-    # of `P`'s own indices, so a mis-shaped `P` could reach numpy as an
-    # `IndexError` instead of the message `_validate` is written to give
-    # (gh #862). `_validate` runs later, in `_build` — too late to be the one
-    # that speaks on any entry point that checks the Hessian before it
-    # builds, which is all of them.
+    # of `P`'s own indices and then takes its eigenvalues, so a malformed `P`
+    # reached numpy and came back as a raw exception naming an array the
+    # caller never created, instead of the message `_validate` is written to
+    # give. `_validate` runs later, in `_build` — too late to be the one that
+    # speaks on any entry point that checks the Hessian before it builds,
+    # which is all of them.
+    #
+    # Two triggers, one ordering: a mis-shaped `P` indexed out of bounds
+    # (`IndexError`, gh #862) and a non-finite `P` failed to converge inside
+    # `eigvalsh` (`LinAlgError`, gh #932). The order of the two checks below
+    # is `_validate`'s own, so an input that is both gets the same message
+    # from both spellings of `check_psd`.
+    _reject_nonfinite("P", P)
     _validate_p_shape(P, n)
     verdict = _psd_verdict_coo(*_lower_triangle_coo(P, n), n)
     if verdict is None:
@@ -686,29 +714,48 @@ def _validate_p_shape(P, n: int) -> None:
         raise ValueError(f"solve_qp: `P` has shape {psh} but must be ({n}, {n})")
 
 
+def _reject_nonfinite(name, arr, allow_inf: bool = False) -> None:
+    """Reject an argument carrying ``NaN`` (or, unless ``allow_inf``, ``Inf``).
+
+    Split out of :func:`_validate` for the same reason
+    :func:`_validate_p_shape` was (gh #862), on a different trigger: the PSD
+    pre-check reads ``P``'s *values* before ``_validate`` ever runs, and
+    ``np.linalg.eigvalsh`` on a non-finite matrix does not raise this
+    message. It raises ``numpy.linalg.LinAlgError: Eigenvalues did not
+    converge`` from numpy internals, or — at ``n = 2``, where the iteration
+    happens to converge to ``nan`` — the *indefinite* error, which blames
+    nonconvexity for a matrix that is not indefinite and recommends
+    ``method='active-set'``, which does not help. See gh #932.
+
+    ``±inf`` bounds are the idiomatic "no bound", so ``lb``/``ub`` pass
+    ``allow_inf=True`` and only ``NaN`` is malformed there.
+
+    Deliberately **not** folded into :func:`_validate_p_shape`, which the
+    ``jax`` and ``torch`` frontends call at trace time on a tracer (gh #874):
+    a shape is known there and a value is not, so ``np.asarray`` on the same
+    argument raises ``TracerArrayConversionError``. Value checks belong on
+    the concrete paths only."""
+    if arr is None:
+        return
+    data = np.asarray(
+        arr.tocoo().data if hasattr(arr, "tocoo") else arr, dtype=np.float64
+    )
+    if not data.size:
+        return
+    bad = np.isnan(data) if allow_inf else ~np.isfinite(data)
+    if bad.any():
+        what = "NaN" if allow_inf else "NaN or Inf"
+        raise ValueError(f"solve_qp: `{name}` contains {what}")
+
+
 def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
     """Reject malformed inputs up front with a precise ``ValueError`` instead
     of a misleading solver status (issue #113): a shape mismatch otherwise
     surfaces as ``primal_infeasible`` and a NaN/Inf as ``iteration_limit``."""
-
-    def _finite(name, arr, allow_inf=False):
-        if arr is None:
-            return
-        data = np.asarray(
-            arr.tocoo().data if hasattr(arr, "tocoo") else arr, dtype=np.float64
-        )
-        if not data.size:
-            return
-        # ±inf bounds are the idiomatic "no bound"; only NaN is malformed there.
-        bad = np.isnan(data) if allow_inf else ~np.isfinite(data)
-        if bad.any():
-            what = "NaN" if allow_inf else "NaN or Inf"
-            raise ValueError(f"solve_qp: `{name}` contains {what}")
-
     for name, arr in (("P", P), ("c", c), ("A", A), ("b", b), ("G", G), ("h", h)):
-        _finite(name, arr)
-    _finite("lb", lb, allow_inf=True)
-    _finite("ub", ub, allow_inf=True)
+        _reject_nonfinite(name, arr)
+    _reject_nonfinite("lb", lb, allow_inf=True)
+    _reject_nonfinite("ub", ub, allow_inf=True)
 
     _validate_p_shape(P, n)
 
