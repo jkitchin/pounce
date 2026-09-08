@@ -509,6 +509,87 @@ changes.
 
 ### Fixed
 
+- **`solve_qp`'s PSD pre-check no longer masks the `P` non-finite guard
+  ([#932](https://github.com/jkitchin/pounce/issues/932)).** Sibling of
+  gh #862 — same ordering, different trigger. With a `NaN`/`Inf` anywhere in
+  `P`, the default path reached `np.linalg.eigvalsh` inside
+  `_min_eig_lower_coo` before `_validate` ever ran, and what came back
+  depended on `n`: at `n ≥ 3` a raw `numpy.linalg.LinAlgError: Eigenvalues
+  did not converge`, and at `n = 2` the *indefinite* error — "P is not
+  positive semidefinite (min eigenvalue nan) … pass `method='active-set'`" —
+  blaming nonconvexity for a matrix that is not indefinite and naming a
+  remedy that does not help. The message the frontend already contains,
+  ``solve_qp: `P` contains NaN or Inf``, was reachable only with
+  `check_psd=False`, which skips the pre-check and lets `_validate` run.
+  Every sibling argument (`c`, `A`, `b`, `h`, `lb`, `ub`) produced it on the
+  default path; only `P` did not.
+
+  The finite check is now `_reject_nonfinite`, called from `_psd_verdict`
+  before it reads `P` as well as from `_validate`, and in `_validate`'s own
+  order — finite first, then shape — so an input that is malformed both ways
+  gets the same message from both spellings of `check_psd`. One site covers
+  the seven entry points that check the Hessian before they build:
+  `solve_qp` (both `method=`), `solve_qp_batch`, `solve_qp_multi_rhs`,
+  `solve_socp`, `QpFactorization`, `QpSensitivity`.
+
+  The same call lands in `_guard_psd` on the `jax` and `torch` layers, where
+  `P` is concrete on the host forward — gh #874's lesson applied before the
+  report rather than after. There it runs **unconditionally**, above the
+  `check_psd is False` early return, exactly where gh #874 put the shape
+  check and for the same reason: `check_psd` says whether the caller wants
+  the *definiteness* precondition verified, and is not permission to solve a
+  different model. A `NaN` in `P`'s **upper** triangle is that different
+  model — `_to_coo_lower` drops it, so those two layers *solved the matrix
+  without it*: measured on `2·I₄` with `P[0, 3] = nan`, no exception and
+  `x = [-0.5, -0.5, -0.5, -0.5]`, the optimum of a model the caller never
+  passed, with `_kkt_backward`'s gradients taken through it. Unlike `qp.py`,
+  there is no `_validate` behind those layers to catch it a moment later.
+  The check is deliberately **not** folded into `_validate_p_shape`, which
+  both frontends also call at trace time on a tracer: a shape is known there
+  and a value is not.
+
+  Reproducing it turned up a fourth symptom the report does not name, and a
+  worse one: `_psd_verdict_coo` did not only raise the wrong exception, it
+  **returned** on a non-finite `P`, differently depending on where the bad
+  entry sat. `diag(1, 1, 1, nan)` returned `(True, 0.0)` — the guard
+  affirming the PSD precondition about a matrix that is not finite — while
+  `diag(nan, 1, 1, 1)` returned `(False, 0.0)`, an indefinite verdict whose
+  own `lam_min` contradicts it. `max(abs(v) for v in pv)` is order-dependent
+  under `NaN` (`nan > x` and `x > nan` are both False), so the tolerance came
+  out `nan` in one order and `1.0` in the other. On the `qp.py` entry points
+  that pass was harmless — `_validate` rejects the model a moment later — but
+  it is the guard answering a question it cannot answer, so the verdict
+  itself now rejects a non-finite triplet as a backstop under the frontend
+  checks.
+
+  No solve changes: this only decides which exception a rejected input gets.
+  Severity is low by construction — it rejected rather than returning a wrong
+  answer; the rejection was opaque and inconsistent.
+  `python/tests/test_issue932_psd_precheck_masks_nonfinite_p.py` asserts the
+  message across all seven entry points, over `n ∈ {2, 3, 4, 5}` because the
+  size split is what gave one input two different diagnoses, and over four
+  placements of the bad entry including one the pre-check never reads (the
+  upper triangle, which reached `_validate` intact and must keep doing so).
+  The two guards are separately mutation-checked: removing the frontend check
+  alone leaves 4 failures (the doubly-malformed ordering case — the backstop
+  catches the rest, with the same message), removing the backstop alone
+  leaves 3 (the verdict-level cases), and removing both — the parent's
+  behaviour — fails 92 of 161. The 69 survivors are the upper-triangle
+  placement, the sibling arguments, the `±inf`-bounds control and the two
+  positive controls, which is the pattern a correct fix has to produce.
+
+  `python/tests/test_issue932_ad_frontends_nonfinite_p.py` (19 cases) owns
+  the two differentiable layers, which neither guard above reaches — the
+  backstop reads the lower triangle and `_validate` is not on their path.
+  Deleting the check from `pounce/jax/_qp.py` fails 4 jax rows and from
+  `pounce/torch/_qp.py` 4 torch rows; moving it back below the
+  `check_psd is False` return fails the 4 `check_psd=False` rows. The `qp`
+  rows never move under any of the three, and the lower-triangle rows survive
+  deleting the frontend check outright — the backstop covers those — so the
+  file measures exactly what each guard owns. Both AD files are now listed in
+  ci.yml's `python-test-torch` job: it is the only job with torch installed,
+  and gh #874's file, whose `importorskip("torch")` is module-level, was
+  running in no job at all.
 - **A limit written as a constraint row is refined too, on the convex arm**
   ([#929](https://github.com/jkitchin/pounce/issues/929) follow-up).
   gh#929 taught `QpSensitivity::parametric_step_path` — the walk — about

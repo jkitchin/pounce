@@ -310,12 +310,22 @@ jobs:
           # CPU torch wheel — pounce solves on the host, no CUDA needed.
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install python/dist/*.whl pytest scipy "jax[cpu]"
+      # The AD-frontend regression files are listed here because this is the
+      # only job with torch: both carry a module-level or per-test
+      # `importorskip("torch")`, so in `python-test` (jax, no torch) their
+      # torch rows skip. `test_issue874_ad_frontends_p_shape.py` skips there
+      # *entirely* — its importorskip is module-level — so until it was added
+      # here it ran in no job at all, which is a regression test for a
+      # silent-wrong-answer defect that was not running anywhere (gh #932's
+      # review found it).
       - name: Run Python torch + parity tests
         run: |
           python -m pytest python/tests/test_torch.py \
             python/tests/test_qp_torch.py \
             python/tests/test_socp_torch.py \
-            python/tests/test_parity_jax_torch.py -q
+            python/tests/test_parity_jax_torch.py \
+            python/tests/test_issue874_ad_frontends_p_shape.py \
+            python/tests/test_issue932_ad_frontends_nonfinite_p.py -q
 
   # Smoke-build the `pounce-solver` wheel on every PR so packaging
   # regressions surface here, not at tag time. Runs only on Linux

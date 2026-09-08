@@ -36,7 +36,7 @@ import numpy as np
 import torch
 
 from .. import _pounce
-from ..qp import _check_psd, _validate_p_shape
+from ..qp import _check_psd, _reject_nonfinite, _validate_p_shape
 from ._build import _DT
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
@@ -62,11 +62,13 @@ def _guard_psd(P, n, check_psd=None):
     inertia count rather than a dense ``eigvalsh`` once ``n`` is large), so
     size no longer decides whether the precondition is verified.
 
-    Shape is validated first, and **unconditionally** — before the
-    ``check_psd is False`` early return below (gh #874). ``check_psd`` is a
-    statement about whether the caller wants the *definiteness* precondition
-    verified; it is not permission to build a different model than the one
-    that was passed. gh #862's ordering argument applies here verbatim: the
+    Shape **and finiteness** are validated first, and unconditionally —
+    before the ``check_psd is False`` early return below (gh #874, gh #932).
+    ``check_psd`` is a statement about whether the caller wants the
+    *definiteness* precondition verified; it is not permission to build a
+    different model than the one that was passed, and a ``NaN`` the
+    lower-triangle filter drops is a different model as surely as a wrong
+    shape is. gh #862's ordering argument applies here verbatim: the
     guard writes ``P``'s own index pairs into an ``(n, n)`` workspace, so an
     oversized ``P`` indexed out of bounds and surfaced as a raw numpy
     ``IndexError`` from inside ``_min_eig_lower_coo`` — naming an array the
@@ -88,6 +90,29 @@ def _guard_psd(P, n, check_psd=None):
     the three frontends' error text identical.
     """
     _validate_p_shape(P, n)
+    # Values, not only shape — and, like the shape check, **unconditionally**,
+    # above the `check_psd is False` return. `P` is concrete here: every call
+    # site is a host forward, so unlike the trace-time `_validate_p_shape`
+    # calls at the entry points there is no tracer to materialize.
+    #
+    # A non-finite `P` otherwise reaches `eigvalsh` and comes back as
+    # `LinAlgError: Eigenvalues did not converge`, or as the indefinite error
+    # blaming nonconvexity for a matrix that is not indefinite (gh #932) --
+    # gh #874's lesson applied before the report rather than after, so the
+    # shared check lands on all three frontends at once.
+    #
+    # It runs above the early return for gh #874's reason, which is not about
+    # ordering but about what `check_psd` means: it says whether the caller
+    # wants the *definiteness* precondition verified, and is not permission to
+    # solve a different model than the one passed. A `NaN` in the **upper**
+    # triangle is exactly that -- `_to_coo_lower` drops it, so the layer
+    # solved the matrix without it. Measured on `2*I4` with `P[0, 3] = nan`
+    # and `check_psd=False`: no exception, `x = [-0.5, -0.5, -0.5, -0.5]`, the
+    # optimum of a model the caller never passed, with `_kkt_backward`'s
+    # gradients taken through it. There is no `_validate` behind these two
+    # layers to catch it a moment later, which is what makes the placement
+    # differ from `qp.py`'s.
+    _reject_nonfinite("P", P)
     if check_psd is False:
         return
     _check_psd(*_to_coo_lower(np.asarray(P)), n)
