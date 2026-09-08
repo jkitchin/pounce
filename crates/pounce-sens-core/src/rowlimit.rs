@@ -276,6 +276,31 @@ impl<B: SensBacksolver> RowLimitView<B> {
         Some(out)
     }
 
+    /// A base-space **solution** lifted into this view's space, the
+    /// left-hand-side counterpart of [`Self::lift_rhs`].
+    ///
+    /// The observer coordinate of a step is `dt = G_w dx`, and the
+    /// adjoined multiplier of a step whose right-hand side came through
+    /// `lift_rhs` is zero — that right-hand side puts nothing in the
+    /// `t` or `mu` rows. So this is [`Self::unfold`] with both those
+    /// pieces zero, written that way rather than open-coded so a lifted
+    /// step cannot drift from what [`SensBacksolver::solve`] returns
+    /// for the same input. `lifting_a_step_agrees_with_solving_it`
+    /// is what holds the two together.
+    ///
+    /// A caller that already has the base step in hand — every one
+    /// does, since the plain step is what the refinement corrects —
+    /// pays two sparse mat-vecs here instead of a second back-solve.
+    pub fn lift_step(&self, base_lhs: &[Number]) -> Option<Vec<Number>> {
+        if base_lhs.len() != self.base_dim {
+            return None;
+        }
+        let zeros = vec![0.0; self.rows.len()];
+        let mut out = vec![0.0; self.dim()];
+        self.unfold(base_lhs, &zeros, &zeros, &mut out);
+        Some(out)
+    }
+
     /// Every releasable row of this view, base and watched alike, in
     /// this view's index space. Same slice
     /// [`SensBacksolver::bound_rows`] returns.
@@ -579,6 +604,69 @@ mod tests {
     /// anything: with a single watched row every ordering of the
     /// observers is the same ordering, which is exactly the shape the
     /// convex fixture has.
+    /// [`RowLimitView::lift_step`] is the cheap route to the augmented
+    /// plain step, and cheap is only worth having if it is the same
+    /// answer: a caller with the base step in hand skips a back-solve
+    /// by using it.
+    ///
+    /// The mutation this catches is the tempting one — lifting a step
+    /// by zero-filling the observers instead of evaluating
+    /// `dt = G_w dx`. That reads as a step whose watched rows do not
+    /// move at all, so nothing ever reaches a limit and the caller is
+    /// back to the defect it was fixing, with no error anywhere.
+    #[test]
+    fn lifting_a_step_agrees_with_solving_it() {
+        let n_x = 3;
+        let rows = vec![
+            watched(None, vec![(0, 1.0), (2, -0.5)]),
+            watched(Some((3, 0.7)), vec![(1, 2.0)]),
+        ];
+        let b = base(Vec::new());
+        let base_dim = b.n;
+        let view = RowLimitView::new(b, n_x, rows).expect("the view must build");
+
+        // A base-space right-hand side, lifted, solved in the view.
+        let base_rhs: Vec<Number> = vec![0.4, -1.1, 0.9, 0.3, -0.6];
+        let lifted_rhs = view.lift_rhs(&base_rhs).expect("the rhs lifts");
+        let mut want = vec![0.0; view.dim()];
+        assert!(view.solve(&lifted_rhs, &mut want), "the view must solve");
+
+        // The same thing from the base answer alone.
+        let mut base_lhs = vec![0.0; base_dim];
+        assert!(
+            view.base.solve(&base_rhs, &mut base_lhs),
+            "the base must solve",
+        );
+        let got = view.lift_step(&base_lhs).expect("the step lifts");
+
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-10,
+                "row {i}: lift_step {g} against solve {w}\n{got:?}\n{want:?}",
+            );
+        }
+        // Not vacuous: the observers actually moved.
+        assert!(
+            got[n_x..n_x + 2].iter().any(|v| v.abs() > 1e-6),
+            "the observers read {:?}, so this test would pass on a \
+             zero-filling lift",
+            &got[n_x..n_x + 2],
+        );
+    }
+
+    /// Length is the only thing `lift_step` can refuse, and refusing is
+    /// the point: a base answer of the wrong width is a caller holding
+    /// the view's own vector by mistake, which would otherwise scatter
+    /// into the observer rows.
+    #[test]
+    fn lift_step_refuses_a_vector_that_is_not_the_base() {
+        let rows = vec![watched(None, vec![(0, 1.0)])];
+        let view = RowLimitView::new(base(Vec::new()), 3, rows).expect("the view must build");
+        assert!(view.lift_step(&vec![0.0; view.dim()]).is_none());
+        assert!(view.lift_step(&[]).is_none());
+        assert!(view.lift_step(&vec![0.0; 5]).is_some());
+    }
+
     #[test]
     fn each_active_row_keeps_its_own_observer() {
         let n_x = 3;
