@@ -91,7 +91,9 @@ pub use qp::{
     BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,
     screen_variable_box,
 };
-pub use sensitivity::{ConeBlockKind, QpKktBacksolver, QpSensitivity, ReducedHessian, SensError};
+pub use sensitivity::{
+    ConeBlockKind, PathTarget, QpKktBacksolver, QpSensitivity, ReducedHessian, SensError,
+};
 pub use sos::{
     PolyProblem, Polynomial, SosBound, SosSolution, sos_constrained_lower_bound,
     sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,

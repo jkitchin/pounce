@@ -47,6 +47,11 @@ tracing.workspace = true
 # FERAL backs the in-tree unit tests so the IPM runs end-to-end against
 # a real sparse symmetric factorization without external solvers.
 pounce-feral.workspace = true
+# Already a normal dependency; repeated here so the *integration* tests can
+# drive `step_along_path` against a bare `QpKktBacksolver` — which is what
+# `parametric_step_path` did before gh#929 adjoined the row observers, and
+# therefore the only way to measure the defect from outside the crate.
+pounce-sens-core.workspace = true
 
 [lints]
 workspace = true

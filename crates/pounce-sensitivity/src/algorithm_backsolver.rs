@@ -158,6 +158,21 @@ pub struct PdSensBacksolver {
     sigma: EffectiveSigma,
 }
 
+/// Which of the four bound-multiplier blocks a compound KKT row falls
+/// in. Produced by [`PdSensBacksolver::bound_block_of`], which is the
+/// only place the block offsets are computed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundBlock {
+    /// `z_l`: lower bound on a variable.
+    ZL,
+    /// `z_u`: upper bound on a variable.
+    ZU,
+    /// `v_l`: lower limit on an inequality row, carried by its slack.
+    VL,
+    /// `v_u`: upper limit on an inequality row, likewise.
+    VU,
+}
+
 /// The barrier diagonals the sensitivity path factors with, after both
 /// corrections that stand between the calculated quantities and the
 /// matrix: gh#654's choice of *frame*, and gh#737's ceiling on how
@@ -253,6 +268,14 @@ struct DeclaredFrameBarrier {
     /// to rebuild it in the same frame.
     slack_x_l: Vec<Number>,
     slack_x_u: Vec<Number>,
+    /// The same two, for the `s` block and the `pd_l` / `pd_u` spaces.
+    /// A released **constraint** limit rebuilds its slack's `Σ` entry
+    /// exactly as a released variable bound does, and a rebuild that
+    /// reached for the live relaxed slacks while the diagonal it was
+    /// patching came from the declared frame would mix the two frames
+    /// in one vector -- the gh#654 defect, one block over.
+    slack_s_l: Vec<Number>,
+    slack_s_u: Vec<Number>,
 }
 
 /// Left/right diagonal pair for the natural-units back-solve; see the
@@ -460,7 +483,7 @@ impl PdSensBacksolver {
             &*curr.z_u,
             dims[0],
         );
-        let (sigma_s, _, _) = declared_frame_sigma(
+        let (sigma_s, slack_s_l, slack_s_u) = declared_frame_sigma(
             &*nlp_ref.pd_l(),
             &*nlp_ref.pd_u(),
             &*curr.s,
@@ -475,6 +498,8 @@ impl PdSensBacksolver {
             sigma_s,
             slack_x_l,
             slack_x_u,
+            slack_s_l,
+            slack_s_u,
         }))
     }
 
@@ -705,10 +730,15 @@ impl PdSensBacksolver {
         if released.is_empty() {
             return self.solve(rhs, lhs);
         }
-        let Some(sigma) = self.released_sigma_x(released) else {
+        // Both diagonals: a released row can bound a slack rather than
+        // a variable, and taking its `z / s` off the `x` block would
+        // leave the constraint limit still enforced (gh#928). `None`
+        // in the `s` slot is the ordinary case and keeps the cached
+        // factorization key.
+        let Some((sigma, sigma_s)) = self.released_sigmas(released) else {
             return false;
         };
-        self.solve_released_prebuilt(released, sigma, None, None, rhs, lhs, shift)
+        self.solve_released_prebuilt(released, sigma, sigma_s, None, rhs, lhs, shift)
     }
 
     /// [`Self::solve_released_inner`] with the released `Σ` supplied by
@@ -773,21 +803,152 @@ impl PdSensBacksolver {
         true
     }
 
-    /// The barrier's `x` diagonal with each released bound's own `z / s`
-    /// taken off the variable it constrains -- subtracted rather than
-    /// zeroed, since a variable bounded on both sides contributes twice
-    /// and only one side is being released.
+    /// The diagonal a *path* pin puts on one primal KKT row: the
+    /// stiffest entry the row's own couplings still survive, which is
+    /// [`sigma_pin_cap`] of the largest constraint coefficient the row
+    /// carries.
+    ///
+    /// A variable in no constraint row reports no ceiling at all
+    /// (gh#653), and `INFINITY` here is not a stiffer pin but a `NaN`
+    /// in the factorization. Those get the scalar the `s` diagonal is
+    /// built under, `sigma_pin_cap(1.0)` -- unit coupling, and a pin
+    /// the coordinate moves under by `eps * SIGMA_PIN_HEADROOM` per
+    /// unit of force, which is roundoff.
+    ///
+    /// The addend is the ceiling itself rather than something under
+    /// it, so [`pinned_entry`] returns the ceiling exactly and the
+    /// capped diagonal differs from the uncapped one by the factor
+    /// `cap / (had + cap)`. On a bound the walk *reaches* -- the only
+    /// kind it pins -- `had` is the base point's barrier term for a
+    /// bound that was inactive there, order one against a ceiling of
+    /// order `1e13`, so that factor is `1 - 1e-13` and the multiplier
+    /// rows need no [`Self::rescale_bound_multipliers`] pass.
+    fn path_pin_add(&self, row: usize) -> Number {
+        let cap = if row < self.dims[0] {
+            self.sigma
+                .cap_x
+                .get(row)
+                .copied()
+                .unwrap_or(Number::INFINITY)
+        } else {
+            sigma_pin_cap(1.0)
+        };
+        if cap.is_finite() {
+            cap
+        } else {
+            sigma_pin_cap(1.0)
+        }
+    }
+
+    /// Body of [`SensBacksolver::solve_released_pinned`]: the
+    /// released solve, with each pinned primal row's diagonal raised
+    /// to [`Self::path_pin_add`].
+    ///
+    /// # Why raising the diagonal costs nothing in accuracy
+    ///
+    /// This is the *operator*, not the pin. The caller applies the
+    /// same exact Schur row on top of it -- `K w - E du = r`,
+    /// `Eᵀ w = 0` -- and `Eᵀ w = 0` says every pinned coordinate of
+    /// `w` is zero, so the term this function added,
+    /// `Σ_pin E Eᵀ w`, is identically zero at the solution. The
+    /// system actually solved is the released one, and `du` comes back
+    /// in the very same frame and units the unregularized pin reports
+    /// it in. Nothing has to be converted, and a walk that takes the
+    /// plain operator on one segment and this one on the next keeps
+    /// accumulating a single `h.mult`.
+    ///
+    /// What the added diagonal buys is that `K⁻¹` exists at all.
+    /// Releasing a bound takes its `Sigma` off the diagonal; on a
+    /// model with no curvature two released variables sharing a
+    /// constraint row are left with linearly dependent stationarity
+    /// rows, and a Schur complement `-Eᵀ K⁻¹ E` cannot be built from a
+    /// singular `K` (gh#930). The diagonal has to be reachable, not
+    /// merely large -- [`Self::path_pin_add`] is the gh#737 ceiling,
+    /// the stiffest entry the row's own couplings survive.
+    ///
+    /// `issue_930_two_curvature_free_releases.rs` measures the two
+    /// operators against each other on a fixture where both run, and
+    /// the answer against a re-solve at the perturbed parameter.
+    fn solve_released_pinned_inner(
+        &self,
+        released: &[usize],
+        pinned: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        if pinned.is_empty() {
+            return false;
+        }
+        let n_p = self.dims[0] + self.dims[1];
+        // A pin is a primal row by contract; anything past the `s`
+        // block is a multiplier row and has no diagonal to raise.
+        if pinned.iter().any(|&r| r >= n_p) {
+            return false;
+        }
+        let pins: Vec<(usize, Number)> =
+            pinned.iter().map(|&r| (r, self.path_pin_add(r))).collect();
+        let Some((sigma_x, sigma_s)) = self.active_set_sigmas(released, &pins) else {
+            return false;
+        };
+        self.solve_released_prebuilt(released, sigma_x, sigma_s, None, rhs, lhs, false)
+    }
+
+    /// The barrier's **primal** diagonals with each released bound's
+    /// own `z / s` taken off the quantity it constrains -- rebuilt
+    /// rather than subtracted, since a quantity bounded on both sides
+    /// contributes twice and only one side is being released.
+    ///
+    /// The second slot is the `s`-block diagonal a released
+    /// **constraint** limit needs, and is `None` when nothing in
+    /// `released` bounds a slack.
     ///
     /// Both the starting diagonal and the slacks the surviving sides are
     /// rebuilt from come from the frame the held iterate belongs to
     /// (gh#654): mixing a declared-frame `Σ` with relaxed-frame slacks
     /// would leave the released variable pinned in one frame and its
     /// neighbours in the other.
-    pub(crate) fn released_sigma_x(
+    ///
+    /// `None` is load-bearing rather than a shortcut: the
+    /// factorization cache keys on the diagonal object's tag, so
+    /// handing back a freshly built `s` vector that is numerically
+    /// identical to the cached one would re-factorize every solve.
+    pub(crate) fn released_sigmas(
         &self,
         released: &[usize],
-    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
-        self.active_set_sigma_x(released, &[])
+    ) -> Option<(
+        Rc<dyn pounce_linalg::Vector>,
+        Option<Rc<dyn pounce_linalg::Vector>>,
+    )> {
+        self.active_set_sigmas(released, &[])
+    }
+
+    /// Which bound block a multiplier row falls in, and its index
+    /// inside that block's compressed vector.
+    ///
+    /// `bound_variable_rows` emits the four groups in block order and
+    /// records only the compound row, so this is where a row is turned
+    /// back into "the `k`th entry of `z_u`". Doing that arithmetic at
+    /// the use site is what the `z`-only version did -- `row -
+    /// base_row - dims[4]` -- and that expression silently returns a
+    /// `z_u` index for a `v_l` row, which is a real number that
+    /// indexes a real vector and is wrong.
+    fn bound_block_of(&self, row: usize) -> Option<(BoundBlock, usize)> {
+        let z_l = self.dims[0] + self.dims[1] + self.dims[2] + self.dims[3];
+        let z_u = z_l + self.dims[4];
+        let v_l = z_u + self.dims[5];
+        let v_u = v_l + self.dims[6];
+        let end = v_u + self.dims[7];
+        if row >= z_l && row < z_u {
+            Some((BoundBlock::ZL, row - z_l))
+        } else if row >= z_u && row < v_l {
+            Some((BoundBlock::ZU, row - z_u))
+        } else if row >= v_l && row < v_u {
+            Some((BoundBlock::VL, row - v_l))
+        } else if row >= v_u && row < end {
+            Some((BoundBlock::VU, row - v_u))
+        } else {
+            None
+        }
     }
 
     /// [`Self::released_sigma_x`], also raising the diagonal on
@@ -795,42 +956,77 @@ impl PdSensBacksolver {
     ///
     /// The two directions an active set can move are the same
     /// modification to one diagonal. A bound that leaves has its
-    /// `z / s` taken off the variable it constrains, and a bound that
+    /// `z / s` taken off the quantity it constrains, and a bound that
     /// becomes active has one put on, so a single vector describes
     /// both and a single factorization serves the whole correction.
     /// The two arguments are in different index spaces and both are
     /// `usize`: `released` holds compound KKT rows of bound
     /// multipliers, `pinned` holds var-x rows. Passing one where the
     /// other belongs is not a type error and will not be caught here.
-    pub(crate) fn active_set_sigma_x(
+    ///
+    /// Returns both primal diagonals, because a released row can bound
+    /// a slack rather than a variable (gh#928): `g(x) <= cap` puts its
+    /// multiplier in `v_u` and its `z / s` on the `s` diagonal, and
+    /// releasing it has to come off the block it was added to. The `s`
+    /// half is `None` whenever `released` touches no slack bound,
+    /// which is every call this had before constraint rows were
+    /// reported and every call on a model with no inequality limits.
+    ///
+    /// `pinned` is a **primal** KKT row, not a var-x row, and the two
+    /// spaces coincide only below `dims[0]`. A constraint's own limit
+    /// is a bound on its slack (gh#928), so its pin belongs on the `s`
+    /// diagonal; writing it into the `x` diagonal at whatever index it
+    /// happens to equal is the gh#450 neighbouring-variable hazard one
+    /// block over. The loop below decides the block rather than
+    /// assuming it.
+    fn active_set_sigmas(
         &self,
         released: &[usize],
         pinned: &[(usize, Number)],
-    ) -> Option<Rc<dyn pounce_linalg::Vector>> {
+    ) -> Option<(
+        Rc<dyn pounce_linalg::Vector>,
+        Option<Rc<dyn pounce_linalg::Vector>>,
+    )> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let rows = self.bound_vars.as_deref()?;
-        let base_row = rows.first()?.row;
         let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
             v.as_any()
                 .downcast_ref::<DenseVector>()
                 .map(|d| d.expanded_values())
         };
-        let mut sigma = dense(self.barrier_sigma_x())?;
-        let (slack_l, slack_u) = match self.declared.as_ref() {
-            Some(d) => (d.slack_x_l.clone(), d.slack_x_u.clone()),
+        let n_x = self.dims[0];
+        let mut sigma_x = dense(self.barrier_sigma_x())?;
+        // Built only if a slack bound is actually released; see
+        // `released_sigmas` on why an untouched `None` matters.
+        let mut sigma_s: Option<Vec<Number>> = None;
+        let (slack_x_l, slack_x_u, slack_s_l, slack_s_u) = match self.declared.as_ref() {
+            Some(d) => (
+                d.slack_x_l.clone(),
+                d.slack_x_u.clone(),
+                d.slack_s_l.clone(),
+                d.slack_s_u.clone(),
+            ),
             None => {
                 let cq_ref = self.cq.borrow();
-                let l = dense(cq_ref.curr_slack_x_l())?;
-                let u = dense(cq_ref.curr_slack_x_u())?;
-                (l, u)
+                (
+                    dense(cq_ref.curr_slack_x_l())?,
+                    dense(cq_ref.curr_slack_x_u())?,
+                    dense(cq_ref.curr_slack_s_l())?,
+                    dense(cq_ref.curr_slack_s_u())?,
+                )
             }
         };
-        let (z_l, z_u) = {
+        let (z_l, z_u, v_l, v_u) = {
             let d = self.data.borrow();
             let curr = d.curr.as_ref()?;
-            (dense(Rc::clone(&curr.z_l))?, dense(Rc::clone(&curr.z_u))?)
+            (
+                dense(Rc::clone(&curr.z_l))?,
+                dense(Rc::clone(&curr.z_u))?,
+                dense(Rc::clone(&curr.v_l))?,
+                dense(Rc::clone(&curr.v_u))?,
+            )
         };
-        // Rebuild each released variable's entry from its bounds that
+        // Rebuild each released quantity's entry from its bounds that
         // stay active, rather than subtracting the released bound's
         // `z / s` from the cached total. The subtraction differences
         // two numbers of order `z / s`, 1e7 and up at a tightly
@@ -845,11 +1041,12 @@ impl PdSensBacksolver {
                 if released.contains(&other.row) {
                     continue;
                 }
-                let k = other.row - base_row - if other.lower { 0 } else { self.dims[4] };
-                let (z, s) = if other.lower {
-                    (*z_l.get(k)?, *slack_l.get(k)?)
-                } else {
-                    (*z_u.get(k)?, *slack_u.get(k)?)
+                let (blk, k) = self.bound_block_of(other.row)?;
+                let (z, s) = match blk {
+                    BoundBlock::ZL => (*z_l.get(k)?, *slack_x_l.get(k)?),
+                    BoundBlock::ZU => (*z_u.get(k)?, *slack_x_u.get(k)?),
+                    BoundBlock::VL => (*v_l.get(k)?, *slack_s_l.get(k)?),
+                    BoundBlock::VU => (*v_u.get(k)?, *slack_s_u.get(k)?),
                 };
                 if s == 0.0 || !s.is_finite() {
                     return None;
@@ -859,29 +1056,57 @@ impl PdSensBacksolver {
             // Under the same ceiling the rest of the diagonal is held
             // to (gh#737): a rebuilt entry is `z/s` off the iterate
             // like any other, and a released variable is the one most
-            // likely to be reached through a constraint row.
-            let cap = self
-                .sigma
-                .cap_x
-                .get(br.var_row)
-                .copied()
-                .unwrap_or(Number::INFINITY);
-            *sigma.get_mut(br.var_row)? = fresh.min(cap);
+            // likely to be reached through a constraint row. The `s`
+            // block's ceiling is the scalar its diagonal was built
+            // under, `sigma_pin_cap(1.0)`, exactly as at construction.
+            if br.var_row < n_x {
+                let cap = self
+                    .sigma
+                    .cap_x
+                    .get(br.var_row)
+                    .copied()
+                    .unwrap_or(Number::INFINITY);
+                *sigma_x.get_mut(br.var_row)? = fresh.min(cap);
+            } else {
+                let ss = match sigma_s.as_mut() {
+                    Some(v) => v,
+                    None => sigma_s.insert(dense(self.barrier_sigma_s())?),
+                };
+                *ss.get_mut(br.var_row - n_x)? = fresh.min(sigma_pin_cap(1.0));
+            }
         }
         for &(var_row, add) in pinned {
-            let cap = self
-                .sigma
-                .cap_x
-                .get(var_row)
-                .copied()
-                .unwrap_or(Number::INFINITY);
-            let slot = sigma.get_mut(var_row)?;
-            *slot = pinned_entry(*slot, add, cap);
+            // `var_row` is a *primal* KKT row, so it reaches past the
+            // `x` block into `s` for a constraint's own limit. Writing
+            // one into the `x` diagonal at whatever index it happens
+            // to equal is the gh#450 neighbouring-variable hazard, so
+            // the block is decided here rather than assumed.
+            if var_row < n_x {
+                let cap = self
+                    .sigma
+                    .cap_x
+                    .get(var_row)
+                    .copied()
+                    .unwrap_or(Number::INFINITY);
+                let slot = sigma_x.get_mut(var_row)?;
+                *slot = pinned_entry(*slot, add, cap);
+            } else {
+                // Same ceiling the `s` diagonal was built under.
+                let ss = match sigma_s.as_mut() {
+                    Some(v) => v,
+                    None => sigma_s.insert(dense(self.barrier_sigma_s())?),
+                };
+                let slot = ss.get_mut(var_row - n_x)?;
+                *slot = pinned_entry(*slot, add, sigma_pin_cap(1.0));
+            }
         }
-        let space = DenseVectorSpace::new(sigma.len() as Index);
-        let mut out = DenseVector::new(space);
-        out.values_mut().copy_from_slice(&sigma);
-        Some(Rc::new(out) as Rc<dyn pounce_linalg::Vector>)
+        let pack = |vals: &[Number]| -> Rc<dyn pounce_linalg::Vector> {
+            let space = DenseVectorSpace::new(vals.len() as Index);
+            let mut out = DenseVector::new(space);
+            out.values_mut().copy_from_slice(vals);
+            Rc::new(out) as Rc<dyn pounce_linalg::Vector>
+        };
+        Some((pack(&sigma_x), sigma_s.as_deref().map(pack)))
     }
 
     /// Zero the released multipliers' own rows of a scaled-space
@@ -898,9 +1123,9 @@ impl PdSensBacksolver {
         let Some(rows) = self.bound_vars.as_deref() else {
             return false;
         };
-        let Some(base_row) = rows.first().map(|b| b.row) else {
+        if rows.is_empty() {
             return false;
-        };
+        }
         let d = self.data.borrow();
         let Some(curr) = d.curr.as_ref() else {
             return false;
@@ -910,22 +1135,38 @@ impl PdSensBacksolver {
                 .downcast_ref::<DenseVector>()
                 .map(|x| x.expanded_values())
         };
-        let (Some(z_l), Some(z_u)) = (dense(&curr.z_l), dense(&curr.z_u)) else {
+        let (Some(z_l), Some(z_u), Some(v_l), Some(v_u)) = (
+            dense(&curr.z_l),
+            dense(&curr.z_u),
+            dense(&curr.v_l),
+            dense(&curr.v_u),
+        ) else {
             return false;
         };
         for &r in released {
             let Some(br) = rows.iter().find(|b| b.row == r) else {
                 return false;
             };
-            let k = r - base_row - if br.lower { 0 } else { self.dims[4] };
-            let Some(&z) = (if br.lower { z_l.get(k) } else { z_u.get(k) }) else {
+            // Which block the row lives in decides which multiplier
+            // vector to read; `br.var_row` is already the compound row
+            // of the primal quantity that carries it, `x` block or `s`
+            // block, so the shift below needs no second case.
+            let Some((blk, k)) = self.bound_block_of(r) else {
+                return false;
+            };
+            let Some(&z) = (match blk {
+                BoundBlock::ZL => z_l.get(k),
+                BoundBlock::ZU => z_u.get(k),
+                BoundBlock::VL => v_l.get(k),
+                BoundBlock::VU => v_u.get(k),
+            }) else {
                 return false;
             };
             if r >= rhs.len() || br.var_row >= rhs.len() {
                 return false;
             }
             rhs[r] = 0.0;
-            // the sign the x row carries this side's multiplier with
+            // the sign the primal row carries this side's multiplier with
             rhs[br.var_row] += if br.lower { -z } else { z };
         }
         true
@@ -1064,17 +1305,28 @@ impl PdSensBacksolver {
                 *v = c;
             }
         }
-        for &(var_row, add) in pinned {
-            let c = caps.get(var_row).copied().unwrap_or(Number::INFINITY);
-            let slot = x.get_mut(var_row)?;
-            *slot = pinned_entry(*slot, add, c);
-            *base_x.get_mut(var_row)? += add;
-        }
         let mut s = dense(live_s)?;
-        let base_s = s.clone();
+        let mut base_s = s.clone();
         for v in s.iter_mut() {
             if *v > cap_s {
                 *v = cap_s;
+            }
+        }
+        // `var_row` is a *primal* KKT row and the primal blocks are
+        // `x` then `s`, so a pin on a constraint's own limit lands in
+        // the second diagonal. Indexing `x` with it would be the
+        // gh#450 neighbouring-entry hazard one block over.
+        for &(var_row, add) in pinned {
+            if var_row < self.dims[0] {
+                let c = caps.get(var_row).copied().unwrap_or(Number::INFINITY);
+                let slot = x.get_mut(var_row)?;
+                *slot = pinned_entry(*slot, add, c);
+                *base_x.get_mut(var_row)? += add;
+            } else {
+                let k = var_row - self.dims[0];
+                let slot = s.get_mut(k)?;
+                *slot = pinned_entry(*slot, add, cap_s);
+                *base_s.get_mut(k)? += add;
             }
         }
         let pack = |vals: Vec<Number>| -> Rc<dyn pounce_linalg::Vector> {
@@ -1109,20 +1361,57 @@ impl PdSensBacksolver {
         self.pack_public(&scaled).ok().map(|iv| iv.freeze())
     }
 
-    /// Var-x row behind each `z_l` then `z_u` entry, through the
-    /// `px_l` / `px_u` expansions. `None` when either is not an
-    /// `ExpansionMatrix` or reports the wrong length -- the release
-    /// half then stays off rather than guessing a mapping.
+    /// The primal KKT row behind every bound multiplier: `z_l`, `z_u`
+    /// through the `px_l` / `px_u` expansions into the `x` block, then
+    /// `v_l`, `v_u` through `pd_l` / `pd_u` into the `s` block.
+    /// `None` when any of the four is not an `ExpansionMatrix` or
+    /// reports the wrong length -- the release half then stays off
+    /// rather than guessing a mapping.
+    ///
+    /// The `v` half is here because a limit written as a **constraint
+    /// row** -- `g(x) <= cap` -- is a bound like any other, on the
+    /// slack rather than on a variable, and reporting only the `z`
+    /// half left every such limit watched by nothing: no breakpoint,
+    /// no release, and a step straight through the cap with an empty
+    /// record (gh#928). The `s` block sits immediately after `x` in
+    /// the compound vector, so the (x, s) prefix is one contiguous box
+    /// and the walk needs no second index space to cover it -- which
+    /// is exactly why `var_row` is documented as a primal KKT row
+    /// rather than a var-x one.
+    ///
+    /// The four groups are emitted in block order, so
+    /// [`Self::bound_row_offsets`] can recover which block a row
+    /// belongs to and its position within that block without this
+    /// function storing either.
     fn bound_variable_rows(
         nlp: &Rc<RefCell<dyn IpoptNlp>>,
         dims: &[usize; 8],
     ) -> Option<Rc<Vec<crate::backsolver::BoundRow>>> {
         let nlp_ref = nlp.borrow();
         let z_l_off = dims[0] + dims[1] + dims[2] + dims[3];
-        let mut out = Vec::with_capacity(dims[4] + dims[5]);
-        for (pm, n_v, off, lower) in [
-            (nlp_ref.px_l(), dims[4], z_l_off, true),
-            (nlp_ref.px_u(), dims[5], z_l_off + dims[4], false),
+        let v_l_off = z_l_off + dims[4] + dims[5];
+        let mut out = Vec::with_capacity(dims[4] + dims[5] + dims[6] + dims[7]);
+        // (expansion, block width, multiplier-row offset, lower?,
+        //  primal-block base, primal-block width)
+        for (pm, n_v, off, lower, base, width) in [
+            (nlp_ref.px_l(), dims[4], z_l_off, true, 0, dims[0]),
+            (
+                nlp_ref.px_u(),
+                dims[5],
+                z_l_off + dims[4],
+                false,
+                0,
+                dims[0],
+            ),
+            (nlp_ref.pd_l(), dims[6], v_l_off, true, dims[0], dims[1]),
+            (
+                nlp_ref.pd_u(),
+                dims[7],
+                v_l_off + dims[6],
+                false,
+                dims[0],
+                dims[1],
+            ),
         ] {
             if n_v == 0 {
                 continue;
@@ -1136,12 +1425,12 @@ impl PdSensBacksolver {
             }
             for (k, &p) in pos.iter().enumerate() {
                 let p = p as usize;
-                if p >= dims[0] {
+                if p >= width {
                     return None;
                 }
                 out.push(crate::backsolver::BoundRow {
                     row: off + k,
-                    var_row: p,
+                    var_row: base + p,
                     lower,
                 });
             }
@@ -2365,6 +2654,16 @@ impl SensBacksolver for PdSensBacksolver {
 
     fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
         self.solve_released_inner(released, rhs, lhs, true)
+    }
+
+    fn solve_released_pinned(
+        &self,
+        released: &[usize],
+        pinned: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        self.bound_vars.is_some() && self.solve_released_pinned_inner(released, pinned, rhs, lhs)
     }
 
     /// Solve `K · lhs = rhs` against the converged factor, in

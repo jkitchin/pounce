@@ -112,6 +112,40 @@ pub trait SensBacksolver {
         false
     }
 
+    /// [`Self::solve_released`] with each **primal** KKT row in
+    /// `pinned` carrying an extra diagonal stiff enough to hold that
+    /// coordinate in place.
+    ///
+    /// This is not the pin the walk applies -- that one is a Schur row
+    /// on top of the factored system, and it is exact. This is the
+    /// *operator* that pin is applied to, for the case where the
+    /// released system on its own has no inverse for a Schur
+    /// complement to be built from: releasing a bound takes its
+    /// `Sigma` off the diagonal, and on a model with no curvature two
+    /// released variables sharing a constraint are left with linearly
+    /// dependent stationarity rows (gh#930).
+    ///
+    /// Adding the diagonal back regularizes exactly those rows, and
+    /// costs nothing in accuracy, because the Schur pin then holds the
+    /// same coordinates at zero: `Eᵀw = 0` annihilates the term that
+    /// was added, so the pinned system solved is the released one
+    /// after all. The diagonal has to be *reachable* -- large enough
+    /// that the regularized operator is invertible, small enough that
+    /// the row's own couplings survive it, which is the gh#737
+    /// ceiling.
+    ///
+    /// `false` by default, which leaves the caller reporting the
+    /// Schur pin's failure.
+    fn solve_released_pinned(
+        &self,
+        _released: &[usize],
+        _pinned: &[usize],
+        _rhs: &[Number],
+        _lhs: &mut [Number],
+    ) -> bool {
+        false
+    }
+
     /// Whether [`Self::solve_released`] is implemented.
     fn supports_release(&self) -> bool {
         false
@@ -119,15 +153,29 @@ pub trait SensBacksolver {
 }
 
 /// One bound-multiplier row of the compound KKT vector, resolved to
-/// the variable it constrains.
+/// the primal quantity it constrains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundRow {
     /// Row of the compound KKT vector holding the multiplier.
     pub row: usize,
-    /// Var-x row of the variable that bound constrains.
+    /// **Primal KKT row** of the quantity that bound constrains: a
+    /// row of the `x` block for a variable bound (`z_l` / `z_u`), and
+    /// a row of the `s` block for a constraint's limit (`v_l` /
+    /// `v_u`), which bounds the slack rather than a variable.
+    ///
+    /// The field is named for the case it had when only variable
+    /// bounds were reported, and below `dims[0]` the two spaces
+    /// coincide, so a var-x reader that never sees a slack row is
+    /// still correct. That is not an accident to rely on quietly:
+    /// **a consumer that indexes a var-x-length vector with this must
+    /// first check `var_row < dims[0]`**, because a slack row's value
+    /// is a valid index into nothing. `Solver::weakly_active_bounds`
+    /// and `step_along_path`'s base-activity table both carry that
+    /// check explicitly.
     pub var_row: usize,
-    /// `true` for a lower bound (`z_l`), `false` for an upper (`z_u`).
-    /// The x row carries the two with opposite signs.
+    /// `true` for a lower bound (`z_l` / `v_l`), `false` for an upper
+    /// (`z_u` / `v_u`). The primal row carries the two with opposite
+    /// signs.
     pub lower: bool,
 }
 

@@ -662,6 +662,218 @@ changes.
   covered, so a check that stops warning fails as loudly as one that warns
   spuriously.
 
+### Fixed
+
+- **`parametric_step_path` could return a point outside a variable's box
+  ([#928](https://github.com/jkitchin/pounce/issues/928)).** With no
+  breakpoint recorded and no warning, on any model whose Hessian diagonal is
+  below the activity classifier's identification floor — which is every LP,
+  and every model whose cost is linear in the coordinate that reaches the
+  bound.
+
+  This is gh#852 reached through the other door. That fix taught the walk to
+  keep watching a bound the factorization carries as a finite penalty rather
+  than enforces, and it learns which those are from `weakly_active_bounds`.
+  Where there is no curvature to divide by, every bound classifies
+  `UNIDENTIFIED`, that list comes back empty, and the walk's own
+  base-activity test — which is exactly `Σ > 1` — bars the bound from the
+  reach scan anyway. The bound is then neither held by the factorization nor
+  watched by the path, and the direction carries the variable straight
+  through it.
+
+  Measured on a five-bus AC-OPF at the load where a generator reaches its
+  rating: at linear generation cost — the normal case in dispatch — the walk
+  predicted **202.98 MW against a 170 MW nameplate**, with zero segments.
+  Adding a quadratic cost term worth 0.1% of the linear one at that output
+  changes nothing physical and fixes it, by lifting the diagonal over the
+  floor. On a three-variable LP reproducer, 11 of 37 base points returned a
+  point outside the box, relative violation up to 0.9999, and the violating
+  band begins at the first point above `Σ = 1`.
+
+  Widening the classifier is not the fix and was rejected: admitting
+  `UNIDENTIFIED` wholesale also admits genuinely enforced bounds
+  (`Σ = 1.1e11` on the same LP) and makes the augmented system singular. The
+  quantity that would discriminate inside the class is the curvature that is
+  by hypothesis unmeasurable there. So `step_along_path` no longer relies on
+  being told: it checks its own answer against the box and treats a
+  base-active bound the answer *crossed* as measured proof the factorization
+  did not enforce it, adds it to the watch list, and re-walks. Threshold-free
+  — no `μ`, no curvature, no units — and a no-op whenever the first walk
+  already lands inside the box, which is the whole existing corpus: the
+  fixture sweep diffs empty across all 194 fixture-legs on both the `exact`
+  and `lbfgs` legs.
+
+  A repair that cannot reach the box is now reported rather than returning
+  the out-of-box point silently — returning it is gh#928's own signature, a
+  violation with nothing in the record naming it. The exception is a walk the
+  caller capped: `max_iter` bounds segments, so `max_iter = 0` asks for the
+  plain linear step, which is outside the box whenever the bound binds and
+  was legal to ask for before the repair existed.
+
+  Measured on a second reproducer with **two** soft bounds coupled through
+  the equality, over 48 base points either side of both kinks and four
+  perturbations each: 48 of 192 cases returned a point outside the box
+  before, **192 of 192 now reproduce the re-solve exactly**, and the new
+  report never fires. On that corpus no case is wrong while staying inside
+  the box, on either version — the defect and the box violation coincide
+  there, which is what makes an endpoint check sufficient for it rather than
+  a patch over the symptom.
+
+- **A limit written as a constraint row was watched by nothing
+  ([#928](https://github.com/jkitchin/pounce/issues/928)).** The second half
+  of the same issue, and the broader one: it needs no degeneracy at all.
+
+  `x <= 1` as a variable bound and `cap: g(x) <= 1` as a row describe the
+  same feasible set. They were not the same thing to the sensitivity layer.
+  A variable bound's multiplier is in `z_l` / `z_u` and the quantity it
+  constrains is a row of the `x` block; a row's limit bounds the **slack**,
+  so its multiplier is in `v_l` / `v_u` and the quantity it constrains is a
+  row of the `s` block. `bound_variable_rows` emitted only the `z` half and
+  `bound_context`'s box covered only the `x` block, so a row limit had no
+  entry in the reach scan, no entry in the base-activity table, no breakpoint
+  it could appear as, and nothing for the box repair above to add to its
+  watch list.
+
+  Measured on `min ½(x − p)²` subject to `x ≤ 1` stated as a row, with `x`
+  carrying no bound of its own: from `p = 0.8` a step to `p = 1.3` walked `x`
+  to **1.300000000 against a true 1.000000000**, three tenths past a stated
+  cap, with an empty segment list. The reverse is worse than a lost record —
+  from `p = 1.3` a step to `p = 0.8` left `x` **pinned at 1.0 against a true
+  0.8**, because nothing took the cap's stiffness out of the operator. At the
+  kink itself both directions were wrong by half the perturbation, which is
+  the two-sided average a degenerate base point returns when nothing watches
+  the bound. Every one of those is now exact to about `1e-10` and carries a
+  segment naming the cap.
+
+  What made the repair small is that blocks `x` and `s` are **contiguous** in
+  the compound KKT vector, so the `(x, s)` prefix is one box and the walk
+  needs no second index space; `path_direction` already pins a generic Schur
+  unit row on any KKT row, so the reach half needed no backsolver arithmetic
+  at all. The release half did: the barrier's `s`-block diagonal is now
+  rebuilt with the released entry's `v / s` taken out, and stays `None` when
+  no slack bound is released, because the factorization cache keys on the
+  diagonal object's identity.
+
+  `BoundRow.var_row` — and so a `PathSegment.var_row`, and a `pinned` row
+  from `parametric_step_bounded` — is therefore a **primal KKT row** rather
+  than a var-x index: below `block_dims()[0]` it is a variable, at or above
+  it the limit is a constraint's own. The new `slack_rows()` accessor
+  (`Solver::d_slack_rows` in Rust) resolves such a row back to its
+  inequality, the primal counterpart of `inequality_multiplier_rows`.
+  Indexing a variable-length vector by the number instead returns a
+  neighbouring variable's answer, the gh#450 hazard, so every consumer inside
+  the crate now decides the block before it uses the value.
+
+  In `pyomo-pounce` the record follows: a `sens_active_set_changes()` entry
+  for a row limit has `.var` naming the `Constraint`, not a `Var`, with the
+  same `bound` and `action` values a variable bound produces.
+
+  The convex arm needed a different repair, because its KKT has no `s` block
+  to make contiguous with `x` — see the next entry.
+
+- **The same limit, on the convex arm, needed a block that was not there
+  ([#929](https://github.com/jkitchin/pounce/issues/929)).** The fix above
+  works because the NLP KKT already carries `dⱼ(x) = sⱼ`, so every constraint
+  has a primal coordinate for the walk to index. The convex active-set KKT
+
+  ```text
+  [ H   Aᵀ  B_aᵀ ] [ dx ]
+  [ A   0   0    ] [ dy ]
+  [ B_a 0   0    ] [ dz ]
+  ```
+
+  has none. An **inactive** `Gⱼx ≤ hⱼ` appears in it nowhere at all, so a step
+  driving it past its limit was silent and the answer came back infeasible; an
+  **active** one has a multiplier row but no primal coordinate, so a
+  perturbation driving that multiplier negative went on holding a row the
+  solution had left.
+
+  `pounce_sens_core::rowlimit::RowLimitView` adjoins an observer `t = G_w x`
+  through a multiplier, immediately after the `x` block so it lands inside the
+  primal prefix the walk indexes. The adjoined block is triangular — `dmu =
+  r_t`, one base back-solve on `r_x + G_wᵀ r_t`, then `dt = G_w dx + r_mu` —
+  so **the base factorization is untouched and the fix costs no
+  factorization**. Releasing an active row generalizes the arm's existing row
+  neutralization from a single `±1` coupling to a whole `G` row, which reuses
+  the symbolic factor.
+
+  Measured on `min ½‖x‖²` subject to `Σx = b`, `x₀ + x₂ ≤ 1` and `x₁ ≤ 0.8`,
+  a fixture whose closed form is known on all three of its branches. Walking
+  `b: 0 → 4`, the row reached `x₀ + x₂ = 2.133` — **1.133 past a stated cap**,
+  with an empty segment list; it is now `1.000`, with breakpoints naming the
+  row at fraction `0.5` and the variable bound at `0.65`. Coming back,
+  `b: 4 → 0` left `(0.5, −0.5, 0.5, −0.5)` with the row still pinned at `1.0`;
+  it is now the origin to `2.1e-14`. A third base reaches the *other* branch —
+  the row already active with a multiplier of `4.1e-5`, released at fraction
+  `8.2e-5` rather than mid-walk — which is a distinct branch of the same rule
+  and had to be measured separately.
+
+  Two things the augmentation deliberately does not do. It is skipped whenever
+  any cone block is present, because there `active_rows` is a cone normal (or,
+  at an apex, the whole block) and `active_ineq` is provenance rather than a
+  `G` row — pinned by a leg that walks a boundary SOC far enough to drive a
+  coordinate the cone does not sign-constrain through zero. And a released
+  *variable bound* is still the base's own business: `RowLimitView` lifts the
+  base's `BoundRow`s and multipliers itself rather than leaving the caller to
+  concatenate two lists, since the walk releases a row only when it finds it
+  in both.
+
+  `QpSensitivity::path_segment_target` resolves a segment to
+  `PathTarget::Variable` or `PathTarget::InequalityRow`, the convex arm's
+  counterpart of `slack_rows()` above, so a consumer cannot read a row index
+  as a column index — the gh#450 hazard in this arm's own index space.
+
+  **`QpSensitivity::parametric_step_bounded` is not covered** and still
+  carries the whole defect: on the same fixture it returns `x₀ + x₂ = 2.1333`
+  against a cap of `1.0`, and in reverse leaves the row pinned at `1.0` where
+  the truth is the origin. It is a different edit rather than the same one —
+  that entry point returns `refine_step_onto_bounds`'s mixed list of released
+  multiplier rows and pinned primal rows, so adjoining observers shifts the
+  meaning of half that list and needs an API decision and a fixture of its
+  own. The NLP arm has no matching gap, because gh#928 widened its box
+  globally rather than through a view.
+
+- **A walk that releases two bounds at once with no curvature in the released
+  coordinates is answered, not refused
+  ([#930](https://github.com/jkitchin/pounce/issues/930)).** Holding a bound
+  the path reached is a Schur pin on the already-factored released system, so
+  `K⁻¹` has to exist before a single pin goes on. Releasing a bound takes its
+  `Sigma` off the diagonal; with no curvature there the diagonal is exactly
+  zero, and two released variables sharing a constraint row are left with
+  linearly dependent stationarity rows. The walk reported `augmented solve
+  failed`.
+
+  The pin did not change — the *operator* it rides on did. On failure the walk
+  retries against `K_released + Σ_pin E Eᵀ`, whose pinned diagonals are raised
+  until it inverts, and the same Schur row goes on top. `Eᵀw = 0` annihilates
+  exactly the term that was added, so the system actually solved is the
+  released one, in the identical frame and units; a walk that takes the plain
+  operator on one segment and the regularized one on the next still
+  accumulates a single `h.mult` per hold. `Σ_pin` is the gh#737 ceiling — the
+  stiffest diagonal the row's own couplings survive — so the held coordinate
+  creeps by roundoff rather than being infinitely stiff, which is bounded by a
+  test rather than asserted.
+
+  The fallback is triggered on the **pinned rows' residual**, not on the
+  factorization returning an error, and referenced to the pin's own
+  right-hand side rather than to `max|d|`. Both choices are load-bearing and
+  both were measured: at rank deficiency one the plain factorization absorbs
+  the singularity, returns `Ok`, and hands back a held row carrying a fifth of
+  the step — while the multiplier rows run at `3e11`, so a 200% miss reads
+  `3e-12` against `max|d|`. The answer is checked against a re-solve at the
+  perturbed parameter, which is the only guard in the layer that reads a
+  number the sensitivity code did not produce.
+
+### Changed
+
+- **The path walk's box-repair budget is the base-activity table's length**
+  ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a
+  fixed constant. Each pass adds at least one bound to the watch list and
+  never removes one, so a budget of that size cannot be exhausted before the
+  list is, which makes the exhausted arm unreachable by construction instead
+  of by argument. Measured, no fixture in the corpus reaches even a second
+  pass.
+
 
 ## [0.11.0] - 2026-09-03
 

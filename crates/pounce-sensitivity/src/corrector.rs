@@ -409,6 +409,18 @@ pub(crate) fn run(
     let dim = bs.dim();
     let off = bs.offsets_public();
     let n_x = bs.block_dims()[0];
+    // The primal prefix: `x` then `s`, contiguous. Bound rows carry a
+    // primal KKT row, so a constraint's own limit lands in the second
+    // half, and `bound_context`'s box spans exactly this range.
+    let n_p = n_x + bs.block_dims()[1];
+    if lo.len() != n_p || hi.len() != n_p {
+        return Err(SolverError::SensComputationFailed(format!(
+            "corrector: the box spans {} entries, but the primal prefix (x then s) \
+             is {n_p}. The bound rows carry primal KKT rows, so the box must cover \
+             both blocks.",
+            lo.len()
+        )));
+    }
     let rows = bs
         .bound_rows()
         .ok_or_else(|| SolverError::SensComputationFailed("corrector: no bound rows".into()))?
@@ -603,8 +615,13 @@ pub(crate) fn run(
         }
         iterations += 1;
 
-        let (sl, dsl) = slacks_and_directions(&rows, &iterate[..n_x], &dir[..n_x], lo, hi, true);
-        let (su, dsu) = slacks_and_directions(&rows, &iterate[..n_x], &dir[..n_x], lo, hi, false);
+        // The whole primal prefix, not just `x`: a bound row's
+        // `var_row` reaches into the `s` block when the limit is
+        // written as a constraint row, and `lo`/`hi` from
+        // `bound_context` span the same (x, s) prefix (gh#928).
+        // Truncating at `n_x` would index past the end for those rows.
+        let (sl, dsl) = slacks_and_directions(&rows, &iterate[..n_p], &dir[..n_p], lo, hi, true);
+        let (su, dsu) = slacks_and_directions(&rows, &iterate[..n_p], &dir[..n_p], lo, hi, false);
         let alpha_p =
             fraction_to_boundary(&sl, &dsl, &[]).min(fraction_to_boundary(&su, &dsu, &[]));
         let alpha_d = fraction_to_boundary(

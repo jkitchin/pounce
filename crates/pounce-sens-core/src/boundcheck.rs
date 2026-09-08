@@ -881,6 +881,7 @@ where
         let view = ReleasedView {
             base: backsolver.clone(),
             rows: released.to_vec(),
+            pinned: Vec::new(),
         };
         let mut pin_app = SensApplication::new(mk(rows.clone())?, view, opts);
         let mut du = vec![0.0; rows.len()];
@@ -1103,6 +1104,12 @@ where
 struct ReleasedView<B: crate::backsolver::SensBacksolver + Clone> {
     base: B,
     rows: Vec<usize>,
+    /// Primal rows whose diagonal the *operator* stiffens, empty for
+    /// the ordinary released view. See
+    /// [`crate::backsolver::SensBacksolver::solve_released_pinned`]:
+    /// this is not the pin, it is the regularization that lets the pin
+    /// be applied at all (gh#930).
+    pinned: Vec<usize>,
 }
 
 impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBacksolver
@@ -1112,6 +1119,11 @@ impl<B: crate::backsolver::SensBacksolver + Clone> crate::backsolver::SensBackso
         self.base.dim()
     }
     fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        if !self.pinned.is_empty() {
+            return self
+                .base
+                .solve_released_pinned(&self.rows, &self.pinned, rhs, lhs);
+        }
         // Nothing released is the converged system, so ask for it
         // directly: routing an empty set through `solve_released` asks
         // a backsolver that cannot release for something it does not
@@ -1146,6 +1158,29 @@ const NO_BOUND_HI: Number = 1e19;
 /// A segment shorter than this has not advanced the path, so the
 /// rows changed at its start stay barred from changing back.
 const PATH_MIN_SEGMENT: Number = 1e-12;
+
+/// How many times the walk may re-run after finding its own answer
+/// outside the box.
+///
+/// This is not a tuned number. A pass that adds nothing stops the
+/// loop, the only rows it can add are entries of the base-activity
+/// table, and a row already watched is never added twice -- so the
+/// loop cannot run more times than that table has entries, and
+/// passing the table's length as the budget makes the exhausted arm
+/// unreachable by construction rather than unreached by luck. That
+/// matters because the exhausted arm returns an error, and an error
+/// on a correct model would be a regression the corpus could not see.
+///
+/// Measured for the record, by capping this to `.min(1)` and
+/// re-running: a budget of **1** clears every Rust test in
+/// `pounce-sens-core`, `pounce-sensitivity` and `pounce-py`, both
+/// gh#928 files included -- 0 failures. The bound below is therefore
+/// slack over that population; it is here so that "the budget ran
+/// out" is a statement about the model rather than about this
+/// constant.
+fn path_box_repair_budget(base_active_rows: usize) -> usize {
+    base_active_rows
+}
 
 /// One breakpoint the path stopped at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1248,12 +1283,20 @@ pub fn step_along_path<B>(
     forced_active: &[usize],
     initial_holds: &[(usize, bool)],
     weak_rows: &[usize],
+    eps: Number,
 ) -> Result<(Vec<Number>, Vec<PathSegment>), String>
 where
     B: crate::backsolver::SensBacksolver + Clone,
 {
     let n_full = backsolver.dim();
-    let n_x = x_curr.len().min(lo.len()).min(hi.len());
+    // The PRIMAL PREFIX, not the `x` block. `bound_context` hands over
+    // a box spanning `x` then `s`, which are contiguous in the
+    // compound vector, because a limit written as a constraint row is
+    // a bound on the slack and has to be watched like any other
+    // (gh#928). Everything below indexes the box, the base point and
+    // the step by the same primal KKT row, so one length covers all
+    // three and the walk needs no second index space.
+    let n_p = x_curr.len().min(lo.len()).min(hi.len());
     if rhs_plain.len() != n_full {
         return Err("step_along_path: rhs length is not the KKT dimension".into());
     }
@@ -1304,10 +1347,14 @@ where
     // What stays live at every consumer is the released list: a
     // base-active bound whose row has been released is no longer in
     // the factorization, from that fraction on.
-    let mut base_active_row: Vec<[Option<usize>; 2]> = vec![[None, None]; n_x];
+    let mut base_active_row: Vec<[Option<usize>; 2]> = vec![[None, None]; n_p];
     if let Some(rows) = bound_rows.as_ref() {
         for br in rows {
-            if br.var_row >= n_x {
+            // `var_row` is a primal KKT row, so this is a range check
+            // against the box the caller supplied, not a block filter.
+            // A caller that hands over an `x`-only box still gets the
+            // old behaviour: its constraint-row bounds fall out here.
+            if br.var_row >= n_p {
                 continue;
             }
             let slack_base = if br.lower {
@@ -1333,6 +1380,207 @@ where
         .flatten()
         .filter_map(|slot| *slot)
         .collect();
+
+    // The walk owes its caller a point inside the box, and the reach
+    // scan above is the only thing that keeps that promise. A bound the
+    // factorization enforces only SOFTLY -- sigma of order one rather
+    // than order 1/mu -- is skipped by that scan as though it were
+    // held, and then holds nothing, so the direction carries the
+    // variable straight through it and no breakpoint is recorded
+    // (gh#852). `weak_rows` is the caller's list of exactly those
+    // bounds, and it is only ever as good as the activity classifier
+    // that built it: where the Hessian diagonal falls below the
+    // identification floor every bound classifies UNIDENTIFIED,
+    // `weakly_active_bounds` returns an empty list, and the scan skips
+    // a bound nothing is holding. That is not an exotic model -- it is
+    // every LP, and every model whose cost is linear in the coordinate
+    // that reaches the bound.
+    //
+    // So the walk does not rely on being told. It runs, compares its
+    // own answer against the box, and treats a base-active bound the
+    // answer CROSSED as proof that the factorization did not enforce
+    // it -- measured on the result rather than inferred from a
+    // curvature that, in this regime, is precisely what cannot be
+    // measured. Such a bound joins the watch list and the walk repeats
+    // with a breakpoint available there.
+    //
+    // Seeded from `weak_rows` rather than replacing it. Measured: the
+    // box check below rediscovers most of what the seed supplies, but
+    // not all -- a stale sigma that damps a coordinate at a later
+    // breakpoint is a RATE error, and the coordinate never leaves its
+    // box, so there is nothing for a box check to observe. The seed
+    // catches what the classifier can name and the check catches what
+    // it cannot.
+    //
+    // The watch list only grows and is bounded by the number of bound
+    // rows, so this terminates; the cap is a budget on factorizations,
+    // not the termination argument.
+    //
+    // A re-walk that FAILS is reported, not swallowed. The tempting
+    // thing is to keep the answer already in hand, but that answer is
+    // out of the box -- being out of the box is why there was a second
+    // walk at all -- and handing it back silently is precisely the
+    // defect this loop exists to remove. A caller told the repair
+    // failed can re-solve; a caller handed a point past a generator's
+    // rating with no breakpoint and no error cannot even know to ask.
+    //
+    // A pass that cannot GROW the list is a different matter and keeps
+    // its answer. There the violated coordinate has no base-active
+    // bound row on the side it left, so the reach scan was already
+    // watching that bound and the walk stopped where it could: the
+    // overshoot is some other condition -- an exhausted `max_iter`,
+    // most likely -- and not the one this loop claims to fix. Erroring
+    // there would change behaviour on a condition the fix has no
+    // evidence about.
+    let setup = WalkSetup {
+        rhs_plain,
+        x_curr,
+        lo,
+        hi,
+        n_p,
+        n_full,
+        max_iter,
+        mult_nat,
+        bound_rows,
+        can_release,
+        base_active_row,
+        base_active_rows,
+        initial_holds,
+    };
+    let mut watch: Vec<usize> = weak_rows.to_vec();
+    let budget = path_box_repair_budget(setup.base_active_rows.len());
+    let mut best = walk_once(backsolver, &setup, &watch)?;
+    for _ in 0..budget {
+        let mut grew = false;
+        for (i, _, _) in bound_violations(
+            setup.x_curr,
+            &best.0[..setup.n_p],
+            setup.lo,
+            setup.hi,
+            eps,
+            &[],
+        ) {
+            // Which side it left, read off the answer rather than the
+            // base point: the base point is ON the bound here, so its
+            // slack cannot say which way the walk went.
+            let side = usize::from(setup.x_curr[i] + best.0[i] > setup.hi[i]);
+            if let Some(r) = setup.base_active_row[i][side]
+                && !watch.contains(&r)
+            {
+                watch.push(r);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+        best = walk_once(backsolver, &setup, &watch).map_err(|e| {
+            format!(
+                "step_along_path: the walk left the box and the repair failed \
+                 (watching {watch:?}): {e}"
+            )
+        })?;
+    }
+
+    // The walk owes its caller a point inside the box, so an answer
+    // still outside one here is wrong however it got there -- the
+    // repair ran out of budget, or the crossing was at a bound the
+    // base-point split did not call active and so there was no row to
+    // add. Returning it is exactly gh#928's own failure mode, a
+    // violation with nothing in the record naming it, so say so
+    // instead. The budget arm is unreachable by construction (see
+    // `path_box_repair_budget`); the no-row-to-add arm is reachable in
+    // principle and is not reached by any fixture in the corpus. That
+    // is the reason to report rather than to trust them.
+    //
+    // Except when the caller capped the walk. `max_iter` is a cap on
+    // segments, and a walk that spent it stopped early BY REQUEST:
+    // `max_iter = 0` is the plain linear step, which is outside the
+    // box whenever the bound binds, and was a legal thing to ask for
+    // before this repair existed. Measured, not reasoned: on the
+    // gh#928 LP reproducer `max_iter = 0` returns a point 1e-2 past
+    // the bound, and turning that into an error would blame the
+    // repair for the caller's own budget. A truncated walk keeps the
+    // old contract; only an untruncated one makes the promise.
+    if best.1.len() >= max_iter {
+        return Ok(best);
+    }
+    let left = bound_violations(
+        setup.x_curr,
+        &best.0[..setup.n_p],
+        setup.lo,
+        setup.hi,
+        eps,
+        &[],
+    );
+    if let Some((i, bnd, past)) = left.first() {
+        // `i` is a primal KKT row, so it names a variable only while
+        // it is inside the `x` block; past that it is a constraint's
+        // own slack. Saying which costs nothing and saves the reader
+        // from reading a slack index as a variable index (gh#450).
+        return Err(format!(
+            "step_along_path: the walk ended outside primal row {i}'s bound \
+             {bnd} by {past:e} and the repair could not reach it \
+             (watched {} rows over at most {budget} passes, \
+             {} segments of a {max_iter} cap). Rows below the `x` block's \
+             length are variables; at or above it they are constraint \
+             slacks, so read the row against `block_dims()`.",
+            watch.len(),
+            best.1.len()
+        ));
+    }
+    Ok(best)
+}
+
+/// Everything [`walk_once`] reads that a repair pass does not change:
+/// the base point, its box, and the base-activity split decided once
+/// above. Bundled rather than passed loose because the walk runs more
+/// than once and the argument list is the part that would drift.
+struct WalkSetup<'a> {
+    rhs_plain: &'a [Number],
+    x_curr: &'a [Number],
+    lo: &'a [Number],
+    hi: &'a [Number],
+    /// Length of the primal prefix (`x` then `s`) the box covers.
+    n_p: usize,
+    n_full: usize,
+    max_iter: usize,
+    mult_nat: Vec<BoundMultiplier>,
+    bound_rows: Option<Vec<crate::backsolver::BoundRow>>,
+    can_release: bool,
+    base_active_row: Vec<[Option<usize>; 2]>,
+    base_active_rows: Vec<usize>,
+    initial_holds: &'a [(usize, bool)],
+}
+
+/// One pass of the walk, under the weak-row set it is given.
+///
+/// Split out of [`step_along_path`] so the box check there can run it
+/// again with a bound the first pass proved unheld. Every pass starts
+/// from the base point: the accumulated step, the holds and the
+/// released list are all local, so a repair pass is a fresh walk and
+/// not a continuation of the one that missed the crossing.
+fn walk_once<B>(
+    backsolver: &B,
+    su: &WalkSetup<'_>,
+    weak_rows: &[usize],
+) -> Result<(Vec<Number>, Vec<PathSegment>), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    let rhs_plain = su.rhs_plain;
+    let x_curr = su.x_curr;
+    let lo = su.lo;
+    let hi = su.hi;
+    let n_p = su.n_p;
+    let n_full = su.n_full;
+    let max_iter = su.max_iter;
+    let mult_nat = &su.mult_nat;
+    let bound_rows = &su.bound_rows;
+    let can_release = su.can_release;
+    let base_active_row = &su.base_active_row;
+    let base_active_rows = &su.base_active_rows;
+    let initial_holds = su.initial_holds;
 
     let mut acc = vec![0.0; n_full];
     let mut t = 0.0_f64;
@@ -1423,7 +1671,7 @@ where
         // release below. "Actually enforces" is the distinction the
         // `factor_holds` comment below draws, and it is narrower than
         // "active at the base".
-        for i in 0..n_x {
+        for i in 0..n_p {
             if holds.iter().any(|h| h.row == i) || changed_here.contains(&i) {
                 continue;
             }
@@ -1459,7 +1707,7 @@ where
         // Base activity comes from the table above; which rows have
         // since been released stays a live check.
         if can_release {
-            for m in &mult_nat {
+            for m in mult_nat {
                 if released.contains(&m.row)
                     || changed_here.contains(&m.row)
                     || !base_active_rows.contains(&m.row)
@@ -1621,6 +1869,108 @@ pub struct WeakBound {
     pub lower: bool,
 }
 
+/// Which operator a caller wants the walk's Schur pin applied to.
+///
+/// The pin is the same in all three cases: solve `K w - E du = r`
+/// subject to `Eᵀ w = 0`. What varies is the `K` it rides on, and
+/// [`Preferred`](PathOperator::Preferred) is the only one a solver
+/// should use -- the other two exist so a test can name the operator
+/// it is measuring instead of inferring which one ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathOperator {
+    /// The plain released system, falling back to the regularized one
+    /// when it fails or does not hold the pins. What the walk uses.
+    Preferred,
+    /// The plain released system, and nothing else. Fails outright on
+    /// a working set that leaves it singular.
+    Plain,
+    /// The released system with the pinned rows' diagonals raised
+    /// until it is invertible. Always answers where the plain one
+    /// does, with the same answer, at the cost of a refactorization
+    /// per solve.
+    Regularized,
+}
+
+/// Pin residual (see [`pin_residual`]) below which the plain operator
+/// is taken without trying the regularized one.
+///
+/// It is a **shortcut threshold, not a correctness one**: above it
+/// both operators are run and the one that holds the pins better is
+/// returned, so setting it too low costs a refactorization and never
+/// costs an answer. Its job is to keep the common case -- a walk whose
+/// Schur pin works -- on the cached factorization.
+///
+/// The two populations it sits between were measured on the gh#928
+/// two-soft-bounds model, over the pinned solves its three curvature
+/// arms take:
+///
+/// ```text
+/// pin took     0, 1.4e-16, 1.5e-16, 1.8e-16, 1.9e-16   (n = 14)
+/// pin missed   8.1e-9, 1.0e-1, 1.0e0   (n = 3, plus one outright refusal)
+/// ```
+///
+/// `1e-11` is five orders above the worst residual a pin that took
+/// leaves and three below the smallest one it misses by. An earlier
+/// draft used `1e-8` and let the `8.1e-9` case through -- which is how
+/// that row came to be measured rather than assumed.
+const PIN_TAKE_RTOL: Number = 1e-11;
+
+/// How much of the pinned rows' motion the correction failed to
+/// remove, as a fraction of the motion it was asked to remove.
+///
+/// `want` is what those rows read *before* the correction, which is
+/// the pin's own right-hand side. Referencing the residual to it, and
+/// not to the step as a whole, is the whole point: the compound
+/// vector's multiplier rows run at `Sigma` scale -- `1e11` on the
+/// gh#930 fixture -- so a residual divided by `max |d|` reads `3e-12`
+/// on a pin that missed its target by 200%.
+fn pin_residual(d: &[Number], pinned: &[usize], want: &[Number]) -> Number {
+    let after = pinned
+        .iter()
+        .filter_map(|&i| d.get(i))
+        .fold(0.0, |a: Number, v| a.max(v.abs()));
+    if after == 0.0 {
+        return 0.0;
+    }
+    let before = want.iter().fold(0.0, |a: Number, v| a.max(v.abs()));
+    after / before.max(after)
+}
+
+/// The step for the whole perturbation under the active set the path
+/// has reached, taking whichever of the two operators actually holds
+/// the pins.
+///
+/// The Schur complement is `-Eᵀ K⁻¹ E` on the *released* system, so
+/// `K⁻¹` has to exist before a single hold is applied. Releasing a
+/// bound takes that bound's `Sigma` off the diagonal, and on a model
+/// with no curvature there two released variables sharing a constraint
+/// are left with linearly dependent stationarity rows (gh#930).
+/// Putting the diagonal back where the holds sit regularizes exactly
+/// those rows and changes no answer, since the pin the Schur
+/// complement then applies holds those coordinates at zero and
+/// annihilates the term that was added.
+///
+/// **The plain operator does not always announce that it was
+/// singular.** How loudly it fails depends on how rank-deficient it
+/// is, which is a property of the model rather than of the defect: on
+/// the gh#930 fixture two zero-curvature released rows coincide and
+/// the augmented solve refuses outright, while adding curvature to a
+/// *third* variable leaves the deficiency at one, the factorization
+/// absorbs it, and the answer comes back `Ok` with the held variable
+/// `1e-5` off its bound -- the silent half of the same defect. So the
+/// choice between the operators is made on the pinned rows'
+/// **residual**, not on whether the solve returned an error.
+///
+/// The regularized operator is second because it is not free: its
+/// diagonal is rebuilt per solve, so the factorization cache misses
+/// and every back-solve in the segment re-factors. A walk whose Schur
+/// pin works must keep taking the plain one.
+///
+/// The last two arms never return less than the old contract did: a
+/// direction the plain operator produced is still returned when
+/// neither operator holds the pins, so a caller that used to get an
+/// answer and let [`step_along_path`]'s box repair judge it still
+/// does.
 pub fn path_direction<B>(
     backsolver: &B,
     rhs_plain: &[Number],
@@ -1630,20 +1980,56 @@ pub fn path_direction<B>(
 where
     B: crate::backsolver::SensBacksolver + Clone,
 {
+    let plain = path_direction_on(backsolver, rhs_plain, released, pinned, false);
+    if matches!(&plain, Ok((_, _, res)) if *res <= PIN_TAKE_RTOL) {
+        return plain.map(|(d, du, _)| (d, du));
+    }
+    let reg = path_direction_on(backsolver, rhs_plain, released, pinned, true);
+    match (plain, reg) {
+        (Ok(p), Ok(r)) => Ok(if r.2 < p.2 { (r.0, r.1) } else { (p.0, p.1) }),
+        (Ok(p), Err(_)) => Ok((p.0, p.1)),
+        (Err(_), Ok(r)) => Ok((r.0, r.1)),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// [`path_direction`] against one of the two operators the pin can be
+/// applied to: the plain released system, or that system with the
+/// pinned rows' diagonals raised enough to make it invertible.
+///
+/// Both take the *same* Schur pin afterwards, so both answer the same
+/// question and report the hold forces in the same units -- which is
+/// what lets a walk that switches between them mid-path keep
+/// accumulating one multiplier per hold.
+fn path_direction_on<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    released: &[usize],
+    pinned: &[usize],
+    regularized: bool,
+) -> Result<(Vec<Number>, Vec<Number>, Number), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    use crate::backsolver::SensBacksolver;
     use crate::sens_app::{SensApplication, SensOptions};
 
     let n_full = backsolver.dim();
-    let mut d = vec![0.0; n_full];
-    let ok = if released.is_empty() {
-        backsolver.solve(rhs_plain, &mut d)
-    } else {
-        backsolver.solve_released(released, rhs_plain, &mut d)
+    let view = ReleasedView {
+        base: backsolver.clone(),
+        rows: released.to_vec(),
+        pinned: if regularized {
+            pinned.to_vec()
+        } else {
+            Vec::new()
+        },
     };
-    if !ok {
+    let mut d = vec![0.0; n_full];
+    if !view.solve(rhs_plain, &mut d) {
         return Err("step_along_path: back-solve failed".into());
     }
     if pinned.is_empty() {
-        return Ok((d, Vec::new()));
+        return Ok((d, Vec::new(), 0.0));
     }
     // Hold each variable where the path left it, on its bound, by
     // asking the augmented system for the correction that takes its
@@ -1655,10 +2041,6 @@ where
     let opts = SensOptions {
         run_sens: true,
         ..SensOptions::default()
-    };
-    let view = ReleasedView {
-        base: backsolver.clone(),
-        rows: released.to_vec(),
     };
     let mut app = SensApplication::new(mk(rows.clone())?, view, opts);
     let rhs: Vec<Number> = pinned.iter().map(|&i| d[i]).collect();
@@ -1672,5 +2054,32 @@ where
     for (k, v) in d.iter_mut().enumerate() {
         *v += corr[k];
     }
-    Ok((d, du))
+    let res = pin_residual(&d, pinned, &rhs);
+    Ok((d, du, res))
+}
+
+/// [`path_direction`] against an operator the caller names.
+///
+/// [`PathOperator::Preferred`] is exactly [`path_direction`]; the
+/// other two skip the choice. The walk itself always takes
+/// `Preferred`.
+pub fn path_direction_with<B>(
+    backsolver: &B,
+    rhs_plain: &[Number],
+    released: &[usize],
+    pinned: &[usize],
+    operator: PathOperator,
+) -> Result<(Vec<Number>, Vec<Number>), String>
+where
+    B: crate::backsolver::SensBacksolver + Clone,
+{
+    match operator {
+        PathOperator::Preferred => path_direction(backsolver, rhs_plain, released, pinned),
+        PathOperator::Plain => path_direction_on(backsolver, rhs_plain, released, pinned, false)
+            .map(|(d, du, _)| (d, du)),
+        PathOperator::Regularized => {
+            path_direction_on(backsolver, rhs_plain, released, pinned, true)
+                .map(|(d, du, _)| (d, du))
+        }
+    }
 }

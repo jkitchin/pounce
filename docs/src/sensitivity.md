@@ -440,8 +440,10 @@ refinement's own test is. Unset, it is how far outside the solve itself
 was willing to settle, so nothing moves for a caller who does not set
 it. A constraint row keeps its own floor, and a bound is released when
 the step drives its multiplier negative past the solve's own margin,
-whatever `bound_eps` is. `mode="path"` reads no such margin, and
-passing it under `linear` or `path` warns.
+whatever `bound_eps` is. `mode="path"` does not take one — it uses the
+solve's own margin internally, to decide when its answer has ended up
+outside the box (gh#928) — and passing `bound_eps` under `linear` or
+`path` warns.
 
 `max_pdpert` refuses rather than answering when the converged factor
 carries an inertia correction above the value given, since every
@@ -548,10 +550,38 @@ for c in sens_active_set_changes(m, [(m.setpoint, 3.0)]):
 ```
 
 Each entry holds the fraction of the perturbation at which the change
-happens, the variable, which bound (`"lower"` or `"upper"`), and
-whether the variable `"reaches"` it or `"leaves"` it. The first
-entry's fraction is how much of the perturbation the held solve's
+happens, the quantity whose limit it is, which bound (`"lower"` or
+`"upper"`), and whether it `"reaches"` the limit or `"leaves"` it. The
+first entry's fraction is how much of the perturbation the held solve's
 active set survives unchanged.
+
+The `.var` field is not always a `Var`. A limit written as a
+constraint row — `m.cap = Constraint(expr=m.x <= 1.0)`, which is how a
+capacity, a ramp or a nameplate is normally stated — bounds that row's
+**slack** rather than any variable, so the entry names the
+`Constraint`:
+
+```python
+c = sens_active_set_changes(m, [(m.p, 1.3)])[0]
+c.var is m.cap      # True, a Constraint, not a Var
+c.bound             # "upper"
+c.action            # "reaches"
+```
+
+Both forms produce the same `bound` and `action` values, and both are
+walked the same way, so a caller that only prints the record needs no
+change; one that looks the entry up in a map of variables must check
+what it got. Before gh#928 a row limit was in no bound row at all: the
+walk could not reach it, could not release it, and recorded nothing
+when it walked past — on the model above, `x` went to 1.3 against a
+true 1.0 with an empty record. That was independent of degeneracy;
+any model stating a limit as a row was exposed. The Rust and Python
+APIs report the same thing one level down, where a segment's `var_row`
+is a **primal KKT row**: below `block_dims()[0]` it is a variable's
+var-x index, at or above it the limit is a row's and
+`slack_rows()` is what resolves it back to a constraint. Indexing a
+variable-length vector by that number instead returns a neighbouring
+variable's answer, which is the gh#450 hazard.
 
 Where the two modes settle the same active set they give the same
 prediction. Where the changes are spread out along the perturbation
@@ -694,6 +724,28 @@ breakpoint to stop it, and only a downstream clamp put it back --
 moving the crossing coordinate and nothing coupled to it. The repair
 landed in the walk itself, which both the decided and the undecided
 callers go through, so `"release_all"` inherited it.
+
+That repair learns which bounds are weak from the activity classifier,
+which leaves the case the classifier cannot see. `classify` needs a
+curvature to divide by, so where the Hessian diagonal falls below the
+identification floor every bound comes back `unidentified`,
+`weakly_active_bounds()` returns nothing, and the walk is told nothing
+— while its own base-activity test still bars the bound from the reach
+scan. That is not a corner: it is every LP, and every model whose cost
+is linear in the coordinate that reaches the bound. On a five-bus
+AC-OPF at the load where a generator reaches its rating, with the
+linear generation cost that dispatch normally uses, `path` predicted
+202.98 MW against a 170 MW nameplate and recorded no breakpoint at all;
+a quadratic cost term worth 0.1% of the linear one changes nothing
+physical and fixes it, by lifting the diagonal over the floor.
+
+So since gh#928 the walk does not rely on being told. It compares its
+own answer against the box and treats a base-active bound the answer
+crossed as evidence the factorization never enforced it, then walks
+again with a breakpoint available there. The two mechanisms are
+complementary rather than redundant: the classifier's list catches a
+stale barrier diagonal that damps a coordinate at a later breakpoint
+without ever pushing it out of its box, which a box check cannot see.
 
 `"one_sided"` takes the single-sided value the thresholds produce,
 bit-identical to the behavior without the argument. On the CSTR held
