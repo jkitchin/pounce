@@ -460,6 +460,43 @@ changes.
 
 ### Fixed
 
+- **A limit written as a constraint row is refined too, on the convex arm**
+  ([#929](https://github.com/jkitchin/pounce/issues/929) follow-up).
+  gh#929 taught `QpSensitivity::parametric_step_path` — the walk — about
+  limits written as `Gⱼ x ≤ hⱼ` rather than as variable bounds, and left
+  `parametric_step_bounded` — the one-shot fix-relax — carrying the whole
+  defect. An active-set KKT has no primal coordinate for a constraint row,
+  and an *inactive* row appears in it nowhere at all, so the refinement had
+  nothing to pin and nothing to release.
+
+  Measured on a four-variable QP whose cap `x₀ + x₂ ≤ 1` is a row: stepping
+  the right-hand side `0 → 4` the refinement returned `x₀ + x₂ = 2.133`,
+  **1.133 past the stated cap**, having correctly pinned the *variable*
+  bound it crossed on the way — which is what made the answer plausible.
+  Coming back, `4 → 0`, it left `(0.5, −0.5, 0.5, −0.5)` with the row still
+  reported binding where the truth is the origin: wrong answer *and* wrong
+  record. Both directions now reproduce a re-solve at the perturbed
+  right-hand side to `< 1e-8`, exactly rather than approximately — the whole
+  active set of the target is reached in one shot, and for a QP fix-relax
+  with the right active set *is* the re-solve.
+
+  The fix reuses gh#929's `RowLimitView` rather than adding machinery: the
+  observer block is triangular in the adjoined variables, so it costs two
+  sparse mat-vecs and **no extra factorization**. `RowLimitView::lift_step`
+  is new — the plain step is already in hand at that point, so lifting it
+  beats a second back-solve. The augmentation is skipped, and the plain
+  refinement kept, wherever the walk skips it, notably on the conic arm.
+
+  The row list `parametric_step_bounded` returns is **mixed**: a released
+  limit is named by its multiplier row, a pinned one by its primal row, and
+  a primal row at or past `n` is now an *observer* rather than a variable.
+  Indexing a variable-length vector by one of these numbers returns a
+  neighbouring variable's answer — the gh#450 hazard — so
+  `QpSensitivity::refined_row_target` is the single decoder, returning the
+  new `RefinedRow { target: PathTarget, released: bool }`. The method has no
+  callers outside this crate's tests and no Python binding, so nothing
+  downstream changes.
+
 - **`curve_fit(sensitivity="exact")`, and two accuracy defects in
   `dpopt_ddata` ([#923](https://github.com/jkitchin/pounce/issues/923),
   [#925](https://github.com/jkitchin/pounce/issues/925)).** The influence

@@ -63,8 +63,22 @@
 //! | `b: 4 → 0` | `(0.5, −0.5, 0.5, −0.5)`, row still pinned | `(0, 0, 0, 0)` | `(0,0,0,0)` |
 //! | `b: 2 → 1` | `(0.5, 2.0e-5, 0.5, 2.0e-5)` | `(0.25, 0.25, 0.25, 0.25)` | `(0.25,…)` |
 //!
-//! The third row is a **different branch**: there the row is in the active set
-//! with a multiplier of `4.1e-5`, so the release happens at fraction `8.2e-5`
+//! and the same two directions through `parametric_step_bounded`, which was
+//! augmented in a follow-up commit on the same branch:
+//!
+//! | direction | before | after | truth |
+//! |---|---|---|---|
+//! | `b: 0 → 4` | `x₀+x₂ = 2.133`, **1.133 past the limit**, `x₁` pinned correctly on the way | reproduces the re-solve to `< 1e-8` | 1.0 |
+//! | `b: 4 → 0` | `(0.5, −0.5, 0.5, −0.5)`, row reported binding | reproduces the re-solve to `< 1e-8` | `(0,0,0,0)` |
+//!
+//! Both are **exact**, not close: the target's whole active set is reached in
+//! one shot, and for a QP fix-relax with the right active set is the re-solve.
+//! The "before" column of each is recomputed here by
+//! `refined_unaugmented`, which drives `refine_step_onto_bounds` straight
+//! against `QpKktBacksolver`, rather than quoted.
+//!
+//! The third row of the first table is a **different branch**: there the row
+//! is in the active set with a multiplier of `4.1e-5`, so the release happens at fraction `8.2e-5`
 //! rather than in the middle of the walk. Per the branch rule in CLAUDE.md, a
 //! fixture that only ever released a healthy multiplier would say nothing
 //! about it.
@@ -83,7 +97,7 @@
 //! | mutation | tests that go red |
 //! |---|---|
 //! | `primal_box` stops appending the observers, so they fall outside the walk's primal prefix — the effect adjoining them at the *end* of the compound vector would have | `a_row_the_step_would_cross_stops_the_walk`, `an_active_row_whose_multiplier_turns_is_released`, `a_barely_active_row_is_released_at_once`, `the_variable_bound_is_still_released_through_the_view` |
-//! | observer box sides swapped (`limit` as the lower bound) | six of the twelve, including `the_observers_are_inert_when_no_limit_is_reached` — the walk stops at fraction ≈ 0 on a step that crosses nothing |
+//! | observer box sides swapped (`limit` as the lower bound) | nine of the eighteen, including both inertness controls (`the_observers_are_inert_when_no_limit_is_reached`, `the_observers_add_nothing_to_a_refinement_that_reaches_no_limit`) — the walk stops at fraction ≈ 0 and the refinement pins, on a step that crosses nothing |
 //! | `base_value` set to `0` rather than `Gⱼ·x` | `a_barely_active_row_is_released_at_once` |
 //! | `RowLimitView::fold` drops the `G_wᵀ r_t` fold | `a_row_the_step_would_cross_stops_the_walk`, `releasing_a_row_moves_its_force_onto_the_observer` |
 //! | `RowLimitView::unfold` drops `r_mu` from `dt` | `the_triangular_solve_is_the_augmented_system` `[core]` |
@@ -94,6 +108,10 @@
 //! | base bound rows dropped from `RowLimitView::bound_rows` | `the_variable_bound_is_still_released_through_the_view`, `an_active_row_whose_multiplier_turns_is_released` |
 //! | base entries dropped from `RowLimitView::lift_multipliers` | the same two — the walk releases a row only when it is in *both* lists, which is why one type owns both |
 //! | the augmentation is applied on the conic path too | `a_conic_model_keeps_the_unaugmented_walk`, on its `boundary-far` leg |
+//! | `parametric_step_bounded` keeps the unaugmented backsolver — the refinement's defect restored | `a_row_the_refinement_would_cross_stops_it`, `an_active_row_the_refinement_releases` |
+//! | `RowLimitView::lift_step` zero-fills the observers instead of evaluating `dt = G_w dx` | `a_row_the_refinement_would_cross_stops_it`; `lifting_a_step_agrees_with_solving_it` `[core]`. The release direction stays **green** — its condition is read off the multiplier, not the observer's motion — so the reach test is the only one here that sees it |
+//! | `refined_row_target` reports every row as a pin, dropping the release lookup | `an_active_row_the_refinement_releases` |
+//! | `refined_row_target` maps with `n_t = 0`, the pre-gh#929 layout, so an observer decodes as a variable | `a_row_the_refinement_would_cross_stops_it` |
 //!
 //! # What this file is NOT evidence about
 //!
@@ -115,19 +133,21 @@
 //!   that at scale.
 //! - **Two-sided rows.** `WatchedRow` is one-sided on purpose; a range row is
 //!   two watched rows and no fixture here has one.
-//! - **`parametric_step_bounded` on this arm**, which is *not* augmented and
-//!   still carries the whole defect. Measured on this file's own fixture, at
-//!   `activity_tol = 1e-7` and `bound_eps = 1e-8`: walking `b: 0 -> 4` it
-//!   returns `x0 + x2 = 2.1333`, **1.1333 past the stated cap of 1.0**, and
-//!   coming back `b: 4 -> 0` it leaves `(0.5, -0.5, 0.5, -0.5)` with the row
-//!   still pinned at `1.0` where the truth is the origin -- the same two
-//!   numbers the module docs quote as the walk's *pre*-gh#929 behaviour.
-//!   Wiring the view in is not the same edit as it was for the walk: this
-//!   entry point returns `refine_step_onto_bounds`'s mixed list of released
-//!   multiplier rows and pinned primal rows, so augmenting it shifts the
-//!   meaning of half that list and needs an API decision plus a fixture of
-//!   its own. The NLP arm has no such gap, because gh#928 widened its box
-//!   globally rather than through a view.
+//! - **The rest of the convex corpus.** `parametric_step_bounded`'s augmented
+//!   branch is reached **3 times across every test in `pounce-convex`**
+//!   (measured, by an `eprintln` in the branch), and all three are this
+//!   file's own. `convex_sens_release.rs`, `convex_sens_backsolver.rs` and
+//!   `convex_soc_sensitivity.rs` reach it **zero** times — they are conic, or
+//!   have no inequality rows. So their staying green across that follow-up is
+//!   evidence of no collateral damage and *not* evidence about the fix; the
+//!   fixture below is the only evidence there is.
+//! - **The mixed list's two spaces, beyond one entry each.** The list
+//!   `parametric_step_bounded` returns names a release by its multiplier row
+//!   and a pin by its primal row, and `refined_row_target` is the only
+//!   decoder. Every case here returns exactly two entries of one kind — two
+//!   pins going up, two releases coming down. A result mixing a release and a
+//!   pin in the same list is decodable by construction (the two ranges do not
+//!   overlap) but is not exercised by any fixture.
 //! - **Rows with no `x` coefficients**, empty `G`, or `m_ineq = 0` — the
 //!   augmentation is skipped for the last of these and the rest are unbuilt.
 
@@ -135,11 +155,13 @@ use pounce_convex::QpOptions;
 use pounce_convex::cones::ConeSpec;
 use pounce_convex::ipm::{solve_qp_ipm, solve_socp_ipm};
 use pounce_convex::qp::{QpProblem, QpSolution, QpStatus, Triplet};
-use pounce_convex::sensitivity::{PathTarget, QpSensitivity};
+use pounce_convex::sensitivity::{PathTarget, QpSensitivity, RefinedRow};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_sens_core::backsolver::SensBacksolver;
-use pounce_sens_core::boundcheck::{BoundMultiplier, PathSegment, step_along_path};
+use pounce_sens_core::boundcheck::{
+    BoundMultiplier, PathSegment, RefineStop, refine_step_onto_bounds, step_along_path,
+};
 use pounce_sens_core::rowlimit::{RowLimitView, WatchedRow};
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
@@ -630,4 +652,243 @@ fn releasing_a_row_moves_its_force_onto_the_observer() {
         "the observer read {dt}, but dx moved the row by {}",
         want[0] + want[2],
     );
+}
+
+// ---------------------------------------------------------------------------
+// The one-shot refinement.
+//
+// `parametric_step_path` walks; `parametric_step_bounded` repairs a single
+// linear predictor. gh#929 taught the first about row limits and left the
+// second carrying the whole defect, which this section closes. The two
+// entry points reach different code — the walk re-forms its direction at each
+// breakpoint and never has a multiplier left to move, while the refinement
+// decides every condition at the base point and needs
+// `solve_released_step`'s shift, the one
+// `releasing_a_row_moves_its_force_onto_the_observer` pins at unit level.
+// ---------------------------------------------------------------------------
+
+/// The refinement, and the point it lands on — the counterpart of [`walk`].
+fn refined(b0: f64, delta: f64) -> (Vec<f64>, Vec<usize>, RefineStop, QpSensitivity) {
+    let prob = model(b0);
+    let sol = solved(b0, QpOptions::default().tol);
+    let mut sens = QpSensitivity::build(&prob, &sol, &QpOptions::default(), ACTIVITY_TOL, backend)
+        .expect("the fixture must build a sensitivity");
+    let (dx, rows, stop) = sens
+        .parametric_step_bounded(&[0], &[delta], EPS, 32)
+        .expect("the refinement must answer");
+    let x = sol.x.iter().zip(&dx).map(|(a, d)| a + d).collect();
+    (x, rows, stop, sens)
+}
+
+/// The same refinement with the observers taken away: `refine_step_onto_bounds`
+/// driven straight against `QpKktBacksolver`, which is exactly what
+/// `parametric_step_bounded` did before this section existed. The "before"
+/// column, recomputed rather than quoted — the counterpart of
+/// [`walk_unaugmented`].
+fn refined_unaugmented(b0: f64, delta: f64) -> Vec<f64> {
+    let prob = model(b0);
+    let sol = solved(b0, QpOptions::default().tol);
+    let sens = QpSensitivity::build(&prob, &sol, &QpOptions::default(), ACTIVITY_TOL, backend)
+        .expect("the fixture must build a sensitivity");
+    let bs = sens.backsolver();
+    let mut rhs = vec![0.0; bs.dim()];
+    rhs[prob.n] = delta;
+    let mut dx_plain = vec![0.0; bs.dim()];
+    assert!(bs.solve(&rhs, &mut dx_plain), "the plain step must answer");
+    let lo: Vec<f64> = (0..prob.n).map(|j| prob.lb[j]).collect();
+    let hi: Vec<f64> = (0..prob.n).map(|j| prob.ub[j]).collect();
+    let mults: Vec<BoundMultiplier> = bs
+        .bound_rows()
+        .unwrap_or(&[])
+        .iter()
+        .map(|br| BoundMultiplier {
+            row: br.row,
+            base: if br.lower {
+                sol.z_lb[br.var_row]
+            } else {
+                sol.z_ub[br.var_row]
+            },
+        })
+        .collect();
+    let (dx, _, _) =
+        refine_step_onto_bounds(&bs, &dx_plain, &sol.x, &lo, &hi, &mults, &rhs, EPS, EPS, 32)
+            .expect("the unaugmented refinement answers too — wrongly, which is the point");
+    sol.x.iter().zip(&dx).map(|(a, d)| a + d).collect()
+}
+
+/// The reach half. `b: 0 -> 4` crosses the row at `b = 2.0` and the bound at
+/// `b = 2.6`; pinning both is the whole active set of the target, so for a QP
+/// the one-shot answer is not an approximation — it is the re-solve.
+#[test]
+fn a_row_the_refinement_would_cross_stops_it() {
+    let (x, rows, stop, sens) = refined(0.0, 4.0);
+    let want = oracle(4.0);
+    assert!(
+        max_err(&x, &want) < 1e-8,
+        "the refinement {x:?} does not reproduce the re-solve {want:?}",
+    );
+    assert!(
+        row_value(&x) <= H0 + 1e-8,
+        "the answer is {:.6} past the row limit",
+        row_value(&x) - H0,
+    );
+    assert_eq!(stop, RefineStop::Settled, "rows {rows:?}");
+
+    // Both conditions are pins, and the row is named as a row.
+    let targets: Vec<RefinedRow> = rows
+        .iter()
+        .map(|&r| {
+            sens.refined_row_target(r)
+                .unwrap_or_else(|| panic!("row {r} must resolve, from {rows:?}"))
+        })
+        .collect();
+    assert_eq!(targets.len(), 2, "{targets:?}");
+    assert!(targets.iter().all(|t| !t.released), "{targets:?}");
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.target == PathTarget::InequalityRow(0)),
+        "the row limit must be reported as a row: {targets:?}",
+    );
+    assert!(
+        targets.iter().any(|t| t.target == PathTarget::Variable(1)),
+        "the variable bound must still be reported: {targets:?}",
+    );
+}
+
+/// The size of the defect, as a number this file computes.
+#[test]
+fn the_unaugmented_refinement_runs_past_the_row() {
+    let x = refined_unaugmented(0.0, 4.0);
+    let over = row_value(&x) - H0;
+    assert!(
+        (over - 1.1333333).abs() < 1e-5,
+        "the pre-fix refinement was supposed to overshoot the row limit by \
+         ~1.1333, got {over} from {x:?}",
+    );
+    // It is not a small perturbation of the truth either — and note that it
+    // pinned `x₁` correctly on the way, which is what made it plausible.
+    assert!(max_err(&x, &oracle(4.0)) > 0.5, "{x:?}");
+    assert!((x[1] - UB1).abs() < 1e-8, "{x:?}");
+}
+
+/// The release half, which is the one the walk cannot stand in for: here the
+/// row's multiplier is still `1.7` when the decision is taken, so
+/// `solve_released_step`'s shift has real force to move.
+#[test]
+fn an_active_row_the_refinement_releases() {
+    let (x, rows, stop, sens) = refined(4.0, -4.0);
+    let want = oracle(0.0);
+    assert!(
+        max_err(&x, &want) < 1e-8,
+        "the refinement {x:?} does not reproduce the re-solve {want:?}",
+    );
+    assert_eq!(stop, RefineStop::Settled, "rows {rows:?}");
+
+    let targets: Vec<RefinedRow> = rows
+        .iter()
+        .map(|&r| {
+            sens.refined_row_target(r)
+                .unwrap_or_else(|| panic!("row {r} must resolve, from {rows:?}"))
+        })
+        .collect();
+    assert_eq!(targets.len(), 2, "{targets:?}");
+    assert!(
+        targets.iter().all(|t| t.released),
+        "both limits are released, not pinned: {targets:?}",
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.target == PathTarget::InequalityRow(0)),
+        "the row must be among the released: {targets:?}",
+    );
+    assert!(
+        targets.iter().any(|t| t.target == PathTarget::Variable(1)),
+        "the bound release must survive the augmentation: {targets:?}",
+    );
+}
+
+/// The reverse direction's "before" column, which is worse than a lost
+/// record: the answer is wrong *and* the report says the cap is binding.
+#[test]
+fn the_unaugmented_refinement_holds_a_row_the_solution_has_left() {
+    let x = refined_unaugmented(4.0, -4.0);
+    assert!(
+        (row_value(&x) - H0).abs() < 1e-8,
+        "the pre-fix refinement was supposed to hold the row at its limit, \
+         got {:.9} from {x:?}",
+        row_value(&x),
+    );
+    let want = [0.5, -0.5, 0.5, -0.5];
+    assert!(
+        max_err(&x, &want) < 1e-6,
+        "the pre-fix answer was measured at {want:?}, got {x:?}",
+    );
+    assert!(
+        max_err(&x, &oracle(0.0)) > 0.4,
+        "and far from the truth: {x:?}"
+    );
+}
+
+/// A step that reaches nothing must be the plain step, or the observers are
+/// manufacturing conditions rather than watching for them. The counterpart of
+/// `the_observers_are_inert_when_no_limit_is_reached`.
+#[test]
+fn the_observers_add_nothing_to_a_refinement_that_reaches_no_limit() {
+    let (x, rows, stop, _) = refined(0.0, 0.4);
+    assert!(
+        rows.is_empty(),
+        "no condition should have been added: {rows:?}"
+    );
+    assert_eq!(stop, RefineStop::Settled);
+    let want = oracle(0.4);
+    assert!(
+        max_err(&x, &want) < 1e-9,
+        "{x:?} should be the plain step, which here is exact: {want:?}",
+    );
+}
+
+/// The conic guard, on the refinement rather than the walk. `row_limit_view`
+/// is one helper, but a gate that is only ever exercised through one caller
+/// is only evidence about that caller — the apex fixture is the one that
+/// would notice, since there every `G` row sits at its `h = 0` and observers
+/// would be born at their limits.
+#[test]
+fn a_conic_model_keeps_the_unaugmented_refinement() {
+    let opts = QpOptions {
+        tol: 1e-11,
+        ..Default::default()
+    };
+    let cones = [ConeSpec::SecondOrder(3)];
+    let apex = QpProblem {
+        n: 4,
+        p_lower: vec![tri(0, 0, 1.0), tri(1, 1, 1.0), tri(2, 2, 1.0)],
+        c: vec![0.0, 0.0, -1.0, 5.0],
+        a: vec![tri(0, 0, 1.0), tri(0, 2, 1.0)],
+        b: vec![1.0],
+        g: vec![tri(0, 3, -1.0), tri(1, 0, -1.0), tri(2, 1, -1.0)],
+        h: vec![0.0, 0.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let db = 1e-3;
+    let sol = solve_socp_ipm(&apex, &cones, &opts, backend);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    let mut sens = QpSensitivity::build_conic(&apex, &cones, &sol, &opts, ACTIVITY_TOL, backend)
+        .expect("the apex must build a sensitivity");
+    let (dx, rows, _) = sens
+        .parametric_step_bounded(&[0], &[db], EPS, 32)
+        .expect("the conic refinement must still answer");
+    assert!(
+        rows.is_empty(),
+        "the conic arm must add no row conditions, got {rows:?}",
+    );
+    for (j, w) in [0.0, 0.0, 1.0, 0.0].iter().enumerate() {
+        assert!(
+            (dx[j] / db - w).abs() < 1e-6,
+            "dx{j}/db = {}, want {w}",
+            dx[j] / db,
+        );
+    }
 }
