@@ -19,11 +19,14 @@ This note answers that scoping question and nothing else. The experiment is
 cargo run --release -p pounce-sensitivity --example soft_mode_scaling
 ```
 
-**Verdict: the matvec is cheaply available, and the extraction is `O(1)`
-back-solves in `n`.** The soft subspace at 100 000 variables costs **16
-back-solves**, about **11% of one NLP solve** on the fixture measured. Two
-facts the issue did not have are what change the answer, and both cut in the
-idea's favour.
+**Verdict: the matvec is cheaply available, the extraction is `O(1)`
+back-solves in `n`, and the iterative eigensolver the issue budgets for is not
+needed at all.** The soft subspace at 100 000 variables costs **16
+back-solves**, about **11% of one NLP solve** on the fixture measured — and a
+randomized range finder plus a `k×k` dense Rayleigh-Ritz matches the Lanczos
+path at the same cost with none of the machinery (see *Do we need the
+eigensolver at all?* below). Two facts the issue did not have are what change
+the answer, and both cut in the idea's favour.
 
 ## 1. `B K⁻¹ Bᵀ` is the *inverse* reduced Hessian, so soft modes are the easy end
 
@@ -181,21 +184,101 @@ evidence about something it never touched:
   the third case). The `y_c` / `y_d` / `s` blocks are never exercised, and the
   `x`-block-of-`K⁻¹` argument, while structurally unchanged, is not measured
   with them live.
-* **No Lanczos exists in the library.** The one in the example is scoping
-  scaffolding — no reorthogonalization strategy beyond the brute-force one, no
-  restart, no convergence test. Shipping this needs a real implementation; the
-  issue's estimate of that work is not disputed.
+* **The extraction code in the example is scoping scaffolding.** Brute-force
+  reorthogonalization, no restart, no convergence test, fixed budgets. The
+  section below argues the shippable version is a randomized range finder
+  rather than any of this, but that version is not written either.
+
+## Do we need the eigensolver at all? (mostly no)
+
+The measurements above extract *eigenpairs*. An escape move does not need
+them — it needs a random direction that is long for its objective rise. So
+section F of the example scores candidate move constructions on two axes at
+once, on the same fixture at `n = 100 000`:
+
+* **reach** — `‖y‖ / sqrt(½ yᵀHy)`, distance travelled per unit objective
+  rise. This is gh#936's "travel far for little change in the objective",
+  made into a number, and it is invariant to `‖y‖` so constructions compare
+  without tuning a step size for each. The ceiling is travel along the
+  softest mode alone.
+* **diversity** — mean `|cos∠|` between independent moves. This axis is the
+  one gh#936's own metric cares about: moves that all point the same way
+  re-enter the same basin, which is a duplicate and a wasted NLP solve.
+
+The two trade off against each other, and no single number decides it: the
+ceiling is reached only by always moving along `v₁`, which has diversity 1.0
+— every hop identical.
+
+| construction | back-solves | reach, well-separated | reach, degenerate | diversity |
+|---|---|---|---|---|
+| isotropic `N(0,I)` | 0 | 0.0% | 0.1% | 0.002 |
+| one back-solve `A g` | 1 | **69.3%** | **69.6%** | 0.73 / 0.15 |
+| `A^{1/2} g`, Krylov, `m = 160` | 160 | 0.3% | 1.7% | 0.41 / 0.10 |
+| range finder, `k = 8`, 2 passes | 16 | 18.3% | 87.1% | 0.29 |
+| range finder + `8×8` Ritz, `1/sqrt(λ)` | 24 | **45.5%** | **87.8%** | 0.54 / 0.31 |
+| gh#936 eigen: 8 modes, `1/sqrt(λ)` | 20 | 42.8% | 54.9% | 0.58 / 0.32 |
+
+Three results, in order of how much they change the plan.
+
+**A randomized range finder replaces the eigensolver.** `Q = orth(AᵠΩ)` for a
+Gaussian `Ω` spans the soft subspace in `q·k` back-solves that **batch into a
+single `kkt_solve_many` call**, with no restart, no locking, no convergence
+test — and no dependence on the gaps *between* the soft modes, only between
+the block and the rest. Adding a `k×k` Rayleigh-Ritz to recover the
+`1/sqrt(λ)` weighting matches or beats the full Lanczos path on both axes
+(45.5% vs 42.8% well-separated, 87.8% vs 54.9% degenerate) for `24`
+back-solves against `20`. The `k×k` symmetric eigendecomposition is
+`pounce_linalg::symmetric_eigen` on an 8×8 matrix — arithmetic, not an
+eigensolver.
+
+This is the alternative gh#936 lists in passing ("or a randomized range
+finder") and then drops in favour of Lanczos. It is the better half of that
+sentence, and it means **the item the issue calls "the bulk of the work, not
+the hop logic" does not need to be built.**
+
+**The matrix-function shortcut does not work — measured, and it was my own
+hypothesis.** `A^{1/2}g` with `g ~ N(0,I)` is a draw with covariance `H_R⁻¹`,
+which is *exactly* gh#936's stated `1/sqrt(λ)` weighting obtained without
+naming a mode, and it is gap-independent. It should have been the clean
+answer. It is not: approximating `sqrt` by a Krylov polynomial across a
+spectrum spanning nine orders converges far too slowly. The self-check
+`yᵀHy / gᵀg`, which is exactly `1` for an accurate square root, reads
+**113.7** at `m = 20`, `27.5` at `m = 40`, `6.7` at `m = 80` and still
+**1.87** at `m = 160` — eight times the range finder's cost for a worse
+answer. Recorded because it is the obvious thing to try second.
+
+**One back-solve is the reach champion and the diversity disaster.** `A g` is
+a single power-iteration step, so it wins reach outright (69% of ceiling for
+**one** back-solve) by collapsing onto `v₁` — diversity 0.73 where the soft
+end is well separated. Since duplicate rate is the metric, that is the wrong
+trade. It is, however, an almost-free *fallback*, and strictly better than
+isotropic on both axes in the degenerate case (69.6% reach at diversity 0.15).
+
+The knob across the whole table is how hard to concentrate the draw toward the
+softest mode: more concentration buys reach and costs diversity. Where to sit
+on that frontier is a question only the efficacy experiment can answer, which
+is the next section's point.
 
 ## Recommendation
 
-The Lanczos work is worth starting, and it is smaller than gh#936 budgeted for
-— the dominant end plus an existing back-solve is the easy case, not the hard
-one. Two corrections to the issue before anyone implements it: the soft modes
-are the **trailing** columns of the current ascending decomposition, not the
-leading ones, and design note 3's free-subspace projection is unnecessary.
+**Do not build an iterative eigensolver for this.** A randomized range finder
+plus a `k×k` dense Rayleigh-Ritz gets the soft subspace and the `1/sqrt(λ)`
+weighting in ~`2k` back-solves, batched into one or two `kkt_solve_many`
+calls, and matches or beats the Lanczos path on both reach and diversity.
+That removes what gh#936 scoped as the bulk of the work.
 
-But the order in gh#936 still stands, for the reason gh#936 gives. The
-extraction being cheap does not make the hop effective, and the efficacy
-experiment is the one that can kill the idea. Build the multimodal benchmark
-and score duplicate rate against the ~1-in-9 break-even above **before**
-writing a production Lanczos.
+Three corrections to the issue before anyone implements it:
+
+1. The soft modes are the **trailing** columns of the current ascending
+   decomposition, not the leading ones — `B K⁻¹ Bᵀ` is the reduced Hessian's
+   inverse.
+2. Design note 3's free-subspace projection is unnecessary; `Σ = z/s`
+   suppresses active bounds by ~25 orders unaided.
+3. The Lanczos/randomized-eigensolver work item can be struck.
+
+But the *order* in gh#936 still stands, and this strengthens the case for it.
+The extraction is now cheap enough that it is no longer the risk on any axis;
+the open question is entirely whether hops along these directions find more
+distinct minima per solve. Build the multimodal benchmark, pick an operating
+point on the reach/diversity frontier above, and score duplicate rate against
+the ~1-in-9 break-even **before** writing any production extraction code.

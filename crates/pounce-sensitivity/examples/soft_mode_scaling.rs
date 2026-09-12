@@ -649,6 +649,421 @@ fn run_case(n: usize, k: usize, m_max: usize, n_bounded: usize, eps: Number) {
     println!();
 }
 
+// ---------------------------------------------------------------------------
+// F. Do we need the eigensolver at all?
+// ---------------------------------------------------------------------------
+
+/// Build a Krylov basis for `op` from `g`, returning `(Q, alpha, beta)` with
+/// full reorthogonalization. Shared by the eigen path and the matrix-function
+/// path — the difference between them is only what is done with `T`.
+fn krylov_basis(
+    op: &KktXOperator,
+    g: &[Number],
+    m_max: usize,
+) -> (Vec<Vec<Number>>, Vec<Number>, Vec<Number>) {
+    let n = op.n_x;
+    let mut q: Vec<Vec<Number>> = Vec::with_capacity(m_max);
+    let mut v = g.to_vec();
+    let nrm = norm(&v);
+    v.iter_mut().for_each(|a| *a /= nrm);
+    q.push(v);
+
+    let mut alpha: Vec<Number> = Vec::new();
+    let mut beta: Vec<Number> = Vec::new();
+    let mut w = vec![0.0; n];
+    let m = m_max.min(n);
+    for j in 0..m {
+        op.apply(&q[j], &mut w);
+        alpha.push(dot(&w, &q[j]));
+        for _ in 0..2 {
+            for qi in q.iter() {
+                let c = dot(&w, qi);
+                for (wi, qv) in w.iter_mut().zip(qi) {
+                    *wi -= c * qv;
+                }
+            }
+        }
+        let b = norm(&w);
+        if j + 1 < m {
+            beta.push(b);
+            if b <= 1e-14 {
+                break;
+            }
+            let mut qn = w.clone();
+            qn.iter_mut().for_each(|a| *a /= b);
+            q.push(qn);
+        }
+    }
+    (q, alpha, beta)
+}
+
+/// `y ≈ A^{1/2} g` by the standard Krylov matrix-function formula
+/// `y = ‖g‖ · Q_m · f(T_m) · e_1`, with `f = sqrt`.
+///
+/// `A` here is the inverse reduced Hessian, so `A^{1/2} g` with `g ~ N(0,I)`
+/// is a draw with covariance `A = H_R⁻¹` — which is *exactly* gh#936's stated
+/// per-mode `1/sqrt(lambda)` weighting ("it equalizes objective rise across
+/// modes"), obtained without ever naming a mode.
+///
+/// The `m×m` symmetric tridiagonal solve inside is `O(m³)` with `m` in the
+/// tens. That is not "the eigensolver" the issue budgets for: no convergence
+/// test, no locking, no restart, and — the point — no dependence on the
+/// eigenvalue gaps of `A`.
+fn sqrt_apply(op: &KktXOperator, g: &[Number], m_max: usize) -> Vec<Number> {
+    let n = op.n_x;
+    let gnorm = norm(g);
+    let (q, alpha, beta) = krylov_basis(op, g, m_max);
+    let mm = alpha.len();
+    let (vals, vecs) = tridiag_eigen(&alpha, &beta);
+    // coeff_j = sum_c V[j,c] * sqrt(d_c) * V[0,c]
+    let mut coeff = vec![0.0; mm];
+    for c in 0..mm {
+        let sq = vals[c].max(0.0).sqrt();
+        let v0 = vecs[c * mm];
+        if sq == 0.0 || v0 == 0.0 {
+            continue;
+        }
+        for (j, cj) in coeff.iter_mut().enumerate().take(mm) {
+            *cj += vecs[c * mm + j] * sq * v0;
+        }
+    }
+    let mut y = vec![0.0; n];
+    for (j, qj) in q.iter().enumerate().take(mm) {
+        let c = coeff[j] * gnorm;
+        for (yi, qv) in y.iter_mut().zip(qj) {
+            *yi += c * qv;
+        }
+    }
+    y
+}
+
+/// `H y` for the chain, `H = κ·tridiag(-1,2,-1) + εI`. Exact, so the objective
+/// rise of a candidate move is measured rather than estimated.
+fn chain_h_apply(y: &[Number], kappa: Number, eps: Number) -> Vec<Number> {
+    let n = y.len();
+    (0..n)
+        .map(|i| {
+            let left = if i == 0 { 0.0 } else { y[i - 1] };
+            let right = if i + 1 == n { 0.0 } else { y[i + 1] };
+            kappa * (2.0 * y[i] - left - right) + eps * y[i]
+        })
+        .collect()
+}
+
+/// **Escape reach**: the distance travelled per unit of objective rise,
+/// `‖y‖ / sqrt(½ yᵀHy)`. This is the quantity gh#936 is actually about — "you
+/// can travel far along them for little change in the objective" — and it is
+/// invariant to the scaling of `y`, so the four constructions are comparable
+/// without tuning a step size for each.
+fn escape_reach(y: &[Number], kappa: Number, eps: Number) -> Number {
+    let hy = chain_h_apply(y, kappa, eps);
+    let rise = 0.5 * dot(y, &hy);
+    norm(y) / rise.max(1e-300).sqrt()
+}
+
+/// Mean |cos| between distinct normalized moves. This is the diversity axis,
+/// and it is the one that matters for gh#936's own metric: moves that all
+/// point the same way re-enter the same basin, which is a duplicate and a
+/// wasted NLP solve. Isotropic draws in high dimension are near-orthogonal
+/// (~0); a construction that collapses onto the single softest mode reads ~1.
+fn mean_pairwise_cos(moves: &[Vec<Number>]) -> Number {
+    let mut acc = 0.0;
+    let mut cnt = 0usize;
+    for i in 0..moves.len() {
+        for j in i + 1..moves.len() {
+            let a = &moves[i];
+            let b = &moves[j];
+            acc += (dot(a, b) / (norm(a) * norm(b))).abs();
+            cnt += 1;
+        }
+    }
+    acc / cnt.max(1) as Number
+}
+
+struct MoveStats {
+    reach: Number,
+    diversity: Number,
+    /// For `A^{1/2}g`: `yᵀHy / gᵀg`, which is exactly 1 when the square root
+    /// is applied accurately. A cheap exact self-check, since `H_R = H` on the
+    /// unconstrained chain.
+    sqrt_fidelity: Option<Number>,
+    matvecs: usize,
+}
+
+fn summarize(
+    moves: Vec<Vec<Number>>,
+    kappa: Number,
+    eps: Number,
+    matvecs: usize,
+    gs: Option<&[Vec<Number>]>,
+) -> MoveStats {
+    let reach = moves
+        .iter()
+        .map(|y| escape_reach(y, kappa, eps))
+        .sum::<Number>()
+        / moves.len() as Number;
+    let diversity = mean_pairwise_cos(&moves);
+    let sqrt_fidelity = gs.map(|gs| {
+        moves
+            .iter()
+            .zip(gs)
+            .map(|(y, g)| {
+                let hy = chain_h_apply(y, kappa, eps);
+                dot(y, &hy) / dot(g, g)
+            })
+            .sum::<Number>()
+            / moves.len() as Number
+    });
+    MoveStats {
+        reach,
+        diversity,
+        sqrt_fidelity,
+        matvecs,
+    }
+}
+
+/// Randomized range finder: `Q = orth(A^q Ω)` for an `n×k` Gaussian `Ω`.
+///
+/// This is the alternative gh#936 mentions in passing ("or a randomized range
+/// finder") and then drops. It returns a basis for (approximately) the
+/// dominant-`k` invariant subspace of `A` — i.e. the soft subspace — in `q·k`
+/// back-solves, **all of which batch into a single `kkt_solve_many` call**.
+///
+/// Nothing here converges an eigenpair: no restart, no locking, no
+/// convergence test, and no dependence on the gaps *between* the soft modes,
+/// only on the gap between the block and the rest. That distinction is the
+/// whole question — a hop needs the soft *subspace*, never the individual
+/// modes spanning it.
+fn range_finder(op: &KktXOperator, k: usize, power_iters: usize, seed: u64) -> Vec<Vec<Number>> {
+    let n = op.n_x;
+    let mut rng = seed;
+    let mut nextf = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        ((rng >> 11) as Number) / ((1u64 << 53) as Number) - 0.5
+    };
+    let mut block: Vec<Vec<Number>> = (0..k).map(|_| (0..n).map(|_| nextf()).collect()).collect();
+    for _ in 0..power_iters {
+        for col in block.iter_mut() {
+            let mut y = vec![0.0; n];
+            op.apply(col, &mut y);
+            *col = y;
+        }
+        orthonormalize(&mut block);
+    }
+    block
+}
+
+/// Modified Gram-Schmidt, `O(nk²)` — negligible next to `k` back-solves.
+fn orthonormalize(block: &mut Vec<Vec<Number>>) {
+    let mut out: Vec<Vec<Number>> = Vec::with_capacity(block.len());
+    for col in block.iter() {
+        let mut v = col.clone();
+        for _ in 0..2 {
+            for b in out.iter() {
+                let c = dot(&v, b);
+                for (vi, bi) in v.iter_mut().zip(b) {
+                    *vi -= c * bi;
+                }
+            }
+        }
+        let nr = norm(&v);
+        if nr > 1e-13 {
+            v.iter_mut().for_each(|a| *a /= nr);
+            out.push(v);
+        }
+    }
+    *block = out;
+}
+
+/// Rayleigh-Ritz inside the `k`-dimensional subspace: form `k×k` `Qᵀ A Q`,
+/// diagonalize it (dense, `k` in the tens — this is arithmetic, not an
+/// eigensolver), and return the Ritz vectors with their Ritz values. Costs
+/// `k` further back-solves.
+fn subspace_ritz(op: &KktXOperator, q: &[Vec<Number>]) -> (Vec<Number>, Vec<Vec<Number>>) {
+    let k = q.len();
+    let n = op.n_x;
+    let aq: Vec<Vec<Number>> = q
+        .iter()
+        .map(|col| {
+            let mut y = vec![0.0; n];
+            op.apply(col, &mut y);
+            y
+        })
+        .collect();
+    let mut h = vec![0.0; k * k];
+    for i in 0..k {
+        for j in 0..k {
+            h[j * k + i] = dot(&q[i], &aq[j]);
+        }
+    }
+    let mut vals = vec![0.0; k];
+    let mut vecs = vec![0.0; k * k];
+    if !pounce_linalg::symmetric_eigen(&h, k, &mut vals, &mut vecs) {
+        return (vec![1.0; k], q.to_vec());
+    }
+    let ritz: Vec<Vec<Number>> = (0..k)
+        .map(|c| {
+            let mut v = vec![0.0; n];
+            for (j, qj) in q.iter().enumerate() {
+                let w = vecs[c * k + j];
+                for (vi, qv) in v.iter_mut().zip(qj) {
+                    *vi += w * qv;
+                }
+            }
+            v
+        })
+        .collect();
+    (vals, ritz)
+}
+
+fn move_comparison(n: usize, eps: Number, k: usize, m: usize, label: &str) {
+    let kappa = 1.0;
+    let tnlp = ChainTnlp::new(n, kappa, eps, 0, 0.05);
+    let lam1 = tnlp.analytic_eigenvalue(1);
+    let (solver, _rc, _t) = solve_chain(tnlp);
+    let op = KktXOperator::new(&solver);
+    let ideal = (2.0 / lam1).sqrt();
+
+    let trials = 8usize;
+    let mut rng = 0xDEADBEEFCAFEu64;
+    let mut nextf = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        ((rng >> 11) as Number) / ((1u64 << 53) as Number) - 0.5
+    };
+    let gs: Vec<Vec<Number>> = (0..trials)
+        .map(|_| (0..op.n_x).map(|_| nextf()).collect())
+        .collect();
+
+    println!("{label}");
+    println!(
+        "  n = {n}, eps = {eps:.0e}, k = {k}   ceiling (pure softest mode) reach = {ideal:.4e}"
+    );
+    println!(
+        "  {:<34} {:>6}  {:>12}  {:>9}  {:>10}  {:>9}",
+        "construction", "b-solv", "reach", "% ceiling", "diversity", "sqrt fid"
+    );
+
+    let mut row = |name: &str, st: MoveStats| {
+        println!(
+            "  {:<34} {:>6}  {:>12.4e}  {:>8.1}%  {:>10.4}  {:>9}",
+            name,
+            st.matvecs,
+            st.reach,
+            100.0 * st.reach / ideal,
+            st.diversity,
+            match st.sqrt_fidelity {
+                Some(f) => format!("{f:.4}"),
+                None => "-".to_string(),
+            }
+        );
+    };
+
+    row(
+        "isotropic N(0,I)",
+        summarize(gs.clone(), kappa, eps, 0, None),
+    );
+
+    let before = op.matvecs.get();
+    let one: Vec<Vec<Number>> = gs
+        .iter()
+        .map(|g| {
+            let mut y = vec![0.0; op.n_x];
+            op.apply(g, &mut y);
+            y
+        })
+        .collect();
+    let mv = (op.matvecs.get() - before) / trials;
+    row("one back-solve  A g", summarize(one, kappa, eps, mv, None));
+
+    for &ms in &[20usize, 40, 80, 160] {
+        let before = op.matvecs.get();
+        let ys: Vec<Vec<Number>> = gs.iter().map(|g| sqrt_apply(&op, g, ms)).collect();
+        let mv = (op.matvecs.get() - before) / trials;
+        row(
+            &format!("sqrt action A^1/2 g  (m = {ms})"),
+            summarize(ys, kappa, eps, mv, Some(&gs)),
+        );
+    }
+
+    // Randomized range finder: hop drawn uniformly from the recovered
+    // soft subspace. No eigenpairs at all.
+    for &pw in &[1usize, 2] {
+        let before = op.matvecs.get();
+        let qb = range_finder(&op, k, pw, 0xA5A5_1234_u64);
+        let mv = op.matvecs.get() - before;
+        let ys: Vec<Vec<Number>> = (0..trials)
+            .map(|_| {
+                let mut y = vec![0.0; op.n_x];
+                for col in qb.iter() {
+                    let w = nextf();
+                    for (yi, cv) in y.iter_mut().zip(col) {
+                        *yi += w * cv;
+                    }
+                }
+                y
+            })
+            .collect();
+        row(
+            &format!("range finder, k={k}, {pw} pass  (no eigen)"),
+            summarize(ys, kappa, eps, mv, None),
+        );
+    }
+
+    // Range finder + a k x k Rayleigh-Ritz, weighted 1/sqrt(lambda).
+    {
+        let before = op.matvecs.get();
+        let qb = range_finder(&op, k, 2, 0xA5A5_1234_u64);
+        let (rv, rvecs) = subspace_ritz(&op, &qb);
+        let mv = op.matvecs.get() - before;
+        let ys: Vec<Vec<Number>> = (0..trials)
+            .map(|_| {
+                let mut y = vec![0.0; op.n_x];
+                for (c, col) in rvecs.iter().enumerate() {
+                    let w = rv[c].max(0.0).sqrt() * nextf();
+                    for (yi, cv) in y.iter_mut().zip(col) {
+                        *yi += w * cv;
+                    }
+                }
+                y
+            })
+            .collect();
+        row(
+            &format!("range finder + {k}x{k} Ritz, 1/sqrt(lambda)"),
+            summarize(ys, kappa, eps, mv, None),
+        );
+    }
+
+    // gh#936's proposal: k softest Ritz modes, weighted 1/sqrt(lambda).
+    let before = op.matvecs.get();
+    let res = lanczos_dominant(&op, k, m, 0x9E3779B97F4A7C15);
+    let mv_eig = op.matvecs.get() - before;
+    let eig: Vec<Vec<Number>> = (0..trials)
+        .map(|_| {
+            let mut y = vec![0.0; op.n_x];
+            for c in 0..res.ritz_values.len() {
+                // Ritz value of A is 1/lambda, so 1/sqrt(lambda) = sqrt(ritz).
+                let wgt = res.ritz_values[c].max(0.0).sqrt() * nextf();
+                for (yi, rv) in y
+                    .iter_mut()
+                    .zip(&res.ritz_vectors[c * op.n_x..(c + 1) * op.n_x])
+                {
+                    *yi += wgt * rv;
+                }
+            }
+            y
+        })
+        .collect();
+    row(
+        &format!("gh#936 eigen: {k} modes, 1/sqrt(lambda)"),
+        summarize(eig, kappa, eps, mv_eig, None),
+    );
+    println!();
+}
+
 fn main() {
     println!("gh#936 — soft reduced-Hessian modes at sparse scale");
     println!("operator: v -> (K^-1)_xx v, one kkt_solve per matvec");
@@ -675,6 +1090,24 @@ fn main() {
 
     println!("\n=== E. how many matvecs are actually needed? (n = 100000, gap-matched) ===\n");
     budget_sweep(100_000, k);
+
+    println!(
+        "\n=== F. is an eigensolver needed at all? escape reach per unit objective rise ===\n"
+    );
+    move_comparison(
+        100_000,
+        1e-12,
+        k,
+        20,
+        "F1. well-separated soft end (eigen path works)",
+    );
+    move_comparison(
+        100_000,
+        1e-6,
+        k,
+        20,
+        "F2. DEGENERATE soft end (eigen path failed above: capture 0.32)",
+    );
 }
 
 /// The Lanczos budget `m` was fixed at 40 above by choice, not by measurement.
