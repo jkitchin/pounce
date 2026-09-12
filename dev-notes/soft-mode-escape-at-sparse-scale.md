@@ -30,32 +30,47 @@ path at the same cost with none of the machinery (see *Do we need the
 eigensolver at all?* below). Two facts the issue did not have are what change
 the answer, and both cut in the idea's favour.
 
-## 1. `B K⁻¹ Bᵀ` is the *inverse* reduced Hessian, so soft modes are the easy end
+## 1. Which end is soft — and a correction to an earlier draft of this note
 
-The issue's step 1 reads:
+> **CORRECTED.** An earlier version of this note claimed
+> `compute_reduced_hessian` returns the reduced Hessian's *inverse*, reasoning
+> from `reduced_hessian.rs`'s unit test, which feeds a synthetic dense `K` and
+> selects two of its rows. That generalization is wrong, and
+> `rh_orientation_check.rs` now measures it: on a model with `H = [[2,1],[1,2]]`
+> and both variables pinned, the API returns `[[−2,−1],[−1,−2]]`. The
+> magnitudes are `H`'s, not `H⁻¹`'s (`2/3`, `1/3`). **It is not an inverse.**
 
-> `compute_reduced_hessian_eigen` returns eigenvalues in **ascending** order
-> plus a column-major, sign-pinned eigenvector matrix. The soft modes are the
-> leading columns, already in the order we want.
+The two paths differ because of *which block* the rows live in. The production
+API takes **pin constraint** indices, and `map_pin_g_to_kkt_rows` puts those at
+`n_x + n_s + c_block(g)` — the `y_c` multiplier block. For
+`K = [[H, Aᵀ], [A, 0]]` the `(y_c, y_c)` block of `K⁻¹` is `−(A H⁻¹ Aᵀ)⁻¹`,
+which inverts once more than the `x`-block case and lands on `±H_R` directly.
+The leading minus is a deliberate, already-documented convention —
+`crossover_sigma_downstream.rs`: *"`compute_reduced_hessian` returns `−H_R`
+under its sign convention"*; `crossover_sigma_frame.rs`: *"carries the
+augmented system's leading minus on a multiplier row"*, with its expected
+matrix written as `[-Q[0][0], …]`.
 
-That is backwards, and `reduced_hessian.rs`'s own unit test is the proof.
-`compute_reduced_hessian` computes `H_R = B K⁻¹ Bᵀ` — a submatrix of the KKT
-**inverse**. For the test's `K = tridiag(-1,2,-1)` on rows `{0,2}` it returns
-`[[3/4,1/4],[1/4,3/4]]`, whose inverse `[[3/2,-1/2],[-1/2,3/2]]` is exactly
-the Schur complement of `K` onto that block — i.e. the true reduced Hessian.
-So the returned matrix is the reduced Hessian's inverse, its eigenvalues are
-reciprocals, and **the leading (smallest) columns of the ascending
-decomposition are the stiffest modes, not the softest.**
+**gh#936's step 1 is still wrong, for a different reason.** The issue says:
 
-Anyone implementing gh#936 off the issue text as written would have hopped
-along the stiff directions — the exact failure the issue is about, with the
-sign of the error hidden behind a plausible-looking spectrum. The
-`1/sqrt(lambda)` weighting in step 2 inverts with it.
+> eigenvalues in **ascending** order […] The soft modes are the leading
+> columns, already in the order we want.
 
-The consequence for scale is the good one. The operator we can *apply* is the
-inverse reduced Hessian, so the soft modes are its **dominant** eigenpairs —
-the end of the spectrum Lanczos reaches first, in a handful of iterations,
-rather than the end that needs shift-invert and a second factorization.
+On `−H_R` the ascending order runs from most negative to least, i.e. from the
+**stiffest** mode to the softest. The soft modes are the **trailing** columns.
+Measured above: eigenvalues `[−3, −1]` for a reduced Hessian whose modes are
+`3` (stiff) and `1` (soft). An implementation following the issue as written
+hops along the stiffest directions — the exact failure the issue exists to
+fix — but by the sign convention, not by an inversion.
+
+**What the rest of this note iterates on is a different operator, and that one
+*is* an inverse.** The `x` block of `K⁻¹` is the inverse of the barrier
+problem's reduced Hessian, so its **dominant** eigenvectors are the soft modes
+— the end iterative methods reach first. That is checked directly against
+analytic eigenpairs to `1e-10` at `n = 100 000` below, so it does not rest on
+the reasoning that went wrong above. Every measurement in this note uses that
+operator via `kkt_solve`, never `compute_reduced_hessian`, so none of them are
+affected by the correction.
 
 ## 2. The matvec is one back-solve against a factor the IPM already holds
 
@@ -347,8 +362,9 @@ That removes what gh#936 scoped as the bulk of the work.
 Three corrections to the issue before anyone implements it:
 
 1. The soft modes are the **trailing** columns of the current ascending
-   decomposition, not the leading ones — `B K⁻¹ Bᵀ` is the reduced Hessian's
-   inverse.
+   decomposition, not the leading ones — `compute_reduced_hessian` returns
+   `−H_R`, so ascending runs stiffest-first. (Not because it is an inverse;
+   see the correction in section 1.)
 2. Design note 3's free-subspace projection is unnecessary; `Σ = z/s`
    suppresses active bounds by ~25 orders unaided.
 3. The Lanczos/randomized-eigensolver work item can be struck.

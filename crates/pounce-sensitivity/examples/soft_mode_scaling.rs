@@ -16,13 +16,20 @@
 //!
 //! Two facts the issue did not have, both of which change the answer:
 //!
-//! 1. **`B K⁻¹ Bᵀ` is the INVERSE of the reduced Hessian**, not the reduced
-//!    Hessian. `reduced_hessian.rs`'s own unit test pins it: for
-//!    `K = tridiag(-1,2,-1)` on rows `{0,2}` it returns `[[3/4,1/4],[1/4,3/4]]`,
-//!    whose inverse `[[3/2,-1/2],[-1/2,3/2]]` is exactly the Schur complement
-//!    of `K` onto that block. So the **soft** modes of the true reduced
-//!    Hessian are the **dominant** eigenvectors of the operator we can apply —
-//!    the end of the spectrum iterative methods reach first, not last.
+//! 1. **The `x` block of `K⁻¹` is the INVERSE reduced Hessian**, so the
+//!    **soft** modes are its **dominant** eigenvectors — the end of the
+//!    spectrum iterative methods reach first, not last. That is what this
+//!    program iterates on, and it is checked against analytic eigenpairs to
+//!    `1e-10` at `n = 100 000` below.
+//!
+//!    Do not confuse this with `Solver::compute_reduced_hessian`, which is
+//!    *not* an inverse: it takes **pin constraint** indices, which land in the
+//!    `y_c` multiplier block, where the Schur complement inverts once more and
+//!    the result is `−H_R` itself (`rh_orientation_check.rs` measures it;
+//!    `crossover_sigma_downstream.rs` documents the sign). Its ascending
+//!    eigenvalues put the *stiffest* mode first because of that minus, which
+//!    is why gh#936's step 1 is still wrong about which columns to take — by
+//!    the sign convention, not by an inversion.
 //!
 //! 2. **The matvec is one back-solve** against the factor the IPM already
 //!    holds: scatter into the `x` block, `kkt_solve`, gather the `x` block.
