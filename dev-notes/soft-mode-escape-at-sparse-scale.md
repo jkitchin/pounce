@@ -20,8 +20,10 @@ cargo run --release -p pounce-sensitivity --example soft_mode_scaling
 ```
 
 **Verdict: the matvec is cheaply available, the extraction is `O(1)`
-back-solves in `n`, and the iterative eigensolver the issue budgets for is not
-needed at all.** The soft subspace at 100 000 variables costs **16
+back-solves in `n`, the iterative eigensolver the issue budgets for is not
+needed at all, and on a purpose-built multimodal benchmark the hop pays ~40x
+at `n = 10 000` — but only when barriers lie along soft directions, and ~0.04x
+when they do not.** The soft subspace at 100 000 variables costs **16
 back-solves**, about **11% of one NLP solve** on the fixture measured — and a
 randomized range finder plus a `k×k` dense Rayleigh-Ritz matches the Lanczos
 path at the same cost with none of the machinery (see *Do we need the
@@ -168,12 +170,11 @@ projected free-variable operator.
 Per the branch rule, stated explicitly so a green result here is not read as
 evidence about something it never touched:
 
-* **Efficacy is untested.** This measures whether soft modes can be *obtained*
-  at scale. Whether *hopping along them* finds more distinct minima per NLP
-  solve — gh#936's own metric, and the stated go/no-go — is not measured here
-  and remains the decision point. The issue is right that it needs a
-  purpose-built multimodal benchmark at scale, and right that the existing
-  corpus would return a meaningless null.
+* **Efficacy is measured, but on synthetic fixtures only.** See the efficacy
+  section below: the method pays ~40x when barriers lie along soft modes and
+  ~0.04x when they do not. Both branches are purpose-built synthetic
+  landscapes with the answer designed in; neither is evidence about which
+  regime a real `--minima` workload occupies, which is now the open question.
 * **One KKT shape.** The fixture is a convex QP with a tridiagonal Hessian:
   the cheapest back-solve and the cheapest NLP solve there is. Both sides of
   the cost ratio move on a real multimodal NLP — the solve gets much more
@@ -188,6 +189,82 @@ evidence about something it never touched:
   reorthogonalization, no restart, no convergence test, fixed budgets. The
   section below argues the shippable version is a randomized range finder
   rather than any of this, but that version is not written either.
+
+## Efficacy: it works, and only when the premise holds
+
+Everything above is about *extraction*. The `soft_mode_scaling.rs` fixture is a
+convex quadratic with exactly one minimum, so it cannot say whether hopping
+along these directions escapes anything. `minima_hop_efficacy.rs` is the other
+half, scored on gh#936's own metric — distinct minima per NLP solve, both
+strategies hopping with the same step norm from the same incumbent under the
+same seed stream, so only the *direction* differs.
+
+Two fixtures had to be discarded first, and both failures are informative.
+
+* **A Frenkel-Kontorova chain** (every coordinate in its own periodic well) is
+  degenerate for this metric: exponentially many minima mean *every* hop lands
+  somewhere new. Duplicate rate `0.0%` for both strategies at `n` = 200 /
+  2 000 / 20 000, ratio exactly `1.00x`. The metric saturates and
+  discriminates nothing — gh#936's own trap one level up, a *metric* uniform
+  in the dimension the change acts on.
+* **Corrugating a collective coordinate** failed for a deeper reason: the
+  corrugation that creates a well also supplies the curvature at the bottom of
+  it, so the barriered direction is *stiff* and the soft modes are the
+  uncorrugated ones that lead nowhere. Soft-mode hops moved the collective
+  coordinates by exactly `0.0000` at every `n`.
+
+The working fixture is `½Σc_i x_i² + ½ρΣ(x_{j+1}−x_j)² + AΣ_{i∈C}(1−cos(2πx_i/P))`
+with `c_i` small on `M` designated coordinates and large elsewhere, `ρ` a weak
+tridiagonal coupling, and **`C` a switch**: corrugate the soft coordinates
+(gh#936's premise holds) or an equal number of stiff ones (it fails).
+Everything else is held fixed, so the switch isolates the premise. Per the
+branch rule, one branch alone would have been worthless.
+
+**Branch 1 — barriers along soft modes.** The advantage is real and it *grows
+with dimension*, which is the specific claim gh#936 makes and the one no
+existing fixture could test:
+
+| `n` | isotropic dup rate | soft-mode dup rate | distinct/solve ratio |
+|---|---|---|---|
+| 16 | 12.2% | 4.9% | 1.08x |
+| 100 | 63.4% | 7.3% | 2.53x |
+| 1 000 | 97.6% | 0.0% | **41.0x** |
+| 10 000 | 97.6% | 2.4% | **40.0x** |
+
+At `n ≥ 1000` isotropic hopping finds *nothing* — 1 minimum in 41 solves,
+0.00 well crossings per hop — while soft-mode hopping crosses ~2.9 wells per
+hop and finds a new minimum almost every time. This is "plausible at 813 and
+implausible at 93 263" as a measurement. Against the ~1-in-9 break-even
+computed above, 40x is not marginal.
+
+**Branch 2 — barriers along stiff modes.** The same machinery is *worse than
+doing nothing*:
+
+| `n` | isotropic distinct/solve | soft-mode distinct/solve | ratio |
+|---|---|---|---|
+| 16 | 0.561 | 0.024 | **0.04x** |
+| 100 | 0.171 | 0.024 | **0.14x** |
+| 1 000 | 0.024 | 0.024 | 1.00x |
+| 10 000 | 0.024 | 0.024 | 1.00x |
+
+Where isotropic still works, soft-mode hopping finds exactly one minimum and
+never crosses a well — it spends every solve travelling along directions with
+nothing at the end of them. A 25x *regression* at `n = 16`.
+
+(Branch 2 needed its amplitude sized separately: at branch 1's `A = 0.02` a
+stiff coordinate's quadratic swamps the corrugation and there is only one
+minimum, which the first run reported as `1` for both strategies — not "the
+premise fails" but "there is nothing to find". `wells_exist` asserts the
+fixture is non-vacuous. That a barrier on a stiff direction must be
+proportionally higher to exist at all is itself structural.)
+
+So the feature is not a general improvement to be switched on. It is a bet
+that the problem's barriers lie along its soft directions, paying ~40x when
+right and ~0.04x when wrong, and **nothing in the solver can tell which
+regime a user's model is in.** That makes fallback and opt-in load-bearing
+rather than defensive, and it makes "which regime do real `--minima`
+workloads live in?" the question that decides whether this ships — not any
+remaining question about cost.
 
 ## Do we need the eigensolver at all? (mostly no)
 
@@ -276,9 +353,13 @@ Three corrections to the issue before anyone implements it:
    suppresses active bounds by ~25 orders unaided.
 3. The Lanczos/randomized-eigensolver work item can be struck.
 
-But the *order* in gh#936 still stands, and this strengthens the case for it.
-The extraction is now cheap enough that it is no longer the risk on any axis;
-the open question is entirely whether hops along these directions find more
-distinct minima per solve. Build the multimodal benchmark, pick an operating
-point on the reach/diversity frontier above, and score duplicate rate against
-the ~1-in-9 break-even **before** writing any production extraction code.
+The go/no-go has moved. Extraction is cheap on every axis and efficacy is no
+longer hypothetical: ~40x when gh#936's premise holds, ~0.04x when it does
+not, with the crossover governed by whether barriers lie along soft
+directions. What is *not* established is which regime real `--minima`
+workloads occupy — and since the solver cannot detect it, that decides both
+whether this ships and whether it can ever be a default.
+
+So: keep it opt-in with an isotropic fallback, and spend the next effort on
+real multimodal models rather than more synthetic ones or any production
+extraction code.
