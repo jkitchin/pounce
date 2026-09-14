@@ -979,7 +979,10 @@ def test_routed_result_exposes_eval_counters():
     """A routed (convex) result must still carry the scipy-standard
     ``nfev``/``njev``/``nhev`` attributes — accessing them must not
     ``AttributeError`` just because a different backend ran. The convex solver
-    consumes the extracted quadratic form, so the counts are 0."""
+    consumes the extracted quadratic form, so no gradient or Hessian callback
+    fires (``njev``/``nhev`` are 0) and the objective is called exactly once:
+    the final ``fun(x)`` that makes the reported objective the objective at the
+    returned point rather than the extracted model's value (gh #939)."""
     fun = lambda x: x[0] ** 2 + x[1] ** 2
     jac = lambda x: 2 * x
     hess = lambda x: 2 * np.eye(2)
@@ -992,7 +995,7 @@ def test_routed_result_exposes_eval_counters():
         solver_selection="auto",
     )
     assert res.info.get("solver") == "qp-ipm"
-    assert res.nfev == 0 and res.njev == 0 and res.nhev == 0
+    assert res.nfev == 1 and res.njev == 0 and res.nhev == 0
 
 
 def test_result_subscript_falls_back_to_info():
@@ -1014,7 +1017,7 @@ def test_result_subscript_falls_back_to_info():
     assert res["solver"] == "qp-ipm"
     assert res.solver == "qp-ipm"
     # top-level key still resolves directly
-    assert res["nfev"] == 0
+    assert res["nfev"] == 1
     # a key in neither place still raises KeyError
     with pytest.raises(KeyError):
         res["definitely_not_a_key"]

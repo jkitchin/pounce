@@ -755,6 +755,30 @@ Jacobians is being conservatively rejected, lower it to be stricter. The
 routing keys are consumed by `minimize` and never forwarded to the backend, so
 the rest of `options` still reaches the NLP solver unchanged.
 
+#### What the routed solver actually optimized
+
+The validation above rules out a *misclassification*. It does not make the
+extracted model **equal** to your objective: the model's `P`, `c` and constant
+are recovered by finite differences, and a model that agrees with `fun` to
+`route_tol` at the probe points is still a different function. So a routed
+solve optimizes a near-copy of your problem, and that has two consequences
+worth knowing (gh #939):
+
+* **`res.fun` is `fun(res.x)`**, not the value the convex solver reported for
+  its own model. `minimize` evaluates your objective once at the returned
+  point, so the scipy contract — `fun` is the objective at `x` — holds on every
+  route, and `res.nfev` is 1 on a routed solve rather than 0. Before that extra
+  call, a routed result could report a `fun` *below* the problem's true global
+  optimum (measured: 8.8e-5 below, on an 11-variable convex QP with a box and
+  one linear equality) with `success=True` and no hint it was a model number.
+* **The model error also moves `res.x`.** On that same QP the routed solution
+  sat 2.7e-5 from the optimum against the NLP route's 1.9e-8. That is the real
+  cost of probing an opaque callable and no extra evaluation can repair it.
+  `res.info["obj_model"]` keeps the model's own value, so
+  `res.info["obj_model"] - res.fun` is a cheap read on how far the extraction
+  drifted; when it is larger than you can accept, pass an analytic `jac` (which
+  removes one whole layer of finite differencing) or `solver_selection="nlp"`.
+
 #### When you still need a typed entry point
 
 Auto-routing handles LP, convex QP, and convex QCQP from the
