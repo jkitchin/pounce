@@ -316,8 +316,10 @@ def test_qp_active_set_reaches_the_sqp_engine():
     the two surfaces agree.
 
     The tell is `nfev`: the convex route consumes the extracted quadratic form
-    and never calls back into Python, so a routed solve reports zero function
-    evaluations, while both the NLP and SQP paths report many.
+    and calls back into Python exactly once — the final `fun(x)` that makes the
+    reported objective the objective *at the returned point* rather than the
+    extracted model's value (gh #939) — while both the NLP and SQP paths report
+    many.
     """
     fun, jac, con = _qp_problem()
     kw = dict(jac=jac, constraints=con)
@@ -326,7 +328,7 @@ def test_qp_active_set_reaches_the_sqp_engine():
     ipm = minimize(fun, np.zeros(2), options={"solver_selection": "qp-ipm"}, **kw)
     nlp = minimize(fun, np.zeros(2), options={"solver_selection": "nlp"}, **kw)
 
-    assert sel.nfev == 0, "qp-active-set must route to the convex driver, not a callback path"
+    assert sel.nfev == 1, "qp-active-set must route to the convex driver, not a callback path"
     assert nlp.nfev > 0, "the NLP path must be distinguishable by callback count"
     # Same problem, same optimum, whichever convex engine ran.
     assert np.allclose(sel.x, ipm.x, atol=1e-6)
@@ -343,8 +345,9 @@ def test_qp_active_set_solves_an_indefinite_qp(recwarn):
     the endpoint `x₀ = −1` (`−1.5`, against `−0.5` at `x₀ = +1`) and the convex
     `x₁` one at `x₁ = 0.5` (`−0.125`), so `f* = −1.625` at `(−1, 0.5)`.
 
-    `nfev == 0` is the tell that the convex driver ran: it consumes the
-    extracted quadratic form and never calls back into Python.
+    `nfev == 1` is the tell that the convex driver ran: it consumes the
+    extracted quadratic form and calls back into Python only for the final
+    `fun(x)` at the returned point (gh #939).
     """
     P = np.diag([-2.0, 1.0])
     c = np.array([0.5, -0.5])
@@ -364,7 +367,7 @@ def test_qp_active_set_solves_an_indefinite_qp(recwarn):
         options={"solver_selection": "qp-active-set"},
     )
     assert res.success
-    assert res.nfev == 0, "must route to the convex driver, not a callback path"
+    assert res.nfev == 1, "must route to the convex driver, not a callback path"
     assert res.fun == pytest.approx(-1.625, abs=1e-6)
     assert np.allclose(res.x, [-1.0, 0.5], atol=1e-6)
     assert res.info["problem_class"] == "nonconvex_qp"
@@ -373,7 +376,7 @@ def test_qp_active_set_solves_an_indefinite_qp(recwarn):
     # general NLP path is the safer default for a nonconvex model.
     auto = minimize(fun, np.zeros(2), jac=jac, bounds=bounds,
                     options={"solver_selection": "auto"})
-    assert auto.nfev > 0, "auto must leave a nonconvex QP on the NLP path"
+    assert auto.nfev > 1, "auto must leave a nonconvex QP on the NLP path"
 
 
 def test_qp_active_set_still_refuses_a_nonlinear_constraint():

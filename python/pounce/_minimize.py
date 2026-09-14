@@ -887,13 +887,70 @@ def _build_problem_obj(
     return cls()
 
 
-def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
+def _objective_at_solution(objective, x, model_val: float, route_name: str):
+    """``(fun, nfev)`` for a convex route: the user's objective evaluated at the
+    point the convex solver returned, with the model value as a fallback.
+
+    gh #939. The convex routes do not solve the user's ``fun`` — they solve a
+    quadratic model of it that ``_route.py`` recovered by **finite
+    differencing** the opaque callable, so ``res.obj`` is *the model's* value at
+    ``x``, not ``fun(x)``. The two differ by the extraction error, and that
+    error is not sign-definite: measured on an 11-variable convex QP with
+    bounds and a linear equality, the model value came out 8.8e-5 (1.1e-5
+    relative) **below** the problem's proven global optimum — a value no
+    feasible point attains — and was reported with ``success=True`` and
+    "Optimization terminated successfully.", which gives a caller no hint that
+    it is a model number. Meanwhile ``fun(x)`` at that same returned ``x`` was
+    right to 3e-9. scipy's contract, which this facade mirrors, is that ``fun``
+    is the objective evaluated at ``x``; one extra call restores it.
+
+    This is the *cheap* half of the FD-extraction cost. The expensive half —
+    the model error also moves ``x`` itself (2.7e-5 from the optimum on that
+    QP, against 1.9e-8 on the NLP route) — is inherent to probing an opaque
+    callable and is not addressed here; ``info["obj_model"]`` is kept alongside
+    so a caller who wants to *see* the extraction error can difference the two.
+
+    The fallback: this evaluation happens after the solve, at a point the user
+    never chose, so a ``fun`` with a restricted domain can raise there (the
+    interior-point solver can land a hair outside a bound it treated as an
+    inequality). A failure must not lose an otherwise good result, so we keep
+    the model value — but warn, because the returned ``fun`` is then not
+    ``fun(x)``.
+    """
+    if objective is None:
+        return model_val, 0
+    try:
+        val = float(objective(x))
+        if not np.isfinite(val):
+            raise ValueError(f"objective evaluated to {val}")
+    except Exception as exc:  # noqa: BLE001 - any user-callable failure
+        warnings.warn(
+            f"pounce.minimize routed this problem to the dedicated {route_name} "
+            "solver but could not evaluate the objective at the point it "
+            f"returned ({exc!r}). Reporting the extracted quadratic model's "
+            "value instead, which differs from fun(x) by the model-extraction "
+            "error. Pass solver_selection='nlp' for a result whose 'fun' is "
+            "always the objective at 'x'.",
+            stacklevel=3,
+        )
+        return model_val, 1
+    return val, 1
+
+
+def _solve_via_convex(
+    ex, opts: dict, method: str = "ipm", objective=None
+) -> OptimizeResult:
     """Adapt a routed convex LP/QP solve back into an :class:`OptimizeResult`.
 
     The convex solver minimizes ``½xᵀPx + cᵀx`` and never sees the objective's
-    degree-0 term, so we add ``ex.obj_const`` back to the reported value (the
+    degree-0 term, so ``ex.obj_const`` is added back to the model value (the
     same constant the CLI threads through ``run_convex_qp``). The result shape
     is identical to the NLP path so the router is transparent to callers.
+
+    ``objective`` is the user's ``fun`` with ``args`` already bound. The
+    reported ``fun`` is that callable evaluated at the returned ``x``, **not**
+    the model value — see :func:`_objective_at_solution` (gh #939). The model's
+    own value stays visible as ``info["obj_model"]``.
     """
     from .qp import solve_qp
 
@@ -910,7 +967,7 @@ def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
         max_iter=opts.get("max_iter"),
         method=method,
     )
-    fun_val = float(res.obj) + ex.obj_const
+    model_val = float(res.obj) + ex.obj_const
     # gh #880: ``optimal_inaccurate`` is a converged-to-acceptable solve, the
     # same convention the NLP arm uses (gh #119 / #123). See `QpResult.success`.
     success = res.status in ("optimal", "optimal_inaccurate")
@@ -919,9 +976,16 @@ def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
         if method == "active-set"
         else ("lp-ipm" if ex.kind == "lp" else "qp-ipm")
     )
+    x = np.asarray(res.x)
+    fun_val, nfev = _objective_at_solution(
+        objective,
+        x,
+        model_val,
+        "nonconvex QP" if ex.kind == "nonconvex_qp" else "convex LP/QP",
+    )
     message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
-        x=np.asarray(res.x),
+        x=x,
         fun=fun_val,
         success=success,
         status=_QP_STATUS_CODE.get(res.status, 1),
@@ -929,16 +993,21 @@ def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
         nit=int(res.iters),
         # The convex solver consumes the extracted quadratic form, not the
         # python callables, so no objective/gradient/Hessian callbacks fire
-        # during the solve. Report 0 (rather than omitting the keys) so the
-        # scipy-standard counters are present on every result regardless of
-        # which backend ran.
-        nfev=0,
+        # *during* the solve. The one `fun` call that does happen is the final
+        # evaluation at the solution (gh #939), so `nfev` is 1 on this route
+        # and 0 only when no objective was handed in. (The router's probe
+        # evaluations are not counted here; they precede this function.)
+        nfev=nfev,
         njev=0,
         nhev=0,
         info={
             "solver": selector,
             "problem_class": ex.kind,
             "obj_val": fun_val,
+            # The extracted model's own value at `x`. Differencing it against
+            # `obj_val` is how a caller sees the FD-extraction error that the
+            # routed solve carried (gh #939).
+            "obj_model": model_val,
             "obj_constant": ex.obj_const,
             "status": res.status,
             "status_msg": res.status,
@@ -948,15 +1017,21 @@ def _solve_via_convex(ex, opts: dict, method: str = "ipm") -> OptimizeResult:
     )
 
 
-def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
+def _solve_via_socp(ex, opts: dict, objective=None) -> OptimizeResult:
     """Adapt a routed convex-QCQP solve (reformulated to a SOCP) back into an
     :class:`OptimizeResult`.
 
     Mirrors :func:`_solve_via_convex`: the conic solver minimizes
     ``½xᵀPx + cᵀx`` over the cone constraints and never sees the objective's
-    degree-0 term, so ``ex.obj_const`` is added back to the reported value (the
+    degree-0 term, so ``ex.obj_const`` is added back to the model value (the
     same constant the CLI threads through ``run_convex_socp``). The result shape
     matches the NLP path so the router stays transparent to callers.
+
+    It mirrors the gh #939 fix too, and for the same reason: this arm's ``P``,
+    ``c`` and ``obj_const`` come out of the *same* finite-difference probe of
+    the opaque ``fun`` (``_fit_objective``), so its model value is no more the
+    user's objective than the QP arm's is. ``fun`` is ``objective(x)``; the
+    model value stays visible as ``info["obj_model"]``.
     """
     from .qp import solve_socp
 
@@ -971,28 +1046,33 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
         tol=opts.get("tol"),
         max_iter=opts.get("max_iter"),
     )
-    fun_val = float(res.obj) + ex.obj_const
+    model_val = float(res.obj) + ex.obj_const
     # gh #880: ``optimal_inaccurate`` is a converged-to-acceptable solve, the
     # same convention the NLP arm uses (gh #119 / #123). See `QpResult.success`.
     success = res.status in ("optimal", "optimal_inaccurate")
+    x = np.asarray(res.x)
+    fun_val, nfev = _objective_at_solution(objective, x, model_val, "convex SOCP")
     message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
-        x=np.asarray(res.x),
+        x=x,
         fun=fun_val,
         success=success,
         status=_QP_STATUS_CODE.get(res.status, 1),
         message=message,
         nit=int(res.iters),
         # See ``_solve_via_convex``: the conic solver works on the extracted
-        # cone program, so the python objective callbacks never fire — report
-        # 0 for the scipy-standard eval counters.
-        nfev=0,
+        # cone program, so the python objective callbacks never fire during the
+        # solve — the only `fun` call is the final evaluation at `x` (gh #939).
+        nfev=nfev,
         njev=0,
         nhev=0,
         info={
             "solver": "socp",
             "problem_class": ex.kind,
             "obj_val": fun_val,
+            # See ``_solve_via_convex``: the extracted model's own value at
+            # `x`, kept so the FD-extraction error stays measurable (gh #939).
+            "obj_model": model_val,
             "obj_constant": ex.obj_const,
             "status": res.status,
             "status_msg": message,
@@ -1057,6 +1137,15 @@ def minimize(
     general NLP (or an expensive ``fun``) pays nothing. Pass
     ``solver_selection="auto"`` only when you want the convex/conic fast paths
     and accept the detection overhead on problems that fall through to NLP.
+
+    A routed solve optimizes that extracted model, not ``fun`` itself, so the
+    model's error is the real cost of the route. ``fun`` is evaluated once more
+    at the returned point so ``res.fun`` is the objective at ``res.x`` rather
+    than the model's value there (gh #939; the model's own value is kept as
+    ``res.info["obj_model"]``, and differencing the two measures the drift).
+    The same error also moves ``res.x``, which no extra evaluation can repair —
+    an analytic ``jac`` removes one layer of the finite differencing, and
+    ``solver_selection="nlp"`` all of it.
 
     Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
     Pass ``disp=True`` for a concise log or an explicit ``print_level=N``
@@ -1315,6 +1404,10 @@ def minimize(
                 extract,
                 options,
                 method="active-set" if selection == "qp-active-set" else "ipm",
+                # The user's objective, `args` already bound — the routed
+                # result's `fun` is this evaluated at the returned `x`, not the
+                # finite-differenced model's value (gh #939).
+                objective=route_fun,
             )
         # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
         # the NLP solver (a quadratic *constraint* lands here, not above).
@@ -1322,7 +1415,7 @@ def minimize(
             socp = classify_and_extract_socp(**route_kw)
             if socp is not None:
                 _warn_convex_dropped_opts("convex SOCP")
-                return _solve_via_socp(socp, options)
+                return _solve_via_socp(socp, options, objective=route_fun)
     elif selection == "socp":
         socp = classify_and_extract_socp(**route_kw)
         if socp is None:
@@ -1332,7 +1425,7 @@ def minimize(
                 "convex, with only linear equalities)"
             )
         _warn_convex_dropped_opts("convex SOCP")
-        return _solve_via_socp(socp, options)
+        return _solve_via_socp(socp, options, objective=route_fun)
 
     problem, _problem_obj, eval_counters = _prepare_nlp(
         fun=fun,

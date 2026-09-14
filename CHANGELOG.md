@@ -509,6 +509,34 @@ changes.
 
 ### Fixed
 
+- **`minimize`'s convex routes report `fun(x)`, not the finite-differenced
+  model's value ([#939](https://github.com/jkitchin/pounce/issues/939)).**
+  Under `solver_selection="auto"` (and the explicit `"lp-ipm"` / `"qp-ipm"` /
+  `"qp-active-set"` / `"socp"`), `minimize` does not hand the solver the user's
+  `fun`: `pounce._route` finite-differences it into a quadratic model and the
+  convex solver optimizes *that*. The reported `OptimizeResult.fun` was that
+  model's value at `x`. On an 11-variable convex QP with a box and one linear
+  equality it came back **8.8e-5 (1.1e-5 relative) below the problem's proven
+  global optimum** — a value no feasible point attains — with `success=True`
+  and "Optimization terminated successfully.", while `fun(x)` at that same
+  returned `x` was right to 3e-9. scipy's contract, which the facade mirrors,
+  is that `fun` is the objective evaluated at `x`.
+
+  The routed result now evaluates the user's objective (with `args` bound) at
+  the returned point, so `res.fun == fun(res.x)` on every route and `res.nfev`
+  is 1 rather than 0. The model's own value is kept as
+  `res.info["obj_model"]`, so `obj_model - fun` measures the extraction error
+  instead of being reported *as* the answer. If that evaluation raises or
+  returns a non-finite value — the interior-point solver can land a hair
+  outside a bound, where a restricted-domain `fun` blows up — the model value
+  stands, with a warning, rather than losing an otherwise good result.
+
+  What this does **not** fix is the other half of the same extraction error:
+  it also moves `x` itself (2.7e-5 from the optimum on that QP, against the
+  NLP route's 1.9e-8). That is inherent to probing an opaque callable; an
+  analytic `jac` removes one layer of it, and `solver_selection="nlp"` all of
+  it. `docs/src/python.md`, "What the routed solver actually optimized".
+
 - **The reduced Hessian's sign convention is documented on the public API
   ([#937](https://github.com/jkitchin/pounce/issues/937)).** Over
   parameter-pin rows `Solver::compute_reduced_hessian` /
