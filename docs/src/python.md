@@ -1168,13 +1168,56 @@ stacked LDLᵀ even though only one block has nonzero signal.
   minibatch projections.
 
 Each fwd registers its converged factor in a bounded LRU on the
-`JaxProblem` (default capacity 128). For very long-running training
-loops with many distinct forward solves you can drop the cache
-explicitly:
+`JaxProblem`. For very long-running training loops with many distinct
+forward solves you can drop the cache explicitly:
 
 ```python
 jp.clear_solver_cache()
 ```
+
+##### What a held factor costs, and closing a `JaxProblem`
+
+A retained factor is not only memory. The FERAL backend behind a held
+`pounce.Solver` lazily builds its **own** rayon thread pool on the
+first parallel factorization and keeps those workers parked for that
+solver's whole lifetime — `RAYON_NUM_THREADS` of them, or one per core
+when that is unset. So the registry holds *(entries × cores)* OS
+threads, not just factors (gh#942).
+
+Two bounds follow from that:
+
+* `jp._solver_registry_capacity` (default 128) is a **hard** ceiling on
+  held factors. It has to stay large: `grad(vmap_solve)` and
+  `grad(lax.map(solve))` register one factor per element *before* any
+  backward runs, so a ceiling below `B` fails them.
+* `jp._solver_registry_target` is the **steady-state** target, and only
+  factors a backward has already read count against it. Its default is
+  derived from a 256-thread budget (`256 // threads_per_factor`,
+  clamped into `[2, capacity]`), which is what keeps a training loop
+  flat instead of climbing to `128 × cores` parked threads. Raise it if
+  you interleave forwards between the cotangents of one backward.
+
+A `JaxProblem` also owns the single-worker executor described below.
+Neither that thread nor the held factors come back when you drop the
+last Python reference — the solvers are `!Send`, so they have to be
+released on the thread that built them, and a `JaxProblem` that has
+solved once is pinned by JAX's own callback caches anyway (it survives
+`jax.clear_caches()` and repeated `gc.collect()`). Close it when you
+are done, or use it as a context manager:
+
+```python
+with JaxProblem(f=f, g=g, n=n, m=m, p_example=p0) as jp:
+    ...                      # train
+# held factors released, executor thread handed back
+```
+
+`close()` is terminal and idempotent; a closed problem raises rather
+than solving. This matters most for the shape gh#942 was reported
+against: a hyperparameter sweep that builds one projection layer —
+hence one `JaxProblem` — per fit, in one process. Without closing, each
+finished fit's threads stay resident and the *next* fit eventually
+fails to start its own worker with `RuntimeError: can't start new
+thread`.
 
 #### Off-thread dispatch (training loops, `jit(value_and_grad(...))`)
 
