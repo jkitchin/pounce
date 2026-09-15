@@ -383,7 +383,6 @@ pub struct TnlpPresolveSession {
     outer: Rc<RefCell<dyn TNLP>>,
     fingerprint: Option<PresolveFingerprint>,
     last: Option<SessionSolution>,
-    own_mu_init: Option<Number>,
     explicit_mu_init: bool,
     /// Held guard keeping iteration capture live once enabled.
     #[allow(dead_code)]
@@ -418,7 +417,6 @@ impl TnlpPresolveSession {
             outer,
             fingerprint: None,
             last: None,
-            own_mu_init: None,
             explicit_mu_init: false,
             iter_scope: None,
         })
@@ -571,7 +569,6 @@ impl TnlpPresolveSession {
                     .set_numeric_value("mu_init", mu, true, false)
                     .is_ok();
                 debug_assert!(ok, "mu_init rejected by the option registry");
-                self.own_mu_init = Some(mu);
             } else {
                 let ok = self
                     .app
@@ -579,7 +576,6 @@ impl TnlpPresolveSession {
                     .set_numeric_value("mu_init", WARM_MU_CEILING, true, false)
                     .is_ok();
                 debug_assert!(ok, "mu_init rejected by the option registry");
-                self.own_mu_init = Some(WARM_MU_CEILING);
             }
         }
 
