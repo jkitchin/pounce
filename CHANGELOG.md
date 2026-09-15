@@ -509,6 +509,59 @@ changes.
 
 ### Fixed
 
+- **`pounce.jax` no longer parks ~one OS thread per core per differentiable
+  solve ([#942](https://github.com/jkitchin/pounce/issues/942)).** A retained
+  factor is not just memory: the FERAL backend behind a held `pounce.Solver`
+  lazily builds its *own* rayon `ThreadPool` on the first parallel `factor()`
+  and keeps those workers parked for that solver's whole lifetime (feral 0.17
+  `numeric/solver.rs::ensure_parallel_pool`, warm on purpose per its issue
+  #19). `JaxProblem` retained up to `_solver_registry_capacity` = 128 of them
+  so the backward could reuse the factor, so a training loop ended up holding
+  `128 × ncores` parked threads. Measured on a 4-core Linux box, one problem,
+  `jax.jit(jax.value_and_grad(...))` over `batched_solve`: +4 threads per
+  gradient step, flat at 544 (= 28 baseline + 129 × 4). The issue reports the
+  same shape on a 10-core host: +10 per step, flat at 1316. Isolated without
+  JAX — six held `pounce.Solver`s take the thread count 7 → 31 and back to 11
+  when dropped, do not move at all under `FERAL_PARALLEL=0`, and grow by 2 per
+  solver under `RAYON_NUM_THREADS=2`.
+
+  Not the pinned `ThreadPoolExecutor` the report suspected (that is one thread
+  per `JaxProblem`), and a `weakref.finalize` on the problem — the issue's
+  other suggestion — cannot work either: a `JaxProblem` that has solved once
+  is pinned by JAX's own callback caches and survives `jax.clear_caches()`
+  plus repeated `gc.collect()`, and a finalizer able to carry the held factors
+  out would have to hold the registries, which reach the problem back through
+  `Problem -> _StackedJaxNlp._jp` and would pin it forever. Three changes
+  instead:
+
+  - **Eviction is two-tiered.** `_solver_registry_capacity` stays a hard
+    ceiling of 128, and a new `_solver_registry_target` governs steady state,
+    counting only factors a backward has already read. Its default is derived
+    from a 256-thread budget rather than chosen. The split is what makes it
+    safe: `grad(vmap_solve)` / `grad(lax.map(solve))` register one factor per
+    element *before* any backward runs — measured, a ceiling below `B` fails
+    that shape loudly — so gating the soft tier on "a backward has read this"
+    leaves it untouched while a training loop's entries become evictable the
+    moment they are dead. The 4-core loop above now flattens at 288 instead of
+    544, with no AD shape changing behaviour.
+  - **`clear_solver_cache()` works.** It cleared on the caller's thread, and
+    `pounce.Solver` is `#[pyclass(unsendable)]`, so every drop raised inside
+    `dict.clear`'s decref — *unraisably*. Calling the documented escape hatch
+    for this leak from the main thread after a jitted step printed one
+    `RuntimeError: PySolver is unsendable, but is being dropped on another
+    thread` traceback per entry, leaked every Rust-side factor permanently,
+    and reclaimed exactly zero threads. The drop is now routed onto the
+    executor's worker, like `_release_pinned` already was.
+  - **`JaxProblem.close()`, and `JaxProblem` as a context manager.** Releases
+    both registries on the owning thread and shuts the pinned executor down;
+    terminal and idempotent, and a closed problem raises rather than solving.
+    This is the path the reported crash needed: a sweep that builds one
+    projection layer — hence one `JaxProblem` — per fit accumulated every
+    finished fit's threads until the *next* fit could not start its own
+    worker, surfacing as `RuntimeError: can't start new thread` from
+    `ThreadPoolExecutor._adjust_thread_count`. Four problems in a row now
+    return to a flat thread count instead of 97, 109, 120, 132.
+
 - **`minimize`'s convex routes report `fun(x)`, not the finite-differenced
   model's value ([#939](https://github.com/jkitchin/pounce/issues/939)).**
   Under `solver_selection="auto"` (and the explicit `"lp-ipm"` / `"qp-ipm"` /

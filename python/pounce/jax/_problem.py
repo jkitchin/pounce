@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import threading
 import warnings
 import weakref
@@ -75,6 +76,103 @@ from ._build import (
 from .._pounce import Problem, Solver
 
 from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
+
+
+# ----- held-factor resource accounting (gh#942) -----
+#
+# A retained :class:`pounce.Solver` is not just the LDL^T factor: the
+# FERAL backend behind it lazily builds its *own* rayon
+# ``ThreadPool`` on the first parallel ``factor()`` and keeps those
+# worker threads parked for the ``Solver``'s whole lifetime (feral
+# 0.17 ``numeric/solver.rs::ensure_parallel_pool``, its issue #19 —
+# the pool is reused across ``factor()`` calls precisely so the
+# threads are not respawned). There is no API to release the pool
+# while keeping the factor, so *every* held factor pins
+# ``_held_factor_threads()`` OS threads until it is dropped.
+#
+# Measured on a 4-core Linux box, one ``JaxProblem``, one
+# ``jax.jit(jax.value_and_grad(...))`` over ``batched_solve``: the
+# process grows by exactly +4 threads per gradient step and flattens
+# at 544 once the registry hits its cap of 128 (= 28 baseline +
+# 129 * 4). gh#942 reports the same shape on a 10-core macOS box:
+# +10 per step, flat at 1316. That ceiling is the LRU doing its job,
+# not a bound anyone chose -- it is ``capacity * ncores``, and on a
+# 64-core host it is over 8000 threads from a single problem.
+#
+# ``RAYON_NUM_THREADS`` is the override FERAL itself consults
+# (``pool_num_threads()``); when it is unset or unparseable FERAL
+# falls back to ``available_parallelism()``.
+def _held_factor_threads() -> int:
+    """OS threads a single retained :class:`pounce.Solver` pins.
+
+    Mirrors FERAL's own ``pool_num_threads()``: ``RAYON_NUM_THREADS``
+    when set and parseable to a positive int, else the machine's
+    parallelism, else 1.
+
+    An estimate, in two directions, which is why it feeds a budget and
+    not an assertion. FERAL builds the pool lazily, so a factor whose
+    supernode tree never cleared ``min_parallel_flops`` pins none. And
+    the affinity ladder below only approximates Rust's
+    ``available_parallelism``, which also reads the cgroup CPU quota:
+    ``process_cpu_count`` (3.13+) and ``sched_getaffinity`` see the
+    affinity mask but not a quota, so a CPU-limited container reads
+    high here. Over-estimating is the safe direction — it shrinks the
+    steady-state target.
+    """
+    raw = os.environ.get("RAYON_NUM_THREADS")
+    if raw is not None:
+        try:
+            n = int(raw.strip())
+        except ValueError:
+            n = 0
+        if n > 0:
+            return n
+    probe = getattr(os, "process_cpu_count", None)
+    if probe is not None:
+        n = probe()
+        if n:
+            return n
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return max(1, len(os.sched_getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
+# OS threads the held-factor registry is allowed to keep parked in
+# *steady state* — i.e. across factors whose backward has already run
+# and that are being retained only in case another cotangent arrives.
+# 256 is a budget, not a measurement: it is small enough to be
+# invisible next to any default ``RLIMIT_NPROC`` / cgroup
+# ``pids.max``, and large enough that the soft tier never binds on
+# the 1–2 core machines where the old flat cap already cost less than
+# this.
+_HELD_FACTOR_THREAD_BUDGET = 256
+
+
+# Why there is no :func:`weakref.finalize` safety net on
+# :class:`JaxProblem`, though gh#942 proposes one (and
+# :class:`AnchorState` has one): a ``JaxProblem`` that has run a
+# single solve is never collected, so a finalizer would never fire.
+# Its ``host_call`` closure — built per differentiable surface by
+# ``_pure_callback_batched_solve`` and friends, and closing over the
+# problem — is retained by JAX's own callback / jit caches. Measured
+# on jax 0.10.2: a problem built, solved once eagerly (no user
+# ``jit``) and dropped is still alive after three ``gc.collect()``
+# rounds *and* after ``jax.clear_caches()``.
+#
+# A finalizer could not carry the held factors out even if it did
+# fire. The teardown has to drop each :class:`pounce.Solver` on the
+# executor's worker thread, so it would have to hold the registries;
+# a held ``Solver`` reaches the problem back through
+# ``Problem -> _StackedJaxNlp._jp``, and ``weakref.finalize`` keeps
+# its arguments in a module-global table — so the net effect would be
+# to pin the very object whose death is the trigger.
+#
+# Hence :meth:`JaxProblem.close` is explicit, and the soft eviction
+# tier in :meth:`JaxProblem._register_solver` is what bounds the
+# steady state without relying on teardown at all.
 
 
 class _StackedJaxNlp:
@@ -458,13 +556,17 @@ def _kkt_backsolve_pure_callback(
             # long-running training loops with very many distinct
             # forward solves whose grads come back out of order.
             # Easiest mitigation: increase
-            # `jp._solver_registry_capacity` or run the grad sooner
+            # `jp._solver_registry_capacity` (hard ceiling) or
+            # `jp._solver_registry_target` (how many already-read
+            # factors are retained, gh#942), or run the grad sooner
             # after the fwd. The dense fallback path
             # (`factor_reuse=False`) is unaffected.
             raise RuntimeError(
                 f"pounce.jax: missing Solver for backward (id={sid}). "
                 "The factor was evicted from the LRU registry — bump "
-                "`_solver_registry_capacity`, run grads closer to the "
+                "`_solver_registry_capacity` (or "
+                "`_solver_registry_target`, if this factor's backward "
+                "had already read it once), run grads closer to the "
                 "fwd, or use `factor_reuse=False`."
             )
 
@@ -690,8 +792,10 @@ def _kkt_backsolve_batched_pure_callback(
             raise RuntimeError(
                 f"pounce.jax: missing stacked Solver for batched backward "
                 f"(id={sid_int}). The stacked factor was evicted from the "
-                "LRU registry. Bump `_solver_registry_capacity`, run grads "
-                "closer to the fwd, or use `factor_reuse=False`."
+                "LRU registry. Bump `_solver_registry_capacity` (or "
+                "`_solver_registry_target`, if this factor's backward had "
+                "already read it once — gh#942), run grads closer to the "
+                "fwd, or use `factor_reuse=False`."
             )
         cot_np = np.asarray(cot_h, dtype=np.float64)
         squeeze = cot_np.ndim == 2  # (B, n) unbatched; (N, B, n) batched
@@ -1334,7 +1438,39 @@ class JaxProblem:
         # without re-reading old ones still bound memory at
         # 128 × sizeof(factor). Users with non-typical patterns can
         # call :meth:`clear_solver_cache` to drop everything early.
+        #
+        # That rationale priced the cache in *factor memory* only, and
+        # a held factor also pins `_held_factor_threads()` OS threads
+        # (gh#942 — see the module-level note). 128 × ncores parked
+        # threads is a resource commitment nobody asked for, so the
+        # count cap below is now a *hard* ceiling and a second, smaller
+        # target governs steady state: see
+        # :attr:`_solver_registry_target` and :meth:`_register_solver`.
+        # The hard ceiling stays 128 so no AD shape that works today
+        # starts failing — an entry is only eligible for the soft tier
+        # once a backward has actually read it.
         self._solver_registry_capacity = 128
+        # Soft target: how many *already-consumed* factors to keep
+        # around in case another cotangent arrives for one of them.
+        # Derived from the OS-thread budget rather than chosen, and
+        # clamped into the hard cap; overridable per instance (the
+        # attribute is read on every registration, so setting it after
+        # construction takes effect on the next forward solve).
+        #
+        # Not in ``_PICKLE_DROP``, so it rides a pickle round-trip
+        # rather than being re-derived on the receiving side — same as
+        # ``_solver_registry_capacity``. That keeps an explicit
+        # override intact when a problem is shipped to Ray / Dask
+        # workers, at the cost of carrying the *sender's* core count
+        # when it was left at the default. Re-derive on the worker if
+        # its parallelism differs materially from the driver's.
+        self._solver_registry_target = max(
+            2,
+            min(
+                self._solver_registry_capacity,
+                _HELD_FACTOR_THREAD_BUDGET // _held_factor_threads(),
+            ),
+        )
         # JIT closures + per-process runtime state (lock / TLS / executor
         # / registry / id counter) live behind helpers so pickle
         # round-trips can drop and rebuild them — see
@@ -1605,6 +1741,14 @@ class JaxProblem:
         pinning.
         """
         self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
+        # Ids in ``_solver_registry`` that a backward has already read
+        # at least once (gh#942). An entry stays out of this set until
+        # its bwd runs, which is what makes the soft eviction tier safe
+        # for the AD shapes that register B forwards before any
+        # backward — ``grad(vmap_solve)`` / ``grad(lax.map(solve))``,
+        # measured to need one live entry per element. See
+        # :meth:`_register_solver`.
+        self._solver_consumed: set[int] = set()
         # Pinned registry for caller-owned :class:`AnchorState` handles
         # (pounce#82). Unlike ``_solver_registry``, entries here are
         # *exempt from LRU eviction* — they survive across arbitrarily
@@ -1630,6 +1774,9 @@ class JaxProblem:
             max_workers=1,
             thread_name_prefix=self._factor_thread_prefix,
         )
+        # Closed by :meth:`close` (gh#942); see the module-level note
+        # on why GC cannot stand in for it.
+        self._closed = False
 
     # Attributes that don't survive a process boundary: drop on
     # __getstate__, rebuild on __setstate__. Kept as a single source of
@@ -1640,6 +1787,10 @@ class JaxProblem:
         "_jac_compressed_jit", "_hess_compressed_jit",
         "_registry_lock", "_tls", "_factor_executor",
         "_solver_registry", "_pinned_solvers", "_solver_id_counter",
+        # gh#942: the consumed-id set tracks this process's backward
+        # reads and ``_closed`` describes this process's executor. Both
+        # are rebuilt (empty / open) by ``_init_runtime_state``.
+        "_solver_consumed", "_closed",
     )
 
     def __getstate__(self):
@@ -1689,6 +1840,14 @@ class JaxProblem:
         worker pool so its B-way concurrency isn't serialized
         through this single thread.
         """
+        if self._closed:
+            raise RuntimeError(
+                "pounce.jax: this JaxProblem is closed — its pinned "
+                "executor has been shut down, so no further solve can "
+                "run on it. close() is terminal; it exists to hand the "
+                "held factors' FERAL worker threads back to the OS "
+                "(gh#942). Build a new JaxProblem."
+            )
         return self._factor_executor.submit(fn).result()
 
     def _build_problem(self) -> tuple[_ReusableJaxNlp, Problem]:
@@ -1825,15 +1984,55 @@ class JaxProblem:
         calls. We bound the registry at ``_solver_registry_capacity``
         and evict the oldest entry on overflow so a long training
         loop doesn't grow without bound.
+
+        Two tiers, because a held factor costs OS threads as well as
+        memory (gh#942 — a retained ``Solver`` keeps its FERAL rayon
+        pool parked, ``_held_factor_threads()`` of them):
+
+        * the **soft** tier trims *already-consumed* entries (ones a
+          backward has read at least once) down to
+          ``_solver_registry_target``, oldest first. This is what
+          keeps a training loop flat instead of climbing to
+          ``capacity × ncores`` parked threads.
+        * the **hard** tier is the unchanged ``capacity`` ceiling and
+          is blind to consumption, so it still bounds a pattern that
+          registers many forwards before any backward runs.
+
+        The split is what makes the soft tier safe. ``grad(vmap_solve)``
+        / ``grad(lax.map(solve))`` register one entry per element and
+        read none of them until every forward has run — measured, a
+        cap below ``B`` fails that shape loudly — so gating the soft
+        tier on "a backward has read this" leaves it untouched, while a
+        training loop (fwd then bwd, every step) makes each entry
+        evictable the moment it is dead.
+
+        Both tiers drop on this thread, which is the factor executor's
+        worker (every registering caller reaches here from inside
+        :meth:`_run_pinned`), so the popped ``Solver`` — which is
+        ``#[pyclass(unsendable)]`` — is decref'd on the thread that
+        built it (pounce#477).
         """
         sid = next(self._solver_id_counter)
         with self._registry_lock:
             self._solver_registry[sid] = solver
             self._solver_registry.move_to_end(sid)
+            target = max(1, int(self._solver_registry_target))
+            if len(self._solver_registry) > target and self._solver_consumed:
+                # Oldest first; `sid` was just inserted and is not
+                # consumed, so it can never be the entry dropped here.
+                for k in list(self._solver_registry):
+                    if len(self._solver_registry) <= target:
+                        break
+                    if k in self._solver_consumed:
+                        # Bare statements: the popped Solver is decref'd
+                        # (and its FERAL pool joined) on this thread.
+                        del self._solver_registry[k]
+                        self._solver_consumed.discard(k)
             while len(self._solver_registry) > self._solver_registry_capacity:
                 # Pop the oldest entry. Its factor (held via Rc inside
                 # the Rust Solver) is freed when this reference drops.
-                self._solver_registry.popitem(last=False)
+                oldest, _ = self._solver_registry.popitem(last=False)
+                self._solver_consumed.discard(oldest)
         return sid
 
     def _lookup_solver(self, sid: int) -> Solver | None:
@@ -1847,6 +2046,12 @@ class JaxProblem:
             s = self._solver_registry.get(sid)
             if s is not None:
                 self._solver_registry.move_to_end(sid)
+                # This read is what makes the entry eligible for the
+                # soft eviction tier (gh#942). Recorded here rather
+                # than after the back-solve so a bwd that raises still
+                # marks the factor dead — it is already at the MRU end,
+                # so a re-read beats every other entry to survival.
+                self._solver_consumed.add(sid)
                 return s
             return self._pinned_solvers.get(sid)
 
@@ -1922,10 +2127,112 @@ class JaxProblem:
         consume (see :meth:`_register_solver`). Cached factors stay
         live until LRU eviction; if you want to free them earlier —
         e.g. you know no more grads are coming for in-flight forwards
-        — call this between phases.
+        — call this between phases. Releases both the factor memory
+        and the FERAL worker threads each held factor keeps parked
+        (gh#942).
+
+        The drop is routed onto the factor executor's worker thread.
+        It has to be: the held :class:`pounce.Solver` is
+        ``#[pyclass(unsendable)]`` and PyO3 raises when it is dropped
+        anywhere else, and — because that raise happens inside
+        ``dict.clear``'s decref — the failure is *unraisable*. Before
+        gh#942 this method cleared on the caller's thread, so calling
+        it from the main thread after a jitted training step printed
+        one ``RuntimeError: PySolver is unsendable, but is being
+        dropped on another thread`` traceback per entry, leaked every
+        Rust-side factor permanently, and reclaimed exactly zero
+        threads: the documented escape hatch for this leak was itself
+        the leak. Same two edge cases as :meth:`_release_pinned` —
+        re-entrancy runs inline, an already-shut-down executor is
+        interpreter teardown and moot.
         """
-        with self._registry_lock:
-            self._solver_registry.clear()
+        def _drop():
+            with self._registry_lock:
+                # Bare statements: every popped Solver is decref'd
+                # here, on this thread.
+                self._solver_registry.clear()
+                self._solver_consumed.clear()
+
+        if threading.current_thread().name.startswith(self._factor_thread_prefix):
+            _drop()
+            return
+        try:
+            self._factor_executor.submit(_drop).result()
+        except RuntimeError:
+            # Executor already shut down (close(), or interpreter
+            # teardown) — nothing left to hand back.
+            pass
+
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has run (gh#942)."""
+        return self._closed
+
+    def close(self) -> None:
+        """Release every held factor and shut the pinned executor down.
+
+        Terminal and idempotent. After this the JaxProblem cannot
+        solve: :meth:`_run_pinned` raises rather than queueing onto a
+        dead executor.
+
+        Why it exists (gh#942). A ``JaxProblem`` owns two OS-thread
+        resources that outlive any single solve: its own
+        single-worker ``ThreadPoolExecutor`` (one thread, pounce#77),
+        and — far larger — the FERAL rayon pool that *each* retained
+        :class:`pounce.Solver` keeps parked,
+        ``_held_factor_threads()`` threads apiece across the LRU and
+        pinned registries. Neither is reclaimed by dropping the last
+        Python reference on an arbitrary thread, because the solvers
+        are unsendable and the executor is never shut down. A
+        hyperparameter sweep that builds one projection layer (hence
+        one ``JaxProblem``) per fit therefore accumulates every
+        previous fit's threads until ``pthread_create`` fails — in
+        gh#942, as ``RuntimeError: can't start new thread`` from
+        ``ThreadPoolExecutor._adjust_thread_count``, raised by the
+        *next* problem trying to start its own worker.
+
+        Prefer the context-manager form::
+
+            with JaxProblem(f=f, g=g, n=n, m=m, p_example=p0) as jp:
+                ...
+
+        There is deliberately no GC safety net behind this — see the
+        module-level note above :class:`_StackedJaxNlp`: a
+        ``JaxProblem`` that has solved once is pinned by JAX's own
+        caches, so a :func:`weakref.finalize` would never fire, and one
+        able to carry the held factors out would pin the problem
+        itself. What bounds the steady state instead is the soft
+        eviction tier in :meth:`_register_solver`; ``close`` is for
+        handing back what a *finished* problem still holds.
+        """
+        if self._closed:
+            return
+        # Order matters: drain the registries on the executor's worker
+        # (the thread that built every held Solver) *before* shutting
+        # it down, or the solvers are dropped by whichever thread frees
+        # this object's __dict__ and PyO3's unsendable check fires
+        # there (pounce#477).
+        self.clear_solver_cache()
+
+        def _drop_pinned():
+            with self._registry_lock:
+                self._pinned_solvers.clear()
+
+        if threading.current_thread().name.startswith(self._factor_thread_prefix):
+            _drop_pinned()
+        else:
+            try:
+                self._factor_executor.submit(_drop_pinned).result()
+            except RuntimeError:
+                pass
+        self._closed = True
+        self._factor_executor.shutdown(wait=False)
+
+    def __enter__(self) -> "JaxProblem":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def _host_solve(self, p_np: np.ndarray, x0_np: np.ndarray, register: bool = True):
         """Forward solve. Returns ``(x, info_with_solver_id)`` — info
