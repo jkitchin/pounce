@@ -517,6 +517,70 @@ enum Reduction {
     },
 }
 
+/// What [`Presolve::project_warm`] did to a seed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConvexWarmReport {
+    /// Seed dual mass on dropped equality rows (`Σ|y|`).
+    pub dropped_eq_l1: f64,
+    /// Seed dual mass on dropped inequality rows (`Σ|z|`).
+    pub dropped_ineq_l1: f64,
+    /// Seed primals clamped into the reduced box.
+    pub x_clamped: usize,
+    /// Chained layers folded through (1 for a single pass).
+    pub layers: usize,
+}
+
+/// Hash of everything [`presolve`] decides on (dims plus every number).
+/// Presolve is deterministic in its input, so a match means an identical
+/// reduction and the recompute is skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvexPresolveFingerprint {
+    hash: u64,
+}
+
+impl ConvexPresolveFingerprint {
+    /// The combined hash, for logging.
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+}
+
+fn convex_mix(h: u64, v: u64) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    (h ^ v).wrapping_mul(PRIME)
+}
+
+fn convex_hash_f64(h: u64, v: f64) -> u64 {
+    convex_mix(h, if v == 0.0 { 0u64 } else { v.to_bits() })
+}
+
+/// Fingerprint `prob` for presolve reuse.
+pub fn convex_presolve_fingerprint(prob: &QpProblem) -> ConvexPresolveFingerprint {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    h = convex_mix(h, prob.n as u64);
+    for v in prob
+        .c
+        .iter()
+        .chain(prob.b.iter())
+        .chain(prob.h.iter())
+        .chain(prob.lb.iter())
+        .chain(prob.ub.iter())
+    {
+        h = convex_hash_f64(h, *v);
+    }
+    for t in prob
+        .p_lower
+        .iter()
+        .chain(prob.a.iter())
+        .chain(prob.g.iter())
+    {
+        h = convex_mix(h, t.row as u64);
+        h = convex_mix(h, t.col as u64);
+        h = convex_hash_f64(h, t.val);
+    }
+    ConvexPresolveFingerprint { hash: h }
+}
+
 /// Captured presolve state: the reduced problem plus the transaction
 /// stack and the index maps needed to expand a reduced solution back to
 /// the original space.
@@ -2526,6 +2590,132 @@ impl Presolve {
             return self.layer_obj_offset;
         }
         self.chain.iter().map(|l| l.obj_offset()).sum()
+    }
+
+    /// Map an original-space [`QpWarmStart`](crate::ipm::QpWarmStart) into
+    /// reduced space (gather survivors, clamp the primal, drop and report
+    /// eliminated-row dual mass — re-derived from stationarity at postsolve).
+    ///
+    /// `None` on a shape mismatch (caller goes cold). Chained layers fold in
+    /// order.
+    pub fn project_warm(
+        &self,
+        warm: &crate::ipm::QpWarmStart,
+    ) -> Option<(crate::ipm::QpWarmStart, ConvexWarmReport)> {
+        if self.chain.is_empty() {
+            return self.project_warm_once(warm).map(|(w, mut r)| {
+                r.layers = 1;
+                (w, r)
+            });
+        }
+        let mut cur = warm.clone();
+        let mut rep = ConvexWarmReport::default();
+        for layer in &self.chain {
+            let (next, r) = layer.project_warm_once(&cur)?;
+            rep.dropped_eq_l1 += r.dropped_eq_l1;
+            rep.dropped_ineq_l1 += r.dropped_ineq_l1;
+            rep.x_clamped += r.x_clamped;
+            rep.layers += 1;
+            cur = next;
+        }
+        Some((cur, rep))
+    }
+
+    /// One layer of [`Self::project_warm`].
+    fn project_warm_once(
+        &self,
+        warm: &crate::ipm::QpWarmStart,
+    ) -> Option<(crate::ipm::QpWarmStart, ConvexWarmReport)> {
+        if warm.x.len() != self.orig_n
+            || warm.y.len() != self.orig_m_eq
+            || warm.z.len() != self.orig_m_ineq
+            || warm.z_lb.len() != self.orig_n
+            || warm.z_ub.len() != self.orig_n
+        {
+            return None;
+        }
+        let mut x = vec![0.0; self.reduced.n];
+        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+            if oldc < warm.x.len() && newc < x.len() {
+                x[newc] = warm.x[oldc];
+            }
+        }
+        let mut x_clamped = 0usize;
+        for (i, v) in x.iter_mut().enumerate() {
+            if let Some(c) =
+                pounce_presolve::clamp_seed(*v, self.reduced.lb_of(i), self.reduced.ub_of(i))
+            {
+                x_clamped += 1;
+                *v = c;
+            }
+        }
+        let mut y = vec![0.0; self.reduced.m_eq()];
+        for (newr, &oldr) in self.kept_eq.iter().enumerate() {
+            if oldr < warm.y.len() && newr < y.len() {
+                y[newr] = warm.y[oldr];
+            }
+        }
+        let mut z = vec![0.0; self.reduced.m_ineq()];
+        for (newr, &oldr) in self.kept_ineq.iter().enumerate() {
+            if oldr < warm.z.len() && newr < z.len() {
+                z[newr] = warm.z[oldr];
+            }
+        }
+        let mut z_lb = vec![0.0; self.reduced.n];
+        let mut z_ub = vec![0.0; self.reduced.n];
+        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+            if oldc < warm.z_lb.len() && newc < z_lb.len() {
+                z_lb[newc] = warm.z_lb[oldc];
+                z_ub[newc] = warm.z_ub[oldc];
+            }
+        }
+        let kept_eq = {
+            let mut kept = vec![false; self.orig_m_eq];
+            for &o in &self.kept_eq {
+                if o < kept.len() {
+                    kept[o] = true;
+                }
+            }
+            kept
+        };
+        let kept_ineq = {
+            let mut kept = vec![false; self.orig_m_ineq];
+            for &o in &self.kept_ineq {
+                if o < kept.len() {
+                    kept[o] = true;
+                }
+            }
+            kept
+        };
+        let dropped_eq_l1: f64 = warm
+            .y
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !kept_eq[*i])
+            .map(|(_, &v)| v.abs())
+            .sum();
+        let dropped_ineq_l1: f64 = warm
+            .z
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !kept_ineq[*i])
+            .map(|(_, &v)| v.abs())
+            .sum();
+        Some((
+            crate::ipm::QpWarmStart {
+                x,
+                y,
+                z,
+                z_lb,
+                z_ub,
+            },
+            ConvexWarmReport {
+                dropped_eq_l1,
+                dropped_ineq_l1,
+                x_clamped,
+                layers: 0,
+            },
+        ))
     }
 
     /// Expand a reduced-problem solution back to the original space,

@@ -242,6 +242,9 @@ pub use pounce_restoration;
 pub mod builder;
 pub use builder::{Nlp, NlpError, Problem, SecondOpinion, Solution as NlpSolution};
 
+// --- warm-start-aware presolve sessions (persistent IPM solves) --------------
+pub mod session;
+
 // --- feature-gated facets (gh #561) -----------------------------------------
 // Each path gets its own module rather than a flat re-export: `pounce-convex`
 // and `pounce-qp` are distinct solver families that both name their types
@@ -270,6 +273,7 @@ pub mod sqp;
 /// ```
 pub mod prelude {
     pub use crate::builder::{Nlp, NlpError, Problem, SecondOpinion};
+    pub use crate::session::{SessionError, SessionSolution, TnlpPresolveSession};
     pub use crate::{FbbtOp, FbbtReport, FbbtTape};
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};

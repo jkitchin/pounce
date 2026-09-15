@@ -95,6 +95,10 @@
 
 pub use pounce_nlp::expression_provider::{ExpressionProvider, FbbtOp, FbbtTape};
 pub use pounce_presolve::fbbt::FbbtReport;
+pub use pounce_presolve::warm::{
+    PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport, clamp_seed,
+    compute_fingerprint, project_warm_point, project_warm_point_full,
+};
 pub use pounce_presolve::{
     AuxiliaryPreprocessingDiagnostics, CachedBounds, LicqVerdict, LinearEqElimTnlp, PresolveError,
     PresolveOptions, PresolveTnlp, TightenReport, wrap_from_options, wrap_with_presolve,

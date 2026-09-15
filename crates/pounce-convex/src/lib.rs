@@ -38,6 +38,7 @@ pub mod activity;
 pub(crate) mod aggregate;
 pub mod batch;
 pub mod cones;
+pub mod convex_presolve_session;
 pub(crate) mod correctors;
 pub mod crossover;
 mod deadline;
@@ -66,11 +67,13 @@ pub use batch::{
     solve_qp_multi_rhs_parallel,
 };
 pub use cones::ConeSpec;
+pub use convex_presolve_session::ConvexPresolveSession;
 pub use ipm::{
     QpFactorization, QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
     solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
 pub use options::ConvexPresolveOptions;
+pub use presolve::{ConvexPresolveFingerprint, ConvexWarmReport, convex_presolve_fingerprint};
 // Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared
 // with the SQP subproblem reader there; re-exported so the public path is
 // unchanged for callers who reach it through this crate.

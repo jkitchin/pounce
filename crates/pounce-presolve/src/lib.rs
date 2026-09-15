@@ -79,6 +79,7 @@ pub mod options;
 pub mod reduction_frame;
 pub mod redundant;
 pub mod trivial_elim;
+pub mod warm;
 
 pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
@@ -99,6 +100,10 @@ pub use linear_eq_plan::{
 pub use options::{AuxiliaryCouplingPolicy, LicqAction, PresolveOptions, register_options};
 pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
+pub use warm::{
+    PresolveFingerprint, PresolveMap, ProjectedWarm, WarmPoint, WarmProjectionReport, clamp_seed,
+    compute_fingerprint, project_warm_point, project_warm_point_full,
+};
 
 /// Errors that can arise while building a presolved TNLP.
 #[derive(Debug)]
@@ -617,6 +622,11 @@ pub struct PresolveTnlp {
     expr_provider: Option<Rc<RefCell<dyn ExpressionProvider>>>,
     opts: PresolveOptions,
 
+    /// Project served primal seeds into the presolved box. Enabled only by
+    /// `TnlpPresolveSession`. Direct wrapper users retain non-projecting
+    /// behavior.
+    project_seed: bool,
+
     /// Which accepting test the final witness-refutation gate uses. Left at
     /// [`WitnessRule::SolverAcceptance`] for every wrapper that is actually
     /// solved through; raised to [`WitnessRule::DeclaredRowRelative`] only by
@@ -637,6 +647,11 @@ pub struct PresolveTnlp {
     /// regains the original constraint count: the kept-row-space lambda
     /// the solver produces otherwise mis-aligns against the `.nl`'s `m`.
     finalized_full_solution: Option<(Vec<Number>, Vec<Number>)>,
+
+    /// What the most recent starting-point calls actually changed while
+    /// projecting the inner seed into this wrapper's row space and box.
+    /// Reset by session callers before each solve.
+    starting_point_projection_report: WarmProjectionReport,
 }
 
 struct PresolveState {
@@ -702,9 +717,11 @@ impl PresolveTnlp {
             inner,
             expr_provider: None,
             opts,
+            project_seed: false,
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
 
@@ -723,6 +740,11 @@ impl PresolveTnlp {
         self
     }
 
+    /// Enable projection of served warm-start primals into the presolved box.
+    pub fn set_project_seed(&mut self, project_seed: bool) {
+        self.project_seed = project_seed;
+    }
+
     /// Build a presolve wrapper with an `ExpressionProvider` handle on
     /// the same inner TNLP. The two handles should reference the
     /// *same* object (typical pattern: clone an `Rc<RefCell<NlTnlp>>`
@@ -738,9 +760,11 @@ impl PresolveTnlp {
             inner,
             expr_provider: Some(expr_provider),
             opts,
+            project_seed: false,
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
 
@@ -786,6 +810,19 @@ impl PresolveTnlp {
         self.finalized_full_solution.clone()
     }
 
+    /// Clear the record of transformations applied by
+    /// [`TNLP::get_starting_point`]. A persistent caller resets this before
+    /// each solve, then reads [`Self::starting_point_projection_report`].
+    pub fn reset_starting_point_projection_report(&mut self) {
+        self.starting_point_projection_report = WarmProjectionReport::default();
+    }
+
+    /// Projection effects observed while this wrapper actually served the
+    /// current solve's starting point.
+    pub fn starting_point_projection_report(&self) -> WarmProjectionReport {
+        self.starting_point_projection_report
+    }
+
     /// Cached reduced bounds, if presolve has run.
     pub fn cached_bounds(&self) -> Option<&CachedBounds> {
         self.state.as_ref().map(|s| &s.bounds)
@@ -815,6 +852,45 @@ impl PresolveTnlp {
             .as_ref()
             .map(|s| s.aux_diagnostics.clone())
             .unwrap_or_default()
+    }
+
+    /// Snapshot the transformation for warm-start mapping. Runs init first.
+    /// `None` when init fails. See [`warm`] for the contract.
+    pub fn transformation(&mut self) -> Option<PresolveMap> {
+        let s = self.ensure_init()?;
+        let mut fixed: std::collections::BTreeMap<usize, Number> =
+            std::collections::BTreeMap::new();
+        for frame in s.reduction_stack.iter_bottom_up() {
+            for (k, &i) in frame.fixed_vars.iter().enumerate() {
+                if let Some(&v) = frame.fixed_values.get(k) {
+                    fixed.insert(i, v);
+                }
+            }
+        }
+        let (fixed_vars, fixed_values): (Vec<usize>, Vec<Number>) = fixed.into_iter().unzip();
+        Some(PresolveMap {
+            n_inner: s.info_inner.n.max(0) as usize,
+            m_inner: s.info_inner.m.max(0) as usize,
+            m_outer: s.info_outer.m.max(0) as usize,
+            rows_kept: s.rows_kept.clone(),
+            x_l: s.bounds.x_l.clone(),
+            x_u: s.bounds.x_u.clone(),
+            fixed_vars,
+            fixed_values,
+        })
+    }
+
+    /// Fingerprint what this transformation was computed from. A session
+    /// rebuilds the wrapper when this moves. `None` means "always rebuild".
+    pub fn fingerprint(&mut self) -> Option<PresolveFingerprint> {
+        crate::warm::compute_fingerprint(&self.inner, &self.opts)
+    }
+
+    /// Drop the cached transformation, the next query recomputes it. Needed
+    /// after fingerprint-invisible changes (FBBT tapes).
+    pub fn invalidate(&mut self) {
+        self.state = None;
+        self.reset_starting_point_projection_report();
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,
@@ -1711,6 +1787,34 @@ impl TNLP for PresolveTnlp {
         sp.z_l.copy_from_slice(&z_l_full);
         sp.z_u.copy_from_slice(&z_u_full);
         let s = self.state.as_ref().expect("inited");
+        let mut x_fixed_overridden_count = None;
+        let mut x_clamped_count = None;
+        // Project the served primal into the reduced box the solver
+        // sees, mirroring `warm::project_warm_point`.
+        if self.project_seed && sp.init_x {
+            let mut n_fixed = 0;
+            for frame in s.reduction_stack.iter_bottom_up() {
+                for (k, &i) in frame.fixed_vars.iter().enumerate() {
+                    if let (Some(dst), Some(&v)) = (sp.x.get_mut(i), frame.fixed_values.get(k)) {
+                        if *dst != v {
+                            n_fixed += 1;
+                        }
+                        *dst = v;
+                    }
+                }
+            }
+            let mut n_clamped = 0;
+            for (i, v) in sp.x.iter_mut().enumerate() {
+                if let (Some(&lo), Some(&hi)) = (s.bounds.x_l.get(i), s.bounds.x_u.get(i))
+                    && let Some(c) = crate::warm::clamp_seed(*v, lo, hi)
+                {
+                    *v = c;
+                    n_clamped += 1;
+                }
+            }
+            x_fixed_overridden_count = Some(n_fixed);
+            x_clamped_count = Some(n_clamped);
+        }
         // Phase 4: overlay presolve hints onto any zero/unset
         // entries. User-supplied warm-start values always win.
         if sp.init_z && self.opts.warm_z_bounds {
@@ -1727,6 +1831,32 @@ impl TNLP for PresolveTnlp {
         }
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
             sp.lambda[outer] = lambda_full[i_inner];
+        }
+        let n_dropped_rows = m_in.saturating_sub(s.rows_kept.len());
+        let dropped_dual_l1 = sp.init_lambda.then(|| {
+            let mut kept = vec![false; m_in];
+            for &inner in &s.rows_kept {
+                if inner < kept.len() {
+                    kept[inner] = true;
+                }
+            }
+            lambda_full
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !kept[*i])
+                .map(|(_, value)| value.abs())
+                .sum()
+        });
+        self.starting_point_projection_report.n_dropped_rows = n_dropped_rows;
+        if let Some(value) = dropped_dual_l1 {
+            self.starting_point_projection_report.dropped_dual_l1 = value;
+        }
+        if let Some(value) = x_fixed_overridden_count {
+            self.starting_point_projection_report
+                .x_fixed_overridden_count = value;
+        }
+        if let Some(value) = x_clamped_count {
+            self.starting_point_projection_report.x_clamped_count = value;
         }
         true
     }
@@ -2529,6 +2659,7 @@ mod tests {
             ..PresolveOptions::defaults()
         };
         let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
         let info = wrapped.get_nlp_info().expect("init ok");
         // Variable count unchanged (clamp, not reduce).
         assert_eq!(info.n, 2);
@@ -2837,9 +2968,31 @@ mod tests {
             ..PresolveOptions::defaults()
         };
         let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
         let info = wrapped.get_nlp_info().expect("init ok");
         assert_eq!(info.n, 2, "variable count unchanged (clamp, not reduce)");
         assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
+
+        let (mut x0, mut z_l0, mut z_u0) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
+        let mut lambda0 = Vec::new();
+        wrapped.reset_starting_point_projection_report();
+        assert!(wrapped.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x0,
+            init_z: false,
+            z_l: &mut z_l0,
+            z_u: &mut z_u0,
+            init_lambda: true,
+            lambda: &mut lambda0,
+        }));
+        assert_eq!(x0, vec![2.0, 1.0], "wrapper serves aux-fixed values");
+        let start_report = wrapped.starting_point_projection_report();
+        assert_eq!(
+            start_report.x_fixed_overridden_count, 2,
+            "report = {start_report:?}"
+        );
+        assert_eq!(start_report.x_clamped_count, 0, "report = {start_report:?}");
+        assert_eq!(start_report.n_dropped_rows, 2, "report = {start_report:?}");
 
         // The reduced solve returns the clamped point (2, 1); the IPM places
         // large bound multipliers on the now-fixed variables, and the reduced
@@ -2873,6 +3026,115 @@ mod tests {
             vec![0.0, 0.0],
             "z_u must be zeroed at aux-fixed vars (H10)"
         );
+    }
+
+    /// min x^2 s.t. x + y = 3, x/y in [0, 5]. The row tightens both
+    /// upper bounds 5 -> 3; the seed sits at the stale corner [5, 5].
+    struct TightenSeed {
+        x0: Vec<Number>,
+    }
+
+    impl TNLP for TightenSeed {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[0.0, 0.0]);
+            b.x_u.copy_from_slice(&[5.0, 5.0]);
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x.copy_from_slice(&self.x0);
+            }
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[0])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 2.0 * x[0];
+            g[1] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.fill(Linearity::Linear);
+            true
+        }
+        fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// The report is recorded by the same call that projects the served seed.
+    #[test]
+    fn served_warm_primal_records_its_projection() {
+        let inner: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(TightenSeed { x0: vec![5.0, 5.0] }));
+        let opts = PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        wrapped.set_project_seed(true);
+
+        let (mut x_l, mut x_u) = (vec![0.0; 2], vec![0.0; 2]);
+        let (mut g_l, mut g_u) = (vec![0.0; 1], vec![0.0; 1]);
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        assert_eq!(x_u, vec![3.0, 3.0], "row x + y = 3 tightens x_u to 3");
+
+        let (mut x, mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
+        let mut lambda = vec![0.0; 1];
+        assert!(wrapped.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: false,
+            lambda: &mut lambda,
+        }));
+        assert_eq!(
+            x,
+            vec![3.0, 3.0],
+            "served seed must be clamped into the tightened box"
+        );
+
+        let report = wrapped.starting_point_projection_report();
+        assert_eq!(report.x_clamped_count, 2, "report = {report:?}");
+        assert_eq!(report.x_fixed_overridden_count, 0, "report = {report:?}");
     }
 
     /// Same model as [`RecordingTwoVar`] but (a) records the `g` vector that

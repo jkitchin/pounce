@@ -130,6 +130,35 @@
 //! warm, but not the traced path). [`SessionStats`] breaks the counts out the
 //! same way, so "is the warm path engaging?" is a question with an answer.
 //!
+//! The **interior-point** counterpart is [`ConvexPresolveSession`], which
+//! retains the *presolve transformation* and maps original-space
+//! [`QpWarmStart`]s into the reduced space the IPM sees.
+//! ```
+//! use pounce_rs::convex::{ConvexPresolveSession, QpOptions, QpProblem, QpStatus, Triplet};
+//! use pounce_rs::convex::QpWarmStart;
+//! use pounce_rs::linsol::backend;
+//!
+//! let prob = QpProblem {
+//!     n: 1,
+//!     p_lower: vec![Triplet::new(0, 0, 2.0)],
+//!     c: vec![-1.0],
+//!     a: vec![],
+//!     b: vec![],
+//!     g: vec![],
+//!     h: vec![],
+//!     lb: vec![0.0],
+//!     ub: vec![1.0],
+//! };
+//!
+//! let mut session = ConvexPresolveSession::new();
+//! let cold = session.solve(&prob, None, &QpOptions::default(), backend);
+//! assert_eq!(cold.status, QpStatus::Optimal);
+//! let warm = QpWarmStart::from_solution(&cold);
+//! let second = session.solve(&prob, Some(&warm), &QpOptions::default(), backend);
+//! assert_eq!(second.status, QpStatus::Optimal);
+//! assert!(session.last_reused_transform());
+//! ```
+//!
 //! A frontend driving the engine directly instead of through a session gets
 //! the whole recipe, not just the middle of it: [`screen_variable_box`] first
 //! (an empty variable box is a verdict, and reaches the engine as a hard error
@@ -168,17 +197,19 @@
 //! without adding a dependency.
 
 pub use pounce_convex::{
-    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, ConeSpec, HessianInertia,
-    NEG_INF, POS_INF, PolyProblem, Polynomial, PresolveNote, PsdCertificateError, QpFactorization,
+    ActiveSetOverrides, ActiveSetQp, ActiveSetSession, BoxScreen, ConeSpec,
+    ConvexPresolveFingerprint, ConvexPresolveSession, ConvexWarmReport, HessianInertia, NEG_INF,
+    POS_INF, PolyProblem, Polynomial, PresolveNote, PsdCertificateError, QpFactorization,
     QpIterate, QpOptions, QpProblem, QpResiduals, QpSensitivity, QpSolution, QpStatus, QpWarmStart,
     ReducedHessian, Reuse, SecondOrderVerdict, SensError, SessionStats, SosBound, SosSolution,
-    Triplet, back_translate, back_translate_verified, certify_psd_lower_triangle, engine_options,
-    screen_variable_box, solve_qp_active_set, solve_qp_active_set_inertia, solve_qp_batch,
-    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug,
-    solve_qp_ipm_warm, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm,
-    solve_socp_ipm_debug, solve_socp_ipm_warm, sos_constrained_lower_bound,
-    sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,
-    sos_minimize_opts, sos_opts, verify_status,
+    Triplet, back_translate, back_translate_verified, certify_psd_lower_triangle,
+    convex_presolve_fingerprint, engine_options, screen_variable_box, solve_qp_active_set,
+    solve_qp_active_set_inertia, solve_qp_batch, solve_qp_batch_parallel,
+    solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
+    solve_qp_multi_rhs, solve_qp_multi_rhs_parallel, solve_socp_ipm, solve_socp_ipm_debug,
+    solve_socp_ipm_warm, sos_constrained_lower_bound, sos_constrained_lower_bound_opts,
+    sos_lower_bound, sos_lower_bound_opts, sos_minimize, sos_minimize_opts, sos_opts,
+    verify_status,
 };
 
 /// The underlying crate, for anything not surfaced above.

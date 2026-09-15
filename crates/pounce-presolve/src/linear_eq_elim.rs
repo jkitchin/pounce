@@ -144,6 +144,7 @@ use crate::linear_eq_plan::{
     EliminationPlan, LinearEqElimReport, PlanConfig, PlanInput, VarRecovery, build_plan,
 };
 use crate::options::PresolveOptions;
+use crate::warm::WarmProjectionReport;
 
 /// A gather list: `out[k] = Σ scale · inner_values[src]` over the terms in
 /// `terms[start[k]..start[k+1]]`.
@@ -254,6 +255,7 @@ pub struct LinearEqElimTnlp {
     opts: PresolveOptions,
     state: Option<ElimState>,
     finalized: Option<FullSolution>,
+    starting_point_projection_report: WarmProjectionReport,
 }
 
 impl LinearEqElimTnlp {
@@ -263,6 +265,7 @@ impl LinearEqElimTnlp {
             opts,
             state: None,
             finalized: None,
+            starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
 
@@ -299,6 +302,29 @@ impl LinearEqElimTnlp {
     /// the reduced space and therefore the wrong length.
     pub fn finalized_full_solution(&self) -> Option<&FullSolution> {
         self.finalized.as_ref()
+    }
+
+    /// Clear the record of transformations applied by
+    /// [`TNLP::get_starting_point`].
+    pub fn reset_starting_point_projection_report(&mut self) {
+        self.starting_point_projection_report = WarmProjectionReport::default();
+    }
+
+    /// Projection effects observed while this wrapper actually served the
+    /// current solve's starting point.
+    pub fn starting_point_projection_report(&self) -> WarmProjectionReport {
+        self.starting_point_projection_report
+    }
+
+    /// Clone of the elimination plan, if init has run.
+    pub fn elimination_plan(&mut self) -> Option<EliminationPlan> {
+        self.ensure_init().map(|s| s.plan.clone())
+    }
+
+    /// Drop the cached plan. The next query recomputes it.
+    pub fn invalidate(&mut self) {
+        self.state = None;
+        self.reset_starting_point_projection_report();
     }
 
     fn ensure_init(&mut self) -> Option<&ElimState> {
@@ -1038,6 +1064,16 @@ impl TNLP for LinearEqElimTnlp {
         }
         for (red, &full) in s.plan.rows_kept.iter().enumerate() {
             sp.lambda[red] = lambda_full[full];
+        }
+        self.starting_point_projection_report.n_dropped_rows =
+            s.plan.m_full.saturating_sub(s.plan.rows_kept.len());
+        if sp.init_lambda {
+            self.starting_point_projection_report.dropped_dual_l1 = lambda_full
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| !s.plan.row_kept[*row])
+                .map(|(_, value)| value.abs())
+                .sum();
         }
         true
     }
