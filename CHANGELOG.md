@@ -661,6 +661,33 @@ changes.
   `pounce-sens-core`'s `factor`, which turns four of the five tests red.
   `crates/pounce-sensitivity/examples/rh_orientation_check.rs` is the
   one-command demonstration.
+- **The emscripten wheel no longer carries relaxed-SIMD instructions, which
+  stopped it compiling in browsers that lack the proposal.** `pounce-solver`'s
+  wasm build pulled in pulp 0.22.2 through faer, and that version compiles its
+  wasm `RelaxedSimd` backend *unconditionally*: 46 `f64x2.relaxed_madd` across
+  three functions that can never run, because nothing in the graph ever calls
+  `enable_relaxed_simd()` and the build sets no `target-feature`, so the flag
+  selecting them is `false` for the life of the process. WebAssembly validates
+  an entire module before executing any of it, so unreachable is not the same
+  as harmless — a browser without the proposal rejects the whole solver, and
+  the Python demo page died on boot:
+
+      CompileError: WebAssembly.Module doesn't parse at byte 1171:
+      relaxed simd instructions not supported, in function at index 486
+
+  Index 486 is `func[646]` with the module's 160 imported functions counted off
+  the front. Relaxed SIMD needs Chrome/Edge 114+, Firefox 120+ or Safari 18.4+,
+  which is why this was invisible to anyone testing on a current browser.
+
+  pulp 0.22.3 puts that backend behind a `relaxed-simd` cargo feature, and every
+  edge into pulp here — faer, faer-traits, gemm-common, qd — already declares
+  `default-features = false`, so bumping the lockfile resolves the feature off
+  and the instructions are never emitted. Nothing is given up: the ordinary
+  `Simd128` path and its 1210 plain `f64x2` ops are untouched, and the relaxed
+  path was dead code. Because nothing *pins* the feature off, and because the
+  failure cannot be seen on a modern browser, `build-wheel.sh` now inspects the
+  module it just built and refuses to stage one carrying either the backend's
+  symbols or a relaxed opcode.
 
 - **`solve_qp`'s PSD pre-check no longer masks the `P` non-finite guard
   ([#932](https://github.com/jkitchin/pounce/issues/932)).** Sibling of

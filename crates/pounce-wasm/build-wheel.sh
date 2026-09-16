@@ -230,6 +230,49 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
     zout.writestr(record, "\n".join(rows) + "\n")
 SLIM
 
+# A relaxed-SIMD instruction anywhere in this module stops the *whole* module
+# from compiling in a browser that lacks the proposal: wasm is validated up
+# front, so an instruction nothing can reach is as fatal as one on the hot
+# path. That is not hypothetical. pulp 0.22.2 — pulled in through faer, never
+# asked for — compiled its wasm `RelaxedSimd` backend unconditionally, and the
+# 46 `f64x2.relaxed_madd` it left in three unreachable functions took the demo
+# page down with
+#
+#   CompileError: WebAssembly.Module doesn't parse at byte 1171:
+#   relaxed simd instructions not supported, in function at index 486
+#
+# pulp 0.22.3 puts that backend behind a cargo feature, and every edge into
+# pulp here declares `default-features = false`, so it resolves off. Nothing
+# *pins* it off, though, and the failure only shows up in a browser old enough
+# to reject it — so check the artifact, not the lockfile.
+echo "==> checking for relaxed SIMD"
+probe="$toolchain/_pounce.abi3.so"
+python3 - "$wheels/$name" "$probe" <<'EXTRACT'
+import sys, zipfile
+src, dst = sys.argv[1:3]
+zin = zipfile.ZipFile(src)
+member = next(n for n in zin.namelist() if n.endswith("_pounce.abi3.so"))
+open(dst, "wb").write(zin.read(member))
+EXTRACT
+relaxed_bad=0
+# GOT symbol names survive `-C strip=symbols`, so this needs no extra tooling
+# and works on any runner.
+if strings "$probe" | grep -q RelaxedSimd; then
+  echo "wheel carries pulp's RelaxedSimd backend -- see the note in $(basename "${BASH_SOURCE[0]}")" >&2
+  relaxed_bad=1
+fi
+# wabt is not installed everywhere; when it is, check the instructions directly
+# rather than trusting a symbol name to stand in for them.
+if command -v wasm-objdump >/dev/null 2>&1; then
+  relaxed_n=$(wasm-objdump -d "$probe" | grep -cE '\b[fi][0-9]+x[0-9]+\.relaxed_[a-z0-9_]+' || true)
+  if [[ "$relaxed_n" != 0 ]]; then
+    echo "wheel carries $relaxed_n relaxed-SIMD instructions -- see the note above" >&2
+    relaxed_bad=1
+  fi
+fi
+rm -f "$probe"
+[[ $relaxed_bad == 0 ]] || exit 1
+
 # The page reads this rather than a hard-coded file name: the ABI tag moves
 # with the emscripten version, and a stale constant would surface as a micropip
 # resolution error that reads like a missing package.
