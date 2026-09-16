@@ -1,0 +1,24 @@
+[package]
+name = "pounce-rslab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+publish = false
+description = "Experimental RSLAB sparse symmetric LDL^T backend for POUNCE. Implements pounce-linsol's SparseSymLinearSolverInterface alongside pounce-feral (FERAL) and pounce-hsl (MA57)."
+keywords = ["rslab", "ldl", "linear-solver", "sparse", "ipopt"]
+categories = ["mathematics", "algorithms"]
+
+[dependencies]
+pounce-common.workspace = true
+pounce-linsol.workspace = true
+rslab.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pounce-feral.workspace = true
+
+[lints]
+workspace = true

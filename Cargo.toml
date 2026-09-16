@@ -8,6 +8,7 @@ members = [
     "crates/pounce-nl",
     "crates/pounce-hsl",
     "crates/pounce-feral",
+    "crates/pounce-rslab",
     "crates/pounce-algorithm",
     "crates/pounce-restoration",
     "crates/pounce-presolve",
@@ -76,6 +77,12 @@ pounce-nlp = { path = "crates/pounce-nlp", version = "0.11.0" }
 pounce-nl = { path = "crates/pounce-nl", version = "0.11.0" }
 pounce-hsl = { path = "crates/pounce-hsl", version = "0.11.0" }
 pounce-feral = { path = "crates/pounce-feral", version = "0.11.0" }
+# Experimental RSLAB backend. `publish = false`: RSLAB is not on crates.io
+# under this name (the registry `rslab` is an unrelated slab allocator), so
+# the crate is a git dependency and pounce-rslab can never be published.
+# It is a workspace member but NOT a default-member, exactly like
+# pounce-hsl, so a plain `cargo build` / `cargo test` never fetches RSLAB.
+pounce-rslab = { path = "crates/pounce-rslab" }
 pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.11.0" }
 pounce-restoration = { path = "crates/pounce-restoration", version = "0.11.0" }
 pounce-presolve = { path = "crates/pounce-presolve", version = "0.11.0" }
@@ -235,6 +242,19 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.11.0
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
 feral = { version = "0.17.0" }
+
+# RSLAB (github.com/milanofthe/rslab) — a fork of feral that adds an
+# unsymmetric LU path, complex-symmetric support and solver-in-the-loop
+# diagnostics. Consumed ONLY by `crates/pounce-rslab`, which is not a
+# default-member, so a plain `cargo build` / `cargo test` never fetches it;
+# build the experimental backend with `-p pounce-rslab`.
+#
+# Pinned by revision rather than version because the crates.io name `rslab`
+# belongs to an unrelated slab allocator (os-module/rslab, 0.2.1) — the
+# solver has no registry release. That is why `pounce-rslab` carries
+# `publish = false` and why nothing in the publishable graph may depend on
+# it: cargo refuses to publish a crate with a git dependency.
+rslab = { git = "https://github.com/milanofthe/rslab", rev = "8268b2e39cca990f43d2b499abeb0deb6e79fb94" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
