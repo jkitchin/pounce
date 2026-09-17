@@ -77,13 +77,33 @@ jobs:
         # buffers); revisit if a real perf-relevant lint surfaces. Other
         # groups (style, restriction, pedantic) stay as informational
         # warns, matching Cargo.toml's workspace lint policy.
-        run: cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious
+        run: cargo clippy --workspace --exclude pounce-hsl --exclude pounce-rslab --all-targets -- -D clippy::correctness -D clippy::suspicious
 
       - name: Build
-        run: cargo build --workspace --exclude pounce-hsl --verbose
+        run: cargo build --workspace --exclude pounce-hsl --exclude pounce-rslab --verbose
 
       - name: Test
-        run: cargo test --workspace --exclude pounce-hsl --verbose
+        run: cargo test --workspace --exclude pounce-hsl --exclude pounce-rslab --verbose
+
+      # pounce-rslab is excluded from the three steps above for a different
+      # reason from pounce-hsl's: it compiles fine, but it depends on RSLAB,
+      # which has no crates.io release under its own name (the registry
+      # `rslab` is an unrelated slab allocator) and is therefore a **git**
+      # dependency on a third-party repository. Leaving it in `--workspace`
+      # would put a network fetch of github.com/milanofthe/rslab, plus its
+      # `gemm` tree, on the critical path of every pull request in this repo —
+      # for a crate that is `publish = false`, ships nothing, and exists to
+      # answer one evaluation question (dev-notes/rslab-backend-assessment.md).
+      # An outage or a force-push over there would break CI here.
+      #
+      # It is also not a default-member, so a plain `cargo build` never
+      # reaches it either. Build and test it explicitly:
+      #
+      #     cargo test -p pounce-rslab
+      #
+      # If RSLAB is ever adopted rather than evaluated, this exclusion is the
+      # first thing to remove — at which point the dependency needs to be
+      # vendored or published, not fetched from a branch.
 
       # The pounce-rs facade's convex / active-set-QP / sensitivity modules are
       # behind off-by-default features (gh #561), so the workspace steps above
