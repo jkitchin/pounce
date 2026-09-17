@@ -520,6 +520,107 @@ changes.
 
 ### Fixed
 
+- **The limited-memory arm no longer fails on equality-constrained models it
+  has already solved
+  ([#945](https://github.com/jkitchin/pounce/issues/945)).** A failed line
+  search at an iterate that is already feasible to round-off is retried once
+  against `theta`'s own evaluation noise before the driver hands it to a
+  restoration phase that has nothing to minimize. On by default; new option
+  `filter_theta_roundoff_retry=no` restores the plain hand-off.
+
+  **The defect.** `pounce.minimize` with an objective and gradient but no
+  Hessian — the mode the Python frontend and the CasADi plugin select on
+  their own — exited `Error_In_Step_Computation` at iteration 131 on a
+  10-variable, strictly convex, separable quadratic with one linear equality,
+  no bounds and `cond(H) = 3.2e3`, at a point whose relative KKT error was
+  3.8e-3, five orders above the default `tol = 1e-8`. Identical at `max_iter`
+  200, 1000 and 5000 — a breakdown, not an exhausted budget — while POUNCE's
+  own exact-Hessian arm reaches that model's KKT point in **one** iteration.
+
+  Not the quasi-Newton update and not the linear algebra: over all 576
+  augmented-system solves on the failing trajectory the
+  Sherman-Morrison-Woodbury path's iterative-refinement residual ratio never
+  exceeds **4.1e-11**, inside its own `residual_ratio_max` every time. What
+  failed is `Filter::dominated_by_any`. The model's constraint is *linear*,
+  so `theta` is satisfied to round-off from the first feasible iterate on;
+  every filter entry then records a `theta` of one or two `ulp`, and
+  upstream's bare `theta > e.theta` ranks later trials on nothing but which
+  way the last constraint sum rounded. Measured at iteration 94, trial 3,
+  `alpha = 0.125`: the trial cut `phi` by 5.1e-9 and passed Armijo, the entry
+  it was compared against sat 2.0e-8 below it in `phi` — real work by that
+  arm — and the whole decision turned on `theta` 5.551115123125783e-16
+  against 1.110211922394910e-16, two roundings of the same identically-zero
+  quantity. The alpha-loop then backtracked to `alpha_min` and handed a point
+  feasible to **0.0** to the restoration phase, which has no violation to
+  minimize, so the solve reported a failure from the optimum.
+
+  **The fix is shaped by that last sentence:** the hand-off cannot work, so
+  before making it the driver re-runs the alpha-loop once with the `theta`
+  axis measured against `theta`'s own evaluation noise, and only when the
+  iterate it failed at is feasible to that noise. If the retry finds nothing
+  either, the original outcome stands and the hand-off proceeds
+  byte-for-byte as before — the mechanism is reachable only on a trajectory
+  that was already entering restoration. It is not a weakening of the
+  filter: the two `theta`s above are *tied*, both being zero, so the filter
+  has no feasibility ground to stand on.
+
+  The reported model now exits `Solve_Succeeded` at the closed-form optimum
+  and the issue's conditioning ladder is solved at every rung. Over 480 fresh
+  random instances of the reported shape, at `max_iter` 10000, the bad count
+  goes **122 → 44** and the 122 were *every one* a breakdown. What is left at
+  `cond = 1e5` is gh#818's six-pair L-BFGS window, not this defect. The full
+  table is in `pounce-rs/tests/issue_945_eq_constrained_lbfgs_filter_noise.rs`.
+
+  **Why a gated retry and not a filter setting**, and why the floor is the
+  expression it is, are recorded where they are checked rather than here:
+  applying the floor to *every* filter decision fixes gh#945 and costs
+  MacMPEC's `qpec_small` its answer at exactly the floor gh#945 requires,
+  with no constant and no scale-aware formula between them
+  (`pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`,
+  `the_gh945_retry_gate_is_what_this_fixture_relies_on`, which carries the
+  measured boundary). The gate separates them by asking about the *iterate*:
+  `qpec_small` fails its one line search 2.6× above its own noise floor, so
+  restoration there has real violation to work on. Gating on the Hessian arm
+  instead also separates them, and was rejected as an accident — both MPCCs
+  happen to be exact-Hessian solves while the Python frontend selects
+  `limited-memory` on its own.
+
+  Both the gate and the filter's allowance read the same value, capped at
+  `compare_le`'s own `10·eps·max(1, |theta|)` band; the uncapped bound is a
+  product of ∞-norms and runs orders above the noise the near-zero rows carry
+  when the largest Jacobian entry and the largest variable sit in different
+  rows. `IpoptCq::theta_evaluation_noise_floor` records why there is no
+  safety factor on `eps` and why the max over rows rather than the 1-norm
+  sum. Only the `theta` axis gets an allowance: `phi`'s equivalent is an
+  absolute number once `|phi|` is large, and costs `autocorr_bern55-06` its
+  status.
+
+  **gh#884's CLI reproducer is dissolved rather than perturbed.** The same
+  model as a `.nl` file under `bound_relax_factor=0 mu_strategy_fallback=no`
+  used to stall at `Solved_To_Acceptable_Level`/41 with an unscaled dual of
+  `7.90e4` and need gh#884's `perturb_always_cd` promotion to reach
+  `9.96e-8`. That stall began with the same line-search failure, so it is
+  gone: the **base** solve now converges by itself at `Optimal`/100,
+  `f = 4.5454149802e-10` at `x = [0.99998, 0.99999, 8.70e-6]`, KKT error
+  `5.65e-10` (unscaled dual infeasibility `6.26e-10`) and constraint
+  violation exactly `0` — two orders better than the promotion it replaces,
+  without the re-solve gh#884 documents as lying on `ralph1`.
+
+  That leaves gh#884's detector, kill switch, dominance gate and promotion
+  gate without an input on their own reproducer, so the tests whose subject
+  *is* that machinery now run under a `filter_theta_roundoff_retry=no`
+  constant that holds the base trajectory fixed, and two new tests pin the
+  default. That is holding an input fixed, not preserving a bug: the state
+  stays reachable on other models, and both default-path tests assert that
+  the detector still fires.
+
+  **Trajectory ledger** (`scripts/sweep-fixtures.sh`, both legs, 194
+  fixture-legs, measured against this change's merge base). The **exact leg
+  is byte-identical**. **One** `lbfgs` line moves, and it changes neither
+  status nor objective: `cresc4`'s already-failing base solve grinds to the
+  3000 cap instead of 1323 for the same promoted verdict (tot 1604 → 3281).
+  That is the whole corpus cost.
+
 - **`pounce.jax` no longer parks ~one OS thread per core per differentiable
   solve ([#942](https://github.com/jkitchin/pounce/issues/942)).** A retained
   factor is not just memory: the FERAL backend behind a held `pounce.Solver`

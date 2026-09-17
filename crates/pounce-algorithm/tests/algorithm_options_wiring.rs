@@ -208,6 +208,27 @@ fn filter_reset_constants_flow_through() {
     assert_eq!(b.filter_reset_trigger, 9);
 }
 
+/// gh#945's retry: registered default `yes`, and it has to reach the
+/// assembled `BacktrackingLineSearch` rather than stopping at the builder —
+/// the acceptor never reads it, the driver does.
+#[test]
+fn the_gh945_roundoff_retry_reaches_the_assembled_line_search() {
+    assert!(builder_from(|_| {}).line_search.filter_theta_roundoff_retry);
+    let off = builder_from(|app| {
+        app.options_mut()
+            .set_string_value("filter_theta_roundoff_retry", "no", true, false)
+            .unwrap();
+    });
+    assert!(!off.line_search.filter_theta_roundoff_retry);
+    assert!(!off.build().line_search.filter_theta_roundoff_retry);
+    assert!(
+        AlgorithmBuilder::new()
+            .build()
+            .line_search
+            .filter_theta_roundoff_retry
+    );
+}
+
 #[test]
 fn refinement_constants_default_match_registered() {
     let r = builder_from(|_| {}).refinement;

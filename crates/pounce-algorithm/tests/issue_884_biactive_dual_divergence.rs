@@ -987,3 +987,143 @@ fn a_retry_that_does_not_promote_leaves_the_base_answer_in_place() {
         "the refused retry changed the reported residual",
     );
 }
+
+/// gh#945's retry is **gated** because of *this model*, and this test is
+/// the measurement that keeps the gate where it is.
+///
+/// gh#945 is a filter defect: on a model feasible to round-off, every filter
+/// entry records a `theta` of a few ulp and later trials are ranked against
+/// it on which way the last constraint sum rounded. Allowing the round-off
+/// floor of evaluating `c` fixes it. `qpec_small` needs the opposite — the
+/// `theta` axis ENFORCED exactly where gh#945 needs it forgiven — and as a
+/// *threshold on theta* the two requirements overlap with no gap between
+/// them. Swept over a floor applied to every filter decision, this fixture
+/// reports `Solve_Succeeded` at an unscaled KKT of 9.96e-8 (the right
+/// answer) at floors of 0 and 1e-16, is already lost at **4.44e-16** — which
+/// is precisely the floor gh#945's model requires, `5.551115123125783e-16`
+/// against an entry's `1.110211922394910e-16` — and at 1e-14 comes back as
+/// `Solve_Succeeded` at 5.74e-2, a *false* certificate. Both models sit at
+/// `‖x‖∞ ≈ 1` with `theta` at round-off, so a scale-aware floor hands them
+/// the same number too.
+///
+/// What separates them is not a threshold on `theta` at all. The retry as
+/// shipped asks a question about the **iterate**: is the point the α-loop
+/// gave up at feasible to its own evaluation noise — i.e. does the
+/// restoration phase the driver is about to call have anything to minimize?
+/// On gh#945's model the answer is no, at every failure: `theta` is 0.0 or
+/// one ulp against a floor of 1.2e-15. On this fixture the answer is yes.
+/// It has exactly **one** line-search failure in the whole solve, at
+///
+/// ```text
+///   theta = 1.746646e-15      noise floor = 6.664715e-16
+/// ```
+///
+/// 2.6× above its own noise — so the gate declines, no retry runs, and the
+/// trajectory is byte-identical. Widened to a fixed floor the gate holds
+/// this fixture at 1.2e-15 and 1.5e-15 and loses it at 1.8e-15, 2.0e-15 and
+/// above; the shipped floor reads 6.66e-16 here, a factor of 2.6 under the
+/// nearest value that costs anything.
+///
+/// That margin is what this test pins, and it pins it the only way that
+/// cannot be satisfied by a coincidence: the retry option off against the
+/// retry option on, asserting the solve is **identical** — status, point,
+/// objective, residual and iteration count. Anything that widens the gate,
+/// raises the floor, or moves this fixture into the band turns one of those
+/// five red. (`issue_945_the_retry_is_the_mechanism` in
+/// `pounce-rs/tests/issue_945_eq_constrained_lbfgs_filter_noise.rs` is the
+/// other half of the pair: it fails if the retry ever stops firing.)
+///
+/// `ralph1` is not in the same position and does not need the gate: its
+/// iterate sits at `3.8e-8`, its `theta` differences are seven orders above
+/// their own noise floor, and the floor is scale-aware for that reason. The
+/// model that forces the gate is this one.
+///
+/// **What this is not.** It is a claim about *this* fixture — `qpec_small`
+/// under the `prod_eq` lowering, at this file's options — and not about
+/// every MPCC. The same model as a `.nl` file under `bound_relax_factor=0
+/// mu_strategy_fallback=no` does reach the retry, and there the effect runs
+/// the other way: its base solve stops needing gh#884's `perturb_always_cd`
+/// promotion at all, converging on its own at `Optimal`/100 with a KKT error
+/// of `5.65e-10` (unscaled dual infeasibility `6.26e-10`) against the
+/// `9.96e-8` the promotion used to buy. That is
+/// pinned in `pounce-cli/tests/issue884_promotion_gate_reads_the_answer.rs`,
+/// `the_reproducer_no_longer_needs_the_retry`, alongside
+/// `the_reproducer_still_promotes`, which now pins
+/// `filter_theta_roundoff_retry=no` so the promotion gate keeps an input to
+/// be tested on.
+#[test]
+fn the_gh945_retry_gate_is_what_this_fixture_relies_on() {
+    let run = |retry_on: bool| {
+        let (tnlp, captured) = QpecSmallProdEq::new(false);
+        let mut a = IpoptApplication::new();
+        {
+            let o = a.options_mut();
+            let _ = o.set_string_value("sb", "yes", true, false);
+            let _ = o.set_integer_value("print_level", 0, true, false);
+            let _ = o.set_numeric_value("tol", 1e-8, true, false);
+            let _ = o.set_numeric_value("bound_relax_factor", 0.0, true, false);
+            let _ = o.set_string_value("honor_original_bounds", "yes", true, false);
+            let _ = o.set_integer_value("max_iter", 300, true, false);
+            let _ = o.set_string_value(
+                "filter_theta_roundoff_retry",
+                if retry_on { "yes" } else { "no" },
+                true,
+                false,
+            );
+        }
+        a.initialize().expect("initialize");
+        let status = a.optimize_tnlp(Rc::new(RefCell::new(tnlp)));
+        let x = captured.borrow().clone().expect("finalize_solution ran").x;
+        let s = a.statistics();
+        (
+            status,
+            x,
+            s.final_objective,
+            s.final_unscaled_kkt_error,
+            s.iteration_count,
+        )
+    };
+
+    // Without the retry — i.e. the pre-gh#945 line search exactly — this
+    // fixture reaches a certificate that holds in the model's own units.
+    // That is the thing there is something to lose here.
+    let (off_status, off_x, off_obj, off_kkt, off_iters) = run(false);
+    assert!(
+        matches!(off_status, ApplicationReturnStatus::SolveSucceeded),
+        "this fixture is supposed to reach a real certificate without the \
+         retry; got {off_status:?} at unscaled KKT {off_kkt:.3e}"
+    );
+    assert!(
+        off_kkt <= 1e-6,
+        "that certificate is supposed to be real in the model's own units; \
+         got {off_kkt:.3e}"
+    );
+
+    // With the retry at the shipped default, the gate declines and nothing
+    // moves. Five separate reads, because a trajectory change that left the
+    // verdict alone is exactly what `scripts/sweep-fixtures.sh` exists to
+    // catch and exactly what a status-only assertion would miss.
+    let (on_status, on_x, on_obj, on_kkt, on_iters) = run(true);
+    assert_eq!(
+        on_status, off_status,
+        "the gh#945 retry changed this fixture's verdict — the gate is \
+         supposed to decline here (theta 1.746646e-15 against a floor of \
+         6.664715e-16). Re-measure the table in this test's doc before \
+         changing it"
+    );
+    assert_eq!(on_x, off_x, "the gh#945 retry moved this fixture's point");
+    assert_eq!(
+        on_obj, off_obj,
+        "the gh#945 retry moved this fixture's objective"
+    );
+    assert_eq!(
+        on_kkt, off_kkt,
+        "the gh#945 retry moved this fixture's residual"
+    );
+    assert_eq!(
+        on_iters, off_iters,
+        "the gh#945 retry changed this fixture's trajectory length \
+         ({off_iters} -> {on_iters}) without changing its verdict; that is \
+         the class of regression the fixture sweep exists for"
+    );
+}

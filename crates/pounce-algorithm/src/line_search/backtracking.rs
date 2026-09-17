@@ -226,6 +226,13 @@ pub struct BacktrackingLineSearch {
     /// Lower bound on α; below this we declare a tiny step (mirrors
     /// `alpha_min_frac` flow, `IpBacktrackingLineSearch.cpp:CalculateAlphaMin`).
     pub alpha_min: Number,
+    /// `filter_theta_roundoff_retry` (gh#945) — whether a line search that
+    /// has run out of `alpha` at an iterate that is *already feasible to
+    /// round-off* gets one more pass with the filter's `theta` axis measured
+    /// against `theta`'s own evaluation noise, before the driver hands off to
+    /// a restoration phase that has nothing to minimize. `true` is the
+    /// default; `false` restores the plain hand-off.
+    pub filter_theta_roundoff_retry: bool,
     /// Maximum trial-iteration cap before declaring failure.
     pub max_trials: i32,
 
@@ -368,6 +375,7 @@ impl BacktrackingLineSearch {
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
             alpha_min: 1e-12,
+            filter_theta_roundoff_retry: true,
             max_trials: 50,
             in_watchdog: false,
             watchdog_iterate: None,
@@ -768,10 +776,93 @@ impl BacktrackingLineSearch {
         };
 
         // Run the alpha-loop on the caller's `delta`.
-        let result = self.run_alpha_loop(
+        let mut result = self.run_alpha_loop(
             data, cq, delta, alpha_init, alpha_dual, nlp, search_dir, theta, phi, d_phi,
-            /*skip_first*/ false,
+            /*skip_first*/ false, /*theta_floor*/ 0.0,
         );
+
+        // ---- gh#945: the round-off retry.
+        //
+        // The branch below this one hands a failed line search to the
+        // restoration phase, whose job is to *reduce the constraint
+        // violation*. When the iterate the hand-off starts from is already
+        // feasible to the round-off of its own constraint evaluation, that
+        // phase has nothing to minimize: it converges on its first iterate,
+        // returns the point it was given, and the solve dies from the
+        // optimum with `Error_In_Step_Computation`.
+        //
+        // What blocked the line search in that situation is not a real
+        // filter entry. `theta` at every entry and at every trial is one or
+        // two ulp of the same cancellation, so the `theta` arm of
+        // `FilterEntry::Acceptable` turns on which way the last constraint
+        // sum rounded. Where it rounds the wrong way the entry falls back on
+        // its `phi` arm alone, and a one-dimensional filter on `phi` is a
+        // *monotone* test — strictly stronger than the Armijo condition the
+        // filter method exists to replace, and able to reject the step the
+        // algorithm has to take. Measured on gh#945 at iteration 94, trial
+        // 3, `alpha = 0.125`: the trial cut `phi` by 5.1e-9 and passed
+        // Armijo, the entry's `phi` was 2.0e-8 below it, and the whole
+        // decision turned on `theta` 5.55e-16 against 1.11e-16.
+        //
+        // So before the hand-off that cannot work, re-run the alpha loop
+        // once with the `theta` axis measured against `theta`'s own
+        // evaluation noise (`IpoptCq::theta_evaluation_noise_floor`). A
+        // point that genuinely worsens feasibility is still dominated; a
+        // point that differs from an entry only in how the sum rounded is
+        // not. If the retry finds nothing either, the original outcome
+        // stands and the hand-off proceeds exactly as before — which is why
+        // this can only ever be reached on a trajectory that was otherwise
+        // about to enter restoration.
+        if self.filter_theta_roundoff_retry
+            && !self.in_watchdog
+            && matches!(
+                result,
+                AlphaResult::Failed { .. } | AlphaResult::TinyStep { .. }
+            )
+        {
+            // `theta <= floor` is the gate, and it is the whole reason this
+            // is a retry rather than a filter setting. Applying the floor to
+            // every filter decision fixes gh#945 too and costs MacMPEC's
+            // `qpec_small` its answer at exactly the floor gh#945 needs, with
+            // no constant and no scale-aware formula between them. This gate
+            // is a question about the *iterate*, not about a pair of entries:
+            // `qpec_small`'s one line-search failure under the `prod_eq`
+            // lowering sits at `theta = 1.746646e-15` against a floor of
+            // `6.664715e-16`, 2.6x above it, so restoration there has real
+            // violation to work on, the gate declines, and that fixture is
+            // byte-identical. See
+            // `pounce-algorithm/tests/issue_884_biactive_dual_divergence.rs`,
+            // `the_gh945_retry_gate_is_what_this_fixture_relies_on`.
+            let floor = cq.borrow().theta_evaluation_noise_floor();
+            // The gate reads the same *capped* allowance the filter does, not
+            // the raw bound (gh#946 review). `theta_evaluation_noise_floor` is
+            // a product of ∞-norms, so on a badly scaled model it runs orders
+            // above the noise the near-zero rows carry, and gating on it opens
+            // the retry exactly where the rule above says it must not:
+            // `square_flowsheet_resto` reads a floor of 2.0e-7 against a
+            // `theta` pinned at 1.04e-9, five orders above round-off and with
+            // real violation for restoration to work on. The cap is
+            // `compare_le`'s band, evaluated here at the iterate as
+            // [`super::filter::entry_accepts`] evaluates it at the entry.
+            let gate = floor.min(10.0 * Number::EPSILON * theta.abs().max(1.0));
+            if floor > 0.0 && theta <= gate {
+                // No SOC on the retry: `search_dir` was consumed by the
+                // first pass, and the point of this pass is the filter
+                // decision, not a different direction.
+                let retry = self.run_alpha_loop(
+                    data, cq, delta, alpha_init, alpha_dual, nlp, None, theta, phi, d_phi,
+                    /*skip_first*/ false, floor,
+                );
+                // Take the retry's outcome when it found a point, and when
+                // the time budget went during it (pounce#242) — that one is
+                // terminal and must not be masked by the first pass's
+                // failure. Anything else leaves the original outcome, and
+                // with it the info fields the hand-off reports.
+                if matches!(retry, AlphaResult::Accepted { .. } | AlphaResult::Deadline) {
+                    result = retry;
+                }
+            }
+        }
 
         match result {
             AlphaResult::Accepted { n_steps } => {
@@ -966,6 +1057,7 @@ impl BacktrackingLineSearch {
                 phi,
                 d_phi,
                 /*skip_first*/ true,
+                /*theta_floor*/ 0.0,
             );
             match result2 {
                 AlphaResult::Accepted { n_steps: ns2 } => {
@@ -1032,7 +1124,40 @@ impl BacktrackingLineSearch {
     /// `data.trial` so the watchdog `accept-anyway` path can promote
     /// it.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn run_alpha_loop(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+        alpha_init: Number,
+        alpha_dual: Number,
+        nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
+        search_dir: Option<&mut PdSearchDirCalc>,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        skip_first: bool,
+        theta_floor: Number,
+    ) -> AlphaResult {
+        // Every α-loop states its `theta` floor, and every α-loop leaves it at
+        // zero. Only the gh#945 retry passes a nonzero one, and having the set
+        // and the clear be this function's own entry and exit is what makes
+        // "left switched on" unreachable rather than merely tested for
+        // (gh#946 review): the floor cannot outlive the pass that asked for
+        // it, and the paths that read the filter outside an α-loop — the
+        // acceptor's `make_orig_progress_check` snapshot among them — always
+        // see zero.
+        self.acceptor.set_theta_roundoff_floor(theta_floor);
+        let result = self.run_alpha_loop_inner(
+            data, cq, delta, alpha_init, alpha_dual, nlp, search_dir, theta, phi, d_phi, skip_first,
+        );
+        self.acceptor.set_theta_roundoff_floor(0.0);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_alpha_loop_inner(
         &mut self,
         data: &IpoptDataHandle,
         cq: &IpoptCqHandle,
