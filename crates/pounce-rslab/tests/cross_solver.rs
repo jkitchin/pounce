@@ -25,6 +25,8 @@
 //!   although a dense eigensolve puts its condition number at 2.6. The
 //!   "no delayed pivoting" branch, which is the one that matters.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::{Path, PathBuf};
 
 use pounce_common::types::{Index, Number};
@@ -68,12 +70,7 @@ fn load_kkt(name: &str) -> KktFixture {
     assert!(n > 0 && !vals.is_empty(), "{name}: empty fixture");
     assert_eq!(rhs.len(), n as usize, "{name}: rhs length");
     KktFixture {
-        matrix: SymTriplet {
-            n,
-            irn,
-            jcn,
-            vals,
-        },
+        matrix: SymTriplet { n, irn, jcn, vals },
         rhs,
         expected_neg,
     }
@@ -169,10 +166,19 @@ fn every_backend_reports_a_singular_system_as_singular() {
     }
 }
 
-/// The harness measures the refactorization separately from the first factor,
-/// and the symbolic cache has to make it cheaper. This is what the IPM pays
-/// per iteration, so a backend that cannot reuse its analysis is disqualified
-/// on cost before any accuracy question.
+/// Every backend reuses its symbolic analysis across a refactorization.
+///
+/// This is what the IPM pays for, hundreds of times per solve: the pattern is
+/// fixed by `initialize_structure` and only the values change, so a backend
+/// that re-orders and re-amalgamates on every call is disqualified on cost
+/// before any accuracy question is reached.
+///
+/// Asserted **structurally**, not on wall-clock. `run_backend` factors twice,
+/// and `LinearSolverSummary` counts how many of those reused the cached
+/// analysis — an exact number. The first version of this test compared the
+/// refactorization's milliseconds against the first factor's, which on a
+/// 168-row matrix is a 3 ms measurement against a 5 ms one under a parallel
+/// test runner: it passed, then failed, and it was measuring the machine.
 #[test]
 fn every_backend_reuses_its_symbolic_analysis() {
     let a = load_kkt("airport_kkt_iter0").matrix;
@@ -181,14 +187,66 @@ fn every_backend_reuses_its_symbolic_analysis() {
         if rec.factor_status != ESymSolverStatus::Success {
             continue;
         }
-        let refac = rec.refactor_ms.expect("refactor timed");
+        assert_eq!(
+            rec.n_pattern_changes, 1,
+            "{}: only the first factorization may build a fresh analysis",
+            rec.solver
+        );
         assert!(
-            refac <= rec.factor_ms,
-            "{}: refactor {refac:.3} ms is not cheaper than the first factor {:.3} ms",
+            rec.n_pattern_reuse >= 1,
+            "{}: the refactorization did not reuse the analysis ({} reuses)",
             rec.solver,
-            rec.factor_ms
+            rec.n_pattern_reuse
         );
     }
+}
+
+/// And for RSLAB the skipped phase is visible directly: a refactorization
+/// spends exactly zero time in the symbolic analysis, because it does not
+/// enter it at all.
+#[test]
+fn an_rslab_refactorization_skips_the_symbolic_phase_entirely() {
+    use pounce_linsol::SparseSymLinearSolverInterface as _;
+
+    let a = load_kkt("airport_kkt_iter0").matrix;
+    let mut s = pounce_rslab::RslabSolverInterface::new();
+    s.initialize_structure(a.n, a.nnz() as Index, &a.irn, &a.jcn);
+    s.values_array_mut().copy_from_slice(&a.vals);
+    let mut rhs = a.sample_rhs();
+    assert_eq!(
+        s.multi_solve(true, &a.irn, &a.jcn, 1, &mut rhs, false, 0),
+        ESymSolverStatus::Success
+    );
+    assert!(
+        s.phase_timings().symbolic_ms > 0.0,
+        "premise: the first factorization runs the analysis"
+    );
+
+    s.values_array_mut().copy_from_slice(&a.vals);
+    let mut rhs = a.sample_rhs();
+    assert_eq!(
+        s.multi_solve(true, &a.irn, &a.jcn, 1, &mut rhs, false, 0),
+        ESymSolverStatus::Success
+    );
+    assert_eq!(
+        s.phase_timings().symbolic_ms,
+        0.0,
+        "a refactorization must not re-enter the symbolic analysis"
+    );
+    assert!(
+        s.phase_timings().numeric_ms > 0.0,
+        "…but it must still do the numeric work"
+    );
+
+    // A pure back-solve reaches no factor phase at all, so a solve-only call
+    // cannot be read as a factorization.
+    let mut rhs = a.sample_rhs();
+    assert_eq!(
+        s.multi_solve(false, &a.irn, &a.jcn, 1, &mut rhs, false, 0),
+        ESymSolverStatus::Success
+    );
+    assert_eq!(s.phase_timings().factor_total_ms(), 0.0);
+    assert!(s.phase_timings().solve_ms > 0.0);
 }
 
 // ---------------------------------------------------------------------------

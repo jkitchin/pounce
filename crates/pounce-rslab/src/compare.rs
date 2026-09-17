@@ -122,6 +122,13 @@ pub struct SolveRecord {
     pub nnz_l: Option<usize>,
     /// `nnz(L) / nnz(A)`.
     pub fill_ratio: Option<f64>,
+    /// Factorizations that reused the cached symbolic analysis, and those that
+    /// had to build a fresh one. Both FERAL and the RSLAB adapter populate
+    /// these, and they are the *structural* answer to "did the analysis get
+    /// reused" — a timing comparison at these sizes is dominated by noise.
+    pub n_pattern_reuse: u64,
+    /// See [`Self::n_pattern_reuse`].
+    pub n_pattern_changes: u64,
     /// Slots of `L` holding an exact zero, where the backend reports it.
     ///
     /// `nnz_l` is structural on every arm — it is what the factor occupies —
@@ -151,7 +158,12 @@ pub struct SolveRecord {
 }
 
 impl SolveRecord {
-    fn failed(solver: &'static str, status: ESymSolverStatus, structure_ms: f64, factor_ms: f64) -> Self {
+    fn failed(
+        solver: &'static str,
+        status: ESymSolverStatus,
+        structure_ms: f64,
+        factor_ms: f64,
+    ) -> Self {
         Self {
             solver,
             factor_status: status,
@@ -166,6 +178,8 @@ impl SolveRecord {
             nnz_a: None,
             nnz_l: None,
             fill_ratio: None,
+            n_pattern_reuse: 0,
+            n_pattern_changes: 0,
             explicit_zeros_in_l: None,
             structure_ms,
             factor_ms,
@@ -196,8 +210,10 @@ impl SolveRecord {
             "{:<6}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{}\t{}",
             self.solver,
             self.factor_status,
-            self.inertia
-                .map_or_else(|| format!("(-,{},-)", u(self.negative_evals.map(|v| v as usize))), |(p, n, z)| format!("({p},{n},{z})")),
+            self.inertia.map_or_else(
+                || format!("(-,{},-)", u(self.negative_evals.map(|v| v as usize))),
+                |(p, n, z)| format!("({p},{n},{z})")
+            ),
             u(self.two_by_two_pivots),
             u(self.perturbed_pivots),
             f(self.min_abs_pivot),
@@ -213,8 +229,7 @@ impl SolveRecord {
 }
 
 /// Column header matching [`SolveRecord::row`].
-pub const ROW_HEADER: &str =
-    "solver\tstatus\tinertia\t2x2\tpert\tmin|piv|\tnnz(L)\tfac_ms\trefac_ms\tsolve_s\tfill\tresid_ratio\trel_resid";
+pub const ROW_HEADER: &str = "solver\tstatus\tinertia\t2x2\tpert\tmin|piv|\tnnz(L)\tfac_ms\trefac_ms\tsolve_s\tfill\tresid_ratio\trel_resid";
 
 /// POUNCE's residual metric, as `PdFullSpaceSolver::compute_residual_ratio`
 /// computes it: `‖r‖_∞ / (min(‖Ax‖_∞, 10⁶·‖b‖_∞) + ‖b‖_∞)`, falling back to
@@ -306,7 +321,9 @@ pub fn run_backend<B: SparseSymLinearSolverInterface>(
         factor_status: ESymSolverStatus::Success,
         solve_status: Some(solve_st),
         inertia: None,
-        negative_evals: backend.provides_inertia().then(|| backend.number_of_neg_evals()),
+        negative_evals: backend
+            .provides_inertia()
+            .then(|| backend.number_of_neg_evals()),
         min_abs_pivot: None,
         max_abs_pivot: None,
         two_by_two_pivots: None,
@@ -315,15 +332,15 @@ pub fn run_backend<B: SparseSymLinearSolverInterface>(
         nnz_a: None,
         nnz_l: None,
         fill_ratio: None,
+        n_pattern_reuse: 0,
+        n_pattern_changes: 0,
         explicit_zeros_in_l: None,
         structure_ms,
         factor_ms,
         refactor_ms: (refac_st == ESymSolverStatus::Success).then_some(refactor_ms),
         solve_ms: (solve_st == ESymSolverStatus::Success).then_some(solve_ms),
-        residual_ratio: (solve_st == ESymSolverStatus::Success)
-            .then(|| residual_ratio(a, &x2, b)),
-        rel_residual: (solve_st == ESymSolverStatus::Success)
-            .then(|| relative_residual(a, &x2, b)),
+        residual_ratio: (solve_st == ESymSolverStatus::Success).then(|| residual_ratio(a, &x2, b)),
+        rel_residual: (solve_st == ESymSolverStatus::Success).then(|| relative_residual(a, &x2, b)),
     };
     probe(&backend, &mut rec);
     rec
@@ -339,6 +356,8 @@ pub fn fold_summary(s: &pounce_linsol::summary::LinearSolverSummary, rec: &mut S
     rec.nnz_a = s.last_nnz_a;
     rec.nnz_l = s.last_nnz_l;
     rec.fill_ratio = s.max_fill_ratio;
+    rec.n_pattern_reuse = s.n_pattern_reuse;
+    rec.n_pattern_changes = s.n_pattern_changes;
 }
 
 /// Run the RSLAB adapter, reading its `InertiaInfo` for the fields no other
@@ -389,25 +408,69 @@ pub fn run_feral(a: &SymTriplet, b: &[Number], cfg: pounce_feral::FeralConfig) -
 /// on the link path. `None` otherwise — the harness records the arm as
 /// unavailable rather than quietly dropping it from the comparison.
 ///
+/// `options` is **required**, not defaulted. `Ma57SolverInterface::new()`
+/// hard-codes `Options::defaults()` and is what pounce gh#825 was: nine
+/// `ma57_*` options registered, documented, accepted and silently discarded,
+/// with every arm of every solve coming out identical to all seventeen digits.
+/// A comparison harness is exactly where that would be invisible — the MA57
+/// column would simply be MA57-with-defaults no matter what the reader had
+/// tuned. Taking the options by value makes discarding them a thing a caller
+/// has to write down.
+///
 /// MA57 keeps its factors inside opaque Fortran work arrays, so it reports
 /// neither a pivot-magnitude extent nor a 2×2 count through this trait; only
 /// `number_of_neg_evals` is comparable. Rows for it are therefore mostly `-`,
 /// which is a fact about MA57's interface and not a gap in the harness.
 #[cfg(feature = "ma57")]
-pub fn run_ma57(a: &SymTriplet, b: &[Number]) -> Option<SolveRecord> {
+pub fn run_ma57(a: &SymTriplet, b: &[Number], options: pounce_hsl::Options) -> Option<SolveRecord> {
     Some(run_backend(
         "ma57",
-        pounce_hsl::Ma57SolverInterface::new(),
+        pounce_hsl::Ma57SolverInterface::with_options(options),
         a,
         b,
         |_backend, _rec| {},
     ))
 }
 
+/// See the `ma57`-enabled sibling. The `options` parameter is kept so the two
+/// signatures agree and a caller need not `cfg` around the call.
+#[cfg(not(feature = "ma57"))]
+pub fn run_ma57(_a: &SymTriplet, _b: &[Number], _options: Ma57Options) -> Option<SolveRecord> {
+    None
+}
+
+/// `pounce_hsl::Options` when the `ma57` feature is on; a placeholder
+/// otherwise, so [`run_ma57`]'s signature does not move with the feature.
+#[cfg(feature = "ma57")]
+pub type Ma57Options = pounce_hsl::Options;
+
 /// See the `ma57`-enabled sibling.
 #[cfg(not(feature = "ma57"))]
-pub fn run_ma57(_a: &SymTriplet, _b: &[Number]) -> Option<SolveRecord> {
-    None
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ma57Options;
+
+impl Ma57Options {
+    /// MA57's own library defaults.
+    ///
+    /// Named rather than implicit: a caller reaching for this is saying "I
+    /// have no `ma57_*` options to honour", which is true of the harness and
+    /// not true of POUNCE's solve path. See [`run_ma57`].
+    #[cfg(not(feature = "ma57"))]
+    pub fn library_defaults() -> Self {
+        Self
+    }
+}
+
+/// MA57's library defaults, for a caller with no `OptionsList` to read.
+#[cfg(feature = "ma57")]
+pub fn ma57_library_defaults() -> Ma57Options {
+    pounce_hsl::Options::defaults()
+}
+
+/// See the `ma57`-enabled sibling.
+#[cfg(not(feature = "ma57"))]
+pub fn ma57_library_defaults() -> Ma57Options {
+    Ma57Options
 }
 
 /// Every available backend on one system, in a stable order.
@@ -425,7 +488,10 @@ pub fn run_all(a: &SymTriplet, b: &[Number]) -> Vec<SolveRecord> {
         run_rslab(a, b, crate::RslabConfig::default()),
         run_rslab_static_pivoting(a, b, 1e-12),
     ];
-    out.extend(run_ma57(a, b));
+    // The harness has no `OptionsList` to read `ma57_*` from, so it asks for
+    // MA57's library defaults by name. A caller who has tuned them calls
+    // `run_ma57` directly with their own.
+    out.extend(run_ma57(a, b, ma57_library_defaults()));
     out
 }
 
@@ -522,7 +588,10 @@ pub fn dense_inertia_oracle(
                 off += at(&m, i, j) * at(&m, i, j);
             }
         }
-        let scale = (0..n).map(|i| at(&m, i, i).abs()).fold(0.0, f64::max).max(1.0);
+        let scale = (0..n)
+            .map(|i| at(&m, i, i).abs())
+            .fold(0.0, f64::max)
+            .max(1.0);
         if off.sqrt() <= 1e-15 * scale {
             break;
         }

@@ -32,6 +32,8 @@
 //! cargo run -p pounce-rslab --release --example rslab_bench
 //! ```
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -166,12 +168,7 @@ fn load_fixture(name: &str) -> Option<SymTriplet> {
             _ => {}
         }
     }
-    Some(SymTriplet {
-        n,
-        irn,
-        jcn,
-        vals,
-    })
+    Some(SymTriplet { n, irn, jcn, vals })
 }
 
 /// Best of `reps` — wall-clock, so the minimum is the least contaminated
@@ -325,9 +322,7 @@ fn main() {
         s.initialize_structure(a.n, a.nnz() as Index, &a.irn, &a.jcn);
         s.values_array_mut().copy_from_slice(&a.vals);
         let mut rhs = b.clone();
-        if s.multi_solve(true, &a.irn, &a.jcn, 1, &mut rhs, false, 0)
-            != ESymSolverStatus::Success
-        {
+        if s.multi_solve(true, &a.irn, &a.jcn, 1, &mut rhs, false, 0) != ESymSolverStatus::Success {
             // The conversion still ran and was still timed, even though the
             // factorization that followed it did not complete.
             println!(

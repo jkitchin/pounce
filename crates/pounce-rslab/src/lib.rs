@@ -32,11 +32,11 @@
 //! RSLAB has no `min_pivot_magnitude()` anywhere in the crate. POUNCE's
 //! inertia-trust gate (pounce gh#540) is a comparison of the smallest accepted
 //! pivot magnitude against a floor, so a backend that cannot report that
-//! quantity cannot preserve the behaviour the gate exists for. `analyze_with`
-//! + [`rslab::factor_numeric`] hand back `rslab::LdltNumeric`, whose
-//! `d_diag` / `d_subdiag` / `two_by_two` are public — from which
-//! [`inertia::scan_d`] recovers both the extent and a cancellation-free
-//! inertia recount in one O(n) pass.
+//! quantity cannot preserve the behaviour the gate exists for.
+//! `analyze_with` plus [`rslab::factor_numeric`] hand back
+//! `rslab::LdltNumeric`, whose `d_diag` / `d_subdiag` / `two_by_two` are
+//! public — from which [`inertia::scan_d`] recovers both the extent and a
+//! cancellation-free inertia recount in one O(n) pass.
 //!
 //! The cost of that choice is paid in two places, both documented and both
 //! measured by `examples/rslab_bench.rs`:
@@ -44,7 +44,8 @@
 //! * the solve runs RSLAB's CSC reference sweep ([`rslab::solve_ldlt_many`])
 //!   rather than the supernodal panel sweep, because `SolvePlan` is
 //!   `pub(crate)`;
-//! * `LdltNumeric::into_factors` materializes `L` in CSC, one copy per factor.
+//! * `LdltNumeric::into_factors` materializes `L` in CSC, one copy per
+//!   factorization.
 //!
 //! Neither is a numerical difference, and neither is worth fixing before the
 //! numbers say RSLAB is worth keeping.
@@ -457,7 +458,8 @@ impl RslabSolverInterface {
         for j in 0..m.n {
             for k in m.col_ptr[j]..m.col_ptr[j + 1] {
                 let i = m.row_idx[k];
-                self.scaled.push(m.values[k] * self.scale[i] * self.scale[j]);
+                self.scaled
+                    .push(m.values[k] * self.scale[i] * self.scale[j]);
             }
         }
     }
@@ -650,12 +652,10 @@ impl RslabSolverInterface {
         //    a `min/max` ratio: an interior-point KKT is *designed* to become
         //    ill-conditioned as `μ→0`, so the ratio collapses on healthy
         //    full-rank systems near the solution.
-        if self.cfg.singular_pivot_floor > 0.0 {
-            if let Some(mp) = min_abs {
-                if mp < self.cfg.singular_pivot_floor {
-                    return ESymSolverStatus::Singular;
-                }
-            }
+        if self.cfg.singular_pivot_floor > 0.0
+            && min_abs.is_some_and(|mp| mp < self.cfg.singular_pivot_floor)
+        {
+            return ESymSolverStatus::Singular;
         }
 
         ESymSolverStatus::Success
@@ -693,10 +693,8 @@ impl RslabSolverInterface {
         s.last_nnz_a = Some(nnz_a);
         s.last_nnz_l = Some(nnz_l);
 
-        if let Some(sink) = self.sink.as_ref() {
-            if let Ok(mut guard) = sink.lock() {
-                *guard = s.clone();
-            }
+        if let Some(Ok(mut guard)) = self.sink.as_ref().map(|s| s.lock()) {
+            *guard = s.clone();
         }
 
         // The same tracing span fields `pounce-feral` records, so an existing
@@ -938,7 +936,10 @@ mod tests {
         );
         let r0 = 4.0 * rhs2[0] + rhs2[1] - 5.0;
         let r1 = rhs2[0] + 5.0 * rhs2[1] - 6.0;
-        assert!(r0.abs() < 1e-10 && r1.abs() < 1e-10, "residual ({r0}, {r1})");
+        assert!(
+            r0.abs() < 1e-10 && r1.abs() < 1e-10,
+            "residual ({r0}, {r1})"
+        );
         // One analysis, two factorizations.
         let sum = s.summary();
         assert_eq!(sum.n_factors, 2);
@@ -961,7 +962,8 @@ mod tests {
         assert!((rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 1.0).abs() < 1e-12);
 
         // Refill with the same effective matrix split differently.
-        s.values_array_mut().copy_from_slice(&[0.25, 1.75, 1.0, 3.0]);
+        s.values_array_mut()
+            .copy_from_slice(&[0.25, 1.75, 1.0, 3.0]);
         let mut rhs2 = vec![3.0, 4.0];
         assert_eq!(
             s.multi_solve(true, &irn, &jcn, 1, &mut rhs2, false, 0),

@@ -18,6 +18,8 @@
 //! cargo run -p pounce-rslab --release --example rslab_nlp_solve -- model.nl
 //! ```
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -99,9 +101,7 @@ fn main() {
             solve(model, "feral", |_| {
                 Box::new(pounce_feral::FeralSolverInterface::new())
             }),
-            solve(model, "rslab", |_| {
-                Box::new(RslabSolverInterface::new())
-            }),
+            solve(model, "rslab", |_| Box::new(RslabSolverInterface::new())),
             solve(model, "rslab-sp", |_| {
                 Box::new(RslabSolverInterface::with_config(
                     RslabConfig::static_pivoting(1e-12),

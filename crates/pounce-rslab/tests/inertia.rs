@@ -12,6 +12,8 @@
 //! reaches"). Where a fixture is meant to force a 2×2 block, that is asserted
 //! rather than assumed.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{ESymSolverStatus, SparseSymLinearSolverInterface};
 use pounce_rslab::scaling::Equilibration;
@@ -44,12 +46,7 @@ fn diag_triplets(d: &[Number]) -> (Vec<Index>, Vec<Index>, Vec<Number>) {
 }
 
 /// Inertia of the factored matrix, requiring the factorization to succeed.
-fn inertia_of(
-    n: Index,
-    irn: &[Index],
-    jcn: &[Index],
-    vals: &[Number],
-) -> InertiaInfo {
+fn inertia_of(n: Index, irn: &[Index], jcn: &[Index], vals: &[Number]) -> InertiaInfo {
     let (s, st) = factor(RslabConfig::default(), n, irn, jcn, vals);
     assert_eq!(st, ESymSolverStatus::Success, "factorization failed");
     s.inertia_info().clone()
@@ -213,7 +210,10 @@ fn a_subfloor_pivot_makes_the_inertia_unreliable() {
     let irn = vec![1, 2, 2];
     let jcn = vec![1, 1, 2];
     let vals = vec![1.0, 1.0, 1.0 - 2.0_f64.powi(-53)];
-    assert_ne!(vals[2], 1.0, "premise: the perturbation must survive rounding");
+    assert_ne!(
+        vals[2], 1.0,
+        "premise: the perturbation must survive rounding"
+    );
     let (s, st) = factor(cfg, 2, &irn, &jcn, &vals);
     assert_eq!(st, ESymSolverStatus::Success);
     let info = s.inertia_info();
@@ -425,8 +425,8 @@ fn the_adapters_equilibration_matches_rslabs() {
 
     // Indefinite, with row scales spanning 8 orders of magnitude.
     let n = 5usize;
-    let rows_0 = vec![0usize, 1, 2, 2, 3, 4, 4];
-    let cols_0 = vec![0usize, 1, 1, 2, 3, 0, 4];
+    let rows_0 = [0usize, 1, 2, 2, 3, 4, 4];
+    let cols_0 = [0usize, 1, 1, 2, 3, 0, 4];
     let vals = vec![1e8, 2.0, -3.0, 1e-4, -5.0, 7e3, 4.0];
 
     let a = CscMatrix::<f64>::from_triplets(n, &rows_0, &cols_0, &vals).unwrap();
@@ -461,8 +461,8 @@ fn the_adapters_equilibration_matches_rslabs() {
 #[test]
 fn turning_the_equilibration_off_is_observable() {
     let n = 5usize;
-    let rows_0 = vec![0usize, 1, 2, 2, 3, 4, 4];
-    let cols_0 = vec![0usize, 1, 1, 2, 3, 0, 4];
+    let rows_0 = [0usize, 1, 2, 2, 3, 4, 4];
+    let cols_0 = [0usize, 1, 1, 2, 3, 0, 4];
     let vals = vec![1e8, 2.0, -3.0, 1e-4, -5.0, 7e3, 4.0];
     let irn: Vec<Index> = rows_0.iter().map(|&r| r as Index + 1).collect();
     let jcn: Vec<Index> = cols_0.iter().map(|&c| c as Index + 1).collect();

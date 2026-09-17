@@ -31,6 +31,8 @@
 //! * `airport`, `lp_degen2` — a mid-size NLP and a degenerate LP, for the
 //!   rank-deficient-Jacobian shape.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -131,10 +133,10 @@ impl SparseSymLinearSolverInterface for Capturing {
             number_of_neg_evals,
         );
         if new_matrix && nrhs == 1 {
-            let keep = self.seen % self.stride == 0;
+            let keep = self.seen.is_multiple_of(self.stride);
             self.seen += 1;
-            if keep {
-                if let Ok(mut g) = self.sink.lock() {
+            if let (true, Ok(mut g)) = (keep, self.sink.lock()) {
+                {
                     g.push(CapturedKkt {
                         matrix: SymTriplet {
                             n: self.dim,
@@ -289,7 +291,11 @@ fn main() {
         }
 
         let mut tally = Tally::default();
-        println!("## {name}  (n = {}, nnz = {})", captured[0].matrix.n, captured[0].matrix.nnz());
+        println!(
+            "## {name}  (n = {}, nnz = {})",
+            captured[0].matrix.n,
+            captured[0].matrix.nnz()
+        );
         println!("{}", compare::ROW_HEADER);
 
         for (k, cap) in captured.iter().enumerate() {
@@ -339,9 +345,10 @@ fn main() {
                         _ => {}
                     }
                     if let (Some(a), Some(b)) = (f.residual_ratio, r.residual_ratio) {
-                        tally.ns_worst_gap = tally
-                            .ns_worst_gap
-                            .max(if a > 0.0 { b / a } else { f64::INFINITY });
+                        tally.ns_worst_gap =
+                            tally
+                                .ns_worst_gap
+                                .max(if a > 0.0 { b / a } else { f64::INFINITY });
                     }
                 }
                 if r.factor_status == ESymSolverStatus::Success {
@@ -352,12 +359,14 @@ fn main() {
                 }
             }
             let rslab_sp = recs.iter().find(|r| r.solver == "rslab-sp");
-            if let Some(sp) = rslab_sp {
-                if sp.factor_status == ESymSolverStatus::Success {
+            if let Some(sp) = rslab_sp.filter(|s| s.factor_status == ESymSolverStatus::Success) {
+                {
                     tally.rslab_sp_factor_ok += 1;
                     tally.rslab_sp_perturbed += sp.perturbed_pivots.unwrap_or(0);
                     tally.rslab_sp_2x2 += sp.two_by_two_pivots.unwrap_or(0);
-                    if let (Some(f), Some(e)) = (feral.and_then(|f| f.negative_evals), sp.negative_evals) {
+                    if let (Some(f), Some(e)) =
+                        (feral.and_then(|f| f.negative_evals), sp.negative_evals)
+                    {
                         if f == e {
                             tally.rslab_sp_inertia_agree += 1;
                         } else {
@@ -412,9 +421,11 @@ fn main() {
                         _ => {}
                     }
                     if let (Some(a), Some(b)) = (f.residual_ratio, r.residual_ratio) {
-                        tally.worst_residual_gap = tally
-                            .worst_residual_gap
-                            .max(if a > 0.0 { b / a } else { f64::INFINITY });
+                        tally.worst_residual_gap = tally.worst_residual_gap.max(if a > 0.0 {
+                            b / a
+                        } else {
+                            f64::INFINITY
+                        });
                     }
                 }
             }
@@ -447,7 +458,10 @@ fn main() {
             tally.ns_worst_gap
         );
         println!("  2x2 pivots (rslab, total)          {}", tally.rslab_2x2);
-        println!("  rslab inertia flagged unreliable   {}", tally.rslab_unreliable);
+        println!(
+            "  rslab inertia flagged unreliable   {}",
+            tally.rslab_unreliable
+        );
         println!(
             "  -- paired comparison over the {} systems BOTH factored --",
             tally.paired

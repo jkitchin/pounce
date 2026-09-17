@@ -217,7 +217,7 @@ pub fn scan_d(
     d_diag: &[Number],
     d_subdiag: &[Number],
     two_by_two: &[bool],
-) -> (Option<(Number, Number)>, (usize, usize, usize), usize) {
+) -> (Option<PivotExtent>, InertiaCounts, usize) {
     let n = d_diag.len();
     let mut min_mag = Number::INFINITY;
     let mut max_mag = 0.0_f64;
@@ -269,7 +269,7 @@ pub fn stable_recount(
     d_diag: &[Number],
     d_subdiag: &[Number],
     two_by_two: &[bool],
-) -> (usize, usize, usize) {
+) -> InertiaCounts {
     scan_d(d_diag, d_subdiag, two_by_two).1
 }
 
@@ -295,6 +295,12 @@ pub fn inertia_trust_floor(configured: Option<f64>, dim: usize) -> f64 {
         None => dim as f64 * f64::EPSILON,
     }
 }
+
+/// `(min |λ(D)|, max |λ(D)|)` over every eliminated 1×1 pivot and 2×2 block.
+pub type PivotExtent = (Number, Number);
+
+/// `(positive, negative, zero)`.
+pub type InertiaCounts = (usize, usize, usize);
 
 /// Decide whether POUNCE may treat RSLAB's counts as a measurement.
 ///
@@ -322,8 +328,8 @@ pub fn inertia_trust_floor(configured: Option<f64>, dim: usize) -> f64 {
 /// A `trust_floor` of `0.0` disables disqualifier 2, matching
 /// `FeralConfig::inertia_pivot_floor = Some(0.0)`.
 pub fn classify_reliability(
-    rslab_counts: (usize, usize, usize),
-    stable: (usize, usize, usize),
+    rslab_counts: InertiaCounts,
+    stable: InertiaCounts,
     min_abs: Option<Number>,
     perturbed: usize,
     trust_floor: Number,
@@ -334,12 +340,8 @@ pub fn classify_reliability(
     if stable != rslab_counts {
         return false;
     }
-    if trust_floor > 0.0 {
-        if let Some(m) = min_abs {
-            if m < trust_floor {
-                return false;
-            }
-        }
+    if trust_floor > 0.0 && min_abs.is_some_and(|m| m < trust_floor) {
+        return false;
     }
     true
 }
@@ -403,8 +405,15 @@ mod tests {
         // The naive subtraction cancels to exactly zero here; ours does not.
         let tr = a + c;
         let disc = ((a - c) * (a - c) + 4.0 * b * b).sqrt();
-        assert_eq!(0.5 * (tr - disc).abs(), 0.0, "premise: the naive form cancels");
-        assert!(lo > 0.0, "the stable form must not report a zero eigenvalue");
+        assert_eq!(
+            0.5 * (tr - disc).abs(),
+            0.0,
+            "premise: the naive form cancels"
+        );
+        assert!(
+            lo > 0.0,
+            "the stable form must not report a zero eigenvalue"
+        );
     }
 
     /// The fused determinant keeps a sign the naive product difference loses.
