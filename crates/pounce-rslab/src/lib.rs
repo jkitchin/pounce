@@ -545,14 +545,21 @@ impl RslabSolverInterface {
         // `nnz(L)` is reported **structurally** — every slot the factor
         // occupies — not as the count of numerically nonzero entries.
         //
-        // The distinction is not pedantic on a POUNCE KKT. The triplet
-        // pattern POUNCE hands over carries explicit zeros wherever the
-        // Hessian or the (2,2) block has a structural slot but no value: on
-        // `airport`'s first KKT, 1768 of 2016 stored entries are exactly
-        // `0.0`. RSLAB propagates them and then drops them
+        // The distinction is not pedantic on a POUNCE KKT. The triplet pattern
+        // is fixed once by `initialize_structure` and reused for every later
+        // factorization, so it is the union over the whole solve: a slot with
+        // no value yet at the starting point still has to be there. On
+        // `airport`'s *first* KKT that leaves 1768 of 2016 stored entries
+        // exactly `0.0` — and 2% by the last one, which is the number that
+        // describes the solve (`examples/kkt_zero_census.rs`).
+        //
+        // RSLAB propagates those zeros and then drops them
         // (`LdltNumeric::n_zeros`, and `PanelFactor::to_csc` omits them
         // outright), so its "stored nonzeros" came to 330 against FERAL's
-        // 5721 — a 17x difference that is entirely an accounting artefact.
+        // 5721 on that first factorization — a 17x difference that is entirely
+        // an accounting artefact, and one that shrinks to nothing by the end of
+        // the same solve without the pattern changing at all. A factor-size
+        // figure that moves with the values is not a fill metric.
         // `numeric.factor.nnz()` is the panel storage RSLAB actually holds,
         // which is the quantity FERAL's `nnz_l` also reports and the one a
         // memory comparison needs.

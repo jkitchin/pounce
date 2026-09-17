@@ -131,12 +131,13 @@ pub struct SolveRecord {
     pub n_pattern_changes: u64,
     /// Slots of `L` holding an exact zero, where the backend reports it.
     ///
-    /// `nnz_l` is structural on every arm — it is what the factor occupies —
-    /// but on a POUNCE KKT most of it carries no information, because the
-    /// triplet pattern arrives full of explicit zeros (1768 of 2016 stored
-    /// entries on `airport`'s first KKT). Only RSLAB reports the split, so a
-    /// fill comparison against FERAL has to be read as structural-to-
-    /// structural and nothing finer.
+    /// `nnz_l` is structural on every arm — it is what the factor occupies.
+    /// Only RSLAB reports how much of it is numerically zero, and that figure
+    /// is **value-dependent**: on `airport` it is 88% of the pattern at the
+    /// first factorization and 2% at the last, with the pattern unchanged
+    /// throughout (`examples/kkt_zero_census.rs`). So it is a fact about the
+    /// iterate, not about the fill, and a fill comparison against FERAL has to
+    /// be read as structural-to-structural and nothing finer.
     pub explicit_zeros_in_l: Option<usize>,
     /// Wall time of `initialize_structure` — the symbolic-analysis *request*.
     /// Backends differ in how much they do here versus fold into the first

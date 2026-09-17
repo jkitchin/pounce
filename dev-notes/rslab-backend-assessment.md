@@ -10,6 +10,7 @@ cargo run -p pounce-rslab --release --example rslab_kkt_replay # real KKT system
 cargo run -p pounce-rslab --release --example rslab_nlp_solve  # whole NLPs
 cargo run -p pounce-rslab --release --example rslab_bench       # phase timings
 cargo run -p pounce-rslab --release --example rslab_scale_smoke # end-to-end, 3 scales
+cargo run -p pounce-rslab --release --example kkt_zero_census   # the explicit-zero census
 ```
 
 MA57 was not measured: `libcoinhsl` is not on the link path here. The harness
@@ -261,7 +262,7 @@ Eight mismatches. Six are mechanical and live in the adapter; two are not.
 | 3 | **Multi-RHS layout** | RSLAB's `solve_ldlt_many` reads and writes **row-major** `n × nrhs`; POUNCE packs columns. The adapter transposes, fused with the equilibration. Silent for every `nrhs > 1` — the transposed answer has the right shape and no dimension error fires. Caught by `packed_multi_rhs_matches_one_at_a_time`, not by inspection. |
 | 4 | **Equilibration is private** | `LdltSolver` equilibrates and the low-level path does not; `equilibrate_with` is `pub(crate)`. The adapter reproduces the one-pass inf-norm step (`scaling.rs`, nine lines), pinned end-to-end against `LdltSolver::factor` by `the_adapters_equilibration_matches_rslabs`. |
 | 5 | **`ForceAccept` is not FERAL's** | The adapter does not re-export `ZeroPivotAction`. `PivotPolicy` is adapter-owned, and its static-pivot arm computes the floor per factorization from the equilibrated matrix, which is RSLAB's own recommended recipe and not something a caller can supply at construction time. |
-| 6 | **`nnz(L)` means something different** | POUNCE's KKT triplets carry explicit zeros — 1768 of 2016 stored entries on `airport`'s first system — which RSLAB propagates and then drops. Reporting its stored-nonzero count gave 330 against FERAL's 5721, a 17× "win" that is pure accounting. The adapter reports the structural size and exposes the exact-zero count separately. |
+| 6 | **`nnz(L)` means something different** | RSLAB drops numerically-zero entries when it materializes `L`; FERAL keeps the structural slot. Reporting RSLAB's stored-nonzero count gave 330 against FERAL's 5721 on `airport`'s first system, a 17× "win" that is pure accounting — and one that evaporates by the last factorization of the same solve, pattern unchanged (§4). The adapter reports the structural size and exposes the exact-zero count separately. |
 | 7 | **No quality ladder** | `α` is a compile-time constant with no `SolverSettings` route to it. `increase_quality()` returns `false` — "already at maximum", which terminates the caller's retry loop rather than spinning. |
 | 8 | **Naive 2×2 determinant** | *Not resolvable in an adapter*, since RSLAB computes the inertia internally. The adapter recounts from the same `D` with the fused determinant and marks a disagreement unreliable — it does not pick a winner. |
 
@@ -379,6 +380,39 @@ every refactorization. The cached triplet→CSC slot scatter takes conversion fr
 At scale the two are at rough parity, with the split going the wrong way for an
 IPM: RSLAB is 11% faster on the first factorization and **11% slower on the
 refactorization**, which is the one paid every iteration.
+
+### Aside: the explicit zeros, and why they are not waste — `kkt_zero_census`
+
+An earlier draft of this note said "POUNCE's KKT carries 88% explicit zeros".
+That was measured on `airport`'s **first** factorization and generalised to the
+solve, which it does not survive:
+
+| model | slots | factzns | zero @ it0 | zero @ last | zero in *every* factzn |
+| --- | --- | --- | --- | --- | --- |
+| airport | 2100 | 17 | 88.2% | **2.0%** | 2.0% |
+| eigena2 | 1825 | 43 | 88.5% | **9.0%** | 0.0% |
+| deb7 | 8063 | 150 | 38.3% | 11.1% | 11.1% |
+| convex_qp_qscfxm1 | 4395 | 25 | 24.2% | 7.5% | 7.5% |
+| lp_degen2 | 5402 | 251 | 8.2% | **0.0%** | 0.0% |
+| wyndor_min | 15 | 10 | 20.0% | 20.0% | 20.0% |
+
+Iteration 0 cannot be representative. The pattern is fixed once by
+`initialize_structure` and reused for every later factorization, so it is the
+union over the whole solve; at the starting point much of the barrier diagonal
+and the Hessian contribution has no value yet, but the slot still has to exist
+because the same entry is nonzero five iterations later. **The zeros are the
+price of the fixed symbolic pattern** — the thing that makes refactorization
+cheap, and the thing §4's timings show working (symbolic 318 ms → 0 ms).
+
+The only column that measures waste is the last one: slots zero in *every*
+factorization. That is 0–11%, and exactly zero on two of six models. There is
+no POUNCE-side inefficiency here to go and fix.
+
+What it does settle is the accounting question in §3 row 6. RSLAB's
+stored-nonzero figure for the same unchanged pattern moves from 88% to 2% of
+the slots across one `airport` solve. A factor-size number that moves with the
+values is not a fill metric, so the harness reports the structural size — which
+is also what FERAL reports and what memory costs.
 
 ### End-to-end at three scales — `rslab_scale_smoke`
 
