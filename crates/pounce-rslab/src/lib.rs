@@ -162,6 +162,21 @@ pub struct RslabConfig {
     /// `FeralConfig::singular_pivot_floor`'s default.
     pub singular_pivot_floor: f64,
 
+    /// Whether a perturbed factorization's inertia may still be acted on.
+    ///
+    /// Default `false`: under static pivoting RSLAB lifts small pivots, and a
+    /// 2×2 lift moves eigenvalues across zero (it adds to *both* diagonals and,
+    /// failing that, to the determinant outright), so the count describes
+    /// `A + E` and not `A`. `true` drops that one disqualifier, leaving the
+    /// sub-floor and recount checks in place.
+    ///
+    /// This exists as an attribution knob, not as a recommendation. RSLAB
+    /// under static pivoting converges on `eigena2` where FERAL enters
+    /// restoration, and "did the factorization do that, or did the gate?" is
+    /// not a question prose can settle — the two arms differ only in this
+    /// flag. `examples/rslab_nlp_solve.rs` runs both.
+    pub trust_perturbed_inertia: bool,
+
     /// RSLAB factorization settings other than the pivot policy (ordering,
     /// threads, kernel knobs). Defaults to [`SolverSettings::default`], i.e.
     /// the left-looking path with the `Auto` ordering.
@@ -175,6 +190,7 @@ impl Default for RslabConfig {
             equilibration: scaling::Equilibration::OnePassInfNorm,
             inertia_pivot_floor: None,
             singular_pivot_floor: 0.0,
+            trust_perturbed_inertia: false,
             settings: SolverSettings::default(),
         }
     }
@@ -488,7 +504,11 @@ impl RslabSolverInterface {
             counts,
             stable,
             min_abs,
-            numeric.n_perturbed,
+            if self.cfg.trust_perturbed_inertia {
+                0
+            } else {
+                numeric.n_perturbed
+            },
             self.trust_floor(),
         );
         self.inertia = InertiaInfo {
