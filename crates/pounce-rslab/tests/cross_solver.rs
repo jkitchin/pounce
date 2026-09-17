@@ -342,6 +342,108 @@ fn feral_is_the_more_accurate_of_the_two_where_both_factor() {
     assert!(rslab < 1e-10, "rslab residual_ratio {rslab:.3e}");
 }
 
+/// A synthetic reproducer of the failure, independent of any captured fixture.
+///
+/// The shape is a saddle point `[[W + Σ, Jᵀ], [J, 0]]` over a grid Laplacian.
+/// Two variants, and the pair is the test:
+///
+/// * a **dense-row** `J`, where each constraint couples a whole grid row —
+///   RSLAB factors it at every size tried, up to `n = 160 400`;
+/// * a **sparse-row** `J` with one entry per constraint, which is what a slack
+///   or simple-bound row contributes and what gives a KKT its arrow signature
+///   — RSLAB refuses it at every size.
+///
+/// FERAL factors both. The first variant alone would have said the failure
+/// does not exist, which is why the benchmark carries both and why the real
+/// KKT capture was necessary to find it in the first place: a corpus uniform
+/// in the dimension a defect acts on reports nothing, however large its
+/// models are.
+///
+/// This is the minimal form of the finding, so it is what a bug report to
+/// RSLAB should carry.
+#[test]
+fn a_sparse_jacobian_saddle_point_reproduces_the_failure() {
+    fn grid_saddle(k: usize, dense_rows: bool) -> SymTriplet {
+        let nx = k * k;
+        let nc = if dense_rows { k } else { nx / 2 };
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let at = |i: usize, j: usize| i * k + j;
+        for i in 0..k {
+            for j in 0..k {
+                let r = at(i, j) as Index + 1;
+                irn.push(r);
+                jcn.push(r);
+                vals.push(5.0);
+                if i > 0 {
+                    irn.push(r);
+                    jcn.push(at(i - 1, j) as Index + 1);
+                    vals.push(-1.0);
+                }
+                if j > 0 {
+                    irn.push(r);
+                    jcn.push(at(i, j - 1) as Index + 1);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        if dense_rows {
+            for c in 0..nc {
+                for j in 0..k {
+                    irn.push((nx + c) as Index + 1);
+                    jcn.push(at(c, j) as Index + 1);
+                    vals.push(1.0 + 0.1 * j as f64);
+                }
+            }
+        } else {
+            for c in 0..nc {
+                irn.push((nx + c) as Index + 1);
+                jcn.push((2 * c) as Index + 1);
+                vals.push(1.0);
+            }
+        }
+        // The structurally present, numerically zero (2,2) block POUNCE emits.
+        for c in 0..nc {
+            irn.push((nx + c) as Index + 1);
+            jcn.push((nx + c) as Index + 1);
+            vals.push(0.0);
+        }
+        SymTriplet {
+            n: (nx + nc) as Index,
+            irn,
+            jcn,
+            vals,
+        }
+    }
+
+    for k in [8usize, 16, 24] {
+        let dense = grid_saddle(k, true);
+        let sparse = grid_saddle(k, false);
+        for (tag, a) in [("dense-J", &dense), ("sparse-J", &sparse)] {
+            let b = a.sample_rhs();
+            let recs = compare::run_all(a, &b);
+            assert_eq!(
+                record(&recs, "feral").factor_status,
+                ESymSolverStatus::Success,
+                "k={k} {tag}: FERAL must factor both variants"
+            );
+            assert!(
+                record(&recs, "rslab-sp").factor_status == ESymSolverStatus::Success,
+                "k={k} {tag}: static pivoting must not fail"
+            );
+        }
+        assert_eq!(
+            record(&compare::run_all(&dense, &dense.sample_rhs()), "rslab").factor_status,
+            ESymSolverStatus::Success,
+            "k={k}: RSLAB factors the dense-row variant — this is the branch that              hides the defect"
+        );
+        assert_eq!(
+            record(&compare::run_all(&sparse, &sparse.sample_rhs()), "rslab").factor_status,
+            ESymSolverStatus::Singular,
+            "k={k}: RSLAB now factors the sparse-row saddle point; the              no-delayed-pivoting finding needs re-measuring"
+        );
+    }
+}
+
 /// Turning equilibration off on both sides does not rescue RSLAB, so the
 /// failure is not an artefact of the adapter's scaling differing from FERAL's.
 ///

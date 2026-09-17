@@ -213,6 +213,52 @@ impl RslabConfig {
     }
 }
 
+/// Wall-clock split of the most recent `multi_solve`, in milliseconds.
+///
+/// POUNCE refactors matrices with an identical sparsity pattern hundreds of
+/// times per solve, so "how long did the factorization take" is the wrong
+/// granularity: what matters is which part of it the second and subsequent
+/// calls skip. These five rows are the parts, and they are measured rather
+/// than inferred — RSLAB's own `Diagnostics` stages do not include the
+/// adapter's conversion or the CSC materialization, which between them are not
+/// negligible.
+///
+/// Zero for a phase the call did not reach (a back-solve leaves everything but
+/// [`Self::solve_ms`] at zero, and a refactorization leaves
+/// [`Self::symbolic_ms`] at zero because the analysis is cached).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PhaseTimings {
+    /// Triplet → CSC. The full `from_triplets` (bucket, sort, sum duplicates)
+    /// on the first factorization of a pattern; the cached-slot scatter, which
+    /// is O(nnz) and allocation-free, on every later one.
+    pub conversion_ms: f64,
+    /// Symmetric equilibration `A_hat = D A D`.
+    pub equilibration_ms: f64,
+    /// `rslab::analyze_with` — fill-reducing ordering, elimination tree,
+    /// supernode amalgamation. Paid once per pattern.
+    pub symbolic_ms: f64,
+    /// `rslab::factor_numeric` — the numeric factorization proper.
+    pub numeric_ms: f64,
+    /// `LdltNumeric::into_factors` — materializing `L` in CSC for the solve.
+    /// An artefact of the adapter reaching for RSLAB's low-level entry points
+    /// (its supernodal `SolvePlan` is `pub(crate)`), and the first thing to
+    /// remove if RSLAB is ever adopted.
+    pub materialize_ms: f64,
+    /// Back-substitution, including the row-major transpose either way.
+    pub solve_ms: f64,
+}
+
+impl PhaseTimings {
+    /// Everything except the solve — what one `new_matrix = true` call costs.
+    pub fn factor_total_ms(&self) -> f64 {
+        self.conversion_ms
+            + self.equilibration_ms
+            + self.symbolic_ms
+            + self.numeric_ms
+            + self.materialize_ms
+    }
+}
+
 /// RSLAB solver implementing the IPM-side sparse symmetric backend contract.
 pub struct RslabSolverInterface {
     cfg: RslabConfig,
@@ -261,6 +307,8 @@ pub struct RslabSolverInterface {
 
     summary: LinearSolverSummary,
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
+    /// Phase split of the most recent `multi_solve`. See [`PhaseTimings`].
+    timings: PhaseTimings,
 }
 
 impl std::fmt::Debug for RslabSolverInterface {
@@ -310,6 +358,7 @@ impl RslabSolverInterface {
                 ..Default::default()
             },
             sink: None,
+            timings: PhaseTimings::default(),
         }
     }
 
@@ -337,6 +386,11 @@ impl RslabSolverInterface {
     /// The configuration this backend was built with.
     pub fn config(&self) -> &RslabConfig {
         &self.cfg
+    }
+
+    /// Wall-clock split of the most recent `multi_solve`. See [`PhaseTimings`].
+    pub fn phase_timings(&self) -> PhaseTimings {
+        self.timings
     }
 
     /// Slots of the most recent factor holding an exact zero
@@ -422,10 +476,15 @@ impl RslabSolverInterface {
     /// 4. a completed factor whose smallest pivot is below
     ///    `singular_pivot_floor` is `Singular`.
     fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
+        self.timings = PhaseTimings::default();
+        let t = std::time::Instant::now();
         if !self.refresh_matrix() {
             return ESymSolverStatus::FatalError;
         }
+        self.timings.conversion_ms = t.elapsed().as_secs_f64() * 1e3;
+        let t = std::time::Instant::now();
         self.equilibrate();
+        self.timings.equilibration_ms = t.elapsed().as_secs_f64() * 1e3;
 
         // The static-pivot floor is relative to the matrix RSLAB actually
         // factors, i.e. after equilibration — a floor derived from the
@@ -442,7 +501,10 @@ impl RslabSolverInterface {
 
         let pattern_reused = self.symbolic.is_some();
         if self.symbolic.is_none() {
-            match rslab::analyze_with(scaled.n, &scaled.col_ptr, &scaled.row_idx, &opts) {
+            let t = std::time::Instant::now();
+            let analysis = rslab::analyze_with(scaled.n, &scaled.col_ptr, &scaled.row_idx, &opts);
+            self.timings.symbolic_ms = t.elapsed().as_secs_f64() * 1e3;
+            match analysis {
                 Ok(s) => self.symbolic = Some(s),
                 Err(e) => {
                     tracing::error!(
@@ -455,7 +517,10 @@ impl RslabSolverInterface {
         }
         let symb = self.symbolic.as_ref().expect("analysis stored above");
 
-        let numeric = match rslab::factor_numeric(symb, &scaled, &opts) {
+        let t = std::time::Instant::now();
+        let factored = rslab::factor_numeric(symb, &scaled, &opts);
+        self.timings.numeric_ms = t.elapsed().as_secs_f64() * 1e3;
+        let numeric = match factored {
             Ok(nf) => nf,
             Err(rslab::RslabError::NumericallyRankDeficient) => {
                 tracing::debug!(
@@ -524,7 +589,9 @@ impl RslabSolverInterface {
         };
         self.negevals = counts.1 as Index;
         self.explicit_zeros = explicit_zeros;
+        let t = std::time::Instant::now();
         self.factors = Some(numeric.into_factors());
+        self.timings.materialize_ms = t.elapsed().as_secs_f64() * 1e3;
         self.record_factor_stats(pattern_reused, nnz_l);
 
         if !self.inertia.recount_agrees() {
@@ -672,6 +739,7 @@ impl RslabSolverInterface {
             return ESymSolverStatus::FatalError;
         };
 
+        let t = std::time::Instant::now();
         // Column-major → row-major, scaling in on the way.
         self.rhs_scratch.resize(n * nrhs, 0.0);
         for c in 0..nrhs {
@@ -695,6 +763,7 @@ impl RslabSolverInterface {
                 rhs_vals[c * n + i] = x[i * nrhs + c] * self.scale[i];
             }
         }
+        self.timings.solve_ms = t.elapsed().as_secs_f64() * 1e3;
         ESymSolverStatus::Success
     }
 }
@@ -768,6 +837,11 @@ impl SparseSymLinearSolverInterface for RslabSolverInterface {
             if s != ESymSolverStatus::Success {
                 return s;
             }
+        } else {
+            // A back-solve reaches none of the factor phases; leaving the
+            // previous call's numbers in place would make a solve-only call
+            // look like a factorization.
+            self.timings = PhaseTimings::default();
         }
         self.backsolve(nrhs, rhs_vals)
     }
