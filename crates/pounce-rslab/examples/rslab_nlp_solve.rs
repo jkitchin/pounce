@@ -101,6 +101,19 @@ fn main() {
             solve(model, "feral", |_| {
                 Box::new(pounce_feral::FeralSolverInterface::new())
             }),
+            // FERAL with delayed pivoting turned OFF -- `feral_static_pivoting`,
+            // which POUNCE already exposes. This is the control for the whole
+            // RSLAB comparison: RSLAB's defining structural difference is that
+            // it has no delayed pivoting, so if FERAL configured the same way
+            // reproduces RSLAB's result, the result was never RSLAB's.
+            solve(model, "feral-sp", |_| {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(
+                    pounce_feral::FeralConfig {
+                        static_pivoting: Some(true),
+                        ..pounce_feral::FeralConfig::default()
+                    },
+                ))
+            }),
             solve(model, "rslab", |_| Box::new(RslabSolverInterface::new())),
             solve(model, "rslab-sp", |_| {
                 Box::new(RslabSolverInterface::with_config(

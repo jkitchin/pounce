@@ -37,6 +37,12 @@ restoration and fails (17 iterations, `constr_viol` 1.1e-9). Deterministic over
 three runs, and attributable to the factorization rather than to the adapter's
 inertia gate: the two arms that differ only in that gate both converge.
 
+That last result is probably **not a reason to adopt RSLAB**, and chasing it is
+the most useful thing in this note. RSLAB is a fork of FERAL (its `NOTICE` says
+so), the win comes from lift-to-floor static pivoting, and FERAL already has
+that mode — `Solver::with_static_pivot_threshold`. POUNCE just does not expose
+it. See "The control, and where the `eigena2` win actually comes from" in §4.
+
 **And it is 3.8–6.3× slower end to end** on a banded KKT at three scales
 (1.5k / 15k / 150k rows), with identical iteration counts on every arm so the
 ratio is comparable. 92% of that time is RSLAB's own numeric factorization and
@@ -479,6 +485,53 @@ loop up a perturbation ladder. That is worth pursuing independently of RSLAB.
 On speed, separately: FERAL is 3.8–6.3× faster end to end on a banded KKT at
 three scales, with 92% of RSLAB's time in its own numeric factorization and
 ~2% in the adapter — so that gap is RSLAB's, not the integration's.
+
+#### The control, and where the `eigena2` win actually comes from
+
+RSLAB's defining structural difference from FERAL is the absence of delayed
+pivoting. FERAL can be told to drop it too — POUNCE already exposes that as
+`feral_static_pivoting` / `POUNCE_FERAL_STATIC_PIVOTING` — so the comparison
+has an obvious control that the first pass of this note was missing. Run it
+(the `feral-sp` arm of `rslab_nlp_solve`) and the answer is **negative**:
+
+| model | feral | feral-sp | rslab-sp |
+| --- | --- | --- | --- |
+| eigena2 | RestorationFailed, 17 it | RestorationFailed, 17 it | **Succeeded, 21 it** |
+| eigenb2 | Succeeded, 21 it | Succeeded, 21 it | Succeeded, 21 it |
+| deb7 | RestorationFailed, 54 it | RestorationFailed, 35 it | failed at 1 it |
+
+On `eigena2`, `feral-sp` is identical to plain `feral` to every printed digit.
+Turning off delayed pivoting is **not** what gets RSLAB the win.
+
+What does is the *other* half of the configuration, and the two are easy to
+conflate. POUNCE's `feral_static_pivoting` bool maps to
+`ZeroPivotAction::ForceAccept`, which in FERAL accepts the tiny pivot **at face
+value**, zeroes the `L` column and books it as a zero. RSLAB's static-pivot mode
+**lifts** the pivot to an absolute floor and keeps the `L` column live. Those
+are different numerics, and §2 already recorded that `ForceAccept` does not mean
+the same thing in the two libraries — this is that difference showing up as a
+converged solve.
+
+**FERAL has the lift-to-floor mode.** `NumericParams::static_pivot_threshold`,
+reachable as `feral::Solver::with_static_pivot_threshold(t)`, enforces an
+absolute floor of `t · ‖D·A·D‖∞` on the scaled matrix — the same MA57 recipe,
+computed against the same equilibrated matrix, as
+[`crate::PivotPolicy::StaticPivotRelative`] in this adapter. `factorize.rs`
+notes it "applies regardless of `on_zero_pivot`", so it is independent of the
+ForceAccept/Fail trichotomy.
+
+**POUNCE does not wire it.** `pounce_feral::FeralConfig` carries the
+`static_pivoting` bool and not the threshold, and `static_pivot_threshold`
+appears nowhere in `crates/`. So the configuration that produced the only
+result in this note where RSLAB beats FERAL is one that FERAL supports and
+POUNCE cannot currently ask for.
+
+That makes the actionable item a POUNCE change rather than a backend swap: add
+`static_pivot_threshold: Option<f64>` to `FeralConfig` (default `None`, so no
+trajectory moves until someone opts in) and re-run `eigena2`. If it converges,
+the win is FERAL's and RSLAB was only the instrument that found it. **This is a
+prediction, not a measurement — it has not been run**, because it needs a field
+on a shipping crate and this crate was scoped not to touch one.
 
 ### E. Are its 2×2 Bunch-Kaufman pivots beneficial on those cases?
 
