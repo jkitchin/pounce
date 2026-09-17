@@ -5724,6 +5724,13 @@ impl IpoptApplication {
         if let Some(v) = read_int("filter_reset_trigger") {
             builder.line_search.filter_reset_trigger = v;
         }
+        // `filter_theta_roundoff_retry` (gh#945).
+        if let Ok((v, true)) = self
+            .options
+            .get_bool_value("filter_theta_roundoff_retry", "")
+        {
+            builder.line_search.filter_theta_roundoff_retry = v;
+        }
         // Penalty line-search constants (#551), consumed by
         // `PenaltyLsAcceptor` (only on the `line_search_method=penalty`
         // / `cg-penalty` paths). The acceptor implements ν and the

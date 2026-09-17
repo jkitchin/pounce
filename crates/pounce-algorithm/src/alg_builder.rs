@@ -894,6 +894,14 @@ pub struct LineSearchOptions {
     /// `filter_reset_trigger` — successive filter-rejected iterations that
     /// trigger a filter reset.
     pub filter_reset_trigger: Index,
+    /// `filter_theta_roundoff_retry` (gh#945) — whether a line search that
+    /// runs out of `alpha` at an iterate already feasible to round-off gets
+    /// one more pass with the filter's `theta` axis measured against
+    /// `theta`'s own evaluation noise, before the driver hands off to a
+    /// restoration phase that has nothing to minimize. **On by default**;
+    /// see `BacktrackingLineSearch::run_filter_line_search` and
+    /// `IpoptCq::theta_evaluation_noise_floor`.
+    pub filter_theta_roundoff_retry: bool,
 
     // Penalty-acceptor constants baked onto the assembled
     // [`crate::line_search::penalty_acceptor::PenaltyLsAcceptor`] (only
@@ -950,6 +958,7 @@ impl Default for LineSearchOptions {
             obj_max_inc: 5.0,
             max_filter_resets: 5,
             filter_reset_trigger: 5,
+            filter_theta_roundoff_retry: true,
             nu_init: 1e-6,
             nu_inc: 1e-4,
             rho: 0.1,
@@ -1494,6 +1503,7 @@ impl AlgorithmBuilder {
         };
         let mut line_search = BacktrackingLineSearch::new(acceptor);
         line_search.alpha_red_factor = self.line_search.alpha_red_factor;
+        line_search.filter_theta_roundoff_retry = self.line_search.filter_theta_roundoff_retry;
         // Resolve `None` against the Hessian mode; see the field's doc
         // for the measurement behind the split (gh#818).
         line_search.alpha_red_factor_min =

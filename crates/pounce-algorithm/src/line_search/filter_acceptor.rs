@@ -616,6 +616,13 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.end_of_line_search();
     }
 
+    /// Forward the gh#945 round-off floor to the filter. The driver sets
+    /// it for the duration of one retry pass and clears it again; see
+    /// [`super::filter::Filter::dominated_by_any`].
+    fn set_theta_roundoff_floor(&mut self, floor: Number) {
+        self.filter.set_theta_roundoff_floor(floor);
+    }
+
     /// Port of `IpFilterLSAcceptor.cpp:CalculateAlphaMin` (lines
     /// 450-469). Returns `alpha_min_frac * alpha_min` where
     /// `alpha_min` is `gamma_theta` by default, tightened to

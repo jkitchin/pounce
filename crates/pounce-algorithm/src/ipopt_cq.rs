@@ -1904,6 +1904,95 @@ impl IpoptCalculatedQuantities {
         c.asum() + dms.asum()
     }
 
+    /// The round-off floor of [`Self::curr_constraint_violation`] at this
+    /// iterate — the magnitude below which a difference in `theta` is an
+    /// artefact of having evaluated `c` in floating point rather than a
+    /// difference in feasibility (gh#945).
+    ///
+    /// The standard forward-error bound for a floating-point sum is `eps`
+    /// times the magnitudes of the terms summed, and for row `i` of `c`
+    /// those terms are the `J_ij x_j`. Bounding a row's terms by its largest
+    /// Jacobian entry times `‖x‖∞` gives
+    ///
+    /// ```text
+    ///   eps · ( max_i rowmax|J_i| · ‖x‖∞  +  ‖s‖∞ )
+    /// ```
+    ///
+    /// with the `d − s` rows contributing `‖s‖∞`, since they subtract `s`
+    /// from `d(x)` and carry its magnitude into the cancellation
+    /// independently of the Jacobian.
+    ///
+    /// **Two deliberate under-estimates, in the same direction.** `theta` is
+    /// a 1-norm, so its round-off is the *sum* of the rows' rather than the
+    /// largest; and `max_j |J_ij| · ‖x‖∞` is itself below `Σ_j |J_ij x_j|`
+    /// by roughly the row's nonzero count. Both are taken on purpose. The
+    /// caller — [`crate::line_search::backtracking::BacktrackingLineSearch`]'s
+    /// gh#945 retry — reads this as "is the iterate feasible to its own
+    /// evaluation noise, so the restoration phase has nothing to minimize",
+    /// and answering *yes* when the answer is no reroutes a solve that was
+    /// working, while answering *no* when the answer is yes costs nothing
+    /// but upstream's behaviour. Measured: the 1-norm form reads 2.0e-15 on
+    /// MacMPEC's `qpec_small` against a failure at `theta = 1.746e-15` and
+    /// takes that fixture's answer away; the ∞-norm form reads 6.66e-16 at
+    /// the same point, 2.6× under it, and leaves the trajectory
+    /// byte-identical.
+    ///
+    /// There is no safety factor on `eps` for the same reason. A factor of
+    /// 10 — `compare_le`'s — puts `qpec_small`'s 1.746e-15 failure inside
+    /// the band and costs it the same way.
+    ///
+    /// Why it cannot be a constant: the quantity it bounds moves with the
+    /// iterate. On gh#945's model (`c = Σx`, `‖x‖∞ ≈ 1`) it is ~1.2e-15 and
+    /// the `theta` values the filter was ranking — 1.1e-16 against 5.6e-16 —
+    /// sit inside it. On MacMPEC's `ralph1` at `x = [6.1e-10, 3.8e-8]` it is
+    /// ~1.7e-23, and that model's 5.8e-16 / 1.1e-15 / 2.4e-15 sit orders
+    /// *above* it — real differences in violation, which the filter is right
+    /// to rank on. An absolute `eps` cannot tell those apart; this does,
+    /// without knowing anything about either model.
+    ///
+    /// **This is not [`Self::row_noise_floor`] and must not be folded into
+    /// it.** That one carries `ROW_NOISE_KAPPA = 64` and a global `‖x‖∞`
+    /// on purpose, and its own doc records the measurement that rejected the
+    /// per-row term sum for it. The two answer opposite questions and are
+    /// conservative in opposite directions: `row_noise_floor` decides
+    /// whether a residual is too small to be *real*, where being generous
+    /// avoids claiming a convergence you have not got; this decides whether
+    /// an iterate is feasible enough that restoration is pointless, where
+    /// being generous overrides filter decisions that carry information.
+    /// Hence one at `64 · eps` and one at `eps`.
+    pub fn theta_evaluation_noise_floor(&self) -> Number {
+        let iv = self.curr_iv();
+        let x_amax = iv.x.amax();
+        if !x_amax.is_finite() {
+            return 0.0;
+        }
+
+        let mut jac_amax: Number = 0.0;
+        let jac_c = self.curr_jac_c();
+        if jac_c.n_rows() > 0 {
+            let mut rows = iv.y_c.make_new();
+            jac_c.compute_row_amax(&mut *rows, true);
+            jac_amax = jac_amax.max(rows.amax());
+        }
+        let jac_d = self.curr_jac_d();
+        if jac_d.n_rows() > 0 {
+            let mut rows = iv.s.make_new();
+            jac_d.compute_row_amax(&mut *rows, true);
+            jac_amax = jac_amax.max(rows.amax());
+        }
+
+        // The `d − s` rows subtract `s` from `d(x)`, so `s` carries its own
+        // magnitude into the cancellation independently of the Jacobian.
+        let slack_scale = iv.s.amax();
+
+        let floor = Number::EPSILON * (jac_amax * x_amax + slack_scale);
+        if floor.is_finite() {
+            floor.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Number of constraint rows backing the 1-norm above, i.e.
     /// `dim(c) + dim(d - s)`. Upstream never needs this because it
     /// treats `theta` as a bare scalar, but any threshold expressed in

@@ -201,14 +201,76 @@ fn a_worse_feasible_local_solution_is_not_promoted() {
 /// `qpec_small`'s promotion moves the objective *worse* by `5.8e-11` —
 /// deliberately, to buy nine orders of unscaled dual residual — so a rule
 /// that refused any worsening at all would refuse the reproducer.
+///
+/// **`filter_theta_roundoff_retry=no` is what keeps this reachable, and it
+/// is pinned rather than incidental (gh#945).** The trajectory the gate was
+/// designed against is the one where this model's base solve stalls at
+/// `Solved_To_Acceptable_Level`/41 with an unscaled KKT error of `7.90e4`,
+/// which is what makes the retry worth promoting. gh#945 removed the
+/// line-search failure that stall comes from, so at the shipped default the
+/// base solve reaches the optimum on its own and there is no promotion left
+/// to guard — see [`the_reproducer_no_longer_needs_the_retry`], which pins
+/// that. Turning the option off here is not preserving a bug; it is holding
+/// the gate's *input* fixed so the gate itself stays under test.
 #[test]
 fn the_reproducer_still_promotes() {
-    let (r, out) = solve("mpcc_qpec_small_biactive", REPRO);
+    let mut opts = REPRO.to_vec();
+    opts.push("filter_theta_roundoff_retry=no");
+    let (r, out) = solve("mpcc_qpec_small_biactive", &opts);
     assert!(
         r.statistics.dual_divergence_retry_promoted,
         "the reproducer lost its fix. stdout:\n{out}"
     );
     assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded);
+}
+
+/// …and at the shipped default it does not need the retry at all (gh#945).
+///
+/// The stall that gh#884's detector fires on — `Solved_To_Acceptable_Level`
+/// at 41 iterations with an unscaled KKT error of `7.90e4` — begins with the
+/// filter line search giving up at an iterate feasible to round-off and
+/// handing it to a restoration phase with nothing to minimize. With the
+/// gh#945 retry the α-loop finds the step instead, and the *base* attempt
+/// converges: `Optimal Solution Found` at 100 iterations,
+/// `f = 4.5454149802e-10` at `x = [0.99998, 0.99999, 8.70e-6]`, KKT error
+/// `5.65e-10` (unscaled dual infeasibility `6.26e-10`) and constraint
+/// violation exactly `0`. That is two orders
+/// *better* than the promoted retry it replaces (`9.96e-8`), reached without
+/// the `perturb_always_cd` re-solve gh#884 documents as lying on `ralph1`.
+///
+/// The detector still fires — the signature is a property of the iterate,
+/// not of the fix — so what this pins is the gate declining a retry there is
+/// nothing to gain from, and the base answer shipping.
+#[test]
+fn the_reproducer_no_longer_needs_the_retry() {
+    let (r, out) = solve("mpcc_qpec_small_biactive", REPRO);
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "stdout:\n{out}"
+    );
+    assert!(
+        r.statistics.dual_divergence_signature,
+        "the detector must still fire at the default — the signature is a \
+         property of the iterate, and it is what says this family has not \
+         lost its subject to `filter_theta_roundoff_retry=no`. stdout:\n{out}"
+    );
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "the base attempt is supposed to stand on its own here. stdout:\n{out}"
+    );
+    assert!(
+        (0.0..1e-8).contains(&r.solution.objective),
+        "reported objective {:.6e} is not f* = 0",
+        r.solution.objective,
+    );
+    for (i, want) in [1.0, 1.0, 0.0].iter().enumerate() {
+        assert!(
+            (r.solution.x[i] - want).abs() <= 1e-4,
+            "x[{i}] = {:.6e} is not within 1e-4 of the optimum {want}",
+            r.solution.x[i],
+        );
+    }
 }
 
 /// One run, one answer.

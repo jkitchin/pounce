@@ -62,6 +62,11 @@ pub trait BacktrackingLsAcceptor {
         0.0
     }
 
+    /// Tell the acceptor the round-off floor of `theta` at the current
+    /// iterate (gh#945), in `theta`'s own units. Default: ignore it, which
+    /// is what every acceptor without a filter does.
+    fn set_theta_roundoff_floor(&mut self, _floor: Number) {}
+
     /// Decide whether the trial `(theta_trial, phi_trial)` at primal
     /// step `alpha_primal` is acceptable, given the current iterate's
     /// `(theta, phi)` and the directional derivative `d_phi`.

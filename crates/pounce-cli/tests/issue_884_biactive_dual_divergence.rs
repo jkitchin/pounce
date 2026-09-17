@@ -30,6 +30,27 @@
 //! whole defect: a `Solved_To_Acceptable_Level` on a point whose
 //! Lagrangian gradient is 7.9e+04 in the model's own units.
 //!
+//! **What changed under gh#945, and what it means for this file.** That
+//! `Solved_To_Acceptable_Level` is not where the trouble starts. It is where
+//! the solve settles *after* the filter line search gives up at an iterate
+//! feasible to round-off and hands it to a restoration phase with no
+//! violation to minimize. gh#945's retry finds the step instead, so at the
+//! shipped default this model never reaches the state above: the base attempt
+//! converges by itself, `Optimal`, KKT error `5.65e-10` and unscaled dual
+//! infeasibility `6.26e-10` against the
+//! `7.9e+04` this file is named for, at `[0.99998, 0.99999, 8.70e-6]` — two
+//! orders better than the promoted answer, without the `perturb_always_cd`
+//! re-solve. [`the_reproducer_no_longer_stalls_at_the_default`] pins that.
+//!
+//! Which leaves gh#884's own machinery without an input, so the tests whose
+//! subject *is* that machinery — the detector, the kill switch, the dominance
+//! gate — run under [`REPRO_PRE945`], which holds the base trajectory fixed
+//! with `filter_theta_roundoff_retry=no`. Read that constant's doc before
+//! deciding it is a workaround: the state is still reachable on other models,
+//! the detector still fires here at the default, and the alternative is a
+//! family of tests that pass by never reaching their own subject. The numbers
+//! quoted throughout this comment are that trajectory's, not the default's.
+//!
 //! **The primal was never wrong.** With the retry off the point is
 //! `[1.0000000000000, 1.0000000000000, 1.5e-14]` — right to 14 digits.
 //! The retry's promoted answer is *further* out, `3.7e-06` in `y₂`, and
@@ -76,6 +97,33 @@ const OPTIMUM_X: [f64; 3] = [1.0, 1.0, 0.0];
 
 /// The options that reproduce the issue. See the module comment.
 const REPRO: &[&str] = &["bound_relax_factor=0", "mu_strategy_fallback=no"];
+
+/// [`REPRO`] plus `filter_theta_roundoff_retry=no` — the base trajectory
+/// gh#884's machinery was built against, held fixed (gh#945).
+///
+/// The stall this file is about does not start in the convergence gate. It
+/// starts one layer down, with the filter line search giving up at an iterate
+/// feasible to round-off and handing it to a restoration phase that has no
+/// violation to minimize; `Solved_To_Acceptable_Level` at an unscaled dual of
+/// `7.90e4` is what the solve settles for afterwards. gh#945's retry finds the
+/// step instead, so **at the shipped default this model no longer reaches that
+/// state at all**: the base attempt converges by itself at `Optimal`/100,
+/// KKT error `5.65e-10` (unscaled dual infeasibility `6.26e-10`),
+/// `x = [0.99998, 0.99999, 8.70e-6]`. That is pinned
+/// by [`the_reproducer_no_longer_stalls_at_the_default`].
+///
+/// Which leaves gh#884's own machinery — the detector, the kill switch, the
+/// dominance gate — with no input to be tested on unless the input is held
+/// fixed. That is what this constant is for, and it is not preserving a bug:
+/// the state it reproduces is one a different model can still reach (the gate
+/// for that is `runaway_is_the_whole_residual` in `pounce-algorithm`), and the
+/// detector still fires at the default here, so nothing in this family has
+/// lost its subject.
+const REPRO_PRE945: &[&str] = &[
+    "bound_relax_factor=0",
+    "mu_strategy_fallback=no",
+    "filter_theta_roundoff_retry=no",
+];
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -211,7 +259,7 @@ fn max_x_error(r: &SolveReport) -> f64 {
 /// multiplier fails on the residual line, not on the status line.
 #[test]
 fn the_reproducer_converges_with_a_multiplier_a_reader_can_check() {
-    let (r, stdout) = solve(REPRO);
+    let (r, stdout) = solve(REPRO_PRE945);
     let (_, unscaled_du) = residual(&stdout, "Dual infeasibility");
     assert!(
         unscaled_du <= 1e-6,
@@ -242,6 +290,68 @@ fn the_reproducer_converges_with_a_multiplier_a_reader_can_check() {
     );
 }
 
+/// **At the shipped default the reproducer does not stall** (gh#945), and
+/// that is why every test in this family that needs the stall now names
+/// [`REPRO_PRE945`].
+///
+/// The `Solved_To_Acceptable_Level` at an unscaled dual of `7.90e4` is what
+/// the solve settles for after the filter line search gives up at an iterate
+/// feasible to round-off and hands it to a restoration phase with nothing to
+/// minimize. gh#945's retry finds the step, so the base attempt converges by
+/// itself: `Optimal`, KKT error `5.65e-10` and unscaled dual infeasibility
+/// `6.26e-10` against the
+/// reported `7.8965510781517834e+04`, at `[0.99998, 0.99999, 8.70e-6]` — two
+/// orders *better* in the residual than the promoted answer it replaces
+/// (`9.96e-8`), and reached without the `perturb_always_cd` re-solve.
+///
+/// One attempt, and gh#884's criterion 1 read off that attempt: this is the
+/// assertion that would catch a future change reaching `Solve_Succeeded` here
+/// while carrying a runaway multiplier again.
+#[test]
+fn the_reproducer_no_longer_stalls_at_the_default() {
+    let (r, stdout) = solve(REPRO);
+    let counts = iteration_counts(&stdout);
+    assert_eq!(
+        counts.len(),
+        1,
+        "{FIXTURE}: expected a single attempt at the default, saw {counts:?}; \
+         stdout=\n{stdout}"
+    );
+    assert!(
+        r.statistics.dual_divergence_signature,
+        "{FIXTURE}: the detector must still fire at the default — the \
+         signature is a property of the iterate, and `REPRO_PRE945`'s whole \
+         rationale is that nothing in this family has lost its subject. If \
+         this goes red, that rationale is wrong and gh#884 needs a second, \
+         non-synthetic reproducer rather than a pinned option; \
+         stdout=\n{stdout}"
+    );
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted,
+        "{FIXTURE}: nothing should be promoted when the base attempt \
+         converges; stdout=\n{stdout}"
+    );
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "{FIXTURE}: stdout=\n{stdout}"
+    );
+    let (_, unscaled_du) = residual(&stdout, "Dual infeasibility");
+    assert!(
+        unscaled_du <= 1e-6,
+        "{FIXTURE}: unscaled dual infeasibility {unscaled_du:.6e} — gh#884 is \
+         about *this* number (it read 7.8965510781517834e+04), and a base \
+         attempt that converges is held to it exactly as a promoted one is; \
+         stdout=\n{stdout}"
+    );
+    let err = max_x_error(&r);
+    assert!(
+        err <= 1e-4,
+        "{FIXTURE}: {err:.3e} from (1, 1, 0) at {:?}; stdout=\n{stdout}",
+        r.solution.x
+    );
+}
+
 /// The defect itself, reachable through the kill switch — and the two
 /// columns that hid it.
 ///
@@ -262,7 +372,7 @@ fn the_reproducer_converges_with_a_multiplier_a_reader_can_check() {
 /// reached by something before deleting anything else in this family.
 #[test]
 fn the_kill_switch_shows_what_the_scaled_aggregate_was_hiding() {
-    let opts: Vec<&str> = REPRO
+    let opts: Vec<&str> = REPRO_PRE945
         .iter()
         .copied()
         .chain(["dual_divergence_retry=no"])
@@ -509,7 +619,7 @@ fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
 /// row above directly.
 #[test]
 fn the_gate_that_reads_the_answer_does_not_cost_the_reproducer_its_retry() {
-    let (r, stdout) = solve(REPRO);
+    let (r, stdout) = solve(REPRO_PRE945);
     let counts = iteration_counts(&stdout);
     assert_eq!(
         counts.len(),
