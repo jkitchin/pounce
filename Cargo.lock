@@ -1239,6 +1239,7 @@ version = "0.11.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
+ "pounce-hsl",
  "pounce-linsol",
  "rslab",
  "tracing",

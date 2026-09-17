@@ -61,6 +61,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod compare;
 pub mod inertia;
 pub mod scaling;
 

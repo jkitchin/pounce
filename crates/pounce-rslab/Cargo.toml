@@ -16,9 +16,21 @@ pounce-common.workspace = true
 pounce-linsol.workspace = true
 rslab.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
+# The cross-solver harness in `src/compare.rs` measures FERAL and RSLAB
+# through the same code path; a harness that drove one from `src/` and the
+# other from a dev-only shim would not be comparing like with like. This crate
+# is `publish = false` and is not a default-member, so the extra edge costs a
+# normal build nothing.
 pounce-feral.workspace = true
+# MA57 is the third arm of the comparison where the HSL library is on the link
+# path. Absent, the harness records it as unavailable rather than skipping the
+# comparison.
+pounce-hsl = { workspace = true, optional = true }
+
+[features]
+default = []
+# Add the HSL MA57 arm to the cross-solver harness. Requires libcoinhsl.
+ma57 = ["dep:pounce-hsl"]
 
 [lints]
 workspace = true
