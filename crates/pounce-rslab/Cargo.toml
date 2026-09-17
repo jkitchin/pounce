@@ -27,6 +27,15 @@ pounce-feral.workspace = true
 # comparison.
 pounce-hsl = { workspace = true, optional = true }
 
+[dev-dependencies]
+# The real-KKT examples run an actual POUNCE solve and capture the KKT
+# systems the IPM hands its linear solver. Dev-only: the adapter itself has
+# no edge into the optimizer, and pounce-algorithm has none into this crate,
+# so there is no cycle.
+pounce-algorithm.workspace = true
+pounce-nl.workspace = true
+pounce-nlp.workspace = true
+
 [features]
 default = []
 # Add the HSL MA57 arm to the cross-solver harness. Requires libcoinhsl.

@@ -74,6 +74,60 @@ use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
 use rslab::{CscMatrix, LdltFactors, MultifrontalSymbolic, SolverSettings, ZeroPivotAction};
 
+/// How the adapter asks RSLAB to treat a pivot it cannot eliminate.
+///
+/// This is an adapter-owned enum rather than a re-export of
+/// [`ZeroPivotAction`], because RSLAB's three arms do not mean what their
+/// names suggest to a POUNCE reader and because the useful static-pivot floor
+/// is a function of the matrix, which the caller does not have at
+/// configuration time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PivotPolicy {
+    /// Exact factorization: a fully-summed block RSLAB cannot pivot is
+    /// [`ESymSolverStatus::Singular`]. RSLAB's own `SolverSettings::default()`,
+    /// and the adapter's.
+    ///
+    /// **This mode cannot factor a POUNCE KKT.** RSLAB restricts Bunch-Kaufman
+    /// pivoting to each front's fully-summed block and has no delayed
+    /// pivoting — its module docs say so outright: *"a fully-summed block that
+    /// is singular in exact mode surfaces as `NumericallyRankDeficient`"*. A
+    /// saddle-point row factors only when its 2×2 partner happens to land in
+    /// the same front. Measured over every KKT system six real models handed
+    /// their linear solver, that never happened: see
+    /// `dev-notes/rslab-backend-assessment.md`.
+    Exact,
+    /// Static pivoting with an absolute floor: a pivot below `floor` is lifted
+    /// to `sign(d)·floor`, and the factor is of `A + E` rather than `A`.
+    StaticPivotAbsolute(f64),
+    /// Static pivoting with the floor computed per factorization as
+    /// `eps_rel · max|A_ij|` over the **equilibrated** matrix — RSLAB's own
+    /// recommended recipe (`SolverSettings::preconditioner`'s doc names
+    /// `eps_rel ∈ [1e-12, 1e-8]`).
+    ///
+    /// This is the only mode in which RSLAB completes a POUNCE KKT
+    /// factorization, and what it produces is a *preconditioner*: the reported
+    /// inertia is that of `A + E`, so the adapter marks it unreliable, and the
+    /// solve needs iterative refinement against the unperturbed `A` to reach a
+    /// direct solver's accuracy.
+    StaticPivotRelative(f64),
+}
+
+impl PivotPolicy {
+    /// The RSLAB action for this policy, given the largest magnitude in the
+    /// equilibrated matrix about to be factored.
+    fn to_rslab(self, a_max: f64) -> ZeroPivotAction {
+        match self {
+            Self::Exact => ZeroPivotAction::Fail,
+            Self::StaticPivotAbsolute(f) => ZeroPivotAction::PerturbToEps {
+                abs_floor: f.max(0.0),
+            },
+            Self::StaticPivotRelative(rel) => ZeroPivotAction::PerturbToEps {
+                abs_floor: (rel * a_max.max(1.0)).max(0.0),
+            },
+        }
+    }
+}
+
 /// Construction-time configuration for [`RslabSolverInterface`].
 ///
 /// The defaults are chosen to make RSLAB behave the way POUNCE's FERAL path
@@ -82,25 +136,8 @@ use rslab::{CscMatrix, LdltFactors, MultifrontalSymbolic, SolverSettings, ZeroPi
 /// their option defaults.
 #[derive(Debug, Clone)]
 pub struct RslabConfig {
-    /// Near-zero pivot policy handed to RSLAB.
-    ///
-    /// Default [`ZeroPivotAction::Fail`], which is RSLAB's own
-    /// `SolverSettings::default()`. On a structurally zero 1×1 pivot (RSLAB
-    /// tests `d == 0.0` exactly) or a 2×2 whose `|det|` falls to
-    /// `1e-14 · scale²`, RSLAB returns `NumericallyRankDeficient` and the
-    /// adapter maps that to [`ESymSolverStatus::Singular`] — which is where
-    /// POUNCE's outer loop wants a rank-deficient constraint Jacobian to land
-    /// (`perturb_for_singular`, bumping `δ_c`), exactly as
-    /// `pounce_feral::FeralSolverInterface` routes its `zero > 0` case.
-    ///
-    /// Setting [`ZeroPivotAction::PerturbToEps`] or
-    /// [`ZeroPivotAction::ForceAccept`] turns RSLAB into a never-fail
-    /// preconditioner. **Both perturb**: RSLAB's `ForceAccept` is not feral's
-    /// — it derives an absolute floor `max(‖A‖_max, 1)·ε` and lifts sub-floor
-    /// pivots to it, where feral's `ForceAccept` accepts the tiny pivot at
-    /// face value and books it as a zero. Under either, `n_perturbed > 0` and
-    /// the adapter reports the inertia unreliable.
-    pub on_zero_pivot: ZeroPivotAction,
+    /// See [`PivotPolicy`]. Default [`PivotPolicy::Exact`].
+    pub pivot: PivotPolicy,
 
     /// Symmetric equilibration applied before factoring. Default
     /// [`scaling::Equilibration::OnePassInfNorm`], reproducing
@@ -125,7 +162,7 @@ pub struct RslabConfig {
     /// `FeralConfig::singular_pivot_floor`'s default.
     pub singular_pivot_floor: f64,
 
-    /// RSLAB factorization settings other than `on_zero_pivot` (ordering,
+    /// RSLAB factorization settings other than the pivot policy (ordering,
     /// threads, kernel knobs). Defaults to [`SolverSettings::default`], i.e.
     /// the left-looking path with the `Auto` ordering.
     pub settings: SolverSettings,
@@ -134,7 +171,7 @@ pub struct RslabConfig {
 impl Default for RslabConfig {
     fn default() -> Self {
         Self {
-            on_zero_pivot: ZeroPivotAction::Fail,
+            pivot: PivotPolicy::Exact,
             equilibration: scaling::Equilibration::OnePassInfNorm,
             inertia_pivot_floor: None,
             singular_pivot_floor: 0.0,
@@ -144,10 +181,19 @@ impl Default for RslabConfig {
 }
 
 impl RslabConfig {
-    /// The [`SolverSettings`] actually handed to RSLAB: [`Self::settings`]
-    /// with [`Self::on_zero_pivot`] applied.
-    fn effective_settings(&self) -> SolverSettings {
-        self.settings.clone().with_pivot(self.on_zero_pivot.clone())
+    /// The configuration in which RSLAB can actually factor a POUNCE KKT:
+    /// static pivoting at `eps_rel · max|A_ij|`. See
+    /// [`PivotPolicy::StaticPivotRelative`] for what that costs.
+    pub fn static_pivoting(eps_rel: f64) -> Self {
+        Self {
+            pivot: PivotPolicy::StaticPivotRelative(eps_rel),
+            ..Self::default()
+        }
+    }
+
+    /// The [`SolverSettings`] actually handed to RSLAB.
+    fn effective_settings(&self, a_max: f64) -> SolverSettings {
+        self.settings.clone().with_pivot(self.pivot.to_rslab(a_max))
     }
 }
 
@@ -193,6 +239,9 @@ pub struct RslabSolverInterface {
     /// Inertia and reliability of the most recent successful factorization.
     inertia: InertiaInfo,
     negevals: Index,
+    /// Slots of the most recent factor holding an exact zero. See the note in
+    /// [`Self::factor`] on why `nnz(L)` is reported structurally.
+    explicit_zeros: usize,
 
     summary: LinearSolverSummary,
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
@@ -239,6 +288,7 @@ impl RslabSolverInterface {
             factors: None,
             inertia: InertiaInfo::empty(),
             negevals: 0,
+            explicit_zeros: 0,
             summary: LinearSolverSummary {
                 solver_name: "rslab".to_string(),
                 ..Default::default()
@@ -271,6 +321,20 @@ impl RslabSolverInterface {
     /// The configuration this backend was built with.
     pub fn config(&self) -> &RslabConfig {
         &self.cfg
+    }
+
+    /// Slots of the most recent factor holding an exact zero
+    /// (`rslab::LdltNumeric::n_zeros`).
+    ///
+    /// `LinearSolverSummary::last_nnz_l` reports the **structural** factor
+    /// size, which is what FERAL reports and what memory costs. This is the
+    /// part of it that carries no information — on a POUNCE KKT it is most of
+    /// it, because the triplet pattern arrives full of explicit zeros. A
+    /// caller comparing "useful" fill across backends wants
+    /// `last_nnz_l - explicit_zeros`; a caller comparing memory wants
+    /// `last_nnz_l`.
+    pub fn explicit_zeros(&self) -> usize {
+        self.explicit_zeros
     }
 
     /// Effective inertia-trust floor for the current dimension.
@@ -347,7 +411,11 @@ impl RslabSolverInterface {
         }
         self.equilibrate();
 
-        let opts = self.cfg.effective_settings();
+        // The static-pivot floor is relative to the matrix RSLAB actually
+        // factors, i.e. after equilibration — a floor derived from the
+        // unscaled entries would mean something different on every iterate.
+        let a_max = self.scaled.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let opts = self.cfg.effective_settings(a_max);
         let m = self.matrix.as_ref().expect("refresh_matrix stored one");
         let scaled = CscMatrix::<f64> {
             n: m.n,
@@ -391,7 +459,22 @@ impl RslabSolverInterface {
             }
         };
 
-        let nnz_l = numeric.factor.nnz().saturating_sub(numeric.n_zeros);
+        // `nnz(L)` is reported **structurally** — every slot the factor
+        // occupies — not as the count of numerically nonzero entries.
+        //
+        // The distinction is not pedantic on a POUNCE KKT. The triplet
+        // pattern POUNCE hands over carries explicit zeros wherever the
+        // Hessian or the (2,2) block has a structural slot but no value: on
+        // `airport`'s first KKT, 1768 of 2016 stored entries are exactly
+        // `0.0`. RSLAB propagates them and then drops them
+        // (`LdltNumeric::n_zeros`, and `PanelFactor::to_csc` omits them
+        // outright), so its "stored nonzeros" came to 330 against FERAL's
+        // 5721 — a 17x difference that is entirely an accounting artefact.
+        // `numeric.factor.nnz()` is the panel storage RSLAB actually holds,
+        // which is the quantity FERAL's `nnz_l` also reports and the one a
+        // memory comparison needs.
+        let nnz_l = numeric.factor.nnz();
+        let explicit_zeros = numeric.n_zeros;
         let (extent, stable, n_2x2) =
             inertia::scan_d(&numeric.d_diag, &numeric.d_subdiag, &numeric.two_by_two);
         let counts = (
@@ -420,6 +503,7 @@ impl RslabSolverInterface {
             reliable,
         };
         self.negevals = counts.1 as Index;
+        self.explicit_zeros = explicit_zeros;
         self.factors = Some(numeric.into_factors());
         self.record_factor_stats(pattern_reused, nnz_l);
 
@@ -641,6 +725,7 @@ impl SparseSymLinearSolverInterface for RslabSolverInterface {
         self.scale = vec![1.0; dim as usize];
         self.scaled.clear();
         self.inertia = InertiaInfo::empty();
+        self.explicit_zeros = 0;
         ESymSolverStatus::Success
     }
 
@@ -877,6 +962,6 @@ mod tests {
             .as_any()
             .and_then(|a| a.downcast_ref::<RslabSolverInterface>())
             .expect("downcast");
-        assert!(matches!(back.config().on_zero_pivot, ZeroPivotAction::Fail));
+        assert_eq!(back.config().pivot, PivotPolicy::Exact);
     }
 }

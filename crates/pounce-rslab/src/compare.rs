@@ -122,6 +122,15 @@ pub struct SolveRecord {
     pub nnz_l: Option<usize>,
     /// `nnz(L) / nnz(A)`.
     pub fill_ratio: Option<f64>,
+    /// Slots of `L` holding an exact zero, where the backend reports it.
+    ///
+    /// `nnz_l` is structural on every arm — it is what the factor occupies —
+    /// but on a POUNCE KKT most of it carries no information, because the
+    /// triplet pattern arrives full of explicit zeros (1768 of 2016 stored
+    /// entries on `airport`'s first KKT). Only RSLAB reports the split, so a
+    /// fill comparison against FERAL has to be read as structural-to-
+    /// structural and nothing finer.
+    pub explicit_zeros_in_l: Option<usize>,
     /// Wall time of `initialize_structure` — the symbolic-analysis *request*.
     /// Backends differ in how much they do here versus fold into the first
     /// numeric factor: both FERAL and the RSLAB adapter defer their ordering,
@@ -157,6 +166,7 @@ impl SolveRecord {
             nnz_a: None,
             nnz_l: None,
             fill_ratio: None,
+            explicit_zeros_in_l: None,
             structure_ms,
             factor_ms,
             refactor_ms: None,
@@ -305,6 +315,7 @@ pub fn run_backend<B: SparseSymLinearSolverInterface>(
         nnz_a: None,
         nnz_l: None,
         fill_ratio: None,
+        explicit_zeros_in_l: None,
         structure_ms,
         factor_ms,
         refactor_ms: (refac_st == ESymSolverStatus::Success).then_some(refactor_ms),
@@ -344,6 +355,7 @@ pub fn run_rslab(a: &SymTriplet, b: &[Number], cfg: crate::RslabConfig) -> Solve
             rec.two_by_two_pivots = Some(info.two_by_two_pivots);
             rec.perturbed_pivots = Some(info.perturbed_pivots);
             rec.inertia_reliable = Some(info.reliable);
+            rec.explicit_zeros_in_l = Some(backend.explicit_zeros());
         },
     )
 }
@@ -399,13 +411,152 @@ pub fn run_ma57(_a: &SymTriplet, _b: &[Number]) -> Option<SolveRecord> {
 }
 
 /// Every available backend on one system, in a stable order.
+///
+/// RSLAB appears twice, because one configuration of it does not answer the
+/// question. `rslab` is the exact mode, the like-for-like comparison against
+/// FERAL and MA57. `rslab-sp` is static pivoting at `1e-12·max|A|`, which is
+/// the only mode in which RSLAB completes a POUNCE KKT factorization at all —
+/// and which produces a preconditioner rather than a direct factor, so its
+/// inertia is that of `A + E`. Dropping either arm would misreport RSLAB: the
+/// first alone says it cannot do the job, the second alone hides what it cost.
 pub fn run_all(a: &SymTriplet, b: &[Number]) -> Vec<SolveRecord> {
     let mut out = vec![
         run_feral(a, b, pounce_feral::FeralConfig::default()),
         run_rslab(a, b, crate::RslabConfig::default()),
+        run_rslab_static_pivoting(a, b, 1e-12),
     ];
     out.extend(run_ma57(a, b));
     out
+}
+
+/// The scaling-neutral control: FERAL and RSLAB with equilibration switched
+/// off on both sides.
+///
+/// It exists because the two backends do not equilibrate the same way and
+/// cannot be made to. FERAL's default is `ScalingStrategy::Auto` — MC64
+/// matching on arrow-KKT-shaped matrices, iterative Knight-Ruiz otherwise —
+/// and RSLAB offers neither through the surface the adapter can reach; its
+/// `SolverSettings` default is the single-pass inf-norm step, which is what
+/// `scaling::Equilibration::OnePassInfNorm` reproduces. A residual gap between
+/// the two default configurations is therefore a gap between two *solvers*,
+/// not between two factorization kernels, and reporting it as the latter would
+/// be wrong. Running both unscaled removes the confound: what is left is the
+/// pivoting and the elimination order.
+pub fn run_scaling_neutral_pair(a: &SymTriplet, b: &[Number]) -> Vec<SolveRecord> {
+    let mut feral = run_feral(
+        a,
+        b,
+        pounce_feral::FeralConfig {
+            scaling: pounce_feral::ScalingStrategy::Identity,
+            ..pounce_feral::FeralConfig::default()
+        },
+    );
+    feral.solver = "feral-ns";
+    let mut rslab = run_rslab(
+        a,
+        b,
+        crate::RslabConfig {
+            equilibration: crate::scaling::Equilibration::Identity,
+            ..crate::RslabConfig::default()
+        },
+    );
+    rslab.solver = "rslab-ns";
+    vec![feral, rslab]
+}
+
+/// RSLAB in static-pivoting mode. See [`crate::PivotPolicy::StaticPivotRelative`].
+pub fn run_rslab_static_pivoting(a: &SymTriplet, b: &[Number], eps_rel: f64) -> SolveRecord {
+    let mut rec = run_backend(
+        "rslab-sp",
+        crate::RslabSolverInterface::with_config(crate::RslabConfig::static_pivoting(eps_rel)),
+        a,
+        b,
+        |backend, rec| {
+            fold_summary(&backend.summary(), rec);
+            let info = backend.inertia_info();
+            rec.two_by_two_pivots = Some(info.two_by_two_pivots);
+            rec.perturbed_pivots = Some(info.perturbed_pivots);
+            rec.inertia_reliable = Some(info.reliable);
+            rec.explicit_zeros_in_l = Some(backend.explicit_zeros());
+        },
+    );
+    rec.solver = "rslab-sp";
+    rec
+}
+
+/// Exact inertia of a **small** symmetric matrix, by dense cyclic-Jacobi
+/// eigenvalues — an oracle independent of every LDLᵀ implementation under
+/// test.
+///
+/// This is the outside number the comparison otherwise lacks. Every other
+/// quantity in a [`SolveRecord`] is one factorization's opinion of itself; two
+/// backends agreeing tells you they agree, not that either is right. Jacobi
+/// converges for any real symmetric matrix and touches no pivot rule, so when
+/// it disagrees with a backend the backend is wrong.
+///
+/// Returns `(positive, negative, zero, min|λ|, max|λ|)`, classifying against
+/// `n·ε·max|λ|` — the backward-error bound for a symmetric eigensolve.
+/// `None` above `max_n`, since the routine is `O(n³)` per sweep and dense.
+pub fn dense_inertia_oracle(
+    a: &SymTriplet,
+    max_n: usize,
+) -> Option<(usize, usize, usize, f64, f64)> {
+    let n = a.n as usize;
+    if n == 0 || n > max_n {
+        return None;
+    }
+    let mut m = vec![0.0f64; n * n];
+    for k in 0..a.vals.len() {
+        let i = (a.irn[k] - 1) as usize;
+        let j = (a.jcn[k] - 1) as usize;
+        m[i * n + j] += a.vals[k];
+        if i != j {
+            m[j * n + i] += a.vals[k];
+        }
+    }
+    let at = |m: &[f64], i: usize, j: usize| m[i * n + j];
+    for _sweep in 0..100 {
+        let mut off = 0.0f64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                off += at(&m, i, j) * at(&m, i, j);
+            }
+        }
+        let scale = (0..n).map(|i| at(&m, i, i).abs()).fold(0.0, f64::max).max(1.0);
+        if off.sqrt() <= 1e-15 * scale {
+            break;
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let apq = at(&m, p, q);
+                if apq == 0.0 {
+                    continue;
+                }
+                let theta = (at(&m, q, q) - at(&m, p, p)) / (2.0 * apq);
+                let t = if theta >= 0.0 { 1.0 } else { -1.0 }
+                    / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let sn = t * c;
+                for k in 0..n {
+                    let (akp, akq) = (m[k * n + p], m[k * n + q]);
+                    m[k * n + p] = c * akp - sn * akq;
+                    m[k * n + q] = sn * akp + c * akq;
+                }
+                for k in 0..n {
+                    let (apk, aqk) = (m[p * n + k], m[q * n + k]);
+                    m[p * n + k] = c * apk - sn * aqk;
+                    m[q * n + k] = sn * apk + c * aqk;
+                }
+            }
+        }
+    }
+    let ev: Vec<f64> = (0..n).map(|i| m[i * n + i]).collect();
+    let max_abs = ev.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+    let min_abs = ev.iter().fold(f64::INFINITY, |acc, v| acc.min(v.abs()));
+    let tol = max_abs * (n as f64) * f64::EPSILON;
+    let pos = ev.iter().filter(|v| **v > tol).count();
+    let neg = ev.iter().filter(|v| **v < -tol).count();
+    Some((pos, neg, n - pos - neg, min_abs, max_abs))
 }
 
 #[cfg(test)]

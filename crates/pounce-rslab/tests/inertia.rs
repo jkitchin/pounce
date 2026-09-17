@@ -100,22 +100,20 @@ fn singular_diagonal_is_reported_singular_not_counted() {
     assert_eq!(st, ESymSolverStatus::Singular);
 }
 
-/// Under a perturbing policy the same matrix factors — and reports the inertia
-/// of the *perturbed* matrix, which is not `(1, 1, 1)`.
+/// Under static pivoting the same matrix factors — and reports the inertia of
+/// the *perturbed* matrix, which is not `(1, 1, 1)`.
 ///
-/// RSLAB's `ForceAccept` is not feral's. feral accepts the tiny pivot at face
-/// value and books it in the `zero` bucket; RSLAB derives an absolute floor
-/// `max(‖A‖_max, 1)·ε` and *lifts* the pivot to it, so the zero eigenvalue
-/// comes back as a positive one and the reported triple is `(2, 1, 0)`. The
-/// adapter cannot make that count mean what POUNCE means, and does not try:
+/// The zero pivot is lifted to `+floor`, so the zero eigenvalue comes back as
+/// a positive one and the reported triple is `(2, 1, 0)`. (feral's
+/// `ForceAccept` does the opposite: it accepts the tiny pivot at face value
+/// and books it in the `zero` bucket. RSLAB has no arm that does that — its
+/// own `ForceAccept` also perturbs, to `max(‖A‖_max, 1)·ε`.) The adapter
+/// cannot make the lifted count mean what POUNCE means, and does not try:
 /// `perturbed_pivots > 0` makes the inertia unreliable, so the count is never
 /// spent on a `δ_w` retry.
 #[test]
 fn a_perturbing_policy_reports_the_perturbed_inertia_and_flags_it() {
-    let cfg = RslabConfig {
-        on_zero_pivot: rslab::ZeroPivotAction::ForceAccept,
-        ..Default::default()
-    };
+    let cfg = RslabConfig::static_pivoting(1e-12);
     let (irn, jcn, vals) = diag_triplets(&[3.0, -2.0, 0.0]);
     let (s, st) = factor(cfg, 3, &irn, &jcn, &vals);
     assert_eq!(st, ESymSolverStatus::Success);
