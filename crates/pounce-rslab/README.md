@@ -29,14 +29,32 @@ Nothing is lost for the evaluation. The backend is a
   through the real IPM, with RSLAB under it and no change to POUNCE's core.
   `examples/rslab_nlp_solve.rs` does exactly that.
 
-`pounce-rslab` is a workspace member but **not** a default-member, exactly like
-`pounce-hsl`, so a plain `cargo build` / `cargo test` never fetches RSLAB. Build
-it explicitly:
+`pounce-rslab` is a workspace member but **not** a default-member, and it is
+excluded from CI's `--workspace` steps — RSLAB can only be a git dependency, and
+a crate that ships nothing should not put a third-party network fetch on every
+pull request. So a plain `cargo build` / `cargo test` never reaches it. Build it
+explicitly:
 
 ```sh
-cargo test -p pounce-rslab
-cargo run -p pounce-rslab --release --example rslab_bench
+cargo test -p pounce-rslab                                       # the contracts
+cargo run -p pounce-rslab --release --example rslab_kkt_replay   # real KKT systems
+cargo run -p pounce-rslab --release --example rslab_nlp_solve    # whole NLPs
+cargo run -p pounce-rslab --release --example rslab_bench        # phase timings
+cargo run -p pounce-rslab --release --example rslab_scale_smoke  # end-to-end, 3 scales
 ```
+
+## What it found
+
+RSLAB in its exact mode factored **13 of 90** real POUNCE KKT systems; FERAL
+factored 90. It has no delayed pivoting, which its own module docs state, so a
+saddle-point row factors only when its 2×2 partner lands in the same front.
+Static pivoting completes every one and produces a preconditioner rather than a
+direct factor — and on `eigena2` that converges where FERAL enters restoration.
+End to end it is 3.8–6.3× slower, 92% of which is RSLAB's own numeric
+factorization and ~2% the adapter.
+
+The full account, with the numbers and the answers to the seven questions the
+evaluation was framed around, is `dev-notes/rslab-backend-assessment.md`.
 
 ## What the adapter actually does
 
