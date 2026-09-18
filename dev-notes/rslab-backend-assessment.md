@@ -414,6 +414,50 @@ the slots across one `airport` solve. A factor-size number that moves with the
 values is not a fill metric, so the harness reports the structural size — which
 is also what FERAL reports and what memory costs.
 
+### Does keeping the zeros cost memory? — factor size at scale
+
+FERAL keeps a structurally-present entry of `L` whether or not it evaluates to
+zero; RSLAB drops the numerically-zero ones when it materializes `L`. The
+natural worry is that FERAL's choice inflates the factor — in the limit, that a
+large KKT ends up stored densely. Measured on the LQ model at three scales, it
+does not:
+
+| KKT dim | nnz(A) | nnz(L) | fill | stored L | dense lower triangle | L as % of dense |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 502 | 3 003 | 10 495 | 3.49× | ≥0.1 MiB | 9 MiB | 1.39% |
+| 15 002 | 30 003 | 104 989 | 3.50× | ≥1.2 MiB | 859 MiB | 0.140% |
+| 150 002 | 300 003 | 1 049 989 | 3.50× | ≥12 MiB | **83.8 GiB** | **0.014%** |
+
+Three things to read off it.
+
+**The fill ratio is flat at 3.50× across a 100× range in `n`.** The factor grows
+*linearly* with the problem, not quadratically — which is the entire purpose of
+the fill-reducing ordering the symbolic phase computes. The percentage-of-dense
+column falls by 100× precisely because the numerator is linear and the
+denominator is quadratic. (3.50× is this model's number, not a universal one:
+the real fixtures run 2.8× on `airport` and 7.8–9.4× on `lp_degen2`. The
+constancy across scale is the transferable part, the value is not.)
+
+**FERAL and RSLAB store the same factor.** 1 049 989 against 1 049 988 — one
+entry apart in a million, at every scale. The keep-versus-drop difference is not
+a memory difference here at all. It showed up on `airport` only because that
+measurement was taken at iteration 0, where 88% of `A`'s *values* were zero; on
+a matrix whose values are all nonzero the two counts coincide exactly. That is
+also a consistency check on the §3 row-6 fix: reporting RSLAB's structural size
+makes the two arms agree where they should.
+
+**Keeping them is required by the contract anyway.** The pattern is fixed once
+by `initialize_structure` and never revisited, so a slot that is zero at this
+iteration and nonzero at the next cannot be dropped without redoing the symbolic
+analysis — the one cost the whole design exists to avoid paying per iteration.
+
+Peak RSS for the entire three-scale run, all arms, is **396 MiB**. The stored
+factor is 12 MiB of that, so the working set is dominated by the frontal panels,
+the IPM's own vectors and the model — not by `L`, and nowhere near the 83.8 GiB
+a dense factor would need. That working set is the number this note does *not*
+measure separately, and RSLAB's a-priori `MemoryEstimate` (§5 F) is the tool for
+it.
+
 ### End-to-end at three scales — `rslab_scale_smoke`
 
 Whole POUNCE solves of one LQ optimal-control model at three sizes, only the

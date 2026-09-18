@@ -210,6 +210,10 @@ struct Run {
     /// Phase totals over the whole solve, for the RSLAB arms. `None` for
     /// FERAL, which does not split.
     phases: Option<pounce_rslab::PhaseTimings>,
+    /// The last factorization's size, from the backend's own
+    /// `LinearSolverSummary`. Both arms populate it.
+    nnz_a: Option<usize>,
+    nnz_l: Option<usize>,
 }
 
 /// Sums [`pounce_rslab::PhaseTimings`] across every call of a whole solve.
@@ -314,14 +318,21 @@ impl Arm {
     fn backend(
         self,
         accum: &std::sync::Arc<PhaseAccum>,
+        summary: &std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
     ) -> Box<dyn SparseSymLinearSolverInterface> {
         let cfg = match self {
-            Arm::Feral => return Box::new(pounce_feral::FeralSolverInterface::new()),
+            Arm::Feral => {
+                return Box::new(
+                    pounce_feral::FeralSolverInterface::new()
+                        .with_summary_sink(std::sync::Arc::clone(summary)),
+                );
+            }
             Arm::Rslab => RslabConfig::default(),
             Arm::RslabStaticPivot => RslabConfig::static_pivoting(1e-12),
         };
         Box::new(Timed {
-            inner: RslabSolverInterface::with_config(cfg),
+            inner: RslabSolverInterface::with_config(cfg)
+                .with_summary_sink(std::sync::Arc::clone(summary)),
             accum: std::sync::Arc::clone(accum),
         })
     }
@@ -338,10 +349,16 @@ fn run(t: usize, arm: Arm) -> Run {
     app.initialize_with_options_str("print_level 0\nmax_iter 300\n")
         .unwrap();
     let accum = std::sync::Arc::new(PhaseAccum::default());
-    let accum_for_factory = std::sync::Arc::clone(&accum);
+    let summary = std::sync::Arc::new(std::sync::Mutex::new(
+        pounce_linsol::summary::LinearSolverSummary::default(),
+    ));
+    let (accum_f, summary_f) = (
+        std::sync::Arc::clone(&accum),
+        std::sync::Arc::clone(&summary),
+    );
     app.set_linear_backend_factory(Box::new(
         move |_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
-            arm.backend(&accum_for_factory)
+            arm.backend(&accum_f, &summary_f)
         },
     ));
     let clock = Instant::now();
@@ -355,6 +372,8 @@ fn run(t: usize, arm: Arm) -> Run {
         constr_viol: s.final_constr_viol,
         wall_s,
         phases: (arm != Arm::Feral).then(|| accum.snapshot()),
+        nnz_a: summary.lock().ok().and_then(|g| g.last_nnz_a),
+        nnz_l: summary.lock().ok().and_then(|g| g.last_nnz_l),
     }
 }
 
@@ -415,6 +434,31 @@ fn main() {
                 r.wall_s,
                 note
             );
+            // Factor memory. `nnz_l` is structural on both arms, which is the
+            // quantity that matters here: it is what the factor occupies.
+            if let (Some(na), Some(nl)) = (r.nnz_a, r.nnz_l) {
+                // 8 bytes per f64 + 4 per row index. An underestimate for both
+                // backends (neither stores a bare CSC triple), so read it as a
+                // floor, not a footprint.
+                let l_mb = nl as f64 * 12.0 / (1 << 20) as f64;
+                // The dense lower triangle of the same KKT, for scale.
+                let dim = (3 * t + 2) as f64;
+                let dense_mb = dim * (dim + 1.0) / 2.0 * 8.0 / (1 << 20) as f64;
+                println!(
+                    "{:>7} {:>9} {:<10} {:<24} factor: nnz(A) {:>9}  nnz(L) {:>10}  fill {:>5.2}x  \
+                     >={:>8.1} MB  = {:.4}% of the dense triangle ({:.0} MB)",
+                    "",
+                    "",
+                    "",
+                    "",
+                    na,
+                    nl,
+                    nl as f64 / na as f64,
+                    l_mb,
+                    100.0 * l_mb / dense_mb,
+                    dense_mb,
+                );
+            }
             if let Some(p) = r.phases {
                 println!(
                     "{:>7} {:>9} {:<10} {:<24} phases ms: convert {:.1}  equil {:.1}  symbolic {:.1}  \
