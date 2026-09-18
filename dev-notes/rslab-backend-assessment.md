@@ -38,11 +38,15 @@ restoration and fails (17 iterations, `constr_viol` 1.1e-9). Deterministic over
 three runs, and attributable to the factorization rather than to the adapter's
 inertia gate: the two arms that differ only in that gate both converge.
 
-That last result is probably **not a reason to adopt RSLAB**, and chasing it is
-the most useful thing in this note. RSLAB is a fork of FERAL (its `NOTICE` says
-so), the win comes from lift-to-floor static pivoting, and FERAL already has
-that mode — `Solver::with_static_pivot_threshold`. POUNCE just does not expose
-it. See "The control, and where the `eigena2` win actually comes from" in §4.
+That last result is probably **not a reason to adopt RSLAB**, but the obvious
+explanation for it is wrong. RSLAB is a fork of FERAL (its `NOTICE` says so) and
+was running lift-to-floor static pivoting, which FERAL has and POUNCE could not
+reach — so the natural prediction was that exposing
+`Solver::with_static_pivot_threshold` would reproduce it. It was exposed, swept
+over three decades, and **reproduces none of it**. The `eigena2` result stands
+unexplained. What the same sweep did find is that `feral_static_pivoting`, a
+knob POUNCE already had, is the only setting that converges `lp_degen2`. Both
+in §4, "The control, and where the `eigena2` win actually comes from".
 
 **And it is 3.8–6.3× slower end to end** on a banded KKT at three scales
 (1.5k / 15k / 150k rows), with identical iteration counts on every arm so the
@@ -604,12 +608,43 @@ appears nowhere in `crates/`. So the configuration that produced the only
 result in this note where RSLAB beats FERAL is one that FERAL supports and
 POUNCE cannot currently ask for.
 
-That makes the actionable item a POUNCE change rather than a backend swap: add
-`static_pivot_threshold: Option<f64>` to `FeralConfig` (default `None`, so no
-trajectory moves until someone opts in) and re-run `eigena2`. If it converges,
-the win is FERAL's and RSLAB was only the instrument that found it. **This is a
-prediction, not a measurement — it has not been run**, because it needs a field
-on a shipping crate and this crate was scoped not to touch one.
+#### The prediction, and its falsification
+
+An earlier revision of this note predicted the fix: add
+`static_pivot_threshold: Option<f64>` to `FeralConfig` and `eigena2` would
+converge, making the win FERAL's and RSLAB merely the instrument that found it.
+
+**That has now been run, and the prediction is wrong.** The field is wired
+(`pounce_feral::FeralConfig::static_pivot_threshold`, default `None`) and swept
+over the band FERAL's C ABI documents as useful:
+
+| model | feral | spt 1e-12 | spt 1e-10 | spt 1e-8 | feral-sp | rslab-sp |
+| --- | --- | --- | --- | --- | --- | --- |
+| eigena2 | RestFail 17 | RestFail 17 | RestFail 16 | RestFail 15 | RestFail 17 | **OK 21** |
+| eigenb2 | OK 21 | OK 67 | OK 43 | OK 46 | OK 21 | OK 21 |
+| deb7 | RestFail 54 | RestFail 54 | RestFail 54 | RestFail 54 | RestFail 35 | fail 1 |
+| lp_degen2 | RestFail 165 | RestFail 151 | RestFail 164 | RestFail 97 | **OK 209** | RestFail 138 |
+| airport, qscfxm1, wyndor | unchanged across every arm | | | | | |
+
+The floor rescues **nothing**, `eigena2` included, and on `eigenb2` it costs
+2–3× the iterations. So RSLAB's `eigena2` win is *not* explained by
+lift-to-floor static pivoting, and remains unexplained. The knob is kept because
+the capability gap was real — FERAL had a mode POUNCE could not reach — not
+because a measurement asked for it, and its doc comment says so.
+
+**The sweep did turn up a result, on a different row.** `feral_static_pivoting`
+— the boolean POUNCE *already* exposed, which drops delayed pivoting and
+force-accepts — is the only one of eight arms that converges `lp_degen2`: 209
+iterations at `constr_viol` 1.98e-10 and `dual_inf` 7.2e-14, against restoration
+failure for the default, for all three floors, and for all three RSLAB arms.
+Deterministic over three runs. That has nothing to do with RSLAB; it surfaced
+because the control arm was in the harness at all.
+
+Two cautions before anyone turns it on by default. It is a **trajectory change**
+in the `CLAUDE.md` sense, so it needs the fixture sweep first. And it is not
+free elsewhere — on `deb7` it takes 54 iterations to 35 and still fails, and the
+earlier RSLAB comparison found it makes no difference on `eigena2` or `eigenb2`.
+A per-model win is not a default.
 
 ### E. Are its 2×2 Bunch-Kaufman pivots beneficial on those cases?
 

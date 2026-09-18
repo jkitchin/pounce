@@ -572,6 +572,48 @@ pub struct FeralConfig {
     /// The empirical motivation is pounce#254 (emfl050's ~44 s single
     /// factorization); see `dev-notes/feral-factor-interrupt.md`.
     pub static_pivoting: Option<bool>,
+    /// FERAL's MA57-style static-pivot floor, i.e.
+    /// `NumericParams::static_pivot_threshold` via
+    /// [`feral::Solver::with_static_pivot_threshold`]. `None` (default)
+    /// leaves it off.
+    ///
+    /// **This is a different knob from [`Self::static_pivoting`], and the two
+    /// are easy to conflate.** `static_pivoting` disables *delayed* pivoting,
+    /// so a failing pivot is force-accepted at face value
+    /// (`ZeroPivotAction::ForceAccept`, the `L` column zeroed and the pivot
+    /// booked as a zero). This one leaves delayed pivoting alone and instead
+    /// enforces an absolute floor: a pivot below `t · ‖D·A·D‖∞` on the
+    /// **scaled** matrix is lifted to that floor with its sign, and its `L`
+    /// column stays live. FERAL applies it regardless of `on_zero_pivot`, so
+    /// the two compose rather than override each other.
+    ///
+    /// `t` is relative to the scaled infinity norm, so it is dimensionless;
+    /// FERAL's C ABI documents `1e-12 … 1e-8` as the useful band and this is
+    /// the Rust-side twin of its `FERAL_STATIC_PIVOT` env var.
+    ///
+    /// **Exposed, but with no measured case for turning it on.** It was wired
+    /// to test a specific hypothesis, and the hypothesis failed. Evaluating
+    /// RSLAB as a backend (`dev-notes/rslab-backend-assessment.md`), the one
+    /// model where RSLAB beat FERAL end to end was `eigena2` — the gh#540
+    /// small-pivot case — and RSLAB was running lift-to-floor static pivoting,
+    /// which FERAL has and POUNCE could not reach. Swept over `1e-12`, `1e-10`
+    /// and `1e-8` on seven models, it reproduces none of that result:
+    /// `eigena2` still enters restoration at every value, and on `eigenb2` it
+    /// costs 2–3× the iterations (21 → 67 / 43 / 46). It rescued no model that
+    /// FERAL's default fails. So RSLAB's `eigena2` win is **not** explained by
+    /// this mechanism, and the knob is here because the capability gap was
+    /// real, not because a measurement asked for it.
+    ///
+    /// Read [`Self::static_pivoting`] before reaching for this one — on
+    /// `lp_degen2` *that* knob is the only setting of either that converges the
+    /// model (209 iterations, `constr_viol` 2.0e-10, against restoration
+    /// failure on the default), which is the opposite of what the names
+    /// suggest.
+    ///
+    /// Opt-in for the same reason `static_pivoting` is: it perturbs the matrix
+    /// being factored, so the accuracy trade is the caller's to make
+    /// deliberately, and it is never coupled to a time budget.
+    pub static_pivot_threshold: Option<f64>,
 }
 
 impl Default for FeralConfig {
@@ -607,6 +649,7 @@ impl Default for FeralConfig {
             parallel: None,
             min_par_flops: None,
             static_pivoting: None,
+            static_pivot_threshold: None,
         }
     }
 }
@@ -734,6 +777,16 @@ impl FeralConfig {
                     .ok()
                     .as_deref(),
             ),
+            // Read through `feral::env` for the same reason `min_par_flops`
+            // is: a locally-parsed float silently drops what it cannot read,
+            // and a static-pivot floor that vanished would look exactly like
+            // one that was set and did nothing. `> 0` because a zero or
+            // negative floor means "off", which is what `None` already says.
+            static_pivot_threshold: feral::env::f64_var_where(
+                "POUNCE_FERAL_STATIC_PIVOT_THRESHOLD",
+                "> 0",
+                |v| v > 0.0,
+            ),
         }
     }
 }
@@ -821,6 +874,13 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
     // pathological factorization cheap. See pounce#254.
     if let Some(on) = cfg.static_pivoting {
         solver = solver.with_static_pivoting(on);
+    }
+    // The MA57-style static-pivot floor. Independent of the toggle above --
+    // feral applies it regardless of `on_zero_pivot` -- so both may be set.
+    // See `FeralConfig::static_pivot_threshold` for why they are not the same
+    // knob.
+    if let Some(t) = cfg.static_pivot_threshold {
+        solver = solver.with_static_pivot_threshold(t);
     }
     // Fill-reducing ordering (`feral_ordering` / `POUNCE_FERAL_ORDERING`),
     // and diagonal scaling (`feral_scaling` / `POUNCE_FERAL_SCALING`).
@@ -2323,9 +2383,49 @@ mod tests {
     #[test]
     fn default_static_pivoting_is_none() {
         assert_eq!(FeralConfig::default().static_pivoting, None);
+        // The floor is a separate, also-off-by-default knob. Both must stay
+        // `None`: each perturbs the factored matrix, and a default that
+        // perturbed would be a trajectory change for every solve.
+        assert_eq!(FeralConfig::default().static_pivot_threshold, None);
     }
 
     /// Both explicit static-pivoting settings still construct, factor, and
+    /// The static-pivot **floor** reaches the solver and still solves a
+    /// well-conditioned system exactly.
+    ///
+    /// Separate from the `static_pivoting` test below because they are
+    /// separate knobs: this one is `with_static_pivot_threshold`
+    /// (lift a sub-floor pivot to `t·‖D·A·D‖∞`, keep its `L` column live),
+    /// the other is `with_static_pivoting` (drop delayed pivoting,
+    /// force-accept at face value). Conflating them is the mistake
+    /// `FeralConfig::static_pivot_threshold` documents.
+    #[test]
+    fn static_pivot_threshold_propagates_and_factors() {
+        for t in [1e-12, 1e-8] {
+            let mut s = FeralSolverInterface::with_config(FeralConfig {
+                static_pivot_threshold: Some(t),
+                ..FeralConfig::default()
+            });
+            // [[2, 1], [1, 3]] — SPD, every pivot far above any of these
+            // floors, so the answer must be unperturbed.
+            let (irn, jcn) = (vec![1, 2, 2], vec![1, 1, 2]);
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success,
+                "structure init for threshold={t}"
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = vec![3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "solve for threshold={t}"
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for threshold={t}");
+            assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for threshold={t}");
+        }
+    }
+
     /// solve a tiny SPD system exactly — the `with_static_pivoting` builder
     /// call is wired through `configure_solver` and does not break solving.
     /// (feral exposes no public getter for `allow_delayed_pivots`, so the

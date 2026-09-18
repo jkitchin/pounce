@@ -101,6 +101,33 @@ fn main() {
             solve(model, "feral", |_| {
                 Box::new(pounce_feral::FeralSolverInterface::new())
             }),
+            // FERAL with the MA57-style static-pivot FLOOR (lift-to-floor),
+            // which is the configuration RSLAB's winning arm actually used.
+            // Swept over the band feral's C ABI documents as useful.
+            solve(model, "feral-spt12", |_| {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(
+                    pounce_feral::FeralConfig {
+                        static_pivot_threshold: Some(1e-12),
+                        ..pounce_feral::FeralConfig::default()
+                    },
+                ))
+            }),
+            solve(model, "feral-spt10", |_| {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(
+                    pounce_feral::FeralConfig {
+                        static_pivot_threshold: Some(1e-10),
+                        ..pounce_feral::FeralConfig::default()
+                    },
+                ))
+            }),
+            solve(model, "feral-spt8", |_| {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(
+                    pounce_feral::FeralConfig {
+                        static_pivot_threshold: Some(1e-8),
+                        ..pounce_feral::FeralConfig::default()
+                    },
+                ))
+            }),
             // FERAL with delayed pivoting turned OFF -- `feral_static_pivoting`,
             // which POUNCE already exposes. This is the control for the whole
             // RSLAB comparison: RSLAB's defining structural difference is that
