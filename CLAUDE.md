@@ -142,11 +142,25 @@ fixture-legs and flips `scaled_feasible_a` on the lbfgs leg from
 `MaximumIterationsExceeded`/199 to `SolveSucceeded`/69.
 
 Each line also records **which engine solved the model** (`cvx-qp`,
-`cvx-qcqp`, `nlp`). Status, objective and iteration count can all be unchanged
-while a model silently changes arms, and the JSON report does not name the
-engine, so a routing regression used to leave no trace in the diff. A line
-whose only moving field is the engine is a routing change, and is as
-reportable as a moved iteration count.
+`cvx-qcqp`, `qp-active-set`, `sqp-active-set`, `nlp`). Status, objective and
+iteration count can all be unchanged while a model silently changes arms, so a
+routing regression used to leave no trace in the diff. A line whose only moving
+field is the engine is a routing change, and is as reportable as a moved
+iteration count.
+
+`sqp-active-set` is the active-set SQP outer loop (`algorithm=active-set-sqp`);
+`qp-active-set` is `pounce_convex::active_set`, reached by
+`solver_selection=qp-active-set` on an LP or convex QP. Different engines, not
+synonyms — both solve their subproblems with `pounce-qp`, which is why the
+names are close. The SQP arm reported `nlp` until it was fixed, so a sweep
+taken against a binary older than that shows every SQP line moving in this
+column and nothing else; that is the reporting fix, not a reroute.
+
+The engine is read from the JSON report's `solution.engine`. When a fixture
+produces no JSON at all — `deb7` on the L-BFGS leg under
+`algorithm=active-set-sqp` times out — the sweep falls back to scraping the
+`Selected solver:` banner, so a change to that banner's wording moves the
+column on exactly those lines, with `NO_JSON` unchanged either side.
 
 What the corpus still cannot give you is **magnitude at benchmark scale**. The
 largest fixture of any class is `deb7` at 813 variables and the largest convex
