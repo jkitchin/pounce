@@ -150,12 +150,41 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         last_f = f_trial;
         last_c.clone_from(&c_trial);
 
+        // A trial point the model cannot be evaluated at is REJECTED, before
+        // any acceptance test reads it.
+        //
+        // Every test below is a comparison, and every comparison against a
+        // `NaN` is false — which rejects it in `phi_progress` but ACCEPTS it
+        // in `SqpFilter::accepts`, whose dominance test asks whether some
+        // filter entry dominates the trial. No entry can dominate a `NaN`,
+        // because `phi >= entry.phi` is false for all of them, so the filter
+        // reports "not dominated" and a step to a point where the objective
+        // does not exist is taken as progress. It only needs `theta_trial` to
+        // stay finite to get there, which it does whenever the constraints
+        // evaluate and the objective does not.
+        //
+        // Observed on `cresc4` with a named `bound_relax_factor`: the very
+        // first step, `‖p‖_inf = 2.0e1`, landed outside the model's domain and
+        // was accepted at `α = 1` with `f_new = NaN`. gh#876's screen then
+        // caught it at the top of the next iteration and reported
+        // `Invalid_Number_Detected` — an honest verdict on a solve that had
+        // already thrown the answer away, where backtracking would have kept
+        // it (that leg solves the model to `0.8718975487` without the
+        // widening).
+        //
+        // Rejecting rather than aborting is what makes this a repair: `alpha`
+        // halves and the next trial is closer to an iterate that evaluated
+        // fine, which is the ordinary remedy for a step that overshot. Only a
+        // model that is non-finite at EVERY trial length exhausts the loop,
+        // and that one genuinely has nowhere to go.
+        let trial_is_evaluable =
+            f_trial.is_finite() && theta_trial.is_finite() && c_trial.iter().all(|v| v.is_finite());
         // Sufficient progress: at least one of θ or φ strictly
         // decreased against the *current* iterate by the
         // configured margin.
         let theta_progress = theta_trial <= (1.0 - filter.gamma_theta) * theta_curr;
         let phi_progress = phi_trial <= phi_curr - filter.gamma_phi * theta_curr;
-        let progress = theta_progress || phi_progress;
+        let progress = trial_is_evaluable && (theta_progress || phi_progress);
 
         if progress && filter.accepts(theta_trial, phi_trial) {
             // Accept. Add current to filter (Fletcher-Leyffer's
@@ -208,7 +237,17 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                             // uncorrected full step's, else fall back
                             // to backtracking.
                             let soc_feasible = theta_soc <= KAPPA_SOC * theta_trial;
-                            if soc_feasible && (tp || pp) && filter.accepts(theta_soc, phi_soc) {
+                            // Same guard as the main trial above: the
+                            // correction is a step too, and `filter.accepts`
+                            // cannot reject a `NaN` on its own.
+                            let soc_evaluable = f_soc.is_finite()
+                                && theta_soc.is_finite()
+                                && c_soc.iter().all(|v| v.is_finite());
+                            if soc_evaluable
+                                && soc_feasible
+                                && (tp || pp)
+                                && filter.accepts(theta_soc, phi_soc)
+                            {
                                 filter.add(theta_curr, phi_curr);
                                 return LineSearchResult {
                                     alpha: 1.0,
