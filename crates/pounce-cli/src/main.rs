@@ -1694,6 +1694,13 @@ pub fn main() -> ExitCode {
     // and run again. Without `resolve`, this runs exactly once.
     let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
     let mut status = loop {
+        // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
+        // whole run, not to each attempt. Deferred from here through the
+        // second-opinion ladder below, which releases it and prints it once
+        // with the status that actually ships. Without this, every retry
+        // driver's attempt printed its own verdict and a run that recovered
+        // reported a mid-run one that read as the final answer.
+        app.defer_end_verdict();
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();
         let Some(req) = req else { break st };
@@ -1788,42 +1795,30 @@ pub fn main() -> ExitCode {
         solve_stats = outcome.statistics.clone();
         outcome
     } else {
+        // The ladder is exempted here, so it cannot be the one to release the
+        // deferred verdict — release it on this path too, or a debugger
+        // session and a presolve-certified infeasibility each lose their
+        // `EXIT:` line entirely.
+        if app.release_end_verdict() {
+            app.print_end_verdict(status);
+        }
         SecondOpinionOutcome::unchanged(status, solve_stats.clone())
     };
-    // Keep the *console* in lockstep with the verdict that shipped (gh #508).
-    // Every rung prints its own end-of-run summary, which is expected and
-    // announced — but when nothing is promoted the last banner on the terminal
-    // is the last rejected rung's, while the `.sol`, the summary and the JSON
-    // report all carry the original verdict. Two banners disagreeing about one
-    // solve misleads a human reading the tail of the log and a machine reading
-    // it the same way: `validation/p3_control.py` keeps the last `EXIT:` line
-    // it sees and pairs it with the `.sol`, so it recorded a status the `.sol`
-    // never held. Measured on `min (x-5)² s.t. x²+δ = 0` at `tol=1e-4`: the
-    // console ended `Error in step computation.` (δ=1e-9) and `Maximum Number
-    // of Iterations Exceeded.` (δ=1e-1) over a `.sol` that said locally
-    // infeasible in both. Re-emitting the verdict that actually shipped makes
-    // the terminal's final word the true one.
+    // gh #508's arbiter used to live here: every rung printed its own
+    // `EXIT:` banner, so when nothing was promoted the terminal's last word
+    // was the last REJECTED rung's, while the `.sol`, the summary and the JSON
+    // report all carried the original verdict. `validation/p3_control.py`
+    // keeps the last `EXIT:` line it sees and pairs it with the `.sol`, so it
+    // recorded a status the `.sol` never held. Measured on
+    // `min (x-5)² s.t. x²+δ = 0` at `tol=1e-4`: the console ended
+    // `Error in step computation.` (δ=1e-9) and `Maximum Number of Iterations
+    // Exceeded.` (δ=1e-1) over a `.sol` that said locally infeasible in both.
     //
-    // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
-    // which is what printed the banners this one arbitrates; at `print_level 0`
-    // there are none to disagree.
-    if second_opinion.ran()
-        && second_opinion.promoted_by.is_none()
-        && app
-            .options()
-            .get_integer_value("print_level", "")
-            .map(|(v, _found)| v >= 1)
-            .unwrap_or(true)
-    {
-        println!();
-        println!("EXIT: {}", print::status_message(status));
-        println!();
-        println!(
-            "POUNCE {}: {}",
-            env!("CARGO_PKG_VERSION"),
-            print::status_message(status)
-        );
-    }
+    // There is nothing left to arbitrate. The verdict is deferred across the
+    // whole run and printed exactly once, by whoever releases the last
+    // deferral, with the status that ships — so the terminal's final word is
+    // the true one by construction rather than by a correcting re-emission
+    // after the fact. Re-emitting here now would print it twice.
 
     // Failure diagnosis, printed once, after the ladder has finished moving
     // `status` and before the machine-readable verdict below.

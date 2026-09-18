@@ -143,8 +143,22 @@ pub fn run_second_opinion_ladder(
     statistics: SolveStatistics,
     report: &mut dyn FnMut(&str),
 ) -> SecondOpinionOutcome {
+    // The run-ending verdict is released here, on every path out, because
+    // every frontend calls this function unconditionally after its base solve
+    // and defers the verdict before it. Releasing on the early returns too is
+    // what makes that deferral safe: a run with no ladder still gets its one
+    // `EXIT:` line, printed with the base status, from here.
+    macro_rules! finish {
+        ($st:expr, $outcome:expr) => {{
+            if app.release_end_verdict() {
+                app.print_end_verdict($st);
+            }
+            return $outcome;
+        }};
+    }
+
     let Some(trigger) = SecondOpinionTrigger::for_status(status) else {
-        return SecondOpinionOutcome::unchanged(status, statistics);
+        finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     };
     let avail = SecondOpinionAvailability::from_options(
         app.options(),
@@ -153,7 +167,7 @@ pub fn run_second_opinion_ladder(
     );
     let rungs = second_opinion_rungs(avail);
     if rungs.is_empty() {
-        return SecondOpinionOutcome::unchanged(status, statistics);
+        finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     }
 
     let restore = OptionSnapshot::take(app);
@@ -250,6 +264,13 @@ pub fn run_second_opinion_ladder(
 
     let (status, statistics) =
         resolve_scaling_retry_outcome(status, retry_status, statistics, retry_stats);
+    // After `resolve_scaling_retry_outcome`, so the verdict is the one that
+    // actually ships — the promoted rung's when a rung promoted, the base
+    // one when none did. Printing it before this line is how the console
+    // used to end on a verdict the `.sol` never held (gh#508).
+    if app.release_end_verdict() {
+        app.print_end_verdict(status);
+    }
     SecondOpinionOutcome {
         status,
         statistics,

@@ -686,6 +686,24 @@ pub fn print_summary(
         "Total seconds in POUNCE                              = {:.3}",
         stats.total_wallclock_time_secs
     );
+}
+
+/// The two lines that end a run: `EXIT: <verdict>` and
+/// `POUNCE <version>: <verdict>`.
+///
+/// Split out of [`print_summary`] because they are the only part of the block
+/// that is about the RUN rather than about the attempt. Every retry driver
+/// re-enters the solve routine, so printing them per attempt produced a
+/// mid-run `POUNCE 0.11.0: Solved To Acceptable Level.` that reads as the
+/// final answer on a run that goes on to report `Optimal Solution Found` —
+/// and a consumer keeping the last `EXIT:` line (p3_control.py does; see
+/// `issue_508_infeasibility_gap_status`) had to hope the last attempt was the
+/// one that shipped. The statistics block above still prints per attempt,
+/// because it describes what that attempt achieved.
+///
+/// The caller decides when the run is over; see
+/// `IpoptApplication::defer_end_verdict`.
+pub fn print_exit_verdict(status: ApplicationReturnStatus) {
     println!();
     println!("EXIT: {}", status_message(status));
     println!();

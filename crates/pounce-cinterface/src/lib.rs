@@ -752,6 +752,13 @@ pub unsafe extern "C" fn IpoptSolve(
             info.app.set_restoration_factory_provider(resto_provider);
 
             let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+            // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
+            // whole run, not to each attempt. Deferred from here through the
+            // second-opinion ladder below, which releases it and prints it once
+            // with the status that actually ships. Without this, every retry
+            // driver's attempt printed its own verdict and a run that recovered
+            // reported a mid-run one that read as the final answer.
+            info.app.defer_end_verdict();
             let status = info.app.optimize_tnlp(bridge_for_solve);
             let stats = info.app.statistics();
             // Second-opinion ladder, on by default as it is in the CLI and the

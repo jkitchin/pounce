@@ -604,6 +604,20 @@ pub struct IpoptApplication {
     /// in-call fallbacks say nothing at all, so there the suppressed header is
     /// replaced by a line announcing the attempt.
     in_retry_sequence: std::cell::Cell<bool>,
+    /// Nesting depth of retry drivers that have taken ownership of the
+    /// run-ending `EXIT:` / `POUNCE <version>:` verdict.
+    ///
+    /// `emit_end_summary` prints the per-attempt statistics block whatever
+    /// this reads, and prints the verdict only at zero. A driver raises it
+    /// before its first attempt and lowers it after its last, then prints the
+    /// verdict once with the status it is actually returning.
+    ///
+    /// A counter rather than a flag because the drivers nest: the ℓ₁ fallback
+    /// can wrap the μ-strategy fallback, which the dual-divergence retry can
+    /// wrap in turn, and the CLI brackets the whole lot again around the
+    /// second-opinion ladder. Only the outermost knows the run is over, and
+    /// "outermost" is exactly "the one that brings this back to zero".
+    end_verdict_deferrals: std::cell::Cell<u32>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -669,6 +683,7 @@ impl IpoptApplication {
             kkt_schur_block: None,
             last_printed_problem_stats: RefCell::new(None),
             in_retry_sequence: std::cell::Cell::new(false),
+            end_verdict_deferrals: std::cell::Cell::new(0),
         }
     }
 
@@ -784,6 +799,46 @@ impl IpoptApplication {
     /// its header and nothing worse.
     pub fn set_in_retry_sequence(&self, active: bool) {
         self.in_retry_sequence.set(active);
+    }
+
+    /// Take ownership of the run-ending `EXIT:` / `POUNCE <version>:` verdict
+    /// for the attempts that follow.
+    ///
+    /// Between this and [`Self::release_end_verdict`] the per-attempt end
+    /// summary prints its statistics block but not the verdict, so a retried
+    /// run no longer reports a mid-run verdict that reads as the final answer.
+    /// The releaser prints it once, with the status it is returning.
+    ///
+    /// Callers must pair the two on every exit path. An unmatched acquire
+    /// costs the run its verdict line; the counter saturates rather than
+    /// wrapping, so an unmatched release cannot make a nested driver print
+    /// one early.
+    pub fn defer_end_verdict(&self) {
+        self.end_verdict_deferrals
+            .set(self.end_verdict_deferrals.get().saturating_add(1));
+    }
+
+    /// Release one [`Self::defer_end_verdict`]. Returns `true` when this was
+    /// the outermost one — i.e. when the caller now owns printing the verdict.
+    #[must_use]
+    pub fn release_end_verdict(&self) -> bool {
+        let next = self.end_verdict_deferrals.get().saturating_sub(1);
+        self.end_verdict_deferrals.set(next);
+        next == 0
+    }
+
+    /// Print the run-ending verdict, honouring `print_level`.
+    ///
+    /// The gate matches `emit_end_summary`'s, which is the block this follows:
+    /// at `print_level 0` there is no summary for it to end.
+    pub fn print_end_verdict(&self, status: ApplicationReturnStatus) {
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if console_output {
+            pounce_solve_report::console::print_exit_verdict(status);
+        }
     }
 
     pub fn set_restoration_factory_provider(&mut self, provider: RestorationFactoryProvider) {
@@ -2710,6 +2765,12 @@ impl IpoptApplication {
             n_h: stats.num_hess_evals as u64,
         };
         pounce_solve_report::console::print_summary(app_status, &stats, &counts);
+        // The verdict belongs to the run, not to the attempt. Held back while
+        // any retry driver is managing attempts; that driver prints it once,
+        // with the status it actually returns.
+        if self.end_verdict_deferrals.get() == 0 {
+            pounce_solve_report::console::print_exit_verdict(app_status);
+        }
     }
 
     /// Build a *copy* of the algorithm builder configured per the
@@ -2981,7 +3042,12 @@ impl IpoptApplication {
     /// path does, so there is one answer to "what does `linear_solver` mean"
     /// rather than one per algorithm.
     fn make_backend_factory(&self) -> LinearBackendFactory {
-        let mut feral_cfg = feral_config_from_options(&self.options);
+        // `RefineCarveOut::None`: this arm does not refine the unreduced system
+        // itself, so the backend loop is the only refinement in the stack and
+        // the interior-point carve-out's premise is false here. See
+        // `feral_config_from_options_scoped` for the measurement.
+        let mut feral_cfg =
+            feral_config_from_options_scoped(&self.options, RefineCarveOut::None);
         // Same override, and for the same reason, as the IPM path: the
         // external permutation carries a vector, which no string option can
         // express, so it arrives through the side-channel field instead.
@@ -6327,6 +6393,50 @@ pub fn default_backend_factory_with_sink(
 pub fn feral_config_from_options(
     options: &pounce_common::options_list::OptionsList,
 ) -> pounce_feral::FeralConfig {
+    feral_config_from_options_scoped(options, RefineCarveOut::InteriorPoint)
+}
+
+/// Whether [`feral_config_from_options_scoped`] applies the interior-point
+/// arm's limited-memory `feral_refine` carve-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineCarveOut {
+    /// Apply it: under `hessian_approximation=limited-memory`, force
+    /// `refine = false` unless the user said otherwise. This is the shipped
+    /// interior-point behaviour and what [`feral_config_from_options`] does.
+    InteriorPoint,
+    /// Skip it. For arms that do not refine the unreduced system themselves,
+    /// where the backend loop is the only refinement in the stack.
+    None,
+}
+
+/// [`feral_config_from_options`] with the limited-memory `refine` carve-out
+/// made explicit.
+///
+/// The carve-out is interior-point-specific in both of its premises, and
+/// neither holds on the active-set SQP arm. It is justified by
+/// `PdFullSpaceSolver::compute_residuals` already refining the *unreduced*
+/// Newton system — the SQP arm has no such host loop, so
+/// `pounce_qp::factor::LinearSolver` relies on the backend's own refinement
+/// ("refinement is *implicit* in this layer", that module's docs) and turning
+/// it off removes refinement from the stack entirely. And it keys off
+/// `hessian_approximation`, which is not that arm's Hessian selector at all:
+/// `sqp_hessian` is.
+///
+/// Measured, and this is why the parameter exists rather than the SQP path
+/// just calling the plain function: inheriting the carve-out moved 10 of 97
+/// fixtures on the sweep's L-BFGS leg under `algorithm=active-set-sqp`, while
+/// the exact leg did not move at all. Some of that movement looked like a win
+/// (`mu_fallback_point_floor` MaximumIterationsExceeded/200 ->
+/// SolveSucceeded/8), but it was a win bought by disabling refinement for a
+/// reason that does not apply here, and it came with `hs13_bigstart` landing
+/// on a different point (objective 1 -> 1.0018) and `eigena2` and
+/// `mpcc_scholtes4_biactive` likewise. Turning refinement off on this arm may
+/// well be worth measuring on its own merits; it should not arrive as a side
+/// effect of honouring `linear_solver`.
+pub fn feral_config_from_options_scoped(
+    options: &pounce_common::options_list::OptionsList,
+    carve_out: RefineCarveOut,
+) -> pounce_feral::FeralConfig {
     let mut cfg = pounce_feral::FeralConfig::from_env();
     // Tri-state: the `(_, true)` arm only fires when the user set the
     // option explicitly. Leaving it unset keeps `cfg.cascade_break` at
@@ -6412,10 +6522,11 @@ pub fn feral_config_from_options(
     // So the corpus and the AC-OPF benchmarks both prefer `no` and
     // `NARX_CFy` pays 57% more iterations for it. Nothing here separates
     // those, which is why the default is scoped rather than flipped.
-    let limited_memory = matches!(
-        options.get_string_value("hessian_approximation", ""),
-        Ok((ref s, true)) if s == "limited-memory"
-    );
+    let limited_memory = carve_out == RefineCarveOut::InteriorPoint
+        && matches!(
+            options.get_string_value("hessian_approximation", ""),
+            Ok((ref s, true)) if s == "limited-memory"
+        );
     if std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
         // Deliberately `_`, not `true`: see above.
         if let Ok((v, _)) = options.get_bool_value("feral_refine", "") {

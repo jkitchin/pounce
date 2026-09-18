@@ -161,10 +161,28 @@ fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
         "square_flowsheet_resto.nl",
         &["hessian_approximation=limited-memory", "max_iter=500"],
     );
+    // The base solve must still hit the cap: this rung recovers a failure,
+    // it does not prevent one.
+    //
+    // Read off the FIRST attempt's own statistics block rather than off an
+    // `EXIT: Maximum Number of Iterations Exceeded` banner, which is what
+    // this used to match. The verdict is now printed once per run rather
+    // than once per attempt, so the only `EXIT:` line here is the promoted
+    // rung's `Optimal Solution Found` — see
+    // `one_verdict_per_run.rs`. The per-attempt statistics block is
+    // unchanged, and it is the more direct evidence anyway: it reports the
+    // base attempt's own count instead of a status string that a later
+    // attempt could also have produced.
+    let base_iters: i64 = run
+        .out
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("Number of Iterations....:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no per-attempt iteration count:\n{}", run.out));
     assert!(
-        run.out.contains("Maximum Number of Iterations Exceeded"),
-        "the base solve should still hit the cap — this rung recovers a \
-         failure, it does not prevent one:\n{}",
+        base_iters >= 500,
+        "the base solve should still hit the 500-iteration cap; its own \
+         summary reports {base_iters}:\n{}",
         run.out
     );
     let lines = ladder_lines(&run.out);
