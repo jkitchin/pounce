@@ -2367,6 +2367,20 @@ impl IpoptApplication {
         // Same Q6 reconciliation as the IPM route: the SQP driver
         // evaluates the same derivatives through the same NLP object.
         self.install_constant_derivative_hints(&mut orig_nlp);
+        // Record the caller's own box before the solve. This arm applies NO
+        // `bound_relax_factor` widening — `relax_bounds` is an IPM-path call
+        // (`optimize_constrained`), and a feasible-iterate log-barrier is what
+        // needs `x` strictly inside its bounds; an active-set QP does not — so
+        // the declared box and the box actually solved against coincide here.
+        //
+        // The snapshot is still required, because `declared_box_violation`
+        // reads it and abstains without it. That abstention is what printed
+        // `Variable bound violation: nan` on every active-set SQP solve, while
+        // the interior-point arm reported real and sometimes nonzero numbers
+        // on the same models (`hs71_obj1e8` 9.99e-09, `csfi2` 4.48e-07). The
+        // row is the one a reader is told to check (gh#900), so an arm that
+        // cannot answer it is an arm whose answer cannot be checked.
+        orig_nlp.snapshot_declared_bounds();
         let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
         let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
@@ -2472,6 +2486,46 @@ impl IpoptApplication {
             stats.final_unscaled_constr_viol = res.final_constr_viol;
             stats.final_unscaled_compl = 0.0;
             stats.final_unscaled_kkt_error = res.final_stationarity.max(res.final_constr_viol);
+            // Ipopt's `Variable bound violation` — how far the returned point
+            // sits outside the box the caller wrote. Left at its `NaN` default
+            // until now, which printed `nan` on this arm's every summary.
+            //
+            // Measured through the same `declared_box_violation` accessor the
+            // interior-point arm reads (`curr_declared_box_violation_max`), so
+            // the two arms cannot drift into reporting different quantities
+            // under one heading. gh#900 is the precedent and the warning: it
+            // fixed this row on the NLP and convex arms and noted the two were
+            // "independent code paths, so a test that exercised one would say
+            // nothing about the other" — this is the third, and it was missed.
+            //
+            // `res.x` is algorithm-space, which is what the accessor expects
+            // (it lifts to full-x itself); `finalize_via_sqp` wraps it exactly
+            // this way for the same reason.
+            stats.final_declared_box_viol = {
+                use pounce_linalg::dense_vector::DenseVectorSpace;
+                let nlp_borrow = nlp_rc.borrow();
+                let x_space = DenseVectorSpace::new(nlp_borrow.n());
+                let mut x_dv = x_space.make_new_dense();
+                x_dv.set_values(&res.x);
+                // `NaN`, not `0.0`, on the abstention — deliberately unlike
+                // the IPM path's `unwrap_or(0.0)`.
+                //
+                // `None` from this accessor means one thing only: the declared
+                // bounds were never snapshotted. It is NOT "the model has no
+                // finite bounds" — an unbounded model still snapshots, the
+                // loops find nothing, and the answer is a measured `Some(0.0)`.
+                // So on this arm `None` can only mean the
+                // `snapshot_declared_bounds` call above was lost, and mapping
+                // that to zero would replace a visible "no answer" with an
+                // invisible false claim that the point is inside its box.
+                // gh#900's subject is exactly that: a zero that must not be
+                // fabricated. Checked by mutation — delete the snapshot call
+                // and this row goes back to `nan` rather than quietly reading
+                // `0.00e+00`.
+                nlp_borrow
+                    .declared_box_violation(&x_dv)
+                    .unwrap_or(Number::NAN)
+            };
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
         }
         let (app_status, solver_status) = match res.status {

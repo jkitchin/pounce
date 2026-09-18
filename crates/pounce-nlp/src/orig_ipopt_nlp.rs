@@ -965,18 +965,30 @@ impl OrigIpoptNlp {
     /// (which only reads bounds via cached evals — so order doesn't
     /// affect scaling — but the bounds themselves should be the
     /// post-relax values when they enter the algorithm).
-    pub fn relax_bounds(&mut self, bound_relax_factor: Number, constr_viol_tol: Number) {
-        // Snapshot the declared inequality bounds before anything widens them
-        // — even when relaxation is disabled, so `declared_d_bounds` has one
-        // authoritative answer per solve. Safe-slack adjustments come later
-        // and only touch the live vectors.
+    /// Record the bounds **as the caller declared them**, before anything
+    /// widens them.
+    ///
+    /// Taken unconditionally — even when no relaxation will be applied — so
+    /// [`Self::declared_d_bounds`] and [`Self::declared_box_violation`] have
+    /// one authoritative answer per solve rather than an answer that exists
+    /// only on widened runs. Safe-slack adjustments come later and only touch
+    /// the live vectors, so this stays the user's own box.
+    ///
+    /// Split out of [`Self::relax_bounds`] for the active-set SQP arm, which
+    /// applies no widening at all and so never called it. The cost of that was
+    /// `Variable bound violation` reading `nan` on every SQP solve: the row is
+    /// computed from this snapshot, and without it the accessor abstains. An
+    /// arm that does not widen still has a declared box, and the distance the
+    /// answer sits outside it is still the number that row exists to report.
+    pub fn snapshot_declared_bounds(&mut self) {
         *self.declared_d_l.borrow_mut() = Some(self.d_l.expanded_values());
         *self.declared_d_u.borrow_mut() = Some(self.d_u.expanded_values());
-        // Same snapshot for the variable box, so `honor_original_bounds`
-        // has the user's own bounds to project back onto after the
-        // widening below.
         *self.declared_x_l.borrow_mut() = Some(self.x_l.expanded_values());
         *self.declared_x_u.borrow_mut() = Some(self.x_u.expanded_values());
+    }
+
+    pub fn relax_bounds(&mut self, bound_relax_factor: Number, constr_viol_tol: Number) {
+        self.snapshot_declared_bounds();
         if bound_relax_factor <= 0.0 {
             return;
         }
@@ -3970,6 +3982,131 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    /// `min 0` over `x ∈ [-1, 2]`, one variable, no constraints. The
+    /// objective is irrelevant: these tests drive the bound accessors
+    /// directly rather than solving anything.
+    struct BoxedVar;
+    impl TNLP for BoxedVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1.0;
+            b.x_u[0] = 2.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 0.0;
+            true
+        }
+        fn eval_f(&mut self, _: &[Number], _: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, _: &[Number], _: bool, _: &mut [Number]) -> bool {
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, _: SparsityRequest<'_>) -> bool {
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    fn boxed_var_nlp() -> OrigIpoptNlp {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(BoxedVar));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).unwrap()
+    }
+
+    fn at(x: Number) -> DenseVector {
+        let space = DenseVectorSpace::new(1);
+        let mut v = space.make_new_dense();
+        v.set_values(&[x]);
+        v
+    }
+
+    /// Without a snapshot the accessor **abstains**, and that is the whole
+    /// reason the active-set SQP arm printed `Variable bound violation: nan`:
+    /// it never called `relax_bounds`, because it applies no widening, so the
+    /// declared box was never recorded and there was nothing to measure
+    /// against.
+    ///
+    /// Pinned as its own case so the `nan` cannot come back by someone
+    /// dropping the `snapshot_declared_bounds` call in
+    /// `IpoptApplication::optimize_sqp_tnlp` — this states what that call is
+    /// load-bearing for.
+    #[test]
+    fn the_box_violation_abstains_until_the_declared_bounds_are_snapshotted() {
+        let nlp = boxed_var_nlp();
+        assert!(
+            nlp.declared_box_violation(&at(5.0)).is_none(),
+            "no snapshot means no answer, not a fabricated zero"
+        );
+    }
+
+    /// And after the snapshot it is a **measurement**: it tracks where the
+    /// point is, on both sides of the box, and is zero only when the point is
+    /// genuinely inside.
+    ///
+    /// This is what makes the SQP arm's zero trustworthy. That arm reports
+    /// `0.0` on every fixture, which is the correct answer for it — it applies
+    /// no `bound_relax_factor` widening, so its declared box IS the box it
+    /// solves against, and the active-set QP keeps its iterate inside — but a
+    /// hardcoded `0.0` would be indistinguishable from the outside. gh#900's
+    /// subject was exactly that: "a zero that must not be fabricated". So the
+    /// nonzero readings are pinned here, where the point can be placed by
+    /// hand, rather than hoped for from a solve.
+    #[test]
+    fn the_box_violation_measures_the_distance_outside_the_declared_box() {
+        let mut nlp = boxed_var_nlp();
+        nlp.snapshot_declared_bounds();
+        // Inside: zero, and it is measured rather than assumed.
+        assert_eq!(nlp.declared_box_violation(&at(0.5)), Some(0.0));
+        // Exactly on each bound is still inside.
+        assert_eq!(nlp.declared_box_violation(&at(-1.0)), Some(0.0));
+        assert_eq!(nlp.declared_box_violation(&at(2.0)), Some(0.0));
+        // Past the upper bound, and past the lower one, by the distance.
+        let over = nlp.declared_box_violation(&at(2.25)).unwrap();
+        assert!((over - 0.25).abs() < 1e-15, "expected 0.25, got {over}");
+        let under = nlp.declared_box_violation(&at(-1.5)).unwrap();
+        assert!((under - 0.5).abs() < 1e-15, "expected 0.5, got {under}");
+    }
+
+    /// `relax_bounds` still takes the snapshot, so the interior-point arm is
+    /// unaffected by the extraction — and it takes it BEFORE widening, which
+    /// is what makes the row report the widening rather than zero.
+    #[test]
+    fn relaxing_the_bounds_still_snapshots_the_declared_ones_first() {
+        let mut nlp = boxed_var_nlp();
+        nlp.relax_bounds(1e-2, 1.0);
+        // The live upper bound moved out to 2.02; the DECLARED one is still
+        // 2.0, so a point at the widened bound reads 0.02 outside the model
+        // the caller wrote. Reading the live bound here would report zero,
+        // which is the defect the declared snapshot exists to prevent.
+        let v = nlp.declared_box_violation(&at(2.02)).unwrap();
+        assert!((v - 0.02).abs() < 1e-12, "expected 0.02, got {v}");
     }
 
     #[test]

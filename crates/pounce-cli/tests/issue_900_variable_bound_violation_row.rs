@@ -298,6 +298,102 @@ fn nothing_is_styled_when_stdout_is_not_a_terminal() {
     );
 }
 
+// ── the active-set SQP arm ───────────────────────────────────────────────────
+//
+// The third code path, and the one this file's header did not know about: it
+// printed `nan` on that row for every solve while the two arms above printed
+// measurements. `IpoptApplication::optimize_sqp_tnlp` never called
+// `relax_bounds` — correctly, because this arm applies no widening — and the
+// declared-box snapshot that the row is computed from was taken inside it.
+//
+// The cliff fixture cannot carry these: it is a convex QP, so `auto` routes it
+// to pounce-convex and `algorithm=active-set-sqp` never reaches the SQP driver
+// at all. A genuine NLP is needed to exercise this arm.
+
+/// `hs71_obj1e8.nl` — a real NLP (so it reaches the SQP driver) with a finite
+/// lower and upper bound on every variable, so the box is not vacuous.
+fn nlp_fixture() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/hs71_obj1e8.nl");
+    p
+}
+
+fn run_sqp(extra: &[&str]) -> Run {
+    let json_path = tmp_path("sqp_report.json");
+    let sol_path = tmp_path("sqp_out.sol");
+    let mut cmd = Command::new(pounce_exe());
+    cmd.arg(nlp_fixture())
+        .arg(&sol_path)
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("algorithm=active-set-sqp");
+    for o in extra {
+        cmd.arg(o);
+    }
+    cmd.env_remove("CLICOLOR_FORCE");
+    let out = cmd.output().expect("spawn pounce");
+    let text = std::fs::read_to_string(&json_path).expect("read json report");
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&sol_path);
+    Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        report: serde_json::from_str(&text).expect("deserialize SolveReport"),
+    }
+}
+
+/// The row carries a number on this arm too. `nan` is the defect: it is not a
+/// measurement, and it is what the row read on every active-set SQP solve.
+#[test]
+fn the_sqp_arm_reports_a_number_on_the_bound_violation_row() {
+    let r = run_sqp(&[]);
+    // Confirm the SQP driver actually ran — this fixture must not quietly
+    // route elsewhere, or the test measures the wrong arm.
+    assert_eq!(
+        r.report.solution.engine, "sqp-active-set",
+        "expected the active-set SQP arm; got {:?}",
+        r.report.solution.engine
+    );
+    let (scaled, unscaled) = bound_violation_row(&r.stdout);
+    assert!(
+        scaled.is_finite() && unscaled.is_finite(),
+        "the row must be a measurement, not `nan`: {scaled} / {unscaled}"
+    );
+    assert!(
+        r.report.statistics.final_declared_box_viol.is_finite(),
+        "and the JSON field too: {}",
+        r.report.statistics.final_declared_box_viol
+    );
+    let tol = 8.0 * f64::EPSILON * scaled.abs().max(1.0);
+    assert!(
+        (scaled - r.report.statistics.final_declared_box_viol).abs() <= tol,
+        "row and field must be one measurement: {scaled:e} vs {:e}",
+        r.report.statistics.final_declared_box_viol
+    );
+}
+
+/// Why that number is zero, stated as a contrast rather than left to be
+/// assumed: this arm applies no `bound_relax_factor` widening, so its declared
+/// box IS the box it solves against and the answer cannot land outside it.
+///
+/// The same option on the interior-point arm moves the row off zero — that is
+/// `the_row_reports_the_widening_on_the_nlp_arm` above. Running both here
+/// makes the SQP zero a statement about this arm rather than a number nobody
+/// checked. That the zero is *measured* and not hardcoded is pinned where the
+/// point can be placed by hand, in `pounce-nlp`'s
+/// `the_box_violation_measures_the_distance_outside_the_declared_box`.
+#[test]
+fn the_sqp_arm_does_not_widen_so_its_bound_violation_stays_zero() {
+    for extra in [&[][..], &[RELAX][..]] {
+        let r = run_sqp(extra);
+        let (scaled, _) = bound_violation_row(&r.stdout);
+        assert_eq!(
+            scaled, 0.0,
+            "the active-set arm applies no widening, at {extra:?}, so the \
+             returned point is inside the box the caller wrote; got {scaled:e}"
+        );
+    }
+}
+
 /// The residual table stays free of styling even with color forced on. It is
 /// diffed against `ipopt`'s own output byte-for-byte, which is the reason the
 /// styling went on the POUNCE-only line instead of the row that would most
