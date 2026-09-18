@@ -876,8 +876,34 @@ pub fn main() -> ExitCode {
         // fast-path for a post-optimal request (#196), report the NLP path that
         // actually runs, not the convex one `resolve_solver` picked.
         if !suppress_banner && !json_dbg {
-            let described = if decline_convex {
-                SolverChoice::Nlp.describe()
+            // `algorithm=active-set-sqp` is invisible to `resolve_solver`,
+            // which routes on `solver_selection` alone — and that is `auto`
+            // on a general NLP no matter how `algorithm` is set. So until
+            // this check existed the line read "NLP filter line-search
+            // interior-point (pounce-nlp)" on every active-set SQP run: not
+            // merely uninformative but the opposite of what happened, on the
+            // one line a user reads to confirm which engine they got. The
+            // banner above it is worse still (it is a fixed string naming the
+            // interior point), so this line is the whole budget.
+            //
+            // Asked of the application rather than re-derived here, so the
+            // announcement and the dispatch cannot disagree; a convex decline
+            // still wins, because those routes never reach the SQP driver.
+            // Gated on actually reaching the general NLP route, because
+            // `is_sqp_algorithm_selected` is also true for
+            // `solver_selection=qp-active-set` — and that value routes an LP
+            // or convex QP to `pounce_convex::active_set`, a different engine
+            // that `choice.describe()` already names correctly. Likewise
+            // `algorithm=active-set-sqp` on an LP under `auto` is routed to
+            // the convex IPM and never reaches the SQP driver at all, so the
+            // `algorithm` option alone does not license this branch.
+            let reaches_nlp_route = decline_convex || matches!(choice, SolverChoice::Nlp);
+            let described = if reaches_nlp_route {
+                if app.is_sqp_algorithm_selected() {
+                    "active-set SQP (pounce-qp subproblems)"
+                } else {
+                    SolverChoice::Nlp.describe()
+                }
             } else {
                 choice.describe()
             };
@@ -2184,7 +2210,26 @@ pub fn main() -> ExitCode {
         // picked: a convex solve that declines its own result lands
         // here (gh #535) after the `Selected solver:` banner has
         // already said `pounce-convex`.
-        builder.solution.engine = "nlp".to_string();
+        //
+        // "the arm" is two arms, and this used to be a constant. Everything
+        // that reaches this block went through `IpoptApplication::optimize_*`,
+        // which dispatches on `is_sqp_algorithm_selected` — so a general NLP
+        // under `algorithm=active-set-sqp` was reported as `nlp` by exactly
+        // the field whose doc comment says it exists so that a reroute leaves
+        // a trace. `scripts/sweep-fixtures.sh` reads this field for its engine
+        // column, so the blind spot CLAUDE.md describes there covered the SQP
+        // arm too: a change that moved a model between the interior-point and
+        // active-set arms could not show up in a sweep diff.
+        //
+        // Read after the solve, so it is also right for the late convex
+        // declines above: those call back into `optimize_tnlp` and get
+        // whichever arm the option selects, long after the banner printed.
+        builder.solution.engine = if app.is_sqp_algorithm_selected() {
+            "sqp-active-set"
+        } else {
+            "nlp"
+        }
+        .to_string();
         builder.solution.status = status;
         // Same source of truth as the `.sol` writer below — a run must not
         // report 201 in one output and 200 in the other.

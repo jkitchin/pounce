@@ -145,6 +145,33 @@ mirror `SqpOptions::default()`.
 | `sqp_print_level`       | `0`         | 0=silent, 1=per-iter summary, 2+=trace             |
 | `sqp_lbfgs_max_history` | `6`         | L-BFGS history size                                |
 
+#### Confirming the engine actually ran
+
+The copyright banner says "interior-point" on every run — it is a fixed
+string and does not read `algorithm`. Three things do tell you:
+
+* **The routing line.** `Selected solver: active-set SQP (pounce-qp
+  subproblems)`, printed under the banner.
+* **`sqp_print_level=1`**, which prints the outer-iteration table:
+
+  ```text
+  iter      objective   inf_pr   inf_du    ||p||    alpha     ws
+     0  1.6000000e+09 1.20e+01 1.20e+09        -        -      -
+     1  1.5937500e+09 1.62e+00 2.41e+08 1.25e+00 1.00e+00      2
+  ```
+
+  Row `k` reports the residuals *at* `x_k`; the step columns describe the
+  step that arrived there, so they are blank on row 0 — the same convention
+  the interior-point table uses. `ws` is that iteration's QP working-set
+  changes. `sqp_print_level=2` adds a per-iteration trace of the iterate,
+  the QP step and the line search.
+* **`--json-output`**, whose `solution.engine` reads `sqp-active-set`. From
+  Python, `info["n_qp_solves"]` is nonzero if and only if this engine ran.
+
+Two summary lines also fingerprint this arm, though neither is meant as an
+indicator: `Complementarity` is exactly zero (there is no barrier term) and
+`Variable bound violation` reads `nan`.
+
 #### The inner QP subproblem (`sqp_qp_*`)
 
 Each outer SQP iteration solves a QP subproblem with the `pounce-qp`

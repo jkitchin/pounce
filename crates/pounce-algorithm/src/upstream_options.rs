@@ -640,7 +640,7 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         0,
         12,
         0,
-        "0 silences the SQP driver; 1 prints per-iteration summaries; 2+ enables trace output (planned). Only consulted when \"algorithm\" is \"active-set-sqp\".",
+        "0 silences the SQP driver; 1 prints a per-iteration summary table (iter, objective, constraint violation, stationarity, step norm, line-search alpha, working-set changes); 2+ adds a per-iteration trace of the iterate, the QP step and the line search. Only consulted when \"algorithm\" is \"active-set-sqp\". THE 1 AND 2 BEHAVIOURS ARE NEW; through 0.11.0 this option did nothing at all in any binary a user could run. The three reader sites were behind #[cfg(test)] AND wrote through tracing::debug!, so a release build printed nothing at any level with or without RUST_LOG, while this text and docs/src/active-set-sqp.md both documented a per-iteration summary. Same shape as gh#677 (limited_memory_initialization registered and never read): a switch nothing reads is worse than no switch, because its documentation describes behaviour that does not exist. The level-1 table shares the interior-point table's column widths for iter/objective/inf_pr/inf_du so the two arms line up side by side on one model; it is printed by the SQP driver directly rather than through the journalist, which it has no handle on.",
     )?;
     r.add_lower_bounded_integer_option(
         "sqp_lbfgs_max_history",

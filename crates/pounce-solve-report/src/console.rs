@@ -20,7 +20,10 @@ use std::rc::Rc;
 #[cfg(test)]
 const BOUND_INF: f64 = 1.0e19;
 
-#[derive(Debug, Clone, Copy)]
+/// `PartialEq` is load-bearing, not a convenience: `IpoptApplication`
+/// compares each attempt's block against the last one it printed so a retry
+/// does not reprint an identical header. See `emit_problem_stats`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProblemStats {
     pub n: i32,
     pub m: i32,

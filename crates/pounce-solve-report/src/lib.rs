@@ -341,7 +341,16 @@ pub struct ProblemInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionInfo {
     /// Which engine produced this verdict: `"cvx-qp"`, `"cvx-qcqp"`,
-    /// `"qp-active-set"` or `"nlp"`.
+    /// `"qp-active-set"`, `"sqp-active-set"` or `"nlp"`.
+    ///
+    /// `"qp-active-set"` and `"sqp-active-set"` are different engines and
+    /// not synonyms: the first is `pounce_convex::active_set` reached by
+    /// `solver_selection=qp-active-set` on an LP or convex QP, the second is
+    /// `pounce_algorithm::sqp`'s outer loop reached by
+    /// `algorithm=active-set-sqp` on a general NLP. Both solve their
+    /// subproblems with `pounce-qp`, which is why the names are close; they
+    /// wrap it in different algorithms, which is why they are not the same
+    /// string.
     ///
     /// The `Selected solver:` banner names the engine *routing* chose, which
     /// is not always the one that answered: a convex solve that declines its

@@ -178,6 +178,12 @@ pub fn run_second_opinion_ladder(
     let mut promoted_by = None;
     let base_status = status;
     let base_iteration_count = statistics.iteration_count.max(0) as usize;
+    // Every rung below is a fresh `optimize_tnlp` on the SAME problem, so the
+    // application must not treat each one as a new run and reprint the
+    // Ipopt-style problem-statistics header: a four-rung ladder emitted five
+    // identical copies of it. Cleared unconditionally after the loop — there
+    // is one exit path, the promoting rung `break`s to it.
+    app.set_in_retry_sequence(true);
     for rung in &rungs {
         report(&format!(
             "pounce: second opinion — re-solving with {}…",
@@ -230,6 +236,7 @@ pub fn run_second_opinion_ladder(
             rung.label
         ));
     }
+    app.set_in_retry_sequence(false);
     if promoted_by.is_none() {
         report(&format!(
             "pounce: keeping the original {} verdict; it survived {} \

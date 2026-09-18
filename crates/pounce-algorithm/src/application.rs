@@ -566,6 +566,44 @@ pub struct IpoptApplication {
     /// so a stray hook never breaks a solve. Persistent config (not
     /// auto-cleared). Wire-set via [`Self::set_kkt_schur_block`].
     kkt_schur_block: Option<Vec<usize>>,
+    /// The problem-statistics block most recently printed during the current
+    /// run, so a retry attempt does not reprint an identical one.
+    ///
+    /// Every retry driver — the ℓ₁ fallback, the μ-strategy fallback, the
+    /// second-opinion ladder, the dual-divergence retry — re-enters the solve
+    /// routine that emits this block, so a run that retried once printed the
+    /// whole Ipopt-style header twice with nothing between the copies saying a
+    /// second attempt had started. Read as "the solver printed everything
+    /// twice", which is what it looked like.
+    ///
+    /// Scoped to one run: reset at the top of
+    /// [`Self::optimize_tnlp_with_derivative_test_tnlp`], which every entry
+    /// point funnels through. Without that reset a library caller's second
+    /// deliberate `optimize_tnlp` on the same application would lose its
+    /// header, which is a different thing entirely from a retry inside one
+    /// call.
+    ///
+    /// Compared rather than counted because the block can legitimately differ
+    /// between attempts: the ℓ₁ wrapper adds slack variables, so its retry
+    /// solves a genuinely larger problem and reprinting is informative.
+    last_printed_problem_stats: RefCell<Option<pounce_solve_report::console::ProblemStats>>,
+    /// Set while an *outside* retry driver is re-entering `optimize_tnlp` for
+    /// another attempt on the same problem — today only
+    /// `pounce_restoration::second_opinion_driver::run_second_opinion_ladder`.
+    ///
+    /// The retries that nest INSIDE one `optimize_tnlp` call (the ℓ₁ fallback,
+    /// the μ-strategy fallback) are covered by `last_printed_problem_stats`
+    /// alone, because the funnel that resets it runs once for all of them. The
+    /// ladder's rungs are `optimize_tnlp` calls in their own right, so without
+    /// this flag each one resets the memo and reprints the header — which is
+    /// how a four-rung ladder printed five identical copies of it.
+    ///
+    /// It also decides who explains the retry. The ladder narrates every rung
+    /// on stderr, naming the knob it varies and whether the rung recovered, so
+    /// `emit_problem_stats` stays quiet and lets that narration stand. The
+    /// in-call fallbacks say nothing at all, so there the suppressed header is
+    /// replaced by a line announcing the attempt.
+    in_retry_sequence: std::cell::Cell<bool>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -629,6 +667,8 @@ impl IpoptApplication {
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
             kkt_schur_block: None,
+            last_printed_problem_stats: RefCell::new(None),
+            in_retry_sequence: std::cell::Cell::new(false),
         }
     }
 
@@ -730,6 +770,22 @@ impl IpoptApplication {
     /// stale one, so the default one-shot restoration factory does
     /// not panic on its second invocation. If both `set_restoration_factory`
     /// and this are configured, the provider wins.
+    /// Mark that the next `optimize_*` calls are further **attempts at the
+    /// same problem**, driven from outside, rather than new solves.
+    ///
+    /// Retry drivers that re-enter `optimize_tnlp` per attempt — the
+    /// second-opinion ladder is the only one today — bracket their attempts
+    /// with `true` … `false`. The effect is confined to console presentation:
+    /// the Ipopt-style problem-statistics header is printed once for the run
+    /// instead of once per attempt. Nothing about the solve changes.
+    ///
+    /// Callers must clear it on every exit path, including the early returns a
+    /// ladder takes when a rung promotes; a stuck `true` costs a later solve
+    /// its header and nothing worse.
+    pub fn set_in_retry_sequence(&self, active: bool) {
+        self.in_retry_sequence.set(active);
+    }
+
     pub fn set_restoration_factory_provider(&mut self, provider: RestorationFactoryProvider) {
         self.restoration_factory_provider = Some(provider);
     }
@@ -1215,6 +1271,15 @@ impl IpoptApplication {
         self.dual_divergence_signature.set(false);
         self.dual_divergence_retry_promoted.set(false);
         self.answer_restored_from_floor.set(false);
+        // Same scoping argument as the three above, for the same reason: the
+        // memo suppresses a REPEATED header within one run, so it must not
+        // carry across runs. A library caller solving twice on one
+        // application gets its header both times — which is exactly what the
+        // guard protects: an outside retry driver re-entering here for another
+        // attempt is not such a caller, and says so by setting the flag.
+        if !self.in_retry_sequence.get() {
+            *self.last_printed_problem_stats.borrow_mut() = None;
+        }
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
         // the core's scaling models the objective and the constraint
@@ -2177,7 +2242,19 @@ impl IpoptApplication {
         )
     }
 
-    fn is_sqp_algorithm_selected(&self) -> bool {
+    /// Will the next `optimize_tnlp` run the active-set SQP driver rather
+    /// than the interior-point one?
+    ///
+    /// Public because the dispatch decision has to be *reportable*, not just
+    /// taken: before this was reachable, the CLI's `Selected solver:` line
+    /// and the JSON report's `solution.engine` both named the filter-IPM on
+    /// every `algorithm=active-set-sqp` run, because the only thing either
+    /// consulted was `solver_selection` — which is `auto` on a general NLP
+    /// however the `algorithm` option is set. Reading the same predicate
+    /// `optimize_tnlp` dispatches on is what keeps the report and the run
+    /// from disagreeing; deriving it a second time in the CLI is how they
+    /// drifted in the first place.
+    pub fn is_sqp_algorithm_selected(&self) -> bool {
         // `algorithm` is the primary selector.
         // `solver_selection = qp-active-set` selects the
         // same active-set SQP engine.
@@ -2241,7 +2318,18 @@ impl IpoptApplication {
 
         let mut builder = self.algorithm_builder_snapshot();
         builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
-        let factory = self.make_backend_factory();
+        // Prefer a caller-installed factory, exactly as `optimize_constrained`
+        // does, so an embedder that plugs its own backend gets it on both
+        // arms. `take()` matches the IPM's one-shot semantics rather than
+        // introducing a second, different lifetime for the same hook.
+        //
+        // `maybe_crossover` deliberately does NOT do this: it runs after the
+        // IPM solve has already taken the factory, so there is never one left
+        // to find, and its two closures cannot both hold `&mut self` anyway.
+        let factory = self
+            .linear_backend_factory
+            .take()
+            .unwrap_or_else(|| self.make_backend_factory());
         let mut alg = match builder.build_sqp_with_backend(factory) {
             Some(a) => a,
             None => return ApplicationReturnStatus::InternalError,
@@ -2558,7 +2646,31 @@ impl IpoptApplication {
         if let Some(stats) =
             pounce_solve_report::console::collect_stats(tnlp, lo_inf, up_inf, fixed_treatment)
         {
-            pounce_solve_report::console::print_problem_stats(&stats);
+            // A retry re-enters here with the same problem. Reprinting the
+            // block verbatim is what made a retried run look like it had
+            // printed its whole report twice for no reason, so say what is
+            // actually happening instead: a new attempt on an unchanged
+            // problem. One line, in place of seventeen that carry no
+            // information the reader does not already have.
+            //
+            // The attempt is announced rather than merely suppressed because
+            // the iteration table below it restarts at iteration 0 either way.
+            // Silence would leave that table appearing from nowhere — trading
+            // a confusing duplicate for a confusing gap.
+            let mut memo = self.last_printed_problem_stats.borrow_mut();
+            if memo.as_ref() == Some(&stats) {
+                // Silent under an outside retry driver, which narrates its own
+                // attempts in more detail than this line could ("pounce:
+                // second opinion — re-solving with feral_scaling=mc64…").
+                // Printing both would be two announcements of one event.
+                if !self.in_retry_sequence.get() {
+                    println!("Re-solving the same problem (a further attempt follows).");
+                    println!();
+                }
+            } else {
+                pounce_solve_report::console::print_problem_stats(&stats);
+                *memo = Some(stats);
+            }
         }
     }
 
@@ -2849,11 +2961,38 @@ impl IpoptApplication {
     /// Construct a LinearBackendFactory honoring the
     /// `linear_solver` option. Default FERAL; HSL MA57 when
     /// built with the `ma57` feature.
+    /// Build a linear-solver factory from the application's current options,
+    /// for the paths that do not go through `optimize_constrained`'s own
+    /// factory plumbing — the active-set SQP driver and the post-convergence
+    /// crossover.
+    ///
+    /// This used to ignore its `choice` argument and return
+    /// `FeralSolverInterface::new()`: a default-configured FERAL, whatever the
+    /// caller asked for. Three things were silently dropped on every SQP
+    /// solve. `linear_solver=ma57` ran FERAL while the banner said
+    /// `MA57 (HSL)`, so an MA57-vs-FERAL comparison on this path measured
+    /// nothing — the same defect as gh#825, one path over. Every `feral_*`
+    /// option (`feral_refine`, `feral_ordering`, `feral_scaling`,
+    /// `feral_increase_quality`, …) was accepted and discarded. And
+    /// `set_external_ordering` — whose whole purpose is to inject an ordering
+    /// a generic algorithm cannot derive — reached the IPM and not this arm.
+    ///
+    /// Reads the same two snapshots and calls the same constructor the IPM
+    /// path does, so there is one answer to "what does `linear_solver` mean"
+    /// rather than one per algorithm.
     fn make_backend_factory(&self) -> LinearBackendFactory {
-        Box::new(
-            |_choice| -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
-                Box::new(pounce_feral::FeralSolverInterface::new())
-            },
+        let mut feral_cfg = feral_config_from_options(&self.options);
+        // Same override, and for the same reason, as the IPM path: the
+        // external permutation carries a vector, which no string option can
+        // express, so it arrives through the side-channel field instead.
+        if let Some(perm) = &self.external_ordering {
+            feral_cfg.ordering = pounce_feral::OrderingMethod::External(perm.clone());
+        }
+        let ma57_cfg = ma57_config_from_options(&self.options, "");
+        default_backend_factory_with_sink(
+            feral_cfg,
+            ma57_cfg,
+            Arc::clone(&self.linsol_summary_sink),
         )
     }
 
