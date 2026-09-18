@@ -150,8 +150,9 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         last_f = f_trial;
         last_c.clone_from(&c_trial);
 
-        // A trial point the model cannot be evaluated at is REJECTED, before
-        // any acceptance test reads it.
+        // A trial point the model cannot be EVALUATED at is REJECTED, before
+        // any acceptance test reads it. Inevaluable means `NaN`; see below for
+        // why an infinity is deliberately not included.
         //
         // Every test below is a comparison, and every comparison against a
         // `NaN` is false — which rejects it in `phi_progress` but ACCEPTS it
@@ -177,8 +178,17 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         // fine, which is the ordinary remedy for a step that overshot. Only a
         // model that is non-finite at EVERY trial length exhausts the loop,
         // and that one genuinely has nowhere to go.
+        // NaN only, NOT `!is_finite()`: `±inf` is a different condition and
+        // must keep its existing path. On a minimization `f_trial = -inf` is
+        // the objective DIVERGING, which is a real answer about the model --
+        // `unbounded_cubic.nl` is that case, and gh#876's screen at the top of
+        // the outer loop is what turns it into a verdict. Refusing those steps
+        // would replace a diverging trajectory with a backtrack to
+        // `Search_Direction_Becomes_Too_Small` at `f = -3.6e+184`, which
+        // reports a stall where the truth is divergence. A `NaN` carries no
+        // such information: it says the model could not be evaluated there.
         let trial_is_evaluable =
-            f_trial.is_finite() && theta_trial.is_finite() && c_trial.iter().all(|v| v.is_finite());
+            !f_trial.is_nan() && !theta_trial.is_nan() && !c_trial.iter().any(|v| v.is_nan());
         // Sufficient progress: at least one of θ or φ strictly
         // decreased against the *current* iterate by the
         // configured margin.
@@ -240,9 +250,9 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                             // Same guard as the main trial above: the
                             // correction is a step too, and `filter.accepts`
                             // cannot reject a `NaN` on its own.
-                            let soc_evaluable = f_soc.is_finite()
-                                && theta_soc.is_finite()
-                                && c_soc.iter().all(|v| v.is_finite());
+                            let soc_evaluable = !f_soc.is_nan()
+                                && !theta_soc.is_nan()
+                                && !c_soc.iter().any(|v| v.is_nan());
                             if soc_evaluable
                                 && soc_feasible
                                 && (tp || pp)
