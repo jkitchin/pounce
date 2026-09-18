@@ -228,13 +228,31 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.11.0
 # identical defect on `POUNCE_FERAL_MIN_PAR_FLOPS`, whose documented default we
 # print as `1e8`. Those reads now go through `feral::env`.
 #
-# 0.17.0 is the current pin. If you ever need to develop against an unreleased
+# 0.18.0 (feral#203, #208) fixes nested-dissection separator refinement in all
+# three ND orderings. It does not move the default path: `Auto` never selects
+# nested dissection (feral#209, open), so a solve that leaves `feral_ordering`
+# unset is unchanged. The fixture sweep, both legs, against a 0.17.0 baseline:
+# 0 of 194 lines move at the default ordering, and 0 under `auto_race`. Forced
+# orderings move 2 (metis, scotch) and 4 (kahip) lines, all on `deb7` and
+# `convex_qp_qscfxm1`, and one is a loss: `deb7` (exact) under
+# `feral_ordering=scotch` goes `SolveSucceeded`/144 to `ErrorInStepComputation`
+# /199. Where nested dissection is set on purpose the fix is large:
+# GasLib-40 transient control at 56k/112k variables runs 2.3x/3.6x faster
+# under `metis` than on 0.17.0 (2.25x/3.0x per iteration), which makes
+# `metis` 2.1x/3.3x faster than the default there. See docs/src/options.md,
+# "Collocation, optimal-control and PDE-in-time models: set `metis`".
+#
+# The release candidate before #208 raced `{Amd, Amf, MetisND}` under
+# `auto_race`, and that sent `laptime` to a false local-infeasibility exit;
+# the released set is `{Amd, MetisND}`, and `laptime` solves (349 it).
+#
+# 0.18.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.17.0" }
+feral = { version = "0.18.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
