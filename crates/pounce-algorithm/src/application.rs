@@ -777,14 +777,6 @@ impl IpoptApplication {
         self.diagnostics.as_ref().map(Rc::clone)
     }
 
-    /// Plug a restoration-phase **factory provider** for drivers that
-    /// need to run the inner IPM more than once per `optimize_tnlp`
-    /// call (notably the Phase-3 ℓ₁-exact penalty-barrier outer loop,
-    /// pounce#10). On each inner solve, the application consults the
-    /// provider to mint a fresh [`RestorationFactory`], replacing any
-    /// stale one, so the default one-shot restoration factory does
-    /// not panic on its second invocation. If both `set_restoration_factory`
-    /// and this are configured, the provider wins.
     /// The three options that decide how the TNLP is *classified* before any
     /// algorithm sees it: the two infinity thresholds and the fixed-variable
     /// treatment.
@@ -884,6 +876,14 @@ impl IpoptApplication {
         }
     }
 
+    /// Plug a restoration-phase **factory provider** for drivers that
+    /// need to run the inner IPM more than once per `optimize_tnlp`
+    /// call (notably the Phase-3 ℓ₁-exact penalty-barrier outer loop,
+    /// pounce#10). On each inner solve, the application consults the
+    /// provider to mint a fresh [`RestorationFactory`], replacing any
+    /// stale one, so the default one-shot restoration factory does
+    /// not panic on its second invocation. If both `set_restoration_factory`
+    /// and this are configured, the provider wins.
     pub fn set_restoration_factory_provider(&mut self, provider: RestorationFactoryProvider) {
         self.restoration_factory_provider = Some(provider);
     }
@@ -3143,9 +3143,6 @@ impl IpoptApplication {
         None
     }
 
-    /// Construct a LinearBackendFactory honoring the
-    /// `linear_solver` option. Default FERAL; HSL MA57 when
-    /// built with the `ma57` feature.
     /// Build a linear-solver factory from the application's current options,
     /// for the paths that do not go through `optimize_constrained`'s own
     /// factory plumbing — the active-set SQP driver and the post-convergence

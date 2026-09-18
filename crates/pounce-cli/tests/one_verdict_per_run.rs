@@ -210,6 +210,53 @@ fn a_single_attempt_run_still_reports_its_verdict() {
     assert_eq!(run.verdict(), "Optimal Solution Found.");
 }
 
+/// A debugger `resolve` re-runs the solve inside one CLI invocation, and
+/// the run still reports exactly one verdict: the resumed solve's.
+///
+/// The CLI's solve loop goes round once per `resolve`, while the verdict is
+/// released once, after it. Deferring inside the loop left one deferral
+/// unmatched after a single `resolve`, and the run ended with no `EXIT:`
+/// line at all: the unmatched-acquire failure the test above warns about,
+/// on the one path that test cannot reach. `solver_selection=nlp` because
+/// `resolve` is refused on the convex route, where this would pass without
+/// resolving anything; the stderr check is what proves it did resolve.
+#[test]
+fn a_debugger_resolve_still_reports_one_verdict() {
+    let script =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("one_verdict_per_run_resolve.dbg");
+    std::fs::write(&script, "resolve\ncontinue\n").expect("write debug script");
+    let out = Command::new(pounce_exe())
+        .arg(fixture("airport.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=nlp")
+        .arg("--debug-script")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn pounce");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("re-solving from saved point"),
+        "the script did not resolve, so this test proves nothing:\n{stderr}"
+    );
+    let run = Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+    };
+    assert_eq!(
+        run.count("EXIT:"),
+        1,
+        "verdict lost or repeated:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        run.count("POUNCE 0"),
+        1,
+        "verdict lost or repeated:\n{}",
+        run.stdout
+    );
+    assert_eq!(run.verdict(), "Optimal Solution Found.");
+}
+
 /// `print_level 0` is a request for silence, and the verdict is no more
 /// exempt from it than the summary block it used to end.
 #[test]

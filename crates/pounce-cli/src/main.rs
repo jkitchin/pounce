@@ -1693,14 +1693,18 @@ pub fn main() -> ExitCode {
     // the captured `x` (via `SeededTnlp`), re-install a fresh debugger,
     // and run again. Without `resolve`, this runs exactly once.
     let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
+    // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
+    // whole run, not to each attempt. Deferred from here through the
+    // second-opinion ladder below, which releases it and prints it once
+    // with the status that actually ships. Without this, every retry
+    // driver's attempt printed its own verdict and a run that recovered
+    // reported a mid-run one that read as the final answer.
+    //
+    // Once, OUTSIDE the loop: a debugger `resolve` goes round it again, and
+    // there is exactly one release below. Deferring per pass left the
+    // counter at 1 after a resolve, so the run printed no verdict at all.
+    app.defer_end_verdict();
     let mut status = loop {
-        // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
-        // whole run, not to each attempt. Deferred from here through the
-        // second-opinion ladder below, which releases it and prints it once
-        // with the status that actually ships. Without this, every retry
-        // driver's attempt printed its own verdict and a run that recovered
-        // reported a mid-run one that read as the final answer.
-        app.defer_end_verdict();
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();
         let Some(req) = req else { break st };
