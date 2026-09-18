@@ -2367,20 +2367,53 @@ impl IpoptApplication {
         // Same Q6 reconciliation as the IPM route: the SQP driver
         // evaluates the same derivatives through the same NLP object.
         self.install_constant_derivative_hints(&mut orig_nlp);
-        // Record the caller's own box before the solve. This arm applies NO
-        // `bound_relax_factor` widening — `relax_bounds` is an IPM-path call
-        // (`optimize_constrained`), and a feasible-iterate log-barrier is what
-        // needs `x` strictly inside its bounds; an active-set QP does not — so
-        // the declared box and the box actually solved against coincide here.
+        // `bound_relax_factor`, on the convex arm's rule (gh#745's
+        // `convex_bound_relax`), because this arm's position is the convex
+        // arm's and not the interior-point arm's.
         //
-        // The snapshot is still required, because `declared_box_violation`
-        // reads it and abstains without it. That abstention is what printed
-        // `Variable bound violation: nan` on every active-set SQP solve, while
-        // the interior-point arm reported real and sometimes nonzero numbers
-        // on the same models (`hs71_obj1e8` 9.99e-09, `csfi2` 4.48e-07). The
-        // row is the one a reader is told to check (gh#900), so an arm that
-        // cannot answer it is an arm whose answer cannot be checked.
-        orig_nlp.snapshot_declared_bounds();
+        // The widening is a change to the MODEL, and its error is one-signed:
+        // enlarging the feasible set can only flatter the objective, by `δ`
+        // times the bound's multiplier, with nothing bounding that product and
+        // no amount of tightening `tol` closing it. On `LISWET1` it buys `9.0`
+        // of objective (`27.1221` against the true `36.1224`); over the
+        // 91-instance netlib LP corpus, dropping it took the median objective
+        // error from `1.2e-08` to `3.8e-11`.
+        //
+        // The interior-point arm keeps it and must: it is a feasible-iterate
+        // log-barrier that needs `x` strictly inside its bounds, and matching
+        // Ipopt is that arm's contract — the fixture sweep at
+        // `bound_relax_factor=0` turns `square_flowsheet_resto` into
+        // `InfeasibleProblemDetected`. An active-set QP needs none of it: its
+        // iterates are feasible for the box by construction, which is why this
+        // arm has always run un-widened without incident.
+        //
+        // So: unset means solve the model as declared, which is what this arm
+        // already did. What it did NOT do is honour an explicit request — the
+        // option was accepted and discarded, the gh#677 shape, and a caller
+        // comparing arms under a named `bound_relax_factor` was comparing two
+        // different models without being told. Set means the caller asked by
+        // name and gets exactly the interior-point arm's model.
+        //
+        // Either branch snapshots the declared bounds first (`relax_bounds`
+        // does it before widening), which `declared_box_violation` needs: its
+        // absence is what printed `Variable bound violation: nan` here.
+        let requested_relax = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .ok()
+            .and_then(|(v, set)| set.then_some(v));
+        match requested_relax {
+            Some(factor) => {
+                let cap = self
+                    .options
+                    .get_numeric_value("constr_viol_tol", "")
+                    .ok()
+                    .and_then(|(v, set)| set.then_some(v))
+                    .unwrap_or(1e-4);
+                orig_nlp.relax_bounds(factor, cap);
+            }
+            None => orig_nlp.snapshot_declared_bounds(),
+        }
         let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
         let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
