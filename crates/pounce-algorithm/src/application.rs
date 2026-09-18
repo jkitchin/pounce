@@ -785,6 +785,49 @@ impl IpoptApplication {
     /// stale one, so the default one-shot restoration factory does
     /// not panic on its second invocation. If both `set_restoration_factory`
     /// and this are configured, the provider wins.
+    /// The three options that decide how the TNLP is *classified* before any
+    /// algorithm sees it: the two infinity thresholds and the fixed-variable
+    /// treatment.
+    ///
+    /// One reader, because there were three copies and they drifted. The
+    /// active-set SQP path built its adapter with `TNLPAdapter::new`, which
+    /// hard-codes the same three defaults — so the options were accepted and
+    /// discarded on that arm, and a model with `fixed_variable_treatment=
+    /// relax_bounds` or a non-default `nlp_upper_bound_inf` was classified one
+    /// way for the interior-point arm and another for this one. Silently: the
+    /// defaults coincide, so it only diverges for a caller who sets them, and
+    /// nothing reported the difference.
+    ///
+    /// `make_constraint` / `make_parameter_nodual` are not implemented and
+    /// fall back to `make_parameter`; the adapter auto-retries to
+    /// `relax_bounds` when `make_parameter` would leave `n_x_var < n_c`
+    /// (upstream `IpTNLPAdapter.cpp:623-633`).
+    fn adapter_options(&self) -> (Number, Number, FixedVarTreatment) {
+        let lo_inf = self
+            .options
+            .get_numeric_value("nlp_lower_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
+        let up_inf = self
+            .options
+            .get_numeric_value("nlp_upper_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
+        let fixed_treatment = match self
+            .options
+            .get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref()
+        {
+            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
+            _ => FixedVarTreatment::MakeParameter,
+        };
+        (lo_inf, up_inf, fixed_treatment)
+    }
+
     /// Mark that the next `optimize_*` calls are further **attempts at the
     /// same problem**, driven from outside, rather than new solves.
     ///
@@ -2344,7 +2387,22 @@ impl IpoptApplication {
         // (benchmarks/scripts/compare_qp_four_way.py had to skip the column).
         let t_start = std::time::Instant::now();
 
-        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+        // `new_with_options`, not `new`: the latter hard-codes the same three
+        // defaults, so `fixed_variable_treatment`, `nlp_lower_bound_inf` and
+        // `nlp_upper_bound_inf` were accepted and discarded on this arm. The
+        // defaults coincide, which is why it went unnoticed — it diverges only
+        // for a caller who sets one, and then the two arms CLASSIFY THE MODEL
+        // DIFFERENTLY: a bound at the caller's own infinity threshold is a
+        // bound here and no bound there, and a fixed variable is eliminated on
+        // one arm and relaxed on the other. That is a different problem, not a
+        // different trajectory on one.
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
+        let adapter = match TNLPAdapter::new_with_options(
+            Rc::clone(&tnlp),
+            lo_inf,
+            up_inf,
+            fixed_treatment,
+        ) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
@@ -2763,28 +2821,7 @@ impl IpoptApplication {
         if !console_output {
             return;
         }
-        let lo_inf = self
-            .options
-            .get_numeric_value("nlp_lower_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
-        let up_inf = self
-            .options
-            .get_numeric_value("nlp_upper_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
-        let fixed_treatment = match self
-            .options
-            .get_string_value("fixed_variable_treatment", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .as_deref()
-        {
-            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
-            _ => FixedVarTreatment::MakeParameter,
-        };
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
         if let Some(stats) =
             pounce_solve_report::console::collect_stats(tnlp, lo_inf, up_inf, fixed_treatment)
         {
@@ -4326,31 +4363,7 @@ impl IpoptApplication {
         // which the adapter also auto-selects as a fallback when
         // `make_parameter` would leave `n_x_var < n_c` — mirrors upstream
         // `IpTNLPAdapter.cpp:623-633`).
-        let lo_inf = self
-            .options
-            .get_numeric_value("nlp_lower_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
-        let up_inf = self
-            .options
-            .get_numeric_value("nlp_upper_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
-        let fixed_treatment = match self
-            .options
-            .get_string_value("fixed_variable_treatment", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .as_deref()
-        {
-            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
-            // `make_constraint` / `make_parameter_nodual` not yet
-            // implemented; fall back to `make_parameter` (auto-retry to
-            // `relax_bounds` will still kick in if DOF runs short).
-            _ => FixedVarTreatment::MakeParameter,
-        };
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
         let adapter = match TNLPAdapter::new_with_options(
             Rc::clone(&tnlp),
             lo_inf,
