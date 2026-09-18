@@ -31,6 +31,69 @@ use pounce_qp::{
     HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolver, QpStatus, WorkingSet,
 };
 
+/// Header for the `sqp_print_level >= 1` iteration table.
+///
+/// Column widths for `iter` / `objective` / `inf_pr` / `inf_du` are the
+/// interior-point table's exactly (`crate::output::orig`), so the two arms'
+/// logs line up when a reader puts them side by side on one model. The
+/// remaining columns are the ones this arm actually has: an active-set SQP
+/// has no barrier parameter and no dual step length, so `lg(mu)`, `lg(rg)`
+/// and `alpha_du` would be permanently blank, and it does have a working-set
+/// size that the IPM does not.
+const SQP_ITER_HEADER: &str = "iter      objective   inf_pr   inf_du    ||p||    alpha     ws";
+
+/// What the step into the current iterate cost — the trailing columns of a
+/// row. `None` on row 0, where no step has been taken yet.
+struct SqpStepRecord {
+    /// `‖p‖_inf` of the QP step accepted into this iterate.
+    p_inf: Number,
+    /// Line-search step length.
+    alpha: Number,
+    /// Whether the accepted step was a second-order correction. Rendered as
+    /// a trailing `c`, the same position Ipopt puts its `alpha_char` in.
+    soc: bool,
+    /// Active-set changes (adds + drops) in the QP that produced the step.
+    ws_changes: u32,
+}
+
+/// One row of the `sqp_print_level >= 1` table.
+///
+/// Row `k` reports the residuals **at** `x_k`; the step columns describe the
+/// step that arrived there, so they are blank on row 0. That is Ipopt's
+/// convention and `crate::output::orig::OrigIterationOutput::format_row`'s.
+fn format_sqp_row(
+    iter: u32,
+    obj: Number,
+    inf_pr: Number,
+    inf_du: Number,
+    step: Option<&SqpStepRecord>,
+) -> String {
+    use crate::output::orig::format_e;
+    match step {
+        Some(st) => format!(
+            "{:>4} {:>14} {:>8} {:>8} {:>8} {:>8}{} {:>5}",
+            iter,
+            format_e(obj, 7),
+            format_e(inf_pr, 2),
+            format_e(inf_du, 2),
+            format_e(st.p_inf, 2),
+            format_e(st.alpha, 2),
+            if st.soc { 'c' } else { ' ' },
+            st.ws_changes,
+        ),
+        None => format!(
+            "{:>4} {:>14} {:>8} {:>8} {:>8} {:>8}  {:>5}",
+            iter,
+            format_e(obj, 7),
+            format_e(inf_pr, 2),
+            format_e(inf_du, 2),
+            "-",
+            "-",
+            "-",
+        ),
+    }
+}
+
 /// SQP-side algorithm driver.
 pub struct SqpAlgorithm {
     qp_solver: ParametricActiveSetSolver,
@@ -166,6 +229,10 @@ impl SqpAlgorithm {
         // by `l1_merit_line_search`. Initialized from
         // `SqpOptions::l1_penalty`.
         let mut nu = self.opts.l1_penalty;
+        // Trailing columns of the `sqp_print_level >= 1` row: what the step
+        // into the CURRENT iterate cost. Written at the end of each
+        // iteration, read at the top of the next, `None` on row 0.
+        let mut prev_step: Option<SqpStepRecord> = None;
         // Reset filter state at the top of each optimize call.
         self.filter = SqpFilter::new();
         // Cache the most recent f(x) and c(x) so we don't
@@ -348,14 +415,49 @@ impl SqpAlgorithm {
                 });
             }
 
-            #[cfg(test)]
+            // Per-iteration summary row (`sqp_print_level >= 1`). Emitted at
+            // the TOP of the iteration, on Ipopt's convention: row `k`
+            // reports the residuals AT `x_k`, and its step columns describe
+            // the step that arrived there — so they are blank on row 0. The
+            // interior-point arm's table reads the same way
+            // (`crate::output::orig::OrigIterationOutput::format_row`), which
+            // is the whole point: a reader should not have to learn a second
+            // convention to compare the two arms on one model.
+            //
+            // Written with `println!` rather than through a journalist because
+            // `SqpAlgorithm` has no handle on one — the same reason
+            // `pounce_solve_report::console` prints the problem statistics and
+            // the end-of-run summary that bracket this table directly.
+            //
+            // This block used to be `#[cfg(test)]` around a `tracing::debug!`,
+            // which meant the option was registered, documented in
+            // `docs/src/active-set-sqp.md` as "1=per-iter summary", threaded
+            // all the way to `opts.print_level` — and produced nothing
+            // whatsoever in any binary a user can run, at any level, with or
+            // without `RUST_LOG`. Same shape as gh#677
+            // (`limited_memory_initialization` registered and never read) and
+            // the `sqp_qp_use_homotopy` no-op: a switch nothing reads is worse
+            // than no switch, because its documentation describes behaviour
+            // that does not exist.
             if self.opts.print_level >= 1 {
-                tracing::debug!(target: "pounce::sqp",
-                    "[sqp k={outer:3}] x={:?} f={:.4e} ‖c‖={:.2e} stat={:.2e} ν={:.2e}",
+                if outer % 10 == 0 {
+                    println!("{SQP_ITER_HEADER}");
+                }
+                println!(
+                    "{}",
+                    format_sqp_row(
+                        outer,
+                        f_curr,
+                        kkt.constr_viol,
+                        kkt.stationarity,
+                        prev_step.as_ref(),
+                    )
+                );
+            }
+            if self.opts.print_level >= 2 {
+                println!(
+                    "         x={:?} ν={:.2e}",
                     iter.x.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
-                    f_curr,
-                    kkt.constr_viol,
-                    kkt.stationarity,
                     nu,
                 );
             }
@@ -852,10 +954,9 @@ impl SqpAlgorithm {
                 }
             }
 
-            #[cfg(test)]
-            if self.opts.print_level >= 1 {
-                let p_inf = sol.x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-                tracing::debug!(target: "pounce::sqp",
+            let p_inf = sol.x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            if self.opts.print_level >= 2 {
+                println!(
                     "         qp: ‖p‖_inf={:.3e} ‖λ_g_qp‖_inf={:.3e}",
                     p_inf,
                     sol.lambda_g.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
@@ -982,9 +1083,8 @@ impl SqpAlgorithm {
                 }
             };
             n_qp_solves += n_soc_solves;
-            #[cfg(test)]
-            if self.opts.print_level >= 1 {
-                tracing::debug!(target: "pounce::sqp",
+            if self.opts.print_level >= 2 {
+                println!(
                     "         ls: α={:.3e} ν={:.3e} ok={} f_new={:.3e}",
                     ls.alpha, ls.nu, ls.success, ls.f_new
                 );
@@ -1006,6 +1106,12 @@ impl SqpAlgorithm {
                 });
             }
             iter.x = ls.x_new;
+            // Captured before the match below moves `sol.working` and
+            // `ls.soc_duals` out from under them. Both are cheap Copy reads;
+            // taking them here rather than after is what keeps the row's
+            // `ws` column this QP's own count instead of the running total.
+            let qp_ws_changes = sol.stats.n_working_set_changes;
+            let soc_taken = ls.soc_duals.is_some();
             match ls.soc_duals {
                 Some((soc_lg, soc_lx)) => {
                     // A second-order-correction step was taken (α = 1
@@ -1032,6 +1138,16 @@ impl SqpAlgorithm {
             nu = ls.nu;
             f_cached = Some(ls.f_new);
             c_cached = Some(ls.c_new);
+            // Recorded after acceptance, so the row describes the step that
+            // was actually taken rather than the last one tried. `ws_changes`
+            // is this QP's contribution to the running total, which is the
+            // number the working-set warm start is judged on.
+            prev_step = Some(SqpStepRecord {
+                p_inf,
+                alpha: ls.alpha,
+                soc: soc_taken,
+                ws_changes: qp_ws_changes,
+            });
         }
 
         let obj = nlp.eval_f(&iter.x);

@@ -876,8 +876,34 @@ pub fn main() -> ExitCode {
         // fast-path for a post-optimal request (#196), report the NLP path that
         // actually runs, not the convex one `resolve_solver` picked.
         if !suppress_banner && !json_dbg {
-            let described = if decline_convex {
-                SolverChoice::Nlp.describe()
+            // `algorithm=active-set-sqp` is invisible to `resolve_solver`,
+            // which routes on `solver_selection` alone — and that is `auto`
+            // on a general NLP no matter how `algorithm` is set. So until
+            // this check existed the line read "NLP filter line-search
+            // interior-point (pounce-nlp)" on every active-set SQP run: not
+            // merely uninformative but the opposite of what happened, on the
+            // one line a user reads to confirm which engine they got. The
+            // banner above it is worse still (it is a fixed string naming the
+            // interior point), so this line is the whole budget.
+            //
+            // Asked of the application rather than re-derived here, so the
+            // announcement and the dispatch cannot disagree; a convex decline
+            // still wins, because those routes never reach the SQP driver.
+            // Gated on actually reaching the general NLP route, because
+            // `is_sqp_algorithm_selected` is also true for
+            // `solver_selection=qp-active-set` — and that value routes an LP
+            // or convex QP to `pounce_convex::active_set`, a different engine
+            // that `choice.describe()` already names correctly. Likewise
+            // `algorithm=active-set-sqp` on an LP under `auto` is routed to
+            // the convex IPM and never reaches the SQP driver at all, so the
+            // `algorithm` option alone does not license this branch.
+            let reaches_nlp_route = decline_convex || matches!(choice, SolverChoice::Nlp);
+            let described = if reaches_nlp_route {
+                if app.is_sqp_algorithm_selected() {
+                    "active-set SQP (pounce-qp subproblems)"
+                } else {
+                    SolverChoice::Nlp.describe()
+                }
             } else {
                 choice.describe()
             };
@@ -1667,6 +1693,17 @@ pub fn main() -> ExitCode {
     // the captured `x` (via `SeededTnlp`), re-install a fresh debugger,
     // and run again. Without `resolve`, this runs exactly once.
     let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
+    // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
+    // whole run, not to each attempt. Deferred from here through the
+    // second-opinion ladder below, which releases it and prints it once
+    // with the status that actually ships. Without this, every retry
+    // driver's attempt printed its own verdict and a run that recovered
+    // reported a mid-run one that read as the final answer.
+    //
+    // Once, OUTSIDE the loop: a debugger `resolve` goes round it again, and
+    // there is exactly one release below. Deferring per pass left the
+    // counter at 1 after a resolve, so the run printed no verdict at all.
+    app.defer_end_verdict();
     let mut status = loop {
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();
@@ -1762,42 +1799,30 @@ pub fn main() -> ExitCode {
         solve_stats = outcome.statistics.clone();
         outcome
     } else {
+        // The ladder is exempted here, so it cannot be the one to release the
+        // deferred verdict — release it on this path too, or a debugger
+        // session and a presolve-certified infeasibility each lose their
+        // `EXIT:` line entirely.
+        if app.release_end_verdict() {
+            app.print_end_verdict(status);
+        }
         SecondOpinionOutcome::unchanged(status, solve_stats.clone())
     };
-    // Keep the *console* in lockstep with the verdict that shipped (gh #508).
-    // Every rung prints its own end-of-run summary, which is expected and
-    // announced — but when nothing is promoted the last banner on the terminal
-    // is the last rejected rung's, while the `.sol`, the summary and the JSON
-    // report all carry the original verdict. Two banners disagreeing about one
-    // solve misleads a human reading the tail of the log and a machine reading
-    // it the same way: `validation/p3_control.py` keeps the last `EXIT:` line
-    // it sees and pairs it with the `.sol`, so it recorded a status the `.sol`
-    // never held. Measured on `min (x-5)² s.t. x²+δ = 0` at `tol=1e-4`: the
-    // console ended `Error in step computation.` (δ=1e-9) and `Maximum Number
-    // of Iterations Exceeded.` (δ=1e-1) over a `.sol` that said locally
-    // infeasible in both. Re-emitting the verdict that actually shipped makes
-    // the terminal's final word the true one.
+    // gh #508's arbiter used to live here: every rung printed its own
+    // `EXIT:` banner, so when nothing was promoted the terminal's last word
+    // was the last REJECTED rung's, while the `.sol`, the summary and the JSON
+    // report all carried the original verdict. `validation/p3_control.py`
+    // keeps the last `EXIT:` line it sees and pairs it with the `.sol`, so it
+    // recorded a status the `.sol` never held. Measured on
+    // `min (x-5)² s.t. x²+δ = 0` at `tol=1e-4`: the console ended
+    // `Error in step computation.` (δ=1e-9) and `Maximum Number of Iterations
+    // Exceeded.` (δ=1e-1) over a `.sol` that said locally infeasible in both.
     //
-    // Gated on `print_level >= 1` to match `Application::emit_end_summary`,
-    // which is what printed the banners this one arbitrates; at `print_level 0`
-    // there are none to disagree.
-    if second_opinion.ran()
-        && second_opinion.promoted_by.is_none()
-        && app
-            .options()
-            .get_integer_value("print_level", "")
-            .map(|(v, _found)| v >= 1)
-            .unwrap_or(true)
-    {
-        println!();
-        println!("EXIT: {}", print::status_message(status));
-        println!();
-        println!(
-            "POUNCE {}: {}",
-            env!("CARGO_PKG_VERSION"),
-            print::status_message(status)
-        );
-    }
+    // There is nothing left to arbitrate. The verdict is deferred across the
+    // whole run and printed exactly once, by whoever releases the last
+    // deferral, with the status that ships — so the terminal's final word is
+    // the true one by construction rather than by a correcting re-emission
+    // after the fact. Re-emitting here now would print it twice.
 
     // Failure diagnosis, printed once, after the ladder has finished moving
     // `status` and before the machine-readable verdict below.
@@ -2184,7 +2209,26 @@ pub fn main() -> ExitCode {
         // picked: a convex solve that declines its own result lands
         // here (gh #535) after the `Selected solver:` banner has
         // already said `pounce-convex`.
-        builder.solution.engine = "nlp".to_string();
+        //
+        // "the arm" is two arms, and this used to be a constant. Everything
+        // that reaches this block went through `IpoptApplication::optimize_*`,
+        // which dispatches on `is_sqp_algorithm_selected` — so a general NLP
+        // under `algorithm=active-set-sqp` was reported as `nlp` by exactly
+        // the field whose doc comment says it exists so that a reroute leaves
+        // a trace. `scripts/sweep-fixtures.sh` reads this field for its engine
+        // column, so the blind spot CLAUDE.md describes there covered the SQP
+        // arm too: a change that moved a model between the interior-point and
+        // active-set arms could not show up in a sweep diff.
+        //
+        // Read after the solve, so it is also right for the late convex
+        // declines above: those call back into `optimize_tnlp` and get
+        // whichever arm the option selects, long after the banner printed.
+        builder.solution.engine = if app.is_sqp_algorithm_selected() {
+            "sqp-active-set"
+        } else {
+            "nlp"
+        }
+        .to_string();
         builder.solution.status = status;
         // Same source of truth as the `.sol` writer below — a run must not
         // report 201 in one output and 200 in the other.

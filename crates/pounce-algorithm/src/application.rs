@@ -566,6 +566,58 @@ pub struct IpoptApplication {
     /// so a stray hook never breaks a solve. Persistent config (not
     /// auto-cleared). Wire-set via [`Self::set_kkt_schur_block`].
     kkt_schur_block: Option<Vec<usize>>,
+    /// The problem-statistics block most recently printed during the current
+    /// run, so a retry attempt does not reprint an identical one.
+    ///
+    /// Every retry driver — the ℓ₁ fallback, the μ-strategy fallback, the
+    /// second-opinion ladder, the dual-divergence retry — re-enters the solve
+    /// routine that emits this block, so a run that retried once printed the
+    /// whole Ipopt-style header twice with nothing between the copies saying a
+    /// second attempt had started. Read as "the solver printed everything
+    /// twice", which is what it looked like.
+    ///
+    /// Scoped to one run: reset at the top of
+    /// [`Self::optimize_tnlp_with_derivative_test_tnlp`], which every entry
+    /// point funnels through. Without that reset a library caller's second
+    /// deliberate `optimize_tnlp` on the same application would lose its
+    /// header, which is a different thing entirely from a retry inside one
+    /// call.
+    ///
+    /// Compared rather than counted because the block can legitimately differ
+    /// between attempts: the ℓ₁ wrapper adds slack variables, so its retry
+    /// solves a genuinely larger problem and reprinting is informative.
+    last_printed_problem_stats: RefCell<Option<pounce_solve_report::console::ProblemStats>>,
+    /// Set while an *outside* retry driver is re-entering `optimize_tnlp` for
+    /// another attempt on the same problem — today only
+    /// `pounce_restoration::second_opinion_driver::run_second_opinion_ladder`.
+    ///
+    /// The retries that nest INSIDE one `optimize_tnlp` call (the ℓ₁ fallback,
+    /// the μ-strategy fallback) are covered by `last_printed_problem_stats`
+    /// alone, because the funnel that resets it runs once for all of them. The
+    /// ladder's rungs are `optimize_tnlp` calls in their own right, so without
+    /// this flag each one resets the memo and reprints the header — which is
+    /// how a four-rung ladder printed five identical copies of it.
+    ///
+    /// It also decides who explains the retry. The ladder narrates every rung
+    /// on stderr, naming the knob it varies and whether the rung recovered, so
+    /// `emit_problem_stats` stays quiet and lets that narration stand. The
+    /// in-call fallbacks say nothing at all, so there the suppressed header is
+    /// replaced by a line announcing the attempt.
+    in_retry_sequence: std::cell::Cell<bool>,
+    /// Nesting depth of retry drivers that have taken ownership of the
+    /// run-ending `EXIT:` / `POUNCE <version>:` verdict.
+    ///
+    /// `emit_end_summary` prints the per-attempt statistics block whatever
+    /// this reads, and prints the verdict only at zero. A driver raises it
+    /// before its first attempt and lowers it after its last, then prints the
+    /// verdict once with the status it is actually returning.
+    ///
+    /// A counter rather than a flag because the drivers nest: the ℓ₁ fallback
+    /// can wrap the μ-strategy fallback, which the dual-divergence retry can
+    /// wrap in turn, and the CLI brackets the whole lot again around the
+    /// second-opinion ladder. Only the outermost knows the run is over, and
+    /// "outermost" is exactly "the one that brings this back to zero".
+    end_verdict_deferrals: std::cell::Cell<u32>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -629,6 +681,9 @@ impl IpoptApplication {
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
             kkt_schur_block: None,
+            last_printed_problem_stats: RefCell::new(None),
+            in_retry_sequence: std::cell::Cell::new(false),
+            end_verdict_deferrals: std::cell::Cell::new(0),
         }
     }
 
@@ -720,6 +775,105 @@ impl IpoptApplication {
     /// the solve completes.
     pub fn diagnostics(&self) -> Option<Rc<DiagnosticsState>> {
         self.diagnostics.as_ref().map(Rc::clone)
+    }
+
+    /// The three options that decide how the TNLP is *classified* before any
+    /// algorithm sees it: the two infinity thresholds and the fixed-variable
+    /// treatment.
+    ///
+    /// One reader, because there were three copies and they drifted. The
+    /// active-set SQP path built its adapter with `TNLPAdapter::new`, which
+    /// hard-codes the same three defaults — so the options were accepted and
+    /// discarded on that arm, and a model with `fixed_variable_treatment=
+    /// relax_bounds` or a non-default `nlp_upper_bound_inf` was classified one
+    /// way for the interior-point arm and another for this one. Silently: the
+    /// defaults coincide, so it only diverges for a caller who sets them, and
+    /// nothing reported the difference.
+    ///
+    /// `make_constraint` / `make_parameter_nodual` are not implemented and
+    /// fall back to `make_parameter`; the adapter auto-retries to
+    /// `relax_bounds` when `make_parameter` would leave `n_x_var < n_c`
+    /// (upstream `IpTNLPAdapter.cpp:623-633`).
+    fn adapter_options(&self) -> (Number, Number, FixedVarTreatment) {
+        let lo_inf = self
+            .options
+            .get_numeric_value("nlp_lower_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
+        let up_inf = self
+            .options
+            .get_numeric_value("nlp_upper_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
+        let fixed_treatment = match self
+            .options
+            .get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref()
+        {
+            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
+            _ => FixedVarTreatment::MakeParameter,
+        };
+        (lo_inf, up_inf, fixed_treatment)
+    }
+
+    /// Mark that the next `optimize_*` calls are further **attempts at the
+    /// same problem**, driven from outside, rather than new solves.
+    ///
+    /// Retry drivers that re-enter `optimize_tnlp` per attempt — the
+    /// second-opinion ladder is the only one today — bracket their attempts
+    /// with `true` … `false`. The effect is confined to console presentation:
+    /// the Ipopt-style problem-statistics header is printed once for the run
+    /// instead of once per attempt. Nothing about the solve changes.
+    ///
+    /// Callers must clear it on every exit path, including the early returns a
+    /// ladder takes when a rung promotes; a stuck `true` costs a later solve
+    /// its header and nothing worse.
+    pub fn set_in_retry_sequence(&self, active: bool) {
+        self.in_retry_sequence.set(active);
+    }
+
+    /// Take ownership of the run-ending `EXIT:` / `POUNCE <version>:` verdict
+    /// for the attempts that follow.
+    ///
+    /// Between this and [`Self::release_end_verdict`] the per-attempt end
+    /// summary prints its statistics block but not the verdict, so a retried
+    /// run no longer reports a mid-run verdict that reads as the final answer.
+    /// The releaser prints it once, with the status it is returning.
+    ///
+    /// Callers must pair the two on every exit path. An unmatched acquire
+    /// costs the run its verdict line; the counter saturates rather than
+    /// wrapping, so an unmatched release cannot make a nested driver print
+    /// one early.
+    pub fn defer_end_verdict(&self) {
+        self.end_verdict_deferrals
+            .set(self.end_verdict_deferrals.get().saturating_add(1));
+    }
+
+    /// Release one [`Self::defer_end_verdict`]. Returns `true` when this was
+    /// the outermost one — i.e. when the caller now owns printing the verdict.
+    #[must_use]
+    pub fn release_end_verdict(&self) -> bool {
+        let next = self.end_verdict_deferrals.get().saturating_sub(1);
+        self.end_verdict_deferrals.set(next);
+        next == 0
+    }
+
+    /// Print the run-ending verdict, honouring `print_level`.
+    ///
+    /// The gate matches `emit_end_summary`'s, which is the block this follows:
+    /// at `print_level 0` there is no summary for it to end.
+    pub fn print_end_verdict(&self, status: ApplicationReturnStatus) {
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if console_output {
+            pounce_solve_report::console::print_exit_verdict(status);
+        }
     }
 
     /// Plug a restoration-phase **factory provider** for drivers that
@@ -1215,6 +1369,15 @@ impl IpoptApplication {
         self.dual_divergence_signature.set(false);
         self.dual_divergence_retry_promoted.set(false);
         self.answer_restored_from_floor.set(false);
+        // Same scoping argument as the three above, for the same reason: the
+        // memo suppresses a REPEATED header within one run, so it must not
+        // carry across runs. A library caller solving twice on one
+        // application gets its header both times — which is exactly what the
+        // guard protects: an outside retry driver re-entering here for another
+        // attempt is not such a caller, and says so by setting the flag.
+        if !self.in_retry_sequence.get() {
+            *self.last_printed_problem_stats.borrow_mut() = None;
+        }
         // gh#486 stage 2: per-variable `scaling_factor` is applied by
         // substituting variables one level below the algorithm, since
         // the core's scaling models the objective and the constraint
@@ -2177,7 +2340,19 @@ impl IpoptApplication {
         )
     }
 
-    fn is_sqp_algorithm_selected(&self) -> bool {
+    /// Will the next `optimize_tnlp` run the active-set SQP driver rather
+    /// than the interior-point one?
+    ///
+    /// Public because the dispatch decision has to be *reportable*, not just
+    /// taken: before this was reachable, the CLI's `Selected solver:` line
+    /// and the JSON report's `solution.engine` both named the filter-IPM on
+    /// every `algorithm=active-set-sqp` run, because the only thing either
+    /// consulted was `solver_selection` — which is `auto` on a general NLP
+    /// however the `algorithm` option is set. Reading the same predicate
+    /// `optimize_tnlp` dispatches on is what keeps the report and the run
+    /// from disagreeing; deriving it a second time in the CLI is how they
+    /// drifted in the first place.
+    pub fn is_sqp_algorithm_selected(&self) -> bool {
         // `algorithm` is the primary selector.
         // `solver_selection = qp-active-set` selects the
         // same active-set SQP engine.
@@ -2212,7 +2387,22 @@ impl IpoptApplication {
         // (benchmarks/scripts/compare_qp_four_way.py had to skip the column).
         let t_start = std::time::Instant::now();
 
-        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+        // `new_with_options`, not `new`: the latter hard-codes the same three
+        // defaults, so `fixed_variable_treatment`, `nlp_lower_bound_inf` and
+        // `nlp_upper_bound_inf` were accepted and discarded on this arm. The
+        // defaults coincide, which is why it went unnoticed — it diverges only
+        // for a caller who sets one, and then the two arms CLASSIFY THE MODEL
+        // DIFFERENTLY: a bound at the caller's own infinity threshold is a
+        // bound here and no bound there, and a fixed variable is eliminated on
+        // one arm and relaxed on the other. That is a different problem, not a
+        // different trajectory on one.
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
+        let adapter = match TNLPAdapter::new_with_options(
+            Rc::clone(&tnlp),
+            lo_inf,
+            up_inf,
+            fixed_treatment,
+        ) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
@@ -2235,13 +2425,71 @@ impl IpoptApplication {
         // Same Q6 reconciliation as the IPM route: the SQP driver
         // evaluates the same derivatives through the same NLP object.
         self.install_constant_derivative_hints(&mut orig_nlp);
+        // `bound_relax_factor`, on the convex arm's rule (gh#745's
+        // `convex_bound_relax`), because this arm's position is the convex
+        // arm's and not the interior-point arm's.
+        //
+        // The widening is a change to the MODEL, and its error is one-signed:
+        // enlarging the feasible set can only flatter the objective, by `δ`
+        // times the bound's multiplier, with nothing bounding that product and
+        // no amount of tightening `tol` closing it. On `LISWET1` it buys `9.0`
+        // of objective (`27.1221` against the true `36.1224`); over the
+        // 91-instance netlib LP corpus, dropping it took the median objective
+        // error from `1.2e-08` to `3.8e-11`.
+        //
+        // The interior-point arm keeps it and must: it is a feasible-iterate
+        // log-barrier that needs `x` strictly inside its bounds, and matching
+        // Ipopt is that arm's contract — the fixture sweep at
+        // `bound_relax_factor=0` turns `square_flowsheet_resto` into
+        // `InfeasibleProblemDetected`. An active-set QP needs none of it: its
+        // iterates are feasible for the box by construction, which is why this
+        // arm has always run un-widened without incident.
+        //
+        // So: unset means solve the model as declared, which is what this arm
+        // already did. What it did NOT do is honour an explicit request — the
+        // option was accepted and discarded, the gh#677 shape, and a caller
+        // comparing arms under a named `bound_relax_factor` was comparing two
+        // different models without being told. Set means the caller asked by
+        // name and gets exactly the interior-point arm's model.
+        //
+        // Either branch snapshots the declared bounds first (`relax_bounds`
+        // does it before widening), which `declared_box_violation` needs: its
+        // absence is what printed `Variable bound violation: nan` here.
+        let requested_relax = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .ok()
+            .and_then(|(v, set)| set.then_some(v));
+        match requested_relax {
+            Some(factor) => {
+                let cap = self
+                    .options
+                    .get_numeric_value("constr_viol_tol", "")
+                    .ok()
+                    .and_then(|(v, set)| set.then_some(v))
+                    .unwrap_or(1e-4);
+                orig_nlp.relax_bounds(factor, cap);
+            }
+            None => orig_nlp.snapshot_declared_bounds(),
+        }
         let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
 
         let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
 
         let mut builder = self.algorithm_builder_snapshot();
         builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
-        let factory = self.make_backend_factory();
+        // Prefer a caller-installed factory, exactly as `optimize_constrained`
+        // does, so an embedder that plugs its own backend gets it on both
+        // arms. `take()` matches the IPM's one-shot semantics rather than
+        // introducing a second, different lifetime for the same hook.
+        //
+        // `maybe_crossover` deliberately does NOT do this: it runs after the
+        // IPM solve has already taken the factory, so there is never one left
+        // to find, and its two closures cannot both hold `&mut self` anyway.
+        let factory = self
+            .linear_backend_factory
+            .take()
+            .unwrap_or_else(|| self.make_backend_factory());
         let mut alg = match builder.build_sqp_with_backend(factory) {
             Some(a) => a,
             None => return ApplicationReturnStatus::InternalError,
@@ -2329,6 +2577,46 @@ impl IpoptApplication {
             stats.final_unscaled_constr_viol = res.final_constr_viol;
             stats.final_unscaled_compl = 0.0;
             stats.final_unscaled_kkt_error = res.final_stationarity.max(res.final_constr_viol);
+            // Ipopt's `Variable bound violation` — how far the returned point
+            // sits outside the box the caller wrote. Left at its `NaN` default
+            // until now, which printed `nan` on this arm's every summary.
+            //
+            // Measured through the same `declared_box_violation` accessor the
+            // interior-point arm reads (`curr_declared_box_violation_max`), so
+            // the two arms cannot drift into reporting different quantities
+            // under one heading. gh#900 is the precedent and the warning: it
+            // fixed this row on the NLP and convex arms and noted the two were
+            // "independent code paths, so a test that exercised one would say
+            // nothing about the other" — this is the third, and it was missed.
+            //
+            // `res.x` is algorithm-space, which is what the accessor expects
+            // (it lifts to full-x itself); `finalize_via_sqp` wraps it exactly
+            // this way for the same reason.
+            stats.final_declared_box_viol = {
+                use pounce_linalg::dense_vector::DenseVectorSpace;
+                let nlp_borrow = nlp_rc.borrow();
+                let x_space = DenseVectorSpace::new(nlp_borrow.n());
+                let mut x_dv = x_space.make_new_dense();
+                x_dv.set_values(&res.x);
+                // `NaN`, not `0.0`, on the abstention — deliberately unlike
+                // the IPM path's `unwrap_or(0.0)`.
+                //
+                // `None` from this accessor means one thing only: the declared
+                // bounds were never snapshotted. It is NOT "the model has no
+                // finite bounds" — an unbounded model still snapshots, the
+                // loops find nothing, and the answer is a measured `Some(0.0)`.
+                // So on this arm `None` can only mean the
+                // `snapshot_declared_bounds` call above was lost, and mapping
+                // that to zero would replace a visible "no answer" with an
+                // invisible false claim that the point is inside its box.
+                // gh#900's subject is exactly that: a zero that must not be
+                // fabricated. Checked by mutation — delete the snapshot call
+                // and this row goes back to `nan` rather than quietly reading
+                // `0.00e+00`.
+                nlp_borrow
+                    .declared_box_violation(&x_dv)
+                    .unwrap_or(Number::NAN)
+            };
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
         }
         let (app_status, solver_status) = match res.status {
@@ -2533,32 +2821,35 @@ impl IpoptApplication {
         if !console_output {
             return;
         }
-        let lo_inf = self
-            .options
-            .get_numeric_value("nlp_lower_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
-        let up_inf = self
-            .options
-            .get_numeric_value("nlp_upper_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
-        let fixed_treatment = match self
-            .options
-            .get_string_value("fixed_variable_treatment", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .as_deref()
-        {
-            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
-            _ => FixedVarTreatment::MakeParameter,
-        };
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
         if let Some(stats) =
             pounce_solve_report::console::collect_stats(tnlp, lo_inf, up_inf, fixed_treatment)
         {
-            pounce_solve_report::console::print_problem_stats(&stats);
+            // A retry re-enters here with the same problem. Reprinting the
+            // block verbatim is what made a retried run look like it had
+            // printed its whole report twice for no reason, so say what is
+            // actually happening instead: a new attempt on an unchanged
+            // problem. One line, in place of seventeen that carry no
+            // information the reader does not already have.
+            //
+            // The attempt is announced rather than merely suppressed because
+            // the iteration table below it restarts at iteration 0 either way.
+            // Silence would leave that table appearing from nowhere — trading
+            // a confusing duplicate for a confusing gap.
+            let mut memo = self.last_printed_problem_stats.borrow_mut();
+            if memo.as_ref() == Some(&stats) {
+                // Silent under an outside retry driver, which narrates its own
+                // attempts in more detail than this line could ("pounce:
+                // second opinion — re-solving with feral_scaling=mc64…").
+                // Printing both would be two announcements of one event.
+                if !self.in_retry_sequence.get() {
+                    println!("Re-solving the same problem (a further attempt follows).");
+                    println!();
+                }
+            } else {
+                pounce_solve_report::console::print_problem_stats(&stats);
+                *memo = Some(stats);
+            }
         }
     }
 
@@ -2598,6 +2889,12 @@ impl IpoptApplication {
             n_h: stats.num_hess_evals as u64,
         };
         pounce_solve_report::console::print_summary(app_status, &stats, &counts);
+        // The verdict belongs to the run, not to the attempt. Held back while
+        // any retry driver is managing attempts; that driver prints it once,
+        // with the status it actually returns.
+        if self.end_verdict_deferrals.get() == 0 {
+            pounce_solve_report::console::print_exit_verdict(app_status);
+        }
     }
 
     /// Build a *copy* of the algorithm builder configured per the
@@ -2846,14 +3143,42 @@ impl IpoptApplication {
         None
     }
 
-    /// Construct a LinearBackendFactory honoring the
-    /// `linear_solver` option. Default FERAL; HSL MA57 when
-    /// built with the `ma57` feature.
+    /// Build a linear-solver factory from the application's current options,
+    /// for the paths that do not go through `optimize_constrained`'s own
+    /// factory plumbing — the active-set SQP driver and the post-convergence
+    /// crossover.
+    ///
+    /// This used to ignore its `choice` argument and return
+    /// `FeralSolverInterface::new()`: a default-configured FERAL, whatever the
+    /// caller asked for. Three things were silently dropped on every SQP
+    /// solve. `linear_solver=ma57` ran FERAL while the banner said
+    /// `MA57 (HSL)`, so an MA57-vs-FERAL comparison on this path measured
+    /// nothing — the same defect as gh#825, one path over. Every `feral_*`
+    /// option (`feral_refine`, `feral_ordering`, `feral_scaling`,
+    /// `feral_increase_quality`, …) was accepted and discarded. And
+    /// `set_external_ordering` — whose whole purpose is to inject an ordering
+    /// a generic algorithm cannot derive — reached the IPM and not this arm.
+    ///
+    /// Reads the same two snapshots and calls the same constructor the IPM
+    /// path does, so there is one answer to "what does `linear_solver` mean"
+    /// rather than one per algorithm.
     fn make_backend_factory(&self) -> LinearBackendFactory {
-        Box::new(
-            |_choice| -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
-                Box::new(pounce_feral::FeralSolverInterface::new())
-            },
+        // `RefineCarveOut::None`: this arm does not refine the unreduced system
+        // itself, so the backend loop is the only refinement in the stack and
+        // the interior-point carve-out's premise is false here. See
+        // `feral_config_from_options_scoped` for the measurement.
+        let mut feral_cfg = feral_config_from_options_scoped(&self.options, RefineCarveOut::None);
+        // Same override, and for the same reason, as the IPM path: the
+        // external permutation carries a vector, which no string option can
+        // express, so it arrives through the side-channel field instead.
+        if let Some(perm) = &self.external_ordering {
+            feral_cfg.ordering = pounce_feral::OrderingMethod::External(perm.clone());
+        }
+        let ma57_cfg = ma57_config_from_options(&self.options, "");
+        default_backend_factory_with_sink(
+            feral_cfg,
+            ma57_cfg,
+            Arc::clone(&self.linsol_summary_sink),
         )
     }
 
@@ -4035,31 +4360,7 @@ impl IpoptApplication {
         // which the adapter also auto-selects as a fallback when
         // `make_parameter` would leave `n_x_var < n_c` — mirrors upstream
         // `IpTNLPAdapter.cpp:623-633`).
-        let lo_inf = self
-            .options
-            .get_numeric_value("nlp_lower_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
-        let up_inf = self
-            .options
-            .get_numeric_value("nlp_upper_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
-        let fixed_treatment = match self
-            .options
-            .get_string_value("fixed_variable_treatment", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .as_deref()
-        {
-            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
-            // `make_constraint` / `make_parameter_nodual` not yet
-            // implemented; fall back to `make_parameter` (auto-retry to
-            // `relax_bounds` will still kick in if DOF runs short).
-            _ => FixedVarTreatment::MakeParameter,
-        };
+        let (lo_inf, up_inf, fixed_treatment) = self.adapter_options();
         let adapter = match TNLPAdapter::new_with_options(
             Rc::clone(&tnlp),
             lo_inf,
@@ -6188,6 +6489,50 @@ pub fn default_backend_factory_with_sink(
 pub fn feral_config_from_options(
     options: &pounce_common::options_list::OptionsList,
 ) -> pounce_feral::FeralConfig {
+    feral_config_from_options_scoped(options, RefineCarveOut::InteriorPoint)
+}
+
+/// Whether [`feral_config_from_options_scoped`] applies the interior-point
+/// arm's limited-memory `feral_refine` carve-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineCarveOut {
+    /// Apply it: under `hessian_approximation=limited-memory`, force
+    /// `refine = false` unless the user said otherwise. This is the shipped
+    /// interior-point behaviour and what [`feral_config_from_options`] does.
+    InteriorPoint,
+    /// Skip it. For arms that do not refine the unreduced system themselves,
+    /// where the backend loop is the only refinement in the stack.
+    None,
+}
+
+/// [`feral_config_from_options`] with the limited-memory `refine` carve-out
+/// made explicit.
+///
+/// The carve-out is interior-point-specific in both of its premises, and
+/// neither holds on the active-set SQP arm. It is justified by
+/// `PdFullSpaceSolver::compute_residuals` already refining the *unreduced*
+/// Newton system — the SQP arm has no such host loop, so
+/// `pounce_qp::factor::LinearSolver` relies on the backend's own refinement
+/// ("refinement is *implicit* in this layer", that module's docs) and turning
+/// it off removes refinement from the stack entirely. And it keys off
+/// `hessian_approximation`, which is not that arm's Hessian selector at all:
+/// `sqp_hessian` is.
+///
+/// Measured, and this is why the parameter exists rather than the SQP path
+/// just calling the plain function: inheriting the carve-out moved 10 of 97
+/// fixtures on the sweep's L-BFGS leg under `algorithm=active-set-sqp`, while
+/// the exact leg did not move at all. Some of that movement looked like a win
+/// (`mu_fallback_point_floor` MaximumIterationsExceeded/200 ->
+/// SolveSucceeded/8), but it was a win bought by disabling refinement for a
+/// reason that does not apply here, and it came with `hs13_bigstart` landing
+/// on a different point (objective 1 -> 1.0018) and `eigena2` and
+/// `mpcc_scholtes4_biactive` likewise. Turning refinement off on this arm may
+/// well be worth measuring on its own merits; it should not arrive as a side
+/// effect of honouring `linear_solver`.
+pub fn feral_config_from_options_scoped(
+    options: &pounce_common::options_list::OptionsList,
+    carve_out: RefineCarveOut,
+) -> pounce_feral::FeralConfig {
     let mut cfg = pounce_feral::FeralConfig::from_env();
     // Tri-state: the `(_, true)` arm only fires when the user set the
     // option explicitly. Leaving it unset keeps `cfg.cascade_break` at
@@ -6273,10 +6618,11 @@ pub fn feral_config_from_options(
     // So the corpus and the AC-OPF benchmarks both prefer `no` and
     // `NARX_CFy` pays 57% more iterations for it. Nothing here separates
     // those, which is why the default is scoped rather than flipped.
-    let limited_memory = matches!(
-        options.get_string_value("hessian_approximation", ""),
-        Ok((ref s, true)) if s == "limited-memory"
-    );
+    let limited_memory = carve_out == RefineCarveOut::InteriorPoint
+        && matches!(
+            options.get_string_value("hessian_approximation", ""),
+            Ok((ref s, true)) if s == "limited-memory"
+        );
     if std::env::var_os("POUNCE_FERAL_REFINE").is_none() {
         // Deliberately `_`, not `true`: see above.
         if let Ok((v, _)) = options.get_bool_value("feral_refine", "") {

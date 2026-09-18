@@ -76,15 +76,26 @@ fn run(extra: &[&str]) -> String {
 #[test]
 fn a_restoration_failure_opens_the_ladder_and_the_displaced_start_recovers_it() {
     let log = run(&[]);
-    assert!(
-        log.contains("EXIT: Restoration Failed!"),
-        "the baseline solve is supposed to fail in restoration — if this \
-         line is gone the fixture no longer reaches the branch under test, \
-         and the assertions below would pass vacuously:\n{log}"
-    );
+    // The baseline solve is supposed to fail in restoration — if it stops
+    // doing so the fixture no longer reaches the branch under test and the
+    // assertions below pass vacuously.
+    //
+    // The witness is the ladder's own trigger line, not an
+    // `EXIT: Restoration Failed!` banner, which is what this used to match.
+    // That banner was the BASE attempt's, and the verdict is now printed once
+    // per run rather than once per attempt — this run ends
+    // `EXIT: Optimal Solution Found.` because rung 3 promotes, which is the
+    // very thing the test is here to demonstrate. See `one_verdict_per_run.rs`.
+    //
+    // The trigger line is an equally strong witness and a more direct one:
+    // `SecondOpinionTrigger::for_status` emits "restoration failure" for
+    // `Restoration_Failed` and for nothing else, so the phrase appears only
+    // when the base solve ended exactly there. The old banner match was
+    // weaker — any attempt's banner could have satisfied it.
     assert!(
         log.contains("restoration failure — re-solving along"),
-        "a restoration failure must open the ladder (gh#815):\n{log}"
+        "the baseline solve must fail in restoration and open the ladder on \
+         that trigger (gh#815):\n{log}"
     );
     assert!(
         log.contains("re-solving with start_point_perturbation=1e-2"),

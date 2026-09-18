@@ -298,6 +298,158 @@ fn nothing_is_styled_when_stdout_is_not_a_terminal() {
     );
 }
 
+// ── the active-set SQP arm ───────────────────────────────────────────────────
+//
+// The third code path, and the one this file's header did not know about: it
+// printed `nan` on that row for every solve while the two arms above printed
+// measurements. `IpoptApplication::optimize_sqp_tnlp` never called
+// `relax_bounds` — correctly, because this arm applies no widening — and the
+// declared-box snapshot that the row is computed from was taken inside it.
+//
+// The cliff fixture cannot carry these: it is a convex QP, so `auto` routes it
+// to pounce-convex and `algorithm=active-set-sqp` never reaches the SQP driver
+// at all. A genuine NLP is needed to exercise this arm.
+
+/// `hs71_obj1e8.nl` — a real NLP (so it reaches the SQP driver) with a finite
+/// lower and upper bound on every variable, so the box is not vacuous.
+fn nlp_fixture() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/hs71_obj1e8.nl");
+    p
+}
+
+fn run_sqp(extra: &[&str]) -> Run {
+    let json_path = tmp_path("sqp_report.json");
+    let sol_path = tmp_path("sqp_out.sol");
+    let mut cmd = Command::new(pounce_exe());
+    cmd.arg(nlp_fixture())
+        .arg(&sol_path)
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("algorithm=active-set-sqp");
+    for o in extra {
+        cmd.arg(o);
+    }
+    cmd.env_remove("CLICOLOR_FORCE");
+    let out = cmd.output().expect("spawn pounce");
+    let text = std::fs::read_to_string(&json_path).expect("read json report");
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&sol_path);
+    Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        report: serde_json::from_str(&text).expect("deserialize SolveReport"),
+    }
+}
+
+/// The row carries a number on this arm too. `nan` is the defect: it is not a
+/// measurement, and it is what the row read on every active-set SQP solve.
+#[test]
+fn the_sqp_arm_reports_a_number_on_the_bound_violation_row() {
+    let r = run_sqp(&[]);
+    // Confirm the SQP driver actually ran — this fixture must not quietly
+    // route elsewhere, or the test measures the wrong arm.
+    assert_eq!(
+        r.report.solution.engine, "sqp-active-set",
+        "expected the active-set SQP arm; got {:?}",
+        r.report.solution.engine
+    );
+    let (scaled, unscaled) = bound_violation_row(&r.stdout);
+    assert!(
+        scaled.is_finite() && unscaled.is_finite(),
+        "the row must be a measurement, not `nan`: {scaled} / {unscaled}"
+    );
+    assert!(
+        r.report.statistics.final_declared_box_viol.is_finite(),
+        "and the JSON field too: {}",
+        r.report.statistics.final_declared_box_viol
+    );
+    let tol = 8.0 * f64::EPSILON * scaled.abs().max(1.0);
+    assert!(
+        (scaled - r.report.statistics.final_declared_box_viol).abs() <= tol,
+        "row and field must be one measurement: {scaled:e} vs {:e}",
+        r.report.statistics.final_declared_box_viol
+    );
+}
+
+/// The row is a live measurement on this arm, not a constant that happens to
+/// read zero.
+///
+/// This is the case that makes the zero trustworthy, and it exists because the
+/// arm follows the convex arm's `bound_relax_factor` rule (gh#745): unset
+/// means solve the model as declared, so the answer is inside the box and the
+/// row is genuinely `0`; named means the caller asked for the widening and
+/// gets it, so the answer sits `~δ` outside the box they wrote and the row
+/// says so.
+///
+/// Before the arm honoured the option there was no way to move this number
+/// from the outside at all, and a hardcoded `0.0` would have been
+/// indistinguishable from a measurement.
+#[test]
+fn the_sqp_bound_violation_is_zero_as_declared_and_nonzero_when_widened() {
+    let as_declared = run_sqp(&[]);
+    let (declared_row, _) = bound_violation_row(&as_declared.stdout);
+    assert_eq!(
+        declared_row, 0.0,
+        "unset `bound_relax_factor` solves the model as declared, so the \
+         returned point is inside the box the caller wrote; got {declared_row:e}"
+    );
+
+    let widened = run_sqp(&[RELAX]);
+    let (widened_row, _) = bound_violation_row(&widened.stdout);
+    assert!(
+        widened_row > 0.0,
+        "a named `bound_relax_factor` is honoured on this arm, so the answer \
+         sits outside the declared box and the row must report it; got \
+         {widened_row:e}"
+    );
+    // The widening is `min(factor·max(|b|,1), cap)` per bound, so with
+    // `factor = 1e-8` and `cap = constr_viol_tol = 1e-4` the distance outside
+    // is of order `1e-8` for an `O(1)` bound. Asserted as an order of
+    // magnitude rather than a value: how far the solve actually settles from
+    // the widened bound is trajectory-dependent.
+    assert!(
+        (1e-9..1e-7).contains(&widened_row),
+        "expected a violation of order the 1e-8 widening; got {widened_row:e}"
+    );
+}
+
+/// Naming the option gives this arm the interior-point arm's model, which is
+/// the whole point of honouring it: before, the same binary solved two
+/// different models depending on `algorithm`, and a caller comparing the arms
+/// under a named `bound_relax_factor` was comparing answers to different
+/// questions without being told.
+///
+/// Compared on the UNSCALED objective, which is the one both arms report in
+/// the model's own units; the NLP arm additionally scales its internal
+/// objective, so the scaled columns are not comparable across arms.
+#[test]
+fn a_named_bound_relax_factor_gives_both_arms_the_same_model() {
+    let sqp = run_sqp(&[RELAX]);
+    let (_, sqp_obj) = row(&sqp.stdout, "Objective...............");
+
+    let json_path = tmp_path("nlp_relax.json");
+    let sol_path = tmp_path("nlp_relax.sol");
+    let out = Command::new(pounce_exe())
+        .arg(nlp_fixture())
+        .arg(&sol_path)
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg(RELAX)
+        .output()
+        .expect("spawn pounce");
+    let nlp_stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&sol_path);
+    let (_, nlp_obj) = row(&nlp_stdout, "Objective...............");
+
+    let rel = (sqp_obj - nlp_obj).abs() / nlp_obj.abs().max(1.0);
+    assert!(
+        rel < 1e-6,
+        "both arms must answer the same widened model: SQP {sqp_obj:e} vs \
+         NLP {nlp_obj:e} (relative {rel:e})"
+    );
+}
+
 /// The residual table stays free of styling even with color forced on. It is
 /// diffed against `ipopt`'s own output byte-for-byte, which is the reason the
 /// styling went on the POUNCE-only line instead of the row that would most

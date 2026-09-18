@@ -491,6 +491,11 @@ impl<P: Problem + 'static> Nlp<P> {
         // builder never exercises the `None` arm. gh #877 F-7: pass the
         // override only when it actually differs, so the default path here is
         // the same call shape every other frontend makes.
+        // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
+        // whole run, not to each attempt. Deferred from here through the
+        // second-opinion ladder below, which releases it and prints it once
+        // with the status that actually ships.
+        app.defer_end_verdict();
         let status = match &fbbt_handle {
             Some(_) => {
                 let derivative_test_tnlp = Rc::clone(&adapter) as Rc<RefCell<dyn TNLP>>;

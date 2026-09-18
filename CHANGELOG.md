@@ -520,6 +520,50 @@ changes.
 
 ### Fixed
 
+- **The active-set SQP arm now says which engine ran, and its reports carry
+  numbers instead of placeholders.** Running `algorithm=active-set-sqp` was
+  undetectable from the console: the copyright banner names the interior
+  point unconditionally, the `Selected solver:` line reported the NLP
+  filter-IPM, and `--json-output`'s `solution.engine` read `nlp`. The two
+  lines now name the active-set SQP engine and the report reads
+  `sqp-active-set`. `sqp_print_level` also works for the first time — its
+  three reader sites were behind `#[cfg(test)]`, so the per-iteration table
+  the option and the book both promised printed nothing in any released
+  binary; level 1 prints an iteration table sharing the interior-point
+  table's columns, level 2 adds a QP and line-search trace. The
+  `Variable bound violation` row, which read `nan` on every solve of this
+  arm, is a measurement.
+
+- **`linear_solver` and the `feral_*` options reach the active-set SQP arm.**
+  That path built its linear solver from a hard-coded default, so
+  `linear_solver=ma57` ran FERAL while the banner said MA57, and every
+  `feral_*` option and `set_external_ordering` was accepted and discarded.
+  It now resolves the backend exactly as the interior-point path does.
+  `bound_relax_factor` is honoured too, on the convex arm's rule: left unset
+  the model is solved as declared, and naming it gives this arm the
+  interior-point arm's widened model rather than being silently ignored.
+
+- **A retried solve no longer prints its report twice, and reports one
+  verdict.** Every retry driver — the ℓ₁ fallback, the μ-strategy fallback,
+  the dual-divergence retry, the second-opinion ladder — re-entered the
+  routine that prints the problem-statistics header and the
+  `EXIT:` / `POUNCE <version>:` verdict, so a run that retried printed both
+  again per attempt. On `csfi2` the terminal said
+  `POUNCE 0.11.0: Solved To Acceptable Level.` and then went on to report
+  `Optimal Solution Found.` The header is printed once per run (and again
+  only when a retry genuinely changes the problem, as the ℓ₁ wrapper's added
+  slacks do), and the verdict once, carrying the status that ships.
+
+- **The active-set SQP filter no longer steps to a point where the objective
+  is `NaN`.** The filter's dominance test cannot reject a `NaN`: every
+  `phi >= entry.phi` comparison against it is false, so no filter entry
+  dominates the trial and a point at which the model does not evaluate was
+  taken as progress at `α = 1`. A trial whose objective or constraints are
+  `NaN` is now rejected and the line search backtracks. Infinities are
+  deliberately untouched — a diverging objective is a fact about the model,
+  and reporting it stays the job of the non-finite screen at the top of the
+  outer loop.
+
 - **The limited-memory arm no longer fails on equality-constrained models it
   has already solved
   ([#945](https://github.com/jkitchin/pounce/issues/945)).** A failed line
