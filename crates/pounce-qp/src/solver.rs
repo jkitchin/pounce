@@ -4759,14 +4759,63 @@ fn model_step_cap(
     let p_sq: Number = p.iter().map(|v| v * v).sum();
     if curv > 1e-12 * h_scale * p_sq {
         (-slope / curv).max(1.0)
-    } else if slope < 0.0 {
+    } else if slope < -1e-12 * slope_scale(p_sq, hx, g) {
         // A successful shifted factorization has `pᵀ(H + δI)p > 0`, hence
         // `pᵀr = −(pᵀHp + δ‖p‖²) < 0`: descent is structural here, and the
         // test only guards against a direction corrupted by round-off.
+        //
+        // RELATIVE, not `slope < 0.0` (gh#948). `slope` is an accumulated
+        // inner product `pᵀr`, so on a direction along which the model is
+        // FLAT — the exact slope is zero — what comes back is round-off of
+        // order `eps·‖p‖·‖r‖`, with a sign that is a coin flip. A bare sign
+        // test reads half of those as descent and returns `+∞`, and an
+        // infinite cap is what the active-set loop's recession-ray branch
+        // takes as proof of unboundedness *without* consulting
+        // `ray_is_unbounded_descent`, whose own descent clause is
+        // scale-relative and would have rejected it. The result was a false
+        // `Unbounded`, and since every `Unbounded` return carries zero
+        // multipliers by construction, the convex driver then re-derived a
+        // KKT error of `‖c‖` and reported `NumericalFailure` on a QP whose
+        // primal point was optimal to machine precision.
+        //
+        // A flat direction is exactly what a NON-UNIQUE optimum looks like:
+        // an LP whose cost is parallel to a constraint normal (the optimal
+        // set is an edge), or a QP with rank-deficient `P` (flat along
+        // `null(P)`). gh#948 measured 51 of 100 such constructions failing,
+        // 0 of 100 once a `1e-8` perturbation made the optimum unique, and
+        // integer data — where the tie is exact and the round-off is
+        // identically zero — never failing at all. That last one is the
+        // signature of a round-off sign test and is why this is relative.
+        //
+        // The floor mirrors the curvature floor directly above it, in
+        // constant and in argument: below the round-off level of its own
+        // accumulation the quantity is zero, not small. Genuine descent is
+        // orders above it, so a real recession ray is unaffected — and the
+        // conservative direction is the right one here, since a false
+        // `Unbounded` is a wrong verdict about the user's model while a
+        // missed one is a budget exit.
         Number::INFINITY
     } else {
         1.0
     }
+}
+
+/// Round-off scale of the `pᵀ(Hx + g)` accumulation in [`model_step_cap`]:
+/// `‖p‖·‖Hx + g‖`, the Cauchy-Schwarz bound on the inner product itself.
+///
+/// Returning the bound rather than the accumulated `Σ|pᵢrᵢ|` keeps the test a
+/// pure cosine threshold — `slope/(‖p‖‖r‖) < -1e-12` — so it is invariant to
+/// how `p` is scaled, which the shifted solve does not control.
+fn slope_scale(p_sq: Number, hx: &[Number], g: &[Number]) -> Number {
+    let r_sq: Number = hx
+        .iter()
+        .zip(g.iter())
+        .map(|(&hxi, &gi)| {
+            let r = hxi + gi;
+            r * r
+        })
+        .sum();
+    (p_sq * r_sq).sqrt()
 }
 
 pub(crate) fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
