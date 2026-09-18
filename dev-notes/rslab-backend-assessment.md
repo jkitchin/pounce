@@ -628,20 +628,44 @@ pivoting rather than a shortage of 2×2 blocks.
 ### F. Is there anything in RSLAB that should be ported back into FERAL?
 
 **RSLAB is a fork of FERAL** (see its `NOTICE`), which reframes the question:
-most of what is good in it came from FERAL. Three things did not, and are worth
-considering — none of them the factorization core:
+most of what is good in it came from FERAL. Two things did not, and both are
+now filed:
 
-1. **The phase-resolved diagnostics.** `Diagnostics` / `StageReport` /
-   `Decisions` give a per-call, concurrency-safe breakdown of analyse / scale /
-   factor / solve-layout with an a-priori memory estimate alongside the measured
-   time. `pounce-feral` had to reconstruct a coarser version of this from
-   outside (`PhaseTimings` here), and `LinearSolverSummary` has no place to put
-   it. This is the clearest borrow.
-2. **The explicit `two_by_two: Vec<bool>`** instead of inferring block starts
-   from `d_subdiag[k] != 0.0`. A representation that cannot be misread.
-3. **The a-priori memory estimate** (`MemoryEstimate`, `estimate_memory`),
-   which would let POUNCE's deadline machinery predict a factorization's cost
-   rather than learning it from the first one that overran.
+1. **An a-priori memory and work estimate** (`MemoryEstimate`, `estimate_memory`)
+   — computed from the symbolic analysis, so it answers "what will this
+   factorization cost" *before* paying for it. `factor_flops` is what POUNCE's
+   `predict_factor_overshoot` needs: that guard currently estimates from the
+   worst factorization observed so far, i.e. it learns the cost by overrunning
+   once. `panel_live_peak_bytes` / `transient_peak_bytes` is the number §4's
+   memory table could not report — the frontal working set between the 12 MiB
+   stored factor and the 396 MiB process peak. Filed as
+   [feral#204](https://github.com/jkitchin/feral/issues/204).
+2. **The `Decisions` report** — specifically `ordering_requested` vs
+   `ordering_used`. FERAL routes adaptively (`OrderingMethod::Auto`,
+   `with_ordering_escalation`) and `FactorStats` names the *scaling* choice via
+   `ScalingInfo` but not the ordering one, so a routing change leaves no trace
+   in any reported number. That is the same defect POUNCE fixed one layer up by
+   adding the engine column to the fixture sweep. Filed as
+   [feral#205](https://github.com/jkitchin/feral/issues/205).
+
+**Two candidates were checked and dropped**, which is worth recording because an
+earlier draft of this note asserted the first of them:
+
+* *Phase-resolved diagnostics.* This note previously called them "the clearest
+  borrow". **That was wrong** — FERAL has `Solver::with_profiling(true)` →
+  `profile_report()` / `symbolic_profile_report()`, and its `ProfileReport`
+  (per-supernode buckets, prologue sub-phase breakdown, validation warnings) is
+  richer than RSLAB's stage report. The real gap was only ever the *a-priori*
+  half, which is item 1. What `pounce-feral` reconstructs from outside
+  (`PhaseTimings` here) it reconstructs because POUNCE never wires the profiling
+  through, not because FERAL lacks it.
+* *The explicit `two_by_two: Vec<bool>`.* FERAL infers block starts from
+  `d_subdiag[k] != 0.0` at each consumer site. That convention is sound — a 2×2
+  block's off-diagonal is nonzero by construction — and FERAL already exposes
+  the derived quantities an external caller would otherwise walk `D` for
+  (`inertia()`, `min_pivot_magnitude()`), so nobody outside has to reimplement
+  the walk. The adapter here only had to because *RSLAB* lacks those accessors.
+  Not filed.
 
 The traffic in the other direction is heavier, and is the actionable half of
 this note. RSLAB should take from FERAL: **delayed pivoting**, without which it
