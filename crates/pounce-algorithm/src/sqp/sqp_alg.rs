@@ -40,8 +40,7 @@ use pounce_qp::{
 /// has no barrier parameter and no dual step length, so `lg(mu)`, `lg(rg)`
 /// and `alpha_du` would be permanently blank, and it does have a working-set
 /// size that the IPM does not.
-const SQP_ITER_HEADER: &str =
-    "iter      objective   inf_pr   inf_du    ||p||    alpha     ws";
+const SQP_ITER_HEADER: &str = "iter      objective   inf_pr   inf_du    ||p||    alpha     ws";
 
 /// What the step into the current iterate cost — the trailing columns of a
 /// row. `None` on row 0, where no step has been taken yet.

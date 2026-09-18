@@ -216,7 +216,12 @@ fn a_single_attempt_run_still_reports_its_verdict() {
 fn print_level_zero_reports_no_verdict_at_all() {
     let run = Run::go("hs71_obj1e8.nl", &["print_level=0"]);
     assert_eq!(run.count("EXIT:"), 0, "expected silence:\n{}", run.stdout);
-    assert_eq!(run.count("POUNCE 0"), 0, "expected silence:\n{}", run.stdout);
+    assert_eq!(
+        run.count("POUNCE 0"),
+        0,
+        "expected silence:\n{}",
+        run.stdout
+    );
 }
 
 /// The header is suppressed by comparison, not by counting attempts.
@@ -230,7 +235,10 @@ fn print_level_zero_reports_no_verdict_at_all() {
 fn the_header_reprints_when_the_retry_changes_the_problem() {
     let run = Run::go(
         "csfi2.nl",
-        &["l1_fallback_on_restoration_failure=yes", "mu_strategy_fallback=no"],
+        &[
+            "l1_fallback_on_restoration_failure=yes",
+            "mu_strategy_fallback=no",
+        ],
     );
     let headers = run.count("Total number of variables");
     assert!(

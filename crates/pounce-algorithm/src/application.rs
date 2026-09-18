@@ -3133,8 +3133,7 @@ impl IpoptApplication {
         // itself, so the backend loop is the only refinement in the stack and
         // the interior-point carve-out's premise is false here. See
         // `feral_config_from_options_scoped` for the measurement.
-        let mut feral_cfg =
-            feral_config_from_options_scoped(&self.options, RefineCarveOut::None);
+        let mut feral_cfg = feral_config_from_options_scoped(&self.options, RefineCarveOut::None);
         // Same override, and for the same reason, as the IPM path: the
         // external permutation carries a vector, which no string option can
         // express, so it arrives through the side-channel field instead.
