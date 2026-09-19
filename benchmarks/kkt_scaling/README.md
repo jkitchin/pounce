@@ -59,4 +59,20 @@ python benchmarks/kkt_scaling/gen_scopf.py OUTDIR case118_ieee 1 2 4 8 16 32 64 
 `--screen` solves each candidate outage alone once (cached per case) and keeps
 only the ones pounce solves.
 
+## Block-parallel factorization prototype
+
+`blockfac/` (Rust, standalone — deliberately not a workspace member) factors a
+dumped KKT two ways and checks the inertias agree: monolithically, and block by
+block in parallel with a Schur complement on the shared columns. It recovers
+the blocks from the matrix alone (the shared columns are the high-degree ones).
+
+```bash
+pounce model.nl out.sol --dump kkt:10 --dump-dir dump
+python benchmarks/kkt_scaling/export_kkt_blocks.py dump/iter_010/kkt_solve_001.jsonl kkt.bin
+cd benchmarks/kkt_scaling/blockfac && cargo run --release -- ../../../kkt.bin
+```
+
+On the 210k-variable N-1 SCOPF it runs 7.1× faster than the best monolithic
+refactorization, with matching inertia.
+
 Findings are recorded in `dev-notes/kkt-scaling-phase0b.md`.

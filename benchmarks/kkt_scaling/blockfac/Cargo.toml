@@ -1,0 +1,15 @@
+# Standalone on purpose: a benchmark prototype, not a workspace member, so
+# it never enters pounce's build / test / clippy runs.
+[workspace]
+
+[package]
+name = "blockfac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+feral = "0.18.0"
+rayon = "1"
+
+[profile.release]
+opt-level = 3

@@ -293,6 +293,50 @@ evaluator rather than structure; the structural part is that identical blocks
 share one sparsity pattern and one coloring, so they can be evaluated in a
 single vectorised pass. Evaluation is 48% of this solve.
 
+## Phase 5b prototype: block-parallel factorization, measured
+
+`benchmarks/kkt_scaling/blockfac` (+ `export_kkt_blocks.py`) factors a real
+dumped KKT both ways and checks the inertias agree. Input: the 210k-variable
+SCOPF (`case1354_pegase`, K = 64) dumped at iteration 10 — n = 883 551, 4.09 M
+lower-triangle nonzeros. The blocks are recovered **from the matrix alone**: the
+shared columns have degree > 100 where everything else is under 72, and
+removing them leaves exactly 65 components of ~13 600, matching the model.
+
+Steady state (pattern cached, as in an IPM), 14 threads:
+
+| path | time |
+|---|---|
+| monolithic refactorization, best ordering (`amf`/`auto`, feral's own parallelism) | **0.34 s** |
+| block refactorization alone, parallel | 0.035 s |
+| block factor + Schur, feral's native `factorize_multifrontal_with_schur` | **0.047 s** + 0.002 s border → **7.1×** |
+| block factor + Schur, dense multi-RHS solves | 0.40 s → 0.7× (*slower*) |
+
+`inertia(K) = Σ_k inertia(A_kk) + inertia(S)` holds exactly — (458 643, 424 908,
+0) both ways — so the block path reproduces the pivot information the IPM's
+inertia correction runs on.
+
+Three things this pins down:
+
+1. **Block granularity is what feral's elimination tree cannot reach.** The
+   same factorization is 10× faster when it is 65 coarse tasks (0.035 s against
+   0.34 s), while feral's own tree parallelism on the whole matrix tops out at
+   1.2×. The work was always embarrassingly parallel; the tasks were too small.
+2. **How the Schur complement is formed decides whether any of that survives.**
+   Forming it with dense multi-RHS solves costs 0.37 s and gives the whole gain
+   back. It is an implementation artefact: each border column has ~2 nonzeros
+   in a block (mean 1.98, max 2), yet a dense solve moves a 13 589 × 259 buffer
+   per block. feral's native path forms the same complement inside the
+   factorization and costs 0.012 s on top of the block factors.
+3. **The monolithic baseline must be the best ordering.** `metis` needs 2.6–3.3 s
+   on this matrix against `amf`'s 0.34 s, and an unfair baseline turns 7× into
+   a reported 10–200×.
+
+Scope: one matrix, one iterate, one machine, 14 threads; no back-solve
+(the IPM also needs the block back-substitution, not measured here); and a
+factorization that is 35% of this solve, so 7× on it is ~1.4× end to end before
+any evaluation work. What it establishes is that the arrowhead's block
+parallelism is real and reachable with feral as it ships.
+
 ## Verdict for the structured-KKT plan
 
 Across both families the attribution is the same: **the only superlinear row is
@@ -322,8 +366,11 @@ So, against the Phase 0 gate:
    through FERAL's routing, or through declared structure that says "this is a
    mesh" — is a default-path change and needs the fixture sweep on both legs
    plus `benchmarks/qp`, where `metis` is known to lose.
-3. **The arrowhead case is now measured (Phase 0c): the ordering is already
-   right, and the opening is parallelism.** On N-1 SCOPF up to 210k variables
+3. **The arrowhead's block parallelism is real: 7.1× on the factorization,
+   prototyped and inertia-checked** (Phase 5b above), on top of a
+   block-separable evaluation that is the larger half of the solve. This is
+   the capability's case, and it is now measured rather than assumed.
+4. **The arrowhead's ordering is already right (Phase 0c).** On N-1 SCOPF up to 210k variables
    the generic orderings reach linear fill with bounded fronts, and the
    remaining cost is split between block-separable function evaluation (~half)
    and block-separable factorization (~a third). Declared structure's case
