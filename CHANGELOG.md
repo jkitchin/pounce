@@ -520,6 +520,25 @@ changes.
 
 ### Fixed
 
+- **A convex QP or LP with a non-unique optimum is no longer reported as a
+  numerical failure
+  ([#948](https://github.com/jkitchin/pounce/issues/948)).** The active-set QP
+  engine — `pounce.solve_qp(..., method="active-set")` and the CLI's
+  `solver_selection=qp-active-set` — returned `numerical_failure` with all-zero
+  multipliers on small, well-scaled, feasible convex QPs and LPs whose optimum
+  is not unique, while the primal point it returned was optimal to machine
+  precision. That covers an LP whose cost vector is parallel to a constraint
+  normal (the optimal set is an edge) and a QP with rank-deficient `P` (flat
+  along `null(P)`). Through the CLI it exited 1 with
+  `EXIT: INTERNAL ERROR: Unknown SolverReturn value.`
+
+  Along a direction where the objective is flat the exact slope is zero, so the
+  engine's step-length cap was reading the sign of pure round-off; half the
+  time that looked like descent and the engine reported the problem unbounded,
+  which discards the multipliers. Integer data, where the tie is exact, never
+  triggered it. The cap's descent test is now relative to the size of the
+  quantities it is formed from, so a flat direction reads as flat.
+
 - **The active-set SQP arm now says which engine ran, and its reports carry
   numbers instead of placeholders.** Running `algorithm=active-set-sqp` was
   undetectable from the console: the copyright banner names the interior
