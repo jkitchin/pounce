@@ -2185,6 +2185,81 @@ The user should not need to understand the linear algebra to benefit from it.
 
 ---
 
+# 63.5 Phase 5b design: `BlockAugSystemSolver`
+
+Concrete because the prototype measured it (`benchmarks/kkt_scaling/blockfac`,
+`dev-notes/kkt-scaling-phase0b.md`): on a 210k-variable N-1 SCOPF, factor +
+border + back-solve is **6.1× faster** than the best monolithic path, with
+inertia identical and residual no worse. This is what shipping that looks like.
+
+## Where it plugs in
+
+A third arm beside `StdAugSystemSolver` and `SchurAugSystemSolver`, built by
+`AlgorithmBuilder::build_with_backend` when a block structure is installed
+(§12's `Problem::set_block_structure`), wrapping `StdAugSystemSolver` for
+assembly and fallback exactly as the Schur arm does. It owns:
+
+* `blocks: Vec<Vec<Index>>` and `border: Vec<Index>`, in KKT space, from the
+  Phase 1 mapper;
+* one `feral::SymbolicFactorization` per block, built once per pattern with
+  `symbolic_factorize_with_schur(block ∪ border, schur_indices = border)`;
+* per-iteration: `factorize_multifrontal_with_schur` per block (rayon), which
+  returns that block's factors **and** its dense Schur contribution without
+  forming any `n_block × n_border` buffer — the step that decides whether the
+  gain survives (0.012 s against 0.37 s for dense multi-RHS solves);
+* the summed border complement `S = A_bb − Σ_k A_bk A_kk⁻¹ A_kb`, factored on
+  its own.
+
+## Contract with the IPM
+
+* **Inertia** by Haynsworth: `inertia(K) = Σ_k inertia(A_kk) + inertia(S)`,
+  verified exact in the prototype. This is what `perturb_for_wrong_inertia`
+  consumes, so the existing inertia-correction ladder works unchanged.
+* **Regularization.** `δ_w` / `δ_c` are diagonal, so a retry adds them to the
+  block diagonals and the border and refactors: the same cost again, no new
+  symbolic analysis.
+* **Back-solve** by block elimination: `y_k = A_kk⁻¹ b_k`, `S Δ_s = b_s − Σ_k
+  A_sk y_k`, `x_k = A_kk⁻¹ (b_k − A_ks Δ_s)` — two block solves and one border
+  solve, measured 3.3× the monolithic back-solve and at least as accurate.
+* **Fallback**, first-class as in `SchurAugSystemSolver`: a malformed
+  partition, a block-to-block coupling the structure did not declare, a
+  singular block, or any backend error routes the rest of the solve through
+  `inner`. `linear_solver.blocks` present in the report is the signal it
+  actually ran, mirroring `linear_solver.schur`.
+* **Validation** before the first factor: every off-diagonal KKT entry must be
+  block-local or block-to-border. This is the structural check §46 describes;
+  it is cheap (one pass over the assembled triplet) and it is what makes a
+  wrong declaration fall back instead of silently costing fill.
+
+## Parallelism policy
+
+Blocks are the coarse tasks feral's elimination tree cannot see (measured: 1.2×
+from tree parallelism against 10× from block tasks). So: rayon across blocks,
+feral's own parallelism **off** inside each block, and the whole thing measured
+against feral's threading rather than against one thread. Thread count follows
+pounce's existing policy; a serial fallback (one block at a time) must stay
+correct because it is also the debugging path.
+
+## What is not designed yet
+
+* **Restoration** builds a different KKT (extra `p`/`n` columns) and has no
+  structure. It falls back until Phase 6.
+* **L-BFGS** routes through the low-rank wrapper, which owns the (2,2) block;
+  the block arm is exact-Hessian only, like the Schur arm.
+* **Nested blocks** (a block graph deeper than one border) — out of scope; this
+  is the arrowhead, and the chain is refuted for gas (§38.3).
+
+## Acceptance
+
+§33 exactness against `StdAugSystemSolver` on the same iterate (step and
+inertia), §34's NLP equivalence with iteration count *reported* rather than
+required, the fallback exercised by a deliberately wrong structure, and a
+scaling run on the Phase 0c arrowhead family. Opt-in — it engages only when a
+structure is installed — so no default path moves and the fixture sweep is not
+required, though the arrowhead family should be swept before and after.
+
+---
+
 # 64. Bottom Line
 
 The proposed feature is not primarily a new decomposition algorithm at the optimization level.
