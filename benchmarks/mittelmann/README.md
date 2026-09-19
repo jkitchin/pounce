@@ -7,50 +7,54 @@ against pounce and ipopt. 47 medium-to-large NLP instances, sizes 500 to 261k va
 
 ```
 mittelmann/
-├── Makefile          orchestration (fetch / translate / run / report)
-├── problems.txt      the 47 problem names
-├── run_solver.sh     per-instance solve wrapper
-├── make_report.py    SGM table generator
-├── profiles/         per-problem overrides (env files); see profiles/README.md
-├── notes/            per-problem diagnostic write-ups
-├── source/           cached .mod files from plato.asu.edu (gitignored)
-├── nl/               cached .nl files produced by ampl (gitignored)
-├── logs/             per-instance solver stdout (gitignored)
-├── results/          per-version JSON results (gitignored)
-└── reports/          per-version markdown reports (checked in)
+├── Makefile          fetch + translate only (tracked)
+├── problems.txt      the 47 problem names (tracked)
+├── gen_robot_nl.py   robot_a/b/c straight to .nl, no AMPL needed (tracked)
+├── ipopt_ma57.json   saved Ipopt-MA57 reference (tracked)
+├── source/           .mod files from plato.asu.edu (untracked)
+├── nl/               .nl translations (untracked; see NLDIR below)
+└── pounce.json       per-release POUNCE results (untracked)
 ```
 
-## Prerequisites
+Running the solvers and building the report are not done here. Like every
+suite, Mittelmann runs through `benchmarks/scripts/run_nl_bench.sh` and is
+reported by `benchmarks/benchmark_report.py`.
 
-1. **AMPL Community Edition** installed at `../.venv-ampl/`. To install:
+## Running it
+
+From the repository root:
+
+```
+make -C benchmarks mittelmann-run           # POUNCE, part of the release sweep
+make -C benchmarks ipopt-ref-mittelmann     # refresh the saved Ipopt reference
+```
+
+Both first run `make -C benchmarks/mittelmann fetch translate NLDIR=<dir>`, where
+`<dir>` is `$POUNCE_BENCH_DATA/mittelmann/nl` (or `benchmarks/mittelmann/nl`).
+Both steps skip every problem whose `.nl` is already there, so with a translated
+set in place no network and no AMPL are needed. Only a missing `.nl` is fetched
+from plato.asu.edu and translated.
+
+## Prerequisites for translating
+
+Only needed when a `.nl` is missing:
+
+1. **AMPL Community Edition** at `.venv-ampl/` in the repository root, or pass
+   `AMPL=<path to the ampl binary>`:
    ```
-   uv venv ../.venv-ampl --python 3.12
-   ../.venv-ampl/bin/python -m ensurepip
-   uv pip install --python ../.venv-ampl/bin/python amplpy
-   ../.venv-ampl/bin/python -m amplpy.modules install ampl
-   ../.venv-ampl/bin/python -m amplpy.modules activate <CE-UUID>
+   uv venv .venv-ampl --python 3.12
+   uv pip install --python .venv-ampl/bin/python amplpy
+   .venv-ampl/bin/python -m amplpy.modules install ampl
+   .venv-ampl/bin/python -m amplpy.modules activate <CE-UUID>
    ```
-   Register for a UUID at https://ampl.com/ce.
+   Register for a UUID at https://ampl.com/ce. **The activation step matters.**
+   Without it AMPL runs as a demo, limited to 300 variables and 300
+   constraints. Almost every problem here is larger, so translation fails
+   with "a demo license for AMPL is limited to 300 variables".
 
-2. **ipopt** binary on PATH (e.g. `brew install ipopt`).
-
-3. **pounce** built: `cargo build --release --bin pounce` (run from repo root).
-
-## Usage
-
-```
-make fetch              # download .mod files from plato (cached, ~1 min)
-make translate          # ampl: .mod -> .nl (cached, ~30 s)
-make run-pounce         # run pounce on every .nl, write results/pounce_<version>.json
-make run-ipopt-feral    # run ipopt (FERAL) on every .nl  (also: run-ipopt-mumps, run-ipopt-ma57)
-make run-all            # run every solver variant
-make report             # regenerate reports/BENCHMARK_REPORT_<version>.md
-
-make all         # fetch + translate + run-all + report
-```
-
-Default per-instance timeout is 7200s, matching Mittelmann's published convention.
-Override with `make run-pounce TIMELIMIT=300`.
+2. For the Ipopt reference, an Ipopt built with CoinHSL and the AMPL interface.
+   Point the harness at it with `IPOPT_MA57_BIN=<path>/bin/ipopt`. No build
+   recipe is tracked, so `make build-ipopt-ma57` just says so.
 
 ## `robot_a` / `robot_b` / `robot_c` without AMPL
 
@@ -78,7 +82,8 @@ form for comparison.
 
 The .mod sources are fetched from Mittelmann's public mirror and **not redistributed
 in this repo** (gitignored). The .nl translations are AMPL artifacts and also gitignored.
-Only the harness files and the markdown reports are in git.
+Only the harness (`Makefile`, `problems.txt`, `gen_robot_nl.py`) and the saved
+reference results are in git.
 
 The bundled AMPL CE license is non-commercial and tied to your registration; it
 is not redistributable.

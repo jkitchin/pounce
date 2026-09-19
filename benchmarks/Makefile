@@ -590,7 +590,11 @@ ipopt-reference-provenance:
 # defaults to `CLEAN_SOLVERS=pounce`, deliberately leaving the ipopt
 # reference cached (its binary does not change between pounce iterations).
 gams-bench:
-	@stamp=$$(mktemp); \
+	@if [ ! -d $(REPO_ROOT)/gams/nlpbench ]; then \
+	  echo "gams-bench: skipped, gams/nlpbench is not present (a private GAMS-licensed clone; see .gitignore)"; \
+	  exit 0; \
+	fi; \
+	stamp=$$(mktemp); \
 	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench-smoke bench-smoke; \
 	rc=$$?; \
 	if [ $$rc -ne 0 ]; then rm -f $$stamp; exit $$rc; fi; \

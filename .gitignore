@@ -48,6 +48,11 @@
 # Model generators that reproduce a Mittelmann instance *without* an AMPL
 # licence (the .mod sources and their .nl translations stay untracked).
 !/benchmarks/mittelmann/gen_*.py
+# The Mittelmann fetch/translate harness and its problem list (the Makefile was
+# kept out of git by the rule above until 0.12.0, so mittelmann-run could not
+# run from a fresh checkout).
+!/benchmarks/mittelmann/Makefile
+!/benchmarks/mittelmann/problems.txt
 # The warm-start suite is a Python harness rather than a directory of .nl:
 # its sources (including the two package subdirectories) are tracked, its
 # per-run results.json / results.md outputs are regenerated and ignored
