@@ -1,4 +1,4 @@
-# KKT scaling, Phase 0b: GasLib-40 transient, horizon sweep
+# KKT scaling, Phase 0b: where GasLib-40's superlinear solve time comes from
 
 Structured-KKT decomposition, Phase 0b: fit an exponent in the number of time
 blocks to every quantity that could carry superlinear solve time, and place the
@@ -9,7 +9,7 @@ Harness: `benchmarks/kkt_scaling/sweep.py` (the report fields it reads were
 added in the same branch: factorization seconds, work proxy, delayed / 2×2 /
 tiny pivots, largest front, and restoration factorizations reported apart).
 
-## Family
+## First family: horizon extension
 
 GasLib-40 transient (public GasLib topology): hourly backward-Euler finite
 volumes, initial state fixed to the steady state, daily sinusoidal demand,
@@ -67,17 +67,111 @@ Exponent in `H` (log-log least squares over all six sizes):
 6. **Non-factorization work is ~30% of the time and grows ~linearly** (1.1),
    so it is not a hidden quadratic either.
 
-## What this does not settle
+## Second family: the observed `n^2.3`, reproduced and attributed
 
-The observed quadratic scaling came from other configurations. Candidates this
-family deliberately left out, each of which changes the structure:
+GasLib-40-T transient optimal control (Radau collocation, 3 points per element,
+`n_seg = 10` volumes per pipe, 775 states per time point, six compressor-ratio
+controls, 36 bar pressure floor, simulated warm start): a **fixed 24 h
+horizon, time step refined** from 2 h to 15 min — 12, 24, 48, 96 elements,
+27 978 to 223 782 variables. This is the family pounce#947 reported. Solved
+through the JAX front end at `cecadc3d`; every solve converged to the
+documented objectives (160.7544, 160.5897, 160.5534, 160.5360 MWh).
 
-- **periodic / cyclic-steady-state terminal constraints** (a ring, and in the
-  CSS computation the initial state is free);
-- the **linepack lower bound** and terminal targets of the production runs;
-- a **finer discretization** (the documented 24 h GasLib-40 transient runs are
-  56k variables, ≈ 2.7× this model's per-hour size) or a 30-minute time step;
-- sizes beyond 163k (the documented 72 h case is 503k variables).
+Exponent in `n`:
 
-Next: rerun the sweep on the configuration that actually showed near-`N²`
-growth, then decide the §38.2 row from that, not from this family.
+| metric | auto | metis |
+|---|---|---|
+| iterations | 0.13 | −0.09 |
+| nnz(L) | 1.50 | 1.34 |
+| work proxy per factorization | **2.41** | **1.96** |
+| delayed columns per factorization | 1.15 | 1.22 |
+| factorization s / iteration | **2.41** | **1.69** |
+| other s / iteration | 1.14 | 1.10 |
+| wall | **2.35** | **1.47** |
+
+| n | auto: wall, iters, factorization share, largest front | metis: wall, iters, share, front |
+|---|---|---|
+| 27 978 | 22 s, 68, 65%, 937 | 16 s, 63, 64%, 1 034 |
+| 55 950 | 144 s, 83, 87%, 1 809 | 100 s, 94, 80%, 1 932 |
+| 111 894 | 495 s, 58, 93%, 3 535 | 142 s, 41, 89%, 2 644 |
+| 223 782 | **3 408 s**, 103, **96%**, 4 856 | **428 s**, 68, 85%, 3 414 |
+
+**The quadratic is the fill row.** Iterations are flat, non-factorization work
+is linear, and delayed pivoting grows only slightly faster than the problem;
+factorization time per iteration tracks the work proxy exactly under `auto`
+(2.41 and 2.41), and the largest front grows almost linearly with `n`. At 224k
+variables factorization is 96% of the solve.
+
+**`metis` removes most of it**: 8× faster at 224k, wall exponent 2.35 → 1.47,
+and over the last doubling its factorization time per iteration grows as only
+`n^0.9` (fill ≈ linear, 49M → 102M). For a two-dimensional mesh, nested
+dissection's asymptotic cost is `N^1.5` flops; `metis` is at or below that at
+the top of this range. The pounce#947 comparison point: the same 224k problem
+took 4 357 s at the default ordering before feral 0.18; now the default `auto`,
+which never selects nested dissection, takes 3 408 s and `metis` takes 428 s.
+
+**`auto_race` finds it without being told.** Racing AMD against METIS on fill,
+it chose the `metis` factorization at every size (identical `nnz(L)` and
+fronts) and matched its time to within 1%: 16.5, 101.6, 145.4, 429.2 s, wall
+exponent 1.46. The race's extra symbolic pass is noise at this scale.
+
+## Prior measurement: time-axis decomposition was tried and lost
+
+The study behind pounce#947 (the second family above) also measured the
+decomposition this plan proposes. That was before feral 0.18, but the fix
+(feral#203) changed only FERAL's own nested-dissection separators; a
+caller-supplied ordering and the Schur path's interface do not go through it.
+
+It lost:
+
+- four hand-built orderings that eliminate along the time axis, supplied
+  through `Problem.set_ordering`, were **exactly linear in the horizon and
+  20–40× slower** than the generic ordering;
+- a one-level Schur partition of the horizon (`set_kkt_schur_block`, a
+  793-index interface, 0.18% of the KKT dimension) was **about 3× slower per
+  iteration**.
+
+The recorded reason is structural: each time point carries 775 states whose
+spatial coupling has only 1 977 nonzeros (average degree under 3), so cutting
+between time points turns a sparse interior into a dense front. In the plan's
+terms, the linking set between consecutive blocks is the whole state slice —
+the same size as the block — so the premise `m ≪ n` does not hold. The model is
+a two-dimensional space-by-time mesh, sparse in both directions, and a
+two-dimensional nested dissection (what `metis` computes) is the right
+elimination; a one-dimensional temporal one is not.
+
+## Verdict for the structured-KKT plan
+
+Across both families the attribution is the same: **the only superlinear row is
+fill.** Iterations are flat, non-factorization work is linear, and delayed
+pivoting grows at most slightly faster than the problem.
+
+On the family that showed the quadratic, that fill is removed by the elimination
+the model's geometry calls for — a *two-dimensional* nested dissection of the
+space-by-time mesh, which `metis` computes and `auto_race` selects — and not by
+the one-dimensional temporal decomposition the plan proposes, which was
+measured 20–40× worse as an ordering and 3× worse per iteration as a Schur
+split, because the linking set between time points is the whole 775-state
+slice. The plan's premise that linking variables are few relative to block size
+does not hold for this model.
+
+So, against the Phase 0 gate:
+
+1. **Gas does not justify a block-structured KKT solver** (Phases 3–4) as its
+   motivating case. The decomposable row is present, but the decomposition that
+   works is already available, and near its asymptotic cost at the top of the
+   measured range.
+2. **The actionable finding is routing.** The default `auto` never selects
+   nested dissection and costs 8× at 224k variables; `auto_race` gets it right
+   on this family. Making that choice automatic for space-by-time models —
+   through FERAL's routing, or through declared structure that says "this is a
+   mesh" — is a default-path change and needs the fixture sweep on both legs
+   plus `benchmarks/qp`, where `metis` is known to lose.
+3. **The general capability's remaining case is untested.** The arrowhead
+   topology (scenarios or contingencies sharing global variables) rests on
+   parallelism and memory, not on beating an ordering's exponent, and neither
+   gas family says anything about it. Phase 0c's generator is what would.
+
+Not covered here: periodic (ring) terminal constraints, sizes above 224k in the
+refinement family, and the 72 h / 20 min 503k case, which the earlier study
+solved in 1 h 30 min with `metis`.
