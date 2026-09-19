@@ -8,8 +8,8 @@
 # The build context is irrelevant here (nothing is COPYed in), so it can be
 # built from anywhere — including straight off GitHub without a clone:
 #
-#   docker build -f docker/Dockerfile.release -t pounce:0.11.0 \
-#     --build-arg POUNCE_VERSION=0.11.0 .
+#   docker build -f docker/Dockerfile.release -t pounce:0.12.0 \
+#     --build-arg POUNCE_VERSION=0.12.0 .
 #
 # or `make docker-release`, which reads the version out of Cargo.toml.
 #
@@ -59,7 +59,7 @@ FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE}
 # single arg pins both wheels. Pinned rather than floating on purpose: an
 # image tagged 0.9.0 should contain 0.9.0 forever, not whatever was newest
 # the day it was rebuilt.
-ARG POUNCE_VERSION=0.11.0
+ARG POUNCE_VERSION=0.12.0
 
 LABEL org.opencontainers.image.title="POUNCE" \
       org.opencontainers.image.description="Interior-point optimization solver (CLI + Python + Pyomo), released build from PyPI" \

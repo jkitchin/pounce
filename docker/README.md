@@ -38,7 +38,7 @@ The equivalents by hand:
 docker build -f docker/Dockerfile -t pounce:dev \
   --build-arg POUNCE_BUILD_GIT="$(git rev-parse --short=8 HEAD)" .
 
-docker build -f docker/Dockerfile.release -t pounce:0.11.0 \
+docker build -f docker/Dockerfile.release -t pounce:0.12.0 \
   --build-arg POUNCE_VERSION=0.11.0 .
 ```
 

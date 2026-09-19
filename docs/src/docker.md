@@ -80,7 +80,7 @@ The optional extras are *not* installed — no JAX, no PyTorch, no `plotly`,
 no GAMS bindings. Add what you need in a derived image:
 
 ```dockerfile
-FROM ghcr.io/jkitchin/pounce:0.11.0
+FROM ghcr.io/jkitchin/pounce:0.12.0
 USER root
 RUN pip install --no-cache-dir "pounce-solver[jax]==0.11.0"
 USER pounce
@@ -92,7 +92,7 @@ Most HPC sites run Apptainer (formerly Singularity) rather than Docker,
 because it needs no daemon and no root. It pulls Docker images directly:
 
 ```sh
-apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.11.0
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.12.0
 apptainer run pounce.sif problem.nl
 ```
 
