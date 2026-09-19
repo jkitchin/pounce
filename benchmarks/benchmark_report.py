@@ -154,6 +154,10 @@ def _build_comparisons(records, suite_name, left_key='pounce', right_key='ipopt'
             'ipopt_solved': c_solved,
             'both_solved': both,
             'passed': both and not math.isnan(od) and od < 1e-4,
+            # No record at all on the reference side -- not "the reference
+            # failed". See `main`: these rows are kept out of every
+            # head-to-head count.
+            'ref_missing': name not in ipopt_by_name,
         })
 
     return comparisons
@@ -949,8 +953,36 @@ def head_to_head_lines(head_to_head):
     return lines
 
 
+def unreferenced_lines(unreferenced):
+    """Problems a suite now runs that its saved Ipopt reference predates.
+
+    A suite that has a reference but grew since it was taken has problems with
+    no Ipopt record at all. Scoring those as "Ipopt not Optimal" would credit
+    POUNCE with wins nobody measured, so they are excluded from every
+    head-to-head count above and listed here with POUNCE's result alone.
+    """
+    out = []
+    out.append(f"## Problems without an Ipopt reference — {len(unreferenced)} problems")
+    out.append("")
+    out.append("These problems were added to a suite after its saved ipopt-ma57 "
+               "reference was taken. They are **excluded from every POUNCE-vs-Ipopt "
+               "count in this report** (the executive summary, the per-suite table, "
+               "the profiles, wins and regressions) rather than scored as Ipopt "
+               "failures. Refresh the suite's reference with "
+               "`make -C benchmarks ipopt-ref-<suite>` to bring them into the comparison.")
+    out.append("")
+    out.append("| Problem | Suite | n | m | POUNCE status | POUNCE objective |")
+    out.append("|---------|-------|---|---|---------------|------------------|")
+    for c in unreferenced:
+        ro = c['pounce_obj']
+        ro_str = f"{ro:.6e}" if isinstance(ro, (int, float)) and not math.isnan(ro) else "N/A"
+        out.append(f"| {c['name']} | {c['suite']} | {c['n']} | {c['m']} | {c['pounce_status']} | {ro_str} |")
+    out.append("")
+    return out
+
+
 def generate_report(suites, output_path, baseline=None, profile_dirs=None,
-                    head_to_head=None, env_stamps=None):
+                    head_to_head=None, env_stamps=None, unreferenced=None):
     """Generate the unified benchmark report."""
     prov = collect_provenance()
     lines = []
@@ -1041,6 +1073,8 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
             f"| {s['passed']}/{max(s['both'],1)} |"
         )
     lines.append("")
+    if unreferenced:
+        lines.extend(unreferenced_lines(unreferenced))
 
     # Vanderbei cross-check against the cute_table reference (if present).
     for name, comps in suites:
@@ -1327,6 +1361,7 @@ def main():
     # retired compiled CUTEst suite; large_scale is now generated as .nl by
     # benchmarks/large_scale/generate_nl.py rather than a Rust harness.
     missing_reference = []
+    unreferenced = []  # rows a referenced suite has no reference record for
     profile_dirs = []  # dirnames with both pounce + ipopt, for the profiles
     env_stamps = {}    # suite -> thread stamp, for the threading note
     for suite_name, dirname, make_target in (
@@ -1348,6 +1383,13 @@ def main():
         # pounce arm means the suite was skipped (e.g. lpopt). Without this
         # guard a suite with only the committed ipopt-ma57 reference would
         # render as "pounce 0/N solved" — a spurious total regression.
+        if suite and has_pounce and has_ipopt:
+            unref = [c for c in suite if c.get('ref_missing')]
+            if unref:
+                unreferenced.extend(unref)
+                suite = [c for c in suite if not c.get('ref_missing')]
+                print(f"{suite_name} suite: {len(unref)} problem(s) have no ipopt "
+                      f"reference record; excluded from the comparison and listed separately")
         if suite and has_pounce:
             suites.append((suite_name, suite))
             # Only for suites that actually render — a stamp for a skipped
@@ -1415,7 +1457,8 @@ def main():
     combined, _summary = generate_report(suites, output_path, baseline,
                                           profile_dirs=profile_dirs,
                                           head_to_head=head_to_head,
-                                          env_stamps=env_stamps)
+                                          env_stamps=env_stamps,
+                                          unreferenced=unreferenced)
 
     print(f"\nReport written to {output_path}")
     print(f"Baseline saved to {output_path.replace('.md', '.json')}")
