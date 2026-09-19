@@ -258,8 +258,40 @@ better ordering.** Not measured here: how much of that FERAL's tree
 parallelism already delivers inside the factorization, and whether evaluation
 through the AMPL `.nl` interface can be run per block at all.
 
-(Aside: `FireIntermediateCallback` takes 6.6 s of that 77 s solve — 8% — which
-is out of proportion for a callback and worth its own look.)
+(Aside, checked and **not** a defect: `FireIntermediateCallback` takes 6.6 s of
+that 77 s solve. It fires at the top of each iteration, right after the iterate
+moves, so it is the first caller to ask for the objective and the primal/dual
+infeasibility at the new point and is billed for evaluating them; the
+convergence check later reuses the cached values. The counters confirm no
+duplicated work: 60 objective / constraint / Jacobian / Hessian evaluations for
+59 iterations.)
+
+### What parallelism is actually available
+
+**FERAL's tree parallelism delivers ~1.2× here, and the factorization is
+overhead-bound, not flop-bound.** On the 210k-variable instance (`case1354`,
+K = 64), factorization time against rayon threads: 25.3 s serial, 22.6 s at 2,
+**21.2 s at 4**, 24.9 s at 8, 26.5 s at 14 — and back-solves get monotonically
+*slower* (5.6 s → 7.8 s). Lowering feral's parallel-dispatch flop gate changes
+nothing (21.3 s at 4 threads either way), so the gate is not the limiter. The
+reason is granularity: the factorization does 1.22e9 flops spread over 196 561
+supernodes — about 6 k flops each, ~50 MFlop/s — so per-supernode overhead
+dominates and rayon's per-task cost cannot be amortised. Block-granular
+parallelism (65 coarse independent tasks, one per contingency) is exactly the
+shape this workload lacks, which is the structural opening.
+
+**Evaluation is block-separable and vectorises ~20× per block.** The
+contingency blocks are the same network with one branch out, so a frontend that
+knows this can evaluate them together. Measured in JAX on `case1354` (one block:
+2 969 variables, 6 690 rows; Jacobian 29 colors, Hessian 22 colors): a
+directional derivative over **all 64 blocks at once costs 0.99 ms, 0.044× the
+one-at-a-time cost**, and a Lagrangian-Hessian-vector product 1.0 ms (0.03×).
+At 29 / 22 colors that is ≈ 29 ms for the whole Jacobian and ≈ 22 ms for the
+whole Hessian, against the `.nl` path's measured 107 ms and 463 ms per
+evaluation — roughly 4× and 20×. Part of that gap is JAX/XLA against the ASL
+evaluator rather than structure; the structural part is that identical blocks
+share one sparsity pattern and one coloring, so they can be evaluated in a
+single vectorised pass. Evaluation is 48% of this solve.
 
 ## Verdict for the structured-KKT plan
 
