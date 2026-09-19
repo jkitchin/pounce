@@ -29,6 +29,13 @@ changes.
   work. Additive within `pounce.solve-report/v1`. These are the Phase 0
   measurements for structured-KKT decomposition.
 
+- **`feral_ordering_preprocess`** (`auto` / `none` / `ldlt_compress`), with
+  the resolved choice reported as `linear_solver.last_ordering_preprocess`.
+  Exposes FERAL's matching-compressed ordering, which `auto` already selects
+  on many KKT systems and which dominates factorization cost on GasLib-40
+  transient control: forcing `none` there cuts flops per factorization 7× but
+  doubles the iterations. Default unchanged.
+
 ### Fixed
 
 - **Linear-solver summary under L-BFGS reported one backend's counts, not the

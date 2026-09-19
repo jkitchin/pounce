@@ -1376,6 +1376,10 @@ fn linear_solver_dict<'py>(
     d.set_item("last_two_by_two", s.last_two_by_two)?;
     d.set_item("last_n_tiny", s.last_n_tiny)?;
     d.set_item("last_ordering", s.last_ordering.as_deref())?;
+    d.set_item(
+        "last_ordering_preprocess",
+        s.last_ordering_preprocess.as_deref(),
+    )?;
     let schur: PyObject = match &s.schur {
         Some(c) => {
             let sd = PyDict::new_bound(py);

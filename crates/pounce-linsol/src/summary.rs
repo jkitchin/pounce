@@ -83,6 +83,10 @@ pub struct LinearSolverSummary {
     /// Concrete fill-reducing ordering the final factorization used
     /// (never `auto`: the method the dispatcher resolved to).
     pub last_ordering: Option<String>,
+    /// Ordering-stage preprocessing the final factorization applied
+    /// (`none`, or `ldlt_compress`: the matching-compressed ordering that
+    /// keeps each 2x2 KKT pivot pair together).
+    pub last_ordering_preprocess: Option<String>,
 
     /// Present when the KKT solve went through the block-triangular /
     /// Schur path (`set_kkt_schur_block`) and it actually factored.
@@ -155,6 +159,8 @@ pub struct FactorRecord {
     pub n_tiny: Option<usize>,
     /// Concrete ordering used.
     pub ordering: Option<String>,
+    /// Ordering preprocessing actually applied (`none` / `ldlt_compress`).
+    pub ordering_preprocess: Option<String>,
 }
 
 impl LinearSolverSummary {
@@ -211,6 +217,7 @@ impl LinearSolverSummary {
         self.last_two_by_two = r.two_by_two;
         self.last_n_tiny = r.n_tiny;
         self.last_ordering = r.ordering.clone();
+        self.last_ordering_preprocess = r.ordering_preprocess.clone();
     }
 }
 

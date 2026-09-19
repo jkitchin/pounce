@@ -202,6 +202,8 @@ pub struct LinearSolverSummaryInfo {
     pub last_n_tiny: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_ordering: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_ordering_preprocess: Option<String>,
     /// Present only when the Schur KKT path actually factored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub schur: Option<SchurSummaryInfo>,
@@ -248,6 +250,7 @@ impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
             last_two_by_two: s.last_two_by_two,
             last_n_tiny: s.last_n_tiny,
             last_ordering: s.last_ordering,
+            last_ordering_preprocess: s.last_ordering_preprocess,
             schur: s.schur.map(|c| SchurSummaryInfo {
                 n_eliminated: c.n_eliminated,
                 n_schur: c.n_schur,

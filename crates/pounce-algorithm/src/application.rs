@@ -6786,6 +6786,11 @@ pub fn feral_config_from_options_scoped(
             cfg.ordering = m;
         }
     }
+    if let Ok((v, true)) = options.get_string_value("feral_ordering_preprocess", "") {
+        if let Some(p) = pounce_feral::parse_ordering_preprocess(&v) {
+            cfg.ordering_preprocess = p;
+        }
+    }
     // Same explicit-set discipline as `feral_ordering`: `from_env`
     // defaults to ScalingStrategy::Auto (FERAL's current default), so
     // leaving the option unset preserves existing behaviour exactly.

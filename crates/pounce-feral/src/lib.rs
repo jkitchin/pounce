@@ -32,6 +32,7 @@ use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, 
 /// [`FeralConfig`] without taking a direct dependency on `feral`.
 pub use feral::scaling::ScalingStrategy;
 pub use feral::symbolic::OrderingMethod;
+pub use feral::symbolic::OrderingPreprocess;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
@@ -519,6 +520,15 @@ pub struct FeralConfig {
     /// `feral/src/symbolic/mod.rs::OrderingMethod` for the
     /// per-variant rationale.
     pub ordering: OrderingMethod,
+    /// Ordering-stage preprocessing ([`feral::symbolic::SupernodeParams::preprocess`]).
+    /// `LdltCompress` is the Duff-Pralet symmetric matching plus
+    /// quotient-graph compression (MUMPS `ICNTL(12)=2`): each matched pair
+    /// of a KKT system -- typically a variable and the constraint it pivots
+    /// with -- is ordered as one super-variable, so the fill-reducing method
+    /// never separates a 2x2 pivot. Default [`OrderingPreprocess::Auto`]
+    /// (feral's shape predicate decides). Override via the
+    /// `feral_ordering_preprocess` option or `POUNCE_FERAL_ORDERING_PREPROCESS`.
+    pub ordering_preprocess: OrderingPreprocess,
     /// Diagonal scaling strategy passed to
     /// [`feral::Solver::with_scaling`]. Default
     /// [`ScalingStrategy::Auto`]: FERAL's adaptive shape-based router
@@ -606,6 +616,7 @@ impl Default for FeralConfig {
             inertia_pivot_floor: None,
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
+            ordering_preprocess: OrderingPreprocess::Auto,
             scaling: ScalingStrategy::Auto,
             parallel: None,
             min_par_flops: None,
@@ -697,6 +708,11 @@ impl FeralConfig {
                 .as_deref()
                 .and_then(parse_ordering_method)
                 .unwrap_or(OrderingMethod::Auto),
+            ordering_preprocess: std::env::var("POUNCE_FERAL_ORDERING_PREPROCESS")
+                .ok()
+                .as_deref()
+                .and_then(parse_ordering_preprocess)
+                .unwrap_or(OrderingPreprocess::Auto),
             scaling: std::env::var("POUNCE_FERAL_SCALING")
                 .ok()
                 .as_deref()
@@ -832,6 +848,24 @@ pub(crate) fn factor_record(
         two_by_two: pivots.map(|p| p.1),
         n_tiny: Some(stats.n_tiny),
         ordering: Some(ordering_label(&stats.ordering_info.used)),
+        ordering_preprocess: Some(
+            match stats.ordering_info.preprocess {
+                OrderingPreprocess::None => "none",
+                OrderingPreprocess::LdltCompress => "ldlt_compress",
+                OrderingPreprocess::Auto => "auto",
+            }
+            .to_string(),
+        ),
+    }
+}
+
+/// Parse a `feral_ordering_preprocess` tag. `None` for an unrecognized one.
+pub fn parse_ordering_preprocess(s: &str) -> Option<OrderingPreprocess> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(OrderingPreprocess::Auto),
+        "none" => Some(OrderingPreprocess::None),
+        "ldlt_compress" | "ldlt-compress" | "compress" => Some(OrderingPreprocess::LdltCompress),
+        _ => None,
     }
 }
 
@@ -869,7 +903,11 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
             np.cascade_break_eps = None;
         }
     }
-    let mut solver = Solver::with_params(np, SupernodeParams::default());
+    let sn = SupernodeParams {
+        preprocess: cfg.ordering_preprocess,
+        ..SupernodeParams::default()
+    };
+    let mut solver = Solver::with_params(np, sn);
     // Internal-parallelism toggle. Explicit `cfg.parallel` is the primary
     // per-backend lever; when unset, fall back to the legacy process-wide
     // `FERAL_PARALLEL` env var. The env var is bidirectional and uses the
@@ -2517,6 +2555,59 @@ mod tests {
         }
         assert_eq!(parse_ordering_method("not_a_method"), None);
         assert_eq!(parse_ordering_method(""), None);
+    }
+
+    #[test]
+    fn parse_ordering_preprocess_accepts_documented_tags() {
+        use OrderingPreprocess::*;
+        for (tag, expected) in [
+            ("auto", Auto),
+            ("none", None),
+            ("NONE", None),
+            ("ldlt_compress", LdltCompress),
+            ("ldlt-compress", LdltCompress),
+            ("compress", LdltCompress),
+        ] {
+            assert_eq!(parse_ordering_preprocess(tag), Some(expected), "{tag:?}");
+        }
+        assert_eq!(parse_ordering_preprocess("mc64"), Option::None);
+    }
+
+    /// A forced preprocessing choice reaches FERAL and is what the summary
+    /// reports back; `Auto` reports the concrete choice it resolved to.
+    #[test]
+    fn ordering_preprocess_setting_reaches_the_factorization() {
+        for (setting, expect) in [
+            (OrderingPreprocess::None, Some("none")),
+            (OrderingPreprocess::LdltCompress, Some("ldlt_compress")),
+            (OrderingPreprocess::Auto, Option::None),
+        ] {
+            let mut s = FeralSolverInterface::with_config(FeralConfig {
+                ordering_preprocess: setting,
+                ..FeralConfig::default()
+            });
+            let irn: [Index; 3] = [1, 2, 2];
+            let jcn: [Index; 3] = [1, 1, 2];
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success
+            );
+            s.values_array_mut().copy_from_slice(&[0.0, 1.0, 0.0]);
+            let mut rhs = [1.0, 2.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+                ESymSolverStatus::Success
+            );
+            let got = s.summary().last_ordering_preprocess;
+            match expect {
+                Some(e) => assert_eq!(got.as_deref(), Some(e), "{setting:?}"),
+                // Auto resolves to a concrete choice, never "auto"
+                Option::None => assert!(
+                    matches!(got.as_deref(), Some("none") | Some("ldlt_compress")),
+                    "Auto reported {got:?}"
+                ),
+            }
+        }
     }
 
     /// Each `OrderingMethod` variant constructs a usable solver and

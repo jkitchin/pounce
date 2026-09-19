@@ -1617,6 +1617,17 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, feral's `choose_adaptive` dispatcher. Concrete-method choices bypass the dispatcher and pin a single method for the run. AutoRace measures symbolic fill per problem, which is not the same as measuring factorization time. For collocation, optimal-control and PDE-in-time models set `metis` (see docs/src/options.md, feral_ordering variants). Falls back to the POUNCE_FERAL_ORDERING environment variable (same tag set) when not set on the OptionsList. See `crates/pounce-feral/src/lib.rs` (FeralConfig::ordering) and `feral/src/symbolic/mod.rs` (OrderingMethod) for per-variant rationale and evidence.",
     )?;
     r.add_string_option(
+        "feral_ordering_preprocess",
+        "Ordering-stage preprocessing for the FERAL backend.",
+        "auto",
+        &[
+            ("auto", "FERAL's shape predicate decides whether to compress. Pounce default."),
+            ("none", "Order the symmetric KKT pattern directly."),
+            ("ldlt_compress", "Duff-Pralet symmetric matching plus quotient-graph compression (MUMPS ICNTL(12)=2): each matched pair -- typically a variable and the constraint it pivots with -- is ordered as one super-variable, so the fill-reducing method never splits a 2x2 pivot."),
+        ],
+        "Pounce reads this option only when set explicitly; unset keeps FERAL's Auto. Applies to every fill-reducing method except a caller-supplied permutation. Falls back to the POUNCE_FERAL_ORDERING_PREPROCESS environment variable. The resolved choice is reported as linear_solver.last_ordering_preprocess.",
+    )?;
+    r.add_string_option(
         "feral_scaling",
         "Diagonal scaling strategy for the FERAL backend.",
         "auto",
