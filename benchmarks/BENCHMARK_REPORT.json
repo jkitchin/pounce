@@ -7620,16 +7620,6 @@
     "ipopt_solved": true
   },
   {
-    "name": "laptime",
-    "suite": "LargeScale",
-    "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
-    "pounce_obj": 65.2946393859211,
-    "ipopt_obj": null,
-    "pounce_solved": true,
-    "ipopt_solved": false
-  },
-  {
     "name": "optcontrol",
     "suite": "LargeScale",
     "pounce_status": "Optimal",

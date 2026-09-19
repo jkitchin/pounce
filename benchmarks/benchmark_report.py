@@ -154,6 +154,10 @@ def _build_comparisons(records, suite_name, left_key='pounce', right_key='ipopt'
             'ipopt_solved': c_solved,
             'both_solved': both,
             'passed': both and not math.isnan(od) and od < 1e-4,
+            # No record at all on the reference side -- not "the reference
+            # failed". See `main`: these rows are kept out of every
+            # head-to-head count.
+            'ref_missing': name not in ipopt_by_name,
         })
 
     return comparisons
@@ -874,7 +878,8 @@ def generate_profiles(profile_dirs):
 def head_to_head_lines(head_to_head):
     """Render the dedicated-convex-vs-general-NLP head-to-head section.
 
-    `head_to_head` is a list of (suite_name, comps) where each comps was
+    `head_to_head` is a list of (suite_name, comps, (left_label, right_label))
+    -- the labels head the table columns -- where each comps was
     built with the 'convex' arm in the left slot (pounce_*) and the 'nlp'
     arm in the right slot (ipopt_*). This is a pounce-vs-pounce comparison
     on identical .nl problems, so it is rendered with its own labels and
@@ -906,11 +911,11 @@ def head_to_head_lines(head_to_head):
     lines.append("> regression -- gh #744 was filed by not doing that.")
     lines.append("")
 
-    for name, comps in head_to_head:
+    for name, comps, (a, b) in head_to_head:
         s = suite_summary(name, comps)
         lines.append(f"### {name}")
         lines.append("")
-        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append(f"| Metric | {a} | {b} |")
         lines.append("|--------|---------------|------------|")
         lines.append(
             f"| Optimal | {s['r_optimal']}/{s['total']} "
@@ -931,26 +936,54 @@ def head_to_head_lines(head_to_head):
 
         lines.append(f"On {sp['n_problems']} problems solved by both arms:")
         lines.append("")
-        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append(f"| Metric | {a} | {b} |")
         lines.append("|--------|---------------|------------|")
         lines.append(f"| Median time | {fmt_time(sp['r_median_time'])} | {fmt_time(sp['i_median_time'])} |")
         lines.append(f"| Total time | {fmt_time(sp['r_total_time'])} | {fmt_time(sp['i_total_time'])} |")
         lines.append(f"| Mean iterations | {sp['r_mean_iters']:.1f} | {sp['i_mean_iters']:.1f} |")
         lines.append(f"| Median iterations | {sp['r_median_iters']} | {sp['i_median_iters']} |")
         lines.append("")
-        lines.append(f"- **Geometric-mean speedup (convex over nlp)**: {sp['geo_mean_speedup']:.1f}x")
+        lines.append(f"- **Geometric-mean speedup ({a} over {b})**: {sp['geo_mean_speedup']:.1f}x")
         lines.append(f"- **Median speedup**: {sp['median_speedup']:.1f}x")
-        lines.append(f"- pounce-convex faster: {sp['r_faster_count']}/{sp['n_problems']} "
+        lines.append(f"- {a} faster: {sp['r_faster_count']}/{sp['n_problems']} "
                      f"({100*sp['r_faster_count']/sp['n_problems']:.0f}%)")
-        lines.append(f"- pounce-convex 10x+ faster: {sp['r_10x_faster']}/{sp['n_problems']}")
-        lines.append(f"- pounce-nlp faster: {sp['i_faster_count']}/{sp['n_problems']}")
+        lines.append(f"- {a} 10x+ faster: {sp['r_10x_faster']}/{sp['n_problems']}")
+        lines.append(f"- {b} faster: {sp['i_faster_count']}/{sp['n_problems']}")
         lines.append("")
 
     return lines
 
 
+def unreferenced_lines(unreferenced):
+    """Problems a suite now runs that its saved Ipopt reference predates.
+
+    A suite that has a reference but grew since it was taken has problems with
+    no Ipopt record at all. Scoring those as "Ipopt not Optimal" would credit
+    POUNCE with wins nobody measured, so they are excluded from every
+    head-to-head count above and listed here with POUNCE's result alone.
+    """
+    out = []
+    out.append(f"## Problems without an Ipopt reference — {len(unreferenced)} problems")
+    out.append("")
+    out.append("These problems were added to a suite after its saved ipopt-ma57 "
+               "reference was taken. They are **excluded from every POUNCE-vs-Ipopt "
+               "count in this report** (the executive summary, the per-suite table, "
+               "the profiles, wins and regressions) rather than scored as Ipopt "
+               "failures. Refresh the suite's reference with "
+               "`make -C benchmarks ipopt-ref-<suite>` to bring them into the comparison.")
+    out.append("")
+    out.append("| Problem | Suite | n | m | POUNCE status | POUNCE objective |")
+    out.append("|---------|-------|---|---|---------------|------------------|")
+    for c in unreferenced:
+        ro = c['pounce_obj']
+        ro_str = f"{ro:.6e}" if isinstance(ro, (int, float)) and not math.isnan(ro) else "N/A"
+        out.append(f"| {c['name']} | {c['suite']} | {c['n']} | {c['m']} | {c['pounce_status']} | {ro_str} |")
+    out.append("")
+    return out
+
+
 def generate_report(suites, output_path, baseline=None, profile_dirs=None,
-                    head_to_head=None, env_stamps=None):
+                    head_to_head=None, env_stamps=None, unreferenced=None):
     """Generate the unified benchmark report."""
     prov = collect_provenance()
     lines = []
@@ -1041,6 +1074,8 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
             f"| {s['passed']}/{max(s['both'],1)} |"
         )
     lines.append("")
+    if unreferenced:
+        lines.extend(unreferenced_lines(unreferenced))
 
     # Vanderbei cross-check against the cute_table reference (if present).
     for name, comps in suites:
@@ -1327,6 +1362,7 @@ def main():
     # retired compiled CUTEst suite; large_scale is now generated as .nl by
     # benchmarks/large_scale/generate_nl.py rather than a Rust harness.
     missing_reference = []
+    unreferenced = []  # rows a referenced suite has no reference record for
     profile_dirs = []  # dirnames with both pounce + ipopt, for the profiles
     env_stamps = {}    # suite -> thread stamp, for the threading note
     for suite_name, dirname, make_target in (
@@ -1348,6 +1384,13 @@ def main():
         # pounce arm means the suite was skipped (e.g. lpopt). Without this
         # guard a suite with only the committed ipopt-ma57 reference would
         # render as "pounce 0/N solved" — a spurious total regression.
+        if suite and has_pounce and has_ipopt:
+            unref = [c for c in suite if c.get('ref_missing')]
+            if unref:
+                unreferenced.extend(unref)
+                suite = [c for c in suite if not c.get('ref_missing')]
+                print(f"{suite_name} suite: {len(unref)} problem(s) have no ipopt "
+                      f"reference record; excluded from the comparison and listed separately")
         if suite and has_pounce:
             suites.append((suite_name, suite))
             # Only for suites that actually render — a stamp for a skipped
@@ -1384,26 +1427,31 @@ def main():
     # so they stay out of the Ipopt-reference machinery (profiles, baseline,
     # regressions/wins, executive summary).
     head_to_head = []
-    for suite_name, dirname, files, keys in (
+    # The last field names the two arms in the rendered tables; the L-BFGS
+    # suite rendered under the convex labels until 0.12.0.
+    for suite_name, dirname, files, keys, labels in (
             ('LP — convex vs NLP', 'lp_convex',
-             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+             ('convex.json', 'nlp.json'), ('convex', 'nlp'),
+             ('pounce-convex', 'pounce-nlp')),
             ('QP — convex vs NLP', 'qp_convex',
-             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+             ('convex.json', 'nlp.json'), ('convex', 'nlp'),
+             ('pounce-convex', 'pounce-nlp')),
             # Exact vs limited-memory Hessian on the same problems. The
             # Python frontend and the CasADi plugin pick L-BFGS on their
             # own when no exact Lagrangian Hessian exists, so this arm is
             # a default path for a large share of users, not an opt-in.
             ('Mittelmann — exact vs L-BFGS', 'lbfgs',
-             ('exact.json', 'limited.json'), ('exact', 'lbfgs')),
+             ('exact.json', 'limited.json'), ('exact', 'lbfgs'),
+             ('exact Hessian', 'L-BFGS')),
     ):
         comps, has_convex, has_nlp = load_suite(
             suite_name, dirname,
             left_file=files[0], right_file=files[1],
             left_key=keys[0], right_key=keys[1])
         if comps:
-            head_to_head.append((suite_name, comps))
+            head_to_head.append((suite_name, comps, labels))
             print(f"{suite_name} suite: {len(comps)} records loaded — "
-                  f"convex-vs-nlp head-to-head")
+                  f"{labels[0]}-vs-{labels[1]} head-to-head")
         else:
             print(f"{suite_name} suite: no results "
                   f"(run `make -C benchmarks {dirname.replace('_', '-')}-run` first)")
@@ -1415,7 +1463,8 @@ def main():
     combined, _summary = generate_report(suites, output_path, baseline,
                                           profile_dirs=profile_dirs,
                                           head_to_head=head_to_head,
-                                          env_stamps=env_stamps)
+                                          env_stamps=env_stamps,
+                                          unreferenced=unreferenced)
 
     print(f"\nReport written to {output_path}")
     print(f"Baseline saved to {output_path.replace('.md', '.json')}")
