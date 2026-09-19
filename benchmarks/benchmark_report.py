@@ -878,7 +878,8 @@ def generate_profiles(profile_dirs):
 def head_to_head_lines(head_to_head):
     """Render the dedicated-convex-vs-general-NLP head-to-head section.
 
-    `head_to_head` is a list of (suite_name, comps) where each comps was
+    `head_to_head` is a list of (suite_name, comps, (left_label, right_label))
+    -- the labels head the table columns -- where each comps was
     built with the 'convex' arm in the left slot (pounce_*) and the 'nlp'
     arm in the right slot (ipopt_*). This is a pounce-vs-pounce comparison
     on identical .nl problems, so it is rendered with its own labels and
@@ -910,11 +911,11 @@ def head_to_head_lines(head_to_head):
     lines.append("> regression -- gh #744 was filed by not doing that.")
     lines.append("")
 
-    for name, comps in head_to_head:
+    for name, comps, (a, b) in head_to_head:
         s = suite_summary(name, comps)
         lines.append(f"### {name}")
         lines.append("")
-        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append(f"| Metric | {a} | {b} |")
         lines.append("|--------|---------------|------------|")
         lines.append(
             f"| Optimal | {s['r_optimal']}/{s['total']} "
@@ -935,19 +936,19 @@ def head_to_head_lines(head_to_head):
 
         lines.append(f"On {sp['n_problems']} problems solved by both arms:")
         lines.append("")
-        lines.append("| Metric | pounce-convex | pounce-nlp |")
+        lines.append(f"| Metric | {a} | {b} |")
         lines.append("|--------|---------------|------------|")
         lines.append(f"| Median time | {fmt_time(sp['r_median_time'])} | {fmt_time(sp['i_median_time'])} |")
         lines.append(f"| Total time | {fmt_time(sp['r_total_time'])} | {fmt_time(sp['i_total_time'])} |")
         lines.append(f"| Mean iterations | {sp['r_mean_iters']:.1f} | {sp['i_mean_iters']:.1f} |")
         lines.append(f"| Median iterations | {sp['r_median_iters']} | {sp['i_median_iters']} |")
         lines.append("")
-        lines.append(f"- **Geometric-mean speedup (convex over nlp)**: {sp['geo_mean_speedup']:.1f}x")
+        lines.append(f"- **Geometric-mean speedup ({a} over {b})**: {sp['geo_mean_speedup']:.1f}x")
         lines.append(f"- **Median speedup**: {sp['median_speedup']:.1f}x")
-        lines.append(f"- pounce-convex faster: {sp['r_faster_count']}/{sp['n_problems']} "
+        lines.append(f"- {a} faster: {sp['r_faster_count']}/{sp['n_problems']} "
                      f"({100*sp['r_faster_count']/sp['n_problems']:.0f}%)")
-        lines.append(f"- pounce-convex 10x+ faster: {sp['r_10x_faster']}/{sp['n_problems']}")
-        lines.append(f"- pounce-nlp faster: {sp['i_faster_count']}/{sp['n_problems']}")
+        lines.append(f"- {a} 10x+ faster: {sp['r_10x_faster']}/{sp['n_problems']}")
+        lines.append(f"- {b} faster: {sp['i_faster_count']}/{sp['n_problems']}")
         lines.append("")
 
     return lines
@@ -1426,26 +1427,31 @@ def main():
     # so they stay out of the Ipopt-reference machinery (profiles, baseline,
     # regressions/wins, executive summary).
     head_to_head = []
-    for suite_name, dirname, files, keys in (
+    # The last field names the two arms in the rendered tables; the L-BFGS
+    # suite rendered under the convex labels until 0.12.0.
+    for suite_name, dirname, files, keys, labels in (
             ('LP — convex vs NLP', 'lp_convex',
-             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+             ('convex.json', 'nlp.json'), ('convex', 'nlp'),
+             ('pounce-convex', 'pounce-nlp')),
             ('QP — convex vs NLP', 'qp_convex',
-             ('convex.json', 'nlp.json'), ('convex', 'nlp')),
+             ('convex.json', 'nlp.json'), ('convex', 'nlp'),
+             ('pounce-convex', 'pounce-nlp')),
             # Exact vs limited-memory Hessian on the same problems. The
             # Python frontend and the CasADi plugin pick L-BFGS on their
             # own when no exact Lagrangian Hessian exists, so this arm is
             # a default path for a large share of users, not an opt-in.
             ('Mittelmann — exact vs L-BFGS', 'lbfgs',
-             ('exact.json', 'limited.json'), ('exact', 'lbfgs')),
+             ('exact.json', 'limited.json'), ('exact', 'lbfgs'),
+             ('exact Hessian', 'L-BFGS')),
     ):
         comps, has_convex, has_nlp = load_suite(
             suite_name, dirname,
             left_file=files[0], right_file=files[1],
             left_key=keys[0], right_key=keys[1])
         if comps:
-            head_to_head.append((suite_name, comps))
+            head_to_head.append((suite_name, comps, labels))
             print(f"{suite_name} suite: {len(comps)} records loaded — "
-                  f"convex-vs-nlp head-to-head")
+                  f"{labels[0]}-vs-{labels[1]} head-to-head")
         else:
             print(f"{suite_name} suite: no results "
                   f"(run `make -C benchmarks {dirname.replace('_', '-')}-run` first)")
