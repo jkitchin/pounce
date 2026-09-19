@@ -1134,6 +1134,7 @@ POUNCE-side work is §57. `discopt`-side work is listed here as **drafts**. Each
 | **I1** | Export solver-neutral block structure with NLP indices | Phase 1, end-to-end test | Block membership for variables **and** constraints, links, globals, block graph, in the NLP index space POUNCE sees (§8, §45). Stable identity through `discopt`'s transformations (§41). Validation of declared structure against incidence. |
 | **I2** | `solve(structured_kkt=...)` passthrough to `Problem.set_block_structure` | Phase 2 on models built in `discopt` | Builds I1's structure and hands it to POUNCE. Depends on I1. |
 | **I3** | Multi-horizon gas model emitted at \(T = 1 \dots 64\) | Phase 0b, *only if* D2 says the gas instances come from `discopt` | `.nl` instances per horizon count, same network and data. |
+| **I5** | Block-parallel / vectorised evaluation of identical blocks | Phase 5a — **the largest measured win** | Evaluate every block in one pass, sharing the one sparsity pattern and coloring they have in common: measured 0.044× the one-at-a-time cost per directional derivative on 64 SCOPF blocks, i.e. ≈ 29 ms (Jacobian) and ≈ 22 ms (Hessian) against the `.nl` path's 107 ms and 463 ms. Needs I1's block membership. POUNCE needs no change. |
 | **I4** | Automatic structure detection yielding a block graph | After Phase 4 | §10. Not on the critical path. |
 
 ---
@@ -1873,7 +1874,12 @@ All phases are POUNCE work unless marked **[discopt: In]**, which means a draft 
 
 ## Phase 0 — inspect, instrument, measure, attribute
 
-*Status 2026-09-19:* **0a done** (branch `feat/feral-factor-stats`: factorization time, work proxy, delayed / 2×2 / tiny pivots, largest front, ordering used, Schur breakdown, restoration reported apart; two summary-reporting defects fixed). **0b done** (`benchmarks/kkt_scaling/sweep.py`; `dev-notes/kkt-scaling-phase0b.md`): fill row, chain structure refuted for gas. **0d added**: routing. **0c** open.
+*Status 2026-09-19: Phase 0 is complete, and it reorders what follows —
+parallelism (Phase 5) ahead of the block solver (Phases 3–4), which nothing
+measured so far justifies. See "After Phase 0" in §58 and
+`dev-notes/kkt-scaling-phase0b.md`.*
+
+**0a done** (branch `feat/feral-factor-stats`: factorization time, work proxy, delayed / 2×2 / tiny pivots, largest front, ordering used, Schur breakdown, restoration reported apart; two summary-reporting defects fixed). **0b done** (`benchmarks/kkt_scaling/sweep.py`): fill row; chain structure refuted for gas, and a network × time structure-derived ordering measured and beaten by `metis`. **0c done** (`benchmarks/kkt_scaling/gen_scopf.py`): the arrowhead's ordering is already right, and the remaining cost is block-separable evaluation (48%) and factorization (35%). **0d** (routing) open. All numbers: `dev-notes/kkt-scaling-phase0b.md`.
 
 **0a. Instrumentation (one PR, POUNCE).** Surface per-factorization FERAL stats in `info` and the solve report: `nnz_l`, `fill_ratio`, `factor_flops`, `max_front_rows`, `n_tiny`, `ordering_info.used`, and a delayed-pivot count if FERAL can provide one (§32). Make sure factorization time per iteration is available (`timing_statistics="yes"` today). Without this PR, §38.2 cannot be measured.
 
@@ -1881,7 +1887,10 @@ All phases are POUNCE work unless marked **[discopt: In]**, which means a draft 
 
 **0d. Ordering routing (from 0b).** The default `auto` never selects nested dissection and costs 8× at 224k on the space-by-time family; `auto_race` gets it right there. Make the right ordering reachable without the user knowing to ask. A default-path change: needs the fixture sweep on both legs and `benchmarks/qp`, where `metis` loses.
 
-**0c. Arrowhead generator (POUNCE `benchmarks/`).** An N-1 SCOPF emitter with \(k\) contingencies, plus the synthetic chain and star families (§35), each emitting its block structure alongside the `.nl`.
+**0c. Arrowhead generator (POUNCE `benchmarks/`).** *Done:*
+`benchmarks/kkt_scaling/gen_scopf.py` — corrective N-1 AC-SCOPF, `case118_ieee`
+to K = 128 and `case1354_pegase` to K = 64 (210k variables). The synthetic
+chain and star families (§35) are still open.
 
 Also inspect and document:
 
@@ -1927,11 +1936,11 @@ Build the permutation from the declared structure inside POUNCE, and apply it th
 
 **[discopt: I2]** once gas is built directly from `discopt` rather than from emitted `.nl`.
 
-## Phase 3 — existing Schur path, arrowhead only
+## Phase 3 — existing Schur path, arrowhead only (**not justified by Phase 0; do not start without a new reason**)
 
 Use `set_kkt_schur_block` for the **global** variables of the arrowhead problem and of the gas model (\(n_s\) in the tens). Do not use it for the temporal links: it factors the eliminated block as one matrix and materializes two dense \(n_f \times n_s\) buffers, about 40 GB at \(n_f = 5 \times 10^5\), \(n_s = 5000\). Either cap the §30 sweep at a size that fits in memory, or implement column-streamed formation of \(S\) first.
 
-## Phase 4 — block solver on the `AugSystemSolver` extension point
+## Phase 4 — block solver on the `AugSystemSolver` extension point (**not justified by Phase 0**; reachable only as 5b's serial fallback or if a new topology shows fill the ordering misses)
 
 Generalize `SchurAugSystemSolver` from a two-block partition to a block graph:
 
@@ -1942,9 +1951,15 @@ Generalize `SchurAugSystemSolver` from a two-block partition to a block graph:
 
 Start with the topology whose Phase 2–3 results left a measured gap that ordering could not close.
 
-## Phase 5 — parallel blocks
+## Phase 5 — parallel blocks (**the phase Phase 0 promoted**)
 
-Parallelize local factorizations and solves. This improves the constant, not the exponent. Measure it on the arrowhead problem first, where blocks are independent.
+Phase 0c measured where the time goes on a 210k-variable arrowhead: evaluation 48% (Lagrangian Hessian 36%), factorization 35%, back-solve 11% — and both large terms are block-separable, while the ordering has nothing left to give. So this phase, not a new KKT solver, carries the general capability.
+
+**5a. Block-parallel evaluation (frontend; the larger half).** Identical blocks share one sparsity pattern and one coloring, so a frontend that knows the structure evaluates them in one vectorised pass. Measured in JAX on `case1354_pegase`: a directional derivative over all 64 blocks costs 0.044× the one-at-a-time cost, giving ≈ 29 ms (Jacobian, 29 colors) and ≈ 22 ms (Hessian, 22 colors) against the `.nl` path's 107 ms and 463 ms. This is `discopt` work (draft issue I5, §28); POUNCE's part is only to accept the derivatives.
+
+**5b. Block-parallel factorization (POUNCE / FERAL).** FERAL's tree parallelism reaches 1.2× on this workload and degrades past four threads, because the factorization is per-supernode-overhead bound: 1.22e9 flops over 196 561 supernodes. Declared blocks give 65 coarse independent tasks instead. The prototype question is whether factoring each block on its own thread — with a Schur complement on the ~259 shared columns — recovers the parallelism the elimination tree cannot.
+
+Both are constants, not exponents. Measure against FERAL's own threading, never against a single thread.
 
 ## Phase 6 — coverage
 
@@ -1962,11 +1977,14 @@ Gates are judged **per topology**, against the **best generic ordering**, and on
 
 "Material" and "substantial" below mean the D3 thresholds. Proposed: an exponent drop of at least 0.3 in the block count, or at least 2× at the largest instance, or at least 30% less peak memory; for parallelism, efficiency above 50% at 8 threads, measured against FERAL's own threading.
 
-## After Phase 0 (gas)
+## After Phase 0 — **complete; it reorders the plan**
 
-- If the \(T^2\) sits in the **iterations** or **other per-iteration work** rows of §38.2, the gas scaling problem is not a KKT problem. Pursue it separately. The general capability proceeds on its other merits, and gas remains a correctness and plumbing test case.
-- If it sits in the **fill** or **pivoting** rows, gas proceeds as the chain benchmark with a stated target row.
-- *Outcome (2026-09-19):* **fill row**, but the chain structure is refuted for gas. Gas proceeds to Phase 2 only as the test of a network-derived structure (§38.3) against `metis` / `auto_race`; it is not the motivating case for Phases 3–4. Routing (0d) is taken first because it is the measured win.
+The original test (which row of §38.2 carries the growth) resolved to **fill**, on both topologies, and then the follow-through changed the plan:
+
+- **Gas.** The chain structure is refuted (20–40× worse as an ordering). A network × time structure-derived ordering, built with the spatial cells, time spans and primal-dual pairs it needs, matched `metis` at 56k and lost 44–54% at 112k–224k end to end. The available win is *routing* (0d): `auto` never selects nested dissection and costs 8× at 224k.
+- **Arrowhead.** Generic orderings already find it: fill exactly linear in the block count, largest front bounded by the block, the three orderings within ~10%. Factorization is 25–40% of the solve.
+- **Therefore:** on one core there is no fill left for declared structure to remove on either topology. What remains is **parallelism and memory** — Phase 5, promoted — with evaluation the larger half. Phases 3–4 are **not justified** by anything measured; do not start them without a topology that shows fill the ordering misses.
+- Phase 2 keeps one open question per topology: for gas, whether a better network-derived design exists (this one is not it); for the arrowhead, nothing — the ordering is already right.
 
 ## After Phase 2
 
@@ -1982,7 +2000,7 @@ Per topology, proceed to broader generalization if the block solver shows a subs
 
 ## After Phase 5
 
-Proceed if parallel speedup across blocks is material on the arrowhead benchmark at a realistic block count.
+Proceed if parallel speedup across blocks is material on the arrowhead benchmark at a realistic block count, **measured against FERAL's own threading** (1.2× at 4 threads on the 210k case, degrading past that) and against the `.nl` evaluator for 5a. This is now the gate that decides whether the capability ships at all: if block parallelism does not beat those baselines, declared structure has no measured win left on either topology.
 
 ## Standing requirements at every gate
 
