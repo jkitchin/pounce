@@ -89,6 +89,10 @@
 !/benchmarks/lp/mps_to_nl.py
 !/benchmarks/lpopt/build_subset.py
 !/benchmarks/lpopt/mps_to_nl.py
+# The kkt_scaling suite (structured-KKT Phase 0b) is a Python harness over
+# locally generated instance families: track the harness, not its inputs or
+# per-run results.
+!/benchmarks/kkt_scaling/*.py
 # The MPCC suite (gh#794) is a Python harness like warmstart, not a
 # directory of .nl: its sources, the generated-and-committed manifest.json,
 # and the result schema are tracked; the per-run results-*.json /
