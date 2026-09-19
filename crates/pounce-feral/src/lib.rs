@@ -508,8 +508,11 @@ pub struct FeralConfig {
     /// [`feral::Solver::with_ordering`]. Default
     /// [`OrderingMethod::Auto`]: the adaptive dispatcher picks a
     /// concrete method per matrix from cheap pattern features (very-
-    /// large-and-sparse → AMD; `n ≤ 10 000` → AMF; otherwise →
-    /// MetisND). Override via the `feral_ordering` OptionsList option
+    /// large-and-sparse → AMD; everything else → AMF — feral's
+    /// `choose_adaptive` never selects nested dissection, so
+    /// collocation / optimal-control / PDE-in-time models need
+    /// `metis` set explicitly; see `docs/src/options.md`).
+    /// Override via the `feral_ordering` OptionsList option
     /// or the `POUNCE_FERAL_ORDERING` env var when a specific
     /// concrete method (`amd`, `amf`, `metis`, `scotch`, `kahip`) or
     /// the symbolic-time race (`auto_race`) is wanted. See

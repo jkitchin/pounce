@@ -1926,7 +1926,7 @@ environment variable when left unset on the OptionsList (see
 
 | Option                       | Default | Meaning                                                                                                                                                                                  |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `feral_ordering`             | `auto`  | Fill-reducing ordering method (see table below). `auto` lets feral's adaptive dispatcher pick per-matrix; `auto_race` measures the actual symbolic outcome and keeps the best.            |
+| `feral_ordering`             | `auto`  | Fill-reducing ordering method (see table below). `auto` lets feral's adaptive dispatcher pick per-matrix; `auto_race` measures symbolic fill and keeps the smallest. Collocation, optimal-control and PDE-in-time models should set `metis`. |
 | `feral_pivtol`               | `1e-8`  | Relative Bunch-Kaufman partial-pivoting threshold `u`. Analog of `ma27_pivtol` / `ma57_pivtol`. Smaller → sparser `L`, faster, less stable; larger → more 2×2 blocks, denser, more stable. LAPACK's textbook maximum-stability value is `0.5`. |
 | `feral_refine`               | *conditional* | Whether FERAL runs its own iterative refinement inside every back-solve. **The default is conditional and this column cannot express it (gh#909): `yes` on the exact-Hessian path — the default path — and `no` under `hessian_approximation=limited-memory`. `--print-options` prints `yes`, the exact-Hessian value, because a single registered default is all it has; read the carve-out here.** gh#710 (reported as gh#698 observation 5) turned refinement off for the NLP solver, as on every direct linear solver Ipopt ships and on POUNCE's own MA57 — but it registered `no` while the reader consulted only the user's setting, so an unset option kept `FeralConfig`'s own `yes` and the exact path never changed. gh#909 found the disagreement and kept the behaviour, because gh#710's measurement below was taken **under limited-memory** and that is precisely the path the carve-out still turns off. On the exact path, measured across all 79 fixtures on both legs, refinement is the better default: ten fixture-legs move, no status flips, and the balance favours it (`issue_508_infeasible_gap_1em4` 441 → 245 iterations, `square_flowsheet_resto` 54 → 47, against one loss at 31 → 32). Off-corpus `NARX_CFy` goes 400 → 630 iterations without it, and on `eigena2` it is what makes the superlinear tail robust — `3.4e-10` with, `5.4e-09` without. `FeralConfig`'s own default stays `yes` for callers such as `pounce-convex`'s SOS/QP solvers that refine their own system but never call `increase_quality`. Refinement belongs on the *unreduced* Newton system — that is `PdFullSpaceSolver`'s loop, capped at `max_refinement_steps` and accepting at `residual_ratio_max = 1e-10` — not on the condensed system a backend factorized, because the condensation destroys information as `mu -> 0` (Wachter-Biegler 3.10). Turning it on nests FERAL's loop inside that one, and FERAL's convergence target is hard-wired to `eps*sqrt(n)`; on a large ill-conditioned KKT that target is unreachable, so the inner loop runs to its cap on every back-solve chasing digits the caller discards. It was on unconditionally through 0.10.0 because FERAL's `ZeroPivotAction::ForceAccept` can leave real residual against the system it factorized, and without it the gh#590 badly-scaled LP exits `RestorationFailed` — but Ipopt's answer to a factorization that cannot deliver is `IncreaseQuality` (escalate the pivot threshold and refactorize), and that rung was unimplemented in the FERAL backend. It is now, so refinement no longer has to stand in for it. On the 126028-dimension `laptime` KKT under limited-memory, one binary, three runs back to back: 68.9 s on, 18.8 s off, against MA57's 10.7 s (back-solve 54.6 s -> 8.2 s). Set `yes` to restore pre-0.11 behaviour on a problem that needs it. |
 | `feral_refine_steps`         | `10`    | Maximum correction steps FERAL's inner iterative refinement may take on a single back-solve, when `feral_refine` is on. An **upper bound**, not a step count: refinement still exits early on its own convergence test, so lowering this only truncates the solves that were going to run long. `0` leaves refinement enabled but caps it at zero corrections — that still costs the residual evaluation, so use `feral_refine=no` to switch refinement off outright. Reach for a small cap (`1`) on very large, badly conditioned KKT systems where the interior-point tail spends most of its wall clock inside refinement rather than the factor (gh#710) — but check the answer, not just the clock: sweeping the fixture corpus at `1` moves 15 of 118 legs and loses two, `deb7` (exact) from `SolveSucceeded` to `ErrorInStepComputation` and `cresc4` (limited-memory) from `SolveSucceeded` to `InfeasibleProblemDetected`, while others improve. A per-problem lever, not a global one. Ignored when `feral_refine=no`, which is what `hessian_approximation=limited-memory` selects (gh#909) — on that path set `feral_refine=yes` explicitly before either knob has any effect. On the exact-Hessian path refinement is on, so both knobs are live there without setting anything. |
@@ -1949,18 +1949,57 @@ OptionsList.
 
 | Value       | Strategy                                                                                                                                                                                                                                                  |
 |-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `auto`      | **Default.** Adaptive dispatcher: picks a concrete method per matrix from cheap pattern features. Branches: very-large-and-sparse (`n > 100 000`, avg degree < 5) → AMD; `n ≤ 10 000` → AMF; otherwise → MetisND. One symbolic pass; right when the heuristic shape rules apply (the common case). |
-| `auto_race` | Race-based dispatcher: runs full symbolic factorization on AMD, MetisND, ScotchND, KahipND and keeps the smallest `factor_nnz`. ~4× a single symbolic pass, paid once per problem (symbolic factorization is cached across numeric refactorizations with the same pattern). Use when the cheap dispatcher's guess is suspect — e.g. `pinene_3200_0009`, where `auto` picks MetisND (88 s numeric factor) but `amd` factors in 19.5 s on the same matrix. |
+| `auto`      | **Default.** Adaptive dispatcher: picks a concrete method per matrix from cheap pattern features. Branches: very-large-and-sparse (`n > 100 000`, avg degree < 5) → AMD; **everything else → AMF**. It never selects nested dissection: the branch that used to route `n > 10 000` to MetisND now goes to AMF (feral#67, #73). One symbolic pass; right for most models, and wrong for the collocation class below. |
+| `auto_race` | Race-based dispatcher: runs full symbolic factorization on AMD and MetisND (feral ≥ 0.18; AMD, MetisND, ScotchND, KahipND before) and keeps the smallest `factor_nnz`. ~2× a single symbolic pass, paid once per problem (symbolic factorization is cached across numeric refactorizations with the same pattern). It measures fill, not time, and fill has mispredicted the wall-clock winner repeatedly in feral's own measurements, so a pinned method you have timed beats it. |
 | `amd`       | Approximate Minimum Degree (Amestoy/Davis/Duff). Pins AMD regardless of problem shape; robust default for IPM workloads. Best for very-large-and-sparse cases that the adaptive dispatcher already routes here.                                            |
 | `amf`       | Approximate Minimum Fill (HAMF4 variant of Amestoy 1999). Strong on small-and-sparse populations (`n ≤ 10 000`); aggregate fill ≈ 0.87× AMD on feral's IPM small-sparse inventory.                                                                          |
-| `metis`     | feral-metis multilevel nested dissection. Tends to produce squarer fronts than AMD on banded / nearly-1D structure; preferred for large structured matrices.                                                                                              |
+| `metis`     | feral-metis multilevel nested dissection. **Pin it for collocation, optimal-control and PDE-in-time models** (see below). Tends to produce squarer fronts than AMD on banded / nearly-1D structure. |
 | `scotch`    | feral-scotch nested dissection. Similar regime to METIS; alternative when METIS is unavailable or for cross-validation.                                                                                                                                   |
 | `kahip`     | feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4–6× per-call symbolic cost. Reach for it only when ND fill matters and per-call cost is amortized.                                                          |
 
-When in doubt: leave `feral_ordering` at the default. When a hard
-problem looks linear-solver-bound, try `feral_ordering auto_race`
-before per-variant manual sweeping — it's the safe choice when the
-per-problem winner is uncertain.
+When in doubt: leave `feral_ordering` at the default, with one
+exception.
+
+#### Collocation, optimal-control and PDE-in-time models: set `metis`
+
+A model transcribed on a mesh — direct collocation of an ODE/DAE, a
+discretized optimal-control problem, a PDE stepped in time — has a KKT
+matrix that is a space-by-time grid, sparse in *both* directions. Nested
+dissection is the ordering built for that shape, and the default never
+picks it (see `auto` above). Set it explicitly:
+
+```
+pounce model.nl feral_ordering=metis
+```
+
+Measured with feral 0.18, whose separator-refinement fix (feral#203) is
+what makes it pay — before that fix `metis` was *slower* per iteration
+than the default on the same models:
+
+| Model | Variables | Default | `metis` | Speedup |
+|---|---|---|---|---|
+| GasLib-40 transient control, 24 h hourly | 55 950 | 209 s, 122 it | 100 s, 80 it | 2.1× |
+| GasLib-40 transient control, 24 h 30 min | 111 894 | 546 s, 63 it | 165 s, 47 it | 3.3× |
+| `laptime` (Radau collocation, [large_scale](benchmarks.md)) | 58 014 | 136 s, 380 it | 70 s, 349 it | 2.0× |
+
+On GasLib-40 the gain grows with the mesh: per iteration it is 1.4× at
+56k and 2.5× at 112k, and `metis` also takes fewer iterations. The
+503 502-variable, 72-hour case ran in 1 h 30 min this way. `scotch` and
+`kahip` land within about 10% of `metis` on these models once feral
+0.18 is in.
+
+It is a per-class choice, **not a better default**. Across the
+[Maros-Meszaros QP set](benchmarks.md) `metis` is 5% slower (geomean
+over the problems that take at least a second) and loses 7–78% on the
+grid QPs (`AUG2DQP`, `AUG2DCQP`, `CONT-*`); on `benchmarks/large_scale`
+it is 13–22% slower on `poisson`, `optcontrol` (single-state, linear
+dynamics) and `sparseqp`. It wins big on `CVXQP2_L` / `CVXQP3_L`
+(2.9× / 1.9×). If you are unsure which class a model is in, time one
+run each way: the answer is usually a factor of two, not a few percent.
+
+For other hard models that look linear-solver-bound, `feral_ordering
+auto_race` is a cheap first probe, but it ranks arms by fill, so confirm
+its pick against a pinned run before relying on it.
 
 #### Caller-supplied ordering (`External`)
 

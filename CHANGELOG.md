@@ -1358,6 +1358,27 @@ changes.
 
 ### Changed
 
+- **FERAL 0.18.0, and `feral_ordering=metis` for collocation models.**
+  feral 0.18 fixes the separator refinement in all three nested-dissection
+  orderings (feral#203). It does not change a default solve: `auto` never
+  selects nested dissection (feral#209), and the fixture sweep against 0.17.0
+  moves 0 of 194 lines at the default ordering. Where you set one, it is a
+  large win on the models it suits. On GasLib-40 transient control,
+  `feral_ordering=metis` is 2.1× faster than the default at 56k variables and
+  3.3× at 112k, and 2.3×/3.6× faster than `metis` was on 0.17.0; the `laptime`
+  collocation benchmark runs 2× faster than the default. It is slower on grid
+  QPs and simple-structured models, so it is a per-model choice, now
+  documented under "Collocation, optimal-control and PDE-in-time models: set
+  `metis`" in the options reference.
+
+  Two corrections ride along. The `auto` row of the `feral_ordering` docs said
+  it sends `n > 10 000` to MetisND; it sends everything that is not very large
+  and very sparse to AMF. And `auto_race` now races AMD and MetisND
+  (previously AMD, MetisND, ScotchND and KaHIP), ranking by fill, which is not
+  the same as speed. One forced-ordering loss is known: `deb7` (exact) under
+  `feral_ordering=scotch` now exits `Error_In_Step_Computation` where 0.17.0
+  solved it.
+
 - **The path walk's box-repair budget is the base-activity table's length**
   ([#928](https://github.com/jkitchin/pounce/issues/928)), rather than a
   fixed constant. Each pass adds at least one bound to the watch list and

@@ -31,6 +31,7 @@ walks through adding it.
 | Restoration phase fires repeatedly | [ℓ₁ exact-penalty wrapper](#restoration--ℓ₁-exact-penalty-wrapper) |
 | Iterates wander on an LP-like / linearly constrained problem | [`mehrotra_algorithm=yes`](#mehrotra-predictor-corrector) |
 | Hundreds of iterations, monotone μ stair-steps slowly toward optimal | [`mu_strategy=adaptive`](#monotone-vs-adaptive) |
+| Collocation, optimal-control or PDE-in-time model that is slow per iteration | [`feral_ordering=metis`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 | `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
 | `Infeasible_Problem_Detected` on a model you believe is feasible | [the second-opinion ladder](#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are), then [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
@@ -702,18 +703,34 @@ dominated by the linear solve — typical on dense / quadratically-
 coupled KKT systems where iteration counts look reasonable but
 seconds-per-iter are high — the fill-reducing ordering choice often
 matters more than any other knob. By default, `feral_ordering=auto`
-picks AMD / AMF / METIS from cheap pattern features. This is right
-in the common case but can miss badly on a single hard problem.
+picks AMD for very large, very sparse matrices and AMF for everything
+else — it never picks nested dissection. That is right in the common
+case and misses badly on one whole class.
 
-The safe recipe is to *measure* the right ordering rather than guess:
+**If the model is a collocation, optimal-control or PDE-in-time
+transcription, set `metis`:**
+
+```
+pounce problem.nl feral_ordering=metis
+```
+
+Its KKT matrix is a space-by-time mesh, which is the shape nested
+dissection exists for; with feral 0.18 this runs GasLib-40 transient
+control 2.1× faster at 56k variables and 3.3× at 112k, and the
+`laptime` collocation benchmark 2×. It is slower on other shapes, so it
+is a per-model choice — the measurements, and where it loses, are under
+[collocation models](options.md#collocation-optimal-control-and-pde-in-time-models-set-metis).
+
+For any other hard model, *measure* rather than guess:
 
 ```
 pounce problem.nl feral_ordering=auto_race
 ```
 
-This runs symbolic factorization on AMD, METIS, SCOTCH and KaHIP and
-keeps the one with the smallest `factor_nnz`. Costs ~4× a single
-symbolic pass — paid once per problem because symbolic factorization
+This runs symbolic factorization on AMD and METIS (feral ≥ 0.18)
+and keeps the one with the smallest `factor_nnz`. Smallest fill is not
+always fastest, so confirm its pick against a pinned run. Costs ~2× a
+single symbolic pass — paid once per problem because symbolic factorization
 is cached across numeric refactorizations with the same pattern, so
 the overhead is invisible to the per-iter cost on anything but a
 one-iter problem.
