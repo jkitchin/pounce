@@ -1,6 +1,6 @@
 {
-  "wheel": "pounce_solver-0.11.0-cp39-abi3-emscripten_4_0_9_wasm32.whl",
-  "version": "0.11.0",
+  "wheel": "pounce_solver-0.12.0-cp39-abi3-emscripten_4_0_9_wasm32.whl",
+  "version": "0.12.0",
   "pyodide_version": "0.28.3",
   "emscripten_version": "4.0.9"
 }

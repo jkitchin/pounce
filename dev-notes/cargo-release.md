@@ -116,7 +116,18 @@ note they all share the `pounce-` prefix under account `jkitchin`.
 4. Bump `CITATION.cff` to match: set `version:` to the new release version and
    `date-released:` to the release date. GitHub's "Cite this repository"
    widget reads these. (The `doi:` is the Zenodo *concept* DOI and stays put.)
-5. Run `cargo package --workspace --exclude pounce-py --exclude
+5. Rebuild the browser demo's Pyodide wheel with
+   `crates/pounce-wasm/build-wheel.sh` and commit what it stages under
+   `crates/pounce-wasm/web-python/wheels/`. The wheel is committed and its
+   filename carries the `python/pyproject.toml` version, so after step 2 the
+   staged one is stale: `build-wheel.sh --check`, run by CI's `WebAssembly
+   build + smoke` job, fails the release PR with `staged wheel is
+   pounce_solver-<old>-… but python/pyproject.toml is at <new>`.
+   `check-release-consistency.sh` does not check it. Renaming the file is not
+   a fix — the wheel embeds the solver, so the demo would run the previous
+   release under the new version's name. The script installs its own
+   Pyodide toolchain under `target/` on first run (needs CPython 3.13).
+6. Run `cargo package --workspace --exclude pounce-py --exclude
    pounce-studio-pyo3 --exclude iter-diff --exclude pounce-wasm` to catch
    missing metadata, broken links, or dirty-tree errors. It packages and then
    compiles every publishable crate, so breakage appears here rather than
