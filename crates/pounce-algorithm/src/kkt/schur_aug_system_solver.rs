@@ -75,6 +75,18 @@ impl SchurAugSystemSolver {
         }
     }
 
+    /// Record the Schur backend's factorizations into a shared summary sink
+    /// (see [`pounce_linsol::summary::LinearSolverSummary::schur`]). A fallback
+    /// to `inner` records through `inner`'s own backend instead, so
+    /// `summary.schur` stays absent and says which path ran.
+    pub fn with_summary_sink(
+        mut self,
+        sink: std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
+    ) -> Self {
+        self.schur = self.schur.with_summary_sink(sink);
+        self
+    }
+
     /// Decide (once per KKT dimension) whether the Schur path is usable and, if
     /// so, pin its structure. `irn/jcn` are the assembled lower-triangle
     /// triplet from `inner`.

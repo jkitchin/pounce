@@ -123,8 +123,11 @@ fn solve_output(fixture: &str, scaling: &str) -> String {
 /// The numerical content of a solve, with the parts that cannot be
 /// compared across two runs removed: the whole `fair_metadata` block
 /// (a result id, timestamps, an elapsed time, and the scratch path the
-/// fixture was copied to) and the two wall-clock timings. Everything
-/// left is deterministic for a fixed binary and a fixed set of options.
+/// fixture was copied to) and every wall-clock timing. A timing is any key
+/// ending in `_secs` — the report's naming convention for seconds — which
+/// covers the statistics' two and the linear-solver summary's factorization
+/// times without listing each one. Everything left is deterministic for a
+/// fixed binary and a fixed set of options.
 fn numeric_output(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut depth: i32 = 0;
@@ -147,9 +150,7 @@ fn numeric_output(text: &str) -> String {
             }
             continue;
         }
-        if key.starts_with("\"total_wallclock_time_secs\"")
-            || key.starts_with("\"restoration_wall_secs\"")
-        {
+        if key.starts_with('"') && key.contains("_secs\":") {
             continue;
         }
         out.push_str(line);

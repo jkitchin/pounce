@@ -32,6 +32,6 @@ pub use ruiz::RuizTSymScalingMethod;
 pub use scaling::{IdentityScalingMethod, SlackBasedTSymScalingMethod, TSymScalingMethod};
 pub use sparse_sym_iface::{EMatrixFormat, FactorPattern, SparseSymLinearSolverInterface};
 pub use status::ESymSolverStatus;
-pub use summary::LinearSolverSummary;
+pub use summary::{FactorRecord, LinearSolverSummary, SchurSummary};
 pub use sym_solver::SymLinearSolver;
 pub use t_sym_solver::TSymLinearSolver;

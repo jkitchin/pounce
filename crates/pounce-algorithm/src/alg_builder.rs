@@ -455,6 +455,11 @@ pub struct AlgorithmBuilder {
     /// The Schur solver falls back to the standard solver transparently when
     /// the partition is unsuitable. Set via [`Self::set_kkt_schur`].
     pub kkt_schur: Option<(Vec<usize>, pounce_feral::FeralConfig)>,
+    /// Summary sink the Schur backend records into, so the solve's
+    /// `LinearSolverSummary` covers the Schur path too. Set via
+    /// [`Self::set_kkt_schur_summary_sink`]; `None` records nothing.
+    pub kkt_schur_summary_sink:
+        Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
     /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
@@ -1233,6 +1238,7 @@ impl Default for AlgorithmBuilder {
             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
             init: InitOptions::default(),
             kkt_schur: None,
+            kkt_schur_summary_sink: None,
             quality_escalation_counter: None,
         }
     }
@@ -1250,6 +1256,15 @@ impl AlgorithmBuilder {
     /// [`Self::build_with_backend`]; ignored otherwise.
     pub fn set_kkt_schur(&mut self, schur_indices: Vec<usize>, cfg: pounce_feral::FeralConfig) {
         self.kkt_schur = Some((schur_indices, cfg));
+    }
+
+    /// Route the Schur backend's factorization stats into `sink` (the same
+    /// sink the standard backend records into).
+    pub fn set_kkt_schur_summary_sink(
+        &mut self,
+        sink: std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
+    ) {
+        self.kkt_schur_summary_sink = Some(sink);
     }
 
     /// Assemble the strategy bundle without a search-direction
@@ -1316,9 +1331,11 @@ impl AlgorithmBuilder {
             // solve; we gate on `linear_solver == Feral` here to avoid silently
             // ignoring a user's explicit MA57 selection.
             if matches!(self.linear_solver, LinearSolverChoice::Feral) {
-                Box::new(crate::kkt::SchurAugSystemSolver::new(
-                    inner_aug, indices, cfg,
-                ))
+                let schur = crate::kkt::SchurAugSystemSolver::new(inner_aug, indices, cfg);
+                Box::new(match self.kkt_schur_summary_sink.clone() {
+                    Some(sink) => schur.with_summary_sink(sink),
+                    None => schur,
+                })
             } else {
                 Box::new(inner_aug)
             }
@@ -1816,6 +1833,7 @@ mod tests {
                             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
                             init: InitOptions::default(),
                             kkt_schur: None,
+                            kkt_schur_summary_sink: None,
                             quality_escalation_counter: None,
                         }
                         .build();

@@ -323,10 +323,20 @@ pub fn main() -> ExitCode {
     // and the auto-fallback (`l1_fallback_on_restoration_failure`) don't
     // panic with "restoration factory invoked more than once" on their
     // second inner solve — see pounce#10 Phase 3 / pounce#24.
+    // Restoration factorizations record into their own sink, reported as
+    // `linear_solver.restoration`.
+    let resto_sink = app.restoration_summary_sink();
     let bff_mint = move || -> InnerBackendFactoryFactory {
         let feral_cfg = feral_cfg.clone();
         let ma57_cfg = ma57_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
+        let sink = std::sync::Arc::clone(&resto_sink);
+        Box::new(move || {
+            default_backend_factory(
+                feral_cfg.clone(),
+                ma57_cfg.clone(),
+                std::sync::Arc::clone(&sink),
+            )
+        })
     };
     // Hand the inner IPM a builder mirroring the outer options so its
     // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
@@ -4002,15 +4012,20 @@ fn print_about() {
 /// gh#825: this arm called `Ma57SolverInterface::new()` and every
 /// `ma57_*` option a user set was accepted and then discarded, with no
 /// warning and no observable effect on the solve.
+///
+/// `sink` is the application's restoration summary sink; the FERAL arms
+/// record into it (MA57 does not self-instrument).
 fn default_backend_factory(
     feral_cfg: pounce_feral::FeralConfig,
     ma57_cfg: Ma57Config,
+    sink: std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
 ) -> LinearBackendFactory {
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => Box::new(
-                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()),
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
+                        .with_summary_sink(std::sync::Arc::clone(&sink)),
                 ),
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
@@ -4022,9 +4037,10 @@ fn default_backend_factory(
                     #[cfg(not(feature = "ma57"))]
                     {
                         let _ = &ma57_cfg;
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(
-                            feral_cfg.clone(),
-                        ))
+                        Box::new(
+                            pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
+                                .with_summary_sink(std::sync::Arc::clone(&sink)),
+                        )
                     }
                 }
             }

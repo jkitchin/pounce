@@ -173,6 +173,53 @@ pub struct LinearSolverSummaryInfo {
     pub last_nnz_a: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_nnz_l: Option<usize>,
+
+    // Work and pivoting totals over every factorization. `default` keeps
+    // reports written before these fields existed readable.
+    #[serde(default)]
+    pub total_factor_secs: f64,
+    #[serde(default)]
+    pub total_factor_flops: f64,
+    #[serde(default)]
+    pub total_delayed_cols: u64,
+    #[serde(default)]
+    pub total_two_by_two: u64,
+    #[serde(default)]
+    pub total_n_tiny: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_factor_flops: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_peak_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_n_supernodes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_max_front_rows: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_delayed_cols: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_two_by_two: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_n_tiny: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_ordering: Option<String>,
+    /// Present only when the Schur KKT path actually factored.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub schur: Option<SchurSummaryInfo>,
+    /// The restoration phase's factorizations, same shape, kept apart from
+    /// the main-solve fields above. Present only when restoration factored.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub restoration: Option<Box<LinearSolverSummaryInfo>>,
+}
+
+/// Serializable mirror of [`pounce_linsol::summary::SchurSummary`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchurSummaryInfo {
+    pub n_eliminated: usize,
+    pub n_schur: usize,
+    pub n_factors: u64,
+    pub eliminated_factor_secs: f64,
+    pub form_schur_secs: f64,
+    pub schur_factor_secs: f64,
 }
 
 impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
@@ -188,6 +235,28 @@ impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
             last_inertia: s.last_inertia,
             last_nnz_a: s.last_nnz_a,
             last_nnz_l: s.last_nnz_l,
+            total_factor_secs: s.total_factor_secs,
+            total_factor_flops: s.total_factor_flops,
+            total_delayed_cols: s.total_delayed_cols,
+            total_two_by_two: s.total_two_by_two,
+            total_n_tiny: s.total_n_tiny,
+            last_factor_flops: s.last_factor_flops,
+            last_peak_bytes: s.last_peak_bytes,
+            last_n_supernodes: s.last_n_supernodes,
+            last_max_front_rows: s.last_max_front_rows,
+            last_delayed_cols: s.last_delayed_cols,
+            last_two_by_two: s.last_two_by_two,
+            last_n_tiny: s.last_n_tiny,
+            last_ordering: s.last_ordering,
+            schur: s.schur.map(|c| SchurSummaryInfo {
+                n_eliminated: c.n_eliminated,
+                n_schur: c.n_schur,
+                n_factors: c.n_factors,
+                eliminated_factor_secs: c.eliminated_factor_secs,
+                form_schur_secs: c.form_schur_secs,
+                schur_factor_secs: c.schur_factor_secs,
+            }),
+            restoration: s.restoration.map(|r| Box::new(Self::from(*r))),
         }
     }
 }
@@ -926,6 +995,49 @@ mod tests {
         let report = b.finish();
         assert_eq!(report.fair_metadata.solver.target_triple, TARGET_TRIPLE);
         assert_ne!(report.fair_metadata.solver.target_triple, "unknown");
+    }
+
+    /// The Phase-0a work / pivoting fields and the Schur breakdown survive a
+    /// JSON round trip, and a `linear_solver` object written before those
+    /// fields existed still deserializes (the change is additive within v1).
+    #[test]
+    fn linear_solver_summary_round_trips_and_stays_backward_compatible() {
+        use pounce_linsol::summary::SchurSummary;
+        let summary = LinearSolverSummary {
+            solver_name: "feral".into(),
+            n_factors: 3,
+            total_factor_secs: 0.5,
+            total_factor_flops: 1.0e6,
+            total_delayed_cols: 7,
+            total_two_by_two: 2,
+            last_ordering: Some("metis".into()),
+            last_max_front_rows: Some(40),
+            schur: Some(SchurSummary {
+                n_eliminated: 100,
+                n_schur: 4,
+                n_factors: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let info = LinearSolverSummaryInfo::from(summary);
+        let json = serde_json::to_string(&info).expect("serialize");
+        let back: LinearSolverSummaryInfo = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.total_delayed_cols, 7);
+        assert_eq!(back.total_two_by_two, 2);
+        assert_eq!(back.last_ordering.as_deref(), Some("metis"));
+        assert_eq!(back.last_max_front_rows, Some(40));
+        let sch = back.schur.expect("schur survives");
+        assert_eq!((sch.n_eliminated, sch.n_schur, sch.n_factors), (100, 4, 3));
+        // Unset optionals are omitted, not written as null.
+        assert!(!json.contains("last_peak_bytes"));
+
+        let old = r#"{"solver_name":"feral","n_factors":2,"n_pattern_reuse":1,"n_pattern_changes":1,"last_nnz_l":10}"#;
+        let back: LinearSolverSummaryInfo = serde_json::from_str(old).expect("old report parses");
+        assert_eq!(back.n_factors, 2);
+        assert_eq!(back.total_factor_secs, 0.0);
+        assert!(back.schur.is_none());
+        assert!(back.restoration.is_none());
     }
 
     #[test]

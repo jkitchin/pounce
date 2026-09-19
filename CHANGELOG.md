@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Factorization work and pivoting statistics** in the linear-solver
+  summary: the solve report's `linear_solver` object and a new Python
+  `info["linear_solver"]` dict. Per solve: seconds spent in the numeric
+  factor (always measured, independent of `timing_statistics`), FERAL's
+  `Σ ncol·nrow²` work proxy, delayed-column entries, 2×2 pivot blocks and
+  statically perturbed pivots, each as a total over factorizations; for the
+  final factorization, the same counts plus predicted peak memory, supernode
+  count, largest front and the concrete ordering used (never `auto`). When the
+  block-triangular / Schur path (`set_kkt_schur_block`) actually factors, a
+  `schur` sub-object breaks the time into the eliminated block, forming `S`
+  and factoring `S`; its absence means the path was not requested or fell back,
+  which was previously invisible. Factorizations inside the restoration phase
+  are reported in a nested `restoration` object of the same shape, so the
+  main-solve fields stay about the main solve; before, restoration recorded
+  nothing, and on a restoration-heavy solve that was most of the factorization
+  work. Additive within `pounce.solve-report/v1`. These are the Phase 0
+  measurements for structured-KKT decomposition.
+
+### Fixed
+
+- **Linear-solver summary under L-BFGS reported one backend's counts, not the
+  solve's.** The limited-memory path builds two FERAL backends from one factory
+  (the low-rank solver's and its bypass), and each overwrote the shared summary
+  with its own running totals, so `n_factors` and every aggregate reflected
+  whichever factored last. Each factorization is now folded into the summary.
+
+- **Linear-solver summary described a different solve than the verdict after a
+  second-opinion ladder.** Every rung's re-solve resets and refills the
+  summary, so when the ladder kept the original verdict, the reported status
+  and statistics were the original solve's while `linear_solver` was the last
+  rejected rung's. The summary now follows the same rule as the statistics: the
+  promoted rung's on promotion, the original solve's otherwise.
+
 
 ## [0.12.0] - 2026-09-19
 

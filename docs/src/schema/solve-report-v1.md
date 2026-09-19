@@ -279,6 +279,22 @@ Omitted from JSON when no backend reported.
 | `last_inertia` | `[int, int, int]` \| omitted | `(positive, negative, zero)` inertia of the final factor. Should match `(n, m, 0)` at a regular KKT optimum. |
 | `last_nnz_a` | integer \| omitted | Non-zero count of the assembled KKT matrix at the final factor. |
 | `last_nnz_l` | integer \| omitted | Non-zero count of the L-factor at the final factor. |
+| `total_factor_secs` | float | Wall-clock seconds inside the numeric factor call, summed over every factorization (regularization retries included). Always measured, independent of `timing_statistics`. On the Schur path, includes forming and factoring `S`. Divide by `statistics.iteration_count` for a per-iteration figure. |
+| `total_factor_flops` | float | Sum of the backend's a-priori work proxy (FERAL: `Σ ncol·nrow²` over supernodes). For comparing orderings and sizes; not a time. |
+| `total_delayed_cols` | integer | Delayed-column entries summed over factorizations. A column delayed up `k` tree levels counts `k` times. |
+| `total_two_by_two` | integer | 2×2 pivot blocks summed over factorizations. |
+| `total_n_tiny` | integer | Pivots statically perturbed to the pivot floor, summed. |
+| `last_factor_flops` | float \| omitted | Work proxy of the final factor. |
+| `last_peak_bytes` | integer \| omitted | Predicted peak memory (factor plus transient contribution blocks) of the final factor. |
+| `last_n_supernodes` | integer \| omitted | Supernodes in the final factor's elimination tree. |
+| `last_max_front_rows` | integer \| omitted | Rows in the final factor's largest frontal matrix. |
+| `last_delayed_cols` | integer \| omitted | Delayed-column entries in the final factor. |
+| `last_two_by_two` | integer \| omitted | 2×2 pivot blocks in the final factor. |
+| `last_n_tiny` | integer \| omitted | Statically perturbed pivots in the final factor. |
+| `last_ordering` | string \| omitted | Concrete ordering the final factor used (`amd`, `amf`, `metis`, `scotch`, `kahip`, `external`), never `auto`. |
+| `schur` | object \| omitted | Present only when the block-triangular / Schur path (`set_kkt_schur_block`) actually factored; absent when it was not requested **or** fell back to the standard solver. Fields: `n_eliminated`, `n_schur`, `n_factors`, `eliminated_factor_secs`, `form_schur_secs`, `schur_factor_secs`. The eliminated block's factorizations are also counted in the fields above. |
+
+| `restoration` | object \| omitted | The restoration phase's factorizations, in the same shape as this object (without a nested `restoration`). Present only when restoration factored. The fields above describe the main solve alone, so total factorization work is the sum of the two. Recorded by the CLI, Python and C frontends, which wire the restoration backend; a custom restoration factory records nothing. |
 
 ## Detail levels
 

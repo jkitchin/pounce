@@ -255,6 +255,14 @@ pub struct OptionFileLoad {
     pub warnings: Vec<String>,
 }
 
+/// Opaque snapshot of an application's linear-solver summaries; see
+/// [`IpoptApplication::linear_solver_summary_state`].
+#[derive(Debug, Clone)]
+pub struct LinearSolverSummaryState {
+    main: LinearSolverSummary,
+    restoration: LinearSolverSummary,
+}
+
 /// Factory that constructs a fresh restoration-phase strategy on
 /// demand. The outer algorithm owns at most one restoration object,
 /// so the factory is invoked once per `optimize_tnlp` call. The
@@ -437,6 +445,11 @@ pub struct IpoptApplication {
     /// custom factories plugged through [`Self::set_linear_backend_factory`]
     /// and the HSL MA57 backend leave the sink empty.
     linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// Companion to [`Self::linsol_summary_sink`] for the restoration
+    /// phase's sub-solves. The frontends that wire a restoration factory
+    /// install it via [`Self::restoration_summary_sink`]; it is reset with
+    /// the main sink and surfaces as [`LinearSolverSummary::restoration`].
+    resto_linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
     /// Shared tally of successful linear-solver quality escalations for
     /// the current solve (gh#857). Handed to every `AlgorithmBuilder`
     /// this application mints — [`Self::algorithm_builder_from_options`]
@@ -668,6 +681,7 @@ impl IpoptApplication {
             convex_routing_available: false,
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
@@ -1176,13 +1190,55 @@ impl IpoptApplication {
     /// recorded (custom factory plugged via
     /// [`Self::set_linear_backend_factory`], or solve aborted before
     /// the first KKT factor). Reset at the top of every solve.
+    ///
+    /// Restoration-phase factorizations are attached as
+    /// [`LinearSolverSummary::restoration`] when the frontend wired
+    /// [`Self::restoration_summary_sink`] into its restoration factory.
     pub fn linear_solver_summary(&self) -> Option<LinearSolverSummary> {
-        let guard = self.linsol_summary_sink.lock().ok()?;
-        if guard.is_empty() {
-            None
-        } else {
-            Some(guard.clone())
+        let mut main = self.linsol_summary_sink.lock().ok()?.clone();
+        let resto = self
+            .resto_linsol_summary_sink
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .filter(|r| !r.is_empty());
+        if main.is_empty() && resto.is_none() {
+            return None;
         }
+        main.restoration = resto.map(Box::new);
+        Some(main)
+    }
+
+    /// Snapshot of both linear-solver summary sinks (main and
+    /// restoration), for a driver that re-solves and must report the
+    /// summary of the solve whose verdict it keeps. The second-opinion
+    /// ladder takes one before its rungs and restores it when no rung is
+    /// promoted, exactly as it does for the statistics.
+    pub fn linear_solver_summary_state(&self) -> LinearSolverSummaryState {
+        let read =
+            |s: &Arc<Mutex<LinearSolverSummary>>| s.lock().map(|g| g.clone()).unwrap_or_default();
+        LinearSolverSummaryState {
+            main: read(&self.linsol_summary_sink),
+            restoration: read(&self.resto_linsol_summary_sink),
+        }
+    }
+
+    /// Put back a [`Self::linear_solver_summary_state`] snapshot.
+    pub fn restore_linear_solver_summary_state(&self, state: LinearSolverSummaryState) {
+        if let Ok(mut g) = self.linsol_summary_sink.lock() {
+            *g = state.main;
+        }
+        if let Ok(mut g) = self.resto_linsol_summary_sink.lock() {
+            *g = state.restoration;
+        }
+    }
+
+    /// The sink a restoration backend factory should record into, e.g.
+    /// through [`default_backend_factory_with_sink`]. Kept separate from
+    /// the main solve's sink so the main-solve totals stay about the main
+    /// solve.
+    pub fn restoration_summary_sink(&self) -> Arc<Mutex<LinearSolverSummary>> {
+        Arc::clone(&self.resto_linsol_summary_sink)
     }
 
     /// Drive a solve.
@@ -4343,12 +4399,14 @@ impl IpoptApplication {
         // other. Surviving the lock failure with a debug-assert keeps
         // a poisoned mutex from sinking a release build that doesn't
         // even consume the summary.
-        match self.linsol_summary_sink.lock() {
-            Ok(mut guard) => {
-                *guard = LinearSolverSummary::default();
-            }
-            _ => {
-                debug_assert!(false, "linsol summary sink mutex poisoned");
+        for sink in [&self.linsol_summary_sink, &self.resto_linsol_summary_sink] {
+            match sink.lock() {
+                Ok(mut guard) => {
+                    *guard = LinearSolverSummary::default();
+                }
+                _ => {
+                    debug_assert!(false, "linsol summary sink mutex poisoned");
+                }
             }
         }
         // Same reasoning for the quality-escalation tally (gh#857): the
@@ -4593,6 +4651,7 @@ impl IpoptApplication {
         // exact-Hessian path and falls back to the standard solver otherwise.
         if let Some(indices) = &self.kkt_schur_block {
             builder.set_kkt_schur(indices.clone(), feral_cfg.clone());
+            builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
         }
         // A caller-supplied KKT permutation (pounce#180 item 1) overrides
         // the string-option / env ordering: `OrderingMethod::External`

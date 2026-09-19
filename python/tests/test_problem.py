@@ -257,17 +257,17 @@ def _convex_eq_qp(target, A, b):
 
 def test_kkt_schur_block_matches_full_space_solve():
     """A Schur partition (the constraint-dual block) reaches the same optimum
-    as the standard full-space solve, and round-trips through the API.
+    as the standard full-space solve, round-trips through the API, and the
+    Schur path actually *engaged*.
 
-    NOTE: this test cannot detect whether the Schur solver actually *engaged* —
-    the path falls back to the standard full-space solver transparently, so a
-    silently-disabled Schur path produces exactly the assertions below. It once
-    did: the gate compared the *requested* linear solver against FERAL while the
-    registry default "ma57" was recorded even on builds that substitute FERAL,
-    so `set_kkt_schur_block()` was a no-op for every default user and this test
-    still passed. The guard for that is
-    `application_linear_solver_records_the_effective_backend` on the Rust side;
-    coverage of `kkt/schur_aug_system_solver.rs` is the end-to-end signal.
+    The last part used to be undetectable: the path falls back to the standard
+    solver transparently, so a silently-disabled Schur path produced the same
+    optimum. It once was disabled that way — the gate compared the *requested*
+    linear solver against FERAL while the registry default "ma57" was recorded
+    even on builds that substitute FERAL, so `set_kkt_schur_block()` was a
+    no-op for every default user and this test still passed.
+    `info["linear_solver"]["schur"]` is present only when the Schur backend
+    factored, so it is now asserted directly.
     """
     target = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     A = np.array([[1.0, 1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 1.0]])
@@ -288,6 +288,14 @@ def test_kkt_schur_block_matches_full_space_solve():
     assert info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(x, x_ref, atol=1e-7)
 
+    assert info_ref["linear_solver"]["schur"] is None
+    sch = info["linear_solver"]["schur"]
+    assert sch is not None, "Schur path fell back silently"
+    assert (sch["n_eliminated"], sch["n_schur"]) == (n, m)
+    assert sch["n_factors"] >= 1
+    # Every Schur factorization factors the eliminated block once.
+    assert info["linear_solver"]["n_factors"] >= sch["n_factors"]
+
     prob.clear_kkt_schur_block()
     assert prob.get_kkt_schur_block() is None
 
@@ -303,10 +311,121 @@ def test_kkt_schur_block_oversized_falls_back():
     prob.set_kkt_schur_block(list(range(n + m - 1)))
     x, info = prob.solve(x0=np.zeros(n))
     assert info["status_msg"] == "Solve_Succeeded"
+    # The fallback is visible: no Schur breakdown, standard factorizations.
+    assert info["linear_solver"]["schur"] is None
+    assert info["linear_solver"]["n_factors"] >= 1
 
     prob_ref, _, _ = _convex_eq_qp(target, A, b)
     x_ref, _ = prob_ref.solve(x0=np.zeros(n))
     np.testing.assert_allclose(x, x_ref, atol=1e-7)
+
+
+def test_info_linear_solver_reports_factorization_stats():
+    """`info["linear_solver"]` carries the factorization counts plus the work
+    and pivoting totals (structured-KKT Phase 0a), consistently with each
+    other and keyed like the solve report's `linear_solver` object."""
+    target = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    A = np.array([[1.0, 1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 1.0]])
+    b = np.array([3.0, 12.0])
+    prob, n, m = _convex_eq_qp(target, A, b)
+    _x, info = prob.solve(x0=np.zeros(n))
+    assert info["status_msg"] == "Solve_Succeeded"
+
+    ls = info["linear_solver"]
+    assert ls["solver_name"] == "feral"
+    assert ls["n_factors"] >= 1
+    assert ls["n_pattern_reuse"] + ls["n_pattern_changes"] == ls["n_factors"]
+    # Fill of the final factor is bounded by the running maximum.
+    assert ls["last_nnz_l"] / ls["last_nnz_a"] <= ls["max_fill_ratio"] + 1e-12
+    # KKT inertia at a regular optimum: n positive, m negative, none zero.
+    assert tuple(ls["last_inertia"]) == (n, m, 0)
+    assert ls["total_factor_secs"] >= 0.0
+    assert ls["total_factor_flops"] >= ls["last_factor_flops"] > 0.0
+    assert ls["last_ordering"] in {"amd", "amf", "metis", "scotch", "kahip"}
+    for k in ("total_delayed_cols", "total_two_by_two", "total_n_tiny"):
+        assert isinstance(ls[k], int) and ls[k] >= 0
+    assert ls["total_delayed_cols"] >= ls["last_delayed_cols"]
+    assert ls["total_two_by_two"] >= ls["last_two_by_two"]
+    assert ls["last_n_supernodes"] >= 1
+    assert ls["last_max_front_rows"] >= 1
+    assert ls["last_peak_bytes"] > 0
+    assert ls["schur"] is None
+
+
+def _infeasible_parabolas(ladder):
+    """x0**2 - x1 + 1 = 0 and x1 + x0**2 = 0: their sum is 2*x0**2 + 1 = 0,
+    so the problem is infeasible, the solve enters restoration, and it ends in
+    ``Infeasible_Problem_Detected`` — a verdict the second-opinion ladder
+    re-solves and, here, keeps.
+
+    Nonlinear on purpose. On a linear infeasible pair every rung reproduces
+    the original solve's factorization counts, so a summary taken from the
+    last rejected rung is indistinguishable from the right one; here the last
+    rung (``start_point_perturbation``) takes a different trajectory."""
+
+    class P:
+        def objective(self, x):
+            return float(x @ x)
+
+        def gradient(self, x):
+            return 2.0 * x
+
+        def constraints(self, x):
+            return np.array([x[0] ** 2 - x[1] + 1.0, x[1] + x[0] ** 2])
+
+        def jacobianstructure(self):
+            return (np.array([0, 0, 1, 1]), np.array([0, 1, 0, 1]))
+
+        def jacobian(self, x):
+            return np.array([2.0 * x[0], -1.0, 2.0 * x[0], 1.0])
+
+        def hessianstructure(self):
+            return (np.array([0, 1, 1]), np.array([0, 0, 1]))
+
+        def hessian(self, x, lagrange, obj_factor):
+            return np.array([
+                2.0 * obj_factor + 2.0 * lagrange[0] + 2.0 * lagrange[1],
+                0.0,
+                2.0 * obj_factor,
+            ])
+
+    prob = pounce.Problem(n=2, m=2, problem_obj=P(), cl=[0.0, 0.0], cu=[0.0, 0.0])
+    prob.add_option("print_level", 0)
+    if not ladder:
+        # Every rung this verdict can open, or the "plain" solve is itself
+        # a ladder run that ends on the same rung as the laddered one.
+        for rung in ("feral_infeasibility_scaling_retry",
+                     "infeasibility_mu_strategy_retry",
+                     "infeasibility_perturbed_start_retry",
+                     "feral_increase_quality_retry"):
+            prob.add_option(rung, "no")
+    _x, info = prob.solve(x0=np.array([0.5, 0.3]))
+    return info
+
+
+def test_linear_solver_summary_follows_the_kept_verdict():
+    """Restoration factorizations are reported under ``restoration``, and when
+    the ladder re-solves but keeps the original verdict, the summary is the
+    original solve's — not the last rejected rung's. Every rung's solve resets
+    and refills the summary, so before the ladder restored it, the verdict and
+    statistics described one solve and ``linear_solver`` another."""
+    plain = _infeasible_parabolas(ladder=False)
+    laddered = _infeasible_parabolas(ladder=True)
+    assert plain["status_msg"] == "Infeasible_Problem_Detected"
+    assert laddered["status_msg"] == "Infeasible_Problem_Detected"
+    assert plain["second_opinion"] is None, "the plain solve must not run the ladder"
+    assert laddered["second_opinion"]["tried"], "the ladder must have run"
+    assert laddered["second_opinion"]["promoted_by"] is None
+
+    resto = plain["linear_solver"]["restoration"]
+    assert resto is not None, "restoration factorizations were not reported"
+    assert resto["n_factors"] >= plain["restoration_inner_iters"]
+    assert resto["restoration"] is None
+
+    a, b = plain["linear_solver"], laddered["linear_solver"]
+    assert a["n_factors"] == b["n_factors"]
+    assert a["restoration"]["n_factors"] == b["restoration"]["n_factors"]
+    assert a["total_two_by_two"] == b["total_two_by_two"]
 
 
 def test_kkt_schur_block_negative_index_rejected():

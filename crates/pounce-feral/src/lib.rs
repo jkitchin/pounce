@@ -33,7 +33,7 @@ use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, 
 pub use feral::scaling::ScalingStrategy;
 pub use feral::symbolic::OrderingMethod;
 use pounce_common::types::{Index, Number};
-use pounce_linsol::summary::LinearSolverSummary;
+use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
 };
@@ -758,6 +758,83 @@ pub fn parse_ordering_method(s: &str) -> Option<OrderingMethod> {
     }
 }
 
+/// The `feral_ordering` token for a concrete ordering method, so a
+/// reported ordering reads the way the option that selects it is
+/// spelled. Variants without a token fall back to their lowercased
+/// `Debug` form.
+pub(crate) fn ordering_label(m: &OrderingMethod) -> String {
+    match m {
+        OrderingMethod::Amd => "amd".into(),
+        OrderingMethod::Amf => "amf".into(),
+        OrderingMethod::MetisND => "metis".into(),
+        OrderingMethod::ScotchND => "scotch".into(),
+        OrderingMethod::KahipND => "kahip".into(),
+        OrderingMethod::External(_) => "external".into(),
+        other => format!("{other:?}").to_ascii_lowercase(),
+    }
+}
+
+/// Pivoting counts read off a completed factorization:
+/// `(delayed-column entries, 2×2 pivot blocks)`. `None` when the solver
+/// holds no multifrontal factors (e.g. its dense fast path ran).
+///
+/// Delayed entries are summed per node, so a column delayed `k` levels
+/// counts `k` times. 2×2 blocks are counted with the same walk feral's
+/// solve uses: a nonzero `d_subdiag[k]` opens a block over `k, k+1`.
+pub(crate) fn pivot_counts(solver: &Solver) -> Option<(usize, usize)> {
+    let factors = solver.factors()?;
+    let mut delayed = 0usize;
+    let mut two_by_two = 0usize;
+    for node in &factors.node_factors {
+        delayed += node.n_delayed_in;
+        let ff = &node.frontal_factors;
+        let mut k = 0;
+        while k < ff.nelim {
+            if k + 1 < ff.nelim && ff.d_subdiag[k] != 0.0 {
+                two_by_two += 1;
+                k += 2;
+            } else {
+                k += 1;
+            }
+        }
+    }
+    Some((delayed, two_by_two))
+}
+
+/// Everything POUNCE records about one successful factorization. Shared
+/// by the monolithic backend and the Schur backend's eliminated block.
+/// Every read is `O(n)` or cheaper — negligible next to the factor.
+pub(crate) fn factor_record(
+    solver: &Solver,
+    stats: &FactorStats,
+    factor_secs: f64,
+) -> FactorRecord {
+    let work = solver.work_estimate();
+    let pivots = pivot_counts(solver);
+    FactorRecord {
+        pattern_reused: stats.pattern_reused,
+        fill_ratio: stats.fill_ratio,
+        min_abs_pivot: stats.min_abs_pivot,
+        max_abs_pivot: stats.max_abs_pivot,
+        inertia: (
+            stats.inertia.positive,
+            stats.inertia.negative,
+            stats.inertia.zero,
+        ),
+        nnz_a: stats.nnz_a,
+        nnz_l: stats.nnz_l,
+        factor_secs,
+        factor_flops: work.as_ref().map(|w| w.factor_flops),
+        peak_bytes: work.as_ref().map(|w| w.peak_bytes),
+        n_supernodes: Some(stats.ordering_info.n_supernodes),
+        max_front_rows: Some(stats.ordering_info.max_front_rows),
+        delayed_cols: pivots.map(|p| p.0),
+        two_by_two: pivots.map(|p| p.1),
+        n_tiny: Some(stats.n_tiny),
+        ordering: Some(ordering_label(&stats.ordering_info.used)),
+    }
+}
+
 /// Build a configured `feral::Solver` from a [`FeralConfig`]. Extracted from
 /// [`FeralSolverInterface::with_config`] so the Schur backend
 /// ([`crate::schur::FeralSchurSolver`]) configures its per-block solvers
@@ -954,38 +1031,19 @@ impl FeralSolverInterface {
     }
 
     /// Fold a single feral `FactorStats` into the running summary,
-    /// then mirror the snapshot into the sink if one is installed.
-    fn record_factor_stats(&mut self, stats: FactorStats) {
-        let s = &mut self.summary;
-        s.n_factors += 1;
-        if stats.pattern_reused {
-            s.n_pattern_reuse += 1;
-        } else {
-            s.n_pattern_changes += 1;
-        }
-        s.max_fill_ratio = Some(match s.max_fill_ratio {
-            Some(prev) => prev.max(stats.fill_ratio),
-            None => stats.fill_ratio,
-        });
-        s.min_abs_pivot = Some(match s.min_abs_pivot {
-            Some(prev) => prev.min(stats.min_abs_pivot),
-            None => stats.min_abs_pivot,
-        });
-        s.max_abs_pivot = Some(match s.max_abs_pivot {
-            Some(prev) => prev.max(stats.max_abs_pivot),
-            None => stats.max_abs_pivot,
-        });
-        s.last_inertia = Some((
-            stats.inertia.positive,
-            stats.inertia.negative,
-            stats.inertia.zero,
-        ));
-        s.last_nnz_a = Some(stats.nnz_a);
-        s.last_nnz_l = Some(stats.nnz_l);
-
+    /// then fold the same record into the shared sink if one is
+    /// installed. Folding into the sink, rather than overwriting it with
+    /// this instance's summary, is what keeps the totals right when two
+    /// backends share one sink (see [`LinearSolverSummary::record`]).
+    fn record_factor_stats(&mut self, stats: FactorStats, factor_secs: f64) {
+        let record = factor_record(&self.solver, &stats, factor_secs);
+        self.summary.record(&record);
         if let Some(sink) = self.sink.as_ref() {
             if let Ok(mut guard) = sink.lock() {
-                *guard = s.clone();
+                if guard.solver_name.is_empty() {
+                    guard.solver_name = self.summary.solver_name.clone();
+                }
+                guard.record(&record);
             }
         }
 
@@ -1116,11 +1174,13 @@ impl FeralSolverInterface {
         }
         let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
 
+        let t0 = std::time::Instant::now();
         let status = self.solver.factor(matrix, None);
+        let factor_secs = t0.elapsed().as_secs_f64();
         match status {
             FactorStatus::Success => {
                 if let Some(stats) = self.solver.last_factor_stats() {
-                    self.record_factor_stats(stats);
+                    self.record_factor_stats(stats, factor_secs);
                 }
                 // IPOPT / MA57 convention: `number_of_neg_evals` is the
                 // count of strict negative pivots (MA57's INFO(24)). Zero
@@ -1772,6 +1832,73 @@ mod tests {
         assert_eq!(s.number_of_neg_evals(), 0);
         assert!(s.provides_inertia());
         assert_eq!(s.matrix_format(), EMatrixFormat::TripletFormat);
+    }
+
+    /// Factor `[[0,1],[1,0]]` (a zero diagonal forces a 2×2 pivot) through
+    /// an interface, optionally with a shared sink.
+    fn factor_swap_2x2(sink: Option<Arc<Mutex<LinearSolverSummary>>>) -> FeralSolverInterface {
+        let mut s = FeralSolverInterface::new();
+        if let Some(sink) = sink {
+            s = s.with_summary_sink(sink);
+        }
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[0.0, 1.0, 0.0]);
+        let mut rhs = [1.0, 2.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::Success
+        );
+        s
+    }
+
+    /// The Phase-0a fields are populated by a real factorization, and the
+    /// 2×2 count matches the pivot the zero diagonal forces.
+    #[test]
+    fn summary_records_work_and_pivoting_stats() {
+        let s = factor_swap_2x2(None);
+        let sum = s.summary();
+        assert_eq!(sum.solver_name, "feral");
+        assert_eq!(sum.n_factors, 1);
+        assert_eq!(sum.last_inertia, Some((1, 1, 0)));
+        assert!(sum.total_factor_secs >= 0.0);
+        let ordering = sum.last_ordering.as_deref().expect("ordering recorded");
+        assert_ne!(ordering, "auto", "must report the resolved method");
+        assert!(sum.last_n_supernodes.is_some());
+        assert!(sum.last_max_front_rows.is_some());
+        assert_eq!(sum.last_n_tiny, Some(0));
+        assert_eq!(sum.last_delayed_cols, Some(0));
+        assert!(sum.last_factor_flops.is_some_and(|f| f > 0.0));
+        assert_eq!(
+            sum.last_two_by_two,
+            Some(1),
+            "the zero-diagonal swap matrix needs one 2x2 pivot"
+        );
+        assert_eq!(sum.total_two_by_two, 1);
+    }
+
+    /// Two interfaces sharing one sink (the L-BFGS layout: the low-rank
+    /// solver's backend and its bypass) must *sum* into it. Before the fold,
+    /// each overwrote the sink with its own running summary, so the sink
+    /// read `n_factors == 1` here.
+    #[test]
+    fn two_backends_sharing_a_sink_accumulate() {
+        let sink = Arc::new(Mutex::new(LinearSolverSummary::default()));
+        let a = factor_swap_2x2(Some(Arc::clone(&sink)));
+        let b = factor_swap_2x2(Some(Arc::clone(&sink)));
+        assert_eq!(a.summary().n_factors, 1);
+        assert_eq!(b.summary().n_factors, 1);
+        let shared = sink.lock().unwrap().clone();
+        assert_eq!(shared.n_factors, 2);
+        assert_eq!(shared.solver_name, "feral");
+        assert_eq!(
+            shared.total_two_by_two,
+            a.summary().total_two_by_two + b.summary().total_two_by_two
+        );
     }
 
     /// 2x2 indefinite `[[1,2],[2,1]]` — eigenvalues 3, -1.
