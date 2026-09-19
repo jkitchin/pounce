@@ -9,6 +9,9 @@ changes.
 
 ## [Unreleased]
 
+
+## [0.12.0] - 2026-09-18
+
 ### Added
 
 - **Presolve-aware warm solve sessions.** Repeated NLP and convex-QP solves no
@@ -1172,8 +1175,6 @@ changes.
   written the other way round. Both branches of the consistency check are
   covered, so a check that stops warning fails as loudly as one that warns
   spuriously.
-
-### Fixed
 
 - **`parametric_step_path` could return a point outside a variable's box
   ([#928](https://github.com/jkitchin/pounce/issues/928)).** With no
@@ -21317,7 +21318,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/jkitchin/pounce/releases/tag/v0.12.0
 [0.11.0]: https://github.com/jkitchin/pounce/releases/tag/v0.11.0
 [0.10.0]: https://github.com/jkitchin/pounce/releases/tag/v0.10.0
 [0.9.0]: https://github.com/jkitchin/pounce/releases/tag/v0.9.0

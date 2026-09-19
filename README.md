@@ -180,7 +180,7 @@ Most HPC sites run Apptainer/Singularity rather than Docker; it pulls the
 same image and runs it as your own user:
 
 ```sh
-apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.11.0
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.12.0
 apptainer run pounce.sif problem.nl
 ```
 
