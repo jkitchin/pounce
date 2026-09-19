@@ -310,10 +310,16 @@ Steady state (pattern cached, as in an IPM), 14 threads:
 | block refactorization alone, parallel | 0.035 s |
 | block factor + Schur, feral's native `factorize_multifrontal_with_schur` | **0.047 s** + 0.002 s border → **7.1×** |
 | block factor + Schur, dense multi-RHS solves | 0.40 s → 0.7× (*slower*) |
+| **back-solve**, monolithic | 0.049 s |
+| **back-solve**, block-parallel (two block solves + the border system) | **0.015 s → 3.3×** |
+| **whole KKT solve** (factor + border + back-solve) | 0.389 s → **0.064 s = 6.1×** |
 
 `inertia(K) = Σ_k inertia(A_kk) + inertia(S)` holds exactly — (458 643, 424 908,
 0) both ways — so the block path reproduces the pivot information the IPM's
-inertia correction runs on.
+inertia correction runs on. The block solve is also at least as accurate:
+relative residual 1.53e-14 against the monolithic solve's 1.94e-14 and the
+2.05e-14 of the solution pounce itself produced for this system (both dumped
+with the matrix).
 
 Three things this pins down:
 
@@ -331,10 +337,12 @@ Three things this pins down:
    on this matrix against `amf`'s 0.34 s, and an unfair baseline turns 7× into
    a reported 10–200×.
 
-Scope: one matrix, one iterate, one machine, 14 threads; no back-solve
-(the IPM also needs the block back-substitution, not measured here); and a
-factorization that is 35% of this solve, so 7× on it is ~1.4× end to end before
-any evaluation work. What it establishes is that the arrowhead's block
+Scope: one matrix, one iterate, one machine, 14 threads. The linear algebra is
+~46% of this solve (factorization 35%, back-solve 11%), so 6.1× on it is ~1.8×
+end to end before any evaluation work. The prototype factors each block twice
+(once through `Solver` for the back-solve, once through the native Schur call);
+a real implementation keeps the factors the native call already returns, so the
+factor figure is if anything pessimistic. What it establishes is that the arrowhead's block
 parallelism is real and reachable with feral as it ships.
 
 ## Verdict for the structured-KKT plan

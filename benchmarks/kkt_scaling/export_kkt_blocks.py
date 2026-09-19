@@ -10,7 +10,8 @@ above --degree leaves the blocks as connected components. Prints the split so a
 wrong threshold is visible (one component means the border was missed).
 
 Binary layout, little-endian: n, nnz, n_blocks (i64) | irn, jcn (i32, **0-based**
-lower triangle) | vals (f64) | label per index (i32, -1 = border).
+lower triangle) | vals (f64) | label per index (i32, -1 = border) | rhs, sol
+(f64, the right-hand side pounce solved and the solution it got).
 """
 
 import argparse
@@ -48,6 +49,8 @@ def main():
         jcn.astype(np.int32).tofile(f)
         vals.tofile(f)
         lab.tofile(f)
+        np.asarray(d["rhs"], np.float64).tofile(f)
+        np.asarray(d["sol"], np.float64).tofile(f)
 
 
 if __name__ == "__main__":

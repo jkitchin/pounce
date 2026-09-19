@@ -22,7 +22,9 @@ use std::io::Read;
 use std::time::Instant;
 
 #[allow(clippy::type_complexity)]
-fn read_kkt(path: &str) -> (usize, Vec<i32>, Vec<i32>, Vec<f64>, Vec<i32>, usize) {
+type Kkt = (usize, Vec<i32>, Vec<i32>, Vec<f64>, Vec<i32>, usize, Vec<f64>, Vec<f64>);
+
+fn read_kkt(path: &str) -> Kkt {
     let mut f = std::fs::File::open(path).expect("open kkt.bin");
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).unwrap();
@@ -42,7 +44,12 @@ fn read_kkt(path: &str) -> (usize, Vec<i32>, Vec<i32>, Vec<f64>, Vec<i32>, usize
     let jcn: Vec<i32> = take(nnz, 4).chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
     let vals: Vec<f64> = take(nnz, 8).chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
     let lab: Vec<i32> = take(n, 4).chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
-    (n, irn, jcn, vals, lab, nblocks)
+    let f64s = |b: &[u8]| -> Vec<f64> {
+        b.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()
+    };
+    let rhs = f64s(take(n, 8));
+    let sol = f64s(take(n, 8));
+    (n, irn, jcn, vals, lab, nblocks, rhs, sol)
 }
 
 fn sizes_max_local(n: usize) -> usize {
@@ -68,7 +75,7 @@ fn inertia_of(s: &Solver) -> (usize, usize, usize) {
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| "../scopf/kkt.bin".into());
-    let (n, irn, jcn, vals, lab, nblocks) = read_kkt(&path);
+    let (n, irn, jcn, vals, lab, nblocks, rhs, pounce_sol) = read_kkt(&path);
     let border: Vec<usize> = (0..n).filter(|&i| lab[i] < 0).collect();
     let nb = border.len();
     println!("KKT n={n} nnz={} blocks={nblocks} border={nb}", irn.len());
@@ -101,6 +108,8 @@ fn main() {
         }
     }
     println!("monolithic best: {best} at {mono_s:.2}s, inertia {mono_inertia:?}");
+    let mut mono_solver = solver(order_from(best.split_whitespace().next().unwrap()), true);
+    assert!(matches!(mono_solver.factor(&a, None), FactorStatus::Success));
 
     // ---- block-parallel --------------------------------------------------
     // local index of every unknown inside its block, and border position
@@ -329,10 +338,10 @@ fn main() {
     }
     let t = Instant::now();
     let sm = CscMatrix::from_triplets(nb, &r, &c, &v).expect("S build");
-    let mut ssolve = solver(OrderingMethod::Amd, false);
-    let st = ssolve.factor(&sm, None);
+    let mut border_solver = solver(OrderingMethod::Amd, false);
+    let st = border_solver.factor(&sm, None);
     let s_fac = t.elapsed().as_secs_f64();
-    let si = inertia_of(&ssolve);
+    let si = inertia_of(&border_solver);
     let total = t_all.elapsed().as_secs_f64();
     let combined = (inert.0 + si.0, inert.1 + si.1, inert.2 + si.2);
     println!(
@@ -345,5 +354,83 @@ fn main() {
         "DENSE-RHS block path vs monolithic refactor: {:.2}x (the multi-RHS Schur \
          formation is what costs; see the native line above)",
         mono_s / total
+    );
+
+    // ---- back-solve: the other half of a KKT solve -----------------------
+    // K x = b by block elimination:
+    //   y_k = A_kk^-1 b_k            (parallel)
+    //   S dx_s = b_s - sum_k A_sk y_k
+    //   x_k = A_kk^-1 (b_k - A_ks dx_s)   (parallel)
+    // `solvers` already holds each block's factors; the border system is the
+    // Schur complement formed above.
+    let residual = |x: &[f64]| -> f64 {
+        let mut r = rhs.clone();
+        for e in 0..rows.len() {
+            let (i, j, v) = (rows[e], cols[e], vals[e]);
+            r[i] -= v * x[j];
+            if i != j {
+                r[j] -= v * x[i];
+            }
+        }
+        let num = r.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let den = rhs.iter().fold(0.0f64, |a, v| a.max(v.abs())).max(1.0);
+        num / den
+    };
+    let t = Instant::now();
+    let x_mono = mono_solver.solve(&rhs).expect("monolithic solve");
+    let mono_solve = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    let y: Vec<Vec<f64>> = solvers
+        .par_iter()
+        .enumerate()
+        .map(|(b, (s, _))| {
+            let mut bk = vec![0.0f64; sizes[b]];
+            for i in 0..n {
+                if lab[i] as usize == b && lab[i] >= 0 {
+                    bk[local[i]] = rhs[i];
+                }
+            }
+            s.solve(&bk).expect("block solve")
+        })
+        .collect();
+    let mut rs: Vec<f64> = border.iter().map(|&i| rhs[i]).collect();
+    for b in 0..nblocks {
+        for e in 0..cpl[b].0.len() {
+            rs[cpl[b].1[e]] -= cpl[b].2[e] * y[b][cpl[b].0[e]];
+        }
+    }
+    let dx_s = border_solver.solve(&rs).expect("border solve");
+    let x_blocks: Vec<Vec<f64>> = solvers
+        .par_iter()
+        .enumerate()
+        .map(|(b, (s, _))| {
+            let mut bk = vec![0.0f64; sizes[b]];
+            for i in 0..n {
+                if lab[i] >= 0 && lab[i] as usize == b {
+                    bk[local[i]] = rhs[i];
+                }
+            }
+            for e in 0..cpl[b].0.len() {
+                bk[cpl[b].0[e]] -= cpl[b].2[e] * dx_s[cpl[b].1[e]];
+            }
+            s.solve(&bk).expect("block solve 2")
+        })
+        .collect();
+    let block_solve = t.elapsed().as_secs_f64();
+    let mut x_blk = vec![0.0f64; n];
+    for i in 0..n {
+        if lab[i] >= 0 {
+            x_blk[i] = x_blocks[lab[i] as usize][local[i]];
+        } else {
+            x_blk[i] = dx_s[bpos[i]];
+        }
+    }
+    println!(
+        "back-solve: monolithic {mono_solve:.3}s (residual {:.2e})  block-parallel {block_solve:.3}s \
+         (residual {:.2e})  pounce's own solution residual {:.2e}",
+        residual(&x_mono),
+        residual(&x_blk),
+        residual(&pounce_sol)
     );
 }
