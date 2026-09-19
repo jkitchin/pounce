@@ -140,6 +140,127 @@ a two-dimensional space-by-time mesh, sparse in both directions, and a
 two-dimensional nested dissection (what `metis` computes) is the right
 elimination; a one-dimensional temporal one is not.
 
+## A structure-derived space × time ordering, measured
+
+The earlier study's structure was the wrong one (time only). The obvious
+structure-derived alternative uses the network as well: every state belongs to
+a network cell (a node pressure, a pipe-interior pressure, a segment flow, the
+energy integral) and every compressor control is its own cell; the cell graph
+is split by recursive vertex separators (on a pipe network these are cut
+pipes), time is split at element boundaries, and a two-dimensional nested
+dissection eliminates across whichever cut is cheaper at each level. Every KKT
+unknown is placed from the declared layout plus the Jacobian. Built outside the
+repository (it imports the model code) and supplied through `set_ordering`.
+
+Three pieces of structural knowledge turned out to be needed, each found by a
+measurement that failed without it:
+
+- **spatial cells** — the network cuts were exact: zero KKT edges cross a
+  spatial separator;
+- **time spans** — a compressor-control knot's piecewise-linear support covers
+  several elements, so it belongs in any time separator it straddles; placed at
+  a single point, one time cut leaked 2 282 edges;
+- **primal-dual pairs** — each collocation equation is pivoted with its own
+  state; separating them at time cuts produced 36 506 delayed pivots per
+  factorization and a solve that hit 500 iterations; keeping the dual with its
+  state brought delays to 31 per factorization (`metis`: 146–285).
+
+End to end, same build, same run (28k: 33 s / 72 iterations against 16 s / 63):
+
+| n | structure-derived: wall, iterations, factorization s / iteration | `metis` |
+|---|---|---|
+| 55 950 | 95 s, 78, 1.04 | 102 s, 94, 0.87 |
+| 111 894 | 209 s, 75, 2.49 | 145 s, 41, 3.14 |
+| 223 782 | 654 s, 96, 6.16 | 424 s, 68, 5.28 |
+
+A single-factorization probe had shown this ordering 1.4× faster than `metis`
+at 56k and 112k; over a full solve the per-iteration cost is within
+0.8–1.2× of `metis`, and the iteration count is higher at the larger sizes (an
+ordering is also a pivoting decision, so it moves the trajectory). **This
+structure-derived ordering does not beat the generic one on gas.** It is one
+design — leaf ordering, separator choice, and which dimension to cut are all
+open — so it does not show that no structure can; it shows that the network ×
+time structure, applied this way, buys nothing METIS does not already find.
+
+## A side finding: 2×2 pairing, not ordering, dominates the factor cost
+
+Parked here because it is a factorization question, not a decomposition one,
+but it bounds what any ordering — generic or structure-derived — can buy on
+this model. `feral_ordering_preprocess` (added for this) shows that `metis`'s
+automatic preprocessing is `ldlt_compress`: MC64 matching pairs each state
+with its collocation equation and the pairs are ordered as super-variables.
+At 112k variables that pairing costs 7× in flops (6.5e10 against 8.8e9 per
+factorization, 2.9 s against 0.42 s). Dropping it is not usable as is —
+~100k delayed columns per factorization, tiny pivots, quality escalations, and
+at 56k 190 iterations and 234 s against 94 and 100 s.
+
+A value-based *selective* pairing — keep a matched pair only when neither
+member passes the Bunch-Kaufman one-pivot test at the first factorization —
+was built and measured and does not separate the two: at 56k, keeping 61% of
+the pairs halves the delays and saves 18% of the flops; keeping 3% saves 70% of
+the flops and keeps nearly all the delays. Which pivots go weak is decided by
+Schur updates during elimination and by how the iterate evolves, not by the
+original diagonal, so a static test on the first matrix cannot find them.
+Structure does not identify them either: every collocation state carries a
+Hessian diagonal. The literature on this (Duff-Pralet matching compression;
+Schenk-Wächter-Hagemann on IPOPT KKT matchings; Hogg-Scott compressed threshold
+pivoting; quasidefinite regularization; static pivoting with refinement) is a
+separate line of work from decomposition by structure and is left for later.
+
+The consequence for decomposition: **a declared block structure must keep each
+primal-dual pair inside one block.** The first structure-derived ordering
+split collocation equations from their states at time cuts and delayed 36 506
+pivots per factorization; keeping the pairs together brought that to 31.
+
+## Phase 0c: the arrowhead — corrective N-1 AC-SCOPF
+
+`benchmarks/kkt_scaling/gen_scopf.py`: a base-case polar AC-OPF plus K
+contingency copies of a pglib network, each with one branch out, coupled only
+through the base-case dispatch of the non-reference generators (the shared
+block); each contingency carries its own voltages, reactive power, reference
+generator and a corrective re-dispatch within ±20% of capacity. (Preventive —
+one dispatch for every contingency — is jointly infeasible on case118_ieee from
+K = 64 although every single contingency is feasible; Ipopt agrees. Outages are
+screened individually and cached.) Base cases reproduce pglib's published
+optima (97 214 and 1 258 844). Two families, all 45 solves converged:
+
+- `case118_ieee`, K = 1…128: 686 to 44 247 variables, 53 shared, 343 per block;
+- `case1354_pegase`, K = 1…64: 6 454 to 209 755 variables, 259 shared, ~3 200
+  per block.
+
+Exponent in `n` (auto / metis / auto_race within ±0.1 of each other):
+
+| metric | case118 | case1354 |
+|---|---|---|
+| iterations | 0.23 | 0.10 |
+| nnz(L) | 0.99 | 1.00–1.04 |
+| work proxy per factorization | 0.96 | 1.36–1.49 |
+| factorization s / iteration | 0.95 | 1.10–1.15 |
+| other s / iteration | 1.01 | 1.04–1.08 |
+| wall | 1.22 | 1.17–1.19 |
+
+**The generic orderings already find the arrowhead.** Fill is exactly linear in
+the block count and the largest front is bounded by the block (case118: 38–44
+rows at every K from 8 up; case1354: it grows toward the block size and
+plateaus, 1 014 at K = 32 and 1 025 at K = 64): they eliminate each block and
+then the shared dispatch, which is the block elimination a structured solver
+would perform. The three orderings are within about 10% of each other. There is
+no fill for declared structure to remove on one core.
+
+**Factorization is not most of the time.** It is 25–40% of the solve; at 210k
+variables (77 s) the breakdown is function evaluation 37.5 s (48%, of which the
+Lagrangian Hessian 27.8 s), factorization 27.1 s (35%), back-solve 8.2 s (11%).
+Both large terms are block-separable: every contingency's residuals, Jacobian
+and Hessian, and every block's factorization, are independent given the shared
+dispatch. **On the arrowhead the value of declared structure is parallelism —
+across block evaluations as much as block factorizations — and memory, not a
+better ordering.** Not measured here: how much of that FERAL's tree
+parallelism already delivers inside the factorization, and whether evaluation
+through the AMPL `.nl` interface can be run per block at all.
+
+(Aside: `FireIntermediateCallback` takes 6.6 s of that 77 s solve — 8% — which
+is out of proportion for a callback and worth its own look.)
+
 ## Verdict for the structured-KKT plan
 
 Across both families the attribution is the same: **the only superlinear row is
@@ -160,17 +281,21 @@ So, against the Phase 0 gate:
 1. **Gas does not justify a block-structured KKT solver** (Phases 3–4) as its
    motivating case. The decomposable row is present, but the decomposition that
    works is already available, and near its asymptotic cost at the top of the
-   measured range.
+   measured range. A structure-derived network × time ordering, built with
+   the spatial cells, time spans and primal-dual pairs it turned out to need,
+   matched `metis` at 56k and lost by 44–54% at 112k–224k end to end.
 2. **The actionable finding is routing.** The default `auto` never selects
    nested dissection and costs 8× at 224k variables; `auto_race` gets it right
    on this family. Making that choice automatic for space-by-time models —
    through FERAL's routing, or through declared structure that says "this is a
    mesh" — is a default-path change and needs the fixture sweep on both legs
    plus `benchmarks/qp`, where `metis` is known to lose.
-3. **The general capability's remaining case is untested.** The arrowhead
-   topology (scenarios or contingencies sharing global variables) rests on
-   parallelism and memory, not on beating an ordering's exponent, and neither
-   gas family says anything about it. Phase 0c's generator is what would.
+3. **The arrowhead case is now measured (Phase 0c): the ordering is already
+   right, and the opening is parallelism.** On N-1 SCOPF up to 210k variables
+   the generic orderings reach linear fill with bounded fronts, and the
+   remaining cost is split between block-separable function evaluation (~half)
+   and block-separable factorization (~a third). Declared structure's case
+   there is running the blocks in parallel (plan Phase 5), not reordering them.
 
 Not covered here: periodic (ring) terminal constraints, sizes above 224k in the
 refinement family, and the 72 h / 20 min 503k case, which the earlier study
