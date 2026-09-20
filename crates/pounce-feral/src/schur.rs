@@ -31,11 +31,15 @@
 //! `n_s ≪ n_f`; the caller (Phase 2 `SchurAugSystemSolver`) is responsible for
 //! gating on that and falling back to the standard solver otherwise.
 
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use feral::{CscMatrix, FactorStatus, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::ESymSolverStatus;
+use pounce_linsol::summary::{LinearSolverSummary, SchurSummary};
 
-use crate::{FeralConfig, configure_solver};
+use crate::{FeralConfig, configure_solver, factor_record};
 
 /// Schur-complement KKT solver over a caller-supplied F/S partition.
 ///
@@ -92,6 +96,11 @@ pub struct FeralSchurSolver {
     have_factor: bool,
     initialized: bool,
     last_status: ESymSolverStatus,
+
+    /// Optional shared summary sink. The eliminated block's factorizations
+    /// are recorded like any other; the Schur breakdown goes into
+    /// [`LinearSolverSummary::schur`].
+    sink: Option<Arc<Mutex<LinearSolverSummary>>>,
 }
 
 impl FeralSchurSolver {
@@ -127,6 +136,49 @@ impl FeralSchurSolver {
             have_factor: false,
             initialized: false,
             last_status: ESymSolverStatus::Success,
+            sink: None,
+        }
+    }
+
+    /// Install a shared summary sink (see [`crate::FeralSolverInterface::with_summary_sink`]).
+    pub fn with_summary_sink(mut self, sink: Arc<Mutex<LinearSolverSummary>>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Fold the eliminated block's factorization into the sink.
+    fn record_eliminated_factor(&self, factor_secs: f64) {
+        let (Some(sink), Some(stats)) = (self.sink.as_ref(), self.ff_solver.last_factor_stats())
+        else {
+            return;
+        };
+        let record = factor_record(&self.ff_solver, &stats, factor_secs);
+        if let Ok(mut guard) = sink.lock() {
+            if guard.solver_name.is_empty() {
+                guard.solver_name = "feral".to_string();
+            }
+            guard.record(&record);
+        }
+    }
+
+    /// Record one completed Schur factorization's breakdown. Forming and
+    /// factoring `S` are also added to `total_factor_secs`, so that total is
+    /// the whole KKT factorization cost on either path.
+    fn record_schur_factor(&self, ff_secs: f64, form_secs: f64, s_secs: f64) {
+        let Some(sink) = self.sink.as_ref() else {
+            return;
+        };
+        if let Ok(mut guard) = sink.lock() {
+            guard.total_factor_secs += form_secs + s_secs;
+            let sch = guard.schur.get_or_insert_with(|| SchurSummary {
+                n_eliminated: self.n_f,
+                n_schur: self.n_s,
+                ..Default::default()
+            });
+            sch.n_factors += 1;
+            sch.eliminated_factor_secs += ff_secs;
+            sch.form_schur_secs += form_secs;
+            sch.schur_factor_secs += s_secs;
         }
     }
 
@@ -273,7 +325,13 @@ impl FeralSchurSolver {
                 Ok(m) => m,
                 Err(_) => return self.set_status(ESymSolverStatus::FatalError),
             };
-        let (neg_ff, singular_ff) = match self.ff_solver.factor(&ff_mat, None) {
+        let t_ff = Instant::now();
+        let ff_status = self.ff_solver.factor(&ff_mat, None);
+        let ff_secs = t_ff.elapsed().as_secs_f64();
+        if matches!(ff_status, FactorStatus::Success) {
+            self.record_eliminated_factor(ff_secs);
+        }
+        let (neg_ff, singular_ff) = match ff_status {
             FactorStatus::Success => match self.ff_solver.inertia() {
                 Some(i) => (i.negative, i.zero > 0),
                 None => (self.ff_solver.num_negative_eigenvalues(), false),
@@ -289,6 +347,7 @@ impl FeralSchurSolver {
         }
 
         // 2. Form S = A_SS − A_SFᵀ·(A_FF⁻¹·A_FS). One dense back-solve batch.
+        let t_form = Instant::now();
         for v in self.afs.iter_mut() {
             *v = 0.0;
         }
@@ -342,7 +401,14 @@ impl FeralSchurSolver {
             Ok(m) => m,
             Err(_) => return self.set_status(ESymSolverStatus::FatalError),
         };
-        let (neg_s, singular_s) = match self.s_solver.factor(&s_mat, None) {
+        let form_secs = t_form.elapsed().as_secs_f64();
+        let t_s = Instant::now();
+        let s_status = self.s_solver.factor(&s_mat, None);
+        let s_secs = t_s.elapsed().as_secs_f64();
+        if matches!(s_status, FactorStatus::Success) {
+            self.record_schur_factor(ff_secs, form_secs, s_secs);
+        }
+        let (neg_s, singular_s) = match s_status {
             FactorStatus::Success => match self.s_solver.inertia() {
                 Some(i) => (i.negative, i.zero > 0),
                 None => (self.s_solver.num_negative_eigenvalues(), false),
@@ -563,6 +629,38 @@ mod tests {
         let st = s.multi_solve(true, ia, ja, 1, &mut b, false, 0);
         assert_eq!(st, ESymSolverStatus::Success);
         (b, s.number_of_neg_evals())
+    }
+
+    /// A sink sees the eliminated block as an ordinary factorization and the
+    /// Schur breakdown in `schur`; `total_factor_secs` covers the whole block
+    /// factorization, so it is at least the sum of the three phases.
+    #[test]
+    fn summary_sink_records_the_schur_breakdown() {
+        let (n_f, n_s) = (40, 4);
+        let (dim, ia, ja, vals) = kkt(n_f, n_s, 3, true);
+        let sink = Arc::new(Mutex::new(LinearSolverSummary::default()));
+        let mut solver =
+            FeralSchurSolver::new(FeralConfig::default()).with_summary_sink(Arc::clone(&sink));
+        let schur = schur_indices_tail(n_f, n_s);
+        assert_eq!(
+            solver.initialize_structure(dim, &ia, &ja, &schur),
+            ESymSolverStatus::Success
+        );
+        for _ in 0..2 {
+            solver.values_array_mut().copy_from_slice(&vals);
+            assert_eq!(solver.factor(false, 0), ESymSolverStatus::Success);
+        }
+        let s = sink.lock().unwrap().clone();
+        assert_eq!(s.solver_name, "feral");
+        assert_eq!(s.n_factors, 2, "eliminated-block factorizations");
+        assert!(s.last_nnz_a.is_some());
+        let sch = s.schur.expect("the Schur path factored");
+        assert_eq!(
+            (sch.n_eliminated, sch.n_schur, sch.n_factors),
+            (n_f, n_s, 2)
+        );
+        let phases = sch.eliminated_factor_secs + sch.form_schur_secs + sch.schur_factor_secs;
+        assert!(s.total_factor_secs >= phases - 1e-12);
     }
 
     fn schur_indices_tail(n_f: usize, n_s: usize) -> Vec<usize> {

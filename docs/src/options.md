@@ -1927,6 +1927,7 @@ environment variable when left unset on the OptionsList (see
 | Option                       | Default | Meaning                                                                                                                                                                                  |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `feral_ordering`             | `auto`  | Fill-reducing ordering method (see table below). `auto` lets feral's adaptive dispatcher pick per-matrix; `auto_race` measures symbolic fill and keeps the smallest. Collocation, optimal-control and PDE-in-time models should set `metis`. |
+| `feral_ordering_preprocess`  | `auto`  | Ordering-stage preprocessing. `ldlt_compress` is the Duff-Pralet symmetric matching plus quotient-graph compression (MUMPS `ICNTL(12)=2`): each matched pair — typically a variable and the constraint it pivots with — is ordered as one super-variable, so the fill-reducing method never splits a 2×2 pivot. `none` orders the KKT pattern directly. `auto` (default) lets FERAL's shape predicate decide; the choice it made is reported as `linear_solver.last_ordering_preprocess`. The trade-off is large and model-dependent: on GasLib-40 transient control at 112k variables with `metis`, `none` factors 7× faster than the `ldlt_compress` that `auto` picks (8.8e9 against 6.5e10 flops) but pivots so poorly — about 100k delayed columns per factorization, tiny pivots, quality escalations — that the 56k solve takes 190 iterations and 234 s against 94 and 100 s. A diagnostic lever, not a tuning default. |
 | `feral_pivtol`               | `1e-8`  | Relative Bunch-Kaufman partial-pivoting threshold `u`. Analog of `ma27_pivtol` / `ma57_pivtol`. Smaller → sparser `L`, faster, less stable; larger → more 2×2 blocks, denser, more stable. LAPACK's textbook maximum-stability value is `0.5`. |
 | `feral_refine`               | *conditional* | Whether FERAL runs its own iterative refinement inside every back-solve. **The default is conditional and this column cannot express it (gh#909): `yes` on the exact-Hessian path — the default path — and `no` under `hessian_approximation=limited-memory`. `--print-options` prints `yes`, the exact-Hessian value, because a single registered default is all it has; read the carve-out here.** gh#710 (reported as gh#698 observation 5) turned refinement off for the NLP solver, as on every direct linear solver Ipopt ships and on POUNCE's own MA57 — but it registered `no` while the reader consulted only the user's setting, so an unset option kept `FeralConfig`'s own `yes` and the exact path never changed. gh#909 found the disagreement and kept the behaviour, because gh#710's measurement below was taken **under limited-memory** and that is precisely the path the carve-out still turns off. On the exact path, measured across all 79 fixtures on both legs, refinement is the better default: ten fixture-legs move, no status flips, and the balance favours it (`issue_508_infeasible_gap_1em4` 441 → 245 iterations, `square_flowsheet_resto` 54 → 47, against one loss at 31 → 32). Off-corpus `NARX_CFy` goes 400 → 630 iterations without it, and on `eigena2` it is what makes the superlinear tail robust — `3.4e-10` with, `5.4e-09` without. `FeralConfig`'s own default stays `yes` for callers such as `pounce-convex`'s SOS/QP solvers that refine their own system but never call `increase_quality`. Refinement belongs on the *unreduced* Newton system — that is `PdFullSpaceSolver`'s loop, capped at `max_refinement_steps` and accepting at `residual_ratio_max = 1e-10` — not on the condensed system a backend factorized, because the condensation destroys information as `mu -> 0` (Wachter-Biegler 3.10). Turning it on nests FERAL's loop inside that one, and FERAL's convergence target is hard-wired to `eps*sqrt(n)`; on a large ill-conditioned KKT that target is unreachable, so the inner loop runs to its cap on every back-solve chasing digits the caller discards. It was on unconditionally through 0.10.0 because FERAL's `ZeroPivotAction::ForceAccept` can leave real residual against the system it factorized, and without it the gh#590 badly-scaled LP exits `RestorationFailed` — but Ipopt's answer to a factorization that cannot deliver is `IncreaseQuality` (escalate the pivot threshold and refactorize), and that rung was unimplemented in the FERAL backend. It is now, so refinement no longer has to stand in for it. On the 126028-dimension `laptime` KKT under limited-memory, one binary, three runs back to back: 68.9 s on, 18.8 s off, against MA57's 10.7 s (back-solve 54.6 s -> 8.2 s). Set `yes` to restore pre-0.11 behaviour on a problem that needs it. |
 | `feral_refine_steps`         | `10`    | Maximum correction steps FERAL's inner iterative refinement may take on a single back-solve, when `feral_refine` is on. An **upper bound**, not a step count: refinement still exits early on its own convergence test, so lowering this only truncates the solves that were going to run long. `0` leaves refinement enabled but caps it at zero corrections — that still costs the residual evaluation, so use `feral_refine=no` to switch refinement off outright. Reach for a small cap (`1`) on very large, badly conditioned KKT systems where the interior-point tail spends most of its wall clock inside refinement rather than the factor (gh#710) — but check the answer, not just the clock: sweeping the fixture corpus at `1` moves 15 of 118 legs and loses two, `deb7` (exact) from `SolveSucceeded` to `ErrorInStepComputation` and `cresc4` (limited-memory) from `SolveSucceeded` to `InfeasibleProblemDetected`, while others improve. A per-problem lever, not a global one. Ignored when `feral_refine=no`, which is what `hessian_approximation=limited-memory` selects (gh#909) — on that path set `feral_refine=yes` explicitly before either knob has any effect. On the exact-Hessian path refinement is on, so both knobs are live there without setting anything. |
@@ -2023,6 +2024,133 @@ poor ordering only costs fill/time, never correctness. This maps to
 FERAL's `OrderingMethod::External` (feral#107) and honors only the default
 FERAL backend.
 
+## Block-structured KKT
+
+Some models are *arrowhead*: independent blocks that touch each other only
+through a small set of shared columns or linking rows. Security-constrained
+OPF (one block per contingency, sharing the base-case dispatch), two-stage
+stochastic programs (one block per scenario, sharing the first stage) and
+multi-cell process models all have this shape. Told where the blocks are,
+POUNCE factorizes them in parallel and couples them through a dense complement
+over the border, instead of factorizing one monolithic KKT.
+
+**This is exact.** It is a permutation plus block elimination of the same
+symmetric indefinite system, with inertia recovered by Haynsworth additivity —
+not a decomposition algorithm, and nothing about convexity is assumed. The
+solve takes the same iterates it would have taken: on the measurements below
+the iteration counts and objectives are identical to the monolithic path, digit
+for digit.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `block_structure_file` | (unset) | Path to a declaration for the `.nl` path. First line `n m`, then `n` variable labels and `m` constraint labels, whitespace-separated, **negative for the shared ones**. POUNCE maps model indices onto the KKT itself. |
+| `kkt_block_detect` | `no` | Look for the structure in the assembled KKT rather than being told it. A degree heuristic — see the limits below. |
+| `kkt_block_min_size` | `256` | Refuse a partition whose *median* block is narrower than this many KKT columns. `0` honors any partition. |
+| `kkt_block_restoration` | `yes` | Use the same partition inside the restoration sub-IPM. |
+
+Honored on the FERAL + exact-Hessian path (the default path). Anywhere else —
+another linear solver, `hessian_approximation=limited-memory`, a declaration
+that does not fit the problem — POUNCE falls back to the standard solver with a
+warning and solves normally. A declaration can cost you time; it cannot cost
+you an answer.
+
+### Declaring the structure
+
+Three routes, all carrying the same information:
+
+* **From Python**, in *model* coordinates — one label per variable and one per
+  constraint, negative for shared:
+
+  ```python
+  problem.set_block_structure(var_blocks, con_blocks)
+  ```
+
+  POUNCE maps these onto the KKT layout itself, which is the point: the layout
+  depends on which variables were fixed and removed and on how constraints
+  split into equalities and inequalities, none of which a modelling layer can
+  see. (`set_kkt_block_structure` takes KKT-space indices directly and exists
+  for callers that already have them; prefer the model-space form.)
+* **From a `.nl` file**, with `block_structure_file` — the same two label lists
+  in a text file, for the CLI and any AMPL-style pipeline.
+* **From discopt**, which resolves a model's `set_block` / `mark_coupling`
+  annotations into this form and passes them through
+  (`solve_nlp_from_model(..., block_structure="auto")`).
+
+### When it pays, and when it does not
+
+The block path's only win is parallelism: a good ordering already finds
+arrowhead structure, so the monolithic factorization is not doing redundant
+work. Against that win sits a fixed per-block cost — one symbolic analysis, one
+task, one border tail — so **blocks have to be wide enough to be worth
+dispatching**. Measured on a 32-block arrowhead, factorization seconds
+full-space → declared:
+
+| columns per block | full-space | declared | ratio |
+|---|---|---|---|
+| 60 | 0.0060 s | 0.0195 s | 0.31× |
+| 125 | 0.0133 s | 0.0231 s | 0.57× |
+| 250 | 0.0260 s | 0.0264 s | 0.98× |
+| 500 | 0.0534 s | 0.0343 s | 1.56× |
+| 1 000 | 0.1244 s | 0.0500 s | 2.49× |
+| 2 000 | 0.2725 s | 0.0843 s | 3.23× |
+
+`kkt_block_min_size` is the guard for that: below it the declaration is refused
+and logged, so a small model does not silently take the slower path. Raise it
+if your blocks are wide but the border is large; set `0` to override the check.
+
+The border matters for the same reason — its complement is dense, so a
+partition whose border runs to thousands of columns costs more than the
+factorization it replaces, and POUNCE refuses those too.
+
+On a corrective N-1 AC-SCOPF built from pglib `case1354_pegase`, where the
+blocks are 13 601 KKT columns wide and the border is 259:
+
+| contingencies | variables | factorization | wall | iterations |
+|---|---|---|---|---|
+| 16 | 54 859 | 5.66 → 1.31 s (4.3×) | 18.1 → 10.0 s | 43 = 43 |
+| 32 | 106 491 | 11.52 → 2.42 s (4.8×) | 37.7 → 21.1 s | 49 = 49 |
+| 64 | 209 755 | 10.72 → 2.82 s (3.8×) | 125.1 → 111.9 s | 87 = 87 |
+
+The end-to-end factor is smaller than the factorization factor because
+factorization is only part of a solve — on these models roughly a third, with
+function evaluation the larger share. That is arithmetic, not a disappointment:
+speeding up a third of the work by 4× is a 1.3–1.8× solve.
+
+### Restoration
+
+`kkt_block_restoration` (default `yes`) carries the partition into the
+restoration sub-IPM. It applies unchanged there because POUNCE reduces the
+restoration KKT onto the original system before factorizing, so the same labels
+describe it. On the infeasible 64-contingency run above, restoration's
+factorizations fall from 35.0 s to 11.4 s — three times the main solve's share.
+
+One caveat worth knowing: block elimination cannot pivot across the
+block/border split, so the factorizations are not bit-identical to the
+monolithic ones. The main solve reproduced its trajectory exactly on every
+model measured; restoration, which is called precisely because the model is
+locally infeasible, can take a slightly different path to the same verdict. Set
+`no` to hold restoration to the monolithic factorization.
+
+### Detection, and why a declaration beats it
+
+`kkt_block_detect=yes` looks for the structure by ranking columns by degree and
+peeling the densest. It works when the shared columns stand out — on
+`case118_ieee` they have degree 130 against a median of 6 — and **fails when
+they do not**: on `case1354_pegase` the shared generator columns have degree
+~50, no more than many ordinary columns, and detection reports 581 blocks over
+a 7 301-column border, which the border guard then refuses. The model knows
+which columns are shared; a degree heuristic only sometimes does. Use detection
+to discover whether a model has structure worth declaring, and a declaration to
+exploit it.
+
+### What gets reported
+
+When the path engages, the solve report's `linear_solver.blocks` object (and
+Python's `info["linear_solver"]["blocks"]`) carries `n_blocks`, `border_dim`,
+`largest_block`, the number of block factorizations and the seconds they took;
+restoration's appear under `linear_solver.restoration.blocks`. If that object
+is absent, the partition was refused — the log says why.
+
 ## Environment overrides (FERAL and debug gates)
 
 A handful of knobs are reachable through environment variables. The
@@ -2043,6 +2171,7 @@ embeddings).
 | Variable                            | Option                       |
 |-------------------------------------|------------------------------|
 | `POUNCE_FERAL_ORDERING`             | `feral_ordering`             |
+| `POUNCE_FERAL_ORDERING_PREPROCESS`  | `feral_ordering_preprocess`  |
 | `POUNCE_FERAL_SCALING`              | `feral_scaling`              |
 | `POUNCE_FERAL_PIVTOL`               | `feral_pivtol` (deprecated bare `FERAL_PIVTOL` also accepted) |
 | `POUNCE_FERAL_REFINE`               | `feral_refine`               |

@@ -81,6 +81,10 @@ pub struct PyProblem {
     /// `IpoptApplication::set_kkt_schur_block` in `prepare`. `None` uses the
     /// standard full-space solver.
     kkt_schur_block: Option<Vec<usize>>,
+    /// KKT-space block labels for the block-parallel path; `< 0` is the border.
+    kkt_blocks: Option<Vec<i32>>,
+    /// The same structure in model space: `(variable labels, constraint labels)`.
+    model_blocks: Option<(Vec<i32>, Vec<i32>)>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -156,6 +160,8 @@ impl PyProblem {
             user_scaling: None,
             external_ordering: None,
             kkt_schur_block: None,
+            kkt_blocks: None,
+            model_blocks: None,
         })
     }
 
@@ -465,6 +471,16 @@ impl PyProblem {
         }
         info.set_item("wall_time", timing.overall_alg.total_wallclock_time())?;
         info.set_item("timing", timing_dict)?;
+        // Linear-solver post-mortem: factorization counts, fill, the work
+        // and pivoting totals, and the Schur breakdown when that path ran.
+        // Same keys as the solve report's `linear_solver` object. `None`
+        // when the backend does not self-instrument (MA57, custom factories).
+        let linsol = app.linear_solver_summary().filter(|s| !s.is_empty());
+        let linsol_obj: PyObject = match &linsol {
+            Some(s) => linear_solver_dict(py, s)?.into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("linear_solver", linsol_obj)?;
         // Optional `pounce.solve-report/v1` JSON, written by the canonical
         // Rust writer (same schema as the CLI's `--json-output`), so callers
         // like the pip GAMS link can emit a FAIR solve report without the
@@ -478,6 +494,7 @@ impl PyProblem {
                 &stats,
                 status,
                 &bridge.borrow().state,
+                linsol,
             )?;
         }
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
@@ -634,6 +651,92 @@ impl PyProblem {
         }
         self.kkt_schur_block = Some(out);
         Ok(())
+    }
+
+    /// Declare the block structure in the model's own terms: one block id per
+    /// variable and per constraint, negative for the shared ones.
+    ///
+    /// The natural form for a structured model — "this variable is shared,
+    /// everything in scenario `k` is block `k`" — with pounce mapping it to
+    /// KKT indices itself (fixed variables, the equality / inequality split).
+    /// Blocks must couple only through the shared entries; when they do not,
+    /// or the lengths do not match the problem, the solve falls back to the
+    /// standard solver and `info["linear_solver"]["blocks"]` stays `None`.
+    ///
+    /// Each block is then factored independently and in parallel, with a Schur
+    /// complement on the shared columns. Honored on the default feral +
+    /// exact-Hessian path.
+    ///
+    /// Persistent config; drop it with `clear_block_structure()`.
+    fn set_block_structure(
+        &mut self,
+        var_blocks: Py<PyAny>,
+        con_blocks: Py<PyAny>,
+    ) -> PyResult<()> {
+        let v = extract_index_vec_inferred(&var_blocks, "block structure (variables)")?;
+        let c = extract_index_vec_inferred(&con_blocks, "block structure (constraints)")?;
+        if v.len() != self.n as usize || c.len() != self.m as usize {
+            return Err(PyValueError::new_err(format!(
+                "block structure: expected {} variable and {} constraint labels, got {} and {}",
+                self.n,
+                self.m,
+                v.len(),
+                c.len()
+            )));
+        }
+        self.model_blocks = Some((
+            v.into_iter().map(|x| x as i32).collect(),
+            c.into_iter().map(|x| x as i32).collect(),
+        ));
+        Ok(())
+    }
+
+    /// Drop any declared model-space block structure.
+    fn clear_block_structure(&mut self) {
+        self.model_blocks = None;
+    }
+
+    /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
+    ///
+    /// `labels` are **KKT-space block ids** (`0..dim`, in the solver's
+    /// internal `x, slack, eq-dual, ineq-dual` block order), one per KKT
+    /// index, with any negative value marking the shared border: blocks couple
+    /// to the border and never to each other. Each block is then factored
+    /// independently and in parallel, with a Schur complement on the border
+    /// and inertia by Haynsworth additivity.
+    ///
+    /// For arrowhead systems — scenarios, contingencies, or any blocks sharing
+    /// a few global columns. When the partition does not match the matrix (an
+    /// entry joining two blocks), or a block is singular, the solve falls back
+    /// to the standard solver transparently; `info["linear_solver"]["blocks"]`
+    /// is present only when the block path actually factored. Honored on the
+    /// default feral + exact-Hessian path.
+    ///
+    /// Pass an empty sequence to ask the solver to *detect* the structure from
+    /// the assembled KKT (equivalent to the `kkt_block_detect=yes` option).
+    ///
+    /// Persistent config: call once before `solve()`; drop with
+    /// `clear_kkt_block_structure()`.
+    fn set_kkt_block_structure(&mut self, labels: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&labels, "kkt_block_structure")?;
+        self.kkt_blocks = Some(idx.into_iter().map(|v| v as i32).collect());
+        Ok(())
+    }
+
+    /// Drop any installed block partition, restoring the standard solver.
+    fn clear_kkt_block_structure(&mut self) {
+        self.kkt_blocks = None;
+    }
+
+    /// The currently-installed block partition as a numpy int64 array, or
+    /// `None`.
+    fn get_kkt_block_structure<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.kkt_blocks.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
     }
 
     /// Drop any installed Schur KKT partition, restoring the standard
@@ -1123,11 +1226,25 @@ impl PyProblem {
         if let Some(indices) = &self.kkt_schur_block {
             app.set_kkt_schur_block(indices.clone());
         }
+        // Block-parallel KKT partition (structured-KKT Phase 5b), declared in
+        // model space or directly in KKT space.
+        if let Some((v, c)) = &self.model_blocks {
+            app.set_block_structure(v.clone(), c.clone());
+        }
+        if let Some(labels) = &self.kkt_blocks {
+            app.set_kkt_block_structure(labels.clone());
+        }
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
+        // Restoration factorizations record into their own sink, reported as
+        // `info["linear_solver"]["restoration"]`.
+        let resto_sink = app.restoration_summary_sink();
         let bff_mint = move || -> InnerBackendFactoryFactory {
             let feral_cfg = feral_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone()))
+            let sink = std::sync::Arc::clone(&resto_sink);
+            Box::new(move || {
+                default_backend_factory(feral_cfg.clone(), std::sync::Arc::clone(&sink))
+            })
         };
         let resto_provider = make_default_restoration_factory_provider(
             RestoAlgorithmBuilder::new(),
@@ -1298,6 +1415,7 @@ fn write_solve_report(
     stats: &pounce_nlp::solve_statistics::SolveStatistics,
     status: ApplicationReturnStatus,
     state: &PyTnlpInit,
+    linsol: Option<pounce_linsol::summary::LinearSolverSummary>,
 ) -> PyResult<()> {
     let detail = match detail {
         Some(s) => ReportDetail::parse(s).map_err(PyValueError::new_err)?,
@@ -1315,10 +1433,86 @@ fn write_solve_report(
     builder.solution.objective = state.final_obj;
     builder.solution.x = state.final_x.clone();
     builder.solution.lambda = state.final_lambda.clone();
+    if let Some(summary) = linsol {
+        builder.set_linear_solver_summary(summary);
+    }
     let report = builder.finish();
     write_report_file(std::path::Path::new(path), &report)
         .map_err(|e| PyIOError::new_err(format!("failed to write solve report to {path}: {e}")))?;
     Ok(())
+}
+
+/// `info["linear_solver"]`: the [`LinearSolverSummary`] as a dict, keyed
+/// exactly like the solve report's `linear_solver` object. Unset optional
+/// fields are `None` here rather than omitted, so a caller can index any
+/// key without guarding it.
+///
+/// [`LinearSolverSummary`]: pounce_linsol::summary::LinearSolverSummary
+fn linear_solver_dict<'py>(
+    py: Python<'py>,
+    s: &pounce_linsol::summary::LinearSolverSummary,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("solver_name", &s.solver_name)?;
+    d.set_item("n_factors", s.n_factors)?;
+    d.set_item("n_pattern_reuse", s.n_pattern_reuse)?;
+    d.set_item("n_pattern_changes", s.n_pattern_changes)?;
+    d.set_item("max_fill_ratio", s.max_fill_ratio)?;
+    d.set_item("min_abs_pivot", s.min_abs_pivot)?;
+    d.set_item("max_abs_pivot", s.max_abs_pivot)?;
+    d.set_item("last_inertia", s.last_inertia)?;
+    d.set_item("last_nnz_a", s.last_nnz_a)?;
+    d.set_item("last_nnz_l", s.last_nnz_l)?;
+    d.set_item("total_factor_secs", s.total_factor_secs)?;
+    d.set_item("total_factor_flops", s.total_factor_flops)?;
+    d.set_item("total_delayed_cols", s.total_delayed_cols)?;
+    d.set_item("total_two_by_two", s.total_two_by_two)?;
+    d.set_item("total_n_tiny", s.total_n_tiny)?;
+    d.set_item("last_factor_flops", s.last_factor_flops)?;
+    d.set_item("last_peak_bytes", s.last_peak_bytes)?;
+    d.set_item("last_n_supernodes", s.last_n_supernodes)?;
+    d.set_item("last_max_front_rows", s.last_max_front_rows)?;
+    d.set_item("last_delayed_cols", s.last_delayed_cols)?;
+    d.set_item("last_two_by_two", s.last_two_by_two)?;
+    d.set_item("last_n_tiny", s.last_n_tiny)?;
+    d.set_item("last_ordering", s.last_ordering.as_deref())?;
+    d.set_item(
+        "last_ordering_preprocess",
+        s.last_ordering_preprocess.as_deref(),
+    )?;
+    let schur: PyObject = match &s.schur {
+        Some(c) => {
+            let sd = PyDict::new_bound(py);
+            sd.set_item("n_eliminated", c.n_eliminated)?;
+            sd.set_item("n_schur", c.n_schur)?;
+            sd.set_item("n_factors", c.n_factors)?;
+            sd.set_item("eliminated_factor_secs", c.eliminated_factor_secs)?;
+            sd.set_item("form_schur_secs", c.form_schur_secs)?;
+            sd.set_item("schur_factor_secs", c.schur_factor_secs)?;
+            sd.into_any().unbind()
+        }
+        None => py.None(),
+    };
+    d.set_item("schur", schur)?;
+    let blocks: PyObject = match &s.blocks {
+        Some(b) => {
+            let bd = PyDict::new_bound(py);
+            bd.set_item("n_blocks", b.n_blocks)?;
+            bd.set_item("border_dim", b.border_dim)?;
+            bd.set_item("largest_block", b.largest_block)?;
+            bd.set_item("n_factors", b.n_factors)?;
+            bd.set_item("factor_secs", b.factor_secs)?;
+            bd.into_any().unbind()
+        }
+        None => py.None(),
+    };
+    d.set_item("blocks", blocks)?;
+    let resto: PyObject = match &s.restoration {
+        Some(r) => linear_solver_dict(py, r)?.into_any().unbind(),
+        None => py.None(),
+    };
+    d.set_item("restoration", resto)?;
+    Ok(d)
 }
 
 /// Stable string name for a warm-start block verdict, so
@@ -1672,15 +1866,21 @@ fn decode_bounds(
 /// `"resto."`-prefixed snapshot at its call site, or the `ma57_*`
 /// options go silently missing on the Python path the way they did
 /// everywhere else.
-fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
+///
+/// `sink` is the application's restoration summary sink.
+fn default_backend_factory(
+    feral_cfg: pounce_feral::FeralConfig,
+    sink: std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
+) -> LinearBackendFactory {
     Box::new(
         move |_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             // Only FERAL is wired into the wheel build; the `_choice`
             // argument is honored by the CLI build (which can route to
             // MA57) but ignored here.
-            Box::new(pounce_feral::FeralSolverInterface::with_config(
-                feral_cfg.clone(),
-            ))
+            Box::new(
+                pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
+                    .with_summary_sink(std::sync::Arc::clone(&sink)),
+            )
         },
     )
 }

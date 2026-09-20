@@ -35,7 +35,8 @@ use crate::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
+    IpoptApplication, default_backend_factory_with_sink, feral_config_from_options,
+    ma57_config_from_options,
 };
 use pounce_algorithm::second_opinion::{
     SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
@@ -171,6 +172,11 @@ pub fn run_second_opinion_ladder(
     }
 
     let restore = OptionSnapshot::take(app);
+    // The linear-solver summary follows the same rule as the statistics:
+    // every rung's `optimize_tnlp` resets and refills it, so without this the
+    // caller kept the original verdict beside the last *rejected* rung's
+    // factorization counts.
+    let base_linsol = app.linear_solver_summary_state();
     report(&format!(
         "pounce: {} — re-solving along {} different trajector{} before \
          believing it (second-opinion ladder: {}).",
@@ -222,10 +228,18 @@ pub fn run_second_opinion_ladder(
         // rung may set `linear_solver` or an `ma57_*` knob, and the provider is
         // rebuilt precisely so the sub-IPM sees the rung and not the baseline.
         let ma57_cfg = ma57_config_from_options(app.options(), "resto.");
+        let resto_sink = app.restoration_summary_sink();
         let bff_mint = move || -> InnerBackendFactoryFactory {
             let feral_cfg = feral_cfg.clone();
             let ma57_cfg = ma57_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
+            let sink = std::sync::Arc::clone(&resto_sink);
+            Box::new(move || {
+                default_backend_factory_with_sink(
+                    feral_cfg.clone(),
+                    ma57_cfg.clone(),
+                    std::sync::Arc::clone(&sink),
+                )
+            })
         };
         app.set_restoration_factory_provider(make_default_restoration_factory_provider(
             RestoAlgorithmBuilder::new(),
@@ -261,6 +275,9 @@ pub fn run_second_opinion_ladder(
         ));
     }
     restore.apply(app);
+    if !scaling_retry_promoted(retry_status) {
+        app.restore_linear_solver_summary_state(base_linsol);
+    }
 
     let (status, statistics) =
         resolve_scaling_retry_outcome(status, retry_status, statistics, retry_stats);

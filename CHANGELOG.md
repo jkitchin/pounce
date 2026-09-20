@@ -9,6 +9,70 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Block-structured KKT solve.** A model that is arrowhead — independent
+  blocks coupled only through a small border, as in security-constrained OPF,
+  two-stage stochastic programs and multi-cell process models — can now tell
+  POUNCE where its blocks are, and the KKT factorization runs block-parallel
+  over a shared border instead of monolithically. Declare it in model
+  coordinates with `Problem.set_block_structure(var_blocks, con_blocks)`
+  (negative labels are the shared ones), from a `.nl` pipeline with the
+  `block_structure_file` option, or let `kkt_block_detect=yes` look for it.
+  Exact by construction — a permutation plus block elimination of the same
+  system, inertia by Haynsworth additivity — so the solve takes the same
+  iterates: measured on a corrective N-1 AC-SCOPF from pglib `case1354_pegase`
+  at 16/32/64 contingencies, identical iteration counts and objectives with the
+  factorization 4.3× / 4.8× / 3.8× faster and the solve 1.8× / 1.8× / 1.1×.
+  `kkt_block_restoration` (default `yes`) carries the partition into the
+  restoration sub-IPM, where it took an infeasible 209 755-variable run's
+  factorizations from 35.0 s to 11.4 s. `kkt_block_min_size` (default 256)
+  refuses a partition whose blocks are too narrow to pay for their own
+  dispatch, measured to be slower below ~250 columns per block. Honored on the
+  FERAL + exact-Hessian path; anywhere else, and on a declaration that does not
+  fit the problem, POUNCE warns and solves normally. Reported under
+  `linear_solver.blocks`. See "Block-structured KKT" in `docs/src/options.md`.
+
+- **Factorization work and pivoting statistics** in the linear-solver
+  summary: the solve report's `linear_solver` object and a new Python
+  `info["linear_solver"]` dict. Per solve: seconds spent in the numeric
+  factor (always measured, independent of `timing_statistics`), FERAL's
+  `Σ ncol·nrow²` work proxy, delayed-column entries, 2×2 pivot blocks and
+  statically perturbed pivots, each as a total over factorizations; for the
+  final factorization, the same counts plus predicted peak memory, supernode
+  count, largest front and the concrete ordering used (never `auto`). When the
+  block-triangular / Schur path (`set_kkt_schur_block`) actually factors, a
+  `schur` sub-object breaks the time into the eliminated block, forming `S`
+  and factoring `S`; its absence means the path was not requested or fell back,
+  which was previously invisible. Factorizations inside the restoration phase
+  are reported in a nested `restoration` object of the same shape, so the
+  main-solve fields stay about the main solve; before, restoration recorded
+  nothing, and on a restoration-heavy solve that was most of the factorization
+  work. Additive within `pounce.solve-report/v1`. These are the Phase 0
+  measurements for structured-KKT decomposition.
+
+- **`feral_ordering_preprocess`** (`auto` / `none` / `ldlt_compress`), with
+  the resolved choice reported as `linear_solver.last_ordering_preprocess`.
+  Exposes FERAL's matching-compressed ordering, which `auto` already selects
+  on many KKT systems and which dominates factorization cost on GasLib-40
+  transient control: forcing `none` there cuts flops per factorization 7× but
+  doubles the iterations. Default unchanged.
+
+### Fixed
+
+- **Linear-solver summary under L-BFGS reported one backend's counts, not the
+  solve's.** The limited-memory path builds two FERAL backends from one factory
+  (the low-rank solver's and its bypass), and each overwrote the shared summary
+  with its own running totals, so `n_factors` and every aggregate reflected
+  whichever factored last. Each factorization is now folded into the summary.
+
+- **Linear-solver summary described a different solve than the verdict after a
+  second-opinion ladder.** Every rung's re-solve resets and refills the
+  summary, so when the ladder kept the original verdict, the reported status
+  and statistics were the original solve's while `linear_solver` was the last
+  rejected rung's. The summary now follows the same rule as the statistics: the
+  promoted rung's on promotion, the original solve's otherwise.
+
 
 ## [0.12.0] - 2026-09-19
 

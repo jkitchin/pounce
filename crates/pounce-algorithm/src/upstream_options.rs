@@ -1617,6 +1617,48 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, feral's `choose_adaptive` dispatcher. Concrete-method choices bypass the dispatcher and pin a single method for the run. AutoRace measures symbolic fill per problem, which is not the same as measuring factorization time. For collocation, optimal-control and PDE-in-time models set `metis` (see docs/src/options.md, feral_ordering variants). Falls back to the POUNCE_FERAL_ORDERING environment variable (same tag set) when not set on the OptionsList. See `crates/pounce-feral/src/lib.rs` (FeralConfig::ordering) and `feral/src/symbolic/mod.rs` (OrderingMethod) for per-variant rationale and evidence.",
     )?;
     r.add_string_option(
+        "block_structure_file",
+        "Path to a block-structure declaration for the block-parallel KKT path.",
+        "",
+        &[("*", "Any acceptable standard file name")],
+        "Text file: `n m` on the first line, then n variable block ids and m constraint block ids, whitespace-separated, negative for the shared ones. Blocks must couple only through the shared entries. pounce maps the declaration to KKT indices itself (fixed variables, equality / inequality split) and falls back to the standard solver when it does not fit the problem or the matrix. This is the .nl-file route to the structure a modelling layer would otherwise pass through the API; see IpoptApplication::set_block_structure.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "kkt_block_min_size",
+        "Refuse a block partition whose median block is narrower than this.",
+        0,
+        256,
+        "The monolithic factorization of an arrowhead KKT already finds this structure, so the block path's only win is parallelism, against a fixed per-block cost (one symbolic analysis, one task, one border tail). Below a few hundred columns per block that cost is the whole story and the partition makes the solve slower: measured on a 32-block arrowhead, factorization is 0.31x at 60 columns per block, 0.57x at 125, 0.98x at 250, 1.56x at 500, 2.49x at 1000, 3.23x at 2000. The default sits just above the crossover. `0` disables the check and always honors the partition.",
+    )?;
+    r.add_string_option(
+        "kkt_block_restoration",
+        "Carry the block-parallel KKT partition into the restoration sub-IPM.",
+        "yes",
+        &[("yes", "Restoration factors block-parallel too"), ("no", "Restoration factors monolithically")],
+        "Only has an effect when a partition is in use (block_structure_file, set_block_structure, or kkt_block_detect). `AugRestoSystemSolver` reduces the 8-block restoration KKT onto the original 4-block system before delegating, so the matrix its inner solver factors has the outer system's dimension and sparsity and the same labels describe it. Worth turning off only to measure what restoration contributes: on an infeasible 209k-variable SCOPF it takes restoration's factorization time from 34.7s to 11.3s, three times the main solve's share.",
+    )?;
+    r.add_string_option(
+        "kkt_block_detect",
+        "Detect a block-diagonal-plus-border KKT and solve it block-parallel.",
+        "no",
+        &[
+            ("no", "Standard monolithic KKT solve. Default."),
+            ("yes", "Look for a block structure in the assembled KKT (high-degree shared columns, blocks as the components without them) and, when one is found, factor every block independently and in parallel with a Schur complement on the shared columns. Falls back transparently when no structure is found or a block is singular; `linear_solver.blocks` in the solve report says whether it ran."),
+        ],
+        "For arrowhead systems -- scenarios, contingencies, or any blocks sharing a few global columns. Measured on a 210k-variable N-1 security-constrained OPF: the factorization is ~10x faster as coarse block tasks than feral's per-supernode tree parallelism can make it, and a whole KKT solve ~4-6x. Honored on the IPM + feral + exact-Hessian path only. A caller that knows its structure can supply it directly instead (IpoptApplication::set_kkt_block_structure), which skips detection.",
+    )?;
+    r.add_string_option(
+        "feral_ordering_preprocess",
+        "Ordering-stage preprocessing for the FERAL backend.",
+        "auto",
+        &[
+            ("auto", "FERAL's shape predicate decides whether to compress. Pounce default."),
+            ("none", "Order the symmetric KKT pattern directly."),
+            ("ldlt_compress", "Duff-Pralet symmetric matching plus quotient-graph compression (MUMPS ICNTL(12)=2): each matched pair -- typically a variable and the constraint it pivots with -- is ordered as one super-variable, so the fill-reducing method never splits a 2x2 pivot."),
+        ],
+        "Pounce reads this option only when set explicitly; unset keeps FERAL's Auto. Applies to every fill-reducing method except a caller-supplied permutation. Falls back to the POUNCE_FERAL_ORDERING_PREPROCESS environment variable. The resolved choice is reported as linear_solver.last_ordering_preprocess.",
+    )?;
+    r.add_string_option(
         "feral_scaling",
         "Diagonal scaling strategy for the FERAL backend.",
         "auto",

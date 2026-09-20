@@ -255,6 +255,14 @@ pub struct OptionFileLoad {
     pub warnings: Vec<String>,
 }
 
+/// Opaque snapshot of an application's linear-solver summaries; see
+/// [`IpoptApplication::linear_solver_summary_state`].
+#[derive(Debug, Clone)]
+pub struct LinearSolverSummaryState {
+    main: LinearSolverSummary,
+    restoration: LinearSolverSummary,
+}
+
 /// Factory that constructs a fresh restoration-phase strategy on
 /// demand. The outer algorithm owns at most one restoration object,
 /// so the factory is invoked once per `optimize_tnlp` call. The
@@ -437,6 +445,21 @@ pub struct IpoptApplication {
     /// custom factories plugged through [`Self::set_linear_backend_factory`]
     /// and the HSL MA57 backend leave the sink empty.
     linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// Companion to [`Self::linsol_summary_sink`] for the restoration
+    /// phase's sub-solves. The frontends that wire a restoration factory
+    /// install it via [`Self::restoration_summary_sink`]; it is reset with
+    /// the main sink and surfaces as [`LinearSolverSummary::restoration`].
+    resto_linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// The block-parallel KKT partition this solve resolved, published for
+    /// the restoration sub-IPM (structured-KKT Phase 5b). Restoration's inner
+    /// builder is minted by the frontend *before* the solve — before the KKT
+    /// layout, and so the mapping onto it, exists — so the labels cannot be
+    /// installed on it directly. They are written here as the outer algorithm
+    /// is built and read when restoration runs. `AugRestoSystemSolver` reduces
+    /// the restoration KKT onto the original 4-block system before delegating,
+    /// so the matrix the inner solver factors is the one these labels
+    /// describe. Reset with the sinks at the top of every solve.
+    kkt_blocks_published: crate::alg_builder::KktBlocksCell,
     /// Shared tally of successful linear-solver quality escalations for
     /// the current solve (gh#857). Handed to every `AlgorithmBuilder`
     /// this application mints — [`Self::algorithm_builder_from_options`]
@@ -566,6 +589,15 @@ pub struct IpoptApplication {
     /// so a stray hook never breaks a solve. Persistent config (not
     /// auto-cleared). Wire-set via [`Self::set_kkt_schur_block`].
     kkt_schur_block: Option<Vec<usize>>,
+    /// Block-parallel KKT partition (structured-KKT Phase 5b): KKT-space block
+    /// labels, `< 0` for the shared border, **empty** meaning "detect".
+    /// Wire-set via [`Self::set_kkt_block_structure`].
+    kkt_blocks: Option<Vec<i32>>,
+    /// The same partition declared in the *model's* own terms — one block per
+    /// variable and per constraint — which [`map_block_structure_to_kkt`]
+    /// turns into `kkt_blocks` once the NLP layout is known. Wire-set via
+    /// [`Self::set_block_structure`].
+    model_blocks: Option<(Vec<i32>, Vec<i32>)>,
     /// The problem-statistics block most recently printed during the current
     /// run, so a retry attempt does not reprint an identical one.
     ///
@@ -668,6 +700,8 @@ impl IpoptApplication {
             convex_routing_available: false,
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            kkt_blocks_published: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
@@ -681,6 +715,8 @@ impl IpoptApplication {
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
             kkt_schur_block: None,
+            kkt_blocks: None,
+            model_blocks: None,
             last_printed_problem_stats: RefCell::new(None),
             in_retry_sequence: std::cell::Cell::new(false),
             end_verdict_deferrals: std::cell::Cell::new(0),
@@ -1176,13 +1212,55 @@ impl IpoptApplication {
     /// recorded (custom factory plugged via
     /// [`Self::set_linear_backend_factory`], or solve aborted before
     /// the first KKT factor). Reset at the top of every solve.
+    ///
+    /// Restoration-phase factorizations are attached as
+    /// [`LinearSolverSummary::restoration`] when the frontend wired
+    /// [`Self::restoration_summary_sink`] into its restoration factory.
     pub fn linear_solver_summary(&self) -> Option<LinearSolverSummary> {
-        let guard = self.linsol_summary_sink.lock().ok()?;
-        if guard.is_empty() {
-            None
-        } else {
-            Some(guard.clone())
+        let mut main = self.linsol_summary_sink.lock().ok()?.clone();
+        let resto = self
+            .resto_linsol_summary_sink
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .filter(|r| !r.is_empty());
+        if main.is_empty() && resto.is_none() {
+            return None;
         }
+        main.restoration = resto.map(Box::new);
+        Some(main)
+    }
+
+    /// Snapshot of both linear-solver summary sinks (main and
+    /// restoration), for a driver that re-solves and must report the
+    /// summary of the solve whose verdict it keeps. The second-opinion
+    /// ladder takes one before its rungs and restores it when no rung is
+    /// promoted, exactly as it does for the statistics.
+    pub fn linear_solver_summary_state(&self) -> LinearSolverSummaryState {
+        let read =
+            |s: &Arc<Mutex<LinearSolverSummary>>| s.lock().map(|g| g.clone()).unwrap_or_default();
+        LinearSolverSummaryState {
+            main: read(&self.linsol_summary_sink),
+            restoration: read(&self.resto_linsol_summary_sink),
+        }
+    }
+
+    /// Put back a [`Self::linear_solver_summary_state`] snapshot.
+    pub fn restore_linear_solver_summary_state(&self, state: LinearSolverSummaryState) {
+        if let Ok(mut g) = self.linsol_summary_sink.lock() {
+            *g = state.main;
+        }
+        if let Ok(mut g) = self.resto_linsol_summary_sink.lock() {
+            *g = state.restoration;
+        }
+    }
+
+    /// The sink a restoration backend factory should record into, e.g.
+    /// through [`default_backend_factory_with_sink`]. Kept separate from
+    /// the main solve's sink so the main-solve totals stay about the main
+    /// solve.
+    pub fn restoration_summary_sink(&self) -> Arc<Mutex<LinearSolverSummary>> {
+        Arc::clone(&self.resto_linsol_summary_sink)
     }
 
     /// Drive a solve.
@@ -1908,6 +1986,57 @@ impl IpoptApplication {
     /// large a fraction of the system, malformed, or a backend error), so a
     /// stray hook never breaks a solve. Persistent config (not auto-cleared);
     /// drop it via [`Self::clear_kkt_schur_block`].
+    /// Declare the block structure in the **model's own terms**: one block id
+    /// per variable and per constraint, negative for the shared ones
+    /// (structured-KKT Phase 5b). Blocks must couple only through the shared
+    /// entries; the solver checks that against the assembled KKT and falls
+    /// back when it does not hold.
+    ///
+    /// This is the form a model can produce — "`pg[g]` is shared, everything
+    /// in contingency `k` is block `k`" — and pounce maps it to KKT indices
+    /// itself, accounting for fixed variables and the equality / inequality
+    /// split. Lengths are the problem's own `n` and `m`; a mismatch is
+    /// reported and the solve proceeds monolithically.
+    ///
+    /// Persistent config; drop it with [`Self::clear_block_structure`].
+    pub fn set_block_structure(&mut self, var_blocks: Vec<i32>, con_blocks: Vec<i32>) {
+        self.model_blocks = Some((var_blocks, con_blocks));
+    }
+
+    /// Drop any declared model-space block structure.
+    pub fn clear_block_structure(&mut self) {
+        self.model_blocks = None;
+    }
+
+    /// The declared model-space block structure, if any.
+    pub fn block_structure(&self) -> Option<(&[i32], &[i32])> {
+        self.model_blocks
+            .as_ref()
+            .map(|(v, c)| (v.as_slice(), c.as_slice()))
+    }
+
+    /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
+    /// `labels` are KKT-space block ids in the solver's internal
+    /// `x, slack, eq-dual, ineq-dual` order, `< 0` for the shared border; an
+    /// **empty** vector asks the solver to detect the structure from the
+    /// assembled KKT. Honored on the IPM + feral + exact-Hessian path, with a
+    /// transparent fallback to the standard solver when the partition does not
+    /// match the matrix. Persistent config; drop it with
+    /// [`Self::clear_kkt_block_structure`].
+    pub fn set_kkt_block_structure(&mut self, labels: Vec<i32>) {
+        self.kkt_blocks = Some(labels);
+    }
+
+    /// Drop any installed block partition.
+    pub fn clear_kkt_block_structure(&mut self) {
+        self.kkt_blocks = None;
+    }
+
+    /// The currently-installed block partition, if any.
+    pub fn kkt_block_structure(&self) -> Option<&[i32]> {
+        self.kkt_blocks.as_deref()
+    }
+
     pub fn set_kkt_schur_block(&mut self, indices: Vec<usize>) {
         self.kkt_schur_block = Some(indices);
     }
@@ -4343,17 +4472,26 @@ impl IpoptApplication {
         // other. Surviving the lock failure with a debug-assert keeps
         // a poisoned mutex from sinking a release build that doesn't
         // even consume the summary.
-        match self.linsol_summary_sink.lock() {
-            Ok(mut guard) => {
-                *guard = LinearSolverSummary::default();
-            }
-            _ => {
-                debug_assert!(false, "linsol summary sink mutex poisoned");
+        for sink in [&self.linsol_summary_sink, &self.resto_linsol_summary_sink] {
+            match sink.lock() {
+                Ok(mut guard) => {
+                    *guard = LinearSolverSummary::default();
+                }
+                _ => {
+                    debug_assert!(false, "linsol summary sink mutex poisoned");
+                }
             }
         }
         // Same reasoning for the quality-escalation tally (gh#857): the
         // number belongs to this solve, not to whatever ran before it.
         self.quality_escalations.set(0);
+        // And for the published partition: back-to-back solves on one
+        // application can differ in which variables are fixed, so last
+        // solve's labels must not describe this solve's KKT. Cleared here and
+        // written again below only if this solve resolves one.
+        if let Ok(mut g) = self.kkt_blocks_published.lock() {
+            *g = None;
+        }
 
         // Build adapter + Nlp. Honor `fixed_variable_treatment` (default
         // `make_parameter`; pounce additionally implements `relax_bounds`,
@@ -4593,6 +4731,51 @@ impl IpoptApplication {
         // exact-Hessian path and falls back to the standard solver otherwise.
         if let Some(indices) = &self.kkt_schur_block {
             builder.set_kkt_schur(indices.clone(), feral_cfg.clone());
+            builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
+        }
+        // Block-parallel KKT partition (structured-KKT Phase 5b), explicit or
+        // detected (`kkt_block_detect`).
+        let detect = matches!(
+            self.options.get_string_value("kkt_block_detect", ""),
+            Ok((ref v, true)) if v.eq_ignore_ascii_case("yes")
+        );
+        // A model-space declaration (§45) is mapped to KKT indices here, where
+        // the NLP layout — which variables survived fixing, how constraints
+        // split into equalities and inequalities — is known.
+        let mapped = self.model_blocks.as_ref().and_then(|(v, c)| {
+            let cls = adapter.borrow().classification().clone();
+            match map_block_structure_to_kkt(&cls, v, c) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "pounce::kkt",
+                        error = %e,
+                        "declared block structure does not fit this problem; using the standard solver"
+                    );
+                    None
+                }
+            }
+        });
+        if let Some(labels) = mapped
+            .or_else(|| self.kkt_blocks.clone())
+            .or(detect.then(Vec::new))
+        {
+            builder.set_kkt_blocks(labels.clone(), feral_cfg.clone());
+            builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
+            // And to the restoration sub-IPM, whose builder was minted before
+            // this mapping existed. Its reduced system is this one, so the
+            // same labels apply; see `kkt_blocks_published`. Off with
+            // `kkt_block_restoration no`, which is how restoration's own
+            // contribution is measured.
+            let resto_blocks = !matches!(
+                self.options.get_string_value("kkt_block_restoration", ""),
+                Ok((ref v, _)) if v.eq_ignore_ascii_case("no")
+            );
+            if resto_blocks {
+                if let Ok(mut g) = self.kkt_blocks_published.lock() {
+                    *g = Some((labels, feral_cfg.clone()));
+                }
+            }
         }
         // A caller-supplied KKT permutation (pounce#180 item 1) overrides
         // the string-option / env ordering: `OrderingMethod::External`
@@ -5179,6 +5362,18 @@ impl IpoptApplication {
         // frontend builds the restoration provider's inner builder from
         // this method, so restoration escalations aggregate here too.
         builder.quality_escalation_counter = Some(Rc::clone(&self.quality_escalations));
+        // Structured-KKT Phase 5b: the same reasoning, one solve later. The
+        // partition this solve resolves is not known yet — it is derived from
+        // a KKT layout that does not exist until `optimize` builds it — so the
+        // builder takes the cell rather than the labels, and reads it when
+        // restoration actually runs. Block-path factorizations record into the
+        // restoration sink, so `linear_solver.restoration` reports them where
+        // the rest of restoration's linear algebra is reported.
+        if let Ok((v, _)) = self.options.get_integer_value("kkt_block_min_size", "") {
+            builder.kkt_block_min_size = v.max(0) as usize;
+        }
+        builder.set_kkt_blocks_cell(Arc::clone(&self.kkt_blocks_published));
+        builder.set_kkt_schur_summary_sink(Arc::clone(&self.resto_linsol_summary_sink));
 
         // `mehrotra_algorithm` is parsed first so its cascading
         // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
@@ -6452,6 +6647,60 @@ pub fn default_backend_factory(
     )
 }
 
+/// Turn a model-space block declaration into the KKT-space labels the block
+/// solver takes (structured-KKT Phase 5b's mapper, plan §63.6).
+///
+/// The KKT is laid out `[x | slacks | equality duals | inequality duals]`, so
+/// each part inherits a label from what it belongs to:
+///
+/// * an `x` column takes its variable's label — skipping variables fixed out
+///   by `fixed_variable_treatment`, which are not in the KKT at all;
+/// * a slack and its inequality dual take their constraint's label;
+/// * an equality dual takes its constraint's label.
+///
+/// `var_blocks` / `con_blocks` are in the model's own indexing (`n_full_x`,
+/// `n_full_g`); negative means shared. Returns the label per KKT index, or an
+/// error naming the mismatch — the caller then falls back rather than
+/// mislabel, because a label that is off by one row silently declares a
+/// structure the matrix does not have.
+pub fn map_block_structure_to_kkt(
+    cls: &pounce_nlp::tnlp_adapter::BoundClassification,
+    var_blocks: &[i32],
+    con_blocks: &[i32],
+) -> Result<Vec<i32>, String> {
+    if var_blocks.len() != cls.n_full_x as usize {
+        return Err(format!(
+            "block structure has {} variable labels, the problem has {} variables",
+            var_blocks.len(),
+            cls.n_full_x
+        ));
+    }
+    if con_blocks.len() != cls.n_full_g as usize {
+        return Err(format!(
+            "block structure has {} constraint labels, the problem has {} constraints",
+            con_blocks.len(),
+            cls.n_full_g
+        ));
+    }
+    let n_x = cls.x_not_fixed_map.len();
+    let n_c = cls.c_map.len();
+    let n_d = cls.d_map.len();
+    let mut labels = Vec::with_capacity(n_x + 2 * n_d + n_c);
+    for &full in &cls.x_not_fixed_map {
+        labels.push(var_blocks[full as usize]);
+    }
+    for &full in &cls.d_map {
+        labels.push(con_blocks[full as usize]); // slack
+    }
+    for &full in &cls.c_map {
+        labels.push(con_blocks[full as usize]); // equality dual
+    }
+    for &full in &cls.d_map {
+        labels.push(con_blocks[full as usize]); // inequality dual
+    }
+    Ok(labels)
+}
+
 /// Sink-aware variant of [`default_backend_factory`]. Identical
 /// dispatch, but the FERAL backend is constructed with a
 /// `LinearSolverSummary` sink so [`IpoptApplication`] can read out
@@ -6725,6 +6974,11 @@ pub fn feral_config_from_options_scoped(
     if let Ok((v, true)) = options.get_string_value("feral_ordering", "") {
         if let Some(m) = pounce_feral::parse_ordering_method(&v) {
             cfg.ordering = m;
+        }
+    }
+    if let Ok((v, true)) = options.get_string_value("feral_ordering_preprocess", "") {
+        if let Some(p) = pounce_feral::parse_ordering_preprocess(&v) {
+            cfg.ordering_preprocess = p;
         }
     }
     // Same explicit-set discipline as `feral_ordering`: `from_env`
@@ -7456,6 +7710,69 @@ fn finalize_via_sqp(
     snap.replay(tnlp);
     *sink.borrow_mut() = Some(snap);
     Ok(f_final)
+}
+
+#[cfg(test)]
+mod block_structure_tests {
+    use super::map_block_structure_to_kkt;
+    use pounce_nlp::tnlp_adapter::BoundClassification;
+
+    /// Three variables (the middle one fixed out) and four constraints: two
+    /// equalities (rows 0 and 3) and two inequalities (rows 1 and 2).
+    fn classification() -> BoundClassification {
+        BoundClassification {
+            n_full_x: 3,
+            n_full_g: 4,
+            n_x_fixed: 1,
+            x_not_fixed_map: vec![0, 2],
+            x_fixed_map: vec![1],
+            x_fixed_vals: vec![0.0],
+            full_to_var: vec![0, -1, 1],
+            x_l_map: vec![],
+            x_u_map: vec![],
+            n_c: 2,
+            c_map: vec![0, 3],
+            n_d: 2,
+            d_map: vec![1, 2],
+            d_l_map: vec![],
+            d_u_map: vec![],
+            full_to_c: vec![0, -1, -1, 1],
+            full_to_d: vec![-1, 0, 1, -1],
+        }
+    }
+
+    /// The KKT is `[x | slacks | equality duals | inequality duals]`, so a
+    /// declaration in the model's terms lands as: the surviving variables'
+    /// labels, then each inequality's label twice (slack and dual) around the
+    /// equalities' labels. A variable fixed out of the problem contributes
+    /// nothing — reading its label anyway would shift every later one.
+    #[test]
+    fn model_labels_map_onto_the_kkt_layout() {
+        let cls = classification();
+        let var_blocks = vec![7, 99, -1]; // x0 -> block 7, x1 fixed, x2 shared
+        let con_blocks = vec![5, 6, -1, 8]; // eq 5, ineq 6, ineq shared, eq 8
+        let labels = map_block_structure_to_kkt(&cls, &var_blocks, &con_blocks).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                7, -1, // x: the two unfixed variables
+                6, -1, // slacks, in d order (rows 1 and 2)
+                5, 8, // equality duals, in c order (rows 0 and 3)
+                6, -1, // inequality duals, same order as their slacks
+            ]
+        );
+    }
+
+    /// A length that does not match the problem is refused rather than
+    /// truncated: a structure off by one row declares blocks the matrix does
+    /// not have, and the solver would only notice as a wrong answer or a
+    /// rejected partition.
+    #[test]
+    fn a_mismatched_declaration_is_refused() {
+        let cls = classification();
+        assert!(map_block_structure_to_kkt(&cls, &[1, 2], &[1, 2, 3, 4]).is_err());
+        assert!(map_block_structure_to_kkt(&cls, &[1, 2, 3], &[1, 2, 3]).is_err());
+    }
 }
 
 #[cfg(test)]

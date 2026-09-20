@@ -21,7 +21,8 @@
 //! now-null handle is safe (it null-checks).
 
 use pounce_algorithm::application::{
-    IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
+    IpoptApplication, default_backend_factory_with_sink, feral_config_from_options,
+    ma57_config_from_options,
 };
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
@@ -215,10 +216,18 @@ pub unsafe extern "C" fn IpoptSolverSolve(
             // The `ma57_*` options under the `"resto."` prefix — dead until
             // gh#825, because nothing threaded any MA57 config into a factory.
             let ma57_cfg = ma57_config_from_options(info.problem.app.options(), "resto.");
+            let resto_sink = info.problem.app.restoration_summary_sink();
             let bff_mint = move || -> InnerBackendFactoryFactory {
                 let feral_cfg = feral_cfg.clone();
                 let ma57_cfg = ma57_cfg.clone();
-                Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
+                let sink = std::sync::Arc::clone(&resto_sink);
+                Box::new(move || {
+                    default_backend_factory_with_sink(
+                        feral_cfg.clone(),
+                        ma57_cfg.clone(),
+                        std::sync::Arc::clone(&sink),
+                    )
+                })
             };
             let resto_provider = make_default_restoration_factory_provider(
                 RestoAlgorithmBuilder::new(),
