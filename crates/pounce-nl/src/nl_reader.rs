@@ -5570,6 +5570,34 @@ impl NlTnlp {
     #[cfg(not(target_arch = "wasm32"))]
     const JAC_PAR_MIN_NNZ: usize = 4096;
 
+    /// Smallest row count that earns a parallel constraint evaluation. This is
+    /// the cheapest of the three walks per row — one forward sweep, no
+    /// gradient, no directional derivative — so the dispatch is a larger share
+    /// of it and the threshold is the highest of the three.
+    ///
+    /// Measured on the banded synthetic, serial -> parallel with the gate
+    /// forced open: 500 rows 0.34x, 2 000 0.84x, 5 000 1.07x, 8 000 1.53x,
+    /// 20 000 3.19x, 60 000 4.97x, 200 000 5.78x. The crossover is near 5 000,
+    /// so the gate sits just under it. Unlike the Hessian, this walk has no
+    /// color ceiling — every row is its own task — which is why it keeps
+    /// climbing to ~6x where the Hessian's 3-color model stalls at 1.7x.
+    #[cfg(not(target_arch = "wasm32"))]
+    const EVAL_G_PAR_MIN_ROWS: usize = 4096;
+
+    /// Whether `eval_g` runs in parallel over rows. Shares
+    /// `POUNCE_NL_PARALLEL_EVAL` with the other two walks.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn eval_g_parallel(&self) -> bool {
+        // The shared-CSE arm returns earlier; this gate only ever sees the
+        // flat path.
+        let big = self.prob.m >= Self::EVAL_G_PAR_MIN_ROWS;
+        match std::env::var("POUNCE_NL_PARALLEL_EVAL").as_deref() {
+            Ok("0") | Ok("no") | Ok("false") => false,
+            Ok("1") | Ok("yes") | Ok("true") => true,
+            _ => big,
+        }
+    }
+
     /// Whether the flat Jacobian walk runs in parallel over row groups.
     /// Shares `POUNCE_NL_PARALLEL_EVAL` with the Hessian.
     #[cfg(not(target_arch = "wasm32"))]
@@ -5957,6 +5985,31 @@ impl TNLP for NlTnlp {
                 let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
                 g[i] = nl + lin;
             }
+            return true;
+        }
+        // Row `i` reads only `x` and writes only `g[i]`, so this one is
+        // parallel as written — no inversion, no row-offset bookkeeping, and
+        // the per-row arithmetic is untouched, which is why the values are
+        // bit-identical. Only the forward-value arena is per-worker.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.eval_g_parallel() {
+            use rayon::prelude::*;
+            let max_tape_n = self.vals_scratch.len();
+            let con_tapes = &self.con_tapes;
+            g.par_iter_mut().enumerate().for_each_init(
+                || vec![0.0; max_tape_n],
+                |vals, (i, gi)| {
+                    let mut nl: Number = 0.0;
+                    for t in &con_tapes[i] {
+                        nl += t.eval_into(x, vals);
+                    }
+                    if let Some(f) = quad.row_form(i) {
+                        nl += quad.value(f, x);
+                    }
+                    let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+                    *gi = nl + lin;
+                },
+            );
             return true;
         }
         let (con_tapes, vals) = (&self.con_tapes, &mut self.vals_scratch);

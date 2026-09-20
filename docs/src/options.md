@@ -2151,6 +2151,56 @@ Python's `info["linear_solver"]["blocks"]`) carries `n_blocks`, `border_dim`,
 restoration's appear under `linear_solver.restoration.blocks`. If that object
 is absent, the partition was refused — the log says why.
 
+## Parallel function evaluation
+
+On a large `.nl` model, evaluation — not factorization — is usually where the
+time goes. Measured on a 54 859-variable AC-SCOPF with
+`print_timing_statistics`, function evaluation was **70%** of the solve and the
+Lagrangian Hessian alone 52%, against 14% for the factorization. POUNCE's `.nl`
+evaluators now use the machine's cores for all three of the expensive walks:
+
+| Walk | Split over | Measured (case1354_pegase, K=16) |
+|---|---|---|
+| Lagrangian Hessian | Hessian colors | 4.890 s → 1.114 s |
+| Constraint Jacobian | row groups | 1.214 s → 0.193 s |
+| Constraint values | rows | 12.3 ms → 1.8 ms per call |
+
+Whole solve on that model: **9.81 s → 4.68 s**, and with a declared block
+structure (see [Block-structured KKT](#block-structured-kkt)) 18.1 s → 4.68 s.
+
+**The results are bit-identical to the serial ones**, which is the property
+worth relying on: the iteration counts and objectives do not move, because each
+walk contributes the same terms in the same order. It is not "the same to
+within a tolerance" — the parallel Hessian keeps every color's contributions in
+ascending row order precisely so the sums are identical term by term. So this
+changes how long a solve takes and nothing else.
+
+It switches on automatically above a measured size threshold per walk, and
+below it POUNCE stays serial because the dispatch would cost more than it
+saves. Nothing to configure.
+
+**What to expect, and what not to.** The Jacobian and constraint walks split
+over rows, so their parallelism is bounded only by the core count (~6× at 8
+threads on the models measured). The **Hessian's is bounded by the number of
+colors** in its compressed Hessian: 28 colors on this AC-SCOPF gives 4.9×,
+while a banded model needing only 3 colors reaches 1.7× and cannot do better
+however many cores are free. A model whose Hessian colors well will gain more
+than one that does not.
+
+| Variable | Meaning |
+|---|---|
+| `POUNCE_NL_PARALLEL_EVAL=0` | Force the serial walks. |
+| `POUNCE_NL_PARALLEL_EVAL=1` | Force the parallel walks regardless of size. |
+
+Since both settings compute identical values, these are levers for measurement
+— `1` is how the thresholds were measured — and for pinning a suspected
+parallelism bug, not correctness switches. Models built for the browser
+(`wasm32`) always take the serial walks.
+
+One path is not parallel yet: the shared-CSE arm, which forwards one prelude
+for the whole constraint block (models whose rows share large common
+subexpressions). It is not slower than before — it simply has not been split.
+
 ## Environment overrides (FERAL and debug gates)
 
 A handful of knobs are reachable through environment variables. The

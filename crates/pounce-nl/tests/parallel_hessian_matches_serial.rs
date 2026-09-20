@@ -245,3 +245,57 @@ fn jacobian(rows: usize, parallel: bool) -> Vec<f64> {
     ));
     values
 }
+
+/// Constraint values, the third walk and the simplest: row `i` reads only `x`
+/// and writes only `g[i]`, so the parallel version is the serial loop with a
+/// per-worker forward arena. Nothing is reordered or duplicated.
+///
+/// It earns a test anyway, for the reason the other two do: "obviously
+/// parallel" is what every incorrect parallelization was called first. The
+/// specific thing it pins is that the per-worker arena really is per worker —
+/// sharing one `vals` buffer across rows is the mistake this shape invites,
+/// and it corrupts values non-deterministically rather than failing.
+///
+/// Mutation table:
+///
+/// | Break | Result |
+/// |---|---|
+/// | Write `g[i + 1]` instead of `g[i]` (an off-by-one in the row index) | **run**: 2,999 of 3,000 entries differ |
+#[test]
+fn parallel_eval_g_matches_serial_bit_for_bit() {
+    let serial = constraint_values(ROWS, false);
+    let parallel = constraint_values(ROWS, true);
+
+    assert_eq!(serial.len(), parallel.len());
+    let nonzero = serial.iter().filter(|v| **v != 0.0).count();
+    assert!(nonzero > 1_000, "{nonzero} nonzero entries");
+    let differing: Vec<usize> = (0..serial.len())
+        .filter(|&i| serial[i].to_bits() != parallel[i].to_bits())
+        .collect();
+    assert!(
+        differing.is_empty(),
+        "{} of {} entries differ; first at {}: serial {:.17e} vs parallel {:.17e}",
+        differing.len(),
+        serial.len(),
+        differing[0],
+        serial[differing[0]],
+        parallel[differing[0]],
+    );
+}
+
+/// `g(x)` at the same varied point as the other two walks.
+fn constraint_values(rows: usize, parallel: bool) -> Vec<f64> {
+    // SAFETY: single-threaded test body, set before the evaluator is built.
+    unsafe {
+        std::env::set_var("POUNCE_NL_PARALLEL_EVAL", if parallel { "1" } else { "0" });
+    }
+    let mut t = NlTnlp::new(model(rows));
+    let info = t.get_nlp_info().expect("info");
+    let (n, m) = (info.n as usize, info.m as usize);
+    let x: Vec<f64> = (0..n)
+        .map(|i| 0.3 + 0.7 * ((i % 13) as f64) / 13.0)
+        .collect();
+    let mut g = vec![0.0; m];
+    assert!(t.eval_g(&x, true, &mut g));
+    g
+}
