@@ -47,7 +47,15 @@ pub struct BlockAugSystemSolver {
     negevals: Index,
     last_status: ESymSolverStatus,
     timing: Option<Rc<TimingStatistics>>,
+    /// Refuse a partition whose median block is narrower than this many
+    /// columns. `0` disables the check. See [`DEFAULT_MIN_BLOCK_SIZE`].
+    min_block_size: usize,
 }
+
+/// Default for [`BlockAugSystemSolver::with_min_block_size`]: the next power of
+/// two above the measured crossover (~250 columns per block), below which the
+/// block path is slower than the monolithic one. The numbers are in `decide`.
+pub const DEFAULT_MIN_BLOCK_SIZE: usize = 256;
 
 impl BlockAugSystemSolver {
     /// Wrap `inner` with a block backend over `labels` (KKT-space; `< 0` is
@@ -65,7 +73,15 @@ impl BlockAugSystemSolver {
             negevals: 0,
             last_status: ESymSolverStatus::Success,
             timing: None,
+            min_block_size: DEFAULT_MIN_BLOCK_SIZE,
         }
+    }
+
+    /// Refuse a partition whose *median* block is narrower than `n` columns;
+    /// `0` disables the check. See [`DEFAULT_MIN_BLOCK_SIZE`].
+    pub fn with_min_block_size(mut self, n: usize) -> Self {
+        self.min_block_size = n;
+        self
     }
 
     /// Record the block path's factorizations into a shared summary sink.
@@ -127,6 +143,49 @@ impl BlockAugSystemSolver {
                 "block structure's border is too large to pay off; using the standard solver"
             );
             return;
+        }
+        // Small blocks do not pay. The monolithic factorization of an arrowhead
+        // KKT already finds this structure — generic orderings were measured
+        // doing exactly that — so the block path's only win is parallelism,
+        // against a fixed per-block cost: one symbolic analysis, one task, one
+        // border tail. Below a few hundred columns per block that cost is the
+        // whole story and the partition makes the solve *slower*.
+        //
+        // Measured through discopt on a 32-block arrowhead, factorization
+        // seconds full-space -> declared: 60 cols 0.0060 -> 0.0195 (0.31x),
+        // 125 0.0133 -> 0.0231 (0.57x), 250 0.0260 -> 0.0264 (0.98x), 500
+        // 0.0534 -> 0.0343 (1.56x), 1000 0.1244 -> 0.0500 (2.49x), 2000
+        // 0.2725 -> 0.0843 (3.23x). The crossover sits at ~250 columns; the
+        // default is the next power of two above it.
+        //
+        // The *median* block, not the largest: a partition of one wide block
+        // and a thousand narrow ones is paced by the narrow ones, and
+        // `merge_small_blocks` has already folded away the stragglers.
+        if self.min_block_size > 0 {
+            let mut sizes: Vec<usize> = {
+                let n_blocks = self.labels.iter().copied().max().unwrap_or(-1) + 1;
+                let mut v = vec![0usize; n_blocks.max(0) as usize];
+                for &l in &self.labels {
+                    if l >= 0 {
+                        v[l as usize] += 1;
+                    }
+                }
+                v
+            };
+            if !sizes.is_empty() {
+                sizes.sort_unstable();
+                let median = sizes[sizes.len() / 2];
+                if median < self.min_block_size {
+                    tracing::warn!(
+                        target: "pounce::kkt",
+                        median_block = median,
+                        min_block_size = self.min_block_size,
+                        n_blocks = sizes.len(),
+                        "block structure's blocks are too small to pay off; using the standard solver"
+                    );
+                    return;
+                }
+            }
         }
         let t = std::time::Instant::now();
         let st = self

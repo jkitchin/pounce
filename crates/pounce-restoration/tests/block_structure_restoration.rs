@@ -28,6 +28,7 @@
 //! | Do not read the cell in `build_with_backend` | `the_partition_reaches_restoration` |
 //! | Ignore `kkt_block_restoration=no` | `the_option_turns_the_restoration_path_off` |
 //! | Publish stale labels across solves (drop the per-solve reset) | `a_second_solve_does_not_inherit_the_first_ones_labels` |
+//! | Drop the median-block-size guard | `tiny_blocks_are_refused_by_default` |
 
 use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
@@ -254,10 +255,23 @@ struct Run {
 /// Solve the `k`-cell model. `declare` installs the model-space partition;
 /// `resto` is the `kkt_block_restoration` setting, `None` leaving it default.
 fn solve(k: usize, declare: bool, resto: Option<&str>) -> Run {
+    solve_with(k, declare, resto, Some(0))
+}
+
+/// `min_block_size` is passed through to `kkt_block_min_size`. This fixture's
+/// blocks are two columns wide — far below the size at which the block path
+/// pays — so every test here that wants the path *engaged* has to lower the
+/// guard. `tiny_blocks_are_refused_by_default` is the one that does not.
+fn solve_with(k: usize, declare: bool, resto: Option<&str>, min_block_size: Option<i32>) -> Run {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
+    if let Some(n) = min_block_size {
+        app.options_mut()
+            .set_integer_value("kkt_block_min_size", n, true, false)
+            .unwrap();
+    }
     if let Some(v) = resto {
         app.options_mut()
             .set_string_value("kkt_block_restoration", v, true, false)
@@ -370,6 +384,9 @@ fn a_second_solve_does_not_inherit_the_first_ones_labels() {
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
+    app.options_mut()
+        .set_integer_value("kkt_block_min_size", 0, true, false)
+        .unwrap();
     app.initialize().unwrap();
     wire_restoration(&mut app);
 
@@ -401,4 +418,33 @@ fn a_second_solve_does_not_inherit_the_first_ones_labels() {
             .is_none(),
         "and restoration must not still be reading the first solve's labels"
     );
+}
+
+/// The guard the other tests in this file switch off. This fixture's blocks
+/// are two columns wide, and at that size the block path is *slower* than the
+/// monolithic one — measured through discopt on a 32-block arrowhead,
+/// factorization runs 0.31x at 60 columns per block and does not reach parity
+/// until ~250. A declaration is not a reason to take a slower path, so pounce
+/// refuses it at the default `kkt_block_min_size` and says so in the log.
+///
+/// This is the one test here that leaves the option alone.
+#[test]
+fn tiny_blocks_are_refused_by_default() {
+    let declared = solve_with(6, true, None, None);
+    assert_eq!(
+        declared.main_blocks, None,
+        "two-column blocks are below the size at which the partition pays"
+    );
+    assert_eq!(
+        declared.resto_blocks, None,
+        "and restoration inherits the refusal, not the labels"
+    );
+    assert_eq!(
+        declared.status,
+        solve(6, false, None).status,
+        "refusing the partition must not change the answer either"
+    );
+    // The same declaration is honored once the guard is lowered, so what the
+    // test above pins is the guard and not some other refusal.
+    assert_eq!(solve_with(6, true, None, Some(0)).main_blocks, Some(6));
 }

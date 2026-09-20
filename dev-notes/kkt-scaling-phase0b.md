@@ -490,6 +490,67 @@ evidence.
 Pinned by `crates/pounce-restoration/tests/block_structure_restoration.rs`,
 which carries its own mutation table; all four mutations were run.
 
+## The block path has a crossover, and now a guard
+
+Run end to end from discopt (`set_block` -> `block_structure_for_model` ->
+`Problem.set_block_structure`) on a K = 32 arrowhead whose block width varies,
+factorization seconds, best of three:
+
+| columns per block | n | full-space | declared | ratio |
+|---|---|---|---|---|
+| 60 | 1,921 | 0.0060 s | 0.0195 s | **0.31x** |
+| 125 | 4,001 | 0.0133 s | 0.0231 s | **0.57x** |
+| 250 | 8,001 | 0.0260 s | 0.0264 s | 0.98x |
+| 500 | 16,001 | 0.0534 s | 0.0343 s | 1.56x |
+| 1,000 | 32,001 | 0.1244 s | 0.0500 s | 2.49x |
+| 2,000 | 64,001 | 0.2725 s | 0.0843 s | 3.23x |
+
+The reason is the same one the arrowhead section gives for why ordering was
+never the opening: **the monolithic factorization already finds this
+structure**, so the block path's only win is parallelism, against a fixed
+per-block cost — one symbolic analysis, one task, one border tail. Below a few
+hundred columns per block that cost is the whole story.
+
+A declaration is not a reason to take a slower path, so `decide` now refuses a
+partition whose **median** block is narrower than `kkt_block_min_size`
+(default 256, `0` disables) and says so in the log. The median rather than the
+largest: a partition of one wide block and a thousand narrow ones is paced by
+the narrow ones. Re-measured with the guard in place, the three losing rows
+read 1.02x / 1.02x / 1.01x — the declaration is refused and nothing is lost —
+and the winning rows are unchanged at 1.72x / 2.65x / 3.52x. The SCOPF
+families are far above the threshold (13,601 columns per block on
+`case1354_pegase` K = 16) and are unaffected.
+
+This is the first thing a user with a small model would have hit, and neither
+repo's tests could have found it: discopt's spy the labels, pounce's declare
+its own.
+
+## Corrections from the discopt side
+
+Two claims in this note were measured against the `.nl`/ASL path and do not
+hold on discopt's path, which drives POUNCE's own Rust AD tape. Both come from
+`docs/dev/1370-block-eval-entry-2026-09-20.md` in that repo.
+
+* **"Evaluation is 48% of this solve"** is an ASL number. On the tape it is
+  **20-24%** (0.140 s of 0.709 s at K = 8, 0.961 s of 4.217 s at K = 32,
+  1.598 s of 6.735 s at K = 64), with a second instrument bracketing it from
+  below at 12-21%. So a perfect evaluator caps the end-to-end gain at 1.31x on
+  that class, and Phase 5a is worth ~1.45x *after* the factorization win lands,
+  not "the larger half". The two halves compound to roughly 1.9x, not 3x.
+* **The 0.044x directional-derivative figure** was also against ASL. Against
+  the tape, compressed derivatives over identical blocks run 5.24x combined at
+  K = 64 on small blocks and **17.74x** at block sizes near this note's SCOPF
+  case. The mechanism survives the better baseline; the headline number
+  changes. Their dense per-block arm — same engine, same blocks, no
+  compression — runs 0.49-1.77x and loses almost everywhere, which is the
+  evidence that the win is the shared pattern and coloring rather than the
+  engine.
+
+The general lesson is the one this note keeps relearning: a ratio is a
+statement about its baseline. "4x faster than ASL" and "4x faster than the
+evaluator the solve actually uses" are different claims, and only the second
+one predicts what a user sees.
+
 ## Verdict for the structured-KKT plan
 
 Across both families the attribution is the same: **the only superlinear row is

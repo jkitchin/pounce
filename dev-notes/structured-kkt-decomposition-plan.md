@@ -1154,6 +1154,19 @@ These measurements are critical for determining whether the architecture actuall
 
 POUNCE-side work is §57. `discopt`-side work is listed here as **drafts**. Each is filed in `discopt` only when the phase that needs it is reached, and only after approval. None is needed to start.
 
+*Status 2026-09-20 (later the same day): **implemented and merged on the
+discopt side** — `python/discopt/block_structure.py`, a `block_structure=`
+passthrough in `solvers/nlp_pounce.py`, compressed derivatives over declared
+blocks for Part B, and `python/tests/test_1370_block_structure.py`. Verified
+end to end here against this branch's POUNCE: a 24-block arrowhead declared in
+discopt reaches `block-parallel KKT path engaged blocks=24 border=1` and the
+partition is reported back through `NLPResult.linear_solver`. That run also
+found the crossover this branch now guards (`kkt_block_min_size`) — see
+`dev-notes/kkt-scaling-phase0b.md`. Two of the numbers in the issue were
+corrected by their measurements: evaluation is 20-24% of the solve on the tape
+path rather than 48% on the `.nl` path, so Part B is worth ~1.45x after Part A
+rather than being "the larger half".*
+
 *Status 2026-09-20: filed, as **one** issue — jkitchin/discopt#1370, "Export
 model block structure to pounce, and evaluate identical blocks in one pass".
 I1 and I5 are its two halves and I2 is folded in as the passthrough, because

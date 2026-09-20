@@ -1623,6 +1623,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         &[("*", "Any acceptable standard file name")],
         "Text file: `n m` on the first line, then n variable block ids and m constraint block ids, whitespace-separated, negative for the shared ones. Blocks must couple only through the shared entries. pounce maps the declaration to KKT indices itself (fixed variables, equality / inequality split) and falls back to the standard solver when it does not fit the problem or the matrix. This is the .nl-file route to the structure a modelling layer would otherwise pass through the API; see IpoptApplication::set_block_structure.",
     )?;
+    r.add_lower_bounded_integer_option(
+        "kkt_block_min_size",
+        "Refuse a block partition whose median block is narrower than this.",
+        0,
+        256,
+        "The monolithic factorization of an arrowhead KKT already finds this structure, so the block path's only win is parallelism, against a fixed per-block cost (one symbolic analysis, one task, one border tail). Below a few hundred columns per block that cost is the whole story and the partition makes the solve slower: measured on a 32-block arrowhead, factorization is 0.31x at 60 columns per block, 0.57x at 125, 0.98x at 250, 1.56x at 500, 2.49x at 1000, 3.23x at 2000. The default sits just above the crossover. `0` disables the check and always honors the partition.",
+    )?;
     r.add_string_option(
         "kkt_block_restoration",
         "Carry the block-parallel KKT partition into the restoration sub-IPM.",

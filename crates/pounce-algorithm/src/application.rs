@@ -5369,6 +5369,9 @@ impl IpoptApplication {
         // restoration actually runs. Block-path factorizations record into the
         // restoration sink, so `linear_solver.restoration` reports them where
         // the rest of restoration's linear algebra is reported.
+        if let Ok((v, _)) = self.options.get_integer_value("kkt_block_min_size", "") {
+            builder.kkt_block_min_size = v.max(0) as usize;
+        }
         builder.set_kkt_blocks_cell(Arc::clone(&self.kkt_blocks_published));
         builder.set_kkt_schur_summary_sink(Arc::clone(&self.resto_linsol_summary_sink));
 

@@ -484,6 +484,11 @@ pub struct AlgorithmBuilder {
     /// so the outer labels describe it exactly. `BlockAugSystemSolver` checks
     /// the length against the assembled matrix regardless and falls back.
     pub kkt_blocks_shared: Option<KktBlocksCell>,
+    /// Refuse a partition whose median block is narrower than this many KKT
+    /// columns (`kkt_block_min_size`; `0` disables). Below the measured
+    /// crossover the block path is slower than the monolithic one — see
+    /// [`crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE`].
+    pub kkt_block_min_size: usize,
     pub kkt_schur_summary_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
@@ -1266,6 +1271,7 @@ impl Default for AlgorithmBuilder {
             kkt_schur: None,
             kkt_blocks: None,
             kkt_blocks_shared: None,
+            kkt_block_min_size: crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
             kkt_schur_summary_sink: None,
             quality_escalation_counter: None,
         }
@@ -1378,7 +1384,8 @@ impl AlgorithmBuilder {
             // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
             // owns the (2,2) block, so this is the exact-Hessian path only.
             if matches!(self.linear_solver, LinearSolverChoice::Feral) {
-                let blocks = crate::kkt::BlockAugSystemSolver::new(inner_aug, labels, cfg);
+                let blocks = crate::kkt::BlockAugSystemSolver::new(inner_aug, labels, cfg)
+                    .with_min_block_size(self.kkt_block_min_size);
                 Box::new(match self.kkt_schur_summary_sink.clone() {
                     Some(sink) => blocks.with_summary_sink(sink),
                     None => blocks,
@@ -1899,6 +1906,8 @@ mod tests {
                             kkt_schur: None,
                             kkt_blocks: None,
                             kkt_blocks_shared: None,
+                            kkt_block_min_size:
+                                crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
                             kkt_schur_summary_sink: None,
                             quality_escalation_counter: None,
                         }
