@@ -18,5 +18,50 @@
   },
   "followups": {
     "WM_CFy": "Measured out of band on 2026-08-11 at the reference's own 1800s limit (same host, threads pinned, binary from ce41b5bc): POUNCE returns `Optimal Solution Found` in 673s / 239 iterations, vs Ipopt's 1147s / 556. Objectives differ by 0.136% (two local optima; Ipopt's is the better point). Deliberately not merged into the results, which record the sweep as configured \u2014 see dev-notes/research/wm-cfy-timelimit.md."
+  },
+  "problem_overrides": {
+    "grid": {
+      "problems": [
+        "pglib_case10000_goc",
+        "pglib_case118_ieee",
+        "pglib_case1354_pegase",
+        "pglib_case14_ieee",
+        "pglib_case162_ieee_dtc",
+        "pglib_case179_goc",
+        "pglib_case1888_rte",
+        "pglib_case2000_goc",
+        "pglib_case240_pserc",
+        "pglib_case300_ieee",
+        "pglib_case30_ieee",
+        "pglib_case4661_sdet",
+        "pglib_case500_goc",
+        "pglib_case57_ieee",
+        "pglib_case588_sdet",
+        "pglib_case73_ieee_rts",
+        "pglib_case793_goc",
+        "pglib_case89_pegase"
+      ],
+      "generated": "2026-09-19",
+      "host": "this project's M4 Pro laptop (Darwin 25.6.0 arm64), not the base reference host",
+      "ipopt_bin": "~/projects/research/pglib-bench/opt/ipopt-ma57/bin/ipopt",
+      "ipopt_version": "Ipopt 3.14.19 (Darwin arm64), ASL(20241202); linear_solver=ma57 (CoinHSL)",
+      "timelimit": 300,
+      "threads": "pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)",
+      "git_sha": "a31dab9c",
+      "why": "these problems were added to the suite after the base reference was taken, so they had no Ipopt row and the report listed them as unreferenced. Only these rows were run and appended; the suite's existing rows are unchanged. Note the Ipopt version (3.14.19) and host differ from the base reference (3.14.20, Johns-Mac-mini): statuses and objectives are comparable, times only roughly."
+    },
+    "large_scale": {
+      "problems": [
+        "laptime"
+      ],
+      "generated": "2026-09-19",
+      "host": "this project's M4 Pro laptop (Darwin 25.6.0 arm64), not the base reference host",
+      "ipopt_bin": "~/projects/research/pglib-bench/opt/ipopt-ma57/bin/ipopt",
+      "ipopt_version": "Ipopt 3.14.19 (Darwin arm64), ASL(20241202); linear_solver=ma57 (CoinHSL)",
+      "timelimit": 300,
+      "threads": "pinned to 1 (OMP/OPENBLAS/VECLIB/RAYON)",
+      "git_sha": "a31dab9c",
+      "why": "these problems were added to the suite after the base reference was taken, so they had no Ipopt row and the report listed them as unreferenced. Only these rows were run and appended; the suite's existing rows are unchanged. Note the Ipopt version (3.14.19) and host differ from the base reference (3.14.20, Johns-Mac-mini): statuses and objectives are comparable, times only roughly."
+    }
   }
 }
