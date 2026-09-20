@@ -9,10 +9,24 @@ version, git SHA, Ipopt version, linear solver) emitted in the report
 header.
 
 The benchmark *inputs* (large `.nl` exports, compiled SIF problem
-libraries) and the per-run *outputs* (logs, JSON results, generated
-reports) are regenerated locally and not tracked in the repository.
-The per-suite README files, the source harnesses, and
-`benchmarks/scripts/` are tracked.
+libraries) and the per-run *outputs* (logs, JSON results) are not tracked
+in the repository. The per-suite README files, the source harnesses,
+`benchmarks/scripts/`, the saved Ipopt references and the composite report
+are tracked.
+
+### The inputs are local and not publicly available
+
+The maintainers keep the full set of `.nl` inputs locally, in the data root
+described below, and do not publish it. Some of those files carry license
+restrictions that do not allow redistribution. For example, the Mittelmann
+`.nl` files are AMPL translations of Mittelmann's models, and `gams/nlpbench`
+is a private GAMS-licensed clone. So the published results cannot be
+reproduced from this repository alone. Three suites can be regenerated from
+public sources: `make qp-generate`, `make lp-generate` and
+`make large-scale-generate` download or build their inputs. The
+`robot_a/b/c` Mittelmann instances can also be written without AMPL
+(`mittelmann/gen_robot_nl.py`). For every other suite, the tracked README
+says where the problems come from.
 
 ## Where the `.nl` live (`POUNCE_BENCH_DATA`)
 

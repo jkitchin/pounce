@@ -31,8 +31,8 @@ POUNCE_BENCH_DATA ?= $(REPO_ROOT)/benchmarks
 # ---- ipopt-ma57 for the .nl-driven suites --------------------------------
 # Every suite is now .nl-driven and compares against the locally-built
 # MA57 Ipopt AMPL executable at ref/Ipopt/install-ma57/bin/ipopt (built
-# by `make -C mittelmann build-ipopt-ma57`). This matches POUNCE-MA57
-# against the same linear-solver family. No pkg-config / libipopt FFI is
+# locally; no build recipe is tracked, see `build-ipopt-ma57`). This
+# matches POUNCE-MA57 against the same linear-solver family. No pkg-config / libipopt FFI is
 # needed any more — the compiled CUTEst and large_scale Rust harnesses
 # that linked libipopt have been retired.
 IPOPT_MA57_INSTALL ?= $(REPO_ROOT)/ref/Ipopt/install-ma57
@@ -48,7 +48,7 @@ export IPOPT_LINEAR_SOLVER
 	vanderbei-run vanderbei-rerun \
 	electrolyte-run electrolyte-rerun grid-run grid-rerun cho-run cho-rerun \
 	large-scale large-scale-generate large-scale-rerun \
-	mittelmann-run mittelmann-rerun mittelmann-translate \
+	mittelmann-run mittelmann-rerun mittelmann-check \
 	gas-run gas-rerun water-run water-rerun \
 	qp-run qp-rerun qp-generate \
 	lp-run lp-rerun lp-generate \
@@ -86,7 +86,7 @@ help:
 	@echo "  cho-run         / -rerun   CHO parameter estimation benchmark"
 	@echo "  large-scale     / large-scale-rerun  Synthetic large-scale NLPs (.nl from generate_nl.py)"
 	@echo "  large-scale-generate       (Re)generate the large_scale .nl files only (needs pyomo)"
-	@echo "  mittelmann-run  / -rerun   Mittelmann ampl-nlp .nl suite (shared driver; .nl via mittelmann-translate)"
+	@echo "  mittelmann-run  / -rerun   Mittelmann ampl-nlp .nl suite (shared driver; .nl from POUNCE_BENCH_DATA)"
 	@echo "  gas-run         / -rerun   Gas pipeline NLPs (AMPL .nl files)"
 	@echo "  water-run       / -rerun   Water distribution network NLPs (AMPL .nl files)"
 	@echo "  qp-run          / -rerun   Maros-Meszaros convex QP suite (.nl from generate_nl.py)"
@@ -125,7 +125,10 @@ help:
 
 # Convenience shim — the actual recipe lives in benchmarks/mittelmann/Makefile.
 build-ipopt-ma57:
-	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann build-ipopt-ma57
+	@echo "No build recipe for the Ipopt-MA57 reference binary is tracked." >&2
+	@echo "Build Ipopt with CoinHSL and the AMPL (ASL) interface, then run" >&2
+	@echo "  make -C benchmarks IPOPT_MA57_BIN=<path>/bin/ipopt ipopt-ref-<suite>" >&2
+	@exit 1
 
 # ---- Domain benchmarks ----
 # Every suite is .nl-driven through the shared driver
@@ -489,17 +492,23 @@ lpopt-rerun:
 	rm -f $(LPOPT_DIR)/pounce.json
 	$(MAKE) lpopt-run
 
-# Mittelmann ampl-nlp suite. The .nl are translated from .mod by the
-# mittelmann sub-Makefile (`fetch translate`, needs AMPL; incremental).
-# The sub-Makefile's broader multi-solver comparison harness still lives
-# in benchmarks/mittelmann/Makefile for on-demand use.
-mittelmann-translate:
-	$(MAKE) -C $(MITT_DIR) fetch translate NLDIR=$(nldir_mittelmann)
+# Mittelmann ampl-nlp suite. The .nl files are not generated here: the
+# translated set lives in the benchmark data root ($(POUNCE_BENCH_DATA)).
+# This only checks it is there, so a missing data root fails with a message
+# instead of an empty run. (It used to call a benchmarks/mittelmann/Makefile
+# that was never tracked, so `mittelmann-run` failed from any fresh checkout.)
+mittelmann-check:
+	@n=$$(ls $(nldir_mittelmann)/*.nl 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "mittelmann: no .nl files in $(nldir_mittelmann); set POUNCE_BENCH_DATA to the benchmark data root" >&2; \
+	  exit 1; \
+	fi; \
+	echo "mittelmann: $$n .nl files in $(nldir_mittelmann)"
 
 $(MITT_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(nldir_mittelmann)/*.nl)
 	$(NL_DRIVER) mittelmann $(nldir_mittelmann) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
-mittelmann-run: mittelmann-translate $(MITT_DIR)/pounce.json
+mittelmann-run: mittelmann-check $(MITT_DIR)/pounce.json
 
 mittelmann-rerun:
 	rm -f $(MITT_DIR)/pounce.json
@@ -524,7 +533,7 @@ ipopt-ref-%:
 
 # Suites whose .nl must be produced before ipopt can run on them.
 ipopt-ref-large_scale: $(nldir_large_scale)/sparseqp.nl
-ipopt-ref-mittelmann:  mittelmann-translate
+ipopt-ref-mittelmann:  mittelmann-check
 ipopt-ref-qp:          $(nldir_qp)/QPTEST.nl
 ipopt-ref-lp:          $(nldir_lp)/afiro.nl
 ipopt-ref-lpopt:       $(nldir_lpopt)/qap15.nl
@@ -590,7 +599,11 @@ ipopt-reference-provenance:
 # defaults to `CLEAN_SOLVERS=pounce`, deliberately leaving the ipopt
 # reference cached (its binary does not change between pounce iterations).
 gams-bench:
-	@stamp=$$(mktemp); \
+	@if [ ! -d $(REPO_ROOT)/gams/nlpbench ]; then \
+	  echo "gams-bench: skipped, gams/nlpbench is not present (a private GAMS-licensed clone; see .gitignore)"; \
+	  exit 0; \
+	fi; \
+	stamp=$$(mktemp); \
 	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench-smoke bench-smoke; \
 	rc=$$?; \
 	if [ $$rc -ne 0 ]; then rm -f $$stamp; exit $$rc; fi; \
