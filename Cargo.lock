@@ -968,6 +968,7 @@ dependencies = [
  "feral",
  "pounce-common",
  "pounce-linsol",
+ "rayon",
  "tracing",
 ]
 

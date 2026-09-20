@@ -241,19 +241,38 @@ fn main() {
             .collect();
         println!("  native: symbolic with schur tail (parallel): {:.2}s", t_sym.elapsed().as_secs_f64());
         let t_nat = Instant::now();
-        let parts: Vec<(Vec<f64>, (usize, usize, usize))> = prepared
+        let parts: Vec<(Vec<f64>, (usize, usize, usize), feral::numeric::factorize::SparseFactors)> = prepared
             .par_iter()
             .map(|(m, sym)| {
-                let (_f, inertia, sb) =
+                let (f, inertia, sb) =
                     factorize_multifrontal_with_schur(m, sym, &NumericParams::default())
                         .expect("factor with schur");
-                (sb.data, (inertia.positive, inertia.negative, inertia.zero))
+                (sb.data, (inertia.positive, inertia.negative, inertia.zero), f)
             })
             .collect();
+        // Can those factors solve A_kk alone? (the tail is not eliminated).
+        // Compare against the block-only Solver factors on block 0.
+        {
+            let b = 0usize;
+            let nloc = sizes[b];
+            let mut rhs_full = vec![0.0f64; nloc + nb];
+            for i in 0..nloc {
+                rhs_full[i] = 1.0 + (i % 7) as f64;
+            }
+            let x_schur = feral::solve_sparse(&parts[b].2, &rhs_full).expect("solve with schur factors");
+            let x_ref = solvers[b].0.solve(&rhs_full[..nloc].to_vec()).expect("block solve");
+            let err = x_ref
+                .iter()
+                .zip(x_schur.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            let scale = x_ref.iter().fold(0.0f64, |a, v| a.max(v.abs())).max(1.0);
+            println!("  schur-tail factors vs block-only factors on block 0: max |diff| {:.2e} (scale {:.2e})", err, scale);
+        }
         let nat_wall = t_nat.elapsed().as_secs_f64();
         let mut s_nat = ss.clone();
         let mut inat = (0usize, 0usize, 0usize);
-        for (sk, i) in &parts {
+        for (sk, i, _) in &parts {
             inat = (inat.0 + i.0, inat.1 + i.1, inat.2 + i.2);
             for (d, v) in s_nat.iter_mut().zip(sk.iter()) {
                 *d += v;            // native returns the Schur complement itself
