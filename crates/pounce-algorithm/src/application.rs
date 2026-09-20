@@ -450,6 +450,16 @@ pub struct IpoptApplication {
     /// install it via [`Self::restoration_summary_sink`]; it is reset with
     /// the main sink and surfaces as [`LinearSolverSummary::restoration`].
     resto_linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// The block-parallel KKT partition this solve resolved, published for
+    /// the restoration sub-IPM (structured-KKT Phase 5b). Restoration's inner
+    /// builder is minted by the frontend *before* the solve — before the KKT
+    /// layout, and so the mapping onto it, exists — so the labels cannot be
+    /// installed on it directly. They are written here as the outer algorithm
+    /// is built and read when restoration runs. `AugRestoSystemSolver` reduces
+    /// the restoration KKT onto the original 4-block system before delegating,
+    /// so the matrix the inner solver factors is the one these labels
+    /// describe. Reset with the sinks at the top of every solve.
+    kkt_blocks_published: crate::alg_builder::KktBlocksCell,
     /// Shared tally of successful linear-solver quality escalations for
     /// the current solve (gh#857). Handed to every `AlgorithmBuilder`
     /// this application mints — [`Self::algorithm_builder_from_options`]
@@ -691,6 +701,7 @@ impl IpoptApplication {
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            kkt_blocks_published: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
@@ -4474,6 +4485,13 @@ impl IpoptApplication {
         // Same reasoning for the quality-escalation tally (gh#857): the
         // number belongs to this solve, not to whatever ran before it.
         self.quality_escalations.set(0);
+        // And for the published partition: back-to-back solves on one
+        // application can differ in which variables are fixed, so last
+        // solve's labels must not describe this solve's KKT. Cleared here and
+        // written again below only if this solve resolves one.
+        if let Ok(mut g) = self.kkt_blocks_published.lock() {
+            *g = None;
+        }
 
         // Build adapter + Nlp. Honor `fixed_variable_treatment` (default
         // `make_parameter`; pounce additionally implements `relax_bounds`,
@@ -4742,8 +4760,22 @@ impl IpoptApplication {
             .or_else(|| self.kkt_blocks.clone())
             .or(detect.then(Vec::new))
         {
-            builder.set_kkt_blocks(labels, feral_cfg.clone());
+            builder.set_kkt_blocks(labels.clone(), feral_cfg.clone());
             builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
+            // And to the restoration sub-IPM, whose builder was minted before
+            // this mapping existed. Its reduced system is this one, so the
+            // same labels apply; see `kkt_blocks_published`. Off with
+            // `kkt_block_restoration no`, which is how restoration's own
+            // contribution is measured.
+            let resto_blocks = !matches!(
+                self.options.get_string_value("kkt_block_restoration", ""),
+                Ok((ref v, _)) if v.eq_ignore_ascii_case("no")
+            );
+            if resto_blocks {
+                if let Ok(mut g) = self.kkt_blocks_published.lock() {
+                    *g = Some((labels, feral_cfg.clone()));
+                }
+            }
         }
         // A caller-supplied KKT permutation (pounce#180 item 1) overrides
         // the string-option / env ordering: `OrderingMethod::External`
@@ -5330,6 +5362,15 @@ impl IpoptApplication {
         // frontend builds the restoration provider's inner builder from
         // this method, so restoration escalations aggregate here too.
         builder.quality_escalation_counter = Some(Rc::clone(&self.quality_escalations));
+        // Structured-KKT Phase 5b: the same reasoning, one solve later. The
+        // partition this solve resolves is not known yet — it is derived from
+        // a KKT layout that does not exist until `optimize` builds it — so the
+        // builder takes the cell rather than the labels, and reads it when
+        // restoration actually runs. Block-path factorizations record into the
+        // restoration sink, so `linear_solver.restoration` reports them where
+        // the rest of restoration's linear algebra is reported.
+        builder.set_kkt_blocks_cell(Arc::clone(&self.kkt_blocks_published));
+        builder.set_kkt_schur_summary_sink(Arc::clone(&self.resto_linsol_summary_sink));
 
         // `mehrotra_algorithm` is parsed first so its cascading
         // defaults (mu_strategy=adaptive, mu_oracle=probing) can be

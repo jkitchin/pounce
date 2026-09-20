@@ -2296,9 +2296,14 @@ Python, `block_structure_file` for the `.nl` path. Measured on
 identical iteration counts and objectives. The section below is the design it
 was built to; what it did not anticipate is that a fixed variable moves the
 border (53 declared shared columns become a border of 18 on `case118_ieee`) and
-that restoration's KKT is a different matrix, so its factorizations stay
-monolithic — 92% of the remaining factor time on the infeasible K = 64 run.
-Numbers in `dev-notes/kkt-scaling-phase0b.md`.*
+that restoration's factorizations were 92% of the remaining factor time on the
+infeasible K = 64 run. Restoration is covered too as of the commit after:
+`AugRestoSystemSolver` reduces onto the original 4-block system, so the same
+labels describe it, and the only thing missing was a way to hand them to a
+builder minted before the mapping existed (`kkt_blocks_shared`,
+`kkt_block_restoration`). That took the K = 64 run's restoration factor time
+from 35.0 s to 11.4 s and its wall from 113 s to 83 s. Numbers in
+`dev-notes/kkt-scaling-phase0b.md`.*
 
 The block solver works; what it lacked was a usable way to be *told* the
 structure. Today it takes KKT-space labels (`x | slack | eq-dual | ineq-dual`,
@@ -2328,11 +2333,10 @@ object to key on. Both surfaces shipped, plus `block_structure_file` so the
 route was not built, because a labels file is the same information and does not
 tie pounce to one generator's naming convention.
 
-**What the next commit on this line is**, in measured order: (a) carry the
-structure into the restoration sub-IPM, whose `p`/`n` pair per constraint makes
-a block-preserving map obvious and which is 34.7 s against the main solve's
-2.8 s on the K = 64 run; (b) Phase 5a's block-parallel evaluation, the larger
-half of every one of these solves, which pounce does not own.
+**Restoration is done** — it needed no new mapping at all, only the cell that
+gets the labels to a builder minted before the mapping existed. What is left on
+this line is Phase 5a's block-parallel evaluation, the larger half of every one
+of these solves, which pounce does not own (discopt draft I5, unfiled).
 
 # 64. Bottom Line
 

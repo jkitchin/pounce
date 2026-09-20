@@ -433,13 +433,62 @@ Two things to read off the K = 64 row rather than skip:
   same objective at the point of detection). A matching trajectory into a
   restoration failure is the same evidence as a matching trajectory into a
   solve; it is reported here rather than dropped for looking bad.
-- Its wall gain is 1.12× against 1.8× on the rows above because **restoration's
-  factorizations are still monolithic**: 70 of them, 34.7 s, unchanged between
-  the legs, against 2.8 s in the main solve. The restoration sub-IPM adds a
-  `p`/`n` pair per constraint, so its KKT is not the one the declaration was
-  mapped onto, and the block path never reaches it. On this run that is 92% of
-  the remaining factor time — the next thing to extend, and the reason the
-  nested `restoration` summary object exists.
+- Its wall gain was 1.12× against 1.8× on the rows above because
+  **restoration's factorizations were still monolithic**: 70 of them, 34.7 s,
+  unchanged between the legs, against 2.8 s in the main solve — 92% of the
+  remaining factor time. That is fixed below.
+
+## Restoration: the same partition, and why it applies unchanged
+
+The first reading of the row above was wrong, and the wrong reason is worth
+recording because it is the kind that stops a line of work: *the restoration
+sub-IPM adds a `p`/`n` pair per constraint, so its KKT is not the matrix the
+declaration was mapped onto.* The first half is true and the conclusion does
+not follow. `AugRestoSystemSolver` (`crates/pounce-restoration/src/`) reduces
+the 8-block restoration KKT onto the **original 4-block system** by eliminating
+those four slack blocks analytically, and hands *that* to its inner solver. The
+matrix actually factored in restoration has the outer system's dimension and
+sparsity, and the outer labels describe it exactly. Nothing had to be
+re-derived; the labels only had to arrive.
+
+What blocked them was plumbing, not mathematics. Every frontend mints
+restoration's inner `AlgorithmBuilder` from
+`IpoptApplication::algorithm_builder_from_options` **before the solve starts** —
+before the KKT layout, and therefore the mapping onto it, exists. So the
+builder takes a *cell* (`AlgorithmBuilder::kkt_blocks_shared`) that the
+application publishes into as it builds the outer algorithm, exactly as it
+already did for the quality-escalation tally. `kkt_block_restoration=no` turns
+it off, which is how the split below was measured.
+
+**Measured on the same infeasible K = 64 instance** (209 755 variables, 65
+blocks over a 259-column border):
+
+| | main factor | restoration factor | wall |
+|---|---|---|---|
+| monolithic | 10.72 s | 35.05 s (70×) | 125.1 s |
+| declared, restoration monolithic | 2.82 s | 35.05 s (70×) | 113.2 s |
+| declared, restoration too | 2.86 s | **11.39 s** (88×) | **82.8 s** |
+
+Same verdict, same 87 outer iterations, same objective to ten digits, and the
+same `restoration_calls = 10` / `restoration_inner_iters = 66`, with
+`quality_escalations = 0` on both — so pounce's own residual test accepted
+every block solve, and no step was retried for accuracy.
+
+**The one thing that does move is the step, slightly.** Block elimination
+cannot pivot across the block/border split, so the factorizations are not
+bit-identical to the monolithic one, and on this model that shows: 281 differing
+lines in the iteration log, 425 versus 428 logged inner iterations, and 70
+versus 88 factorizations, with the regularized-iteration count essentially
+unchanged (42 versus 43). The main solve reproduced its trajectory exactly on
+every instance measured; restoration — degenerate by construction, it is called
+because the model is locally infeasible — does not. Both reach the same answer,
+and the extra factorizations are still a third of the time. This is a property
+of restricted pivoting, not a defect, but it is the reason the option exists
+and the reason a *feasible* model's trajectory is the better correctness
+evidence.
+
+Pinned by `crates/pounce-restoration/tests/block_structure_restoration.rs`,
+which carries its own mutation table; all four mutations were run.
 
 ## Verdict for the structured-KKT plan
 

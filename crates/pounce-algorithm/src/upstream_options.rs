@@ -1624,6 +1624,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Text file: `n m` on the first line, then n variable block ids and m constraint block ids, whitespace-separated, negative for the shared ones. Blocks must couple only through the shared entries. pounce maps the declaration to KKT indices itself (fixed variables, equality / inequality split) and falls back to the standard solver when it does not fit the problem or the matrix. This is the .nl-file route to the structure a modelling layer would otherwise pass through the API; see IpoptApplication::set_block_structure.",
     )?;
     r.add_string_option(
+        "kkt_block_restoration",
+        "Carry the block-parallel KKT partition into the restoration sub-IPM.",
+        "yes",
+        &[("yes", "Restoration factors block-parallel too"), ("no", "Restoration factors monolithically")],
+        "Only has an effect when a partition is in use (block_structure_file, set_block_structure, or kkt_block_detect). `AugRestoSystemSolver` reduces the 8-block restoration KKT onto the original 4-block system before delegating, so the matrix its inner solver factors has the outer system's dimension and sparsity and the same labels describe it. Worth turning off only to measure what restoration contributes: on an infeasible 209k-variable SCOPF it takes restoration's factorization time from 34.7s to 11.3s, three times the main solve's share.",
+    )?;
+    r.add_string_option(
         "kkt_block_detect",
         "Detect a block-diagonal-plus-border KKT and solve it block-parallel.",
         "no",

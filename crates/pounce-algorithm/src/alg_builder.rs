@@ -206,6 +206,12 @@ impl Default for ConvCheckOptions {
     }
 }
 
+/// A block-parallel KKT partition published after a builder was cloned —
+/// see [`AlgorithmBuilder::kkt_blocks_shared`]. `None` inside means the outer
+/// solve resolved no partition, and the clone builds the standard solver.
+pub type KktBlocksCell =
+    std::sync::Arc<std::sync::Mutex<Option<(Vec<i32>, pounce_feral::FeralConfig)>>>;
+
 #[derive(Debug, Clone)]
 pub struct AlgorithmBuilder {
     /// Top-level algorithm dispatch. Default `InteriorPoint` ⇒
@@ -464,6 +470,20 @@ pub struct AlgorithmBuilder {
     /// Honored on the IPM + feral + exact-Hessian path; the block solver falls
     /// back to the standard one transparently. Set via [`Self::set_kkt_blocks`].
     pub kkt_blocks: Option<(Vec<i32>, pounce_feral::FeralConfig)>,
+    /// Late-bound partition, read only when [`Self::kkt_blocks`] is `None`.
+    /// The restoration sub-IPM's builder is constructed by the frontend before
+    /// the solve starts, which is before the outer KKT layout — and therefore
+    /// the mapping from a model-space declaration onto it — is known. The
+    /// application publishes the resolved labels into this cell as it builds
+    /// the outer algorithm, and the inner builder, a clone made earlier, reads
+    /// them here when restoration actually runs.
+    ///
+    /// Sound because `AugRestoSystemSolver` reduces the 8-block restoration
+    /// KKT onto the *original* 4-block system before delegating: the matrix
+    /// the inner solver factors has the outer system's dimension and sparsity,
+    /// so the outer labels describe it exactly. `BlockAugSystemSolver` checks
+    /// the length against the assembled matrix regardless and falls back.
+    pub kkt_blocks_shared: Option<KktBlocksCell>,
     pub kkt_schur_summary_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
@@ -1245,6 +1265,7 @@ impl Default for AlgorithmBuilder {
             init: InitOptions::default(),
             kkt_schur: None,
             kkt_blocks: None,
+            kkt_blocks_shared: None,
             kkt_schur_summary_sink: None,
             quality_escalation_counter: None,
         }
@@ -1270,6 +1291,22 @@ impl AlgorithmBuilder {
     /// vector asks the solver to detect the structure from the assembled KKT.
     pub fn set_kkt_blocks(&mut self, labels: Vec<i32>, cfg: pounce_feral::FeralConfig) {
         self.kkt_blocks = Some((labels, cfg));
+    }
+
+    /// Read a partition from `cell` when none is installed directly — the
+    /// restoration path, see [`Self::kkt_blocks_shared`].
+    pub fn set_kkt_blocks_cell(&mut self, cell: KktBlocksCell) {
+        self.kkt_blocks_shared = Some(cell);
+    }
+
+    /// The partition to build with: an installed one first, then the
+    /// late-bound cell.
+    fn resolved_kkt_blocks(&self) -> Option<(Vec<i32>, pounce_feral::FeralConfig)> {
+        self.kkt_blocks.clone().or_else(|| {
+            self.kkt_blocks_shared
+                .as_ref()
+                .and_then(|c| c.lock().ok().and_then(|g| g.clone()))
+        })
     }
 
     /// Route the Schur backend's factorization stats into `sink` (the same
@@ -1336,7 +1373,7 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug),
                 Box::new(StdAugSystemSolver::new(bypass_linsol)),
             ))
-        } else if let Some((labels, cfg)) = self.kkt_blocks.clone() {
+        } else if let Some((labels, cfg)) = self.resolved_kkt_blocks() {
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
             // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
             // owns the (2,2) block, so this is the exact-Hessian path only.
@@ -1861,6 +1898,7 @@ mod tests {
                             init: InitOptions::default(),
                             kkt_schur: None,
                             kkt_blocks: None,
+                            kkt_blocks_shared: None,
                             kkt_schur_summary_sink: None,
                             quality_escalation_counter: None,
                         }
