@@ -33,6 +33,9 @@ use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, 
 pub use feral::scaling::ScalingStrategy;
 pub use feral::symbolic::OrderingMethod;
 pub use feral::symbolic::OrderingPreprocess;
+
+pub mod block;
+pub use block::FeralBlockSolver;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{

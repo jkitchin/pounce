@@ -88,6 +88,11 @@ pub struct LinearSolverSummary {
     /// keeps each 2x2 KKT pivot pair together).
     pub last_ordering_preprocess: Option<String>,
 
+    /// Present when the KKT solve went through the block-parallel path
+    /// (a declared block-diagonal-plus-border structure) and it actually
+    /// factored; absent when no structure was given or the path fell back.
+    pub blocks: Option<BlockSummary>,
+
     /// Present when the KKT solve went through the block-triangular /
     /// Schur path (`set_kkt_schur_block`) and it actually factored.
     /// Absent when no Schur block was set **or** the path fell back to
@@ -101,6 +106,22 @@ pub struct LinearSolverSummary {
     /// when restoration never factored. Only the outermost summary
     /// carries one.
     pub restoration: Option<Box<LinearSolverSummary>>,
+}
+
+/// Block-parallel KKT path. See [`LinearSolverSummary::blocks`].
+#[derive(Debug, Clone, Default)]
+pub struct BlockSummary {
+    /// Blocks the KKT was partitioned into.
+    pub n_blocks: usize,
+    /// Order of the shared border.
+    pub border_dim: usize,
+    /// Order of the largest block.
+    pub largest_block: usize,
+    /// Completed block factorizations (blocks + border count as one).
+    pub n_factors: u64,
+    /// Seconds in those factorizations, summed (wall time, so the blocks'
+    /// parallelism is already in it).
+    pub factor_secs: f64,
 }
 
 /// Block-triangular / Schur KKT path breakdown. See
