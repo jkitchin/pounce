@@ -410,6 +410,31 @@ The second approach should be transparent to the nonlinear optimization algorith
 
 # 8. Proposed `discopt` Additions
 
+*Correction 2026-09-20: this section, and §45's structure object, were written
+without reading `discopt.decomposition`, and they propose something that is
+largely already there. `DecompositionStructure` carries `block_of_var`,
+`complicating_vars` and a `block_of_constraint` that is **already `-1` for
+coupling rows** — the convention POUNCE settled on independently — resolved
+from `set_block` / `mark_coupling` / `first_stage` annotations or auto-detected
+(bridge constraints + connected components). The advisor registers
+`MethodKind.SCHUR` "for later phases", its design doc's taxonomy table already
+names the structural signature ("KKT sparsity graph | a border (bordered
+block-diagonal)"), and `ROADMAP.md` lists Schur among the remaining methods.
+So the discopt-side ask is not a structure export; it is the **consumer** for a
+slot already reserved, plus the index-space mapping and its stability through
+discopt's transformations. jkitchin/discopt#1370 was revised to say that.*
+
+*The distinction worth keeping straight, because it is why this is not
+redundant with what `decomposition/` already does: Benders / GBD / Lagrangian
+decompose the **algorithm** — a master and subproblem loop whose soundness is
+conditional (GBD is exact only on convex recourse, Lagrangian yields a bound),
+which is why that module has a `Soundness` gatekeeper at all. The block-KKT
+path decomposes the **linear algebra inside one solve**: same IPM, same
+iterates, exact on any nonconvex NLP because it is a permutation plus block
+elimination of a symmetric indefinite system. Its evidence is identical
+iteration counts and objectives, not a convexity classification. They compose —
+a block-structured Benders subproblem can be solved this way.*
+
 The first goal is to expose a solver-neutral structural description.
 
 ## 8.1 Core object
