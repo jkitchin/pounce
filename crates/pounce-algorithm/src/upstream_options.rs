@@ -1617,6 +1617,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, feral's `choose_adaptive` dispatcher. Concrete-method choices bypass the dispatcher and pin a single method for the run. AutoRace measures symbolic fill per problem, which is not the same as measuring factorization time. For collocation, optimal-control and PDE-in-time models set `metis` (see docs/src/options.md, feral_ordering variants). Falls back to the POUNCE_FERAL_ORDERING environment variable (same tag set) when not set on the OptionsList. See `crates/pounce-feral/src/lib.rs` (FeralConfig::ordering) and `feral/src/symbolic/mod.rs` (OrderingMethod) for per-variant rationale and evidence.",
     )?;
     r.add_string_option(
+        "block_structure_file",
+        "Path to a block-structure declaration for the block-parallel KKT path.",
+        "",
+        &[("*", "Any acceptable standard file name")],
+        "Text file: `n m` on the first line, then n variable block ids and m constraint block ids, whitespace-separated, negative for the shared ones. Blocks must couple only through the shared entries. pounce maps the declaration to KKT indices itself (fixed variables, equality / inequality split) and falls back to the standard solver when it does not fit the problem or the matrix. This is the .nl-file route to the structure a modelling layer would otherwise pass through the API; see IpoptApplication::set_block_structure.",
+    )?;
+    r.add_string_option(
         "kkt_block_detect",
         "Detect a block-diagonal-plus-border KKT and solve it block-parallel.",
         "no",

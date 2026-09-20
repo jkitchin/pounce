@@ -583,6 +583,11 @@ pub struct IpoptApplication {
     /// labels, `< 0` for the shared border, **empty** meaning "detect".
     /// Wire-set via [`Self::set_kkt_block_structure`].
     kkt_blocks: Option<Vec<i32>>,
+    /// The same partition declared in the *model's* own terms — one block per
+    /// variable and per constraint — which [`map_block_structure_to_kkt`]
+    /// turns into `kkt_blocks` once the NLP layout is known. Wire-set via
+    /// [`Self::set_block_structure`].
+    model_blocks: Option<(Vec<i32>, Vec<i32>)>,
     /// The problem-statistics block most recently printed during the current
     /// run, so a retry attempt does not reprint an identical one.
     ///
@@ -700,6 +705,7 @@ impl IpoptApplication {
             external_ordering: None,
             kkt_schur_block: None,
             kkt_blocks: None,
+            model_blocks: None,
             last_printed_problem_stats: RefCell::new(None),
             in_retry_sequence: std::cell::Cell::new(false),
             end_verdict_deferrals: std::cell::Cell::new(0),
@@ -1969,6 +1975,35 @@ impl IpoptApplication {
     /// large a fraction of the system, malformed, or a backend error), so a
     /// stray hook never breaks a solve. Persistent config (not auto-cleared);
     /// drop it via [`Self::clear_kkt_schur_block`].
+    /// Declare the block structure in the **model's own terms**: one block id
+    /// per variable and per constraint, negative for the shared ones
+    /// (structured-KKT Phase 5b). Blocks must couple only through the shared
+    /// entries; the solver checks that against the assembled KKT and falls
+    /// back when it does not hold.
+    ///
+    /// This is the form a model can produce — "`pg[g]` is shared, everything
+    /// in contingency `k` is block `k`" — and pounce maps it to KKT indices
+    /// itself, accounting for fixed variables and the equality / inequality
+    /// split. Lengths are the problem's own `n` and `m`; a mismatch is
+    /// reported and the solve proceeds monolithically.
+    ///
+    /// Persistent config; drop it with [`Self::clear_block_structure`].
+    pub fn set_block_structure(&mut self, var_blocks: Vec<i32>, con_blocks: Vec<i32>) {
+        self.model_blocks = Some((var_blocks, con_blocks));
+    }
+
+    /// Drop any declared model-space block structure.
+    pub fn clear_block_structure(&mut self) {
+        self.model_blocks = None;
+    }
+
+    /// The declared model-space block structure, if any.
+    pub fn block_structure(&self) -> Option<(&[i32], &[i32])> {
+        self.model_blocks
+            .as_ref()
+            .map(|(v, c)| (v.as_slice(), c.as_slice()))
+    }
+
     /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
     /// `labels` are KKT-space block ids in the solver's internal
     /// `x, slack, eq-dual, ineq-dual` order, `< 0` for the shared border; an
@@ -4686,7 +4721,27 @@ impl IpoptApplication {
             self.options.get_string_value("kkt_block_detect", ""),
             Ok((ref v, true)) if v.eq_ignore_ascii_case("yes")
         );
-        if let Some(labels) = self.kkt_blocks.clone().or(detect.then(Vec::new)) {
+        // A model-space declaration (§45) is mapped to KKT indices here, where
+        // the NLP layout — which variables survived fixing, how constraints
+        // split into equalities and inequalities — is known.
+        let mapped = self.model_blocks.as_ref().and_then(|(v, c)| {
+            let cls = adapter.borrow().classification().clone();
+            match map_block_structure_to_kkt(&cls, v, c) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "pounce::kkt",
+                        error = %e,
+                        "declared block structure does not fit this problem; using the standard solver"
+                    );
+                    None
+                }
+            }
+        });
+        if let Some(labels) = mapped
+            .or_else(|| self.kkt_blocks.clone())
+            .or(detect.then(Vec::new))
+        {
             builder.set_kkt_blocks(labels, feral_cfg.clone());
             builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
         }
@@ -6548,6 +6603,60 @@ pub fn default_backend_factory(
     )
 }
 
+/// Turn a model-space block declaration into the KKT-space labels the block
+/// solver takes (structured-KKT Phase 5b's mapper, plan §63.6).
+///
+/// The KKT is laid out `[x | slacks | equality duals | inequality duals]`, so
+/// each part inherits a label from what it belongs to:
+///
+/// * an `x` column takes its variable's label — skipping variables fixed out
+///   by `fixed_variable_treatment`, which are not in the KKT at all;
+/// * a slack and its inequality dual take their constraint's label;
+/// * an equality dual takes its constraint's label.
+///
+/// `var_blocks` / `con_blocks` are in the model's own indexing (`n_full_x`,
+/// `n_full_g`); negative means shared. Returns the label per KKT index, or an
+/// error naming the mismatch — the caller then falls back rather than
+/// mislabel, because a label that is off by one row silently declares a
+/// structure the matrix does not have.
+pub fn map_block_structure_to_kkt(
+    cls: &pounce_nlp::tnlp_adapter::BoundClassification,
+    var_blocks: &[i32],
+    con_blocks: &[i32],
+) -> Result<Vec<i32>, String> {
+    if var_blocks.len() != cls.n_full_x as usize {
+        return Err(format!(
+            "block structure has {} variable labels, the problem has {} variables",
+            var_blocks.len(),
+            cls.n_full_x
+        ));
+    }
+    if con_blocks.len() != cls.n_full_g as usize {
+        return Err(format!(
+            "block structure has {} constraint labels, the problem has {} constraints",
+            con_blocks.len(),
+            cls.n_full_g
+        ));
+    }
+    let n_x = cls.x_not_fixed_map.len();
+    let n_c = cls.c_map.len();
+    let n_d = cls.d_map.len();
+    let mut labels = Vec::with_capacity(n_x + 2 * n_d + n_c);
+    for &full in &cls.x_not_fixed_map {
+        labels.push(var_blocks[full as usize]);
+    }
+    for &full in &cls.d_map {
+        labels.push(con_blocks[full as usize]); // slack
+    }
+    for &full in &cls.c_map {
+        labels.push(con_blocks[full as usize]); // equality dual
+    }
+    for &full in &cls.d_map {
+        labels.push(con_blocks[full as usize]); // inequality dual
+    }
+    Ok(labels)
+}
+
 /// Sink-aware variant of [`default_backend_factory`]. Identical
 /// dispatch, but the FERAL backend is constructed with a
 /// `LinearSolverSummary` sink so [`IpoptApplication`] can read out
@@ -7557,6 +7666,69 @@ fn finalize_via_sqp(
     snap.replay(tnlp);
     *sink.borrow_mut() = Some(snap);
     Ok(f_final)
+}
+
+#[cfg(test)]
+mod block_structure_tests {
+    use super::map_block_structure_to_kkt;
+    use pounce_nlp::tnlp_adapter::BoundClassification;
+
+    /// Three variables (the middle one fixed out) and four constraints: two
+    /// equalities (rows 0 and 3) and two inequalities (rows 1 and 2).
+    fn classification() -> BoundClassification {
+        BoundClassification {
+            n_full_x: 3,
+            n_full_g: 4,
+            n_x_fixed: 1,
+            x_not_fixed_map: vec![0, 2],
+            x_fixed_map: vec![1],
+            x_fixed_vals: vec![0.0],
+            full_to_var: vec![0, -1, 1],
+            x_l_map: vec![],
+            x_u_map: vec![],
+            n_c: 2,
+            c_map: vec![0, 3],
+            n_d: 2,
+            d_map: vec![1, 2],
+            d_l_map: vec![],
+            d_u_map: vec![],
+            full_to_c: vec![0, -1, -1, 1],
+            full_to_d: vec![-1, 0, 1, -1],
+        }
+    }
+
+    /// The KKT is `[x | slacks | equality duals | inequality duals]`, so a
+    /// declaration in the model's terms lands as: the surviving variables'
+    /// labels, then each inequality's label twice (slack and dual) around the
+    /// equalities' labels. A variable fixed out of the problem contributes
+    /// nothing — reading its label anyway would shift every later one.
+    #[test]
+    fn model_labels_map_onto_the_kkt_layout() {
+        let cls = classification();
+        let var_blocks = vec![7, 99, -1]; // x0 -> block 7, x1 fixed, x2 shared
+        let con_blocks = vec![5, 6, -1, 8]; // eq 5, ineq 6, ineq shared, eq 8
+        let labels = map_block_structure_to_kkt(&cls, &var_blocks, &con_blocks).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                7, -1, // x: the two unfixed variables
+                6, -1, // slacks, in d order (rows 1 and 2)
+                5, 8, // equality duals, in c order (rows 0 and 3)
+                6, -1, // inequality duals, same order as their slacks
+            ]
+        );
+    }
+
+    /// A length that does not match the problem is refused rather than
+    /// truncated: a structure off by one row declares blocks the matrix does
+    /// not have, and the solver would only notice as a wrong answer or a
+    /// rejected partition.
+    #[test]
+    fn a_mismatched_declaration_is_refused() {
+        let cls = classification();
+        assert!(map_block_structure_to_kkt(&cls, &[1, 2], &[1, 2, 3, 4]).is_err());
+        assert!(map_block_structure_to_kkt(&cls, &[1, 2, 3], &[1, 2, 3]).is_err());
+    }
 }
 
 #[cfg(test)]

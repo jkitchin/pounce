@@ -348,6 +348,18 @@ pub fn main() -> ExitCode {
     );
     app.set_restoration_factory_provider(resto_provider);
 
+    // A block-structure declaration for the block-parallel KKT path
+    // (`block_structure_file`): the .nl route to what a modelling layer would
+    // pass through `set_block_structure`. Read here because the CLI owns file
+    // I/O; a malformed file is a warning and a monolithic solve, never a
+    // failed run.
+    if let Ok((path, true)) = app.options().get_string_value("block_structure_file", "") {
+        match read_block_structure(&path) {
+            Ok((vars, cons)) => app.set_block_structure(vars, cons),
+            Err(e) => eprintln!("pounce: ignoring block_structure_file {path}: {e}"),
+        }
+    }
+
     // gh#483 follow-up: refuse a `linear_solver` pounce does not
     // implement. Checked here — before the banner, and before the routing
     // that would send an LP/QP to `pounce-convex` without ever reaching
@@ -3999,6 +4011,41 @@ fn print_about() {
     println!("Report bugs at {}/issues", env!("CARGO_PKG_REPOSITORY"));
 }
 
+/// Read a block-structure declaration: `n m` on the first line, then `n`
+/// variable block ids and `m` constraint block ids, whitespace-separated and
+/// negative for the shared ones.
+fn read_block_structure(path: &str) -> Result<(Vec<i32>, Vec<i32>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut it = text.split_ascii_whitespace();
+    let mut next = |what: &str| -> Result<i64, String> {
+        it.next()
+            .ok_or_else(|| format!("file ends before {what}"))?
+            .parse::<i64>()
+            .map_err(|e| format!("{what}: {e}"))
+    };
+    // Both counts are read before either list, so a corrupt header must not
+    // become an allocation: a negative is refused and the reserve is capped.
+    // The loops below are the real bound -- they stop at the end of the file.
+    let count = |v: i64, what: &str| -> Result<usize, String> {
+        usize::try_from(v).map_err(|_| format!("{what} is negative: {v}"))
+    };
+    let n = count(next("the variable count")?, "the variable count")?;
+    let m = count(next("the constraint count")?, "the constraint count")?;
+    let reserve = |k: usize| k.min(1 << 20);
+    let mut vars = Vec::with_capacity(reserve(n));
+    for _ in 0..n {
+        vars.push(next("a variable label")? as i32);
+    }
+    let mut cons = Vec::with_capacity(reserve(m));
+    for _ in 0..m {
+        cons.push(next("a constraint label")? as i32);
+    }
+    if it.next().is_some() {
+        return Err(format!("more labels than the declared {n} + {m}"));
+    }
+    Ok((vars, cons))
+}
+
 /// Default backend factory used by the restoration sub-IPM. Mirrors
 /// the `default_backend_factory` in `pounce-algorithm`: FERAL is the
 /// shipping default, with MA57 available behind the `ma57` cargo
@@ -4046,6 +4093,75 @@ fn default_backend_factory(
             }
         },
     )
+}
+
+#[cfg(test)]
+mod block_structure_file_tests {
+    use super::read_block_structure;
+
+    /// A scratch file that removes itself, so the tests leave nothing behind.
+    /// No `tempfile` crate: this workspace depends on none, and one test
+    /// helper is not the reason to add one.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str, text: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "pounce-blocks-{}-{}-{tag}.txt",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            ));
+            std::fs::write(&p, text).unwrap();
+            Self(p)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The shape `gen_scopf.py` writes: counts, then the variable labels, then
+    /// the constraint labels, with `-1` for the shared ones.
+    #[test]
+    fn a_well_formed_declaration_round_trips() {
+        let f = Scratch::new("ok", "4 3\n0 0 -1 1\n0 1 -1\n");
+        let (vars, cons) = read_block_structure(f.path()).unwrap();
+        assert_eq!(vars, vec![0, 0, -1, 1]);
+        assert_eq!(cons, vec![0, 1, -1]);
+    }
+
+    /// Both counts are read before either list, so a corrupt header would
+    /// otherwise reach `Vec::with_capacity` as a reserve request. A negative
+    /// count is refused by name, and an absurd one must fail by running out of
+    /// file rather than by trying to allocate for it.
+    #[test]
+    fn a_corrupt_header_is_refused_without_allocating_for_it() {
+        let f = Scratch::new("neg", "-1 3\n");
+        let e = read_block_structure(f.path()).unwrap_err();
+        assert!(e.contains("negative"), "{e}");
+
+        let f = Scratch::new("huge", "1000000000000 1\n0 0\n");
+        let e = read_block_structure(f.path()).unwrap_err();
+        assert!(e.contains("file ends before"), "{e}");
+    }
+
+    /// A file with more labels than it declared is a mislabelling waiting to
+    /// happen, not something to truncate silently.
+    #[test]
+    fn extra_labels_are_an_error() {
+        let f = Scratch::new("extra", "2 1\n0 1\n-1 7\n");
+        let e = read_block_structure(f.path()).unwrap_err();
+        assert!(e.contains("more labels"), "{e}");
+    }
 }
 
 #[cfg(test)]

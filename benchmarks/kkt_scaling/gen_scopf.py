@@ -31,8 +31,11 @@ chosen first in case order among branches whose loss keeps the network
 connected *and* whose single-contingency problem pounce solves (screened once
 per case with --screen BIN and cached): an infeasible contingency makes every
 larger instance infeasible, which measures the infeasibility detector rather
-than the KKT solve. Written with symbolic labels, so the .row/.col files carry each
-variable's and constraint's block index as the first index of its name.
+than the KKT solve. Written with symbolic labels, so the .row/.col files carry each variable's and
+constraint's block index as the first index of its name — and, beside each
+.nl, a `.blocks` file declaring that structure for pounce's block-parallel KKT
+path (`pounce model.nl block_structure_file=model.blocks`): `n m`, then one
+block id per variable and per constraint, `-1` for the shared dispatch.
 
 Usage:
   gen_scopf.py OUTDIR CASE K [K ...] [--screen POUNCE_BIN]
@@ -177,10 +180,10 @@ def build(case, K, cache_dir, outages=None):
     m.C = pyo.RangeSet(1, K) if K > 0 else pyo.Set(initialize=[])
     m.dpg = pyo.Var(m.C, m.S, bounds=lambda _, k, g: (-RAMP * pmax[g], RAMP * pmax[g]),
                     initialize=0.0)
-    m.dpg_box = pyo.ConstraintList()   # the re-dispatched output stays in its limits
-    for k in m.C:
-        for g in shared:
-            m.dpg_box.add(pyo.inequality(pmin[g], m.pg[g] + m.dpg[k, g], pmax[g]))
+    # the re-dispatched output stays in its own limits
+    m.dpg_box = pyo.Constraint(
+        m.C, m.S, rule=lambda m, k, g: pyo.inequality(pmin[g], m.pg[g] + m.dpg[k, g], pmax[g])
+    )
     for k in m.B:
         m.va[k, ref].fix(0.0)
 
@@ -202,9 +205,10 @@ def build(case, K, cache_dir, outages=None):
         qt = -(b_[e] + b[e] / 2) * vt**2 - (vf * vt / tf) * (g_[e] * pyo.sin(-d) - b_[e] * pyo.cos(-d))
         return pf, qf, pt, qt
 
-    m.pbal = pyo.ConstraintList()
-    m.qbal = pyo.ConstraintList()
-    m.therm = pyo.ConstraintList()
+    # Expressions first, then block-indexed constraints: the component names
+    # (`pbal[k,i]`, `therm[k,e,side]`) carry the block, which is what the
+    # `.blocks` declaration and the .row/.col files are read from.
+    p_res, q_res, t_res = {}, {}, {}
     for k in m.B:
         p_inj = {i: -bus[i, 2] / base - bus[i, 4] / base * m.vm[k, i] ** 2 for i in range(nb)}
         q_inj = {i: -bus[i, 3] / base + bus[i, 5] / base * m.vm[k, i] ** 2 for i in range(nb)}
@@ -221,16 +225,57 @@ def build(case, K, cache_dir, outages=None):
             pf, qf, pt, qt = flows(k, e)
             p_out[f] += pf; q_out[f] += qf; p_out[t] += pt; q_out[t] += qt
             if rate[e] < 99:
-                m.therm.add(pf**2 + qf**2 <= (limit * rate[e]) ** 2)
-                m.therm.add(pt**2 + qt**2 <= (limit * rate[e]) ** 2)
+                t_res[k, e, 0] = pf**2 + qf**2 <= (limit * rate[e]) ** 2
+                t_res[k, e, 1] = pt**2 + qt**2 <= (limit * rate[e]) ** 2
         for i in range(nb):
-            m.pbal.add(p_inj[i] == p_out[i])
-            m.qbal.add(q_inj[i] == q_out[i])
+            p_res[k, i] = (p_inj[i], p_out[i])
+            q_res[k, i] = (q_inj[i], q_out[i])
+
+    m.pbal = pyo.Constraint(m.B, m.N, rule=lambda m, k, i: p_res[k, i][0] == p_res[k, i][1])
+    m.qbal = pyo.Constraint(m.B, m.N, rule=lambda m, k, i: q_res[k, i][0] == q_res[k, i][1])
+    m.SIDES = pyo.RangeSet(0, 1)
+    m.therm = pyo.Constraint(
+        m.B, m.L, m.SIDES,
+        rule=lambda m, k, e, s: t_res.get((k, e, s), pyo.Constraint.Skip),
+    )
 
     c2, c1, c0 = cost[:, 4] * base**2, cost[:, 5] * base, cost[:, 6]
     m.obj = pyo.Objective(expr=sum(
         c2[g] * p_gen(0, g) ** 2 + c1[g] * p_gen(0, g) + c0[g] for g in range(ng)))
     return m, dict(nb=nb, ng=ng, nl=nl, shared=len(shared), outages=outages)
+
+
+def block_of(name):
+    """Block id from a component's name: `x[k,...]` -> k, shared -> -1.
+
+    The model indexes every per-contingency component by its block first, and
+    the globals (`pg[g]`) not at all, so the name carries the structure.
+    """
+    base, _, rest = name.partition("[")
+    if base in ("pg",):
+        return -1
+    first = rest.split(",")[0].rstrip("]")
+    try:
+        return int(first)
+    except ValueError:
+        return -1
+
+
+def write_blocks(m, smap_id, path):
+    """Declare the structure in the .nl's own variable / constraint order."""
+    smap = m.solutions.symbol_map[smap_id]
+    order = {"v": {}, "c": {}}
+    for symbol, obj in smap.bySymbol.items():
+        kind = symbol[0]
+        if kind in order and symbol[1:].isdigit():
+            order[kind][int(symbol[1:])] = obj
+    var = [block_of(order["v"][i].name) for i in range(len(order["v"]))]
+    con = [block_of(order["c"][i].name) for i in range(len(order["c"]))]
+    with open(path, "w") as f:
+        f.write(f"{len(var)} {len(con)}\n")
+        f.write(" ".join(str(b) for b in var) + "\n")
+        f.write(" ".join(str(b) for b in con) + "\n")
+    return f"{len(set(b for b in var + con if b >= 0))} blocks, {sum(1 for b in var + con if b < 0)} shared"
 
 
 def main(outdir, case, Ks, pounce=None):
@@ -241,9 +286,11 @@ def main(outdir, case, Ks, pounce=None):
     for K in Ks:
         m, info = build(case, K, cache, outages=outages)
         path = os.path.join(outdir, f"scopf_{case}_K{K:03d}.nl")
-        m.write(path, format="nl", io_options={"symbolic_solver_labels": True})
+        _, smap_id = m.write(path, format="nl", io_options={"symbolic_solver_labels": True})
         nv = sum(1 for v in m.component_data_objects(pyo.Var) if not v.fixed)
-        print(f"K={K:3d}  blocks={K + 1:3d}  vars={nv:7d}  shared={info['shared']}  -> {path}", flush=True)
+        nb = write_blocks(m, smap_id, os.path.splitext(path)[0] + ".blocks")
+        print(f"K={K:3d}  blocks={K + 1:3d}  vars={nv:7d}  shared={info['shared']}  "
+              f"declared={nb}  -> {path}", flush=True)
 
 
 if __name__ == "__main__":

@@ -389,8 +389,57 @@ generator columns have degree ~50, no more than many ordinary columns — there 
 reports 581 blocks with a 7 301-column border, which the border-size guard
 rejects, and the solve proceeds monolithically. That is the argument for
 *declared* structure: the model knows which columns are shared; a degree
-heuristic only sometimes does. The Phase 1 mapper (NLP-space labels → KKT
-indices) is what turns that into the usable path, and it is not built yet.
+heuristic only sometimes does. The mapper below is what turns that into the
+usable path.
+
+## The mapper: model-space labels → KKT indices
+
+`set_kkt_block_structure` takes labels in *KKT* coordinates, which no modelling
+layer knows: they depend on which variables pounce fixed and removed, and on
+the equality / inequality split it derived. `IpoptApplication::set_block_structure`
+(`Problem.set_block_structure` in Python, `block_structure_file` from the CLI)
+takes one label per model variable and one per model constraint — negative for
+the shared ones — and `map_block_structure_to_kkt` puts them through the same
+`BoundClassification` the solver builds its KKT from: `x_not_fixed_map` for the
+variable block, `c_map` for the equality duals, and `d_map` twice, once for the
+slacks and once for the inequality duals, because a slack and its dual are the
+same row of the model. A declaration that does not match the problem is a
+warning and a monolithic solve, never a failed run.
+
+That the mapping is not the identity is visible in the first measurement:
+`case118_ieee` declares 53 shared generator variables and pounce reports a
+border of 18, because 35 of those generators have `pmin == pmax` and were
+removed by `make_parameter`. Labelling in KKT space by hand would have had to
+know that.
+
+**`case1354_pegase`, the family detection could not read** (corrective N-1
+SCOPF, same binary, `.nl` through the CLI, runs serialised on an idle machine):
+
+| K | vars | blocks / border | factorization std → declared | wall | iterations | objective |
+|---|---|---|---|---|---|---|
+| 16 | 54 859 | 17 / 259 | 5.66 → 1.31 s (**4.3×**) | 18.1 → 10.0 s | 43 = 43 | identical |
+| 32 | 106 491 | 33 / 259 | 11.52 → 2.42 s (**4.8×**) | 37.7 → 21.1 s | 49 = 49 | identical |
+| 64 | 209 755 | 65 / 259 | 10.72 → 2.82 s (**3.8×**) | 125.1 → 111.9 s | 87 = 87 | identical |
+
+Detection reports 581 blocks and a 7 301-column border on this family and is
+refused by the border guard; the declaration gives 17/33/65 blocks over a
+259-column border — the 259 base-case dispatch variables, exactly what the
+model says is shared. Same iteration counts and same objectives as the
+monolithic path, to every digit printed.
+
+Two things to read off the K = 64 row rather than skip:
+
+- It is **infeasible**, and both paths detect that identically (87 iterations,
+  same objective at the point of detection). A matching trajectory into a
+  restoration failure is the same evidence as a matching trajectory into a
+  solve; it is reported here rather than dropped for looking bad.
+- Its wall gain is 1.12× against 1.8× on the rows above because **restoration's
+  factorizations are still monolithic**: 70 of them, 34.7 s, unchanged between
+  the legs, against 2.8 s in the main solve. The restoration sub-IPM adds a
+  `p`/`n` pair per constraint, so its KKT is not the one the declaration was
+  mapped onto, and the block path never reaches it. On this run that is 92% of
+  the remaining factor time — the next thing to extend, and the reason the
+  nested `restoration` summary object exists.
 
 ## Verdict for the structured-KKT plan
 

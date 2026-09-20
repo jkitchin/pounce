@@ -83,6 +83,8 @@ pub struct PyProblem {
     kkt_schur_block: Option<Vec<usize>>,
     /// KKT-space block labels for the block-parallel path; `< 0` is the border.
     kkt_blocks: Option<Vec<i32>>,
+    /// The same structure in model space: `(variable labels, constraint labels)`.
+    model_blocks: Option<(Vec<i32>, Vec<i32>)>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -159,6 +161,7 @@ impl PyProblem {
             external_ordering: None,
             kkt_schur_block: None,
             kkt_blocks: None,
+            model_blocks: None,
         })
     }
 
@@ -648,6 +651,49 @@ impl PyProblem {
         }
         self.kkt_schur_block = Some(out);
         Ok(())
+    }
+
+    /// Declare the block structure in the model's own terms: one block id per
+    /// variable and per constraint, negative for the shared ones.
+    ///
+    /// The natural form for a structured model — "this variable is shared,
+    /// everything in scenario `k` is block `k`" — with pounce mapping it to
+    /// KKT indices itself (fixed variables, the equality / inequality split).
+    /// Blocks must couple only through the shared entries; when they do not,
+    /// or the lengths do not match the problem, the solve falls back to the
+    /// standard solver and `info["linear_solver"]["blocks"]` stays `None`.
+    ///
+    /// Each block is then factored independently and in parallel, with a Schur
+    /// complement on the shared columns. Honored on the default feral +
+    /// exact-Hessian path.
+    ///
+    /// Persistent config; drop it with `clear_block_structure()`.
+    fn set_block_structure(
+        &mut self,
+        var_blocks: Py<PyAny>,
+        con_blocks: Py<PyAny>,
+    ) -> PyResult<()> {
+        let v = extract_index_vec_inferred(&var_blocks, "block structure (variables)")?;
+        let c = extract_index_vec_inferred(&con_blocks, "block structure (constraints)")?;
+        if v.len() != self.n as usize || c.len() != self.m as usize {
+            return Err(PyValueError::new_err(format!(
+                "block structure: expected {} variable and {} constraint labels, got {} and {}",
+                self.n,
+                self.m,
+                v.len(),
+                c.len()
+            )));
+        }
+        self.model_blocks = Some((
+            v.into_iter().map(|x| x as i32).collect(),
+            c.into_iter().map(|x| x as i32).collect(),
+        ));
+        Ok(())
+    }
+
+    /// Drop any declared model-space block structure.
+    fn clear_block_structure(&mut self) {
+        self.model_blocks = None;
     }
 
     /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
@@ -1180,7 +1226,11 @@ impl PyProblem {
         if let Some(indices) = &self.kkt_schur_block {
             app.set_kkt_schur_block(indices.clone());
         }
-        // Block-parallel KKT partition (structured-KKT Phase 5b).
+        // Block-parallel KKT partition (structured-KKT Phase 5b), declared in
+        // model space or directly in KKT space.
+        if let Some((v, c)) = &self.model_blocks {
+            app.set_block_structure(v.clone(), c.clone());
+        }
         if let Some(labels) = &self.kkt_blocks {
             app.set_kkt_block_structure(labels.clone());
         }

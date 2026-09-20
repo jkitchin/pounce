@@ -2192,11 +2192,10 @@ The user should not need to understand the linear algebra to benefit from it.
 `IpoptApplication::set_kkt_block_structure`, `Problem.set_kkt_block_structure`,
 and the `kkt_block_detect` option. On `case118_ieee`: factorization 3.6–4.0×
 faster at K = 32…128, identical iteration counts and objectives, ~1.3× end to
-end (factorization is ~35% of these solves). What is **not** built is the Phase 1
-mapper that turns a model's own block labels into KKT indices; without it the
-only structure input is KKT-space labels or detection, and detection is a
-degree heuristic that fails where the shared columns do not stand out (measured
-on `case1354_pegase`). That mapper is now the critical path — see §63.6.*
+end (factorization is ~35% of these solves). Detection is a degree heuristic
+and fails where the shared columns do not stand out (measured on
+`case1354_pegase`); the Phase 1 mapper in §63.6, which turns a model's own
+block labels into KKT indices, is what covers that case and is also built.*
 
 Concrete because the prototype measured it (`benchmarks/kkt_scaling/blockfac`,
 `dev-notes/kkt-scaling-phase0b.md`): on a 210k-variable N-1 SCOPF, factor +
@@ -2287,9 +2286,21 @@ required, though the arrowhead family should be swept before and after.
 
 ---
 
-# 63.6 Phase 1, now the critical path: the block-structure mapper
+# 63.6 Phase 1: the block-structure mapper — **implemented**
 
-The block solver works; what it lacks is a usable way to be *told* the
+*Status 2026-09-19: `map_block_structure_to_kkt` +
+`IpoptApplication::set_block_structure`, `Problem.set_block_structure` in
+Python, `block_structure_file` for the `.nl` path. Measured on
+`case1354_pegase`, the family detection could not read: 17/33/65 blocks over a
+259-column border at K = 16/32/64, factorization 4.3× / 4.8× / 3.8× faster,
+identical iteration counts and objectives. The section below is the design it
+was built to; what it did not anticipate is that a fixed variable moves the
+border (53 declared shared columns become a border of 18 on `case118_ieee`) and
+that restoration's KKT is a different matrix, so its factorizations stay
+monolithic — 92% of the remaining factor time on the infeasible K = 64 run.
+Numbers in `dev-notes/kkt-scaling-phase0b.md`.*
+
+The block solver works; what it lacked was a usable way to be *told* the
 structure. Today it takes KKT-space labels (`x | slack | eq-dual | ineq-dual`,
 in the solver's internal order), which a modeller cannot be expected to
 produce, or it detects them, which works only when the shared columns stand out
@@ -2312,7 +2323,16 @@ The mapper is the missing piece, and it is small:
 
 With it, `case1354_pegase` (where detection fails) becomes the second
 end-to-end measurement, and Phase 5a's evaluation work has the same structure
-object to key on.
+object to key on. Both surfaces shipped, plus `block_structure_file` so the
+`.nl` path has one without a modelling layer; the `.row`/`.col` symbolic-name
+route was not built, because a labels file is the same information and does not
+tie pounce to one generator's naming convention.
+
+**What the next commit on this line is**, in measured order: (a) carry the
+structure into the restoration sub-IPM, whose `p`/`n` pair per constraint makes
+a block-preserving map obvious and which is 34.7 s against the main solve's
+2.8 s on the K = 64 run; (b) Phase 5a's block-parallel evaluation, the larger
+half of every one of these solves, which pounce does not own.
 
 # 64. Bottom Line
 
@@ -2342,7 +2362,7 @@ For the multi-horizon gas-network problem, its first instance, the target is:
 The immediate development sequence should be:
 
 1. instrument FERAL stats, then attribute the gas \(T^2\) to a row of §38.2 (Phase 0),
-2. build `Problem.set_block_structure`, the index mapper, validation and diagnostics in POUNCE (general), with the `discopt` export (I1) filed when an end-to-end test needs it,
+2. build `Problem.set_block_structure`, the index mapper, validation and diagnostics in POUNCE (general), with the `discopt` export (I1) filed when an end-to-end test needs it — **done** (§63.6),
 3. benchmark structure-derived ordering, block-level nested dissection on the chain, on the gas model **and** an arrowhead problem,
 4. benchmark the existing Schur path on global variables only,
 5. implement the block solver for whichever topology the measurements leave a gap on,
