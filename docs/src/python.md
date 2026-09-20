@@ -218,6 +218,49 @@ back to the standard full-space path transparently**, so the hook can never
 break a solve; it only changes *how* the identical system is factored, never
 the solution. Honored on the default feral + exact-Hessian path.
 
+### Block-structured KKT solve (`set_block_structure`)
+
+Where `set_kkt_schur_block` eliminates *one* block, this declares that the
+model is **arrowhead** — many independent blocks coupled only through a small
+border — and POUNCE factorizes the blocks in parallel, coupling them through a
+dense complement over the border. One label per variable and one per
+constraint, **negative for the shared ones**:
+
+```python
+prob = pounce.Problem(n, m, problem_obj=...)      # needs an exact Hessian
+prob.set_block_structure(var_blocks, con_blocks)  # model-space labels, < 0 = shared
+x, info = prob.solve(x0=...)
+info["linear_solver"]["blocks"]                   # {'n_blocks': ..., 'border_dim': ...}
+# prob.block_structure()        -> the installed declaration, or None
+# prob.clear_block_structure()
+```
+
+The labels are in **model** coordinates, and that is the difference that
+matters: POUNCE maps them onto the KKT layout itself, which depends on which
+variables it fixed and removed and on how constraints split into equalities and
+inequalities. A model declaring 53 shared columns can come back with a border
+of 18 because 35 of them were fixed at their bounds — arithmetic no caller
+should have to reproduce. (`set_kkt_block_structure` takes KKT-space labels
+directly, for callers that already have them.)
+
+Exact by construction: a permutation plus block elimination of the same
+symmetric indefinite system, with inertia recovered by Haynsworth additivity,
+so the solve takes the same iterates. On a corrective N-1 AC-SCOPF from pglib
+`case1354_pegase` with 65 blocks over a 259-column border, the factorization
+runs 3.8-4.8× faster with iteration counts and objectives identical to the
+monolithic path.
+
+It pays when the blocks are **wide** — the monolithic factorization already
+finds arrowhead structure, so the only win is parallelism, against a fixed
+per-block cost. Below roughly 250 columns per block the declaration makes the
+solve slower, and POUNCE refuses it for you (`kkt_block_min_size`, default
+256). As with every structure hook here, an unsuitable or malformed
+declaration falls back to the standard path with a warning rather than
+breaking the solve. Honored on the default FERAL + exact-Hessian path. Full
+account, including detection (`kkt_block_detect`) and restoration
+(`kkt_block_restoration`): [Block-structured
+KKT](options.md#block-structured-kkt).
+
 ## Building a model in memory (`NlExpr` / `build_nl_problem`)
 
 `pounce.read_nl("model.nl")` gives you pounce's native reverse-mode-AD

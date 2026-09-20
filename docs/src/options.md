@@ -2024,6 +2024,133 @@ poor ordering only costs fill/time, never correctness. This maps to
 FERAL's `OrderingMethod::External` (feral#107) and honors only the default
 FERAL backend.
 
+## Block-structured KKT
+
+Some models are *arrowhead*: independent blocks that touch each other only
+through a small set of shared columns or linking rows. Security-constrained
+OPF (one block per contingency, sharing the base-case dispatch), two-stage
+stochastic programs (one block per scenario, sharing the first stage) and
+multi-cell process models all have this shape. Told where the blocks are,
+POUNCE factorizes them in parallel and couples them through a dense complement
+over the border, instead of factorizing one monolithic KKT.
+
+**This is exact.** It is a permutation plus block elimination of the same
+symmetric indefinite system, with inertia recovered by Haynsworth additivity —
+not a decomposition algorithm, and nothing about convexity is assumed. The
+solve takes the same iterates it would have taken: on the measurements below
+the iteration counts and objectives are identical to the monolithic path, digit
+for digit.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `block_structure_file` | (unset) | Path to a declaration for the `.nl` path. First line `n m`, then `n` variable labels and `m` constraint labels, whitespace-separated, **negative for the shared ones**. POUNCE maps model indices onto the KKT itself. |
+| `kkt_block_detect` | `no` | Look for the structure in the assembled KKT rather than being told it. A degree heuristic — see the limits below. |
+| `kkt_block_min_size` | `256` | Refuse a partition whose *median* block is narrower than this many KKT columns. `0` honors any partition. |
+| `kkt_block_restoration` | `yes` | Use the same partition inside the restoration sub-IPM. |
+
+Honored on the FERAL + exact-Hessian path (the default path). Anywhere else —
+another linear solver, `hessian_approximation=limited-memory`, a declaration
+that does not fit the problem — POUNCE falls back to the standard solver with a
+warning and solves normally. A declaration can cost you time; it cannot cost
+you an answer.
+
+### Declaring the structure
+
+Three routes, all carrying the same information:
+
+* **From Python**, in *model* coordinates — one label per variable and one per
+  constraint, negative for shared:
+
+  ```python
+  problem.set_block_structure(var_blocks, con_blocks)
+  ```
+
+  POUNCE maps these onto the KKT layout itself, which is the point: the layout
+  depends on which variables were fixed and removed and on how constraints
+  split into equalities and inequalities, none of which a modelling layer can
+  see. (`set_kkt_block_structure` takes KKT-space indices directly and exists
+  for callers that already have them; prefer the model-space form.)
+* **From a `.nl` file**, with `block_structure_file` — the same two label lists
+  in a text file, for the CLI and any AMPL-style pipeline.
+* **From discopt**, which resolves a model's `set_block` / `mark_coupling`
+  annotations into this form and passes them through
+  (`solve_nlp_from_model(..., block_structure="auto")`).
+
+### When it pays, and when it does not
+
+The block path's only win is parallelism: a good ordering already finds
+arrowhead structure, so the monolithic factorization is not doing redundant
+work. Against that win sits a fixed per-block cost — one symbolic analysis, one
+task, one border tail — so **blocks have to be wide enough to be worth
+dispatching**. Measured on a 32-block arrowhead, factorization seconds
+full-space → declared:
+
+| columns per block | full-space | declared | ratio |
+|---|---|---|---|
+| 60 | 0.0060 s | 0.0195 s | 0.31× |
+| 125 | 0.0133 s | 0.0231 s | 0.57× |
+| 250 | 0.0260 s | 0.0264 s | 0.98× |
+| 500 | 0.0534 s | 0.0343 s | 1.56× |
+| 1 000 | 0.1244 s | 0.0500 s | 2.49× |
+| 2 000 | 0.2725 s | 0.0843 s | 3.23× |
+
+`kkt_block_min_size` is the guard for that: below it the declaration is refused
+and logged, so a small model does not silently take the slower path. Raise it
+if your blocks are wide but the border is large; set `0` to override the check.
+
+The border matters for the same reason — its complement is dense, so a
+partition whose border runs to thousands of columns costs more than the
+factorization it replaces, and POUNCE refuses those too.
+
+On a corrective N-1 AC-SCOPF built from pglib `case1354_pegase`, where the
+blocks are 13 601 KKT columns wide and the border is 259:
+
+| contingencies | variables | factorization | wall | iterations |
+|---|---|---|---|---|
+| 16 | 54 859 | 5.66 → 1.31 s (4.3×) | 18.1 → 10.0 s | 43 = 43 |
+| 32 | 106 491 | 11.52 → 2.42 s (4.8×) | 37.7 → 21.1 s | 49 = 49 |
+| 64 | 209 755 | 10.72 → 2.82 s (3.8×) | 125.1 → 111.9 s | 87 = 87 |
+
+The end-to-end factor is smaller than the factorization factor because
+factorization is only part of a solve — on these models roughly a third, with
+function evaluation the larger share. That is arithmetic, not a disappointment:
+speeding up a third of the work by 4× is a 1.3–1.8× solve.
+
+### Restoration
+
+`kkt_block_restoration` (default `yes`) carries the partition into the
+restoration sub-IPM. It applies unchanged there because POUNCE reduces the
+restoration KKT onto the original system before factorizing, so the same labels
+describe it. On the infeasible 64-contingency run above, restoration's
+factorizations fall from 35.0 s to 11.4 s — three times the main solve's share.
+
+One caveat worth knowing: block elimination cannot pivot across the
+block/border split, so the factorizations are not bit-identical to the
+monolithic ones. The main solve reproduced its trajectory exactly on every
+model measured; restoration, which is called precisely because the model is
+locally infeasible, can take a slightly different path to the same verdict. Set
+`no` to hold restoration to the monolithic factorization.
+
+### Detection, and why a declaration beats it
+
+`kkt_block_detect=yes` looks for the structure by ranking columns by degree and
+peeling the densest. It works when the shared columns stand out — on
+`case118_ieee` they have degree 130 against a median of 6 — and **fails when
+they do not**: on `case1354_pegase` the shared generator columns have degree
+~50, no more than many ordinary columns, and detection reports 581 blocks over
+a 7 301-column border, which the border guard then refuses. The model knows
+which columns are shared; a degree heuristic only sometimes does. Use detection
+to discover whether a model has structure worth declaring, and a declaration to
+exploit it.
+
+### What gets reported
+
+When the path engages, the solve report's `linear_solver.blocks` object (and
+Python's `info["linear_solver"]["blocks"]`) carries `n_blocks`, `border_dim`,
+`largest_block`, the number of block factorizations and the seconds they took;
+restoration's appear under `linear_solver.restoration.blocks`. If that object
+is absent, the partition was refused — the log says why.
+
 ## Environment overrides (FERAL and debug gates)
 
 A handful of knobs are reachable through environment variables. The

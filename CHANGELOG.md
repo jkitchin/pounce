@@ -11,6 +11,28 @@ changes.
 
 ### Added
 
+- **Block-structured KKT solve.** A model that is arrowhead — independent
+  blocks coupled only through a small border, as in security-constrained OPF,
+  two-stage stochastic programs and multi-cell process models — can now tell
+  POUNCE where its blocks are, and the KKT factorization runs block-parallel
+  over a shared border instead of monolithically. Declare it in model
+  coordinates with `Problem.set_block_structure(var_blocks, con_blocks)`
+  (negative labels are the shared ones), from a `.nl` pipeline with the
+  `block_structure_file` option, or let `kkt_block_detect=yes` look for it.
+  Exact by construction — a permutation plus block elimination of the same
+  system, inertia by Haynsworth additivity — so the solve takes the same
+  iterates: measured on a corrective N-1 AC-SCOPF from pglib `case1354_pegase`
+  at 16/32/64 contingencies, identical iteration counts and objectives with the
+  factorization 4.3× / 4.8× / 3.8× faster and the solve 1.8× / 1.8× / 1.1×.
+  `kkt_block_restoration` (default `yes`) carries the partition into the
+  restoration sub-IPM, where it took an infeasible 209 755-variable run's
+  factorizations from 35.0 s to 11.4 s. `kkt_block_min_size` (default 256)
+  refuses a partition whose blocks are too narrow to pay for their own
+  dispatch, measured to be slower below ~250 columns per block. Honored on the
+  FERAL + exact-Hessian path; anywhere else, and on a declaration that does not
+  fit the problem, POUNCE warns and solves normally. Reported under
+  `linear_solver.blocks`. See "Block-structured KKT" in `docs/src/options.md`.
+
 - **Factorization work and pivoting statistics** in the linear-solver
   summary: the solve report's `linear_solver` object and a new Python
   `info["linear_solver"]` dict. Per solve: seconds spent in the numeric
