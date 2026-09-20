@@ -834,10 +834,22 @@ mod tests {
         fs::remove_dir_all(tmp).ok();
     }
 
+    /// A unique scratch directory per call.
+    ///
+    /// The sequence number is load-bearing, not decoration: this clock has
+    /// **microsecond** granularity (measured — 1,887 of 2,000 back-to-back
+    /// reads were byte-identical), `#[test]`s run as parallel threads of one
+    /// process, and every test here removes its directory when it finishes.
+    /// Two tests entering the same microsecond therefore shared a directory
+    /// and one deleted it under the other. Seen once in a full `--workspace`
+    /// run (`state_emits_solve_indices_and_iter_dirs`), never in 25 runs of
+    /// this crate alone — which is what a same-microsecond race looks like.
     fn tempdir() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "pounce-diag-test-{}-{}",
+            "pounce-diag-test-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -4106,9 +4106,15 @@ mod block_structure_file_tests {
 
     impl Scratch {
         fn new(tag: &str, text: &str) -> Self {
+            // The sequence number, not the clock, is what makes this unique:
+            // the clock has microsecond granularity and `#[test]`s are
+            // parallel threads of one process. See the same helper's note in
+            // `pounce-common::diagnostics`.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let p = std::env::temp_dir().join(format!(
-                "pounce-blocks-{}-{}-{tag}.txt",
+                "pounce-blocks-{}-{}-{}-{tag}.txt",
                 std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos())
