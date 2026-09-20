@@ -45,6 +45,25 @@
 
 use pounce_nl::nl_reader::{BinOp, Expr, NlProblem, NlProblemParts, NlTnlp, UnaryOp};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
+use std::sync::{Mutex, OnceLock};
+
+/// Serializes "set the switch, build, evaluate".
+///
+/// The switch is `POUNCE_NL_PARALLEL_EVAL`, which is **process-wide**, and
+/// libtest runs these tests as concurrent threads of one process. A test that
+/// loses the race does not fail — it passes *vacuously*, because both arms of
+/// its comparison end up on the same path and agree for the wrong reason.
+///
+/// Measured, with the reverse-order mutation applied to the parallel Hessian
+/// walk and the file run 20 times: **with this lock the mutation is caught
+/// 20/20; without it, 16/20**. So four runs in twenty proved nothing, silently.
+/// That is the failure this file exists to prevent, occurring inside the file
+/// itself, and it is why the guard is held across the evaluation rather than
+/// just across the `set_var`.
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// `rows` nonlinear rows over `rows + 2` variables, each row coupling three
 /// neighbours so the Hessian needs several colors:
@@ -89,7 +108,9 @@ fn model(rows: usize) -> NlProblem {
 /// constant multiplier vector hides an index error by making the wrong entry
 /// equal to the right one.
 fn hessian(rows: usize, parallel: bool) -> Vec<f64> {
-    // SAFETY: single-threaded test body, set before any evaluator is built.
+    // Held until this function returns: see `env_lock`.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: the lock above makes this the only thread touching the variable.
     unsafe {
         if parallel {
             std::env::remove_var("POUNCE_NL_PARALLEL_EVAL");
@@ -225,7 +246,8 @@ fn parallel_jacobian_matches_serial_bit_for_bit() {
 
 /// The constraint Jacobian at the same varied point as [`hessian`].
 fn jacobian(rows: usize, parallel: bool) -> Vec<f64> {
-    // SAFETY: single-threaded test body, set before the evaluator is built.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: the lock above makes this the only thread touching the variable.
     unsafe {
         std::env::set_var("POUNCE_NL_PARALLEL_EVAL", if parallel { "1" } else { "0" });
     }
@@ -285,7 +307,8 @@ fn parallel_eval_g_matches_serial_bit_for_bit() {
 
 /// `g(x)` at the same varied point as the other two walks.
 fn constraint_values(rows: usize, parallel: bool) -> Vec<f64> {
-    // SAFETY: single-threaded test body, set before the evaluator is built.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: the lock above makes this the only thread touching the variable.
     unsafe {
         std::env::set_var("POUNCE_NL_PARALLEL_EVAL", if parallel { "1" } else { "0" });
     }
