@@ -2185,7 +2185,18 @@ The user should not need to understand the linear algebra to benefit from it.
 
 ---
 
-# 63.5 Phase 5b design: `BlockAugSystemSolver`
+# 63.5 Phase 5b: `BlockAugSystemSolver` — **implemented**
+
+*Status 2026-09-19: built and measured through the CLI on the arrowhead family
+— `pounce_feral::FeralBlockSolver`, `kkt::BlockAugSystemSolver`,
+`IpoptApplication::set_kkt_block_structure`, `Problem.set_kkt_block_structure`,
+and the `kkt_block_detect` option. On `case118_ieee`: factorization 3.6–4.0×
+faster at K = 32…128, identical iteration counts and objectives, ~1.3× end to
+end (factorization is ~35% of these solves). What is **not** built is the Phase 1
+mapper that turns a model's own block labels into KKT indices; without it the
+only structure input is KKT-space labels or detection, and detection is a
+degree heuristic that fails where the shared columns do not stand out (measured
+on `case1354_pegase`). That mapper is now the critical path — see §63.6.*
 
 Concrete because the prototype measured it (`benchmarks/kkt_scaling/blockfac`,
 `dev-notes/kkt-scaling-phase0b.md`): on a 210k-variable N-1 SCOPF, factor +
@@ -2240,6 +2251,22 @@ against feral's threading rather than against one thread. Thread count follows
 pounce's existing policy; a serial fallback (one block at a time) must stay
 correct because it is also the debugging path.
 
+## Three things the implementation had to get right
+
+Each was found by a measurement, not by inspection:
+
+* **Unscale the Schur block.** feral factors `D·A·D`, so the complement comes
+  back scaled by the border's own factors. Inertia is a congruence invariant,
+  so every inertia assertion passes either way — only a solve notices.
+* **Surface `Singular` rather than falling back on it.** Unlike the Schur arm,
+  every dual row here lives inside a block, so `perturb_for_singular`'s δ_c
+  reaches it; a KKT with structurally empty constraint rows reads as singular
+  on the monolithic path too.
+* **Fold tiny components into a block, never into the border.** Isolated rows
+  (empty constraints keeping only δ_c) each form their own component; putting
+  them in the border makes its dense complement cost more than the
+  factorization it replaces.
+
 ## What is not designed yet
 
 * **Restoration** builds a different KKT (extra `p`/`n` columns) and has no
@@ -2259,6 +2286,33 @@ structure is installed — so no default path moves and the fixture sweep is not
 required, though the arrowhead family should be swept before and after.
 
 ---
+
+# 63.6 Phase 1, now the critical path: the block-structure mapper
+
+The block solver works; what it lacks is a usable way to be *told* the
+structure. Today it takes KKT-space labels (`x | slack | eq-dual | ineq-dual`,
+in the solver's internal order), which a modeller cannot be expected to
+produce, or it detects them, which works only when the shared columns stand out
+by degree.
+
+The mapper is the missing piece, and it is small:
+
+* **Input** (§45): a block id per *model* variable and per *model* constraint,
+  `< 0` for shared — exactly what an indexed model already knows (`pg[g]` is
+  shared; everything in contingency `k` is block `k`).
+* **Mapping**: `x` takes the variable's label; a slack and its inequality dual
+  take the constraint's; an equality dual likewise. The pitfall is presolve: a
+  dropped row or fixed column shifts every later index, so the mapper must work
+  from the *post-presolve* model the KKT is assembled from, and refuse (fall
+  back) on a length mismatch rather than mislabel.
+* **Surfaces**: `Problem.set_block_structure(var_blocks, con_blocks)` in Python,
+  and for the `.nl` path either a labels file or — better — the block index
+  already carried by the `.row`/`.col` symbolic names, which is how
+  `gen_scopf.py`'s instances identify their contingencies.
+
+With it, `case1354_pegase` (where detection fails) becomes the second
+end-to-end measurement, and Phase 5a's evaluation work has the same structure
+object to key on.
 
 # 64. Bottom Line
 

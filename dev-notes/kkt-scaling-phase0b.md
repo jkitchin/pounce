@@ -345,6 +345,53 @@ a real implementation keeps the factors the native call already returns, so the
 factor figure is if anything pessimistic. What it establishes is that the arrowhead's block
 parallelism is real and reachable with feral as it ships.
 
+## Phase 5b, implemented: the block path inside pounce
+
+`pounce_feral::FeralBlockSolver` + `kkt::BlockAugSystemSolver`, engaged either
+by a caller-supplied partition (`IpoptApplication::set_kkt_block_structure`,
+`Problem.set_kkt_block_structure` in Python) or by `kkt_block_detect=yes`,
+which looks for the structure in the assembled KKT. End to end on the
+`case118_ieee` arrowhead family, same binary, `.nl` through the CLI:
+
+| K | blocks / border | factorization std → block | wall | iterations | objective |
+|---|---|---|---|---|---|
+| 32 | 33 / 18 | 1.077 → 0.271 s (**4.0×**) | 2.79 → 2.07 s | 43 = 43 | identical |
+| 64 | 65 / 18 | 2.290 → 0.592 s (**3.9×**) | 6.01 → 4.50 s | 48 = 48 | identical |
+| 128 | 129 / 18 | 7.110 → 1.953 s (**3.6×**) | 20.05 → 15.85 s | 81 = 81 | identical |
+
+Identical iteration counts and objectives are the correctness evidence: the
+block path reproduces the monolithic *trajectory*, not merely a comparable
+answer. The end-to-end factor of ~1.3× is exactly what the attribution above
+predicts — factorization is ~35% of these solves, and 3.9× on that share is
+1.35×. The rest is evaluation (Phase 5a), which pounce does not own.
+
+Three things the implementation had to get right, each found by a measurement:
+
+1. **Unscale the Schur block.** feral factors `D·A·D`, so the complement comes
+   back scaled. Inertia is a congruence invariant, so every inertia assertion
+   passes either way and only a solve notices.
+2. **Surface `Singular`, do not fall back on it.** Unlike the Schur arm — where
+   a rank-deficient *eliminated* block is outside δ_c's reach — every dual row
+   here lives inside a block, so `perturb_for_singular` fixes it on the next
+   factor. A KKT whose structurally empty constraint rows carry only δ_c reads
+   as singular on the monolithic path too (2 240 such rows on a 64-contingency
+   SCOPF), and that path reports rather than gives up. Falling back instead
+   cost the whole feature on the first end-to-end run.
+3. **Fold tiny components into a block, never into the border.** Those 2 240
+   empty rows are isolated, so each is its own "block"; putting them in the
+   border would grow it from 18 to thousands and make its dense complement cost
+   more than the factorization it replaces.
+
+**Detection's limits, measured.** It ranks columns by degree and peels: it finds
+the structure when the shared columns stand out (`case118_ieee`: degree 130
+against a median of 6) and **fails to on `case1354_pegase`**, where the shared
+generator columns have degree ~50, no more than many ordinary columns — there it
+reports 581 blocks with a 7 301-column border, which the border-size guard
+rejects, and the solve proceeds monolithically. That is the argument for
+*declared* structure: the model knows which columns are shared; a degree
+heuristic only sometimes does. The Phase 1 mapper (NLP-space labels → KKT
+indices) is what turns that into the usable path, and it is not built yet.
+
 ## Verdict for the structured-KKT plan
 
 Across both families the attribution is the same: **the only superlinear row is

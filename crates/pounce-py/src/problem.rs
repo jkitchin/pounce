@@ -81,6 +81,8 @@ pub struct PyProblem {
     /// `IpoptApplication::set_kkt_schur_block` in `prepare`. `None` uses the
     /// standard full-space solver.
     kkt_schur_block: Option<Vec<usize>>,
+    /// KKT-space block labels for the block-parallel path; `< 0` is the border.
+    kkt_blocks: Option<Vec<i32>>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -156,6 +158,7 @@ impl PyProblem {
             user_scaling: None,
             external_ordering: None,
             kkt_schur_block: None,
+            kkt_blocks: None,
         })
     }
 
@@ -647,6 +650,49 @@ impl PyProblem {
         Ok(())
     }
 
+    /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
+    ///
+    /// `labels` are **KKT-space block ids** (`0..dim`, in the solver's
+    /// internal `x, slack, eq-dual, ineq-dual` block order), one per KKT
+    /// index, with any negative value marking the shared border: blocks couple
+    /// to the border and never to each other. Each block is then factored
+    /// independently and in parallel, with a Schur complement on the border
+    /// and inertia by Haynsworth additivity.
+    ///
+    /// For arrowhead systems — scenarios, contingencies, or any blocks sharing
+    /// a few global columns. When the partition does not match the matrix (an
+    /// entry joining two blocks), or a block is singular, the solve falls back
+    /// to the standard solver transparently; `info["linear_solver"]["blocks"]`
+    /// is present only when the block path actually factored. Honored on the
+    /// default feral + exact-Hessian path.
+    ///
+    /// Pass an empty sequence to ask the solver to *detect* the structure from
+    /// the assembled KKT (equivalent to the `kkt_block_detect=yes` option).
+    ///
+    /// Persistent config: call once before `solve()`; drop with
+    /// `clear_kkt_block_structure()`.
+    fn set_kkt_block_structure(&mut self, labels: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&labels, "kkt_block_structure")?;
+        self.kkt_blocks = Some(idx.into_iter().map(|v| v as i32).collect());
+        Ok(())
+    }
+
+    /// Drop any installed block partition, restoring the standard solver.
+    fn clear_kkt_block_structure(&mut self) {
+        self.kkt_blocks = None;
+    }
+
+    /// The currently-installed block partition as a numpy int64 array, or
+    /// `None`.
+    fn get_kkt_block_structure<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.kkt_blocks.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
+    }
+
     /// Drop any installed Schur KKT partition, restoring the standard
     /// full-space solver.
     fn clear_kkt_schur_block(&mut self) {
@@ -1134,6 +1180,10 @@ impl PyProblem {
         if let Some(indices) = &self.kkt_schur_block {
             app.set_kkt_schur_block(indices.clone());
         }
+        // Block-parallel KKT partition (structured-KKT Phase 5b).
+        if let Some(labels) = &self.kkt_blocks {
+            app.set_kkt_block_structure(labels.clone());
+        }
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
         // Restoration factorizations record into their own sink, reported as
@@ -1394,6 +1444,19 @@ fn linear_solver_dict<'py>(
         None => py.None(),
     };
     d.set_item("schur", schur)?;
+    let blocks: PyObject = match &s.blocks {
+        Some(b) => {
+            let bd = PyDict::new_bound(py);
+            bd.set_item("n_blocks", b.n_blocks)?;
+            bd.set_item("border_dim", b.border_dim)?;
+            bd.set_item("largest_block", b.largest_block)?;
+            bd.set_item("n_factors", b.n_factors)?;
+            bd.set_item("factor_secs", b.factor_secs)?;
+            bd.into_any().unbind()
+        }
+        None => py.None(),
+    };
+    d.set_item("blocks", blocks)?;
     let resto: PyObject = match &s.restoration {
         Some(r) => linear_solver_dict(py, r)?.into_any().unbind(),
         None => py.None(),

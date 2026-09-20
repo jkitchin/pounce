@@ -579,6 +579,10 @@ pub struct IpoptApplication {
     /// so a stray hook never breaks a solve. Persistent config (not
     /// auto-cleared). Wire-set via [`Self::set_kkt_schur_block`].
     kkt_schur_block: Option<Vec<usize>>,
+    /// Block-parallel KKT partition (structured-KKT Phase 5b): KKT-space block
+    /// labels, `< 0` for the shared border, **empty** meaning "detect".
+    /// Wire-set via [`Self::set_kkt_block_structure`].
+    kkt_blocks: Option<Vec<i32>>,
     /// The problem-statistics block most recently printed during the current
     /// run, so a retry attempt does not reprint an identical one.
     ///
@@ -695,6 +699,7 @@ impl IpoptApplication {
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
             kkt_schur_block: None,
+            kkt_blocks: None,
             last_printed_problem_stats: RefCell::new(None),
             in_retry_sequence: std::cell::Cell::new(false),
             end_verdict_deferrals: std::cell::Cell::new(0),
@@ -1964,6 +1969,28 @@ impl IpoptApplication {
     /// large a fraction of the system, malformed, or a backend error), so a
     /// stray hook never breaks a solve. Persistent config (not auto-cleared);
     /// drop it via [`Self::clear_kkt_schur_block`].
+    /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
+    /// `labels` are KKT-space block ids in the solver's internal
+    /// `x, slack, eq-dual, ineq-dual` order, `< 0` for the shared border; an
+    /// **empty** vector asks the solver to detect the structure from the
+    /// assembled KKT. Honored on the IPM + feral + exact-Hessian path, with a
+    /// transparent fallback to the standard solver when the partition does not
+    /// match the matrix. Persistent config; drop it with
+    /// [`Self::clear_kkt_block_structure`].
+    pub fn set_kkt_block_structure(&mut self, labels: Vec<i32>) {
+        self.kkt_blocks = Some(labels);
+    }
+
+    /// Drop any installed block partition.
+    pub fn clear_kkt_block_structure(&mut self) {
+        self.kkt_blocks = None;
+    }
+
+    /// The currently-installed block partition, if any.
+    pub fn kkt_block_structure(&self) -> Option<&[i32]> {
+        self.kkt_blocks.as_deref()
+    }
+
     pub fn set_kkt_schur_block(&mut self, indices: Vec<usize>) {
         self.kkt_schur_block = Some(indices);
     }
@@ -4651,6 +4678,16 @@ impl IpoptApplication {
         // exact-Hessian path and falls back to the standard solver otherwise.
         if let Some(indices) = &self.kkt_schur_block {
             builder.set_kkt_schur(indices.clone(), feral_cfg.clone());
+            builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
+        }
+        // Block-parallel KKT partition (structured-KKT Phase 5b), explicit or
+        // detected (`kkt_block_detect`).
+        let detect = matches!(
+            self.options.get_string_value("kkt_block_detect", ""),
+            Ok((ref v, true)) if v.eq_ignore_ascii_case("yes")
+        );
+        if let Some(labels) = self.kkt_blocks.clone().or(detect.then(Vec::new)) {
+            builder.set_kkt_blocks(labels, feral_cfg.clone());
             builder.set_kkt_schur_summary_sink(Arc::clone(&self.linsol_summary_sink));
         }
         // A caller-supplied KKT permutation (pounce#180 item 1) overrides

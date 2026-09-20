@@ -207,10 +207,23 @@ pub struct LinearSolverSummaryInfo {
     /// Present only when the Schur KKT path actually factored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub schur: Option<SchurSummaryInfo>,
+    /// Present only when the block-parallel KKT path actually factored.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blocks: Option<BlockSummaryInfo>,
     /// The restoration phase's factorizations, same shape, kept apart from
     /// the main-solve fields above. Present only when restoration factored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub restoration: Option<Box<LinearSolverSummaryInfo>>,
+}
+
+/// Serializable mirror of [`pounce_linsol::summary::BlockSummary`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockSummaryInfo {
+    pub n_blocks: usize,
+    pub border_dim: usize,
+    pub largest_block: usize,
+    pub n_factors: u64,
+    pub factor_secs: f64,
 }
 
 /// Serializable mirror of [`pounce_linsol::summary::SchurSummary`].
@@ -258,6 +271,13 @@ impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
                 eliminated_factor_secs: c.eliminated_factor_secs,
                 form_schur_secs: c.form_schur_secs,
                 schur_factor_secs: c.schur_factor_secs,
+            }),
+            blocks: s.blocks.map(|b| BlockSummaryInfo {
+                n_blocks: b.n_blocks,
+                border_dim: b.border_dim,
+                largest_block: b.largest_block,
+                n_factors: b.n_factors,
+                factor_secs: b.factor_secs,
             }),
             restoration: s.restoration.map(|r| Box::new(Self::from(*r))),
         }

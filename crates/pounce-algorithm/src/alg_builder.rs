@@ -458,6 +458,12 @@ pub struct AlgorithmBuilder {
     /// Summary sink the Schur backend records into, so the solve's
     /// `LinearSolverSummary` covers the Schur path too. Set via
     /// [`Self::set_kkt_schur_summary_sink`]; `None` records nothing.
+    /// Optional block-parallel KKT partition (structured-KKT Phase 5b):
+    /// `(labels, feral_cfg)`, labels in KKT space with `< 0` for the shared
+    /// border and **empty** meaning "detect it from the assembled matrix".
+    /// Honored on the IPM + feral + exact-Hessian path; the block solver falls
+    /// back to the standard one transparently. Set via [`Self::set_kkt_blocks`].
+    pub kkt_blocks: Option<(Vec<i32>, pounce_feral::FeralConfig)>,
     pub kkt_schur_summary_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
@@ -1238,6 +1244,7 @@ impl Default for AlgorithmBuilder {
             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
             init: InitOptions::default(),
             kkt_schur: None,
+            kkt_blocks: None,
             kkt_schur_summary_sink: None,
             quality_escalation_counter: None,
         }
@@ -1256,6 +1263,13 @@ impl AlgorithmBuilder {
     /// [`Self::build_with_backend`]; ignored otherwise.
     pub fn set_kkt_schur(&mut self, schur_indices: Vec<usize>, cfg: pounce_feral::FeralConfig) {
         self.kkt_schur = Some((schur_indices, cfg));
+    }
+
+    /// Install a block-parallel KKT partition (structured-KKT Phase 5b).
+    /// `labels` are KKT-space block ids (`< 0` = the shared border); an empty
+    /// vector asks the solver to detect the structure from the assembled KKT.
+    pub fn set_kkt_blocks(&mut self, labels: Vec<i32>, cfg: pounce_feral::FeralConfig) {
+        self.kkt_blocks = Some((labels, cfg));
     }
 
     /// Route the Schur backend's factorization stats into `sink` (the same
@@ -1322,6 +1336,19 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug),
                 Box::new(StdAugSystemSolver::new(bypass_linsol)),
             ))
+        } else if let Some((labels, cfg)) = self.kkt_blocks.clone() {
+            // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
+            // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
+            // owns the (2,2) block, so this is the exact-Hessian path only.
+            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+                let blocks = crate::kkt::BlockAugSystemSolver::new(inner_aug, labels, cfg);
+                Box::new(match self.kkt_schur_summary_sink.clone() {
+                    Some(sink) => blocks.with_summary_sink(sink),
+                    None => blocks,
+                })
+            } else {
+                Box::new(inner_aug)
+            }
         } else if let Some((indices, cfg)) = self.kkt_schur.clone() {
             // Block-triangular / Schur KKT path (pounce#180 item 2). Only on the
             // exact-Hessian feral path — the Schur backend is feral-specific,
@@ -1833,6 +1860,7 @@ mod tests {
                             sqp_qp: pounce_qp::QpOptions::sqp_subproblem(),
                             init: InitOptions::default(),
                             kkt_schur: None,
+                            kkt_blocks: None,
                             kkt_schur_summary_sink: None,
                             quality_escalation_counter: None,
                         }

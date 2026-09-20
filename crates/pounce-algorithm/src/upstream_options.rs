@@ -1617,6 +1617,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, feral's `choose_adaptive` dispatcher. Concrete-method choices bypass the dispatcher and pin a single method for the run. AutoRace measures symbolic fill per problem, which is not the same as measuring factorization time. For collocation, optimal-control and PDE-in-time models set `metis` (see docs/src/options.md, feral_ordering variants). Falls back to the POUNCE_FERAL_ORDERING environment variable (same tag set) when not set on the OptionsList. See `crates/pounce-feral/src/lib.rs` (FeralConfig::ordering) and `feral/src/symbolic/mod.rs` (OrderingMethod) for per-variant rationale and evidence.",
     )?;
     r.add_string_option(
+        "kkt_block_detect",
+        "Detect a block-diagonal-plus-border KKT and solve it block-parallel.",
+        "no",
+        &[
+            ("no", "Standard monolithic KKT solve. Default."),
+            ("yes", "Look for a block structure in the assembled KKT (high-degree shared columns, blocks as the components without them) and, when one is found, factor every block independently and in parallel with a Schur complement on the shared columns. Falls back transparently when no structure is found or a block is singular; `linear_solver.blocks` in the solve report says whether it ran."),
+        ],
+        "For arrowhead systems -- scenarios, contingencies, or any blocks sharing a few global columns. Measured on a 210k-variable N-1 security-constrained OPF: the factorization is ~10x faster as coarse block tasks than feral's per-supernode tree parallelism can make it, and a whole KKT solve ~4-6x. Honored on the IPM + feral + exact-Hessian path only. A caller that knows its structure can supply it directly instead (IpoptApplication::set_kkt_block_structure), which skips detection.",
+    )?;
+    r.add_string_option(
         "feral_ordering_preprocess",
         "Ordering-stage preprocessing for the FERAL backend.",
         "auto",
