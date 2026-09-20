@@ -3322,6 +3322,8 @@ pub struct NlTnlp {
     obj_tape_colors: Vec<Vec<u32>>,
     /// Same as `obj_tape_colors` but per constraint × summand.
     con_tape_colors: Vec<Vec<Vec<u32>>>,
+    /// The same work, color-major, for the parallel flat Hessian path.
+    hess_color_index: HessColorIndex,
     /// Color of each variable's Hessian column, `u32::MAX` for a column
     /// that needs no pass of its own. Kept so
     /// [`NlTnlp::veto_ill_conditioned_peels`] can find a peeled column's
@@ -4299,6 +4301,7 @@ fn build_color_tables(
             .collect(),
         seeds,
         decoding,
+        hess_color_index: HessColorIndex::build(n_colors, &con_tape_colors),
         obj_tape_colors,
         con_tape_colors,
     }
@@ -4316,6 +4319,69 @@ struct ColorTables {
     decoding: Vec<Vec<ColorWrite>>,
     obj_tape_colors: Vec<Vec<u32>>,
     con_tape_colors: Vec<Vec<Vec<u32>>>,
+    /// `con_tape_colors` inverted to color-major, CSR-packed: the (row, tape)
+    /// pairs whose tape touches each color, and the objective tapes likewise.
+    ///
+    /// The flat `eval_h` walks tapes and, inside each, the colors it touches,
+    /// so several rows accumulate into one `compressed[c]` — fine serially,
+    /// unshareable across threads. Walking color-major makes each color's
+    /// accumulator private to its task, at the cost of forwarding a tape once
+    /// per color it touches instead of once (measured at 2.9 colors per tape
+    /// on an AC-SCOPF model, against a directional sweep that costs several
+    /// forwards, so ~20% more serial work for 28-way parallelism).
+    ///
+    /// Within a color the pairs stay in ascending (row, tape) order, which is
+    /// the order the tape-major loop contributes them in, so the two walks
+    /// accumulate identical sums in identical order — bit-for-bit, not merely
+    /// within tolerance. `parallel_matches_serial_bit_for_bit` pins that.
+    hess_color_index: HessColorIndex,
+}
+
+/// Color-major (row, tape) work lists for the flat Hessian path. See
+/// [`ColorTables::hess_color_index`].
+#[derive(Debug, Default, Clone)]
+pub(crate) struct HessColorIndex {
+    /// Constraint (row, tape) pairs per color, CSR. The objective's tapes are
+    /// deliberately absent: `eval_h` accumulates them into `compressed`
+    /// *before* the constraint block and keeps doing so serially, which is
+    /// what makes the parallel walk's per-color ordering identical to the
+    /// serial one — objective first, then rows ascending.
+    con_off: Vec<u32>,
+    con_row: Vec<u32>,
+    con_tape: Vec<u32>,
+}
+
+impl HessColorIndex {
+    fn build(n_colors: usize, con_tape_colors: &[Vec<Vec<u32>>]) -> Self {
+        // Rows ascending, then tapes ascending: the tape-major loop's order.
+        let mut con: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_colors];
+        for (k, row) in con_tape_colors.iter().enumerate() {
+            for (ti, colors) in row.iter().enumerate() {
+                for &c in colors {
+                    con[c as usize].push((k as u32, ti as u32));
+                }
+            }
+        }
+        let mut out = HessColorIndex {
+            con_off: Vec::with_capacity(n_colors + 1),
+            ..Default::default()
+        };
+        out.con_off.push(0);
+        for list in &con {
+            for &(k, ti) in list {
+                out.con_row.push(k);
+                out.con_tape.push(ti);
+            }
+            out.con_off.push(out.con_row.len() as u32);
+        }
+        out
+    }
+
+    /// The (row, tape) pairs of color `c`, as two parallel slices.
+    fn con_pairs(&self, c: usize) -> (&[u32], &[u32]) {
+        let (a, b) = (self.con_off[c] as usize, self.con_off[c + 1] as usize);
+        (&self.con_row[a..b], &self.con_tape[a..b])
+    }
 }
 
 impl NlTnlp {
@@ -4603,6 +4669,7 @@ impl NlTnlp {
             decoding,
             obj_tape_colors,
             con_tape_colors,
+            hess_color_index,
         } = build_color_tables(
             prob.n,
             prob.m,
@@ -4648,6 +4715,21 @@ impl NlTnlp {
         }
 
         if std::env::var("POUNCE_DBG_TAPE_STATS").is_ok() {
+            // Mean number of Hessian colors a single constraint tape touches.
+            // It is the cost multiplier of visiting the work color-major
+            // rather than tape-major: each (tape, color) pair needs the
+            // tape's forward values, so a color-major walk forwards each tape
+            // this many times instead of once.
+            let (mut tape_color_pairs, mut n_live_tapes) = (0usize, 0usize);
+            for row in &con_tape_colors {
+                for cols in row {
+                    if !cols.is_empty() {
+                        tape_color_pairs += cols.len();
+                        n_live_tapes += 1;
+                    }
+                }
+            }
+            let colors_per_tape = tape_color_pairs as f64 / n_live_tapes.max(1) as f64;
             let n_obj = obj_tapes.len();
             let n_con: usize = con_tapes.iter().map(|r| r.len()).sum();
             let total = n_obj + n_con;
@@ -4667,7 +4749,8 @@ impl NlTnlp {
             eprintln!(
                 "[tape stats] summands={total} (obj={n_obj} con={n_con}) \
                  total_ops={sum_ops} avg_ops={:.1} max_ops={max_tape_n} \
-                 n_colors={n_colors} avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h}",
+                 n_colors={n_colors} avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h} \
+                 colors_per_tape={colors_per_tape:.2}",
                 sum_ops as f64 / t as f64,
             );
             // Flat vs shared-CSE op counts for the constraint block. The
@@ -4740,6 +4823,7 @@ impl NlTnlp {
             decoding,
             obj_tape_colors,
             con_tape_colors,
+            hess_color_index,
             var_color,
             peeled_cols,
             final_x: None,
@@ -4895,6 +4979,7 @@ impl NlTnlp {
             decoding,
             obj_tape_colors,
             con_tape_colors,
+            hess_color_index,
         } = build_color_tables(
             self.prob.n,
             self.prob.m,
@@ -4911,6 +4996,11 @@ impl NlTnlp {
         self.decoding = decoding;
         self.obj_tape_colors = obj_tape_colors;
         self.con_tape_colors = con_tape_colors;
+        // Recoloring invalidates the color-major index: its entries name
+        // colors, so a stale one would send a row's contribution to whatever
+        // color now holds that slot. Refreshed here, not rebuilt lazily,
+        // because nothing downstream can detect the staleness.
+        self.hess_color_index = hess_color_index;
         self.compressed = vec![vec![0.0; self.prob.n]; n_colors];
     }
 
@@ -5370,6 +5460,134 @@ impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
     }
 }
 
+/// Per-worker scratch for the parallel Hessian walk. Four buffers of
+/// `max_tape_n` — the largest tape's node count, tens of entries on the models
+/// this path is for — so a worker's copy costs about a kilobyte.
+#[cfg(not(target_arch = "wasm32"))]
+struct HessScratch {
+    vals: Vec<f64>,
+    dot: Vec<f64>,
+    adj: Vec<f64>,
+    adj_dot: Vec<f64>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HessScratch {
+    fn new(n: usize) -> Self {
+        Self {
+            vals: vec![0.0; n],
+            dot: vec![0.0; n],
+            adj: vec![0.0; n],
+            adj_dot: vec![0.0; n],
+        }
+    }
+}
+
+impl NlTnlp {
+    /// Smallest (row, tape) × color work list that earns a parallel walk.
+    /// Below it the rayon dispatch costs more than the sweeps it splits, and
+    /// the serial tape-major walk is also cheaper per unit work because it
+    /// forwards each tape once rather than once per color.
+    ///
+    /// Measured on a banded synthetic (`sin(x_i·x_{i+1}) + x_{i+1}²·x_{i+2}`
+    /// per row, the model in `parallel_hessian_matches_serial.rs`), serial ->
+    /// parallel with the gate forced open:
+    ///
+    /// | pairs | serial | parallel | ratio |
+    /// |---|---|---|---|
+    /// | 400 | 0.028 ms | 0.036 ms | 0.79x |
+    /// | 1 200 | 0.073 ms | 0.066 ms | 1.11x |
+    /// | 4 000 | 0.179 ms | 0.112 ms | 1.60x |
+    /// | 12 000 | 0.344 ms | 0.203 ms | 1.69x |
+    ///
+    /// The crossover sits between 400 and 1 200, hence this value.
+    ///
+    /// **What that table does not say is how big the win gets.** That model
+    /// has three Hessian colors, so it has three tasks to hand out however
+    /// many cores are free, and 1.7x is near its ceiling. The parallelism
+    /// available here *is* the color count: an AC-SCOPF model with 28 colors
+    /// runs the same walk 4.9x faster (108.3 ms -> 22.2 ms at 54 859
+    /// variables, 421.0 ms -> 89.0 ms at 209 755). Gating on pair count alone
+    /// is therefore conservative in the safe direction — at equal pairs, more
+    /// colors can only help.
+    const HESS_PAR_MIN_PAIRS: usize = 1024;
+
+    /// Whether the flat Hessian walk runs color-major and in parallel.
+    ///
+    /// `POUNCE_NL_PARALLEL_EVAL` overrides the size gate: `0` forces the
+    /// serial walk, `1` forces the parallel one whatever the size. The two
+    /// produce bit-identical values, so this is a lever for measurement and
+    /// for pinning a suspected parallelism bug, not a correctness switch —
+    /// and `1` is how the threshold below was measured, since the gate would
+    /// otherwise hide the small end of the curve.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hess_flat_parallel(&self) -> bool {
+        // More than one color is a hard requirement, not a heuristic: with one
+        // color there is one task and the inversion is pure overhead.
+        let multi_color = self.compressed.len() > 1;
+        match std::env::var("POUNCE_NL_PARALLEL_EVAL").as_deref() {
+            Ok("0") | Ok("no") | Ok("false") => false,
+            Ok("1") | Ok("yes") | Ok("true") => multi_color,
+            _ => multi_color && self.hess_color_index.con_row.len() >= Self::HESS_PAR_MIN_PAIRS,
+        }
+    }
+
+    /// The flat Hessian's constraint block, walked color-major with one rayon
+    /// task per color.
+    ///
+    /// Each task owns its color's `compressed[c]` outright, so nothing is
+    /// shared mutably and no reduction is needed. Within a color the pairs are
+    /// visited in ascending (row, tape) order — the order the serial walk
+    /// contributes them in — so the sums are identical term by term and the
+    /// two paths agree bit-for-bit, which
+    /// `parallel_matches_serial_bit_for_bit` pins.
+    ///
+    /// The cost of the inversion is forwarding a tape once per color it
+    /// touches instead of once for all of them (2.9 colors per tape measured
+    /// on AC-SCOPF). That is paid back by the parallelism and only above
+    /// `HESS_PAR_MIN_PAIRS`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hess_flat_colors_parallel(&mut self, x_arg: Option<&[Number]>, lam: &[Number]) {
+        use rayon::prelude::*;
+        let Self {
+            compressed,
+            seeds,
+            con_tapes,
+            hess_color_index: idx,
+            vals_scratch,
+            prob,
+            ..
+        } = self;
+        let x = x_arg.unwrap_or(&prob.x0);
+        let max_tape_n = vals_scratch.len();
+        compressed.par_iter_mut().enumerate().for_each_init(
+            || HessScratch::new(max_tape_n),
+            |sc, (c, out)| {
+                let (rows, tapes) = idx.con_pairs(c);
+                let seed = &seeds[c];
+                let HessScratch {
+                    vals,
+                    dot,
+                    adj,
+                    adj_dot,
+                } = sc;
+                for (&k, &ti) in rows.iter().zip(tapes.iter()) {
+                    let w = lam[k as usize];
+                    if w == 0.0 {
+                        continue;
+                    }
+                    let t = &con_tapes[k as usize][ti as usize];
+                    if t.ops.is_empty() {
+                        continue;
+                    }
+                    t.forward_into(x, vals);
+                    t.hessian_directional(vals, seed, w, out, dot, adj, adj_dot);
+                }
+            },
+        );
+    }
+}
+
 impl TNLP for NlTnlp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
@@ -5736,7 +5954,12 @@ impl TNLP for NlTnlp {
                 true
             }
             SparsityRequest::Values { values } => {
-                let x = x.unwrap_or(&self.prob.x0);
+                // Kept alongside the resolved slice: the parallel walk below
+                // resolves it again *after* destructuring `self`, so `x` and
+                // the buffers it writes borrow different fields and neither
+                // has to be copied per evaluation.
+                let x_arg = x;
+                let x = x_arg.unwrap_or(&self.prob.x0);
                 values.fill(0.0);
 
                 let obj_seed = if self.prob.minimize {
@@ -5802,6 +6025,12 @@ impl TNLP for NlTnlp {
                     }
                 }
 
+                // Computed before the match: its scrutinee takes `self` mutably,
+                // so a guard cannot also read `self`. Absent on wasm32 along
+                // with the arm it guards — the arm still has to *typecheck*
+                // there, dead or not, and the method it calls does not exist.
+                #[cfg(not(target_arch = "wasm32"))]
+                let hess_flat_parallel = self.hess_flat_parallel();
                 match (lambda, self.con_hybrid.as_mut()) {
                     // Shared-CSE path (issue #557). Per color the prelude's
                     // second-order work runs ONCE for the whole constraint
@@ -5885,6 +6114,13 @@ impl TNLP for NlTnlp {
                                 prelude_adj_dot,
                             );
                         }
+                    }
+                    // Color-major and parallel when the work is big enough
+                    // to pay for the dispatch; bit-identical to the walk
+                    // below, which stays the path every small model takes.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    (Some(lam), _) if hess_flat_parallel => {
+                        self.hess_flat_colors_parallel(x_arg, lam);
                     }
                     (Some(lam), _) => {
                         for k in 0..self.prob.m {
