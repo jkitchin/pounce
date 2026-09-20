@@ -1013,6 +1013,7 @@ dependencies = [
  "libm",
  "pounce-common",
  "pounce-nlp",
+ "rayon",
  "tracing",
 ]
 

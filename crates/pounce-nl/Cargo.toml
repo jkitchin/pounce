@@ -25,6 +25,13 @@ libm.workspace = true
 # browser demo (`crates/pounce-wasm`) — get the stub `ExternalLibrary::load`
 # in `nl_external.rs`, which reports that such models can't be evaluated
 # there rather than failing to compile.
+# Parallel Hessian/Jacobian evaluation. Target-gated because this crate also
+# builds for `wasm32-unknown-unknown` (the browser demo reaches the whole `.nl`
+# pipeline through `pounce-wasm`), where rayon has no threads to hand out; the
+# evaluators fall back to their serial walks under `cfg(target_arch = "wasm32")`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
 [target.'cfg(any(unix, windows))'.dependencies]
 libloading = "0.8"
 

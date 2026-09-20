@@ -9,6 +9,22 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`.nl` function evaluation now uses all cores.** The Lagrangian Hessian is
+  accumulated color-major with one task per Hessian color, and the constraint
+  Jacobian and constraint values split over rows. On a 54 859-variable
+  AC-SCOPF, where evaluation was 70% of the solve against the factorization's
+  14%: Hessian 4.890 s → 1.114 s, Jacobian 1.214 s → 0.193 s, whole solve
+  9.81 s → 4.68 s. **Values are bit-identical to the serial walks**, so
+  iteration counts and objectives do not move — each walk contributes the same
+  terms in the same order, by construction and by test. It engages
+  automatically above a measured per-walk size threshold and stays serial below
+  it; `POUNCE_NL_PARALLEL_EVAL=0`/`1` forces either way for measurement. The
+  Hessian's speedup is bounded by its color count (4.9× at 28 colors, 1.7× at
+  3), while the row-split walks scale with cores. The shared-CSE evaluation arm
+  is unchanged. See "Parallel function evaluation" in `docs/src/options.md`.
+
 ### Added
 
 - **Block-structured KKT solve.** A model that is arrowhead — independent
