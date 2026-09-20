@@ -3324,6 +3324,13 @@ pub struct NlTnlp {
     con_tape_colors: Vec<Vec<Vec<u32>>>,
     /// The same work, color-major, for the parallel flat Hessian path.
     hess_color_index: HessColorIndex,
+    /// Offset of each row's run in the Jacobian `values` array, length
+    /// `m + 1`. Lets a parallel row group take one contiguous slice.
+    jac_row_off: Vec<u32>,
+    /// Per-worker scratch for the parallel Jacobian, kept across evaluations:
+    /// each holds a length-`n` gradient row, too big to allocate per call.
+    #[cfg(not(target_arch = "wasm32"))]
+    jac_scratch_pool: Vec<JacScratch>,
     /// Color of each variable's Hessian column, `u32::MAX` for a column
     /// that needs no pass of its own. Kept so
     /// [`NlTnlp::veto_ill_conditioned_peels`] can find a peeled column's
@@ -4824,6 +4831,9 @@ impl NlTnlp {
             obj_tape_colors,
             con_tape_colors,
             hess_color_index,
+            jac_row_off: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            jac_scratch_pool: Vec::new(),
             var_color,
             peeled_cols,
             final_x: None,
@@ -5471,6 +5481,27 @@ struct HessScratch {
     adj_dot: Vec<f64>,
 }
 
+/// Per-worker scratch for the parallel Jacobian walk: one gradient row of
+/// length `n` plus the two small tape arenas `gradient_seed_into` fills.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+struct JacScratch {
+    row_grad: Vec<f64>,
+    vals: Vec<f64>,
+    adj: Vec<f64>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl JacScratch {
+    fn new(n: usize, max_tape_n: usize) -> Self {
+        Self {
+            row_grad: vec![0.0; n],
+            vals: vec![0.0; max_tape_n],
+            adj: vec![0.0; max_tape_n],
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl HessScratch {
     fn new(n: usize) -> Self {
@@ -5530,6 +5561,125 @@ impl NlTnlp {
             Ok("1") | Ok("yes") | Ok("true") => multi_color,
             _ => multi_color && self.hess_color_index.con_row.len() >= Self::HESS_PAR_MIN_PAIRS,
         }
+    }
+
+    /// Smallest Jacobian nonzero count that earns a parallel walk. Same shape
+    /// of trade as [`Self::HESS_PAR_MIN_PAIRS`], but a cheaper one to cross:
+    /// the row walk is *not* reordered or duplicated, so the only cost is the
+    /// dispatch and one length-`n` scratch row per worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    const JAC_PAR_MIN_NNZ: usize = 4096;
+
+    /// Whether the flat Jacobian walk runs in parallel over row groups.
+    /// Shares `POUNCE_NL_PARALLEL_EVAL` with the Hessian.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn jac_flat_parallel(&self) -> bool {
+        let big = self.jac_nnz >= Self::JAC_PAR_MIN_NNZ;
+        match std::env::var("POUNCE_NL_PARALLEL_EVAL").as_deref() {
+            Ok("0") | Ok("no") | Ok("false") => false,
+            Ok("1") | Ok("yes") | Ok("true") => true,
+            _ => big,
+        }
+    }
+
+    /// The flat Jacobian, walked in parallel over contiguous groups of rows.
+    ///
+    /// Unlike the Hessian this needs no inversion: rows are already
+    /// independent — each zeroes only its own columns of the gradient scratch,
+    /// accumulates into them, and writes a contiguous run of `values`. So the
+    /// work is split by *rows*, each group keeping the serial order inside
+    /// itself, and every row computes exactly what it computed serially. The
+    /// results are bit-identical for the stronger reason that nothing was
+    /// reordered at all.
+    ///
+    /// Two things are per-worker rather than per-call: the length-`n` gradient
+    /// row (the reason this is not simply `par_iter`, since `n` can be tens of
+    /// thousands and allocating one per row would dwarf the work) and the two
+    /// small tape arenas. They are pooled on `self` and reused across
+    /// evaluations.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn jac_flat_rows_parallel(&mut self, x_arg: Option<&[Number]>, values: &mut [Number]) {
+        use rayon::prelude::*;
+        let n = self.prob.n;
+        let m = self.prob.m;
+        let groups = rayon::current_num_threads().clamp(1, m.max(1));
+        let max_tape_n = self.vals_scratch.len();
+
+        // Row -> offset of its run in `values`, so a group can be hnaded one
+        // contiguous slice. Rebuilt only when the shape changes.
+        if self.jac_row_off.len() != m + 1 {
+            self.jac_row_off = Vec::with_capacity(m + 1);
+            let mut acc = 0u32;
+            for cols in &self.jac_cols {
+                self.jac_row_off.push(acc);
+                acc += cols.len() as u32;
+            }
+            self.jac_row_off.push(acc);
+        }
+        if self.jac_scratch_pool.len() != groups {
+            self.jac_scratch_pool = (0..groups)
+                .map(|_| JacScratch::new(n, max_tape_n))
+                .collect();
+        }
+
+        // Equal-row groups. Rows differ in width, so this is not a perfect
+        // balance; rayon is given more groups than threads only when that is
+        // free, and the measurement below is taken with this split.
+        let per = m.div_ceil(groups.max(1));
+        let Self {
+            prob,
+            con_tapes,
+            quad,
+            jac_cols,
+            jac_row_off,
+            jac_scratch_pool,
+            ..
+        } = self;
+        let xs = x_arg.unwrap_or(&prob.x0);
+
+        // Hand each group its own contiguous run of `values`.
+        let mut rest: &mut [Number] = values;
+        let mut slices: Vec<&mut [Number]> = Vec::with_capacity(groups);
+        for g in 0..groups {
+            let end_row = ((g + 1) * per).min(m);
+            let start_row = (g * per).min(m);
+            let len = (jac_row_off[end_row] - jac_row_off[start_row]) as usize;
+            let (head, tail) = rest.split_at_mut(len);
+            slices.push(head);
+            rest = tail;
+        }
+
+        jac_scratch_pool
+            .par_iter_mut()
+            .zip(slices.into_par_iter())
+            .enumerate()
+            .for_each(|(g, (sc, out))| {
+                let (lo, hi) = ((g * per).min(m), ((g + 1) * per).min(m));
+                let JacScratch {
+                    row_grad,
+                    vals,
+                    adj,
+                } = sc;
+                let mut k = 0usize;
+                for i in lo..hi {
+                    for &j in &jac_cols[i] {
+                        row_grad[j] = 0.0;
+                    }
+                    for t in &con_tapes[i] {
+                        t.gradient_seed_into(xs, 1.0, row_grad, vals, adj);
+                    }
+                    if let Some(f) = quad.row_form(i) {
+                        quad.add_gradient(f, xs, 1.0, row_grad);
+                    }
+                    for &(v, c) in &prob.con_linear[i] {
+                        row_grad[v] += c;
+                    }
+                    for &j in &jac_cols[i] {
+                        out[k] = row_grad[j];
+                        k += 1;
+                    }
+                }
+            });
     }
 
     /// The flat Hessian's constraint block, walked color-major with one rayon
@@ -5849,6 +5999,18 @@ impl TNLP for NlTnlp {
                 let n = self.prob.n;
                 if self.scratch_row_grad.len() < n {
                     self.scratch_row_grad.resize(n, 0.0);
+                }
+                // Rows are independent and write disjoint runs of `values`, so
+                // the parallel walk is the same work in the same order, split
+                // by row group. Only the flat path: the shared-CSE arm below
+                // forwards one prelude for the whole block, which is exactly
+                // the sharing a row split would have to undo.
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.con_hybrid.as_ref().filter(|h| h.use_for_jac).is_none()
+                    && self.jac_flat_parallel()
+                {
+                    self.jac_flat_rows_parallel(x, values);
+                    return true;
                 }
                 let Self {
                     prob,

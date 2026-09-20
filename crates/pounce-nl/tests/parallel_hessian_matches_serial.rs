@@ -179,3 +179,69 @@ fn a_model_below_the_threshold_is_serial() {
         "a model below the parallel threshold must evaluate identically either way"
     );
 }
+
+/// The Jacobian's parallel walk splits **rows**, not colors, and does not
+/// reorder anything: each row zeroes only its own columns of the gradient
+/// scratch and writes a contiguous run of `values`. So the bar is higher than
+/// for the Hessian — not "the same sum in the same order" but "the same
+/// arithmetic entirely" — and the bitwise comparison is correspondingly
+/// stricter than it looks.
+///
+/// What it really guards is the bookkeeping: each group gets its own slice of
+/// `values`, sized from the row offsets, and writes into it from index zero.
+/// Getting that wrong shifts a row's gradient onto its neighbour's nonzeros —
+/// plausible-looking numbers in the wrong places, which no residual check
+/// downstream would flag.
+///
+/// Mutation table:
+///
+/// | Break | Result |
+/// |---|---|
+/// | Reset the write cursor per row instead of per group | **run**: all 9,000 entries differ, from the first |
+#[test]
+fn parallel_jacobian_matches_serial_bit_for_bit() {
+    let serial = jacobian(ROWS, false);
+    let parallel = jacobian(ROWS, true);
+
+    assert_eq!(serial.len(), parallel.len());
+    let nonzero = serial.iter().filter(|v| **v != 0.0).count();
+    assert!(
+        nonzero > 1_000,
+        "the comparison must have something to compare: {nonzero} nonzero entries"
+    );
+    let differing: Vec<usize> = (0..serial.len())
+        .filter(|&i| serial[i].to_bits() != parallel[i].to_bits())
+        .collect();
+    assert!(
+        differing.is_empty(),
+        "{} of {} entries differ; first at {}: serial {:.17e} vs parallel {:.17e}",
+        differing.len(),
+        serial.len(),
+        differing[0],
+        serial[differing[0]],
+        parallel[differing[0]],
+    );
+}
+
+/// The constraint Jacobian at the same varied point as [`hessian`].
+fn jacobian(rows: usize, parallel: bool) -> Vec<f64> {
+    // SAFETY: single-threaded test body, set before the evaluator is built.
+    unsafe {
+        std::env::set_var("POUNCE_NL_PARALLEL_EVAL", if parallel { "1" } else { "0" });
+    }
+    let mut t = NlTnlp::new(model(rows));
+    let info = t.get_nlp_info().expect("info");
+    let (n, nnz) = (info.n as usize, info.nnz_jac_g as usize);
+    let x: Vec<f64> = (0..n)
+        .map(|i| 0.3 + 0.7 * ((i % 13) as f64) / 13.0)
+        .collect();
+    let mut values = vec![0.0; nnz];
+    assert!(t.eval_jac_g(
+        Some(&x),
+        true,
+        SparsityRequest::Values {
+            values: &mut values
+        },
+    ));
+    values
+}
