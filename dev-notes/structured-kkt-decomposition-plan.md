@@ -1129,6 +1129,18 @@ These measurements are critical for determining whether the architecture actuall
 
 POUNCE-side work is §57. `discopt`-side work is listed here as **drafts**. Each is filed in `discopt` only when the phase that needs it is reached, and only after approval. None is needed to start.
 
+*Status 2026-09-20: filed, as **one** issue — jkitchin/discopt#1370, "Export
+model block structure to pounce, and evaluate identical blocks in one pass".
+I1 and I5 are its two halves and I2 is folded in as the passthrough, because
+I5 needs I1's membership and I1 alone buys only the factorization share, which
+is about a third of these solves. I3 is dropped: the gas question was answered
+by measurement and does not need a block-structured KKT. I4 stays unfiled —
+POUNCE has a detector, and the declaration is what covers the cases it misses.
+Two things the sketch in §45 asked for were dropped from the ask as well:
+`coupling_groups` / `graph_edges`, because the implemented solver is arrowhead
+and labels alone suffice, and §46's `structure_validation` modes, because
+POUNCE validates and falls back on its own.*
+
 | Draft | Title | Needed by | Summary |
 |---|---|---|---|
 | **I1** | Export solver-neutral block structure with NLP indices | Phase 1, end-to-end test | Block membership for variables **and** constraints, links, globals, block graph, in the NLP index space POUNCE sees (§8, §45). Stable identity through `discopt`'s transformations (§41). Validation of declared structure against incidence. |
