@@ -47,6 +47,8 @@ export IPOPT_LINEAR_SOLVER
 .PHONY: help benchmark benchmark-rerun benchmark-report build-ipopt-ma57 \
 	vanderbei-run vanderbei-rerun \
 	electrolyte-run electrolyte-rerun grid-run grid-rerun cho-run cho-rerun \
+	grid-ecf-run grid-ecf-rerun grid-polar-run grid-polar-rerun \
+	grid-ecf-generate \
 	large-scale large-scale-generate large-scale-rerun \
 	mittelmann-run mittelmann-rerun mittelmann-check \
 	gas-run gas-rerun water-run water-rerun \
@@ -83,6 +85,9 @@ help:
 	@echo "  vanderbei-run   / -rerun   Vanderbei CUTE-in-AMPL .nl suite (733 problems)"
 	@echo "  electrolyte-run / -rerun   Electrolyte thermodynamics benchmark"
 	@echo "  grid-run        / -rerun   AC optimal power flow (electrical grid) benchmark"
+	@echo "  grid-ecf-run    / -rerun   AC-OPF, equivalent-circuit formulation"
+	@echo "  grid-polar-run  / -rerun   AC-OPF, matched polar control"
+	@echo "  grid-ecf-generate          regenerate BOTH .nl sets above"
 	@echo "  cho-run         / -rerun   CHO parameter estimation benchmark"
 	@echo "  large-scale     / large-scale-rerun  Synthetic large-scale NLPs (.nl from generate_nl.py)"
 	@echo "  large-scale-generate       (Re)generate the large_scale .nl files only (needs pyomo)"
@@ -170,6 +175,10 @@ $(POUNCE_BIN):
 nldir_vanderbei   := $(POUNCE_BENCH_DATA)/vanderbei/nl
 nldir_electrolyte := $(POUNCE_BENCH_DATA)/electrolyte/nl
 nldir_grid        := $(POUNCE_BENCH_DATA)/grid/nl
+# The ECF formulation comparison: two .nl sets from one generator, differing
+# only in formulation. See benchmarks/grid_ecf/README.md.
+nldir_grid_ecf    := $(POUNCE_BENCH_DATA)/grid_ecf/nl
+nldir_grid_polar  := $(POUNCE_BENCH_DATA)/grid_polar/nl
 nldir_cho         := $(POUNCE_BENCH_DATA)/cho/nl_export_results
 nldir_large_scale := $(POUNCE_BENCH_DATA)/large_scale/nl
 nldir_gas         := $(POUNCE_BENCH_DATA)/gas
@@ -215,6 +224,37 @@ grid-run: $(REPO_ROOT)/benchmarks/grid/pounce.json
 grid-rerun:
 	rm -f $(REPO_ROOT)/benchmarks/grid/pounce.json
 	$(MAKE) grid-run
+
+# --- ECF vs polar formulation comparison ---------------------------------
+# Both .nl sets come from benchmarks/grid_ecf/ecf_nl_export.py. Regenerate
+# them together: a comparison across two different generator invocations
+# (different --thermal, say) is not a comparison. Each nl dir carries a
+# manifest.json recording the conventions it was built under.
+GRID_ECF_GEN := $(REPO_ROOT)/benchmarks/grid_ecf/ecf_nl_export.py
+
+grid-ecf-generate:
+	$(PYTHON) $(GRID_ECF_GEN) --form ecf
+	$(PYTHON) $(GRID_ECF_GEN) --form polar
+
+$(REPO_ROOT)/benchmarks/grid_ecf/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_grid_ecf)/*.nl)
+	$(NL_DRIVER) grid_ecf $(nldir_grid_ecf) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+grid-ecf-run: $(REPO_ROOT)/benchmarks/grid_ecf/pounce.json
+
+grid-ecf-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/grid_ecf/pounce.json
+	$(MAKE) grid-ecf-run
+
+$(REPO_ROOT)/benchmarks/grid_polar/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_grid_polar)/*.nl)
+	$(NL_DRIVER) grid_polar $(nldir_grid_polar) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+grid-polar-run: $(REPO_ROOT)/benchmarks/grid_polar/pounce.json
+
+grid-polar-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/grid_polar/pounce.json
+	$(MAKE) grid-polar-run
 
 $(REPO_ROOT)/benchmarks/cho/pounce.json: $(POUNCE_BIN) \
 	$(wildcard $(nldir_cho)/*.nl)
@@ -696,6 +736,10 @@ clean-bench-nl:
 	      $(REPO_ROOT)/benchmarks/electrolyte/pounce.json
 	rm -f $(nldir_grid)/*.sol \
 	      $(REPO_ROOT)/benchmarks/grid/pounce.json
+	rm -f $(nldir_grid_ecf)/*.sol \
+	      $(REPO_ROOT)/benchmarks/grid_ecf/pounce.json
+	rm -f $(nldir_grid_polar)/*.sol \
+	      $(REPO_ROOT)/benchmarks/grid_polar/pounce.json
 	rm -f $(nldir_gas)/*.sol \
 	      $(REPO_ROOT)/benchmarks/gas/pounce.json
 	rm -f $(nldir_water)/*.sol \
