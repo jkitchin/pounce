@@ -105,6 +105,8 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 | [`electrolyte/`](electrolyte/README.md) | Gibbs free-energy minimization | 13 problems | Aqueous electrolyte equilibrium; ill-conditioned by construction |
 | [`gas/`](gas/README.md)             | Gas-pipeline network NLP | 4 problems, up to 21k vars | Finite-volume Euler discretization, GasLib networks |
 | [`grid/`](grid/README.md)           | AC optimal power flow | MATPOWER cases | Polar-form ACOPF; canonical nonconvex grid NLP |
+| [`grid_ecf/`](grid_ecf/README.md)   | AC-OPF, equivalent-circuit form | pglib-opf | Rectangular/GB formulation (Jereminov et al. 2018); no trigonometry |
+| [`grid_polar/`](grid_polar/README.md) | AC-OPF, matched polar control | pglib-opf | Same generator, same data, same limits — only the formulation differs |
 | [`large_scale/`](large_scale/README.md) | Synthetic large sparse NLPs | up to 100k vars | Rosenbrock, Bratu, OptControl, PoissonControl, SparseQP — `.nl` from a Pyomo generator; stresses sparse linsol |
 | [`mittelmann/`](mittelmann/README.md) | Mittelmann ampl-nlp | 47 problems, up to 261k vars | Standard public NLP benchmark |
 | [`qp/`](qp/README.md)               | Convex QP (Maros-Mészáros) | 138 problems, up to ~93k vars | Standard convex-QP benchmark; `.nl` from a generator that converts the qpsolvers `.mat` mirror |

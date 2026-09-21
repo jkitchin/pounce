@@ -74,6 +74,13 @@
 # a fine mesh is transcription knowledge the solver cannot have, so the
 # frontend that does it is part of the measurement, not a per-run artifact.
 !/benchmarks/large_scale/mesh_continuation.py
+# The grid_ecf suite is the ECF-vs-polar formulation comparison: one generator
+# emits BOTH .nl sets (see benchmarks/grid_ecf/README.md), so it is source in
+# the same sense as large_scale/mesh_continuation.py -- the transcription IS
+# the measurement. Its downloaded pglib .m, generated .nl and per-run results
+# stay ignored like every other suite. grid_polar holds only results; its .nl
+# come from the same generator.
+!/benchmarks/grid_ecf/ecf_nl_export.py
 # The qp (Maros-Meszaros convex QP) suite is likewise .nl-driven: its
 # problems are downloaded as .mat from the qpsolvers mirror and converted
 # to .nl by a Pyomo generator. Track the generator (and README +
