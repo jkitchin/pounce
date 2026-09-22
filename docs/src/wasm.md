@@ -189,16 +189,33 @@ CLI vs `wasm32-wasip1` under Node:
 - before gh#960: status or iteration count differed on 15 of 52
 - after: identical status and iteration count on 48 of 52
 
-The four that still differ are trajectory-sensitive, not a missing code
-path: the same shim compiled natively matches the CLI iteration for
-iteration, so the divergence is floating-point behaviour of the target.
-`pooling_rt2stp` agrees with the CLI through iteration 2 and diverges at
-the first inertia correction, then reaches the same optimum in 184
-iterations instead of 109; `cresc4` (68 vs 69) and `scaled_feasible_a`
-(20 vs 22) likewise reach the same point. `deb7` does not: the CLI solves
-it in 147 iterations and wasm ends `ErrorInStepComputation` at 160.
-`case6468_rte` (49 734 × 75 002) matches the CLI exactly — 146 iterations,
-3 restoration calls, objective 2 069 730.14512.
+The four that still differ all reach the same optimum; only the iteration
+count moves (`pooling_rt2stp` 184 vs 109, `cresc4` 68 vs 69,
+`scaled_feasible_a` 20 vs 22, `deb7` 131 vs 147). `case6468_rte`
+(49 734 × 75 002) matches the CLI exactly — 146 iterations, 3 restoration
+calls, objective 2 069 730.14512.
+
+**Why wasm32 is not bit-identical to native.** It is the same source, and
+the arithmetic in it agrees: `pow`, `exp`, `sin`, `sqrt` and `mul_add` are
+bit-identical between the two targets, as is scalar code including a plain
+dot product. The factorization is not. A fixed 4 000 × 4 000 sparse
+symmetric matrix, factored and solved through the same FERAL version on
+both targets, gives solutions one ulp apart. It is not parallelism —
+native is byte-identical with FERAL's internal threading forced on or off
+— and not the wasm SIMD proposal, since `-C target-feature=+simd128` does
+not change the result: `pulp`, which dispatches FERAL's kernels, has no
+wasm backend, so wasm runs scalar lanes where aarch64 runs NEON `f64x2`.
+Both results are backward-stable; an interior-point trajectory is simply
+free to amplify the difference.
+
+`deb7` is the worked example, and the reason it now solves. It follows the
+native trajectory for 83 iterations, diverges by one ulp in `inf_du` at
+iteration 84, and used to end `Error_In_Step_Computation` at 160. That
+status opened no second-opinion ladder, although `mu_strategy=adaptive`
+recovers this exact failure; it opens one now, and the same binary reaches
+the native optimum in 131 iterations. So a browser solve whose trajectory
+the target's rounding has walked into a bad region now gets the same
+second opinion every other frontend gets.
 
 The other 45 fixtures are convex LPs, QPs and QCQPs that the CLI hands to a
 specialised engine (`solver_selection=auto`). The wasm shim has no such
