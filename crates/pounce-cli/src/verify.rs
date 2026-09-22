@@ -521,8 +521,8 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         // stationary for exactly one of them; we report which.
         let s_pos = lagrangian_gradient(1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
         let s_neg = lagrangian_gradient(-1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
-        let resid_pos = bound_projected_residual(&s_pos, &x, &x_l, &x_u);
-        let resid_neg = bound_projected_residual(&s_neg, &x, &x_l, &x_u);
+        let resid_pos = bound_projected_residual(&s_pos, &x, &x_l, &x_u, args.opt_tol);
+        let resid_neg = bound_projected_residual(&s_neg, &x, &x_l, &x_u, args.opt_tol);
         let (best_resid, sign, s) = if resid_pos <= resid_neg {
             (resid_pos, 1, &s_pos)
         } else {
@@ -603,32 +603,52 @@ fn lagrangian_gradient(
 /// variable, the part of `s` that a valid sign-constrained bound multiplier
 /// `z_L, z_U ≥ 0` cannot absorb. Returns `‖projected s‖∞`.
 ///
+/// Stationarity is `z_L − z_U = s`, so a positive `s_j` is absorbable by the
+/// lower bound and a negative one by the upper. A bound may absorb it when
+/// the multiplier that would take is complementary with the variable's gap
+/// to that bound: `|s_j|·gap ≤ compl_tol`, or the gap is within `1e-8`
+/// relative. The product is the test an interior-point answer passes. It
+/// stops a barrier's distance from the bound, not on it, and that distance
+/// is `μ/z`, so an activity test on the gap alone misreads its active bounds
+/// as interior variables and reports their whole gradient as residual. On
+/// PGLib case6468_rte, variables 1.9e-8 inside a bound of 0.2189 (under the
+/// relative test's 1.2e-8) read as a residual of 0.44 against a solver dual
+/// infeasibility of 2.3e-8, with their `ipopt_zU_out` matching the gradient
+/// to every printed digit.
+///
 /// This is a *relaxation*: it projects out exactly the component a bound
 /// multiplier would carry, so it cannot see a missing or wrong `z` (gh #495).
 /// When the `.sol` exports the multipliers, prefer
 /// [`exact_dual_infeasibility`].
-fn bound_projected_residual(s: &[Number], x: &[Number], x_l: &[Number], x_u: &[Number]) -> Number {
+fn bound_projected_residual(
+    s: &[Number],
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    compl_tol: Number,
+) -> Number {
     let n = s.len();
-    // Activity tolerance for "x_j sits on a bound."
     let mut dual_inf = 0.0_f64;
     for j in 0..n {
-        let at_lo =
-            lower_bound_present(x_l[j]) && (x[j] - x_l[j]).abs() <= 1e-8 * (1.0 + x_l[j].abs());
-        let at_hi =
-            upper_bound_present(x_u[j]) && (x_u[j] - x[j]).abs() <= 1e-8 * (1.0 + x_u[j].abs());
         let fixed = lower_bound_present(x_l[j])
             && upper_bound_present(x_u[j])
             && (x_u[j] - x_l[j]).abs() <= 1e-12;
-        let r = if fixed {
+        if fixed {
+            continue;
+        }
+        let absorbable = |present: bool, bound: Number, gap: Number, z: Number| {
+            present && (gap.abs() <= 1e-8 * (1.0 + bound.abs()) || z * gap.max(0.0) <= compl_tol)
+        };
+        let r = if s[j] > 0.0 {
+            if absorbable(lower_bound_present(x_l[j]), x_l[j], x[j] - x_l[j], s[j]) {
+                0.0
+            } else {
+                s[j]
+            }
+        } else if absorbable(upper_bound_present(x_u[j]), x_u[j], x_u[j] - x[j], -s[j]) {
             0.0
-        } else if at_lo && !at_hi {
-            // need z_L = s_j ≥ 0; leftover is the negative part.
-            (-s[j]).max(0.0)
-        } else if at_hi && !at_lo {
-            // need z_U = -s_j ≥ 0; leftover is the positive part.
-            s[j].max(0.0)
         } else {
-            s[j].abs()
+            -s[j]
         };
         dual_inf = dual_inf.max(r);
     }
@@ -1545,11 +1565,38 @@ mod tests {
         // Projection: x sits on its upper bound, so a valid z_U absorbs the
         // whole negative gradient and the residual reads zero — with *no*
         // multiplier supplied at all.
-        assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u), 0.0);
+        assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u, 1e-6), 0.0);
         // The exact check does not get to assume one exists.
         assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[0.0]), 4.0);
         // Nor that it has the right sign.
         assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[4.0]), 8.0);
+    }
+
+    /// An interior-point answer stops `μ/z` short of an active bound, not on
+    /// it. Numbers from PGLib case6468_rte: `x` 1.9e-8 inside an upper
+    /// bound of 0.2189 with gradient −0.4399 is an active bound carrying
+    /// `z_U = 0.44` at complementarity 8.4e-9 — not an interior variable
+    /// with a residual of 0.44, which is what a gap-only activity test
+    /// (1.2e-8 here) reported. The same gradient on a variable well inside
+    /// its box is still a residual.
+    #[test]
+    fn a_barrier_stand_off_from_a_bound_is_still_active() {
+        let x_l = [-0.1276];
+        let x_u = [0.2189];
+        let s = [-0.4399];
+        let near = [0.2189 - 1.9e-8];
+        assert_eq!(bound_projected_residual(&s, &near, &x_l, &x_u, 1e-6), 0.0);
+        let inside = [0.05];
+        assert_eq!(
+            bound_projected_residual(&s, &inside, &x_l, &x_u, 1e-6),
+            0.4399
+        );
+        // Only the bound on the matching side absorbs: a positive gradient
+        // at the upper bound needs a negative z_U and stays a residual.
+        assert_eq!(
+            bound_projected_residual(&[0.4399], &near, &x_l, &x_u, 1e-6),
+            0.4399
+        );
     }
 
     /// **gh #516.** Constraint complementarity (rows) and bound

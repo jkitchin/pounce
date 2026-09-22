@@ -76,6 +76,32 @@ changes.
 
 ### Fixed
 
+- **Fixed variables were reported with no bound multiplier.**
+  `fixed_variable_treatment=make_parameter` (the default) removes a fixed
+  variable from the problem, and the solution then reported `z_L = z_U = 0`
+  for it. That is not a zero multiplier but a missing one: the bound is
+  active by construction and carries whatever the rest of its stationarity
+  row leaves over, which is why Ipopt 3.14 recovers it — and why it
+  registers `make_parameter_nodual` for callers who want it left out. The
+  reported duals were therefore not a KKT point for any model with a fixed
+  variable: on PGLib `case6468_rte` (56 fixed variables) `pounce verify`
+  measured a dual residual of 2.9e3 against the solver's own 2.3e-8. Now
+  recovered at the reported point as `z_L - z_U = ∇f + Jᵀλ` on the
+  interior-point path, the active-set SQP path, and in the `.sol` /
+  `ipopt_zL_out` / `ipopt_zU_out` suffixes the CLI writes; set
+  `fixed_variable_treatment=make_parameter_nodual` to opt out. Presolve's
+  linear-equality elimination removes declared-fixed columns before the
+  solver sees them and now recovers the same multiplier, so the reported
+  dual no longer depends on whether the reduction ran.
+- **`pounce verify` read an interior-point solution's active bounds as
+  interior variables.** Its bound-projected stationarity residual — the
+  estimate it falls back on when a `.sol` carries no `ipopt_zL_out` /
+  `ipopt_zU_out` suffixes — counted a variable as sitting on a bound only
+  within `1e-8` relative. A barrier method stops `μ/z` short of the bound,
+  so on `case6468_rte` variables 1.9e-8 inside a bound of 0.2189 read as
+  interior and their whole gradient was reported as residual: 0.44 on a
+  converged solve. A bound may now absorb the gradient when the multiplier
+  it would take is complementary with the gap (`|s|·gap ≤ opt_tol`).
 - **The WebAssembly build had no restoration phase** (gh#960). `pounce-wasm`
   built a bare `IpoptApplication` and never installed a restoration factory,
   so the first time the filter line search needed restoration the solve

@@ -933,7 +933,10 @@ fn park_on_own_bound(
 /// reported. This is the case where there is none to move: accumulated
 /// transfers can leave a survivor's reduced box as a single point, and a
 /// variable with equal bounds is a *fixed* variable, which the solver drops
-/// from its internal problem and reports `z_l = z_u = 0` for.
+/// from its internal problem. The solver recovers such a variable's
+/// multiplier from its own stationarity row, but that is the row of the
+/// *reduced* problem, so it cannot account for what the sweep later puts on
+/// the consumed rows.
 ///
 /// After [`recover_dropped_multipliers`], `resid` is zero at every column
 /// the sweep consumed, so anything left sits on a surviving column — and,
@@ -950,10 +953,16 @@ fn park_on_own_bound(
 /// multiplier that does exist. Placing it changes what the consumed rows
 /// have to carry, so a `true` return asks the caller to re-sweep.
 ///
-/// Only surviving columns are examined. An eliminated column with an
-/// elimination step of its own already had its residual closed by that
-/// step's row multiplier, and one without a step is a column the model
-/// declares fixed, which is out of scope here.
+/// Surviving columns are examined, and so are columns the model itself
+/// declares fixed, which this layer eliminates to constants before the
+/// solver sees them. The solver reports a bound multiplier for every
+/// declared-fixed column it removes (Ipopt 3.14's `make_parameter`
+/// behaviour), so a fixed column removed here has to get one too, or the
+/// same model reports a different dual depending on whether the reduction
+/// ran. Its residual goes on its own bound, split by sign; a fixed column
+/// consumes no row, so the sweep does not need to be redone for it. Any
+/// other eliminated column had its residual closed by its own step's row
+/// multiplier.
 fn attribute_bound_residual(
     plan: &EliminationPlan,
     resid: &[Number],
@@ -968,10 +977,18 @@ fn attribute_bound_residual(
     let mut any_pending = false;
     for j in 0..plan.n_full {
         let r = resid[j];
-        if !r.is_finite()
-            || r.abs() <= resid_tol
-            || !matches!(plan.recovery[j], VarRecovery::Kept(_))
-        {
+        if !r.is_finite() || r.abs() <= resid_tol {
+            continue;
+        }
+        if matches!(plan.recovery[j], VarRecovery::Constant(_)) && declared_fixed(j, x_l, x_u) {
+            if r > 0.0 {
+                z_l[j] += r;
+            } else {
+                z_u[j] -= r;
+            }
+            continue;
+        }
+        if !matches!(plan.recovery[j], VarRecovery::Kept(_)) {
             continue;
         }
         if park_on_own_bound(j, r, x, x_l, x_u, z_l, z_u) {
