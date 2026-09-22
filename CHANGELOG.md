@@ -108,6 +108,64 @@ changes.
   interior-point arm solved this instance at both scales throughout.
   ([#958](https://github.com/jkitchin/pounce/issues/958))
 
+- **Fixed variables were reported with no bound multiplier.**
+  `fixed_variable_treatment=make_parameter` (the default) removes a fixed
+  variable from the problem, and the solution then reported `z_L = z_U = 0`
+  for it. That is not a zero multiplier but a missing one: the bound is
+  active by construction and carries whatever the rest of its stationarity
+  row leaves over, which is why Ipopt 3.14 recovers it — and why it
+  registers `make_parameter_nodual` for callers who want it left out. The
+  reported duals were therefore not a KKT point for any model with a fixed
+  variable: on PGLib `case6468_rte` (56 fixed variables) `pounce verify`
+  measured a dual residual of 2.9e3 against the solver's own 2.3e-8. Now
+  recovered at the reported point as `z_L - z_U = ∇f + Jᵀλ` on the
+  interior-point path, the active-set SQP path, and in the `.sol` /
+  `ipopt_zL_out` / `ipopt_zU_out` suffixes the CLI writes; set
+  `fixed_variable_treatment=make_parameter_nodual` to opt out. Presolve's
+  linear-equality elimination removes declared-fixed columns before the
+  solver sees them and now recovers the same multiplier, so the reported
+  dual no longer depends on whether the reduction ran.
+- **`pounce verify` read an interior-point solution's active bounds as
+  interior variables.** Its bound-projected stationarity residual — the
+  estimate it falls back on when a `.sol` carries no `ipopt_zL_out` /
+  `ipopt_zU_out` suffixes — counted a variable as sitting on a bound only
+  within `1e-8` relative. A barrier method stops `μ/z` short of the bound,
+  so on `case6468_rte` variables 1.9e-8 inside a bound of 0.2189 read as
+  interior and their whole gradient was reported as residual: 0.44 on a
+  converged solve. A bound may now absorb the gradient when the multiplier
+  it would take is complementary with the gap (`|s|·gap ≤ opt_tol`).
+- **A step-computation breakdown got no second opinion.** `for_status`
+  mapped `Error_In_Step_Computation` to no trigger, so the second-opinion
+  ladder never opened on it — although a breakdown is a statement about the
+  trajectory the solve took, exactly like the restoration failure next to it
+  in that map, and not a request for more budget. It now opens the ladder
+  with the barrier-schedule rung (`infeasibility_mu_strategy_retry`, whose
+  scope is now wider than its name). Found on `deb7` under the wasm32 build,
+  whose factorization rounds differently from the native one: the solve
+  follows the native trajectory for 83 iterations, diverges by one ulp at
+  iteration 84, and ended `Error_In_Step_Computation` at 160 where native
+  solves in 147. With the ladder open, the same binary reaches the native
+  optimum in 131. Only that rung opens — measured on the same case,
+  `feral_scaling=mc64` still fails at 154, `feral_increase_quality=no` at
+  201, and `start_point_perturbation` spends 324 iterations to fail anyway.
+  The fixture sweep moves four lines, all of them fixtures that already
+  ended in this status and that the rung does not rescue: they each pay one
+  extra rung (`unbounded_exp` 23 → 27 total on the exact leg and 7 → 14 on
+  lbfgs, `eigena2` 186 → 372, `deb7` 715 → 1430), with no status, objective,
+  iteration count or engine moving anywhere.
+- **The WebAssembly build had no restoration phase** (gh#960). `pounce-wasm`
+  built a bare `IpoptApplication` and never installed a restoration factory,
+  so the first time the filter line search needed restoration the solve
+  stopped with `RestorationFailed` and `restoration_calls = 0`. On PGLib
+  `case6468_rte` AC-OPF that was iteration 54, exactly where the native CLI
+  enters restoration and goes on to the Ipopt optimum. The shim now wires the
+  restoration phase and the second-opinion ladder the way the CLI, C and
+  Python entry points do, and solves that case in 146 iterations to objective
+  2 069 730.14512, matching the CLI. Across the NLP-arm fixtures, disagreement
+  with the CLI drops from 15 of 52 to 4. The solve JSON gains `base_status`
+  and `second_opinion`, so a rescued solve stays visible. The earlier parity
+  claim in `docs/src/wasm.md` compared the shim with itself and missed this;
+  it now compares against the CLI.
 - **Linear-solver summary under L-BFGS reported one backend's counts, not the
   solve's.** The limited-memory path builds two FERAL backends from one factory
   (the low-rank solver's and its bypass), and each overwrote the shared summary

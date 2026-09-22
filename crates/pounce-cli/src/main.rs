@@ -1446,6 +1446,7 @@ pub fn main() -> ExitCode {
         // `sens_bound_eps`, which is a primal margin.
         let release_eps = pounce_sensitivity::release_floor_from_options(app.options());
         let sens_opts_cb = sens_options;
+        let fixed_var_duals = app.reports_fixed_var_duals();
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
@@ -1508,6 +1509,19 @@ pub fn main() -> ExitCode {
                     lambda.extend(std::iter::repeat(0.0).take(n_d));
                 }
             }
+            // The lifts below report a fixed variable's multiplier as 0.0
+            // because the algorithm never held one; recover it from the
+            // reported point before `lambda` moves into the capture.
+            let mut z_l_full = nlp.borrow().finalize_solution_z_l(&*curr.z_l);
+            let mut z_u_full = nlp.borrow().finalize_solution_z_u(&*curr.z_u);
+            if fixed_var_duals {
+                nlp.borrow().complete_fixed_var_bound_multipliers(
+                    &x,
+                    &lambda,
+                    &mut z_l_full,
+                    &mut z_u_full,
+                );
+            }
             *cap.borrow_mut() = Some((x.clone(), lambda));
 
             // Lift the algorithm-side compressed bound multipliers to
@@ -1518,8 +1532,6 @@ pub fn main() -> ExitCode {
             // upper bound) — exactly Ipopt's `ipopt_zL_out`/`ipopt_zU_out`
             // (gh #296). A non-`OrigIpoptNlp` returns empty here and no
             // bound-multiplier suffixes are written.
-            let z_l_full = nlp.borrow().finalize_solution_z_l(&*curr.z_l);
-            let z_u_full = nlp.borrow().finalize_solution_z_u(&*curr.z_u);
             if !z_l_full.is_empty() || !z_u_full.is_empty() {
                 *bmult_cap.borrow_mut() = Some((z_l_full, z_u_full));
             }

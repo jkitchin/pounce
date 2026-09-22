@@ -22,6 +22,7 @@ pounce-nlp.workspace = true
 pounce-nl.workspace = true
 pounce-algorithm.workspace = true
 pounce-presolve.workspace = true
+pounce-restoration.workspace = true
 # `status_to_solve_result_num` for the `.sol` objno line — the same mapping
 # the CLI writes, so a browser `.sol` and a CLI `.sol` agree.
 pounce-solve-report.workspace = true

@@ -168,18 +168,59 @@ way.
 
 ## Numerical parity with the native build
 
-The wasm build runs the same code, so it produces the same answers. Over
-all 37 `.nl` fixtures in `crates/pounce-cli/tests/fixtures`, driven through
-the same entry points on both sides:
+The wasm module runs the same solver code as the native CLI, and since
+gh#960 it runs the same *driver* too: the restoration phase and the
+second-opinion ladder are wired in exactly as the CLI, the C interface and
+the Python frontend wire them.
 
-- exit status: identical on 37 of 37
-- iteration count: identical on 37 of 37
-- objective: bit-identical on 34 of the 36 that return one; the two
-  exceptions (`scaled_feasible_a`, `feasible_x0_sentinel_bound`) differ by
-  one ulp, at objectives of 4.5e-10 and 7.1e-11
+Before that fix the shim had no restoration phase, so any solve whose line
+search asked for one stopped immediately with `RestorationFailed` and
+`restoration_calls = 0` — PGLib `case6468_rte` at iteration 54, the exact
+iteration where the CLI enters restoration and goes on to solve. The parity
+table that used to stand here did not see it, because it compared the shim
+compiled to wasm against *the same shim* compiled natively: both lacked
+restoration, so they agreed. Parity is measured against `pounce model.nl`
+now.
 
-The 37th (`presolve_overflow_feasible`) returns `InvalidNumberDetected`
-with no objective on either side — that is the fixture's job.
+Over the 52 fixtures in `crates/pounce-cli/tests/fixtures` that the CLI
+routes to the NLP arm, same default options, native `aarch64-apple-darwin`
+CLI vs `wasm32-wasip1` under Node:
+
+- before gh#960: status or iteration count differed on 15 of 52
+- after: identical status and iteration count on 48 of 52
+
+The four that still differ all reach the same optimum; only the iteration
+count moves (`pooling_rt2stp` 184 vs 109, `cresc4` 68 vs 69,
+`scaled_feasible_a` 20 vs 22, `deb7` 131 vs 147). `case6468_rte`
+(49 734 × 75 002) matches the CLI exactly — 146 iterations, 3 restoration
+calls, objective 2 069 730.14512.
+
+**Why wasm32 is not bit-identical to native.** It is the same source, and
+the arithmetic in it agrees: `pow`, `exp`, `sin`, `sqrt` and `mul_add` are
+bit-identical between the two targets, as is scalar code including a plain
+dot product. The factorization is not. A fixed 4 000 × 4 000 sparse
+symmetric matrix, factored and solved through the same FERAL version on
+both targets, gives solutions one ulp apart. It is not parallelism —
+native is byte-identical with FERAL's internal threading forced on or off
+— and not the wasm SIMD proposal, since `-C target-feature=+simd128` does
+not change the result: `pulp`, which dispatches FERAL's kernels, has no
+wasm backend, so wasm runs scalar lanes where aarch64 runs NEON `f64x2`.
+Both results are backward-stable; an interior-point trajectory is simply
+free to amplify the difference.
+
+`deb7` is the worked example, and the reason it now solves. It follows the
+native trajectory for 83 iterations, diverges by one ulp in `inf_du` at
+iteration 84, and used to end `Error_In_Step_Computation` at 160. That
+status opened no second-opinion ladder, although `mu_strategy=adaptive`
+recovers this exact failure; it opens one now, and the same binary reaches
+the native optimum in 131 iterations. So a browser solve whose trajectory
+the target's rounding has walked into a bad region now gets the same
+second opinion every other frontend gets.
+
+The other 45 fixtures are convex LPs, QPs and QCQPs that the CLI hands to a
+specialised engine (`solver_selection=auto`). The wasm shim has no such
+routing and always solves with the NLP interior point, so those are not
+compared here.
 
 Speed is what you would expect from wasm. Solver-internal wall time, same
 build, same code path, native `x86_64` vs `wasm32-wasip1` under Node:

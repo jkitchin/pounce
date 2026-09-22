@@ -471,7 +471,8 @@ fn a_chain_whose_intersection_is_a_point_still_closes_stationarity() {
     assert_kkt("reduction on", &model, &on.captured);
 }
 
-/// The boundary of the fix, pinned so it cannot drift.
+/// A column the model declares fixed carries a multiplier, with or without
+/// the reduction.
 ///
 /// ```text
 ///   min (x0−4)² + (x1−4)² + (x2−1)²   s.t.  2·x0 + 3·x1 = 6,  x1 ∈ [1,1]
@@ -479,14 +480,15 @@ fn a_chain_whose_intersection_is_a_point_still_closes_stationarity() {
 ///
 /// `x1` is a constant before the sweep starts, so the row is a singleton in
 /// `x0` and pins it at `1.5`; stationarity at `x0` fixes `λ = 2.5`, and the
-/// `3·λ` that lands on `x1` is carried by nothing. That is *not* a Phase 6
-/// defect: the model declares `x1` fixed, so the solver drops it as a
-/// parameter and reports no multiplier for it whether or not the reduction
-/// runs. The bar here is parity with the bare solve, not a KKT point —
-/// manufacturing a multiplier a no-presolve solve does not report would be
-/// a divergence, and belongs to `fixed_variable_treatment` if anywhere.
+/// `3·λ` that lands on `x1` leaves `−6 + 7.5 = 1.5` on its lower bound.
+///
+/// This used to be pinned the other way: the bare solve dropped `x1` as a
+/// parameter and reported `z = 0` for it, so the bar was parity with that
+/// non-KKT answer. The solver now recovers a removed fixed variable's
+/// multiplier the way Ipopt 3.14 does, and a zero would be the divergence —
+/// so both sides must be KKT points, and the same one.
 #[test]
-fn a_declared_fixed_column_reports_exactly_what_the_bare_solve_reports() {
+fn a_declared_fixed_column_carries_its_multiplier_with_or_without_the_reduction() {
     let model = Model {
         targets: vec![4.0, 4.0, 1.0],
         x_l: vec![-1e19, 1.0, -1e19],
@@ -497,6 +499,13 @@ fn a_declared_fixed_column_reports_exactly_what_the_bare_solve_reports() {
     let on = solve(&model, true);
     let off = solve(&model, false);
     assert!((on.captured.x[0] - 1.5).abs() < 1e-6, "{:?}", on.captured.x);
+    assert_kkt("reduction on", &model, &on.captured);
+    assert_kkt("reduction off", &model, &off.captured);
+    assert!(
+        (off.captured.z_l[1] - 1.5).abs() < 1e-6 && off.captured.z_u[1] == 0.0,
+        "the fixed column's multiplier: {:?}",
+        off.captured
+    );
     assert_eq!(
         kkt_violations(&model, &on.captured, 1e-4),
         kkt_violations(&model, &off.captured, 1e-4),
