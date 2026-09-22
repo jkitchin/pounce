@@ -53,8 +53,12 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
-/// What one CLI solve of `fixture_name` reports about duals.
+/// What one CLI solve of `fixture_name` reports about duals and the objective.
 struct Duals {
+    /// `solution.objective` from the JSON report.
+    objective: f64,
+    /// `statistics.final_objective` — documented to mirror `solution.objective`.
+    stat_objective: f64,
     /// The `.sol` dual block — AMPL marginals, `d obj / d rhs`.
     sol: Vec<f64>,
     /// `solution.lambda` from the JSON report — internal multipliers.
@@ -97,8 +101,11 @@ fn solve(fixture_name: &str, selection: &str, tag: &str) -> Duals {
         .map(|a| a.iter().map(|v| v.as_f64().expect("f64")).collect())
         .unwrap_or_default();
 
+    let num = |v: &serde_json::Value| v.as_f64().unwrap_or(f64::NAN);
     let (marginals, rest) = parse_sol_marginals(&sol_text);
     Duals {
+        objective: num(&report["solution"]["objective"]),
+        stat_objective: num(&report["statistics"]["final_objective"]),
         sol: marginals,
         json: json_lambda,
         z_l: parse_suffix(rest, "ipopt_zL_out"),
@@ -254,6 +261,108 @@ fn a_maximize_model_with_an_active_bound_reports_the_reduced_cost_upstreams_way(
         (value_at(&min.z_u, 0) - (-3.0)).abs() < 1e-4,
         "ipopt_zU_out[0] must be -3 = ∂f/∂x₀ for the minimize model; got {}",
         value_at(&min.z_u, 0),
+    );
+}
+
+/// The objective is the same field one over, and it diverged the same way: a
+/// `maximize` model is solved as `min -f`, so the NLP arm's JSON report carried
+/// `-36` where the convex arm carried `+36` for the same file.
+///
+/// Both JSON fields are pinned, because `solution.objective` is documented to
+/// mirror `statistics.final_objective` and a fix that moved only one would
+/// leave the report self-contradictory. The analytic value is the reference:
+/// Wyndor's optimum is `3·2 + 5·6 = 36`, and `34.5 = 3·1.5 + 5·6` for the
+/// boxed twin.
+///
+/// The console residual table is deliberately NOT pinned to the declared
+/// sense, and that is the point of `the_console_table_keeps_ipopt_parity`
+/// below — it is a diff target against Ipopt's own output, and upstream prints
+/// the internal minimization's value there.
+#[test]
+fn the_reported_objective_is_in_the_models_declared_sense() {
+    for (fx, want) in [("wyndor_max.nl", 36.0), ("wyndor_max_boxed.nl", 34.5)] {
+        for sel in ["nlp", "auto"] {
+            let d = solve(fx, sel, "obj");
+            assert!(
+                (d.objective - want).abs() < 1e-4,
+                "{fx} ({sel}): solution.objective must be {want}; got {}",
+                d.objective,
+            );
+            assert!(
+                (d.stat_objective - want).abs() < 1e-4,
+                "{fx} ({sel}): statistics.final_objective must mirror it at {want}; got {}",
+                d.stat_objective,
+            );
+        }
+    }
+    // The minimize twins, unmoved at the negation — the same guard against a
+    // uniform flip the dual tests carry.
+    for (fx, want) in [("wyndor_min.nl", -36.0), ("wyndor_min_boxed.nl", -34.5)] {
+        for sel in ["nlp", "auto"] {
+            let d = solve(fx, sel, "objmin");
+            assert!(
+                (d.objective - want).abs() < 1e-4,
+                "{fx} ({sel}): solution.objective must be {want}; got {}",
+                d.objective,
+            );
+        }
+    }
+}
+
+/// The console residual table stays in the internal minimization's sense, and
+/// says so on a separate line.
+///
+/// `pounce-solve-report/src/console.rs` records that this block "is diffed
+/// against `ipopt`'s own output". Upstream prints the internal value there for
+/// a maximize model — `AmplTNLP::eval_f` returns `obj_sign * objval` and the
+/// summary prints what the TNLP returned — so flipping the row would trade one
+/// divergence for another against a surface whose whole job is to match. The
+/// declared-sense value is disclosed additively instead, outside the diffed
+/// table, exactly as the `Violation of the model as declared` line is.
+///
+/// Pinned because "leave it alone" is a decision, not an oversight, and
+/// without a test the next reader cannot tell which.
+#[test]
+fn the_console_table_keeps_ipopt_parity_and_discloses_the_declared_sense() {
+    let dir = std::env::temp_dir().join(format!("pounce_i959_console_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let nl = dir.join("m.nl");
+    std::fs::copy(fixture("wyndor_max.nl"), &nl).expect("copy fixture");
+    let out = Command::new(pounce_exe())
+        .arg(&nl)
+        .arg("solver_selection=nlp")
+        .output()
+        .expect("spawn pounce");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("Objective..."))
+        .expect("the summary table carries an Objective row");
+    assert!(
+        row.contains("-3.6000"),
+        "the Ipopt-parity row must keep the internal minimization's value; got {row}",
+    );
+
+    let disclosure = stdout
+        .lines()
+        .find(|l| l.contains("declared sense (maximize)"))
+        .expect("a maximize model discloses its declared-sense objective");
+    assert!(
+        disclosure.contains("3.6000") && !disclosure.contains("-3.6000"),
+        "the disclosure line must carry +36; got {disclosure}",
+    );
+
+    // And a minimize model gets no extra line at all.
+    std::fs::copy(fixture("wyndor_min.nl"), &nl).expect("copy fixture");
+    let out = Command::new(pounce_exe())
+        .arg(&nl)
+        .arg("solver_selection=nlp")
+        .output()
+        .expect("spawn pounce");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("declared sense"),
+        "a minimize model must print no declared-sense line",
     );
 }
 

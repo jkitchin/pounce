@@ -153,7 +153,7 @@ Problem dimensions reported by the TNLP at `get_nlp_info()`.
 | `n_variables` | integer | Number of primal variables. |
 | `n_constraints` | integer | Number of constraints (equalities + inequalities). |
 | `n_objectives` | integer | Number of objectives. The IPM uses objective 0; extras are read but ignored. |
-| `minimize` | boolean | `true` for minimization (the AMPL default). |
+| `minimize` | boolean | `true` for minimization (the AMPL default), `false` for a `maximize` model. Read it to interpret the sign of `solution.objective` and `solution.lambda`, both of which are in the sense this field names. Reported by every arm since 0.12.0; the general NLP arm left it at its `true` default before that, so a maximize model reads `true` in an older report ([#959](https://github.com/jkitchin/pounce/issues/959)). |
 | `nnz_jac_g` | integer \| omitted | Number of declared non-zeros in the constraint Jacobian. |
 | `nnz_h_lag` | integer \| omitted | Number of declared non-zeros in the lower triangle of the Lagrangian Hessian. |
 
@@ -164,7 +164,7 @@ Problem dimensions reported by the TNLP at `get_nlp_info()`.
 | `status` | string | `ApplicationReturnStatus` enum variant name verbatim (e.g. `"SolveSucceeded"`, `"MaximumIterationsExceeded"`). |
 | `status_upstream` | string | The same verdict in upstream IPOPT's C enumerator spelling from `IpReturnCodes_inc.h` (e.g. `"Solve_Succeeded"`, `"Infeasible_Problem_Detected"`) — the spelling CUTEst status tables, the CLI's own `Status:` line and the reference JSONs under `benchmarks/*/ipopt_ma57.json` all use. Derived from `status`, so the two can never disagree. Compare against this field, not `status`, when your consumer already keys off IPOPT's names. Added after `pounce.solve-report/v1` shipped; absent from reports written by pounce ≤ 0.10.0. |
 | `solve_result_num` | integer | AMPL-style solve-result code (Gay 2005, "Hooking Your Solver to AMPL" §5, p. 23 table): 0 = solved, 100-range = warning, 200-range = infeasible, 400-range = limit reached, 500-range = failure. Within the solved range, `0` is `SolveSucceeded` and `1` is `SolvedToAcceptableLevel` — IPOPT's codes ([solution output](../solution-output.md#solved-strict-acceptable-and-square)). Identical to the `objno` code in the `.sol`. |
-| `objective` | float | Final unscaled objective value. `0.0` (not NaN) when the solve never completed; check `statistics.iteration_count > 0` to distinguish. |
+| `objective` | float | Final unscaled objective value, **in the sense the model declares** — a `maximize` model reports the value of the objective as written, not of the internal minimization. `0.0` (not NaN) when the solve never completed; check `statistics.iteration_count > 0` to distinguish. |
 | `x` | array of float \| empty | Primal vector, length `problem.n_variables`. Empty when the binary doesn't capture the final iterate (currently: `pounce` on the `newton_driver` fast-path). Omitted from JSON when empty. |
 | `lambda` | array of float \| empty | Constraint multipliers, length `problem.n_constraints`. Same omission convention as `x`. |
 | `suffixes` | array of object \| empty | sIPOPT-style suffix blocks; emitted only at `--json-detail full`. See below. |
@@ -218,6 +218,18 @@ the per-iteration history (which lives at the top level when present).
 >
 > Consumers should treat `null` as "not computed", not as zero. pounce's own
 > readers map it to NaN, which fails closed against any `value <= tol` test.
+
+> **Objective sense.** Both objective fields are in the sense `problem.minimize`
+> names, on every engine. POUNCE solves a `maximize` model internally as
+> `min −f`, so the algorithm's own numbers are negated; the report carries them
+> back. The **console** residual table does not, and deliberately: that block is
+> diffed against IPOPT's own output, and upstream prints the internal value
+> there (`AmplTNLP::eval_f` returns `obj_sign · objval`). On a maximize model
+> the CLI prints the declared-sense value on its own line below the table
+> instead. Before 0.12.0 the general NLP arm reported the internal value in the
+> report as well, so one binary gave `−36` and `+36` for the same file
+> depending on which engine answered
+> ([#959](https://github.com/jkitchin/pounce/issues/959)).
 | `num_obj_evals` | integer | `eval_f` call count. |
 | `num_constr_evals` | integer | `eval_g` call count. |
 | `num_obj_grad_evals` | integer | `eval_grad_f` count. |

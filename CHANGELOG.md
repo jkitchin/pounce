@@ -87,10 +87,23 @@ changes.
   all, so Pyomo and AMPL users read `model.dual` / `.dual` with the wrong sign
   there; `ipopt_zL_out` / `ipopt_zU_out` and the browser (WASM) `.sol` were
   affected identically, and the per-minimum `.sol` files from `--minima` with
-  them. The NLP arm's JSON report also described a maximize model as a
-  minimization (`problem.minimize`). `minimize` models, primal `x`, objective
-  values, the convex arms and the GAMS links were never affected.
-  ([#959](https://github.com/jkitchin/pounce/issues/959))
+  them.
+
+  The **reported objective** diverged the same way and is fixed with it: the
+  NLP arm's JSON report carried the internal minimization's value, so one
+  binary reported `objective: -36` and `objective: 36` for the same file
+  depending on which engine answered. `solution.objective`,
+  `statistics.final_objective` and `statistics.final_scaled_objective` are now
+  in the model's declared sense on every arm — as are `--minima`'s ranked table
+  and `minima` section, and the browser (WASM) report. The **console residual
+  table keeps IPOPT parity** and still prints the internal value, because that
+  block is diffed against IPOPT's own output and upstream prints the internal
+  value there too; on a maximize model the CLI now states the declared-sense
+  objective on its own line below the table. The NLP arm's JSON report also
+  described a maximize model as a minimization (`problem.minimize`).
+
+  `minimize` models, primal `x`, the convex arms and the GAMS links were never
+  affected. ([#959](https://github.com/jkitchin/pounce/issues/959))
 
 - **The active-set QP engine was not invariant to objective scaling.** On a
   feasible, bounded 4-variable convex QP with a rank-deficient PSD `P` of

@@ -1943,6 +1943,56 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // ---- Objective sense: the report carries the model's own, not the
+    // ---- internal minimization's (gh#959 follow-up)
+    //
+    // Same root as the dual-sign block further down, one field over. A
+    // `maximize` `.nl` is solved as `min -f`, so every objective the algorithm
+    // recorded is the negated one, and the JSON report carried it: on the
+    // Wyndor LP written as a maximize, `solver_selection=auto` reported
+    // `objective: 36` and `solver_selection=nlp` reported `-36` for the same
+    // file. Both convex arms report `sign * sol.obj + obj_const` — the model's
+    // own sense, said so in their own comments — and this arm did not, so the
+    // field a benchmark harness or `scripts/sweep-fixtures.sh` reads was
+    // engine-dependent.
+    //
+    // Applied to `final_objective` AND `final_scaled_objective` together, so
+    // their ratio — which is the objective scaling factor, and which
+    // `issue_266_mu_min_scaled_floor.rs` reads as exactly that — is unmoved.
+    // `nl_dual_sign` is `+1` for a minimize `.nl` and for every builtin.
+    //
+    // What is deliberately NOT touched is the console residual table printed
+    // by `Application::emit_end_summary`. That block is diffed against
+    // `ipopt`'s own output (see the note on `print_declared_violation` in
+    // `pounce-solve-report/src/console.rs`), and upstream prints the internal
+    // value there too: `AmplTNLP::eval_f` returns `obj_sign * objval`, and the
+    // summary prints what the TNLP returned. Flipping that row would trade one
+    // divergence for another, against a surface whose whole job is to match.
+    // The line below is how a reader of the console is told instead — additive,
+    // maximize-only, and outside the diffed table, exactly as
+    // `print_declared_violation` is.
+    if nl_dual_sign < 0.0 {
+        solve_stats.final_objective = -solve_stats.final_objective;
+        solve_stats.final_scaled_objective = -solve_stats.final_scaled_objective;
+        if !json_dbg
+            && app
+                .options()
+                .get_integer_value("print_level", "")
+                .map(|(v, _found)| v >= 1)
+                .unwrap_or(true)
+        {
+            println!();
+            println!(
+                "Objective in the model's declared sense (maximize): {}",
+                pounce_solve_report::console::fmt_ipopt(solve_stats.final_objective),
+            );
+            println!(
+                "  (the table above is the internal minimization's value, as Ipopt reports it;"
+            );
+            println!("   the .sol duals and the JSON report use the declared sense)");
+        }
+    }
+
     // The machine-readable verdict, printed exactly once per run, after every
     // path above has finished moving `status`.
     //
