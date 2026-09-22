@@ -466,9 +466,39 @@ impl SchurState {
     /// Mirrors the convex IPM's `solve_refined`, for the same reason: a single
     /// back-solve near a degenerate optimum loses digits.
     pub fn solve(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
-        /// Refinement passes. Two is enough to recover full accuracy here —
-        /// the drift is a small relative perturbation, not a conditioning wall.
-        const IR_MAX_PASSES: usize = 2;
+        /// Refinement passes.
+        ///
+        /// Two used to be the cap, on the reasoning quoted above — "the drift
+        /// is a small relative perturbation, not a conditioning wall". That
+        /// holds for the update layer's own drift and does not hold once the
+        /// objective is large: with `‖P‖ ≈ 2.4e8` the base factor's H block
+        /// dwarfs the O(1) constraint rows the SMW columns carry, `S` is
+        /// correspondingly ill-conditioned, and the first two passes take the
+        /// residual from `1.7e7` down to only `1.3e3` — a *relative* KKT
+        /// residual of `7e-5`, handed to the active-set loop as an exact
+        /// direction (gh#958).
+        ///
+        /// The loop stops on `IR_MIN_GAIN` as soon as a pass buys less than a
+        /// factor of two, so a well-scaled solve still converges in one or two
+        /// passes and pays nothing for this ceiling; it is reached only where
+        /// refinement is still making progress, which is exactly where it is
+        /// worth spending. Measured on gh#958's 4-variable rank-deficient QP,
+        /// `‖P‖ ≈ 2.4e8`: the passes actually used run 1–12 across the solve,
+        /// the residual lands at `1e-10`–`1e-17` against `‖b‖ ≈ 1e6`–`1e7`,
+        /// and the engine goes from `numerical_failure` at a point violating
+        /// `Gx ≤ h` by `3.5e-3` to the true optimum at `12` iterations.
+        ///
+        /// **Where the number comes from.** Swept against
+        /// `pounce-convex/tests/issue958_objective_scale_invariance.rs`, the
+        /// verdict is a step function: caps 2, 4, 6 and 8 all leave at least
+        /// one arm red, 10 is the first that passes, and 16 and 24 are
+        /// bit-identical to 10 — the answer saturates there. 12 is the first
+        /// round value above the saturation point, chosen so the ceiling has
+        /// margin over the measurement rather than sitting on its edge. It is
+        /// a ceiling, not a target: `IR_MIN_GAIN` decides when to stop, and on
+        /// every solve that does not need the passes it stops long before
+        /// this.
+        const IR_MAX_PASSES: usize = 12;
         /// Minimum fractional residual reduction for a pass to count as
         /// progress. Below this the correction is round-off, not signal.
         const IR_MIN_GAIN: Number = 0.5;
@@ -483,12 +513,33 @@ impl SchurState {
         // *solution* error, which is precisely the drift being fixed. Refine
         // while the residual keeps shrinking instead, and stop when it does
         // not: that is scale-free and cannot loop.
+        //
+        // **Best-so-far**, so refinement can only improve the answer. The loop
+        // applies a correction before it can know whether that correction
+        // helped, and near the precision floor one does not: the next pass
+        // measures the *larger* residual, breaks on `IR_MIN_GAIN`, and leaves
+        // the worse iterate behind. Measured on gh#958, a pass took the
+        // residual from `4.5e5` to `7.4e5` and that was what came back. It is
+        // also what makes the ceiling above safe to raise: an extra pass can
+        // now cost time, and nothing else.
+        //
+        // One buffer, filled by `copy_from_slice`, so this is one allocation
+        // per solve — the same order as `b` above — rather than one per pass.
+        let mut best_x: Vec<Number> = rhs.to_vec();
+        let mut best_norm = Number::INFINITY;
         let mut prev = Number::INFINITY;
         for _ in 0..IR_MAX_PASSES {
             let Some(kx) = self.kw_matvec(rhs) else { break };
             let mut r: Vec<Number> = b.iter().zip(kx.iter()).map(|(&bi, &ki)| bi - ki).collect();
             let r_norm = r.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
-            if !r_norm.is_finite() || r_norm == 0.0 {
+            if !r_norm.is_finite() {
+                break;
+            }
+            if r_norm < best_norm {
+                best_norm = r_norm;
+                best_x.copy_from_slice(rhs);
+            }
+            if r_norm == 0.0 {
                 break;
             }
             // No meaningful progress ⇒ further passes are noise.
@@ -505,6 +556,24 @@ impl SchurState {
             for (xi, &dxi) in rhs.iter_mut().zip(r.iter()) {
                 *xi += dxi;
             }
+        }
+        // The loop measures the residual at the TOP of a pass, so whatever
+        // correction it applied last was never weighed. Weigh it here — one
+        // matvec, no back-solve — and fall back to the best iterate when the
+        // last correction was not an improvement. `is_nan()` is spelled out
+        // rather than folded into a negated comparison so a NaN residual takes
+        // the fallback explicitly.
+        let final_norm = self
+            .kw_matvec(rhs)
+            .map(|kx| {
+                b.iter()
+                    .zip(kx.iter())
+                    .map(|(&bi, &ki)| (bi - ki).abs())
+                    .fold(0.0_f64, f64::max)
+            })
+            .unwrap_or(Number::INFINITY);
+        if final_norm.is_nan() || final_norm > best_norm {
+            rhs.copy_from_slice(&best_x);
         }
         Ok(())
     }

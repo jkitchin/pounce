@@ -292,7 +292,15 @@ impl ElasticReformulation {
         let n = self.n_orig;
         let m = self.m_orig;
         for i in 0..m {
-            if x_aug[n + i] > feas_tol || x_aug[n + m + i] > feas_tol {
+            // Magnitude, not `> feas_tol` (gh#958). Every slack carries the
+            // lower bound `0`, so a *negative* one is a point outside the
+            // augmented problem's own box, and the one-sided test read it as
+            // "the slacks were driven out" — the answer it is here to give.
+            // Measured on gh#958's QP: the augmented solve came back with
+            // `v_u = -0.765`, this returned `true`, and `solve_elastic`
+            // reported the recovered `x` as an optimum whose multipliers price
+            // a row that a bound-violating slack was holding.
+            if x_aug[n + i].abs() > feas_tol || x_aug[n + m + i].abs() > feas_tol {
                 return false;
             }
         }

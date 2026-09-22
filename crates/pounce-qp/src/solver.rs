@@ -1889,6 +1889,26 @@ impl ParametricActiveSetSolver {
         let repaired = self.solve_elastic(qp, opts)?;
         let after = max_violation(qp, &repaired.x);
         if after <= before {
+            // NOTE (gh#958): a repair that is "no worse" is not necessarily
+            // feasible, and this returns it with whatever status
+            // `solve_elastic` gave it — `Optimal` included, at a point the
+            // audit three lines up measured as violating the constraints. On
+            // gh#958's QP that was `Optimal` at `max(Gx − h) = 3.5e-3`.
+            // `pounce-convex` re-derives its own verdict and saw through it;
+            // the SQP outer loop and every direct `pounce-qp` caller do not.
+            //
+            // Demoting on `!point_is_feasible(qp, &repaired.x, opts.feas_tol)`
+            // is NOT the fix, and was tried: this path's whole reason for
+            // existing is the near-miss, and `sqp_near_solution_start.rs`
+            // is the case — HS071 started at `x* + 1e-6·e₁` lands here with a
+            // step-QP point missing `feas_tol` by a factor of two (1.95e-9
+            // against 1e-9) on a QP with points feasible to slack 1.66, and
+            // the absolute test turns that into `QpIterationLimit` at
+            // iteration 0. Telling a hair's-breadth miss from `3.5e-3` needs a
+            // scale-relative feasibility test, which is a change of its own
+            // with its own measurement — not a rider on this one. The gh#958
+            // fixes in `schur.rs` mean this model no longer reaches here at
+            // all; the gap is real and recorded, not closed.
             return Ok(repaired);
         }
         // Repair regressed feasibility: keep the audited point, but do not

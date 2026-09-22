@@ -1301,14 +1301,54 @@ fn solved_band(err: f64, tol: f64) -> Option<QpStatus> {
 /// The natural scale of `prob` at the point `sol` — the largest of the term
 /// magnitudes that compose the three KKT residuals, and hence the size the
 /// finite-precision floor on an *absolute* residual is proportional to.
+///
+/// The matrix-vector terms are measured as `|P||x|`, `|A|ᵀ|y|`, `|G|ᵀ|z|` —
+/// the standard error bound on the product — and **not** as `‖Px‖`, `‖Aᵀy‖`,
+/// `‖Gᵀz‖`. The distinction is the whole point of this function. What the
+/// floor is proportional to is the size of the terms that were *summed*, not
+/// the size of what survived the summation, and the two part company exactly
+/// when the sum cancels. On gh#958's QP — `P = L Lᵀ` of rank 2 with
+/// `‖P‖ ≈ 2.4e8`, whose optimum sits near `null(P)` — `‖Px‖` reads `23.3`
+/// while `|P||x|` reads `7.6e8`, eight orders apart, so the products' norm
+/// shut the relative arm on a solve whose stationarity residual (`2.0e-8`) was
+/// *below* its own cancellation floor (`|P||x|·ε ≈ 1.7e-7`). The engine then
+/// reported `OptimalInaccurate` for a point accurate to every digit double
+/// precision has — the same mislabelling gh#641 fixed one level up, reached
+/// through a rank-deficient `P` instead of a large one.
+///
+/// A rank-deficient `P` is not a corner case here: it is what a QP with a
+/// non-unique optimum looks like (gh#948), and `‖Px‖` is small on every one
+/// of them whose solution lies along a flat direction.
+///
+/// `‖Px‖ ≤ ‖|P||x|‖` always, so this only ever *widens* the set of problems on
+/// which [`adjudicated_kkt_error`] consults its relative arm — and that arm is
+/// an `err.min(..)`, which can only lower the error. So the direction of this
+/// change is bounded: a solve that used to be reported as solved cannot start
+/// failing because of it. What it can do is let a badly wrong point through
+/// the relative test on a problem that previously never reached it, which is
+/// gh#414's failure mode — the reason the relative parts are measured in the
+/// **equilibrated** metric rather than by global ∞-norms, and the reason
+/// `issue414_cost_normalized_false_optimal.rs` and `illconditioned_huge_scale.rs`
+/// are the tests to run beside this one.
 fn natural_scale(prob: &QpProblem, sol: &QpSolution) -> f64 {
+    // `|P| |x|`: accumulate over the stored lower triangle, mirroring the
+    // implicit upper half exactly as `p_mul_add` does, with absolute values.
     let mut px = vec![0.0; prob.n];
-    prob.p_mul(&sol.x, &mut px);
-    // `at_mul`/`gt_mul` accumulate, so a zeroed target yields the product itself.
+    for t in &prob.p_lower {
+        px[t.row] += t.val.abs() * sol.x[t.col].abs();
+        if t.row != t.col {
+            px[t.col] += t.val.abs() * sol.x[t.row].abs();
+        }
+    }
+    // `|A|ᵀ |y|` and `|G|ᵀ |z|`.
     let mut aty = vec![0.0; prob.n];
-    prob.at_mul(&sol.y, &mut aty);
+    for t in &prob.a {
+        aty[t.col] += t.val.abs() * sol.y[t.row].abs();
+    }
     let mut gtz = vec![0.0; prob.n];
-    prob.gt_mul(&sol.z, &mut gtz);
+    for t in &prob.g {
+        gtz[t.col] += t.val.abs() * sol.z[t.row].abs();
+    }
     inf_norm(&px)
         .max(inf_norm(&prob.c))
         .max(inf_norm(&aty))

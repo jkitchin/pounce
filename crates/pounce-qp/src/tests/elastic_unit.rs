@@ -268,3 +268,42 @@ fn is_feasible_nonzero_slack_returns_false() {
     let x_aug = [0.5, 0.5, 0.001, 0.0]; // v_l > tol
     assert!(!reform.is_feasible(&x_aug, 1e-9));
 }
+
+/// gh#958. A slack **below** its own lower bound is not "the slacks were
+/// driven out" — it is a point outside the augmented problem's box, and the
+/// `x` recovered beside it is held feasible by a quantity that is not allowed
+/// to exist. The test was one-sided (`v > feas_tol`), so it answered `true`
+/// on exactly that point: measured on gh#958's QP the equilibrated retry came
+/// back with `v_u = -0.765` and `solve_elastic` reported the result as an
+/// optimum, multipliers and all.
+///
+/// Both slack blocks are checked, because a one-sided test is one-sided on
+/// each of them independently.
+#[test]
+fn is_feasible_negative_slack_returns_false() {
+    let (h, a, g, bl, bu, xl, xu) = tiny_qp_with_one_inequality();
+    let qp = QpProblem {
+        n: 2,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let reform = ElasticReformulation::build(&qp, 1e6);
+    assert!(
+        !reform.is_feasible(&[0.5, 0.5, -0.765, 0.0], 1e-9),
+        "v_l = -0.765 is below its own lower bound of 0"
+    );
+    assert!(
+        !reform.is_feasible(&[0.5, 0.5, 0.0, -0.765], 1e-9),
+        "v_u = -0.765 is below its own lower bound of 0"
+    );
+    // Round-off either side of zero still reads as driven out: the tolerance
+    // is two-sided, not removed.
+    assert!(reform.is_feasible(&[0.5, 0.5, -1e-12, 1e-12], 1e-9));
+}
