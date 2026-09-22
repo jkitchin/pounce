@@ -37,13 +37,20 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::application::{
+    IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
+};
 use pounce_nl::nl_reader::{NlProblem, NlTnlp, parse_nl_text};
 use pounce_nl::sol_writer::{
     SolSuffix, SolSuffixTarget, SolSuffixValues, SolutionFile, format_sol,
 };
 use pounce_nlp::expression_provider::ExpressionProvider;
 use pounce_nlp::tnlp::{Linearity, TNLP};
+use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
+use pounce_restoration::resto_inner_solver::{
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
+};
+use pounce_restoration::second_opinion_driver::run_second_opinion_ladder;
 
 /// Bound on how many per-variable / per-constraint entries a JSON payload
 /// carries. A million-variable model would otherwise serialize a JSON array
@@ -475,8 +482,48 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
         (None, None) => Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
     };
 
-    let status = app.optimize_tnlp(target);
+    // Wire the restoration phase exactly as the CLI and the C interface do.
+    // Without a factory the outer algorithm has no fallback, and the first
+    // line-search failure that would enter the ℓ1 feasibility sub-IPM ends
+    // the solve as `RestorationFailed` with zero restoration calls — gh#960,
+    // where PGLib case6468_rte failed at iteration 54, the exact iteration
+    // at which the CLI enters restoration and goes on to solve. The
+    // multi-pass provider mints a fresh factory per inner solve, which the
+    // second-opinion ladder below needs. `feral_*` / `resto.ma57_*` options
+    // are snapshot from the populated option list so they reach the sub-IPM.
+    let feral_cfg = feral_config_from_options(app.options());
+    let ma57_cfg = ma57_config_from_options(app.options(), "resto.");
+    let bff_mint = move || -> InnerBackendFactoryFactory {
+        let feral_cfg = feral_cfg.clone();
+        let ma57_cfg = ma57_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone(), ma57_cfg.clone()))
+    };
+    let resto_provider = make_default_restoration_factory_provider(
+        RestoAlgorithmBuilder::new(),
+        app.algorithm_builder_from_options(),
+        bff_mint,
+    );
+    app.set_restoration_factory_provider(resto_provider);
+
+    // The run-ending verdict belongs to the whole run, so it is deferred
+    // through the second-opinion ladder, which prints it once with the
+    // status that actually ships (the browser streams stdout as its log).
+    app.defer_end_verdict();
+    let status = app.optimize_tnlp(Rc::clone(&target));
     let stats = app.statistics();
+    // Second-opinion ladder, on by default in every other single-solve
+    // entry point: a failing verdict is re-solved along deliberately
+    // different trajectories and a re-solve is promoted only if it
+    // converges. A converged solve pays nothing. Narration joins the
+    // solver's own log, gated as the C interface gates it.
+    let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
+    let ladder = run_second_opinion_ladder(&mut app, target, status, stats, &mut |line| {
+        if narrate {
+            println!("{line}");
+        }
+    });
+    let status = ladder.status;
+    let stats = ladder.statistics;
     let presolve_report = presolve.as_ref().map(|p| {
         let h = p.borrow();
         let tr = h.tighten_report();
@@ -545,6 +592,11 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
         "complementarity": stats.final_unscaled_compl,
         "kkt_error": stats.final_unscaled_kkt_error,
         "restoration_calls": stats.restoration_calls,
+        // On a promotion the reported status and counts are the rescuing
+        // re-solve's; these two keep the base solve's failure visible
+        // (gh#850).
+        "base_status": format!("{:?}", ladder.base_status),
+        "second_opinion": ladder.promoted_by,
         "presolve": presolve_report,
         "evals": {
             "objective": stats.num_obj_evals,
@@ -859,6 +911,31 @@ mod tests {
         assert!(
             pounce_solution_sol().is_null(),
             "stale .sol survived a reload"
+        );
+    }
+
+    /// gh#960: the browser shim built a bare `IpoptApplication` and never
+    /// installed a restoration phase, so the first time the filter line
+    /// search asked for restoration the solve ended `RestorationFailed`
+    /// with `restoration_calls == 0` — on PGLib case6468_rte, at exactly
+    /// the iteration where the native CLI enters restoration and goes on to
+    /// solve. This model needs restoration five times on the CLI path and
+    /// still solves, so it fails the same way without the wiring.
+    #[test]
+    fn a_solve_that_needs_restoration_reaches_it() {
+        const POOLING_NL: &str = include_str!("../../pounce-cli/tests/fixtures/pooling_rt2stp.nl");
+        call_load(POOLING_NL, "", "");
+        let r = call_solve("print_level 0\n");
+        assert_eq!(r["status"], "SolveSucceeded", "solve payload: {r}");
+        assert!(
+            r["restoration_calls"].as_i64().unwrap_or(0) > 0,
+            "the fixture no longer exercises restoration: {r}"
+        );
+        // Same optimum the CLI reports for this fixture.
+        let obj = r["objective"].as_f64().unwrap_or(f64::NAN);
+        assert!(
+            (obj + 3273.9549922501797).abs() < 1e-4,
+            "unexpected objective {obj}"
         );
     }
 

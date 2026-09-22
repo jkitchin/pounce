@@ -168,18 +168,42 @@ way.
 
 ## Numerical parity with the native build
 
-The wasm build runs the same code, so it produces the same answers. Over
-all 37 `.nl` fixtures in `crates/pounce-cli/tests/fixtures`, driven through
-the same entry points on both sides:
+The wasm module runs the same solver code as the native CLI, and since
+gh#960 it runs the same *driver* too: the restoration phase and the
+second-opinion ladder are wired in exactly as the CLI, the C interface and
+the Python frontend wire them.
 
-- exit status: identical on 37 of 37
-- iteration count: identical on 37 of 37
-- objective: bit-identical on 34 of the 36 that return one; the two
-  exceptions (`scaled_feasible_a`, `feasible_x0_sentinel_bound`) differ by
-  one ulp, at objectives of 4.5e-10 and 7.1e-11
+Before that fix the shim had no restoration phase, so any solve whose line
+search asked for one stopped immediately with `RestorationFailed` and
+`restoration_calls = 0` — PGLib `case6468_rte` at iteration 54, the exact
+iteration where the CLI enters restoration and goes on to solve. The parity
+table that used to stand here did not see it, because it compared the shim
+compiled to wasm against *the same shim* compiled natively: both lacked
+restoration, so they agreed. Parity is measured against `pounce model.nl`
+now.
 
-The 37th (`presolve_overflow_feasible`) returns `InvalidNumberDetected`
-with no objective on either side — that is the fixture's job.
+Over the 52 fixtures in `crates/pounce-cli/tests/fixtures` that the CLI
+routes to the NLP arm, same default options, native `aarch64-apple-darwin`
+CLI vs `wasm32-wasip1` under Node:
+
+- before gh#960: status or iteration count differed on 15 of 52
+- after: identical status and iteration count on 48 of 52
+
+The four that still differ are trajectory-sensitive, not a missing code
+path: the same shim compiled natively matches the CLI iteration for
+iteration, so the divergence is floating-point behaviour of the target.
+`pooling_rt2stp` agrees with the CLI through iteration 2 and diverges at
+the first inertia correction, then reaches the same optimum in 184
+iterations instead of 109; `cresc4` (68 vs 69) and `scaled_feasible_a`
+(20 vs 22) likewise reach the same point. `deb7` does not: the CLI solves
+it in 147 iterations and wasm ends `ErrorInStepComputation` at 160.
+`case6468_rte` (49 734 × 75 002) matches the CLI exactly — 146 iterations,
+3 restoration calls, objective 2 069 730.14512.
+
+The other 45 fixtures are convex LPs, QPs and QCQPs that the CLI hands to a
+specialised engine (`solver_selection=auto`). The wasm shim has no such
+routing and always solves with the NLP interior point, so those are not
+compared here.
 
 Speed is what you would expect from wasm. Solver-internal wall time, same
 build, same code path, native `x86_64` vs `wasm32-wasip1` under Node:
