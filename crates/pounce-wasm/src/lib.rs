@@ -543,13 +543,34 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
     });
 
     let mut t = tnlp.borrow_mut();
+    // Carry the duals and the objective back into the user's sense (gh#959). A
+    // `maximize` model is solved as `min -f` — `NlTnlp::eval_f` negates it —
+    // so every multiplier the engine produced belongs to that Lagrangian, and
+    // reporting it unchanged puts the browser's marginals and reduced costs
+    // opposite in sign to the ones the CLI writes for the same file. Upstream
+    // does this in `AmplTNLP::finalize_solution`; the CLI does it where it
+    // assembles the `.sol` blocks. `+1` for a minimize model, so nothing moves
+    // on the path everything else takes.
+    let dual_sign: f64 = if t.problem().minimize { 1.0 } else { -1.0 };
     let x: Vec<f64> = t.final_x().map(<[f64]>::to_vec).unwrap_or_default();
-    let lambda: Vec<f64> = t.final_lambda().map(<[f64]>::to_vec).unwrap_or_default();
+    let lambda: Vec<f64> = t
+        .final_lambda()
+        .map(|l| l.iter().map(|&v| dual_sign * v).collect())
+        .unwrap_or_default();
     let (z_l, z_u) = t
         .final_bound_multipliers()
-        .map(|(l, u)| (l.to_vec(), u.to_vec()))
+        .map(|(l, u)| {
+            (
+                l.iter().map(|&v| dual_sign * v).collect::<Vec<f64>>(),
+                u.iter().map(|&v| dual_sign * v).collect::<Vec<f64>>(),
+            )
+        })
         .unwrap_or_default();
-    let objective = t.final_obj();
+    // Same conversion, one field over: a `maximize` model's `final_obj` is the
+    // internal `min -f` value, and reporting it unchanged puts the browser's
+    // objective opposite in sign to the one the CLI's JSON report carries for
+    // the same file (gh#959 follow-up).
+    let objective = dual_sign * t.final_obj();
     // Constraint values at the returned point, so the page can show which
     // rows are tight or violated without re-evaluating the model in JS.
     let m = t.problem().m;

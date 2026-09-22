@@ -111,6 +111,15 @@ the best minimum, plus a backward-compatible `minima` section:
 Omitting `--minima` leaves the default single-solve output completely
 unchanged.
 
+**Objective sense.** The table, the `minima` section and `solution.objective`
+all report the objective in the sense the model declares, so a `maximize`
+model's numbers match what a plain solve of the same file reports. The search
+itself runs on the internal minimization either way, and the ranking is
+unaffected — rank 0 is the best point in the model's own terms. Before 0.12.0
+the reported values were the internal minimization's, so `--minima` on a
+maximize model disagreed in sign with a plain solve
+([#959](https://github.com/jkitchin/pounce/issues/959)).
+
 ## Example
 
 The six-hump camel function has six local minima (two global at

@@ -705,6 +705,7 @@ pub fn run(
     cfg: &MinimaArgs,
     args: &Args,
     sol_path: Option<&Path>,
+    dual_sign: Number,
 ) -> ExitCode {
     let info = match base.borrow_mut().get_nlp_info() {
         Some(i) => i,
@@ -846,18 +847,20 @@ pub fn run(
         .collect();
     let best_obj = order.first().map(|&i| driver.archive.fs[i]);
 
-    print_table(&minima, &l_scale, stop, n_solves);
+    print_table(&minima, &l_scale, stop, n_solves, dual_sign);
 
     // Write the per-minimum `.sol` files: best → <stub>.sol, the rest →
     // ranked siblings <stub>.minNNN.sol.
     if let Some(sp) = sol_path {
-        write_sol_files(sp, &minima, m);
+        write_sol_files(sp, &minima, m, dual_sign);
     }
 
     // JSON report: the standard single-solve report for the best minimum,
     // plus a backward-compatible `minima` section listing all of them.
     if let Some(json_path) = &args.json_output {
-        write_json_report(json_path, args, cfg, stop, n_solves, &minima, n, m, &info);
+        write_json_report(
+            json_path, args, cfg, stop, n_solves, &minima, n, m, &info, dual_sign,
+        );
     }
 
     if best_obj.is_some() {
@@ -867,8 +870,22 @@ pub fn run(
     }
 }
 
-/// Print a ranked console table of the distinct minima found.
-fn print_table(minima: &[Minimum], l_scale: &[Number], stop: Stop, n_solves: usize) {
+/// Print a ranked console table of the distinct optima found.
+///
+/// `obj_sign` is `-1.0` for a `maximize` `.nl` and `+1.0` otherwise, and it is
+/// applied to the printed objective for the same reason the `.sol` duals carry
+/// it (gh#959): the search runs on the internal `min -f`, so the number the
+/// archive holds is the negated one. The RANKING is unaffected — rank 0 is the
+/// best point either way — but for a maximize model the column now reads as
+/// the maxima it actually found, in the model's own units, matching what a
+/// plain solve of the same file reports.
+fn print_table(
+    minima: &[Minimum],
+    l_scale: &[Number],
+    stop: Stop,
+    n_solves: usize,
+    obj_sign: Number,
+) {
     println!();
     println!(
         "find-minima: {} distinct minim{} in {} solves ({})",
@@ -885,12 +902,24 @@ fn print_table(minima: &[Minimum], l_scale: &[Number], stop: Stop, n_solves: usi
     let best = &minima[0].x;
     for (rank, mn) in minima.iter().enumerate() {
         let d = scaled_distance(&mn.x, best, l_scale);
-        println!("  {rank:>4}   {:>16.8e}   {:>14.6e}", mn.objective, d);
+        println!(
+            "  {rank:>4}   {:>16.8e}   {:>14.6e}",
+            obj_sign * mn.objective,
+            d
+        );
     }
 }
 
 /// Write `.sol` files: best to `sol_path`, ranked siblings alongside.
-fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
+///
+/// `dual_sign` is `-1.0` for a `maximize` `.nl` and `+1.0` otherwise. The
+/// captured `lambda` is a multiplier of the problem the engine solved, which
+/// for a maximize model is the negated one, so the sense has to be carried
+/// back out here exactly as the single-solve path does (gh#959). Without it a
+/// `--minima` run on a maximize model writes marginals opposite in sign to the
+/// ones a plain solve of the same file writes. The same factor is applied to
+/// the reported objective, in `print_table` and `write_json_report`.
+fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize, dual_sign: Number) {
     let zeros = vec![0.0; m];
     for (rank, mn) in minima.iter().enumerate() {
         let path = if rank == 0 {
@@ -904,15 +933,15 @@ fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
         );
         // Real base-problem duals recovered per minimum (issue #196, related);
         // `recover_duals` guarantees length `m`, but guard defensively.
-        let lambda = if mn.lambda.len() == m {
-            &mn.lambda
+        let lambda: Vec<Number> = if mn.lambda.len() == m {
+            mn.lambda.iter().map(|&v| dual_sign * v).collect()
         } else {
-            &zeros
+            zeros.clone()
         };
         let payload = crate::nl_writer::SolutionFile {
             message: &message,
             x: &mn.x,
-            mult_g: lambda,
+            mult_g: &lambda,
             solve_result_num: status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded),
             suffixes: &[],
         };
@@ -944,6 +973,7 @@ fn write_json_report(
     n: usize,
     m: usize,
     info: &pounce_nlp::tnlp::NlpInfo,
+    obj_sign: Number,
 ) {
     let input = match &args.problem {
         ProblemSource::Builtin(name) => InputDescriptor::Builtin { name: name.clone() },
@@ -962,7 +992,10 @@ fn write_json_report(
         builder.solution.status = ApplicationReturnStatus::SolveSucceeded;
         builder.solution.solve_result_num =
             status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded);
-        builder.solution.objective = best.objective;
+        // The model's own sense, as every other POUNCE report carries it
+        // (gh#959). Without it `--minima` on a `maximize` model reports an
+        // objective opposite in sign to a plain solve of the same file.
+        builder.solution.objective = obj_sign * best.objective;
         builder.solution.x = best.x.clone();
         // Real base-problem duals for the best minimum (issue #196, related);
         // `recover_duals` guarantees length `m`, guard defensively.
@@ -988,11 +1021,11 @@ fn write_json_report(
         .map(|mn| {
             serde_json::json!({
                 "x": mn.x,
-                "objective": mn.objective,
+                "objective": obj_sign * mn.objective,
             })
         })
         .collect();
-    let values: Vec<Number> = minima.iter().map(|mn| mn.objective).collect();
+    let values: Vec<Number> = minima.iter().map(|mn| obj_sign * mn.objective).collect();
     if let serde_json::Value::Object(map) = &mut value {
         map.insert(
             "minima".to_string(),

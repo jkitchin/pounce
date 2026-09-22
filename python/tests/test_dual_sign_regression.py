@@ -57,10 +57,10 @@ def _build_wyndor_pyomo(pyo, maximize):
     return m
 
 
-def _solve_pyomo_duals(pyo, solver_name, maximize):
+def _solve_pyomo_duals(pyo, solver_name, maximize, options=None):
     m = _build_wyndor_pyomo(pyo, maximize)
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
-    pyo.SolverFactory(solver_name).solve(m)
+    pyo.SolverFactory(solver_name).solve(m, options=options or {})
     x = np.array([pyo.value(m.x1), pyo.value(m.x2)])
     duals = np.array([m.dual[c] for c in (m.c1, m.c2, m.c3)])
     return x, duals
@@ -108,6 +108,57 @@ def test_pyomo_pounce_matches_ipopt_duals(maximize):
     np.testing.assert_allclose(
         got, WYNDOR_SHADOW if maximize else -WYNDOR_SHADOW, atol=1e-4
     )
+
+
+@pytest.mark.parametrize(
+    "maximize, expected",
+    [
+        (True, WYNDOR_SHADOW),
+        (False, -WYNDOR_SHADOW),
+    ],
+)
+def test_pyomo_model_dual_sign_on_the_nlp_arm(maximize, expected):
+    """The same assertion, on the arm the default routing does not take (gh#959).
+
+    Wyndor is an LP, so ``SolverFactory('pounce')`` sends it to the convex
+    arm — which applied the maximize sign all along. The general NLP arm did
+    not, and the two disagreed on one file: ``auto`` wrote ``(0, 1.5, 1)`` and
+    ``solver_selection=nlp`` wrote ``(-0, -1.5, -1)``. The test above could
+    never see it, because its fixture never reached the broken branch. This is
+    that test with the routing pinned, and it is the point of having it: a
+    green leg on one branch says nothing about the other.
+
+    Any nonconvex or nonlinear maximize model reaches the NLP arm with no
+    option at all, so this is the default path for most maximize models, not an
+    opt-in.
+    """
+    pyo = pytest.importorskip("pyomo.environ")
+    pytest.importorskip("pyomo_pounce")  # registers 'pounce'
+    import pyomo_pounce  # noqa: F401
+
+    x, duals = _solve_pyomo_duals(
+        pyo, "pounce", maximize, options={"solver_selection": "nlp"}
+    )
+    np.testing.assert_allclose(x, [2.0, 6.0], atol=1e-4)
+    np.testing.assert_allclose(duals, expected, atol=1e-4)
+
+
+def test_the_two_pounce_arms_agree_on_one_maximize_model():
+    """The internal contradiction gh#959 led with, as an assertion.
+
+    Weak on its own — a uniform flip of both arms satisfies it — and here
+    because it is what a user sees: one binary, one file, two answers. The
+    exact-value asserts above are what say which way to resolve it.
+    """
+    pyo = pytest.importorskip("pyomo.environ")
+    pytest.importorskip("pyomo_pounce")
+    import pyomo_pounce  # noqa: F401
+
+    _, auto = _solve_pyomo_duals(pyo, "pounce", True)
+    _, nlp = _solve_pyomo_duals(
+        pyo, "pounce", True, options={"solver_selection": "nlp"}
+    )
+    np.testing.assert_allclose(nlp, auto, atol=1e-4)
 
 
 # ── pounce.minimize(...).info["mult_g"] — Lagrange convention = −marginal ─────

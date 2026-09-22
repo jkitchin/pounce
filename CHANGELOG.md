@@ -76,6 +76,51 @@ changes.
 
 ### Fixed
 
+- **Constraint duals came back sign-flipped on `maximize` models solved by the
+  general NLP path.** A `maximize` `.nl` is solved internally as `min -f`, and
+  the NLP arm reported the resulting multipliers, reduced costs and `.sol`
+  marginals without putting the sense back — opposite to Ipopt, to the analytic
+  shadow prices, and to POUNCE's own convex arms on the same file. On the
+  Wyndor Glass LP written as a maximize, `solver_selection=auto` wrote
+  `(0, 1.5, 1)` and `solver_selection=nlp` wrote `(-0, -1.5, -1)`. Any
+  nonconvex or nonlinear maximize model reaches the NLP arm with no option at
+  all, so Pyomo and AMPL users read `model.dual` / `.dual` with the wrong sign
+  there; `ipopt_zL_out` / `ipopt_zU_out` and the browser (WASM) `.sol` were
+  affected identically, and the per-minimum `.sol` files from `--minima` with
+  them.
+
+  The **reported objective** diverged the same way and is fixed with it: the
+  NLP arm's JSON report carried the internal minimization's value, so one
+  binary reported `objective: -36` and `objective: 36` for the same file
+  depending on which engine answered. `solution.objective`,
+  `statistics.final_objective` and `statistics.final_scaled_objective` are now
+  in the model's declared sense on every arm — as are `--minima`'s ranked table
+  and `minima` section, and the browser (WASM) report. The **console residual
+  table keeps IPOPT parity** and still prints the internal value, because that
+  block is diffed against IPOPT's own output and upstream prints the internal
+  value there too; on a maximize model the CLI now states the declared-sense
+  objective on its own line below the table. The NLP arm's JSON report also
+  described a maximize model as a minimization (`problem.minimize`).
+
+  `minimize` models, primal `x`, the convex arms and the GAMS links were never
+  affected. ([#959](https://github.com/jkitchin/pounce/issues/959))
+
+- **The active-set QP engine was not invariant to objective scaling.** On a
+  feasible, bounded 4-variable convex QP with a rank-deficient PSD `P` of
+  magnitude `2.4e8`, `solve_qp(..., method="active-set")` returned
+  `numerical_failure` at a point violating `Gx <= h` by `3.5e-3` — and
+  multiplying the whole objective by `0.01`, which leaves the minimizer
+  unchanged, made it return the right answer. The Schur-update KKT solve
+  stopped refining after two passes, which on a large `P` leaves a relative
+  residual of `7e-5`; the active-set loop took that direction as exact and
+  walked off its own working set. Two smaller defects rode along: the elastic
+  phase-1's feasibility test was one-sided, so a slack *below* its lower bound
+  read as "driven out", and the status bands' scale gate measured `||Px||`
+  where the finite-precision floor is `|P||x|` — eight orders apart on a
+  rank-deficient `P` — which banded an exact answer `optimal_inaccurate`. The
+  interior-point arm solved this instance at both scales throughout.
+  ([#958](https://github.com/jkitchin/pounce/issues/958))
+
 - **Fixed variables were reported with no bound multiplier.**
   `fixed_variable_treatment=make_parameter` (the default) removes a fixed
   variable from the problem, and the solution then reported `z_L = z_U = 0`
