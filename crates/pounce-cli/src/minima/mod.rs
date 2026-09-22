@@ -705,6 +705,7 @@ pub fn run(
     cfg: &MinimaArgs,
     args: &Args,
     sol_path: Option<&Path>,
+    dual_sign: Number,
 ) -> ExitCode {
     let info = match base.borrow_mut().get_nlp_info() {
         Some(i) => i,
@@ -851,7 +852,7 @@ pub fn run(
     // Write the per-minimum `.sol` files: best → <stub>.sol, the rest →
     // ranked siblings <stub>.minNNN.sol.
     if let Some(sp) = sol_path {
-        write_sol_files(sp, &minima, m);
+        write_sol_files(sp, &minima, m, dual_sign);
     }
 
     // JSON report: the standard single-solve report for the best minimum,
@@ -890,7 +891,14 @@ fn print_table(minima: &[Minimum], l_scale: &[Number], stop: Stop, n_solves: usi
 }
 
 /// Write `.sol` files: best to `sol_path`, ranked siblings alongside.
-fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
+///
+/// `dual_sign` is `-1.0` for a `maximize` `.nl` and `+1.0` otherwise. The
+/// captured `lambda` is a multiplier of the problem the engine solved, which
+/// for a maximize model is the negated one, so the sense has to be carried
+/// back out here exactly as the single-solve path does (gh#959). Without it a
+/// `--minima` run on a maximize model writes marginals opposite in sign to the
+/// ones a plain solve of the same file writes.
+fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize, dual_sign: Number) {
     let zeros = vec![0.0; m];
     for (rank, mn) in minima.iter().enumerate() {
         let path = if rank == 0 {
@@ -904,15 +912,15 @@ fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
         );
         // Real base-problem duals recovered per minimum (issue #196, related);
         // `recover_duals` guarantees length `m`, but guard defensively.
-        let lambda = if mn.lambda.len() == m {
-            &mn.lambda
+        let lambda: Vec<Number> = if mn.lambda.len() == m {
+            mn.lambda.iter().map(|&v| dual_sign * v).collect()
         } else {
-            &zeros
+            zeros.clone()
         };
         let payload = crate::nl_writer::SolutionFile {
             message: &message,
             x: &mn.x,
-            mult_g: lambda,
+            mult_g: &lambda,
             solve_result_num: status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded),
             suffixes: &[],
         };

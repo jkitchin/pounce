@@ -493,6 +493,18 @@ pub fn main() -> ExitCode {
     // read off `NlProblem` before `NlTnlp` consumes it.
     let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
     let mut nl_dims: Option<(usize, usize)> = None;
+    // Sign that converts a dual of the *internal minimize* problem into the
+    // user's objective sense: `+1` to minimize, `-1` to maximize. The `.nl`
+    // evaluator negates a maximize objective (`NlTnlp`'s `eval_f`/`eval_grad_f`
+    // read `prob.minimize`), so everything downstream of it — the NLP arm
+    // included — solves `min -f` and produces duals of THAT Lagrangian. Upstream
+    // Ipopt's `AmplTNLP::finalize_solution` carries `obj_sign` back out onto
+    // every dual it writes; pounce's convex arms do the same through
+    // `qp_extract::recover_duals`'s own `sign`, and the NLP arm did not — which
+    // is gh#959: on one maximize `.nl`, `solver_selection=auto` wrote
+    // `(0, 1.5, 1)` and `solver_selection=nlp` wrote `(-0, -1.5, -1)`.
+    // Builtins are always minimize, so this stays `1.0` for them.
+    let mut nl_dual_sign: f64 = 1.0;
     // The model's own AMPL option words, echoed back in the `.sol`
     // `Options` block the way an ASL solver does. Empty for problems
     // that did not come from a `.nl` header.
@@ -533,6 +545,7 @@ pub fn main() -> ExitCode {
                 Ok(prob) => {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
+                    nl_dual_sign = if prob.minimize { 1.0 } else { -1.0 };
                     nl_ampl_options = prob.ampl_options.clone();
                     let elapsed = t0.elapsed().as_secs_f64();
                     // Render the source constraint equations and hand them to
@@ -738,7 +751,14 @@ pub fn main() -> ExitCode {
             );
         }
         app.set_presolve_already_applied(true);
-        return pounce_cli::minima::run(&mut app, &inner_tnlp, mcfg, &args, sol_path.as_deref());
+        return pounce_cli::minima::run(
+            &mut app,
+            &inner_tnlp,
+            mcfg,
+            &args,
+            sol_path.as_deref(),
+            nl_dual_sign,
+        );
     }
 
     // LP/QP routing (Phase 1). Resolve the `solver_selection` option
@@ -2146,6 +2166,48 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // ---- Objective sense: carry the duals back into the user's frame ----
+    //
+    // gh#959. Every capture above is a dual of the problem the ENGINE solved,
+    // and for a `maximize` `.nl` that problem is `min -f`: the evaluator
+    // negates the objective (`NlTnlp::eval_f` / `eval_grad_f` read
+    // `prob.minimize`) and nothing between there and here puts the sign back.
+    // So the multipliers, the reduced costs and the `.sol` marginals built from
+    // them all came out negated against Ipopt, against the analytic shadow
+    // prices, and — the part that makes it an internal contradiction rather
+    // than a convention disagreement — against POUNCE's own convex arms on the
+    // *same file*, which apply exactly this `sign` in
+    // `qp_extract::recover_duals` / the `ipopt_zL_out` block of
+    // `run_convex_qp`.
+    //
+    // Upstream is the reference for which direction is right, and it does this
+    // in one place too — `AmplTNLP::finalize_solution`, where `obj_sign == -1`
+    // selects `lambda_sol = +lambda`, `z_L_sol = -z_L`, `z_U_sol = +z_U`
+    // against the minimize branch's `-lambda`, `+z_L`, `-z_U`. The `.sol`
+    // writer negates `mult_g` on the way out (a marginal is `d obj / d b`, not
+    // a multiplier), so writing `sign * lambda` here is what makes the file
+    // carry `+lambda` for a maximize model. The bound blocks are emitted below
+    // as `+z_l` / `-z_u`, so scaling the captures by `sign` turns them into
+    // `-z_l` / `+z_u` — upstream's maximize branch, term for term.
+    //
+    // Applied here, after presolve lifting and the gh#486 scaling undo, so it
+    // lands once on the numbers BOTH the `.sol` and the JSON report read: those
+    // two must never disagree about a sign (issue #294's whole subject).
+    // `nl_dual_sign` is `1.0` for a minimize `.nl` and for every builtin, so
+    // this block is a no-op on the path the existing corpus covers.
+    if nl_dual_sign < 0.0 {
+        if let Some((_x, lambda)) = nominal_capture.borrow_mut().as_mut() {
+            for v in lambda.iter_mut() {
+                *v = nl_dual_sign * *v;
+            }
+        }
+        if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+            for v in z_l.iter_mut().chain(z_u.iter_mut()) {
+                *v = nl_dual_sign * *v;
+            }
+        }
+    }
+
     // Reduced Hessian: print to stderr (informational), mirroring
     // upstream sIPOPT's RedHessian / Eigenvalues prints in
     // `SensReducedHessianCalculator.cpp`.
@@ -2227,6 +2289,13 @@ pub fn main() -> ExitCode {
             builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
         }
+        // The model's declared sense. Both convex arms set this from
+        // `NlProblem::minimize`; this one never did, so a `maximize` `.nl`
+        // came out of the NLP arm described as a minimization — and now that
+        // `solution.lambda` beside it is in the user's sense (gh#959), the
+        // field a consumer would read to interpret that sign was the one that
+        // was wrong. `true` for every builtin, which is what it already said.
+        builder.problem.minimize = nl_dual_sign > 0.0;
         // The arm that produced this verdict, not the one routing
         // picked: a convex solve that declines its own result lands
         // here (gh #535) after the `Selected solver:` banner has
