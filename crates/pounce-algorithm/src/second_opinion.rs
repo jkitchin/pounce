@@ -72,6 +72,24 @@ pub enum SecondOpinionTrigger {
     /// this is a statement about the trajectory the solve happened to take,
     /// not about the model; see [`SecondOpinionTrigger::for_status`].
     RestorationFailure,
+    /// `Error_In_Step_Computation` — the step computation broke down: the
+    /// KKT system could not be made to yield a usable step, even after
+    /// regularization. Like a restoration failure and unlike a budget exit,
+    /// this is a statement about the trajectory the solve happened to take,
+    /// so a different barrier schedule is evidence against it.
+    ///
+    /// Measured on `deb7` (found via gh#960): the wasm32 build, whose factorization
+    /// rounds differently from the native one, follows the native trajectory
+    /// for 83 iterations, diverges by one ulp in `inf_du` at iteration 84,
+    /// and ends `Error_In_Step_Computation` at 160 where native solves in
+    /// 147. Under `mu_strategy=adaptive` the same binary and the same model
+    /// reach the same optimum as native — `Solve_Succeeded`, 131 iterations,
+    /// objective 97.559938 — so the rescue was already in the ladder and
+    /// only the trigger was missing. This opens **only** that rung: on the
+    /// same case `feral_scaling=mc64` still fails at 154 iterations,
+    /// `feral_increase_quality=no` at 201, and `start_point_perturbation`
+    /// spends 324 iterations to fail anyway.
+    StepComputationError,
     /// `Maximum_Iterations_Exceeded` — **and only when the solve escalated
     /// the linear solver's factorization quality at least once** (gh#857).
     ///
@@ -247,8 +265,13 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
             assignments: vec!["feral_scaling mc64\n".to_string()],
         });
     }
+    // The barrier-schedule rung is the one rung a step-computation
+    // breakdown opens, and the only one measured to recover one: the
+    // trajectory walked into a KKT system no regularization could make
+    // usable, and a different μ schedule is a different trajectory. See
+    // `SecondOpinionTrigger::StepComputationError` for the deb7 numbers.
     if avail.baseline_scaling.is_some()
-        && infeasible
+        && (infeasible || avail.trigger == SecondOpinionTrigger::StepComputationError)
         && avail.mu_retry_enabled
         && !avail.already_adaptive
     {
@@ -270,8 +293,14 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     // fresh trajectory with the same budget and the same escalating ladder
     // waiting for it. Opening it here would put an extra solve on every
     // escalating budget exit for no reason anyone has measured.
+    // Not on the step-computation trigger either, and for a measured
+    // reason rather than the reasoning above: on deb7 it spends 324
+    // iterations and fails anyway, where the rung above solves in 131.
     if avail.baseline_scaling.is_some()
-        && avail.trigger != SecondOpinionTrigger::IterationLimit
+        && !matches!(
+            avail.trigger,
+            SecondOpinionTrigger::IterationLimit | SecondOpinionTrigger::StepComputationError
+        )
         && avail.perturbed_start_retry_enabled
         && !avail.already_perturbed
     {
@@ -426,6 +455,9 @@ impl SecondOpinionTrigger {
             ApplicationReturnStatus::MaximumIterationsExceeded => {
                 Some(SecondOpinionTrigger::IterationLimit)
             }
+            ApplicationReturnStatus::ErrorInStepComputation => {
+                Some(SecondOpinionTrigger::StepComputationError)
+            }
             _ => None,
         }
     }
@@ -436,6 +468,7 @@ impl SecondOpinionTrigger {
             SecondOpinionTrigger::LocalInfeasibility => "local infeasibility",
             SecondOpinionTrigger::InvalidNumber => "invalid number",
             SecondOpinionTrigger::RestorationFailure => "restoration failure",
+            SecondOpinionTrigger::StepComputationError => "step computation breakdown",
             SecondOpinionTrigger::IterationLimit => {
                 "iteration limit after a factorization escalation"
             }
@@ -989,8 +1022,8 @@ mod scaling_retry_tests {
     }
 
     /// The status → trigger map is the whole opt-in surface, so pin both
-    /// halves: the three verdicts that open a ladder, and a representative
-    /// budget exit that must not. `MaximumIterationsExceeded` is the case the
+    /// halves: the verdicts that open a ladder, and a representative exit
+    /// that must not. `MaximumIterationsExceeded` is the case the
     /// doc comment argues about — a bigger budget is the answer there, and a
     /// re-solve would burn the same budget to reach the same wall.
     #[test]
@@ -1017,15 +1050,73 @@ mod scaling_retry_tests {
                 A::MaximumIterationsExceeded,
                 Some(SecondOpinionTrigger::IterationLimit),
             ),
+            // The wasm32 case from gh#960. This row read `None` until deb7 under the wasm32
+            // build produced a step-computation breakdown that
+            // `mu_strategy=adaptive` recovers outright — the rescue was in
+            // the ladder already and only the mapping was missing. Unlike
+            // a budget exit, a breakdown is not a request for more of
+            // anything: the trajectory reached a KKT system no
+            // regularization could make usable, and only a different
+            // trajectory answers it.
+            (
+                A::ErrorInStepComputation,
+                Some(SecondOpinionTrigger::StepComputationError),
+            ),
             (A::MaximumCpuTimeExceeded, None),
             (A::SolveSucceeded, None),
             (A::SolvedToAcceptableLevel, None),
-            (A::ErrorInStepComputation, None),
         ] {
             assert_eq!(
                 SecondOpinionTrigger::for_status(status),
                 want,
                 "{status:?} opened the wrong ladder"
+            );
+        }
+    }
+
+    /// The wasm32 case from gh#960. A step-computation breakdown opens exactly one rung, and it
+    /// is the barrier-schedule one.
+    ///
+    /// The other three are excluded on measurement, not on principle: on
+    /// `deb7` under the wasm32 build — the case that found this — `mc64`
+    /// still fails at 154 iterations, `feral_increase_quality=no` at 201,
+    /// and `start_point_perturbation` burns 324 to fail anyway, while this
+    /// rung solves in 131. A perturbed-start rung here would have doubled
+    /// the cost of a failure it cannot fix.
+    #[test]
+    fn a_step_computation_breakdown_opens_only_the_barrier_rung() {
+        let base = SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::StepComputationError,
+            // Rung 4's own gate is open, so only the trigger keeps it out;
+            // otherwise this would pass for the wrong reason.
+            baseline_quality_escalations: 2,
+            ..avail()
+        };
+        assert_eq!(
+            second_opinion_rungs(base)
+                .iter()
+                .map(|r| r.label)
+                .collect::<Vec<_>>(),
+            vec!["mu_strategy=adaptive"]
+        );
+
+        // The option still governs it, and a solve already on the adaptive
+        // schedule has nothing left to try.
+        for off in [
+            SecondOpinionAvailability {
+                mu_retry_enabled: false,
+                ..base
+            },
+            SecondOpinionAvailability {
+                already_adaptive: true,
+                ..base
+            },
+        ] {
+            let rungs = second_opinion_rungs(off);
+            assert!(
+                rungs.is_empty(),
+                "{:?}",
+                rungs.iter().map(|r| r.label).collect::<Vec<_>>()
             );
         }
     }

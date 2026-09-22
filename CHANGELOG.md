@@ -102,6 +102,25 @@ changes.
   interior and their whole gradient was reported as residual: 0.44 on a
   converged solve. A bound may now absorb the gradient when the multiplier
   it would take is complementary with the gap (`|s|·gap ≤ opt_tol`).
+- **A step-computation breakdown got no second opinion.** `for_status`
+  mapped `Error_In_Step_Computation` to no trigger, so the second-opinion
+  ladder never opened on it — although a breakdown is a statement about the
+  trajectory the solve took, exactly like the restoration failure next to it
+  in that map, and not a request for more budget. It now opens the ladder
+  with the barrier-schedule rung (`infeasibility_mu_strategy_retry`, whose
+  scope is now wider than its name). Found on `deb7` under the wasm32 build,
+  whose factorization rounds differently from the native one: the solve
+  follows the native trajectory for 83 iterations, diverges by one ulp at
+  iteration 84, and ended `Error_In_Step_Computation` at 160 where native
+  solves in 147. With the ladder open, the same binary reaches the native
+  optimum in 131. Only that rung opens — measured on the same case,
+  `feral_scaling=mc64` still fails at 154, `feral_increase_quality=no` at
+  201, and `start_point_perturbation` spends 324 iterations to fail anyway.
+  The fixture sweep moves four lines, all of them fixtures that already
+  ended in this status and that the rung does not rescue: they each pay one
+  extra rung (`unbounded_exp` 23 → 27 total on the exact leg and 7 → 14 on
+  lbfgs, `eigena2` 186 → 372, `deb7` 715 → 1430), with no status, objective,
+  iteration count or engine moving anywhere.
 - **The WebAssembly build had no restoration phase** (gh#960). `pounce-wasm`
   built a bare `IpoptApplication` and never installed a restoration factory,
   so the first time the filter line search needed restoration the solve
