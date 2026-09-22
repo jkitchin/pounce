@@ -61,7 +61,9 @@ use crate::constant_derivatives::{
     ConstantDerivatives, DerivativeProof, DerivativeProofs, subsystem_proof,
 };
 use crate::ipopt_nlp::{IpoptNlp, Nlp, SplitNames};
-use crate::tnlp::{IDX_NAMES, MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint};
+use crate::tnlp::{
+    IDX_NAMES, IndexStyle, MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint, TNLP,
+};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
 use pounce_common::cached::Cache;
 use pounce_common::timing::TimingStatistics;
@@ -1596,6 +1598,53 @@ impl OrigIpoptNlp {
         full_z_l
     }
 
+    /// Bound multipliers for the variables `make_parameter` removed, written
+    /// into the full-x `z_l` / `z_u` the lifts above left at `0.0` for them.
+    ///
+    /// A fixed variable is not in the KKT system, so the algorithm holds no
+    /// multiplier for it. The `0.0` the lift reports is not a zero
+    /// multiplier but a missing one: the bound is active by construction and
+    /// carries whatever the rest of its stationarity row leaves over. `pounce
+    /// verify` read those zeros as a dual residual of 2.9e3 on a converged
+    /// AC-OPF (PGLib case6468_rte, 56 fixed variables, solver-reported dual
+    /// infeasibility 2.3e-8). Recovered as Ipopt 3.14 does
+    /// (`TNLPAdapter::ResortBoundMultipliers`): at the reported point,
+    /// `z_L − z_U = ∇f + Jᵀλ`, the positive part to `z_L` and the negative
+    /// part to `z_U`, so both stay `≥ 0`.
+    ///
+    /// `x` and `lambda` are in the space of the adapter's TNLP — what
+    /// [`Self::finalize_solution_x`] and [`Self::finalize_solution_lambda`]
+    /// return — so the gradient is evaluated on that TNLP, and any wrapper
+    /// above it (per-variable scaling, presolve) transforms these the same
+    /// way it transforms every other multiplier. Leaves the entries at zero
+    /// if a callback declines to evaluate.
+    pub fn complete_fixed_var_bound_multipliers(
+        &self,
+        x: &[Number],
+        lambda: &[Number],
+        z_l: &mut [Number],
+        z_u: &mut [Number],
+    ) {
+        let (fixed, tnlp) = {
+            let adapter = self.adapter.borrow();
+            let fixed = adapter.classification().x_fixed_map.clone();
+            (fixed, Rc::clone(adapter.tnlp()))
+        };
+        if fixed.is_empty() {
+            return;
+        }
+        let Some(s) = lagrangian_gradient_full(&tnlp, x, lambda) else {
+            return;
+        };
+        for j in fixed {
+            let j = j as usize;
+            if let (Some(&sj), Some(l), Some(u)) = (s.get(j), z_l.get_mut(j), z_u.get_mut(j)) {
+                *l = sj.max(0.0);
+                *u = (-sj).max(0.0);
+            }
+        }
+    }
+
     /// Mirror of [`Self::finalize_solution_z_l`] for the upper-bound
     /// duals. Indexed via `x_u_map`.
     pub fn finalize_solution_z_u(&self, z_u: &dyn Vector) -> Vec<Number> {
@@ -2761,6 +2810,16 @@ impl IpoptNlp for OrigIpoptNlp {
         OrigIpoptNlp::finalize_solution_z_u(self, z_u)
     }
 
+    fn complete_fixed_var_bound_multipliers(
+        &self,
+        x: &[Number],
+        lambda: &[Number],
+        z_l: &mut [Number],
+        z_u: &mut [Number],
+    ) {
+        OrigIpoptNlp::complete_fixed_var_bound_multipliers(self, x, lambda, z_l, z_u)
+    }
+
     fn variable_scaling(&self) -> Option<Vec<Number>> {
         // Forwarded, not stored: the substitution lives in the
         // `ScalingTnlp` the adapter wraps, and `TNLP::scaling_factors`
@@ -2811,6 +2870,63 @@ impl IpoptNlp for OrigIpoptNlp {
 }
 
 // -------------------- Tests --------------------
+
+/// `∇f(x) + J(x)ᵀλ` on `tnlp`, full-x indexed — the stationarity row
+/// before any bound multiplier enters, in the convention the final solution
+/// is reported in (`∇f + Jᵀλ − z_L + z_U = 0`). `None` if a callback
+/// declines to evaluate.
+fn lagrangian_gradient_full(
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+    x: &[Number],
+    lambda: &[Number],
+) -> Option<Vec<Number>> {
+    let mut t = tnlp.borrow_mut();
+    let info = t.get_nlp_info()?;
+    let n = info.n as usize;
+    let nnz = info.nnz_jac_g as usize;
+    let mut s = vec![0.0; n];
+    if !t.eval_grad_f(x, true, &mut s) {
+        return None;
+    }
+    if nnz > 0 {
+        let mut irow = vec![0 as Index; nnz];
+        let mut jcol = vec![0 as Index; nnz];
+        if !t.eval_jac_g(
+            None,
+            false,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol,
+            },
+        ) {
+            return None;
+        }
+        let mut vals = vec![0.0; nnz];
+        if !t.eval_jac_g(
+            Some(x),
+            false,
+            SparsityRequest::Values { values: &mut vals },
+        ) {
+            return None;
+        }
+        let off: Index = match info.index_style {
+            IndexStyle::Fortran => 1,
+            IndexStyle::C => 0,
+        };
+        for k in 0..nnz {
+            let (Ok(r), Ok(c)) = (
+                usize::try_from(irow[k] - off),
+                usize::try_from(jcol[k] - off),
+            ) else {
+                continue;
+            };
+            if let (Some(&l), Some(sc)) = (lambda.get(r), s.get_mut(c)) {
+                *sc += vals[k] * l;
+            }
+        }
+    }
+    Some(s)
+}
 
 #[cfg(test)]
 mod tests {

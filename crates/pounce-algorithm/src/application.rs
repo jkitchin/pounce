@@ -856,6 +856,22 @@ impl IpoptApplication {
         (lo_inf, up_inf, fixed_treatment)
     }
 
+    /// Whether the final solution reports bound multipliers for variables
+    /// `make_parameter` removed (see
+    /// `OrigIpoptNlp::complete_fixed_var_bound_multipliers`).
+    /// Ipopt 3.14 does, for every treatment except `make_parameter_nodual`,
+    /// which exists to ask it not to.
+    pub fn reports_fixed_var_duals(&self) -> bool {
+        !matches!(
+            self.options
+                .get_string_value("fixed_variable_treatment", "")
+                .ok()
+                .map(|(v, _)| v)
+                .as_deref(),
+            Some("make_parameter_nodual")
+        )
+    }
+
     /// Mark that the next `optimize_*` calls are further **attempts at the
     /// same problem**, driven from outside, rather than new solves.
     ///
@@ -2825,7 +2841,14 @@ impl IpoptApplication {
         // OrigIpoptNlp's lifting hooks. Failure here is silent
         // (we still return the algorithm's status) — the user
         // sees the right ApplicationReturnStatus regardless.
-        let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp, &self.last_finalize);
+        let _ = finalize_via_sqp(
+            &nlp_rc,
+            &res,
+            solver_status,
+            &tnlp,
+            &self.last_finalize,
+            self.reports_fixed_var_duals(),
+        );
 
         // Honor the opt-in status-fidelity gate on the SQP path too
         // (pounce#173), then emit the end-of-run summary with the final
@@ -5307,6 +5330,7 @@ impl IpoptApplication {
                 app_status,
                 &tnlp,
                 &self.last_finalize,
+                self.reports_fixed_var_duals(),
             ) {
                 Ok(f_unscaled) => {
                     self.statistics.borrow_mut().final_objective = f_unscaled;
@@ -7421,6 +7445,7 @@ fn finalize_via_orig_nlp(
     _app_status: ApplicationReturnStatus,
     tnlp: &Rc<RefCell<dyn TNLP>>,
     sink: &RefCell<Option<FinalizeSnapshot>>,
+    fixed_var_duals: bool,
 ) -> Result<Number, ()> {
     let curr = alg.data.borrow().curr.clone().ok_or(())?;
     // Lift compressed x_var → full-x (length `info.n`) so the user
@@ -7457,6 +7482,9 @@ fn finalize_via_orig_nlp(
     let mut lambda = nlp_borrow.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
     if lambda.is_empty() {
         lambda = vec![0.0; m];
+    }
+    if fixed_var_duals {
+        nlp_borrow.complete_fixed_var_bound_multipliers(&x_vec, &lambda, &mut z_l, &mut z_u);
     }
     drop(nlp_borrow);
     // Compute g(x) via the user TNLP so the final residual is
@@ -7633,6 +7661,7 @@ fn finalize_via_sqp(
     solver_status: pounce_nlp::SolverReturn,
     tnlp: &Rc<RefCell<dyn TNLP>>,
     sink: &RefCell<Option<FinalizeSnapshot>>,
+    fixed_var_duals: bool,
 ) -> Result<Number, ()> {
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
@@ -7689,6 +7718,9 @@ fn finalize_via_sqp(
     let mut lambda = nlp_borrow.finalize_solution_lambda(&y_c_dv, &y_d_dv);
     if lambda.is_empty() {
         lambda = vec![0.0; m];
+    }
+    if fixed_var_duals {
+        nlp_borrow.complete_fixed_var_bound_multipliers(&x_vec, &lambda, &mut z_l, &mut z_u);
     }
     drop(nlp_borrow);
 

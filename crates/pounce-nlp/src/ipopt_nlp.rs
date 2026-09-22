@@ -363,6 +363,23 @@ pub trait IpoptNlp: Nlp {
         Vec::new()
     }
 
+    /// Fill in, on the full-x `z_l` / `z_u` that
+    /// [`Self::finalize_solution_z_l`] / [`Self::finalize_solution_z_u`]
+    /// produced, the bound multipliers of the variables `make_parameter`
+    /// removed — which those lifts can only report as `0.0`, because the
+    /// algorithm never held one. `x` and `lambda` are the reported point
+    /// and constraint multipliers in the same space
+    /// (`finalize_solution_x` / `finalize_solution_lambda`). Default no-op:
+    /// an impl without fixed-variable elimination has nothing to fill.
+    fn complete_fixed_var_bound_multipliers(
+        &self,
+        _x: &[Number],
+        _lambda: &[Number],
+        _z_l: &mut [Number],
+        _z_u: &mut [Number],
+    ) {
+    }
+
     /// Map a 0-based **full-x** index (user-TNLP space, length
     /// `n_full_x()`) to a 0-based **var-x** index (algorithm-side,
     /// length `n()`). Returns `None` when the variable was eliminated
