@@ -76,6 +76,19 @@ changes.
 
 ### Fixed
 
+- **The WebAssembly build had no restoration phase** (gh#960). `pounce-wasm`
+  built a bare `IpoptApplication` and never installed a restoration factory,
+  so the first time the filter line search needed restoration the solve
+  stopped with `RestorationFailed` and `restoration_calls = 0`. On PGLib
+  `case6468_rte` AC-OPF that was iteration 54, exactly where the native CLI
+  enters restoration and goes on to the Ipopt optimum. The shim now wires the
+  restoration phase and the second-opinion ladder the way the CLI, C and
+  Python entry points do, and solves that case in 146 iterations to objective
+  2 069 730.14512, matching the CLI. Across the NLP-arm fixtures, disagreement
+  with the CLI drops from 15 of 52 to 4. The solve JSON gains `base_status`
+  and `second_opinion`, so a rescued solve stays visible. The earlier parity
+  claim in `docs/src/wasm.md` compared the shim with itself and missed this;
+  it now compares against the CLI.
 - **Linear-solver summary under L-BFGS reported one backend's counts, not the
   solve's.** The limited-memory path builds two FERAL backends from one factory
   (the low-rank solver's and its bypass), and each overwrote the shared summary
