@@ -661,6 +661,66 @@ A convex solve that declines to certify is handed to the NLP arm
 (gh #535), and that re-solve also runs on the declared model unless you
 asked for a widening by name.
 
+### The same product is unbounded on the NLP arm (gh #967)
+
+"Widening moves the optimum by `δ` times the bound's multiplier, and
+nothing bounds that product" is a statement about arithmetic, not about
+the convex arm. It holds on the NLP arm too, where the widening is *on*
+by default — and a large objective coefficient is all it takes:
+
+```
+min C·x + y/C   s.t.  x + y ≥ 1,  x, y ∈ [0, 1]
+```
+
+The optimum is `x=0, y=1` with value `1/C` for every `C`. The NLP arm
+returns `x ≈ −1e-8` — the same constant box violation at every scale —
+so the reported objective is off by `C · 1e-8`. At `C = 1e12` that is
+`−1.0e+04`: wrong by four orders, and **negative**, for an objective
+that is non-negative everywhere on the declared box. The same model
+through `solver_selection=auto` returns `+7.8e-09`, because that arm
+does not widen.
+
+This is not a defect with a default that fixes it. Both candidates were
+measured and rejected — `honor_original_bounds=yes` trades box
+feasibility for *row* feasibility (equality residuals from exactly zero
+to `~1e-8` on 10 of 97 fixtures), and capping the widening by objective
+sensitivity is vacuous wherever `∇f(x₀) = 0` and reaches a strictly
+worse local solution on an MPCC. The reasoning and the numbers are in
+`dev-notes/bound-relax-objective-amplification.md`.
+
+What to do instead, in order of preference:
+
+| situation | remedy |
+|---|---|
+| LP or convex QP | `solver_selection=auto` — that arm solves the declared model. The Python frontend defaults to `nlp`, so ask for `auto` by name. |
+| you need a vertex | [`crossover=yes`](crossover.md) — establishes the active set against the declared bounds. |
+| the box matters more than the rows | `honor_original_bounds=yes`, having read the trade above. |
+| you want to detect it | read `final_declared_box_viol`, below. |
+
+### What `Solve_Succeeded` guarantees
+
+`Solve_Succeeded` is a statement about the **scaled** KKT residuals of
+the **relaxed** model. It is not a bound on the unscaled objective
+error, and where `nlp_scaling_method` deflates the objective the two can
+be many orders apart — on the model above, `final_kkt_error = 1.6e-14`
+and `final_unscaled_kkt_error = 2.7e-05` on the same exit.
+
+A consumer that needs an unscaled guarantee should read the numbers
+rather than branch on the status:
+
+* **`final_unscaled_kkt_error`** — the max-norm KKT error in your units.
+  `kkt_fidelity_tol` turns a threshold on it into a status downgrade
+  (off by default; it is a pure relabel and does not change the answer).
+* **`final_declared_box_viol`** — how far outside the box *as declared*
+  the returned point sits. `final_declared_constr_viol` is its row
+  counterpart. Both are reported on every arm, and the console prints
+  `Violation of the model as declared` whenever it differs materially.
+
+Note that `Solved_To_Acceptable_Level` is still `success=True` on the
+SciPy-shaped Python result: it is a converged answer at the acceptable
+tolerance, not a failure, so a downgrade alone will not trip a caller
+that only checks `success`.
+
 ## Large constraint values and `primal_noise_floor_kappa`
 
 On a model whose constraint values run to `~1e7` and beyond, a converged

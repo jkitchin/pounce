@@ -9,6 +9,51 @@ changes.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`bound_relax_factor` × a large objective coefficient, and what
+  `Solve_Succeeded` guarantees (gh#967).** `min C·x + y/C` over `x + y ≥ 1`,
+  `x, y ∈ [0,1]` has optimum `1/C` at every `C`, and the NLP arm returns
+  `x ≈ −1e-8` — the same constant box violation at every scale — so the
+  reported objective is off by `C · 1e-8`. At `C = 1e12` that is `−1.0e+04`:
+  four orders wrong, and *negative*, for an objective that is non-negative
+  everywhere on the declared box, under `Solve_Succeeded`. The same model
+  through `solver_selection=auto` returns `+7.8e-09`, because gh#760 already
+  made the widening opt-in on that arm.
+
+  No default changed, and that is the finding rather than an omission. Both
+  candidates were built and measured against the fixture corpus and rejected:
+  `honor_original_bounds=yes` is exact on this family but trades box
+  feasibility for **row** feasibility, taking declared equality residuals from
+  exactly zero to `~1e-8` on 10 of 97 fixtures (`pounce verify --feas-tol
+  1e-12` over every returned `.sol`) — its own projection knows nothing about
+  the rows, which is what `crossover_issue612.rs` means by "paper over".
+  Capping the widening by objective sensitivity bounds the error at `~6e-06`
+  across `C = 1e2..1e12` but is **vacuous** wherever `∇f(x₀) = 0`
+  (`units_qp_k1` is inert even at `1e-30`), reaches a point the suite already
+  names "a strictly worse feasible point" on `mpcc_worse_local_solution`
+  (`−13.0057 → −1.2072`) **non-monotonically** — `1e-6` and `1e-10` are both
+  fine — and costs 3.8× iterations on `pooling_rt2stp` (109 → 418) and `deb7`
+  lbfgs (715 → 2732). Both moved **zero** statuses across all 194 fixture-legs,
+  which is exactly why the sweep and not the suite had to decide it.
+
+  `docs/src/options.md` gains the NLP-arm statement of the unbounded
+  `δ × multiplier` product, the remedy table (`solver_selection=auto` for an
+  LP, `crossover=yes` for a vertex, `honor_original_bounds=yes` when the box
+  matters more than the rows), and a "What `Solve_Succeeded` guarantees"
+  section: it is a claim about the **scaled** residuals of the **relaxed**
+  model — `final_kkt_error = 1.6e-14` against
+  `final_unscaled_kkt_error = 2.7e-05` on the same exit — so a consumer
+  needing an unscaled guarantee reads `final_unscaled_kkt_error` and
+  `final_declared_box_viol` rather than branching on the status.
+  `Solved_To_Acceptable_Level` is still `success=True` on the Python result,
+  so `kkt_fidelity_tol` alone does not warn a caller that only checks
+  `success`. Full record, including the rejected prototype's commit:
+  `dev-notes/bound-relax-objective-amplification.md`. Pinned by
+  `python/tests/test_issue_967_bound_relax_objective.py`, which asserts the
+  error tracks `C ·` (box violation) so a change of cause, not just of
+  magnitude, fails it.
+
 ### Changed
 
 - **`.nl` function evaluation now uses all cores.** The Lagrangian Hessian is
