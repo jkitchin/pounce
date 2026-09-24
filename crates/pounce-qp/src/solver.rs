@@ -2014,16 +2014,43 @@ impl ParametricActiveSetSolver {
             // KKT error of 10). Carry the inner verdict instead; the point
             // is still returned, just not dressed up.
             let obj = quad_objective(qp, &x);
+            // An `Unbounded` phase-1 verdict is about the *original*
+            // objective and must survive (gh#969). Where the slacks have
+            // vanished the augmented objective is the original one plus a
+            // zero penalty, so a recession ray of the augmented problem
+            // whose slack block is zero is a recession ray of the original
+            // feasible set — the same reasoning the `feasible` branch
+            // already rests on to return `x` at all. Flattening it to
+            // `MaxIter` cost the model-level verdict: an unbounded
+            // free-variable LP came back `iteration_limit` after 4
+            // iterations with the budget untouched, i.e.
+            // `solve_result_num=400` ("raise the limit and retry") on a
+            // model where retrying can never help, while `lp-ipm`, `nlp`
+            // and `auto` all said `DivergingIterates`/300 on the same file.
+            //
+            // The claim is *not* trusted from here. The ray is handed up and
+            // `pounce_convex::active_set::verify_status` re-derives the
+            // certificate against the original problem with
+            // `ray_certifies_unbounded`, exactly as gh#388 routed this
+            // engine's other `Unbounded` claim; a ray that does not stand up
+            // is downgraded there. The slack-block test below is only what
+            // makes the *projection* meaningful: a direction that buys its
+            // descent by growing an elastic slack is relaxing the model, not
+            // travelling in it.
+            let ray = sol_aug.unbounded_ray.as_ref().and_then(|d| {
+                let slack_moves = d[n..].iter().any(|s| s.abs() > opts.feas_tol);
+                (!slack_moves).then(|| d[..n].to_vec())
+            });
             return Ok(QpSolution {
                 x,
                 lambda_g,
                 lambda_x,
                 working,
                 obj,
-                status: if sol_aug.status == QpStatus::Optimal {
-                    QpStatus::Optimal
-                } else {
-                    QpStatus::MaxIter
+                status: match sol_aug.status {
+                    QpStatus::Optimal => QpStatus::Optimal,
+                    QpStatus::Unbounded if ray.is_some() => QpStatus::Unbounded,
+                    _ => QpStatus::MaxIter,
                 },
                 stats: QpStats {
                     n_working_set_changes: sol_aug.stats.n_working_set_changes,
@@ -2033,7 +2060,7 @@ impl ParametricActiveSetSolver {
                     time: started.elapsed(),
                     ..Default::default()
                 },
-                unbounded_ray: None,
+                unbounded_ray: ray,
             });
         }
 

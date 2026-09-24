@@ -121,6 +121,42 @@ changes.
 
 ### Fixed
 
+- **`qp-active-set` reported an unbounded LP as `iteration_limit` after four
+  iterations (gh#969).** On an unbounded LP with free variables — a recession
+  ray in `null(A_eq)` — the active-set engine returned
+  `MaximumIterationsExceeded` / `solve_result_num=400`, identically with
+  `max_iter=None` and `max_iter=100000`. The budget was never exhausted, so
+  the status did not describe what happened, and it displaced a model-level
+  verdict every other engine reached on the same file: `lp-ipm`, `nlp` and
+  `auto` all report `DivergingIterates` / `300`. `400` tells an AMPL / Pyomo /
+  GAMS driver "raise the iteration limit and retry", which on an unbounded
+  model can never help.
+
+  The engine was not missing the certificate — it was throwing one away. The
+  phase-1 recovery path reaches a correct `Unbounded` verdict *with a ray*
+  (once the elastic slacks vanish the augmented objective is the original one
+  plus a zero penalty), and `solve_general`'s `feasible` branch then flattened
+  **every** non-`Optimal` inner status to `MaxIter`, dropping the verdict and
+  the ray together one frame below where `verify_status` would have re-derived
+  it. The ray is now carried up when its slack block is zero — the condition
+  that makes the projection into original space a direction of the model
+  rather than a relaxation of it — and the claim is still re-derived against
+  the original problem by `ray_certifies_unbounded`, exactly as gh#388 routed
+  this engine's other `Unbounded` claim, so a ray that does not stand up is
+  downgraded rather than believed.
+
+  Measured over the adversary's family (`min cᵀx s.t. Ax = 1`, `x` free, with
+  a verified ray) the active-set arm goes from **107 misreports in 180 trials
+  to 0**, across six `n`/`m` shapes, with the IPM agreeing on all 180 either
+  way. The fixture corpus is unmoved on both legs — and at the default
+  `solver_selection=auto` that is no evidence at all, since `auto` never
+  routes to this engine; swept explicitly at `solver_selection=qp-active-set`,
+  where **116 of 200 fixture-legs reach it**, the diff is also empty, which is
+  the no-collateral-damage claim. Pinned by
+  `crates/pounce-convex/tests/issue969_unbounded_lp_status.rs`, whose third
+  case boxes the same `A` and `c` so a fix that simply called every phase-1
+  exit `Unbounded` would fail it.
+
 - **Constraint duals came back sign-flipped on `maximize` models solved by the
   general NLP path.** A `maximize` `.nl` is solved internally as `min -f`, and
   the NLP arm reported the resulting multipliers, reduced costs and `.sol`
