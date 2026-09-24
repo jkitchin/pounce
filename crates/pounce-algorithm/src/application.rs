@@ -4610,7 +4610,16 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(1e-4);
-        orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
+        // `bound_relax_obj_cap` (pounce#967, default 0 = off): additionally
+        // cap each coordinate's widening at `cap / |∂f/∂xᵢ|` so the
+        // relaxation cannot move the reported objective by more than this.
+        let bound_relax_obj_cap = self
+            .options
+            .get_numeric_value("bound_relax_obj_cap", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(0.0);
+        orig_nlp.relax_bounds_capped(bound_relax_factor, constr_viol_tol, bound_relax_obj_cap);
 
         // `honor_original_bounds` (default `no`, matching upstream):
         // project the reported point back into the un-relaxed box. Must

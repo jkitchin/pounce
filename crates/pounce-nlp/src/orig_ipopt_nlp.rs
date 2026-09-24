@@ -990,16 +990,116 @@ impl OrigIpoptNlp {
     }
 
     pub fn relax_bounds(&mut self, bound_relax_factor: Number, constr_viol_tol: Number) {
+        self.relax_bounds_capped(bound_relax_factor, constr_viol_tol, 0.0);
+    }
+
+    /// Per-variable objective-sensitivity caps for the box relaxation
+    /// (gh#967 prototype). Entry `i` is the largest widening variable
+    /// `x_not_fixed_map[i]` may take before it moves the objective by more
+    /// than `obj_cap`, i.e. `obj_cap / |∂f/∂xᵢ|` — `INFINITY` where the
+    /// objective does not depend on the coordinate.
+    ///
+    /// `None` when the starting point or the gradient is unavailable, in
+    /// which case the caller applies the uncapped upstream formula.
+    /// Evaluated at the same lifted `x0` the gradient-based scaling uses,
+    /// for the same reason: a fixed variable left at a raw `x0` instead of
+    /// its fixed value can shift `‖∇f‖` by orders of magnitude.
+    fn obj_sensitivity_caps(&self, obj_cap: Number) -> Option<Vec<Number>> {
+        let cls = self.adapter.borrow().classification().clone();
+        let n_full_x = cls.n_full_x as usize;
+        let n_full_g = cls.n_full_g as usize;
+        let mut full_x = vec![0.0; n_full_x];
+        let mut z_l = vec![0.0; n_full_x];
+        let mut z_u = vec![0.0; n_full_x];
+        let mut lambda = vec![0.0; n_full_g];
+        let started = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.get_starting_point(StartingPoint {
+                init_x: true,
+                x: &mut full_x,
+                init_z: false,
+                z_l: &mut z_l,
+                z_u: &mut z_u,
+                init_lambda: false,
+                lambda: &mut lambda,
+            })
+        };
+        if !started {
+            return None;
+        }
+        for (i, &full_idx) in cls.x_fixed_map.iter().enumerate() {
+            full_x[full_idx as usize] = cls.x_fixed_vals[i];
+        }
+        let mut grad = vec![0.0; n_full_x];
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.eval_grad_f(&full_x, true, &mut grad)
+        };
+        if !ok {
+            return None;
+        }
+        Some(
+            cls.x_not_fixed_map
+                .iter()
+                .map(|&full_idx| {
+                    let g = grad[full_idx as usize].abs();
+                    if g > 0.0 && g.is_finite() {
+                        obj_cap / g
+                    } else {
+                        Number::INFINITY
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// [`Self::relax_bounds`] with an optional per-variable objective
+    /// sensitivity cap (gh#967 prototype; `obj_cap <= 0` reproduces
+    /// upstream exactly).
+    ///
+    /// `bound_relax_factor` perturbs the feasible set by an **absolute**
+    /// amount whose effect on the reported objective is unbounded in
+    /// `|∂f/∂xᵢ|`. On `min C·x + y/C` over `[0,1]²` the default `1e-8`
+    /// widening lets `x` settle at `-1e-8`, and at `C = 1e12` that moves the
+    /// objective by `1e4` — negative, for an objective that is non-negative
+    /// on the declared box. Capping coordinate `i`'s widening at
+    /// `obj_cap / |∂f/∂xᵢ|` bounds that movement by `obj_cap`, leaving
+    /// insensitive coordinates (where the widening is what keeps the
+    /// log-barrier's iterates strictly interior) untouched.
+    ///
+    /// Row bounds (`d_l` / `d_u`) are left alone: their widening is already
+    /// scale-relative (#385) and a row's contribution to the objective is
+    /// not a per-coordinate quantity.
+    pub fn relax_bounds_capped(
+        &mut self,
+        bound_relax_factor: Number,
+        constr_viol_tol: Number,
+        obj_cap: Number,
+    ) {
         self.snapshot_declared_bounds();
         if bound_relax_factor <= 0.0 {
             return;
         }
         let relax = bound_relax_factor.abs();
         let cap = constr_viol_tol;
-        let apply = |v: &mut DenseVector, sign: Number| {
+        let sens = if obj_cap > 0.0 {
+            self.obj_sensitivity_caps(obj_cap)
+        } else {
+            None
+        };
+        let cls = self.adapter.borrow().classification().clone();
+        // `x_l` / `x_u` are indexed by "which variables carry this bound";
+        // `x_l_map[i]` is the compressed (non-fixed) variable index, which
+        // is what `sens` is indexed by.
+        let apply_x = |v: &mut DenseVector, sign: Number, map: &[Index]| {
             let xs = v.values_mut();
-            for x in xs.iter_mut() {
-                let delta = (relax * x.abs().max(1.0)).min(cap);
+            for (i, x) in xs.iter_mut().enumerate() {
+                let mut delta = (relax * x.abs().max(1.0)).min(cap);
+                if let Some(s) = sens.as_ref() {
+                    delta = delta.min(s[map[i] as usize]);
+                }
                 *x += sign * delta;
             }
         };
@@ -1034,13 +1134,15 @@ impl OrigIpoptNlp {
         // leaving bounds tighter than `bound_relax_factor` requires; that is
         // a programming error, so fail loudly to match `adjust_variable_bounds`
         // rather than no-op.
-        apply(
+        apply_x(
             Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"),
             -1.0,
+            &cls.x_l_map,
         );
-        apply(
+        apply_x(
             Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
             1.0,
+            &cls.x_u_map,
         );
         apply_d(
             Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),
