@@ -2764,3 +2764,137 @@ fn repeatedly_rank_deficient_equalities_do_not_error() {
         sol.x
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// gh#971 — a consistent redundant equality row drove the elastic
+// multipliers to the `±γ` penalty cap.
+//
+// Row 3 = row 1 + row 2, `b` consistent by construction, box `[-2, 2]`,
+// rank-1 `H`. The cold homotopy's corrector falls through to l1-elastic,
+// where every row has its own slack pair: the dependent row no longer makes
+// anything singular, so no rank guard fires, and `λ` slides along
+// `null(Aᵀ) = span(1, 1, −1)` until a row reaches `γ = 1e6`. The engine
+// returned `MaxIter` with `λ = (1e6, 1e6, −1e6)` and `|Ax − b| ≈ 3e-6`.
+//
+// `solve_elastic` now rank-reveals the equality rows and runs on an
+// independent subset — but only keeps that answer when the dropped rows
+// hold at it. The second test is the reason for that condition: move row 3's
+// right-hand side and the block is contradictory while its rank is the same,
+// so the prune by itself would return the two-row optimum as `Optimal` at a
+// point violating row 3 by 0.5.
+// Data: seed 155 of the issue's `numpy.random.default_rng` generator.
+fn issue_971_qp_parts(shift: f64) -> (SymTMatrix, GenTMatrix, Vec<f64>, Vec<f64>) {
+    let v = [
+        -1.8273390143890733_f64,
+        -0.24535960128069498,
+        0.18582556752464716,
+        0.4180888279857321,
+    ];
+    let (mut hi, mut hj, mut hv) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..4 {
+        for j in 0..=i {
+            hi.push(i as i32 + 1);
+            hj.push(j as i32 + 1);
+            hv.push(v[i] * v[j]);
+        }
+    }
+    let mut h = SymTMatrix::new(SymTMatrixSpace::new(4, hi, hj));
+    h.set_values(&hv);
+    #[rustfmt::skip]
+    let rows: [[f64; 4]; 3] = [
+        [1.8207619861986173, -2.7456402747587245, 0.7995850935329225, 0.8712283527052398],
+        [0.9770683785838647, -0.9210003765043308, -0.40674360602557913, -0.10211300182846439],
+        [2.797830364782482, -3.666640651263055, 0.3928414875073434, 0.7691153508767754],
+    ];
+    let (mut ai, mut aj, mut av) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, r) in rows.iter().enumerate() {
+        for (j, &x) in r.iter().enumerate() {
+            ai.push(i as i32 + 1);
+            aj.push(j as i32 + 1);
+            av.push(x);
+        }
+    }
+    let mut a = GenTMatrix::new(GenTMatrixSpace::new(3, 4, ai, aj));
+    a.set_values(&av);
+    let b = vec![
+        -0.37147458000233335,
+        -0.08041693825355356,
+        -0.45189151825588647 + shift,
+    ];
+    let g = vec![
+        0.41533064386674734,
+        -1.389847552821441,
+        -0.41502780761130875,
+        0.1039154844102442,
+    ];
+    (h, a, b, g)
+}
+
+#[test]
+fn issue_971_redundant_equality_keeps_multipliers_bounded() {
+    let (h, a, b, g) = issue_971_qp_parts(0.0);
+    let (xl, xu) = (vec![-2.0; 4], vec![2.0; 4]);
+    let qp = QpProblem {
+        n: 4,
+        m: 3,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &b,
+        bu: &b,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let sol = new_solver()
+        .solve(&qp, None, &QpOptions::default())
+        .expect("solve");
+    assert_eq!(sol.status, QpStatus::Optimal, "λ = {:?}", sol.lambda_g);
+    let lmax = sol.lambda_g.iter().fold(0.0_f64, |w, l| w.max(l.abs()));
+    assert!(
+        lmax < 10.0,
+        "λ drifted to the elastic cap: {:?}",
+        sol.lambda_g
+    );
+    let ax = crate::kkt::a_times_x(&a, &sol.x, 3);
+    for i in 0..3 {
+        assert!(
+            (ax[i] - b[i]).abs() < 1e-9,
+            "row {i}: |Ax − b| = {:e}",
+            (ax[i] - b[i]).abs()
+        );
+    }
+    // Clarabel's optimum for this QP.
+    assert!(
+        (sol.obj - -0.2499623364970595).abs() < 1e-8,
+        "obj {}",
+        sol.obj
+    );
+}
+
+#[test]
+fn issue_971_inconsistent_dependent_equality_is_not_pruned_to_optimal() {
+    let (h, a, b, g) = issue_971_qp_parts(0.5);
+    let (xl, xu) = (vec![-2.0; 4], vec![2.0; 4]);
+    let qp = QpProblem {
+        n: 4,
+        m: 3,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &b,
+        bu: &b,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let sol = new_solver()
+        .solve(&qp, None, &QpOptions::default())
+        .expect("solve");
+    assert_ne!(
+        sol.status,
+        QpStatus::Optimal,
+        "contradictory equalities reported optimal at x = {:?}",
+        sol.x
+    );
+}

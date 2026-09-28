@@ -121,6 +121,24 @@ changes.
 
 ### Fixed
 
+- **`qp-active-set` equality multipliers drifted to `±1e6` on a consistent
+  redundant row (gh#971).** With one equality row a sum of two others, the
+  engine returned `λ = (1e6, 1e6, −1e6)` — KKT-valid only through
+  cancellation — and on some seeds `Solved_To_Acceptable_Level` with
+  `|Ax − b| = 3.1e-6`. The value was the l1-elastic penalty `γ`, not a
+  converged one: the elastic reformulation gives every row its own slack pair,
+  so a dependent row no longer makes any KKT matrix singular and no rank guard
+  fires, and the multiplier slides along `null(Aᵀ)` until the slack pairs' own
+  bound `|λᵢ| ≤ γ` stops it. `solve_elastic` now rank-reveals the equality rows
+  and solves on an independent subset (dropped rows get `λ = 0`). That answer
+  is accepted only if every dropped row holds at it, so a *contradictory*
+  dependent row still goes through the unpruned solve. Where the reduced solve
+  stalls and the full-row one lands, the full-row point seeds a warm phase-2
+  on the independent rows to recover the multipliers. Over the issue's
+  generator (200 seeds): before, 9 `optimal_inaccurate` and 105 more `optimal`
+  with `|λ| ≈ 1e6`; after, 200/200 `optimal`, `|λ| < 1e3`, worst `|Ax − b|`
+  6.8e-10. Fixture sweep: 0 of 200 fixture-legs move.
+
 - **`qp-active-set` reported an unbounded LP as `iteration_limit` after four
   iterations (gh#969).** On an unbounded LP with free variables — a recession
   ray in `null(A_eq)` — the active-set engine returned

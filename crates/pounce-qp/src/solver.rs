@@ -25,7 +25,7 @@ use crate::problem::{
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
-use pounce_linalg::triplet::{SymTMatrix, SymTMatrixSpace};
+use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::status::ESymSolverStatus;
 
@@ -1919,6 +1919,96 @@ impl ParametricActiveSetSolver {
         Ok(kept)
     }
 
+    /// l1-elastic mode — §4.3, with **consistent redundant equality rows
+    /// taken out first** (gh#971).
+    ///
+    /// The reformulation gives every row its own slack pair, so a row that is
+    /// a linear combination of other equality rows no longer makes the KKT
+    /// matrix singular — the rank guards the other paths rely on never fire.
+    /// What it leaves instead is a multiplier with a null space: stationarity
+    /// only sees `Aᵀλ`, so `λ + t·w` for any `w ∈ null(Aᵀ)` is equally
+    /// stationary, and the only thing bounding `t` is the slack pairs' own
+    /// multipliers, `|λᵢ| ≤ γ`. The active-set pivots walk `λ` along that
+    /// direction until a row hits `±γ` — `±1e6` at the default — where a slack
+    /// goes degenerate and the recovered point misses `Ax = b` by the round-off
+    /// of `Aᵀλ` at that magnitude. On the issue's QP (row 3 = row 1 + row 2)
+    /// that was `λ = (1e6, 1e6, −1e6)`, `|Ax − b| = 3.1e-6`, and
+    /// `Solved_To_Acceptable_Level`, while the same engine on the two
+    /// independent rows returned `Optimal` with `|λ| ≈ 1`.
+    ///
+    /// So rank-reveal the equality rows here — the same guard
+    /// `cold_general_initial` applies — and run elastic on a maximal
+    /// independent subset. A dropped row gets `λ = 0` and stays `Inactive`,
+    /// the convention every other prune in this file already uses.
+    ///
+    /// Dropping a row is only exact when it is *consistent* with the kept
+    /// ones, and that is not something the rank test can see: `x₀ + x₁ = 1`
+    /// and `x₀ + x₁ = 3` are dependent too. So a pruned result is accepted
+    /// only if it satisfies every dropped row; otherwise the full-row elastic
+    /// solve runs exactly as before, and it — not this shortcut — owns the
+    /// infeasibility verdict.
+    ///
+    /// The reduced elastic solve is not guaranteed to converge where the
+    /// full-row one does (on 9 of the issue generator's 200 seeds it stalls
+    /// at `MaxIter` with a slack a few `1e-8` below zero, while the full-row
+    /// solve reaches a feasible point). So when the full-row solve is the one
+    /// that lands, its point — feasible for every row — seeds a warm phase-2
+    /// on the reduced rows, which is what puts the multipliers back on the
+    /// full-rank system. That polish is kept only when it is `Optimal` and
+    /// feasible for the *full* row set; otherwise the full-row answer stands.
+    fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+        let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
+            return self.solve_elastic_rows(qp, opts);
+        };
+        let qp_red = pruned.problem(qp);
+
+        let red = self.solve_elastic_rows(&qp_red, opts)?;
+        // `Infeasible` needs no consistency check: a subset of the rows
+        // admitting no point proves the full set admits none. A timeout
+        // claims nothing and must not start a second solve.
+        let decisive = match red.status {
+            QpStatus::Infeasible | QpStatus::TimeLimit => true,
+            QpStatus::Optimal | QpStatus::Unbounded => {
+                pruned.dropped_rows_hold(qp, &red.x, opts.feas_tol)
+            }
+            _ => false,
+        };
+        if decisive {
+            return Ok(pruned.expand(qp, red));
+        }
+
+        let full = self.solve_elastic_rows(qp, opts)?;
+        if full.status != QpStatus::Optimal || !point_is_feasible(qp, &full.x, opts.feas_tol) {
+            return Ok(full);
+        }
+        let ws = QpWarmStart {
+            x: full.x.clone(),
+            lambda_g: vec![0.0; qp_red.m],
+            lambda_x: vec![0.0; qp.n],
+            working: self.working_set_at(&qp_red, &full.x, opts.feas_tol),
+        };
+        let polish = if opts.use_schur_updates {
+            self.solve_general_schur(&qp_red, Some(&ws), opts)
+        } else {
+            self.solve_general(&qp_red, Some(&ws), opts)
+        };
+        match polish {
+            Ok(p)
+                if p.status == QpStatus::Optimal
+                    && point_is_feasible(qp, &p.x, opts.feas_tol)
+                    && pruned.dropped_rows_hold(qp, &p.x, opts.feas_tol) =>
+            {
+                let mut p = pruned.expand(qp, p);
+                p.stats.used_phase1 = true;
+                Ok(p)
+            }
+            Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
+            // A polish that fails is a polish not had: the full-row answer
+            // is feasible and optimal, only its multipliers are ugly.
+            _ => Ok(full),
+        }
+    }
+
     /// l1-elastic mode — §4.3. Builds an
     /// [`ElasticReformulation`], seeds the augmented problem so
     /// the elastic slacks absorb any infeasibility at the initial
@@ -1927,7 +2017,11 @@ impl ParametricActiveSetSolver {
     /// Unpacks the augmented solution into the original variable
     /// space and reports `QpStatus::Infeasible` when residual
     /// slacks exceed `feas_tol`.
-    fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+    fn solve_elastic_rows(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
         let m = qp.m;
@@ -3325,6 +3419,126 @@ const RANK_REL_TOL: Number = 1e-9;
 /// the surviving candidates). So the tabu suppresses a row only while
 /// its rate stays in this drift band; a genuine rate re-admits it.
 const TABU_DRIFT_REL: Number = 1e-7;
+
+/// Equality rows the rank test found linearly dependent on the others, and
+/// the row maps that take a solution on the independent subset back to the
+/// full row set (gh#971, see `solve_elastic`).
+struct PrunedEqualities {
+    /// `keep[i]` is false exactly for the dropped equality rows.
+    keep: Vec<bool>,
+    /// Reduced row index -> original row index.
+    old_of: Vec<usize>,
+    a_red: GenTMatrix,
+    bl_red: Vec<Number>,
+    bu_red: Vec<Number>,
+}
+
+impl PrunedEqualities {
+    /// `None` when there are fewer than two equality rows or the rank test
+    /// keeps them all.
+    fn build(linsol: &mut LinearSolver, qp: &QpProblem) -> Option<Self> {
+        let m = qp.m;
+        let eq_rows: Vec<usize> = (0..m)
+            .filter(|&i| qp.bl[i] == qp.bu[i] && qp.bl[i].is_finite())
+            .collect();
+        if eq_rows.len() < 2 {
+            return None;
+        }
+        let (kept, _) = independent_active_subset(linsol, qp, &eq_rows, &[]);
+        if kept.len() >= eq_rows.len() {
+            return None;
+        }
+        let mut keep = vec![true; m];
+        for &r in &eq_rows {
+            keep[r] = false;
+        }
+        for &r in &kept {
+            keep[r] = true;
+        }
+        let mut new_of: Vec<Option<usize>> = vec![None; m];
+        let mut old_of: Vec<usize> = Vec::with_capacity(m);
+        for i in 0..m {
+            if keep[i] {
+                new_of[i] = Some(old_of.len());
+                old_of.push(i);
+            }
+        }
+        let (mut irows, mut jcols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..qp.a.irows().len() {
+            let row = (qp.a.irows()[k] - 1) as usize;
+            if let Some(r) = new_of[row] {
+                irows.push((r + 1) as Index);
+                jcols.push(qp.a.jcols()[k]);
+                vals.push(qp.a.values()[k]);
+            }
+        }
+        let space = GenTMatrixSpace::new(old_of.len() as Index, qp.n as Index, irows, jcols);
+        let mut a_red = GenTMatrix::new(space);
+        a_red.set_values(&vals);
+        let bl_red = old_of.iter().map(|&i| qp.bl[i]).collect();
+        let bu_red = old_of.iter().map(|&i| qp.bu[i]).collect();
+        Some(Self {
+            keep,
+            old_of,
+            a_red,
+            bl_red,
+            bu_red,
+        })
+    }
+
+    fn problem<'a>(&'a self, qp: &QpProblem<'a>) -> QpProblem<'a> {
+        QpProblem {
+            n: qp.n,
+            m: self.old_of.len(),
+            h: qp.h,
+            g: qp.g,
+            a: &self.a_red,
+            bl: &self.bl_red,
+            bu: &self.bu_red,
+            xl: qp.xl,
+            xu: qp.xu,
+            hessian_inertia: qp.hessian_inertia,
+        }
+    }
+
+    /// Every dropped row holds at `x`, to `feas_tol` scaled by the size of
+    /// the terms that cancel in it — a row that is a sum of others carries
+    /// their round-off.
+    fn dropped_rows_hold(&self, qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
+        let ax = a_times_x(qp.a, x, qp.m);
+        let mut row_mag = vec![0.0; qp.m];
+        for k in 0..qp.a.irows().len() {
+            let row = (qp.a.irows()[k] - 1) as usize;
+            let col = (qp.a.jcols()[k] - 1) as usize;
+            row_mag[row] += (qp.a.values()[k] * x[col]).abs();
+        }
+        (0..qp.m).filter(|&i| !self.keep[i]).all(|i| {
+            let scale = 1.0_f64.max(qp.bl[i].abs()).max(row_mag[i]);
+            (ax[i] - qp.bl[i]).abs() <= feas_tol * scale
+        })
+    }
+
+    /// Scatter a reduced-row solution back to the full row set: dropped rows
+    /// get `λ = 0` and stay `Inactive`.
+    fn expand(&self, qp: &QpProblem, red: QpSolution) -> QpSolution {
+        let mut lambda_g = vec![0.0; qp.m];
+        let mut working = WorkingSet::cold(qp.n, qp.m);
+        for (r, &i) in self.old_of.iter().enumerate() {
+            if let Some(&l) = red.lambda_g.get(r) {
+                lambda_g[i] = l;
+            }
+            if let Some(&c) = red.working.constraints.get(r) {
+                working.constraints[i] = c;
+            }
+        }
+        working.bounds.copy_from_slice(&red.working.bounds[..qp.n]);
+        QpSolution {
+            lambda_g,
+            working,
+            ..red
+        }
+    }
+}
 
 /// Select a maximal linearly-independent subset of the given active
 /// constraint / bound normals by modified Gram-Schmidt with one
