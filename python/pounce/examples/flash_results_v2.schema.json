@@ -1,0 +1,389 @@
+{
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "$id": "https://github.com/jkitchin/pounce/python/pounce/examples/flash_results_v2.schema.json",
+ "title": "POUNCE/DiscOpt Gate 1 flash result file",
+ "description": "Version 2 of the gh#776 Gate 1 result contract. It preserves the POUNCE-only path, oracle, and source-vs-NLP separation from pounce-flash-results/1 and adds a versioned DiscOpt comparison block. Version 1 means the comparison is absent. In version 2 comparison.state distinguishes an intentionally unrun comparison from a completed comparison, and each record distinguishes not_run, failed, local, and certified outcomes.",
+ "type": "object",
+ "required": ["schema", "stamp", "config", "oracle", "hysteresis", "legs", "comparison"],
+ "additionalProperties": false,
+ "properties": {
+  "schema": {"const": "pounce-flash-results/2"},
+  "issue": {"type": "string"},
+  "stamp": {
+   "type": "object",
+   "required": ["repositories", "model_data_revision", "environment", "model", "started_utc"],
+   "properties": {
+    "repositories": {
+     "type": "object",
+     "required": ["pounce", "discopt"],
+     "properties": {
+      "pounce": {
+       "type": "object",
+       "required": ["commit", "describe"],
+       "properties": {
+        "commit": {"type": "string", "minLength": 7},
+        "short": {"type": "string"},
+        "describe": {"type": "string"},
+        "dirty": {"type": ["boolean", "null"]}
+       }
+      },
+      "discopt": {
+       "type": "object",
+       "required": ["present", "comparison_run", "reason"],
+       "properties": {
+        "present": {"type": "boolean"},
+        "version": {"type": "string"},
+        "commit": {"type": ["string", "null"], "minLength": 7},
+        "comparison_run": {"type": "boolean"},
+        "reason": {"type": "string"}
+       }
+      }
+     }
+    },
+    "model_data_revision": {
+     "type": "string",
+     "minLength": 8,
+     "description": "Hash over the modules defining the shared fixture. Artifacts with different revisions are different benchmarks."
+    },
+    "environment": {"type": "object"},
+    "model": {
+     "type": "object",
+     "required": ["case", "components", "feed_composition", "pressure_pa", "temperatures_k"],
+     "properties": {
+      "case": {"type": "string"},
+      "components": {"type": "array", "items": {"type": "string"}},
+      "critical_temperature_k": {"type": "array", "items": {"type": "number"}},
+      "critical_pressure_pa": {"type": "array", "items": {"type": "number"}},
+      "acentric_factor": {"type": "array", "items": {"type": "number"}},
+      "binary_interaction": {"type": "array"},
+      "feed_composition": {"type": "array", "items": {"type": "number"}},
+      "pressure_pa": {"type": "number"},
+      "temperatures_k": {"type": "array", "items": {"type": "number"}},
+      "equation_of_state": {"type": "string"},
+      "constants_source": {"type": "string"},
+      "provenance": {"type": "string"}
+     }
+    },
+    "started_utc": {"type": "string"},
+    "wall_s": {"type": "number", "minimum": 0}
+   }
+  },
+  "config": {
+   "type": "object",
+   "required": ["base_options", "supported_route", "tau_schedule"],
+   "properties": {
+    "base_options": {"type": "object"},
+    "supported_route": {"type": "string"},
+    "tau_schedule": {"type": "array", "items": {"type": "number"}},
+    "controls": {"type": "array", "items": {"type": "string"}},
+    "routes": {"type": "object"},
+    "legs": {"type": "array", "items": {"type": "string"}}
+   }
+  },
+  "oracle": {
+   "type": "object",
+   "required": ["rows", "method"],
+   "properties": {
+    "method": {"type": "string"},
+    "switch_temperatures_k": {"type": "object"},
+    "rows": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "required": ["temperature_k", "regime", "beta", "sum_x", "sum_y"],
+      "properties": {
+       "temperature_k": {"type": "number"},
+       "regime": {"enum": ["liquid", "two_phase", "vapor"]},
+       "beta": {"type": "number"},
+       "sum_x": {"type": "number"},
+       "sum_y": {"type": "number"},
+       "k": {"type": "array", "items": {"type": "number"}},
+       "residual": {"type": "number"},
+       "trivial": {"type": "boolean"},
+       "ambiguous": {"type": "boolean"},
+       "no_incipient_phase": {"type": "boolean"},
+       "vapor_trial_sum": {"type": "number"},
+       "liquid_trial_sum": {"type": "number"},
+       "vapor_trial_stationary_points": {"type": "array"},
+       "liquid_trial_stationary_points": {"type": "array"}
+      }
+     }
+    }
+   }
+  },
+  "hysteresis": {
+   "type": "object",
+   "required": ["disagreements", "iterations", "failures", "cold_legs_agree", "path_dependent"],
+   "properties": {
+    "path_dependent": {"type": "boolean"},
+    "disagreements": {"type": "object"},
+    "iterations": {"type": "object"},
+    "failures": {"type": "object"},
+    "cold_legs_agree": {"type": "boolean"}
+   }
+  },
+  "legs": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": ["direction", "start_mode", "route", "records"],
+    "properties": {
+     "direction": {"enum": ["up", "down"]},
+     "start_mode": {"enum": ["cold", "warm"]},
+     "route": {"type": "string"},
+     "control": {"type": "string"},
+     "records": {"type": "array", "items": {"$ref": "#/definitions/legRecord"}}
+    }
+   }
+  },
+  "comparison": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["state", "discopt_issue", "temperatures_k", "methods", "records", "reason"],
+   "properties": {
+    "state": {"enum": ["not_run", "complete"]},
+    "discopt_issue": {"const": "jkitchin/discopt#1526"},
+    "temperatures_k": {"type": "array", "items": {"type": "number"}, "minItems": 1, "uniqueItems": true},
+    "methods": {
+     "type": "array",
+     "items": {"enum": ["gdp", "sos1", "scholtes"]},
+     "minItems": 3,
+     "maxItems": 3,
+     "uniqueItems": true,
+     "allOf": [
+      {"contains": {"const": "gdp"}},
+      {"contains": {"const": "sos1"}},
+      {"contains": {"const": "scholtes"}}
+     ]
+    },
+    "records": {
+     "type": "array",
+     "items": {"$ref": "#/definitions/comparisonRecord"},
+     "description": "Flat temperature/method cells. This schema requires every method to occur; producers must additionally enforce exactly one cell for every (temperatures_k, methods) pair because Draft 7 cannot express that cross-array join."
+    },
+    "reason": {"type": ["string", "null"]}
+   },
+   "allOf": [
+    {
+     "if": {"properties": {"state": {"const": "complete"}}},
+     "then": {
+      "properties": {
+       "temperatures_k": {"minItems": 1},
+       "methods": {"minItems": 1},
+       "records": {
+        "minItems": 3,
+        "allOf": [
+         {"contains": {"type": "object", "required": ["method"], "properties": {"method": {"const": "gdp"}}}},
+         {"contains": {"type": "object", "required": ["method"], "properties": {"method": {"const": "sos1"}}}},
+         {"contains": {"type": "object", "required": ["method"], "properties": {"method": {"const": "scholtes"}}}}
+        ]
+       },
+       "reason": {"type": "null"}
+      }
+     },
+     "else": {"properties": {"records": {"maxItems": 0}, "reason": {"type": "string", "minLength": 1}}}
+    }
+   ]
+  }
+ },
+ "definitions": {
+  "nullableNumber": {"type": ["number", "null"]},
+  "residual": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["value", "definition", "admitted_scale"],
+   "properties": {
+    "value": {"type": "number", "minimum": 0},
+    "definition": {"type": "string", "minLength": 1},
+    "admitted_scale": {"type": ["number", "null"], "minimum": 0}
+   }
+  },
+  "point": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["beta", "x", "y", "sum_x", "sum_y", "compressibility", "root_branches", "nontrivial_branch", "regime", "active_branches"],
+   "properties": {
+    "beta": {"type": "number", "minimum": 0, "maximum": 1},
+    "x": {"type": "array", "items": {"type": "number", "minimum": 0, "maximum": 1}, "minItems": 2, "maxItems": 2},
+    "y": {"type": "array", "items": {"type": "number", "minimum": 0, "maximum": 1}, "minItems": 2, "maxItems": 2},
+    "sum_x": {"type": "number"},
+    "sum_y": {"type": "number"},
+    "compressibility": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["liquid", "vapor"],
+     "properties": {
+      "liquid": {"type": "number", "minimum": 0},
+      "vapor": {"type": "number", "minimum": 0}
+     }
+    },
+    "root_branches": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["liquid", "vapor"],
+     "properties": {
+      "liquid": {"enum": ["one_real_root", "three_real_roots"]},
+      "vapor": {"enum": ["one_real_root", "three_real_roots"]}
+     }
+    },
+    "nontrivial_branch": {
+     "enum": ["component_0_above", "component_0_below", "component_1_above", "component_1_below"]
+    },
+    "regime": {"enum": ["liquid", "bubble", "two_phase", "dew", "vapor", "undetermined"]},
+    "active_branches": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["vapor", "liquid"],
+     "properties": {
+      "vapor": {"type": "array", "items": {"enum": ["amount_zero", "slack_zero"]}, "minItems": 1, "uniqueItems": true},
+      "liquid": {"type": "array", "items": {"enum": ["amount_zero", "slack_zero"]}, "minItems": 1, "uniqueItems": true}
+     }
+    }
+   }
+  },
+  "source": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["balance", "isofugacity", "eos", "root_selection", "nontriviality", "bound", "sign", "complementarity"],
+   "properties": {
+    "balance": {"$ref": "#/definitions/residual"},
+    "isofugacity": {"$ref": "#/definitions/residual"},
+    "eos": {"$ref": "#/definitions/residual"},
+    "root_selection": {"$ref": "#/definitions/residual"},
+    "nontriviality": {"$ref": "#/definitions/residual"},
+    "bound": {"$ref": "#/definitions/residual"},
+    "sign": {"$ref": "#/definitions/residual"},
+    "complementarity": {"$ref": "#/definitions/residual"}
+   }
+  },
+  "lowered": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["row"],
+   "properties": {
+    "row": {"$ref": "#/definitions/residual"}
+   }
+  },
+  "oracleComparison": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["regime_match", "biactive_branch_admissible", "beta_error", "x_error", "y_error", "sum_x_error", "sum_y_error", "z_liquid_error", "z_vapor_error", "root_branches_match"],
+   "properties": {
+    "regime_match": {"type": "boolean"},
+    "biactive_branch_admissible": {"type": ["boolean", "null"]},
+    "beta_error": {"type": "number", "minimum": 0},
+    "x_error": {"type": "number", "minimum": 0},
+    "y_error": {"type": "number", "minimum": 0},
+    "sum_x_error": {"type": "number", "minimum": 0},
+    "sum_y_error": {"type": "number", "minimum": 0},
+    "z_liquid_error": {"type": "number", "minimum": 0},
+    "z_vapor_error": {"type": "number", "minimum": 0},
+    "root_branches_match": {"type": "boolean"}
+   }
+  },
+  "legRecord": {
+   "type": "object",
+   "required": ["case", "temperature_k", "route", "ok", "status", "source", "validation", "nlp"],
+   "properties": {
+    "case": {"type": "string"},
+    "temperature_k": {"type": "number"},
+    "route": {"type": "string"},
+    "control": {"type": "string"},
+    "start": {"type": "string"},
+    "lowering": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "status": {"type": "integer"},
+    "status_msg": {"type": "string"},
+    "x": {"type": ["array", "null"], "items": {"type": "number"}},
+    "beta": {"type": ["number", "null"]},
+    "sum_x": {"type": ["number", "null"]},
+    "sum_y": {"type": ["number", "null"]},
+    "regime": {"type": ["string", "null"]},
+    "source": {
+     "type": "object",
+     "properties": {
+      "balance_viol": {"type": "number"},
+      "isofugacity_viol": {"type": "number"},
+      "bound_viol": {"type": "number"},
+      "sign_viol": {"type": "number"},
+      "compl_max": {"type": "number"},
+      "compl_sum": {"type": "number"}
+     }
+    },
+    "validation": {"type": "object"},
+    "nlp": {"type": "object"},
+    "iters": {"type": "integer"},
+    "outer_stages": {"type": "integer"},
+    "restarts": {"type": "integer"},
+    "restoration": {"type": "object"},
+    "wall_s": {"type": "number"},
+    "stages": {"type": "array"},
+    "finish_applied": {"type": ["boolean", "null"]},
+    "finish_status_msg": {"type": ["string", "null"]},
+    "error": {"type": ["string", "null"]}
+   }
+  },
+  "comparisonRecord": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": ["temperature_k", "method", "state", "status", "gap_certified", "objective", "bound", "gap", "node_count", "wall_s", "point", "source", "lowered", "oracle", "error"],
+   "properties": {
+    "temperature_k": {"type": "number"},
+    "method": {"enum": ["gdp", "sos1", "scholtes"]},
+    "state": {"enum": ["not_run", "failed", "local", "certified"]},
+    "status": {"type": ["string", "null"]},
+    "gap_certified": {"type": "boolean"},
+    "objective": {"$ref": "#/definitions/nullableNumber"},
+    "bound": {"$ref": "#/definitions/nullableNumber"},
+    "gap": {"$ref": "#/definitions/nullableNumber"},
+    "node_count": {"type": ["integer", "null"], "minimum": 0},
+    "wall_s": {"$ref": "#/definitions/nullableNumber"},
+    "point": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/point"}]},
+    "source": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/source"}]},
+    "lowered": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/lowered"}]},
+    "oracle": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/oracleComparison"}]},
+    "error": {"type": ["string", "null"]}
+   },
+   "allOf": [
+    {
+     "if": {"properties": {"state": {"const": "local"}}},
+     "then": {"properties": {"method": {"const": "scholtes"}, "gap_certified": {"const": false}, "objective": {"type": "number"}, "bound": {"type": "null"}, "gap": {"type": "null"}, "point": {"$ref": "#/definitions/point"}, "source": {"$ref": "#/definitions/source"}, "lowered": {"$ref": "#/definitions/lowered"}, "oracle": {"$ref": "#/definitions/oracleComparison"}, "error": {"type": "null"}}}
+    },
+    {
+     "if": {"properties": {"state": {"const": "certified"}}},
+     "then": {"properties": {"method": {"enum": ["gdp", "sos1"]}, "gap_certified": {"const": true}, "objective": {"type": "number"}, "bound": {"type": "number"}, "gap": {"type": "number", "minimum": 0}, "point": {"$ref": "#/definitions/point"}, "source": {"$ref": "#/definitions/source"}, "lowered": {"$ref": "#/definitions/lowered"}, "oracle": {"$ref": "#/definitions/oracleComparison"}, "error": {"type": "null"}}}
+    },
+    {
+     "if": {"properties": {"state": {"enum": ["not_run", "failed"]}}},
+     "then": {"properties": {"gap_certified": {"const": false}, "bound": {"type": "null"}, "point": {"type": "null"}, "source": {"type": "null"}, "lowered": {"type": "null"}, "oracle": {"type": "null"}}}
+    }
+   ]
+  }
+ },
+ "allOf": [
+  {
+   "if": {"properties": {"comparison": {"properties": {"state": {"const": "complete"}}}}},
+   "then": {
+    "properties": {
+     "stamp": {
+      "properties": {
+       "repositories": {
+        "properties": {
+         "discopt": {
+          "required": ["commit"],
+          "properties": {
+           "present": {"const": true},
+           "commit": {"type": "string", "minLength": 7},
+           "comparison_run": {"const": true}
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "else": {"properties": {"stamp": {"properties": {"repositories": {"properties": {"discopt": {"properties": {"comparison_run": {"const": false}}}}}}}}}
+  }
+ ]
+}

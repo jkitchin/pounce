@@ -222,7 +222,7 @@ jobs:
       - name: Install wheel + test deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax
+          python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax jsonschema
           # `gamsapi[core]` is GAMS's own PyPI package: pure Python, no GAMS
           # install and no license needed. It is here so the GAMS link's
           # `gmoModelStat_*` / `gmoSolveStat_*` constants can be checked
@@ -393,6 +393,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install python/dist/*.whl
           python -c "import pounce; print('import ok:', pounce.__file__)"
+          python -c "from importlib.resources import files; assert files('pounce.examples').joinpath('flash_results_v2.schema.json').is_file()"
           # The console-script entry should now exist on PATH and shim
           # to the bundled binary. `--help` exercises the full execve
           # round-trip without needing an actual .nl input file.

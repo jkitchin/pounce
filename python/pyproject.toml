@@ -67,7 +67,16 @@ viz = ["plotly>=5"]
 # is used to merge POUNCE into an existing gamsconfig.yaml without clobbering
 # other solvers.
 gams = ["gamsapi[core]>=45", "pyyaml>=6"]
-dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "torch>=2.2", "plotly>=5", "pyyaml>=6"]
+dev = [
+    "pytest>=7",
+    "scipy>=1.11",
+    "jax>=0.4.30",
+    "jaxlib>=0.4.30",
+    "torch>=2.2",
+    "plotly>=5",
+    "pyyaml>=6",
+    "jsonschema>=4",
+]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
@@ -99,4 +108,7 @@ strip = true
 # invoking maturin; this glob captures whatever lands there. The
 # `format = "wheel"` scope keeps it out of the sdist (which is
 # platform-agnostic and should not carry a compiled binary).
-include = [{ path = "pounce/bin/*", format = "wheel" }]
+include = [
+    { path = "pounce/bin/*", format = "wheel" },
+    "pounce/examples/*.schema.json",
+]

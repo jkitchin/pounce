@@ -48,6 +48,24 @@ regenerated per run and gitignored; `schema.json` is tracked. The smoke
 subset also runs in CI as `python/tests/test_flash_mpcc.py`, which is
 the "fast regression" gh#776 asks Gate 1 to become.
 
+`schema.json` remains the contract for the POUNCE-only
+`pounce-flash-results/1` artifact. The cross-repository comparison requested by
+[DiscOpt #1526](https://github.com/jkitchin/discopt/issues/1526) uses the packaged
+`pounce-flash-results/2` schema at
+`pounce.examples/flash_results_v2.schema.json`. Version 1 means that the comparison
+is absent; version 2 has an explicit comparison state and distinguishes records that
+were not run, failed, returned a local point, or returned a global certificate.
+A `not_run` comparison can record DiscOpt as absent with an omitted or null
+commit; a completed comparison requires DiscOpt to be present with a commit
+of at least seven characters. Load the schema without depending on a source
+checkout:
+
+```python
+from importlib.resources import files
+
+schema_path = files("pounce.examples").joinpath("flash_results_v2.schema.json")
+```
+
 ## The model
 
 Ethane / n-butane, equimolar feed, 10 bar, Peng--Robinson with classical

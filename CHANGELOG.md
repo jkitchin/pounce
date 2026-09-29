@@ -72,6 +72,17 @@ changes.
 
 ### Added
 
+- **A packaged `pounce-flash-results/2` contract for the DiscOpt half of MPCC
+  Gate 1.** The schema adds per-temperature GDP, SOS1 and Scholtes records to the
+  existing phase-changing-flash evidence without conflating local points with global
+  certificates: `not_run`, `failed`, `local` and `certified` are distinct, every source
+  residual carries its definition, and a local record cannot carry a certified bound.
+  An unrun comparison can honestly record an absent DiscOpt environment without a
+  commit; completed comparisons require DiscOpt presence and commit provenance.
+  The POUNCE-only `pounce-flash-results/1` artifact is unchanged. The schema ships as
+  `pounce.examples/flash_results_v2.schema.json` so DiscOpt #1526 can validate a combined
+  result without a POUNCE source checkout. Contributes to gh#776 Gate 1.
+
 - **Block-structured KKT solve.** A model that is arrowhead — independent
   blocks coupled only through a small border, as in security-constrained OPF,
   two-stage stochastic programs and multi-cell process models — can now tell

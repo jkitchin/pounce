@@ -91,6 +91,32 @@ the reference at every two-phase temperature — and was wrong only in the
 single-phase regimes, the ones the fixture exists to reach. The notebook
 reproduces that defect side by side with the correct row.
 
+### Cross-repository result contract
+
+The POUNCE-only harness continues to emit `pounce-flash-results/1`. The reduced
+DiscOpt comparison tracked by
+[DiscOpt #1526](https://github.com/jkitchin/discopt/issues/1526) emits
+`pounce-flash-results/2`, whose schema ships in the Python package as
+`pounce.examples/flash_results_v2.schema.json`. The version-2 comparison keeps
+source and lowered residuals separate, preserves every residual's definition, and
+distinguishes methods that were not run, failed, returned a local point, or returned a
+global certificate. The DiscOpt point records the selected liquid/vapour compressibility
+roots and their one-root/three-root branches; its source block requires separate EOS,
+root-selection, and nontrivial-stationary-point residuals, so an artifact cannot validate
+while omitting the algebraic logic unique to the global encoding. A local record is
+structurally forbidden from carrying a certified gap or bound.
+A completed comparison requires at least one GDP, SOS1, and Scholtes record,
+plus DiscOpt provenance with `present: true` and a commit of at least seven
+characters. Exact one-per-cell coverage of the declared temperature-by-method
+matrix is a producer invariant (Draft 7 cannot express that cross-array join);
+the DiscOpt artifact builder checks it before validation.
+
+When DiscOpt is unavailable, version 2 can instead report
+`comparison.state: "not_run"`, empty records, and a reason. Its DiscOpt stamp
+uses `present: false` and `comparison_run: false`; the commit may be omitted or
+null. An installed DiscOpt environment may also report `not_run`, retaining its
+known provenance.
+
 ## Two findings
 
 **The supported route's second half needs a fallback on a square flash.**
@@ -129,13 +155,9 @@ correct while the Hessian was not.
 
 - One equilibrium stage, two components, one operating parameter. Nothing
   here bounds a tray, a column, or a dynamic transcription.
-- The reduced DiscOpt GDP/SOS1 regime cross-validation that gh#776 also asks
-  of Gate 1 is blocked on the live DiscOpt
-  slices [#1147](https://github.com/jkitchin/discopt/issues/1147) then
-  [#1148](https://github.com/jkitchin/discopt/issues/1148) and was not run;
-  every result file records that explicitly.
-  [#1123](https://github.com/jkitchin/discopt/issues/1123) is closed and is
-  the design record, not the blocker.
+- The reduced DiscOpt GDP/SOS1/Scholtes comparison is tracked by
+  [DiscOpt #1526](https://github.com/jkitchin/discopt/issues/1526). Version 1 records
+  that no comparison was run; version 2 is the shared artifact once that work runs.
 - The path stays far from the mixture critical point. Ethane is above its
   own `Tc` over the top third of it, which is ordinary and is not a
   supercritical *mixture* state.
