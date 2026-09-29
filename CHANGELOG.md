@@ -132,18 +132,23 @@ changes.
   bound `|λᵢ| ≤ γ` stops it. `solve_elastic` now rank-reveals the equality rows
   and solves on an independent subset (dropped rows get `λ = 0`). That answer
   is accepted only if every dropped row holds at it, so a *contradictory*
-  dependent row still goes through the unpruned solve. Where the reduced
-  solve stalls and the full-row one lands, the full-row point seeds a warm
-  phase-2 on the independent rows to recover bounded multipliers. (The stall
-  is a separate, still-open Schur-update-path defect — an active bound's
-  pin-row error amplified by the model step cap; the in-loop repairs tried
-  for it each cost a solved Maros-Meszaros problem or gh#958's scale
-  invariance, so it is routed around here, not fixed.) Over the issue's
+  dependent row still goes through the unpruned solve. Over the issue's
   generator (200 seeds): before, 9 `optimal_inaccurate` and 105 more `optimal`
   with `|λ| ≈ 1e6`; after, 200/200 `optimal`, `|λ| < 1e3`, worst `|Ax − b|`
   6.8e-10.
 
-  A further defect surfaced while measuring it, on the same class of model:
+  Two further defects surfaced while measuring it:
+
+  * **The Schur-update path took amplified steps on a stale factor.** The
+    model step cap extends a δ-shifted step by `α ≫ 1` (gh#416), which
+    multiplies whatever error the step carries — and on a factor with pending
+    SMW updates that includes the solve's residual on the rows pinning active
+    bounds. An elastic slack pinned at 0 carried `−1.26e-11`, the cap took
+    `α = 5195`, and the slack ended at `−6.6e-8`, below its own bound, for
+    good: a full-rank two-row QP came back `MaxIter` where the refactor path
+    solves it in nine pivots. An extended step is now taken only from a fresh
+    factor. This was the stall behind the "polish" step the first fix carried,
+    which is gone.
 
   * **A false `Optimal` on an exactly duplicated equality row, through the
     active-set SQP.** Every cold route detected a dependent equality row only

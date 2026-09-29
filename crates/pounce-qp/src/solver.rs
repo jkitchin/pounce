@@ -1948,65 +1948,17 @@ impl ParametricActiveSetSolver {
     /// solve runs exactly as before, and it — not this shortcut — owns the
     /// infeasibility verdict.
     ///
-    /// The reduced elastic solve does not always converge where the full-row
-    /// one does. On 9 of the issue generator's 200 seeds it ends `MaxIter`
-    /// with a slack a few `1e-8` below its bound, while the full-row solve
-    /// lands feasible but with its multipliers at the cap. That stall is a
-    /// defect of the Schur-update path, not of the prune: an elastic slack
-    /// active at 0 carries the SMW solve's pin-row error (`p = −1.26e-11`),
-    /// the model step cap takes `α = 5195` along the δ-shifted, near-flat
-    /// direction (gh#416), and the slack lands at `−6.6e-8`, where the
-    /// zero-RHS inner loop never moves it back. The refactor path solves the
-    /// same QP in nine pivots. Repairing it in the Schur loop was tried three
-    /// ways and none is safe to ship: zeroing pinned `p_j` and correcting
-    /// bound drift alone both broke gh#958 at objective scale 100, and
-    /// correcting row residuals (full, or only the drift since activation)
-    /// turned Maros-Meszaros `CVXQP3_S` from `Optimal` into a hard
-    /// singular-KKT error under `qp-active-set`.
-    ///
-    /// So when the full-row solve is the one that lands, its point — feasible
-    /// for every row — seeds a warm phase-2 on the independent rows, which
-    /// puts the multipliers back on the full-rank system. That polish is kept
-    /// only when it is `Optimal`, feasible for the *full* row set, and every
-    /// dropped row holds; otherwise the full-row answer stands.
+    /// #973 also carried a warm "polish" for when the reduced elastic solve
+    /// stalled at `MaxIter` while the full-row one landed. The stall was a
+    /// Schur-path defect — an amplified step taken on a factor with pending
+    /// SMW updates, fixed in `solve_general_schur` — and with it fixed the
+    /// polish was reached by none of the issue generator's 200 seeds, so it is
+    /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
         if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows)? {
             return Ok(sol);
         }
-        let full = self.solve_elastic_rows(qp, opts)?;
-        let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
-            return Ok(full);
-        };
-        if full.status != QpStatus::Optimal || !point_is_feasible(qp, &full.x, opts.feas_tol) {
-            return Ok(full);
-        }
-        let qp_red = pruned.problem(qp);
-        let ws = QpWarmStart {
-            x: full.x.clone(),
-            lambda_g: vec![0.0; qp_red.m],
-            lambda_x: vec![0.0; qp.n],
-            working: self.working_set_at(&qp_red, &full.x, opts.feas_tol),
-        };
-        let polish = if opts.use_schur_updates {
-            self.solve_general_schur(&qp_red, Some(&ws), opts)
-        } else {
-            self.solve_general(&qp_red, Some(&ws), opts)
-        };
-        match polish {
-            Ok(p)
-                if p.status == QpStatus::Optimal
-                    && point_is_feasible(qp, &p.x, opts.feas_tol)
-                    && pruned.dropped_rows_hold(qp, &p.x, opts.feas_tol) =>
-            {
-                let mut p = pruned.expand(qp, p);
-                p.stats.used_phase1 = true;
-                Ok(p)
-            }
-            Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
-            // A polish that fails is a polish not had: the full-row answer
-            // is feasible and optimal, only its multipliers are ugly.
-            _ => Ok(full),
-        }
+        self.solve_elastic_rows(qp, opts)
     }
 
     /// Run `inner` on `qp` with its linearly dependent equality rows taken
@@ -3309,6 +3261,30 @@ impl ParametricActiveSetSolver {
                 // NaN ratio ever gets here. Clamping beats propagating a
                 // non-finite iterate.
                 alpha = 1.0;
+            }
+            // An extended step (`α > 1`, the model-step-cap extension of a
+            // δ-shifted direction, gh#416) multiplies whatever error `p`
+            // carries by `α`. On a factor with pending rank-2 updates that
+            // error includes the SMW solve's residual on the pin rows, which
+            // the refactor path does not have: gh#971's elastic slack, active
+            // at 0, carried `p = −1.26e-11` after five updates, the cap took
+            // `α = 5195`, and the slack landed at `−6.6e-8` — below its own
+            // bound, where the zero-RHS loop never moves it back — so phase-1
+            // ended `MaxIter` on a full-rank two-row QP the refactor path
+            // solves in nine pivots. Take an amplified step only from a fresh
+            // factor: refactor and recompute. After the reset there are no
+            // pending updates, so this fires at most once per step.
+            if alpha > 1.0 && schur.n_schur_updates() > 0 {
+                self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                )?;
+                n_refactor += 1;
+                continue;
             }
             if trace && blocker.is_none() {
                 eprintln!(

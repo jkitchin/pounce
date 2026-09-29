@@ -2899,7 +2899,99 @@ fn issue_971_inconsistent_dependent_equality_is_not_pruned_to_optimal() {
     );
 }
 
-// gh#971, second defect — an exactly duplicated equality row fooled the cold
+// gh#971, second defect — the Schur path let an active bound drift.
+//
+// Rows 0 and 2 of the issue generator's seed 2: a *full-rank* two-row
+// equality QP with a rank-1 `H` and box `[-2, 2]`. With Schur updates on and
+// the homotopy off, the cold start goes to l1-elastic. There, an elastic slack
+// sitting in the working set at its lower bound 0 got a step component of
+// `−1.26e-11` — the rank-2-updated Schur solve's residual on the row `p_j = 0`,
+// where the refactor path gives exactly zero — and the model step cap then
+// took `α = 5195` along the δ-shifted, near-flat direction. The slack ended at
+// `−6.6e-8`, phase-1 reported `Optimal` at a point `is_feasible` rejected, and
+// the solve came back `MaxIter` with `|Ax − b| = 6.6e-8`. The refactor path
+// solves the same QP `Optimal` to 1e-16. An extended step is now taken only
+// from a fresh factor.
+#[test]
+fn issue_971_schur_path_keeps_active_bounds_pinned() {
+    let v = [
+        0.5452887139646817_f64,
+        -0.6071856998706371,
+        0.12682784711186987,
+        -0.8922740434297903,
+    ];
+    let (mut hi, mut hj, mut hv) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..4 {
+        for j in 0..=i {
+            hi.push(i as i32 + 1);
+            hj.push(j as i32 + 1);
+            hv.push(v[i] * v[j]);
+        }
+    }
+    let mut h = SymTMatrix::new(SymTMatrixSpace::new(4, hi, hj));
+    h.set_values(&hv);
+    #[rustfmt::skip]
+    let rows: [[f64; 4]; 2] = [
+        [1.799707382720902, 1.1441658720372287, -0.32542283686782436, 0.7738065867276614],
+        [2.0809180525185513, 0.5903430356131764, 0.6521446142582114, 0.4632500400685089],
+    ];
+    let (mut ai, mut aj, mut av) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, r) in rows.iter().enumerate() {
+        for (j, &x) in r.iter().enumerate() {
+            ai.push(i as i32 + 1);
+            aj.push(j as i32 + 1);
+            av.push(x);
+        }
+    }
+    let mut a = GenTMatrix::new(GenTMatrixSpace::new(2, 4, ai, aj));
+    a.set_values(&av);
+    let b = vec![0.4012918483643172, -0.05780840720292829];
+    let g = vec![
+        0.18905338179353307,
+        -0.5227484414807474,
+        -0.41306354339189344,
+        -2.4414673826398556,
+    ];
+    let (xl, xu) = (vec![-2.0; 4], vec![2.0; 4]);
+    let qp = QpProblem {
+        n: 4,
+        m: 2,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &b,
+        bu: &b,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut objs = Vec::new();
+    for schur in [true, false] {
+        let opts = QpOptions {
+            use_schur_updates: schur,
+            use_homotopy: false,
+            ..QpOptions::default()
+        };
+        let sol = new_solver().solve(&qp, None, &opts).expect("solve");
+        assert_eq!(sol.status, QpStatus::Optimal, "schur={schur}");
+        let ax = crate::kkt::a_times_x(&a, &sol.x, 2);
+        for i in 0..2 {
+            assert!(
+                (ax[i] - b[i]).abs() < 1e-9,
+                "schur={schur} row {i}: |Ax − b| = {:e}",
+                (ax[i] - b[i]).abs()
+            );
+        }
+        for (j, &xj) in sol.x.iter().enumerate() {
+            assert!((-2.0..=2.0).contains(&xj), "schur={schur} x[{j}] = {xj:e}");
+        }
+        objs.push(sol.obj);
+    }
+    // Schur updates are a performance switch: both arms reach one optimum.
+    assert!((objs[0] - objs[1]).abs() < 1e-9, "{objs:?}");
+}
+
+// gh#971, third defect — an exactly duplicated equality row fooled the cold
 // fast paths into a wrong `Optimal`.
 //
 // Rows `[0, 1, 0]` of the issue generator's seed 32 (row 2 an exact copy of
