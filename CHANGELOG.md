@@ -132,12 +132,30 @@ changes.
   bound `|λᵢ| ≤ γ` stops it. `solve_elastic` now rank-reveals the equality rows
   and solves on an independent subset (dropped rows get `λ = 0`). That answer
   is accepted only if every dropped row holds at it, so a *contradictory*
-  dependent row still goes through the unpruned solve. Where the reduced solve
-  stalls and the full-row one lands, the full-row point seeds a warm phase-2
-  on the independent rows to recover the multipliers. Over the issue's
+  dependent row still goes through the unpruned solve. Where the reduced
+  solve stalls and the full-row one lands, the full-row point seeds a warm
+  phase-2 on the independent rows to recover bounded multipliers. (The stall
+  is a separate, still-open Schur-update-path defect — an active bound's
+  pin-row error amplified by the model step cap; the in-loop repairs tried
+  for it each cost a solved Maros-Meszaros problem or gh#958's scale
+  invariance, so it is routed around here, not fixed.) Over the issue's
   generator (200 seeds): before, 9 `optimal_inaccurate` and 105 more `optimal`
   with `|λ| ≈ 1e6`; after, 200/200 `optimal`, `|λ| < 1e3`, worst `|Ax − b|`
-  6.8e-10. Fixture sweep: 0 of 200 fixture-legs move.
+  6.8e-10.
+
+  A further defect surfaced while measuring it, on the same class of model:
+
+  * **A false `Optimal` on an exactly duplicated equality row, through the
+    active-set SQP.** Every cold route detected a dependent equality row only
+    when the KKT factorization *failed*, and an exact duplicate need not make
+    it fail: the backend returned multipliers `±4.4e14` on the pair, whose sum
+    — the real multiplier, `0.404` — survives only to the `0.0625` resolution
+    of numbers that size. The step against them read as stationary at a point
+    that was not, and `algorithm=active-set-sqp` reported `Solve_Succeeded` at
+    `f = 0.739` against a true `0.556`. The cold entry now rank-reveals the
+    equality rows before any route runs (sparse probe only; a backend without
+    one keeps the old behaviour rather than pay a dense `O(k²n)` test on every
+    solve).
 
 - **`qp-active-set` reported an unbounded LP as `iteration_limit` after four
   iterations (gh#969).** On an unbounded LP with free variables — a recession

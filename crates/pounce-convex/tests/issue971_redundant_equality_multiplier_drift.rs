@@ -266,13 +266,17 @@ fn seed_155_redundant_row_is_solved_with_bounded_multipliers() {
     check(&SEED155, -0.2499623364970595, 155);
 }
 
-/// Seed 2 takes the *other* branch of the fix. The reduced (independent-row)
-/// elastic solve stalls at `MaxIter` with a slack a few `1e-8` below zero, so
-/// the full-row solve runs — and lands `Optimal` and feasible, but with
-/// `λ = (1e6, 1e6, −1e6)`. Before the fix that was returned as-is: `Optimal`,
-/// so the issue's status-based count never saw it, but the same ±1e6 shadow
-/// prices. Its feasible point now seeds a warm phase-2 on the independent rows.
-/// 105 of the generator's 200 seeds were in this `Optimal`-at-the-cap class.
+/// Seed 2 takes the polish branch. The prune keeps rows 0 and 2, and the
+/// elastic solve on that *full-rank* pair stalls in the Schur-update path: an
+/// elastic slack active at its bound carries the SMW solve's pin-row error
+/// (`−1.26e-11`), the model step cap takes `α = 5195` along a near-flat
+/// δ-shifted direction, and the slack lands at `−6.6e-8`. Phase-1 ends
+/// `MaxIter`, the consistency gate refuses it, and the full-row fallback
+/// returns `Optimal` with `λ = (1e6, 1e6, −1e6)` — the same ±1e6 shadow prices
+/// under a status the issue's count never flagged (105 of the generator's 200
+/// seeds were in that class). Its feasible point now seeds a warm phase-2 on
+/// the independent rows. The stall itself is not fixed here; see
+/// `solve_elastic`'s doc for the repairs that were measured and rejected.
 /// Oracle: the same engine on the two independent rows.
 #[test]
 fn seed_2_full_row_fallback_is_polished_onto_the_independent_rows() {

@@ -1948,39 +1948,39 @@ impl ParametricActiveSetSolver {
     /// solve runs exactly as before, and it — not this shortcut — owns the
     /// infeasibility verdict.
     ///
-    /// The reduced elastic solve is not guaranteed to converge where the
-    /// full-row one does (on 9 of the issue generator's 200 seeds it stalls
-    /// at `MaxIter` with a slack a few `1e-8` below zero, while the full-row
-    /// solve reaches a feasible point). So when the full-row solve is the one
-    /// that lands, its point — feasible for every row — seeds a warm phase-2
-    /// on the reduced rows, which is what puts the multipliers back on the
-    /// full-rank system. That polish is kept only when it is `Optimal` and
-    /// feasible for the *full* row set; otherwise the full-row answer stands.
+    /// The reduced elastic solve does not always converge where the full-row
+    /// one does. On 9 of the issue generator's 200 seeds it ends `MaxIter`
+    /// with a slack a few `1e-8` below its bound, while the full-row solve
+    /// lands feasible but with its multipliers at the cap. That stall is a
+    /// defect of the Schur-update path, not of the prune: an elastic slack
+    /// active at 0 carries the SMW solve's pin-row error (`p = −1.26e-11`),
+    /// the model step cap takes `α = 5195` along the δ-shifted, near-flat
+    /// direction (gh#416), and the slack lands at `−6.6e-8`, where the
+    /// zero-RHS inner loop never moves it back. The refactor path solves the
+    /// same QP in nine pivots. Repairing it in the Schur loop was tried three
+    /// ways and none is safe to ship: zeroing pinned `p_j` and correcting
+    /// bound drift alone both broke gh#958 at objective scale 100, and
+    /// correcting row residuals (full, or only the drift since activation)
+    /// turned Maros-Meszaros `CVXQP3_S` from `Optimal` into a hard
+    /// singular-KKT error under `qp-active-set`.
+    ///
+    /// So when the full-row solve is the one that lands, its point — feasible
+    /// for every row — seeds a warm phase-2 on the independent rows, which
+    /// puts the multipliers back on the full-rank system. That polish is kept
+    /// only when it is `Optimal`, feasible for the *full* row set, and every
+    /// dropped row holds; otherwise the full-row answer stands.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
-        let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
-            return self.solve_elastic_rows(qp, opts);
-        };
-        let qp_red = pruned.problem(qp);
-
-        let red = self.solve_elastic_rows(&qp_red, opts)?;
-        // `Infeasible` needs no consistency check: a subset of the rows
-        // admitting no point proves the full set admits none. A timeout
-        // claims nothing and must not start a second solve.
-        let decisive = match red.status {
-            QpStatus::Infeasible | QpStatus::TimeLimit => true,
-            QpStatus::Optimal | QpStatus::Unbounded => {
-                pruned.dropped_rows_hold(qp, &red.x, opts.feas_tol)
-            }
-            _ => false,
-        };
-        if decisive {
-            return Ok(pruned.expand(qp, red));
+        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows)? {
+            return Ok(sol);
         }
-
         let full = self.solve_elastic_rows(qp, opts)?;
+        let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
+            return Ok(full);
+        };
         if full.status != QpStatus::Optimal || !point_is_feasible(qp, &full.x, opts.feas_tol) {
             return Ok(full);
         }
+        let qp_red = pruned.problem(qp);
         let ws = QpWarmStart {
             x: full.x.clone(),
             lambda_g: vec![0.0; qp_red.m],
@@ -2007,6 +2007,36 @@ impl ParametricActiveSetSolver {
             // is feasible and optimal, only its multipliers are ugly.
             _ => Ok(full),
         }
+    }
+
+    /// Run `inner` on `qp` with its linearly dependent equality rows taken
+    /// out, and hand the answer back in `qp`'s row space — or `Ok(None)` when
+    /// there is nothing to drop or the reduced answer cannot be trusted for
+    /// the full row set, in which case the caller runs `inner` on `qp` itself.
+    ///
+    /// "Trusted" is the consistency gate: an `Optimal` / `Unbounded` reduced
+    /// answer must satisfy every dropped row. `Infeasible` needs no check — a
+    /// subset of the rows admitting no point proves the full set admits
+    /// none — and a timeout claims nothing and must not start a second solve.
+    fn solve_pruned(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+        mut inner: impl FnMut(&mut Self, &QpProblem, &QpOptions) -> Result<QpSolution, QpError>,
+    ) -> Result<Option<QpSolution>, QpError> {
+        let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
+            return Ok(None);
+        };
+        let qp_red = pruned.problem(qp);
+        let red = inner(self, &qp_red, opts)?;
+        let decisive = match red.status {
+            QpStatus::Infeasible | QpStatus::TimeLimit => true,
+            QpStatus::Optimal | QpStatus::Unbounded => {
+                pruned.dropped_rows_hold(qp, &red.x, opts.feas_tol)
+            }
+            _ => false,
+        };
+        Ok(decisive.then(|| pruned.expand(qp, red)))
     }
 
     /// l1-elastic mode — §4.3. Builds an
@@ -3444,6 +3474,16 @@ impl PrunedEqualities {
         if eq_rows.len() < 2 {
             return None;
         }
+        // Sparse rank-reveal only. This now runs on *every* cold solve with
+        // two or more equality rows, not just after a factorization has
+        // failed, and the dense fallback in `independent_active_subset` is
+        // `O(k²·n)` modified Gram-Schmidt — on a backend without the sparse
+        // probe (MA57) and a Maros-Meszaros-sized equality block that is the
+        // whole solve budget. Without the probe, keep the pre-gh#971
+        // behaviour rather than pay that on every solve.
+        if !linsol.provides_degeneracy_detection() {
+            return None;
+        }
         let (kept, _) = independent_active_subset(linsol, qp, &eq_rows, &[]);
         if kept.len() >= eq_rows.len() {
             return None;
@@ -4068,6 +4108,28 @@ impl ParametricActiveSetSolver {
         if let Some(w) = ws {
             if !point_is_feasible(qp, &w.x, opts.feas_tol) {
                 return self.solve_elastic(qp, opts);
+            }
+        }
+
+        // Cold start with linearly dependent equality rows (gh#971). Every
+        // cold route below detects a rank-deficient equality block only when
+        // the KKT factorization *fails* on it, and an exactly duplicated row
+        // need not make it fail: the backend can count a round-off pivot
+        // toward the expected inertia and return a "solution" whose
+        // multipliers on the duplicate pair are `±4.4e14`. Their sum should be
+        // the true `0.404` but carries only the `0.0625` resolution of numbers
+        // that size, so the step computed against them is `≈ 0` at a point
+        // that is not stationary — and that point came back `Optimal` at
+        // `f = 0.739` against a true `0.556`, through the refactor path and
+        // the Schur path alike. It reached users as `Solve_Succeeded` from the
+        // active-set SQP, whose step QPs take this cold route with the
+        // homotopy off. So rank-reveal first rather than wait for a failure
+        // that may not come; the recursion is on a strictly smaller row set,
+        // and the full-row solve below still runs whenever the reduced answer
+        // is not decisive.
+        if ws.is_none() {
+            if let Some(sol) = self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o))? {
+                return Ok(sol);
             }
         }
 
