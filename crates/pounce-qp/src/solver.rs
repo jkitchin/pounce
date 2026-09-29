@@ -125,12 +125,16 @@ pub struct ParametricActiveSetSolver {
     /// reuse the rank-repair helpers, which take the shared linear-solver
     /// backend rather than owning one.
     pub(crate) linsol: LinearSolver,
+    /// Set only while [`Self::solve_elastic_rows`] runs its phase-1 solve:
+    /// enables the Schur loop's pin repair (see `solve_general_schur`).
+    pin_repair: bool,
 }
 
 impl ParametricActiveSetSolver {
     pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
         Self {
             linsol: LinearSolver::new(backend),
+            pin_repair: false,
         }
     }
 
@@ -2055,11 +2059,14 @@ impl ParametricActiveSetSolver {
         // was also actively wrong: `sqp_qp_max_iter = 3` asks for a
         // bounded solve, and a phase-1 quietly spending 2000 is not that
         // (`sqp_qp_options_reach_the_active_set_engine` caught it).
+        let outer_pin_repair = std::mem::replace(&mut self.pin_repair, true);
         let sol_aug = if opts_p1.use_schur_updates {
-            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)?
+            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)
         } else {
-            self.solve_general(&qp_aug, Some(&ws), &opts_p1)?
+            self.solve_general(&qp_aug, Some(&ws), &opts_p1)
         };
+        self.pin_repair = outer_pin_repair;
+        let sol_aug = sol_aug?;
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -2929,6 +2936,7 @@ impl ParametricActiveSetSolver {
         // Residual of each active slot when it entered the working set; see
         // the pin repair at the top of the loop.
         let mut frozen_resid: Vec<Option<Number>> = vec![None; m_total];
+        let pin_repair = self.pin_repair;
         let mut prev_p_inf = Number::INFINITY;
         let mut prev_was_null_step = false;
         let mut floor_refactored = false;
@@ -2946,14 +2954,14 @@ impl ParametricActiveSetSolver {
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
-            // Pin repair. Each active slot's right-hand side is zero unless its
-            // residual has drifted more than `feas_tol` from the value it had
-            // when the slot entered the working set; then it is that drift, so
-            // the next step undoes it. A pin that is still within tolerance is
-            // left exactly as before, so a working set that does not drift
-            // sees the old arithmetic bit for bit.
+            // Pin repair, l1-elastic phase-1 only. Each active slot's
+            // right-hand side is zero unless its residual has drifted more than
+            // `feas_tol` (scaled like the quantity's own round-off) from the
+            // value it had when the slot entered the working set; then it is
+            // that drift, so the next step undoes it. Outside phase-1, and for
+            // every pin within tolerance, the old zero RHS stands bit for bit.
             //
-            // gh#971: an l1-elastic slack active at 0 carried the SMW solve's
+            // gh#971: an elastic slack active at 0 carried the SMW solve's
             // pin-row error (`p = −1.26e-11`) after five rank-2 updates, the
             // model step cap took `α = 5195` along a near-flat δ-shifted
             // direction (gh#416), and the slack landed at `−6.6e-8` — below its
@@ -2962,21 +2970,34 @@ impl ParametricActiveSetSolver {
             // rejected, and a full-rank two-row QP came back `MaxIter` that the
             // refactor path solves in nine pivots.
             //
-            // Why only past `feas_tol`: a drift below it is invisible to every
-            // feasibility check the engine and its callers make, and correcting
-            // it anyway was measured to cost more than it buys. The same
-            // correction applied to every slot turned Maros-Meszaros
-            // `CVXQP3_S` from `Optimal` into a hard singular-KKT error under
-            // `qp-active-set`; refactoring before every amplified step instead
-            // (which re-chooses the inertia shift, so it changes the direction
-            // and not just its accuracy) took gh#974's generator from 4 failures
-            // in 400 to 18. Zeroing pinned `p_j`, or correcting bounds only,
-            // broke gh#958 at objective scale 100.
+            // Why so narrow, on measurement. The same repair on every Schur
+            // solve lost Maros-Meszaros `QSHARE2B` (acceptable → hard error
+            // under `qp-active-set`): outside phase-1 some solves move their
+            // active constraints far beyond round-off, and pulling those back
+            // derails them. Applying it to every slot ungated lost `CVXQP3_S`;
+            // refactoring before every amplified step instead (which re-chooses
+            // the inertia shift, so it changes the direction and not just its
+            // accuracy) took gh#974's hardest seeds from 8 failures to 18;
+            // zeroing pinned `p_j`, or correcting bounds only, broke gh#958 at
+            // objective scale 100.
             {
                 let ax_w = a_times_x(qp.a, &x, m);
-                let gate = |slot: &mut Option<Number>, r: Number| -> Number {
+                // Size of the terms that cancel in each row — the scale its
+                // round-off lives on, and the one the consistency gate in
+                // `PrunedEqualities::dropped_rows_hold` already uses.
+                let mut row_mag = vec![0.0; m];
+                for k in 0..qp.a.irows().len() {
+                    let i = (qp.a.irows()[k] - 1) as usize;
+                    let j = (qp.a.jcols()[k] - 1) as usize;
+                    row_mag[i] += (qp.a.values()[k] * x[j]).abs();
+                }
+                let gate = |slot: &mut Option<Number>, r: Number, scale: Number| -> Number {
                     let d = r - *slot.get_or_insert(r);
-                    if d.abs() > opts.feas_tol { d } else { 0.0 }
+                    if pin_repair && d.abs() > opts.feas_tol * scale {
+                        d
+                    } else {
+                        0.0
+                    }
                 };
                 for i in 0..m {
                     let target = match working.constraints[i] {
@@ -2987,7 +3008,8 @@ impl ParametricActiveSetSolver {
                             continue;
                         }
                     };
-                    rhs[n + i] = gate(&mut frozen_resid[i], target - ax_w[i]);
+                    let scale = 1.0_f64.max(target.abs()).max(row_mag[i]);
+                    rhs[n + i] = gate(&mut frozen_resid[i], target - ax_w[i], scale);
                 }
                 for j in 0..n {
                     let target = match working.bounds[j] {
@@ -2998,7 +3020,8 @@ impl ParametricActiveSetSolver {
                             continue;
                         }
                     };
-                    rhs[n + m + j] = gate(&mut frozen_resid[m + j], target - x[j]);
+                    let scale = 1.0_f64.max(target.abs());
+                    rhs[n + m + j] = gate(&mut frozen_resid[m + j], target - x[j], scale);
                 }
             }
             // A singular Schur complement is a normal event in SMW updating,

@@ -146,11 +146,13 @@ changes.
     `−1.26e-11`, the cap took `α = 5195`, and the slack ended at `−6.6e-8`,
     below its own bound; the inner loop solved with a zero right-hand side on
     active rows, so nothing ever moved it back, and a full-rank two-row QP came
-    back `MaxIter` where the refactor path solves it in nine pivots. An active
-    pin that has drifted more than `feas_tol` since it entered the working set
-    now gets that drift as its right-hand side, so the next step undoes it;
-    pins within tolerance are untouched. This was the stall behind the
-    "polish" step the first fix carried, which is gone.
+    back `MaxIter` where the refactor path solves it in nine pivots. In the
+    l1-elastic phase-1 solve, an active pin that has drifted more than
+    `feas_tol` (scaled like its own round-off) since it entered the working
+    set now gets that drift as its right-hand side, so the next step undoes
+    it; pins within tolerance, and every other Schur solve, are untouched.
+    Applied to all Schur solves it lost Maros-Meszaros `QSHARE2B`. This was
+    the stall behind the "polish" step the first fix carried, which is gone.
 
   * **A false `Optimal` on an exactly duplicated equality row, through the
     active-set SQP.** Every cold route detected a dependent equality row only
