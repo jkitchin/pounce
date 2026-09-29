@@ -2910,8 +2910,8 @@ fn issue_971_inconsistent_dependent_equality_is_not_pruned_to_optimal() {
 // took `α = 5195` along the δ-shifted, near-flat direction. The slack ended at
 // `−6.6e-8`, phase-1 reported `Optimal` at a point `is_feasible` rejected, and
 // the solve came back `MaxIter` with `|Ax − b| = 6.6e-8`. The refactor path
-// solves the same QP `Optimal` to 1e-16. An extended step is now taken only
-// from a fresh factor.
+// solves the same QP `Optimal` to 1e-16. The Schur loop now repairs an active
+// pin that has drifted past `feas_tol`.
 #[test]
 fn issue_971_schur_path_keeps_active_bounds_pinned() {
     let v = [

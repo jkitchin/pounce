@@ -1950,8 +1950,8 @@ impl ParametricActiveSetSolver {
     ///
     /// #973 also carried a warm "polish" for when the reduced elastic solve
     /// stalled at `MaxIter` while the full-row one landed. The stall was a
-    /// Schur-path defect — an amplified step taken on a factor with pending
-    /// SMW updates, fixed in `solve_general_schur` — and with it fixed the
+    /// Schur-path defect — an active pin driven past `feas_tol` by an
+    /// amplified step, repaired in `solve_general_schur` — and with it fixed the
     /// polish was reached by none of the issue generator's 200 seeds, so it is
     /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
@@ -2926,6 +2926,9 @@ impl ParametricActiveSetSolver {
         // error, so a point that is not really optimal is demoted, not
         // believed — and it is strictly better than spending the whole budget
         // re-deriving the same step.
+        // Residual of each active slot when it entered the working set; see
+        // the pin repair at the top of the loop.
+        let mut frozen_resid: Vec<Option<Number>> = vec![None; m_total];
         let mut prev_p_inf = Number::INFINITY;
         let mut prev_was_null_step = false;
         let mut floor_refactored = false;
@@ -2942,6 +2945,61 @@ impl ParametricActiveSetSolver {
             let mut rhs = vec![0.0; n + m_total];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
+            }
+            // Pin repair. Each active slot's right-hand side is zero unless its
+            // residual has drifted more than `feas_tol` from the value it had
+            // when the slot entered the working set; then it is that drift, so
+            // the next step undoes it. A pin that is still within tolerance is
+            // left exactly as before, so a working set that does not drift
+            // sees the old arithmetic bit for bit.
+            //
+            // gh#971: an l1-elastic slack active at 0 carried the SMW solve's
+            // pin-row error (`p = −1.26e-11`) after five rank-2 updates, the
+            // model step cap took `α = 5195` along a near-flat δ-shifted
+            // direction (gh#416), and the slack landed at `−6.6e-8` — below its
+            // own bound, where the zero-RHS loop never moved it back. Phase-1
+            // reported `Optimal` at a point the elastic feasibility check
+            // rejected, and a full-rank two-row QP came back `MaxIter` that the
+            // refactor path solves in nine pivots.
+            //
+            // Why only past `feas_tol`: a drift below it is invisible to every
+            // feasibility check the engine and its callers make, and correcting
+            // it anyway was measured to cost more than it buys. The same
+            // correction applied to every slot turned Maros-Meszaros
+            // `CVXQP3_S` from `Optimal` into a hard singular-KKT error under
+            // `qp-active-set`; refactoring before every amplified step instead
+            // (which re-chooses the inertia shift, so it changes the direction
+            // and not just its accuracy) took gh#974's generator from 4 failures
+            // in 400 to 18. Zeroing pinned `p_j`, or correcting bounds only,
+            // broke gh#958 at objective scale 100.
+            {
+                let ax_w = a_times_x(qp.a, &x, m);
+                let gate = |slot: &mut Option<Number>, r: Number| -> Number {
+                    let d = r - *slot.get_or_insert(r);
+                    if d.abs() > opts.feas_tol { d } else { 0.0 }
+                };
+                for i in 0..m {
+                    let target = match working.constraints[i] {
+                        ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+                        ConsStatus::AtUpper => qp.bu[i],
+                        ConsStatus::Inactive => {
+                            frozen_resid[i] = None;
+                            continue;
+                        }
+                    };
+                    rhs[n + i] = gate(&mut frozen_resid[i], target - ax_w[i]);
+                }
+                for j in 0..n {
+                    let target = match working.bounds[j] {
+                        BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[j],
+                        BoundStatus::AtUpper => qp.xu[j],
+                        BoundStatus::Inactive => {
+                            frozen_resid[m + j] = None;
+                            continue;
+                        }
+                    };
+                    rhs[n + m + j] = gate(&mut frozen_resid[m + j], target - x[j]);
+                }
             }
             // A singular Schur complement is a normal event in SMW updating,
             // not a solver breakdown: the accumulated rank-2 updates can leave
@@ -3261,30 +3319,6 @@ impl ParametricActiveSetSolver {
                 // NaN ratio ever gets here. Clamping beats propagating a
                 // non-finite iterate.
                 alpha = 1.0;
-            }
-            // An extended step (`α > 1`, the model-step-cap extension of a
-            // δ-shifted direction, gh#416) multiplies whatever error `p`
-            // carries by `α`. On a factor with pending rank-2 updates that
-            // error includes the SMW solve's residual on the pin rows, which
-            // the refactor path does not have: gh#971's elastic slack, active
-            // at 0, carried `p = −1.26e-11` after five updates, the cap took
-            // `α = 5195`, and the slack landed at `−6.6e-8` — below its own
-            // bound, where the zero-RHS loop never moves it back — so phase-1
-            // ended `MaxIter` on a full-rank two-row QP the refactor path
-            // solves in nine pivots. Take an amplified step only from a fresh
-            // factor: refactor and recompute. After the reset there are no
-            // pending updates, so this fires at most once per step.
-            if alpha > 1.0 && schur.n_schur_updates() > 0 {
-                self.schur_reset_rank_repaired(
-                    &mut schur,
-                    qp,
-                    &mut working,
-                    opts,
-                    &mut n_changes,
-                    &mut rank_repair_budget,
-                )?;
-                n_refactor += 1;
-                continue;
             }
             if trace && blocker.is_none() {
                 eprintln!(

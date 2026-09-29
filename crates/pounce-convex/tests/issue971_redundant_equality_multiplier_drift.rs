@@ -274,8 +274,8 @@ fn seed_155_redundant_row_is_solved_with_bounded_multipliers() {
 /// direction, and the slack landed at `−6.6e-8`. Phase-1 ended `MaxIter`, the
 /// consistency gate refused it, and the full-row fallback returned `Optimal`
 /// with `λ = (1e6, 1e6, −1e6)` — the same ±1e6 shadow prices under a status
-/// the issue's count never flagged. An amplified step is now taken only from
-/// a fresh factor, so the pruned solve is decisive here. Engine-level pin:
+/// the issue's count never flagged. The Schur loop now repairs an active pin
+/// that has drifted past `feas_tol`, so the pruned solve is decisive here. Engine-level pin:
 /// `pounce-qp`'s `issue_971_schur_path_keeps_active_bounds_pinned`.
 /// Oracle: the same engine on the two independent rows.
 #[test]

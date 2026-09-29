@@ -139,16 +139,18 @@ changes.
 
   Two further defects surfaced while measuring it:
 
-  * **The Schur-update path took amplified steps on a stale factor.** The
-    model step cap extends a δ-shifted step by `α ≫ 1` (gh#416), which
-    multiplies whatever error the step carries — and on a factor with pending
-    SMW updates that includes the solve's residual on the rows pinning active
-    bounds. An elastic slack pinned at 0 carried `−1.26e-11`, the cap took
-    `α = 5195`, and the slack ended at `−6.6e-8`, below its own bound, for
-    good: a full-rank two-row QP came back `MaxIter` where the refactor path
-    solves it in nine pivots. An extended step is now taken only from a fresh
-    factor. This was the stall behind the "polish" step the first fix carried,
-    which is gone.
+  * **The Schur-update path left an active bound violated.** The model step
+    cap extends a δ-shifted step by `α ≫ 1` (gh#416), which multiplies
+    whatever error the step carries — including the SMW solve's residual on
+    the rows pinning active bounds. An elastic slack pinned at 0 carried
+    `−1.26e-11`, the cap took `α = 5195`, and the slack ended at `−6.6e-8`,
+    below its own bound; the inner loop solved with a zero right-hand side on
+    active rows, so nothing ever moved it back, and a full-rank two-row QP came
+    back `MaxIter` where the refactor path solves it in nine pivots. An active
+    pin that has drifted more than `feas_tol` since it entered the working set
+    now gets that drift as its right-hand side, so the next step undoes it;
+    pins within tolerance are untouched. This was the stall behind the
+    "polish" step the first fix carried, which is gone.
 
   * **A false `Optimal` on an exactly duplicated equality row, through the
     active-set SQP.** Every cold route detected a dependent equality row only
