@@ -577,10 +577,30 @@ fn the_declared_frame_survives_a_point_outside_the_declared_box() {
     // Pinned so that a corrector which learns to act here fails
     // deliberately rather than silently — at which point the assertion
     // to add is against a re-solve, not against `improved()`.
+    //
+    // "Declines" is a residual that does not *materially* fall, not the
+    // strict `improved()`: the box-projected step's residual sits within
+    // round-off of the handed step's, so which side of `<` it lands on is
+    // the base point's last digits. gh#974 moved the crossover's base point
+    // by ~5e-9 (a permanent row the rank probe used to drop is now kept),
+    // and `improved()` flipped on a residual fall of 1.5e-11 in 0.4 — with
+    // the returned step bit-identical to before, 0.4500 from the truth
+    // against the plain step's 0.4514.
+    let fall = (rep.initial_residual - rep.residual) / rep.initial_residual;
     assert!(
-        !rep.improved(),
-        "measured: the corrector declines at this perturbation; if it now \
-         acts, check it against a re-solve before loosening this",
+        fall <= 1e-8,
+        "measured: the corrector declines at this perturbation (residual \
+         {:e} -> {:e}); if it now acts, check it against a re-solve before \
+         loosening this",
+        rep.initial_residual,
+        rep.residual,
+    );
+    // The property the decline protects (gh#764): whatever comes back is
+    // no further from the truth than the step it was handed.
+    let want_wide = truth(2.0, true, &base);
+    assert!(
+        dist(&add(&base, &out[..n]), &want_wide) <= dist(&add(&base, &step[..n]), &want_wide),
+        "the declined step must not move away from the truth",
     );
 
     // And the narrower perturbation still corrects at the same relaxed
