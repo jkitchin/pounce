@@ -38,6 +38,15 @@ use pounce_linsol::status::ESymSolverStatus;
 /// exposes a second row behind the first.
 const PIN_REPAIR_MAX_ROUNDS: usize = 3;
 
+/// Re-pin rounds for the drift repair in
+/// `ParametricActiveSetSolver::repin_and_resolve` (gh#974). EXPAND lets
+/// inactive rows drift by up to its τ, so a converged phase-2 can end with
+/// many entries a hair past their bounds; each projection that pins some of
+/// them nudges the rest. On `lp_degen2` the count went 16 → 10 → 1 over three
+/// rounds, one short of [`PIN_REPAIR_MAX_ROUNDS`]. Each round is one pinned
+/// factorization, against the elastic phase-1 the failure falls back to.
+const DRIFT_REPAIR_MAX_ROUNDS: usize = 8;
+
 /// Violated rows [`ParametricActiveSetSolver::repair_pinned_hint`] will always
 /// try to re-pin, however small the hint's active set. Beyond this floor the
 /// budget scales with the active set (a quarter of it): a hint wrong in a few
@@ -284,8 +293,20 @@ impl ParametricActiveSetSolver {
     /// hands over redundant equality rows — the saddle KKT is singular and
     /// the §4.5 H-shift cannot repair a rank-deficient *constraint* block.
     /// Linear-independence guard: prune the active set to a maximal
-    /// independent subset, retry once, and return the pruned working set so
-    /// the inner loop starts from a full-rank state. Dropped rows are linear
+    /// independent subset and retry, and return the pruned working set so
+    /// the inner loop starts from a full-rank state.
+    ///
+    /// The prune is a *loop* while the subset keeps shrinking, for the reason
+    /// `cold_general_initial` gives: the rank test's verdict depends on the
+    /// shift the factorization settled at, so the retry's own masked-deficiency
+    /// guard can reject a subset the first prune called independent. gh#974 is
+    /// that case on this path — the homotopy's `t = 1` handoff pinned 14 rows,
+    /// the prune kept 13, the retry found only 12 of those independent, and
+    /// the single-shot `?` surfaced a hard `LinearSolverFailure` that
+    /// `pounce-convex` reports as `numerical_failure` at iteration 0, on a
+    /// feasible QP whose only defect is one consistent redundant equality.
+    ///
+    /// Dropped rows are linear
     /// combinations of the kept ones, hence satisfied at the recovered primal
     /// — and they stay `Inactive` in the returned set, since the ratio test
     /// skips `bl == bu` rows so a dropped equality can never re-enter.
@@ -326,15 +347,27 @@ impl ParametricActiveSetSolver {
         ) {
             Ok(x) => Ok((x, working.clone())),
             Err(e) if e.is_recoverable_factorization_failure() => {
-                let (kc, kb) =
-                    independent_active_subset(&mut self.linsol, qp, &active_cons, &active_bounds);
-                if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
-                    // Full rank already — not a deficiency this repairs.
-                    return Err(e);
-                }
-                let kc_targets: Vec<Number> = kc.iter().map(|&i| cons_target(i)).collect();
-                let kb_targets: Vec<Number> = kb.iter().map(|&i| bound_target(i)).collect();
-                let x = self.factor_pinned_primal(qp, &kc, &kc_targets, &kb, &kb_targets, opts)?;
+                // Shrink until the pinned set factors. Terminates: every pass
+                // either factors, returns, or strictly shrinks `kc ∪ kb`.
+                let (mut kc, mut kb) = (active_cons.clone(), active_bounds.clone());
+                let mut err = e;
+                let x = loop {
+                    let (nc, nb) = independent_active_subset(&mut self.linsol, qp, &kc, &kb);
+                    if nc.len() == kc.len() && nb.len() == kb.len() {
+                        // Not shrinking: full rank already, or the rank test
+                        // disagrees with the factorization — not a deficiency
+                        // this repairs.
+                        return Err(err);
+                    }
+                    (kc, kb) = (nc, nb);
+                    let kc_targets: Vec<Number> = kc.iter().map(|&i| cons_target(i)).collect();
+                    let kb_targets: Vec<Number> = kb.iter().map(|&i| bound_target(i)).collect();
+                    match self.factor_pinned_primal(qp, &kc, &kc_targets, &kb, &kb_targets, opts) {
+                        Ok(x) => break x,
+                        Err(e) if e.is_recoverable_factorization_failure() => err = e,
+                        Err(e) => return Err(e),
+                    }
+                };
 
                 // Forward a pruned working set: dropped active rows /
                 // bounds revert to Inactive. A dropped row has `a·p = 0`
@@ -401,18 +434,19 @@ impl ParametricActiveSetSolver {
     ///     needs a *drop* the repair cannot choose without a ratio test, and
     ///     keeps the old path;
     ///   * the re-pin fails to factor, or does not reach feasibility within
-    ///     [`PIN_REPAIR_MAX_ROUNDS`].
+    ///     `max_rounds`.
     fn repair_pinned_hint(
         &mut self,
         qp: &QpProblem,
         x: &[Number],
         working: &WorkingSet,
         opts: &QpOptions,
+        max_rounds: usize,
     ) -> Option<(Vec<Number>, WorkingSet)> {
         let mut x_cur = x.to_vec();
         let mut w_cur = working.clone();
 
-        for _ in 0..PIN_REPAIR_MAX_ROUNDS {
+        for _ in 0..max_rounds {
             let (cons, bounds) = violated_inactive(qp, &x_cur, &w_cur, opts.feas_tol)?;
             if cons.is_empty() && bounds.is_empty() {
                 return Some((x_cur, w_cur));
@@ -625,7 +659,15 @@ impl ParametricActiveSetSolver {
 
             // §4.5 companion (gh #416): a δ-shifted direction is not
             // minimized by the unit step — see `model_step_cap`.
-            let mut alpha = model_step_cap(qp.h, qp.g, &hx, &p, delta);
+            let mut alpha = drift_step_cap(
+                qp,
+                &working,
+                &p,
+                &a_times_x(qp.a, &p, qp.m),
+                None,
+                model_step_cap(qp.h, qp.g, &hx, &p, delta),
+                opts.feas_tol,
+            );
             let mut blocker: Option<(usize, BoundStatus)> = None;
             for i in 0..n {
                 if working.bounds[i].is_active() {
@@ -887,7 +929,15 @@ impl ParametricActiveSetSolver {
             let p: Vec<Number> = rhs[..n].to_vec();
             // §4.5 companion (gh #416): a δ-shifted direction is not
             // minimized by the unit step — see `model_step_cap`.
-            let mut alpha = model_step_cap(qp.h, qp.g, &hx, &p, delta);
+            let mut alpha = drift_step_cap(
+                qp,
+                &working,
+                &p,
+                &a_times_x(qp.a, &p, qp.m),
+                None,
+                model_step_cap(qp.h, qp.g, &hx, &p, delta),
+                opts.feas_tol,
+            );
             let mut blocker: Option<(usize, BoundStatus)> = None;
             for i in 0..n {
                 if working.bounds[i].is_active() {
@@ -1011,6 +1061,22 @@ impl ParametricActiveSetSolver {
                 Err(e) => return Err(e),
             };
 
+        // Refined recession-ray candidate, taken while the shifted factor is
+        // still the cached one (the rank probe below refactors). See the N1
+        // block further down for how it is used.
+        let refined_ray: Option<Vec<Number>> = if delta > 0.0 && opts.certify_recession_ray {
+            let mut r = vec![0.0; qp.n + qp.m];
+            for (ri, &xi) in r.iter_mut().zip(rhs[..qp.n].iter()) {
+                *ri = delta * xi;
+            }
+            self.linsol.resolve(&mut r).ok().map(|()| {
+                r.truncate(qp.n);
+                r
+            })
+        } else {
+            None
+        };
+
         // Masked-rank-deficiency guard (companion to the one in
         // `factor_pinned_primal`). A large enough δ can grow the H
         // diagonal until the backend stops flagging the singular
@@ -1094,10 +1160,26 @@ impl ParametricActiveSetSolver {
                 false
             };
 
-            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x, &x) {
-                // The witness direction on this path IS the blown-up
-                // iterate `x` (see the `d = x/‖x‖` argument above).
-                let ray = x.clone();
+            // The candidate is not `x` itself but one refinement step past it,
+            // `d = δ(K + δI)⁻¹ [x; 0]` on the same shifted factor (gh#974).
+            // `x = x_null + x_range`, and the shifted solve leaves `x_range`
+            // at O(1) while `x_null` grows like `1/δ`, so `x/‖x‖` still
+            // carries an O(δ) range component — and `‖Hd‖∞` is measured on
+            // exactly that component. At the δ = 1e-8 the shift loop lands on
+            // first it read 8.8e-10 against a `1e-10·‖H‖` floor of 2.7e-10 on
+            // a rank-1 `H` with no rows: a genuine recession ray, `dᵀHd ≈
+            // 1e-16`, rejected — and the unbounded QP returned `Optimal` at
+            // `‖x‖ = 5.5e8` with `‖Hx + g‖ = δ‖x‖ ≈ 5.5`. That was the
+            // homotopy's box relaxation on seed 136 of the issue's generator,
+            // and the path it started from there never recovered. The
+            // refinement multiplies each range eigencomponent by a further
+            // `δ/(λ + δ)` and keeps the null component, and `A d = 0` holds
+            // exactly because it is a constraint of the solve. It does not turn
+            // a curved direction into a ray: on `H = diag(1e-6, 0)`, `g =
+            // (−1, 0)` the refined `d` is still `e₁`, where `‖Hd‖∞ = 1e-6·‖H‖`.
+            let ray_dir = refined_ray.as_deref().unwrap_or(&x);
+            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x, ray_dir) {
+                let ray = ray_dir.to_vec();
                 return Ok(QpSolution {
                     x,
                     lambda_g,
@@ -1524,7 +1606,15 @@ impl ParametricActiveSetSolver {
             // §4.5 companion: a δ-shifted direction is not minimized by
             // the unit step (see `model_step_cap`), so let the ratio test
             // run out to the model's own minimizer along `p`.
-            let alpha_cap = model_step_cap(qp.h, qp.g, &hx, &p, delta);
+            let alpha_cap = drift_step_cap(
+                qp,
+                &working,
+                &p,
+                &a_times_x(qp.a, &p, qp.m),
+                None,
+                model_step_cap(qp.h, qp.g, &hx, &p, delta),
+                opts.feas_tol,
+            );
 
             let (mut alpha, blocker) =
                 select_blocker(&candidates, opts, expand_tol, force_bland, alpha_cap);
@@ -1875,6 +1965,18 @@ impl ParametricActiveSetSolver {
         {
             return Ok(sol);
         }
+        // Cheapest repair first: move the point back onto the working set it
+        // converged on (gh#974). The loop steps with a zero right-hand side, so
+        // round-off and EXPAND's deliberate overshoot (up to its τ per step)
+        // accumulate: NETLIB `SHARE1B` phase-2 from a feasible simplex vertex
+        // reached the right objective, `−76589.3186`, at 1.8e-6 of violation
+        // built up over 180 steps. Sending that to elastic cost several solves
+        // and ended in a false `Unbounded` further away (5.5e3). `solve_general*`
+        // bypass this audit, so this cannot recurse, and a repair that does not
+        // land feasible and `Optimal` falls through to elastic exactly as before.
+        if let Some(repaired) = self.repin_and_resolve(qp, &sol, opts)? {
+            return Ok(repaired);
+        }
         // Never-regress on the recovery. Elastic phase-1 is a *repair* for a
         // solve that converged to a constraint-violating point, but it is not
         // guaranteed to land somewhere better, and when it does not the
@@ -1921,6 +2023,141 @@ impl ParametricActiveSetSolver {
         let mut kept = sol;
         kept.status = QpStatus::MaxIter;
         Ok(kept)
+    }
+
+    /// `x`, moved the least distance that puts the working set's own rows and
+    /// bounds exactly on their targets — or `None` when they already are, or
+    /// when that move would leave any other row or bound further out than `x`
+    /// already is (gh#974).
+    ///
+    /// The Schur loop steps with a zero right-hand side on the active rows, so
+    /// every step's residual on them stays in the iterate, and the drift cap
+    /// (see [`drift_step_cap`]) deliberately lets it reach `feas_tol`. At an
+    /// optimum that residual multiplies the rows' multipliers in the
+    /// complementarity measure: on gh#974's generator seeds 7 and 66, active
+    /// rows 1e-9 off their bounds with multipliers of 10–60 left
+    /// complementarity at 6.5e-8 and 3.3e-8, and a correct optimum was
+    /// reported `optimal_inaccurate`. On Maros-Meszaros `QSCFXM1` the same
+    /// drift fed the rest of the solve: unpolished, every attempt ends at the
+    /// cycle guard with complementarity 4e-5 (`MaxIter`, 195 s); polished, the
+    /// first attempt certifies `Optimal` in 67 s. The projection solves one pinned KKT with
+    /// `H = I`, so it moves `x` by no more than the residual; the caller takes
+    /// one more iteration from the moved point so the multipliers it reports
+    /// are the ones that belong to it (returning them unchanged left seed 7's
+    /// dual residual at 2.1e-7).
+    fn polish_onto_working_set(
+        &mut self,
+        qp: &QpProblem,
+        x: &[Number],
+        working: &WorkingSet,
+        opts: &QpOptions,
+    ) -> Option<Vec<Number>> {
+        let ax = a_times_x(qp.a, x, qp.m);
+        let mut resid: Number = 0.0;
+        for i in 0..qp.m {
+            let target = match working.constraints[i] {
+                ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+                ConsStatus::AtUpper => qp.bu[i],
+                ConsStatus::Inactive => continue,
+            };
+            resid = resid.max((ax[i] - target).abs());
+        }
+        for j in 0..qp.n {
+            let target = match working.bounds[j] {
+                BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[j],
+                BoundStatus::AtUpper => qp.xu[j],
+                BoundStatus::Inactive => continue,
+            };
+            resid = resid.max((x[j] - target).abs());
+        }
+        if resid <= 1e-3 * opts.feas_tol {
+            return None;
+        }
+        let (h_id, g_proj) = projection_objective(x);
+        let qp_proj = QpProblem {
+            h: &h_id,
+            g: &g_proj,
+            hessian_inertia: HessianInertia::Psd,
+            ..*qp
+        };
+        match self.pin_working_set(&qp_proj, working, opts) {
+            Ok((y, _)) if max_violation(qp, &y) <= max_violation(qp, x) => Some(y),
+            _ => None,
+        }
+    }
+
+    /// [`Self::audit_and_repair`]'s first recovery: project `sol.x` onto the
+    /// rows and bounds of `sol.working`, and if that point is feasible, re-solve
+    /// warm from it. `None` when that does not produce a feasible `Optimal`.
+    fn repin_and_resolve(
+        &mut self,
+        qp: &QpProblem,
+        sol: &QpSolution,
+        opts: &QpOptions,
+    ) -> Result<Option<QpSolution>, QpError> {
+        // Least-change correction, not a re-solve: `min ½‖y − x‖²` over the
+        // working set's rows, i.e. the pinned KKT with `H = I`, `g = −x`.
+        // Pinning with the problem's own `H` determines the point only at a
+        // vertex; on `lp_degen2` phase-2 stopped with 385 rows active for
+        // `n = 473`, `H = 0` left the pinned KKT singular, and the shift the
+        // factorization settled on put the "repaired" point 4.4e8 off.
+        let (h_id, g_proj) = projection_objective(&sol.x);
+        let qp_proj = QpProblem {
+            h: &h_id,
+            g: &g_proj,
+            hessian_inertia: HessianInertia::Psd,
+            ..*qp
+        };
+        let (x, working) = match self.pin_working_set(&qp_proj, &sol.working, opts) {
+            Ok(p) => p,
+            Err(QpError::DeadlineExpired) => return Err(QpError::DeadlineExpired),
+            Err(_) => return Ok(None),
+        };
+        // The projection makes the working set's rows exact; rows outside it
+        // that the drift pushed past their bound are still past it. Pin those
+        // too and project again — the same repair a warm-start hint gets, run
+        // on the projection problem.
+        //
+        // Both this and the acceptance below measure feasibility against each
+        // row's own scale (see `point_is_feasible_scaled`), not the absolute
+        // `feas_tol` that sent the point here. A row the rank prune dropped as
+        // dependent is satisfied only to the round-off of the combination that
+        // implies it, and that round-off grows with the terms that cancel:
+        // `lp_degen2`'s projected point sat 3.0e-9 off in absolute terms, which
+        // no amount of re-pinning moves, and phase-2 had already reached the
+        // optimum. Without this the point went to elastic and spent 600 s.
+        let (x, working) = if point_is_feasible_scaled(qp, &x, opts.feas_tol) {
+            (x, working)
+        } else {
+            match self.repair_pinned_hint(&qp_proj, &x, &working, opts, DRIFT_REPAIR_MAX_ROUNDS) {
+                Some(p) => p,
+                None => return Ok(None),
+            }
+        };
+        let ws = QpWarmStart {
+            x,
+            lambda_g: vec![0.0; qp.m],
+            lambda_x: vec![0.0; qp.n],
+            working,
+        };
+        let out = if opts.use_schur_updates {
+            self.solve_general_schur(qp, Some(&ws), opts)
+        } else {
+            self.solve_general(qp, Some(&ws), opts)
+        };
+        match out {
+            Ok(r)
+                if r.status == QpStatus::Optimal
+                    && point_is_feasible_scaled(qp, &r.x, opts.feas_tol) =>
+            {
+                let mut r = r;
+                r.stats.n_working_set_changes += sol.stats.n_working_set_changes;
+                r.stats.n_refactor += sol.stats.n_refactor;
+                Ok(Some(r))
+            }
+            Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
+            _ => Ok(None),
+        }
     }
 
     /// l1-elastic mode — §4.3, with **consistent redundant equality rows
@@ -2789,10 +3026,10 @@ impl ParametricActiveSetSolver {
     ///
     /// Each repair strictly shrinks the active set, so the inner loop
     /// terminates. `budget` additionally caps how many repairs one *solve* may
-    /// perform: the ratio test can re-admit a pruned row on a later iteration,
-    /// and without the refactor path's rank-tabu bookkeeping there is nothing
-    /// here to stop a prune/re-add cycle. Exhausting the budget surfaces the
-    /// original error instead of spinning.
+    /// perform: the ratio test can re-admit a pruned row on a later iteration.
+    /// Exhausting the budget surfaces the original error instead of spinning.
+    /// `pruned` is set whenever a repair drops anything, so the caller's pin
+    /// repair can re-freeze its reference residuals.
     fn schur_reset_rank_repaired(
         &mut self,
         schur: &mut crate::schur::SchurState,
@@ -2801,6 +3038,7 @@ impl ParametricActiveSetSolver {
         opts: &QpOptions,
         n_changes: &mut u32,
         budget: &mut u32,
+        pruned: &mut bool,
     ) -> Result<(), QpError> {
         loop {
             let ac = active_slot_count(working);
@@ -2828,6 +3066,7 @@ impl ParametricActiveSetSolver {
                         return Err(e);
                     }
                     *budget -= 1;
+                    *pruned = true;
                     let mut keep_c = vec![false; qp.m];
                     for &i in &kc {
                         keep_c[i] = true;
@@ -2854,11 +3093,45 @@ impl ParametricActiveSetSolver {
         }
     }
 
+    /// [`Self::solve_general_schur_inner`], never returning worse than the
+    /// optimum it reached before its polish (see the `Optimal` exit there).
+    ///
+    /// The polish moves `x` onto the working set and takes one more
+    /// iteration so the multipliers belong to the moved point. On most
+    /// problems that iteration is a null step and the residual only falls,
+    /// but it is a fresh factorization, and on an ill-conditioned `H` it can
+    /// come back worse: gh#958's QP at objective scale 100 (`‖H‖ ≈ 2.4e10`,
+    /// rank 2) went from a dual residual certified `Optimal` to 0.11. So the
+    /// pre-polish solution is kept aside, and whatever the polished run ends
+    /// in — a worse optimum, a limit, an error — it is what comes back.
     fn solve_general_schur(
         &mut self,
         qp: &QpProblem,
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        let mut pre_polish = None;
+        let res = self.solve_general_schur_inner(qp, ws, opts, &mut pre_polish);
+        let Some(mut pre) = pre_polish else {
+            return res;
+        };
+        if let Ok(sol) = &res {
+            if sol.status == QpStatus::Optimal
+                && active_kkt_residual(qp, sol) <= active_kkt_residual(qp, &pre)
+            {
+                return res;
+            }
+            pre.stats = sol.stats.clone();
+        }
+        Ok(pre)
+    }
+
+    fn solve_general_schur_inner(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+        pre_polish: &mut Option<QpSolution>,
     ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
@@ -2872,6 +3145,9 @@ impl ParametricActiveSetSolver {
         // see `schur_reset_rank_repaired` on why a cap is needed here and not
         // on the refactor path.
         let mut rank_repair_budget: u32 = (qp.n + qp.m).min(1000) as u32;
+        // Set by a rank repair; tells the pin repair to re-freeze its reference
+        // residuals (see there).
+        let mut pruned = false;
 
         let (mut x, mut working) = if let Some(w) = ws {
             (w.x.clone(), w.working.clone())
@@ -2899,6 +3175,7 @@ impl ParametricActiveSetSolver {
             opts,
             &mut n_changes,
             &mut rank_repair_budget,
+            &mut pruned,
         )?;
         n_refactor += 1;
 
@@ -2944,6 +3221,17 @@ impl ParametricActiveSetSolver {
         /// of halving it means the step accomplished nothing.
         const NULL_STEP_GAIN: Number = 0.5;
 
+        // Cycle guard (gh#974). While the objective does not move, record each
+        // working set the loop passes through; the loop is deterministic in
+        // the working set and `x`, so meeting the same set again at the same
+        // point means it is going round a cycle, and the remaining budget
+        // cannot change that. In the convex feasibility phase-1 of
+        // Maros-Meszaros `QSCFXM1` four pivots at `α = 0` — drop 647, drop
+        // 644, add 647, add 644 — repeated 1740 times, twice, spending both
+        // passes' full 6960-iteration budgets to end `MaxIter` where they
+        // stood. Stopping reports the same `MaxIter` from the same point.
+        let mut streak_obj = Number::NAN;
+        let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -2980,6 +3268,20 @@ impl ParametricActiveSetSolver {
             // accuracy) took gh#974's hardest seeds from 8 failures to 18;
             // zeroing pinned `p_j`, or correcting bounds only, broke gh#958 at
             // objective scale 100.
+            //
+            // A rank repair re-freezes every reference (gh#974). The residuals
+            // were recorded against a working set that no longer exists, and a
+            // nonzero right-hand side on the kept rows gives the rows just
+            // pruned — combinations of them — a rate along the next direction
+            // that should have been zero, so the ratio test re-adds them at
+            // `α = 0` and the repair prunes them again. The Maros-Meszaros
+            // `QSCFXM1` phase-1 cycled that way on three rows (966–968 active
+            // for its 965 elastic variables) until the repair budget ran out
+            // and the solve surfaced a hard singular-KKT error.
+            if pruned {
+                pruned = false;
+                frozen_resid.iter_mut().for_each(|r| *r = None);
+            }
             {
                 let ax_w = a_times_x(qp.a, &x, m);
                 // Size of the terms that cancel in each row — the scale its
@@ -3050,6 +3352,7 @@ impl ParametricActiveSetSolver {
                     opts,
                     &mut n_changes,
                     &mut rank_repair_budget,
+                    &mut pruned,
                 )?;
                 n_refactor += 1;
                 // `solve` writes through `rhs`, so restore it before retrying.
@@ -3119,6 +3422,7 @@ impl ParametricActiveSetSolver {
                         opts,
                         &mut n_changes,
                         &mut rank_repair_budget,
+                        &mut pruned,
                     )?;
                     n_refactor += 1;
                     prev_was_null_step = false;
@@ -3193,6 +3497,7 @@ impl ParametricActiveSetSolver {
                             opts,
                             &mut n_changes,
                             &mut rank_repair_budget,
+                            &mut pruned,
                         )?;
                         n_refactor += 1;
                     }
@@ -3206,6 +3511,7 @@ impl ParametricActiveSetSolver {
                             opts,
                             &mut n_changes,
                             &mut rank_repair_budget,
+                            &mut pruned,
                         )?;
                         n_refactor += 1;
                     }
@@ -3231,7 +3537,7 @@ impl ParametricActiveSetSolver {
                     }
                 }
 
-                return Ok(QpSolution {
+                let sol = QpSolution {
                     obj: quad_objective(qp, &x),
                     x,
                     lambda_g,
@@ -3247,7 +3553,33 @@ impl ParametricActiveSetSolver {
                         ..Default::default()
                     },
                     unbounded_ray: None,
-                });
+                };
+                // Once per solve: land the active rows exactly and take one
+                // more iteration there, so the multipliers match the point.
+                // The caller keeps `sol` in case that comes back worse.
+                if pre_polish.is_none() {
+                    if let Some(y) = self.polish_onto_working_set(qp, &sol.x, &sol.working, opts) {
+                        x = y;
+                        working = sol.working.clone();
+                        *pre_polish = Some(sol);
+                        // The projection factored on this solver's backend,
+                        // so the Schur state's base factor is gone.
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                            &mut pruned,
+                        )?;
+                        n_refactor += 1;
+                        prev_was_null_step = false;
+                        floor_refactored = false;
+                        continue;
+                    }
+                }
+                return Ok(sol);
             }
 
             // Ratio test — identical to solve_general but tracking
@@ -3291,6 +3623,15 @@ impl ParametricActiveSetSolver {
             // and rank-2 updates never touch the H block, so `schur.shift()`
             // is the δ that produced this `p`.
             let alpha_cap = model_step_cap(qp.h, qp.g, &hx, &p, schur.shift());
+            let alpha_cap = drift_step_cap(
+                qp,
+                &working,
+                &p,
+                &ap,
+                Some(&rhs_backup[n..]),
+                alpha_cap,
+                opts.feas_tol,
+            );
 
             let (mut alpha, blocker) =
                 select_blocker(&candidates, opts, expand_tol, false, alpha_cap);
@@ -3391,6 +3732,7 @@ impl ParametricActiveSetSolver {
                         opts,
                         &mut n_changes,
                         &mut rank_repair_budget,
+                        &mut pruned,
                     )?;
                     n_refactor += 1;
                 }
@@ -3404,6 +3746,7 @@ impl ParametricActiveSetSolver {
                         opts,
                         &mut n_changes,
                         &mut rank_repair_budget,
+                        &mut pruned,
                     )?;
                     n_refactor += 1;
                 }
@@ -3423,6 +3766,19 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
+            }
+
+            let obj_now = quad_objective(qp, &x);
+            if obj_now == streak_obj {
+                let key = working_set_key(&working);
+                let count = seen_sets.entry(key).or_insert(0);
+                *count += 1;
+                if *count >= CYCLE_REPEAT_LIMIT {
+                    break;
+                }
+            } else {
+                streak_obj = obj_now;
+                seen_sets.clear();
             }
 
             // Null-iteration bookkeeping. A blocker means the working set grew,
@@ -3468,6 +3824,26 @@ fn active_slot_count(working: &WorkingSet) -> usize {
 /// fraction of its original norm is judged linearly dependent
 /// (redundant) and dropped.
 const RANK_REL_TOL: Number = 1e-9;
+
+/// Times the Schur loop may meet the same working set, with the objective
+/// unchanged in between, before it stops as `MaxIter` (see the cycle guard in
+/// `solve_general_schur`). More than one because the Schur factor's update
+/// layer is part of the state too, and a refactor between visits can break a
+/// cycle that the working set alone would call closed.
+const CYCLE_REPEAT_LIMIT: u32 = 5;
+
+/// A hash of which rows and bounds `working` holds active, and on which side.
+fn working_set_key(working: &WorkingSet) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in &working.constraints {
+        std::mem::discriminant(c).hash(&mut h);
+    }
+    for b in &working.bounds {
+        std::mem::discriminant(b).hash(&mut h);
+    }
+    h.finish()
+}
 
 /// Rate threshold (relative to the step inf-norm) below which a
 /// rank-tabu'd row is treated as genuinely linearly dependent and
@@ -3632,6 +4008,205 @@ impl PrunedEqualities {
 /// rows are processed before variable bounds, so equality / general
 /// rows are preferred over bounds when a tie must be broken.
 pub(crate) fn independent_active_subset(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    let (kc, kb) = independent_active_subset_any(linsol, qp, active_cons, active_bounds);
+
+    // Permanent rows are pruned only for dependence on *each other* (gh#974).
+    //
+    // An equality row (`bl == bu`) or a fixed bound (`xl == xu`) that a prune
+    // drops is gone for good: every caller reverts it to `Inactive`, and the
+    // ratio test skips `bl == bu` rows, so nothing ever puts it back. That is
+    // only harmless when it is implied by the *other permanent* rows. Implied
+    // by the tight inequalities as well is not enough — those leave the
+    // working set, and the equality leaves with them. Which member of a
+    // dependent set the sparse probe flags is up to its LU pivoting, and at a
+    // degenerate vertex it flagged an equality: gh#974 seed 302, where a warm
+    // phase-2 started *feasible* dropped equality row 14, released the
+    // inequalities that had implied it, and returned `Optimal` with that row
+    // violated by 0.12 at an objective below the true optimum.
+    let permanent_c = |i: &usize| qp.bl[*i] == qp.bu[*i];
+    let permanent_b = |j: &usize| qp.xl[*j] == qp.xu[*j];
+    let mut kept_c = vec![false; qp.m];
+    kc.iter().for_each(|&i| kept_c[i] = true);
+    let mut kept_b = vec![false; qp.n];
+    kb.iter().for_each(|&j| kept_b[j] = true);
+    let dropped_permanent = active_cons.iter().any(|&i| permanent_c(&i) && !kept_c[i])
+        || active_bounds.iter().any(|&j| permanent_b(&j) && !kept_b[j]);
+    if !dropped_permanent {
+        return (kc, kb);
+    }
+    let perm_c: Vec<usize> = active_cons.iter().copied().filter(permanent_c).collect();
+    let perm_b: Vec<usize> = active_bounds.iter().copied().filter(permanent_b).collect();
+    let (pc, pb) = independent_active_subset_any(linsol, qp, &perm_c, &perm_b);
+    if pc.iter().all(|&i| kept_c[i]) && pb.iter().all(|&j| kept_b[j]) {
+        // Every permanent row the probe dropped was dependent on the kept
+        // permanent rows alone: the prune is sound as it stands.
+        return (kc, kb);
+    }
+    // Re-select with the independent permanent rows taking precedence — when
+    // that is affordable. The re-selection is dense in the active constraint
+    // rows, `O(k_c²n)`, and runs inside the homotopy's rank repair, which checks
+    // the deadline only between steps: on Maros-Meszaros `QSHELL` (`k_c` in the
+    // hundreds, `n = 1775`) it ran a 120 s `max_wall_time` past 180 s. Past the
+    // budget the probe's selection stands, as it did before this re-selection
+    // existed; the attempt ladder above this engine is what catches a solve
+    // that goes wrong from there.
+    let other_c: Vec<usize> = active_cons
+        .iter()
+        .copied()
+        .filter(|i| !permanent_c(i))
+        .collect();
+    let k_c = (pc.len() + other_c.len()) as Number;
+    if k_c * k_c * qp.n as Number > RESELECT_FLOP_BUDGET {
+        return (kc, kb);
+    }
+    let other_b: Vec<usize> = active_bounds
+        .iter()
+        .copied()
+        .filter(|j| !permanent_b(j))
+        .collect();
+    let (mut keep_c, mut keep_b) = independent_with_precedence(qp, &pc, &pb, &other_c, &other_b);
+    keep_c.sort_unstable();
+    keep_b.sort_unstable();
+    (keep_c, keep_b)
+}
+
+/// Largest `k_c²·n` for which [`independent_active_subset`] re-selects a
+/// prune that dropped a permanent row: about 50 ms of dense Gram-Schmidt. Every
+/// gh#974 generator seed (`n < 30`) and `HUES-MOD` (`k_c = 2`) fall inside it.
+const RESELECT_FLOP_BUDGET: Number = 5e7;
+
+/// Smallest `1 − ‖Qᵀe_j‖²` for which [`independent_with_precedence`] restores
+/// orthonormality with the rank-1 formula rather than afresh: its `(1 − s)^{-½}`
+/// amplifies round-off by about `1/(1 − s)`, so this keeps the basis orthogonal
+/// to ~1e-12.
+const RANK1_UPDATE_MIN: Number = 1e-4;
+
+/// Greedy modified Gram-Schmidt over `first_c`, `first_b`, `then_c`,
+/// `then_b`, in that order, keeping each normal independent of those kept
+/// before it — with a basis over the constraint rows alone, however many
+/// bounds are active.
+///
+/// Feeding every normal to dense MGS is `O(k²n)` in the *total* row count
+/// `k`, and a bound-heavy vertex makes `k ≈ n`: Maros-Meszaros `HUES-MOD`
+/// (`n = 10 000`, two dense equality rows, nearly every bound active) sat in
+/// it past a 120 s `max_wall_time` it never checks. A bound normal is a unit
+/// vector `e_j` and `qᵀe_j = q_j`, which is what makes it avoidable:
+///
+/// * a kept bound spans coordinate `j`, so every other normal is independent
+///   of it exactly when it is with column `j` zeroed — `first_b` is taken by
+///   zeroing columns before the constraint rows are orthogonalized, and a kept
+///   `then_b` bound zeroes its column in the basis (then re-orthonormalizes
+///   it) instead of being added to it;
+/// * a bound whose column is already zero in the basis is orthogonal to it,
+///   so independent, and keeping it changes nothing — the common case.
+///
+/// The basis never exceeds the constraint rows' rank `k_c`, so a bound costs
+/// `O(k_c n)`. Two drafts measured why both halves matter: re-orthonormalizing
+/// afresh for every kept bound is `O(k_c²n)` each and took `QSCFXM1` from 71 s
+/// to 270 s; adding each kept bound's residual to the basis instead lets it
+/// grow to `n` on `HUES-MOD`, whose dense rows put every column in the span.
+fn independent_with_precedence(
+    qp: &QpProblem,
+    first_c: &[usize],
+    first_b: &[usize],
+    then_c: &[usize],
+    then_b: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    let n = qp.n;
+    let mut zeroed = vec![false; n];
+    let mut keep_b = Vec::new();
+    for &j in first_b {
+        if !zeroed[j] {
+            zeroed[j] = true;
+            keep_b.push(j);
+        }
+    }
+    let mut pos_of_row: Vec<Option<usize>> = vec![None; qp.m];
+    for (pos, &i) in first_c.iter().chain(then_c).enumerate() {
+        pos_of_row[i] = Some(pos);
+    }
+    let mut normals = vec![vec![0.0; n]; first_c.len() + then_c.len()];
+    let (a_irows, a_jcols, a_vals) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+    for k in 0..a_irows.len() {
+        let col = (a_jcols[k] - 1) as usize;
+        if let Some(pos) = pos_of_row[(a_irows[k] - 1) as usize] {
+            if !zeroed[col] {
+                normals[pos][col] += a_vals[k];
+            }
+        }
+    }
+    let mut basis: Vec<Vec<Number>> = Vec::new();
+    let mut keep_c = Vec::new();
+    for (v, &i) in normals.iter_mut().zip(first_c.iter().chain(then_c)) {
+        if accept_if_independent(v, &mut basis) {
+            keep_c.push(i);
+        }
+    }
+    for &j in then_b {
+        if zeroed[j] {
+            continue;
+        }
+        // Column `j` already zero in the basis: `e_j` is orthogonal to it, so
+        // independent, and keeping it changes nothing. The common case.
+        if basis.iter().all(|q| q[j] == 0.0) {
+            zeroed[j] = true;
+            keep_b.push(j);
+            continue;
+        }
+        // The same two-pass residual test `accept_if_independent` applies.
+        let mut r = vec![0.0; n];
+        r[j] = 1.0;
+        let before = basis.len();
+        if !accept_if_independent(&mut r, &mut basis) {
+            continue;
+        }
+        basis.truncate(before);
+        zeroed[j] = true;
+        keep_b.push(j);
+        // Keep it by zeroing column `j` of the basis instead of adding to it.
+        // With `u = Qᵀe_j` the zeroed columns' Gram matrix is `I − uuᵀ`, and
+        // `(I − uuᵀ)^{-1/2} = I + c·uuᵀ` restores orthonormality in `O(k_c n)`
+        // — when `1 − ‖u‖²` is large enough to take the reciprocal square root
+        // of accurately. Below that, orthonormalize afresh.
+        let u: Vec<Number> = basis.iter().map(|q| q[j]).collect();
+        let s = dot(&u, &u);
+        for q in basis.iter_mut() {
+            q[j] = 0.0;
+        }
+        if 1.0 - s >= RANK1_UPDATE_MIN {
+            let c = (1.0 / (1.0 - s).sqrt() - 1.0) / s;
+            let mut w = vec![0.0; n];
+            for (q, &ul) in basis.iter().zip(&u) {
+                if ul != 0.0 {
+                    for (wi, &qi) in w.iter_mut().zip(q) {
+                        *wi += ul * qi;
+                    }
+                }
+            }
+            for (q, &ui) in basis.iter_mut().zip(&u) {
+                if ui != 0.0 {
+                    for (qi, &wi) in q.iter_mut().zip(&w) {
+                        *qi += c * ui * wi;
+                    }
+                }
+            }
+        } else {
+            for mut q in std::mem::take(&mut basis) {
+                accept_if_independent(&mut q, &mut basis);
+            }
+        }
+    }
+    (keep_c, keep_b)
+}
+
+/// [`independent_active_subset`] without the permanent-row precedence: which
+/// member of a dependent set is dropped is whatever the rank test prefers.
+fn independent_active_subset_any(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],
@@ -3949,7 +4524,17 @@ fn select_blocker(
             // below by `α_min_relaxed` so that even at a
             // degenerate vertex (true ratio = 0) we take a
             // strictly positive step of magnitude ≈ τ/|a·p|.
-            let tol = opts.feas_tol * (1.0 + alpha_min_relaxed.abs());
+            //
+            // `tol` is a window in *step length*, but what it has to bound is
+            // how far the step overshoots the rows it passes, and that is
+            // `tol·|a·p|` — so it is divided by the largest rate on offer
+            // (gh#974). The unscaled window assumed O(1) rates and is
+            // unchanged there. On the convex `SHARE1B` QP a refactor handed
+            // back rates of 4e15; the 1e-9 window then admitted a candidate
+            // whose ratio sat 6e-13 past the true minimum, and the step left
+            // row 86 violated by 2.4e3 and bound 68 by 4.7e4.
+            let rate_max = candidates.iter().fold(1.0_f64, |m, c| m.max(c.2));
+            let tol = opts.feas_tol * (1.0 + alpha_min_relaxed.abs()) / rate_max;
             let mut best: Option<(BlockerTarget, f64, f64)> = None;
             for &(target, r, ap_mag) in candidates {
                 let r_relaxed = if ap_mag > 0.0 {
@@ -4438,7 +5023,7 @@ impl ParametricActiveSetSolver {
         let (x_init, fwd_working) = if point_is_feasible(qp, &x_init, opts.feas_tol) {
             (x_init, fwd_working)
         } else {
-            self.repair_pinned_hint(qp, &x_init, &fwd_working, opts)
+            self.repair_pinned_hint(qp, &x_init, &fwd_working, opts, PIN_REPAIR_MAX_ROUNDS)
                 .unwrap_or((x_init, fwd_working))
         };
 
@@ -4829,6 +5414,143 @@ pub(crate) struct HintPinQuality {
     pub(crate) active: usize,
     /// Inactive rows plus bounds the pinned point violates beyond `feas_tol`.
     pub(crate) violated: usize,
+}
+
+/// `alpha_cap`, shortened so the working set's own rows do not drift past
+/// `feas_tol` along the step (gh#974).
+///
+/// The model cap lengthens a δ-shifted step by `α ≫ 1`, which multiplies the
+/// direction's residual on the active rows along with it — measured against
+/// `pin_rhs`, the right-hand side those rows were solved with (zero except in
+/// the Schur loop's phase-1 pin repair). On the convex `SHARE1B` QP a 5.8e-9 direction
+/// with `‖A_W p‖∞ = 4.2e-15` took `α = 6e8` and moved the active rows 2.5e-6
+/// off their bounds, leaving the objective unchanged to twelve digits.
+///
+/// It is a cap, not a refusal, and that is load-bearing: a refusal was tried
+/// and measured. Treating such a step as null stopped gh#971's model 1.2e-9 short of optimal (`α = 5195` on a pin
+/// carrying 1.26e-11, the drift the pin repair exists to undo), and stopped the
+/// active-set SQP on `eigena2` at 117.3 against an optimum of 82.5 with "search
+/// direction becoming too small". Capped, the step still makes progress. The
+/// unit step is never shortened: at `α ≤ 1` the drift is at most the solve's
+/// own accuracy, which every step carries.
+fn drift_step_cap(
+    qp: &QpProblem,
+    working: &WorkingSet,
+    p: &[Number],
+    ap: &[Number],
+    pin_rhs: Option<&[Number]>,
+    alpha_cap: Number,
+    feas_tol: Number,
+) -> Number {
+    if !(alpha_cap > 1.0) {
+        return alpha_cap;
+    }
+    let target = |slot: usize| pin_rhs.map_or(0.0, |r| r[slot]);
+    let mut drift: Number = 0.0;
+    for j in 0..qp.n {
+        if working.bounds[j].is_active() {
+            drift = drift.max((p[j] - target(qp.m + j)).abs());
+        }
+    }
+    for i in 0..qp.m {
+        if working.constraints[i].is_active() {
+            drift = drift.max((ap[i] - target(i)).abs());
+        }
+    }
+    if drift > 0.0 {
+        alpha_cap.min((feas_tol / drift).max(1.0))
+    } else {
+        alpha_cap
+    }
+}
+
+/// `H = I` and `g = −x`: the objective of `min ½‖y − x‖²`, for projecting `x`
+/// onto a working set through the ordinary pinned-KKT machinery.
+fn projection_objective(x: &[Number]) -> (SymTMatrix, Vec<Number>) {
+    let n = x.len();
+    let idx: Vec<Index> = (1..=n as Index).collect();
+    let mut h_id = SymTMatrix::new(SymTMatrixSpace::new(n as Index, idx.clone(), idx));
+    h_id.set_values(&vec![1.0; n]);
+    (h_id, x.iter().map(|v| -v).collect())
+}
+
+/// The KKT residual of `sol` as far as its working set decides it: the
+/// stationarity residual `‖Hx + g + Aᵀλ_g − λ_x‖∞`, and the largest `|λ r|`
+/// over active rows and bounds off their targets by `r` — the complementarity
+/// term `pounce-convex` measures. Only for ranking two optima of one problem
+/// (see [`ParametricActiveSetSolver::solve_general_schur`]).
+fn active_kkt_residual(qp: &QpProblem, sol: &QpSolution) -> Number {
+    let x = &sol.x;
+    let mut r = h_times_x(qp.h, x);
+    for (ri, (&gi, &lx)) in r.iter_mut().zip(qp.g.iter().zip(&sol.lambda_x)) {
+        *ri += gi - lx;
+    }
+    let irows = qp.a.irows();
+    let jcols = qp.a.jcols();
+    for (k, &v) in qp.a.values().iter().enumerate() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        r[j] += v * sol.lambda_g[i];
+    }
+    let mut worst = r.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let ax = a_times_x(qp.a, x, qp.m);
+    for i in 0..qp.m {
+        let target = match sol.working.constraints[i] {
+            ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+            ConsStatus::AtUpper => qp.bu[i],
+            ConsStatus::Inactive => continue,
+        };
+        worst = worst.max((sol.lambda_g[i] * (ax[i] - target)).abs());
+    }
+    for j in 0..qp.n {
+        let target = match sol.working.bounds[j] {
+            BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[j],
+            BoundStatus::AtUpper => qp.xu[j],
+            BoundStatus::Inactive => continue,
+        };
+        worst = worst.max((sol.lambda_x[j] * (x[j] - target)).abs());
+    }
+    worst
+}
+
+/// [`point_is_feasible`] with each row's tolerance scaled by the size of the
+/// terms that meet in it — `feas_tol · max(1, |bound|, Σ|aᵢⱼ xⱼ|)` — and each
+/// bound's by `max(1, |bound|)`. The same measure
+/// `PrunedEqualities::dropped_rows_hold` applies to the rows it drops, and for
+/// the same reason: a row satisfied only through cancellation carries the
+/// round-off of its largest term.
+fn point_is_feasible_scaled(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
+    let ax = a_times_x(qp.a, x, qp.m);
+    let mut mag = vec![0.0; qp.m];
+    let (ir, jc, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+    for k in 0..ir.len() {
+        mag[(ir[k] - 1) as usize] += (av[k] * x[(jc[k] - 1) as usize]).abs();
+    }
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF {
+            let tol = feas_tol * 1.0_f64.max(qp.bl[i].abs()).max(mag[i]);
+            if qp.bl[i] - ax[i] > tol {
+                return false;
+            }
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF {
+            let tol = feas_tol * 1.0_f64.max(qp.bu[i].abs()).max(mag[i]);
+            if ax[i] - qp.bu[i] > tol {
+                return false;
+            }
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF && qp.xl[i] - xi > feas_tol * 1.0_f64.max(qp.xl[i].abs())
+        {
+            return false;
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF && xi - qp.xu[i] > feas_tol * 1.0_f64.max(qp.xu[i].abs())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
@@ -5274,5 +5996,134 @@ mod select_blocker_tests {
             Some(BlockerTarget::Bound(0, BoundStatus::AtLower))
         ));
         assert!(alpha >= 0.5 && alpha <= 1.0, "α in range, got {alpha}");
+    }
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    //! [`independent_with_precedence`] against the dense ordered modified
+    //! Gram-Schmidt it replaces (gh#974): the same kept set, from a basis
+    //! over the constraint rows alone.
+    use super::{accept_if_independent, independent_with_precedence};
+    use crate::problem::{HessianInertia, QpProblem};
+    use pounce_common::{Index, Number};
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    /// Dense ordered MGS over every normal, bounds included.
+    fn reference(
+        rows: &[Vec<Number>],
+        n: usize,
+        order_c: &[usize],
+        order_b: &[usize],
+        then_c: &[usize],
+        then_b: &[usize],
+    ) -> (Vec<usize>, Vec<usize>) {
+        let mut basis = Vec::new();
+        let (mut kc, mut kb) = (Vec::new(), Vec::new());
+        let unit = |j: usize| {
+            let mut v = vec![0.0; n];
+            v[j] = 1.0;
+            v
+        };
+        for &i in order_c {
+            if accept_if_independent(&mut rows[i].clone(), &mut basis) {
+                kc.push(i);
+            }
+        }
+        for &j in order_b {
+            if accept_if_independent(&mut unit(j), &mut basis) {
+                kb.push(j);
+            }
+        }
+        for &i in then_c {
+            if accept_if_independent(&mut rows[i].clone(), &mut basis) {
+                kc.push(i);
+            }
+        }
+        for &j in then_b {
+            if accept_if_independent(&mut unit(j), &mut basis) {
+                kb.push(j);
+            }
+        }
+        (kc, kb)
+    }
+
+    #[test]
+    fn matches_dense_ordered_gram_schmidt() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |k: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % k
+        };
+        let mut dependent_cases = 0;
+        for _ in 0..300 {
+            let n = 3 + next(8) as usize;
+            let m = 1 + next(6) as usize;
+            let rows: Vec<Vec<Number>> = (0..m)
+                .map(|_| (0..n).map(|_| next(4) as Number - 1.0).collect())
+                .collect();
+            let (mut irows, mut jcols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, r) in rows.iter().enumerate() {
+                for (j, &v) in r.iter().enumerate() {
+                    if v != 0.0 {
+                        irows.push((i + 1) as Index);
+                        jcols.push((j + 1) as Index);
+                        vals.push(v);
+                    }
+                }
+            }
+            let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, n as Index, irows, jcols));
+            a.set_values(&vals);
+            let h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, vec![], vec![]));
+            let (g, bl, bu, xl, xu) = (
+                vec![0.0; n],
+                vec![0.0; m],
+                vec![0.0; m],
+                vec![0.0; n],
+                vec![0.0; n],
+            );
+            let qp = QpProblem {
+                n,
+                m,
+                h: &h,
+                g: &g,
+                a: &a,
+                bl: &bl,
+                bu: &bu,
+                xl: &xl,
+                xu: &xu,
+                hessian_inertia: HessianInertia::Psd,
+            };
+            // Split rows and a random set of bounds into a "first" and a
+            // "then" group; the first group is made independent the way the
+            // caller guarantees it, by running it through the reference.
+            let (mut c1, mut c2, mut b1, mut b2) = (vec![], vec![], vec![], vec![]);
+            for i in 0..m {
+                if next(3) == 0 { c1.push(i) } else { c2.push(i) }
+            }
+            for j in 0..n {
+                match next(4) {
+                    0 => b1.push(j),
+                    1 | 2 => b2.push(j),
+                    _ => {}
+                }
+            }
+            let (c1, b1) = reference(&rows, n, &c1, &b1, &[], &[]);
+            let want = reference(&rows, n, &c1, &b1, &c2, &b2);
+            let got = independent_with_precedence(&qp, &c1, &b1, &c2, &b2);
+            if want.0.len() + want.1.len() < c1.len() + b1.len() + c2.len() + b2.len() {
+                dependent_cases += 1;
+            }
+            assert_eq!(
+                got, want,
+                "n={n} m={m} rows={rows:?} c1={c1:?} b1={b1:?} c2={c2:?} b2={b2:?}"
+            );
+        }
+        assert!(
+            dependent_cases > 100,
+            "only {dependent_cases} cases had a dependence"
+        );
     }
 }

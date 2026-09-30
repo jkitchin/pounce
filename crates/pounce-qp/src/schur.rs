@@ -626,6 +626,20 @@ fn dot(a: &[Number], b: &[Number]) -> Number {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
+/// Relative pivot below which the Schur block is treated as singular.
+///
+/// An exact-zero test let a *numerically* singular block through (gh#974). On
+/// the convex `SHARE1B` QP, dropping one row left a zero-curvature direction;
+/// the refactor path would have met that with inertia control, but the update
+/// layer solved `S` with a smallest pivot of `6.3e-16` against `‖S‖max = 208`
+/// and returned `‖p‖∞ = 6e19`. The step that followed left rows violated by
+/// 8.6e4, and the solve ended `Unbounded` from there. Over the healthy
+/// iterations of the same solve the smallest pivot ratio was `3.3e-9`, so this
+/// sits four orders from either side. The error it returns says "singular",
+/// which is what makes it recoverable: the loop discards the update layer and
+/// refactors under inertia control.
+const SCHUR_PIVOT_REL: Number = 1e-13;
+
 /// In-place Gauss elimination with partial pivoting for a small
 /// dense matrix `s` of size `dim × dim` (row-major). Returns
 /// `S⁻¹ b`. For the Schur block (`dim ≤ max_schur_updates`, ≤ a
@@ -637,6 +651,7 @@ fn small_dense_lu_solve(
 ) -> Result<Vec<Number>, QpError> {
     let mut a = s_in.to_vec();
     let mut b = b_in.to_vec();
+    let smax = a.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
     // Gaussian elimination with partial pivoting.
     for k in 0..dim {
         // Find pivot.
@@ -649,7 +664,7 @@ fn small_dense_lu_solve(
                 piv = i;
             }
         }
-        if piv_mag == 0.0 {
+        if piv_mag <= SCHUR_PIVOT_REL * smax.max(1.0) {
             return Err(QpError::LinearSolverFailure(format!(
                 "Schur block is singular at column {k}"
             )));
