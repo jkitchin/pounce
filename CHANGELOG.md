@@ -143,12 +143,39 @@ changes.
   bound `|λᵢ| ≤ γ` stops it. `solve_elastic` now rank-reveals the equality rows
   and solves on an independent subset (dropped rows get `λ = 0`). That answer
   is accepted only if every dropped row holds at it, so a *contradictory*
-  dependent row still goes through the unpruned solve. Where the reduced solve
-  stalls and the full-row one lands, the full-row point seeds a warm phase-2
-  on the independent rows to recover the multipliers. Over the issue's
+  dependent row still goes through the unpruned solve. Over the issue's
   generator (200 seeds): before, 9 `optimal_inaccurate` and 105 more `optimal`
   with `|λ| ≈ 1e6`; after, 200/200 `optimal`, `|λ| < 1e3`, worst `|Ax − b|`
-  6.8e-10. Fixture sweep: 0 of 200 fixture-legs move.
+  6.8e-10.
+
+  Two further defects surfaced while measuring it:
+
+  * **The Schur-update path left an active bound violated.** The model step
+    cap extends a δ-shifted step by `α ≫ 1` (gh#416), which multiplies
+    whatever error the step carries — including the SMW solve's residual on
+    the rows pinning active bounds. An elastic slack pinned at 0 carried
+    `−1.26e-11`, the cap took `α = 5195`, and the slack ended at `−6.6e-8`,
+    below its own bound; the inner loop solved with a zero right-hand side on
+    active rows, so nothing ever moved it back, and a full-rank two-row QP came
+    back `MaxIter` where the refactor path solves it in nine pivots. In the
+    l1-elastic phase-1 solve, an active pin that has drifted more than
+    `feas_tol` (scaled like its own round-off) since it entered the working
+    set now gets that drift as its right-hand side, so the next step undoes
+    it; pins within tolerance, and every other Schur solve, are untouched.
+    Applied to all Schur solves it lost Maros-Meszaros `QSHARE2B`. This was
+    the stall behind the "polish" step the first fix carried, which is gone.
+
+  * **A false `Optimal` on an exactly duplicated equality row, through the
+    active-set SQP.** Every cold route detected a dependent equality row only
+    when the KKT factorization *failed*, and an exact duplicate need not make
+    it fail: the backend returned multipliers `±4.4e14` on the pair, whose sum
+    — the real multiplier, `0.404` — survives only to the `0.0625` resolution
+    of numbers that size. The step against them read as stationary at a point
+    that was not, and `algorithm=active-set-sqp` reported `Solve_Succeeded` at
+    `f = 0.739` against a true `0.556`. The cold entry now rank-reveals the
+    equality rows before any route runs (sparse probe only; a backend without
+    one keeps the old behaviour rather than pay a dense `O(k²n)` test on every
+    solve).
 
 - **`qp-active-set` reported an unbounded LP as `iteration_limit` after four
   iterations (gh#969).** On an unbounded LP with free variables — a recession

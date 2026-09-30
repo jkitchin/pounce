@@ -266,16 +266,20 @@ fn seed_155_redundant_row_is_solved_with_bounded_multipliers() {
     check(&SEED155, -0.2499623364970595, 155);
 }
 
-/// Seed 2 takes the *other* branch of the fix. The reduced (independent-row)
-/// elastic solve stalls at `MaxIter` with a slack a few `1e-8` below zero, so
-/// the full-row solve runs — and lands `Optimal` and feasible, but with
-/// `λ = (1e6, 1e6, −1e6)`. Before the fix that was returned as-is: `Optimal`,
-/// so the issue's status-based count never saw it, but the same ±1e6 shadow
-/// prices. Its feasible point now seeds a warm phase-2 on the independent rows.
-/// 105 of the generator's 200 seeds were in this `Optimal`-at-the-cap class.
+/// Seed 2 is the case that exposed a second, independent defect. The prune
+/// keeps rows 0 and 2, and the elastic solve on that *full-rank* pair used to
+/// stall in the Schur-update path: an elastic slack active at its bound
+/// carried the SMW solve's pin-row error (`−1.26e-11`) after five rank-2
+/// updates, the model step cap took `α = 5195` along a near-flat δ-shifted
+/// direction, and the slack landed at `−6.6e-8`. Phase-1 ended `MaxIter`, the
+/// consistency gate refused it, and the full-row fallback returned `Optimal`
+/// with `λ = (1e6, 1e6, −1e6)` — the same ±1e6 shadow prices under a status
+/// the issue's count never flagged. The Schur loop now repairs an active pin
+/// that has drifted past `feas_tol`, so the pruned solve is decisive here. Engine-level pin:
+/// `pounce-qp`'s `issue_971_schur_path_keeps_active_bounds_pinned`.
 /// Oracle: the same engine on the two independent rows.
 #[test]
-fn seed_2_full_row_fallback_is_polished_onto_the_independent_rows() {
+fn seed_2_pruned_solve_is_decisive_on_the_schur_path() {
     let sol = active_set(&problem(&SEED2, 3));
     let two = active_set(&problem(&SEED2, 2));
     assert_eq!(sol.status, QpStatus::Optimal);

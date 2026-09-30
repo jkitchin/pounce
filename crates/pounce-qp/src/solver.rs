@@ -125,12 +125,16 @@ pub struct ParametricActiveSetSolver {
     /// reuse the rank-repair helpers, which take the shared linear-solver
     /// backend rather than owning one.
     pub(crate) linsol: LinearSolver,
+    /// Set only while [`Self::solve_elastic_rows`] runs its phase-1 solve:
+    /// enables the Schur loop's pin repair (see `solve_general_schur`).
+    pin_repair: bool,
 }
 
 impl ParametricActiveSetSolver {
     pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
         Self {
             linsol: LinearSolver::new(backend),
+            pin_repair: false,
         }
     }
 
@@ -1948,24 +1952,39 @@ impl ParametricActiveSetSolver {
     /// solve runs exactly as before, and it — not this shortcut — owns the
     /// infeasibility verdict.
     ///
-    /// The reduced elastic solve is not guaranteed to converge where the
-    /// full-row one does (on 9 of the issue generator's 200 seeds it stalls
-    /// at `MaxIter` with a slack a few `1e-8` below zero, while the full-row
-    /// solve reaches a feasible point). So when the full-row solve is the one
-    /// that lands, its point — feasible for every row — seeds a warm phase-2
-    /// on the reduced rows, which is what puts the multipliers back on the
-    /// full-rank system. That polish is kept only when it is `Optimal` and
-    /// feasible for the *full* row set; otherwise the full-row answer stands.
+    /// #973 also carried a warm "polish" for when the reduced elastic solve
+    /// stalled at `MaxIter` while the full-row one landed. The stall was a
+    /// Schur-path defect — an active pin driven past `feas_tol` by an
+    /// amplified step, repaired in `solve_general_schur` — and with it fixed the
+    /// polish was reached by none of the issue generator's 200 seeds, so it is
+    /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows)? {
+            return Ok(sol);
+        }
+        self.solve_elastic_rows(qp, opts)
+    }
+
+    /// Run `inner` on `qp` with its linearly dependent equality rows taken
+    /// out, and hand the answer back in `qp`'s row space — or `Ok(None)` when
+    /// there is nothing to drop or the reduced answer cannot be trusted for
+    /// the full row set, in which case the caller runs `inner` on `qp` itself.
+    ///
+    /// "Trusted" is the consistency gate: an `Optimal` / `Unbounded` reduced
+    /// answer must satisfy every dropped row. `Infeasible` needs no check — a
+    /// subset of the rows admitting no point proves the full set admits
+    /// none — and a timeout claims nothing and must not start a second solve.
+    fn solve_pruned(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+        mut inner: impl FnMut(&mut Self, &QpProblem, &QpOptions) -> Result<QpSolution, QpError>,
+    ) -> Result<Option<QpSolution>, QpError> {
         let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
-            return self.solve_elastic_rows(qp, opts);
+            return Ok(None);
         };
         let qp_red = pruned.problem(qp);
-
-        let red = self.solve_elastic_rows(&qp_red, opts)?;
-        // `Infeasible` needs no consistency check: a subset of the rows
-        // admitting no point proves the full set admits none. A timeout
-        // claims nothing and must not start a second solve.
+        let red = inner(self, &qp_red, opts)?;
         let decisive = match red.status {
             QpStatus::Infeasible | QpStatus::TimeLimit => true,
             QpStatus::Optimal | QpStatus::Unbounded => {
@@ -1973,40 +1992,7 @@ impl ParametricActiveSetSolver {
             }
             _ => false,
         };
-        if decisive {
-            return Ok(pruned.expand(qp, red));
-        }
-
-        let full = self.solve_elastic_rows(qp, opts)?;
-        if full.status != QpStatus::Optimal || !point_is_feasible(qp, &full.x, opts.feas_tol) {
-            return Ok(full);
-        }
-        let ws = QpWarmStart {
-            x: full.x.clone(),
-            lambda_g: vec![0.0; qp_red.m],
-            lambda_x: vec![0.0; qp.n],
-            working: self.working_set_at(&qp_red, &full.x, opts.feas_tol),
-        };
-        let polish = if opts.use_schur_updates {
-            self.solve_general_schur(&qp_red, Some(&ws), opts)
-        } else {
-            self.solve_general(&qp_red, Some(&ws), opts)
-        };
-        match polish {
-            Ok(p)
-                if p.status == QpStatus::Optimal
-                    && point_is_feasible(qp, &p.x, opts.feas_tol)
-                    && pruned.dropped_rows_hold(qp, &p.x, opts.feas_tol) =>
-            {
-                let mut p = pruned.expand(qp, p);
-                p.stats.used_phase1 = true;
-                Ok(p)
-            }
-            Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
-            // A polish that fails is a polish not had: the full-row answer
-            // is feasible and optimal, only its multipliers are ugly.
-            _ => Ok(full),
-        }
+        Ok(decisive.then(|| pruned.expand(qp, red)))
     }
 
     /// l1-elastic mode — §4.3. Builds an
@@ -2073,11 +2059,14 @@ impl ParametricActiveSetSolver {
         // was also actively wrong: `sqp_qp_max_iter = 3` asks for a
         // bounded solve, and a phase-1 quietly spending 2000 is not that
         // (`sqp_qp_options_reach_the_active_set_engine` caught it).
+        let outer_pin_repair = std::mem::replace(&mut self.pin_repair, true);
         let sol_aug = if opts_p1.use_schur_updates {
-            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)?
+            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)
         } else {
-            self.solve_general(&qp_aug, Some(&ws), &opts_p1)?
+            self.solve_general(&qp_aug, Some(&ws), &opts_p1)
         };
+        self.pin_repair = outer_pin_repair;
+        let sol_aug = sol_aug?;
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -2944,6 +2933,10 @@ impl ParametricActiveSetSolver {
         // error, so a point that is not really optimal is demoted, not
         // believed — and it is strictly better than spending the whole budget
         // re-deriving the same step.
+        // Residual of each active slot when it entered the working set; see
+        // the pin repair at the top of the loop.
+        let mut frozen_resid: Vec<Option<Number>> = vec![None; m_total];
+        let pin_repair = self.pin_repair;
         let mut prev_p_inf = Number::INFINITY;
         let mut prev_was_null_step = false;
         let mut floor_refactored = false;
@@ -2960,6 +2953,76 @@ impl ParametricActiveSetSolver {
             let mut rhs = vec![0.0; n + m_total];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
+            }
+            // Pin repair, l1-elastic phase-1 only. Each active slot's
+            // right-hand side is zero unless its residual has drifted more than
+            // `feas_tol` (scaled like the quantity's own round-off) from the
+            // value it had when the slot entered the working set; then it is
+            // that drift, so the next step undoes it. Outside phase-1, and for
+            // every pin within tolerance, the old zero RHS stands bit for bit.
+            //
+            // gh#971: an elastic slack active at 0 carried the SMW solve's
+            // pin-row error (`p = −1.26e-11`) after five rank-2 updates, the
+            // model step cap took `α = 5195` along a near-flat δ-shifted
+            // direction (gh#416), and the slack landed at `−6.6e-8` — below its
+            // own bound, where the zero-RHS loop never moved it back. Phase-1
+            // reported `Optimal` at a point the elastic feasibility check
+            // rejected, and a full-rank two-row QP came back `MaxIter` that the
+            // refactor path solves in nine pivots.
+            //
+            // Why so narrow, on measurement. The same repair on every Schur
+            // solve lost Maros-Meszaros `QSHARE2B` (acceptable → hard error
+            // under `qp-active-set`): outside phase-1 some solves move their
+            // active constraints far beyond round-off, and pulling those back
+            // derails them. Applying it to every slot ungated lost `CVXQP3_S`;
+            // refactoring before every amplified step instead (which re-chooses
+            // the inertia shift, so it changes the direction and not just its
+            // accuracy) took gh#974's hardest seeds from 8 failures to 18;
+            // zeroing pinned `p_j`, or correcting bounds only, broke gh#958 at
+            // objective scale 100.
+            {
+                let ax_w = a_times_x(qp.a, &x, m);
+                // Size of the terms that cancel in each row — the scale its
+                // round-off lives on, and the one the consistency gate in
+                // `PrunedEqualities::dropped_rows_hold` already uses.
+                let mut row_mag = vec![0.0; m];
+                for k in 0..qp.a.irows().len() {
+                    let i = (qp.a.irows()[k] - 1) as usize;
+                    let j = (qp.a.jcols()[k] - 1) as usize;
+                    row_mag[i] += (qp.a.values()[k] * x[j]).abs();
+                }
+                let gate = |slot: &mut Option<Number>, r: Number, scale: Number| -> Number {
+                    let d = r - *slot.get_or_insert(r);
+                    if pin_repair && d.abs() > opts.feas_tol * scale {
+                        d
+                    } else {
+                        0.0
+                    }
+                };
+                for i in 0..m {
+                    let target = match working.constraints[i] {
+                        ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+                        ConsStatus::AtUpper => qp.bu[i],
+                        ConsStatus::Inactive => {
+                            frozen_resid[i] = None;
+                            continue;
+                        }
+                    };
+                    let scale = 1.0_f64.max(target.abs()).max(row_mag[i]);
+                    rhs[n + i] = gate(&mut frozen_resid[i], target - ax_w[i], scale);
+                }
+                for j in 0..n {
+                    let target = match working.bounds[j] {
+                        BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[j],
+                        BoundStatus::AtUpper => qp.xu[j],
+                        BoundStatus::Inactive => {
+                            frozen_resid[m + j] = None;
+                            continue;
+                        }
+                    };
+                    let scale = 1.0_f64.max(target.abs());
+                    rhs[n + m + j] = gate(&mut frozen_resid[m + j], target - x[j], scale);
+                }
             }
             // A singular Schur complement is a normal event in SMW updating,
             // not a solver breakdown: the accumulated rank-2 updates can leave
@@ -3442,6 +3505,16 @@ impl PrunedEqualities {
             .filter(|&i| qp.bl[i] == qp.bu[i] && qp.bl[i].is_finite())
             .collect();
         if eq_rows.len() < 2 {
+            return None;
+        }
+        // Sparse rank-reveal only. This now runs on *every* cold solve with
+        // two or more equality rows, not just after a factorization has
+        // failed, and the dense fallback in `independent_active_subset` is
+        // `O(k²·n)` modified Gram-Schmidt — on a backend without the sparse
+        // probe (MA57) and a Maros-Meszaros-sized equality block that is the
+        // whole solve budget. Without the probe, keep the pre-gh#971
+        // behaviour rather than pay that on every solve.
+        if !linsol.provides_degeneracy_detection() {
             return None;
         }
         let (kept, _) = independent_active_subset(linsol, qp, &eq_rows, &[]);
@@ -4068,6 +4141,28 @@ impl ParametricActiveSetSolver {
         if let Some(w) = ws {
             if !point_is_feasible(qp, &w.x, opts.feas_tol) {
                 return self.solve_elastic(qp, opts);
+            }
+        }
+
+        // Cold start with linearly dependent equality rows (gh#971). Every
+        // cold route below detects a rank-deficient equality block only when
+        // the KKT factorization *fails* on it, and an exactly duplicated row
+        // need not make it fail: the backend can count a round-off pivot
+        // toward the expected inertia and return a "solution" whose
+        // multipliers on the duplicate pair are `±4.4e14`. Their sum should be
+        // the true `0.404` but carries only the `0.0625` resolution of numbers
+        // that size, so the step computed against them is `≈ 0` at a point
+        // that is not stationary — and that point came back `Optimal` at
+        // `f = 0.739` against a true `0.556`, through the refactor path and
+        // the Schur path alike. It reached users as `Solve_Succeeded` from the
+        // active-set SQP, whose step QPs take this cold route with the
+        // homotopy off. So rank-reveal first rather than wait for a failure
+        // that may not come; the recursion is on a strictly smaller row set,
+        // and the full-row solve below still runs whenever the reduced answer
+        // is not decisive.
+        if ws.is_none() {
+            if let Some(sol) = self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o))? {
+                return Ok(sol);
             }
         }
 
