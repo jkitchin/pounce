@@ -375,6 +375,51 @@ where
         equilibrate: false,
         ..*opts
     };
+
+    // ---- An LP takes the simplex seed first (gh#974) ----
+    //
+    // For an LP the seeded route below — a simplex phase-1 vertex, then
+    // active-set phase-2 from it — *is* the simplex method, and it is the
+    // attempt this engine is good at. The homotopy is the wrong start for one:
+    // its `t = 0` problem is the box relaxation, which for an LP is either
+    // unbounded or made bounded by an artificial `δ` far from anything the
+    // rows allow. On NETLIB `DEGEN2` (`lp_degen2`, n = 473) the path took 60 s
+    // to hand over a point 10.6 infeasible, and every recovery after it —
+    // phase-2 to `MaxIter`, l1-elastic from cold, the feasibility passes —
+    // spent the full 8530-iteration budget; the first attempt alone ran past
+    // 1100 s. The seeded attempt solves it in 7.8 s. That route used to look
+    // cheap only because a hard error ended it at the handoff (the gh#974
+    // defect itself).
+    //
+    // Why only an LP: the ordering note on the last-resort stage below is
+    // about QPs (`QPCBOEI1`, where a seeded first attempt consumed the budget
+    // the Ruiz retry needed), and a QP's homotopy starts from a genuine
+    // box-relaxed minimizer. Nothing about a QP's route changes here.
+    let lp_seeded_first =
+        prob.p_lower.iter().all(|t| t.val == 0.0) && engine.use_homotopy != Some(false);
+    let mut lp_seeded = None;
+    if lp_seeded_first {
+        let seeded_engine = ActiveSetOverrides {
+            use_homotopy: Some(false),
+            ..*engine
+        };
+        let seeded = solve_translated(
+            prob,
+            &unscaled_opts,
+            &seeded_engine,
+            inertia,
+            make_backend,
+            FeasibilityProbe::Allowed,
+        );
+        if is_final(seeded.sol.status) {
+            return seeded;
+        }
+        if crate::deadline::expired() {
+            return timed_out(seeded);
+        }
+        lp_seeded = Some(seeded);
+    }
+
     let att = solve_translated(
         prob,
         &unscaled_opts,
@@ -383,14 +428,17 @@ where
         make_backend,
         FeasibilityProbe::Allowed,
     );
-    if is_conclusive(att.sol.status) {
-        return att;
+    let mut best = match lp_seeded {
+        Some(seeded) if outranks(&seeded.sol, &att.sol) => seeded,
+        _ => att,
+    };
+    if is_final(best.sol.status) {
+        return best;
     }
     if crate::deadline::expired() {
-        return timed_out(att);
+        return timed_out(best);
     }
 
-    let mut best = att;
     if opts.equilibrate {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
         let mut retry = solve_translated(
@@ -417,10 +465,10 @@ where
         // just re-earned its Farkas certificate against the *original* problem;
         // `DualInfeasible` does not, because its witness (the engine's ray) is not
         // available out here to re-check.
-        if is_solved(retry.sol.status) || retry.sol.status == QpStatus::PrimalInfeasible {
+        if outranks(&retry.sol, &best.sol) {
             best = retry;
         }
-        if is_conclusive(best.sol.status) {
+        if is_final(best.sol.status) {
             return best;
         }
         if crate::deadline::expired() {
@@ -452,7 +500,7 @@ where
     // timeout, because the seeded attempt consumed the budget the Ruiz retry
     // needed.) When the caller already asked for `use_homotopy=no`, the first
     // attempt was seeded and there is nothing new to try.
-    if engine.use_homotopy != Some(false) {
+    if engine.use_homotopy != Some(false) && !lp_seeded_first {
         if crate::deadline::expired() {
             return timed_out(best);
         }
@@ -468,12 +516,33 @@ where
             make_backend,
             FeasibilityProbe::Allowed,
         );
-        if is_solved(seeded.sol.status) || seeded.sol.status == QpStatus::PrimalInfeasible {
+        if outranks(&seeded.sol, &best.sol) {
             return seeded;
         }
     }
 
     best
+}
+
+/// Is this attempt's verdict one no later rung could improve on? Every
+/// [`is_conclusive`] verdict except `OptimalInaccurate`: that one is a usable
+/// answer, kept as the fallback, but the next rung can still certify the same
+/// point cleanly (gh#974 — on gh#958's QP at objective scale 100 the unscaled
+/// attempt ended inaccurate and the Ruiz retry, never reached, is `Optimal`).
+fn is_final(s: QpStatus) -> bool {
+    is_conclusive(s) && s != QpStatus::OptimalInaccurate
+}
+
+/// Does a later attempt's `new` replace the best-so-far `old`? The rule each
+/// rung used before — a solve or a certified `PrimalInfeasible` wins over a
+/// failure — plus `Optimal` over `OptimalInaccurate`, so an inaccurate best is
+/// only displaced by a strictly better verdict.
+fn outranks(new: &QpSolution, old: &QpSolution) -> bool {
+    let wins = is_solved(new.status) || new.status == QpStatus::PrimalInfeasible;
+    match old.status {
+        QpStatus::OptimalInaccurate => new.status == QpStatus::Optimal,
+        _ => wins,
+    }
 }
 
 /// [`crate::ipm::mark_timed_out`] over an [`Attempt`].
@@ -1005,10 +1074,12 @@ where
     }
     debug_trace(|| {
         format!(
-            "engine={:?} -> reported={:?} kkt_err={:.3e} obj={:.6e}",
+            "engine={:?} -> reported={:?} kkt_err={:.3e} [{:?}] p1={} obj={:.6e}",
             qsol.status,
             sol.status,
             sol.kkt_residuals(prob).kkt_error(),
+            sol.kkt_residuals(prob),
+            qsol.stats.used_phase1,
             sol.obj,
         )
     });

@@ -132,6 +132,89 @@ changes.
 
 ### Fixed
 
+- **`qp-active-set` failed feasible convex QPs carrying a consistent redundant
+  equality row, depending on row order (gh#974)**, and the defects that
+  failure had been hiding behind it. On the issue's generator (400 seeds, as
+  generated) every seed now solves to the IPM's objective — 8 failed on `main`
+  and 1 (seed 181) on #975's head — and the seeds pinned in the regression
+  test solve in all three row orders. Under
+  `solver_selection=qp-active-set`, five fixtures that ended `Internal_Error`
+  now solve: NETLIB `SHARE1B` (LP and QP), `ISRAEL`, `DEGEN2`, and
+  Maros-Meszaros `QSCFXM1`, where #975's head also reported the wrong
+  objective (`-200.6` against `1.6882691639e7`).
+
+  * *The issue's seed 388.* The homotopy's `t = 1` handoff pinned one row more
+    than the constraint block's rank; `pin_working_set` pruned once (14 → 13)
+    and its single-shot retry then found another dependence at the shift that
+    factorization settled at (13 → 12), surfacing a hard
+    `LinearSolverFailure`. It now keeps pruning while the subset shrinks,
+    as `cold_general_initial` already did. (#975 made the homotopy fall back
+    on that error; this removes the error.)
+  * *Seeds 136, 26.* The box relaxation came back `Optimal` at `‖x‖ ≈ 5e8`:
+    `solve_equality_only` tested a genuine recession ray with the raw
+    iterate, not the regularized solve's own direction, and rejected it.
+  * *Seeds 151, 153, 302.* A rank prune at a degenerate vertex dropped an
+    *equality* row (or fixed bound), which the ratio test then never
+    enforced. A prune that drops a permanent row independent of the other
+    permanent rows now re-selects with them ordered first. The re-selection
+    keeps bound normals implicit (they are unit vectors), so its cost is in
+    the active *constraint* rows only: done densely it sat past a 120 s
+    `max_wall_time` on Maros-Meszaros `HUES-MOD` (`n = 10 000`, nearly every
+    bound active) without ever checking it.
+  * *NETLIB.* A Schur block with smallest pivot `6.3e-16` was accepted
+    (`‖p‖∞ = 6e19`) — now refused below `1e-13` relative. EXPAND's
+    step-length window assumed O(1) rates and at `4e15` overshot rows by
+    4.7e4 — now divided by the largest rate. A lengthened step (`α = 6e8`)
+    carried the active rows' round-off 2.5e-6 off their bounds — the step is
+    now capped where that drift would reach `feas_tol`. The feasibility audit
+    sent a phase-2 optimum with 1.8e-6 of such drift straight to l1-elastic,
+    which ended in a false `Unbounded` — it now first projects back onto the
+    converged working set and re-solves warm. And an LP now takes the
+    simplex-seeded attempt first, since for an LP that is the simplex method.
+  * *`QSCFXM1`.* A rank-repair prune in l1-elastic phase-1 invalidated the
+    pins' frozen residuals, which are now re-frozen after it; and a
+    drop/add cycle at `α = 0` repeated one working set thousands of times —
+    the Schur loop now stops a zero-progress streak that revisits a working
+    set 5 times. That turned #975's wrong answer into the right objective at
+    `MaxIter`; the polish below turns it into `Optimal`, in 67 s.
+  * *Drift at the optimum.* The step cap lets active rows sit up to
+    `feas_tol` off their bounds, and at the optimum that times the
+    multipliers reads as complementarity: 6.5e-8 on seed 7, 4e-5 on
+    `QSCFXM1`. The Schur loop now projects once onto its working set at the
+    optimum and takes one more iteration there. The polished answer is kept
+    only if its active KKT residual is no worse; otherwise the unpolished
+    optimum is returned (on gh#958's QP at objective scale 100 the extra
+    iteration's factorization made the dual residual worse).
+  * *The attempt ladder stopped at `optimal_inaccurate`.* `pounce-convex`
+    treated an inaccurate answer as final, so the equilibrated and
+    simplex-seeded attempts that certify the same point `Optimal` never ran.
+    It is now the fallback, displaced only by an `Optimal` from a later
+    attempt. Either this or the polish clears seeds 7 and 66, which fail
+    with neither; with the polish in, this is what keeps gh#958's QP at
+    objective scale 100 `Optimal`.
+
+  Seed 237 (the issue's `iteration_limit`, macOS arm64) solves on x86-64 at
+  every commit, so it is pinned as a guard, not reproduced.
+
+  Fixture sweep against #975's head: 0 of 200 fixture-legs move at `auto`,
+  which never reaches this engine, so it was also run with
+  `solver_selection=qp-active-set`. There 10 fixtures move on both legs: the
+  five above go from `InternalError` (`NO_JSON` for `lp_degen2`) to
+  `SolveSucceeded` at the IPM's objective (`convex_qp_share1b` in 1711
+  iterations, `QSCFXM1` in 2121); `lp_afiro` 109 → 14 and
+  `issue745_netlib_problem` 96 → 18 iterations; and, the cost of seeding LPs
+  with the simplex attempt, `wyndor_max` / `wyndor_min` 1 → 4 and
+  `scaled_feasible_a` 1 → 5.
+
+  Maros-Meszaros (`benchmarks/qp`, 138 problems, `solver_selection=qp-active-set`,
+  `max_wall_time=120`), against #975's head: `Optimal` 47 → 76, acceptable
+  7 → 2, failed 84 → 60. Thirty problems improve and none regress; eight of
+  them were `Internal_Error` (`QSHARE1B`, `QSCSD1`, `QGROW7`, `QBRANDY`,
+  `QADLITTL`, `QBORE3D`, `QISRAEL`, `QSCAGR7`), and a ninth, `QSCSD6`, now
+  reports the time limit instead. On the 47 both solve,
+  total time is 227 s → 96 s, and none is more than twice as slow. `BOYD2`
+  overruns the 120 s limit at both commits.
+
 - **`qp-active-set` equality multipliers drifted to `±1e6` on a consistent
   redundant row (gh#971).** With one equality row a sum of two others, the
   engine returned `λ = (1e6, 1e6, −1e6)` — KKT-valid only through

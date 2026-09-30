@@ -228,10 +228,16 @@ fn an_infeasible_member_is_still_certified() {
 }
 
 /// A warm verdict that does not stand up is not reported, and the cold ladder
-/// owns the answer. `tol = 1e-300` is unreachable in double precision, so
-/// nothing can be certified and every attempt is rejected — the wiring under
-/// test is that a rejection *falls through* rather than reporting the
-/// unverified point.
+/// owns the answer. `tol = 1e-300` rejects every point that carries any
+/// round-off at all, so the warm verdict is rejected — the wiring under test
+/// is that a rejection *falls through* rather than reporting the unverified
+/// point.
+///
+/// The cold ladder is not bound by the same premise: its last rung starts
+/// from a simplex vertex, and on this two-variable QP it lands the optimum
+/// with a KKT residual of exactly `0.0`, which is `<= 1e-300` and certifies.
+/// So the check is that the reported answer *is* the cold ladder's, not that
+/// the cold ladder fails (it used to, and that was never the property).
 #[test]
 fn a_rejected_warm_verdict_falls_through_to_the_cold_ladder() {
     let mut s = session().with_presolve(false);
@@ -248,7 +254,7 @@ fn a_rejected_warm_verdict_falls_through_to_the_cold_ladder() {
     assert_eq!(s.stats().attempts_accepted(), 0);
     // Two cold solves: the first member, and the fallback for this one.
     assert_eq!(s.stats().cold_solves, 2);
-    // The reported answer is the cold ladder's, honest failure and all.
+    // The reported answer is the cold ladder's, whatever it is.
     let want = {
         let mut mk = backend;
         solve_qp_active_set(
@@ -261,8 +267,7 @@ fn a_rejected_warm_verdict_falls_through_to_the_cold_ladder() {
             &mut mk,
         )
     };
-    assert_eq!(got.status, want.status);
-    assert_ne!(got.status, QpStatus::Optimal);
+    assert_same_solution(&got, &want, "rejected warm verdict");
 }
 
 /// The variable-box screen runs on the warm path too. An empty box panicked the
