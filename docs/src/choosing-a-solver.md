@@ -7,9 +7,12 @@ reach for it, and how they fit together.
 ![POUNCE solver landscape](images/solver-landscape.svg)
 
 The one-sentence version: **convex and conic problems are solved to the global
-optimum; nonconvex problems are solved locally by default, or to a certified
-global optimum via the SOS (polynomial) and spatial branch-and-bound (general)
-paths.** Every solver, whatever its flavor, ultimately factorizes a symmetric
+optimum; nonconvex problems are solved locally, except polynomials, which the
+SOS / Lasserre path can solve to a certified global optimum.** There is no
+spatial branch-and-bound for general nonconvex models (see the note below and
+[Global Optimization](global-optimization.md)); for those, use a global
+orchestrator such as [discopt](https://github.com/jkitchin/discopt) that calls
+POUNCE as its local solver. Every solver, whatever its flavor, ultimately factorizes a symmetric
 KKT system through the shared `pounce-linsol` layer, which in turn drives a
 pluggable backend (FERAL by default, HSL MA57 optionally).
 
