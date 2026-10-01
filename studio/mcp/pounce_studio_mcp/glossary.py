@@ -31,10 +31,39 @@ COLUMNS: dict[str, dict[str, Any]] = {
         "see_also": [],
     },
     "inf_pr": {
-        "definition": "Primal infeasibility: max-norm of constraint violation c(x_k).",
+        "definition": (
+            "Primal infeasibility as the iteration table prints it: the max-norm "
+            "violation of the user's constraints at x_k (on restoration rows, of the "
+            "original NLP)."
+        ),
         "typical_range": "Drops monotonically toward `tol` (default 1e-8) at convergence.",
         "what_abnormal_means": "Stalling at large inf_pr → likely infeasible or restoration-stuck.",
         "see_also": ["wachter2006", "byrd2010"],
+    },
+    "inf_pr_internal": {
+        "definition": (
+            "The algorithm's internal primal residual ‖(c(x), d(x) − s)‖∞ in the scaled "
+            "slack form — what the filter and convergence test read. On restoration "
+            "rows, the restoration problem's own residual."
+        ),
+        "typical_range": "Tracks inf_pr; differs while a slack sits away from d(x) or when scaling is active.",
+        "what_abnormal_means": (
+            "Small inf_pr_internal beside a large inf_pr on restoration rows is normal: "
+            "the restoration slacks absorb the violation."
+        ),
+        "see_also": ["wachter2006"],
+    },
+    "phase": {
+        "definition": (
+            "`main` for a main-phase iteration, `restoration` for an inner restoration "
+            "iteration (the `r`-suffixed rows of the printed table)."
+        ),
+        "typical_range": "All `main` unless restoration ran.",
+        "what_abnormal_means": (
+            "Long `restoration` runs → the main phase could not reduce infeasibility; "
+            "see `restoration_used`."
+        ),
+        "see_also": ["wachter2006"],
     },
     "inf_du": {
         "definition": "Dual infeasibility: max-norm of the gradient of the Lagrangian.",
@@ -78,11 +107,14 @@ COLUMNS: dict[str, dict[str, Any]] = {
     "alpha_primal_char": {
         "definition": (
             "Single-character tag for what the line search did this iter: "
-            "`f` filter-accepted, `h` Armijo, `r` restoration, `s` second-order correction, "
-            "`R` restoration entry, `-` rejected."
+            "`f` filter-accepted, `h` Armijo, `s` second-order correction, "
+            "`R` restoration entry/exit, `-` rejected."
         ),
         "typical_range": "Mostly `f` on a healthy solve.",
-        "what_abnormal_means": "Runs of `r` are restoration windows; consecutive `R` entries = `restoration_loop`.",
+        "what_abnormal_means": (
+            "Rows with `phase` = `restoration` (printed `r`) are restoration windows; "
+            "repeated separate windows = `restoration_loop`."
+        ),
         "see_also": ["wachter2006"],
     },
     "ls_trials": {

@@ -21,10 +21,12 @@
 //!   fields and appends it to the active [`IterCaptureGuard`] slot,
 //!   which the application drains into the solve report.
 //!
-//! The collector skips events nested inside a `restoration` span, so
-//! the report captures only the outer solve's iterations (including
-//! `'R'`-marked outer iters) and not the restoration sub-solve's inner
-//! IPM iterations — matching the pre-tracing behavior exactly.
+//! Events nested inside a `restoration` span are the restoration
+//! sub-solve's inner IPM iterations — the console's `r`-suffixed rows.
+//! The collector keeps them, tagged [`IterPhase::Restoration`], so the
+//! captured trajectory reproduces the printed table line for line
+//! (gh#979; before that they were dropped and only the `'R'`-marked
+//! outer row recorded that restoration ran).
 //!
 //! ## Thread-scoped capture for embedders
 //!
@@ -41,7 +43,7 @@
 use std::cell::RefCell;
 
 use pounce_common::types::{Index, Number};
-use pounce_nlp::solve_statistics::IterRecord;
+use pounce_nlp::solve_statistics::{IterPhase, IterRecord};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
@@ -52,8 +54,8 @@ use tracing_subscriber::registry::LookupSpan;
 pub const ITER_TARGET: &str = "pounce::iteration";
 
 /// Span name whose presence in an event's ancestry marks the event as
-/// belonging to the restoration sub-solve. The collector uses it to
-/// exclude inner restoration iterations from the report.
+/// belonging to the restoration sub-solve. The collector tags such
+/// events [`IterPhase::Restoration`].
 pub const RESTORATION_SPAN: &str = "restoration";
 
 // ---- Per-solve capture slot ----
@@ -174,6 +176,7 @@ impl Visit for IterVisitor {
         match field.name() {
             "objective" => self.rec.objective = v,
             "inf_pr" => self.rec.inf_pr = v,
+            "inf_pr_internal" => self.rec.inf_pr_internal = v,
             "inf_du" => self.rec.inf_du = v,
             "mu" => self.rec.mu = v,
             "d_norm" => self.rec.d_norm = v,
@@ -205,8 +208,10 @@ impl Visit for IterVisitor {
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "alpha_char" {
-            self.rec.alpha_primal_char = value.chars().next().unwrap_or(' ');
+        match field.name() {
+            "alpha_char" => self.rec.alpha_primal_char = value.chars().next().unwrap_or(' '),
+            "phase" => self.rec.phase = IterPhase::from_name(value),
+            _ => {}
         }
     }
 
@@ -231,24 +236,23 @@ where
         if event.metadata().target() != ITER_TARGET {
             return;
         }
-        // Skip iterations belonging to a restoration sub-solve so the
-        // report keeps only the outer trajectory.
-        if let Some(scope) = ctx.event_scope(event) {
-            for span in scope.from_root() {
-                if span.name() == RESTORATION_SPAN {
-                    return;
-                }
-            }
-        }
         let mut visitor = IterVisitor::default();
         event.record(&mut visitor);
+        // An event under a `restoration` span is an inner restoration
+        // iteration even if its emitter did not say so in `phase`.
+        let under_restoration = ctx
+            .event_scope(event)
+            .is_some_and(|mut scope| scope.any(|span| span.name() == RESTORATION_SPAN));
+        if under_restoration {
+            visitor.rec.phase = IterPhase::Restoration;
+        }
         push_record(visitor.rec);
     }
 }
 
 /// Per-layer filter for [`IterCollectorLayer`]: admit spans (so the
 /// collector's `event_scope` can see the `restoration` ancestor for
-/// scoping) plus the iteration event itself.
+/// phase tagging) plus the iteration event itself.
 ///
 /// A per-layer filter is required so the collector does not force every
 /// callsite globally enabled; without admitting spans here the filtered
@@ -530,6 +534,7 @@ mod tests {
             alpha_primal: alpha,
             alpha_primal_char: c,
             ls_trials: 1,
+            ..IterRecord::default()
         }
     }
 
@@ -587,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn collector_excludes_restoration_nested_iterations() {
+    fn collector_tags_restoration_nested_iterations() {
         use tracing_subscriber::filter::filter_fn;
         use tracing_subscriber::prelude::*;
 
@@ -605,8 +610,8 @@ mod tests {
         // Same layer wiring as `install()`: the filter must admit spans
         // so the collector's `event_scope` can see the `restoration`
         // ancestor. Regression guard for the per-layer-filter bug where
-        // a `target`-only filter hid span ancestry and let inner
-        // restoration iterations leak into the report.
+        // a `target`-only filter hid span ancestry, so an inner
+        // restoration iteration would be reported as a main-phase row.
         let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let subscriber = tracing_subscriber::registry().with(collector);
 
@@ -617,17 +622,20 @@ mod tests {
                 let _resto = tracing::info_span!("restoration").entered();
                 let _inner_solve = tracing::info_span!("solve").entered();
                 let _inner_iter = tracing::info_span!("iteration").entered();
-                emit(99, 'R'); // inner restoration sub-solve -> excluded
+                emit(99, 'f'); // inner restoration sub-solve -> tagged
             }
             emit(1, ' '); // outer -> captured
             guard.finish()
         });
 
-        let iters: Vec<i32> = captured.iter().map(|r| r.iter).collect();
+        let rows: Vec<(i32, IterPhase)> = captured.iter().map(|r| (r.iter, r.phase)).collect();
         assert_eq!(
-            iters,
-            vec![0, 1],
-            "inner restoration iteration leaked: {iters:?}"
+            rows,
+            vec![
+                (0, IterPhase::Main),
+                (99, IterPhase::Restoration),
+                (1, IterPhase::Main)
+            ],
         );
     }
 
@@ -734,22 +742,43 @@ mod tests {
     }
 
     #[test]
-    fn with_iter_capture_excludes_restoration_subsolve() {
+    fn with_iter_capture_keeps_restoration_subsolve_rows_tagged() {
         let ((), records) = with_iter_capture(|| {
             emit_iter(0, ' ');
             {
                 let _resto = tracing::info_span!("restoration").entered();
                 let _inner_iter = tracing::info_span!("iteration").entered();
-                emit_iter(99, 'R');
+                emit_iter(99, 'f');
             }
             emit_iter(1, ' ');
         });
-        let iters: Vec<i32> = records.iter().map(|r| r.iter).collect();
+        let rows: Vec<(i32, IterPhase)> = records.iter().map(|r| (r.iter, r.phase)).collect();
         assert_eq!(
-            iters,
-            vec![0, 1],
-            "inner restoration iteration leaked: {iters:?}"
+            rows,
+            vec![
+                (0, IterPhase::Main),
+                (99, IterPhase::Restoration),
+                (1, IterPhase::Main)
+            ],
         );
+    }
+
+    #[test]
+    fn collector_reads_inf_pr_internal_and_phase_fields() {
+        let ((), records) = with_iter_capture(|| {
+            tracing::info!(
+                target: ITER_TARGET,
+                iter = 3_i64,
+                inf_pr = 0.94,
+                inf_pr_internal = 0.955,
+                alpha_char = "f",
+                phase = "restoration",
+            );
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].inf_pr, 0.94);
+        assert_eq!(records[0].inf_pr_internal, 0.955);
+        assert_eq!(records[0].phase, IterPhase::Restoration);
     }
 
     #[test]
@@ -797,7 +826,7 @@ mod tests {
         // This checks `IterRecord` field assignment, not the `Visit`
         // impl — constructing a real `tracing::field::Field` standalone
         // needs a callsite, so the visitor's record_* arms are covered
-        // end-to-end by `collector_excludes_restoration_nested_iterations`
+        // end-to-end by `collector_tags_restoration_nested_iterations`
         // (which emits real events and asserts the rebuilt `iter`s).
         let mut v = IterVisitor::default();
         v.rec.iter = 7;

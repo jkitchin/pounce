@@ -157,6 +157,11 @@ fn format_e(x: f64, precision: usize) -> String {
 pub struct RestoIterationOutputAdapter {
     pub inner: RestoIterationOutput,
     orig_nlp: Option<std::rc::Rc<std::cell::RefCell<dyn pounce_nlp::ipopt_nlp::IpoptNlp>>>,
+    /// `(iter, objective, inf_pr)` of the row `format_row` last printed,
+    /// handed to [`Self::printed_objective_inf_pr`] so the structured
+    /// event reports the printed numbers without evaluating the original
+    /// NLP a second time (gh#979). Taken on read, so it is one-shot.
+    last_printed: Option<(i32, f64, f64)>,
 }
 
 impl RestoIterationOutputAdapter {
@@ -164,6 +169,7 @@ impl RestoIterationOutputAdapter {
         Self {
             inner: RestoIterationOutput::new(),
             orig_nlp: None,
+            last_printed: None,
         }
     }
 
@@ -191,24 +197,12 @@ impl pounce_algorithm::output::r#trait::IterationOutput for RestoIterationOutput
         data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
         cq: &pounce_algorithm::ipopt_cq::IpoptCqHandle,
     ) -> String {
+        let (unscaled_f, inf_pr) = self.objective_inf_pr(data, cq);
         let d = data.borrow();
         let c = cq.borrow();
 
         let iter = d.iter_count;
-        // Resto-NLP fallbacks; overridden below when `orig_nlp` is
-        // wired so we report orig-NLP `f` and `inf_pr` at the
-        // `(x_orig, s)` slice of the resto iterate (upstream
-        // `IpRestoIterationOutput.cpp:106-156`).
-        let mut unscaled_f = c.curr_f();
-        let mut inf_pr = c.curr_primal_infeasibility_max();
-        if let Some(orig_rc) = &self.orig_nlp {
-            if let Some(curr) = d.curr.clone() {
-                if let Some((f_orig, viol_orig)) = eval_orig_at_inner_curr(&curr, orig_rc) {
-                    unscaled_f = f_orig;
-                    inf_pr = viol_orig;
-                }
-            }
-        }
+        self.last_printed = Some((iter, unscaled_f, inf_pr));
         let inf_du = c.curr_dual_infeasibility_max();
         let mu = d.curr_mu;
 
@@ -236,6 +230,43 @@ impl pounce_algorithm::output::r#trait::IterationOutput for RestoIterationOutput
             alpha_char,
             ls_count,
         )
+    }
+
+    fn printed_objective_inf_pr(
+        &mut self,
+        data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
+        cq: &pounce_algorithm::ipopt_cq::IpoptCqHandle,
+    ) -> Option<(f64, f64)> {
+        let iter = data.borrow().iter_count;
+        match self.last_printed.take() {
+            Some((it, f, pr)) if it == iter => Some((f, pr)),
+            _ => Some(self.objective_inf_pr(data, cq)),
+        }
+    }
+
+    fn is_restoration(&self) -> bool {
+        true
+    }
+}
+
+impl RestoIterationOutputAdapter {
+    /// The objective and `inf_pr` columns of a restoration row. Resto-NLP
+    /// fallbacks, overridden when `orig_nlp` is wired so the row reports
+    /// orig-NLP `f` and `inf_pr` at the `(x_orig, s)` slice of the resto
+    /// iterate (upstream `IpRestoIterationOutput.cpp:106-156`).
+    fn objective_inf_pr(
+        &self,
+        data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
+        cq: &pounce_algorithm::ipopt_cq::IpoptCqHandle,
+    ) -> (f64, f64) {
+        let d = data.borrow();
+        let c = cq.borrow();
+        if let (Some(orig_rc), Some(curr)) = (&self.orig_nlp, d.curr.as_ref()) {
+            if let Some(vals) = eval_orig_at_inner_curr(curr, orig_rc) {
+                return vals;
+            }
+        }
+        (c.curr_f(), c.curr_primal_infeasibility_max())
     }
 }
 

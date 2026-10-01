@@ -18,4 +18,23 @@ pub trait IterationOutput {
     fn format_row(&mut self, _data: &IpoptDataHandle, _cq: &IpoptCqHandle) -> String {
         String::new()
     }
+
+    /// The `(objective, inf_pr)` pair the row prints, for the structured
+    /// per-iteration event, so the solve report carries the console's
+    /// numbers rather than a neighbouring quantity (gh#979). `None` means
+    /// this output prints no such columns, and the caller falls back to
+    /// the algorithm's own `unscaled_curr_f` / internal infeasibility.
+    fn printed_objective_inf_pr(
+        &mut self,
+        _data: &IpoptDataHandle,
+        _cq: &IpoptCqHandle,
+    ) -> Option<(f64, f64)> {
+        None
+    }
+
+    /// Whether the rows this output prints belong to the restoration
+    /// phase (the `r`-suffixed rows). Tags the structured event.
+    fn is_restoration(&self) -> bool {
+        false
+    }
 }

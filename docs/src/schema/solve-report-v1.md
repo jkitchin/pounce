@@ -254,21 +254,29 @@ Per-iteration trajectory. Emitted only at `--json-detail full` (when
 `IpoptApplication::enable_iter_history()` was called). Omitted from
 JSON entirely when empty.
 
-Each row maps to one line of the upstream-formatted console iter
-table. Fields:
+Each row is one line of the console iteration table, in order, and
+carries the numbers that line prints — restoration-phase rows (the
+`r`-suffixed lines) included, tagged `"phase": "restoration"`. On those
+rows `objective` and `inf_pr` are the *original* problem's at the
+restoration iterate, exactly as printed; the remaining columns belong to
+the restoration sub-solve. A restoration row's `iter` continues the outer
+count, so the main-phase `R` row that leaves restoration repeats the last
+restoration row's index, as the console does (gh#979). Fields:
 
 | Field | Type | Notes |
 |---|---|---|
 | `iter` | integer | 0-based iteration index. |
-| `objective` | float | `f(x_k)` at the start of iter `k` (unscaled). |
-| `inf_pr` | float | Primal infeasibility `||c(x_k)||∞`. |
+| `phase` | string | `"main"` or `"restoration"`. Absent in reports from 0.12.x and earlier — read it as `"main"`. |
+| `objective` | float | `f(x_k)` at the start of iter `k` (unscaled), as printed. |
+| `inf_pr` | float | Primal infeasibility as printed in the `inf_pr` column: under the default `inf_pr_output=original`, the unscaled max-norm violation of the user's constraints. |
+| `inf_pr_internal` | float | The algorithm's internal residual `‖(c(x), d(x) − s)‖∞` in the scaled slack form — what the filter, the convergence test and the `intermediate` callback's `inf_pr` read. Differs from `inf_pr` while a slack sits off `d(x)` (e.g. 0.955 vs 0.94 at a start where `g = 2.44 > c_u = 1.5`); on restoration rows it is the restoration problem's own residual. |
 | `inf_du` | float | Dual infeasibility `||∇L_k||∞`. |
 | `mu` | float | Barrier parameter μ_k (not log10; consumers can take `log10` if they want the console format). |
 | `d_norm` | float | `||d_xs||∞` of the search step taken at iter `k-1` to land at iter `k`. `0.0` at iter 0. |
 | `regularization` | float | Hessian regularization `δ_w` applied this iter; `0.0` when none was needed. |
 | `alpha_dual` | float | Dual step length. |
 | `alpha_primal` | float | Primal step length. |
-| `alpha_primal_char` | string (1 char) | Single-character tag (`f`, `h`, `r`, etc.) matching the alpha-primal column of upstream's iter table. |
+| `alpha_primal_char` | string (1 char) | Single-character tag (`f`, `h`, `R`, etc.) matching the alpha-primal column of upstream's iter table. |
 | `ls_trials` | integer | Number of backtracking line-search trials this iter. |
 
 ### `linear_solver` (object, optional)
@@ -363,9 +371,10 @@ Levels map to verbosity in the same spirit as upstream's `print_level`
   },
   "statistics": { "iteration_count": 9, "final_dual_inf": 2.89e-14, "...": "..." },
   "iterations": [
-    { "iter": 0, "objective": 0.0451, "inf_pr": 5.0, "inf_du": 0.407, "mu": 0.1,
-      "d_norm": 0.0, "regularization": 0.0, "alpha_dual": 0.0, "alpha_primal": 0.0,
-      "alpha_primal_char": " ", "ls_trials": 0 },
+    { "iter": 0, "objective": 0.0451, "inf_pr": 5.0, "inf_pr_internal": 5.0,
+      "inf_du": 0.407, "mu": 0.1, "d_norm": 0.0, "regularization": 0.0,
+      "alpha_dual": 0.0, "alpha_primal": 0.0, "alpha_primal_char": " ",
+      "ls_trials": 0, "phase": "main" },
     { "iter": 1, "objective": 0.957, "inf_pr": 0.212, "...": "..." }
   ]
 }

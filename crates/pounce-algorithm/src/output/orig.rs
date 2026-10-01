@@ -78,11 +78,7 @@ impl IterationOutput for OrigIterationOutput {
         let c = cq.borrow();
 
         let iter = d.iter_count;
-        let unscaled_f = c.unscaled_curr_f();
-        let inf_pr = match self.inf_pr_output {
-            InfPrTag::Internal => c.curr_primal_infeasibility_max(),
-            InfPrTag::Original => c.curr_unscaled_nlp_constraint_violation_max(),
-        };
+        let (unscaled_f, inf_pr) = self.objective_inf_pr(&c);
         let inf_du = c.curr_dual_infeasibility_max();
         let mu = d.curr_mu;
         let lg_mu = mu.log10();
@@ -130,6 +126,26 @@ impl IterationOutput for OrigIterationOutput {
             row.push_str(&d.info_string);
         }
         row
+    }
+
+    fn printed_objective_inf_pr(
+        &mut self,
+        _data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> Option<(f64, f64)> {
+        Some(self.objective_inf_pr(&cq.borrow()))
+    }
+}
+
+impl OrigIterationOutput {
+    /// The objective and `inf_pr` columns, shared by the printed row and
+    /// the structured event so the two cannot drift apart (gh#979).
+    fn objective_inf_pr(&self, c: &crate::ipopt_cq::IpoptCalculatedQuantities) -> (f64, f64) {
+        let inf_pr = match self.inf_pr_output {
+            InfPrTag::Internal => c.curr_primal_infeasibility_max(),
+            InfPrTag::Original => c.curr_unscaled_nlp_constraint_violation_max(),
+        };
+        (c.unscaled_curr_f(), inf_pr)
     }
 }
 

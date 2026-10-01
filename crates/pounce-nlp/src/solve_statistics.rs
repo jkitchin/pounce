@@ -24,8 +24,21 @@ pub struct IterRecord {
     pub iter: Index,
     /// Unscaled objective `f(x_k)` at the start of iter `k`.
     pub objective: Number,
-    /// Primal infeasibility (max-norm of constraint violation).
+    /// Primal infeasibility exactly as the console table prints it in
+    /// the `inf_pr` column: under the default `inf_pr_output=original`,
+    /// the unscaled constraint violation of the user's model (for
+    /// restoration rows, of the *original* NLP at the restoration
+    /// iterate's `x`). See [`Self::inf_pr_internal`] for the residual
+    /// the filter and the convergence test read (gh#979).
     pub inf_pr: Number,
+    /// The algorithm's internal primal infeasibility `‖(c(x), d(x) − s)‖∞`
+    /// in the scaled slack form, with the slack pushed off its bound —
+    /// what the filter, the convergence test and the `intermediate`
+    /// callback's `inf_pr` see. On restoration rows it is the
+    /// restoration NLP's own residual. Differs from [`Self::inf_pr`]
+    /// whenever a slack sits away from `d(x)` or scaling is active.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub inf_pr_internal: Number,
     /// Dual infeasibility (max-norm of grad-Lagrangian).
     pub inf_du: Number,
     /// Barrier parameter μ.
@@ -44,6 +57,45 @@ pub struct IterRecord {
     pub alpha_primal_char: char,
     /// Number of backtracking line-search trials this iter.
     pub ls_trials: Index,
+    /// Which phase printed this row: the main IPM, or the restoration
+    /// sub-solve (the console's `r`-suffixed rows). A restoration row's
+    /// `iter` is the restoration solver's counter, which continues the
+    /// outer count, so the outer row that leaves restoration repeats the
+    /// last restoration row's index — exactly as the console does.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub phase: IterPhase,
+}
+
+/// Phase of an [`IterRecord`] row (gh#979).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
+pub enum IterPhase {
+    /// A main-phase iteration (including the `R`-tagged row that hands
+    /// over to restoration).
+    #[default]
+    Main,
+    /// An inner iteration of the restoration phase, printed with an `r`
+    /// suffix on the iteration index.
+    Restoration,
+}
+
+impl IterPhase {
+    /// Stable lowercase name, as serialized in the solve report.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IterPhase::Main => "main",
+            IterPhase::Restoration => "restoration",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]; unknown names read as [`IterPhase::Main`].
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "restoration" => IterPhase::Restoration,
+            _ => IterPhase::Main,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

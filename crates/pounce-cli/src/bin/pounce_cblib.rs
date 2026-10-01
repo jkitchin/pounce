@@ -192,6 +192,7 @@ fn main() -> ExitCode {
                     iter: it.iter as _,
                     objective: it.objective,
                     inf_pr: it.primal_infeasibility,
+                    inf_pr_internal: it.primal_infeasibility,
                     inf_du: it.dual_infeasibility,
                     mu: it.mu,
                     d_norm: 0.0,
@@ -200,6 +201,7 @@ fn main() -> ExitCode {
                     alpha_primal: it.alpha_primal,
                     alpha_primal_char: ' ',
                     ls_trials: 0,
+                    phase: Default::default(),
                 })
                 .collect();
         }

@@ -2477,8 +2477,25 @@ impl IpoptAlgorithm {
         // capture active and JSON logging off) so the default run pays
         // no per-iteration field-evaluation / allocation cost.
         if pounce_observability::iteration_event_wanted() {
+            // The objective / `inf_pr` the row printed (gh#979): on the main
+            // phase the unscaled violation of the user's model rather than
+            // the internal slack-form residual, and on restoration rows the
+            // original NLP's values rather than the restoration problem's.
+            // The internal residual rides alongside as `inf_pr_internal`.
+            let printed = self
+                .bundle
+                .iter_output
+                .printed_objective_inf_pr(&self.data, &self.cq);
+            let phase = if self.bundle.iter_output.is_restoration() {
+                "restoration"
+            } else {
+                "main"
+            };
             let d = self.data.borrow();
             let c = self.cq.borrow();
+            let inf_pr_internal = c.curr_primal_infeasibility_max();
+            let (objective, inf_pr) =
+                printed.unwrap_or_else(|| (c.unscaled_curr_f(), inf_pr_internal));
             let alpha_char = d.info_alpha_primal_char;
             let alpha_char_s = alpha_char.to_string();
             let d_norm = match &d.delta {
@@ -2488,8 +2505,9 @@ impl IpoptAlgorithm {
             tracing::info!(
                 target: pounce_observability::ITER_TARGET,
                 iter = d.iter_count,
-                objective = c.unscaled_curr_f(),
-                inf_pr = c.curr_primal_infeasibility_max(),
+                objective = objective,
+                inf_pr = inf_pr,
+                inf_pr_internal = inf_pr_internal,
                 inf_du = c.curr_dual_infeasibility_max(),
                 mu = d.curr_mu,
                 d_norm = d_norm,
@@ -2499,6 +2517,7 @@ impl IpoptAlgorithm {
                 ls_trials = d.info_ls_count,
                 alpha_char = alpha_char_s.as_str(),
                 resto_kind = pounce_common::style::resto_kind_str(alpha_char),
+                phase = phase,
             );
         }
 

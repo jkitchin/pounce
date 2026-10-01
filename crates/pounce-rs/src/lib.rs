@@ -224,7 +224,7 @@ pub mod restoration;
 // --- iteration capture & observability --------------------------------------
 // Thread-scoped helpers so an embedding library can record a solve's
 // trajectory (and turn on console logs) with no direct `tracing` deps.
-pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
+pub use pounce_nlp::solve_statistics::{IterPhase, IterRecord, SolveStatistics};
 pub use pounce_observability::{
     CollectorScope, IterCaptureGuard, ScopedIterCapture, collector_scope, init_subscriber,
     with_iter_capture,
@@ -278,7 +278,7 @@ pub mod prelude {
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
-    pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
+    pub use pounce_nlp::solve_statistics::{IterPhase, IterRecord, SolveStatistics};
     pub use pounce_nlp::tnlp::{
         BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution,
         SparsityRequest, StartingPoint, TNLP,
