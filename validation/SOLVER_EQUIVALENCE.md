@@ -19,9 +19,18 @@ resolve to.)
 
 ## Environment
 
+> **Version note.** Every figure in this report was produced against POUNCE
+> **0.9.0** on the date below and has not been re-run since. Later releases
+> (the current one is newer than 0.9.0) may differ in iteration counts and in
+> low-order digits; the sign and value agreement of the duals and
+> sensitivities is what this report establishes, and it applies to 0.9.0. To
+> check a newer version, re-run `python validation/run_all.py` (it needs IPOPT
+> at the path set in `validation/_common.py`, plus IPOPT-MA57 for P1) and
+> update this report and `results.json` together.
+
 | item                               | value                                                |
 |------------------------------------|------------------------------------------------------|
-| POUNCE version                     | `0.9.0`                                              |
+| POUNCE version (results apply to)  | `0.9.0`                                              |
 | POUNCE binary (via `pyomo_pounce`) | `python/pounce/bin/pounce` → `target/release/pounce` |
 | IPOPT (P2–P5, default MUMPS)       | `Ipopt 3.14.19 (Darwin arm64), ASL(20241202)`        |
 | IPOPT-MA57 (P1 live reference)     | `Ipopt 3.14.20`, HSL MA57 (`ipopt-ma57`)             |
