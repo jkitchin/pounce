@@ -71,6 +71,7 @@ pub struct ConvergenceTrace {
     pub iter: Vec<i32>,
     pub objective: Vec<f64>,
     pub inf_pr: Vec<f64>,
+    pub inf_pr_internal: Vec<f64>,
     pub inf_du: Vec<f64>,
     pub mu: Vec<f64>,
     pub d_norm: Vec<f64>,
@@ -79,6 +80,8 @@ pub struct ConvergenceTrace {
     pub alpha_primal: Vec<f64>,
     pub alpha_primal_char: Vec<char>,
     pub ls_trials: Vec<i32>,
+    /// `"main"` / `"restoration"` per row (gh#979).
+    pub phase: Vec<String>,
 }
 
 pub fn convergence_trace(report: &SolveReport) -> ConvergenceTrace {
@@ -87,6 +90,7 @@ pub fn convergence_trace(report: &SolveReport) -> ConvergenceTrace {
         iter: Vec::with_capacity(n),
         objective: Vec::with_capacity(n),
         inf_pr: Vec::with_capacity(n),
+        inf_pr_internal: Vec::with_capacity(n),
         inf_du: Vec::with_capacity(n),
         mu: Vec::with_capacity(n),
         d_norm: Vec::with_capacity(n),
@@ -95,11 +99,13 @@ pub fn convergence_trace(report: &SolveReport) -> ConvergenceTrace {
         alpha_primal: Vec::with_capacity(n),
         alpha_primal_char: Vec::with_capacity(n),
         ls_trials: Vec::with_capacity(n),
+        phase: Vec::with_capacity(n),
     };
     for r in &report.iterations {
         t.iter.push(r.iter);
         t.objective.push(r.objective);
         t.inf_pr.push(r.inf_pr);
+        t.inf_pr_internal.push(r.inf_pr_internal);
         t.inf_du.push(r.inf_du);
         t.mu.push(r.mu);
         t.d_norm.push(r.d_norm);
@@ -108,6 +114,14 @@ pub fn convergence_trace(report: &SolveReport) -> ConvergenceTrace {
         t.alpha_primal.push(r.alpha_primal);
         t.alpha_primal_char.push(r.alpha_primal_char);
         t.ls_trials.push(r.ls_trials);
+        t.phase.push(
+            if r.is_restoration() {
+                "restoration"
+            } else {
+                "main"
+            }
+            .into(),
+        );
     }
     t
 }
@@ -149,13 +163,17 @@ pub fn find_stalls_with(
 ) -> Vec<Stall> {
     let min_window = min_window.max(MIN_STALL_WINDOW);
     let mut out = Vec::new();
+    // Main-phase rows only: a restoration row's `inf_du` and `mu` belong to
+    // the restoration problem, so splicing them into the main series would
+    // fabricate (or hide) progress.
+    let iters = main_phase_rows(report);
     for (metric, series) in [
-        ("inf_pr", series_log10(&report.iterations, |r| r.inf_pr)),
-        ("inf_du", series_log10(&report.iterations, |r| r.inf_du)),
+        ("inf_pr", series_log10(&iters, |r| r.inf_pr)),
+        ("inf_du", series_log10(&iters, |r| r.inf_du)),
     ] {
         scan_stalls(
             &series,
-            &report.iterations,
+            &iters,
             metric,
             min_window,
             max_log10_progress,
@@ -163,6 +181,17 @@ pub fn find_stalls_with(
         );
     }
     out
+}
+
+/// The main-phase rows of the trajectory, dropping the inner restoration
+/// rows (gh#979) that the per-phase heuristics must not mix in.
+fn main_phase_rows(report: &SolveReport) -> Vec<IterRecord> {
+    report
+        .iterations
+        .iter()
+        .filter(|r| !r.is_restoration())
+        .cloned()
+        .collect()
 }
 
 fn series_log10<F: Fn(&IterRecord) -> f64>(iters: &[IterRecord], f: F) -> Vec<Option<f64>> {
@@ -225,8 +254,9 @@ fn scan_stalls(
     }
 }
 
-/// Contiguous runs of iters tagged `'r'` in the alpha-primal char
-/// column — one entry per restoration entry → exit cycle.
+/// Contiguous runs of restoration rows — inner `phase = "restoration"`
+/// rows plus the `R`-tagged main rows that enter and leave them — one
+/// entry per restoration entry → exit cycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestorationWindow {
     pub start_iter: i32,
@@ -237,7 +267,8 @@ pub fn restoration_windows(report: &SolveReport) -> Vec<RestorationWindow> {
     let mut out: Vec<RestorationWindow> = Vec::new();
     let mut current: Option<RestorationWindow> = None;
     for r in &report.iterations {
-        if r.alpha_primal_char.to_ascii_lowercase() == 'r' {
+        // An inner restoration row continues the window its `R` row opened.
+        if r.is_restoration() || r.alpha_primal_char.eq_ignore_ascii_case(&'r') {
             match &mut current {
                 Some(w) => w.end_iter = r.iter,
                 None => {
@@ -290,7 +321,8 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
     let mut findings = Vec::new();
     let stats = &report.statistics;
     let solution = &report.solution;
-    let iters = &report.iterations;
+    let main_iters = main_phase_rows(report);
+    let iters = &main_iters;
     let status = solution.status.as_str();
 
     if status == "SolveSucceeded" {
@@ -599,6 +631,47 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].start_iter, 2);
         assert_eq!(windows[0].end_iter, 4);
+    }
+
+    /// gh#979 shape: `1R`, inner rows `2r..4r` (line-search tags `f`/`h`),
+    /// then the main `4R` that leaves restoration. One window, not two —
+    /// otherwise every recorded restoration reads as a `restoration_loop`.
+    #[test]
+    fn inner_restoration_rows_continue_their_window() {
+        let mut iters = vec![iter(0, 0.1, 1e-2)];
+        let mut entry = iter(1, 0.1, 1e-2);
+        entry.alpha_primal_char = 'R';
+        iters.push(entry);
+        for i in 2..5 {
+            let mut r = iter(i, 1e-3, 5.0);
+            r.alpha_primal_char = if i % 2 == 0 { 'f' } else { 'h' };
+            r.phase = "restoration".into();
+            iters.push(r);
+        }
+        let mut exit = iter(4, 0.1, 1e-3);
+        exit.alpha_primal_char = 'R';
+        iters.push(exit);
+        iters.push(iter(5, 0.1, 1e-4));
+        let report = report_with(iters);
+        let windows = restoration_windows(&report);
+        assert_eq!(
+            windows,
+            vec![RestorationWindow {
+                start_iter: 1,
+                end_iter: 4
+            }]
+        );
+        assert!(
+            !diagnose(&report)
+                .iter()
+                .any(|f| f.code == "restoration_loop"),
+            "one restoration must not read as a loop"
+        );
+        let trace = convergence_trace(&report);
+        assert_eq!(
+            trace.phase.iter().filter(|p| *p == "restoration").count(),
+            3
+        );
     }
 
     #[test]

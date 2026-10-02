@@ -958,8 +958,9 @@ def load_solve_report(path: str) -> dict[str, Any]:
 def convergence_trace(path: str, columns: list[str] | None = None) -> dict[str, Any]:
     """Return per-iteration trajectory as column-oriented arrays.
 
-    Columns: iter, objective, inf_pr, inf_du, mu, d_norm, regularization,
-    alpha_dual, alpha_primal, alpha_primal_char, ls_trials. Pass a subset
+    Columns: iter, objective, inf_pr, inf_pr_internal, inf_du, mu, d_norm,
+    regularization, alpha_dual, alpha_primal, alpha_primal_char, ls_trials,
+    phase ("main" or "restoration" — the console's `r` rows). Pass a subset
     in `columns` to keep responses small. The report must have been
     written at --json-detail full or this returns empty arrays.
 

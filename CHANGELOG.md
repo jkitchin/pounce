@@ -132,6 +132,33 @@ changes.
 
 ### Fixed
 
+- **The solve report's `iterations` now reproduces the printed iteration
+  table line for line (gh#979).** Two differences, both measured against
+  the `print_level=5` table of the same solve. `inf_pr` was the internal
+  slack-form residual `‖d(x) − s‖` with the slack pushed off its bound —
+  0.955 where the table prints 0.94 at a start with `g = 2.44 > c_u = 1.5`
+  — and is now the printed violation; the internal number moved to a new
+  `inf_pr_internal` field beside it, so the two cannot be confused. And
+  the restoration phase's `r`-suffixed rows were dropped, leaving only the
+  `R` row that entered restoration; they are now recorded, tagged
+  `"phase": "restoration"`, with the original problem's objective and
+  violation the console prints rather than the restoration problem's.
+  Both columns come from the formatter that prints the row, so the table
+  and the report can no longer drift apart. Reports from earlier versions
+  read with `phase` absent, meaning `"main"`. Consumers that assumed one
+  row per outer iteration should filter on `phase`; studio's stall,
+  `mu_stuck` and line-search heuristics now read main-phase rows only, and
+  `restoration_windows` counts an entry → inner rows → exit as one window.
+  The `intermediate` callback is unchanged: its `inf_pr` stays the internal
+  residual, as in Ipopt. With the table silenced (`print_level=0`) and the
+  history captured, each restoration row now evaluates the original NLP
+  once to report its printed values — the same evaluations the printed
+  table already costs at `print_level ≥ 1`.
+  Pinned by `crates/pounce-rs/tests/issue979_report_rows_match_printed_table.rs`,
+  which parses the printed table and the captured rows from one child solve
+  and compares every column by the digits printed; both arms fail on the
+  previous code (0.955 vs 0.94; 20 rows recorded against 31 printed).
+
 - **`qp-active-set` failed feasible convex QPs carrying a consistent redundant
   equality row, depending on row order (gh#974)**, and the defects that
   failure had been hiding behind it. On the issue's generator (400 seeds, as

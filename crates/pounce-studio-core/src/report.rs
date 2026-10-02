@@ -297,15 +297,37 @@ pub struct LinearSolverSummaryInfo {
 pub struct IterRecord {
     pub iter: i32,
     pub objective: f64,
+    /// `inf_pr` as the console table prints it.
     pub inf_pr: f64,
+    /// The internal slack-form primal residual (gh#979). Absent from
+    /// reports written before it existed.
+    #[serde(default)]
+    pub inf_pr_internal: f64,
     pub inf_du: f64,
     pub mu: f64,
     pub d_norm: f64,
     pub regularization: f64,
     pub alpha_dual: f64,
     pub alpha_primal: f64,
-    /// Single-character tag (`f`, `h`, `r`, ...) describing the
-    /// alpha-primal column. `'r'` indicates a restoration iteration.
+    /// Single-character tag (`f`, `h`, `R`, ...) describing the
+    /// alpha-primal column. `'R'` marks the main-phase row that entered
+    /// restoration.
     pub alpha_primal_char: char,
     pub ls_trials: i32,
+    /// `"main"` or `"restoration"` (an inner restoration row, printed
+    /// `r`-suffixed). Absent — and so `"main"` — in reports written
+    /// before restoration rows were recorded (gh#979).
+    #[serde(default = "default_phase")]
+    pub phase: String,
+}
+
+fn default_phase() -> String {
+    "main".into()
+}
+
+impl IterRecord {
+    /// Whether this row is an inner restoration-phase iteration.
+    pub fn is_restoration(&self) -> bool {
+        self.phase == "restoration"
+    }
 }
