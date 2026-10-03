@@ -925,6 +925,10 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         self.inner.provides_inertia()
     }
 
+    fn singularity_certified(&self) -> bool {
+        self.inner.singularity_certified()
+    }
+
     fn number_of_neg_evals(&self) -> Index {
         if self.inner.provides_inertia() {
             self.inner.number_of_neg_evals()

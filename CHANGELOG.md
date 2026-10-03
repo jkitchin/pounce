@@ -153,14 +153,25 @@ changes.
   declared-bound, unscaled violation (`inf_pr_output=original`). The schema
   doc also says what `final_constr_viol` is — the internal scaled residual,
   on every exit; `final_declared_constr_viol` is the user-unit one.
-- **gh#981 finding 1 is measured but not fixed.** The gh#592 `δ_c`
-  walk-back withdraws `δ_c` on a genuinely rank-deficient Jacobian (a CSTR
-  with one row written twice: 16 iterations at peak `δ_w` 1.09 against 12
-  at 2.1e-3 with `perturb_delta_c_max_rungs=0`). Both candidate fixes — a
-  reinstatement rule and a default of `0` — cost other models (a gh#884-class
-  `Solve_Succeeded` and a worse MPCC local solution under
-  `bound_relax_factor=0`), so neither shipped; `perturb_delta_c_max_rungs=0`
-  is the workaround. Measurements: `dev-notes/issue-981-delta-c-walkback.md`.
+- **The gh#592 `δ_c` walk-back no longer strands a rank-deficient Jacobian
+  (gh#981).** On a CSTR with one equality row written twice, `δ_c` is the
+  right perturbation but the nonconvex Hessian block still needs `δ_w`, so
+  the walk-back withdrew `δ_c` after three rungs and the ladder then climbed
+  against a matrix only `δ_c` can make nonsingular: 16 iterations at a peak
+  `δ_w` of 1.09 (31 iterations, two restoration calls and `δ_w = 1e10` under
+  `mu_strategy=adaptive`). feral now says *why* it reported `Singular` — a
+  zero pivot it found, or (gh#540) an inertia count it declined to trust —
+  and when the first factorization without `δ_c` reports a found zero pivot,
+  `δ_c` is reinstated and the ladder resumes from the withdrawal rung, once
+  per augmented system. The CSTR now takes 12 iterations at `δ_w` 2.1e-3
+  (adaptive: 10, no restoration). gh#884's MPCC reproducers, whose
+  post-withdrawal `Singular`s are all of the untrusted kind and which need
+  the walk-back, are unchanged. Sweep: `pooling_rt2stp` on the L-BFGS leg
+  goes from `ErrorInStepComputation` after 716 iterations to solved in 146
+  (17/17 round-off draws); `infeasible_square_scaled_1em4`'s second-opinion
+  total 78 → 74; nothing else moved. Non-feral backends report every
+  `Singular` as uncertified, which keeps their previous behaviour. Full
+  record: `dev-notes/issue-981-delta-c-walkback.md`.
 - **Step-character glossary corrected (gh#981).** `pounce-studio` defined
   `h` as "Armijo" and `s` as "second-order correction"; `s`/`S` are
   soft-restoration steps and upper case `F`/`H` marks a second-order

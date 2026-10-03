@@ -13,10 +13,18 @@
 //! * **5 — restoration rows in scaled units.** A restoration row's `inf_pr`
 //!   must be in the same units as the main rows beside it.
 //!
-//! Finding 1 (the gh#592 `δ_c` walk-back withdrawing `δ_c` on the
-//! rank-deficient `issue981_cstr_dup_row`) is **not fixed** and so not
-//! pinned here: both candidate fixes cost other models, measured in
-//! `dev-notes/issue-981-delta-c-walkback.md`.
+//! * **1 — the gh#592 `δ_c` walk-back on a rank-deficient Jacobian.** On
+//!   `issue981_cstr_dup_row` (one equality row written twice) `δ_c` is the
+//!   right perturbation, the nonconvex Hessian block still needs `δ_x`, and
+//!   after three rungs under `δ_c` the walk-back withdrew it. Every later
+//!   factor was `Singular` — no `δ_x` repairs a dependent row — and the
+//!   ladder climbed to `δ_w = 1.09` (`6.99e19` and a restoration call in
+//!   the issue, through discopt). The fix is the reinstatement in
+//!   `pounce_common::pd_perturbation`: the *first* `δ_c`-free factor
+//!   reporting a zero pivot the linear solver found
+//!   (`AugSystemSolver::singularity_certified`) refutes the withdrawal.
+//!   The discriminator and the two MPCC models that need the walk-back
+//!   kept are measured in `dev-notes/issue-981-delta-c-walkback.md`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -147,4 +155,108 @@ fn restoration_rows_report_inf_pr_in_the_main_rows_units() {
             );
         }
     }
+}
+
+/// Largest `δ_w` any iteration of the run applied.
+fn peak_regularization(r: &SolveReport) -> f64 {
+    r.iterations
+        .iter()
+        .map(|it| it.regularization)
+        .fold(0.0, f64::max)
+}
+
+fn restoration_iterations(r: &SolveReport) -> usize {
+    r.iterations
+        .iter()
+        .filter(|it| it.phase == IterPhase::Restoration)
+        .count()
+}
+
+/// Finding 1, default `mu_strategy`. Measured at `672320d`: 16 iterations
+/// and a peak `δ_w` of `1.09`, every post-withdrawal factor `Singular`.
+/// With `δ_c` kept (`perturb_delta_c_max_rungs=0`, or the reinstatement):
+/// 12 iterations, peak `δ_w = 2.13e-3`. The bounds leave room for round-off
+/// drift but not for the 500x in `δ_w` the walk-back cost.
+#[test]
+fn a_duplicated_row_keeps_its_delta_c() {
+    let r = solve("issue981_cstr_dup_row.nl", &[]);
+    assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded);
+    assert!(
+        (r.solution.objective - 5.352368).abs() < 1e-5,
+        "objective {}",
+        r.solution.objective
+    );
+    assert_eq!(restoration_iterations(&r), 0, "restoration ran");
+    let peak = peak_regularization(&r);
+    assert!(
+        peak < 1e-2,
+        "peak δ_w = {peak:e}: δ_c was withdrawn on a rank-deficient Jacobian \
+         and the δ_x ladder climbed against a singular matrix (it reached \
+         1.09 at 672320d; 2.1e-3 with δ_c kept)"
+    );
+    assert!(
+        r.statistics.iteration_count <= 13,
+        "{} iterations (12 with δ_c kept, 16 without)",
+        r.statistics.iteration_count
+    );
+}
+
+/// Finding 1, `mu_strategy=adaptive` — the configuration the issue measured
+/// through discopt. At `672320d`: 31 iterations, two restoration calls,
+/// `δ_w` at `1e10`. With `δ_c` kept: 10 iterations, no restoration, peak
+/// `δ_w = 1` — identical to the same CSTR *without* the duplicated row.
+#[test]
+fn a_duplicated_row_keeps_its_delta_c_under_adaptive_mu() {
+    let r = solve("issue981_cstr_dup_row.nl", &["mu_strategy=adaptive"]);
+    assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded);
+    assert_eq!(restoration_iterations(&r), 0, "restoration ran");
+    let peak = peak_regularization(&r);
+    assert!(
+        peak <= 1.5,
+        "peak δ_w = {peak:e} (1e10 at 672320d, 1 with δ_c kept)"
+    );
+    assert!(
+        r.statistics.iteration_count <= 12,
+        "{} iterations (10 with δ_c kept, 31 without)",
+        r.statistics.iteration_count
+    );
+}
+
+/// The reinstatement must stay inert where the walk-back is load-bearing.
+/// gh#884's biactive MPCC reaches the same handler state as the CSTR — `δ_c`
+/// up, three `WrongInertia` rungs, `Singular` without it — but every one of
+/// its `Singular` reports is gh#540's untrusted-inertia kind, never a zero
+/// pivot the solver found, so nothing is reinstated and the trajectory is
+/// the one `issue_884_biactive_dual_divergence.rs` pins. This re-states that
+/// file's criterion next to the mechanism that could break it.
+#[test]
+fn the_reinstatement_does_not_reach_the_biactive_mpcc() {
+    let sol_path = tmp_path("out.sol");
+    let out = Command::new(pounce_exe())
+        .arg(fixture("mpcc_qpec_small_biactive.nl"))
+        .arg(&sol_path)
+        .arg("bound_relax_factor=0")
+        .arg("mu_strategy_fallback=no")
+        .output()
+        .expect("spawn pounce");
+    let _ = std::fs::remove_file(&sol_path);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Optimal Solution Found"),
+        "not Solve_Succeeded; stdout=\n{stdout}"
+    );
+    // The *unscaled* column: gh#884 is about the scaled one hiding a
+    // runaway multiplier (`issue_884_biactive_dual_divergence.rs` reads
+    // the same line).
+    let unscaled: f64 = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("Dual infeasibility"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|v| v.parse().ok())
+        .expect("dual infeasibility line");
+    assert!(
+        unscaled <= 1e-6,
+        "unscaled dual infeasibility {unscaled:e}: gh#884's failure class \
+         (2.2e-4 is what reinstating δ_c here produces); stdout=\n{stdout}"
+    );
 }

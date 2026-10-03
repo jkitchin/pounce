@@ -533,6 +533,16 @@ impl AugSystemSolver for BlockAugSystemSolver {
         self.inner.provides_inertia()
     }
 
+    fn singularity_certified(&self) -> bool {
+        // The block path does not yet classify its `Singular` reports;
+        // `false` keeps the pre-gh#981 handler behaviour there.
+        if self.use_blocks {
+            false
+        } else {
+            self.inner.singularity_certified()
+        }
+    }
+
     fn number_of_neg_evals(&self) -> Index {
         if self.use_blocks {
             self.negevals

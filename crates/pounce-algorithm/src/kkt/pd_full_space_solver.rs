@@ -1671,10 +1671,16 @@ impl PdFullSpaceSolver {
 
             if retval == ESymSolverStatus::Singular && (rhs.y_c.dim() + rhs.y_d.dim() > 0) {
                 let curr_mu = data.borrow().curr_mu;
-                let next = self
-                    .perturb
-                    .borrow_mut()
-                    .perturb_for_singular(curr_mu, Some(&IpoptDataSink(data)));
+                // gh#981: tell the handler whether this `Singular` is a
+                // zero pivot the solver found or an inertia count it
+                // declined to trust; only the former can refute a gh#592
+                // walk-back.
+                let certified = self.aug_solver.singularity_certified();
+                let next = self.perturb.borrow_mut().perturb_for_singular_with(
+                    curr_mu,
+                    certified,
+                    Some(&IpoptDataSink(data)),
+                );
                 let Some(nd) = next else { return false };
                 d = nd;
             } else if retval == ESymSolverStatus::WrongInertia

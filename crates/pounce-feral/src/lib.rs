@@ -132,6 +132,13 @@ pub struct FeralSolverInterface {
 
     negevals: Index,
 
+    /// gh#981: the most recent `Singular` report came from a zero pivot
+    /// the factorization found (`inertia.zero > 0`, or feral's own
+    /// `FactorStatus::Singular`), not from an inertia count the
+    /// gh#540 trust floor declined to read. See
+    /// [`SparseSymLinearSolverInterface::singularity_certified`].
+    last_singular_certified: bool,
+
     /// Fill-reducing ordering configured at construction; surfaced on
     /// the `linear_solve` tracing span after each factorization
     /// (pounce#71).
@@ -1045,6 +1052,7 @@ impl FeralSolverInterface {
             matrix: None,
             slot: None,
             negevals: 0,
+            last_singular_certified: false,
             ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
             inertia_pivot_floor: cfg.inertia_pivot_floor,
@@ -1238,7 +1246,9 @@ impl FeralSolverInterface {
                     None => (self.solver.num_negative_eigenvalues(), 0),
                 };
                 self.negevals = neg as Index;
+                self.last_singular_certified = false;
                 if zero > 0 {
+                    self.last_singular_certified = true;
                     tracing::debug!(
                         target: "pounce::linsol",
                         neg, zero, expected = number_of_neg_evals, dim = self.dim,
@@ -1303,7 +1313,10 @@ impl FeralSolverInterface {
                 }
                 ESymSolverStatus::Success
             }
-            FactorStatus::Singular => ESymSolverStatus::Singular,
+            FactorStatus::Singular => {
+                self.last_singular_certified = true;
+                ESymSolverStatus::Singular
+            }
             FactorStatus::WrongInertia { .. } => {
                 // Should not occur — we passed `None` for check_inertia.
                 ESymSolverStatus::FatalError
@@ -1588,6 +1601,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 
     fn provides_inertia(&self) -> bool {
         true
+    }
+
+    fn singularity_certified(&self) -> bool {
+        self.last_singular_certified
     }
 
     fn matrix_format(&self) -> EMatrixFormat {

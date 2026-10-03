@@ -74,6 +74,14 @@ pub trait AugSystemSolver {
     /// Whether the underlying linear solver reports inertia.
     fn provides_inertia(&self) -> bool;
 
+    /// gh#981: whether the most recent `Singular` from `solve` is a rank
+    /// deficiency the linear solver measured (a zero pivot) rather than an
+    /// inertia count it declined to trust. Read right after a `Singular`
+    /// return; meaningless otherwise. Defaults to `false`.
+    fn singularity_certified(&self) -> bool {
+        false
+    }
+
     /// Number of negative eigenvalues observed in the most recent
     /// factorization. Caller checks `provides_inertia()` first.
     fn number_of_neg_evals(&self) -> Index;

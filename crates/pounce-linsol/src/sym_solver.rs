@@ -22,4 +22,11 @@ pub trait SymLinearSolver {
 
     /// Whether this solver reports inertia.
     fn provides_inertia(&self) -> bool;
+
+    /// gh#981: whether the most recent `Singular` came from a pivot the
+    /// backend found to be zero rather than from an untrusted inertia
+    /// count. See `SparseSymLinearSolverInterface::singularity_certified`.
+    fn singularity_certified(&self) -> bool {
+        false
+    }
 }

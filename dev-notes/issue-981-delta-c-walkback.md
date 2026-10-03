@@ -1,10 +1,11 @@
-# gh#981 finding 1 — the `δ_c` walk-back on a rank-deficient Jacobian (open)
+# gh#981 finding 1 — the `δ_c` walk-back on a rank-deficient Jacobian
 
-**Status: measured, not fixed.** Both candidate fixes below were built, swept
-and run against the full `pounce-cli` suite, and both cost other models. The
-walk-back is left exactly as gh#592 shipped it (`perturb_delta_c_max_rungs`
-default `3`). This note is the starting point for a fix that needs a
-discriminator nobody has yet.
+**Status: fixed by the certified-singular reinstatement — see "The fix" at
+the end.** The first two candidates below were built, swept and run against
+the full `pounce-cli` suite, and both cost other models; they are kept
+because the measurements that disqualified them are what the fix is
+measured against. The discriminator nobody had is the linear solver's own
+verdict on *why* it reported `Singular`.
 
 ## The report
 
@@ -119,3 +120,70 @@ duplicate rows would cover the reported model but not near-dependence.
 * `pooling_rt2stp` is chaotic under the walk-back: over the round-off screen
   it scatters between 81 and 3000 iterations and across two local optima.
   Single-draw comparisons on it mean little.
+
+## The fix — a `Singular` the solver can vouch for
+
+`pounce-feral` reports `ESymSolverStatus::Singular` for three different
+reasons, and the handler could not tell them apart:
+
+1. the factorization found a **zero pivot** (`inertia.zero > 0`, or feral's
+   own `FactorStatus::Singular`) — a rank deficiency it measured;
+2. gh#540's **untrusted inertia**: the count disagrees with the expected one
+   and the smallest pivot is under the `n·ε` trust floor — evidence about the
+   measurement, not about the Jacobian;
+3. the absolute `feral_singular_pivot_floor` (`1e-20`).
+
+Traced with a per-factorization pivot dump (`inertia`, smallest pivot and
+its original index, the `Singular` reason) at every withdrawal event:
+
+| model (options) | how `δ_c` came up | first `δ_c`-free factor | zero-pivot `Singular`s in the run |
+|---|---|---|---|
+| `issue981_cstr_dup_row` | seeded, `jac_degenerate` | `Singular`, **zero pivot**, `inertia=(3,3,1)`, pivot in the constraint block (index 6 of `x:0-3, c:4-6`) — at every rung | 25 |
+| `mpcc_qpec_small_biactive` (`bound_relax_factor=0 mu_strategy_fallback=no`) | untrusted-inertia `Singular`, `neg=7 exp=6` | untrusted-inertia `Singular`, `min_piv=5.5e-17`, `neg=7 exp=6` — at every rung up to `δ_x=2e19` | **0** |
+| `mpcc_worse_local_solution` (same + `tol=1e-8`) | untrusted-inertia `Singular` (iter 105); the "`δ_x` exhausted, `δ_c==0`" recovery (iters 0, 113) | `WrongInertia`, `neg=7..8 exp=6` | **0** |
+| `pooling_rt2stp` exact | seeded, `jac_degenerate` (8 withdrawals) | `WrongInertia` or untrusted; a zero pivot appears at one rung of two long climbs (`δ_x=2.3e3`, `5.8e3`) and not at its neighbours | 8 |
+| `pooling_rt2stp` L-BFGS, iter 56 | untrusted-inertia `Singular` | **zero pivot**, at every rung from `3e-5` to `70` | 1988 |
+
+Both MPCC models' `Singular`s are the gh#540 kind, every one; the CSTR's are
+zero pivots, every one. The MPCC runs are also a different physics: the
+extra negative eigenvalue persists to `δ_x = 3.6e17` because the runaway
+multiplier (gh#884) makes `W` indefinite at that scale — `δ_x` is the only
+medicine, and the walk-back is right to withdraw `δ_c`.
+
+**Rule.** `SparseSymLinearSolverInterface::singularity_certified()` (new,
+defaulted `false`, implemented by `pounce-feral` as "reason 1") is carried
+through `SymLinearSolver` / `AugSystemSolver` to `PDFullSpaceSolver`, which
+passes it to `PdPerturbationHandler::perturb_for_singular_with(mu,
+certified, ..)`. After a gh#592 withdrawal, a certified `Singular` from the
+**first** `δ_c`-free factorization refutes it: the factor at the withdrawal
+rung *with* `δ_c` was nonsingular (`WrongInertia`), only `δ_c` changed, so
+the zero pivot is in the constraint block and no `δ_x` removes it. `δ_c`
+goes back at `δ_cd(μ)`, the ladder resumes from the withdrawal rung, and
+`delta_c_reinstated` latches so neither the walk-back nor the reinstatement
+fires again in that aug-system. Anything else — an uncertified `Singular`,
+a `WrongInertia`, or a zero pivot that only shows up later in the climb —
+leaves the withdrawal standing (`withdrawal_untested` closes after one
+report). The "first factor only" clause is what the pooling exact leg
+demanded: honouring the later zero pivots too (the first prototype) moved
+the default draw onto the `−4391.83` optimum and failed two
+`issue_592_delta_c_walkback.rs` pins; with it the exact leg is unchanged.
+Reasons 2 and 3 are deliberately *not* certified; reason 3 has not been
+measured as a discriminator.
+
+**Measured (prototype, branch head as baseline).**
+
+| run | before | after |
+|---|---|---|
+| CSTR default | 16 it, 53 fact., peak δ_w 1.09 | 12 it, 42 fact., peak δ_w 2.13e-3 (rungs=0: 12 / 41 / 2.13e-3) |
+| CSTR `mu_strategy=adaptive` | 31 it, 2 restoration calls, δ_w 1e10 | 10 it, none, peak 1 |
+| `mpcc_qpec_small_biactive` (gh#884 options) | `Solve_Succeeded`, unscaled dual 6.26e-10, 100 it | identical (0 reinstatements) |
+| `mpcc_worse_local_solution` (gh#884 options) | −13.0057, 17 it | identical (0 reinstatements) |
+| `pooling_rt2stp` exact, 17-draw round-off screen | median 127, min 81, max 3000; 10/17 at −3273.95 | median 126, min 81, max 1542; 10/17 at −3273.95; 11 draws bit-identical |
+| `pooling_rt2stp` L-BFGS, same screen | 17/17 `ErrorInStepComputation`, 716 it | 17/17 `SolveSucceeded`, 146 it |
+
+Fixture sweep against the branch head, both legs: three lines move —
+`exact issue981_cstr_dup_row` 16 → 12; `lbfgs pooling_rt2stp` as above;
+`exact infeasible_square_scaled_1em4` second-opinion total 78 → 74 (the
+third rung reinstates at iter 3 on a zero pivot in its constraint block,
+`inertia=(2,1,1)`, and accepts one rung later; status and objective
+unchanged). The two MPCC fixtures do not move on either leg.
