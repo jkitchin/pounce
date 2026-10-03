@@ -72,8 +72,6 @@ fn solve(name: &str, extra: &[&str]) -> SolveReport {
     serde_json::from_str(&text).expect("deserialize SolveReport")
 }
 
-
-
 /// Finding 4. Restoration settles at the local minimizer of the
 /// infeasibility, `x1 = -1` with violation 1.5; the report used to return
 /// `x1 = -1.0885` at 1.588 — where the last restoration *started*.
