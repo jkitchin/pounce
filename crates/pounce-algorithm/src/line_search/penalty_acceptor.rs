@@ -170,6 +170,13 @@ impl BacktrackingLsAcceptor for PenaltyLsAcceptor {
         PenaltyLsAcceptor::reset(self);
     }
 
+    /// gh#981: the Armijo target here is `eta_penalty · pred(α)`, which
+    /// is zero as α → 0, so a null soft-restoration step passes as "no
+    /// merit increase". See `BacktrackingLineSearch::try_soft_resto_step`.
+    fn soft_resto_refuses_steps_below_alpha_min(&self) -> bool {
+        true
+    }
+
     fn penalty_parameters(&self) -> Option<(Number, Number, Number, Number)> {
         Some((self.nu_init, self.nu_inc, self.rho, self.eta_penalty))
     }

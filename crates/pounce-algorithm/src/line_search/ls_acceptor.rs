@@ -89,6 +89,19 @@ pub trait BacktrackingLsAcceptor {
         AcceptDecision::Accept
     }
 
+    /// gh#981: whether a soft-restoration trial shorter than the line
+    /// search's `alpha_min` must be refused for this acceptor. `true`
+    /// only where the acceptor's own test cannot tell a null step from
+    /// progress — its sufficient-decrease target vanishes as α → 0 — so
+    /// a null step would pass as `S` and repeat. `false` (the default)
+    /// keeps upstream's unconditional soft-restoration trial: the
+    /// filter's α = 0 test still demands real reduction in θ or φ, and
+    /// refusing tiny trials there measurably changed filter trajectories
+    /// (`square_flowsheet_resto`, L-BFGS leg, lost its certificate).
+    fn soft_resto_refuses_steps_below_alpha_min(&self) -> bool {
+        false
+    }
+
     /// Post-accept hook — port of
     /// `IpFilterLSAcceptor::UpdateForNextIteration`. Both decides the
     /// `info_alpha_primal_char` tag *and* augments the filter when

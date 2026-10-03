@@ -662,8 +662,11 @@ impl BacktrackingLineSearch {
         // (`TinyStep`, zero trials). Upstream has no such guard and takes
         // the trial at that α anyway. Under the filter that is harmless —
         // a trial at α ~ 1e-13 cannot show the sufficient reduction in θ
-        // or φ the filter asks of it. Under `line_search_method=penalty`
-        // it is not: the penalty acceptor's sufficient-decrease target
+        // or φ the filter asks of it, and refusing it there changed filter
+        // trajectories (measured: `square_flowsheet_resto` on the L-BFGS
+        // leg lost its certificate), so the guard is the acceptor's call
+        // and the filter declines it. Under `line_search_method=penalty`
+        // it is not harmless: the penalty acceptor's sufficient-decrease target
         // scales with α, so a null step passes as "no merit increase",
         // is tagged `S` (which leaves soft restoration and resets
         // `soft_resto_counter`), and the next iteration does it again.
@@ -672,7 +675,7 @@ impl BacktrackingLineSearch {
         // where the filter declares infeasibility in 22 iterations.
         // Refusing the trial hands the iterate to full restoration, as
         // the regular line search's `TinyStep` meant to.
-        if alpha < self.alpha_min {
+        if alpha < self.alpha_min && self.acceptor.soft_resto_refuses_steps_below_alpha_min() {
             return None;
         }
 
