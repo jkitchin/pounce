@@ -513,3 +513,28 @@ fn a_backend_only_options_file_is_refused_by_either_route() {
         );
     }
 }
+
+/// gh#981: `line_search_method=cg-penalty` used to run the plain penalty
+/// acceptor under the `cg-penalty` name — identical iterations, identical
+/// step characters — while `options.md` said the CG-penalty line search
+/// was refused. Now it is, through the unimplemented-*value* table, and
+/// `penalty` (what it actually ran) still solves.
+#[test]
+fn line_search_method_cg_penalty_is_refused_and_penalty_is_not() {
+    let (code, err) = run(
+        "issue981_cstr_dup_row.nl",
+        "cgpenalty",
+        &["line_search_method=cg-penalty"],
+    );
+    assert_eq!(code, Some(2), "stderr:\n{err}");
+    assert!(err.contains("line_search_method=cg-penalty"), "stderr:\n{err}");
+    assert!(err.contains("Chen-Goldfarb"), "stderr:\n{err}");
+    assert!(err.contains("issues/981"), "stderr:\n{err}");
+
+    let (code, err) = run(
+        "issue981_cstr_dup_row.nl",
+        "penalty",
+        &["line_search_method=penalty"],
+    );
+    assert_eq!(code, Some(0), "`penalty` is implemented; stderr:\n{err}");
+}

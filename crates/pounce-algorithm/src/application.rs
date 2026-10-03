@@ -5733,6 +5733,11 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
             if found {
                 builder.line_search_method = match v.as_str() {
+                    // Unreachable from a real solve since gh#981:
+                    // `cg-penalty` is refused by
+                    // `unimplemented_options::UNIMPLEMENTED_VALUES`
+                    // before the builder is configured, because the
+                    // variant assembles the plain penalty acceptor.
                     "cg-penalty" => LineSearchChoice::CgPenalty,
                     "penalty" => LineSearchChoice::Penalty,
                     _ => LineSearchChoice::Filter,

@@ -56,6 +56,27 @@ changes.
 
 ### Changed
 
+- **`perturb_delta_c_max_rungs` now defaults to `0` — the gh#592 `δ_c`
+  walk-back is off (gh#981).** It withdrew `δ_c` on a genuinely
+  rank-deficient Jacobian: a CSTR with one equality row written twice took
+  16 iterations at a peak `δ_w` of 1.09 instead of 12 at 2.1e-3, and under
+  `mu_strategy=adaptive` 31 iterations, two restoration calls and
+  `δ_w = 1e10` instead of 10 and none. Swept with the walk-back off, the
+  fixture corpus improved on `pooling_rt2stp` (exact 162 → 116 iterations;
+  L-BFGS from `ErrorInStepComputation` at 716 to solved at 146), cost
+  `mu_fallback_point_floor` 31 → 46 iterations at the same answer, and moved
+  nothing else materially. **This reopens gh#592's over-damped exit on that
+  reporter's (unvendorable) model**; `perturb_delta_c_max_rungs=3` restores
+  the walk-back. When it is on, a `Singular` from a `δ_c`-free factorization
+  at or above the rung where `δ_c` was withdrawn now puts `δ_c` back, once
+  per augmented system. Full record:
+  `dev-notes/issue-981-delta-c-walkback-default.md`.
+- **`line_search_method=cg-penalty` is refused (gh#981).** It used to run
+  the plain penalty acceptor under the `cg-penalty` name — identical
+  iterations and step characters — while `options.md` said the CG-penalty
+  line search was refused. It now goes through the unimplemented-value table
+  like `bound_mult_init_method=mu-based`; use `filter` or `penalty`.
+
 - **`.nl` function evaluation now uses all cores.** The Lagrangian Hessian is
   accumulated color-major with one task per Hessian color, and the constraint
   Jacobian and constraint values split over rows. On a 54 859-variable
@@ -131,6 +152,27 @@ changes.
   doubles the iterations. Default unchanged.
 
 ### Fixed
+
+- **`Infeasible_Problem_Detected` now returns the least-infeasible point
+  (gh#981).** When restoration settled at a stationary point of the
+  infeasibility, the verdict was reported at the point where that
+  restoration *started*: on Wächter & Biegler's example, `x1 = -1.0885` at
+  violation 1.588 instead of `x1 = -1` at 1.5, the certificate. The
+  restoration iterate is now promoted when it is no more infeasible than the
+  current one.
+- **Restoration rows report `inf_pr` and `objective` in the main rows' units
+  (gh#981).** They printed the row-scaled `max(‖c‖∞, ‖d − s‖∞)` and the
+  scaled objective under the same headings as the main rows' user-unit
+  values: a badly scaled water main read 2.21e5 m of head on its main rows
+  and 0.211 on the restoration rows beside them. They now use the same
+  declared-bound, unscaled violation (`inf_pr_output=original`). The schema
+  doc also says what `final_constr_viol` is — the internal scaled residual,
+  on every exit; `final_declared_constr_viol` is the user-unit one.
+- **Step-character glossary corrected (gh#981).** `pounce-studio` defined
+  `h` as "Armijo" and `s` as "second-order correction"; `s`/`S` are
+  soft-restoration steps and upper case `F`/`H` marks a second-order
+  correction. `docs/src/schema/solve-report-v1.md` now has the full table,
+  including that the penalty line search labels every step `h`.
 
 - **The solve report's `iterations` now reproduces the printed iteration
   table line for line (gh#979).** Two differences, both measured against

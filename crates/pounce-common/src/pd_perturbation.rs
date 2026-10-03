@@ -112,9 +112,20 @@ pub struct PdPerturbationHandler {
     /// straight back and the walk-back would cycle.
     pub delta_c_abandoned: bool,
     /// gh#592: the rung at which `δ_c` is withdrawn — see
-    /// [`Self::perturb_for_wrong_inertia`]. `0` disables the walk-back
-    /// and restores the pre-#592 escalation exactly.
+    /// [`Self::perturb_for_wrong_inertia`]. `0` (the default since
+    /// gh#981) disables the walk-back: the pre-#592 escalation, which is
+    /// upstream's.
     pub delta_c_max_rungs: Index,
+    /// gh#981: the `δ_c` and `δ_x` in force when `δ_c` was withdrawn,
+    /// kept so a withdrawal the next factorization refutes can be
+    /// undone from where it left off. See [`Self::perturb_for_singular`].
+    pub delta_c_withdrawn: Number,
+    pub delta_x_at_withdrawal: Number,
+    /// gh#981: a withdrawal of `δ_c` was refuted and undone for this
+    /// aug-system, so `δ_c` stays on and is not withdrawn again before
+    /// the next [`Self::consider_new_system`]. One withdrawal and one
+    /// reinstatement per aug-system at most, so the two cannot cycle.
+    pub delta_c_reinstated: bool,
 }
 
 impl Default for PdPerturbationHandler {
@@ -144,14 +155,21 @@ impl Default for PdPerturbationHandler {
             jac_degenerate: DegenType::NotYetDetermined,
             degen_iters: 0,
             test_status: TrialStatus::NoTest,
-            // Three rungs is above anything the models δ_c exists for
-            // ever need: on eigena2 and eigenb2 (the gh#540 / gh#544
-            // motivating cases) δ_c is followed by at most one rung
-            // before the factor is accepted. See the doc comment on
-            // `perturb_for_wrong_inertia`.
+            // Off by default since gh#981: the walk-back withdrew δ_c on
+            // a genuinely rank-deficient Jacobian, and across the fixture
+            // corpus turning it off helped or left every model alone but
+            // two, neither of which it rescues (see
+            // `dev-notes/issue-981-delta-c-walkback-default.md`). When it
+            // is opted into, three rungs is above anything the models δ_c
+            // exists for ever need: on eigena2 and eigenb2 (the gh#540 /
+            // gh#544 motivating cases) δ_c is followed by at most one rung
+            // before the factor is accepted.
             delta_c_rungs: 0,
             delta_c_abandoned: false,
-            delta_c_max_rungs: 3,
+            delta_c_max_rungs: 0,
+            delta_c_withdrawn: 0.0,
+            delta_x_at_withdrawal: 0.0,
+            delta_c_reinstated: false,
         }
     }
 }
@@ -268,6 +286,7 @@ impl PdPerturbationHandler {
         // gh#592: the walk-back is scoped to a single aug-system.
         self.delta_c_rungs = 0;
         self.delta_c_abandoned = false;
+        self.delta_c_reinstated = false;
 
         Some(Deltas {
             delta_x,
@@ -289,13 +308,50 @@ impl PdPerturbationHandler {
         let mut delta_c = 0.0;
         let mut delta_d = 0.0;
 
-        // gh#592: `δ_c` has already been tried and withdrawn for this
-        // aug-system (see `maybe_withdraw_delta_c`). A further
-        // `Singular` is the same evidence that did not respond to it,
-        // so answer it on the `δ_x` ladder rather than putting `δ_c`
-        // straight back — which is what the arms below would do, and
-        // would cycle.
-        if self.delta_c_abandoned {
+        // gh#592 / gh#981: `δ_c` has been withdrawn for this aug-system
+        // (see `maybe_withdraw_delta_c`), and the factorization *without*
+        // it has just come back `Singular`.
+        //
+        // The withdrawal was an experiment — "δ_c was not what this
+        // system needed" — and the δ_x ladder restarted low to test it.
+        // A `Singular` from the low rungs says little: it is the same
+        // unmeasurable-inertia evidence (gh#540) that raised δ_c in the
+        // first place, and on gh#592's full-rank Jacobian a few more
+        // rungs of δ_x clear it. Putting δ_c straight back there undoes
+        // the walk-back exactly where it pays: measured on
+        // `pooling_rt2stp` (the gh#544 model), reinstating on *any*
+        // post-withdrawal `Singular` moved the median over a round-off
+        // `mu_init` screen from 127 to 245 iterations.
+        //
+        // A `Singular` at or above the rung where δ_c was withdrawn is a
+        // controlled comparison instead. The factorization at that δ_x
+        // *with* δ_c reported `WrongInertia` — nonsingular, its inertia
+        // measured. Without δ_c, at the same or a larger δ_x, it is
+        // `Singular`. Only δ_c differs, so the singularity is in the
+        // constraint block: the Jacobian is rank-deficient, δ_c is the
+        // only perturbation that touches it, and no δ_x will make
+        // `[W + δ_x I, Jᵀ; J, 0]` nonsingular. Left latched off, the
+        // ladder climbs against a singular matrix: on gh#981's CSTR with
+        // one duplicated row the report measured δ_w = 7e19 and a
+        // restoration call, where `perturb_delta_c_max_rungs=0` solves at
+        // δ_w = 2e-3.
+        //
+        // So the withdrawal is refuted and undone, once: δ_c goes back at
+        // the value it had and the ladder climbs on from here.
+        // `delta_c_reinstated` then keeps δ_c on, and further `Singular`
+        // reports are answered on the δ_x ladder on top of it. One
+        // withdrawal and one reinstatement per aug-system at most: the
+        // two cannot cycle.
+        if self.delta_c_abandoned
+            && !self.delta_c_reinstated
+            && self.delta_x_curr >= self.delta_x_at_withdrawal
+        {
+            self.delta_c_abandoned = false;
+            self.delta_c_reinstated = true;
+            self.delta_c_curr = self.delta_c_withdrawn;
+            self.delta_d_curr = self.delta_c_withdrawn;
+        }
+        if self.delta_c_abandoned || self.delta_c_reinstated {
             self.test_status = TrialStatus::NoTest;
             if !self.get_deltas_for_wrong_inertia(
                 &mut delta_x,
@@ -543,14 +599,24 @@ impl PdPerturbationHandler {
     /// remainder of this aug-system. Where `δ_c` is the right remedy
     /// this never fires — on eigena2 and eigenb2 it is followed by at
     /// most one rung.
+    ///
+    /// The withdrawal can be refuted: if the first factorization without
+    /// `δ_c` reports `Singular`, the Jacobian *is* rank-deficient and
+    /// [`Self::perturb_for_singular`] puts `δ_c` back (gh#981).
     fn maybe_withdraw_delta_c(&mut self, ip_data: Option<&dyn PerturbationSink>) {
-        if self.delta_c_max_rungs <= 0 || self.delta_c_abandoned || self.delta_c_curr <= 0.0 {
+        if self.delta_c_max_rungs <= 0
+            || self.delta_c_abandoned
+            || self.delta_c_reinstated
+            || self.delta_c_curr <= 0.0
+        {
             return;
         }
         self.delta_c_rungs += 1;
         if self.delta_c_rungs < self.delta_c_max_rungs {
             return;
         }
+        self.delta_c_withdrawn = self.delta_c_curr;
+        self.delta_x_at_withdrawal = self.delta_x_curr;
         self.delta_c_curr = 0.0;
         self.delta_d_curr = 0.0;
         self.delta_x_curr = 0.0;
@@ -691,12 +757,34 @@ fn set_info_regu_x(sink: Option<&dyn PerturbationSink>, v: Number) {
 mod tests {
     use super::*;
 
+    /// The gh#592 walk-back at the rung count it shipped with. Off by
+    /// default since gh#981, so the tests of its state machine opt in.
+    fn walkback_on() -> PdPerturbationHandler {
+        let mut h = PdPerturbationHandler::new();
+        h.delta_c_max_rungs = 3;
+        h
+    }
+
+    /// gh#981: the default is upstream's escalation — `δ_c`, once raised,
+    /// stays on however far the `δ_x` ladder climbs.
+    #[test]
+    fn the_walkback_is_off_by_default() {
+        let mut h = PdPerturbationHandler::new();
+        assert_eq!(h.delta_c_max_rungs, 0);
+        h.consider_new_system(0.1, None).unwrap();
+        h.perturb_for_singular(0.1, None).unwrap();
+        for _ in 0..6 {
+            let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+            assert!(d.delta_c > 0.0, "δ_c was withdrawn by default");
+        }
+    }
+
     /// gh#592: three rungs of the `δ_x` ladder with `δ_c` on and still
     /// no acceptable inertia is `δ_c` failing at the job it was raised
     /// for, so it is withdrawn and the ladder restarts without it.
     #[test]
     fn delta_c_is_withdrawn_after_the_ladder_has_climbed_without_it() {
-        let mut h = PdPerturbationHandler::new();
+        let mut h = walkback_on();
         h.consider_new_system(0.1, None).unwrap();
 
         // A `Singular` factor raises δ_c on its own — no δ_x yet.
@@ -723,13 +811,16 @@ mod tests {
         );
     }
 
-    /// ...and it stays withdrawn for the rest of this aug-system. The
-    /// factorization that reported `Singular` will keep reporting it for
-    /// the same reason, so without the latch δ_c would go straight back
-    /// on and the walk-back would cycle.
+    /// ...and it stays withdrawn for the rest of this aug-system while
+    /// the restarted ladder is below the rung it was withdrawn at. A
+    /// `Singular` there is the same unmeasurable-inertia evidence that
+    /// raised δ_c to begin with, so without the latch δ_c would go
+    /// straight back on and the walk-back would cycle. `WrongInertia`
+    /// at any height is gh#592's full-rank case, where the ladder alone
+    /// is the remedy.
     #[test]
     fn a_withdrawn_delta_c_is_not_raised_again_until_the_next_iterate() {
-        let mut h = PdPerturbationHandler::new();
+        let mut h = walkback_on();
         h.consider_new_system(0.1, None).unwrap();
         h.perturb_for_singular(0.1, None).unwrap();
         for _ in 0..3 {
@@ -738,16 +829,98 @@ mod tests {
         assert!(h.delta_c_abandoned);
 
         let d = h.perturb_for_singular(0.1, None).unwrap();
-        assert_eq!(d.delta_c, 0.0, "δ_c came back inside the same aug-system");
+        assert_eq!(d.delta_c, 0.0, "δ_c came back from a low-rung `Singular`");
         assert!(d.delta_x > 0.0, "the `Singular` was not answered at all");
+
+        let mut last = d.delta_x;
+        for _ in 0..6 {
+            let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+            assert_eq!(d.delta_c, 0.0, "δ_c came back inside the same aug-system");
+            assert!(d.delta_x > last, "the ladder stopped climbing");
+            last = d.delta_x;
+        }
 
         // The next iterate starts clean: the withdrawal is a statement
         // about one aug-system, not about the problem.
         h.consider_new_system(0.1, None).unwrap();
         assert!(!h.delta_c_abandoned);
+        assert!(!h.delta_c_reinstated);
         assert_eq!(h.delta_c_rungs, 0);
         let d = h.perturb_for_singular(0.1, None).unwrap();
         assert!(d.delta_c > 0.0, "δ_c is still latched off a new aug-system");
+    }
+
+    /// gh#981: a `Singular` without δ_c at a δ_x where the factor *with*
+    /// δ_c was nonsingular refutes the withdrawal — only δ_c differs, so
+    /// the Jacobian is rank-deficient and no δ_x can fix it. δ_c goes
+    /// back at its old value and the ladder climbs on, instead of
+    /// climbing to `delta_xs_max` against a singular matrix.
+    #[test]
+    fn a_singular_at_the_withdrawal_rung_reinstates_delta_c() {
+        let mut h = walkback_on();
+        h.consider_new_system(0.1, None).unwrap();
+        let dc = h.perturb_for_singular(0.1, None).unwrap().delta_c;
+        assert!(dc > 0.0);
+        for _ in 0..2 {
+            h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        }
+        // The factor at this δ_x, with δ_c on, reported `WrongInertia`.
+        let dx_under_dc = h.delta_x_curr;
+        let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        assert_eq!(d.delta_c, 0.0, "precondition: δ_c was withdrawn");
+        assert!(d.delta_x < dx_under_dc, "precondition: the ladder restarted low");
+
+        // `Singular` all the way up the restarted ladder: δ_c stays off
+        // until a `Singular` comes back from at or above that rung.
+        let mut reinstated_at = None;
+        for _ in 0..20 {
+            let reported_at = h.delta_x_curr;
+            let d = h.perturb_for_singular(0.1, None).unwrap();
+            if d.delta_c > 0.0 {
+                reinstated_at = Some((reported_at, d));
+                break;
+            }
+            assert!(reported_at < dx_under_dc, "a `Singular` at the rung did not reinstate");
+        }
+        let (reported_at, d) = reinstated_at.expect("δ_c was never reinstated");
+        assert!(reported_at >= dx_under_dc);
+        assert_eq!(d.delta_c, dc, "δ_c was not put back at its old value");
+        assert_eq!(d.delta_d, dc);
+        assert!(d.delta_x > reported_at, "the ladder did not climb on");
+        assert!(h.delta_c_reinstated && !h.delta_c_abandoned);
+    }
+
+    /// The reinstatement is final for the aug-system: δ_c is not
+    /// withdrawn a second time, so withdraw/reinstate cannot cycle, and
+    /// later `Singular` reports climb δ_x with δ_c held on.
+    #[test]
+    fn a_reinstated_delta_c_is_not_withdrawn_again() {
+        let mut h = walkback_on();
+        h.consider_new_system(0.1, None).unwrap();
+        let dc = h.perturb_for_singular(0.1, None).unwrap().delta_c;
+        for _ in 0..3 {
+            h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        }
+        while !h.delta_c_reinstated {
+            h.perturb_for_singular(0.1, None).unwrap();
+        }
+
+        let mut last = h.delta_x_curr;
+        for i in 0..6 {
+            let d = if i % 2 == 0 {
+                h.perturb_for_wrong_inertia(0.1, None)
+            } else {
+                h.perturb_for_singular(0.1, None)
+            }
+            .unwrap();
+            assert_eq!(d.delta_c, dc, "δ_c moved after it was reinstated (step {i})");
+            assert!(d.delta_x > last, "the ladder stopped climbing (step {i})");
+            last = d.delta_x;
+        }
+        assert!(!h.delta_c_abandoned);
+
+        h.consider_new_system(0.1, None).unwrap();
+        assert!(!h.delta_c_reinstated, "the reinstatement leaked into the next aug-system");
     }
 
     /// Where `δ_c` is the right remedy the walk-back must be invisible.
@@ -755,7 +928,7 @@ mod tests {
     /// gh#540 / gh#544 raised δ_c for.
     #[test]
     fn one_rung_under_delta_c_leaves_it_alone() {
-        let mut h = PdPerturbationHandler::new();
+        let mut h = walkback_on();
         h.consider_new_system(0.1, None).unwrap();
         h.perturb_for_singular(0.1, None).unwrap();
         let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();

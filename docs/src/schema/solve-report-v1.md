@@ -199,7 +199,7 @@ the per-iteration history (which lives at the top level when present).
 | `final_objective` | float \| null | Unscaled. Matches `solution.objective`. `null` if never computed — see below. |
 | `final_scaled_objective` | float \| null | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. `null` if never computed. |
 | `final_dual_inf` | float \| null | `||∇L||∞` at termination. `null` if never computed — see below. |
-| `final_constr_viol` | float \| null | `||c(x)||∞` (primal infeasibility). `null` if never computed. |
+| `final_constr_viol` | float \| null | Primal infeasibility `‖(c(x), d(x) − s)‖∞` in the **internally scaled** slack form — the residual the convergence test reads, the same quantity as the last row's `inf_pr_internal`, after a restoration exit too. On a badly scaled model it can be orders below the printed `inf_pr`; the violation in the model's own units at the returned point is `final_declared_constr_viol`, which the NLP arm fills whenever `bound_relax_factor > 0` (the default) (gh#981). `null` if never computed. |
 | `final_compl` | float \| null | Max complementarity over the four bound blocks. `null` if never computed. |
 | `final_kkt_error` | float \| null | Overall KKT error reported by the convergence check. `null` if never computed. |
 
@@ -258,8 +258,12 @@ Each row is one line of the console iteration table, in order, and
 carries the numbers that line prints — restoration-phase rows (the
 `r`-suffixed lines) included, tagged `"phase": "restoration"`. On those
 rows `objective` and `inf_pr` are the *original* problem's at the
-restoration iterate, exactly as printed; the remaining columns belong to
-the restoration sub-solve. A restoration row's `iter` continues the outer
+restoration iterate, exactly as printed, and in the same units as on the
+main rows — unscaled objective, and the user's constraints in user units
+against their declared bounds (gh#981; they used to be the row-scaled
+residual, so a badly scaled model's restoration rows read orders below
+the main rows beside them). The remaining columns belong to the
+restoration sub-solve. A restoration row's `iter` continues the outer
 count, so the main-phase `R` row that leaves restoration repeats the last
 restoration row's index, as the console does (gh#979). Fields:
 
@@ -276,8 +280,30 @@ restoration row's index, as the console does (gh#979). Fields:
 | `regularization` | float | Hessian regularization `δ_w` applied this iter; `0.0` when none was needed. |
 | `alpha_dual` | float | Dual step length. |
 | `alpha_primal` | float | Primal step length. |
-| `alpha_primal_char` | string (1 char) | Single-character tag (`f`, `h`, `R`, etc.) matching the alpha-primal column of upstream's iter table. |
+| `alpha_primal_char` | string (1 char) | Single-character tag matching the alpha-primal column of upstream's iter table. See [the step characters](#step-characters-alpha_primal_char) below. |
 | `ls_trials` | integer | Number of backtracking line-search trials this iter. |
+
+#### Step characters (`alpha_primal_char`)
+
+The letter says how the step was accepted. What it can tell you depends
+on `line_search_method` (gh#981):
+
+| Char | Meaning |
+|---|---|
+| `f` | **Filter only.** An *f-type* step: the switching condition held and the step passed the Armijo test on the barrier objective, so the filter was not augmented. |
+| `h` | **Filter:** an *h-type* step, which made sufficient progress on θ or φ against the filter and augmented it. **Penalty:** *every* accepted step. The penalty acceptor has no f/h distinction, so under `line_search_method=penalty` the letter carries no information. |
+| `F` / `H` | As `f` / `h`, but the step that was accepted is a **second-order correction**. Upper case is the SOC marker (`backtracking.rs`, `mode.to_ascii_uppercase()`). |
+| `s` | A **soft-restoration** step (Ipopt's `in_soft_resto_phase_`), accepted on primal-dual error reduction; the line search stays in soft restoration. |
+| `S` | A soft-restoration step that is also acceptable to the original acceptor, so soft restoration ends. Not a second-order correction: SOC only ever produces `F` / `H`. |
+| `w` | **Watchdog** accept-anyway: the last trial was accepted despite the acceptor rejecting it, and the filter was not augmented. |
+| `t` / `T` | Tiny step: the search direction was below `tiny_step_tol`, so the full step was taken without a line search. `T` means the previous iteration was tiny too. |
+| `R` | The row where the main phase hands off to, or takes back from, the restoration phase. The restoration phase's own rows are tagged `"phase": "restoration"` (printed with an `r` suffix). |
+| ` ` (blank) | No acceptor was consulted: iteration 0, or `accept_every_trial_step=yes`. |
+
+A run of `s` with no `R` means soft restoration is making progress on
+the primal-dual error without ever handing off to full restoration. Under
+`line_search_method=penalty` that can continue until `max_iter`; see
+gh#981.
 
 ### `linear_solver` (object, optional)
 

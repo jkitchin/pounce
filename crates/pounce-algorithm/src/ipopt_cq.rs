@@ -161,6 +161,107 @@ pub fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
     }
 }
 
+/// Max-norm constraint violation of the **original** NLP, in user units,
+/// for the `c(x)` / `d(x)` blocks `c` and `d` (internally scaled, as
+/// `IpoptNlp::eval_c` / `eval_d` return them). The body of
+/// [`IpoptCalculatedQuantities::curr_unscaled_nlp_constraint_violation_max`],
+/// which documents the definition; free so the restoration phase's iteration
+/// rows can report the same quantity at the restoration iterate's `x` slice
+/// (gh#981) instead of the scaled residual.
+pub fn unscaled_nlp_constraint_violation_max(nlp: &dyn IpoptNlp, c: &dyn Vector, d: &dyn Vector) -> Number {
+    let (dc, dd) = (nlp.c_scale_vec(), nlp.d_scale_vec());
+    let c_max = unscaled_block_amax(c, dc.as_deref());
+
+    if d.dim() == 0 {
+        return c_max;
+    }
+    let (lo, hi, mask_l, mask_u) = {
+        let (mut cl, mut cu) = (nlp.d_l().make_new(), nlp.d_u().make_new());
+        match nlp.declared_d_bounds() {
+            Some((dl, du)) => {
+                let (Some(cld), Some(cud)) = (
+                    cl.as_any_mut().downcast_mut::<DenseVector>(),
+                    cu.as_any_mut().downcast_mut::<DenseVector>(),
+                ) else {
+                    return c_max;
+                };
+                cld.set_values(&dl);
+                cud.set_values(&du);
+            }
+            None => {
+                cl.copy(nlp.d_l());
+                cu.copy(nlp.d_u());
+            }
+        }
+        let mut lo = d.make_new();
+        lo.set(0.0);
+        nlp.pd_l().mult_vector(1.0, &*cl, 0.0, &mut *lo);
+        let mut hi = d.make_new();
+        hi.set(0.0);
+        nlp.pd_u().mult_vector(1.0, &*cu, 0.0, &mut *hi);
+        // A projected 0 is ambiguous — "no bound on this side" and "a
+        // declared zero bound" both read 0 — so project an all-ones
+        // vector through the same expansion to get presence masks.
+        let mut ones_l = nlp.d_l().make_new();
+        ones_l.set(1.0);
+        let mut mask_l = d.make_new();
+        mask_l.set(0.0);
+        nlp.pd_l().mult_vector(1.0, &*ones_l, 0.0, &mut *mask_l);
+        let mut ones_u = nlp.d_u().make_new();
+        ones_u.set(1.0);
+        let mut mask_u = d.make_new();
+        mask_u.set(0.0);
+        nlp.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
+        (lo, hi, mask_l, mask_u)
+    };
+    let (Some(dv), Some(lo), Some(hi), Some(ml), Some(mu)) = (
+        d.as_any().downcast_ref::<DenseVector>(),
+        lo.as_any().downcast_ref::<DenseVector>(),
+        hi.as_any().downcast_ref::<DenseVector>(),
+        mask_l.as_any().downcast_ref::<DenseVector>(),
+        mask_u.as_any().downcast_ref::<DenseVector>(),
+    ) else {
+        return c_max;
+    };
+    if !(dv.is_initialized()
+        && lo.is_initialized()
+        && hi.is_initialized()
+        && ml.is_initialized()
+        && mu.is_initialized())
+    {
+        return c_max;
+    }
+    let (dv, lov, hiv, mlv, muv) = (
+        dv.expanded_values(),
+        lo.expanded_values(),
+        hi.expanded_values(),
+        ml.expanded_values(),
+        mu.expanded_values(),
+    );
+    let mut worst = c_max;
+    for i in 0..dv.len() {
+        let mut viol = 0.0_f64;
+        if mlv[i] > 0.5 {
+            viol = viol.max(lov[i] - dv[i]);
+        }
+        if muv[i] > 0.5 {
+            viol = viol.max(dv[i] - hiv[i]);
+        }
+        if viol <= 0.0 || !viol.is_finite() {
+            continue;
+        }
+        // Row scaling is per-row (`d_scaled = dd ⊙ d_user`), so the
+        // violation unscales by the same factor. A zero factor is treated
+        // as the identity, matching `unscaled_block_amax`.
+        let viol = match dd.as_deref() {
+            Some(s) if s[i] != 0.0 => viol / s[i],
+            _ => viol,
+        };
+        worst = worst.max(viol);
+    }
+    worst
+}
+
 /// `‖v‖_∞` over the components that clear their own entry of `floor`;
 /// components at or below it contribute `0`. Used by
 /// [`IpoptCalculatedQuantities::curr_primal_infeasibility_above_noise`], which
@@ -1085,102 +1186,9 @@ impl IpoptCalculatedQuantities {
     /// would still see (same reasoning as
     /// [`Self::relative_d_infeasibility_max`]).
     pub fn curr_unscaled_nlp_constraint_violation_max(&self) -> Number {
-        let (dc, dd) = {
-            let nlp = self.nlp.borrow();
-            (nlp.c_scale_vec(), nlp.d_scale_vec())
-        };
-        let c_max = unscaled_block_amax(&*self.curr_c(), dc.as_deref());
-
+        let c = self.curr_c();
         let d = self.curr_d();
-        if d.dim() == 0 {
-            return c_max;
-        }
-        let (lo, hi, mask_l, mask_u) = {
-            let nlp = self.nlp.borrow();
-            let (mut cl, mut cu) = (nlp.d_l().make_new(), nlp.d_u().make_new());
-            match nlp.declared_d_bounds() {
-                Some((dl, du)) => {
-                    let (Some(cld), Some(cud)) = (
-                        cl.as_any_mut().downcast_mut::<DenseVector>(),
-                        cu.as_any_mut().downcast_mut::<DenseVector>(),
-                    ) else {
-                        return c_max;
-                    };
-                    cld.set_values(&dl);
-                    cud.set_values(&du);
-                }
-                None => {
-                    cl.copy(nlp.d_l());
-                    cu.copy(nlp.d_u());
-                }
-            }
-            let mut lo = d.make_new();
-            lo.set(0.0);
-            nlp.pd_l().mult_vector(1.0, &*cl, 0.0, &mut *lo);
-            let mut hi = d.make_new();
-            hi.set(0.0);
-            nlp.pd_u().mult_vector(1.0, &*cu, 0.0, &mut *hi);
-            // A projected 0 is ambiguous — "no bound on this side" and "a
-            // declared zero bound" both read 0 — so project an all-ones
-            // vector through the same expansion to get presence masks.
-            let mut ones_l = nlp.d_l().make_new();
-            ones_l.set(1.0);
-            let mut mask_l = d.make_new();
-            mask_l.set(0.0);
-            nlp.pd_l().mult_vector(1.0, &*ones_l, 0.0, &mut *mask_l);
-            let mut ones_u = nlp.d_u().make_new();
-            ones_u.set(1.0);
-            let mut mask_u = d.make_new();
-            mask_u.set(0.0);
-            nlp.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
-            (lo, hi, mask_l, mask_u)
-        };
-        let (Some(dv), Some(lo), Some(hi), Some(ml), Some(mu)) = (
-            d.as_any().downcast_ref::<DenseVector>(),
-            lo.as_any().downcast_ref::<DenseVector>(),
-            hi.as_any().downcast_ref::<DenseVector>(),
-            mask_l.as_any().downcast_ref::<DenseVector>(),
-            mask_u.as_any().downcast_ref::<DenseVector>(),
-        ) else {
-            return c_max;
-        };
-        if !(dv.is_initialized()
-            && lo.is_initialized()
-            && hi.is_initialized()
-            && ml.is_initialized()
-            && mu.is_initialized())
-        {
-            return c_max;
-        }
-        let (dv, lov, hiv, mlv, muv) = (
-            dv.expanded_values(),
-            lo.expanded_values(),
-            hi.expanded_values(),
-            ml.expanded_values(),
-            mu.expanded_values(),
-        );
-        let mut worst = c_max;
-        for i in 0..dv.len() {
-            let mut viol = 0.0_f64;
-            if mlv[i] > 0.5 {
-                viol = viol.max(lov[i] - dv[i]);
-            }
-            if muv[i] > 0.5 {
-                viol = viol.max(dv[i] - hiv[i]);
-            }
-            if viol <= 0.0 || !viol.is_finite() {
-                continue;
-            }
-            // Row scaling is per-row (`d_scaled = dd ⊙ d_user`), so the
-            // violation unscales by the same factor. A zero factor is treated
-            // as the identity, matching `unscaled_block_amax`.
-            let viol = match dd.as_deref() {
-                Some(s) if s[i] != 0.0 => viol / s[i],
-                _ => viol,
-            };
-            worst = worst.max(viol);
-        }
-        worst
+        unscaled_nlp_constraint_violation_max(&*self.nlp.borrow(), &*c, &*d)
     }
 
     /// The primal violation of the model **as declared** — before the

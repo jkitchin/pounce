@@ -450,17 +450,38 @@ pub struct UnimplementedValue {
     pub feature: &'static str,
     /// What the caller can do instead. Empty when there is nothing.
     pub advice: &'static str,
+    /// Issue tracking the missing mode, named in the error.
+    pub issue: u32,
 }
 
 /// String-option values pounce does not implement. Refused when set.
-pub const UNIMPLEMENTED_VALUES: &[UnimplementedValue] = &[UnimplementedValue {
-    option: "bound_mult_init_method",
-    value: "mu-based",
-    feature: "initializing each bound multiplier to mu_init divided by its \
-              own slack",
-    advice: "`bound_mult_init_method=constant` (the default) initializes them \
-             all to `bound_mult_init_val`, which you can set",
-}];
+pub const UNIMPLEMENTED_VALUES: &[UnimplementedValue] = &[
+    UnimplementedValue {
+        option: "bound_mult_init_method",
+        value: "mu-based",
+        feature: "initializing each bound multiplier to mu_init divided by its \
+                  own slack",
+        advice: "`bound_mult_init_method=constant` (the default) initializes \
+                 them all to `bound_mult_init_val`, which you can set",
+        issue: 604,
+    },
+    // gh#981: the CG-penalty acceptor's *options* were refused (the
+    // first entry of `UNIMPLEMENTED_FEATURES`), but the value that
+    // selects it was not — `application.rs` mapped it to
+    // `LineSearchChoice::CgPenalty`, which `alg_builder.rs` assembles as
+    // the plain `PenaltyLsAcceptor`. Measured: the run was identical to
+    // `line_search_method=penalty` down to the step characters.
+    UnimplementedValue {
+        option: "line_search_method",
+        value: "cg-penalty",
+        feature: "the Chen-Goldfarb (CG-penalty) line search — Ipopt's \
+                  `CGPenaltyLSAcceptor`",
+        advice: "`line_search_method=filter` (the default) or \
+                 `line_search_method=penalty` (`IpPenaltyLSAcceptor`), which \
+                 is what `cg-penalty` actually ran",
+        issue: 981,
+    },
+];
 
 /// Options that *are* honored in the sense that matters — the answer is
 /// unaffected — but whose performance hint pounce does not exploit.
@@ -908,10 +929,10 @@ pub fn value_refusal(options: &OptionsList) -> Option<String> {
             "pounce: `{}={}` selects {}, which pounce does not implement. The \
              value is registered so an ipopt.opt written for Ipopt still \
              parses; falling back to another mode would silently run a \
-             different initialization than the one you asked for, so it is \
+             different algorithm than the one you asked for, so it is \
              refused instead.{advice} Tracking issue: \
-             https://github.com/jkitchin/pounce/issues/604",
-            entry.option, entry.value, entry.feature,
+             https://github.com/jkitchin/pounce/issues/{}",
+            entry.option, entry.value, entry.feature, entry.issue,
         ));
     }
     None
@@ -1310,6 +1331,26 @@ mod tests {
             .unwrap();
         let msg = refusal(&opts, &reg).expect("must refuse");
         assert!(msg.contains("CG-penalty"), "{msg}");
+    }
+
+    /// gh#981: the *value* that selects the CG-penalty acceptor is
+    /// refused too — it used to run the plain penalty acceptor under the
+    /// `cg-penalty` name. The two implemented values stay accepted.
+    #[test]
+    fn line_search_method_cg_penalty_is_refused_but_penalty_is_not() {
+        for ok in ["filter", "penalty"] {
+            let (mut opts, _) = fixture();
+            opts.set_string_value("line_search_method", ok, true, false)
+                .unwrap();
+            assert_eq!(value_refusal(&opts), None, "{ok} is implemented");
+        }
+        let (mut opts, _) = fixture();
+        opts.set_string_value("line_search_method", "cg-penalty", true, false)
+            .expect("upstream's value must still parse");
+        let msg = value_refusal(&opts).expect("cg-penalty must be refused");
+        assert!(msg.contains("line_search_method=cg-penalty"), "{msg}");
+        assert!(msg.contains("Chen-Goldfarb"), "{msg}");
+        assert!(msg.contains("issues/981"), "{msg}");
     }
 
     /// The four constant-derivative hints left this table in gh #588 Q6.

@@ -388,7 +388,44 @@ impl RestorationPhase for MinC1NormRestoration {
         // local infeasibility — the resto sub-problem can't drive
         // `||c||_1` lower than this. Mirrors upstream
         // `IpRestoConvCheck.cpp:240`'s `LOCALLY_INFEASIBLE` throw.
+        //
+        // gh#981: hand the verdict back *with the point that earned it*.
+        // The restoration iterate is the stationary point of the
+        // infeasibility measure — the certificate — while `curr` is still
+        // where restoration was entered. Returning `curr` reported, on the
+        // Wächter–Biegler example, `x1 = -1.0885` at violation 1.588 when
+        // restoration had settled at `x1 = -1` and 1.5. Promote the
+        // recovered primal (keeping `curr`'s multipliers, as the square
+        // feasible-point branch above does) when it is no more infeasible
+        // than `curr` on the original NLP; otherwise `curr` stays, so the
+        // reported point is never a worse one.
         if result.locally_infeasible {
+            let curr_snapshot = data.borrow().curr.clone();
+            if let Some(curr) = curr_snapshot {
+                let recovered = IteratesVector::new(
+                    result.trial_x.clone(),
+                    result.trial_s.clone(),
+                    curr.y_c.clone(),
+                    curr.y_d.clone(),
+                    curr.z_l.clone(),
+                    curr.z_u.clone(),
+                    curr.v_l.clone(),
+                    curr.v_u.clone(),
+                );
+                let saved_trial = data.borrow().trial.clone();
+                data.borrow_mut().set_trial(recovered.clone());
+                let (theta_curr, theta_rec) = {
+                    let c = cq.borrow();
+                    (
+                        c.curr_constraint_violation(),
+                        c.trial_constraint_violation(),
+                    )
+                };
+                data.borrow_mut().trial = saved_trial;
+                if theta_rec.is_finite() && theta_rec <= theta_curr {
+                    data.borrow_mut().set_curr(recovered);
+                }
+            }
             return RestorationOutcome::LocallyInfeasible;
         }
 
