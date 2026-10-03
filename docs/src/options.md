@@ -447,11 +447,9 @@ the FERAL backend's equivalent does: `dev-notes/ma57-batched-backsolve.md`.
 
 ### Withdrawing the constraint perturbation (`perturb_delta_c_max_rungs`)
 
-POUNCE extension; not an upstream Ipopt option. Default `0` — off, which
-is upstream's escalation — since
-[#981](https://github.com/jkitchin/pounce/issues/981); `3` is the
-[#592](https://github.com/jkitchin/pounce/issues/592) walk-back as it
-shipped, and was the default until then.
+POUNCE extension; not an upstream Ipopt option. Default `3`; `0`
+restores the pre-[#592](https://github.com/jkitchin/pounce/issues/592)
+escalation exactly.
 
 When the KKT factorization does not deliver the requested inertia, the
 solver climbs a ladder of perturbations: `delta_w` on the Hessian block,
@@ -480,33 +478,11 @@ restarts, and `delta_c` is latched off for the remainder of that
 augmented system; the next iterate starts clean. Lower values withdraw
 sooner.
 
-On `eigena2` and `eigenb2` `delta_c` is followed by at most one rung, so
-the walk-back never fires there. It does fire where `delta_c` is right
-*and* the Hessian block still needs `delta_w`: a genuinely rank-deficient
-Jacobian on a nonconvex model. That is #981's first finding — a CSTR with
-one equality row written twice — where withdrawing `delta_c` left the
-ladder climbing against a matrix only `delta_c` can make nonsingular
-(16 iterations at a peak `delta_w` of 1.09 instead of 12 at 2.1e-3; under
-`mu_strategy=adaptive`, 31 iterations, two restoration calls and
-`delta_w = 1e10` instead of 10 iterations and none). When the walk-back is
-on, a factorization *without* `delta_c` that reports `Singular` at or
-above the rung where `delta_c` was withdrawn now puts it back, once per
-augmented system: at that `delta_w` the factor with `delta_c` was
-nonsingular, so the singularity is in the constraint block.
-
-Why it is off by default: across the fixture corpus, turning it off
-improved `pooling_rt2stp` on both legs (exact 162 → 116 iterations; the
-L-BFGS leg from `ErrorInStepComputation` after 716 iterations to solved in
-146) and moved nothing else by more than a few iterations except
-`mu_fallback_point_floor` (31 → 46, same answer). No vendored model is
-robustly helped by the walk-back, and three external ones
-(`steenbrd`/`f`/`g`) are robustly hurt by it. The one model it was written
-for is #592's reporter's, which cannot be vendored; if a model exits early
-at an over-damped point after a `delta_c` escalation, try
-`perturb_delta_c_max_rungs=3`. See
-`crates/pounce-common/src/pd_perturbation.rs` (`maybe_withdraw_delta_c`,
-`perturb_for_singular`), `dev-notes/issue-592-restart-non-idempotence.md`
-and `dev-notes/issue-981-delta-c-walkback-default.md`.
+Where `delta_c` is the right remedy this never fires: on `eigena2` and
+`eigenb2` it is followed by at most one rung. See
+`crates/pounce-common/src/pd_perturbation.rs`
+(`maybe_withdraw_delta_c`) and
+`dev-notes/issue-592-restart-non-idempotence.md`.
 
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 

@@ -56,21 +56,6 @@ changes.
 
 ### Changed
 
-- **`perturb_delta_c_max_rungs` now defaults to `0` — the gh#592 `δ_c`
-  walk-back is off (gh#981).** It withdrew `δ_c` on a genuinely
-  rank-deficient Jacobian: a CSTR with one equality row written twice took
-  16 iterations at a peak `δ_w` of 1.09 instead of 12 at 2.1e-3, and under
-  `mu_strategy=adaptive` 31 iterations, two restoration calls and
-  `δ_w = 1e10` instead of 10 and none. Swept with the walk-back off, the
-  fixture corpus improved on `pooling_rt2stp` (exact 162 → 116 iterations;
-  L-BFGS from `ErrorInStepComputation` at 716 to solved at 146), cost
-  `mu_fallback_point_floor` 31 → 46 iterations at the same answer, and moved
-  nothing else materially. **This reopens gh#592's over-damped exit on that
-  reporter's (unvendorable) model**; `perturb_delta_c_max_rungs=3` restores
-  the walk-back. When it is on, a `Singular` from a `δ_c`-free factorization
-  at or above the rung where `δ_c` was withdrawn now puts `δ_c` back, once
-  per augmented system. Full record:
-  `dev-notes/issue-981-delta-c-walkback-default.md`.
 - **`line_search_method=cg-penalty` is refused (gh#981).** It used to run
   the plain penalty acceptor under the `cg-penalty` name — identical
   iterations and step characters — while `options.md` said the CG-penalty
@@ -168,6 +153,14 @@ changes.
   declared-bound, unscaled violation (`inf_pr_output=original`). The schema
   doc also says what `final_constr_viol` is — the internal scaled residual,
   on every exit; `final_declared_constr_viol` is the user-unit one.
+- **gh#981 finding 1 is measured but not fixed.** The gh#592 `δ_c`
+  walk-back withdraws `δ_c` on a genuinely rank-deficient Jacobian (a CSTR
+  with one row written twice: 16 iterations at peak `δ_w` 1.09 against 12
+  at 2.1e-3 with `perturb_delta_c_max_rungs=0`). Both candidate fixes — a
+  reinstatement rule and a default of `0` — cost other models (a gh#884-class
+  `Solve_Succeeded` and a worse MPCC local solution under
+  `bound_relax_factor=0`), so neither shipped; `perturb_delta_c_max_rungs=0`
+  is the workaround. Measurements: `dev-notes/issue-981-delta-c-walkback.md`.
 - **Step-character glossary corrected (gh#981).** `pounce-studio` defined
   `h` as "Armijo" and `s` as "second-order correction"; `s`/`S` are
   soft-restoration steps and upper case `F`/`H` marks a second-order

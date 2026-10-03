@@ -4,18 +4,19 @@
 //!
 //! Finding 2 (`line_search_method=cg-penalty`) is pinned in
 //! `unimplemented_options.rs` and in `pounce_algorithm::unimplemented_options`;
-//! finding 3 (the step-character glossary) is documentation. The three
-//! findings with a numerical symptom are pinned here:
+//! finding 3 (the step-character glossary) is documentation. The two
+//! findings it fixes with a numerical symptom are pinned here:
 //!
-//! * **1 — `δ_c` withdrawn on a rank-deficient Jacobian.** One equality row
-//!   of the CSTR is exactly twice another, so `δ_c` is the right remedy and
-//!   the gh#592 walk-back must not leave the `δ_x` ladder climbing against a
-//!   singular matrix.
 //! * **4 — the point returned with `Infeasible_Problem_Detected`.** It must
 //!   be the restoration phase's least-infeasible iterate (the certificate),
 //!   not the point where the last restoration started.
 //! * **5 — restoration rows in scaled units.** A restoration row's `inf_pr`
 //!   must be in the same units as the main rows beside it.
+//!
+//! Finding 1 (the gh#592 `δ_c` walk-back withdrawing `δ_c` on the
+//! rank-deficient `issue981_cstr_dup_row`) is **not fixed** and so not
+//! pinned here: both candidate fixes cost other models, measured in
+//! `dev-notes/issue-981-delta-c-walkback.md`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -71,91 +72,7 @@ fn solve(name: &str, extra: &[&str]) -> SolveReport {
     serde_json::from_str(&text).expect("deserialize SolveReport")
 }
 
-fn max_regularization(r: &SolveReport) -> f64 {
-    r.iterations
-        .iter()
-        .map(|it| it.regularization)
-        .fold(0.0, f64::max)
-}
 
-fn restoration_rows(r: &SolveReport) -> usize {
-    r.iterations
-        .iter()
-        .filter(|it| it.phase == IterPhase::Restoration)
-        .count()
-}
-
-/// Finding 1. Measured on `main` before the fix: 16 iterations at a peak
-/// `δ_w` of 1.09 by default, against 12 at 2.1e-3 with the walk-back off
-/// (`perturb_delta_c_max_rungs=0`) — the walk-back withdrew `δ_c` and the
-/// `δ_x` ladder then climbed against the duplicated row. (The issue,
-/// driven through discopt, saw it climb to 7e19 and enter restoration.)
-///
-/// Two things answer it, and each arm here pins one: the walk-back is off
-/// by default, and when it is opted into (`=3`, the old default) a
-/// `Singular` without `δ_c` at the rung it was withdrawn at puts it back.
-/// Either way the run must behave like the one that keeps `δ_c`.
-#[test]
-fn delta_c_is_kept_on_a_rank_deficient_jacobian() {
-    let keep = solve("issue981_cstr_dup_row.nl", &["perturb_delta_c_max_rungs=0"]);
-    let default = solve("issue981_cstr_dup_row.nl", &[]);
-    let opt_in = solve("issue981_cstr_dup_row.nl", &["perturb_delta_c_max_rungs=3"]);
-    for (label, r) in [
-        ("default", &default),
-        ("rungs=0", &keep),
-        ("rungs=3", &opt_in),
-    ] {
-        assert_eq!(
-            r.solution.status,
-            ApplicationReturnStatus::SolveSucceeded,
-            "{label}: the CSTR did not solve"
-        );
-        assert!(
-            (r.solution.objective - 5.352368).abs() < 1e-4,
-            "{label}: wrong optimum {}",
-            r.solution.objective
-        );
-    }
-    for (label, r) in [("default", &default), ("rungs=3", &opt_in)] {
-        assert!(
-            max_regularization(r) < 1e-1,
-            "{label}: peak δ_w {:e} on a rank-deficient Jacobian (δ_c kept: \
-             {:e}): the δ_x ladder is climbing against a matrix only δ_c \
-             can make nonsingular",
-            max_regularization(r),
-            max_regularization(&keep),
-        );
-        assert!(
-            r.statistics.iteration_count <= keep.statistics.iteration_count + 1,
-            "{label}: took {} iterations where keeping δ_c takes {}",
-            r.statistics.iteration_count,
-            keep.statistics.iteration_count,
-        );
-        assert_eq!(restoration_rows(r), 0, "{label}: restoration was entered");
-    }
-}
-
-/// The same model under `mu_strategy=adaptive`, where the effect was the
-/// largest measured: 31 iterations, two restoration calls and `δ_w = 1e10`
-/// before the fix, against 10 iterations and no restoration with `δ_c`
-/// kept — identical to the CSTR without the duplicated row.
-#[test]
-fn delta_c_is_kept_on_a_rank_deficient_jacobian_under_adaptive_mu() {
-    for rungs in ["perturb_delta_c_max_rungs=0", "perturb_delta_c_max_rungs=3"] {
-        let r = solve("issue981_cstr_dup_row.nl", &["mu_strategy=adaptive", rungs]);
-        assert_eq!(
-            r.solution.status,
-            ApplicationReturnStatus::SolveSucceeded,
-            "{rungs}"
-        );
-        assert_eq!(restoration_rows(&r), 0, "{rungs}: restoration was entered");
-        assert!(
-            max_regularization(&r) <= 1.0 + 1e-12,
-            "{rungs}: peak δ_w {:e}",
-            max_regularization(&r)
-        );
-    }
-}
 
 /// Finding 4. Restoration settles at the local minimizer of the
 /// infeasibility, `x1 = -1` with violation 1.5; the report used to return

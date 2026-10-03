@@ -1048,7 +1048,7 @@ impl Default for PerturbationOptions {
             jacobian_regularization_value: 1e-8,
             jacobian_regularization_exponent: 0.25,
             perturb_always_cd: false,
-            perturb_delta_c_max_rungs: 0,
+            perturb_delta_c_max_rungs: 3,
         }
     }
 }

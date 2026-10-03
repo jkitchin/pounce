@@ -120,18 +120,6 @@
 //! measurement is recorded so the next reader starts from it rather than
 //! from scratch.
 //!
-//! ## gh#981: the walk-back is off by default
-//!
-//! That revisit happened. gh#981 found the walk-back withdrawing `δ_c` on a
-//! genuinely rank-deficient Jacobian (a CSTR with one row written twice),
-//! and the fixture sweep with the walk-back off came back better or level
-//! on every model but two, neither of which the walk-back rescues:
-//! `pooling_rt2stp` went 162 -> 116 iterations on the exact leg and from
-//! `ErrorInStepComputation` at 716 to solved at 146 on the L-BFGS leg. So
-//! `perturb_delta_c_max_rungs` now defaults to `0`, and the tests below pin
-//! that default and keep the opt-in walk-back honest. The full account is
-//! `dev-notes/issue-981-delta-c-walkback-default.md`.
-//!
 //! The *mechanism* remains directly pinned, as it always was, by the
 //! `pounce_common::pd_perturbation` unit tests for the walk-back state
 //! machine and the `pounce_feral` unit tests for the floor. What is gone
@@ -198,10 +186,6 @@ const NO_WALKBACK: [&str; 1] = ["perturb_delta_c_max_rungs=0"];
 
 const POOLING_OPTIMUM: f64 = -3273.9549;
 
-/// The other local optimum the walk-back-on run reaches on some starts
-/// (gh#981), and the one the L-BFGS leg converges to.
-const POOLING_OTHER_LOCAL_OPTIMUM: f64 = -4391.826;
-
 /// The headline, with its scope corrected by gh#693.
 ///
 /// It was written to say "812 iterations is what gh#544 left behind and
@@ -210,9 +194,9 @@ const POOLING_OTHER_LOCAL_OPTIMUM: f64 = -4391.826;
 /// drift would not fail it but the detour coming back would.
 ///
 /// Since gh#693 the default run is 128 iterations and does not reach for
-/// `δ_c` at all, so this **no longer pins the walk-back specifically**.
-/// Since gh#981 the walk-back is off by default, and the companion tests
-/// below pin that default and the opt-in. What survives is still worth keeping and still fails if gh#544
+/// `δ_c` at all, so this **no longer pins the walk-back specifically** —
+/// the companion test below now measures that directly and finds it
+/// inert. What survives is still worth keeping and still fails if gh#544
 /// comes back by any route: this model reaches its known optimum with a
 /// certificate, in far fewer than 500 iterations. The bound is left where
 /// it was, because its job (catch a return to the 812-iteration régime)
@@ -239,46 +223,53 @@ fn pooling_reaches_its_optimum_without_the_gh544_detour() {
     );
 }
 
-/// gh#981: the walk-back is off by default, so a default solve *is* the
-/// pre-#592 escalation. Pinned directly, so that the default cannot
-/// drift back to the walk-back without this saying so.
+/// This was the guard against a vacuous pass — with the walk-back off,
+/// the build had to still reproduce the 812-iteration run, so that if a
+/// later change shortened `pooling_rt2stp` by some other route the guard
+/// would fail and say so rather than let the headline pass for a reason
+/// it did not describe.
 ///
-/// This replaced `the_walkback_is_inert_on_this_fixture_since_gh693`,
-/// whose claim had gone stale before gh#981 touched it: on `main` at
-/// 672320d the walk-back fired seven times on this model and took it from
-/// 116 iterations (walk-back off) to 162, and over a round-off `mu_init`
-/// screen it scattered the run between 81 and 3000 iterations and across
-/// two local optima, where the walk-back-off run sat at 116 on six of
-/// nine draws.
+/// It did exactly that on gh#693, which shortened the model by a
+/// different route. Rather than delete the guard, it is inverted: the
+/// measured fact is now that the walk-back is **inert on this fixture**,
+/// and that fact is pinned so that the header's claim above cannot
+/// silently go stale in the other direction either. If a future change
+/// makes the walk-back load-bearing here again, this fails and says so —
+/// and that would be the replacement witness the header describes
+/// searching for and not finding.
 #[test]
-fn the_default_is_the_escalation_without_the_walkback() {
-    let default = solve(&[]);
+fn the_walkback_is_inert_on_this_fixture_since_gh693() {
+    let with = solve(&[]);
     let without = solve(&NO_WALKBACK);
     assert_eq!(
-        default.statistics.iteration_count, without.statistics.iteration_count,
-        "the default no longer matches perturb_delta_c_max_rungs=0"
+        without.solution.status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "walk-back off used to mean 812 iterations and now means {}; if it \
+         has started costing the certificate, the header table above is \
+         stale and needs re-measuring",
+        without.statistics.iteration_count,
     );
-    assert_eq!(default.solution.objective, without.solution.objective);
+    assert!(
+        without.statistics.iteration_count < 300,
+        "the pre-#592 escalation is reproducing again ({} iterations with \
+         the walk-back off, against {} with it on). That is a *witness \
+         coming back*, not a regression -- the header above records a \
+         search that failed to find one. Restore the `> 600` guard this \
+         test replaced and re-point the header table.",
+        without.statistics.iteration_count,
+        with.statistics.iteration_count,
+    );
 }
 
-/// The walk-back is still there for a caller who opts into it, and must
-/// still reach a certificate. Not pinned to `POOLING_OPTIMUM`: with the
-/// walk-back on, this model is chaotic between two local optima under
-/// round-off perturbations of `mu_init` (see the test above), and since
-/// gh#981's reinstatement the default-start draw lands on the other one.
+/// The walk-back must not cost the certificate it is meant to reach
+/// sooner: same point, either way. Still true after gh#693, though now
+/// for the trivial reason that the walk-back does nothing here.
 #[test]
-fn the_opt_in_walkback_still_reaches_a_certificate() {
-    let r = solve(&["perturb_delta_c_max_rungs=3"]);
-    assert_eq!(
-        r.solution.status,
-        ApplicationReturnStatus::SolveSucceeded,
-        "the opt-in walk-back lost the certificate ({} iterations)",
-        r.statistics.iteration_count,
-    );
-    let near = |v: f64| (r.solution.objective - v).abs() < 1e-3;
+fn the_walkback_reaches_the_same_point_it_used_to() {
+    let with = solve(&[]).solution.objective;
+    let without = solve(&NO_WALKBACK).solution.objective;
     assert!(
-        near(POOLING_OPTIMUM) || near(POOLING_OTHER_LOCAL_OPTIMUM),
-        "reached neither known local optimum: {}",
-        r.solution.objective,
+        (with - without).abs() < 1e-4,
+        "withdrawing delta_c moved the answer: {with} vs {without}",
     );
 }
