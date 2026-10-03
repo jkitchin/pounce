@@ -261,14 +261,6 @@ fn the_reinstatement_does_not_reach_the_biactive_mpcc() {
     );
 }
 
-/// Main-phase `R` rows: one per hand-off to the restoration phase.
-fn restoration_calls(r: &SolveReport) -> usize {
-    r.iterations
-        .iter()
-        .filter(|it| it.phase == IterPhase::Main && it.alpha_primal_char == 'R')
-        .count()
-}
-
 /// The longest unbroken run of soft-restoration steps (`s` or `S`).
 fn longest_soft_resto_run(r: &SolveReport) -> usize {
     let (mut best, mut run) = (0, 0);
@@ -317,31 +309,6 @@ fn penalty_mode_soft_restoration_hands_off_to_restoration() {
     assert!(
         r.statistics.iteration_count < 100,
         "{}",
-        r.statistics.iteration_count
-    );
-}
-
-/// The issue's closing observation: restoration called 126 times on an
-/// infeasible circle/parabola pair. On this one it recovered to the same
-/// stationary point of the infeasibility 66 times (1361 iterations)
-/// before the verdict, because the outer phase wandered between calls
-/// and every accepted step cleared the cycle detectors' snapshots. Three
-/// recoveries to one point at a real violation now end the solve.
-#[test]
-fn restoration_landing_on_the_same_point_ends_as_local_infeasibility() {
-    let r = solve("issue981_circle_parabola.nl", &[]);
-    assert_eq!(
-        r.solution.status,
-        ApplicationReturnStatus::InfeasibleProblemDetected
-    );
-    assert!(
-        restoration_calls(&r) <= 5,
-        "{} restoration calls",
-        restoration_calls(&r)
-    );
-    assert!(
-        r.statistics.iteration_count < 300,
-        "{} iterations",
         r.statistics.iteration_count
     );
 }

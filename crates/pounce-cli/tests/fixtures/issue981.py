@@ -31,8 +31,14 @@ are the reproductions from gh #981, which were filed against discopt's
   to `max_iter` with no restoration call.
 * `issue981_circle_parabola.nl` — `(x-3)² + y² = 1`, `y = x²`,
   `min x² + y²`, from the origin. Infeasible (the parabola comes no closer
-  than 2.24 to the circle's centre); restoration used to recover to the same
-  stationary point of the infeasibility 66 times before the verdict.
+  than 2.24 to the circle's centre). Restoration recovers to the same
+  stationary point of the infeasibility 66 times (1361 iterations) before the
+  verdict — the issue's "126 restoration calls" observation. NOT fixed: a
+  "same recovery three times running" exit cut this to 3 calls, but the same
+  signature appears on the feasible `square_flowsheet_resto` (L-BFGS), and
+  with `feral_increase_quality_retry=no` it turned that model's honest
+  `Maximum_Iterations_Exceeded` into a false `Infeasible_Problem_Detected`.
+  Kept as the reproduction for whoever takes it up.
 """
 
 import math
