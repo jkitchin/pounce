@@ -116,6 +116,19 @@ pub trait SparseSymLinearSolverInterface {
     /// eigenvalues post-factor.
     fn provides_inertia(&self) -> bool;
 
+    /// gh#981: whether the most recent `Singular` report is one the
+    /// factorization can vouch for — a pivot it found to be zero, i.e.
+    /// a rank deficiency it measured — as opposed to an inertia count it
+    /// declined to trust because the smallest pivot sat at the
+    /// working-precision floor (pounce gh#540). The two call for
+    /// different answers from the perturbation handler: `δ_c` repairs
+    /// the first and is withdrawn when it fails to help with the second
+    /// (gh#592). Defaults to `false` — the conservative answer, under
+    /// which the handler behaves exactly as before this method existed.
+    fn singularity_certified(&self) -> bool {
+        false
+    }
+
     /// Whether a blocked `multi_solve` of `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
     /// against the same factor.

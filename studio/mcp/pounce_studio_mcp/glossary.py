@@ -106,14 +106,27 @@ COLUMNS: dict[str, dict[str, Any]] = {
     },
     "alpha_primal_char": {
         "definition": (
-            "Single-character tag for what the line search did this iter: "
-            "`f` filter-accepted, `h` Armijo, `s` second-order correction, "
-            "`R` restoration entry/exit, `-` rejected."
+            "Single-character tag for how the step was accepted (gh#981). "
+            "Filter line search: `f` f-type (switching condition + Armijo on "
+            "the barrier objective; filter not augmented), `h` h-type "
+            "(sufficient progress on theta or phi; filter augmented). Upper "
+            "case `F`/`H` = the same, accepted after a second-order "
+            "correction. `s` soft-restoration step (stays in soft "
+            "restoration), `S` soft-restoration step also acceptable to the "
+            "original acceptor (leaves soft restoration) — not a second-order "
+            "correction. `w` watchdog accept-anyway. `t`/`T` tiny step taken "
+            "without a line search (`T` = the previous step was tiny too). "
+            "`R` hand-off to or from the restoration phase. Blank = iteration "
+            "0 or `accept_every_trial_step=yes`. Under "
+            "`line_search_method=penalty` every accepted step is `h`/`H`, so "
+            "the letter carries no information there."
         ),
-        "typical_range": "Mostly `f` on a healthy solve.",
+        "typical_range": "Mostly `f`/`h` on a healthy filter solve.",
         "what_abnormal_means": (
             "Rows with `phase` = `restoration` (printed `r`) are restoration windows; "
-            "repeated separate windows = `restoration_loop`."
+            "repeated separate windows = `restoration_loop`. A long unbroken run "
+            "of `s`/`S` with no `R` = soft restoration that never hands off to "
+            "full restoration."
         ),
         "see_also": ["wachter2006"],
     },

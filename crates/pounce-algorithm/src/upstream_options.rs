@@ -292,7 +292,7 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "",
     )?;
     r.set_registering_category("Line Search");
-    r.add_string_option("line_search_method", "Globalization method used in backtracking line search", "filter", &[("filter", "Filter method"), ("cg-penalty", "Chen-Goldfarb penalty function"), ("penalty", "Standard penalty function")], "Only the \"filter\" choice is officially supported. But sometimes, good results might be obtained with the other choices.")?;
+    r.add_string_option("line_search_method", "Globalization method used in backtracking line search", "filter", &[("filter", "Filter method"), ("cg-penalty", "Chen-Goldfarb penalty function"), ("penalty", "Standard penalty function")], "Only the \"filter\" choice is officially supported. But sometimes, good results might be obtained with the other choices. pounce implements \"filter\" and \"penalty\"; \"cg-penalty\" is registered so an ipopt.opt written for Ipopt still parses, and is refused with a message rather than silently served as \"penalty\" (gh#981).")?;
     r.set_registering_category("Undocumented");
     r.add_bool_option(
         "wsmp_iterative",

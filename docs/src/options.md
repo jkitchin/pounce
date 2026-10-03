@@ -154,7 +154,13 @@ that otherwise works. `bound_mult_init_method` is read and honoured, but
 only its default `constant` is implemented; `mu-based` parses (an
 `ipopt.opt` written for Ipopt still loads) and is then refused, because
 serving it as `constant` would run a different initialization than the
-one you asked for under the name you asked for.
+one you asked for under the name you asked for. `line_search_method=cg-penalty`
+is refused for the same reason
+([#981](https://github.com/jkitchin/pounce/issues/981)): the CG-penalty
+acceptor's own knobs were already refused, but the value that selects it
+used to run the plain `penalty` acceptor under the `cg-penalty` name,
+with identical iterations and step characters. Use `filter` (the default)
+or `penalty`.
 
 And it applies per *entry point*, for an option whose feature exists but
 sits somewhere this caller cannot reach. `option_file_name` is refused by

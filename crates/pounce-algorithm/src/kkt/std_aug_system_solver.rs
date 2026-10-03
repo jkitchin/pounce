@@ -454,6 +454,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.linsol.provides_inertia()
     }
 
+    fn singularity_certified(&self) -> bool {
+        self.linsol.singularity_certified()
+    }
+
     fn number_of_neg_evals(&self) -> Index {
         self.last_neg_evals
     }

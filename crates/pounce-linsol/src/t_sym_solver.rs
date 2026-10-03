@@ -431,6 +431,10 @@ impl SymLinearSolver for TSymLinearSolver {
     fn provides_inertia(&self) -> bool {
         self.backend.provides_inertia()
     }
+
+    fn singularity_certified(&self) -> bool {
+        self.backend.singularity_certified()
+    }
 }
 
 /// Gate the deprecated one-shot `POUNCE_DBG_KKT_DUMP` dump

@@ -115,6 +115,24 @@ pub struct PdPerturbationHandler {
     /// [`Self::perturb_for_wrong_inertia`]. `0` disables the walk-back
     /// and restores the pre-#592 escalation exactly.
     pub delta_c_max_rungs: Index,
+    /// gh#981: the `δ_x` rung at which `δ_c` was withdrawn. The factor at
+    /// `(δ_x, δ_c)` reported `WrongInertia`, i.e. was nonsingular; a
+    /// certified `Singular` without `δ_c` refutes the withdrawal and the
+    /// ladder resumes from here.
+    pub delta_x_at_withdrawal: Number,
+    /// gh#981: `δ_c` was withdrawn and then reinstated for this
+    /// aug-system. Latched so that the walk-back does not fire a second
+    /// time; one withdrawal and one reinstatement per aug-system at most.
+    pub delta_c_reinstated: bool,
+    /// gh#981: `δ_c` has been withdrawn and no factorization without it
+    /// has reported back yet. Only the *first* `δ_c`-free factor can
+    /// refute the withdrawal: a dependent row shows up as a zero pivot
+    /// at the very first rung, every time, whereas a zero pivot that
+    /// appears at one rung of a long `δ_x` climb and not at its
+    /// neighbours is round-off (measured on `pooling_rt2stp`, where
+    /// honouring the later ones moved the exact leg to a different
+    /// local optimum).
+    pub withdrawal_untested: bool,
 }
 
 impl Default for PdPerturbationHandler {
@@ -152,6 +170,9 @@ impl Default for PdPerturbationHandler {
             delta_c_rungs: 0,
             delta_c_abandoned: false,
             delta_c_max_rungs: 3,
+            delta_x_at_withdrawal: 0.0,
+            delta_c_reinstated: false,
+            withdrawal_untested: false,
         }
     }
 }
@@ -268,6 +289,9 @@ impl PdPerturbationHandler {
         // gh#592: the walk-back is scoped to a single aug-system.
         self.delta_c_rungs = 0;
         self.delta_c_abandoned = false;
+        self.delta_x_at_withdrawal = 0.0;
+        self.delta_c_reinstated = false;
+        self.withdrawal_untested = false;
 
         Some(Deltas {
             delta_x,
@@ -284,6 +308,28 @@ impl PdPerturbationHandler {
         mu: Number,
         ip_data: Option<&dyn PerturbationSink>,
     ) -> Option<Deltas> {
+        self.perturb_for_singular_with(mu, false, ip_data)
+    }
+
+    /// [`Self::perturb_for_singular`] with the linear solver's verdict on
+    /// the report attached (gh#981). `certified` is true when the
+    /// factorization *found* a zero pivot — a rank deficiency it measured
+    /// — and false when `Singular` stands in for an inertia count the
+    /// solver declined to trust (gh#540). The two differ only after a
+    /// gh#592 walk-back: a certified `Singular` from the `δ_c`-free
+    /// factor refutes the withdrawal, because the factor at that `δ_x`
+    /// *with* `δ_c` was nonsingular and only `δ_c` changed, so the
+    /// singularity is in the constraint block and no `δ_x` can remove it.
+    /// `δ_c` is then put back and the ladder resumes from the withdrawal
+    /// rung. An uncertified `Singular` is answered on the `δ_x` ladder as
+    /// before — on gh#884's biactive MPCC every post-withdrawal `Singular`
+    /// is of that kind, and reinstating `δ_c` there costs the certificate.
+    pub fn perturb_for_singular_with(
+        &mut self,
+        mu: Number,
+        certified: bool,
+        ip_data: Option<&dyn PerturbationSink>,
+    ) -> Option<Deltas> {
         let mut delta_x = 0.0;
         let mut delta_s = 0.0;
         let mut delta_c = 0.0;
@@ -295,6 +341,42 @@ impl PdPerturbationHandler {
         // so answer it on the `δ_x` ladder rather than putting `δ_c`
         // straight back — which is what the arms below would do, and
         // would cycle.
+        let first_without_delta_c = self.withdrawal_untested;
+        self.withdrawal_untested = false;
+        if self.delta_c_abandoned && certified && first_without_delta_c && !self.delta_c_reinstated
+        {
+            // gh#981: the withdrawal is refuted — see the doc comment.
+            self.delta_c_abandoned = false;
+            self.delta_c_reinstated = true;
+            let v = self.delta_cd(mu);
+            self.delta_c_curr = v;
+            self.delta_d_curr = v;
+            // The factor at the withdrawal rung with δ_c on is already
+            // known to be `WrongInertia`; resume the ladder from there so
+            // the rungs below it are not climbed a second time.
+            if self.delta_x_curr < self.delta_x_at_withdrawal {
+                self.delta_x_curr = self.delta_x_at_withdrawal;
+                self.delta_s_curr = self.delta_x_at_withdrawal;
+            }
+            self.test_status = TrialStatus::NoTest;
+            append_info(ip_data, "W");
+            if !self.get_deltas_for_wrong_inertia(
+                &mut delta_x,
+                &mut delta_s,
+                &mut delta_c,
+                &mut delta_d,
+                ip_data,
+            ) {
+                return None;
+            }
+            set_info_regu_x(ip_data, self.delta_x_curr);
+            return Some(Deltas {
+                delta_x: self.delta_x_curr,
+                delta_s: self.delta_s_curr,
+                delta_c: self.delta_c_curr,
+                delta_d: self.delta_d_curr,
+            });
+        }
         if self.delta_c_abandoned {
             self.test_status = TrialStatus::NoTest;
             if !self.get_deltas_for_wrong_inertia(
@@ -469,6 +551,9 @@ impl PdPerturbationHandler {
             }
         }
         self.finalize_test(ip_data);
+        // gh#981: a `WrongInertia` from the first `δ_c`-free factor is
+        // gh#592's full-rank case; the withdrawal stands.
+        self.withdrawal_untested = false;
         self.maybe_withdraw_delta_c(ip_data);
 
         let mut delta_x = 0.0;
@@ -544,13 +629,19 @@ impl PdPerturbationHandler {
     /// this never fires — on eigena2 and eigenb2 it is followed by at
     /// most one rung.
     fn maybe_withdraw_delta_c(&mut self, ip_data: Option<&dyn PerturbationSink>) {
-        if self.delta_c_max_rungs <= 0 || self.delta_c_abandoned || self.delta_c_curr <= 0.0 {
+        if self.delta_c_max_rungs <= 0
+            || self.delta_c_abandoned
+            || self.delta_c_reinstated
+            || self.delta_c_curr <= 0.0
+        {
             return;
         }
         self.delta_c_rungs += 1;
         if self.delta_c_rungs < self.delta_c_max_rungs {
             return;
         }
+        self.delta_x_at_withdrawal = self.delta_x_curr;
+        self.withdrawal_untested = true;
         self.delta_c_curr = 0.0;
         self.delta_d_curr = 0.0;
         self.delta_x_curr = 0.0;
@@ -986,5 +1077,115 @@ mod tests {
         assert_eq!(d.delta_s, 2.0);
         assert_eq!(d.delta_c, 3.0);
         assert_eq!(d.delta_d, 4.0);
+    }
+
+    /// Drive the handler to a gh#592 withdrawal: `δ_c` up on a `Singular`,
+    /// then three `WrongInertia` rungs under it. Returns the rung `δ_c`
+    /// was withdrawn at.
+    fn withdraw(h: &mut PdPerturbationHandler) -> Number {
+        h.consider_new_system(0.1, None).unwrap();
+        h.perturb_for_singular(0.1, None).unwrap();
+        let mut at = 0.0;
+        for _ in 0..3 {
+            at = h.delta_x_curr;
+            h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        }
+        assert!(h.delta_c_abandoned, "precondition: δ_c was withdrawn");
+        assert_eq!(h.delta_x_at_withdrawal, at);
+        at
+    }
+
+    /// gh#981: the first factorization without `δ_c` comes back with a
+    /// zero pivot the solver found. Only `δ_c` changed between that
+    /// factor and the nonsingular one at the withdrawal rung, so the
+    /// Jacobian is rank-deficient and `δ_c` goes back — with the ladder
+    /// resumed from the withdrawal rung, not restarted below it. On the
+    /// gh#981 CSTR this is the difference between a peak `δ_w` of
+    /// `2.1e-3` and one of `1.09`.
+    #[test]
+    fn a_certified_singular_from_the_first_delta_c_free_factor_reinstates_delta_c() {
+        let mut h = PdPerturbationHandler::new();
+        let at = withdraw(&mut h);
+        let d = h.perturb_for_singular_with(0.1, true, None).unwrap();
+        assert!(d.delta_c > 0.0, "δ_c was not reinstated");
+        assert_eq!(d.delta_d, d.delta_c);
+        assert!(
+            d.delta_x > at,
+            "the ladder restarted below the withdrawal rung ({} <= {at})",
+            d.delta_x
+        );
+        assert!(h.delta_c_reinstated && !h.delta_c_abandoned);
+
+        // And it stays: the walk-back does not fire a second time in this
+        // aug-system, however many rungs follow.
+        for _ in 0..6 {
+            let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+            assert!(d.delta_c > 0.0, "δ_c withdrawn a second time");
+        }
+        // A new aug-system starts clean.
+        h.consider_new_system(0.1, None).unwrap();
+        assert!(!h.delta_c_reinstated && !h.withdrawal_untested);
+    }
+
+    /// gh#981: an *uncertified* `Singular` — gh#540's untrusted-inertia
+    /// report — is the evidence the walk-back exists for, and does not
+    /// reinstate. This is the shape of every post-withdrawal `Singular`
+    /// on gh#884's `mpcc_qpec_small_biactive`, where reinstating costs the
+    /// certificate.
+    #[test]
+    fn an_uncertified_singular_does_not_reinstate_delta_c() {
+        let mut h = PdPerturbationHandler::new();
+        withdraw(&mut h);
+        for _ in 0..5 {
+            let d = h.perturb_for_singular_with(0.1, false, None).unwrap();
+            assert_eq!(d.delta_c, 0.0, "δ_c came back on an untrusted report");
+            assert!(d.delta_x > 0.0);
+        }
+        assert!(!h.delta_c_reinstated);
+    }
+
+    /// gh#981: only the *first* `δ_c`-free factor can refute the
+    /// withdrawal. A zero pivot that appears several rungs up a climb
+    /// whose first rungs were nonsingular is round-off, not a dependent
+    /// row — measured on `pooling_rt2stp`, where honouring it moved the
+    /// exact leg onto a different local optimum.
+    #[test]
+    fn a_certified_singular_later_in_the_climb_does_not_reinstate_delta_c() {
+        let mut h = PdPerturbationHandler::new();
+        withdraw(&mut h);
+        // First δ_c-free factor: `WrongInertia` — gh#592's full-rank case.
+        let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+        assert_eq!(d.delta_c, 0.0);
+        assert!(!h.withdrawal_untested);
+        // A certified `Singular` two rungs later is too late.
+        h.perturb_for_singular_with(0.1, false, None).unwrap();
+        let d = h.perturb_for_singular_with(0.1, true, None).unwrap();
+        assert_eq!(d.delta_c, 0.0, "a late zero pivot reinstated δ_c");
+        assert!(!h.delta_c_reinstated);
+    }
+
+    /// gh#981: an uncertified first report also closes the window, so a
+    /// certified one right after it does not reinstate either.
+    #[test]
+    fn an_uncertified_first_report_closes_the_window() {
+        let mut h = PdPerturbationHandler::new();
+        withdraw(&mut h);
+        h.perturb_for_singular_with(0.1, false, None).unwrap();
+        let d = h.perturb_for_singular_with(0.1, true, None).unwrap();
+        assert_eq!(d.delta_c, 0.0);
+    }
+
+    /// gh#981: before any withdrawal a certified `Singular` is the
+    /// ordinary `perturb_for_singular` path — `δ_c` up, nothing latched.
+    #[test]
+    fn a_certified_singular_before_any_withdrawal_is_the_ordinary_path() {
+        let mut h = PdPerturbationHandler::new();
+        h.consider_new_system(0.1, None).unwrap();
+        let a = h.perturb_for_singular_with(0.1, true, None).unwrap();
+        let mut g = PdPerturbationHandler::new();
+        g.consider_new_system(0.1, None).unwrap();
+        let b = g.perturb_for_singular(0.1, None).unwrap();
+        assert_eq!(a, b);
+        assert!(!h.delta_c_reinstated && !h.delta_c_abandoned);
     }
 }

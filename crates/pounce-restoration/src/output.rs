@@ -150,8 +150,8 @@ fn format_e(x: f64, precision: usize) -> String {
 ///
 /// When `orig_nlp` is wired ([`Self::with_orig_nlp`]), the `inf_pr`
 /// and `objective` columns report the **original** NLP's unscaled
-/// constraint violation (`max(||c(x_orig)||∞, ||d(x_orig) − s||∞)`)
-/// and unscaled objective at `x_orig` — matching upstream
+/// constraint violation and unscaled objective at `x_orig`, in the main
+/// rows' units (see `eval_orig_at_inner_curr`, gh#981) — after upstream
 /// `IpRestoIterationOutput.cpp:106-156`. Without it, both fall back
 /// to the resto NLP's own values (the original v0.1 behavior).
 pub struct RestoIterationOutputAdapter {
@@ -262,7 +262,7 @@ impl RestoIterationOutputAdapter {
         let d = data.borrow();
         let c = cq.borrow();
         if let (Some(orig_rc), Some(curr)) = (&self.orig_nlp, d.curr.as_ref()) {
-            if let Some(vals) = eval_orig_at_inner_curr(curr, orig_rc) {
+            if let Some(vals) = eval_orig_at_inner_curr(curr, orig_rc, self.inner.inf_pr_output) {
                 return vals;
             }
         }
@@ -270,15 +270,28 @@ impl RestoIterationOutputAdapter {
     }
 }
 
-/// Evaluate the original NLP's unscaled `f(x_orig)` and constraint
-/// violation `max(||c(x_orig)||∞, ||d(x_orig) − s||∞)` at the resto
-/// iterate's `x_orig` slice (block 0 of the compound `x`) and the
-/// inner `s` vector. Returns `None` if any of the downcasts /
-/// dimension reads fail (in which case the caller falls back to
-/// resto-NLP values).
+/// Evaluate the original NLP's unscaled `f(x_orig)` and its constraint
+/// violation at the resto iterate's `x_orig` slice (block 0 of the
+/// compound `x`). Returns `None` if any of the downcasts / dimension
+/// reads fail (in which case the caller falls back to resto-NLP values).
+///
+/// The violation follows the main rows' convention (gh#981), so a
+/// restoration row and the main row beside it are in the same units:
+///
+/// * [`InfPrTag::Original`] (the default) — the user's constraints in
+///   user units against their declared bounds, the quantity
+///   `OrigIterationOutput` prints, computed by the same
+///   [`pounce_algorithm::ipopt_cq::unscaled_nlp_constraint_violation_max`].
+///   This used to be `max(‖c‖∞, ‖d − s‖∞)` on the *row-scaled* `c` and
+///   `d` that `IpoptNlp::eval_c` / `eval_d` return: on a badly scaled
+///   water main the main rows read 2.21e5 metres of head and the
+///   restoration rows beside them 0.211.
+/// * [`InfPrTag::Internal`] — that scaled slack-form residual,
+///   `max(‖c(x_orig)‖∞, ‖d(x_orig) − s‖∞)` with the inner `s`.
 fn eval_orig_at_inner_curr(
     curr: &pounce_algorithm::iterates_vector::IteratesVector,
     orig_rc: &std::rc::Rc<std::cell::RefCell<dyn pounce_nlp::ipopt_nlp::IpoptNlp>>,
+    inf_pr_output: InfPrTag,
 ) -> Option<(f64, f64)> {
     use pounce_linalg::dense_vector::DenseVectorSpace;
     use pounce_linalg::{CompoundVector, Vector};
@@ -291,27 +304,42 @@ fn eval_orig_at_inner_curr(
     let m_eq = orig.m_eq();
     let m_ineq = orig.m_ineq();
 
-    // c(x_orig)
-    let c_amax = if m_eq > 0 {
-        let mut c_buf = DenseVectorSpace::new(m_eq).make_new_dense();
+    // c(x_orig), d(x_orig) — row-scaled, as the NLP evaluates them.
+    let mut c_buf = DenseVectorSpace::new(m_eq).make_new_dense();
+    if m_eq > 0 {
         orig.eval_c(x_orig, &mut c_buf);
-        c_buf.amax()
-    } else {
-        0.0
-    };
-
-    // d(x_orig) − s
-    let d_minus_s_amax = if m_ineq > 0 {
-        let mut d_buf = DenseVectorSpace::new(m_ineq).make_new_dense();
+    }
+    let mut d_buf = DenseVectorSpace::new(m_ineq).make_new_dense();
+    if m_ineq > 0 {
         orig.eval_d(x_orig, &mut d_buf);
-        d_buf.axpy(-1.0, s_inner);
-        d_buf.amax()
-    } else {
-        0.0
+    }
+
+    let inf_pr = match inf_pr_output {
+        InfPrTag::Original => pounce_algorithm::ipopt_cq::unscaled_nlp_constraint_violation_max(
+            &*orig, &c_buf, &d_buf,
+        ),
+        InfPrTag::Internal => {
+            let c_amax = if m_eq > 0 { c_buf.amax() } else { 0.0 };
+            let d_minus_s_amax = if m_ineq > 0 {
+                d_buf.axpy(-1.0, s_inner);
+                d_buf.amax()
+            } else {
+                0.0
+            };
+            c_amax.max(d_minus_s_amax)
+        }
     };
 
-    let f = orig.eval_f(x_orig);
-    Some((f, c_amax.max(d_minus_s_amax)))
+    // `eval_f` is the scaled objective; unscale it the way
+    // `IpoptCalculatedQuantities::unscaled_curr_f` does for main rows.
+    let f_scaled = orig.eval_f(x_orig);
+    let factor = orig.obj_scaling_factor();
+    let f = if factor == 0.0 {
+        f_scaled
+    } else {
+        f_scaled / factor
+    };
+    Some((f, inf_pr))
 }
 
 #[cfg(test)]
