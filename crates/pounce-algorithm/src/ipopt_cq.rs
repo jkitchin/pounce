@@ -168,7 +168,11 @@ pub fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
 /// which documents the definition; free so the restoration phase's iteration
 /// rows can report the same quantity at the restoration iterate's `x` slice
 /// (gh#981) instead of the scaled residual.
-pub fn unscaled_nlp_constraint_violation_max(nlp: &dyn IpoptNlp, c: &dyn Vector, d: &dyn Vector) -> Number {
+pub fn unscaled_nlp_constraint_violation_max(
+    nlp: &dyn IpoptNlp,
+    c: &dyn Vector,
+    d: &dyn Vector,
+) -> Number {
     let (dc, dd) = (nlp.c_scale_vec(), nlp.d_scale_vec());
     let c_max = unscaled_block_amax(c, dc.as_deref());
 

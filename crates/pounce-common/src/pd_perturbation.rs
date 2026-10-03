@@ -868,7 +868,10 @@ mod tests {
         let dx_under_dc = h.delta_x_curr;
         let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
         assert_eq!(d.delta_c, 0.0, "precondition: δ_c was withdrawn");
-        assert!(d.delta_x < dx_under_dc, "precondition: the ladder restarted low");
+        assert!(
+            d.delta_x < dx_under_dc,
+            "precondition: the ladder restarted low"
+        );
 
         // `Singular` all the way up the restarted ladder: δ_c stays off
         // until a `Singular` comes back from at or above that rung.
@@ -880,7 +883,10 @@ mod tests {
                 reinstated_at = Some((reported_at, d));
                 break;
             }
-            assert!(reported_at < dx_under_dc, "a `Singular` at the rung did not reinstate");
+            assert!(
+                reported_at < dx_under_dc,
+                "a `Singular` at the rung did not reinstate"
+            );
         }
         let (reported_at, d) = reinstated_at.expect("δ_c was never reinstated");
         assert!(reported_at >= dx_under_dc);
@@ -913,14 +919,20 @@ mod tests {
                 h.perturb_for_singular(0.1, None)
             }
             .unwrap();
-            assert_eq!(d.delta_c, dc, "δ_c moved after it was reinstated (step {i})");
+            assert_eq!(
+                d.delta_c, dc,
+                "δ_c moved after it was reinstated (step {i})"
+            );
             assert!(d.delta_x > last, "the ladder stopped climbing (step {i})");
             last = d.delta_x;
         }
         assert!(!h.delta_c_abandoned);
 
         h.consider_new_system(0.1, None).unwrap();
-        assert!(!h.delta_c_reinstated, "the reinstatement leaked into the next aug-system");
+        assert!(
+            !h.delta_c_reinstated,
+            "the reinstatement leaked into the next aug-system"
+        );
     }
 
     /// Where `δ_c` is the right remedy the walk-back must be invisible.

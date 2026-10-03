@@ -315,11 +315,9 @@ fn eval_orig_at_inner_curr(
     }
 
     let inf_pr = match inf_pr_output {
-        InfPrTag::Original => {
-            pounce_algorithm::ipopt_cq::unscaled_nlp_constraint_violation_max(
-                &*orig, &c_buf, &d_buf,
-            )
-        }
+        InfPrTag::Original => pounce_algorithm::ipopt_cq::unscaled_nlp_constraint_violation_max(
+            &*orig, &c_buf, &d_buf,
+        ),
         InfPrTag::Internal => {
             let c_amax = if m_eq > 0 { c_buf.amax() } else { 0.0 };
             let d_minus_s_amax = if m_ineq > 0 {
@@ -336,7 +334,11 @@ fn eval_orig_at_inner_curr(
     // `IpoptCalculatedQuantities::unscaled_curr_f` does for main rows.
     let f_scaled = orig.eval_f(x_orig);
     let factor = orig.obj_scaling_factor();
-    let f = if factor == 0.0 { f_scaled } else { f_scaled / factor };
+    let f = if factor == 0.0 {
+        f_scaled
+    } else {
+        f_scaled / factor
+    };
     Some((f, inf_pr))
 }
 

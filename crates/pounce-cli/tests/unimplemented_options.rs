@@ -527,7 +527,10 @@ fn line_search_method_cg_penalty_is_refused_and_penalty_is_not() {
         &["line_search_method=cg-penalty"],
     );
     assert_eq!(code, Some(2), "stderr:\n{err}");
-    assert!(err.contains("line_search_method=cg-penalty"), "stderr:\n{err}");
+    assert!(
+        err.contains("line_search_method=cg-penalty"),
+        "stderr:\n{err}"
+    );
     assert!(err.contains("Chen-Goldfarb"), "stderr:\n{err}");
     assert!(err.contains("issues/981"), "stderr:\n{err}");
 

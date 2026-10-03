@@ -100,7 +100,11 @@ fn delta_c_is_kept_on_a_rank_deficient_jacobian() {
     let keep = solve("issue981_cstr_dup_row.nl", &["perturb_delta_c_max_rungs=0"]);
     let default = solve("issue981_cstr_dup_row.nl", &[]);
     let opt_in = solve("issue981_cstr_dup_row.nl", &["perturb_delta_c_max_rungs=3"]);
-    for (label, r) in [("default", &default), ("rungs=0", &keep), ("rungs=3", &opt_in)] {
+    for (label, r) in [
+        ("default", &default),
+        ("rungs=0", &keep),
+        ("rungs=3", &opt_in),
+    ] {
         assert_eq!(
             r.solution.status,
             ApplicationReturnStatus::SolveSucceeded,
@@ -139,7 +143,11 @@ fn delta_c_is_kept_on_a_rank_deficient_jacobian() {
 fn delta_c_is_kept_on_a_rank_deficient_jacobian_under_adaptive_mu() {
     for rungs in ["perturb_delta_c_max_rungs=0", "perturb_delta_c_max_rungs=3"] {
         let r = solve("issue981_cstr_dup_row.nl", &["mu_strategy=adaptive", rungs]);
-        assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded, "{rungs}");
+        assert_eq!(
+            r.solution.status,
+            ApplicationReturnStatus::SolveSucceeded,
+            "{rungs}"
+        );
         assert_eq!(restoration_rows(&r), 0, "{rungs}: restoration was entered");
         assert!(
             max_regularization(&r) <= 1.0 + 1e-12,

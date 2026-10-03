@@ -97,6 +97,17 @@ against 27 and 31785.744 with the walk-back). That cost was accepted by the
 maintainer on gh#981 in exchange for the rows above; `perturb_delta_c_max_rungs=3`
 restores the walk-back, now with the reinstatement.
 
+## Sweep of the whole gh#981 change
+
+Against `672320d`, both legs, 192 fixture-legs (the three gh#981 fixtures
+included): the rows in the table above, unchanged, plus
+`issue981_cstr_dup_row` 16 -> 12 iterations, plus an objective-column move on
+infeasibility verdicts that is finding 4 (the returned point is now the
+restoration iterate): `issue981_wachter_biegler` −1.0885 (exact) and
+−1.0714 (L-BFGS) -> −1.0, and last-digit moves on `issue981_water_main`
+and `issue_372_infeasible_bounds`. No status and no other iteration count
+moved.
+
 ## Coverage
 
 * `crates/pounce-common/src/pd_perturbation.rs` — state-machine unit tests:
