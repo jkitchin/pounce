@@ -56,6 +56,13 @@ changes.
 
 ### Changed
 
+- **`expect_infeasible_problem=yes` is refused (gh#981).** It reached the
+  restoration builder and a field nothing read, so it gave results identical
+  to the default (measured on 60 circle/parabola variants); `options.md`
+  documented it as read. It now joins `expect_infeasible_problem_ctol` /
+  `_ytol` in the unimplemented-heuristics refusal. The default `no` still
+  runs.
+
 - **`line_search_method=cg-penalty` is refused (gh#981).** It used to run
   the plain penalty acceptor under the `cg-penalty` name — identical
   iterations and step characters — while `options.md` said the CG-penalty
@@ -137,6 +144,28 @@ changes.
   doubles the iterations. Default unchanged.
 
 ### Fixed
+
+- **`line_search_method=penalty` no longer stalls in soft restoration
+  (gh#981).** When the line search failed because the fraction-to-the-boundary
+  step was already below `alpha_min`, soft restoration took the same null
+  step anyway; the penalty acceptor's sufficient-decrease target is zero at
+  α → 0, so the step passed as `S`, left soft restoration, reset its counter,
+  and the next iteration repeated it — `S` steps at α = 1e-13 … 4e-16 to
+  `max_iter` with no restoration call. A soft-restoration trial below
+  `alpha_min` is now refused, handing the iterate to restoration. On a grid
+  of 36 3-bus AC OPFs, 10 of the 11 penalty runs that hit `max_iter` = 300
+  now reach the filter's `Infeasible_Problem_Detected` (27–116 iterations);
+  feasible cases are unchanged. Fixture `issue981_opf3_overload.nl`.
+- **Restoration recovering to the same point repeatedly now ends as local
+  infeasibility (gh#981).** The restoration-cycle detectors compare
+  consecutive entries and are cleared by any accepted step, so a cycle whose
+  outer phase wanders between restorations was invisible to them: on an
+  infeasible circle/parabola pair restoration recovered 66 times to one
+  stationary point of the infeasibility (successive recoveries 1e-8 … 3e-12
+  apart) before the verdict at iteration 1361. Three consecutive recoveries
+  within 1e-6 of each other, at a violation of at least `constr_viol_tol`,
+  now report `Infeasible_Problem_Detected`: 103 iterations and 3 calls.
+  Fixture `issue981_circle_parabola.nl`.
 
 - **`Infeasible_Problem_Detected` now returns the least-infeasible point
   (gh#981).** When restoration settled at a stationary point of the

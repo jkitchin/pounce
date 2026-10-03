@@ -21,13 +21,26 @@ are the reproductions from gh #981, which were filed against discopt's
   rows print head violations of order 1e5 m while the row-scaled residual is
   of order 0.2; gh #981 finding 5 is the restoration rows printing the
   latter.
+* `issue981_opf3_overload.nl` — a 3-bus polar AC OPF (lines 0.05+0.25j,
+  generators at buses 0 and 1, a 3.6 + 0.5j p.u. load at bus 2) from
+  V = 0.95, θ = (0, 0.4, −0.4), Pg = 1.2, Qg = 0. The load exceeds what the
+  network can carry, so the model is infeasible; the filter line search says
+  so in 22 iterations. The issue's own 3-bus case was not published, so this
+  one was found by a grid search for the symptom it reported: under
+  `line_search_method=penalty` an unbroken run of `S` soft-restoration steps
+  to `max_iter` with no restoration call.
+* `issue981_circle_parabola.nl` — `(x-3)² + y² = 1`, `y = x²`,
+  `min x² + y²`, from the origin. Infeasible (the parabola comes no closer
+  than 2.24 to the circle's centre); restoration used to recover to the same
+  stationary point of the infeasibility 66 times before the verdict.
 """
 
 import math
 import os
 
 from pyomo.environ import (
-    ConcreteModel, Constraint, ConstraintList, Objective, Var, exp, maximize,
+    ConcreteModel, Constraint, ConstraintList, Objective, Var, cos, exp,
+    maximize, sin,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,10 +98,51 @@ def water_main():
     return m
 
 
+def opf3_overload():
+    lines = [(0, 1), (0, 2), (1, 2)]
+    y = 1 / complex(0.05, 0.25)
+    G = {(i, j): 0.0 for i in range(3) for j in range(3)}
+    Bm = dict(G)
+    for (i, j) in lines:
+        G[i, j] -= y.real; G[j, i] -= y.real; Bm[i, j] -= y.imag; Bm[j, i] -= y.imag
+        G[i, i] += y.real; G[j, j] += y.real; Bm[i, i] += y.imag; Bm[j, j] += y.imag
+    gens, Pd, Qd = [0, 1], (0.0, 0.0, 3.6), (0.0, 0.0, 0.5)
+    m = ConcreteModel()
+    m.V = Var(range(3), bounds=(0.9, 1.1), initialize=0.95)
+    m.th = Var(range(3), bounds=(-3.14, 3.14), initialize={0: 0.0, 1: 0.4, 2: -0.4})
+    m.th[0].fix(0)
+    m.Pg = Var(gens, bounds=(0, 2), initialize=1.2)
+    m.Qg = Var(gens, bounds=(-1, 1), initialize=0.0)
+
+    def P(m, i):
+        return m.V[i] * sum(m.V[j] * (G[i, j] * cos(m.th[i] - m.th[j]) + Bm[i, j] * sin(m.th[i] - m.th[j])) for j in range(3))
+
+    def Q(m, i):
+        return m.V[i] * sum(m.V[j] * (G[i, j] * sin(m.th[i] - m.th[j]) - Bm[i, j] * cos(m.th[i] - m.th[j])) for j in range(3))
+
+    m.pb = Constraint(range(3), rule=lambda m, i: (m.Pg[i] if i in gens else 0) - Pd[i] == P(m, i))
+    m.qb = Constraint(range(3), rule=lambda m, i: (m.Qg[i] if i in gens else 0) - Qd[i] == Q(m, i))
+    cost = {0: (0.11, 5, 150), 1: (0.085, 1.2, 600)}
+    m.obj = Objective(expr=sum(cost[g][0] * (100 * m.Pg[g]) ** 2 + cost[g][1] * 100 * m.Pg[g] + cost[g][2] for g in gens))
+    return m
+
+
+def circle_parabola():
+    m = ConcreteModel()
+    m.x = Var(initialize=0.0)
+    m.y = Var(initialize=0.0)
+    m.c1 = Constraint(expr=(m.x - 3) ** 2 + m.y ** 2 == 1)
+    m.c2 = Constraint(expr=m.y == m.x ** 2)
+    m.obj = Objective(expr=m.x ** 2 + m.y ** 2)
+    return m
+
+
 if __name__ == "__main__":
     for name, build in [
         ("issue981_cstr_dup_row", cstr_dup_row),
         ("issue981_wachter_biegler", wachter_biegler),
         ("issue981_water_main", water_main),
+        ("issue981_opf3_overload", opf3_overload),
+        ("issue981_circle_parabola", circle_parabola),
     ]:
         build().write(os.path.join(HERE, name + ".nl"))

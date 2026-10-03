@@ -353,10 +353,12 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
     UnimplementedFeature {
         issue: 551,
         feature: "the `expect_infeasible_problem` heuristics inside the \
-                  filter line search — switching them off once the \
-                  constraint violation drops below a threshold (`_ctol`), \
-                  and diverting to restoration once the constraint \
-                  multipliers' max-norm rises above one (`_ytol`)",
+                  filter line search — entering restoration sooner, \
+                  enforcing more infeasibility reduction before leaving \
+                  it, switching them off once the constraint violation \
+                  drops below a threshold (`_ctol`), and diverting to \
+                  restoration once the constraint multipliers' max-norm \
+                  rises above one (`_ytol`)",
         advice: "the restoration phase itself runs and is unaffected; \
                  pounce enters it when the line search cannot make \
                  progress, and `required_infeasibility_reduction` sets how \
@@ -364,7 +366,13 @@ pub const UNIMPLEMENTED_FEATURES: &[UnimplementedFeature] = &[
                  handing back. `IpBacktrackingLineSearch`'s \
                  `count_successive_shortened_steps_` machinery, which is \
                  what these two thresholds steer, has no counterpart here",
+        // gh#981: `expect_infeasible_problem` itself joined its two
+        // thresholds here. It reached `RestoAlgorithmBuilder` and from
+        // there a `MinC1NormRestoration` field that nothing read, so
+        // `=yes` was a silent no-op — measured identical to the default
+        // on 60 circle/parabola variants, and 0 of 15 KRONOS recoveries.
         options: &[
+            "expect_infeasible_problem",
             "expect_infeasible_problem_ctol",
             "expect_infeasible_problem_ytol",
         ],
@@ -1333,6 +1341,24 @@ mod tests {
         assert!(msg.contains("CG-penalty"), "{msg}");
     }
 
+    /// gh#981: `expect_infeasible_problem=yes` configured nothing — the
+    /// field it reached was never read — so it is refused with its two
+    /// thresholds; the default `no` (or an `ipopt.opt` spelling it out)
+    /// still runs.
+    #[test]
+    fn expect_infeasible_problem_is_refused() {
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("expect_infeasible_problem", "no", true, false)
+            .unwrap();
+        assert_eq!(refusal(&opts, &reg), None, "the default is not refused");
+        let (mut opts, reg) = fixture();
+        opts.set_string_value("expect_infeasible_problem", "yes", true, false)
+            .unwrap();
+        let msg = refusal(&opts, &reg).expect("`yes` must be refused");
+        assert!(msg.contains("expect_infeasible_problem"), "{msg}");
+        assert!(msg.contains("restoration"), "{msg}");
+    }
+
     /// gh#981: the *value* that selects the CG-penalty acceptor is
     /// refused too — it used to run the plain penalty acceptor under the
     /// `cg-penalty` name. The two implemented values stay accepted.
@@ -1478,11 +1504,16 @@ mod tests {
     /// assertion that matters is that the value *reaches the builder* —
     /// a read site populating a field nobody consumes would be a fresh
     /// silent no-op, the very defect this work removes.
+    ///
+    /// `expect_infeasible_problem` was in this list and was exactly that
+    /// fresh no-op: it reached the builder, and the
+    /// `MinC1NormRestoration` field it landed in was never read (gh#981).
+    /// It is refused now, in the `_ctol` / `_ytol` group — see
+    /// `expect_infeasible_problem_is_refused`.
     #[test]
     fn the_restoration_switches_reach_the_builder() {
         for (key, default_on) in [
             ("evaluate_orig_obj_at_resto_trial", true),
-            ("expect_infeasible_problem", false),
             ("start_with_resto", false),
         ] {
             let mut app = crate::application::IpoptApplication::new();
@@ -1490,7 +1521,6 @@ mod tests {
             let resto = app.algorithm_builder_from_options().resto;
             let got = match key {
                 "evaluate_orig_obj_at_resto_trial" => resto.evaluate_orig_obj_at_resto_trial,
-                "expect_infeasible_problem" => resto.expect_infeasible_problem,
                 _ => resto.start_with_resto,
             };
             assert_eq!(got, default_on, "{key}: default changed");
@@ -1504,7 +1534,6 @@ mod tests {
             let resto = app.algorithm_builder_from_options().resto;
             let got = match key {
                 "evaluate_orig_obj_at_resto_trial" => resto.evaluate_orig_obj_at_resto_trial,
-                "expect_infeasible_problem" => resto.expect_infeasible_problem,
                 _ => resto.start_with_resto,
             };
             assert_eq!(

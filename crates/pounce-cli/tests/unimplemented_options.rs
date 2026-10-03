@@ -71,6 +71,13 @@ fn requesting_an_unimplemented_feature_fails_with_an_explanation() {
         // `dual-and-full` multiplier-step rules, which pounce does not
         // have.
         ("theta_min=1e-5", "CG-penalty acceptor", "551"),
+        // gh#981: the parent switch was a silent no-op (its field was
+        // never read); it now joins its two thresholds.
+        (
+            "expect_infeasible_problem=yes",
+            "expect_infeasible_problem",
+            "551",
+        ),
         ("alpha_for_y_tol=1e-3", "primal-and-full", "551"),
         ("suppress_all_output=yes", "output controls", "483"),
         ("hsllib=libcoinhsl.so", "HSL loader", "483"),

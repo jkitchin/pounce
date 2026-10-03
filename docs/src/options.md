@@ -136,11 +136,15 @@ honoured, and it also selects `mu_strategy=adaptive` and
 
 And three **sub-capabilities of features that do run**, where the
 refusal message has to say so or it reads as "restoration is missing":
-`expect_infeasible_problem_ctol` / `_ytol` steer
+`expect_infeasible_problem` and its `_ctol` / `_ytol` thresholds steer
 `IpBacktrackingLineSearch`'s `count_successive_shortened_steps_`
-machinery, which POUNCE does not have — the restoration phase itself
-runs, and `expect_infeasible_problem` and
-`required_infeasibility_reduction` are read;
+machinery and the restoration-exit tightening, which POUNCE does not have
+— the restoration phase itself runs, and
+`required_infeasibility_reduction` is read. (`expect_infeasible_problem`
+was documented here as read until
+[#981](https://github.com/jkitchin/pounce/issues/981): it reached the
+restoration builder and a field nothing consumed, so `=yes` gave results
+identical to the default);
 `resto_failure_feasibility_threshold` asks for a threshold below which a
 stopped restoration is reclassified as a failure, and POUNCE has no such
 reclassification (`max_resto_iter`, below, is what bounds a restoration);

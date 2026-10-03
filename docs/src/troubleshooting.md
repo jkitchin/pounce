@@ -470,7 +470,7 @@ feasible to `2.4e-7` or better, so the verdict was wrong. Of those fifteen:
 |---|---|
 | nothing (the default) | 0 / 15 |
 | `start_with_resto` | 0 / 15 |
-| `expect_infeasible_problem` | 0 / 15 |
+| `expect_infeasible_problem` (a no-op then; refused since #981) | 0 / 15 |
 | `mu_strategy=adaptive` | 4 / 15 |
 | a displaced start | **13 / 15** |
 | a displaced start + restoration | 14 / 15 |

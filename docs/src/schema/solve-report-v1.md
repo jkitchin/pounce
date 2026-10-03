@@ -301,9 +301,14 @@ on `line_search_method` (gh#981):
 | ` ` (blank) | No acceptor was consulted: iteration 0, or `accept_every_trial_step=yes`. |
 
 A run of `s` with no `R` means soft restoration is making progress on
-the primal-dual error without ever handing off to full restoration. Under
-`line_search_method=penalty` that can continue until `max_iter`; see
-gh#981.
+the primal-dual error without handing off to full restoration; it is
+bounded by `max_soft_resto_iters`. A run of `S` cannot last: each `S`
+leaves soft restoration, and a soft-restoration trial shorter than the
+line search's `alpha_min` is refused, which hands the iterate to full
+restoration. Before gh#981 that refusal did not exist, and under
+`line_search_method=penalty` — whose sufficient-decrease target is zero
+at α → 0 — null steps at α ≈ 1e-13 … 1e-16 were accepted as `S` until
+`max_iter`.
 
 ### `linear_solver` (object, optional)
 

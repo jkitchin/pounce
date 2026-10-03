@@ -426,6 +426,14 @@ pub struct IpoptAlgorithm {
     /// step.
     last_resto_recovery_x: Option<Box<dyn Vector>>,
     last_resto_recovery_s: Option<Box<dyn Vector>>,
+    /// gh#981: the `x` of the last restoration recovery, kept across
+    /// line-search accepts (unlike [`Self::last_resto_recovery_x`], which
+    /// any accepted step clears). See
+    /// [`Self::RESTO_SAME_RECOVERY_STRIKES`].
+    resto_recovery_anchor_x: Option<Box<dyn Vector>>,
+    /// gh#981: consecutive restoration recoveries that landed on
+    /// [`Self::resto_recovery_anchor_x`].
+    resto_same_recovery_count: usize,
     /// Count of consecutive restoration entries on which the outer
     /// step (recovery → next-entry) was below the iterate-distance
     /// threshold. Cleared on any LS-accepted step. Limit chosen to
@@ -667,6 +675,8 @@ impl IpoptAlgorithm {
             last_resto_entry_x: None,
             last_resto_entry_s: None,
             last_resto_recovery_x: None,
+            resto_recovery_anchor_x: None,
+            resto_same_recovery_count: 0,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
@@ -816,6 +826,18 @@ impl IpoptAlgorithm {
     /// instant `|x|` crosses the threshold) is preserved, while a low
     /// user threshold no longer fires on the way to a finite optimum.
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
+
+    /// gh#981: restoration recoveries that land on the same point this
+    /// many times running, at a violation of at least `constr_viol_tol`,
+    /// end the solve as local infeasibility. Three, so one repeat is
+    /// still given another outer phase to break away.
+    const RESTO_SAME_RECOVERY_STRIKES: usize = 3;
+    /// gh#981: "the same point" for [`Self::RESTO_SAME_RECOVERY_STRIKES`].
+    /// Successive recoveries on the circle/parabola reproducer sit
+    /// 1e-8 … 3e-12 apart — restoration converges to its own tolerance,
+    /// not to round-off — so the 1e-10 the entry-cycle detectors use
+    /// would catch only some of them.
+    const RESTO_SAME_RECOVERY_RTOL: Number = 1e-6;
     /// Most consecutive iterations the primal divergence guard will defer
     /// to a watchdog sequence before checking the iterate anyway. Upstream's
     /// `watchdog_trial_iter_max` default is 3; one spare covers the
@@ -4245,6 +4267,46 @@ impl IpoptAlgorithm {
                     .clone();
                 self.last_resto_recovery_x = Some(recovered.x.make_new_copy());
                 self.last_resto_recovery_s = Some(recovered.s.make_new_copy());
+                // gh#981: restoration keeps handing back the same point.
+                // The two cycle detectors at the top of
+                // `invoke_restoration` compare consecutive *entries*, and
+                // any accepted line-search step clears their snapshots —
+                // so a cycle whose outer phase wanders for twenty
+                // accepted iterations between restorations and then comes
+                // back is invisible to them. Measured on a circle/parabola
+                // pair (`(x-3)² + y² = 1`, `y = x²`, `min x² + y²`, from
+                // the origin): 66 restoration calls, every one recovering
+                // to the same point at violation 1.75 (successive
+                // recoveries 1e-8 … 3e-12 apart), and
+                // `Infeasible_Problem_Detected` only at iteration 1361.
+                // A recovery that keeps landing on one point with a
+                // violation the user calls a violation is restoration
+                // converging, over and over, to a stationary point of the
+                // infeasibility: the local-infeasibility signature the
+                // cycle exits already report. The violation gate is the
+                // same `constr_viol_tol` test they use (gh#508).
+                let same_as_anchor = self.resto_recovery_anchor_x.as_ref().is_some_and(|a| {
+                    relative_distance(&*recovered.x, &**a) <= Self::RESTO_SAME_RECOVERY_RTOL
+                });
+                self.resto_same_recovery_count = if same_as_anchor {
+                    self.resto_same_recovery_count.saturating_add(1)
+                } else {
+                    0
+                };
+                self.resto_recovery_anchor_x = Some(recovered.x.make_new_copy());
+                if self.resto_same_recovery_count + 1 >= Self::RESTO_SAME_RECOVERY_STRIKES {
+                    let viol = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+                    let tol = self.bundle.conv_check.constr_viol_tol_or_default();
+                    if viol > 0.0 && viol >= tol {
+                        tracing::debug!(target: "pounce::algorithm",
+                            "[POUNCE] restoration recovered to the same point {} times \
+                             running at violation {:.3e}; reporting local infeasibility \
+                             (gh#981)",
+                            self.resto_same_recovery_count + 1, viol,
+                        );
+                        return self.terminate_local_infeasibility();
+                    }
+                }
                 // Mirror upstream `IpoptAlgorithm::AcceptTrialPoint`
                 // (`IpIpoptAlg.cpp:917-963`): kappa_sigma clamp on the
                 // four bound-multiplier vectors. Upstream applies this

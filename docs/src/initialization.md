@@ -995,7 +995,7 @@ better, so the verdict was wrong. What recovered them:
 |---|---|
 | default | 0 |
 | `start_with_resto=yes` | 0 |
-| `expect_infeasible_problem=yes` | 0 |
+| `expect_infeasible_problem=yes` (a no-op then; refused since #981) | 0 |
 | `mu_strategy=adaptive` | 4 |
 | Adam warm-up | 3 |
 | **one displaced start** | **13** |

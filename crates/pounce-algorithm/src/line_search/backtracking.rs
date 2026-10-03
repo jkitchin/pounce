@@ -655,6 +655,27 @@ impl BacktrackingLineSearch {
                 .min(cq_ref.aff_step_alpha_dual_max(delta, tau))
         };
 
+        // gh#981: a step the regular line search would refuse as tiny is
+        // not a soft-restoration step either. The soft-resto trial is
+        // tried *after* that line search failed, very often because the
+        // fraction-to-the-boundary step was already below `alpha_min`
+        // (`TinyStep`, zero trials). Upstream has no such guard and takes
+        // the trial at that α anyway. Under the filter that is harmless —
+        // a trial at α ~ 1e-13 cannot show the sufficient reduction in θ
+        // or φ the filter asks of it. Under `line_search_method=penalty`
+        // it is not: the penalty acceptor's sufficient-decrease target
+        // scales with α, so a null step passes as "no merit increase",
+        // is tagged `S` (which leaves soft restoration and resets
+        // `soft_resto_counter`), and the next iteration does it again.
+        // Measured on an overloaded 3-bus AC OPF: `S` steps at
+        // α = 1e-13 … 4e-16 until `max_iter`, with no restoration call,
+        // where the filter declares infeasibility in 22 iterations.
+        // Refusing the trial hands the iterate to full restoration, as
+        // the regular line search's `TinyStep` meant to.
+        if alpha < self.alpha_min {
+            return None;
+        }
+
         // Soft-resto uses the same scalar α for primal, equality
         // multipliers, and bound multipliers (per upstream).
         let trial_iv = scaled_step(&curr, delta, alpha, alpha, alpha);

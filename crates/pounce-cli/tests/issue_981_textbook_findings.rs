@@ -260,3 +260,88 @@ fn the_reinstatement_does_not_reach_the_biactive_mpcc() {
          (2.2e-4 is what reinstating δ_c here produces); stdout=\n{stdout}"
     );
 }
+
+/// Main-phase `R` rows: one per hand-off to the restoration phase.
+fn restoration_calls(r: &SolveReport) -> usize {
+    r.iterations
+        .iter()
+        .filter(|it| it.phase == IterPhase::Main && it.alpha_primal_char == 'R')
+        .count()
+}
+
+/// The longest unbroken run of soft-restoration steps (`s` or `S`).
+fn longest_soft_resto_run(r: &SolveReport) -> usize {
+    let (mut best, mut run) = (0, 0);
+    for it in r.iterations.iter().filter(|it| it.phase == IterPhase::Main) {
+        if matches!(it.alpha_primal_char, 's' | 'S') {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+/// Finding 3's related observation: under `line_search_method=penalty`
+/// an infeasible 3-bus OPF took `S` soft-restoration steps at
+/// α = 1e-13 … 4e-16 until `max_iter` (282 of 300 iterations), never
+/// calling restoration. A soft-restoration trial below the line search's
+/// own `alpha_min` is now refused, so the iterate goes to restoration and
+/// the penalty run reaches the verdict the filter reaches.
+#[test]
+fn penalty_mode_soft_restoration_hands_off_to_restoration() {
+    let filter = solve("issue981_opf3_overload.nl", &[]);
+    assert_eq!(
+        filter.solution.status,
+        ApplicationReturnStatus::InfeasibleProblemDetected,
+        "precondition: the filter line search calls this model infeasible"
+    );
+    let r = solve(
+        "issue981_opf3_overload.nl",
+        &["line_search_method=penalty", "max_iter=300"],
+    );
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::InfeasibleProblemDetected,
+        "penalty mode: {} iterations, longest soft-restoration run {}",
+        r.statistics.iteration_count,
+        longest_soft_resto_run(&r),
+    );
+    assert!(
+        longest_soft_resto_run(&r) < 5,
+        "an unbroken run of {} soft-restoration steps: they are not handing \
+         off to restoration",
+        longest_soft_resto_run(&r)
+    );
+    assert!(
+        r.statistics.iteration_count < 100,
+        "{}",
+        r.statistics.iteration_count
+    );
+}
+
+/// The issue's closing observation: restoration called 126 times on an
+/// infeasible circle/parabola pair. On this one it recovered to the same
+/// stationary point of the infeasibility 66 times (1361 iterations)
+/// before the verdict, because the outer phase wandered between calls
+/// and every accepted step cleared the cycle detectors' snapshots. Three
+/// recoveries to one point at a real violation now end the solve.
+#[test]
+fn restoration_landing_on_the_same_point_ends_as_local_infeasibility() {
+    let r = solve("issue981_circle_parabola.nl", &[]);
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::InfeasibleProblemDetected
+    );
+    assert!(
+        restoration_calls(&r) <= 5,
+        "{} restoration calls",
+        restoration_calls(&r)
+    );
+    assert!(
+        r.statistics.iteration_count < 300,
+        "{} iterations",
+        r.statistics.iteration_count
+    );
+}
