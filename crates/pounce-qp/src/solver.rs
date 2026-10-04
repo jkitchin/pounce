@@ -2516,6 +2516,7 @@ impl ParametricActiveSetSolver {
         //    same non-committal status rather than certify against a
         //    witness we are carrying.
         let obj = quad_objective(qp, &x);
+        let (mut lambda_g, mut lambda_x) = (lambda_g, lambda_x);
         let status = match sol_aug.status {
             // `p1_verdict == Some(false)` is the only thing here that can
             // carry an infeasibility claim: a *convex* phase-1 that
@@ -2526,9 +2527,41 @@ impl ParametricActiveSetSolver {
             QpStatus::Optimal if p1_verdict == Some(false) && !have_feasible_witness => {
                 QpStatus::Infeasible
             }
+            // The convex phase-1 could not decide, but the question still has
+            // a direct answer: a Farkas certificate (gh#991). `p1_verdict` is
+            // `None` whenever the penalty-bias bound is wider than the
+            // residual, and with a free variable in play that bound is
+            // ~`(1e3)²/(2γ)` — on the issue's two-row sliver
+            // (`x₀ + 2x₁ ≤ 2`, `x₀ + 2x₁ ≥ 2 + 1e-5`, both variables free)
+            // it never dropped below 1e-4 against a true minimal violation of
+            // 5e-6, so the converged phase-1 was flattened to `MaxIter`
+            // after 3 iterations with the budget untouched — AMPL `400`,
+            // "raise the limit and retry", on a model that no budget can
+            // solve, while the IPM and the NLP arm both said `200`.
+            //
+            // The bias bound exists because a *proximal* phase-1's residual
+            // proves nothing by itself. A certificate needs no such bound: it
+            // is checked arithmetic on the data (`farkas_infeasibility_
+            // certificate`), so where one exists it is the verdict, and its
+            // multipliers replace the objective-carrying ones so the
+            // downstream re-derivation (`pounce_convex::active_set::
+            // verify_status`) is checking the vectors that prove the claim.
+            QpStatus::Optimal if p1_verdict.is_none() && !have_feasible_witness => {
+                match self.farkas_infeasibility_certificate(qp, opts) {
+                    Some((y, z)) => {
+                        lambda_g = y;
+                        lambda_x = z;
+                        QpStatus::Infeasible
+                    }
+                    None => QpStatus::MaxIter,
+                }
+            }
             QpStatus::Optimal => QpStatus::MaxIter,
             other => other,
         };
+        if crate::deadline::expired() {
+            return Ok(time_limit_solution(qp, Some(&x), sol_aug.stats.n_refactor));
+        }
 
         Ok(QpSolution {
             x,
@@ -2921,6 +2954,94 @@ impl ParametricActiveSetSolver {
                 };
                 (Some(x), verdict)
             }
+        }
+    }
+
+    /// Multipliers `(y, z)` (rows, box) of the **objective-free** elastic
+    /// phase-1 when they prove the constraint system has no solution, `None`
+    /// otherwise (gh#991).
+    ///
+    /// Dropping `H` and `g` is what makes the multipliers a certificate. The
+    /// objective-carrying elastic solve leaves a stationarity residual
+    /// `Aᵀy + z = −(Hx + g)`, and the proximal phase-1 of
+    /// [`Self::convex_feasibility_seed`] one of `x − r`; on a free coordinate
+    /// neither can be bounded, which is exactly why that phase-1 could not
+    /// certify the issue's model. Minimising violation alone gives
+    /// `Aᵀy + z = 0` to round-off — the same move `pounce-convex`'s
+    /// `feasibility_probe` makes one layer up.
+    ///
+    /// The verdict is the arithmetic in [`farkas_gap`], not the solve: a
+    /// phase-1 that stopped anywhere short of its optimum hands back
+    /// multipliers that simply fail the check.
+    fn farkas_infeasibility_certificate(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+    ) -> Option<(Vec<Number>, Vec<Number>)> {
+        let n = qp.n;
+        let m = qp.m;
+        if m == 0 {
+            // Box-only infeasibility (a crossed box) never reaches elastic.
+            return None;
+        }
+        let h_zero = SymTMatrix::new(SymTMatrixSpace::new(n as Index, vec![], vec![]));
+        let g_zero = vec![0.0; n];
+        let qp_feas = QpProblem {
+            h: &h_zero,
+            g: &g_zero,
+            hessian_inertia: HessianInertia::Psd,
+            ..*qp
+        };
+        // γ = 1: with no objective to compete against, the penalty weight
+        // only scales the multipliers, and a unit weight keeps `|y| ≤ 1`.
+        let reform = crate::elastic::ElasticReformulation::build(&qp_feas, 1.0);
+        let qp_aug = reform.as_qp();
+        let mut x0 = vec![0.0; n];
+        for (xi, (&l, &u)) in x0.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+            if l > NLP_LOWER_BOUND_INF && *xi < l {
+                *xi = l;
+            }
+            if u < NLP_UPPER_BOUND_INF && *xi > u {
+                *xi = u;
+            }
+        }
+        let (x_aug, working_aug) = reform.initial_seed(&qp_feas, &x0, opts.feas_tol);
+        let ws = QpWarmStart {
+            x: x_aug,
+            lambda_g: vec![0.0; reform.m_aug],
+            lambda_x: vec![0.0; reform.n_aug],
+            working: working_aug,
+        };
+        let mut opts_p1 = opts.clone();
+        opts_p1.anti_cycling = AntiCyclingChoice::Bland;
+        let outer_pin_repair = std::mem::replace(&mut self.pin_repair, true);
+        let sol = if opts_p1.use_schur_updates {
+            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)
+        } else {
+            self.solve_general(&qp_aug, Some(&ws), &opts_p1)
+        };
+        self.pin_repair = outer_pin_repair;
+        let sol = sol.ok()?;
+        let y = sol.lambda_g.get(..m)?.to_vec();
+        let z = sol.lambda_x.get(..n)?.to_vec();
+        let gap = farkas_gap(qp, &y)?;
+        // Two floors, and the certificate must clear both.
+        //
+        // * Round-off, relative to the magnitudes the gap was computed from
+        //   (`FARKAS_REL_TOL`, the IPM's default `qp_infeas_tol`): a gap
+        //   that small is not distinguishable from cancellation, and
+        //   `pounce-convex` re-derives the claim at that tolerance, so a
+        //   looser one here would only manufacture claims it then rejects.
+        // * The declared feasibility tolerance. `gap / ‖y‖₁` is a lower
+        //   bound on the largest row violation of *every* `x` in the box —
+        //   `Σ|yᵢ|·violᵢ ≥ gap` — so below `feas_tol` a point feasible to
+        //   tolerance may exist and the model is not infeasible in the
+        //   sense the solver was asked about.
+        let y1: Number = y.iter().map(|v| v.abs()).sum();
+        if gap.margin > FARKAS_REL_TOL * gap.magnitude && gap.margin / y1 > opts.feas_tol {
+            Some((y, z))
+        } else {
+            None
         }
     }
 
@@ -3811,6 +3932,117 @@ impl ParametricActiveSetSolver {
             unbounded_ray: None,
         })
     }
+}
+
+/// Relative floor a Farkas gap must clear in
+/// [`ParametricActiveSetSolver::farkas_infeasibility_certificate`] — the
+/// default `qp_infeas_tol` of `pounce-convex`'s IPM, which re-derives this
+/// engine's `Infeasible` claims at that tolerance.
+const FARKAS_REL_TOL: Number = 1e-7;
+
+/// A row combination's separation, from [`farkas_gap`].
+struct FarkasGap {
+    /// How far apart the two ranges `yᵀAx` must lie in are; positive means no
+    /// `x` satisfies the rows and the box at once.
+    margin: Number,
+    /// Scale the margin was computed at, for a relative round-off floor.
+    magnitude: Number,
+}
+
+/// Separation certified by the row multipliers `y` (gh#991).
+///
+/// For any `x` with `bl ≤ Ax ≤ bu`, `yᵀAx` lies in an interval fixed by the
+/// row bounds and the signs of `y`; for any `x` in the box, `yᵀAx = qᵀx`
+/// (`q = Aᵀy`) lies in an interval fixed by the box and the signs of `q`. A
+/// feasible `x` needs both, so disjoint intervals are a proof of
+/// infeasibility — Farkas' lemma with the box multipliers absorbed into the
+/// box interval. Written sign-agnostically, so it holds whatever sign
+/// convention produced `y`.
+///
+/// A component of `q` on a coordinate with no bound on the side it pushes
+/// toward makes the box interval unbounded, and then there is no deduction —
+/// unless it is round-off on a true zero, `|qⱼ| ≤ 1e-10·‖y‖∞·‖A‖∞`, the same
+/// allowance `pounce-convex`'s `FARKAS_RESID_TOL` makes.
+///
+/// `None` when `y` is zero or anything is non-finite.
+fn farkas_gap(qp: &QpProblem, y: &[Number]) -> Option<FarkasGap> {
+    let y_inf = y.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    if !y_inf.is_finite() || y_inf == 0.0 {
+        return None;
+    }
+    let mut q = vec![0.0; qp.n];
+    let (irows, jcols, vals) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+    let mut a_inf: Number = 1.0;
+    for k in 0..irows.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        q[j] += vals[k] * y[i];
+        a_inf = a_inf.max(vals[k].abs());
+    }
+    let resid_tol = 1e-10 * y_inf * a_inf;
+
+    // [s_lo, s_hi] ∋ yᵀAx from the rows.
+    let (mut s_lo, mut s_hi) = (0.0_f64, 0.0_f64);
+    for (i, &yi) in y.iter().enumerate() {
+        if yi == 0.0 {
+            continue;
+        }
+        let (lo_b, hi_b) = if yi > 0.0 {
+            (qp.bl[i], qp.bu[i])
+        } else {
+            (qp.bu[i], qp.bl[i])
+        };
+        let finite = |b: Number| b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF;
+        s_lo = if finite(lo_b) {
+            s_lo + yi * lo_b
+        } else {
+            Number::NEG_INFINITY
+        };
+        s_hi = if finite(hi_b) {
+            s_hi + yi * hi_b
+        } else {
+            Number::INFINITY
+        };
+    }
+    // [q_lo, q_hi] ∋ qᵀx from the box.
+    let (mut q_lo, mut q_hi) = (0.0_f64, 0.0_f64);
+    for (j, &qj) in q.iter().enumerate() {
+        if qj == 0.0 {
+            continue;
+        }
+        let (lo_b, hi_b) = if qj > 0.0 {
+            (qp.xl[j], qp.xu[j])
+        } else {
+            (qp.xu[j], qp.xl[j])
+        };
+        let finite = |b: Number| b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF;
+        if finite(lo_b) {
+            q_lo += qj * lo_b;
+        } else if qj.abs() > resid_tol {
+            q_lo = Number::NEG_INFINITY;
+        }
+        if finite(hi_b) {
+            q_hi += qj * hi_b;
+        } else if qj.abs() > resid_tol {
+            q_hi = Number::INFINITY;
+        }
+    }
+    let side = |lo: Number, hi: Number| {
+        if lo.is_finite() && hi.is_finite() {
+            Some((lo - hi, lo.abs().max(hi.abs())))
+        } else {
+            None
+        }
+    };
+    // Either the box range sits above the row range, or below it.
+    let best = [side(q_lo, s_hi), side(s_lo, q_hi)]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.0.total_cmp(&b.0))?;
+    best.0.is_finite().then_some(FarkasGap {
+        margin: best.0,
+        magnitude: y_inf.max(best.1),
+    })
 }
 
 fn active_slot_count(working: &WorkingSet) -> usize {
