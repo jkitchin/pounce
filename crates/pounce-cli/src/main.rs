@@ -568,6 +568,13 @@ fn real_main() -> ExitCode {
                     nl_dims = Some((prob.n, prob.m));
                     nl_dual_sign = if prob.minimize { 1.0 } else { -1.0 };
                     nl_ampl_options = prob.ampl_options.clone();
+                    // gh#987: pounce is a continuous solver. A `.nl` that
+                    // declares binary / integer variables is solved as its
+                    // relaxation; say so rather than let `Optimal` read as a
+                    // MIP verdict.
+                    if let Some(w) = pounce_cli::verify::integrality_notice(prob.n_discrete) {
+                        eprintln!("pounce: warning: {w}");
+                    }
                     let elapsed = t0.elapsed().as_secs_f64();
                     // Render the source constraint equations and hand them to
                     // the debugger so `print equation <name|row>` can show a

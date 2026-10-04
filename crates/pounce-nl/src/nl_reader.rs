@@ -711,6 +711,11 @@ pub struct NlProblem {
     /// ([`NlProblem::from_expressions`]) — there is no header to read, and
     /// inventing one would let a consumer trust a count nobody computed.
     pub nl_counts: Option<NlCounts>,
+    /// Header line 7's discrete-variable census: declared binary
+    /// and general-integer variables (gh#987). `None` when there was no header
+    /// or it did not parse. pounce solves the continuous relaxation, so a
+    /// nonzero count means the answer is a bound, not a MIP solution.
+    pub n_discrete: Option<DiscreteCensus>,
     /// AMPL imported (external) functions declared via top-level `F` segments.
     /// Empty unless the `.nl` file calls compiled-C user functions (typically
     /// emitted by IDAES property packages — see issue #49).
@@ -916,6 +921,7 @@ impl NlProblem {
             // fall back to walking the trees, which is what they would have
             // to do here anyway.
             nl_counts: None,
+            n_discrete: None,
             var_names,
             con_names,
             // Built from trees, so every body has one and there is nothing
@@ -1538,6 +1544,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
         suffixes,
         ampl_options: p.ampl_options.clone(),
         nl_counts: p.nl_counts,
+        n_discrete: p.n_discrete,
         imported_funcs,
         // `.nl` text carries no names; `read_nl_file` fills these from the
         // sibling `.col`/`.row` files when present.
@@ -1844,6 +1851,26 @@ fn parse_nl_counts(line3: &str, line5: &str) -> Option<NlCounts> {
     })
 }
 
+/// Header line 7: `nbv niv nlvbi nlvci nlvoi` (gh#987).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscreteCensus {
+    /// `nbv`: binary variables.
+    pub binary: usize,
+    /// `niv`: general-integer variables.
+    pub integer: usize,
+    /// `nlvbi + nlvci + nlvoi`: discrete variables that also appear
+    /// nonlinearly. These are ordered inside the nonlinear blocks, so while
+    /// any exist the integer columns cannot be recovered from the counts.
+    pub nonlinear_discrete: usize,
+}
+
+impl DiscreteCensus {
+    /// Total declared discrete variables (`nbv + niv`).
+    pub fn total(&self) -> usize {
+        self.binary + self.integer
+    }
+}
+
 struct Parser<'a> {
     lines: Vec<&'a str>,
     /// Start address and length of the source text. A recognized body
@@ -1865,6 +1892,8 @@ struct Parser<'a> {
     n_funcs: usize,
     /// Header lines 3 and 5, when both parsed. See [`NlCounts`].
     nl_counts: Option<NlCounts>,
+    /// `(nbv, niv)` from header line 7.
+    n_discrete: Option<DiscreteCensus>,
     /// `nzc` from header line 8: the number of Jacobian nonzeros the file
     /// *declares*. [`parse_nl_string`] cross-checks it against the number the
     /// `J` segments actually deliver, which is how a file truncated before
@@ -1937,6 +1966,7 @@ impl<'a> Parser<'a> {
             num_obj: 0,
             n_funcs: 0,
             nl_counts: None,
+            n_discrete: None,
             declared_jac_nnz: None,
             ampl_options: Vec::new(),
             cses: Vec::new(),
@@ -2051,7 +2081,21 @@ impl<'a> Parser<'a> {
         // catches a file truncated before its `J` segments (gh#785); lines
         // 9 and 10 are the maximum name lengths and the common-expression
         // census.
-        let _l7_discrete = self.next_data_line()?;
+        let l7_discrete = self.next_data_line()?;
+        {
+            let v: Vec<usize> = l7_discrete
+                .split_whitespace()
+                .map_while(|w| w.parse::<usize>().ok())
+                .collect();
+            if v.len() >= 2 {
+                self.n_discrete = Some(DiscreteCensus {
+                    binary: v[0],
+                    integer: v[1],
+                    // `nlvbi nlvci nlvoi`; absent in a short header.
+                    nonlinear_discrete: v.iter().skip(2).take(3).sum(),
+                });
+            }
+        }
         let l8 = self.next_data_line()?;
         // Tolerant like the `nfunc` read above: a header that does not
         // carry the count in the documented shape leaves it `None`, and
@@ -6799,6 +6843,7 @@ b
             imported_funcs: vec![],
             ampl_options: vec![],
             nl_counts: None,
+            n_discrete: None,
             var_names: vec![],
             con_names: vec![],
         };
@@ -6857,6 +6902,7 @@ b
             imported_funcs: vec![],
             ampl_options: vec![],
             nl_counts: None,
+            n_discrete: None,
             var_names: vec![],
             con_names: vec![],
         };

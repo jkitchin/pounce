@@ -228,13 +228,15 @@ fn the_nlp_arm_reports_a_declared_box_violation() {
     );
 }
 
-/// And with the widening off there is nothing to add, on this arm too.
+/// With the widening off the NLP arm still reports the measurement, in the
+/// caller's units (gh#987): the field used to read NaN here, so under row
+/// scaling the user-unit violation was reported nowhere.
 #[test]
-fn the_nlp_arm_adds_nothing_when_it_did_not_widen() {
+fn the_nlp_arm_reports_the_declared_violation_even_without_a_widening() {
     let r = nlp_solve("bound_relax_row.nl", &["bound_relax_factor=0"]);
+    let d = r.statistics.final_declared_constr_viol;
     assert!(
-        r.statistics.final_declared_constr_viol.is_nan(),
-        "expected NaN at bound_relax_factor=0; got {:e}",
-        r.statistics.final_declared_constr_viol
+        d.is_finite() && d <= 1e-6,
+        "expected a finite, converged user-unit violation at bound_relax_factor=0; got {d:e}"
     );
 }

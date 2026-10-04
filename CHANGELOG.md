@@ -11,6 +11,27 @@ changes.
 
 ### Fixed
 
+- **Misleading verdicts and reports (gh#987).** (1) A `.nl` that declares
+  binary / integer variables was solved as its relaxation with no word of it:
+  the CLI now warns on stderr, and `pounce verify` checks the declared integer
+  columns (`REJECTED — not integer-feasible` for a fractional point), prints
+  `integrality: NOT CHECKED` when the columns cannot be identified from the
+  header, adds an `integrality` object to the receipt, and prints a `CAVEAT`
+  when a `VERIFIED` (feasible-only) point has dual infeasibility above
+  `--opt-tol`. (2) `verify --feas-tol` is documented (and labelled in the
+  report and `--help`) as the relative per-row test; `--abs-feas-tol` is the
+  plain absolute alternative. (3) `linear_solver.last_inertia` is documented as
+  the post-regularization inertia (read it with `δ_w`). (4) NLP arm:
+  `final_declared_constr_viol` is now the user-unit violation on every solve,
+  no longer `NaN` at `bound_relax_factor=0`. (5) The convex engines reported
+  `max_iter - 1` iterations when they hit the limit; they now report
+  `max_iter`. (7) Debugger `pause` events carry `phase` (`main` /
+  `restoration`) and `final`; a restoration inner solve's `terminated` no
+  longer drives an in-flight sweep. (8) `sweep_summary` gains `distinct_points`
+  (`distinct_minima` kept as an alias); it counts objective clusters, not
+  curvature-classified minima. Deferred: (6) per-pass summary of the l1
+  multi-pass report.
+
 - **Crashes on legal input (gh#986).** (1, 2) A deep left-deep chain of binary
   `o0` nodes overflowed the CLI's stack and, past its own depth guard, killed
   the Python interpreter via `parse_nl_text` (SIGBUS). The `.nl` expression

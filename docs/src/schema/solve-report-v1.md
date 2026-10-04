@@ -199,7 +199,7 @@ the per-iteration history (which lives at the top level when present).
 | `final_objective` | float \| null | Unscaled. Matches `solution.objective`. `null` if never computed — see below. |
 | `final_scaled_objective` | float \| null | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. `null` if never computed. |
 | `final_dual_inf` | float \| null | `||∇L||∞` at termination. `null` if never computed — see below. |
-| `final_constr_viol` | float \| null | Primal infeasibility `‖(c(x), d(x) − s)‖∞` in the **internally scaled** slack form — the residual the convergence test reads, the same quantity as the last row's `inf_pr_internal`, after a restoration exit too. On a badly scaled model it can be orders below the printed `inf_pr`; the violation in the model's own units at the returned point is `final_declared_constr_viol`, which the NLP arm fills whenever `bound_relax_factor > 0` (the default) (gh#981). `null` if never computed. |
+| `final_constr_viol` | float \| null | Primal infeasibility `‖(c(x), d(x) − s)‖∞` in the **internally scaled** slack form — the residual the convergence test reads, the same quantity as the last row's `inf_pr_internal`, after a restoration exit too. On a badly scaled model it can be orders below the printed `inf_pr`; the violation in the model's own units at the returned point is `final_declared_constr_viol`, which the NLP arm fills on every solve (gh#981; since gh#987 also at `bound_relax_factor=0`, where it was `null`). The convex arm fills it only when a widening was applied. `null` if never computed. |
 | `final_compl` | float \| null | Max complementarity over the four bound blocks. `null` if never computed. |
 | `final_kkt_error` | float \| null | Overall KKT error reported by the convergence check. `null` if never computed. |
 
@@ -322,7 +322,7 @@ Omitted from JSON when no backend reported.
 | `max_fill_ratio` | float \| omitted | Peak `nnz(L) / nnz(A)` observed across all factorizations. |
 | `min_abs_pivot` | float \| omitted | Smallest absolute pivot magnitude seen across all factorizations (diagnostic for near-singularity). |
 | `max_abs_pivot` | float \| omitted | Largest absolute pivot magnitude. |
-| `last_inertia` | `[int, int, int]` \| omitted | `(positive, negative, zero)` inertia of the final factor. Should match `(n, m, 0)` at a regular KKT optimum. |
+| `last_inertia` | `[int, int, int]` \| omitted | `(positive, negative, zero)` inertia of the final factor, **after** regularization: it describes the *corrected* matrix `K + diag(δ_w, −δ_c)`, not the Hessian the model supplied. A solve that ends at a local maximum or saddle with a large `δ_w` therefore still reads `(n, m, 0)`; the wrongly-signed curvature is visible only as the last `iterations[*].regularization` entry (`δ_w`), so read the two together (gh#987). Should match `(n, m, 0)` at a regular KKT optimum with `δ_w = 0`. |
 | `last_nnz_a` | integer \| omitted | Non-zero count of the assembled KKT matrix at the final factor. |
 | `last_nnz_l` | integer \| omitted | Non-zero count of the L-factor at the final factor. |
 | `total_factor_secs` | float | Wall-clock seconds inside the numeric factor call, summed over every factorization (regularization retries included). Always measured, independent of `timing_statistics`. On the Schur path, includes forming and factoring `S`. Divide by `statistics.iteration_count` for a per-iteration figure. |

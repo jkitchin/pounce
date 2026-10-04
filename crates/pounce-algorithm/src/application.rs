@@ -5217,14 +5217,17 @@ impl IpoptApplication {
                 // `qp_extract::BoundRelax`). The two can differ by orders and
                 // nothing used to say so: on netlib `wood1p` this reports
                 // `1.71e-14` at a point `7.96e-09` outside the declared rows
-                // and `9.84e-09` outside the declared box. Only reported when
-                // a widening was applied; without one the two coincide and
-                // `NaN` says "nothing to add".
-                stats.final_declared_constr_viol = if bound_relax_factor > 0.0 {
-                    cq.curr_declared_primal_violation_max()
-                } else {
-                    Number::NAN
-                };
+                // and `9.84e-09` outside the declared box. Reported on
+                // every solve (see gh#987 below).
+                //
+                // gh#987: computed on every solve, not only a widened one.
+                // `final_constr_viol` is documented as the internal scaled
+                // residual, so under row scaling with `bound_relax_factor=0`
+                // the user-unit violation was reported nowhere (the field read
+                // NaN). Without a widening the declared and live models
+                // coincide, but the *units* do not, and this is the one field
+                // that is always in the caller's.
+                stats.final_declared_constr_viol = cq.curr_declared_primal_violation_max();
                 // The box half of the same measurement, unconditionally: this
                 // one is a *summary line* (Ipopt's `Variable bound
                 // violation`), not an extra warning, so it has to carry a real

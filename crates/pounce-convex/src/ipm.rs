@@ -4344,6 +4344,12 @@ fn run_ipm(
                 alpha_dual: step_d,
             });
         }
+
+        // This iteration took its step; count it, so a run that exhausts
+        // `max_iter` reports `max_iter` rather than `max_iter - 1` (gh#987).
+        // Early exits (convergence, a verdict) break above, before here, and
+        // keep `iters = it`: the number of steps taken before the test passed.
+        iters = it + 1;
     }
 
     // `!is_verdict`: the loop breaks with `Optimal` the moment its convergence

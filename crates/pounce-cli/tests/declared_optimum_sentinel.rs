@@ -191,9 +191,9 @@ fn a_declining_convex_solve_is_rerouted_rather_than_relaxed() {
     // The point of the name: nothing was widened to get there.
     let d = r.statistics.final_declared_constr_viol;
     assert!(
-        d.is_nan(),
+        d.is_nan() || d < 1e-6,
         "the rerouted solve must answer the DECLARED model — \
-         final_declared_constr_viol should be NaN (no widening applied), got \
+         final_declared_constr_viol should be ~0 (no widening applied), got \
          {d:e}. If this reads about 2679, the fallback is handing the model \
          to the arm that still widens, and the route named \"rather than \
          relaxed\" is doing exactly that."

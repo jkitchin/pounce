@@ -1222,6 +1222,10 @@ where
                 break;
             }
         }
+
+        // gh#987: count the step just taken, so exhausting `max_iter` reports
+        // `max_iter`, not `max_iter - 1`. Early exits break before this.
+        iters = it + 1;
     }
 
     // gh#984: the loop was chasing an improvement on a relatively-converged
