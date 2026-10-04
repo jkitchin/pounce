@@ -844,8 +844,12 @@ def test_a_loop_built_objective_still_tapes_per_term():
 
 
 def _deep_nl(depth):
-    """`.nl` text whose objective is `((v0 + 1) + 1) ...`, `depth` deep."""
-    body = "o0\n" * depth + "v0\n" + "n1\n" * depth
+    """`.nl` text whose objective is `((v0 - 1) - 1) ...`, `depth` deep.
+
+    Subtraction, not `+`: a left-deep run of binary `o0` is read as one flat
+    n-ary sum (gh#986), so it no longer nests however long it is.
+    """
+    body = "o1\n" * depth + "v0\n" + "n1\n" * depth
     return (
         "g3 0 1 0\n1 0 1 0 0\n0 1\n0 0\n0 1 0\n0 0 0 1\n0 0 0 0 0\n"
         f"0 0\n0 0\n0 0 0 0 0\nO0 0\n{body}x0\nr\nb\n3\nk0\n"
@@ -858,14 +862,14 @@ def test_parsed_nl_deeper_than_the_caller_stack_would_take():
     `NlExpr` surface entirely."""
     for depth in (3_000, 5_000, pounce.NlExpr.max_depth - 1):
         p = pounce.parse_nl_text(_deep_nl(depth))
-        assert p.objective([0.0]) == pytest.approx(float(depth))
+        assert p.objective([0.0]) == pytest.approx(-float(depth))
 
 
 def test_read_nl_takes_the_same_depth_from_a_file(tmp_path):
     path = tmp_path / "deep.nl"
     path.write_text(_deep_nl(5_000))
     p = pounce.read_nl(str(path))
-    assert p.objective([0.0]) == pytest.approx(5_000.0)
+    assert p.objective([0.0]) == pytest.approx(-5_000.0)
 
 
 def test_both_doors_enforce_the_same_depth_limit():
@@ -877,7 +881,6 @@ def test_both_doors_enforce_the_same_depth_limit():
     with pytest.raises(ValueError) as parsed:
         pounce.parse_nl_text(_deep_nl(limit + 1))
     assert str(limit) in str(parsed.value)
-    assert "o54" in str(parsed.value), "the parser's error names the flat form"
 
     e = pounce.NlExpr.var(0)
     with pytest.raises(ValueError) as built:
@@ -896,7 +899,7 @@ out = []
 
 
 def deep_nl(depth):
-    body = "o0\\n" * depth + "v0\\n" + "n1\\n" * depth
+    body = "o1\\n" * depth + "v0\\n" + "n1\\n" * depth
     return (
         "g3 0 1 0\\n1 0 1 0 0\\n0 1\\n0 0\\n0 1 0\\n0 0 0 1\\n0 0 0 0 0\\n"
         "0 0\\n0 0\\n0 0 0 0 0\\nO0 0\\n" + body + "x0\\nr\\nb\\n3\\nk0\\n"
@@ -916,7 +919,7 @@ def work():
 
     # The parser reaches the same recursion from the other side.
     q = pounce.parse_nl_text(deep_nl(2000))
-    assert q.objective([0.0]) == 2000.0
+    assert q.objective([0.0]) == -2000.0
     del q
     out.append(True)
 
@@ -1043,3 +1046,34 @@ def test_hvp_does_not_propagate_nan_through_structural_zeros():
     # The dense product, for contrast: 0 * nan = nan, everywhere.
     dense = _dense_hessian(p, pt)
     assert np.all(np.isnan(dense @ v))
+
+
+def _long_sum_nl(n, wraps=0):
+    """``min sum_i exp(x_i) + x_i^2`` as a left-deep chain of 2n-1 binary
+    ``o0``, wrapped in ``wraps`` pairs of unary negations (``o16``)."""
+    L = ["g3 1 1 0", f" {n} 1 1 0 1", " 0 1", " 0 0", f" 0 {n} 0", " 0 0 0 1 0", " 0 0 0 0 0",
+         f" {n} {n}", " 0 0", " 0 0 0 0 0", "C0", "n0", "O0 0"] + ["o16"] * (2 * wraps) + ["o0"] * (2 * n - 1)
+    for i in range(n):
+        L += ["o44", f"v{i}", "o2", f"v{i}", f"v{i}"]
+    L += ["r", "4 0.5", "b"] + ["0 -1.0 1.0"] * n + [f"k{n-1}"] + [str(i + 1) for i in range(n - 1)]
+    L += [f"J0 {n}"] + [f"{i} 1.0" for i in range(n)] + [f"G0 {n}"] + [f"{i} 0.0" for i in range(n)]
+    return "\n".join(L) + "\n"
+
+
+@pytest.mark.parametrize("n", [5000, 20000, 60000])
+def test_parse_nl_text_long_o0_sum_parses_and_evaluates(n):
+    # gh#986 (second pass): a left-deep o0 chain of any length is read as one
+    # n-ary sum, so the issue's n = 20000 (39999 nested o0) parses instead of
+    # being refused (first pass) or killing the interpreter (before that).
+    p = pounce.parse_nl_text(_long_sum_nl(n))
+    x = np.linspace(-0.5, 0.5, n)
+    assert p.objective(x) == pytest.approx(float(np.sum(np.exp(x) + x * x)), rel=1e-10)
+
+
+def test_parse_nl_text_depth_guard_fires_at_any_depth():
+    # Nesting that really is deep (negations) is refused with a ValueError at
+    # any depth, in debug and release builds alike -- the guard follows the
+    # stack the worker thread reserved, so it fires before the stack does.
+    for wraps in (20000, 40000, 80000):
+        with pytest.raises(ValueError, match="levels"):
+            pounce.parse_nl_text(_long_sum_nl(4, wraps))

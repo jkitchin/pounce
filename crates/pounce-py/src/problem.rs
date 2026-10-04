@@ -913,11 +913,13 @@ impl PyProblem {
     /// `None`. To get both, call `solve` first and pass the `x` it
     /// returns back in as `x0`.
     ///
-    /// Passing `sens_boundcheck=True` clamps the perturbed primal step
-    /// against the variable bounds (single-pass projection — simpler
-    /// than upstream's iterative Schur refinement; see
-    /// `pounce_sensitivity::boundcheck`). `sens_bound_eps` is the
-    /// tolerance (default `1e-9`).
+    /// Passing `sens_boundcheck=True` keeps the perturbed primal step
+    /// inside the **variable bounds**: violated variables are pinned at
+    /// their bound and the step is re-solved, for up to 16 passes (since
+    /// #587; see `pounce_sensitivity::boundcheck`). It does **not** check
+    /// constraint-row limits — a perturbed `g(x)` can leave `[cl, cu]`
+    /// unnoticed; use `parametric_step_bounded` when a row limit can bind.
+    /// `sens_bound_eps` is the tolerance (default `1e-9`).
     #[pyo3(signature = (
         x0,
         pin_constraint_indices,
@@ -1368,6 +1370,9 @@ impl PyProblem {
             // `SolveStatistics` residual/objective defaults.
             final_obj: Number::NAN,
             final_status_code: 0,
+            callback_error: None,
+            callback_error_sink: None,
+            intermediate_positional: None,
         })
     }
 
@@ -1448,12 +1453,70 @@ fn write_solve_report(
 /// key without guarding it.
 ///
 /// [`LinearSolverSummary`]: pounce_linsol::summary::LinearSolverSummary
+/// gh#990 items 3 and 13: `info["derivative_check"]` (the derivative checker's
+/// verdict, `None` when `derivative_test` did not run) and
+/// `info["objective_scaling"]` (the objective-scaling decision). Shared by the
+/// single-solve and batch `info` dicts so they carry the same keys.
+pub(crate) fn set_decision_items(
+    info: &Bound<'_, PyAny>,
+    stats: &pounce_nlp::solve_statistics::SolveStatistics,
+) -> PyResult<()> {
+    let py = info.py();
+    let info = info.downcast::<PyDict>()?;
+    let dc: PyObject = match &stats.derivative_check {
+        None => py.None(),
+        Some(c) => {
+            let d = PyDict::new_bound(py);
+            d.set_item("mode", &c.mode)?;
+            d.set_item("tolerance", c.tolerance)?;
+            d.set_item("perturbation", c.perturbation)?;
+            d.set_item("checked", c.checked)?;
+            d.set_item("suspicious", c.suspicious)?;
+            d.set_item("missing_structure", c.missing_structure)?;
+            d.set_item("evaluations", c.evaluations)?;
+            d.set_item("clean", c.clean)?;
+            d.set_item("max_rel_error_gradient", c.max_rel_error_gradient)?;
+            d.set_item("max_rel_error_jacobian", c.max_rel_error_jacobian)?;
+            d.set_item("max_rel_error_hessian", c.max_rel_error_hessian)?;
+            let flagged = PyList::empty_bound(py);
+            for e in &c.flagged {
+                let row = PyDict::new_bound(py);
+                row.set_item("kind", e.kind)?;
+                row.set_item("block", &e.block)?;
+                row.set_item("row", e.row)?;
+                row.set_item("col", e.col)?;
+                row.set_item("analytic", e.analytic)?;
+                row.set_item("finite_difference", e.finite_difference)?;
+                row.set_item("relative_error", e.relative_error)?;
+                flagged.append(row)?;
+            }
+            d.set_item("flagged", flagged)?;
+            d.into_any().unbind()
+        }
+    };
+    info.set_item("derivative_check", dc)?;
+    let os = PyDict::new_bound(py);
+    let opt = |v: f64| if v.is_finite() { Some(v) } else { None };
+    os.set_item("factor", opt(stats.final_obj_scaling_factor))?;
+    os.set_item("start_gradient_max", opt(stats.start_obj_grad_max))?;
+    os.set_item("certificate_refused", stats.obj_scale_certificate_refused)?;
+    os.set_item(
+        "acceptable_certificate_refused",
+        stats.obj_scale_acceptable_refused,
+    )?;
+    info.set_item("objective_scaling", os)?;
+    Ok(())
+}
+
 fn linear_solver_dict<'py>(
     py: Python<'py>,
     s: &pounce_linsol::summary::LinearSolverSummary,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("solver_name", &s.solver_name)?;
+    // gh#990 item 7: the `linear_solver` option as requested, beside the
+    // backend that ran (`solver_name`).
+    d.set_item("requested", s.requested.clone())?;
     d.set_item("n_factors", s.n_factors)?;
     d.set_item("n_pattern_reuse", s.n_pattern_reuse)?;
     d.set_item("n_pattern_changes", s.n_pattern_changes)?;
@@ -1461,6 +1524,7 @@ fn linear_solver_dict<'py>(
     d.set_item("min_abs_pivot", s.min_abs_pivot)?;
     d.set_item("max_abs_pivot", s.max_abs_pivot)?;
     d.set_item("last_inertia", s.last_inertia)?;
+    d.set_item("last_inertia_unregularized", s.last_inertia_unregularized)?;
     d.set_item("last_nnz_a", s.last_nnz_a)?;
     d.set_item("last_nnz_l", s.last_nnz_l)?;
     d.set_item("total_factor_secs", s.total_factor_secs)?;
@@ -1553,10 +1617,27 @@ pub(crate) fn build_info_dict<'py>(
         d.set_item("eq_duals_rejected", w.eq_duals_rejected)?;
         d.set_item("stationarity_split", w.stationarity_split)?;
         d.set_item("recentering_disabled", w.recentering_disabled)?;
+        d.set_item("slacks_closed", w.slacks_closed)?;
+        d.set_item("slack_close_reverted", w.slack_close_reverted)?;
         info.set_item("warm_start", d)?;
     }
-    info.set_item("status", status as i32)?;
-    info.set_item("status_msg", status_message(status))?;
+    // gh#986 item 6: an `intermediate` callback that *raised* stops the
+    // engine through the same `false` return a deliberate `return False`
+    // does, so the engine reports `User_Requested_Stop` for both. Tell them
+    // apart here: a broken callback gets its own status (`Callback_Error`,
+    // code `CALLBACK_ERROR_STATUS`) and the exception text in
+    // `info["callback_error"]`; `return False` stays `User_Requested_Stop`.
+    match (&bridge.state.callback_error, status) {
+        (Some(err), ApplicationReturnStatus::UserRequestedStop) => {
+            info.set_item("status", CALLBACK_ERROR_STATUS)?;
+            info.set_item("status_msg", "Callback_Error")?;
+            info.set_item("callback_error", err.as_str())?;
+        }
+        _ => {
+            info.set_item("status", status as i32)?;
+            info.set_item("status_msg", status_message(status))?;
+        }
+    }
     info.set_item("obj_val", bridge.state.final_obj)?;
     info.set_item("g", bridge.state.final_g.clone().into_pyarray_bound(py))?;
     info.set_item(
@@ -1648,11 +1729,20 @@ pub(crate) fn build_info_dict<'py>(
     // is the plain max-norm of the three (no s_d/s_c optimality scaling).
     info.set_item("final_unscaled_kkt_error", stats.final_unscaled_kkt_error)?;
     info.set_item("final_unscaled_dual_inf", stats.final_unscaled_dual_inf)?;
+    // gh#983 review: the yardstick `final_unscaled_dual_inf` is judged
+    // against (`max |grad f|, |J^T lambda|, |z|` in the model's units), so a
+    // caller -- `find_minima`'s `kkt_tol` among them -- can read the residual
+    // relative to the scale of the terms it is made of.
+    info.set_item("final_unscaled_dual_scale", stats.final_unscaled_dual_scale)?;
     info.set_item(
         "final_unscaled_constr_viol",
         stats.final_unscaled_constr_viol,
     )?;
     info.set_item("final_unscaled_compl", stats.final_unscaled_compl)?;
+    // gh#983: structured solve-quality warnings (`"<code>: <text>"`), empty
+    // on a clean run. Never changes the status.
+    info.set_item("warnings", stats.warnings.clone())?;
+    set_decision_items(info.as_any(), stats)?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /
@@ -2003,6 +2093,11 @@ fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<
         Ok(out)
     })
 }
+
+/// `info["status"]` for a solve stopped by an `intermediate` callback that
+/// raised (gh#986 item 6). Outside the engine's `ApplicationReturnStatus`
+/// range, so it cannot collide with a real exit.
+pub(crate) const CALLBACK_ERROR_STATUS: i32 = -198;
 
 pub(crate) fn status_message(status: ApplicationReturnStatus) -> &'static str {
     use ApplicationReturnStatus::*;

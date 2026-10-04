@@ -666,6 +666,18 @@ for step in range(horizon):
 
 This is the **same** ergonomics as qpOASES's Python binding, deliberately.
 
+**Fixed variables and branching (gh#986).** The working set a solve returns is
+in the caller's full variable space: a variable the solve eliminated because
+its bounds coincide (`fixed_variable_treatment=make_parameter`, the default)
+is reported as `Fixed` (code `3`). A working set handed to `solve` is likewise
+read in the full space and mapped through *that* solve's elimination, so a
+branch-and-bound child that fixes `x1` warm-starts from its parent's working
+set, and a sibling that fixes `x2` instead receives the same set on the right
+columns. A working set sized to a reduced space (built by hand through the Rust
+API) is used only when the solve eliminates exactly the variables the one that
+produced it did; otherwise it is dropped with a warning and the solve runs
+cold. `statistics.sqp_warm_working_set_applied` says which happened.
+
 ### 7.4 GAMS (`gams/gams_pounce.c`)
 
 GAMS is the hardest case because the link is single-shot per `solve`

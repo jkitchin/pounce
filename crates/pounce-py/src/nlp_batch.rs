@@ -35,6 +35,7 @@ use pounce_algorithm::batch::{
     solve_nlp_batch_warm as solve_batch_seq_warm,
 };
 use pounce_common::types::{Index, Number};
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
@@ -235,11 +236,28 @@ fn build_result<'py>(
     n: usize,
     m: usize,
     equality_mask: &[bool],
+    callback_error: Option<&str>,
 ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
     let info = PyDict::new_bound(py);
-    info.set_item("status", r.status as i32)?;
-    info.set_item("status_msg", status_message(r.status))?;
+    // gh#986 review item 11: the same split `Problem.solve` makes (see
+    // `problem.rs`): a raising `intermediate` stops the engine through the
+    // `false` a deliberate `return False` returns, so the engine says
+    // `User_Requested_Stop` for both; a broken callback gets `Callback_Error`
+    // and its exception text here too.
+    match (callback_error, r.status) {
+        (Some(err), ApplicationReturnStatus::UserRequestedStop) => {
+            info.set_item("status", crate::problem::CALLBACK_ERROR_STATUS)?;
+            info.set_item("status_msg", "Callback_Error")?;
+            info.set_item("callback_error", err)?;
+        }
+        _ => {
+            info.set_item("status", r.status as i32)?;
+            info.set_item("status_msg", status_message(r.status))?;
+        }
+    }
     info.set_item("iter_count", r.stats.iteration_count)?;
+    // gh#990 item 11: parity with `Problem.solve`'s `info["wall_time"]`.
+    info.set_item("wall_time", r.wall_time)?;
     info.set_item("mu", r.stats.final_mu)?;
     info.set_item("final_kkt_error", r.stats.final_kkt_error)?;
     info.set_item("final_dual_inf", r.stats.final_dual_inf)?;
@@ -257,6 +275,12 @@ fn build_result<'py>(
     // dict carries the same contract.
     info.set_item("final_unscaled_kkt_error", r.stats.final_unscaled_kkt_error)?;
     info.set_item("final_unscaled_dual_inf", r.stats.final_unscaled_dual_inf)?;
+    info.set_item(
+        "final_unscaled_dual_scale",
+        r.stats.final_unscaled_dual_scale,
+    )?;
+    info.set_item("warnings", r.stats.warnings.clone())?;
+    crate::problem::set_decision_items(info.as_any(), &r.stats)?;
     info.set_item(
         "final_unscaled_constr_viol",
         r.stats.final_unscaled_constr_viol,
@@ -386,7 +410,7 @@ pub fn solve_nlp_batch<'py>(
         .iter()
         .zip(dims)
         .zip(&eq_masks)
-        .map(|((r, (n, m)), eq)| build_result(py, r, n, m, eq))
+        .map(|((r, (n, m)), eq)| build_result(py, r, n, m, eq, None))
         .collect()
 }
 
@@ -487,11 +511,18 @@ pub fn solve_problem_batch<'py>(
     // run here, once per instance); each `PyTnlp` is plain data plus
     // `Py<PyAny>` handles, hence `Send`, and moves to its worker.
     let mut bridges: Vec<PyTnlp> = Vec::with_capacity(problems.len());
+    // gh#986 review item 11: one error sink per instance, kept here while
+    // the bridge itself moves onto its worker.
+    let mut sinks: Vec<std::sync::Arc<std::sync::Mutex<Option<String>>>> =
+        Vec::with_capacity(problems.len());
     for (i, (p, x0)) in problems.iter().zip(&x0s).enumerate() {
         let pb = p.borrow();
         let (n, _m) = pb.dims();
         let x0_vec = extract_f64_vec(x0, n, &format!("x0s[{i}]"))?;
-        let init = pb.build_tnlp_init(py, x0_vec, None, None, None)?;
+        let mut init = pb.build_tnlp_init(py, x0_vec, None, None, None)?;
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+        init.callback_error_sink = Some(std::sync::Arc::clone(&sink));
+        sinks.push(sink);
         bridges.push(PyTnlp::new(init));
     }
 
@@ -511,7 +542,11 @@ pub fn solve_problem_batch<'py>(
         .iter()
         .zip(dims)
         .zip(&eq_masks)
-        .map(|((r, (n, m)), eq)| build_result(py, r, n, m, eq))
+        .zip(&sinks)
+        .map(|(((r, (n, m)), eq), sink)| {
+            let err = sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            build_result(py, r, n, m, eq, err.as_deref())
+        })
         .collect()
 }
 

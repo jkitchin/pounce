@@ -143,7 +143,7 @@ via its `checkpoint` field):
 | `step_rejected` | line search gave up (tiny step / all backtracks failed), before restoration | the search direction `δ` and the un-accepted iterate |
 | `pre_restoration_entry` | just before restoration | the iterate that tripped restoration |
 | `post_restoration_exit` | restoration returned | what restoration produced |
-| `terminated` | once, before the solve returns | the final / failing iterate + status |
+| `terminated` | before the solve returns — and again for each restoration inner solve | the final / failing iterate + status. A pause event carries `phase` (`"main"` / `"restoration"`) and `final` (true only for the end of the whole solve); an inner restoration solve is `phase: "restoration"`, `final: false` (gh#987) |
 
 By default the debugger only *stops* at `iter_start` (and `terminated`).
 The sub-iteration checkpoints fire every iteration but resume immediately
@@ -974,6 +974,18 @@ stops the solve (so ending with `continue` hands control back at the
 first breakpoint). `--debug-script` implies `--debug` when no `--debug*`
 mode is given, and runs once at the first pause (not on a `resolve`).
 
+**Batch behaviour with a non-terminal stdin.** When a script is given and
+stdin is not a terminal — a Jupyter kernel, a CI step, a
+`subprocess.Popen(stdin=PIPE)` left open — nobody can answer a prompt, so
+once the script is exhausted the debugger treats that as end of input: it
+detaches and the solve runs to completion (as `Ctrl-D` does interactively).
+Before gh#990 a script ending in `continue` stopped at the *next* pause and
+waited forever on the silent pipe. If you want to keep stepping, run on a
+real terminal, or end the script with `quit` to stop the solve instead.
+Without `--debug-script` nothing changes: an interactive session on a
+terminal still prompts. (`--debug-json` is unaffected; there stdin is the
+controlling client.)
+
 ### Example: a scripted initialization-sensitivity run
 
 Because `load`, `sweep`, and `set opt` are ordinary commands, a whole
@@ -1031,14 +1043,14 @@ for line in p.stdout:
         results.append((ev["status"], ev["objective"]))
     elif ev.get("event") == "sweep_summary":
         print(f"{ev['succeeded']}/{ev['solves']} ok, "
-              f"{ev['distinct_minima']} distinct minima, "
+              f"{ev['distinct_points']} distinct end points, "
               f"best obj {ev['best_objective']:.6e}")
         break
 ```
 
 Each `sweep_result` carries `index`, `status`, `iters`, `objective`,
 `inf_pr`, and the `seed` it started from; the `sweep_summary` adds
-`distinct_minima`, `best_index`, and `best_objective`. A client can
+`distinct_points`, `best_index`, and `best_objective`. `distinct_points` clusters the converged *objective values*; it is not curvature-classified, so a saddle the solver accepts counts as one point (the old name `distinct_minima` is kept as a deprecated alias of the same number). A client can
 feature-detect support via `hello.capabilities.sweep`.
 
 ## Exit model

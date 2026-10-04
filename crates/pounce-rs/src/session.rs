@@ -850,6 +850,15 @@ mod tests {
         let rep = second.warm_report.expect("warm report");
         // Dropped y<=10 row shows up as dropped dual mass.
         assert_eq!(rep.n_dropped_rows, 1, "report = {rep:?}");
+        // The warm answer is the cold one; the gh#983 scale audit must not
+        // read a seed sitting at the optimum as a tiny objective and replace
+        // the warm run with an up-scaled re-solve (whose count is the one
+        // reported when promoted).
+        assert!(
+            second.stats.warnings.is_empty(),
+            "warnings = {:?}",
+            second.stats.warnings
+        );
         assert!(
             second.stats.iteration_count < first.stats.iteration_count,
             "warm solve must improve the trajectory: cold={} warm={}",

@@ -240,8 +240,9 @@ trade-off discussion.
 
 When restoration fires repeatedly, the standard IPM is stuck on an
 infeasible subproblem the filter cannot accept. The ℓ₁ exact-penalty
-wrapper rephrases the constraints as an additive penalty term and
-solves a sequence of bound-constrained subproblems instead:
+wrapper elasticizes the **equality** rows (each gets a pair of penalized
+slacks; inequality rows pass through unchanged) and solves a sequence of
+subproblems with the penalty term in the objective instead:
 
 ```
 pounce problem.nl l1_exact_penalty_barrier=yes
@@ -420,6 +421,15 @@ you are reading a log:
 | `mu_strategy=adaptive` | `infeasibility_mu_strategy_retry` | the barrier trajectory |
 | `start_point_perturbation=1e-2` | `infeasibility_perturbed_start_retry` | where the trajectory starts |
 | `feral_increase_quality=no` | `feral_increase_quality_retry` | whether a stalled factorization was allowed to reroute the trajectory |
+
+Only rung 3 moves the starting point, and only by a small deterministic
+displacement (`1e-2·(1 + |xᵢ|)`, clipped inside the bounds). That restores rank
+at a *structurally* degenerate start (a squared slack at zero, the origin on a
+homogeneous quadratic) and does not repair a start that is merely poor, so a
+verdict that survived the ladder is still a statement about the neighbourhood
+of the point you gave. [Recovering from a bad
+start](https://github.com/jkitchin/pounce/wiki/Recovering-from-a-bad-start)
+works backwards from the failure to the point.
 
 Rung 4 is the odd one out in a second way: every other rung's gate is a
 property of the options the failing solve ran under, so the ladder can be

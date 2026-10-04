@@ -416,6 +416,60 @@ impl TNLPAdapter {
         Ok(Some(small))
     }
 
+    /// The declared sparsity of the Lagrangian Hessian, as 0-based
+    /// `(row, col)` pairs in the compressed `x_var` space (fixed variables
+    /// dropped), or `None` when the TNLP declares nothing usable.
+    ///
+    /// This is a *structure-only* query (`eval_h` in `Structure` mode, no
+    /// values, no evaluation point), so it costs no derivative evaluation and
+    /// works on a model whose `eval_h` values are never requested. An empty
+    /// declaration is reported as `None`, not as "the Hessian is zero": a
+    /// TNLP with no second derivatives declares zero nonzeros exactly like one
+    /// that merely declines, and the partitioned quasi-Newton updater uses the
+    /// pattern to *remove* couplings (gh#989 item 5), which must never happen
+    /// on the strength of an absent declaration.
+    pub fn lagrangian_hessian_pattern(&self) -> Option<Vec<(Index, Index)>> {
+        let nnz = self.info.nnz_h_lag;
+        if nnz <= 0 {
+            return None;
+        }
+        let mut irow = vec![0 as Index; nnz as usize];
+        let mut jcol = vec![0 as Index; nnz as usize];
+        if !self.tnlp.borrow_mut().eval_h(
+            None,
+            true,
+            1.0,
+            None,
+            true,
+            crate::tnlp::SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol,
+            },
+        ) {
+            return None;
+        }
+        let offset = match self.info.index_style {
+            IndexStyle::C => 0,
+            IndexStyle::Fortran => 1,
+        };
+        let map = &self.classification.full_to_var;
+        let mut out: Vec<(Index, Index)> = Vec::with_capacity(nnz as usize);
+        for (&r, &c) in irow.iter().zip(jcol.iter()) {
+            let (r, c) = (r - offset, c - offset);
+            if r < 0 || c < 0 || r as usize >= map.len() || c as usize >= map.len() {
+                return None;
+            }
+            let (vr, vc) = (map[r as usize], map[c as usize]);
+            if vr < 0 || vc < 0 {
+                continue;
+            }
+            out.push(if vr >= vc { (vr, vc) } else { (vc, vr) });
+        }
+        out.sort_unstable();
+        out.dedup();
+        if out.is_empty() { None } else { Some(out) }
+    }
+
     /// Which variables the **objective's** second derivatives can reach,
     /// in the compressed `x_var` space, sorted and deduplicated.
     ///

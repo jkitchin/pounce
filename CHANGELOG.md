@@ -9,6 +9,698 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Docs and small API gaps from the textbook checklist (gh#990, partial).**
+  `solve_nlp_batch`'s per-instance `info` now carries `wall_time` (seconds in
+  that instance's solve), like `Problem.solve`. Stderr logging strips ANSI
+  colour unless stderr is a terminal (`NO_COLOR` and `CLICOLOR_FORCE` still
+  honoured), so redirected logs and notebooks no longer carry escapes.
+  `--debug-script` with a non-terminal stdin (a Jupyter kernel, an open
+  `subprocess` pipe) now treats the end of the script as end of input and lets
+  the solve finish, instead of blocking at the next pause. Documented: the
+  `mu_strategy` default under `limited-memory`, `sens_boundcheck` (up to 16
+  passes, variable bounds only, `parametric_step_bounded` for rows), the l1
+  penalty wrapper elasticizing equality rows only, `last_ordering` AMD leaf
+  and equilibrated-space pivots, degenerate LP duals and `qp_crossover`, HSDE
+  certificate scale (1/tau), the `intermediate` callback's `inf_pr` and the
+  JSON `solution.lambda` convention, `--debug-script` batch behaviour, the
+  bundled `pounce` binary path, and the `pounce.qp` docstring (the Python QP
+  path never presolves; `qp_*` options are CLI-only).
+- **Textbook checklist, remaining items (gh#990, second pass).** (3) The
+  derivative checker's verdict is programmatic: `info["derivative_check"]`
+  (mode, counts, `clean`, largest relative error per gradient / Jacobian /
+  Hessian, up to 200 flagged entries with kind, row, column, analytic and
+  finite-difference values) and the report's `statistics.derivative_check`;
+  stderr output is unchanged. (7) `linear_solver.requested` names the
+  `linear_solver` option beside `solver_name`, the backend that ran, so an
+  `ma57` -> FERAL fallback is in the report and `info`, not only the banner.
+  (9) Python `QpResult` / the `solve_qp` dict carry `tau`, `kappa` (of the last
+  HSDE run in the solve) and, on infeasible verdicts, `certificate_scale`, the
+  inf-norm to divide the 1/tau-scaled ray by (Rust:
+  `pounce_convex::hsde_scalars`). (12) With `qp_crossover=yes` the CLI prints
+  one line under the result: engine, accepted or kept, superbasics pushed,
+  pivots by stage, bound flips, KKT error before -> after (Rust:
+  `pounce_convex::crossover::take_report`). (13) The objective-scaling decision
+  is in `info["objective_scaling"]` / `statistics.objective_scaling` (the
+  returned run's factor, the start gradient scale, and whether any attempt
+  refused a termination certificate the scaling masked); the ANSI-free stderr
+  was the first pass. (16) The wiki page "Recovering from a bad start" lives in
+  `jkitchin/pounce.wiki`, which this repository cannot edit: the corrected
+  text (four-rung ladder, rung 3 moves the start, pin-the-trajectory names all
+  four `*_retry` options, 0.10.0 transcripts labelled) is in
+  `dev-notes/wiki-recovering-from-a-bad-start.md`, ready to paste, and
+  `docs/src/troubleshooting.md` now says which rung moves the start.
+
+### Fixed
+
+- **The gh#983 scale audit no longer reads a warm start at an answer as a
+  tiny objective.** The small-objective branch takes the model's gradient
+  scale as `max(grad f(x0), grad f(x*))`; under `warm_start_init_point=yes`
+  both points are answers, and at an interior optimum both gradients are
+  barrier noise. A warm re-solve of unchanged data (`pounce-rs`'s
+  `TnlpPresolveSession::solve_warm_last`) read `grad f = 3.73e-9` against a
+  complementarity of `3.72e-9`, up-scaled the objective by `2.7e8`, and the
+  promoted re-solve's 6 iterations replaced the warm run's 3 -- the same count
+  as the cold solve, which the audit leaves alone (start gradient `4`). Under a
+  warm start an answer gradient within `10x` the complementarity now carries
+  no scale; when neither does, the audit stays out (the exact-zero rule's
+  reasoning). Cold starts are unchanged; the reactor warm-started at its
+  answer (gradient `4e3x` its complementarity) is still up-scaled.
+- **Crashes on legal input, review fixes (gh#986 review).** (8) Under
+  `mehrotra_algorithm=yes` the probing guard's recentring step computed no
+  affine step, and `delta_aff` -- which nothing ever cleared -- fed the
+  PREVIOUS iterate's predictor into the corrector at the recentred point. The
+  recentre now drops it (a plain step at the LOQO mu), and
+  `IpoptData::accept_trial_point` frees it with the trial point as upstream's
+  `AcceptTrialPoint` does. The guard's feasibility bar is the caller's `tol`
+  (was a fixed `1e-8`). Measured: the fixture sweep at default options and at
+  `mu_oracle=probing` is unchanged (probing without Mehrotra never reads
+  `delta_aff` in the search direction); under `mehrotra_algorithm=yes` 65 of
+  206 fixture-legs move, all from the recentre (freeing `delta_aff` at accept
+  moves none): 6 failures become successes (`issue981_cstr_dup_row` both legs,
+  `linear_eq_aggregation`, `linear_eq_aggregation_row_constant`,
+  `linear_eq_collapsed_box`, `hs71_obj1e8` lbfgs), none go the other way, 8
+  change which failure they report, and of 51 that keep their status 27 take
+  fewer iterations and 18 more (`square_flowsheet_resto` now needs the
+  `feral_increase_quality=no` rung, 4659 iterations in total against 223).
+  clnlbeam (Mehrotra, iterations / objective, before -> after): ni = 200 120 /
+  344.876 -> 1365 / 344.876, 500 320 / 346.497 -> 336 / 344.876, 1000 627 /
+  346.496 -> 110 / 346.496, 2000 320 / 346.496 -> 1063 / 346.496. The objective
+  reaches the default algorithm's 344.876 at ni = 500 (pinned by a tight test)
+  but not at 1000 / 2000: unglobalised Mehrotra on this nonconvex model still
+  stops at the other local solution there, and the iteration counts are not
+  uniformly better. The restoration-failure hint no longer claims Mehrotra
+  "can fail even from a feasible start". (9) The `.nl` reader's depth guard
+  assumes Rust's default 2 MiB thread stack (wasm32: 1 MiB) when no budget was
+  declared, instead of the CLI's 1 GiB; and it now counts chains of defined
+  variables: a `V` segment referencing the previous one is one level to the
+  parser and as deep as the chain to every pass that walks through a `Cse`
+  (`collect_vars`, the tape builder, drop glue), so a long chain is a clean
+  error past the guard instead of a stack overflow. The parse-time depth and
+  quadratic-shape passes read earlier `V` verdicts instead of re-walking the
+  chain (they were quadratic in its length): a 16 334-link chain parses in
+  ~50 ms. (10) SQP working sets are published in the caller's full variable
+  space (fixed variables `Fixed`) and warm starts are mapped through the
+  solve's fixed-variable elimination, so the issue's child that fixes `x1`
+  warm-starts from the parent's set (`info["working_set"]` is no longer `None`
+  there), and a sibling fixing `x2` gets it on the right column; a
+  reduced-space set from a different elimination is dropped with a warning.
+  New `statistics.sqp_warm_working_set_applied`. (11) `solve_problem_batch` /
+  `solve_nlp_batch` report a raising `intermediate` as `Callback_Error` (-198)
+  with `callback_error`, like `Problem.solve`; the Pyomo v2 and legacy tables
+  and the pip GAMS link map it (error termination, iterate kept; internal
+  error), with coverage tests. (12) `intermediate`'s calling convention is read
+  once from its signature (keywords if it names them all or takes `**kwargs`,
+  else cyipopt's positional order), so a callback body that raises `TypeError`
+  is no longer run twice. (13) The unreachable per-iteration refactor rescue is
+  removed; `issue_535`'s reroute test asserts the engine, not a status;
+  `issue_986_duplicate_equality_row`'s docstring is corrected (its 3-variable
+  model does reproduce, verified with the seed floor off).
+
+- **Solve-quality audit: one verdict per returned run, re-solves only when
+  they change something (gh#983 review).** (1) `statistics.warnings` /
+  `info["warnings"]` describe the run whose point is returned: they are cleared
+  per attempt and saved/restored with the rest of a floored attempt's tally,
+  each code appears once, and the `WARNING:` lines print once per solve. A
+  promoted gh#884 retry (`x*y = 0`: `Solve_Succeeded` at `du = 1.6e-7`) no
+  longer carries the discarded attempt's `large_dual_scale ... 1.43e9`, and a
+  second solve on one application no longer inherits the first's. (2) The
+  re-scale branch re-solves only when the factor gradient-based scaling
+  computes at the returned point is at least `10x` the frozen one, and the
+  small-objective branch reads the gradient at both ends of the run (a start
+  of exactly zero gradient carries no scale): `hs71_obj1e8` and a start a hair
+  from a stationary point are no longer re-solved, and a declined re-solve no
+  longer attaches a false "froze" warning. Across the CLI fixture corpus (both
+  sweep legs) the audit re-solved 11 fixture-legs (5 promoted, 6 declined) and
+  now re-solves none. (3) The item-5 downgrade (`Solve_Succeeded` ->
+  `Solved_To_Acceptable_Level` on a run that showed the gh#884 signature with
+  an unscaled dual infeasibility above `max(acceptable_tol, 1e-3)`) runs once,
+  on the final verdict, and reads the new
+  `returned_run_dual_divergence_signature` (the detector for the returned run
+  alone), so it can neither reopen the gh#884 retry nor downgrade a promoted run
+  for a discarded sibling's signature. (4) The small-objective trigger is
+  continuous: one threshold (`1e-7` of the gradient scale) both re-solves and,
+  where a re-solve would not change the scale (`1/g < 10`) or the caller owns
+  the scaling, warns -- the issue's reactor at `fs` in `[1e-6, 1e-3]` now ends
+  at a relative error of `3e-8` throughout (the first pass left `3e-5 .. 1e-3`
+  at up to `1.6e-5` with no signal). (5) A gh#884 retry whose unscaled KKT
+  error is at least six orders below the base attempt's and at most `1e-3`,
+  with its violation within `acceptable_tol`, is promoted (still subject to the
+  answer-admissibility rules): the toll-pricing MPCC at `bound_relax_factor=0`
+  now returns the retry's `Solve_Succeeded` at `1.69e-5` instead of the base
+  attempt's acceptable-level point at `1.03e5`. (6) `find_minima`'s `kkt_tol`
+  is relative (`kkt_tol * max(1, g0, final_unscaled_dual_scale)`, `g0` the
+  gradient scale at `x0`); at gradients of `1e12` it rejected 11 of 12 solves.
+  Rejections are counted in `MinimaResult.n_kkt_rejected` and a
+  `RuntimeWarning` says when they emptied the result; `info` gains
+  `final_unscaled_dual_scale`. (7) `dual_inf_tol` set to its default value is
+  read as not named (the gh#532 floor stays); the audit's `obj_scaling_factor`
+  restore puts absence back as absence; docs no longer say warnings never
+  change the status, list the real codes, and say `find_minima` filters with
+  or without `hess=`; `iter_count` is documented as the returned run's. Sweep
+  vs the pre-change binary (both legs): `jit1`/`jit1_boxed` exact 22 -> 24
+  and `jit1_boxed` lbfgs 18 -> 27 (no longer re-solved: the factor at the
+  answer is 7.5x the frozen one; the reported count is now the base attempt's,
+  objective unchanged to 10 digits), `hs71_obj1e8` lbfgs 11 -> 12 (no longer
+  re-solved: factor 0.82x; it now carries `large_dual_scale` /
+  `unscaled_dual_inf_above_acceptable` at `du = 2.4e-2` against terms of
+  `1.5e9`).
+
+- **Convex HSDE: the gap's noise-floor excuse reads the true row slack
+  (gh#689 regression from gh#984's second pass).** `issue_689 ...
+  the_default_route_reaches_the_same_optimum` failed at `max_iter=4000`:
+  `scaled_feasible_a` ended `Error_In_Step_Computation` after 1563 iterations
+  where `ce17aa9` converged at 3596 (bisected to `fa74ed2`). The gap test may
+  stop down to its own `eps*|objective|` noise floor only when complementarity
+  holds, and that half read the internal slack `s`; as `tau -> 0` (`4.5e-7`
+  here) `s` decouples from the true row slack `h - Gx/tau`, so the loop
+  stopped with `max s_i z_i = 2.8e-22` while the returned point's
+  complementarity was `5.0e-3`, and gh#414's verifier then demoted that
+  `Optimal` to `NumericalFailure`. The excuse now also requires every
+  *resolvable* true-slack product within the objective-unit tolerance; the
+  solve converges at 1917 iterations to a KKT error of `1.3e-9`. Fixture
+  sweep (both legs) against the pre-change binary: empty diff.
+
+- **`pounce.jax` jaxpr sparsity: custom derivatives, `reshape(dimensions=)`,
+  memory guard, batched warnings (gh#985 review).** `custom_jvp` /
+  `custom_vjp` functions were analysed through their *primal*, but AD uses
+  the user's rule, which can depend on inputs the primal does not: an
+  implicit-function primal under `stop_gradient` lost `dy/da` and the solve
+  reported `Solve_Succeeded` at objective 2.25 instead of 0.6248, and a
+  straight-through estimator gave an empty pattern. A `custom_jvp` is now read
+  through its JVP rule (run in value semantics with each input tangent carrying
+  its input's dependency, so `jax.nn.relu` stays diagonal), and a `custom_vjp`
+  (opaque backward) or unreadable rule is bounded densely over its inputs,
+  which is sound because a JVP/VJP is linear in the tangents. `reshape`
+  ignored its `dimensions` (transpose-first) parameter, which JAX emits for
+  `ravel(order="F")` and in the gradient of `prod(..., axis=k)`: the latter
+  dropped the pairwise Hessian blocks. `dot_general` built three `B*M*N` index
+  arrays before its budget check, and an implicit broadcast built one; both
+  now check first (a 5000-variable outer product falls back in 0.7 s and 2 MB
+  instead of 5 s and 1.2 GB). `vmap_solve` / `vmap_solve_parallel` (functions
+  and `JaxProblem` methods) report non-converged elements in **one**
+  `RuntimeWarning` naming the count, indices and statuses (`"raise"` in the
+  parallel path names all of them); per-element warnings collapsed to one
+  under Python's default filter. Docs: `solve`'s pattern text (jaxpr first,
+  probes as fallback), scatters listed as handled, `on_failure="raise"`
+  surfacing as `jax.errors.JaxRuntimeError` with a stderr traceback. Tests:
+  `python/tests/test_jax_gh985_review.py` (the repros, 27 more
+  primitive-mix superset cases checked against reverse-over-reverse AD).
+- **`curve_fit` active bounds and `trf_minimize` box radius (gh#989 review,
+  Python).** The gh#989 active-bound rule `z > slack` compared a multiplier
+  (objective per parameter unit) to a slack (parameter units), an absolute
+  threshold in parameter units: an interior slope of `3e-5` in `[0, 1]`,
+  determined to `5e-8`, was flagged active with `perr = 0`. A bound is now
+  active when `z / H_jj > slack` (`H` the Gauss-Newton diagonal: the distance
+  a Newton step would carry the parameter past the bound), invariant under
+  parameter and objective rescaling and independent of `slack * z = mu`, so it
+  holds at an acceptable-level exit; the `1e-6` window is the fallback only
+  without finite multipliers or curvature. It also catches the van Genuchten
+  `theta_r` bound under `sigma=10, absolute_sigma=True`, which `z > slack`
+  missed. `trf_minimize`'s region is a box `|dw_i| <= delta` but the step was
+  measured with the 2-norm: with four or more degrees of freedom a rejected
+  corner step "contracted" to `delta` and was retried until a false
+  `Stalled`, and an accepted one expanded by `2*sqrt(n)`. The step is now the
+  inf-norm of the dof block.
+- **Python-level driver defects (gh#989, items 1-4 and 6).**
+  (1) `trf_minimize` measures the step norm over the `w_index` (trust-region)
+  block only, so a large-valued `y` no longer inflates the radius, and the
+  filter also tests the trial against the current iterate (Fletcher-Leyffer).
+  (2) `curve_fit` decides active bounds from the solver's multipliers against
+  the slack (`z > slack`) instead of a fixed `1e-6` window, so the verdict and
+  the projected standard error no longer depend on `tol`.
+  (3) `QpSensitivity.weakly_active_*` scales its dual threshold by the
+  inequality multipliers only; a large equality multiplier no longer flags
+  strongly active rows. (4) MLSL default `gamma` is 0.5 (2.0 covered a whole
+  2-D box so no solve launched), hitting the sample cap reports
+  `sample_cap_reached` rather than `budget_exhausted`, and the single-linkage
+  scan uses a KD-tree. (6) `Continuation.trace_arclength` halves a step whose
+  corrector lands farther than `max_correction * ds` from the predictor or
+  whose tangent turns past `min_tangent_cos`, instead of jumping branches.
+  Items 5 and 7 are in the second-pass entry below.
+- **`qp_reg` proximal stall and partitioned-Hessian structure (gh#989, items 5
+  and 7).** (7) A proximal-sized `qp_reg` (above `1e-8`) is one absolute
+  number on every column, so on a column whose curvature is far below it the
+  Newton step is damped to a crawl: the CSTR MPC QP with the control in J/min
+  (`qp_reg=1e-4`) ran 200 iterations to a cost of 497.8 (N = 40; 544.8 at the
+  issue's N = 200) against 149.4066 / 149.4757. The HSDE driver now watches
+  `max(residuals, mu)` and, after six iterations without a 10% gain, cuts the
+  effective `qp_reg` by 100x (floored at `1e-10`) with a `tracing` warning;
+  both models now end `Optimal` (J/min: 66 iterations at N = 40, 93 at
+  N = 200). The default `qp_reg` is below the threshold and takes exactly the
+  path it did, so the fixture sweep (both legs) is empty. Cost, stated
+  plainly: the K-unit model, which used to be rescued by the equilibrated
+  retry at 16 iterations, now converges in the first attempt but takes 49
+  (13 -> 65 at N = 40). (5) `hessian_approximation=partitioned` reads the
+  model's *declared* Lagrangian Hessian sparsity (new
+  `partitioned_structure=declared`, default; `jacobian` restores the old dense
+  rows), splits each per-constraint element into the connected groups of that
+  pattern, and keeps only the declared entries of each group. The mesh growth
+  was the dense update formulas writing into structurally zero entries: a
+  collocation row's group is a star (control coupled to each state, no
+  state-state or state-diagonal entries), SR1/BFGS and the `γI` seed filled all
+  of it, and those entries, weighted by multipliers of either sign, gave the
+  assembled `W` the wrong inertia — the IPM then ran on a `δ_w` decaying by a
+  third per iteration. An element whose declared pattern is incomplete now
+  takes the pattern-constrained minimum-change secant update (Toint) from zero,
+  for either `partitioned_update_type`; on a star one pair determines it. With
+  a declared pattern whose connected components all fit in
+  `partitioned_block_size`, `partitioned_elements=blocks` uses those
+  components (the Lagrangian's exact diagonal blocks) instead of contiguous
+  index ranges. Batch reactor (Radau, issue's starting profile), iterations
+  exact / partitioned / `bfgs` / `blocks`, before -> after: N = 25 12 /
+  14 -> 13 / cap -> 13 / 88 -> 13; N = 100 16 / 54 -> 15 / cap -> 15 /
+  139 -> 15; N = 400 18 / 74 -> 21 / cap -> 21 / cap -> 21. `laptime` (N = 80):
+  partitioned 587 -> 240 iterations, ending at a different local minimum
+  (65.460044 against exact's 65.462928; feasible to 1.5e-10, dual
+  infeasibility 8e-9); `blocks` unchanged at 166 (its one 3 280-variable
+  component keeps the contiguous partition). Fixture sweep (both legs)
+  identical. Still open: `bfgs` without a declared Hessian structure
+  (`partitioned_structure=jacobian`, or a Python problem with no `hessian`)
+  does not converge per-constraint, on the batch reactor or on `laptime`;
+  modelling the Lagrangian element `λ_j c_j` with damped BFGS was tried and
+  diverged, and skipping low-curvature pairs froze it.
+- **Warm starts no longer lose to cold starts (gh#988).** `solve_qp` /
+  `solve_qp_ipm_warm` now fall back to the cold HSDE path when the warm
+  (direct infeasible-start) leg ends in `numerical_failure`,
+  `iteration_limit` or `optimal_inaccurate`: an infeasible neighbour gets its
+  `primal_infeasible` certificate instead of 116-199 wasted iterations, and
+  the reported `iters` is the total spent. A warm point is also projected onto
+  pinned columns (`lb == ub`). The NLP warm-start options (notably
+  `warm_start_target_mu=1e-4` for small parameter changes) are documented in
+  `options.md`; the NLP default is unchanged (docs only: no fixture-sweep
+  evidence for changing it).
+- **Warm starts no longer lose to cold starts, second pass (gh#988).**
+  (3) NLP: a parameter change that moves the bound of an *active* inequality
+  away (capacity 14 -> 16) left the carried multiplier (1.41) on a slack that
+  is now 2 wide, while the initializer rebuilt the slack multiplier barrier-
+  sized and capped at ten times `mu / slack`; the start carried 1.41 of dual
+  infeasibility no step could repair at a tiny `mu`, and the solve spent its
+  first dozens of iterations cycling through restoration (49 iterations, 7
+  cold). The seeded inequality multiplier is now the authority on activity:
+  when stationarity of the slack row asks for a multiplier more than ten times
+  what `mu / slack` supports (and the seed passed the gh#617 coherence test),
+  that multiplier is taken and the slack is closed onto its bound at
+  `mu / v`. The model warm-starts in 4 iterations (cold 7) with no option.
+  `benchmarks/warmstart` (`warm-ipm`, 66 runs): 6331 -> 6244 total iterations,
+  `rosenbrock_ring` 68/74/75 -> 67/70/69, `rastrigin_drift` large 380 -> 329,
+  one line up (`rosenbrock_ring_cycle` small 86 -> 88), no failures. The
+  variable-bound branch is deliberately untouched: lifting the same cap there
+  cost `rosenbrock_ring` 68 -> 90. `warm_start_target_mu` stays an explicit
+  override, now documented without the "recommended" claim.
+  (2) `solve_qp(warm_start=...)` on the production LP with `lb == ub` columns:
+  pinned columns are now substituted out of the warm solve (rows left with no
+  free column are dropped when they hold, their multipliers zero, the pinned
+  column's bound multiplier recovered from stationarity), and the direct
+  driver stops at a measured primal-residual plateau (`mu` and the dual
+  residual under `tol`, the primal residual under `tol` relative to the
+  data, no improvement for 3 iterations) instead of running a converged
+  iterate to the iteration limit: the issue's `5e-8` residual on data of order
+  `1e4` is `5e-12` of its scale. Reduced instance (T=26, K=20): warm from the
+  scenario optimum / x only / base plan = 32 / 31 / 36 iterations against 31
+  cold (was 231 / 231 / 82, i.e. the iteration limit then a cold re-solve);
+  textbook instance (T=52, K=60): 36 / 36 / 38 against 60 cold.
+- **gh#988 review fixes.** (1) The second pass's primal-plateau exit declared
+  primal-*infeasible* problems `optimal` from a warm start: it read the
+  residual against `1 + max(‖b‖, ‖h‖, ‖s‖)`, so one large right-hand side
+  excused every row (`x0+x1 = 1`, `x0+x1 = 1+gap` beside `x2 <= big`: warm
+  `optimal` at `|Ax-b|` up to `0.25` for gap/big = 1e-4/1e4, 1e-3/1e6,
+  0.5/1e8, where the cold solve certifies `primal_infeasible`). The exit is
+  removed. Traced per iteration, the production-LP "floor" was not a floor:
+  `‖dy‖ = pinf/δ_c` exactly (478 per iteration) while a bound multiplier of
+  6.7e3 on a violated shipment row walked down, and the accepted point had
+  complementarity `2.6e-4`. In its place a warm leg that *stalls* (primal
+  residual not halved over 5 iterations once `mu < tol`, or over 15
+  regardless) ends without a verdict and hands over to the cold HSDE leg; a
+  cold direct solve (`use_hsde=false`) never stops early, since the drift is
+  its Farkas ray growing. The direct driver's scale-relative stop, which had
+  the same global-norm flaw (the gap 0.5 / big 1e8 case came back `optimal`
+  even without the plateau), now excuses each row and column only by the
+  magnitude of its own terms. All four infeasible cases are now
+  `primal_infeasible` from a warm start (23-32 iterations, cold 17-21) and
+  never `optimal` on the direct driver. Pinned production LP: warm 57-62
+  iterations against 34 cold, `|Ax-b|` 3.4e-9 (cold 7.7e-9) and
+  complementarity 1.5e-9 (the second pass's 31-36 were the unsound accept).
+  (2) The plateau's "no improvement" (`>= 0.9·last` for 3 iterations) is
+  gone with it; the stall test asks for the residual to halve. (3) NLP: the
+  slack-closing move is capped at `0.5·max(1, |s|)` and re-measured after the
+  move (undone if the start is worse than the move accounts for);
+  `info["warm_start"]["primal_residual"]` describes the actual start (it read
+  `0` beside a start 86 infeasible at K=100) and `slacks_closed` /
+  `slack_close_reverted` are reported. A row the carried point violates
+  (capacity tightened 14 -> 12) takes the multiplier its seeded `y_d` implies
+  instead of the constant fill. Pricing sweep, warm / cold iterations: K=8
+  5/7 (was 9), K=12 4/6 (was 24), K=100 2/8 (was 11), K=1e4 3/8 (was 10);
+  warm <= cold at all 12 K. `benchmarks/warmstart` `warm-ipm`: 6244 -> 5974,
+  only `hanging_chain` (142/126/197 -> 47/83/109) and
+  `rosenbrock_ring_cycle` (93/88/101 -> 75/76/87) move, no failures;
+  `warm-qp-ipm` unchanged. (4) `warm_start_recentering` set on the Problem
+  now wins over the `WarmStart`'s own `recentering` (it was overwritten, so
+  `none` ran `residual`; with `none` honoured, K=16 takes 97 iterations).
+  (5) `solve_qp_ipm_warm` runs one warm leg and at most one cold leg; with
+  pinned columns both run on the reduced problem and the verdict is lifted,
+  an infeasibility certificate verified on the full problem before it is
+  returned (the second pass could chain four `max_iter` budgets). `iters` is
+  the total over every leg, including when an inaccurate warm result is
+  kept. (6) An all-pinned row is dropped when its violation is under `tol` or
+  under `64·ε` times its own terms (was `1e-9·max(1,|rhs|)`). (7) Tests
+  assert iteration bounds and that the pin elimination ran. Fixture sweep
+  (both legs, 206 lines): identical to the pre-change binary (the CLI's
+  convex arm runs HSDE; the direct driver only behind it).
+- **Misleading verdicts and reports (gh#987).** (1) A `.nl` that declares
+  binary / integer variables was solved as its relaxation with no word of it:
+  the CLI now warns on stderr, and `pounce verify` checks the declared integer
+  columns (`REJECTED — not integer-feasible` for a fractional point), prints
+  `integrality: NOT CHECKED` when the columns cannot be identified from the
+  header, adds an `integrality` object to the receipt, and prints a `CAVEAT`
+  when a `VERIFIED` (feasible-only) point has dual infeasibility above
+  `--opt-tol`. (2) `verify --feas-tol` is documented (and labelled in the
+  report and `--help`) as the relative per-row test; `--abs-feas-tol` is the
+  plain absolute alternative. (3) `linear_solver.last_inertia` is documented as
+  the post-regularization inertia (read it with `δ_w`). (4) NLP arm:
+  `final_declared_constr_viol` is now the user-unit violation on every solve,
+  no longer `NaN` at `bound_relax_factor=0`. (5) The convex engines reported
+  `max_iter - 1` iterations when they hit the limit; they now report
+  `max_iter`. (7) Debugger `pause` events carry `phase` (`main` /
+  `restoration`) and `final`; a restoration inner solve's `terminated` no
+  longer drives an in-flight sweep. (8) `sweep_summary` gains `distinct_points`
+  (`distinct_minima` kept as an alias); it counts objective clusters, not
+  curvature-classified minima. Deferred: (6) per-pass summary of the l1
+  multi-pass report.
+
+- **Misleading verdicts and reports, second pass (gh#987).** (6) A
+  multi-pass solve now reports every pass. The l1 exact-penalty loop (and the
+  plain attempt that precedes it under `l1_fallback_on_restoration_failure`)
+  reset the statistics on each pass, so `iter_count` and the report kept only
+  the last one (a solve that ran 18 + 22 + 22 + 26 iterations reported 26).
+  `iter_count` / `statistics.iteration_count` is now the **total**, the
+  evaluation and restoration counters are summed the same way, `iterations`
+  holds every pass's rows, and a new `statistics.passes` array carries one
+  entry per pass (`rho`, `iterations`, `first_row`, `slack_sum`,
+  `constraint_violation` in the model's own units, `status`); it is omitted
+  on an ordinary solve. Every other `final_*` field still describes the last
+  pass, which produced the returned point. (3) `linear_solver` gains
+  `last_inertia_unregularized`: the inertia of the most recent factorization
+  tried with no regularization, so the origin of the Bistable repro reads
+  `(0, 2, 0)` where `last_inertia` reads `(2, 0, 0)` after the `delta_w` shift
+  (also `info["linear_solver"]` in Python); additive, `last_inertia` is
+  unchanged. (4) The convex arm's `final_declared_constr_viol` is the
+  user-unit violation on every solve (it was `NaN` whenever no
+  `bound_relax_factor` widening was applied, the common case). (1) The
+  integer-relaxation notice is also in the JSON report's `statistics.warnings`
+  (`integer_relaxation: ...`). A distinct `solve_result` for a MILP
+  relaxation was considered and **not** done: AMPL's convention reads the
+  0-99 band as "solved" and 100-199 as `solved?`, and Pyomo's `.sol` reader
+  maps those bands to termination conditions and solver statuses, so moving a
+  relaxation out of the solved band would change what existing Pyomo / AMPL
+  models do with an answer that is, for the relaxation, correct (this could
+  not be checked against a Pyomo install here, which is the reason to leave
+  the band alone). The stderr warning, the report warning and
+  `pounce verify`'s integrality check are the disclosure; pounce-pyomo keeps
+  its own `termination_condition` handling. Not changed: item 2 (documented
+  in the first pass), items 5, 7, 8 (first pass).
+
+- **Crashes on legal input (gh#986).** (1, 2) A long left-deep chain of
+  binary `o0` nodes overflowed the CLI's stack and, past the reader's guard,
+  killed the Python interpreter via `parse_nl_text`. The `.nl` reader now
+  reads any left-deep `o0` run longer than 64 links as one n-ary `Sum` (same
+  left-to-right additions, one nesting level), so the issue's n = 20 000
+  (39 999 nested `o0`) -- and 100 000 -- parses and solves in the CLI and in
+  `parse_nl_text` (CLI: 0.3 s / 2 s). Genuinely deep nesting (unary / `o2` /
+  `o3`) keeps the recursive path, now bounded by a guard that follows the
+  stack the thread declared (`set_parse_stack_budget`: 32 KiB per level in an
+  unoptimised build, 4 KiB optimised, capped at 40 000), so it is a clean
+  error at any depth in debug and release builds alike -- the earlier
+  `test_parse_nl_text_depth_guard_fires_at_any_depth` crash was a 256 MiB
+  worker overflowing at ~13-26 KiB per unoptimised level. The CLI main thread
+  and the Python worker reserve 1 GiB and fall back to 256 / 64 MiB. (3) A
+  consistent duplicated equality row under `qp_presolve=no qp_reg=0` died at
+  iteration 0: the convex IPM's seed factorization hit a zero pivot with no
+  static regularization at all. With `qp_reg <= 0` the seed now carries a
+  1e-8 floor on the `(x, x)` and equality blocks (it only feeds the symbolic
+  analysis; any `qp_reg > 0`, the default included, seeds exactly as before),
+  (a per-iteration delta_w / delta_c refactor rescue added alongside it was
+  never reached and has since been removed -- see the review entry). At
+  `qp_reg=0` the floor moves one fixture (`qcqp_columns_wellcond`, 25 -> 29
+  iterations, both legs, same objective; measured by sweeping with the floor on
+  and off); at any `qp_reg > 0` nothing moves. The issue's 602-variable MPC
+  solves to 149.4757, and a convex `NumericalFailure` maps to
+  `Error_In_Step_Computation` rather than "INTERNAL ERROR: Unknown
+  SolverReturn value". (4) An active-set
+  SQP `working_set=` warm start whose dimensions no longer fit (a child that
+  fixes a variable) is dropped with a warning and the solve runs cold. (5)
+  `mehrotra_algorithm=yes` on clnlbeam ended `Restoration_Failed` at a feasible
+  point because the probing oracle's iterate-quality guard (ratio 2e9 at
+  iteration 1, `inf_pr` 2e-14) requested a restoration that cannot repair
+  anything; at a feasible iterate (`inf_pr <= 1e-8`) the guard now recentres
+  (LOQO mu) instead, and still restores an infeasible one. clnlbeam now solves
+  at ni = 1000 and 2000. Mehrotra stays unglobalised, so on this nonconvex
+  model it may stop at a different local solution than the default algorithm.
+  (6) A cyipopt-style `intermediate(self, *args)` is retried positionally; a
+  callback that **raises** now ends the solve with `info["status_msg"] ==
+  "Callback_Error"` (`info["status"] == -198`) and the exception text in
+  `info["callback_error"]` instead of `User_Requested_Stop`, which only a
+  deliberate `return False` reports (`minimize` still never upgrades it to
+  success).
+
+- **`pounce.jax` sparsity: structural detection from the jaxpr, patterns and
+  `on_failure` everywhere (gh#985).** The pattern was read from values at a
+  few standard-normal points, so `exp(-E/RT)` underflowing or a polynomial
+  second derivative vanishing there dropped entries for the whole solve
+  (`Solve_Succeeded` at profit 0.022 instead of 5.352; Beckmann stopping at
+  `Maximum_Iterations_Exceeded`). First pass unioned probes over `x0`, the box
+  and normal points. Now an unsupplied pattern is derived by index-set
+  propagation through the jaxpr (`pounce/jax/_jaxpr_sparsity.py`): the
+  Jacobian from `g`'s jaxpr, the Hessian from the Jacobian pattern of the
+  gradient program, symmetrised onto the lower triangle. It is independent of
+  every value, so a value-dependent zero cannot drop an entry; constant
+  (closed-over) matrices contribute only their nonzero pattern (a banded `A @ x`
+  stays banded). Cost is one vectorised sparse step per jaxpr equation (about
+  0.1 ms; 10^5 variables vectorised: 0.16 s; 2 000-interval unrolled clnlbeam:
+  about 9 s, dominated by JAX's own trace; a 300-interval unrolled clnlbeam builds in 7 s against 94 s probing) with no AD pass. A model it cannot
+  bound (`scan`/`while`/`cond`, `sort`, data-dependent indexing) or a
+  dependency matrix past ~2e7 entries falls back, per matrix, to the probe
+  union, so no model that worked stops working. `from_jax` / `JaxProblem` gain
+  `pattern_detection="jaxpr" | "probe"` and report the source in
+  `pattern_source`. `solve_with_warm` now takes `jac_pattern` / `hess_pattern`
+  / `on_failure`, `JaxProblem` takes `on_failure` (and `pattern_detection`),
+  and its parametric probe covers the box and standard-normal points as
+  `from_jax` does. Tests: `python/tests/test_jax_jaxpr_sparsity_gh985.py`
+  (CSTR and Beckmann true structure, 25 primitive-mix superset checks against
+  AD nonzeros, fallback, budget, every entry point), plus the first-pass
+  `test_jax_sparsity_gh985.py`.
+
+- **Convex IPM stopping depended on the units of `c` and `P` (gh#984),
+  items 1, 2, 3, 5, 6.** The HSDE scale-relative arm granted every residual
+  `tol*(1 + its scale)` once any one scale was large, so tightening `tol`
+  could loosen the answer (refinery LP: `kkt_error` 1.2e-6 at `tol=1e-10`
+  against 1.2e-7 at `1e-6`), costs in cents let `|Ax-b|` through, and a 1e9
+  shifted variable returned `optimal` with complementarity 1.08. The relative
+  arm may now stop only when each residual is also within `64*eps*(its own
+  scale)`; short of that the relatively-converged iterate is kept as a
+  candidate while the solve keeps improving, and is returned unchanged if it
+  stalls or breaks down. Separately, the absolute dual/gap tests are now in
+  units of the objective when `max(|P|, |c|) < 1` (portfolio weights were off
+  by `1.6e-2` at `P*1e-9`). LP crossover recomputes `x_B = B^-1(b - N x_N)`
+  after the final pivot, and `POUNCE_SIMPLEX_DEBUG` no longer changes the
+  vertex (the recompute ran only under the flag). Sweep:
+  `units_qp_convex` 20 -> 28 and `sqp_tiny_objective_convex` 8 -> 21
+  iterations (tiny-objective normalization, objectives now more exact),
+  `feasible_x0_{extreme_row,sentinel_bound,wide_scale}` and
+  `scaled_feasible_b` +1 iteration each (one extra candidate iterate).
+
+  **Second pass: items 3 and 4, direct driver.** (3) An orthant solve now
+  also has to bring its largest complementarity product `max s_i z_i` within
+  the objective-unit tolerance before either HSDE arm may stop (the gap is a
+  difference of objective-sized sums and carries `eps*|objective|` noise a
+  product does not, so a `1e9` shifted variable let the gap floor wave through
+  a complementarity of `1.08e-5`); an iterate that cannot improve is returned
+  as before. The verdict is then made on the returned point's own residuals,
+  each read above its finite-precision floor (`4*64*eps` times the scale of its
+  own terms, per complementarity product the noise of its own slack) and with
+  stationarity/complementarity divided by the objective's unit
+  `max(|P|,|c|)`: `QpSolution::kkt_residuals_above_floor`. `optimal` becomes
+  `optimal_inaccurate` when that `kkt_error` exceeds `tol` (HSDE path only; the
+  direct driver judges in the equilibrated metric and is cross-checked against
+  the relative KKT as before). The Python `residuals` dict reports the same
+  four numbers, so `status == "optimal"` never sits beside
+  `residuals["kkt_error"] > tol`, and adds `kkt_error_raw`, the plain absolute
+  max, for comparison with other solvers. On the issue's repro the answer is
+  `optimal` with `kkt_error` 0 (raw 1.2e-7 -- one ulp of the `1e9` row slack,
+  which is unreachable below), and tightening `tol` no longer loosens it.
+  (4) The absolute gap test may now stop down to the gap's own
+  evaluation noise, `64*eps*|objective|`, provided the cancellation-free
+  half (every `s_i z_i` within `tol`) also holds. The gap is a sum of
+  objective-sized terms, so at a `2e7` objective its noise (5e-9) sat within a
+  factor of two of `tol = 1e-8` and the absolute test was met only by luck:
+  the dispatch LP took 37 iterations in dollars against 15 in k$ and the
+  3328-week production LP 199 against 17. Now 14/16 and 21/19. (A first
+  attempt that scaled the gap tolerance *up* with the objective's unit was
+  dropped: it stopped `issue745_netlib_problem` with a postsolved dual
+  infeasibility of 1.9e-4 and the stiff gh#846 box QP with `x` off by 1.)
+  Item 2 re-verified at the issue's own
+  `production_lp(208)` through Python: `||Ax-b||` is 5.5e-9 / 1.0e-9 /
+  1.7e-13 for scales 1 / 100 / 1e-3, all `optimal` (the issue: 5.5e-9 /
+  **4.9e-6** / 1.4e-13). The direct (`qp_hsde=no`) driver reads stationarity
+  and `mu` against the objective's unit when it is below 1, as the HSDE loop
+  does (portfolio weights were off by `1.2e-4` at `P*4e-7`); its LP iteration
+  counts were already identical to the digit across `c` scalings (45/45/45,
+  13/13/13), pinned by a test. Second-pass sweep vs the first-pass binary: only
+  `convex_qp_qscfxm1` (30 -> 26) and `scaled_feasible_b` (48 -> 34) move, both
+  legs, objective unchanged (the gap noise floor on a large internal
+  objective). Cost: one `issue880` iteration pin raised
+  25 -> 30 (the 1e10 case takes 28; the extra iterations are the complementarity
+  requirement).
+  Tests: `crates/pounce-convex/tests/issue984_stopping_units.rs`,
+  `python/tests/test_issue_984_stopping_units.py`.
+
+  **Review fixes.** The second pass's description of item 3 above overstated
+  the measure: its floors were *global* (`max|x_i|` over every boxed variable
+  for the primal, `|c·x| + |h·z| + |ub·z_ub|` excusing every complementarity
+  product), so one large term excused up to `5.7e-5` (500 ulps) anywhere in
+  the item-3 model, and a well-scaled solve with raw `kkt_error 1.2e-9`
+  reported `0.0` -- "a well-scaled solve is untouched" was false. (9) The
+  measure is now per entry: each stationarity component, row, bound and
+  product is excused only by `4·64·ε` times the magnitude of its *own* terms,
+  with no global gap allowance; a row of ordinary magnitude reads its raw
+  residual to `~1e-13`. Item 3 still ends `optimal` with `u` within `1e-8` of
+  `(64, 74, 63)` (reported complementarity `1.08e-9`, raw `1.19e-7` -- one ulp
+  of the `1e9` slack). Upward objective units (`P·1e6`, `P·1e9` on item 5)
+  still read stationarity in the objective's unit, which is what puts raw
+  dual residuals of `3.9` / `4041` within `tol`; that is now flagged rather
+  than hidden: `scaling_warning` (Python) and a stderr note (CLI) give the raw
+  values. (8) The CLI prints the verdict's measurement as the summary's
+  `(scaled)` column and the raw residuals as `(unscaled)`, and the JSON
+  report's `final_*` residuals are the verdict's measurement (they were the
+  raw ones, so `optimal` could sit beside `final_kkt_error > tol`); the
+  LP→NLP reroute note prints both. (10) The HSDE candidate stash ignored the
+  complementarity half (`comp_ok`) and, at loop end, overwrote any status --
+  a primal/dual infeasibility certificate, `TimeLimit` -- with `Optimal` (a
+  deadline became a success). A candidate must now satisfy `comp_ok`, is
+  restored only over `IterationLimit` / `NumericalFailure` with the deadline
+  unexpired, and the restored iterate is pushed as the trace's terminal
+  record. (11) With that, the first pass's relaxations of
+  `issue880_coupled_sigma_forward_error.rs` are reverted (status pins at
+  `cond >= 1e10` back to `OptimalInaccurate`, `an_active_bound_is_stiff_not_free`
+  back to `rel_x_err < 1e-8` at every `cond`; verified to fail without the
+  stash change) and `issue846`'s best-candidate test is back to `1e-12`
+  coincidence with the direct driver's answer. The `issue880` iteration pin
+  stays at 30. (12) The warm path (`solve_qp(warm_start=...)`) now applies the
+  same `optimal` -> `optimal_inaccurate` rule (inside the warm leg, so the
+  cold fallback gets its chance at a clean answer); `method="active-set"` is
+  documented as keeping the active-set engine's own verdict. The Python
+  `residuals` dict adds `primal_infeasibility_raw`, `dual_infeasibility_raw`,
+  `complementarity_raw`. (13) The `DBG984` stderr hook is removed, and
+  `POUNCE_SIMPLEX_DEBUG` on/off is pinned to return the bit-identical vertex
+  (`tests/issue984_simplex_debug_vertex.rs`).
+  Also: the direct driver (warm starts, `use_hsde=false`) now stops only
+  when its largest complementarity product, not just the average `mu`, is
+  within the objective-unit `tol` (the HSDE loop's `comp_ok`); without it a
+  warm `optimal` sat beside `max s_i z_i > tol` and was then demoted. A
+  pinned column (`lb == ub`) is an equality, so its `z_lb·(x - v)` products
+  are not read as complementarity (they charged the multiplier split, `3e-7`
+  on the gh#988 production LP). The CLI re-applies the demotion to the
+  postsolved point on the extracted model when presolve ran (QPILOTNO was
+  `optimal` on the reduced problem beside a model constraint violation of
+  `8.2e-7`).
+  Measured. Fixture sweep vs the pre-change binary (both legs, 206 lines):
+  one line moves on each leg, `scaled_feasible_b` 34 -> 36 iterations (it
+  stopped at complementarity `1.47e-8 > tol`, now `4.1e-11`), engine and
+  objective unchanged. Maros-Meszaros (`benchmarks/qp`, the 106 problems with
+  `n <= 5000`, default CLI): all 106 `SolveSucceeded` before and after; total
+  iterations 2542 -> 2279; six lines move. Routing: QCAPRI and QFORPLAN stay
+  on the convex arm (29 / 33 iterations; they used to stop on a stashed
+  candidate at raw KKT `8.3e-2` / `3.0`, get rerouted and take 299 / 139 on
+  the NLP arm); QPCBOEI2 is newly rerouted to the NLP arm (28 -> 133
+  iterations: the convex point it used to call `optimal` at raw KKT `3.0e-8`
+  is now `optimal_inaccurate` on the presolved problem's per-entry measure).
+  Trajectory: QFFFFF80 40 -> 43 (it stopped at raw KKT `4.5e-6`), QSCFXM2
+  30 -> 34 (`1.6e-6`), QSEBA 27 -> 28 (`2.3e-8`); objectives agree to
+  `5e-10` relative. `benchmarks/warmstart` `warm-qp-ipm`: 5074 -> 5677
+  iterations, no failures (`cold-qp-ipm` 8622): the cost of the warm path's
+  `optimal` meaning what the measure says -- on three families, 1314 without
+  either change, 1399 with the `comp_ok` stop alone, 2145 with the demotion
+  alone, 1682 with both. `issue414_cost_normalized_false_optimal.rs` and
+  `illconditioned_huge_scale.rs` pass unchanged.
+  `issue_689_direct_driver_scaled_feasible::the_default_route_reaches_the_same_optimum`
+  (`max_iter=4000`) fails identically on the pre-change binary (error in
+  step computation at 1563 iterations); not caused or fixed here.
+
+- **Status certified at non-stationary points (gh#983), items 1, 4, 5.**
+  (1) An explicitly set `dual_inf_tol` is now honoured: the scale-relative
+  floor of gh#532 is a default for callers who did not name a tolerance, and
+  setting `dual_inf_tol` without `dual_inf_scale_kappa` turns it off (naming
+  both keeps it). The cusp `min x1 s.t. x2 - x1^3 <= 0, x2 >= 0` reported
+  `Solve_Succeeded` at `|grad L|_inf = 0.144` under `dual_inf_tol=1e-6`
+  because multipliers of 3.5e9 raised the floor to ~35; it now reaches
+  `9e-9`. (4) The gh#884 retry's answer gate no longer refuses an
+  improvement for a violation that is arithmetic noise (`<= 1e-12`):
+  `x*y == 0` from `(0.3, 0.3)` returned the origin, `f = 2`, at an unscaled
+  dual infeasibility of `1.4e9` instead of promoting the retry's `f = 1`.
+  `scholtes4`'s `1.09e-9` is still refused. (5) A declined retry or
+  declined mu-strategy fallback now restores the iteration count and
+  iteration table along with the certificate, so the solve report describes
+  the run that produced the returned point. Fixture sweep: three lines move
+  (`mu_fallback_point_floor` exact and lbfgs, `eigenb2` lbfgs), the iteration
+  count only, now that of the returned attempt; status, objective and engine
+  are unchanged. Items 2 and 3 and the default floor: see the second-pass
+  entry below.
+
+- **Status certified at non-stationary points (gh#983), second pass: items
+  2, 3, 5 and the default floor.** New `solve_quality_audit` (default `yes`)
+  audits a `Solve_Succeeded` / `Solved_To_Acceptable_Level` verdict against the
+  model's own scale and re-solves once from the returned point when the
+  objective scaling is the defect. (3) Gradient scaling frozen at a
+  huge-gradient start (LJ7 from a start with gradient `3e8`: factor `3e-7`,
+  scaled KKT `9e-9`, unscaled `|grad E|` `2.9e-2`, and continuing under that
+  factor does not help) is re-scaled at the returned point and solved again:
+  unscaled residual `4.7e-9`. `find_minima` gains `kkt_tol` (default `1e-4`) and
+  rejects any local solve whose own unscaled dual infeasibility exceeds it,
+  with or without `hess=` (worst accepted gradient `0.96` -> `8.9e-5`).
+  (2) A small user objective (profit in M$/L, gradient `1e-5`, which nothing
+  scales up) is re-solved with the objective multiplied by `1/max|grad f|`:
+  relative objective error `4.7e-4` -> `3e-8`. The re-solve is promoted only
+  if clean, no worse in the model's units, strictly better in the quantity
+  that triggered it and admissible next to the first answer; otherwise the
+  first attempt is restored. (5) A strict verdict on a run that saw the
+  gh#884 signature, whose returned point has an unscaled dual infeasibility
+  above `1e-3` (the toll MPCC with `bound_relax_factor=0`, reached through the
+  mu-strategy fallback, `3.3e-2` against terms of `3e14`), is downgraded to
+  `Solved_To_Acceptable_Level`; the gh#884 retry is deliberately not widened,
+  its floor is the barrier that keeps `ralph1` out. The report fix is now
+  covered end to end (declined gh#884 retry and `deb7` at `max_iter=100`
+  report the returned run's iteration count; the old `deb7` test asserted the
+  declined retry's `100`, the returned run's own count is `116` including
+  restoration iterations). New structured `warnings` list
+  (`info["warnings"]`, JSON `statistics.warnings`, console `WARNING:` lines):
+  `objective_scale_small`, `unscaled_stationarity_above_tol`,
+  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`; they never change
+  a status except the downgrade above. The scale-relative floor for callers
+  who set nothing is **not** capped: the cap that rejects the cusp (`~0.1`)
+  also rejects `orthrds2` (`89.7` at scale `1.6e10`, stationary to nine digits
+  relative to its scale); such points now carry `large_dual_scale`, and the
+  cusp's default-option verdict is the acceptable level. `SeededTnlp` moved
+  from `pounce-cli` to `pounce-nlp` (re-exported). `iteration_count` and the
+  iteration rows of a restored attempt are the returned run's, and so are the
+  evaluation counts, restoration tallies and `quality_escalations` (the old
+  `eigenb2` limited-memory report carried the losing retry's 86 objective
+  evaluations beside the base attempt's 47 iterations and 159 evaluations);
+  only the wall clock is the invocation's. Fixture sweep, both legs against a
+  baseline built from the pre-change HEAD: seven fixture-legs move, status,
+  objective (bar one) and engine unchanged, every one a promoted audit that
+  lowers the unscaled KKT error: `jit1` exact 24 -> 22 and `jit1_boxed` exact
+  24 -> 22 / lbfgs 27 -> 18, `issue880_sigma_uncertified` exact 2 -> 4 (KKT
+  `4.9e-4` -> `0`), `hs71_obj1e8` lbfgs 12 -> 11 (`2.4e-2` -> `9e-6`),
+  `sqp_tiny_objective_k1em20` exact 5 -> 6 with the objective `1e-20` -> `0`
+  (its true minimum), and `mu_fallback_point_floor` lbfgs `q` 1 -> 0 (the
+  returned run's escalation count). A further handful of fixtures
+  (`hs71_obj1e8` exact, `jit1` lbfgs, `jit1_node`) pay one declined re-solve
+  that the sweep cannot see. Pre-existing and not touched: the
+  `issue855_sqp_retry_reaches_the_fallback` tests spend minutes in
+  `algorithm=active-set-sqp` on `eigena2` identically at `ce17aa9`.
+
+
 ### Documentation
 
 - **`bound_relax_factor` × a large objective coefficient, and what

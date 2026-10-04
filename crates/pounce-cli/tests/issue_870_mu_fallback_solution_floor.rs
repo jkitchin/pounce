@@ -147,13 +147,15 @@ fn the_reported_statistics_belong_to_the_reported_status() {
     );
 }
 
-/// The cost counters are deliberately NOT floored: both attempts really ran,
-/// so rewinding `iteration_count` would under-report the work spent. `eigenb2`
-/// under limited memory is the in-tree case — its base solve takes 47
-/// iterations and the losing retry 41 — and the reported count must stay
-/// whatever it was before pounce#870, i.e. unchanged by the floor.
+/// The whole per-run tally is floored with the certificate (gh#983 item 5):
+/// iteration count, iteration rows, evaluation counts. `eigenb2` under limited
+/// memory is the in-tree case -- its base solve takes 47 iterations and 159
+/// objective evaluations, the losing retry 41 and 86 -- and a report that
+/// carried the base attempt's point and residuals beside the retry's 86
+/// evaluations described no run that happened. Only the wall clock is the
+/// whole invocation's.
 #[test]
-fn the_floor_does_not_rewind_the_cost_counters() {
+fn the_floor_restores_the_run_tally_with_the_certificate() {
     let opts = ["hessian_approximation=limited-memory"];
     let stock = solve_named("eigenb2.nl", "eig", &opts);
     let no_retry = solve_named(
@@ -164,13 +166,14 @@ fn the_floor_does_not_rewind_the_cost_counters() {
             "mu_strategy_fallback=no",
         ],
     );
-    assert!(
-        stock.statistics.iteration_count != no_retry.statistics.iteration_count,
-        "the retry ran, so the reported iteration count must not have been \
-         rewound to the single-solve value ({}); flooring the cost as well as \
-         the certificate is what broke deb7 in \
-         issue857_escalation_gated_quality_rung.rs",
-        no_retry.statistics.iteration_count
+    assert_eq!(
+        stock.statistics.iteration_count, no_retry.statistics.iteration_count,
+        "the retry lost, so the reported iteration count is the returned \
+         run's, the same one `mu_strategy_fallback=no` reports"
+    );
+    assert_eq!(
+        stock.statistics.num_obj_evals, no_retry.statistics.num_obj_evals,
+        "evaluation counts belong to the returned run as well"
     );
 }
 

@@ -67,6 +67,26 @@ const REG_MIN: f64 = 1e-14;
 const IR_MAX_PASSES: usize = 5;
 const IR_RELTOL: f64 = 1e-12;
 
+/// Proximal-term stall guard (gh#989 item 7). A static `qp_reg` above
+/// [`PROX_STALL_ABOVE`] is not a roundoff guard but a Tikhonov perturbation of
+/// the `(x, x)` and equality blocks, and it is the same absolute number on
+/// every column. On a column whose curvature is far below it (the MPC control
+/// in J/min: reduced curvature ~1e-10 against `qp_reg = 1e-4`) the Newton step
+/// is damped by `curv / (curv + δ)` and the iteration crawls -- 199 iterations
+/// to a cost of 541 against 149.48 for the same model in K. No static
+/// per-column scale can see that (the nullspace curvature is a property of the
+/// reduced Hessian, not of any diagonal), so the guard watches progress
+/// instead: after [`PROX_STALL_ITERS`] iterations without the merit
+/// `max(residuals, mu)` improving by [`PROX_STALL_GAIN`], the proximal weight
+/// is cut by [`PROX_DECAY`] (floored at [`PROX_REF_REG`]) and a warning is
+/// logged. A solve that converges at the requested `qp_reg` never fires it, and
+/// the default `qp_reg = 1e-10` is below the threshold.
+const PROX_STALL_ABOVE: f64 = 1e-8;
+const PROX_STALL_ITERS: usize = 6;
+const PROX_STALL_GAIN: f64 = 0.9;
+const PROX_DECAY: f64 = 1e-2;
+const PROX_REF_REG: f64 = 1e-10;
+
 /// Dynamic-regularization schedule (Ipopt-style inertia/regularization
 /// correction; Clarabel's dynamic KKT regularization). When the factorization
 /// is singular, or the constant-direction solve cannot be refined below
@@ -111,13 +131,13 @@ const DYN_REG_RES_TOL: f64 = 1e-8;
 /// iterations) but biases `pilot.we`'s objective by 12% while still
 /// certifying Optimal — the regularized problem is a different problem. Only
 /// the iterates that actually show a deficit should pay.
-const DELTA_W_INIT: f64 = 1e-8;
-const DELTA_W_FACTOR: f64 = 10.0;
-const DELTA_W_MAX: f64 = 1e-4;
+pub(crate) const DELTA_W_INIT: f64 = 1e-8;
+pub(crate) const DELTA_W_FACTOR: f64 = 10.0;
+pub(crate) const DELTA_W_MAX: f64 = 1e-4;
 
-const DELTA_C_INIT: f64 = 1e-8;
-const DELTA_C_FACTOR: f64 = 10.0;
-const DELTA_C_MAX: f64 = 1e-1;
+pub(crate) const DELTA_C_INIT: f64 = 1e-8;
+pub(crate) const DELTA_C_FACTOR: f64 = 10.0;
+pub(crate) const DELTA_C_MAX: f64 = 1e-1;
 const INERTIA_MAX_TRIES: usize = 20;
 
 /// Centering fallback for a collapsing step (gh #218).
@@ -168,6 +188,80 @@ const CENTERING_SIGMA_MAX: f64 = 0.9;
 /// collapsed-`τ` iterate of a feasible problem and declaring it infeasible.
 fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
     tau < 1e-2 * kappa
+}
+
+/// gh#984: how many rounding units of its own scale a residual must be inside
+/// before the scale-relative arm may stop on it. The same reading of "numerically
+/// zero" as `ipm::SLACK_NOISE_KAPPA`.
+pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
+
+/// `max_i |ẑ_i · (h_i − (Gx̂)_i)|` over the rows whose true slack is
+/// resolvable (above `REL_FLOOR_KAPPA·ε` of its own terms), in the
+/// un-homogenized frame: `gx` is `G x` and `x̂ = x/τ`, `ẑ = z/τ`.
+///
+/// The complementarity of the point the solve will actually return. The
+/// loop's own `max sᵢzᵢ` reads the internal slack, which is the true slack only
+/// up to the primal residual `ρ_z/τ` -- negligible at `τ ≈ 1`, and not at all
+/// when `τ` collapses (gh#689: `τ = 4.5e-7`, internal product `2.8e-22`, true
+/// product `5.0e-3`). A slack inside its own rounding quantum is not counted,
+/// for the reason `ipm::resolvable_complementarity` gives: there the product
+/// measures the quantum, not a violation (the gh#984 item-3 `1e9` shift).
+pub(crate) fn true_slack_complementarity(h: &[f64], gx: &[f64], z: &[f64], tau: f64) -> f64 {
+    if !(tau > 0.0) {
+        return f64::INFINITY;
+    }
+    let mut worst = 0.0_f64;
+    for ((&hi, &gxi), &zi) in h.iter().zip(gx).zip(z) {
+        let gxh = gxi / tau;
+        let slack = hi - gxh;
+        if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gxh.abs()) {
+            worst = worst.max((slack * zi / tau).abs());
+        }
+    }
+    worst
+}
+
+/// A relatively-converged iterate set aside while the loop tries to do better.
+struct RelCandidate {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    s: Vec<f64>,
+    tau: f64,
+    kappa: f64,
+    /// Worst residual-to-floor ratio at the stash.
+    worst: f64,
+    /// The trace record of the stashed iterate, pushed as the terminal record
+    /// when the stash is what the solve returns (gh#984 review).
+    record: QpIterate,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_candidate(
+    cand: &mut Option<RelCandidate>,
+    x: &mut Vec<f64>,
+    y: &mut Vec<f64>,
+    z: &mut Vec<f64>,
+    s: &mut Vec<f64>,
+    tau: &mut f64,
+    kappa: &mut f64,
+    trace: Option<&mut Vec<QpIterate>>,
+) {
+    if let Some(c) = cand.take() {
+        if let Some(t) = trace {
+            t.push(QpIterate {
+                alpha_primal: 0.0,
+                alpha_dual: 0.0,
+                ..c.record
+            });
+        }
+        *x = c.x;
+        *y = c.y;
+        *z = c.z;
+        *s = c.s;
+        *tau = c.tau;
+        *kappa = c.kappa;
+    }
 }
 
 /// May the scale-relative stopping test *relax* the absolute one for a problem
@@ -392,6 +486,10 @@ where
     let mut ir_b = vec![0.0; kkt.dim];
     let mut ir_r = vec![0.0; kkt.dim];
     let mut ir_d = vec![0.0; kkt.dim];
+    // Effective static proximal weight; starts at `qp_reg`, decays on a stall.
+    let mut reg_static = opts.reg;
+    let mut prox_best = f64::INFINITY;
+    let mut prox_stall = 0usize;
 
     // Scratch + constants for the scale-relative convergence normalizers
     // (see the stopping test below). Dual side: ‖Aᵀŷ‖, ‖Gᵀẑ‖; primal side:
@@ -404,6 +502,25 @@ where
     let norm_b = inf_norm(&prob.b);
     let norm_h = inf_norm(&prob.h);
     let norm_c = inf_norm(&prob.c);
+    // gh#984: the objective's own unit. The dual residual and the gap are in
+    // units of `(P, c)`, so an absolute `tol` on them is a statement about the
+    // caller's choice of units: scale the objective by `1e-9` and the same
+    // iterate, with the same *relative* error, clears it nine iterations
+    // sooner (item 5 -- weights off by `1.6e-2`, `optimal`). Only the downward
+    // direction is handled here; a large objective is `hsde_cost_scale`'s.
+    // Equivalent to solving the objective-normalized problem at `tol`, hence
+    // argmin-invariant. A zero objective has no unit and is left alone.
+    let (unit_d, unit_g) = crate::qp::objective_units(prob);
+    let tol_cost = opts.tol * unit_d;
+    let tol_gap = opts.tol * unit_g;
+    // The relative arm's stash: the first iterate to satisfy it without being
+    // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
+    let mut rel_candidate: Option<RelCandidate> = None;
+    // Complementarity is only a clean product on the nonnegative orthant.
+    let orthant_only = cone
+        .specs()
+        .iter()
+        .all(|c| matches!(c, crate::ConeSpec::Nonneg(_)));
 
     // Direction buffers: p = constant direction, (dx,dy,dz) = the running
     // step, with affine slack/dual kept for the Mehrotra corrector.
@@ -578,6 +695,30 @@ where
         } else {
             pres.max(dres).max(gap)
         };
+        // gh#989 item 7: proximal-stall guard, see `PROX_STALL_ABOVE`.
+        if opts.reg > PROX_STALL_ABOVE && reg_static > PROX_REF_REG {
+            let merit = res.max(mu);
+            if merit < prox_best * PROX_STALL_GAIN {
+                prox_best = merit;
+                prox_stall = 0;
+            } else {
+                prox_stall += 1;
+                if prox_stall >= PROX_STALL_ITERS {
+                    let next = (reg_static * PROX_DECAY).max(PROX_REF_REG);
+                    tracing::warn!(
+                        requested = opts.reg,
+                        from = reg_static,
+                        to = next,
+                        iter = it,
+                        "qp_reg is a proximal term far above the curvature of some block and the \
+                         solve stopped making progress; reducing the effective regularization"
+                    );
+                    reg_static = next;
+                    prox_stall = 0;
+                    prox_best = f64::INFINITY;
+                }
+            }
+        }
         // (`res` also feeds the debugger checkpoints below. The
         // reduced-accuracy salvage that used to read it here now runs *after*
         // the loop, against the true KKT residual — see `SALVAGE`.)
@@ -621,8 +762,132 @@ where
 
         // Absolute test always governs; the scale-relative test only relaxes
         // it for genuinely large-data problems (`large_scale`, gated above).
-        let converged = (pres < opts.tol && dres < opts.tol && gap < opts.tol)
-            || (large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol);
+        //
+        // gh#984: and only down to the finite-precision floor of *each
+        // residual's own scale*. `large_scale` is opened by the largest of the
+        // three scales, but `pres_rel < tol` then grants the primal residual
+        // `tol·(1 + scale_p)` -- a slack set by `b` and `A`, not by anything
+        // that made the absolute test unreachable. A large `c` (costs in
+        // cents) opened the gate and let `‖Ax − b‖∞ = 4.9e-6` through; a large
+        // objective at `tol = 1e-10` stopped at `kkt_error 1e-6` where
+        // `tol = 1e-6` reached `1e-7`. So the relative arm may stop only when
+        // every residual is also within `REL_FLOOR_KAPPA·ε·(its own scale)`;
+        // short of that it is a *candidate*, and the loop is allowed to keep
+        // improving on it (below).
+        let cap_p = (REL_FLOOR_KAPPA * f64::EPSILON * scale_p).max(opts.tol);
+        let cap_d = (REL_FLOOR_KAPPA * f64::EPSILON * scale_d).max(opts.tol);
+        let cap_g_floor = REL_FLOOR_KAPPA * f64::EPSILON * scale_g_raw;
+        let cap_g = cap_g_floor.max(opts.tol);
+        let rel_ok =
+            large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol;
+        // gh#984 item 4: the gap is a *sum* of objective-sized terms, so its
+        // evaluation carries `eps*|objective|` noise that an absolute `tol` does
+        // not grow with. Costs in dollars put the dispatch LP's objective at
+        // 2.3e7: the noise (5e-9) sits within a factor of two of `tol = 1e-8`,
+        // the absolute gap test was met only by luck, and the loop ground on
+        // for 37 iterations where the same LP in k$ stopped in 15 (199 against
+        // 17 on the 3328-week production LP). So the gap may be accepted down
+        // to its own noise floor -- but only together with the
+        // cancellation-free half below (`comp_ok`: every product `s_i z_i`
+        // within `tol`), which is what actually certifies it; the floor excuses
+        // the *measurement*, never a large product.
+        //
+        // gh#689 regression (found bisecting `the_default_route_reaches_the_same_optimum`):
+        // the excuse is only sound when complementarity holds *at the point
+        // being returned*. `comp_ok` below reads the internal slack `s`, and
+        // as `tau -> 0` that slack decouples from the true row slack
+        // `h - Gx/tau` by up to `pres/tau`. On `scaled_feasible_a` at
+        // `max_iter = 4000` this stopped at iteration 1563 with `max s_i z_i =
+        // 2.8e-22` and a gap of `5.0e-5` excused by a floor of `7.1e-3`, while
+        // the un-homogenized point's complementarity was `5.0e-3` -- six
+        // orders above `tol`, and reachable: the same solve without the excuse
+        // converges at 3596 to `1.9e-10`. gh#414's verifier then refused that
+        // `Optimal` and the solve ended `NumericalFailure`. So a gap above
+        // `tol_gap` is excused only when every *resolvable* true-slack product
+        // is within `tol_gap` too ([`true_slack_complementarity`]).
+        let gap_strict = gap < tol_gap;
+        let gap_excused = !gap_strict
+            && gap < cap_g_floor
+            && orthant_only
+            && true_slack_complementarity(&prob.h, &nrm_gx, &z, tau) <= tol_gap;
+        let abs_ok = pres < opts.tol && dres < tol_cost && (gap_strict || gap_excused);
+        let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
+        // gh#984 item 3: the duality gap is a *difference* of objective-sized
+        // sums, so on a large (or large-offset) objective it carries
+        // rounding noise `~ε·|objective|` that complementarity does not:
+        // `max sᵢzᵢ` is a product of two nonnegative numbers and can be driven
+        // to zero however large the objective is. A shifted variable (`1e9`)
+        // let the gap floor wave through a complementarity of `1.08e-5`
+        // against `tol = 1e-8`. So an orthant solve also needs its largest
+        // product within the objective-unit tolerance before either arm may
+        // stop. Short of that the iterate is a candidate, like the relative
+        // arm's, and is restored if the loop cannot improve on it.
+        let comp_max = if orthant_only {
+            s.iter()
+                .zip(&z)
+                .fold(0.0_f64, |m, (&si, &zi)| m.max((si * zi).abs()))
+                / (tau * tau)
+        } else {
+            0.0
+        };
+        let comp_ok = comp_max <= tol_gap;
+        let loose_ok = rel_ok || abs_ok;
+        let converged = (abs_ok || rel_in_floor) && comp_ok;
+        if !converged {
+            let worst = (pres / cap_p)
+                .max(dres / cap_d)
+                .max(gap / cap_g)
+                .max(comp_max / tol_gap);
+            let stash = |c: &mut Option<RelCandidate>| {
+                *c = Some(RelCandidate {
+                    x: x.clone(),
+                    y: y.clone(),
+                    z: z.clone(),
+                    s: s.clone(),
+                    tau,
+                    kappa,
+                    worst,
+                    record: QpIterate {
+                        iter: it,
+                        objective: obj_hat,
+                        primal_infeasibility: pres,
+                        dual_infeasibility: dres,
+                        mu,
+                        alpha_primal: 0.0,
+                        alpha_dual: 0.0,
+                    },
+                });
+            };
+            // gh#984 review: a candidate must satisfy the complementarity half
+            // (`comp_ok`) too. Stashing on `loose_ok` alone kept an iterate
+            // whose largest product `s_i z_i` was above `tol` and later
+            // returned it as `Optimal` -- exactly the item-3 point the
+            // complementarity test was added to refuse.
+            let candidate_ok = loose_ok && comp_ok;
+            match (&rel_candidate, candidate_ok) {
+                (None, true) => stash(&mut rel_candidate),
+                // Still relatively converged and still improving by at least
+                // 2x: keep going, holding the better point.
+                (Some(c), true) if worst <= 0.5 * c.worst => stash(&mut rel_candidate),
+                // Stalled at the floor, or the relative certificate lapsed:
+                // the stash is what the old rule would have returned.
+                (Some(_), _) => {
+                    restore_candidate(
+                        &mut rel_candidate,
+                        &mut x,
+                        &mut y,
+                        &mut z,
+                        &mut s,
+                        &mut tau,
+                        &mut kappa,
+                        opts.collect_iterates.then_some(&mut trace),
+                    );
+                    status = QpStatus::Optimal;
+                    break;
+                }
+                (None, false) => {}
+            }
+        }
         if converged {
             status = QpStatus::Optimal;
             // Terminal record at the converged iterate (no step taken).
@@ -685,11 +950,11 @@ where
         // wrong inertia / singularity (see `DELTA_C_INIT` & co.). The (z,z)
         // slack block keeps `reg_eff`, whose iterate-norm scaling is correct
         // for full-rank large-dual problems (LISWET).
-        let mut delta_c = crate::ipm::adaptive_eq_reg(mu, opts.reg);
+        let mut delta_c = crate::ipm::adaptive_eq_reg(mu, reg_static);
         // δ_w on the (x,x) primal block. Starts at the static `opts.reg` — no
         // change from the previous behaviour on a healthy iterate — and is
         // escalated below only when the factorization reports a defect.
-        let mut delta_w = opts.reg;
+        let mut delta_w = reg_static;
         // Correct KKT inertia has one negative eigenvalue per equality and per
         // inequality row; the SOC auxiliary variables contribute positives
         // only. Too few negatives ⇒ the factor is an indefinite saddle.
@@ -1111,6 +1376,40 @@ where
                 break;
             }
         }
+
+        // gh#987: count the step just taken, so exhausting `max_iter` reports
+        // `max_iter`, not `max_iter - 1`. Early exits break before this.
+        iters = it + 1;
+    }
+
+    // gh#984: the loop was chasing an improvement on a relatively-converged
+    // iterate and ended some other way (breakdown, iteration cap, a spurious
+    // certificate). Hand back the stash: it is exactly what the relative rule
+    // returned before it was asked to keep going.
+    //
+    // gh#984 review: only over a status that concluded nothing about the
+    // problem -- `IterationLimit` or a `NumericalFailure` breakdown. A
+    // certificate is a verdict of its own, and a `TimeLimit` is the caller's
+    // budget running out: stamping `Optimal` over it turned a deadline into a
+    // success. (Every stash now satisfies `comp_ok`, see above.)
+    if matches!(
+        status,
+        QpStatus::IterationLimit | QpStatus::NumericalFailure
+    ) && !crate::deadline::expired()
+        && rel_candidate.is_some()
+        && !crate::debug_stop::requested()
+    {
+        restore_candidate(
+            &mut rel_candidate,
+            &mut x,
+            &mut y,
+            &mut z,
+            &mut s,
+            &mut tau,
+            &mut kappa,
+            opts.collect_iterates.then_some(&mut trace),
+        );
+        status = QpStatus::Optimal;
     }
 
     // `!is_verdict`: the loop breaks with `Optimal` as soon as its convergence
@@ -1204,6 +1503,7 @@ where
     }
 
     tally.report("hsde", iters);
+    crate::hsde_scalars::record(tau, kappa, iters);
     // Never hand back a success verdict without a usable solution (gh #222).
     let status = crate::ipm::demote_unusable(status, &x, obj);
     QpSolution {
@@ -1258,6 +1558,27 @@ mod tests {
     use crate::qp::{QpProblem, Triplet};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
+
+    /// gh#689 regression: the gap's noise-floor excuse must read the true row
+    /// slack, not the internal one. The numbers are the stopping iterate's on
+    /// `scaled_feasible_a` (`tau = 4.5e-7`): a resolvable slack times a unit
+    /// multiplier is counted, a slack inside its own rounding quantum is not.
+    #[test]
+    fn true_slack_complementarity_counts_resolvable_rows_only() {
+        let tau = 4.5e-7;
+        // Row 0: h = 1e5, Gx/tau = 1e5 - 5e-3 -> slack 5e-3, z/tau = 1.
+        // Row 1: h = 1e9, Gx/tau = h exactly up to one ulp -> not resolvable.
+        let h = [1e5, 1e9];
+        let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
+        let z = [1.0 * tau, 1e3 * tau];
+        let c = true_slack_complementarity(&h, &gx, &z, tau);
+        assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
+        // Both inside the quantum: nothing to count.
+        let gx_tight = [1e5 * tau, 1e9 * tau];
+        assert_eq!(true_slack_complementarity(&h, &gx_tight, &z, tau), 0.0);
+        // A collapsed tau cannot certify anything.
+        assert!(true_slack_complementarity(&h, &gx, &z, 0.0).is_infinite());
+    }
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())

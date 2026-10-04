@@ -1663,6 +1663,9 @@ where
                 break;
             }
         }
+
+        // gh#987: count the step just taken (see `ipm.rs`).
+        iters = it + 1;
     }
 
     // `!is_verdict`: the loop breaks with `Optimal` the moment its convergence

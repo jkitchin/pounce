@@ -98,6 +98,12 @@ _STATUS_MAP: dict[str, tuple[int, int]] = {
     "Unrecoverable_Exception": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
     "NonIpopt_Exception_Thrown": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
     "Internal_Error": (MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_INTERNAL_ERR),
+    # gh#986: a front-end status (`info["status"] == -198`): an
+    # `intermediate` callback raised. The C link has no Python callbacks and
+    # never sees it; here it means the link's own callback failed, which is an
+    # internal error, and the iterate is not vouched for (kept out of
+    # `_STATUS_HAS_SOLUTION`).
+    "Callback_Error": (MODELSTAT_INFEASIBLE_INTERMED, SOLVESTAT_INTERNAL_ERR),
 }
 
 # Statuses that still leave a usable primal iterate in `x` (mirrors

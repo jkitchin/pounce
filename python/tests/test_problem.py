@@ -493,6 +493,39 @@ def test_intermediate_truthy_return_continues(truthy):
     np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
 
 
+def test_intermediate_star_args_catch_all_is_called_positionally():
+    # gh#986: a cyipopt-style ``intermediate(self, *args)`` cannot take the
+    # keyword form; it is called positionally (cyipopt's order) instead of
+    # being counted as a failing callback and stopping the solve.
+    seen = []
+
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, *args):
+            seen.append(args)
+            return True
+
+    prob = pounce.Problem(n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[])
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    assert seen and all(len(a) == 11 for a in seen)
+    # gh#986 review: pin cyipopt's order slot by slot, not just "sorted":
+    # (alg_mod, iter_count, obj_value, inf_pr, inf_du, mu, d_norm,
+    #  regularization_size, alpha_du, alpha_pr, ls_trials).
+    assert [a[1] for a in seen] == list(range(len(seen)))  # iter_count
+    assert seen[0][2] == pytest.approx(64.0)  # obj_value = f(x0) = (-8)^2
+    assert all(a[0] in (0, 1) for a in seen)  # alg_mod
+    assert all(a[5] > 0 for a in seen)  # mu
+    assert all(isinstance(a[10], int) for a in seen)  # ls_trials
+    np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
+
+
 def test_intermediate_no_return_continues():
     # A callback that returns None (the common "just observe" case) must NOT
     # be read as a stop.
@@ -516,10 +549,11 @@ def test_intermediate_no_return_continues():
     np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
 
 
-def test_intermediate_exception_aborts_with_user_stop():
-    # A raising `intermediate` aborts the solve (User_Requested_Stop) rather
-    # than crashing across the FFI boundary; post-fix it also logs a trace
-    # line (verified manually — the log goes through the Rust subscriber).
+def test_intermediate_exception_aborts_with_callback_error():
+    # A raising `intermediate` aborts the solve rather than crashing across
+    # the FFI boundary, and (gh#986) reports its own `Callback_Error` status
+    # with the exception text -- not the `User_Requested_Stop` a deliberate
+    # `return False` produces.
     class P:
         def objective(self, x):
             return float((x[0] - 3.0) ** 2)
@@ -535,7 +569,31 @@ def test_intermediate_exception_aborts_with_user_stop():
     )
     prob.add_option("print_level", 0)
     x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Callback_Error"
+    assert info["status"] == -198
+    assert "boom from intermediate" in info["callback_error"]
+    assert "RuntimeError" in info["callback_error"]
+
+
+def test_intermediate_return_false_stays_user_requested_stop():
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, **kw):
+            return kw["iter_count"] < 1
+
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[]
+    )
+    prob.add_option("print_level", 0)
+    _, info = prob.solve(x0=np.array([-5.0]))
     assert info["status_msg"] == "User_Requested_Stop"
+    assert info["status"] == 5
+    assert "callback_error" not in info
 
 
 def _noncontiguous(a):

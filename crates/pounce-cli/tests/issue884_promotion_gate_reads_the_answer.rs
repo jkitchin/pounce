@@ -303,6 +303,38 @@ fn a_declined_retry_reports_one_answer() {
     );
 }
 
+/// gh#983 item 5, at the **report** level: a declined retry must also report
+/// the iteration count of the run that produced the returned point. The
+/// certificate floor used to restore the residuals and leave the count (and
+/// the iteration rows) of the declined retry, so a report carried
+/// `final_objective` from the first attempt beside the retry's
+/// `iteration_count`. The reference is the same model with the retry switched
+/// off, where there is exactly one run and no way to mix.
+#[test]
+fn a_declined_retry_reports_the_returned_runs_iteration_count() {
+    let (r, out) = solve("mpcc_scholtes4_biactive", REPRO);
+    assert!(
+        !r.statistics.dual_divergence_retry_promoted && r.statistics.dual_divergence_signature,
+        "this test is about the declined path. stdout:\n{out}"
+    );
+    let mut single = REPRO.to_vec();
+    single.push("dual_divergence_retry=no");
+    let (one, _) = solve("mpcc_scholtes4_biactive", &single);
+    assert_eq!(
+        r.statistics.iteration_count, one.statistics.iteration_count,
+        "the returned point is the base attempt's, so the report's iteration \
+         count must be the base attempt's (the single-run count), not the \
+         declined retry's. stdout:\n{out}"
+    );
+    // The console's first per-attempt summary is the base attempt's.
+    let first_pass: i32 = out
+        .lines()
+        .find_map(|l| l.strip_prefix("Number of Iterations....:"))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("console iteration count");
+    assert_eq!(r.statistics.iteration_count, first_pass);
+}
+
 /// The same invariant **under a change of variables** — which is the leg
 /// that would have caught R1, and the reason
 /// `a_declined_retry_reports_one_answer` alone was not enough.

@@ -63,6 +63,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .._pounce import Problem
+from . import _jaxpr_sparsity
 # Framework-neutral sparsity helpers shared with the PyTorch frontend
 # (pounce#109). Re-exported from this module so existing
 # ``from pounce.jax._build import _color_columns`` style imports (and the
@@ -98,6 +99,50 @@ def _basis_block(start: int, stop: int, size: int) -> jnp.ndarray:
     return jnp.asarray(E)
 
 
+def _probe_points(rng, n, n_random, lb, ub, x0):
+    """Points at which sparsity is probed (gh#985).
+
+    The union over these points defines the reported pattern, so they
+    must cover the region the solve will visit, not only ``N(0, 1)``:
+    ``exp(-E/(R*T))`` underflows to exactly 0 at ``T ~ N(0, 1)`` and a
+    polynomial's second derivative can vanish near 0, either of which
+    would silently drop a structural nonzero for the whole solve.
+
+    Returns ``x0`` (when given), the box midpoint, several uniform draws
+    inside ``[lb, ub]`` (a half-infinite side is sampled one unit-scale
+    step off its finite bound), and ``n_random`` standard-normal draws.
+    """
+    pts = []
+    lo = np.full(n, -np.inf) if lb is None else np.asarray(lb, dtype=float).reshape(-1)
+    hi = np.full(n, np.inf) if ub is None else np.asarray(ub, dtype=float).reshape(-1)
+    if lo.shape != (n,) or hi.shape != (n,):
+        lo, hi = np.full(n, -np.inf), np.full(n, np.inf)
+    lo = np.where(lo <= -1e19, -np.inf, lo)
+    hi = np.where(hi >= 1e19, np.inf, hi)
+    if x0 is not None:
+        x0a = np.asarray(x0, dtype=float).reshape(-1)
+        if x0a.shape == (n,) and np.all(np.isfinite(x0a)):
+            pts.append(x0a)
+
+    both = np.isfinite(lo) & np.isfinite(hi)
+
+    def in_box(u):
+        z = np.abs(rng.standard_normal(n))
+        x = rng.standard_normal(n)
+        x = np.where(np.isfinite(lo), lo + z, x)
+        x = np.where(np.isfinite(hi) & ~np.isfinite(lo), hi - z, x)
+        with np.errstate(invalid="ignore"):
+            return np.where(both, lo + u * (hi - lo), x)
+
+    if np.any(np.isfinite(lo) | np.isfinite(hi)):
+        pts.append(in_box(0.5))
+        for _ in range(max(2, n_random)):
+            pts.append(in_box(rng.uniform(0.05, 0.95, n)))
+    for _ in range(n_random):
+        pts.append(rng.standard_normal(n))
+    return pts
+
+
 class _JaxProblem:
     """Cyipopt-shaped problem object backed by JAX-AD callables."""
 
@@ -112,7 +157,16 @@ class _JaxProblem:
         n_probes: int = 1,
         jac_pattern=None,
         hess_pattern=None,
+        lb=None,
+        ub=None,
+        x0=None,
+        pattern_detection: str = "jaxpr",
     ):
+        if pattern_detection not in ("jaxpr", "probe"):
+            raise ValueError(
+                f"pattern_detection must be 'jaxpr' or 'probe', got {pattern_detection!r}"
+            )
+        use_jaxpr = pattern_detection == "jaxpr"
         self._f = jax.jit(f)
         self._grad_f = jax.jit(jax.grad(f))
         self._n = n
@@ -150,18 +204,31 @@ class _JaxProblem:
         # --- sparsity pattern: caller-supplied, else blocked probes ---
         rng = np.random.default_rng(seed)
         n_probes = max(1, int(n_probes))
-        x_probes = [jnp.asarray(rng.standard_normal(n)) for _ in range(n_probes)]
-        lam_probes = (
-            [jnp.asarray(rng.standard_normal(m)) for _ in range(n_probes)]
-            if m > 0 else []
-        )
+        x_pts = _probe_points(rng, n, n_probes, lb, ub, x0)
+        x_probes = [jnp.asarray(x) for x in x_pts]
+        # Multipliers: standard-normal plus all-ones for some probes
+        # (a random lam can cancel a structural entry; ones rarely do).
+        lam_probes = []
+        if m > 0:
+            for k in range(len(x_probes)):
+                lam_probes.append(
+                    jnp.ones(m) if k % 3 == 1 else jnp.asarray(rng.standard_normal(m))
+                )
 
+        self.pattern_source = {"jac": "user" if jac_pattern is not None else None,
+                               "hess": "user" if hess_pattern is not None else None}
         if jac_pattern is not None:
             self._jac_rows, self._jac_cols = _normalize_user_pattern(
                 jac_pattern, "jac_pattern", m, n,
             )
         elif m > 0:
-            self._jac_rows, self._jac_cols = self._probe_jac(x_probes)
+            struct = _jaxpr_sparsity.jacobian_pattern(g, n, m) if use_jaxpr else None
+            if struct is not None:
+                self._jac_rows, self._jac_cols = struct
+                self.pattern_source["jac"] = "jaxpr"
+            else:
+                self._jac_rows, self._jac_cols = self._probe_jac(x_probes)
+                self.pattern_source["jac"] = "probe"
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
@@ -171,7 +238,21 @@ class _JaxProblem:
                 hess_pattern, "hess_pattern", n, n, lower=True,
             )
         else:
-            self._hess_rows, self._hess_cols = self._probe_hess(x_probes, lam_probes)
+            struct = None
+            if use_jaxpr:
+                if m > 0:
+                    args = (jnp.zeros(n), jnp.ones(m), jnp.asarray(1.0))
+                    gfun = lambda x, lam, sig: self._grad_lag(x, lam, sig)
+                else:
+                    args = (jnp.zeros(n), jnp.asarray(1.0))
+                    gfun = lambda x, sig: self._grad_lag(x, sig)
+                struct = _jaxpr_sparsity.hessian_lower_pattern(gfun, args, n)
+            if struct is not None:
+                self._hess_rows, self._hess_cols = struct
+                self.pattern_source["hess"] = "jaxpr"
+            else:
+                self._hess_rows, self._hess_cols = self._probe_hess(x_probes, lam_probes)
+                self.pattern_source["hess"] = "probe"
 
         # --- compressed (colored) AD callables, when requested ---
         if sparse:
@@ -351,6 +432,8 @@ def from_jax(
     n_probes: int | None = None,
     jac_pattern=None,
     hess_pattern=None,
+    x0=None,
+    pattern_detection: str = "jaxpr",
 ) -> Problem:
     """Build a pounce :class:`Problem` from JAX-traced functions.
 
@@ -384,13 +467,33 @@ def from_jax(
         This flag governs *per-eval* cost only. Detecting the pattern at
         build time costs ``O(n)`` AD passes either way (blocked, so
         memory stays bounded — see ``jac_pattern`` to skip it).
+    pattern_detection : {"jaxpr", "probe"}
+        How an unsupplied pattern is found (gh#985). ``"jaxpr"`` (default)
+        derives the *structural* pattern by index-set propagation through
+        the jaxpr of ``g`` (Jacobian) and of the gradient of the Lagrangian
+        (Hessian): no AD pass, no evaluation, and a value-dependent zero
+        (``exp`` underflow, a polynomial's vanishing second derivative)
+        can never drop an entry. Cost is one vectorised sparse step per
+        jaxpr equation plus the dependency nnz; a model it cannot bound
+        (``scan``/``while``/``cond``, ``sort``, ``custom_linear_solve``,
+        gathers / scatters / dynamic slices with indices traced from ``x``)
+        or one so densely coupled that the dependency matrices
+        pass ~2e7 entries falls back to the probes below, per matrix.
+        ``"probe"`` forces the probes. ``problem.problem_obj.pattern_source``
+        records which was used (``"user"``/``"jaxpr"``/``"probe"``).
     n_probes : int or None
         Number of random probes whose nonzero patterns are unioned to
-        detect sparsity. ``None`` (default) uses 1 probe for the dense
-        path and 3 for ``sparse=True`` (a mis-probe under compression
+        detect sparsity *when the jaxpr analysis is unavailable or
+        ``pattern_detection="probe"``*. ``None`` (default) uses 3 probes for the dense
+        path and 4 for ``sparse=True`` (a mis-probe under compression
         corrupts the seed structure, not just a reported nonzero, so
         hardening detection matters more there). Pass an explicit integer
         to override. Ignored for a matrix whose pattern you supply below.
+        These are the *standard-normal* probes; in addition the pattern
+        is always probed at ``x0`` (if given), the box midpoint and
+        several points inside ``[lb, ub]`` (gh#985), because a pattern
+        read only near ``x = 0`` drops entries that vanish there
+        (``exp(-E/RT)`` underflowing, ``x**5``'s second derivative).
     jac_pattern, hess_pattern : (rows, cols) or None
         Known sparsity patterns, in cyipopt ``(row_indices,
         col_indices)`` form — ``jac_pattern`` for the ``(m, n)``
@@ -398,7 +501,8 @@ def from_jax(
         the ``(n, n)`` Lagrangian Hessian. Supplying one skips detection
         for that matrix entirely: no probe evaluations, no build memory,
         and no probabilistic-detection risk (issue #464). Either may be
-        given alone; the other is still probed. Upper-triangle entries in
+        given alone; the other is still probed. ``x0`` (optional) adds
+        the starting point to the probe set. Upper-triangle entries in
         ``hess_pattern`` are folded onto their mirror, since ``H`` is
         symmetric.
 
@@ -422,10 +526,11 @@ def from_jax(
     if m > 0 and g is None:
         raise ValueError("g must be provided when m > 0")
     if n_probes is None:
-        n_probes = 3 if sparse else 1
+        n_probes = 4 if sparse else 3
     obj = _JaxProblem(
         f=f, g=g, n=n, m=m, seed=seed, sparse=sparse, n_probes=n_probes,
         jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+        lb=lb, ub=ub, x0=x0, pattern_detection=pattern_detection,
     )
     return Problem(
         n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu,

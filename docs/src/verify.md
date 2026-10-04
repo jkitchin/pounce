@@ -79,10 +79,27 @@ A consumer (CI step, agent harness, Makefile) gates on the exit code.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--feas-tol <t>` | `1e-6` | feasibility tolerance for constraints and bounds |
+| `--feas-tol <t>` | `1e-6` | feasibility tolerance for constraints and bounds. **Relative per row**: a row passes when `|violation| <= t * max(1, |row|)`, where `|row|` is the larger of the evaluated value and its finite bounds. A violation of `1.0` on a row of size `2e6` therefore passes at `1e-6`. |
+| `--abs-feas-tol <t>` | — | judge every row by the plain absolute test `|violation| <= t`, replacing the relative test above (gh#987) |
 | `--opt-tol <t>` | `1e-6` | stationarity tolerance for the optimality check |
 | `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` — the exact one when the `.sol` carries bound multipliers, otherwise the bound-projected one |
 | `--json-output <path>` | — | write a JSON verification receipt |
+
+### Integer variables
+
+pounce solves the continuous relaxation, so a `.sol` written for a `.nl` that
+declares binary / integer variables (header line 7, `nbv`/`niv`) can be
+feasible for every row and still fractional. The solve prints a warning
+saying so. `verify` checks the declared integer columns (the last
+`nbv + niv` columns) against `--feas-tol` and reports `REJECTED — not
+integer-feasible` for a fractional point. When a discrete variable also
+appears nonlinearly its column cannot be identified from the header, and the
+report says `integrality: NOT CHECKED` instead of passing silently. The JSON
+receipt carries an `integrality` object either way.
+
+When a feasible point is `VERIFIED` but its dual infeasibility / stationarity
+residual exceeds `--opt-tol`, a `CAVEAT` line says the verdict means
+*feasible only*; pass `--require-optimal` to gate on it.
 
 ### Feasibility is the gate; optimality is reported
 

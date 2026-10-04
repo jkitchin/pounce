@@ -9,9 +9,17 @@ Solves the standard-form convex quadratic program
                 G x ≤ h
                 lb ≤ x ≤ ub
 
-with a specialized interior-point method (Mehrotra predictor-corrector),
-presolve, and verified infeasibility / unboundedness detection. ``P = 0``
-gives an LP.
+with a specialized interior-point method (Mehrotra predictor-corrector) and
+verified infeasibility / unboundedness detection. ``P = 0`` gives an LP.
+
+.. note::
+
+   This Python path **never presolves**, and it runs the solver's default
+   regularization / HSDE / equilibration settings. The ``qp_presolve``,
+   ``qp_reg``, ``qp_hsde``, ``qp_equilibrate`` and ``qp_crossover`` options
+   are CLI-only (``pounce model.nl qp_presolve=no ...``); ``solve_qp`` exposes
+   ``tol``, ``max_iter``, ``time_limit``, ``tau`` and ``tau_max`` instead. To
+   presolve, write the model to ``.nl`` and run the CLI.
 
 This module is the friendly surface over the compiled ``_pounce``
 bindings: it accepts dense vectors and (optionally) scipy-sparse or dense
@@ -158,7 +166,31 @@ class QpResult:
     residuals:
         Final KKT residuals as a dict with keys
         ``primal_infeasibility``, ``dual_infeasibility``,
-        ``complementarity``, and ``kkt_error`` (the max of the three).
+        ``complementarity``, and ``kkt_error`` (the max of the three), plus
+        ``kkt_error_raw``.
+
+        For the LP/QP solvers (gh #984) the four numbers are the ones the
+        ``"optimal"`` verdict is judged on: each residual entry is read *above
+        the finite-precision floor of its own terms* (a row slack that is a
+        difference of ``1e9``-sized numbers cannot be known below ``~1e-7``,
+        however well the solve went; a row of ordinary magnitude has a floor
+        of ``~1e-13`` and reads as its raw residual) and stationarity /
+        complementarity are divided by the objective's unit
+        ``max(‖P‖∞, ‖c‖∞)``, so they are the residuals of the
+        objective-normalized problem and do not change when ``c`` is rescaled
+        from dollars to cents. With ``method="ipm"`` -- cold or
+        ``warm_start=`` -- a result is ``"optimal"`` only if this
+        ``kkt_error`` is ``<= tol``; otherwise it is ``"optimal_inaccurate"``.
+        With ``method="active-set"`` the status is the active-set engine's own
+        verdict (its working-set KKT test against ``tol``) and is *not*
+        re-judged on this measure, so ``kkt_error`` may exceed ``tol`` beside
+        ``"optimal"`` there. ``kkt_error_raw`` is the plain absolute max of
+        the three un-normalized residuals, for comparison with an external
+        solver, and ``primal_infeasibility_raw`` / ``dual_infeasibility_raw``
+        / ``complementarity_raw`` are its components. When the division by a
+        *large* objective unit is what puts a successful result within
+        ``tol`` (``P`` scaled by ``1e9``: raw dual residual ``4e3``),
+        ``scaling_warning`` says so.
         For a conic (:func:`solve_socp`) solve these are measured against
         the solve's own cones — cone-membership violation for the primal
         residual and the per-block inner product for complementarity —
@@ -169,12 +201,28 @@ class QpResult:
         ``dual_infeasibility``, ``mu``, ``alpha_primal``, ``alpha_dual``.
         Empty unless the solve was called with ``collect_iterates=True``.
     scaling_warning:
-        ``None`` on a cleanly-solved, well-scaled problem. Otherwise a
+        ``None`` on a cleanly-solved, well-scaled problem. On a successful
+        solve whose stationarity / complementarity are within ``tol`` only in
+        the objective's unit (see ``residuals``), a note giving the raw
+        values. Otherwise a
         human-readable warning that the objective curvature ``‖P‖`` is tiny
         relative to the problem data and the (non-``optimal``) result may be
         inaccurate — set only when the solve did not converge cleanly *and* the
         problem is in that ill-scaled regime, with an actionable remedy
         (rescale the objective, or cross-check with a reference solver).
+    tau, kappa:
+        The homogeneous scalars of the last HSDE (self-dual embedding) run in
+        the solve, or ``None`` when the answer came from a driver that has none
+        (the direct driver, the active-set engine). On a solvable problem
+        ``tau`` is positive and ``kappa`` is near zero; on an infeasible one
+        ``tau -> 0`` and ``kappa > 0``, and ``kappa / tau`` says how decisive
+        the verdict is. ``y``, ``z``, ``z_lb``, ``z_ub`` are the un-homogenized
+        ``(y, z) / tau``, which is why an infeasibility certificate is huge.
+    certificate_scale:
+        ``None`` unless ``status`` is ``primal_infeasible`` or
+        ``dual_infeasible``; then the inf-norm of the returned ray (``(y, z,
+        z_lb, z_ub)`` resp. ``x``). The ray is meaningful only up to positive
+        scaling: divide by this to get a unit-norm certificate.
     """
 
     status: str
@@ -188,6 +236,9 @@ class QpResult:
     residuals: Optional[dict] = None
     iterates: list = field(default_factory=list)
     scaling_warning: Optional[str] = None
+    tau: Optional[float] = None
+    kappa: Optional[float] = None
+    certificate_scale: Optional[float] = None
 
     @property
     def success(self) -> bool:
@@ -867,6 +918,9 @@ def _to_result(d: dict) -> QpResult:
         residuals=d.get("residuals"),
         iterates=list(d.get("iterates", [])),
         scaling_warning=d.get("scaling_warning"),
+        tau=d.get("tau"),
+        kappa=d.get("kappa"),
+        certificate_scale=d.get("certificate_scale"),
     )
 
 

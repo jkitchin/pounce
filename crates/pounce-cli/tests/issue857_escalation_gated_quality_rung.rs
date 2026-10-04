@@ -320,7 +320,24 @@ fn a_budget_exit_that_never_escalated_is_left_alone() {
          to test and must not pay for a solve:\n{}",
         run.out
     );
-    assert_eq!(run.iterations, 100);
+    // gh#983 item 5: the returned point is the first attempt's (the gh#884
+    // retry is declined on the answer), so the report's iteration count is the
+    // first attempt's own -- the *first* "Number of Iterations" line, which
+    // counts the restoration iterations it spent (84 outer + 32 restoration
+    // = 116 here). This used to read 100, the declined retry's count, which
+    // was the mixed-run report the issue describes: objective and point from
+    // one run, iteration count from the other.
+    let first_pass: i64 = run
+        .out
+        .lines()
+        .find_map(|l| l.strip_prefix("Number of Iterations....:"))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("console iteration count");
+    assert!(first_pass >= 100, "the cap was reached: {first_pass}");
+    assert_eq!(
+        run.iterations, first_pass,
+        "the report must describe the run that produced the returned point"
+    );
 }
 
 /// The rung is dropped when the baseline already ran with the escalation

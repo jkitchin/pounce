@@ -198,8 +198,12 @@ fn a_ladder_that_promotes_nothing_reports_the_kept_verdict_once() {
 }
 
 /// A run that never retries is unaffected: one attempt, one verdict, one
-/// header. The deferral has to be *released* on this path too, and an
-/// unmatched acquire would silently cost the run its `EXIT:` line — which is
+/// header. `hs71_obj1e8` again (gh#983 review): the first pass of the scale
+/// audit re-solved it -- a declined, pure-cost re-solve keyed on objective
+/// magnitude alone -- and this test was moved to `cresc4` to dodge that. The
+/// audit now re-solves only when the factor re-evaluated at the answer differs
+/// materially, so the large objective is back to one attempt. The deferral
+/// has to be *released* on this path too, and an unmatched acquire would silently cost the run its `EXIT:` line — which is
 /// exactly the failure mode a counter-based scheme has.
 #[test]
 fn a_single_attempt_run_still_reports_its_verdict() {

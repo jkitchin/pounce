@@ -114,9 +114,61 @@ impl Default for DerivativeTestOptions {
     }
 }
 
+/// Cap on the flagged entries a report carries (gh#990 item 3). A model with a
+/// wrong derivative flags thousands of entries; the count (`suspicious`) is
+/// exact, the list is the first this many.
+pub const MAX_FLAGGED_ENTRIES: usize = 200;
+
+/// One flagged comparison, in a form a program can read (gh#990 item 3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivativeEntry {
+    /// `gradient`, `jacobian`, `hessian`, `jacobian_structure` or
+    /// `hessian_structure` (a finite difference is nonzero where the declared
+    /// sparsity says the entry does not exist).
+    pub kind: &'static str,
+    /// Hessian block: `obj` or `g[<row>]`. Empty otherwise.
+    pub block: String,
+    /// Row index (constraint row, or Hessian row); `-1` for a gradient entry.
+    pub row: i64,
+    /// Column index (variable).
+    pub col: i64,
+    /// The model's derivative; `None` for a structural miss.
+    pub analytic: Option<Number>,
+    pub finite_difference: Number,
+    /// `|analytic - fd| / max(1, |fd|)`, the quantity compared with the
+    /// tolerance; `None` for a structural miss.
+    pub relative_error: Option<Number>,
+}
+
+/// The machine-readable result of a derivative check, carried on the solve
+/// statistics, `info["derivative_check"]` and the report's
+/// `statistics.derivative_check`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DerivativeCheckSummary {
+    /// `first-order`, `second-order` or `only-second-order`.
+    pub mode: String,
+    pub tolerance: Number,
+    pub perturbation: Number,
+    pub checked: usize,
+    pub suspicious: usize,
+    pub missing_structure: usize,
+    pub evaluations: usize,
+    /// `true` when nothing was flagged *and* something was compared.
+    pub clean: bool,
+    /// Largest relative error over every compared entry of each kind; `None`
+    /// when no entry of that kind was compared.
+    pub max_rel_error_gradient: Option<Number>,
+    pub max_rel_error_jacobian: Option<Number>,
+    pub max_rel_error_hessian: Option<Number>,
+    /// The flagged entries (at most [`MAX_FLAGGED_ENTRIES`]).
+    pub flagged: Vec<DerivativeEntry>,
+}
+
 /// Outcome of a run. `lines` is the formatted report, ready to print.
 #[derive(Debug, Default)]
 pub struct DerivativeTestReport {
+    /// Machine-readable counterpart of `lines` (gh#990 item 3).
+    pub summary: DerivativeCheckSummary,
     /// Entries compared against a finite difference.
     pub checked: usize,
     /// Entries whose deviation exceeded `derivative_test_tol`.
@@ -129,6 +181,20 @@ pub struct DerivativeTestReport {
 }
 
 impl DerivativeTestReport {
+    fn note_missing(&mut self, kind: &'static str, block: &str, row: i64, col: i64, fd: Number) {
+        if self.summary.flagged.len() < MAX_FLAGGED_ENTRIES {
+            self.summary.flagged.push(DerivativeEntry {
+                kind,
+                block: block.to_string(),
+                row,
+                col,
+                analytic: None,
+                finite_difference: fd,
+                relative_error: None,
+            });
+        }
+    }
+
     /// True when nothing looked wrong.
     pub fn clean(&self) -> bool {
         self.suspicious == 0 && self.missing_structure == 0
@@ -140,6 +206,10 @@ struct Comparison {
     label: String,
     analytic: Number,
     fd: Number,
+    kind: &'static str,
+    block: String,
+    row: i64,
+    col: i64,
 }
 
 impl Comparison {
@@ -349,6 +419,20 @@ pub fn run(tnlp: &mut dyn TNLP, opts: &DerivativeTestOptions) -> Option<Derivati
         )
     };
     report.lines.push(summary);
+    report.summary.mode = match opts.mode {
+        DerivativeTest::FirstOrder => "first-order",
+        DerivativeTest::SecondOrder => "second-order",
+        DerivativeTest::OnlySecondOrder => "only-second-order",
+        DerivativeTest::None => unreachable!("handled above"),
+    }
+    .to_string();
+    report.summary.tolerance = opts.tol;
+    report.summary.perturbation = opts.perturbation;
+    report.summary.checked = report.checked;
+    report.summary.suspicious = report.suspicious;
+    report.summary.missing_structure = report.missing_structure;
+    report.summary.evaluations = report.evaluations;
+    report.summary.clean = report.checked > 0 && report.clean();
     Some(report)
 }
 
@@ -408,6 +492,10 @@ fn check_first_order(
                 label: format!("grad_f[{i:5}]      "),
                 analytic: grad_f[i],
                 fd: (f_pert - f0) / step,
+                kind: "gradient",
+                block: String::new(),
+                row: -1,
+                col: i as i64,
             },
         );
         if m == 0 {
@@ -425,6 +513,10 @@ fn check_first_order(
                         label: format!("jac_g [{row:5},{i:5}]"),
                         analytic: jac[k],
                         fd,
+                        kind: "jacobian",
+                        block: String::new(),
+                        row: row as i64,
+                        col: i as i64,
                     },
                 ),
                 None => {
@@ -433,6 +525,7 @@ fn check_first_order(
                     // error, invisible to any value comparison.
                     if fd.abs() > opts.tol {
                         report.missing_structure += 1;
+                        report.note_missing("jacobian_structure", "", row as i64, i as i64, fd);
                         report.lines.push(format!(
                             "! jac_g [{row:5},{i:5}] is not in the sparsity \
                              structure, but its finite difference is \
@@ -556,11 +649,16 @@ fn check_second_order(
                             label: format!("h_{name}[{j:5},{i:5}]"),
                             analytic: h_vals[k],
                             fd,
+                            kind: "hessian",
+                            block: name.clone(),
+                            row: j as i64,
+                            col: i as i64,
                         },
                     ),
                     None => {
                         if fd.abs() > opts.tol {
                             report.missing_structure += 1;
+                            report.note_missing("hessian_structure", &name, j as i64, i as i64, fd);
                             report.lines.push(format!(
                                 "! h_{name}[{j:5},{i:5}] is not in the Hessian \
                                  sparsity structure, but its finite difference \
@@ -593,8 +691,33 @@ fn row_of_jacobian(
 fn push(report: &mut DerivativeTestReport, opts: &DerivativeTestOptions, cmp: Comparison) {
     report.checked += 1;
     let flagged = cmp.suspicious(opts.tol);
+    let rel = cmp.deviation() / cmp.fd.abs().max(1.0);
+    if rel.is_finite() || rel.is_nan() {
+        let slot = match cmp.kind {
+            "gradient" => &mut report.summary.max_rel_error_gradient,
+            "jacobian" => &mut report.summary.max_rel_error_jacobian,
+            _ => &mut report.summary.max_rel_error_hessian,
+        };
+        // A NaN analytic value is the worst error there is; keep it visible
+        // rather than letting `max` swallow it.
+        *slot = Some(match *slot {
+            Some(m) if m.is_nan() || (!rel.is_nan() && m >= rel) => m,
+            _ => rel,
+        });
+    }
     if flagged {
         report.suspicious += 1;
+        if report.summary.flagged.len() < MAX_FLAGGED_ENTRIES {
+            report.summary.flagged.push(DerivativeEntry {
+                kind: cmp.kind,
+                block: cmp.block.clone(),
+                row: cmp.row,
+                col: cmp.col,
+                analytic: Some(cmp.analytic),
+                finite_difference: cmp.fd,
+                relative_error: Some(rel),
+            });
+        }
     }
     if flagged || opts.print_all {
         report.lines.push(cmp.format(flagged));
@@ -827,6 +950,31 @@ mod tests {
         let r = run(&mut t, &opts(DerivativeTest::FirstOrder)).expect("ran");
         assert_eq!(r.suspicious, 1, "report:\n{}", r.lines.join("\n"));
         assert!(r.lines.iter().any(|l| l.contains("grad_f[    1]")));
+    }
+
+    /// gh#990 item 3: the verdict is machine-readable, not only lines.
+    #[test]
+    fn the_summary_names_the_flagged_entry_and_the_worst_error_per_kind() {
+        let mut t = Quad {
+            bad_grad: true,
+            ..Default::default()
+        };
+        let r = run(&mut t, &opts(DerivativeTest::SecondOrder)).expect("ran");
+        let s = &r.summary;
+        assert_eq!(s.mode, "second-order");
+        assert_eq!((s.checked, s.suspicious), (r.checked, 1));
+        assert!(!s.clean);
+        assert_eq!(s.flagged.len(), 1);
+        let e = &s.flagged[0];
+        assert_eq!((e.kind, e.col, e.row), ("gradient", 1, -1));
+        assert_eq!(s.max_rel_error_gradient, e.relative_error);
+        assert!(s.max_rel_error_jacobian.is_some_and(|v| v < 1e-4));
+        assert!(s.max_rel_error_hessian.is_some_and(|v| v < 1e-4));
+
+        let mut ok = Quad::default();
+        let r = run(&mut ok, &opts(DerivativeTest::FirstOrder)).expect("ran");
+        assert!(r.summary.clean && r.summary.flagged.is_empty());
+        assert!(r.summary.max_rel_error_hessian.is_none());
     }
 
     #[test]

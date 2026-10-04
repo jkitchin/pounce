@@ -62,15 +62,15 @@ const INF: Number = 1e19;
 /// and no traceback. Two things together keep that unreachable, and the
 /// limit is the second of them, not the first:
 ///
-/// * every such walk runs on a worker thread with a [`WORKER_STACK`]-byte
+/// * every such walk runs on a worker thread with a [`WORKER_STACKS`]-sized (1 GiB, falling back to 256 / 64 MiB)
 ///   stack (see [`on_deep_stack`]), so what is survivable stops depending
 ///   on the calling thread — 8 MB on a macOS/Linux main thread, 1 MB on
 ///   Windows, less on a `threading.Thread`;
 /// * this limit then keeps the depth well inside what that stack holds.
 ///
 /// 10 000 is the arithmetic: the deepest frames measured are ~300 bytes in
-/// a release build and ~2 KB in a debug build, so 64 MB covers ~200 000
-/// levels released and ~32 000 in debug — a 3x margin at this limit even
+/// a release build and up to ~26 KB in an unoptimised build, so the 1 GiB
+/// reservation covers ~3 million levels released and ~40 000 unoptimised — a 3x margin at this limit even
 /// in the worst configuration. It is also comfortably past what the parser
 /// managed before it was guarded (~3 000), so no `.nl` file that loaded
 /// before is refused now.
@@ -90,7 +90,7 @@ pub(crate) const INLINE_DEPTH: u32 = 512;
 /// Stack for the worker thread. Reserved, not committed: only the pages
 /// actually touched cost anything. See [`MAX_DEPTH`] for the margin this
 /// buys.
-const WORKER_STACK: usize = 64 << 20;
+const WORKER_STACKS: [usize; 3] = [1 << 30, 256 << 20, 64 << 20];
 
 /// Run `f` on a worker thread with a stack sized for recursion over a
 /// deep expression, whatever the caller's stack is.
@@ -103,23 +103,40 @@ where
     T: Send,
     F: FnOnce() -> T + Send,
 {
+    // Reserve the largest stack the OS grants (1 GiB, then 256 MiB, then
+    // 64 MiB), and tell the `.nl` reader what it got so its depth guard fires
+    // before the stack does at any build profile (gh#986). `f` runs exactly
+    // once, on whichever spawn succeeds.
+    // The body sits in a slot outside the scope: a failed `spawn_scoped`
+    // drops its closure unrun, leaving the body here for the next attempt.
+    let slot = std::sync::Mutex::new(Some(f));
     std::thread::scope(|scope| {
-        let spawned = std::thread::Builder::new()
-            .stack_size(WORKER_STACK)
-            .spawn_scoped(scope, f);
-        let handle = match spawned {
-            Ok(h) => h,
-            // Nothing safe is left to do: running the walk here is the
-            // segfault this function exists to prevent. Panic instead, so
-            // pyo3 raises it as a Python exception.
-            Err(e) => panic!("pounce: cannot spawn the expression worker thread: {e}"),
-        };
-        match handle.join() {
-            Ok(v) => v,
-            // Carry a panic across the join so pyo3 still turns it into a
-            // Python exception rather than losing it here.
-            Err(panic) => std::panic::resume_unwind(panic),
+        for stack in WORKER_STACKS {
+            let slot_ref = &slot;
+            let spawned =
+                std::thread::Builder::new()
+                    .stack_size(stack)
+                    .spawn_scoped(scope, move || {
+                        pounce_nl::nl_reader::set_parse_stack_budget(Some(stack));
+                        let taken = slot_ref.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        let Some(job) = taken else {
+                            panic!("pounce: worker body already consumed")
+                        };
+                        job()
+                    });
+            if let Ok(handle) = spawned {
+                return match handle.join() {
+                    Ok(v) => v,
+                    // Carry a panic across the join so pyo3 still turns it
+                    // into a Python exception rather than losing it here.
+                    Err(panic) => std::panic::resume_unwind(panic),
+                };
+            }
         }
+        // Nothing safe is left to do: running the walk here is the
+        // segfault this function exists to prevent. Panic instead, so
+        // pyo3 raises it as a Python exception.
+        panic!("pounce: cannot spawn the expression worker thread (no stack could be reserved)")
     })
 }
 

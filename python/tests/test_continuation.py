@@ -654,3 +654,96 @@ def test_subdivision_does_not_change_a_healthy_path():
     assert on.n_steps == off.n_steps == len(path)
     assert on.n_inserted == 0
     assert [s.iters for s in on.steps] == [s.iters for s in off.steps]
+
+
+# --------------------------------------------------------------------------
+# gh#989: von Mises truss -- ds=0.1 jumped from the snap-through branch onto
+# another one with no warning.
+
+_TRUSS_EA, _TRUSS_A, _TRUSS_H = 2.0e4, 1.0, 0.1
+_TRUSS_L0 = np.hypot(_TRUSS_A, _TRUSS_H)
+_TRUSS_PREF = 10.0
+
+
+def _truss_bar(w):
+    return np.hypot(_TRUSS_A, _TRUSS_H - w)
+
+
+def _truss_load(w):
+    EA, h, L0 = _TRUSS_EA, _TRUSS_H, _TRUSS_L0
+    return -2 * EA * (_truss_bar(w) - L0) * (h - w) / (L0 * _truss_bar(w))
+
+
+def _truss_stiffness(w):
+    EA, h, L0 = _TRUSS_EA, _TRUSS_H, _TRUSS_L0
+    Lw = _truss_bar(w)
+    c2 = (h - w) ** 2 / Lw**2
+    return 2 * EA / L0 * (c2 + (1 - L0 / Lw) * (1 - c2))
+
+
+class TrussNLP:
+    h = _TRUSS_H
+    P = _TRUSS_PREF
+
+    def objective(self, x):
+        w, Pl = self.h * x[0], self.P * x[1]
+        return (_TRUSS_EA / _TRUSS_L0 * (_truss_bar(w) - _TRUSS_L0) ** 2
+                - Pl * w) / (self.P * self.h)
+
+    def gradient(self, x):
+        return np.array([(_truss_load(self.h * x[0]) - self.P * x[1]) / self.P,
+                         -x[0]])
+
+    def constraints(self, x):
+        return np.array([x[1]])
+
+    def jacobianstructure(self):
+        return np.array([0]), np.array([1])
+
+    def jacobian(self, x):
+        return np.array([1.0])
+
+    def hessianstructure(self):
+        return np.array([0, 1, 1]), np.array([0, 0, 1])
+
+    def hessian(self, x, lam, of):
+        return of * np.array(
+            [_truss_stiffness(self.h * x[0]) * self.h / self.P, -1.0, 0.0])
+
+
+def _truss_trace(**kw):
+    cb = TrussNLP()
+    lb, ub = np.array([-5.0, -1e20]), np.array([8.0, 1e20])
+
+    def bounds(theta):
+        q = float(np.ravel(theta)[0])
+        return lb, ub, np.array([q]), np.array([q])
+
+    def problem(theta):
+        _, _, cl, cu = bounds(theta)
+        p = pounce.Problem(n=2, m=1, problem_obj=cb, lb=lb, ub=ub, cl=cl, cu=cu)
+        p.add_option("print_level", 0)
+        return p
+
+    drv = pounce.Continuation(problem, pins=[0], bounds=bounds)
+    return drv.trace_arclength(np.array([0.0, 0.0]), 0.0, callbacks=cb,
+                               ds=0.1, n_steps=40, **kw)
+
+
+def test_arclength_does_not_jump_branches_on_the_truss():
+    trace = _truss_trace()
+    w = np.array([1e3 * TrussNLP.h * x[0] for x in trace.x])
+    # Before the guard the trace went 137.6 -> -39.2 mm in one step
+    # (max |dw| 176.7 mm); a smooth trace moves tens of mm per step.
+    assert np.abs(np.diff(w)).max() < 60.0
+    # It crosses both limit points and keeps going up the stiffening branch.
+    assert w.max() > 250.0
+    assert not np.any(w[int(np.argmax(w > 100.0)):] < 0.0)
+
+
+def test_arclength_branch_guards_can_be_disabled():
+    """The guards are the fix: with both off the old jump is back, which is
+    also what pins that this test exercises them."""
+    trace = _truss_trace(max_correction=np.inf, min_tangent_cos=0.0)
+    w = np.array([1e3 * TrussNLP.h * x[0] for x in trace.x])
+    assert np.abs(np.diff(w)).max() > 100.0

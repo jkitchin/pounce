@@ -143,7 +143,7 @@ class TRFIterate:
     theta: float
     trust_radius: float
     sampling_radius: float
-    step_norm: float
+    step_norm: float  # inf-norm of the dof-block step (the region is a box)
     kind: str  # f-step | theta-step | rejected | incompatible | subproblem-failed
 
 
@@ -412,7 +412,18 @@ def trf_minimize(
         )
         x_trial = np.asarray(res.x, dtype=float).ravel()
         step = x_trial - x
-        step_norm = float(np.linalg.norm(step))
+        # The trust radius bounds |dw| only (the degree-of-freedom block), so
+        # the step length that feeds the contraction / expansion rules must be
+        # measured over that block: the y block is slaved to w through the
+        # surrogate and can be orders of magnitude larger (gh#989). And it
+        # must be measured in the norm the region is defined in: the region
+        # is a *box* |dw_i| <= delta, so the step is measured with the
+        # inf-norm. The 2-norm of a corner step is sqrt(n_dof) * delta, so with
+        # n_dof >= 4 a rejected corner step "contracted" to
+        # gamma_contract * 2 * delta = delta (no contraction: the same step is
+        # retried until the stall detector fires), and an accepted one expanded
+        # delta by gamma_expand * sqrt(n_dof) instead of gamma_expand.
+        step_norm = float(np.max(np.abs(step[dof]))) if dof.size else 0.0
 
         # A failed subproblem returns whatever iterate the solver stopped on,
         # which is not a point we may trust or evaluate the filter against.
@@ -473,7 +484,7 @@ def trf_minimize(
         trial_pt = FilterPoint(theta_trial, f_trial)
 
         # ---- 4. filter acceptance ----------------------------------------
-        if not filt.is_acceptable(trial_pt):
+        if not filt.is_acceptable(trial_pt, current=FilterPoint(theta_cur, f_cur)):
             kind = "rejected"
             delta = cfg.gamma_contract * (step_norm if step_norm > 0 else delta)
             sigma = min(sigma, delta)

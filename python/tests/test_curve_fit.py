@@ -1399,3 +1399,123 @@ def test_curve_fit_minima_zero_width_box_warns():
     assert fits, "expected at least one result"
     for r in fits:
         np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))
+
+
+def _van_genuchten_case():
+    """The gh#989 retention curve: theta_r pinned at its lower bound 0."""
+    h = np.array([1, 3, 10, 20, 30, 50, 100, 200, 300.0])
+
+    def vg(h, tr, ts, a, n):
+        return tr + (ts - tr) / (1 + (a * h) ** n) ** (1 - 1 / n)
+
+    def vg_jac(h, tr, ts, a, n):
+        m, B = 1 - 1 / n, 1 + (a * h) ** n
+        Se = B ** (-m)
+        dSe_da = -m * B ** (-m - 1) * n * (a * h) ** (n - 1) * h
+        dSe_dn = Se * (-np.log(B) / n**2 - m * (a * h) ** n * np.log(a * h) / B)
+        return np.column_stack([1 - Se, Se, (ts - tr) * dSe_da, (ts - tr) * dSe_dn])
+
+    y = vg(h, 0.02, 0.41, 0.075, 1.89) + 0.01 * np.random.default_rng(6).standard_normal(h.size)
+    bounds = ([0, 0.2, 1e-3, 1.05], [0.2, 0.6, 1, 5])
+    return vg, vg_jac, h, y, bounds
+
+
+@pytest.mark.parametrize("tol", [1e-6, 1e-8, 1e-10])
+def test_active_bound_verdict_independent_of_tol(tol):
+    """gh#989: the active-bound verdict comes from the multiplier vs slack, not
+    a fixed 1e-6 window, so the standard error of a parameter sitting on its
+    bound is 0 (projected) at every solver tolerance."""
+    vg, vg_jac, h, y, bounds = _van_genuchten_case()
+    f = pounce.curve_fit(vg, h, y, p0=[0.05, 0.4, 0.05, 1.5], jac=vg_jac,
+                         bounds=bounds, options={"tol": tol})
+    assert list(f.active_mask) == [True, False, False, False]
+    assert f.perr[0] == 0.0
+    assert f.cov_source == "reduced_hessian(projected)"
+
+
+def test_active_bounds_fallback_window_only_without_evidence():
+    """The fixed relative window is the fallback *only*: with finite
+    multipliers and a positive curvature the verdict is ``z / H > slack``, and
+    it disagrees with the window in both directions (gh#989 review)."""
+    from pounce._curve_fit import _active_bounds
+
+    lb, ub = np.array([0.0, 0.0]), np.array([1.0, 1.0])
+    # Both inside the 1e-6 window.
+    popt = np.array([1e-8, 5e-7])
+    assert list(_active_bounds(popt, lb, ub, {})) == [True, True]
+    hd = np.array([10.0, 10.0])
+    # Finite evidence: param 0 has a real force on the bound (z/H = 1e-4 >>
+    # 1e-8), param 1 only the barrier's mu/slack (z/H = 2e-7 < 5e-7).
+    info = {"mult_x_L": np.array([1e-3, 2e-6]), "mult_x_U": np.zeros(2)}
+    assert list(_active_bounds(popt, lb, ub, info, hd)) == [True, False]
+    # Outside the window but pushed: active (z/H = 1e-3 > 4e-5).
+    popt2 = np.array([4e-5, 0.5])
+    info2 = {"mult_x_L": np.array([1e-2, 1e-9]), "mult_x_U": np.zeros(2)}
+    assert list(_active_bounds(popt2, lb, ub, info2, hd)) == [True, False]
+    # A non-finite multiplier vector or no curvature -> the window.
+    bad = {"mult_x_L": np.array([np.nan, 1.0]), "mult_x_U": np.zeros(2)}
+    assert list(_active_bounds(popt2, lb, ub, bad, hd)) == [False, False]
+    assert list(_active_bounds(popt, lb, ub, info, np.zeros(2))) == [True, True]
+
+
+def test_active_bound_rule_is_invariant_to_parameter_scale():
+    """``z > slack`` compared a force to a length.  Rescaling one parameter
+    (slack x c, z / c, H / c^2) must not change the verdict."""
+    from pounce._curve_fit import _active_bounds
+
+    lb, ub = np.zeros(1), np.full(1, np.inf)
+    for z, slack, H, want in ((2e-3, 1e-6, 6.0, True), (3e-5, 3e-5, 1.7e3, False)):
+        for c in (1e-6, 1e-3, 1.0, 1e3, 1e6):
+            info = {"mult_x_L": np.array([z / c]), "mult_x_U": np.zeros(1)}
+            got = _active_bounds(np.array([slack * c]), lb, ub, info,
+                                 np.array([H / c**2]))
+            assert bool(got[0]) is want, (z, slack, c)
+
+
+def _small_slope_case():
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 10.0, 50)
+    y = 3e-5 * x + 0.5 + 1e-6 * rng.standard_normal(x.size)
+    return (lambda x, a, b: a * x + b), x, y
+
+
+@pytest.mark.parametrize("opts", [
+    {},
+    {"tol": 1e-10},
+    # Ends at the acceptable level, mu far from converged: the rule must not
+    # lean on slack * z = mu.
+    {"tol": 1e-14, "acceptable_tol": 1e-3, "acceptable_iter": 1, "max_iter": 8},
+])
+def test_small_scale_interior_parameter_is_not_active(opts):
+    """gh#989 review: the true slope 3e-5 sits well inside [0, 1] and is
+    determined to ~5e-8.  ``z > slack`` (an absolute threshold in parameter
+    units) flagged it active at the default tol, projecting perr[0] to 0."""
+    lin, x, y = _small_slope_case()
+    f = pounce.curve_fit(lin, x, y, p0=[0.1, 0.1], bounds=([0, 0], [1, 1]),
+                         options=opts)
+    assert list(f.active_mask) == [False, False]
+    assert f.perr[0] > 0.0
+    assert f.popt[0] > 5.0 * f.perr[0]  # statistically far from the bound
+
+
+def test_active_bound_found_at_acceptable_level():
+    """theta_r is active when the solve stops at the acceptable level too."""
+    vg, vg_jac, h, y, bounds = _van_genuchten_case()
+    f = pounce.curve_fit(vg, h, y, p0=[0.05, 0.4, 0.05, 1.5], jac=vg_jac,
+                         bounds=bounds,
+                         options={"tol": 1e-14, "acceptable_tol": 1e-6,
+                                  "acceptable_iter": 1, "max_iter": 20})
+    assert f.message == "Solved_To_Acceptable_Level"
+    assert list(f.active_mask) == [True, False, False, False]
+    assert f.perr[0] == 0.0
+
+
+def test_active_bound_found_with_large_absolute_sigma():
+    """A large absolute sigma shrinks z and H together; z / H does not move.
+    (``z > slack`` missed this one: z = 2.2e-5 against a slack of 4.1e-5.)"""
+    vg, vg_jac, h, y, bounds = _van_genuchten_case()
+    f = pounce.curve_fit(vg, h, y, p0=[0.05, 0.4, 0.05, 1.5], jac=vg_jac,
+                         bounds=bounds, sigma=np.full(h.size, 10.0),
+                         absolute_sigma=True)
+    assert list(f.active_mask) == [True, False, False, False]
+    assert f.perr[0] == 0.0

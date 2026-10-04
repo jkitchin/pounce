@@ -102,6 +102,54 @@ fn to_qp_upper(ub: f64) -> f64 {
     }
 }
 
+/// What crossover did on the last [`maybe_crossover`] call that got past the
+/// gate (gh#990 item 12). Carried out-of-band — the CLI prints a one-line
+/// summary from it — because `QpSolution` has over 200 construction sites and
+/// no `Default`; see [`crate::sigma_verdict`] for the same trade.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossoverReport {
+    /// `simplex` (the revised-simplex LU-basis engine), `active-set` (the
+    /// pounce-qp bridge it falls back to), or `none` when neither returned a
+    /// usable vertex.
+    pub engine: &'static str,
+    /// The purified vertex replaced the interior iterate.
+    pub accepted: bool,
+    /// Structurals the interior iterate left strictly inside their bounds
+    /// (simplex only; `0` for the active-set bridge).
+    pub superbasics: usize,
+    /// Basis changes spent resolving them.
+    pub pivots_push: usize,
+    pub pivots_phase1: usize,
+    pub pivots_phase2: usize,
+    /// Bound flips.
+    pub flips: usize,
+    /// KKT error of the interior iterate and of the point returned.
+    pub kkt_error_before: f64,
+    pub kkt_error_after: f64,
+}
+
+#[derive(Default)]
+struct Attempt {
+    engine: Option<&'static str>,
+    accepted: bool,
+    stats: Option<crate::simplex::SimplexStats>,
+}
+
+thread_local! {
+    static ATTEMPT: std::cell::RefCell<Option<Attempt>> = const { std::cell::RefCell::new(None) };
+    static REPORT: std::cell::RefCell<Option<CrossoverReport>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Forget any recorded report. Call before a solve whose report you will read.
+pub fn clear_report() {
+    REPORT.with(|r| *r.borrow_mut() = None);
+}
+
+/// Take the report of the last crossover attempt on this thread, if one ran.
+pub fn take_report() -> Option<CrossoverReport> {
+    REPORT.with(|r| r.borrow_mut().take())
+}
+
 /// Run the LP-crossover phase. Returns a purified exact-vertex solution when it
 /// is a strict improvement (never-regress), otherwise the original `sol`.
 ///
@@ -109,6 +157,39 @@ fn to_qp_upper(ub: f64) -> f64 {
 /// active-set engine — the same factory the IPM uses, so crossover inherits the
 /// caller's solver choice (FERAL in tree).
 pub fn maybe_crossover<F>(
+    prob: &QpProblem,
+    sol: QpSolution,
+    opts: &QpOptions,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    if !opts.crossover || !prob.p_lower.is_empty() {
+        return sol;
+    }
+    ATTEMPT.with(|a| *a.borrow_mut() = None);
+    let orig = sol.clone();
+    let out = maybe_crossover_inner(prob, sol, opts, make_backend);
+    if let Some(a) = ATTEMPT.with(|a| a.borrow_mut().take()) {
+        let st = a.stats.unwrap_or_default();
+        let report = CrossoverReport {
+            engine: a.engine.unwrap_or("none"),
+            accepted: a.accepted,
+            superbasics: st.superbasics,
+            pivots_push: st.pivots_push,
+            pivots_phase1: st.pivots_phase1,
+            pivots_phase2: st.pivots_phase2,
+            flips: st.flips,
+            kkt_error_before: orig.kkt_residuals(prob).kkt_error(),
+            kkt_error_after: out.kkt_residuals(prob).kkt_error(),
+        };
+        REPORT.with(|r| *r.borrow_mut() = Some(report));
+    }
+    out
+}
+
+fn maybe_crossover_inner<F>(
     prob: &QpProblem,
     sol: QpSolution,
     opts: &QpOptions,
@@ -152,11 +233,17 @@ where
     // degeneracy with Bland's rule — so it resolves the highly-degenerate NETLIB
     // GEN vertices (issue #133) that the active-set bridge below stalls on. On
     // any breakdown it returns `None` and we fall through to the bridge.
+    ATTEMPT.with(|a| *a.borrow_mut() = Some(Attempt::default()));
     let simplex = crate::simplex::crossover_simplex(prob, &sol, opts);
     if crate::deadline::expired() {
         return sol;
     }
     if let Some(v) = simplex {
+        ATTEMPT.with(|a| {
+            if let Some(at) = a.borrow_mut().as_mut() {
+                at.stats = Some(v.stats);
+            }
+        });
         let candidate = QpSolution {
             status: QpStatus::Optimal,
             x: v.x,
@@ -171,6 +258,12 @@ where
         let cand_err = candidate.kkt_residuals(prob).kkt_error();
         let orig_err = sol.kkt_residuals(prob).kkt_error();
         if cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK {
+            ATTEMPT.with(|a| {
+                if let Some(at) = a.borrow_mut().as_mut() {
+                    at.engine = Some("simplex");
+                    at.accepted = true;
+                }
+            });
             return candidate;
         }
     }
@@ -330,11 +423,14 @@ where
     // iterate's (a sign translation / feasibility surprise), keep the original.
     let cand_err = candidate.kkt_residuals(prob).kkt_error();
     let orig_err = sol.kkt_residuals(prob).kkt_error();
-    if cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK {
-        candidate
-    } else {
-        sol
-    }
+    let accepted = cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK;
+    ATTEMPT.with(|a| {
+        if let Some(at) = a.borrow_mut().as_mut() {
+            at.engine = Some("active-set");
+            at.accepted = accepted;
+        }
+    });
+    if accepted { candidate } else { sol }
 }
 
 #[cfg(test)]

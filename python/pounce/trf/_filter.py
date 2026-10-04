@@ -103,11 +103,20 @@ class TRFilter:
         self.theta_max = theta_max
         self._points: list[FilterPoint] = []
 
-    def is_acceptable(self, point: FilterPoint) -> bool:
-        """Whether ``point`` may be accepted as the next iterate."""
+    def is_acceptable(
+        self, point: FilterPoint, current: FilterPoint | None = None
+    ) -> bool:
+        """Whether ``point`` may be accepted as the next iterate.
+
+        ``current`` is the iterate the step starts from. Fletcher-Leyffer and
+        Eason-Biegler test the trial against the filter *and* the current
+        point; f-steps never store the current point, and the filter starts
+        empty, so without it a trial that raises theta tenfold is accepted.
+        """
         if point.theta > self.theta_max:
             return False
-        for entry in self._points:
+        entries = self._points if current is None else [*self._points, current]
+        for entry in entries:
             beats_theta = point.theta <= (1.0 - self.gamma_theta) * entry.theta
             beats_f = point.f <= entry.f - self.gamma_f * entry.theta
             if not (beats_theta or beats_f):

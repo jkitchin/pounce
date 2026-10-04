@@ -1360,6 +1360,7 @@ mod tests {
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
             nl_counts: None,
+            n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         };
@@ -1583,6 +1584,7 @@ mod tests {
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
             nl_counts: None,
+            n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1785,6 +1787,7 @@ mod tests {
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
             nl_counts: None,
+            n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -1827,6 +1830,7 @@ mod tests {
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
             nl_counts: None,
+            n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
@@ -2058,6 +2062,7 @@ mod tests {
             imported_funcs: Vec::new(),
             ampl_options: Vec::new(),
             nl_counts: None,
+            n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
         }

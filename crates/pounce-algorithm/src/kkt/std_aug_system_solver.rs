@@ -106,6 +106,13 @@ pub struct StdAugSystemSolver {
     /// `try_solve_many_flat` decline the batch when a dump is active
     /// without re-reading the environment per call.
     legacy_dump_path: std::cell::OnceCell<Option<String>>,
+
+    /// Where the unregularized-trial inertia is published (gh#987 item 3).
+    /// The sink is the same `LinearSolverSummary` the backend records every
+    /// factorization into, so the copy below reads the backend's own
+    /// `(positive, negative, zero)` for the trial just made.
+    inertia_sink:
+        Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
 }
 
 impl std::fmt::Debug for StdAugSystemSolver {
@@ -149,7 +156,18 @@ impl StdAugSystemSolver {
             have_factor: false,
             timing: None,
             diagnostics: None,
+            inertia_sink: None,
         }
+    }
+
+    /// Publish the inertia of every factorization attempted with zero
+    /// regularization into `sink` (`last_inertia_unregularized`).
+    pub fn with_inertia_sink(
+        mut self,
+        sink: std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>,
+    ) -> Self {
+        self.inertia_sink = Some(sink);
+        self
     }
 
     fn build_structure(&mut self, coeffs: &AugSysCoeffs<'_>) -> ESymSolverStatus {
@@ -526,6 +544,10 @@ impl AugSystemSolver for StdAugSystemSolver {
             .timing
             .as_deref()
             .map(|t| t.linear_system_factorization.guard());
+        let factors_before = self
+            .inertia_sink
+            .as_ref()
+            .and_then(|s| s.lock().ok().map(|g| g.n_factors));
         let status = self.linsol.multi_solve(
             &self.vals,
             true,
@@ -536,6 +558,21 @@ impl AugSystemSolver for StdAugSystemSolver {
         );
         drop(_factor_guard);
         self.last_status = Some(status);
+        // gh#987 item 3: a factorization with no shift added is the
+        // KKT matrix's own inertia. The interior-point loop tries it first
+        // on every iteration; the regularized retries that follow are what
+        // `last_inertia` ends up describing, so a local maximum reads
+        // `(n, m, 0)` there because the shift made it so.
+        if let Some(sink) = &self.inertia_sink
+            && coeffs.delta_x == 0.0
+            && coeffs.delta_s == 0.0
+            && coeffs.delta_c == 0.0
+            && coeffs.delta_d == 0.0
+            && let Ok(mut g) = sink.lock()
+            && factors_before.is_some_and(|b| g.n_factors > b)
+        {
+            g.last_inertia_unregularized = g.last_inertia;
+        }
         // Refresh the cached neg-eval count on every outcome where the backend
         // computed an inertia (Success/WrongInertia/Singular), matching IPOPT's
         // `StdAugSystemSolver::NumberOfNegEVals()`, which is a pure pass-through

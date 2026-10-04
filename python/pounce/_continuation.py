@@ -486,7 +486,7 @@ class Continuation:
         snapshot = problem.options_snapshot() if ws is not None else None
         try:
             if ws is not None:
-                for key, val in ws.options().items():
+                for key, val in ws.overlay_options(snapshot).items():
                     problem.add_option(key, val)
             t0 = time.perf_counter()
             x, info = solver.solve(x0=x0, **kwargs)
@@ -843,7 +843,8 @@ class Continuation:
     def trace_arclength(self, x0, theta0, *, callbacks, lam0=None,
                         ds=0.05, n_steps=200, direction=1.0,
                         newton_tol=1e-9, newton_max=40,
-                        ds_min=1e-6, ds_max=None) -> ContinuationTrace:
+                        ds_min=1e-6, ds_max=None, max_correction=1.0,
+                        min_tangent_cos=0.5) -> ContinuationTrace:
         """Pseudo-arclength continuation **past folds**, without autodiff.
 
         The opt-in mode pounce#608's last scope bullet asks for.
@@ -910,6 +911,17 @@ class Continuation:
             newton_max: Newton iterations before a step is rejected.
             ds_min, ds_max: Arclength step floor and ceiling. ``ds_max``
                 defaults to ``8 * ds``.
+            max_correction: A converged corrector is accepted only if it
+                landed within ``max_correction * ds`` of the predictor
+                (``‖z_corr - z_pred‖``). On the same branch the correction
+                is ``O(ds²)``; one comparable to ``ds`` means Newton was
+                captured by another branch, so the step is halved and
+                retried instead of silently jumping (gh#989).
+            min_tangent_cos: Likewise, the tangent at the corrected point
+                must make at least this cosine with the step's tangent
+                (a turn this sharp inside one step is a branch jump or a
+                step too coarse to resolve the curve); otherwise the step
+                is halved. ``0`` disables the check.
 
         Returns:
             ContinuationTrace. Each step's ``theta`` is a 1-element
@@ -1025,6 +1037,23 @@ class Continuation:
                     Rc, _ = RJ(zc[:n], zc[n:d], float(zc[d]))
                     ok = float(np.max(np.abs(Rc))) <= newton_tol if Rc.size \
                         else True
+                if ok:
+                    # Branch-jump guard (gh#989): a converged corrector is
+                    # not necessarily on the branch the predictor started
+                    # from. Reject a landing far from the predictor, or one
+                    # whose tangent has turned sharply away from this
+                    # step's, and retry with a halved step.
+                    if float(np.linalg.norm(zc - z_pred)) > max_correction * ds:
+                        ok = False
+                    elif min_tangent_cos > 0.0:
+                        _, Jn = RJ(zc[:n], zc[n:d], float(zc[d]))
+                        tn = spsolve(bordered(Jn, tan), rhs)
+                        nn = float(np.linalg.norm(tn))
+                        # ``tan . tn == 1`` by construction, so the cosine
+                        # of the angle between them is ``1 / ||tn||``.
+                        if not np.all(np.isfinite(tn)) or nn == 0.0 \
+                                or 1.0 / nn < min_tangent_cos:
+                            ok = False
                 if ok:
                     break
                 ds *= 0.5

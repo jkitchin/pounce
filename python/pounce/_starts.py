@@ -960,7 +960,8 @@ class _Racer:
                     warnings.simplefilter(
                         "ignore", WarmStartOrderingUnverifiedWarning)
                     ws.check_compatible(problem)
-                for key, val in ws.options().items():
+                for key, val in ws.overlay_options(
+                        problem.options_snapshot()).items():
                     problem.add_option(key, val)
                 kw = ws.solve_kwargs()
                 kw.pop("working_set", None)  # not a Solver.solve keyword

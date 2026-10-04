@@ -263,6 +263,11 @@ pub struct AlgorithmBuilder {
     /// back on the first `∇f`'s nonzeros, which is value-derived; see
     /// that method for what it costs.
     pub objective_nonlinear_vars: Option<Vec<Index>>,
+    /// The TNLP's declared Lagrangian Hessian sparsity in the compressed
+    /// `x_var` space, `(row >= col)`, when it has one and
+    /// `partitioned_structure` is `declared` (gh#989 item 5). Consumed by the
+    /// partitioned updater to split each element along the pattern.
+    pub hessian_declared_pattern: Option<Vec<(Index, Index)>>,
     /// `partitioned_curvature_cap` — multiple of an element's implied
     /// curvature that one update may reach. See
     /// [`crate::hess::partitioned_quasi_newton`].
@@ -490,6 +495,12 @@ pub struct AlgorithmBuilder {
     /// [`crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE`].
     pub kkt_block_min_size: usize,
     pub kkt_schur_summary_sink:
+        Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
+    /// Sink the standard augmented-system solver publishes the inertia of
+    /// its zero-regularization trials into (`last_inertia_unregularized`,
+    /// gh#987 item 3). Set only on the main-IPM builder, so a restoration
+    /// sub-solve's differently-shaped KKT system never overwrites it.
+    pub inertia_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
@@ -1223,6 +1234,7 @@ impl Default for AlgorithmBuilder {
             partitioned_update_type_was_set: false,
             partitioned_max_element: 64,
             objective_nonlinear_vars: None,
+            hessian_declared_pattern: None,
             partitioned_curvature_cap: Number::INFINITY,
             partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
@@ -1273,6 +1285,7 @@ impl Default for AlgorithmBuilder {
             kkt_blocks_shared: None,
             kkt_block_min_size: crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
             kkt_schur_summary_sink: None,
+            inertia_sink: None,
             quality_escalation_counter: None,
         }
     }
@@ -1354,7 +1367,11 @@ impl AlgorithmBuilder {
             }
         };
         let linsol = TSymLinearSolver::new(backend, make_scaling(), self.linear_scaling_on_demand);
-        let inner_aug = StdAugSystemSolver::new(linsol);
+        let with_inertia_sink = |aug: StdAugSystemSolver| match self.inertia_sink.clone() {
+            Some(sink) => aug.with_inertia_sink(sink),
+            None => aug,
+        };
+        let inner_aug = with_inertia_sink(StdAugSystemSolver::new(linsol));
         // Limited-memory mode publishes the Hessian as a
         // `LowRankUpdateSymMatrix`; wrap the standard solver in the
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
@@ -1377,7 +1394,7 @@ impl AlgorithmBuilder {
             );
             Box::new(LowRankAugSystemSolver::with_bypass_solver(
                 Box::new(inner_aug),
-                Box::new(StdAugSystemSolver::new(bypass_linsol)),
+                Box::new(with_inertia_sink(StdAugSystemSolver::new(bypass_linsol))),
             ))
         } else if let Some((labels, cfg)) = self.resolved_kkt_blocks() {
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
@@ -1525,6 +1542,7 @@ impl AlgorithmBuilder {
                 adaptive.qf_section_sigma_tol = self.mu.quality_function_section_sigma_tol;
                 adaptive.qf_section_qf_tol = self.mu.quality_function_section_qf_tol;
                 adaptive.probing_iterate_quality_factor = self.mu.probing_iterate_quality_factor;
+                adaptive.probing_guard_feasible_tol = self.conv_check.tol;
                 adaptive.adaptive_mu_safeguard_factor = self.mu.adaptive_mu_safeguard_factor;
                 adaptive.adaptive_mu_monotone_init_factor =
                     self.mu.adaptive_mu_monotone_init_factor;
@@ -1720,6 +1738,7 @@ impl AlgorithmBuilder {
                     );
                 u.max_element = self.partitioned_max_element;
                 u.objective_vars = self.objective_nonlinear_vars.clone();
+                u.declared_pattern = self.hessian_declared_pattern.clone();
                 u.curvature_cap = self.partitioned_curvature_cap;
                 u.mode = self.partitioned_elements;
                 u.block_size = self.partitioned_block_size;
@@ -1857,6 +1876,7 @@ mod tests {
                             partitioned_update_type_was_set: false,
                             partitioned_max_element: 64,
                             objective_nonlinear_vars: None,
+                            hessian_declared_pattern: None,
                             partitioned_curvature_cap: Number::INFINITY,
                             partitioned_elements:
                                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
@@ -1909,6 +1929,7 @@ mod tests {
                             kkt_block_min_size:
                                 crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
                             kkt_schur_summary_sink: None,
+                            inertia_sink: None,
                             quality_escalation_counter: None,
                         }
                         .build();

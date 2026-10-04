@@ -216,11 +216,11 @@ _NLP_SUCCESS_STATUS = frozenset({0, 1, 6})
 # Statuses for which the KKT-error fallback below must NOT upgrade the solve to
 # ``success=True``. ``User_Requested_Stop`` (5) means the solve was aborted by
 # the user's ``intermediate`` callback — or, via M32, by a callback that raised
-# (which the bridge maps to this same status). That is an external abort, not a
-# numerical stall at an acceptable point, so judging it "successful" because the
-# last computed KKT error happened to be small is wrong and can mask a crashing
-# callback. (L50)
-_NO_KKT_FALLBACK_STATUS = frozenset({5})
+# (which the bridge now reports as ``Callback_Error``, status -198, gh#986). That
+# is an external abort, not a numerical stall at an acceptable point, so judging
+# it "successful" because the last computed KKT error happened to be small is
+# wrong and can mask a crashing callback. (L50)
+_NO_KKT_FALLBACK_STATUS = frozenset({5, -198})
 
 
 # Pure-rename map: scipy option name → Ipopt option name with no value

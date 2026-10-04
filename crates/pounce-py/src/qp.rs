@@ -210,20 +210,70 @@ fn solution_dict<'py>(
     sol: QpSolution,
     prob: Option<&QpProblem>,
     cones: &[ConeSpec],
+    tol: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    solution_dict_hsde(py, sol, prob, cones, None, tol)
+}
+
+/// [`solution_dict`] plus the HSDE homogeneous scalars (gh#990 item 9).
+///
+/// `tau` and `kappa` are those of the last HSDE run in the solve (`None` when
+/// the answer came from a driver that has none). On `primal_infeasible` /
+/// `dual_infeasible` the returned `y`, `z`, `z_lb`, `z_ub` (resp. `x`) are a
+/// *ray* carrying the `1/tau` scale of the un-homogenized embedding; its
+/// magnitude is meaningless. `certificate_scale` is the inf-norm of the
+/// returned ray (the factor to divide by to get a unit-norm certificate), and
+/// `None` on every other status.
+fn solution_dict_hsde<'py>(
+    py: Python<'py>,
+    sol: QpSolution,
+    prob: Option<&QpProblem>,
+    cones: &[ConeSpec],
+    hsde: Option<pounce_convex::hsde_scalars::HsdeScalars>,
+    tol: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("status", status_str(sol.status))?;
+    d.set_item("tau", hsde.map(|h| h.tau))?;
+    d.set_item("kappa", hsde.map(|h| h.kappa))?;
+    let norm = |vs: &[&[f64]]| {
+        vs.iter()
+            .flat_map(|v| v.iter())
+            .fold(0.0_f64, |m, x| m.max(x.abs()))
+    };
+    let scale = match sol.status {
+        QpStatus::PrimalInfeasible => Some(norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub])),
+        QpStatus::DualInfeasible => Some(norm(&[&sol.x])),
+        _ => None,
+    };
+    d.set_item("certificate_scale", scale)?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
     // Final KKT residuals (see the doc comment).
     if let Some(p) = prob {
-        let r = sol.kkt_residuals_conic(p, cones);
+        // gh#984: for the orthant QP/LP path the four numbers are read above
+        // their own finite-precision floor and in the objective's units -- the
+        // measurement the `optimal` verdict is judged on -- so `status ==
+        // "optimal"` never sits beside `kkt_error > tol`. The plain absolute
+        // max is `kkt_error_raw`. Conic solves keep the plain residuals.
+        let raw = sol.kkt_residuals_conic(p, cones);
+        let r = if cones.is_empty() {
+            sol.kkt_residuals_above_floor(p)
+        } else {
+            raw
+        };
         let rd = PyDict::new_bound(py);
         rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
         rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
         rd.set_item("complementarity", r.complementarity)?;
         rd.set_item("kkt_error", r.kkt_error())?;
+        rd.set_item("kkt_error_raw", raw.kkt_error())?;
+        // gh#984 review: the raw components too, so a reader can see which
+        // residual the floor / unit reading moved.
+        rd.set_item("primal_infeasibility_raw", raw.primal_infeasibility)?;
+        rd.set_item("dual_infeasibility_raw", raw.dual_infeasibility)?;
+        rd.set_item("complementarity_raw", raw.complementarity)?;
         d.set_item("residuals", rd)?;
 
         // gh #293 naive-caller guardrail: attach a tiny-curvature scaling
@@ -233,7 +283,13 @@ fn solution_dict<'py>(
         // for the orthant QP/LP path — the ratio test reads `G` as inequality
         // rows, which is meaningless for second-order/exp/power cone blocks.
         if cones.is_empty() {
-            if let Some(warn) = sol.scaling_diagnostic(p) {
+            // gh#984 review: a success that is within `tol` only in the
+            // objective's unit (P scaled by 1e9: raw dual residual 4041) says
+            // so rather than hiding the raw number behind `optimal`.
+            if let Some(warn) = sol
+                .scaling_diagnostic(p)
+                .or_else(|| sol.unit_scaling_note(p, tol))
+            {
                 d.set_item("scaling_warning", warn)?;
             }
         }
@@ -521,11 +577,15 @@ pub fn solve_qp<'py>(
                      indefinite QP",
                 ));
             }
-            let sol = py.allow_threads(|| match &warm {
-                Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
-                None => solve_qp_ipm(&prob.inner, &o, backend),
+            let (sol, hs) = py.allow_threads(|| {
+                pounce_convex::hsde_scalars::clear();
+                let sol = match &warm {
+                    Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
+                    None => solve_qp_ipm(&prob.inner, &o, backend),
+                };
+                (sol, pounce_convex::hsde_scalars::take())
             });
-            solution_dict(py, sol, Some(&prob.inner), &[])
+            solution_dict_hsde(py, sol, Some(&prob.inner), &[], hs, o.tol)
         }
         "active-set" => {
             if warm.is_some() {
@@ -540,7 +600,7 @@ pub fn solve_qp<'py>(
             let sol = py.allow_threads(|| {
                 solve_qp_active_set_inertia(&prob.inner, &o, &ov, inertia, &mut backend)
             });
-            solution_dict(py, sol, Some(&prob.inner), &[])
+            solution_dict(py, sol, Some(&prob.inner), &[], o.tol)
         }
         other => Err(PyValueError::new_err(format!(
             "solve_qp: method must be 'ipm' or 'active-set', got {other:?}"
@@ -605,9 +665,13 @@ pub fn solve_socp<'py>(
             prob.inner.m_ineq()
         )));
     }
-    let sol = py.allow_threads(|| solve_socp_ipm(&prob.inner, &specs, &o, backend));
+    let (sol, hs) = py.allow_threads(|| {
+        pounce_convex::hsde_scalars::clear();
+        let sol = solve_socp_ipm(&prob.inner, &specs, &o, backend);
+        (sol, pounce_convex::hsde_scalars::take())
+    });
     // Conic slack lives in a non-orthant cone: skip the orthant residuals.
-    solution_dict(py, sol, Some(&prob.inner), &specs)
+    solution_dict_hsde(py, sol, Some(&prob.inner), &specs, hs, o.tol)
 }
 
 /// Solve a batch of convex QPs in parallel (across instances). Returns a
@@ -658,7 +722,7 @@ pub fn solve_qp_batch<'py>(
     });
     sols.into_iter()
         .zip(inners.iter())
-        .map(|(s, p)| solution_dict(py, s, Some(p), &[]))
+        .map(|(s, p)| solution_dict(py, s, Some(p), &[], o.tol))
         .collect()
 }
 
@@ -704,7 +768,7 @@ pub fn solve_qp_multi_rhs<'py>(
         .map(|(s, c)| {
             let mut prob = base_inner.clone();
             prob.c = c.clone();
-            solution_dict(py, s, Some(&prob), &[])
+            solution_dict(py, s, Some(&prob), &[], o.tol)
         })
         .collect()
 }
@@ -724,6 +788,7 @@ pub fn solve_qp_multi_rhs<'py>(
 #[pyclass(name = "QpFactorization", module = "pounce._pounce", unsendable)]
 pub struct PyQpFactorization {
     inner: QpFactorization,
+    tol: f64,
 }
 
 #[pymethods]
@@ -740,7 +805,7 @@ impl PyQpFactorization {
                 "QpFactorization: initial factorization failed (structurally singular KKT system)",
             )
         })?;
-        Ok(Self { inner })
+        Ok(Self { inner, tol: o.tol })
     }
 
     /// Solve `prob`, reusing the captured symbolic factor. `prob` must
@@ -775,7 +840,7 @@ impl PyQpFactorization {
                 None => inner.solve(qp),
             }
         });
-        solution_dict(py, sol, Some(&prob.inner), &[])
+        solution_dict(py, sol, Some(&prob.inner), &[], self.tol)
     }
 }
 

@@ -100,6 +100,46 @@ fn curvature_scaling_requested(app: &pounce_algorithm::application::IpoptApplica
 }
 
 pub fn main() -> ExitCode {
+    // gh#986: the `.nl` reader, tape builder and drop glue recurse once per
+    // level of expression nesting, and an overflow is an abort. Run on a
+    // thread with a large reserved (not committed) stack, falling back to
+    // smaller reservations when the OS refuses, and tell the reader how much
+    // it got so its own depth guard fires first at any build profile. (A
+    // left-deep `o0` sum — the shape AMPL and discopt write for a long sum —
+    // is read flat and needs none of this.)
+    for stack in [1usize << 30, 256 << 20, 64 << 20] {
+        let spawned = std::thread::Builder::new()
+            .name("pounce-main".into())
+            .stack_size(stack)
+            .spawn(move || {
+                pounce_nl::nl_reader::set_parse_stack_budget(Some(stack));
+                real_main()
+            });
+        if let Ok(h) = spawned {
+            return match h.join() {
+                Ok(code) => code,
+                Err(p) => std::panic::resume_unwind(p),
+            };
+        }
+    }
+    // Could not reserve any big stack: run in place (the platform's main
+    // thread stack, conservatively assumed small) rather than not at all.
+    pounce_nl::nl_reader::set_parse_stack_budget(Some(1 << 20));
+    real_main()
+}
+
+/// Set once when the `.nl` declares discrete variables (gh#987 item 1); the
+/// report builders append it to `statistics.warnings`.
+static INTEGER_RELAXATION_WARNING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Push the integer-relaxation warning, if any, into a report's statistics.
+fn note_integer_relaxation(stats: &mut pounce_solve_report::StatisticsInfo) {
+    if let Some(w) = INTEGER_RELAXATION_WARNING.get() {
+        stats.warnings.push(w.clone());
+    }
+}
+
+fn real_main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
     // Honors RUST_LOG, NO_COLOR, and POUNCE_LOG_FORMAT.
@@ -547,6 +587,18 @@ pub fn main() -> ExitCode {
                     nl_dims = Some((prob.n, prob.m));
                     nl_dual_sign = if prob.minimize { 1.0 } else { -1.0 };
                     nl_ampl_options = prob.ampl_options.clone();
+                    // gh#987: pounce is a continuous solver. A `.nl` that
+                    // declares binary / integer variables is solved as its
+                    // relaxation; say so rather than let `Optimal` read as a
+                    // MIP verdict.
+                    if let Some(w) = pounce_cli::verify::integrality_notice(prob.n_discrete) {
+                        eprintln!("pounce: warning: {w}");
+                        // Also machine-readable: the solve report's
+                        // `statistics.warnings` carries it, so a consumer that
+                        // reads the JSON and not stderr still sees that the
+                        // `optimal` is a relaxation bound (gh#987 item 1).
+                        let _ = INTEGER_RELAXATION_WARNING.set(format!("integer_relaxation: {w}"));
+                    }
                     let elapsed = t0.elapsed().as_secs_f64();
                     // Render the source constraint equations and hand them to
                     // the debugger so `print equation <name|row>` can show a
@@ -2392,6 +2444,7 @@ pub fn main() -> ExitCode {
             builder.solution.lambda = lambda;
         }
         builder.ingest_stats(&solve_stats);
+        note_integer_relaxation(&mut builder.stats);
         if let Some(linsol) = app.linear_solver_summary() {
             builder.set_linear_solver_summary(linsol);
         }
@@ -2717,7 +2770,11 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
         QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
-        QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+        // gh#986: not `InternalError`, whose console rendering is "INTERNAL
+        // ERROR: Unknown SolverReturn value." — a crash-shaped message for an
+        // honest "no verified KKT point". `ErrorInStepComputation` is the
+        // known status the NLP path uses for a linear-algebra breakdown.
+        QpStatus::NumericalFailure => ApplicationReturnStatus::ErrorInStepComputation,
     }
 }
 
@@ -2979,6 +3036,7 @@ fn run_convex_qp(
     // True under `auto`, false under an explicit convex `solver_selection`.
     sens_may_decline: bool,
 ) -> Option<ExitCode> {
+    pounce_convex::crossover::clear_report();
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
@@ -3256,6 +3314,28 @@ fn run_convex_qp(
         let _t = timing.solve.guard();
         ipm_solve(&qp, &solve_opts())
     };
+    // gh#984 review: the `Optimal` -> `OptimalInaccurate` rule
+    // (`kkt_residuals_above_floor` against `tol`) was applied inside the
+    // solver to the problem *it* was handed -- the presolved one, when
+    // presolve ran. The report below, the `.sol` and the reroute gate are
+    // about the extracted model, so judge the postsolved point there too. A
+    // demotion only: an `OptimalInaccurate` from the solver can have other
+    // causes (an uncertified `σ` path) this measure does not see. Measured on
+    // Maros-Meszaros QPILOTNO: `Optimal` on the reduced problem beside a
+    // constraint violation of `8.2e-7` on the model. The active-set engine
+    // keeps its own verdict.
+    let sol = if !use_active_set
+        && qp_opts.use_hsde
+        && sol.status == QpStatus::Optimal
+        && sol.kkt_residuals_above_floor(&qp).kkt_error() > qp_opts.tol
+    {
+        pounce_convex::QpSolution {
+            status: QpStatus::OptimalInaccurate,
+            ..sol
+        }
+    } else {
+        sol
+    };
     let elapsed = t0.elapsed().as_secs_f64();
 
     // gh #535: the convex path finished an LP without a certificate. An LP is
@@ -3269,11 +3349,14 @@ fn run_convex_qp(
     // purpose — everything below is the verdict, and the rerouted solve owns
     // it. See `lp_declines_to_nlp` for why each gate is there.
     if lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
-        let res = sol.kkt_residuals(&qp);
+        // gh#984 review: the number beside the verdict is the one the verdict
+        // was judged on (`kkt_residuals_above_floor`), raw beside it.
+        let res = sol.kkt_residuals_above_floor(&qp);
+        let raw = sol.kkt_residuals(&qp);
         eprintln!(
             "pounce: note: the convex ({}) solve did not certify a KKT point \
-             after {} iterations in {elapsed:.3}s (KKT error {:.2e} against \
-             tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
+             after {} iterations in {elapsed:.3}s (KKT error {:.2e}, raw {:.2e}, \
+             against tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
              being re-solved on the general NLP interior-point path, which \
              certifies the degenerate, rank-deficient and badly-scaled models \
              the interior path stalls on (gh #133, gh #535). Use \
@@ -3281,6 +3364,7 @@ fn run_convex_qp(
             class.name(),
             sol.iters,
             res.kkt_error(),
+            raw.kkt_error(),
             qp_opts.tol,
         );
         return None;
@@ -3310,6 +3394,29 @@ fn run_convex_qp(
         class.name(),
         sol.iters,
     );
+    // gh#990 item 12: crossover used to be silent at the default print level.
+    // One line: which engine, what it had to do, and the residual it ended on.
+    if let Some(c) = pounce_convex::crossover::take_report() {
+        println!(
+            "Crossover: {} engine, {}; {} superbasic(s) pushed, {} pivot(s) \
+             (push {}, phase 1 {}, phase 2 {}), {} bound flip(s); KKT error \
+             {:.2e} -> {:.2e}",
+            c.engine,
+            if c.accepted {
+                "vertex accepted"
+            } else {
+                "interior point kept"
+            },
+            c.superbasics,
+            c.pivots_push + c.pivots_phase1 + c.pivots_phase2,
+            c.pivots_push,
+            c.pivots_phase1,
+            c.pivots_phase2,
+            c.flips,
+            c.kkt_error_before,
+            c.kkt_error_after,
+        );
+    }
     // gh #848: an indefinite QP whose claimed optimum the second-order screen
     // refuted lands here as `NumericalFailure`, which the shared console
     // vocabulary renders "INTERNAL ERROR: Unknown SolverReturn value." — a
@@ -3346,6 +3453,16 @@ fn run_convex_qp(
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
     let res = sol.kkt_residuals(&qp);
+    // gh#984 review: and the measurement the `Optimal` / `OptimalInaccurate`
+    // verdict was judged on (each residual above its own finite-precision
+    // floor, stationarity / complementarity in the objective's unit). Printed
+    // as the `(scaled)` column beside the raw `(unscaled)` one, and written as
+    // the JSON report's `final_*` residuals, so the status and the number
+    // printed beside it are one measurement.
+    let verdict = sol.kkt_residuals_above_floor(&qp);
+    if let Some(note) = sol.unit_scaling_note(&qp, qp_opts.tol) {
+        eprintln!("pounce: {note}");
+    }
     // ... but `qp` is the model the SOLVER was handed, whose inequality rows
     // and variable box carry the `bound_relax_factor` widening
     // (`qp_extract::BoundRelax`). That is the right model for the convergence
@@ -3359,13 +3476,21 @@ fn run_convex_qp(
     let reported_res = pounce_cli::qp_extract::declared_residuals_qp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
-    print::print_convex_summary(
+    print::print_convex_summary_measured(
         sol.iters,
         reported_obj,
-        res.primal_infeasibility,
-        res.dual_infeasibility,
-        res.complementarity,
-        res.kkt_error(),
+        [
+            verdict.primal_infeasibility,
+            verdict.dual_infeasibility,
+            verdict.complementarity,
+            verdict.kkt_error(),
+        ],
+        [
+            res.primal_infeasibility,
+            res.dual_infeasibility,
+            res.complementarity,
+            res.kkt_error(),
+        ],
         // Ipopt's `Variable bound violation`, measured against the box the
         // caller declared when a widening was applied and against the solved
         // box otherwise — where the two are the same object, so it is one
@@ -3481,19 +3606,28 @@ fn run_convex_qp(
         builder.solution.lambda = lambda.clone();
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
+        note_integer_relaxation(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         // Real final KKT residuals (from pounce-convex, computed above), so the
-        // harness sees genuine convergence numbers rather than zeros.
-        builder.stats.final_constr_viol = res.primal_infeasibility;
-        builder.stats.final_dual_inf = res.dual_infeasibility;
-        builder.stats.final_compl = res.complementarity;
-        builder.stats.final_kkt_error = res.kkt_error();
+        // harness sees genuine convergence numbers rather than zeros -- the
+        // verdict's own measurement (gh#984 review, see `verdict`).
+        builder.stats.final_constr_viol = verdict.primal_infeasibility;
+        builder.stats.final_dual_inf = verdict.dual_infeasibility;
+        builder.stats.final_compl = verdict.complementarity;
+        builder.stats.final_kkt_error = verdict.kkt_error();
         // How far outside the model AS DECLARED the returned point sits —
         // `final_constr_viol` measures the `bound_relax_factor`-widened model
         // the solver was handed, which understates it by the widening.
+        //
+        // gh#987 item 4: with no widening applied the model handed to the
+        // solver IS the model as declared, so the violation `res` measured
+        // (on the extracted rows, in the caller's units) is the declared
+        // one. It used to read NaN there -- the common case -- so the
+        // field that exists to say "how far outside your model" said
+        // nothing on the solves where the answer is simplest.
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
-            .unwrap_or(f64::NAN);
+            .unwrap_or(res.primal_infeasibility);
         // Unconditional, unlike the line above: this is a summary *row*, not a
         // warning that only fires when a widening moved the answer, so it
         // carries a real number on every solve.
@@ -3871,6 +4005,7 @@ fn run_convex_socp(
         builder.solution.lambda = lambda.clone();
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
+        note_integer_relaxation(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         builder.stats.final_constr_viol = res.primal_infeasibility;
         builder.stats.final_dual_inf = res.dual_infeasibility;
@@ -3879,9 +4014,16 @@ fn run_convex_socp(
         // How far outside the model AS DECLARED the returned point sits —
         // `final_constr_viol` measures the `bound_relax_factor`-widened model
         // the solver was handed, which understates it by the widening.
+        //
+        // gh#987 item 4: with no widening applied the model handed to the
+        // solver IS the model as declared, so the violation `res` measured
+        // (on the extracted rows, in the caller's units) is the declared
+        // one. It used to read NaN there -- the common case -- so the
+        // field that exists to say "how far outside your model" said
+        // nothing on the solves where the answer is simplest.
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
-            .unwrap_or(f64::NAN);
+            .unwrap_or(res.primal_infeasibility);
         // Unconditional, unlike the line above: this is a summary *row*, not a
         // warning that only fires when a widening moved the answer, so it
         // carries a real number on every solve.

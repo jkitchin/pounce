@@ -504,22 +504,47 @@ fn install() {
         }
     }
 
-    /// ANSI on unless `NO_COLOR`, with `CLICOLOR_FORCE` overriding and
-    /// a terminal-capability check otherwise.
+    /// ANSI on unless `NO_COLOR`, with `CLICOLOR_FORCE` overriding.
+    /// Otherwise only when stderr -- where this layer writes -- is a
+    /// terminal that advertises colour support (gh#990 item 13: the
+    /// `TERM` check alone left escapes in redirected logs).
     fn ansi_enabled() -> bool {
-        if anstyle_query::clicolor_force() {
-            return true;
-        }
-        if anstyle_query::no_color() {
-            return false;
-        }
-        anstyle_query::term_supports_ansi_color()
+        use std::io::IsTerminal;
+        ansi_policy(
+            anstyle_query::clicolor_force(),
+            anstyle_query::no_color(),
+            std::io::stderr().is_terminal(),
+            anstyle_query::term_supports_ansi_color(),
+        )
     }
+}
+
+/// Pure colour policy behind [`install`]'s `ansi_enabled`.
+fn ansi_policy(force: bool, no_color: bool, stderr_is_tty: bool, term_ok: bool) -> bool {
+    if force {
+        return true;
+    }
+    if no_color {
+        return false;
+    }
+    stderr_is_tty && term_ok
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_policy_strips_colour_unless_stderr_is_a_terminal() {
+        // Redirected stderr (file / pipe / Jupyter): never colour.
+        assert!(!ansi_policy(false, false, false, true));
+        // A TTY with colour support: colour.
+        assert!(ansi_policy(false, false, true, true));
+        assert!(!ansi_policy(false, false, true, false));
+        // NO_COLOR wins over a TTY; CLICOLOR_FORCE wins over everything.
+        assert!(!ansi_policy(false, true, true, true));
+        assert!(ansi_policy(true, false, false, false));
+    }
 
     fn sample_record(iter: i32, alpha: f64, c: char) -> IterRecord {
         IterRecord {

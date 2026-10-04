@@ -63,7 +63,7 @@
 //! wrong (gh #495); with them the exact residual is available, and
 //! `--require-optimal` gates on it.
 
-use crate::nl_reader;
+use crate::nl_reader::{self, DiscreteCensus};
 use pounce_common::tolerance::is_negligible;
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, TNLP};
@@ -76,7 +76,15 @@ pub struct VerifyArgs {
     pub nl: PathBuf,
     pub sol: PathBuf,
     /// Max `|violation|` of any constraint or bound still called feasible.
+    ///
+    /// Applied **per row, relative to the row's magnitude** — the accepting
+    /// test is `|viol| <= feas_tol * max(1, |row|)` (see [`row_is_violated`]),
+    /// so on a row of size `2e6` a violation of `1.0` passes at `1e-6`. Use
+    /// [`abs_feas_tol`](VerifyArgs::abs_feas_tol) for a plain absolute test.
     pub feas_tol: Number,
+    /// `--abs-feas-tol T` — judge every row by the plain absolute test
+    /// `|viol| <= T`, replacing the relative test above (gh#987).
+    pub abs_feas_tol: Option<Number>,
     /// Max stationarity residual still called first-order optimal.
     pub opt_tol: Number,
     /// `--json-output PATH` — write the machine-readable receipt to PATH.
@@ -92,6 +100,7 @@ impl Default for VerifyArgs {
             nl: PathBuf::new(),
             sol: PathBuf::new(),
             feas_tol: 1e-6,
+            abs_feas_tol: None,
             opt_tol: 1e-6,
             json_output: None,
             require_optimal: false,
@@ -112,7 +121,12 @@ Arguments:
   <claim.sol>            claimed AMPL .sol solution to check
 
 Options:
-  --feas-tol <t>         feasibility tolerance (default 1e-6)
+  --feas-tol <t>         feasibility tolerance (default 1e-6). RELATIVE per
+                         row: a row passes when |violation| <= t*max(1,|row|),
+                         so a violation of 1.0 on a row of size 2e6 passes at
+                         1e-6. Use --abs-feas-tol for an absolute test.
+  --abs-feas-tol <t>     judge every row by the absolute test |violation| <= t
+                         (replaces the relative --feas-tol test)
   --opt-tol <t>          stationarity tolerance (default 1e-6)
   --require-optimal      also fail if the KKT stationarity residual
                          exceeds --opt-tol (needs duals in the .sol)
@@ -160,6 +174,10 @@ fn parse_verify_argv(rest: &[String]) -> Result<Option<VerifyArgs>, String> {
             "--feas-tol" => {
                 let v = it.next().ok_or("--feas-tol requires a value")?;
                 a.feas_tol = v.parse().map_err(|e| format!("--feas-tol: {e}"))?;
+            }
+            "--abs-feas-tol" => {
+                let v = it.next().ok_or("--abs-feas-tol requires a value")?;
+                a.abs_feas_tol = Some(v.parse().map_err(|e| format!("--abs-feas-tol: {e}"))?);
             }
             "--opt-tol" => {
                 let v = it.next().ok_or("--opt-tol requires a value")?;
@@ -225,6 +243,15 @@ pub struct VerifyOutcome {
     /// both duals and bound multipliers are present.
     pub stationarity_with_bound_multipliers: Option<Number>,
     pub optimal: Option<bool>,
+    /// The `.nl` header's declared binary / integer census (gh#987).
+    pub discrete: Option<DiscreteCensus>,
+    /// Max distance to the nearest integer over the declared integer
+    /// columns, and the worst column. `None` when integrality was not
+    /// checked (no discrete variables, or their columns cannot be told apart
+    /// from the header alone).
+    pub integrality: Option<(Number, usize)>,
+    /// The tolerance used for the absolute test, when `--abs-feas-tol` was set.
+    pub abs_feas_tol: Option<Number>,
     // final
     pub verified: bool,
 }
@@ -295,6 +322,27 @@ pub(crate) fn row_is_violated(viol: Number, magnitude: Number, feas_tol: Number)
         return true;
     }
     !is_negligible(viol, magnitude, feas_tol)
+}
+
+/// Row verdict under the active tolerance mode: the relative accepting test by
+/// default, the plain absolute test when `--abs-feas-tol` was given.
+fn judge_row(args: &VerifyArgs, viol: Number, magnitude: Number) -> bool {
+    match args.abs_feas_tol {
+        Some(t) => !viol.is_finite() || viol > t,
+        None => row_is_violated(viol, magnitude, args.feas_tol),
+    }
+}
+
+/// The one-line warning for a `.nl` that declares integer variables, shared by
+/// the solve path and `verify` (gh#987). `None` when there are none.
+pub fn integrality_notice(c: Option<DiscreteCensus>) -> Option<String> {
+    let c = c.filter(|c| c.total() > 0)?;
+    Some(format!(
+        "the .nl declares {} binary and {} integer variable(s); pounce is a \
+         continuous solver and solved the RELAXATION, so the result is a bound \
+         on the MIP optimum, not an integer-feasible solution",
+        c.binary, c.integer
+    ))
 }
 
 pub(crate) fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
@@ -369,6 +417,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let m = prob.m;
     let con_names = prob.con_names.clone();
     let var_names = prob.var_names.clone();
+    let prob_discrete = prob.n_discrete;
     let mut tnlp = nl_reader::NlTnlp::new(prob);
 
     let info = tnlp
@@ -416,7 +465,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let mut any_bound_violated = false;
     for j in 0..n {
         let viol = box_violation(x[j], x_l[j], x_u[j]);
-        if row_is_violated(viol, row_magnitude(x[j], x_l[j], x_u[j]), args.feas_tol) {
+        if judge_row(args, viol, row_magnitude(x[j], x_l[j], x_u[j])) {
             any_bound_violated = true;
         }
         if viol > max_bound_violation {
@@ -442,7 +491,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let mut any_con_violated = false;
     for i in 0..m {
         let viol = box_violation(g[i], g_l[i], g_u[i]);
-        if row_is_violated(viol, row_magnitude(g[i], g_l[i], g_u[i]), args.feas_tol) {
+        if judge_row(args, viol, row_magnitude(g[i], g_l[i], g_u[i])) {
             any_con_violated = true;
         }
         if viol > max_con_violation {
@@ -460,7 +509,33 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
 
     // Per-row and scale-relative: a single absolute threshold across rows of
     // wildly different magnitude answers a different question for each of them.
-    let feasible = !any_con_violated && !any_bound_violated;
+    // Integrality (gh#987). pounce solves the continuous relaxation, so a
+    // `.sol` for a MIP `.nl` can be feasible for every row and still be
+    // fractional. Header line 7 says how many columns are binary / integer;
+    // they are the LAST `nbv + niv` columns unless some also appear
+    // nonlinearly (those are ordered inside the nonlinear blocks), in which
+    // case the columns cannot be identified and the check is skipped — the
+    // report says so rather than implying it passed.
+    let discrete = prob_discrete;
+    let integrality = discrete
+        .filter(|d| d.total() > 0 && d.nonlinear_discrete == 0 && d.total() <= n)
+        .map(|d| {
+            let mut worst = (0.0_f64, n - d.total());
+            for (j, &xj) in x.iter().enumerate().skip(n - d.total()) {
+                let dist = if xj.is_finite() {
+                    (xj - xj.round()).abs()
+                } else {
+                    Number::INFINITY
+                };
+                if dist > worst.0 {
+                    worst = (dist, j);
+                }
+            }
+            worst
+        });
+    let integrality_ok =
+        integrality.is_none_or(|(d, _)| d <= args.abs_feas_tol.unwrap_or(args.feas_tol));
+    let feasible = !any_con_violated && !any_bound_violated && integrality_ok;
 
     // --- objective ---
     let objective = tnlp.eval_f(&x, true);
@@ -571,6 +646,9 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         bound_complementarity,
         stationarity_with_bound_multipliers,
         optimal,
+        discrete,
+        integrality,
+        abs_feas_tol: args.abs_feas_tol,
         verified,
     })
 }
@@ -936,7 +1014,13 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         println!("  claimed solve_result_num: {srn}");
     }
     println!();
-    println!("  feasibility (tol {:.1e}):", o.feas_tol);
+    match o.abs_feas_tol {
+        Some(t) => println!("  feasibility (absolute tol {t:.1e}):"),
+        None => println!(
+            "  feasibility (tol {:.1e}, relative per row: |viol| <= tol*max(1,|row|)):",
+            o.feas_tol
+        ),
+    }
     print_row(
         "max constraint violation",
         o.max_con_violation,
@@ -947,6 +1031,18 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         o.max_bound_violation,
         &o.worst_bound,
     );
+    match (o.discrete.filter(|d| d.total() > 0), o.integrality) {
+        (Some(d), Some((v, j))) => println!(
+            "    integrality ({} binary + {} integer columns): max distance to an integer {v:.3e} at x[{j}]",
+            d.binary, d.integer
+        ),
+        (Some(d), None) => println!(
+            "    integrality: NOT CHECKED — the .nl declares {} binary + {} integer variable(s) \
+             that also appear nonlinearly, so their columns cannot be identified from the header",
+            d.binary, d.integer
+        ),
+        (None, _) => {}
+    }
     if let Some(obj) = o.objective {
         println!("  objective at x*: {obj:.10e}");
     }
@@ -993,8 +1089,35 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         println!("  optimality: not checked (.sol carried no duals)");
     }
     println!();
+    if o.verified && !args.require_optimal {
+        if let Some(s) = o.stationarity_with_bound_multipliers {
+            if s > o.opt_tol {
+                println!(
+                    "  CAVEAT: dual infeasibility {s:.3e} exceeds --opt-tol {:.1e}; VERIFIED here \
+                     means FEASIBLE only, not optimal (pass --require-optimal to gate on it).",
+                    o.opt_tol
+                );
+            }
+        } else if let Some(s) = o.stationarity {
+            if s > o.opt_tol {
+                println!(
+                    "  CAVEAT: KKT stationarity residual {s:.3e} exceeds --opt-tol {:.1e}; \
+                     VERIFIED here means FEASIBLE only, not optimal (pass --require-optimal to gate on it).",
+                    o.opt_tol
+                );
+            }
+        }
+    }
     let verdict = if o.verified {
         "VERIFIED — solution is feasible for the canonical problem".to_string()
+    } else if !o.feasible
+        && o.integrality
+            .is_some_and(|(d, _)| d > o.abs_feas_tol.unwrap_or(o.feas_tol))
+        && o.max_con_violation <= o.abs_feas_tol.unwrap_or(o.feas_tol)
+        && o.max_bound_violation <= o.abs_feas_tol.unwrap_or(o.feas_tol)
+    {
+        "REJECTED — solution is not integer-feasible (declared integer columns are fractional)"
+            .to_string()
     } else if !o.feasible {
         "REJECTED — solution VIOLATES the canonical constraints".to_string()
     } else if o.optimal.is_none() {
@@ -1120,7 +1243,22 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
             "claimed_solve_result_num": o.solve_result_num,
             "duals_present": o.duals_present,
         },
-        "tolerances": { "feasibility": o.feas_tol, "optimality": o.opt_tol },
+        "tolerances": {
+            "feasibility": o.feas_tol,
+            "absolute_feasibility": o.abs_feas_tol,
+            "feasibility_mode": if o.abs_feas_tol.is_some() { "absolute" } else { "relative_per_row" },
+            "optimality": o.opt_tol,
+        },
+        "integrality": match (o.discrete, o.integrality) {
+            (Some(d), Some((v, j))) if d.total() > 0 => json!({
+                "checked": true, "binary": d.binary, "integer": d.integer,
+                "max_distance_to_integer": v, "worst_column": j,
+            }),
+            (Some(d), None) if d.total() > 0 => json!({
+                "checked": false, "binary": d.binary, "integer": d.integer,
+            }),
+            _ => json!({ "checked": false, "binary": 0, "integer": 0 }),
+        },
         "feasibility": {
             "max_constraint_violation": o.max_con_violation,
             "worst_constraint": worst_con,

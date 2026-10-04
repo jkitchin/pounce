@@ -141,14 +141,19 @@ fn the_objective_is_past_the_declared_optimum_by_the_widening() {
 
 #[test]
 fn no_widening_means_nothing_extra_to_report() {
-    // The convex arm's DEFAULT. With no widening the two measurements coincide
-    // by construction, so the declared field is left uncomputed rather than
-    // duplicating a number the caller already has.
+    // gh#987 item 4: it is still reported. With no widening the two
+    // measurements coincide, and the field used to read NaN here -- the
+    // common case -- so the number that exists to say how far outside the
+    // caller's model the point sits was absent exactly where it is simplest.
     let r = solve(&[]);
+    let d = r.statistics.final_declared_constr_viol;
     assert!(
-        r.statistics.final_declared_constr_viol.is_nan(),
-        "expected NaN (nothing to add) with no widening; got {:e}",
-        r.statistics.final_declared_constr_viol
+        d.is_finite() && d <= 1e-8,
+        "expected a finite user-unit violation with no widening; got {d:e}"
+    );
+    assert_eq!(
+        d, r.statistics.final_constr_viol,
+        "unwidened, declared and solved models are one object"
     );
     assert!(
         r.statistics.final_constr_viol <= 1e-8,
@@ -228,13 +233,15 @@ fn the_nlp_arm_reports_a_declared_box_violation() {
     );
 }
 
-/// And with the widening off there is nothing to add, on this arm too.
+/// With the widening off the NLP arm still reports the measurement, in the
+/// caller's units (gh#987): the field used to read NaN here, so under row
+/// scaling the user-unit violation was reported nowhere.
 #[test]
-fn the_nlp_arm_adds_nothing_when_it_did_not_widen() {
+fn the_nlp_arm_reports_the_declared_violation_even_without_a_widening() {
     let r = nlp_solve("bound_relax_row.nl", &["bound_relax_factor=0"]);
+    let d = r.statistics.final_declared_constr_viol;
     assert!(
-        r.statistics.final_declared_constr_viol.is_nan(),
-        "expected NaN at bound_relax_factor=0; got {:e}",
-        r.statistics.final_declared_constr_viol
+        d.is_finite() && d <= 1e-6,
+        "expected a finite, converged user-unit violation at bound_relax_factor=0; got {d:e}"
     );
 }

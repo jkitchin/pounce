@@ -237,6 +237,13 @@ checked one multiplier block at a time — `obj_factor = 1, λ = 0` against
 differences of `eval_grad_f`, then `obj_factor = 0, λ = eⱼ` against
 differences of row `j` of `eval_jac_g`.
 
+The report goes to stderr, and the verdict is also machine-readable: the
+Python `info["derivative_check"]` and the solve report's
+`statistics.derivative_check` carry `clean`, the counts, the largest relative
+error per derivative kind and the flagged entries (see
+[the report schema](schema/solve-report-v1.md)), so a notebook or a test can
+assert on it instead of scraping stderr.
+
 Entries that look wrong are marked `*`:
 
 ```
@@ -1277,7 +1284,13 @@ Set `dual_inf_scale_kappa = 0` to switch the floor off and restore
 upstream Ipopt's bare-absolute bound. That is also the setting to reach
 for if you *tighten* `dual_inf_tol` and want that absolute standard
 honoured unconditionally — the floor is a floor, so it can override a
-tightened `dual_inf_tol` on a large-gradient model.
+tightened `dual_inf_tol` on a large-gradient model. Since gh#983 this is
+automatic: setting `dual_inf_tol` explicitly to a value other than its
+default `1`, without also naming `dual_inf_scale_kappa`, switches the floor
+off. Echoing the default (`dual_inf_tol 1`, as a front end passing the whole
+option table does) is read as not naming it and keeps the floor; use
+`dual_inf_scale_kappa 0` for the absolute standard at the default tolerance.
+Name both to keep the floor under a tolerance of your own.
 
 ### `s_max` — where `s_d` and `s_c` come from
 
@@ -1299,6 +1312,75 @@ earlier. The scaled and unscaled numbers are both reported: `--json-output`
 carries `final_kkt_error` and `final_unscaled_kkt_error`, and their ratio
 is exactly what `s_max` controls.
 
+## Success verdicts and the model's own scale (`solve_quality_audit`)
+
+The strict convergence test runs on a *scaled* aggregate. Gradient-based
+scaling measures the objective gradient once, at the starting point, freezes
+the factor, and only ever scales **down**. Two failures follow, one on each
+side, and neither is visible in the scaled space (gh#983):
+
+* **Frozen at a huge-gradient start.** LJ7 from a start whose gradient is
+  `3e8` freezes a factor of `3e-7`; the scaled test passes at a point whose
+  unscaled stationarity residual is `2.9e-2`, and continuing under that
+  factor does not improve it. `pounce.find_minima` without `hess=` then
+  accepted gradients of `~1` as minima.
+* **Small user objective.** A profit in M$/L has a gradient of `1e-5` and
+  nothing scales it up, so the absolute complementarity floor (`~mu`) is
+  `2.5e-4` of the objective's own scale: `Solve_Succeeded` at `T = 359.9513`
+  against an active bound of `360`, `4.7e-4` (relative) off the optimum.
+
+With `solve_quality_audit=yes` (the default), a `Solve_Succeeded` /
+`Solved_To_Acceptable_Level` verdict that shows either signature is re-solved
+**once** from the returned point: the first with the scaling re-evaluated
+there, the second with the objective multiplied by `1/g` (capped at `1e10`),
+where `g` is the larger of `max|grad f|` at the start and at the returned
+point. A re-solve is spent only when it would change something:
+
+* the re-scale only when the factor gradient-based scaling computes **at the
+  returned point** is at least `10x` the frozen one (a legitimately large
+  objective, `hs71` times `1e8`, re-evaluates to the factor it already has and
+  is not re-solved);
+* the up-scale only when the unscaled complementarity exceeds `1e-7` of `g`
+  (on the reactor model the relative objective error is about twice that
+  ratio) and `1/g` is at least `10`. A start that happens to sit near a
+  stationary point does not read as a tiny objective, because `g` also reads
+  the gradient at the answer. When the ratio is exceeded but `1/g < 10`, or
+  the caller owns the scaling (`nlp_scaling_method` `none` /
+  `user-scaling`), the run gets the `objective_scale_small` warning instead of
+  a re-solve, so there is no band of objective scales that gets neither.
+
+The re-solve is promoted only if it returns a clean verdict, is no
+worse in the model's own units, strictly improves the quantity that triggered
+the audit, and is admissible next to the first answer (the same rule as the
+gh#884 retry); otherwise the first attempt's status, point and statistics are
+restored. `equilibration-based` scaling, which pounce currently runs as
+gradient-based, is audited as gradient-based. Cost: one extra solve, from a
+converged point, on a run that shows a signature.
+
+Whatever happens, the run carries **structured warnings**
+(`info["warnings"]`, the JSON report's `statistics.warnings`, `WARNING:`
+console lines): `objective_scale_small`, `unscaled_stationarity_above_tol`,
+`large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They describe the run
+whose point is returned (a discarded retry's warnings go with it), each code
+appears at most once, and they are printed once per solve. A warning does not
+change the status, with one exception that the audit makes on the **final**
+verdict only, after every retry has decided: a `Solve_Succeeded` from a run
+that itself showed the gh#884 signature (a settled primal with a runaway
+multiplier) and still carries an unscaled dual infeasibility above
+`max(acceptable_tol, 1e-3)` is reported as `Solved_To_Acceptable_Level`, with
+`unscaled_dual_inf_above_acceptable` saying so.
+
+**Why the scale-relative floor is not capped.** An explicitly set
+`dual_inf_tol` is honoured (see `dual_inf_scale_kappa` above). For a caller
+who set nothing, the floor `kappa * tol * dual_scale` rises above
+`dual_inf_tol` only once the terms of the stationarity residual reach `1e8`.
+The cusp of gh#983 (multipliers `3.5e9`, residual `0.144`) would be rejected
+by a cap near `0.1`, but so would Vanderbei's `orthrds2` (residual `89.7` at
+scale `1.6e10`, stationary to nine digits relative to its scale). A cap
+cannot separate them by magnitude alone. Instead such a point carries the
+`large_dual_scale` warning, which is the symptom of the failed constraint
+qualification that produced the multipliers.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a
@@ -1313,6 +1395,64 @@ to the specialized convex solvers (LP / convex QP / SOCP, see
 
 A positive factor is a pure conditioning knob; the convex path reports
 natural units either way, so it keeps the fast path.
+
+## Warm-starting an NLP after a parameter change
+
+`warm_start_init_point=yes` (or passing a `WarmStart` from Python) starts the
+solve from a supplied primal/dual iterate. Starting from a *nearby* solution
+does not by itself make the solve short, and one parameter change used to make
+it much longer: when a constraint that is **active at the carried point** has
+its bound move away (a capacity `K` raised from 14 to 16), the carried point
+still has multiplier `1.41` on a row whose slack is now 2 wide. The slack
+multiplier the initializer rebuilt was barrier-sized (`mu / slack`), so the
+start carried `1.41` of dual infeasibility that no step could repair at a
+tiny `mu`, and the solve spent its first dozens of iterations in restoration
+(gh#988: 49 iterations against 7 cold).
+
+Since the gh#988 second pass the initializer treats the supplied equality /
+inequality multiplier as the authority on activity. When the stationarity of
+the slack row (`-y_d + v = 0`) asks for a slack multiplier more than ten times
+what `mu / slack` supports, the multiplier it implies is taken and the slack
+is closed onto its bound at `mu / v` (the move costs a primal infeasibility of
+the old slack, which the first Newton step removes along the active
+constraint). That model now warm-starts in 4 iterations (cold: 7), and no
+`warm_start_*` option is needed. Seeds whose stationarity miss is *not*
+coherent with the primal point (a corrupted `y`) are still refused by the
+gh#617 test and keep the barrier-sized fill, and the gate never touches
+variable-bound multipliers.
+
+The move is capped (gh#988 review): a slack is closed only when it is at most
+`0.5·max(1, |s|)` wide. Past that the bound has moved too far for "still
+active" to be the likely reading — capacity 14 → 100 would have closed an
+86-wide slack and started the solve 86 infeasible — and the capped split is
+used instead. `info["warm_start"]["primal_residual"]` is measured on the point
+the solve actually starts from (after the move), and `slacks_closed` /
+`slack_close_reverted` report what the move did. A row the carried point
+*violates* (a capacity tightened 14 → 12) is active by construction, so its
+slack multiplier takes the value the seeded `y_d` implies rather than the
+constant fill (24 → 4 iterations, cold 6). Across the reviewer's sweep
+K ∈ {8, …, 1e4} the warm start is now no slower than cold at every K.
+
+`warm_start_recentering` set on the `Problem` with `add_option` before a
+`solve(warm_start=...)` takes precedence over the `WarmStart`'s own
+`recentering` field (it used to be overwritten, so `none` silently ran
+`residual`). With `none` the K = 16 case takes 97 iterations — the
+reconstruction above is what makes it 4.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `warm_start_init_point` | `no` | Use the supplied primal and dual iterate as the start. |
+| `warm_start_target_mu` | `0` | When `> 0`, start the barrier at exactly this `mu`, overriding `mu_init` and the recentering pass. An explicit instruction: still wins over the residual estimate. Useful for a small, well-understood parameter change (`1e-4` takes the gh#988 model from 4 to 3-5 iterations); leave at `0` for a stale or distant point, where a larger start `mu` is the safer choice. |
+| `warm_start_recentering` | `residual` | `residual` measures the supplied point and raises `mu` only for measured complementarity; `none` restores pre-gh#606 behaviour. |
+| `warm_start_bound_push`, `warm_start_bound_frac` | `0.001` | Primal push away from bounds (as `bound_push` / `bound_frac`). |
+| `warm_start_slack_bound_push`, `warm_start_slack_bound_frac` | `0.001` | Same for inequality slacks. |
+| `warm_start_mult_bound_push` | `0.001` | Floor on bound multipliers. |
+| `warm_start_mult_init_max` | `1e6` | Cap on supplied multiplier magnitudes. |
+
+The default start `mu` is unchanged. The fix above is in how the supplied
+multipliers are reconciled with the slacks, not in a lower default barrier:
+lowering `mu` for every warm start is a trajectory change for points that are
+stale or distant, where a larger start `mu` is the safer choice.
 
 ## Starting-point conditioning
 
@@ -1354,6 +1494,24 @@ complementarity. The two strategies are `monotone` (default — geometric
 schedule) and `adaptive` (quality-function oracle picks each μ from the
 current iterate's complementarity). See
 [μ-strategy](troubleshooting.md#μ-strategy) for when to switch.
+
+**The default depends on the Hessian.** `monotone` is the registered
+default, but `hessian_approximation=limited-memory` changes what an *unset*
+`mu_strategy` means (gh#746, matching Ipopt's `IpAlgBuilder.cpp:1059`):
+
+| How L-BFGS was selected | Unset `mu_strategy` resolves to |
+|---|---|
+| You asked for `hessian_approximation=limited-memory` (CLI, `add_option`, `minimize(..., hessian_approximation=...)`), even though a `hessian` is defined | `adaptive` |
+| The Python `Problem` object defines no `hessian`, so POUNCE fell back to L-BFGS itself | `monotone` — POUNCE pins it, because the fallback is not a request for a barrier schedule and adaptive measurably hurts warm starts |
+| Exact Hessian | `monotone` |
+
+An explicit `mu_strategy` always wins. On a 10-variable Rosenbrock with L-BFGS
+the two rows differ as 117 iterations (adaptive) against 121 (monotone), so
+the rule is visible as an iteration count. Because `mu_strategy_fallback`
+defaults to on while `mu_strategy` is unset (gh#748), a stalled solve under
+either default is retried once under the other. The solve report does not
+record the strategy that was resolved; pin `mu_strategy` yourself when you
+need the run to be reproducible across call paths.
 
 | Option                                  | Default            | Meaning                                                                                       |
 |-----------------------------------------|--------------------|-----------------------------------------------------------------------------------------------|
@@ -1491,6 +1649,7 @@ optimization above all.
 |---|---|---|---|
 | `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
 | `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
+| `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each element along the model's declared Hessian sparsity and keep only its declared entries |
 | `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
 | `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
 | `partitioned_curvature_cap` | off (`inf`)      | > 0                        | cap on one update's movement. **Leave off** |
@@ -1501,7 +1660,9 @@ ordering, at the cost of as many blocks as there are constraints.
 `blocks` is the partition of Asprion, Chinellato and Guzzella: a direct
 collocation transcription orders its variables by stage, so the
 Lagrangian Hessian is close to block diagonal in contiguous blocks and
-the block count is the *stage* count. Set `partitioned_block_size` to
+the block count is the *stage* count. When the model declares its Hessian
+structure, the blocks come from that pattern instead — see
+`partitioned_structure` below. Set `partitioned_block_size` to
 what one stage contributes (states × collocation points, plus controls)
 — too small and the block misses genuine intra-stage coupling, too large
 and each block carries more parameters than its one curvature pair per
@@ -1516,6 +1677,63 @@ the indefiniteness would never reach the inertia correction.
 `elements=blocks` defaults to damped BFGS instead, since there the
 element *is* the Lagrangian restricted to a block, which is the object
 an interior-point method wants a positive-definite model of.
+
+**`partitioned_structure`.** A constraint row is linear in most of its
+support and nonlinear in a few small independent groups (a collocation
+row couples a state to the control at the same collocation point and to
+nothing else), so its Hessian is a handful of tiny blocks inside a
+dense-looking `k × k` pattern. One secant pair per iteration cannot
+determine a dense block, and the rank spent on pairs that do not couple
+appears as spurious entries (up to `1e2` against a true Hessian whose
+largest entry was `1e-3`, on a Radau-collocated batch reactor).
+`declared` (default) reads the Hessian sparsity the model already
+declares for `eval_h` — structure only, nothing is evaluated — gives
+each connected group its own element, and drops coordinates the pattern
+never couples. A model that declares no Hessian structure (a Python
+problem object without `hessian`, for instance) takes the `jacobian`
+behaviour, because an absent declaration is not evidence of linearity.
+Within each group only the *declared* entries are kept. A connected
+group is usually not complete — a collocation row's group is a star, the
+control coupled to each state at the same point with no state–state and
+no state-diagonal entries — and a dense SR1 or BFGS term writes curvature
+into every one of those structurally zero positions. Weighted by
+multipliers of either sign, those entries gave the assembled Hessian the
+wrong inertia, and the interior-point method spent the solve on a
+regularization `δ_w` decaying by a third per iteration. An element whose
+declared pattern is incomplete is therefore updated by the
+pattern-constrained minimum-change secant update (Toint's sparse PSB),
+from zero, whichever `partitioned_update_type` is set; on a star that
+determines the element Hessian from a single pair, so `sr1` and `bfgs`
+coincide there. `partitioned_update_type` still governs elements whose
+declared pattern is complete and models without a declared pattern.
+
+Radau-collocated batch reactor (gh#989 item 5; discopt model, `.nl`
+export, the issue's starting profile), iterations:
+
+| N | exact | limited-memory | partitioned | `bfgs` | `blocks` |
+|---|---|---|---|---|---|
+| 25 | 12 | 17 | 13 (was 14) | 13 (was cap) | 13 (was 88) |
+| 50 | 17 | 16 | 15 (was 22) | 15 (was cap) | 15 (was 122) |
+| 100 | 16 | 16 | 15 (was 54) | 15 (was cap) | 15 (was 139) |
+| 400 | 18 | 17 | 21 (was 74) | 21 (was cap) | 21 (was cap) |
+
+With `blocks`, a declared pattern whose connected components all fit in
+`partitioned_block_size` supplies the blocks: those components are the
+Lagrangian Hessian's exact diagonal blocks, whatever order the writer put
+the variables in (an AMPL `.nl` puts nonlinear variables first, so
+contiguous ranges are not stages there). A model whose pattern has a wider
+component keeps the contiguous partition — chunking a component cuts
+declared coupling, and on `benchmarks/large_scale` `laptime` (one
+3 280-variable component at N = 80) it hit the iteration cap where the
+contiguous blocks take 166.
+
+Not covered: `partitioned_update_type=bfgs` on a model **without** a
+declared Hessian structure (or with `partitioned_structure=jacobian`)
+still does not converge on the batch reactor, nor on `laptime` either
+way — a positive-semidefinite model of an indefinite `∇²c_j`, weighted by
+a multiplier of either sign. Modelling the Lagrangian element `λ_j c_j`
+instead was tried and diverged (damped) or froze (curvature-skipped).
+Use `sr1` there.
 
 **`partitioned_max_element`.** An element with `k` nonzeros costs
 `k(k+1)/2` stored reals, so one wide constraint row would dominate the
@@ -1788,6 +2006,13 @@ overriding:
 | `l1_slack_tol`                       | `1e-6`  | *Fallback* slack tolerance — see below.                    |
 | `l1_steering_factor`                 | `10.0`  | Steering-rule factor for ρ escalation.                     |
 
+Each ρ pass is a full solve. The reported `iteration_count` (`iter_count` in
+Python) is the **total over all passes**, `iterations` holds every pass's
+rows, and the solve report's `statistics.passes` lists one entry per pass —
+`rho`, `iterations`, the model's own `constraint_violation`, and the pass's
+`status` (gh#987). Other `final_*` fields describe the last pass, which
+produced the returned point.
+
 The wrapper solves an *augmented* problem, `c(x) − p + n = target` with
 `p, n ≥ 0`, whose equality rows the slacks satisfy to machine precision
 by construction. So neither the residual the inner solve converged nor
@@ -2023,6 +2248,21 @@ OptionsList.
 | `metis`     | feral-metis multilevel nested dissection. **Pin it for collocation, optimal-control and PDE-in-time models** (see below). Tends to produce squarer fronts than AMD on banded / nearly-1D structure. |
 | `scotch`    | feral-scotch nested dissection. Similar regime to METIS; alternative when METIS is unavailable or for cross-validation.                                                                                                                                   |
 | `kahip`     | feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4–6× per-call symbolic cost. Reach for it only when ND fill matters and per-call cost is amortized.                                                          |
+
+**`linear_solver.last_ordering` can differ from what you pinned.** FERAL
+uses an AMD *leaf* below `amd_switch` (default 120 rows): on a small matrix
+`feral_ordering=scotch` (or `metis`, `kahip`) still reports
+`last_ordering: "amd"`, because the nested-dissection recursion bottoms out
+in AMD at once. This is not a failed option. The ordering you pinned only
+shows up in `last_ordering` once the matrix is larger than the switch.
+
+**`min_abs_pivot` / `max_abs_pivot` are in FERAL's equilibrated space.**
+They are pivots of the matrix *after* FERAL's own row/column equilibration,
+not of the KKT matrix in your model's units: `max_abs_pivot` reads `3.0`
+whether a Hessian entry is `2` or `2e6`, even at `nlp_scaling_method=none`.
+Use them to compare factorizations of the same model (near-singularity,
+`min_abs_pivot` collapsing between iterations), not to read off the
+curvature scale.
 
 When in doubt: leave `feral_ordering` at the default, with one
 exception.

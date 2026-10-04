@@ -31,6 +31,7 @@ pub mod orig_ipopt_nlp;
 pub mod quadratic;
 pub mod return_codes;
 pub mod scaling_tnlp;
+pub mod seeded_tnlp;
 pub mod solve_statistics;
 pub mod start_conditioner;
 pub mod tnlp;
@@ -45,7 +46,7 @@ pub use ipopt_nlp::{IpoptNlp, Nlp};
 pub use orig_ipopt_nlp::{ConstObjScaling, NlpScaling, NoScaling, OrigIpoptNlp};
 pub use quadratic::QuadraticStructure;
 pub use return_codes::{AlgorithmMode, ApplicationReturnStatus};
-pub use solve_statistics::SolveStatistics;
+pub use solve_statistics::{SolvePassRecord, SolveStatistics};
 pub use tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,

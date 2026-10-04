@@ -265,6 +265,15 @@ _V2_STATUS = {
         TerminationCondition.interrupted,
         SolutionStatus.unknown,
     ),
+    # gh#986: a front-end status, not an engine exit -- the user's
+    # `intermediate` callback *raised* (the engine saw only a stop request,
+    # which is why it would otherwise read `User_Requested_Stop`). A broken
+    # callback is an error, not a deliberate interrupt; the iterate it
+    # stopped at is still handed back.
+    "Callback_Error": (
+        TerminationCondition.error,
+        SolutionStatus.unknown,
+    ),
     # The step-length exit AMPL puts in the same 400 "limit" band as the
     # iteration and time limits; the v2 enum names it exactly.
     "Search_Direction_Becomes_Too_Small": (

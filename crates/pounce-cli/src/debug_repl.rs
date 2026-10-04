@@ -1040,6 +1040,10 @@ pub struct SolverDebugger {
     /// A debugger script (file path) to run once at the first pause
     /// (`--debug-script`); consumed on use.
     pending_script: Option<String>,
+    /// A `--debug-script` was given (it may already have been consumed).
+    /// With a non-TTY stdin, an exhausted script means "let it run" rather
+    /// than blocking on a stream nobody is typing into (gh#990 item 14).
+    script_given: bool,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -1111,6 +1115,7 @@ impl SolverDebugger {
             pump: None,
             watches: Vec::new(),
             pending_script: None,
+            script_given: false,
             staged: Vec::new(),
             sweep: None,
             prompt_interrupts: 0,
@@ -1137,6 +1142,7 @@ impl SolverDebugger {
     /// Queue a debugger script to run once at the first pause.
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
+        self.script_given = true;
         self
     }
 
@@ -2800,7 +2806,7 @@ impl SolverDebugger {
         match self.mode {
             DebugMode::Repl => {
                 eprintln!(
-                    "\n── sweep complete ── {} solves, {} succeeded, {} distinct minima",
+                    "\n── sweep complete ── {} solves, {} succeeded, {} distinct end points (by objective; not curvature-classified)",
                     sweep.records.len(),
                     succeeded.len(),
                     distinct.len()
@@ -2823,6 +2829,10 @@ impl SolverDebugger {
                 "event": "sweep_summary",
                 "solves": sweep.records.len(),
                 "succeeded": succeeded.len(),
+                // gh#987: clusters of converged *objective values*; a saddle
+                // that the solver accepts counts as one. `distinct_minima` is
+                // kept as a deprecated alias of the same number.
+                "distinct_points": distinct.len(),
                 "distinct_minima": distinct.len(),
                 "best_index": best.map(|b| b.idx),
                 "best_objective": best.map(|b| b.objective),
@@ -3250,8 +3260,15 @@ impl SolverDebugger {
         match self.mode {
             DebugMode::Repl => {
                 if terminal {
+                    // gh#987: restoration's inner solve fires `terminated`
+                    // too; say so rather than let it read as the real end.
+                    let which = if self.in_restoration {
+                        "restoration inner solve"
+                    } else {
+                        "solve"
+                    };
                     eprintln!(
-                        "\n── pounce-dbg ── TERMINATED ({})  iter {}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                        "\n── pounce-dbg ── TERMINATED {which} ({})  iter {}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
                         ctx.status().unwrap_or("?"),
                         ctx.iter(),
                         ctx.objective(),
@@ -3312,6 +3329,12 @@ impl SolverDebugger {
                     "checkpoint": ctx.checkpoint().as_str(),
                     "status": ctx.status(),
                     "in_restoration": self.in_restoration,
+                    // gh#987: `terminated` also fires when restoration's
+                    // inner solve returns. `final` is true only for the end
+                    // of the whole solve; a client waiting for "the" end must
+                    // test it (or `in_restoration`), not the checkpoint name.
+                    "phase": if self.in_restoration { "restoration" } else { "main" },
+                    "final": terminal && !self.in_restoration,
                     "dims": dims,
                     "breakpoints": self.breaks,
                     "conditions": conds,
@@ -3506,6 +3529,13 @@ impl SolverDebugger {
                     Err(ReadlineError::Eof) => None,
                     Err(_) => None,
                 };
+            }
+            // Batch mode: a `--debug-script` plus a non-terminal stdin (a
+            // Jupyter kernel, a CI step, a subprocess pipe left open) has
+            // nobody to answer a prompt, so the end of the script is EOF,
+            // which detaches and lets the solve finish.
+            if self.script_given && !std::io::stdin().is_terminal() {
+                return None;
             }
             let _ = write!(std::io::stderr(), "pounce-dbg> ");
             let _ = std::io::stderr().flush();
@@ -3928,7 +3958,7 @@ impl DebugHook for SolverDebugger {
             // An in-flight `sweep`/`multistart` records this solve and
             // launches the next; `Some` means "re-solving from the next
             // seed", `None` means the sweep finished (fall through).
-            if self.sweep.is_some() {
+            if self.sweep.is_some() && !self.in_restoration {
                 // A sweep can only be started on the NLP solver, so the
                 // downcast succeeds whenever one is in flight.
                 if let Some(c) = as_nlp(ctx) {

@@ -98,6 +98,38 @@ impl IterPhase {
     }
 }
 
+/// One pass of a multi-pass solve — an ℓ₁ exact-penalty ρ pass, or the
+/// unwrapped attempt that preceded the ℓ₁ fallback (gh#987 item 6).
+///
+/// `SolveStatistics::iteration_count` and `iterations` cover **all** passes;
+/// this is how a reader gets the per-pass split back.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SolvePassRecord {
+    /// Penalty parameter ρ of an ℓ₁ pass; `None` for the plain (unwrapped)
+    /// attempt that an `l1_fallback_on_restoration_failure` retry follows.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rho: Option<Number>,
+    /// Iterations this pass ran.
+    pub iterations: Index,
+    /// Index into `SolveStatistics::iterations` of this pass's first row
+    /// (rows of all passes are concatenated; each pass restarts its own
+    /// `iter` numbering at 0). Meaningful only when rows were collected.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub first_row: usize,
+    /// `Σ(p + n)` of the augmented slacks at the pass's end (the BNW
+    /// steering signal); `None` for an unwrapped pass.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub slack_sum: Option<Number>,
+    /// Max violation of the **model's own** constraints at the pass's end,
+    /// in the model's units; `None` when it could not be measured.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub constraint_violation: Option<Number>,
+    /// The pass's exit status, as the `ApplicationReturnStatus` variant name.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub status: String,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolveStatistics {
@@ -155,6 +187,44 @@ pub struct SolveStatistics {
     /// `NaN` on a path that does not compute it.
     pub final_declared_box_viol: Number,
     pub final_unscaled_dual_inf: Number,
+    /// gh#983. Magnitude of the terms the unscaled stationarity residual is
+    /// assembled from (`max |∇f|, |Jᵀλ|, |z|` in user units), the yardstick
+    /// `final_unscaled_dual_inf` is judged against by the scale-relative
+    /// floor (gh#532) and by the solve-quality warnings. `NaN` on a path that
+    /// does not compute it.
+    pub final_unscaled_dual_scale: Number,
+    /// gh#983. The solver-computed (gradient-based) objective scaling factor
+    /// the run ended with, excluding the caller's own `obj_scaling_factor`;
+    /// `1` when none was applied, `NaN` on a path that does not compute it.
+    pub final_obj_scaling_factor: Number,
+    /// gh#983. `max |grad f|` at the starting point (what gradient-based
+    /// scaling measured); `NaN` when it did not run. The model's own gradient
+    /// scale, used as the yardstick for the small-objective warning.
+    pub start_obj_grad_max: Number,
+    /// gh#983. Structured solve-quality warnings, each `"<code>: <text>"`,
+    /// describing the run whose point is returned (a discarded attempt's
+    /// warnings are dropped with it). Each code appears at most once. Codes:
+    /// `objective_scale_small`, `unscaled_stationarity_above_tol`,
+    /// `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. Empty on a
+    /// clean run. A warning never changes the status by itself; the one
+    /// status change the audit makes (a strict success on a run that showed
+    /// the gh#884 signature and still carries an unscaled dual infeasibility
+    /// above `max(acceptable_tol, 1e-3)` is reported as
+    /// `Solved_To_Acceptable_Level`) is announced by the
+    /// `unscaled_dual_inf_above_acceptable` warning.
+    pub warnings: Vec<String>,
+    /// gh#990 item 3. The derivative checker's machine-readable verdict, when
+    /// `derivative_test` ran for this solve (`None` otherwise). The console
+    /// report on stderr is unchanged.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub derivative_check: Option<crate::derivative_test::DerivativeCheckSummary>,
+    /// gh#990 item 13. A strict termination certificate was refused because
+    /// the objective scaling masked it (gh#200): the solve kept iterating
+    /// toward the true minimum. The decision used to be visible only as an INFO
+    /// line on stderr.
+    pub obj_scale_certificate_refused: bool,
+    /// Same, for an acceptable-level certificate.
+    pub obj_scale_acceptable_refused: bool,
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
     pub final_unscaled_kkt_error: Number,
@@ -289,6 +359,14 @@ pub struct SolveStatistics {
     /// promoted run that reported `false` here would say the retry's
     /// answer came from nowhere.
     pub dual_divergence_signature: bool,
+    /// gh#983 review item 3. The same detector, for the **one run whose point
+    /// is returned** only. `dual_divergence_signature` accumulates across the
+    /// attempts of a solve on purpose (above); a verdict about the returned
+    /// point must not read a discarded sibling's flag, so the item-5 downgrade
+    /// reads this one. Saved and restored with the rest of the run's tally
+    /// when a retry is declined.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub returned_run_dual_divergence_signature: bool,
     /// gh#884. A dual-divergence retry ran *and* replaced the base
     /// attempt's answer. `false` both when no retry ran and when one ran
     /// and lost — in the latter case the returned point, status and
@@ -309,12 +387,28 @@ pub struct SolveStatistics {
     /// of magnitude, and on a QP-shaped NLP (one outer iteration by
     /// construction) it is the only thing that moves at all.
     pub sqp_qp_working_set_changes: Index,
+    /// gh#986 review item 10: the SQP solve started from a caller-supplied
+    /// working set (after mapping it through this problem's fixed-variable
+    /// elimination). `false` on a cold solve, on the IPM path, and when a
+    /// supplied working set had to be dropped -- which is also logged.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sqp_warm_working_set_applied: bool,
 
     /// Per-iteration trajectory. Empty when the consumer doesn't ask
     /// for it (`iter_history_enabled = false` on the application or
     /// the binary's `--json-detail summary` mode). Populated in order
     /// by [`IpoptAlgorithm::iterate`] when enabled.
     pub iterations: Vec<IterRecord>,
+
+    /// Per-pass summary of a multi-pass solve: one entry per ℓ₁
+    /// exact-penalty ρ pass (preceded by the unwrapped attempt when the ℓ₁
+    /// fallback produced them). Empty on an ordinary single-pass solve.
+    ///
+    /// When non-empty, `iteration_count` is the **total** over these passes
+    /// and `iterations` is their rows concatenated (gh#987 item 6); every
+    /// other `final_*` field describes the last pass, which produced the
+    /// returned point.
+    pub passes: Vec<SolvePassRecord>,
 }
 
 /// The eight residual fields default to **NaN, not zero**.
@@ -372,6 +466,13 @@ impl Default for SolveStatistics {
             final_compl: Number::NAN,
             final_kkt_error: Number::NAN,
             final_unscaled_dual_inf: Number::NAN,
+            final_unscaled_dual_scale: Number::NAN,
+            final_obj_scaling_factor: Number::NAN,
+            start_obj_grad_max: Number::NAN,
+            warnings: Vec::new(),
+            derivative_check: None,
+            obj_scale_certificate_refused: false,
+            obj_scale_acceptable_refused: false,
             final_declared_constr_viol: Number::NAN,
             final_declared_box_viol: Number::NAN,
             final_unscaled_constr_viol: Number::NAN,
@@ -395,10 +496,13 @@ impl Default for SolveStatistics {
             restoration_wall_secs: 0.0,
             quality_escalations: 0,
             dual_divergence_signature: false,
+            returned_run_dual_divergence_signature: false,
             dual_divergence_retry_promoted: false,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
+            sqp_warm_working_set_applied: false,
             iterations: Vec::new(),
+            passes: Vec::new(),
         }
     }
 }

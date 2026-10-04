@@ -119,7 +119,9 @@ class WarmStart:
             derive μ, the unseeded bound-multiplier fills, and the
             equality-multiplier reconstruction from them.
             ``"none"`` restores the pre-#606 universal constants.
-            ``None`` leaves the option unset (solver default).
+            ``None`` leaves the option unset (solver default). A value the
+            caller set on the Problem with ``add_option`` before the warm
+            solve takes precedence over this field (gh#988).
         signature: The :class:`ProblemSignature` this state was captured
             against, or ``None`` for an unsigned state (which is what
             ``from_info`` produces when no ``problem=`` is given, and
@@ -373,6 +375,22 @@ class WarmStart:
         if self.recentering is not None:
             opts["warm_start_recentering"] = self.recentering
         return opts
+
+    #: Overlay options a value already set on the Problem takes precedence
+    #: over (gh#988 review): choices about how the seed is read, not part of
+    #: what makes the solve a warm start.
+    _CALLER_WINS = frozenset({"warm_start_recentering"})
+
+    def overlay_options(self, snapshot) -> dict:
+        """:meth:`options`, minus any :attr:`_CALLER_WINS` option the caller
+        already set on the Problem (``snapshot`` is
+        ``Problem.options_snapshot()`` taken before the overlay)."""
+        user_set = {k for block in snapshot for k, _ in block}
+        return {
+            k: v
+            for k, v in self.options().items()
+            if not (k in self._CALLER_WINS and k in user_set)
+        }
 
     def solve_kwargs(self) -> dict:
         """The seed keyword arguments for :meth:`Problem.solve`."""
@@ -1107,8 +1125,15 @@ def _solve_with_warm_start(
     # gets scoped, so an option added to that recipe later is covered by
     # construction.
     snapshot = self.options_snapshot()
+    # gh#988 (review): `warm_start_recentering` is a choice about *how* the
+    # seed is read, not part of what makes it a warm start, so a value the
+    # caller already set on this Problem wins over the WarmStart's own
+    # (default "residual"). It used to be overwritten unconditionally, so
+    # `add_option("warm_start_recentering", "none")` before a warm solve was
+    # silently ignored -- and the measurement that concluded "none does not
+    # change this" (gh#988 item 3) had in fact run "residual" both times.
     try:
-        for k, v in ws.options().items():
+        for k, v in ws.overlay_options(snapshot).items():
             self.add_option(k, v)
         return _native_solve(self, x0=ws.x if x0 is None else x0, **kw, **kwargs)
     finally:

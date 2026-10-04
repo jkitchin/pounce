@@ -17,6 +17,15 @@ the wheel puts it and where the `pounce` console script looks for it. A bare
 to `target/release/pounce` (announcing that it did), and anything that shells
 out to `pounce` runs a build directory rather than the package's own binary.
 
+The CLI binary the wheel carries lives at `python/pounce/bin/pounce` (in an
+installed wheel, `<site-packages>/pounce/bin/pounce`; `python -c "import
+pounce, pathlib; print(pathlib.Path(pounce.__file__).parent / 'bin' /
+'pounce')"`). The `pounce` console script is a Python shim that imports
+`pounce._cli` before it execs that binary, which costs about 0.24 s per
+call against 3 ms for the binary itself. A notebook that shells out to the CLI
+hundreds of times should call the bundled binary directly rather than the
+console script.
+
 Just the extension module, if that is all you need:
 
 ```sh
@@ -78,7 +87,7 @@ Everything else is conditional or optional, on cyipopt's rules:
 | `constraints` / `jacobian` | required when `m > 0` |
 | `jacobianstructure` | **optional.** Omit it and the Jacobian is dense `(m, n)`: `jacobian(x)` then returns all `m*n` entries, row-major. Supply it to declare a sparse pattern — worth doing for anything but a small dense block. |
 | `hessian` + `hessianstructure` | **optional, both or neither.** Without them the solve runs `hessian_approximation=limited-memory` (L-BFGS). |
-| `intermediate` | optional per-iteration callback; return `False` to stop. |
+| `intermediate` | optional per-iteration callback; return `False` to stop. Its `inf_pr` is the report's `iterations[*].inf_pr_internal` (the scaled slack-form residual the filter and convergence test read), **not** the report's `inf_pr`; on a badly scaled model they differ (by up to 1.74 on the column design example, gh#990). Called with keyword arguments when its signature names them all (or takes `**kwargs`); otherwise -- a cyipopt-style catch-all `intermediate(self, *args)`, or cyipopt's parameter list under other names -- positionally, in cyipopt's order (`alg_mod, iter_count, obj_value, inf_pr, inf_du, mu, d_norm, regularization_size, alpha_du, alpha_pr, ls_trials`). The convention is read once from the signature, so a callback body that itself raises `TypeError` runs once and is reported, never retried. A callback that **raises** ends the solve with `info["status_msg"] == "Callback_Error"` (`info["status"] == -198`) and the exception text in `info["callback_error"]`, from `Problem.solve` and from `solve_problem_batch` / `solve_nlp_batch` alike; only a deliberate `return False` reports `User_Requested_Stop` (gh#986). `Callback_Error` is a front-end status (the engine saw a stop request): the Pyomo interfaces map it to an error termination with the iterate still loadable, the pip GAMS link to an internal error. |
 
 `pounce.preflight(problem_obj, x0, ...)` evaluates the same object once
 and reports what the solver's first iteration will see, under exactly
@@ -98,6 +107,49 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
   residuals with the scaling divided back out, i.e. in your **original
   problem units**. Equal to the scaled values when no scaling activates.
+- `derivative_check` — the derivative checker's verdict when `derivative_test`
+  was set, else `None` (gh#990): `mode`, `tolerance`, `checked`, `suspicious`,
+  `missing_structure`, `clean`, `max_rel_error_gradient` / `_jacobian` /
+  `_hessian`, and `flagged` (a list of `{kind, block, row, col, analytic,
+  finite_difference, relative_error}`; the first 200). The report on stderr is
+  unchanged; the same object is `statistics.derivative_check` in the solve
+  report. Test `info["derivative_check"]["clean"]` in a notebook instead of
+  scraping stderr.
+- `objective_scaling` — the objective-scaling decision: `factor` (the
+  gradient-based factor the returned run ended with), `start_gradient_max`,
+  and `certificate_refused` / `acceptable_certificate_refused` (some attempt
+  refused a termination certificate the scaling masked and kept iterating —
+  the INFO line on stderr). Also `statistics.objective_scaling` in the report.
+- `linear_solver["requested"]` — the `linear_solver` option as requested,
+  beside `linear_solver["solver_name"]`, the backend that ran (`ma57`
+  requested without HSL: `"ma57"` / `"feral"`).
+- `warnings` — list of structured solve-quality warnings about the returned
+  point (`"<code>: <text>"`), empty on a clean run. Codes:
+  `objective_scale_small`, `unscaled_stationarity_above_tol`,
+  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They describe the
+  run whose point is returned and say why a success verdict deserves a second
+  look; by themselves they do not change `status` (the one status change the
+  audit makes -- `Solve_Succeeded` reported as `Solved_To_Acceptable_Level` on a
+  run that showed the gh#884 runaway signature and still carries an unscaled
+  dual infeasibility above `max(acceptable_tol, 1e-3)` -- is announced by
+  `unscaled_dual_inf_above_acceptable`). An objective whose gradient is tiny
+  (profit in M$/L) or a start whose gradient is huge (`3e8`) is re-solved once
+  automatically from the returned point (`solve_quality_audit`); the warning
+  remains only when that did not fix it, or when a re-solve would not change
+  the scale materially. `find_minima` additionally rejects candidates, with or
+  without `hess=`, whose unscaled dual infeasibility exceeds
+  `kkt_tol * max(1, g0, info["final_unscaled_dual_scale"])` (`g0` the
+  gradient scale at `x0`), counts them in
+  `MinimaResult.n_kkt_rejected`, and warns when that emptied the result.
+- `final_unscaled_dual_scale` — the magnitude of the terms the unscaled
+  stationarity residual is assembled from (`max |grad f|, |J^T lambda|, |z|`
+  in the model's units): the yardstick `final_unscaled_dual_inf` is judged
+  against.
+- `iter_count` (and the report's `iteration_count`) counts the iterations of
+  the run that produced the returned point. When a retry replaced the first
+  attempt (`dual_divergence_retry_promoted`, or an audit re-solve), the
+  discarded attempt's iterations are not included; its own console summary
+  shows them.
 - `final_declared_constr_viol` — how far outside the model **as
   declared** the returned point sits, before the `bound_relax_factor`
   widening. `final_constr_viol` measures the widened model the solver was
@@ -956,9 +1008,28 @@ on a banded family (`python/benchmarks/bench_sparse_ad_83.py`):
 The color count stays constant in `n` while the dense path grows
 linearly, so the gap widens without bound as the problem scales.
 
-**Pattern detection.** Sparsity is found by probing the derivative at
-random points and recording where entries are nonzero. Under
-`sparse=True` a mis-probe is costlier — it corrupts the compression
+**Pattern detection.** By default the *structural* pattern is read off the
+jaxpr (gh#985): index sets are propagated through `g`'s jaxpr for the
+Jacobian and through the gradient program of the Lagrangian for the Hessian,
+so a value-dependent zero (`exp(-E/RT)` underflowing, a polynomial's second
+derivative vanishing at the probe points) can never drop an entry. It costs
+one vectorised sparse step per jaxpr equation (about 0.1 ms; the JAX trace
+usually dominates) and no AD pass, and a constant matrix such as a banded
+`A @ x` contributes only its nonzero pattern. A `jax.custom_jvp` function is
+read through its JVP rule rather than its primal, because that rule is what
+AD differentiates (an implicit-function primal computed under
+`stop_gradient`, a straight-through estimator around `round`); a
+`jax.custom_vjp` function, whose backward rule is opaque, is bounded densely
+over its inputs. A model it cannot bound
+(`scan`/`while`/`cond`, `sort`, data-dependent indexing) or one so densely
+coupled that the dependency matrices pass ~2e7 entries falls back, per
+matrix, to the probes below; `pattern_detection="probe"` forces them, and
+`problem.problem_obj.pattern_source` (`JaxProblem.pattern_source`) reports
+`"user"` / `"jaxpr"` / `"probe"`.
+
+The fallback finds sparsity by probing the derivative at points inside the
+box, at `x0` and at random points and recording where entries are nonzero.
+Under `sparse=True` a mis-probe is costlier — it corrupts the compression
 seed, not just a reported nonzero — so detection unions **3 probes** by
 default (vs 1 for the dense path). Override with `n_probes=`.
 
