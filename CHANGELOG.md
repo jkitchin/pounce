@@ -73,6 +73,12 @@ changes.
 
 ### Fixed
 
+- **The refusal for a `qp_*` option on a library solve no longer says the
+  Python path ignores them (gh#990).** The message at the library entry point
+  still told users that `pounce.solve_qp` "never presolves and does not read
+  `qp_*` options". Since `solve_qp` took `qp_presolve`, `qp_reg`, `qp_hsde`,
+  `qp_equilibrate` and `qp_crossover`, that was wrong; it now says so.
+
 - **The active-set QP engine reports a narrowly infeasible QP as infeasible,
   not as an iteration limit (gh#991).** A convex QP whose constraints miss
   each other by a small margin (for example `x0 + 2*x1 <= 2` together with
