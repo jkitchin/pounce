@@ -11,6 +11,28 @@ changes.
 
 ### Fixed
 
+- **Convex IPM stopping depended on the units of `c` and `P` (gh#984),
+  items 1, 2, 3, 5, 6.** The HSDE scale-relative arm granted every residual
+  `tol*(1 + its scale)` once any one scale was large, so tightening `tol`
+  could loosen the answer (refinery LP: `kkt_error` 1.2e-6 at `tol=1e-10`
+  against 1.2e-7 at `1e-6`), costs in cents let `|Ax-b|` through, and a 1e9
+  shifted variable returned `optimal` with complementarity 1.08. The relative
+  arm may now stop only when each residual is also within `64*eps*(its own
+  scale)`; short of that the relatively-converged iterate is kept as a
+  candidate while the solve keeps improving, and is returned unchanged if it
+  stalls or breaks down. Separately, the absolute dual/gap tests are now in
+  units of the objective when `max(|P|, |c|) < 1` (portfolio weights were off
+  by `1.6e-2` at `P*1e-9`). LP crossover recomputes `x_B = B^-1(b - N x_N)`
+  after the final pivot, and `POUNCE_SIMPLEX_DEBUG` no longer changes the
+  vertex (the recompute ran only under the flag). Not done: item 3's literal
+  "never `optimal` above `tol`" (conflicts with genuinely large-data optima
+  that only the relative arm certifies) and item 4 (iteration counts at 1e7
+  objective scale); the direct (`qp_hsde=no`) driver is unchanged. Sweep:
+  `units_qp_convex` 20 -> 28 and `sqp_tiny_objective_convex` 8 -> 21
+  iterations (tiny-objective normalization, objectives now more exact),
+  `feasible_x0_{extreme_row,sentinel_bound,wide_scale}` and
+  `scaled_feasible_b` +1 iteration each (one extra candidate iterate).
+
 - **Status certified at non-stationary points (gh#983), items 1, 4, 5.**
   (1) An explicitly set `dual_inf_tol` is now honoured: the scale-relative
   floor of gh#532 is a default for callers who did not name a tolerance, and

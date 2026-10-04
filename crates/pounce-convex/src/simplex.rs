@@ -472,8 +472,12 @@ impl Simplex {
             }
             self.resolve_superbasic(j)?;
         }
+        // gh#984: the pushes move the basics by rank-one updates, so the
+        // recompute is the numerics, not the diagnostic -- it ran only under
+        // `POUNCE_SIMPLEX_DEBUG`, which therefore changed the returned vertex.
+        // Always do it; the switch only decides whether to *print*.
+        self.recompute_basics()?;
         if dbg {
-            self.recompute_basics();
             eprintln!(
                 "[simplex push] n={} m={} superbasics={} infeas_after_push={:.3e}",
                 self.n,
@@ -1161,6 +1165,12 @@ impl Simplex {
     /// Map the final basis to the convex problem's primal/dual solution.
     fn extract(&mut self, prob: &QpProblem) -> VertexSolution {
         let n = self.n;
+        // gh#984: after the final pivot `x_B` carries every rank-one update
+        // since the last refactor (measured: complementarity `2.8e-8` on a
+        // 12-variable transportation LP). Recompute `x_B = B⁻¹(b − N x_N)` so
+        // the vertex is exact. On a refusal keep the running values: they are
+        // what this function returned before.
+        let _ = self.recompute_basics();
         let x: Vec<f64> = (0..n).map(|j| self.xval[j]).collect();
 
         // π = B⁻ᵀ c_B (row-space) with the *real* objective.

@@ -532,8 +532,14 @@ fn the_repair_takes_the_best_genuine_candidate_not_the_first() {
         backend,
     );
     assert_eq!(direct.status, QpStatus::Optimal);
+    // gh#984: bit-level coincidence (`1e-12`) held only while the first HSDE
+    // solve stopped at `kkt_error 1.3e2` and was *repaired* into the direct
+    // driver's answer. The relative arm now keeps iterating past the first
+    // relatively-converged iterate (`kkt_error 1.3e-1`, `|x-x*|∞ 9.5e-10`),
+    // which is genuine, so the repair no longer fires on this instance and the
+    // two answers agree to the accuracy HSDE reaches rather than to rounding.
     assert!(
-        abs_x_err(&sol.x, &direct.x) < 1e-12,
+        abs_x_err(&sol.x, &direct.x) < 1e-8,
         "the repaired answer should coincide with the direct driver's"
     );
 }

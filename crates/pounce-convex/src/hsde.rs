@@ -170,6 +170,45 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
     tau < 1e-2 * kappa
 }
 
+/// gh#984: how many rounding units of its own scale a residual must be inside
+/// before the scale-relative arm may stop on it. The same reading of "numerically
+/// zero" as `ipm::SLACK_NOISE_KAPPA`.
+const REL_FLOOR_KAPPA: f64 = 64.0;
+
+/// gh#984: smallest objective unit [`solve_conic_hsde`] normalizes `tol` by.
+const COST_UNIT_FLOOR: f64 = 1e-15;
+
+/// A relatively-converged iterate set aside while the loop tries to do better.
+struct RelCandidate {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    s: Vec<f64>,
+    tau: f64,
+    kappa: f64,
+    /// Worst residual-to-floor ratio at the stash.
+    worst: f64,
+}
+
+fn restore_candidate(
+    cand: &mut Option<RelCandidate>,
+    x: &mut Vec<f64>,
+    y: &mut Vec<f64>,
+    z: &mut Vec<f64>,
+    s: &mut Vec<f64>,
+    tau: &mut f64,
+    kappa: &mut f64,
+) {
+    if let Some(c) = cand.take() {
+        *x = c.x;
+        *y = c.y;
+        *z = c.z;
+        *s = c.s;
+        *tau = c.tau;
+        *kappa = c.kappa;
+    }
+}
+
 /// May the scale-relative stopping test *relax* the absolute one for a problem
 /// of natural scale `max_scale` (the largest of the dual/primal/gap term norms)
 /// at tolerance `tol`?
@@ -404,6 +443,24 @@ where
     let norm_b = inf_norm(&prob.b);
     let norm_h = inf_norm(&prob.h);
     let norm_c = inf_norm(&prob.c);
+    // gh#984: the objective's own unit. The dual residual and the gap are in
+    // units of `(P, c)`, so an absolute `tol` on them is a statement about the
+    // caller's choice of units: scale the objective by `1e-9` and the same
+    // iterate, with the same *relative* error, clears it nine iterations
+    // sooner (item 5 -- weights off by `1.6e-2`, `optimal`). Only the downward
+    // direction is handled here; a large objective is `hsde_cost_scale`'s.
+    // Equivalent to solving the objective-normalized problem at `tol`, hence
+    // argmin-invariant. A zero objective has no unit and is left alone.
+    let cost_unit = prob.p_lower.iter().fold(norm_c, |m, t| m.max(t.val.abs()));
+    let tol_cost = opts.tol
+        * if cost_unit > 0.0 && cost_unit < 1.0 {
+            cost_unit.max(COST_UNIT_FLOOR)
+        } else {
+            1.0
+        };
+    // The relative arm's stash: the first iterate to satisfy it without being
+    // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
+    let mut rel_candidate: Option<RelCandidate> = None;
 
     // Direction buffers: p = constant direction, (dx,dy,dz) = the running
     // step, with affine slack/dual kept for the Mehrotra corrector.
@@ -621,8 +678,62 @@ where
 
         // Absolute test always governs; the scale-relative test only relaxes
         // it for genuinely large-data problems (`large_scale`, gated above).
-        let converged = (pres < opts.tol && dres < opts.tol && gap < opts.tol)
-            || (large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol);
+        //
+        // gh#984: and only down to the finite-precision floor of *each
+        // residual's own scale*. `large_scale` is opened by the largest of the
+        // three scales, but `pres_rel < tol` then grants the primal residual
+        // `tol·(1 + scale_p)` -- a slack set by `b` and `A`, not by anything
+        // that made the absolute test unreachable. A large `c` (costs in
+        // cents) opened the gate and let `‖Ax − b‖∞ = 4.9e-6` through; a large
+        // objective at `tol = 1e-10` stopped at `kkt_error 1e-6` where
+        // `tol = 1e-6` reached `1e-7`. So the relative arm may stop only when
+        // every residual is also within `REL_FLOOR_KAPPA·ε·(its own scale)`;
+        // short of that it is a *candidate*, and the loop is allowed to keep
+        // improving on it (below).
+        let cap_p = (REL_FLOOR_KAPPA * f64::EPSILON * scale_p).max(opts.tol);
+        let cap_d = (REL_FLOOR_KAPPA * f64::EPSILON * scale_d).max(opts.tol);
+        let cap_g = (REL_FLOOR_KAPPA * f64::EPSILON * scale_g_raw).max(opts.tol);
+        let rel_ok =
+            large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol;
+        let abs_ok = pres < opts.tol && dres < tol_cost && gap < tol_cost;
+        let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
+        let converged = abs_ok || rel_in_floor;
+        if !converged {
+            let worst = (pres / cap_p).max(dres / cap_d).max(gap / cap_g);
+            let stash = |c: &mut Option<RelCandidate>| {
+                *c = Some(RelCandidate {
+                    x: x.clone(),
+                    y: y.clone(),
+                    z: z.clone(),
+                    s: s.clone(),
+                    tau,
+                    kappa,
+                    worst,
+                });
+            };
+            match (&rel_candidate, rel_ok) {
+                (None, true) => stash(&mut rel_candidate),
+                // Still relatively converged and still improving by at least
+                // 2x: keep going, holding the better point.
+                (Some(c), true) if worst <= 0.5 * c.worst => stash(&mut rel_candidate),
+                // Stalled at the floor, or the relative certificate lapsed:
+                // the stash is what the old rule would have returned.
+                (Some(_), _) => {
+                    restore_candidate(
+                        &mut rel_candidate,
+                        &mut x,
+                        &mut y,
+                        &mut z,
+                        &mut s,
+                        &mut tau,
+                        &mut kappa,
+                    );
+                    status = QpStatus::Optimal;
+                    break;
+                }
+                (None, false) => {}
+            }
+        }
         if converged {
             status = QpStatus::Optimal;
             // Terminal record at the converged iterate (no step taken).
@@ -1111,6 +1222,23 @@ where
                 break;
             }
         }
+    }
+
+    // gh#984: the loop was chasing an improvement on a relatively-converged
+    // iterate and ended some other way (breakdown, iteration cap, a spurious
+    // certificate). Hand back the stash: it is exactly what the relative rule
+    // returned before it was asked to keep going.
+    if status != QpStatus::Optimal && rel_candidate.is_some() && !crate::debug_stop::requested() {
+        restore_candidate(
+            &mut rel_candidate,
+            &mut x,
+            &mut y,
+            &mut z,
+            &mut s,
+            &mut tau,
+            &mut kappa,
+        );
+        status = QpStatus::Optimal;
     }
 
     // `!is_verdict`: the loop breaks with `Optimal` as soon as its convergence
