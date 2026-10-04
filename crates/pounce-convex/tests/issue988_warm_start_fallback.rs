@@ -154,3 +154,69 @@ fn warm_point_off_fixed_column_still_solves() {
         }
     }
 }
+
+/// gh #988 (second pass). A pinned column is substituted out of the warm
+/// solve rather than left as the row pair `x <= v`, `-x <= -v`, which has no
+/// interior. The lift back to the full problem must hand the caller a KKT
+/// point of the *full* problem: pins restored, the pinned column's bound
+/// multiplier recovered from stationarity, the multipliers of rows that were
+/// all-pinned (dropped as constants) zero, and the objective including what
+/// the pin contributes.
+///
+/// ```text
+/// min  x0 + 2 x1 + 3 x2 + 10     s.t.  x0 + x1 + x2 = 4        (equality)
+///                                      x1 <= 3                  (inequality)
+///                                      2 x0 <= 5                (constant once x0 is pinned)
+///      x0 = 1 (lb == ub),  0 <= x1, x2 <= 10
+/// ```
+#[test]
+fn pinned_column_is_eliminated_and_the_lift_is_a_kkt_point() {
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![],
+        c: vec![1.0, 2.0, 3.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0),
+        ],
+        b: vec![4.0],
+        g: vec![Triplet::new(0, 1, 1.0), Triplet::new(1, 0, 2.0)],
+        h: vec![3.0, 5.0],
+        lb: vec![1.0, 0.0, 0.0],
+        ub: vec![1.0, 10.0, 10.0],
+    };
+    let opts = QpOptions {
+        obj_constant: 10.0,
+        ..QpOptions::default()
+    };
+    // A warm point well off the pin and off the optimum.
+    let warm = QpWarmStart {
+        x: vec![2.5, 1.0, 0.5],
+        y: vec![0.5],
+        z: vec![0.1, 0.1],
+        z_lb: vec![0.1; 3],
+        z_ub: vec![0.1; 3],
+    };
+    let sol = solve_qp_ipm_warm(&prob, &opts, &warm, backend);
+    assert_eq!(sol.status, QpStatus::Optimal, "{sol:?}");
+    assert!((sol.x[0] - 1.0).abs() < 1e-9, "pin restored: {:?}", sol.x);
+    assert!(
+        (sol.x[1] - 3.0).abs() < 1e-6 && sol.x[2].abs() < 1e-6,
+        "{:?}",
+        sol.x
+    );
+    // 1 + 2*3 + 10: the pin's cost and the constant are in the objective.
+    assert!((sol.obj - 17.0).abs() < 1e-6, "obj = {}", sol.obj);
+    assert_eq!(sol.y.len(), 1);
+    assert_eq!(sol.z.len(), 2);
+    assert!(
+        sol.z[1].abs() < 1e-12,
+        "dropped constant row has a zero multiplier"
+    );
+    let res = sol.kkt_residuals(&prob);
+    assert!(
+        res.dual_infeasibility < 1e-6 && res.primal_infeasibility < 1e-6,
+        "the lifted point must satisfy the FULL problem's KKT conditions: {res:?}"
+    );
+}

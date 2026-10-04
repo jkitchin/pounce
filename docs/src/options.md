@@ -1367,28 +1367,41 @@ natural units either way, so it keeps the fast path.
 
 `warm_start_init_point=yes` (or passing a `WarmStart` from Python) starts the
 solve from a supplied primal/dual iterate. Starting from a *nearby* solution
-does not by itself make the solve short: the barrier parameter still starts
-at `mu_init` (`0.1`) unless something lowers it, and the first iterations
-re-centre the point onto that barrier. A model that cold-solves in 7
-iterations can take 49 from a warm start whose multipliers have moved only
-modestly (gh#988: a two-product pricing problem, capacity 14 → 16, 1.41 →
-1.12 on the active row). `warm_start_recentering=none` does not change this;
-the cost is the barrier level, not the recentering pass.
+does not by itself make the solve short, and one parameter change used to make
+it much longer: when a constraint that is **active at the carried point** has
+its bound move away (a capacity `K` raised from 14 to 16), the carried point
+still has multiplier `1.41` on a row whose slack is now 2 wide. The slack
+multiplier the initializer rebuilt was barrier-sized (`mu / slack`), so the
+start carried `1.41` of dual infeasibility that no step could repair at a
+tiny `mu`, and the solve spent its first dozens of iterations in restoration
+(gh#988: 49 iterations against 7 cold).
+
+Since the gh#988 second pass the initializer treats the supplied equality /
+inequality multiplier as the authority on activity. When the stationarity of
+the slack row (`-y_d + v = 0`) asks for a slack multiplier more than ten times
+what `mu / slack` supports, the multiplier it implies is taken and the slack
+is closed onto its bound at `mu / v` (the move costs a primal infeasibility of
+the old slack, which the first Newton step removes along the active
+constraint). That model now warm-starts in 4 iterations (cold: 7), and no
+`warm_start_*` option is needed. Seeds whose stationarity miss is *not*
+coherent with the primal point (a corrupted `y`) are still refused by the
+gh#617 test and keep the barrier-sized fill, and the gate never touches
+variable-bound multipliers.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `warm_start_init_point` | `no` | Use the supplied primal and dual iterate as the start. |
-| `warm_start_target_mu` | `0` | When `> 0`, start the barrier at exactly this `mu`, overriding `mu_init` and the recentering pass. **Recommended for small parameter changes: `1e-4`** (restores the cold iteration count, 7, on the gh#988 model). Leave at `0` for a stale or distant point, where a larger start `mu` is the safer choice. |
+| `warm_start_target_mu` | `0` | When `> 0`, start the barrier at exactly this `mu`, overriding `mu_init` and the recentering pass. An explicit instruction: still wins over the residual estimate. Useful for a small, well-understood parameter change (`1e-4` takes the gh#988 model from 4 to 3-5 iterations); leave at `0` for a stale or distant point, where a larger start `mu` is the safer choice. |
 | `warm_start_recentering` | `residual` | `residual` measures the supplied point and raises `mu` only for measured complementarity; `none` restores pre-gh#606 behaviour. |
 | `warm_start_bound_push`, `warm_start_bound_frac` | `0.001` | Primal push away from bounds (as `bound_push` / `bound_frac`). |
 | `warm_start_slack_bound_push`, `warm_start_slack_bound_frac` | `0.001` | Same for inequality slacks. |
 | `warm_start_mult_bound_push` | `0.001` | Floor on bound multipliers. |
 | `warm_start_mult_init_max` | `1e6` | Cap on supplied multiplier magnitudes. |
 
-The default is unchanged: lowering `mu` by default is a trajectory change
-that was not validated against the fixture sweep, and a distant point may do
-better from a larger start `mu`, so it is an opt-in. If a warm start is slower than a cold one, try
-`warm_start_target_mu=1e-4` first.
+The default start `mu` is unchanged. The fix above is in how the supplied
+multipliers are reconciled with the slacks, not in a lower default barrier:
+lowering `mu` for every warm start is a trajectory change for points that are
+stale or distant, where a larger start `mu` is the safer choice.
 
 ## Starting-point conditioning
 

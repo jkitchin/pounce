@@ -1261,6 +1261,70 @@ where
     })
 }
 
+/// The warm solve plus its cold fallback, without the deadline frame or the
+/// fixed-column elimination (both applied by [`solve_qp_ipm_warm`]).
+fn solve_qp_ipm_warm_with_fallback<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    warm: &QpWarmStart,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // gh #988: columns with `lb == ub` are removed by the cold path's
+    // fixed-variable handling, so a warm point off the pin only
+    // pushes the direct method away from the only feasible value.
+    let pinned;
+    let warm = if (0..prob.n).any(|i| {
+        prob.lb_of(i) == prob.ub_of(i) && warm.x.get(i).is_some_and(|&x| x != prob.lb_of(i))
+    }) {
+        let mut w = warm.clone();
+        for i in 0..prob.n {
+            if prob.lb_of(i) == prob.ub_of(i) && i < w.x.len() {
+                w.x[i] = prob.lb_of(i);
+            }
+        }
+        pinned = w;
+        &pinned
+    } else {
+        warm
+    };
+    let (inner, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
+        solve_qp_ipm_warm_inner(prob, opts, warm, &mut *make_backend)
+    });
+    // One gate over every exit of the body below — see [`finite_or_failed`].
+    let mut sol = finite_or_failed(
+        prob,
+        demote_uncertified_sigma_optimum(inner, sigma_uncertified),
+    );
+    // gh #988: a warm start that cannot help must degrade to the cold
+    // path. The warm leg runs the direct infeasible-start method,
+    // which on an infeasible neighbour or a stiff fixed-column model
+    // ends in `NumericalFailure` / `IterationLimit` where the cold
+    // HSDE solve certifies or converges. Only a clean verdict (optimal
+    // or a certified infeasibility) is kept.
+    if !crate::deadline::expired()
+        && matches!(
+            sol.status,
+            QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
+        )
+    {
+        let cold = solve_qp_ipm(prob, opts, make_backend);
+        let cold_clean = matches!(
+            cold.status,
+            QpStatus::Optimal | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
+        );
+        let keep_inaccurate_warm = sol.status == QpStatus::OptimalInaccurate;
+        if cold_clean || !keep_inaccurate_warm {
+            let warm_iters = sol.iters;
+            sol = cold;
+            sol.iters += warm_iters;
+        }
+    }
+    sol
+}
+
 /// Solve a convex QP starting from a warm point (typically a previous
 /// solution of a nearby problem). See [`QpWarmStart`] for the centering
 /// strategy and when warm starting helps.
@@ -1288,58 +1352,37 @@ where
             // the frame", and leaving the one exception to be rediscovered is
             // how F8 happened.
             let mut make_backend = make_backend;
-            // gh #988: columns with `lb == ub` are removed by the cold path's
-            // fixed-variable handling, so a warm point off the pin only
-            // pushes the direct method away from the only feasible value.
-            let pinned;
-            let warm = if (0..prob.n).any(|i| {
-                prob.lb_of(i) == prob.ub_of(i) && warm.x.get(i).is_some_and(|&x| x != prob.lb_of(i))
-            }) {
-                let mut w = warm.clone();
-                for i in 0..prob.n {
-                    if prob.lb_of(i) == prob.ub_of(i) && i < w.x.len() {
-                        w.x[i] = prob.lb_of(i);
-                    }
+            // gh #988 (second pass): columns with `lb == ub` are *eliminated*
+            // before the direct method runs. Expanded to rows they read
+            // `x <= v` and `-x <= -v`, a pair with no interior: the slack
+            // pair is forced to zero and the infeasible-start iteration
+            // stalls (the multi-week production LP with the first weeks
+            // pinned: iteration_limit at 199 where the cold HSDE solve
+            // takes 32). Substituting the pin out leaves a well-posed
+            // problem whose warm start behaves like any other. Anything
+            // but a clean optimum falls through to the full-problem path
+            // below, which owns the infeasibility certificates.
+            let mut spent = 0usize;
+            if let Some(red) = FixedColumns::eliminate(prob) {
+                let w = red.project_warm(warm);
+                let red_opts = QpOptions {
+                    obj_constant: opts.obj_constant + red.obj_shift,
+                    ..*opts
+                };
+                let rsol =
+                    solve_qp_ipm_warm_with_fallback(&red.prob, &red_opts, &w, &mut make_backend);
+                if rsol.status == QpStatus::Optimal {
+                    let sol = red.lift(prob, rsol, opts.obj_constant);
+                    return if crate::deadline::expired() {
+                        mark_timed_out(sol)
+                    } else {
+                        sol
+                    };
                 }
-                pinned = w;
-                &pinned
-            } else {
-                warm
-            };
-            let (inner, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
-                solve_qp_ipm_warm_inner(prob, opts, warm, &mut make_backend)
-            });
-            // One gate over every exit of the body below — see [`finite_or_failed`].
-            let mut sol = finite_or_failed(
-                prob,
-                demote_uncertified_sigma_optimum(inner, sigma_uncertified),
-            );
-            // gh #988: a warm start that cannot help must degrade to the cold
-            // path. The warm leg runs the direct infeasible-start method,
-            // which on an infeasible neighbour or a stiff fixed-column model
-            // ends in `NumericalFailure` / `IterationLimit` where the cold
-            // HSDE solve certifies or converges. Only a clean verdict (optimal
-            // or a certified infeasibility) is kept.
-            if !crate::deadline::expired()
-                && matches!(
-                    sol.status,
-                    QpStatus::NumericalFailure
-                        | QpStatus::IterationLimit
-                        | QpStatus::OptimalInaccurate
-                )
-            {
-                let cold = solve_qp_ipm(prob, opts, &mut make_backend);
-                let cold_clean = matches!(
-                    cold.status,
-                    QpStatus::Optimal | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
-                );
-                let keep_inaccurate_warm = sol.status == QpStatus::OptimalInaccurate;
-                if cold_clean || !keep_inaccurate_warm {
-                    let warm_iters = sol.iters;
-                    sol = cold;
-                    sol.iters += warm_iters;
-                }
+                spent = rsol.iters;
             }
+            let mut sol = solve_qp_ipm_warm_with_fallback(prob, opts, warm, &mut make_backend);
+            sol.iters += spent;
             if crate::deadline::expired() {
                 mark_timed_out(sol)
             } else {
@@ -2333,6 +2376,219 @@ fn expand_bounds(prob: &QpProblem) -> (QpProblem, Vec<(usize, usize, bool)>) {
         ub: Vec::new(),
     };
     (expanded, bound_rows)
+}
+
+/// Columns with `lb == ub` substituted out of a [`QpProblem`] (gh #988).
+///
+/// `x_F = v` is a constraint, not a variable: leaving it in as the row pair
+/// `x <= v`, `-x <= -v` hands the direct infeasible-start method a barrier
+/// with no interior. This is the exact change of variable the cold path's
+/// presolve and HSDE embedding make unnecessary to think about, written out
+/// once for the warm path.
+struct FixedColumns {
+    /// The reduced problem over the free columns.
+    prob: QpProblem,
+    /// Original index of each reduced column.
+    keep: Vec<usize>,
+    /// Original index of each surviving equality / inequality row.
+    eq_rows: Vec<usize>,
+    ineq_rows: Vec<usize>,
+    /// Pinned value per original column (`None` for a free one).
+    pin: Vec<Option<f64>>,
+    /// `½ x_Fᵀ P_FF x_F + c_Fᵀ x_F`, the objective the pins contribute.
+    obj_shift: f64,
+}
+
+impl FixedColumns {
+    /// `None` when no column is pinned, when every column is, or when the
+    /// substitution would leave a constraint row with no free column (a
+    /// row that is then a pure feasibility statement the caller's path
+    /// should judge on the full problem).
+    fn eliminate(prob: &QpProblem) -> Option<FixedColumns> {
+        if prob.lb.is_empty() || prob.ub.is_empty() {
+            return None;
+        }
+        let pin: Vec<Option<f64>> = (0..prob.n)
+            .map(|i| {
+                let (l, u) = (prob.lb_of(i), prob.ub_of(i));
+                (l == u && l.is_finite() && l.abs() < crate::qp::BOUND_INF).then_some(l)
+            })
+            .collect();
+        let n_pinned = pin.iter().filter(|p| p.is_some()).count();
+        if n_pinned == 0 || n_pinned == prob.n {
+            return None;
+        }
+        let mut new_idx = vec![usize::MAX; prob.n];
+        let mut keep = Vec::with_capacity(prob.n - n_pinned);
+        for (i, p) in pin.iter().enumerate() {
+            if p.is_none() {
+                new_idx[i] = keep.len();
+                keep.push(i);
+            }
+        }
+        let xf = |i: usize| pin[i].unwrap_or(0.0);
+        let mut c: Vec<f64> = keep.iter().map(|&i| prob.c[i]).collect();
+        let mut obj_shift: f64 = (0..prob.n)
+            .filter(|&i| pin[i].is_some())
+            .map(|i| prob.c[i] * xf(i))
+            .sum();
+        let mut p_lower = Vec::new();
+        for t in &prob.p_lower {
+            match (pin[t.row].is_some(), pin[t.col].is_some()) {
+                (false, false) => p_lower.push(crate::qp::Triplet::new(
+                    new_idx[t.row],
+                    new_idx[t.col],
+                    t.val,
+                )),
+                (false, true) => c[new_idx[t.row]] += t.val * xf(t.col),
+                (true, false) => c[new_idx[t.col]] += t.val * xf(t.row),
+                (true, true) => {
+                    obj_shift += if t.row == t.col {
+                        0.5 * t.val * xf(t.row) * xf(t.col)
+                    } else {
+                        t.val * xf(t.row) * xf(t.col)
+                    }
+                }
+            }
+        }
+        // A row whose columns are all pinned is a constant statement
+        // `0 = b'` / `0 <= h'`: judge it here, drop it if it holds, and let the
+        // full-problem path own the verdict if it does not.
+        let reduce_rows = |trips: &[crate::qp::Triplet], rhs: &[f64], eq: bool| {
+            let mut r = rhs.to_vec();
+            let mut free_in_row = vec![false; rhs.len()];
+            for t in trips {
+                match pin[t.col] {
+                    Some(v) => r[t.row] -= t.val * v,
+                    None => free_in_row[t.row] = true,
+                }
+            }
+            let mut kept_rows = Vec::new();
+            let mut new_row = vec![usize::MAX; rhs.len()];
+            for i in 0..rhs.len() {
+                if free_in_row[i] {
+                    new_row[i] = kept_rows.len();
+                    kept_rows.push(i);
+                } else {
+                    let tol = 1e-9 * rhs[i].abs().max(1.0);
+                    let holds = if eq { r[i].abs() <= tol } else { r[i] >= -tol };
+                    if !holds {
+                        return None;
+                    }
+                }
+            }
+            let out: Vec<crate::qp::Triplet> = trips
+                .iter()
+                .filter(|t| pin[t.col].is_none())
+                .map(|t| crate::qp::Triplet::new(new_row[t.row], new_idx[t.col], t.val))
+                .collect();
+            let rhs_kept: Vec<f64> = kept_rows.iter().map(|&i| r[i]).collect();
+            Some((out, rhs_kept, kept_rows))
+        };
+        let (a, b, eq_rows) = reduce_rows(&prob.a, &prob.b, true)?;
+        let (g, h, ineq_rows) = reduce_rows(&prob.g, &prob.h, false)?;
+        let red = QpProblem {
+            n: keep.len(),
+            p_lower,
+            c,
+            a,
+            b,
+            g,
+            h,
+            lb: keep.iter().map(|&i| prob.lb_of(i)).collect(),
+            ub: keep.iter().map(|&i| prob.ub_of(i)).collect(),
+        };
+        Some(FixedColumns {
+            prob: red,
+            keep,
+            eq_rows,
+            ineq_rows,
+            pin,
+            obj_shift,
+        })
+    }
+
+    /// The warm point restricted to the free columns.
+    fn project_warm(&self, warm: &QpWarmStart) -> QpWarmStart {
+        let pick = |v: &[f64]| -> Vec<f64> {
+            if v.len() == self.pin.len() {
+                self.keep.iter().map(|&i| v[i]).collect()
+            } else {
+                v.to_vec()
+            }
+        };
+        let rows = |v: &[f64], kept: &[usize]| -> Vec<f64> {
+            if kept.iter().all(|&i| i < v.len()) {
+                kept.iter().map(|&i| v[i]).collect()
+            } else {
+                v.to_vec()
+            }
+        };
+        QpWarmStart {
+            x: pick(&warm.x),
+            y: rows(&warm.y, &self.eq_rows),
+            z: rows(&warm.z, &self.ineq_rows),
+            z_lb: pick(&warm.z_lb),
+            z_ub: pick(&warm.z_ub),
+        }
+    }
+
+    /// Map an optimal reduced solution back to the full problem: restore the
+    /// pins and recover each pinned column's bound multiplier from
+    /// stationarity, `z_lb - z_ub = (Px + c + Aᵀy + Gᵀz)_i`.
+    fn lift(&self, prob: &QpProblem, red: QpSolution, obj_constant: f64) -> QpSolution {
+        let n = prob.n;
+        let mut x = vec![0.0; n];
+        let mut z_lb = vec![0.0; n];
+        let mut z_ub = vec![0.0; n];
+        for (k, &i) in self.keep.iter().enumerate() {
+            x[i] = red.x[k];
+            z_lb[i] = red.z_lb.get(k).copied().unwrap_or(0.0);
+            z_ub[i] = red.z_ub.get(k).copied().unwrap_or(0.0);
+        }
+        for (i, p) in self.pin.iter().enumerate() {
+            if let Some(v) = p {
+                x[i] = *v;
+            }
+        }
+        // Multipliers of the rows that were dropped as constant are zero.
+        let mut y = vec![0.0; prob.m_eq()];
+        for (k, &i) in self.eq_rows.iter().enumerate() {
+            y[i] = red.y[k];
+        }
+        let mut z = vec![0.0; prob.m_ineq()];
+        for (k, &i) in self.ineq_rows.iter().enumerate() {
+            z[i] = red.z[k];
+        }
+        let mut r = prob.c.clone();
+        prob.p_mul_add_pub(&x, &mut r);
+        prob.at_mul(&y, &mut r);
+        prob.gt_mul(&z, &mut r);
+        for (i, p) in self.pin.iter().enumerate() {
+            if p.is_some() {
+                z_lb[i] = r[i].max(0.0);
+                z_ub[i] = (-r[i]).max(0.0);
+            }
+        }
+        // Recomputed on the full problem rather than carried over: the reduced
+        // solve's objective omits what the pins contribute, and which paths
+        // fold `obj_constant` in is the solver's business, not this lift's.
+        let mut px = vec![0.0; n];
+        prob.p_mul_add_pub(&x, &mut px);
+        let obj = obj_constant
+            + (0..n)
+                .map(|i| 0.5 * x[i] * px[i] + prob.c[i] * x[i])
+                .sum::<f64>();
+        QpSolution {
+            x,
+            y,
+            z,
+            z_lb,
+            z_ub,
+            obj,
+            ..red
+        }
+    }
 }
 
 /// A warm-start iterate: a previous primal/dual solution to seed the
@@ -3891,6 +4147,66 @@ fn scale_relative_stop(
     pinf / (1.0 + scale_p) < tol && dinf / (1.0 + scale_d) < tol
 }
 
+/// Detects an iterate that has converged in everything except an absolute
+/// primal residual it cannot lower (gh#988, second pass).
+///
+/// The direct driver's test is absolute (`res < tol`), and the scale-relative
+/// arm ([`scale_relative_stop`]) opens only once `scale·ε > tol`, i.e. beyond
+/// scale `~4.5e7`. Between the two sits a band the production-distribution LP
+/// of gh#988 item 2 lands in: data of order `1e4`, a primal residual that
+/// floors at `4.8e-8` because the pinned columns carry the base solve's own
+/// `1e-8`-level inconsistency through an equality system with dependent rows —
+/// `5e-12` of the data's scale, and nothing Newton can remove. `μ` and the
+/// dual residual reach `1e-15` while `pinf` sits at `4.78e-8` for the rest of
+/// the 199 iterations, the verdict is `iteration_limit`, and the HSDE cold
+/// solve of the same model stops at 32.
+///
+/// The a-priori gate (`scale·ε > tol`) is replaced here by a measurement: the
+/// absolute test stays primary, and is relaxed only after `PLATEAU_ITERS`
+/// consecutive iterations with `μ` and the dual residual already under `tol`,
+/// the primal residual under `tol` *relative to the data* (`1 + ‖b‖∞, ‖h‖∞,
+/// ‖s‖∞`), and no improvement in it. A solve still making progress, or still
+/// off the central path, never trips it, so no trajectory that converged
+/// before changes.
+#[derive(Default)]
+struct PrimalPlateau {
+    last_pinf: f64,
+    count: usize,
+}
+
+impl PrimalPlateau {
+    const PLATEAU_ITERS: usize = 3;
+
+    fn observe(
+        &mut self,
+        prob: &QpProblem,
+        s: &[f64],
+        pinf: f64,
+        dinf_scaled: f64,
+        mu_scaled: f64,
+        tol: f64,
+    ) -> bool {
+        if pinf < tol || !(mu_scaled < tol) || !(dinf_scaled < tol) {
+            self.count = 0;
+            self.last_pinf = pinf;
+            return false;
+        }
+        let data_scale = 1.0 + inf_norm(&prob.b).max(inf_norm(&prob.h)).max(inf_norm(s));
+        if pinf / data_scale >= tol {
+            self.count = 0;
+            self.last_pinf = pinf;
+            return false;
+        }
+        if self.last_pinf > 0.0 && pinf >= 0.9 * self.last_pinf {
+            self.count += 1;
+        } else {
+            self.count = 0;
+        }
+        self.last_pinf = pinf;
+        self.count >= Self::PLATEAU_ITERS
+    }
+}
+
 /// Build the starting iterate `(x, y, z, s)` for [`run_ipm`] by **Mehrotra-style
 /// recentering** (Mehrotra 1992, §7) of a seed point — the warm start when one
 /// is supplied, otherwise the origin `x = 0, y = 0, z = e`.
@@ -4065,6 +4381,8 @@ fn run_ipm(
     let (mut step_s, mut step_z) = (scratch(m_ineq), scratch(m_ineq));
     let (zeros_n, zeros_meq, zeros_m) = (scratch(n), scratch(m_eq), scratch(m_ineq));
     let mut tally = correctors::Tally::default();
+    // gh#988 (second pass): primal-residual plateau detector, see `plateau`.
+    let mut plateau = PrimalPlateau::default();
 
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
@@ -4164,7 +4482,12 @@ fn run_ipm(
             break;
         }
 
-        if res < opts.tol || scale_relative_stop(prob, &x, &y, &z, &s, pinf, dinf, mu, opts.tol) {
+        let at_floor =
+            plateau.observe(prob, &s, pinf, dinf / dir_unit_d, mu / dir_unit_g, opts.tol);
+        if res < opts.tol
+            || scale_relative_stop(prob, &x, &y, &z, &s, pinf, dinf, mu, opts.tol)
+            || at_floor
+        {
             status = QpStatus::Optimal;
             // Record the converged iterate so the trace *ends* at the
             // optimum, matching the NLP path's N+1 convention (a problem

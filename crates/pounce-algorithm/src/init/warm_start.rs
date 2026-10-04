@@ -943,6 +943,8 @@ fn refine_bound_duals_from_stationarity(
 
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
     let mut rebuilt: [Option<Rc<dyn Vector>>; 4] = [None, None, None, None];
+    // Per slack block: how far each entry's slack is closed (gh#988).
+    let mut s_shift: [Option<Vec<Number>>; 2] = [None, None];
     for (i, block) in blocks.iter().enumerate() {
         let mask = &unseeded[i];
         if mask.is_empty() {
@@ -997,6 +999,37 @@ fn refine_bound_duals_from_stationarity(
             } else {
                 0.0
             };
+            // gh#988 item 3. The capped split above is right for a
+            // *corrupted* `y`, and `eq_seed_is_incoherent` has already
+            // refused those. What reaches here for an inequality slack
+            // (`i >= 2`) is a `y_d` that is coherent with the primal
+            // point's stationarity while the slack it pairs with is
+            // orders of magnitude wider than `mu / y_d`: the same
+            // constraint, still active, whose bound has moved away
+            // (a capacity K -> K', a right-hand side that relaxed).
+            // `∇_s L = -y_d + v` then reads `|y_d|` of dual
+            // infeasibility that no barrier-sized `v` can repair, and
+            // the solve spends its first dozens of iterations in
+            // restoration walking the slack back (Pricing, K 14 -> 16:
+            // 49 iterations against 7 cold). The seeded `y_d` is the
+            // authority on activity, so take the multiplier it implies
+            // and close the slack onto the bound at `mu / v`; what the
+            // move costs is a primal infeasibility of the old slack,
+            // which the first Newton step removes along the active
+            // constraint.
+            if i >= 2
+                && target[k].is_finite()
+                && target[k] > SEED_REJECTION_TRIGGER * compl_floor
+                && sl[k].is_finite()
+                && sl[k] > 0.0
+            {
+                let v = target[k].max(hard_floor).min(cap);
+                let new_slack = (mu_hat / v).min(sl[k]);
+                vals[k] = v;
+                let shift = s_shift[i - 2].get_or_insert_with(|| vec![0.0; vals.len()]);
+                shift[k] = sl[k] - new_slack;
+                continue;
+            }
             vals[k] = split.max(compl_floor).max(hard_floor).min(cap);
         }
         let mut out = block.make_new();
@@ -1011,9 +1044,31 @@ fn refine_bound_duals_from_stationarity(
     let pick = |i: usize, orig: &Rc<dyn Vector>| -> Rc<dyn Vector> {
         rebuilt[i].clone().unwrap_or_else(|| Rc::clone(orig))
     };
+    // gh#988: close the slacks whose seeded multiplier says "active".
+    // `s_new = s ∓ P (slack_old - slack_new)`: a lower-bounded slack
+    // sits at `d_L + slack`, an upper-bounded one at `d_U - slack`.
+    let mut s_new: Rc<dyn Vector> = Rc::clone(&curr.s);
+    if s_shift.iter().any(|v| v.is_some()) {
+        let mut s_copy = curr.s.make_new();
+        s_copy.copy(&*curr.s);
+        let nlp_ref = nlp.borrow();
+        let projections = [
+            (nlp_ref.pd_l(), &curr.v_l, -1.0),
+            (nlp_ref.pd_u(), &curr.v_u, 1.0),
+        ];
+        for (shift, (p, template, sign)) in s_shift.iter().zip(projections.iter()) {
+            let Some(shift) = shift else { continue };
+            let mut delta_c = template.make_new();
+            if !scatter(&mut *delta_c, shift) {
+                continue;
+            }
+            p.mult_vector(*sign, &*delta_c, 1.0, &mut *s_copy);
+        }
+        s_new = Rc::from(s_copy);
+    }
     let new_curr = IteratesVector::new(
         Rc::clone(&curr.x),
-        Rc::clone(&curr.s),
+        s_new,
         Rc::clone(&curr.y_c),
         Rc::clone(&curr.y_d),
         pick(0, &curr.z_l),

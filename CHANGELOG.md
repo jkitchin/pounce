@@ -60,6 +60,36 @@ changes.
   `warm_start_target_mu=1e-4` for small parameter changes) are documented in
   `options.md`; the NLP default is unchanged (docs only: no fixture-sweep
   evidence for changing it).
+- **Warm starts no longer lose to cold starts, second pass (gh#988).**
+  (3) NLP: a parameter change that moves the bound of an *active* inequality
+  away (capacity 14 -> 16) left the carried multiplier (1.41) on a slack that
+  is now 2 wide, while the initializer rebuilt the slack multiplier barrier-
+  sized and capped at ten times `mu / slack`; the start carried 1.41 of dual
+  infeasibility no step could repair at a tiny `mu`, and the solve spent its
+  first dozens of iterations cycling through restoration (49 iterations, 7
+  cold). The seeded inequality multiplier is now the authority on activity:
+  when stationarity of the slack row asks for a multiplier more than ten times
+  what `mu / slack` supports (and the seed passed the gh#617 coherence test),
+  that multiplier is taken and the slack is closed onto its bound at
+  `mu / v`. The model warm-starts in 4 iterations (cold 7) with no option.
+  `benchmarks/warmstart` (`warm-ipm`, 66 runs): 6331 -> 6244 total iterations,
+  `rosenbrock_ring` 68/74/75 -> 67/70/69, `rastrigin_drift` large 380 -> 329,
+  one line up (`rosenbrock_ring_cycle` small 86 -> 88), no failures. The
+  variable-bound branch is deliberately untouched: lifting the same cap there
+  cost `rosenbrock_ring` 68 -> 90. `warm_start_target_mu` stays an explicit
+  override, now documented without the "recommended" claim.
+  (2) `solve_qp(warm_start=...)` on the production LP with `lb == ub` columns:
+  pinned columns are now substituted out of the warm solve (rows left with no
+  free column are dropped when they hold, their multipliers zero, the pinned
+  column's bound multiplier recovered from stationarity), and the direct
+  driver stops at a measured primal-residual plateau (`mu` and the dual
+  residual under `tol`, the primal residual under `tol` relative to the
+  data, no improvement for 3 iterations) instead of running a converged
+  iterate to the iteration limit: the issue's `5e-8` residual on data of order
+  `1e4` is `5e-12` of its scale. Reduced instance (T=26, K=20): warm from the
+  scenario optimum / x only / base plan = 32 / 31 / 36 iterations against 31
+  cold (was 231 / 231 / 82, i.e. the iteration limit then a cold re-solve);
+  textbook instance (T=52, K=60): 36 / 36 / 38 against 60 cold.
 - **Misleading verdicts and reports (gh#987).** (1) A `.nl` that declares
   binary / integer variables was solved as its relaxation with no word of it:
   the CLI now warns on stderr, and `pounce verify` checks the declared integer
