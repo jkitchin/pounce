@@ -1040,6 +1040,10 @@ pub struct SolverDebugger {
     /// A debugger script (file path) to run once at the first pause
     /// (`--debug-script`); consumed on use.
     pending_script: Option<String>,
+    /// A `--debug-script` was given (it may already have been consumed).
+    /// With a non-TTY stdin, an exhausted script means "let it run" rather
+    /// than blocking on a stream nobody is typing into (gh#990 item 14).
+    script_given: bool,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -1111,6 +1115,7 @@ impl SolverDebugger {
             pump: None,
             watches: Vec::new(),
             pending_script: None,
+            script_given: false,
             staged: Vec::new(),
             sweep: None,
             prompt_interrupts: 0,
@@ -1137,6 +1142,7 @@ impl SolverDebugger {
     /// Queue a debugger script to run once at the first pause.
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
+        self.script_given = true;
         self
     }
 
@@ -3523,6 +3529,13 @@ impl SolverDebugger {
                     Err(ReadlineError::Eof) => None,
                     Err(_) => None,
                 };
+            }
+            // Batch mode: a `--debug-script` plus a non-terminal stdin (a
+            // Jupyter kernel, a CI step, a subprocess pipe left open) has
+            // nobody to answer a prompt, so the end of the script is EOF,
+            // which detaches and lets the solve finish.
+            if self.script_given && !std::io::stdin().is_terminal() {
+                return None;
             }
             let _ = write!(std::io::stderr(), "pounce-dbg> ");
             let _ = std::io::stderr().flush();

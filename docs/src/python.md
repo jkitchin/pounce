@@ -17,6 +17,15 @@ the wheel puts it and where the `pounce` console script looks for it. A bare
 to `target/release/pounce` (announcing that it did), and anything that shells
 out to `pounce` runs a build directory rather than the package's own binary.
 
+The CLI binary the wheel carries lives at `python/pounce/bin/pounce` (in an
+installed wheel, `<site-packages>/pounce/bin/pounce`; `python -c "import
+pounce, pathlib; print(pathlib.Path(pounce.__file__).parent / 'bin' /
+'pounce')"`). The `pounce` console script is a Python shim that imports
+`pounce._cli` before it execs that binary, which costs about 0.24 s per
+call against 3 ms for the binary itself. A notebook that shells out to the CLI
+hundreds of times should call the bundled binary directly rather than the
+console script.
+
 Just the extension module, if that is all you need:
 
 ```sh
@@ -78,7 +87,7 @@ Everything else is conditional or optional, on cyipopt's rules:
 | `constraints` / `jacobian` | required when `m > 0` |
 | `jacobianstructure` | **optional.** Omit it and the Jacobian is dense `(m, n)`: `jacobian(x)` then returns all `m*n` entries, row-major. Supply it to declare a sparse pattern — worth doing for anything but a small dense block. |
 | `hessian` + `hessianstructure` | **optional, both or neither.** Without them the solve runs `hessian_approximation=limited-memory` (L-BFGS). |
-| `intermediate` | optional per-iteration callback; return `False` to stop. |
+| `intermediate` | optional per-iteration callback; return `False` to stop. Its `inf_pr` is the report's `iterations[*].inf_pr_internal` (the scaled slack-form residual the filter and convergence test read), **not** the report's `inf_pr`; on a badly scaled model they differ (by up to 1.74 on the column design example, gh#990). |
 
 `pounce.preflight(problem_obj, x0, ...)` evaluates the same object once
 and reports what the solver's first iteration will see, under exactly

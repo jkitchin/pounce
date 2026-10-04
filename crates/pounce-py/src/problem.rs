@@ -913,11 +913,13 @@ impl PyProblem {
     /// `None`. To get both, call `solve` first and pass the `x` it
     /// returns back in as `x0`.
     ///
-    /// Passing `sens_boundcheck=True` clamps the perturbed primal step
-    /// against the variable bounds (single-pass projection — simpler
-    /// than upstream's iterative Schur refinement; see
-    /// `pounce_sensitivity::boundcheck`). `sens_bound_eps` is the
-    /// tolerance (default `1e-9`).
+    /// Passing `sens_boundcheck=True` keeps the perturbed primal step
+    /// inside the **variable bounds**: violated variables are pinned at
+    /// their bound and the step is re-solved, for up to 16 passes (since
+    /// #587; see `pounce_sensitivity::boundcheck`). It does **not** check
+    /// constraint-row limits — a perturbed `g(x)` can leave `[cl, cu]`
+    /// unnoticed; use `parametric_step_bounded` when a row limit can bind.
+    /// `sens_bound_eps` is the tolerance (default `1e-9`).
     #[pyo3(signature = (
         x0,
         pin_constraint_indices,

@@ -45,6 +45,14 @@ def test_single_element_batch():
     assert info["iter_count"] > 0
 
 
+def test_batch_info_carries_wall_time():
+    # gh#990 item 11: parity with Problem.solve's info["wall_time"].
+    p = _load()
+    for _x, info in pounce.solve_nlp_batch([p, p], parallel=False):
+        assert isinstance(info["wall_time"], float)
+        assert info["wall_time"] > 0.0
+
+
 def test_batch_results_in_input_order_and_match_sequential():
     p = _load()
     # base, multi-start (shifted x0), and a bound-tightened sibling —

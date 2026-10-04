@@ -1385,6 +1385,24 @@ schedule) and `adaptive` (quality-function oracle picks each μ from the
 current iterate's complementarity). See
 [μ-strategy](troubleshooting.md#μ-strategy) for when to switch.
 
+**The default depends on the Hessian.** `monotone` is the registered
+default, but `hessian_approximation=limited-memory` changes what an *unset*
+`mu_strategy` means (gh#746, matching Ipopt's `IpAlgBuilder.cpp:1059`):
+
+| How L-BFGS was selected | Unset `mu_strategy` resolves to |
+|---|---|
+| You asked for `hessian_approximation=limited-memory` (CLI, `add_option`, `minimize(..., hessian_approximation=...)`), even though a `hessian` is defined | `adaptive` |
+| The Python `Problem` object defines no `hessian`, so POUNCE fell back to L-BFGS itself | `monotone` — POUNCE pins it, because the fallback is not a request for a barrier schedule and adaptive measurably hurts warm starts |
+| Exact Hessian | `monotone` |
+
+An explicit `mu_strategy` always wins. On a 10-variable Rosenbrock with L-BFGS
+the two rows differ as 117 iterations (adaptive) against 121 (monotone), so
+the rule is visible as an iteration count. Because `mu_strategy_fallback`
+defaults to on while `mu_strategy` is unset (gh#748), a stalled solve under
+either default is retried once under the other. The solve report does not
+record the strategy that was resolved; pin `mu_strategy` yourself when you
+need the run to be reproducible across call paths.
+
 | Option                                  | Default            | Meaning                                                                                       |
 |-----------------------------------------|--------------------|-----------------------------------------------------------------------------------------------|
 | `mu_strategy`                           | `monotone`         | `monotone` (Fiacco–McCormick schedule) or `adaptive` (oracle-driven).                         |
@@ -2053,6 +2071,21 @@ OptionsList.
 | `metis`     | feral-metis multilevel nested dissection. **Pin it for collocation, optimal-control and PDE-in-time models** (see below). Tends to produce squarer fronts than AMD on banded / nearly-1D structure. |
 | `scotch`    | feral-scotch nested dissection. Similar regime to METIS; alternative when METIS is unavailable or for cross-validation.                                                                                                                                   |
 | `kahip`     | feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4–6× per-call symbolic cost. Reach for it only when ND fill matters and per-call cost is amortized.                                                          |
+
+**`linear_solver.last_ordering` can differ from what you pinned.** FERAL
+uses an AMD *leaf* below `amd_switch` (default 120 rows): on a small matrix
+`feral_ordering=scotch` (or `metis`, `kahip`) still reports
+`last_ordering: "amd"`, because the nested-dissection recursion bottoms out
+in AMD at once. This is not a failed option. The ordering you pinned only
+shows up in `last_ordering` once the matrix is larger than the switch.
+
+**`min_abs_pivot` / `max_abs_pivot` are in FERAL's equilibrated space.**
+They are pivots of the matrix *after* FERAL's own row/column equilibration,
+not of the KKT matrix in your model's units: `max_abs_pivot` reads `3.0`
+whether a Hessian entry is `2` or `2e6`, even at `nlp_scaling_method=none`.
+Use them to compare factorizations of the same model (near-singularity,
+`min_abs_pivot` collapsing between iterations), not to read off the
+curvature scale.
 
 When in doubt: leave `feral_ordering` at the default, with one
 exception.

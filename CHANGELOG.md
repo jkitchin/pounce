@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Docs and small API gaps from the textbook checklist (gh#990, partial).**
+  `solve_nlp_batch`'s per-instance `info` now carries `wall_time` (seconds in
+  that instance's solve), like `Problem.solve`. Stderr logging strips ANSI
+  colour unless stderr is a terminal (`NO_COLOR` and `CLICOLOR_FORCE` still
+  honoured), so redirected logs and notebooks no longer carry escapes.
+  `--debug-script` with a non-terminal stdin (a Jupyter kernel, an open
+  `subprocess` pipe) now treats the end of the script as end of input and lets
+  the solve finish, instead of blocking at the next pause. Documented: the
+  `mu_strategy` default under `limited-memory`, `sens_boundcheck` (up to 16
+  passes, variable bounds only, `parametric_step_bounded` for rows), the l1
+  penalty wrapper elasticizing equality rows only, `last_ordering` AMD leaf
+  and equilibrated-space pivots, degenerate LP duals and `qp_crossover`, HSDE
+  certificate scale (1/tau), the `intermediate` callback's `inf_pr` and the
+  JSON `solution.lambda` convention, `--debug-script` batch behaviour, the
+  bundled `pounce` binary path, and the `pounce.qp` docstring (the Python QP
+  path never presolves; `qp_*` options are CLI-only). Deferred: items 3
+  (derivative-checker result in `info`), 12 (crossover summary line), 9's
+  exposing tau/kappa, the `requested` solver field, and 16 (wiki page, other
+  repo).
+
 ### Fixed
 
 - **Python-level driver defects (gh#989, items 1-4 and 6).**

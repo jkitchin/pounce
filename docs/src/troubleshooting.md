@@ -240,8 +240,9 @@ trade-off discussion.
 
 When restoration fires repeatedly, the standard IPM is stuck on an
 infeasible subproblem the filter cannot accept. The ℓ₁ exact-penalty
-wrapper rephrases the constraints as an additive penalty term and
-solves a sequence of bound-constrained subproblems instead:
+wrapper elasticizes the **equality** rows (each gets a pair of penalized
+slacks; inequality rows pass through unchanged) and solves a sequence of
+subproblems with the penalty term in the objective instead:
 
 ```
 pounce problem.nl l1_exact_penalty_barrier=yes

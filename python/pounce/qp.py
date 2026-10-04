@@ -9,9 +9,17 @@ Solves the standard-form convex quadratic program
                 G x ≤ h
                 lb ≤ x ≤ ub
 
-with a specialized interior-point method (Mehrotra predictor-corrector),
-presolve, and verified infeasibility / unboundedness detection. ``P = 0``
-gives an LP.
+with a specialized interior-point method (Mehrotra predictor-corrector) and
+verified infeasibility / unboundedness detection. ``P = 0`` gives an LP.
+
+.. note::
+
+   This Python path **never presolves**, and it runs the solver's default
+   regularization / HSDE / equilibration settings. The ``qp_presolve``,
+   ``qp_reg``, ``qp_hsde``, ``qp_equilibrate`` and ``qp_crossover`` options
+   are CLI-only (``pounce model.nl qp_presolve=no ...``); ``solve_qp`` exposes
+   ``tol``, ``max_iter``, ``time_limit``, ``tau`` and ``tau_max`` instead. To
+   presolve, write the model to ``.nl`` and run the CLI.
 
 This module is the friendly surface over the compiled ``_pounce``
 bindings: it accepts dense vectors and (optionally) scipy-sparse or dense

@@ -92,6 +92,10 @@ pub struct NlpBatchResult {
     /// Per-instance solve statistics (iteration count, final KKT
     /// error, timings, …).
     pub stats: SolveStatistics,
+    /// Wall-clock seconds spent in this instance's solve (gh#990 item 11),
+    /// measured around `optimize_tnlp`; `Problem.solve`'s `info["wall_time"]`
+    /// counterpart. `0.0` for an aborted (panicked) instance.
+    pub wall_time: f64,
 }
 
 /// Delegating wrapper that records the `finalize_solution` payload so
@@ -589,19 +593,23 @@ where
     // observing them, so any broken interior-mutability invariant cannot
     // leak out — only the freshly-built `InternalError` row is returned.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let t0 = std::time::Instant::now();
         let status = app.optimize_tnlp(Rc::clone(&cap) as Rc<RefCell<dyn TNLP>>);
+        let wall_time = t0.elapsed().as_secs_f64();
         let stats = app.statistics();
         let solution = cap.borrow_mut().captured.take();
         NlpBatchResult {
             status,
             solution,
             stats,
+            wall_time,
         }
     }));
     outcome.unwrap_or_else(|_| NlpBatchResult {
         status: ApplicationReturnStatus::InternalError,
         solution: None,
         stats: SolveStatistics::default(),
+        wall_time: 0.0,
     })
 }
 
@@ -926,6 +934,8 @@ mod tests {
         let sol = out[0].solution.as_ref().expect("solution captured");
         assert!((sol.x[0] - expected[0]).abs() < 1e-6);
         assert!((sol.x[1] - expected[1]).abs() < 1e-6);
+        // gh#990 item 11: every instance carries its own wall-clock time.
+        assert!(out[0].wall_time > 0.0 && out[0].wall_time.is_finite());
     }
 
     #[test]

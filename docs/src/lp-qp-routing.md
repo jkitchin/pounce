@@ -484,5 +484,35 @@ against the true objective and constraints before the 300 is reported;
 a ray that does not survive yields
 `Search_Direction_Becomes_Too_Small`, never an unboundedness claim.
 
+#### The certificate vectors are unnormalized (scale 1/τ)
+
+The HSDE iterate is homogeneous: it carries a scalar `τ` that tends to a
+positive number at an optimum and to `0` at an infeasible or unbounded
+problem. At an optimum `x/τ`, `y/τ`, `z/τ` are the answer, and that
+division is already done before you see it. At an infeasibility or
+unboundedness verdict `τ → 0` and there is nothing to normalize *by*: the
+returned `y`, `z`, `z_lb`, `z_ub` (infeasible) or `x` (unbounded) are the
+Farkas / recession ray, a **direction** whose length is arbitrary and grows
+like `1/τ`. On a two-variable infeasible LP the multipliers read `z ≈ 4.5e10`
+(gh#990). Do not read the magnitude as a bound on anything; rescale the ray
+yourself (e.g. divide by `max|z|`) if you need a unit-length certificate,
+and test it with the sign and residual conditions the verification step
+already applied. `τ` and `κ` are not exposed on the result.
+
+#### Degenerate LP duals are not unique
+
+At a degenerate vertex the dual solution is not unique: the optimal duals
+form a face. An interior-point method converges to the **relative interior**
+of that face (the analytic-center-like point), so its duals can move with
+data that is *inactive at the vertex* — raising an inactive upper bound from
+20 to 100 changed `z` from `[0, 108.76, 0, 26.29, 91.24]` to
+`[0, 112.76, 0, 38.29, 87.24]` with `x` identical (gh#990). Both are valid
+optimal duals. If you need the **vertex** dual (the one a simplex code
+reports, and the one a sensitivity or shadow-price reading usually wants),
+set `qp_crossover=yes` (pure LPs): it purifies the interior iterate to an
+exact vertex and reads the duals from that basis. Still not unique when the
+vertex is degenerate, but a vertex of the dual face, hence stable under
+changes to inactive data.
+
 The design and roadmap live in
 [`dev-notes/lp-qp-routing.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/lp-qp-routing.md).

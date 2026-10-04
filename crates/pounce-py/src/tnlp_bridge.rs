@@ -371,6 +371,11 @@ impl TNLP for PyTnlp {
         _ip_data: &IpoptData,
         _ip_cq: &IpoptCq,
     ) -> bool {
+        // Callback convention (gh#990 item 10): `inf_pr` here is the
+        // algorithm's internal scaled slack-form residual -- the report's
+        // `iterations[*].inf_pr_internal`, not its `inf_pr`. On a badly
+        // scaled model the two differ (up to 1.74 on the column example).
+        //
         // Optional. If the user object has no `intermediate` method we
         // just keep going; any exception aborts the iteration with a
         // user-stop status (consistent with cyipopt).

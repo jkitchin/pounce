@@ -425,8 +425,10 @@ is available via `--rh-eigendecomp` (AMPL CLI),
 perturbed step is available via `--sens-boundcheck [--sens-bound-eps EPS]`
 (AMPL CLI), `SensSolve::with_boundcheck(eps)` (Rust), and
 `solve_with_sens(sens_boundcheck=True, sens_bound_eps=…)` (Python). The
-bound projection is a single-pass clamp; upstream's iterative Schur
-refinement (re-factorize on each violation) is intentionally not ported.
+bound projection pins any violated variable at its bound and re-solves the
+step, for up to 16 passes (since #587); it covers **variable bounds only**,
+not constraint-row limits — use `parametric_step_bounded` when a row limit
+can bind.
 
 ### Sessions: factor-once / solve-many
 

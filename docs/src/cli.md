@@ -121,6 +121,12 @@ expect them to differ by a sign — that is by design, not a bug.
 > every other solver ([#271](https://github.com/jkitchin/pounce/issues/271)).
 > Objectives and primal solutions were never affected.
 
+For a `maximize` model the JSON `solution.lambda`
+is `σ·λ` with `σ = −1`: the multipliers of the internal minimization, flipped
+into the model's declared sense, as the `.sol` writer already does (gh#959).
+The [report schema](schema/solve-report-v1.md) carries the same note on the
+`lambda` row.
+
 ## Exit codes
 
 - `0` — `Solve_Succeeded`, `Solved_To_Acceptable_Level`, or

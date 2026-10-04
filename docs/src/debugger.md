@@ -974,6 +974,18 @@ stops the solve (so ending with `continue` hands control back at the
 first breakpoint). `--debug-script` implies `--debug` when no `--debug*`
 mode is given, and runs once at the first pause (not on a `resolve`).
 
+**Batch behaviour with a non-terminal stdin.** When a script is given and
+stdin is not a terminal — a Jupyter kernel, a CI step, a
+`subprocess.Popen(stdin=PIPE)` left open — nobody can answer a prompt, so
+once the script is exhausted the debugger treats that as end of input: it
+detaches and the solve runs to completion (as `Ctrl-D` does interactively).
+Before gh#990 a script ending in `continue` stopped at the *next* pause and
+waited forever on the silent pipe. If you want to keep stepping, run on a
+real terminal, or end the script with `quit` to stop the solve instead.
+Without `--debug-script` nothing changes: an interactive session on a
+terminal still prompts. (`--debug-json` is unaffected; there stdin is the
+controlling client.)
+
 ### Example: a scripted initialization-sensitivity run
 
 Because `load`, `sweep`, and `set opt` are ordinary commands, a whole

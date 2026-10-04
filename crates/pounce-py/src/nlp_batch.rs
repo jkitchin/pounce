@@ -240,6 +240,8 @@ fn build_result<'py>(
     info.set_item("status", r.status as i32)?;
     info.set_item("status_msg", status_message(r.status))?;
     info.set_item("iter_count", r.stats.iteration_count)?;
+    // gh#990 item 11: parity with `Problem.solve`'s `info["wall_time"]`.
+    info.set_item("wall_time", r.wall_time)?;
     info.set_item("mu", r.stats.final_mu)?;
     info.set_item("final_kkt_error", r.stats.final_kkt_error)?;
     info.set_item("final_dual_inf", r.stats.final_dual_inf)?;

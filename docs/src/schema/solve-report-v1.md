@@ -166,7 +166,7 @@ Problem dimensions reported by the TNLP at `get_nlp_info()`.
 | `solve_result_num` | integer | AMPL-style solve-result code (Gay 2005, "Hooking Your Solver to AMPL" §5, p. 23 table): 0 = solved, 100-range = warning, 200-range = infeasible, 400-range = limit reached, 500-range = failure. Within the solved range, `0` is `SolveSucceeded` and `1` is `SolvedToAcceptableLevel` — IPOPT's codes ([solution output](../solution-output.md#solved-strict-acceptable-and-square)). Identical to the `objno` code in the `.sol`. |
 | `objective` | float | Final unscaled objective value, **in the sense the model declares** — a `maximize` model reports the value of the objective as written, not of the internal minimization. `0.0` (not NaN) when the solve never completed; check `statistics.iteration_count > 0` to distinguish. |
 | `x` | array of float \| empty | Primal vector, length `problem.n_variables`. Empty when the binary doesn't capture the final iterate (currently: `pounce` on the `newton_driver` fast-path). Omitted from JSON when empty. |
-| `lambda` | array of float \| empty | Constraint multipliers, length `problem.n_constraints`. Same omission convention as `x`. |
+| `lambda` | array of float \| empty | Constraint multipliers, length `problem.n_constraints`. Same omission convention as `x`. **Convention:** `σ·λ`, where `λ` is the multiplier of the internal minimization (the `λ` of `L = f + λᵀg − z_L(x−x_L) + z_U(x−x_U)`) and `σ = +1` for a `minimize` model, `−1` for `maximize` (gh#959), i.e. the multipliers in the model's declared sense. They are Lagrange multipliers, **not** the `.sol` shadow prices, which carry the opposite sign (see [Dual sign conventions](../cli.md#dual-sign-conventions)). |
 | `suffixes` | array of object \| empty | sIPOPT-style suffix blocks; emitted only at `--json-detail full`. See below. |
 
 #### Suffix entries
@@ -320,8 +320,8 @@ Omitted from JSON when no backend reported.
 | `n_pattern_reuse` | integer | Factor calls that reused the existing symbolic pattern. |
 | `n_pattern_changes` | integer | Factor calls that triggered a re-analysis. |
 | `max_fill_ratio` | float \| omitted | Peak `nnz(L) / nnz(A)` observed across all factorizations. |
-| `min_abs_pivot` | float \| omitted | Smallest absolute pivot magnitude seen across all factorizations (diagnostic for near-singularity). |
-| `max_abs_pivot` | float \| omitted | Largest absolute pivot magnitude. |
+| `min_abs_pivot` | float \| omitted | Smallest absolute pivot magnitude seen across all factorizations (diagnostic for near-singularity). Measured in FERAL's **equilibrated** space, not the model's units — compare runs, do not read it as a curvature scale. |
+| `max_abs_pivot` | float \| omitted | Largest absolute pivot magnitude, in the same equilibrated space: it reads `3.0` whether a Hessian entry is `2` or `2e6` (gh#990), so it says nothing about the model's scale. |
 | `last_inertia` | `[int, int, int]` \| omitted | `(positive, negative, zero)` inertia of the final factor, **after** regularization: it describes the *corrected* matrix `K + diag(δ_w, −δ_c)`, not the Hessian the model supplied. A solve that ends at a local maximum or saddle with a large `δ_w` therefore still reads `(n, m, 0)`; the wrongly-signed curvature is visible only as the last `iterations[*].regularization` entry (`δ_w`), so read the two together (gh#987). Should match `(n, m, 0)` at a regular KKT optimum with `δ_w = 0`. |
 | `last_nnz_a` | integer \| omitted | Non-zero count of the assembled KKT matrix at the final factor. |
 | `last_nnz_l` | integer \| omitted | Non-zero count of the L-factor at the final factor. |
@@ -337,7 +337,7 @@ Omitted from JSON when no backend reported.
 | `last_delayed_cols` | integer \| omitted | Delayed-column entries in the final factor. |
 | `last_two_by_two` | integer \| omitted | 2×2 pivot blocks in the final factor. |
 | `last_n_tiny` | integer \| omitted | Statically perturbed pivots in the final factor. |
-| `last_ordering` | string \| omitted | Concrete ordering the final factor used (`amd`, `amf`, `metis`, `scotch`, `kahip`, `external`), never `auto`. |
+| `last_ordering` | string \| omitted | Concrete ordering the final factor used (`amd`, `amf`, `metis`, `scotch`, `kahip`, `external`), never `auto`. Can differ from the requested `feral_ordering`: below `amd_switch` (120) FERAL uses an AMD leaf, so a pinned `scotch` / `metis` / `kahip` reports `amd` on a small matrix. |
 | `schur` | object \| omitted | Present only when the block-triangular / Schur path (`set_kkt_schur_block`) actually factored; absent when it was not requested **or** fell back to the standard solver. Fields: `n_eliminated`, `n_schur`, `n_factors`, `eliminated_factor_secs`, `form_schur_secs`, `schur_factor_secs`. The eliminated block's factorizations are also counted in the fields above. |
 
 | `restoration` | object \| omitted | The restoration phase's factorizations, in the same shape as this object (without a nested `restoration`). Present only when restoration factored. The fields above describe the main solve alone, so total factorization work is the sum of the two. Recorded by the CLI, Python and C frontends, which wire the restoration backend; a custom restoration factory records nothing. |
