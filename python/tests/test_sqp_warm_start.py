@@ -209,3 +209,45 @@ def test_classify_working_set_rejects_bad_dimensions():
             lambda_g=[0.0], z_l=[0.0], z_u=[0.0],
             m_eq=0,
         )
+
+
+class TinyQP:
+    """min (x1-0.6)^2 + (x2-0.3)^2  s.t.  x1 + x2 <= 0.8."""
+
+    def objective(self, x):
+        return (x[0] - 0.6) ** 2 + (x[1] - 0.3) ** 2
+
+    def gradient(self, x):
+        return np.array([2 * (x[0] - 0.6), 2 * (x[1] - 0.3)])
+
+    def constraints(self, x):
+        return np.array([x[0] + x[1]])
+
+    def jacobianstructure(self):
+        return np.array([0, 0]), np.array([0, 1])
+
+    def jacobian(self, x):
+        return np.array([1.0, 1.0])
+
+    def hessianstructure(self):
+        return np.array([0, 1]), np.array([0, 1])
+
+    def hessian(self, x, lagrange, obj_factor):
+        return obj_factor * np.array([2.0, 2.0])
+
+
+def _tiny(lb, ub):
+    p = pounce.Problem(n=2, m=1, problem_obj=TinyQP(), lb=lb, ub=ub, cl=[-1e20], cu=[0.8])
+    p.add_option("print_level", 0)
+    p.add_option("algorithm", "active-set-sqp")
+    return p
+
+
+def test_sqp_warm_start_survives_a_child_that_fixes_a_variable():
+    # gh#986: branching fixes a variable (lb == ub), which shrinks the reduced
+    # problem; the parent's working set no longer fits. It must be dropped
+    # (cold solve), not turned into Internal_Error with x = 0.
+    _, ip = _tiny([0, 0], [1, 1]).solve(x0=np.array([0.5, 0.5]))
+    xc, ic = _tiny([0, 0], [0, 1]).solve(x0=np.array([0.0, 0.3]), working_set=ip["working_set"])
+    assert ic["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(xc, [0.0, 0.3], atol=1e-6)

@@ -391,7 +391,37 @@ impl TNLP for PyTnlp {
             kwargs.set_item("alpha_du", stats.alpha_du)?;
             kwargs.set_item("alpha_pr", stats.alpha_pr)?;
             kwargs.set_item("ls_trials", stats.ls_trials)?;
-            let res = bound.call_method("intermediate", PyTuple::empty_bound(py), Some(&kwargs))?;
+            let res =
+                match bound.call_method("intermediate", PyTuple::empty_bound(py), Some(&kwargs)) {
+                    Ok(r) => r,
+                    // gh#986: a cyipopt-style catch-all `intermediate(self, *args)`
+                    // cannot take keywords, and cyipopt calls it positionally.
+                    // Retry positionally (cyipopt's argument order) when the
+                    // failure is the signature refusing our keywords, not an
+                    // exception from inside the user's callback body.
+                    Err(e)
+                        if e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
+                            && e.value_bound(py)
+                                .to_string()
+                                .contains("unexpected keyword argument") =>
+                    {
+                        let args = (
+                            stats.mode as i32,
+                            stats.iter,
+                            stats.obj_value,
+                            stats.inf_pr,
+                            stats.inf_du,
+                            stats.mu,
+                            stats.d_norm,
+                            stats.regularization_size,
+                            stats.alpha_du,
+                            stats.alpha_pr,
+                            stats.ls_trials,
+                        );
+                        bound.call_method1("intermediate", args)?
+                    }
+                    Err(e) => return Err(e),
+                };
             if res.is_none() {
                 return Ok(Some(true));
             }
@@ -411,7 +441,11 @@ impl TNLP for PyTnlp {
             // leaves a trace instead of masquerading as a silent
             // `User_Requested_Stop`.
             Err(e) => {
-                tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}");
+                tracing::error!(
+                    target: "pounce::py",
+                    "pounce-py: intermediate() raised, so the solve is stopped \
+                     (this is a callback failure, not a deliberate `return False`): {e}"
+                );
                 false
             }
         }

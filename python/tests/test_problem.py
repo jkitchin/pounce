@@ -493,6 +493,32 @@ def test_intermediate_truthy_return_continues(truthy):
     np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
 
 
+def test_intermediate_star_args_catch_all_is_called_positionally():
+    # gh#986: a cyipopt-style ``intermediate(self, *args)`` cannot take the
+    # keyword form; it is called positionally (cyipopt's order) instead of
+    # being counted as a failing callback and stopping the solve.
+    seen = []
+
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, *args):
+            seen.append(args)
+            return True
+
+    prob = pounce.Problem(n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[])
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    assert seen and all(len(a) == 11 for a in seen)
+    assert [a[1] for a in seen] == sorted(a[1] for a in seen)  # iter_count slot
+    np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
+
+
 def test_intermediate_no_return_continues():
     # A callback that returns None (the common "just observe" case) must NOT
     # be read as a stop.

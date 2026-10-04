@@ -69,7 +69,7 @@ const INF: Number = 1e19;
 /// * this limit then keeps the depth well inside what that stack holds.
 ///
 /// 10 000 is the arithmetic: the deepest frames measured are ~300 bytes in
-/// a release build and ~2 KB in a debug build, so 64 MB covers ~200 000
+/// a release build and ~2 KB in a debug build, so 256 MB covers ~200 000
 /// levels released and ~32 000 in debug — a 3x margin at this limit even
 /// in the worst configuration. It is also comfortably past what the parser
 /// managed before it was guarded (~3 000), so no `.nl` file that loaded
@@ -90,7 +90,7 @@ pub(crate) const INLINE_DEPTH: u32 = 512;
 /// Stack for the worker thread. Reserved, not committed: only the pages
 /// actually touched cost anything. See [`MAX_DEPTH`] for the margin this
 /// buys.
-const WORKER_STACK: usize = 64 << 20;
+const WORKER_STACK: usize = 256 << 20;
 
 /// Run `f` on a worker thread with a stack sized for recursion over a
 /// deep expression, whatever the caller's stack is.

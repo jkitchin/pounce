@@ -292,10 +292,18 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
     ]);
     assert_eq!(
         named.solution.status,
-        ApplicationReturnStatus::InternalError,
+        ApplicationReturnStatus::ErrorInStepComputation,
         "precondition: this configuration must reach NumericalFailure on the \
-         convex path — it is the only status that reports InternalError; \
+         convex path — it is the only status that reports ErrorInStepComputation \
+         there (gh#986: it used to be InternalError); \
          stdout=\n{named_out}"
+    );
+
+    // gh#986: the convex numerical failure must render as a known status, not
+    // the crash-shaped "Unknown SolverReturn value".
+    assert!(
+        !named_out.contains("Unknown SolverReturn"),
+        "convex NumericalFailure must map to a known exit status; stdout=\n{named_out}"
     );
 
     let (stdout, stderr, report) = run_json(&[
@@ -317,7 +325,7 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
     );
     assert_ne!(
         report.solution.status,
-        ApplicationReturnStatus::InternalError,
+        ApplicationReturnStatus::ErrorInStepComputation,
         "the uncertified convex result must not be the reported verdict; \
          stdout=\n{stdout}\nstderr=\n{stderr}"
     );

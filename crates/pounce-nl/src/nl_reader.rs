@@ -1070,6 +1070,11 @@ pub struct NlSuffixes {
 /// malformed the names stay empty and every downstream consumer falls
 /// back to indices. Names are a diagnostic nicety, never load-blocking
 /// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
+/// Deepest expression nesting the reader will build (gh#986). Callers must
+/// run the reader on a stack that holds this many levels: the CLI runs on a
+/// 1 GiB thread and `pounce-py` on a 256 MiB worker.
+pub const MAX_PARSE_DEPTH: u32 = 40_000;
+
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
     // AMPL invokes a solver with an extensionless *stub* — e.g.
     // `pounce mymodel -AMPL` — and expects `mymodel.nl` to be read (and
@@ -1889,6 +1894,8 @@ struct Parser<'a> {
     cse_mono_ok: Vec<bool>,
     cse_vars: Vec<Vec<u32>>,
     cse_depth: Vec<u32>,
+    /// Current recursion depth of `parse_expr` (gh#986).
+    parse_depth: u32,
 }
 
 /// One pending operator on the streaming recognizer's stack.
@@ -1939,6 +1946,7 @@ impl<'a> Parser<'a> {
             cse_mono_ok: Vec::new(),
             cse_vars: Vec::new(),
             cse_depth: Vec::new(),
+            parse_depth: 0,
         }
     }
 
@@ -2281,6 +2289,26 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
+        // gh#986: a recursion guard that fires before the stack does. A
+        // stack overflow is an abort, not an error return, so the reader
+        // refuses past `MAX_PARSE_DEPTH` levels with a clean message at any
+        // input depth instead of relying on the caller's stack size.
+        if self.parse_depth >= MAX_PARSE_DEPTH {
+            return Err(format!(
+                "the model nests an expression more than {MAX_PARSE_DEPTH} levels \
+                 deep, which the recursive reader refuses rather than overflow the \
+                 stack. A `.nl` writer that emits `o0` (binary +) chains for a long \
+                 sum will do this; `o54` (n-ary sum) is one level whatever the term \
+                 count."
+            ));
+        }
+        self.parse_depth += 1;
+        let r = self.parse_expr_inner();
+        self.parse_depth -= 1;
+        r
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, String> {
         let raw = self
             .next_line()
             .ok_or_else(|| "expected expression token".to_string())?;
@@ -6539,6 +6567,61 @@ pub fn load_nl_as_tnlp(path: &Path) -> Result<Rc<RefCell<dyn TNLP>>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// gh#986: a chain of binary `o0` nodes deeper than the reader's guard is
+    /// refused with an `Err`, at any depth, instead of overflowing the stack.
+    /// Runs on a big thread because the guard assumes callers provide one.
+    #[test]
+    fn gh986_deep_binary_chain_is_a_clean_error_not_a_stack_overflow() {
+        fn chain(n: usize) -> String {
+            let mut l = vec![
+                "g3 1 1 0".to_string(),
+                format!(" {n} 1 1 0 1"),
+                " 0 1".into(),
+                " 0 0".into(),
+                format!(" 0 {n} 0"),
+                " 0 0 0 1 0".into(),
+                " 0 0 0 0 0".into(),
+                format!(" {n} {n}"),
+                " 0 0".into(),
+                " 0 0 0 0 0".into(),
+                "C0".into(),
+                "n0".into(),
+                "O0 0".into(),
+            ];
+            l.extend(std::iter::repeat_n("o0".to_string(), 2 * n - 1));
+            for i in 0..n {
+                l.extend([
+                    "o44".into(),
+                    format!("v{i}"),
+                    "o2".into(),
+                    format!("v{i}"),
+                    format!("v{i}"),
+                ]);
+            }
+            l.extend(["r".into(), "4 0.5".into(), "b".into()]);
+            l.extend((0..n).map(|_| "0 -1.0 1.0".to_string()));
+            l.push(format!("k{}", n - 1));
+            l.extend((0..n - 1).map(|i| (i + 1).to_string()));
+            l.push(format!("J0 {n}"));
+            l.extend((0..n).map(|i| format!("{i} 1.0")));
+            l.push(format!("G0 {n}"));
+            l.extend((0..n).map(|i| format!("{i} 0.0")));
+            l.join("\n") + "\n"
+        }
+        let h = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(|| {
+                // Past the guard: 2n - 1 + 2 levels > MAX_PARSE_DEPTH.
+                let deep = parse_nl_text(&chain(30_000));
+                let msg = deep.err().expect("past the guard must be an Err");
+                assert!(msg.contains("levels"), "{msg}");
+                // A legal depth below the guard still parses.
+                assert!(parse_nl_text(&chain(5_000)).is_ok());
+            })
+            .unwrap();
+        h.join().unwrap();
+    }
+
     use super::*;
 
     /// Compile-time guarantee for the batched-solve path (pounce#126):

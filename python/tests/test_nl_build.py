@@ -1043,3 +1043,20 @@ def test_hvp_does_not_propagate_nan_through_structural_zeros():
     # The dense product, for contrast: 0 * nan = nan, everywhere.
     dense = _dense_hessian(p, pt)
     assert np.all(np.isnan(dense @ v))
+
+
+def _long_sum_nl(n):
+    L = ["g3 1 1 0", f" {n} 1 1 0 1", " 0 1", " 0 0", f" 0 {n} 0", " 0 0 0 1 0", " 0 0 0 0 0",
+         f" {n} {n}", " 0 0", " 0 0 0 0 0", "C0", "n0", "O0 0"] + ["o0"] * (2 * n - 1)
+    for i in range(n):
+        L += ["o44", f"v{i}", "o2", f"v{i}", f"v{i}"]
+    L += ["r", "4 0.5", "b"] + ["0 -1.0 1.0"] * n + [f"k{n-1}"] + [str(i + 1) for i in range(n - 1)]
+    L += [f"J0 {n}"] + [f"{i} 1.0" for i in range(n)] + [f"G0 {n}"] + [f"{i} 0.0" for i in range(n)]
+    return "\n".join(L) + "\n"
+
+
+def test_parse_nl_text_depth_guard_fires_at_any_depth():
+    # gh#986: past the reader's own guard this used to kill the interpreter.
+    for n in (5000, 20000, 60000):
+        with pytest.raises(ValueError, match="levels"):
+            pounce.parse_nl_text(_long_sum_nl(n))

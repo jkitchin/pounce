@@ -11,6 +11,24 @@ changes.
 
 ### Fixed
 
+- **Crashes on legal input (gh#986).** (1, 2) A deep left-deep chain of binary
+  `o0` nodes overflowed the CLI's stack and, past its own depth guard, killed
+  the Python interpreter via `parse_nl_text` (SIGBUS). The `.nl` expression
+  reader now carries its own recursion guard (`MAX_PARSE_DEPTH`, 40 000) and
+  returns a clean error at any depth; the CLI runs on a 1 GiB reserved-stack
+  thread (a 5 000-term `o0` sum solves) and the Python worker stack grows to
+  256 MiB. (3) A convex-engine `NumericalFailure` now maps to
+  `Error_In_Step_Computation` instead of "INTERNAL ERROR: Unknown SolverReturn
+  value". (4) An active-set SQP `working_set=` warm start whose dimensions no
+  longer fit (a child that fixes a variable) is dropped with a warning and the
+  solve runs cold, instead of `Internal_Error` with `x = 0`. (6) A cyipopt-style
+  `intermediate(self, *args)` is retried positionally when the keyword call is
+  refused, and a raising callback is logged as a callback failure. (5)
+  `mehrotra_algorithm=yes` on a general NLP (clnlbeam: `Restoration_Failed`
+  after 3 iterations at a feasible point) is not fixed: the option disables the
+  line search by design and is meant for LP / convex QP; a restoration failure
+  under it now says so. Tracked in #986.
+
 - **`pounce.jax` sparsity probe dropped structural nonzeros, and the
   function API hid non-converged solves (gh#985).** The pattern was read from
   values at 1 (dense) / 3 (`sparse=True`) standard-normal points, ignoring the

@@ -100,6 +100,27 @@ fn curvature_scaling_requested(app: &pounce_algorithm::application::IpoptApplica
 }
 
 pub fn main() -> ExitCode {
+    // gh#986: the `.nl` reader, tape builder and drop glue recurse once per
+    // level of expression nesting, and an overflow is an abort. Run on a
+    // thread with a large reserved (not committed) stack so a legal deep
+    // sum (a left-deep chain of binary `o0`) solves instead of crashing;
+    // the reader's own depth guard covers anything beyond.
+    const MAIN_STACK: usize = 1 << 30;
+    match std::thread::Builder::new()
+        .name("pounce-main".into())
+        .stack_size(MAIN_STACK)
+        .spawn(real_main)
+    {
+        Ok(h) => match h.join() {
+            Ok(code) => code,
+            Err(p) => std::panic::resume_unwind(p),
+        },
+        // Could not reserve the big stack: run in place rather than not at all.
+        Err(_) => real_main(),
+    }
+}
+
+fn real_main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
     // Honors RUST_LOG, NO_COLOR, and POUNCE_LOG_FORMAT.
@@ -2717,7 +2738,11 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
         QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
-        QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+        // gh#986: not `InternalError`, whose console rendering is "INTERNAL
+        // ERROR: Unknown SolverReturn value." — a crash-shaped message for an
+        // honest "no verified KKT point". `ErrorInStepComputation` is the
+        // known status the NLP path uses for a linear-algebra breakdown.
+        QpStatus::NumericalFailure => ApplicationReturnStatus::ErrorInStepComputation,
     }
 }
 

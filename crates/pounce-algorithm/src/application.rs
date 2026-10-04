@@ -2663,7 +2663,36 @@ impl IpoptApplication {
         // Phase 5c (§6): consume any stashed warm-start iterate.
         // `optimize_with_warm_start(warm=None)` is equivalent to
         // `optimize`, so cold callers see no change.
-        let warm = self.sqp_warm_start.take();
+        let mut warm = self.sqp_warm_start.take();
+        // gh#986: a warm start recorded on one problem is dimensioned for
+        // that problem. A child that fixes a variable (branching) reaches
+        // here with a smaller reduced `n` (and possibly `m`), where the
+        // algorithm's contract is to refuse a mismatched iterate outright —
+        // which surfaced as `Internal_Error` on a perfectly legal solve.
+        // A warm start is only a hint, so drop it with a warning and solve
+        // cold instead.
+        if let Some(w) = warm.as_ref() {
+            use crate::sqp::SqpProblemSpec;
+            let (n, m) = (sqp_adapter.n(), sqp_adapter.m());
+            let fits = w.x.len() == n
+                && w.lambda_x.len() == n
+                && w.lambda_g.len() == m
+                && w.working
+                    .as_ref()
+                    .map(|ws| ws.validate_dims(n, m).is_ok())
+                    .unwrap_or(true);
+            if !fits {
+                tracing::warn!(
+                    target: "pounce::sqp",
+                    "SQP warm start dropped: it is sized for a problem with n = {}, m = {} \
+                     but this one has n = {n}, m = {m} (a fixed variable or removed row \
+                     changes the reduced dimensions); solving cold",
+                    w.x.len(),
+                    w.lambda_g.len(),
+                );
+                warm = None;
+            }
+        }
         let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
             Err(e) => {
@@ -5308,6 +5337,24 @@ impl IpoptApplication {
         // MAIN_LOOP.md's exception table, then apply the opt-in
         // status-fidelity gate (pounce#173).
         let app_status = self.apply_kkt_fidelity_gate(solver_return_to_app_status(solver_status));
+        // gh#986 item 5: `mehrotra_algorithm=yes` runs with no line search
+        // (every trial step is accepted), which is sound on LP / convex QP and
+        // not on a general NLP — there it can walk off a feasible start and
+        // fail in restoration. Say so when that is what happened.
+        if app_status == ApplicationReturnStatus::RestorationFailed
+            && matches!(
+                self.options.get_string_value("mehrotra_algorithm", ""),
+                Ok((ref v, true)) if v == "yes"
+            )
+        {
+            tracing::warn!(
+                target: "pounce::algorithm",
+                "pounce: restoration failed under mehrotra_algorithm=yes. That option \
+                 disables the line search and is intended for LPs and convex QPs; on a \
+                 general NLP it is unglobalized and can fail even from a feasible start. \
+                 Retry with the default (mehrotra_algorithm=no)."
+            );
+        }
 
         // On convergence, fire the user-supplied callback (post-optimal
         // sensitivity hook, pounce#16) before flowing back through
