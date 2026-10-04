@@ -895,6 +895,19 @@ SciPy-shaped) by necessity — e.g. `sos_minimize` takes a polynomial as a
 coefficient dict and returns a certificate, *not* callables and SciPy dicts. See
 [Choosing a Solver](choosing-a-solver.md) for the full map.
 
+`solve_qp` also takes the convex engine's CLI options as keyword arguments —
+`qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate`, `qp_crossover` — with the
+CLI's meanings. Leaving them out keeps the engine defaults, and **no presolve**
+(the CLI presolves by default; this function does only when asked).
+`result.presolve` and `result.crossover` say what those phases did. See
+[LP/QP Routing](lp-qp-routing.md#tuning-the-convex-ipm) for which engine reads which.
+
+```python
+from pounce.qp import solve_qp
+r = solve_qp(c=c, A=A, b=b, lb=lb, ub=ub, qp_presolve=True, qp_crossover=True)
+r.presolve["reduced_vars"], r.crossover["accepted"]   # an LP vertex
+```
+
 > There is no `minimize_global` entry point — POUNCE has no spatial
 > branch-and-bound solver. The only certified-global Python path is
 > `sos_minimize`, for polynomials.
