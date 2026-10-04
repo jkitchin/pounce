@@ -179,6 +179,16 @@ class TestFilter:
         f = TRFilter(theta_max=1.0)
         assert not f.is_acceptable(FilterPoint(2.0, -1e6))
 
+    def test_current_iterate_is_tested_with_empty_filter(self):
+        """gh#989: a trial raising theta tenfold over the current iterate."""
+        f = TRFilter()
+        cur = FilterPoint(1e-2, 5.0)
+        worse = FilterPoint(1e-1, 5.0)
+        assert f.is_acceptable(worse)  # legacy behaviour: empty filter
+        assert not f.is_acceptable(worse, current=cur)
+        assert f.is_acceptable(FilterPoint(1e-1, 4.0), current=cur)
+        assert f.is_acceptable(FilterPoint(1e-3, 6.0), current=cur)
+
     def test_dominated_point_rejected(self):
         f = TRFilter(gamma_theta=0.0, gamma_f=0.0)
         f.add(FilterPoint(1.0, 1.0))
@@ -529,3 +539,31 @@ class TestFrozenBasis:
         assert res.success
         assert res.fun == pytest.approx(SINE_FUN, abs=1e-6)
         assert res.x[1] == pytest.approx(np.sin(res.x[0]), abs=1e-7)
+
+
+class TestStepNormOverDofBlock:
+    """gh#989: the trust radius bounds |dw| only, so it is updated from |dw|."""
+
+    def test_large_valued_output_does_not_inflate_radius(self):
+        truth = lambda w: np.array([1000.0 * np.sin(w[0])])  # noqa: E731
+        fun = lambda x: (x[1] - 700.0) ** 2 * 1e-3 + (x[0] - 3.0) ** 2  # noqa: E731
+        jac = lambda x: np.array(  # noqa: E731
+            [2 * (x[0] - 3.0), 2e-3 * (x[1] - 700.0)]
+        )
+        x0 = np.array([0.1, truth([0.1])[0]])
+        res = trf_minimize(
+            fun,
+            x0,
+            truth,
+            w_index=[0],
+            y_index=[1],
+            jac=jac,
+            bounds=[(-5, 5), (-2000, 2000)],
+            basis="zero",
+            trust_radius=0.5,
+            max_iterations=30,
+        )
+        first = res.history[0]
+        # The step is at most the radius in w; y moved by hundreds.
+        assert first.step_norm <= 0.5 + 1e-8
+        assert first.trust_radius < 10.0

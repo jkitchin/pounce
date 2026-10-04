@@ -243,7 +243,10 @@ class _Context:
         solve fires, so ``max_solves`` never bounds the loop (pounce#103).
         Counting samples gives that loop a hard ceiling."""
         if self.max_samples is not None and self.n_samples >= self.max_samples:
-            raise _Stop("budget_exhausted")
+            # Name the cap that actually tripped: ``budget_exhausted`` means
+            # ``max_solves`` was spent, and a run that stopped after 2 solves
+            # on that label sent users to raise the wrong knob (gh#989).
+            raise _Stop("sample_cap_reached")
         self.n_samples += 1
 
     def solve(self, fun, x0, jac=None, hess=None):
@@ -496,9 +499,20 @@ def _run_multistart(ctx, state, x0, rng, kw):
         state.consider(res.x, res.success, polish=False)
 
 
+# Default critical-radius scale. With the radius formula below, gamma = 2 gives
+# r ~ 1.1 of a 1.41 box diagonal at the first rounds on a 2-D box, so every
+# sample has a better one "nearby" and no solve launches before the sample cap
+# (six-hump camel: 2 solves, gh#989). 0.5 is the same order as the
+# Rinnooy Kan-Timmer critical radius (sigma = 2) and launches solves from the
+# first round.
+_MLSL_GAMMA = 0.5
+
+
 def _run_mlsl(ctx, state, x0, rng, kw):
+    from scipy.spatial import cKDTree
+
     batch = int(kw.get("samples_per_round", 20))
-    gamma = float(kw.get("gamma", 2.0))
+    gamma = float(kw.get("gamma", _MLSL_GAMMA))
     jitter = kw.get("restart_jitter", 1.0)
     sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
     n = x0.size
@@ -526,14 +540,27 @@ def _run_mlsl(ctx, state, x0, rng, kw):
         Ne = max(N, 2)
         radius = gamma * diag * (np.log(Ne) / Ne) ** (1.0 / n)
         order = np.argsort(pool_f)
+        # Single-linkage test through a KD-tree instead of an O(N) interpreter
+        # loop per candidate (~15 s at max_solves=300; gh#989). A k-nearest
+        # query decides almost every point; a point whose k nearest are all
+        # inside ``radius`` and none better is the only one that needs the
+        # (potentially large) ball query.
+        PX = np.asarray(pool_x) / L
+        PF = np.asarray(pool_f)
+        tree = cKDTree(PX)
+        K = min(N, 8)
+        kd, ki = tree.query(PX, k=K)
+        kd, ki = kd.reshape(N, K), ki.reshape(N, K)
         for i in order:
             si, fi = pool_x[i], pool_f[i]
-            # Single-linkage: skip if a *better* sample is within radius
-            # (distances in the scaled metric).
-            better_near = any(
-                pool_f[j] < fi and sdist(si, pool_x[j]) < radius
-                for j in range(N) if j != i
-            )
+            inside = kd[i] < radius
+            if np.any(inside & (PF[ki[i]] < fi)):
+                better_near = True
+            elif K == N or not inside.all():
+                better_near = False
+            else:
+                nb = np.asarray(tree.query_ball_point(PX[i], r=radius), dtype=int)
+                better_near = bool(nb.size and np.any(PF[nb] < fi))
             if better_near or state.archive.near_any(si, radius):
                 continue
             res = ctx.solve(ctx.fun, si, ctx.jac, ctx.hess)
@@ -640,7 +667,8 @@ def find_minima(
     MinimaResult
         ``.minima`` / ``.values`` sorted by objective, ``.x`` the best,
         ``.status`` one of ``"target_reached" | "converged" |
-        "budget_exhausted"``, plus ``.n_solves`` and ``.trace``.
+        "budget_exhausted"`` (``max_solves`` spent) ``|
+        "sample_cap_reached"`` (MLSL ``max_samples`` hit)``, plus ``.n_solves`` and ``.trace``.
     """
     if method not in _STRATEGIES:
         raise ValueError(

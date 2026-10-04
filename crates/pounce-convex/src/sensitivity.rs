@@ -1519,6 +1519,28 @@ pub struct QpSensitivity {
 /// is the one users hit.
 const WEAK_ACTIVE_REL: f64 = 1e-3;
 
+/// Dual scale for the weak-activity screen: the largest *inequality-side*
+/// multiplier (`z`, `z_lb`, `z_ub`), floored at 1.
+///
+/// The screen asks whether an inequality's multiplier is negligible, so the
+/// yardstick must be a multiplier of the same kind. The equality multipliers
+/// `y` are deliberately excluded (gh#989): they are free-signed, carry the
+/// units of whatever the equalities enforce, and are unrelated in magnitude to
+/// the inequality duals. On a 200-step MPC the dynamics multipliers reach
+/// 6.6e3 while the inequality multipliers stay below 3, which lifted the
+/// threshold to 6.6 and flagged nine strongly active rows (`z` between 0.2 and
+/// 3.0) as weakly active. The rule is therefore: a row or bound is weakly
+/// active when it binds in the primal and `z_i <= WEAK_ACTIVE_REL *
+/// max(1, ||z||_inf, ||z_lb||_inf, ||z_ub||_inf)`. (The orthant guard keeps
+/// its own scale, which does include `y`.)
+fn weak_dual_scale(sol: &QpSolution) -> f64 {
+    let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    inf_norm(&sol.z)
+        .max(inf_norm(&sol.z_lb))
+        .max(inf_norm(&sol.z_ub))
+        .max(1.0)
+}
+
 /// Relative margin for the orthant guard's three row-wise tests
 /// ([`SensError::NotOrthantComplementary`]).
 ///
@@ -2037,7 +2059,7 @@ impl QpSensitivity {
         // accepted here and answered wrongly in silence.
         check_orthant_complementarity(prob, sol, &gx, primal_scale, dual_scale)?;
 
-        let dual_zero = WEAK_ACTIVE_REL * dual_scale;
+        let dual_zero = WEAK_ACTIVE_REL * weak_dual_scale(sol);
         let primal_zero = WEAK_ACTIVE_REL * primal_scale;
 
         let weakly_active_ineq: Vec<usize> = (0..prob.m_ineq())
@@ -2131,12 +2153,7 @@ impl QpSensitivity {
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(&sol.x, &mut gx);
         let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
-        let dual_scale = inf_norm(&sol.y)
-            .max(inf_norm(&sol.z))
-            .max(inf_norm(&sol.z_lb))
-            .max(inf_norm(&sol.z_ub))
-            .max(1.0);
-        let dual_zero = WEAK_ACTIVE_REL * dual_scale;
+        let dual_zero = WEAK_ACTIVE_REL * weak_dual_scale(sol);
         let primal_zero = WEAK_ACTIVE_REL * primal_scale;
         let weakly_active_ineq: Vec<usize> = orthant_rows
             .iter()
@@ -3790,6 +3807,39 @@ mod tests {
             "sweep no longer straddles the active-set boundary, so this test \
              no longer demonstrates tol-independence"
         );
+    }
+
+    #[test]
+    fn a_huge_equality_multiplier_does_not_lift_the_weak_activity_threshold() {
+        // gh#989. `min ½‖x‖² + 1e4·x₀  s.t.  x₀ = 0,  x₁ ≥ 1`. The equality
+        // multiplier is ~1e4 while the (strictly active, slack 0) inequality
+        // carries z = 1. The dual yardstick used to include `‖y‖∞`, giving a
+        // threshold of 1e-3 · 1e4 = 10 and flagging the row as weakly active;
+        // the inequality-side scale (z = 1) gives 1e-3 and does not.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![1.0e4, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0)],
+            b: vec![0.0],
+            g: vec![Triplet::new(0, 1, -1.0)],
+            h: vec![-1.0],
+            lb: vec![f64::NEG_INFINITY; 2],
+            ub: vec![f64::INFINITY; 2],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        // Guard the premise: the two scales really are three decades apart.
+        assert!(sol.y[0].abs() > 1.0e3, "y = {:?}", sol.y);
+        assert!((sol.z[0] - 1.0).abs() < 1e-3, "z = {:?}", sol.z);
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+        assert!(
+            sens.weakly_active_ineq().is_empty(),
+            "strongly active row (z = {}) flagged weak because of |y| = {}",
+            sol.z[0],
+            sol.y[0].abs()
+        );
+        assert_eq!(sens.active_ineq(), &[0]);
     }
 
     #[test]

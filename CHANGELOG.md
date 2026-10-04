@@ -11,6 +11,23 @@ changes.
 
 ### Fixed
 
+- **Python-level driver defects (gh#989, items 1-4 and 6).**
+  (1) `trf_minimize` measures the step norm over the `w_index` (trust-region)
+  block only, so a large-valued `y` no longer inflates the radius, and the
+  filter also tests the trial against the current iterate (Fletcher-Leyffer).
+  (2) `curve_fit` decides active bounds from the solver's multipliers against
+  the slack (`z > slack`) instead of a fixed `1e-6` window, so the verdict and
+  the projected standard error no longer depend on `tol`.
+  (3) `QpSensitivity.weakly_active_*` scales its dual threshold by the
+  inequality multipliers only; a large equality multiplier no longer flags
+  strongly active rows. (4) MLSL default `gamma` is 0.5 (2.0 covered a whole
+  2-D box so no solve launched), hitting the sample cap reports
+  `sample_cap_reached` rather than `budget_exhausted`, and the single-linkage
+  scan uses a KD-tree. (6) `Continuation.trace_arclength` halves a step whose
+  corrector lands farther than `max_correction * ds` from the predictor or
+  whose tangent turns past `min_tangent_cos`, instead of jumping branches.
+  Not addressed here: item 5 (partitioned-Hessian mesh growth; needs discopt)
+  and item 7 (`qp_reg` stall warning).
 - **Warm starts no longer lose to cold starts (gh#988).** `solve_qp` /
   `solve_qp_ipm_warm` now fall back to the cold HSDE path when the warm
   (direct infeasible-start) leg ends in `numerical_failure`,

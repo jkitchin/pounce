@@ -137,7 +137,7 @@ def test_mlsl_terminates_and_respects_budget():
         seed=0, options=OPTS,
     )
     # It returns at all (no hang) with a valid terminal status...
-    assert r.status in ("converged", "budget_exhausted")
+    assert r.status in ("converged", "budget_exhausted", "sample_cap_reached")
     # ...having located the single minimum...
     assert len(r) >= 1
     assert r.fun == pytest.approx(0.0, abs=1e-6)
@@ -250,3 +250,28 @@ def test_result_repr_survives_seed_recorded_without_solve():
     # issue's `print(res)` exercised.
     assert repr(res)
     assert str(res)
+
+
+def test_mlsl_default_gamma_launches_solves_on_a_2d_box():
+    """gh#989: the default critical radius (gamma=2) covered the whole box, so
+    MLSL launched 2 solves on six-hump camel before the sample cap."""
+    fun, jac, hess, bounds = six_hump_camel()
+    r = pounce.find_minima(
+        fun, [0.5, 0.5], method="mlsl", jac=jac, hess=hess, bounds=bounds,
+        n_minima=6, max_solves=60, patience=15, dedup=1e-3, seed=0,
+        options=OPTS,
+    )
+    assert r.status == "target_reached"
+    assert len(r) == 6
+
+
+def test_mlsl_sample_cap_status_names_the_cap():
+    """gh#989: hitting ``max_samples`` is not ``max_solves`` being spent."""
+    fun, jac, hess, bounds = six_hump_camel()
+    r = pounce.find_minima(
+        fun, [0.5, 0.5], method="mlsl", jac=jac, hess=hess, bounds=bounds,
+        n_minima=6, max_solves=60, patience=15, dedup=1e-3, seed=0,
+        strategy_kw={"gamma": 2.0, "max_samples": 100}, options=OPTS,
+    )
+    assert r.status == "sample_cap_reached"
+    assert r.n_solves < 60

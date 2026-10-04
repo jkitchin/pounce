@@ -1748,12 +1748,41 @@ def _make_problem_obj(objective, gradient, hess, n, m, g, jac_g):
 
 
 def _active_bounds(popt, lb, ub, info, tol=1e-6):
+    """Which variable bounds are active at ``popt``.
+
+    The verdict comes from the solver's own evidence: a bound is active when
+    its multiplier exceeds the slack to it (``z > slack``). On the central path
+    ``slack * z = mu``, so this is ``slack < sqrt(mu)`` for an active bound
+    (``z`` ~ O(1), slack ~ mu) and false for an interior one (slack ~ O(1),
+    ``z`` ~ mu); it needs no tolerance and so does not move with the solver's
+    ``tol`` (gh#989: at the default ``tol`` a bound the iterate sat 1e-6 from
+    was missed by a fixed window, and the reported standard error was a
+    barrier artefact). Only when the multipliers are unavailable or not finite
+    does it fall back to the fixed relative window ``tol``.
+    """
     n = popt.size
     mask = np.zeros(n, dtype=bool)
-    if lb is not None:
-        mask |= np.isfinite(lb) & (popt - lb <= tol * np.maximum(1.0, np.abs(lb)))
-    if ub is not None:
-        mask |= np.isfinite(ub) & (ub - popt <= tol * np.maximum(1.0, np.abs(ub)))
+    zl = zu = None
+    if isinstance(info, dict):
+        for key in ("mult_x_L", "mult_x_U"):
+            v = info.get(key)
+            if v is not None:
+                v = np.asarray(v, dtype=float).ravel()
+                if v.size != n or not np.all(np.isfinite(v)):
+                    v = None
+            if key == "mult_x_L":
+                zl = v
+            else:
+                zu = v
+    for bound, z, sign in ((lb, zl, 1.0), (ub, zu, -1.0)):
+        if bound is None:
+            continue
+        fin = np.isfinite(bound)
+        slack = sign * (popt - bound)
+        if z is not None:
+            mask |= fin & (z > np.abs(slack))
+        else:
+            mask |= fin & (slack <= tol * np.maximum(1.0, np.abs(bound)))
     return mask
 
 

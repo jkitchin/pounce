@@ -1399,3 +1399,45 @@ def test_curve_fit_minima_zero_width_box_warns():
     assert fits, "expected at least one result"
     for r in fits:
         np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))
+
+
+def _van_genuchten_case():
+    """The gh#989 retention curve: theta_r pinned at its lower bound 0."""
+    h = np.array([1, 3, 10, 20, 30, 50, 100, 200, 300.0])
+
+    def vg(h, tr, ts, a, n):
+        return tr + (ts - tr) / (1 + (a * h) ** n) ** (1 - 1 / n)
+
+    def vg_jac(h, tr, ts, a, n):
+        m, B = 1 - 1 / n, 1 + (a * h) ** n
+        Se = B ** (-m)
+        dSe_da = -m * B ** (-m - 1) * n * (a * h) ** (n - 1) * h
+        dSe_dn = Se * (-np.log(B) / n**2 - m * (a * h) ** n * np.log(a * h) / B)
+        return np.column_stack([1 - Se, Se, (ts - tr) * dSe_da, (ts - tr) * dSe_dn])
+
+    y = vg(h, 0.02, 0.41, 0.075, 1.89) + 0.01 * np.random.default_rng(6).standard_normal(h.size)
+    bounds = ([0, 0.2, 1e-3, 1.05], [0.2, 0.6, 1, 5])
+    return vg, vg_jac, h, y, bounds
+
+
+@pytest.mark.parametrize("tol", [1e-6, 1e-8, 1e-10])
+def test_active_bound_verdict_independent_of_tol(tol):
+    """gh#989: the active-bound verdict comes from the multiplier vs slack, not
+    a fixed 1e-6 window, so the standard error of a parameter sitting on its
+    bound is 0 (projected) at every solver tolerance."""
+    vg, vg_jac, h, y, bounds = _van_genuchten_case()
+    f = pounce.curve_fit(vg, h, y, p0=[0.05, 0.4, 0.05, 1.5], jac=vg_jac,
+                         bounds=bounds, options={"tol": tol})
+    assert list(f.active_mask) == [True, False, False, False]
+    assert f.perr[0] == 0.0
+    assert f.cov_source == "reduced_hessian(projected)"
+
+
+def test_active_bounds_fallback_window_without_multipliers():
+    from pounce._curve_fit import _active_bounds
+
+    popt = np.array([1e-8, 0.5])
+    lb, ub = np.array([0.0, 0.0]), np.array([1.0, 1.0])
+    assert list(_active_bounds(popt, lb, ub, {})) == [True, False]
+    info = {"mult_x_L": np.array([1e-3, 1e-9]), "mult_x_U": np.zeros(2)}
+    assert list(_active_bounds(popt, lb, ub, info)) == [True, False]

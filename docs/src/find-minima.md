@@ -289,6 +289,7 @@ The search stops on whichever fires first, reported in `result.status`:
 | `n_minima` distinct minima found | got what you asked for | `target_reached` |
 | `patience` solves in a row find nothing new | landscape appears exhausted | `converged` |
 | `max_solves` reached | spent the budget | `budget_exhausted` |
+| MLSL `max_samples` reached | sample pool hit its cap before the solve budget | `sample_cap_reached` |
 
 `patience` is what makes the "fewer minima exist than requested" case
 efficient: ask for 6, find 2, try a few more times, and stop with
