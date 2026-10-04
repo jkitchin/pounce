@@ -53,6 +53,7 @@ and silently returns the wrong gradient (pounce#73).
 
 from __future__ import annotations
 
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -257,6 +258,41 @@ def _kkt_implicit_backward(f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU,
     return dL_dp
 
 
+# Ipopt-style statuses that count as a converged forward solve:
+# Solve_Succeeded, Solved_To_Acceptable_Level, Feasible_Point_Found.
+_OK_STATUSES = (0, 1, 6)
+
+
+def _check_forward_status(info, on_failure) -> None:
+    """Surface a non-converged forward solve (gh#985).
+
+    ``on_failure``: ``"warn"`` (default; ``RuntimeWarning``), ``"raise"``
+    (``RuntimeError``) or ``"ignore"``. Never changes the return value, so
+    existing callers keep working. Under ``jax.jit`` the check runs in the
+    host callback, so ``"raise"`` surfaces as a JAX runtime error.
+    """
+    if on_failure == "ignore":
+        return
+    status = int(info["status"])
+    if status in _OK_STATUSES:
+        return
+    msg = (
+        "pounce.jax forward solve did not converge: "
+        f"{info.get('status_msg', status)} (status {status}); the returned x* "
+        "is not an optimum and its gradients are meaningless"
+    )
+    if on_failure == "raise":
+        raise RuntimeError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+
+def _check_on_failure(on_failure) -> None:
+    if on_failure not in ("warn", "raise", "ignore"):
+        raise ValueError(
+            f"on_failure must be 'warn', 'raise' or 'ignore', got {on_failure!r}"
+        )
+
+
 def _solve_once(
     f: Callable,
     g: Callable | None,
@@ -269,6 +305,7 @@ def _solve_once(
     cl,
     cu,
     options: dict | None,
+    extra: dict | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Forward solve. ``p`` is closed over by ``f`` / ``g`` via partial."""
 
@@ -281,12 +318,19 @@ def _solve_once(
     else:
         g_of_x = None
 
-    obj = _JaxProblem(f=f_of_x, g=g_of_x, n=n, m=m)
+    extra = extra or {}
+    obj = _JaxProblem(
+        f=f_of_x, g=g_of_x, n=n, m=m,
+        jac_pattern=extra.get("jac_pattern"),
+        hess_pattern=extra.get("hess_pattern"),
+        lb=lb, ub=ub, x0=x0,
+    )
     problem = Problem(n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu)
     if options:
         for k, v in options.items():
             problem.add_option(k, v)
     x_np, info = problem.solve(x0=np.asarray(x0))
+    _check_forward_status(info, extra.get("on_failure", "warn"))
     return np.asarray(x_np), info
 
 
@@ -297,6 +341,7 @@ def _make_solve_custom_vjp(
     m: int,
     static_bounds,
     options: dict | None,
+    extra: dict | None = None,
 ):
     @jax.custom_vjp
     def solve_fn(p, x0, dyn_bounds):
@@ -304,13 +349,13 @@ def _make_solve_custom_vjp(
         # backward needs (x*, λ*, mult_x_L, mult_x_U) so we re-pack
         # them via the residual.
         x_star, _info = _pure_callback_solve(
-            f, g, p, x0, n, m, static_bounds, dyn_bounds, options
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options, extra
         )
         return x_star
 
     def fwd(p, x0, dyn_bounds):
         x_star, info = _pure_callback_solve(
-            f, g, p, x0, n, m, static_bounds, dyn_bounds, options
+            f, g, p, x0, n, m, static_bounds, dyn_bounds, options, extra
         )
         lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
         mult_xL = jnp.asarray(info["mult_x_L"])
@@ -339,7 +384,9 @@ def _make_solve_custom_vjp(
     return solve_fn
 
 
-def _pure_callback_solve(f, g, p, x0, n, m, static_bounds, dyn_bounds, options):
+def _pure_callback_solve(
+    f, g, p, x0, n, m, static_bounds, dyn_bounds, options, extra=None,
+):
     """JAX pure_callback wrapper around :func:`_solve_once`.
 
     Returns ``(x_star, info)`` where ``info`` is a dict of arrays.
@@ -366,6 +413,7 @@ def _pure_callback_solve(f, g, p, x0, n, m, static_bounds, dyn_bounds, options):
             x0=jnp.asarray(x0_h),
             n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
             options=options,
+            extra=extra,
         )
         info_out = {
             "obj_val": np.float64(info["obj_val"]),
@@ -394,6 +442,9 @@ def solve(
     cl=None,
     cu=None,
     options: dict | None = None,
+    jac_pattern=None,
+    hess_pattern=None,
+    on_failure: str = "warn",
 ):
     """Parametric solve. ``x* = solve(p, f=..., g=..., x0=..., ...)``.
 
@@ -415,9 +466,26 @@ def solve(
     transposes into nothing and is discarded.
 
     ``f`` and ``g`` must take ``(x, p)`` and be JAX-traceable.
+
+    ``jac_pattern`` / ``hess_pattern`` : ``(rows, cols)`` or ``None``
+        Known sparsity patterns, as in :func:`pounce.jax.from_jax`
+        (Jacobian ``(m, n)``; lower triangle of the Lagrangian Hessian).
+        Supplying one skips detection; it must be a superset of the true
+        structure. Without them the pattern is the union of probes at
+        ``x0``, inside ``[lb, ub]`` and at standard-normal points
+        (gh#985).
+
+    ``on_failure`` : ``"warn"`` (default), ``"raise"`` or ``"ignore"``
+        What to do when the forward solve does not converge (anything
+        other than solved / acceptable / feasible point). The return
+        value is unchanged; ``"warn"`` emits a ``RuntimeWarning`` and
+        ``"raise"`` a ``RuntimeError`` from the host callback.
     """
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
-    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options)
+    _check_on_failure(on_failure)
+    extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+                 on_failure=on_failure)
+    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options, extra)
     return fn(p, x0, dyn_bounds)
 
 
@@ -680,6 +748,9 @@ def vmap_solve(
     cl=None,
     cu=None,
     options: dict | None = None,
+    jac_pattern=None,
+    hess_pattern=None,
+    on_failure: str = "warn",
 ):
     """Batched solve over the leading axis of ``p_batch``.
 
@@ -696,6 +767,8 @@ def vmap_solve(
         return solve(
             p_i, f=f, g=g, x0=x0, n=n, m=m,
             lb=lb, ub=ub, cl=cl, cu=cu, options=options,
+            jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+            on_failure=on_failure,
         )
 
     # ``jax.lax.map`` runs sequentially under the hood (one element at
@@ -705,6 +778,7 @@ def vmap_solve(
 
 def _solve_batch_threadpool(
     f, g, p_batch_np, x0_np, n, m, lb, ub, cl, cu, options, workers,
+    extra=None,
 ):
     """Dispatch ``B`` independent solves across a ``ThreadPoolExecutor``.
 
@@ -731,6 +805,7 @@ def _solve_batch_threadpool(
             x0=jnp.asarray(x0_np[i]) if x0_np.ndim == 2 else jnp.asarray(x0_np),
             n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
             options=options,
+            extra=extra,
         )
         x_out[i] = x_np
         lam_out[i] = np.asarray(info["mult_g"], dtype=np.float64)
@@ -754,19 +829,20 @@ def _make_vmap_solve_parallel_custom_vjp(
     static_bounds,
     options: dict | None,
     workers: int | None,
+    extra: dict | None = None,
 ):
     @jax.custom_vjp
     def solve_fn(p_batch, x0_batch, dyn_bounds):
         x_star, *_ = _pure_callback_parallel_solve(
             f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds,
-            options, workers,
+            options, workers, extra,
         )
         return x_star
 
     def fwd(p_batch, x0_batch, dyn_bounds):
         x_star, lam, mult_xL, mult_xU = _pure_callback_parallel_solve(
             f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds,
-            options, workers,
+            options, workers, extra,
         )
         return x_star, (p_batch, x_star, lam, mult_xL, mult_xU, dyn_bounds)
 
@@ -807,6 +883,7 @@ def _make_vmap_solve_parallel_custom_vjp(
 
 def _pure_callback_parallel_solve(
     f, g, p_batch, x0_batch, n, m, static_bounds, dyn_bounds, options, workers,
+    extra=None,
 ):
     B = p_batch.shape[0]
     result_shapes = (
@@ -820,7 +897,7 @@ def _pure_callback_parallel_solve(
         lb, ub, cl, cu = _merge_bounds(static_bounds, bounds_h)
         return _solve_batch_threadpool(
             f, g, np.asarray(p_h), np.asarray(x0_h),
-            n, m, lb, ub, cl, cu, options, workers,
+            n, m, lb, ub, cl, cu, options, workers, extra,
         )
 
     return jax.pure_callback(
@@ -842,6 +919,9 @@ def vmap_solve_parallel(
     cu=None,
     options: dict | None = None,
     workers: int | None = None,
+    jac_pattern=None,
+    hess_pattern=None,
+    on_failure: str = "warn",
 ):
     """Parallel batched solve. Drop-in for :func:`vmap_solve`.
 
@@ -862,6 +942,11 @@ def vmap_solve_parallel(
 
     ``x0`` may be a single ``(n,)`` vector (broadcast to all batch
     elements) or a ``(B, n)`` batch.
+
+    ``jac_pattern`` / ``hess_pattern`` / ``on_failure`` behave as in
+    :func:`solve` (gh#985); the patterns are shared by every batch
+    element, so they must cover the structure at all of them. A
+    non-converged element triggers the warning / error for that element.
     """
     p_batch = jnp.asarray(p_batch)
     B = p_batch.shape[0]
@@ -869,7 +954,10 @@ def vmap_solve_parallel(
     if x0_arr.ndim == 1:
         x0_arr = jnp.broadcast_to(x0_arr, (B, n))
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
+    _check_on_failure(on_failure)
+    extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+                 on_failure=on_failure)
     fn = _make_vmap_solve_parallel_custom_vjp(
-        f, g, n, m, static_bounds, options, workers,
+        f, g, n, m, static_bounds, options, workers, extra,
     )
     return fn(p_batch, x0_arr, dyn_bounds)

@@ -11,6 +11,26 @@ changes.
 
 ### Fixed
 
+- **`pounce.jax` sparsity probe dropped structural nonzeros, and the
+  function API hid non-converged solves (gh#985).** The pattern was read from
+  values at 1 (dense) / 3 (`sparse=True`) standard-normal points, ignoring the
+  box and `x0`, so `exp(-E/RT)` underflowing at `T ~ N(0,1)` or a polynomial
+  whose second derivative vanishes near 0 lost entries for the whole solve:
+  `Solve_Succeeded` at profit 0.022 instead of 5.352 (CSTR), and a Beckmann
+  traffic model that stopped at `Maximum_Iterations_Exceeded`. Detection now
+  unions the probes over `x0` (new `from_jax(x0=...)`; the function API passes
+  it), the box midpoint, several uniform points inside `[lb, ub]`, and
+  standard-normal points, with the default normal count raised to 3 / 4 and
+  alternating `lam` between normal and all-ones. This is still a union of
+  probes, not a jaxpr-structural analysis, so genuinely value-dependent
+  structure can still be missed; pass a pattern for that. `solve`,
+  `vmap_solve` and `vmap_solve_parallel` gain `jac_pattern` / `hess_pattern`
+  and `on_failure="warn" | "raise" | "ignore"`: a forward solve that is not
+  solved / acceptable / feasible now emits a `RuntimeWarning` by default
+  (or raises); return values are unchanged. Not done: `solve_with_warm` and
+  the other `pounce.jax` entry points were not given the new arguments.
+  Tests: `python/tests/test_jax_sparsity_gh985.py`.
+
 - **Convex IPM stopping depended on the units of `c` and `P` (gh#984),
   items 1, 2, 3, 5, 6.** The HSDE scale-relative arm granted every residual
   `tol*(1 + its scale)` once any one scale was large, so tightening `tol`
