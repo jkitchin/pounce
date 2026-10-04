@@ -195,6 +195,32 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
 /// zero" as `ipm::SLACK_NOISE_KAPPA`.
 pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 
+/// `max_i |ẑ_i · (h_i − (Gx̂)_i)|` over the rows whose true slack is
+/// resolvable (above `REL_FLOOR_KAPPA·ε` of its own terms), in the
+/// un-homogenized frame: `gx` is `G x` and `x̂ = x/τ`, `ẑ = z/τ`.
+///
+/// The complementarity of the point the solve will actually return. The
+/// loop's own `max sᵢzᵢ` reads the internal slack, which is the true slack only
+/// up to the primal residual `ρ_z/τ` -- negligible at `τ ≈ 1`, and not at all
+/// when `τ` collapses (gh#689: `τ = 4.5e-7`, internal product `2.8e-22`, true
+/// product `5.0e-3`). A slack inside its own rounding quantum is not counted,
+/// for the reason `ipm::resolvable_complementarity` gives: there the product
+/// measures the quantum, not a violation (the gh#984 item-3 `1e9` shift).
+pub(crate) fn true_slack_complementarity(h: &[f64], gx: &[f64], z: &[f64], tau: f64) -> f64 {
+    if !(tau > 0.0) {
+        return f64::INFINITY;
+    }
+    let mut worst = 0.0_f64;
+    for ((&hi, &gxi), &zi) in h.iter().zip(gx).zip(z) {
+        let gxh = gxi / tau;
+        let slack = hi - gxh;
+        if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gxh.abs()) {
+            worst = worst.max((slack * zi / tau).abs());
+        }
+    }
+    worst
+}
+
 /// A relatively-converged iterate set aside while the loop tries to do better.
 struct RelCandidate {
     x: Vec<f64>,
@@ -765,7 +791,26 @@ where
         // cancellation-free half below (`comp_ok`: every product `s_i z_i`
         // within `tol`), which is what actually certifies it; the floor excuses
         // the *measurement*, never a large product.
-        let abs_ok = pres < opts.tol && dres < tol_cost && gap < tol_gap.max(cap_g_floor);
+        //
+        // gh#689 regression (found bisecting `the_default_route_reaches_the_same_optimum`):
+        // the excuse is only sound when complementarity holds *at the point
+        // being returned*. `comp_ok` below reads the internal slack `s`, and
+        // as `tau -> 0` that slack decouples from the true row slack
+        // `h - Gx/tau` by up to `pres/tau`. On `scaled_feasible_a` at
+        // `max_iter = 4000` this stopped at iteration 1563 with `max s_i z_i =
+        // 2.8e-22` and a gap of `5.0e-5` excused by a floor of `7.1e-3`, while
+        // the un-homogenized point's complementarity was `5.0e-3` -- six
+        // orders above `tol`, and reachable: the same solve without the excuse
+        // converges at 3596 to `1.9e-10`. gh#414's verifier then refused that
+        // `Optimal` and the solve ended `NumericalFailure`. So a gap above
+        // `tol_gap` is excused only when every *resolvable* true-slack product
+        // is within `tol_gap` too ([`true_slack_complementarity`]).
+        let gap_strict = gap < tol_gap;
+        let gap_excused = !gap_strict
+            && gap < cap_g_floor
+            && orthant_only
+            && true_slack_complementarity(&prob.h, &nrm_gx, &z, tau) <= tol_gap;
+        let abs_ok = pres < opts.tol && dres < tol_cost && (gap_strict || gap_excused);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
         // gh#984 item 3: the duality gap is a *difference* of objective-sized
         // sums, so on a large (or large-offset) objective it carries
@@ -1513,6 +1558,27 @@ mod tests {
     use crate::qp::{QpProblem, Triplet};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
+
+    /// gh#689 regression: the gap's noise-floor excuse must read the true row
+    /// slack, not the internal one. The numbers are the stopping iterate's on
+    /// `scaled_feasible_a` (`tau = 4.5e-7`): a resolvable slack times a unit
+    /// multiplier is counted, a slack inside its own rounding quantum is not.
+    #[test]
+    fn true_slack_complementarity_counts_resolvable_rows_only() {
+        let tau = 4.5e-7;
+        // Row 0: h = 1e5, Gx/tau = 1e5 - 5e-3 -> slack 5e-3, z/tau = 1.
+        // Row 1: h = 1e9, Gx/tau = h exactly up to one ulp -> not resolvable.
+        let h = [1e5, 1e9];
+        let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
+        let z = [1.0 * tau, 1e3 * tau];
+        let c = true_slack_complementarity(&h, &gx, &z, tau);
+        assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
+        // Both inside the quantum: nothing to count.
+        let gx_tight = [1e5 * tau, 1e9 * tau];
+        assert_eq!(true_slack_complementarity(&h, &gx_tight, &z, tau), 0.0);
+        // A collapsed tau cannot certify anything.
+        assert!(true_slack_complementarity(&h, &gx, &z, 0.0).is_infinite());
+    }
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())

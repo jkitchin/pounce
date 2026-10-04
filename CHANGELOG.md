@@ -54,6 +54,21 @@ changes.
 
 ### Fixed
 
+- **Convex HSDE: the gap's noise-floor excuse reads the true row slack
+  (gh#689 regression from gh#984's second pass).** `issue_689 ...
+  the_default_route_reaches_the_same_optimum` failed at `max_iter=4000`:
+  `scaled_feasible_a` ended `Error_In_Step_Computation` after 1563 iterations
+  where `ce17aa9` converged at 3596 (bisected to `fa74ed2`). The gap test may
+  stop down to its own `eps*|objective|` noise floor only when complementarity
+  holds, and that half read the internal slack `s`; as `tau -> 0` (`4.5e-7`
+  here) `s` decouples from the true row slack `h - Gx/tau`, so the loop
+  stopped with `max s_i z_i = 2.8e-22` while the returned point's
+  complementarity was `5.0e-3`, and gh#414's verifier then demoted that
+  `Optimal` to `NumericalFailure`. The excuse now also requires every
+  *resolvable* true-slack product within the objective-unit tolerance; the
+  solve converges at 1917 iterations to a KKT error of `1.3e-9`. Fixture
+  sweep (both legs) against the pre-change binary: empty diff.
+
 - **`pounce.jax` jaxpr sparsity: custom derivatives, `reshape(dimensions=)`,
   memory guard, batched warnings (gh#985 review).** `custom_jvp` /
   `custom_vjp` functions were analysed through their *primal*, but AD uses
