@@ -26,10 +26,31 @@ changes.
   certificate scale (1/tau), the `intermediate` callback's `inf_pr` and the
   JSON `solution.lambda` convention, `--debug-script` batch behaviour, the
   bundled `pounce` binary path, and the `pounce.qp` docstring (the Python QP
-  path never presolves; `qp_*` options are CLI-only). Deferred: items 3
-  (derivative-checker result in `info`), 12 (crossover summary line), 9's
-  exposing tau/kappa, the `requested` solver field, and 16 (wiki page, other
-  repo).
+  path never presolves; `qp_*` options are CLI-only).
+- **Textbook checklist, remaining items (gh#990, second pass).** (3) The
+  derivative checker's verdict is programmatic: `info["derivative_check"]`
+  (mode, counts, `clean`, largest relative error per gradient / Jacobian /
+  Hessian, up to 200 flagged entries with kind, row, column, analytic and
+  finite-difference values) and the report's `statistics.derivative_check`;
+  stderr output is unchanged. (7) `linear_solver.requested` names the
+  `linear_solver` option beside `solver_name`, the backend that ran, so an
+  `ma57` -> FERAL fallback is in the report and `info`, not only the banner.
+  (9) Python `QpResult` / the `solve_qp` dict carry `tau`, `kappa` (of the last
+  HSDE run in the solve) and, on infeasible verdicts, `certificate_scale`, the
+  inf-norm to divide the 1/tau-scaled ray by (Rust:
+  `pounce_convex::hsde_scalars`). (12) With `qp_crossover=yes` the CLI prints
+  one line under the result: engine, accepted or kept, superbasics pushed,
+  pivots by stage, bound flips, KKT error before -> after (Rust:
+  `pounce_convex::crossover::take_report`). (13) The objective-scaling decision
+  is in `info["objective_scaling"]` / `statistics.objective_scaling` (the
+  returned run's factor, the start gradient scale, and whether any attempt
+  refused a termination certificate the scaling masked); the ANSI-free stderr
+  was the first pass. (16) The wiki page "Recovering from a bad start" lives in
+  `jkitchin/pounce.wiki`, which this repository cannot edit: the corrected
+  text (four-rung ladder, rung 3 moves the start, pin-the-trajectory names all
+  four `*_retry` options, 0.10.0 transcripts labelled) is in
+  `dev-notes/wiki-recovering-from-a-bad-start.md`, ready to paste, and
+  `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
 

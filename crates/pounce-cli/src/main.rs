@@ -3036,6 +3036,7 @@ fn run_convex_qp(
     // True under `auto`, false under an explicit convex `solver_selection`.
     sens_may_decline: bool,
 ) -> Option<ExitCode> {
+    pounce_convex::crossover::clear_report();
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
@@ -3367,6 +3368,29 @@ fn run_convex_qp(
         class.name(),
         sol.iters,
     );
+    // gh#990 item 12: crossover used to be silent at the default print level.
+    // One line: which engine, what it had to do, and the residual it ended on.
+    if let Some(c) = pounce_convex::crossover::take_report() {
+        println!(
+            "Crossover: {} engine, {}; {} superbasic(s) pushed, {} pivot(s) \
+             (push {}, phase 1 {}, phase 2 {}), {} bound flip(s); KKT error \
+             {:.2e} -> {:.2e}",
+            c.engine,
+            if c.accepted {
+                "vertex accepted"
+            } else {
+                "interior point kept"
+            },
+            c.superbasics,
+            c.pivots_push + c.pivots_phase1 + c.pivots_phase2,
+            c.pivots_push,
+            c.pivots_phase1,
+            c.pivots_phase2,
+            c.flips,
+            c.kkt_error_before,
+            c.kkt_error_after,
+        );
+    }
     // gh #848: an indefinite QP whose claimed optimum the second-order screen
     // refuted lands here as `NumericalFailure`, which the shared console
     // vocabulary renders "INTERNAL ERROR: Unknown SolverReturn value." — a

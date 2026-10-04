@@ -107,6 +107,22 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
   residuals with the scaling divided back out, i.e. in your **original
   problem units**. Equal to the scaled values when no scaling activates.
+- `derivative_check` — the derivative checker's verdict when `derivative_test`
+  was set, else `None` (gh#990): `mode`, `tolerance`, `checked`, `suspicious`,
+  `missing_structure`, `clean`, `max_rel_error_gradient` / `_jacobian` /
+  `_hessian`, and `flagged` (a list of `{kind, block, row, col, analytic,
+  finite_difference, relative_error}`; the first 200). The report on stderr is
+  unchanged; the same object is `statistics.derivative_check` in the solve
+  report. Test `info["derivative_check"]["clean"]` in a notebook instead of
+  scraping stderr.
+- `objective_scaling` — the objective-scaling decision: `factor` (the
+  gradient-based factor the returned run ended with), `start_gradient_max`,
+  and `certificate_refused` / `acceptable_certificate_refused` (some attempt
+  refused a termination certificate the scaling masked and kept iterating —
+  the INFO line on stderr). Also `statistics.objective_scaling` in the report.
+- `linear_solver["requested"]` — the `linear_solver` option as requested,
+  beside `linear_solver["solver_name"]`, the backend that ran (`ma57`
+  requested without HSL: `"ma57"` / `"feral"`).
 - `warnings` — list of structured solve-quality warnings about the returned
   point (`"<code>: <text>"`), empty on a clean run. Codes:
   `objective_scale_small`, `unscaled_stationarity_above_tol`,

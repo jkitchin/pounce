@@ -273,6 +273,9 @@ pub struct StatisticsInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinearSolverSummaryInfo {
     pub solver_name: String,
+    /// The `linear_solver` option as requested (gh#990 item 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
     pub n_factors: u64,
     pub n_pattern_reuse: u64,
     pub n_pattern_changes: u64,

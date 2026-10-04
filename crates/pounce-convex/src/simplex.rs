@@ -79,12 +79,30 @@ const NO_PROGRESS_LIMIT: u32 = 50;
 
 /// The purified exact-vertex solution, in the convex problem's coordinates.
 pub(crate) struct VertexSolution {
+    /// Pivot census (gh#990 item 12).
+    pub stats: SimplexStats,
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub z: Vec<f64>,
     pub z_lb: Vec<f64>,
     pub z_ub: Vec<f64>,
     pub obj: f64,
+}
+
+/// What the crossover simplex did (gh#990 item 12): the superbasics it had to
+/// resolve and the basis changes it spent, by stage.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SimplexStats {
+    /// Structurals the interior iterate left strictly inside their bounds.
+    pub superbasics: usize,
+    /// Basis changes made resolving them (the push).
+    pub pivots_push: usize,
+    /// Basis changes cleaning the residual bound infeasibility (phase 1).
+    pub pivots_phase1: usize,
+    /// Basis changes optimizing to the vertex (phase 2).
+    pub pivots_phase2: usize,
+    /// Bound flips (a move to the opposite bound with no basis change).
+    pub flips: usize,
 }
 
 /// Where a nonbasic variable currently sits.
@@ -336,6 +354,9 @@ struct Simplex {
     /// Bland anti-cycling latch + degenerate-step counter.
     bland: bool,
     stall: u32,
+    /// Pivot census and the stage (1 or 2) the pricing loop is in.
+    stats: SimplexStats,
+    phase: u8,
 }
 
 impl Simplex {
@@ -411,6 +432,8 @@ impl Simplex {
             since_refactor: 0,
             bland: false,
             stall: 0,
+            stats: SimplexStats::default(),
+            phase: 0,
         }
     }
 
@@ -466,6 +489,7 @@ impl Simplex {
             .filter(|&j| self.slot_of[j] == usize::MAX && self.nb[j] == NbStatus::Superbasic)
             .collect();
         let n_super = supers.len();
+        self.stats.superbasics = n_super;
         for j in supers {
             if self.slot_of[j] != usize::MAX || self.nb[j] != NbStatus::Superbasic {
                 continue; // already resolved as a side effect of an earlier pivot
@@ -595,6 +619,7 @@ impl Simplex {
     /// Update the LU for replacing the basis column in `slot` with variable `var`,
     /// refactoring on any feral refusal or periodically to cap fill / drift.
     fn pivot_lu(&mut self, slot: usize, var: usize) -> Option<()> {
+        self.stats.pivots_push += 1;
         self.since_refactor += 1;
         let mut entering_col = vec![0.0; self.m];
         for &(row, val) in &self.cols[var] {
@@ -704,6 +729,7 @@ impl Simplex {
     }
 
     fn run_phase1(&mut self) -> Option<()> {
+        self.phase = 1;
         if self.primal_infeasibility() <= FEAS_TOL {
             return Some(());
         }
@@ -787,6 +813,7 @@ impl Simplex {
     }
 
     fn run_phase2(&mut self) -> Option<()> {
+        self.phase = 2;
         let max_iter = 20 * (self.m + self.nv) + 1000;
         self.bland = false;
         self.stall = 0;
@@ -1104,6 +1131,7 @@ impl Simplex {
                     self.xval[self.basis[slot]] -= alpha[slot] * delta;
                 }
                 self.xval[q] += delta;
+                self.stats.flips += 1;
                 self.nb[q] = match self.nb[q] {
                     NbStatus::AtLower => NbStatus::AtUpper,
                     NbStatus::AtUpper => NbStatus::AtLower,
@@ -1114,6 +1142,11 @@ impl Simplex {
                 Some(())
             }
             Step::Pivot { slot, theta, to } => {
+                if self.phase == 1 {
+                    self.stats.pivots_phase1 += 1;
+                } else {
+                    self.stats.pivots_phase2 += 1;
+                }
                 let delta = t * theta;
                 for s in 0..self.m {
                     self.xval[self.basis[s]] -= alpha[s] * delta;
@@ -1196,6 +1229,7 @@ impl Simplex {
 
         let obj = (0..n).map(|j| prob.c[j] * x[j]).sum();
         VertexSolution {
+            stats: self.stats,
             x,
             y,
             z,

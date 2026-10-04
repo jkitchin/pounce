@@ -260,6 +260,7 @@ fn build_result<'py>(
     info.set_item("final_unscaled_kkt_error", r.stats.final_unscaled_kkt_error)?;
     info.set_item("final_unscaled_dual_inf", r.stats.final_unscaled_dual_inf)?;
     info.set_item("warnings", r.stats.warnings.clone())?;
+    crate::problem::set_decision_items(info.as_any(), &r.stats)?;
     info.set_item(
         "final_unscaled_constr_viol",
         r.stats.final_unscaled_constr_viol,

@@ -211,8 +211,40 @@ fn solution_dict<'py>(
     prob: Option<&QpProblem>,
     cones: &[ConeSpec],
 ) -> PyResult<Bound<'py, PyDict>> {
+    solution_dict_hsde(py, sol, prob, cones, None)
+}
+
+/// [`solution_dict`] plus the HSDE homogeneous scalars (gh#990 item 9).
+///
+/// `tau` and `kappa` are those of the last HSDE run in the solve (`None` when
+/// the answer came from a driver that has none). On `primal_infeasible` /
+/// `dual_infeasible` the returned `y`, `z`, `z_lb`, `z_ub` (resp. `x`) are a
+/// *ray* carrying the `1/tau` scale of the un-homogenized embedding; its
+/// magnitude is meaningless. `certificate_scale` is the inf-norm of the
+/// returned ray (the factor to divide by to get a unit-norm certificate), and
+/// `None` on every other status.
+fn solution_dict_hsde<'py>(
+    py: Python<'py>,
+    sol: QpSolution,
+    prob: Option<&QpProblem>,
+    cones: &[ConeSpec],
+    hsde: Option<pounce_convex::hsde_scalars::HsdeScalars>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("status", status_str(sol.status))?;
+    d.set_item("tau", hsde.map(|h| h.tau))?;
+    d.set_item("kappa", hsde.map(|h| h.kappa))?;
+    let norm = |vs: &[&[f64]]| {
+        vs.iter()
+            .flat_map(|v| v.iter())
+            .fold(0.0_f64, |m, x| m.max(x.abs()))
+    };
+    let scale = match sol.status {
+        QpStatus::PrimalInfeasible => Some(norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub])),
+        QpStatus::DualInfeasible => Some(norm(&[&sol.x])),
+        _ => None,
+    };
+    d.set_item("certificate_scale", scale)?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
@@ -532,11 +564,15 @@ pub fn solve_qp<'py>(
                      indefinite QP",
                 ));
             }
-            let sol = py.allow_threads(|| match &warm {
-                Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
-                None => solve_qp_ipm(&prob.inner, &o, backend),
+            let (sol, hs) = py.allow_threads(|| {
+                pounce_convex::hsde_scalars::clear();
+                let sol = match &warm {
+                    Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
+                    None => solve_qp_ipm(&prob.inner, &o, backend),
+                };
+                (sol, pounce_convex::hsde_scalars::take())
             });
-            solution_dict(py, sol, Some(&prob.inner), &[])
+            solution_dict_hsde(py, sol, Some(&prob.inner), &[], hs)
         }
         "active-set" => {
             if warm.is_some() {
@@ -616,9 +652,13 @@ pub fn solve_socp<'py>(
             prob.inner.m_ineq()
         )));
     }
-    let sol = py.allow_threads(|| solve_socp_ipm(&prob.inner, &specs, &o, backend));
+    let (sol, hs) = py.allow_threads(|| {
+        pounce_convex::hsde_scalars::clear();
+        let sol = solve_socp_ipm(&prob.inner, &specs, &o, backend);
+        (sol, pounce_convex::hsde_scalars::take())
+    });
     // Conic slack lives in a non-orthant cone: skip the orthant residuals.
-    solution_dict(py, sol, Some(&prob.inner), &specs)
+    solution_dict_hsde(py, sol, Some(&prob.inner), &specs, hs)
 }
 
 /// Solve a batch of convex QPs in parallel (across instances). Returns a

@@ -3609,6 +3609,17 @@ impl IpoptAlgorithm {
         self.dual_divergence_signature
     }
 
+    /// gh#990 item 13: whether a strict termination certificate was refused
+    /// because the objective scaling masked it (sticky for the solve).
+    pub fn obj_scale_certificate_refused(&self) -> bool {
+        self.vetoed_seen
+    }
+
+    /// Same, for an acceptable-level certificate.
+    pub fn obj_scale_acceptable_refused(&self) -> bool {
+        self.vetoed_acceptable_seen
+    }
+
     /// Port of `IpBacktrackingLineSearch::DetectTinyStep`
     /// (`IpBacktrackingLineSearch.cpp:1219-1278`). Returns true iff
     /// `max_i |δx_i|/(1+|x_i|) ≤ tiny_step_tol`,

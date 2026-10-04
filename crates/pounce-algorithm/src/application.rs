@@ -725,6 +725,15 @@ pub struct IpoptApplication {
     /// previous attempt's verdict. Also copied into
     /// [`SolveStatistics::dual_divergence_signature`].
     dual_divergence_signature: std::cell::Cell<bool>,
+    /// gh#990 item 3: the derivative checker's structured result for the
+    /// current solve; copied onto the statistics when the solve finishes.
+    derivative_check: RefCell<Option<pounce_nlp::derivative_test::DerivativeCheckSummary>>,
+    /// gh#990 item 13: some attempt of this run refused a termination
+    /// certificate the objective scaling had masked (strict, acceptable).
+    /// Sticky across the attempts a retry driver spends, like
+    /// `dual_divergence_signature`: the returned run is often a re-solve, and
+    /// the decision that led to it belongs on the record.
+    obj_scale_refused: std::cell::Cell<(bool, bool)>,
     /// gh#884. Set when a dual-divergence retry actually replaced the base
     /// attempt's answer. Copied into
     /// [`SolveStatistics::dual_divergence_retry_promoted`].
@@ -941,6 +950,8 @@ impl IpoptApplication {
             kkt_blocks_published: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             dual_divergence_signature: std::cell::Cell::new(false),
+            derivative_check: RefCell::new(None),
+            obj_scale_refused: std::cell::Cell::new((false, false)),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
             answer_restored_from_floor: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
@@ -1481,6 +1492,12 @@ impl IpoptApplication {
             return None;
         }
         main.restoration = resto.map(Box::new);
+        // gh#990 item 7: name what was asked for beside what ran.
+        main.requested = self
+            .options
+            .get_string_value("linear_solver", "")
+            .ok()
+            .map(|(v, _)| v);
         Some(main)
     }
 
@@ -1698,6 +1715,7 @@ impl IpoptApplication {
         // `run_with_dual_divergence_retry` reads "some attempt of the base
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
+        self.obj_scale_refused.set((false, false));
         self.dual_divergence_retry_promoted.set(false);
         self.answer_restored_from_floor.set(false);
         // Same scoping argument as the three above, for the same reason: the
@@ -2692,6 +2710,9 @@ impl IpoptApplication {
     /// solve continues. The report goes to stderr so it survives
     /// `print_level=0` and leaves `--json-output`'s stdout clean.
     pub fn run_derivative_test(&self, tnlp: &Rc<RefCell<dyn TNLP>>) {
+        // gh#990 item 3: the structured result belongs to this solve; a solve
+        // that asks for no test must not inherit the previous one's.
+        *self.derivative_check.borrow_mut() = None;
         let opts = self.derivative_test_options();
         if matches!(opts.mode, DerivativeTest::None) {
             return;
@@ -2708,6 +2729,7 @@ impl IpoptApplication {
             );
             return;
         };
+        *self.derivative_check.borrow_mut() = Some(report.summary.clone());
         use pounce_common::journalist::JournalCategory;
         for line in &report.lines {
             eprintln!("{line}");
@@ -5739,6 +5761,14 @@ impl IpoptApplication {
                 .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
+            stats.derivative_check = self.derivative_check.borrow().clone();
+            let (rs, ra) = self.obj_scale_refused.get();
+            self.obj_scale_refused.set((
+                rs || alg.obj_scale_certificate_refused(),
+                ra || alg.obj_scale_acceptable_refused(),
+            ));
+            stats.obj_scale_certificate_refused = self.obj_scale_refused.get().0;
+            stats.obj_scale_acceptable_refused = self.obj_scale_refused.get().1;
             stats.iterations = captured_iters;
             // A refused starting point does not produce a valid iterate.
             // Leave final objective/residual fields at their NaN defaults.

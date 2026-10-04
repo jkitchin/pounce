@@ -1451,12 +1451,70 @@ fn write_solve_report(
 /// key without guarding it.
 ///
 /// [`LinearSolverSummary`]: pounce_linsol::summary::LinearSolverSummary
+/// gh#990 items 3 and 13: `info["derivative_check"]` (the derivative checker's
+/// verdict, `None` when `derivative_test` did not run) and
+/// `info["objective_scaling"]` (the objective-scaling decision). Shared by the
+/// single-solve and batch `info` dicts so they carry the same keys.
+pub(crate) fn set_decision_items(
+    info: &Bound<'_, PyAny>,
+    stats: &pounce_nlp::solve_statistics::SolveStatistics,
+) -> PyResult<()> {
+    let py = info.py();
+    let info = info.downcast::<PyDict>()?;
+    let dc: PyObject = match &stats.derivative_check {
+        None => py.None(),
+        Some(c) => {
+            let d = PyDict::new_bound(py);
+            d.set_item("mode", &c.mode)?;
+            d.set_item("tolerance", c.tolerance)?;
+            d.set_item("perturbation", c.perturbation)?;
+            d.set_item("checked", c.checked)?;
+            d.set_item("suspicious", c.suspicious)?;
+            d.set_item("missing_structure", c.missing_structure)?;
+            d.set_item("evaluations", c.evaluations)?;
+            d.set_item("clean", c.clean)?;
+            d.set_item("max_rel_error_gradient", c.max_rel_error_gradient)?;
+            d.set_item("max_rel_error_jacobian", c.max_rel_error_jacobian)?;
+            d.set_item("max_rel_error_hessian", c.max_rel_error_hessian)?;
+            let flagged = PyList::empty_bound(py);
+            for e in &c.flagged {
+                let row = PyDict::new_bound(py);
+                row.set_item("kind", e.kind)?;
+                row.set_item("block", &e.block)?;
+                row.set_item("row", e.row)?;
+                row.set_item("col", e.col)?;
+                row.set_item("analytic", e.analytic)?;
+                row.set_item("finite_difference", e.finite_difference)?;
+                row.set_item("relative_error", e.relative_error)?;
+                flagged.append(row)?;
+            }
+            d.set_item("flagged", flagged)?;
+            d.into_any().unbind()
+        }
+    };
+    info.set_item("derivative_check", dc)?;
+    let os = PyDict::new_bound(py);
+    let opt = |v: f64| if v.is_finite() { Some(v) } else { None };
+    os.set_item("factor", opt(stats.final_obj_scaling_factor))?;
+    os.set_item("start_gradient_max", opt(stats.start_obj_grad_max))?;
+    os.set_item("certificate_refused", stats.obj_scale_certificate_refused)?;
+    os.set_item(
+        "acceptable_certificate_refused",
+        stats.obj_scale_acceptable_refused,
+    )?;
+    info.set_item("objective_scaling", os)?;
+    Ok(())
+}
+
 fn linear_solver_dict<'py>(
     py: Python<'py>,
     s: &pounce_linsol::summary::LinearSolverSummary,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("solver_name", &s.solver_name)?;
+    // gh#990 item 7: the `linear_solver` option as requested, beside the
+    // backend that ran (`solver_name`).
+    d.set_item("requested", s.requested.clone())?;
     d.set_item("n_factors", s.n_factors)?;
     d.set_item("n_pattern_reuse", s.n_pattern_reuse)?;
     d.set_item("n_pattern_changes", s.n_pattern_changes)?;
@@ -1675,6 +1733,7 @@ pub(crate) fn build_info_dict<'py>(
     // gh#983: structured solve-quality warnings (`"<code>: <text>"`), empty
     // on a clean run. Never changes the status.
     info.set_item("warnings", stats.warnings.clone())?;
+    set_decision_items(info.as_any(), stats)?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /

@@ -206,6 +206,18 @@ pub struct SolveStatistics {
     /// `rescale_retry_declined`. Empty on a clean run. Never changes the
     /// status; it says why a status the run earned deserves a second look.
     pub warnings: Vec<String>,
+    /// gh#990 item 3. The derivative checker's machine-readable verdict, when
+    /// `derivative_test` ran for this solve (`None` otherwise). The console
+    /// report on stderr is unchanged.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub derivative_check: Option<crate::derivative_test::DerivativeCheckSummary>,
+    /// gh#990 item 13. A strict termination certificate was refused because
+    /// the objective scaling masked it (gh#200): the solve kept iterating
+    /// toward the true minimum. The decision used to be visible only as an INFO
+    /// line on stderr.
+    pub obj_scale_certificate_refused: bool,
+    /// Same, for an acceptable-level certificate.
+    pub obj_scale_acceptable_refused: bool,
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
     pub final_unscaled_kkt_error: Number,
@@ -437,6 +449,9 @@ impl Default for SolveStatistics {
             final_obj_scaling_factor: Number::NAN,
             start_obj_grad_max: Number::NAN,
             warnings: Vec::new(),
+            derivative_check: None,
+            obj_scale_certificate_refused: false,
+            obj_scale_acceptable_refused: false,
             final_declared_constr_viol: Number::NAN,
             final_declared_box_viol: Number::NAN,
             final_unscaled_constr_viol: Number::NAN,

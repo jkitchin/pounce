@@ -495,9 +495,18 @@ returned `y`, `z`, `z_lb`, `z_ub` (infeasible) or `x` (unbounded) are the
 Farkas / recession ray, a **direction** whose length is arbitrary and grows
 like `1/τ`. On a two-variable infeasible LP the multipliers read `z ≈ 4.5e10`
 (gh#990). Do not read the magnitude as a bound on anything; rescale the ray
-yourself (e.g. divide by `max|z|`) if you need a unit-length certificate,
-and test it with the sign and residual conditions the verification step
-already applied. `τ` and `κ` are not exposed on the result.
+yourself if you need a unit-length certificate, and test it with the sign
+and residual conditions the verification step already applied. Python's
+`solve_qp` / `solve_socp` result carries what is needed: `tau` and `kappa`
+(the homogeneous scalars of the last HSDE run in the solve; `None` when the
+answer came from a driver that has none, e.g. the direct driver or the
+active-set engine), and `certificate_scale`, the inf-norm of the returned ray
+(`(y, z, z_lb, z_ub)` for `primal_infeasible`, `x` for `dual_infeasible`,
+`None` on every other status) - divide by it for a unit-norm certificate.
+`kappa / tau` says how decisive the verdict is: `tau ≈ 4e-11`, `kappa ≈ 1.06`
+on the two-variable example above. In Rust, `pounce_convex::hsde_scalars`
+(`clear()` before the solve, `take()` after, same thread) carries the same
+pair.
 
 #### Degenerate LP duals are not unique
 
@@ -510,7 +519,15 @@ data that is *inactive at the vertex* — raising an inactive upper bound from
 optimal duals. If you need the **vertex** dual (the one a simplex code
 reports, and the one a sensitivity or shadow-price reading usually wants),
 set `qp_crossover=yes` (pure LPs): it purifies the interior iterate to an
-exact vertex and reads the duals from that basis. Still not unique when the
+exact vertex and reads the duals from that basis. The CLI prints one line
+about it at the default print level, right under the `POUNCE (...)` result
+line: `Crossover: simplex engine, vertex accepted; 20 superbasic(s) pushed,
+22 pivot(s) (push 20, phase 1 0, phase 2 2), 1 bound flip(s); KKT error
+1.29e-09 -> 2.84e-14` (engine `simplex` or the `active-set` bridge it falls
+back to, whether the vertex replaced the interior iterate, the structurals
+the interior point left strictly inside their bounds, basis changes by stage,
+and the KKT error before and after). In Rust the same record is
+`pounce_convex::crossover::take_report()`. Still not unique when the
 vertex is degenerate, but a vertex of the dual face, hence stable under
 changes to inactive data.
 

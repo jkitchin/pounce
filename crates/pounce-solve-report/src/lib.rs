@@ -157,6 +157,10 @@ pub struct SecondOpinionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinearSolverSummaryInfo {
     pub solver_name: String,
+    /// The `linear_solver` option as requested (gh#990 item 7); differs from
+    /// `solver_name` when the backend that ran is not the one asked for.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requested: Option<String>,
     pub n_factors: u64,
     pub n_pattern_reuse: u64,
     pub n_pattern_changes: u64,
@@ -246,6 +250,7 @@ impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
     fn from(s: LinearSolverSummary) -> Self {
         Self {
             solver_name: s.solver_name,
+            requested: s.requested,
             n_factors: s.n_factors,
             n_pattern_reuse: s.n_pattern_reuse,
             n_pattern_changes: s.n_pattern_changes,
@@ -540,6 +545,108 @@ where
     Ok(Option::<Number>::deserialize(de)?.unwrap_or_else(uncomputed))
 }
 
+/// One flagged derivative-checker comparison (gh#990 item 3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivativeEntryInfo {
+    /// `gradient`, `jacobian`, `hessian`, `jacobian_structure` or
+    /// `hessian_structure`.
+    pub kind: String,
+    /// Hessian block (`obj` or `g[<row>]`); omitted otherwise.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub block: String,
+    /// Row (`-1` for a gradient entry).
+    pub row: i64,
+    pub col: i64,
+    /// `None` for a structural miss (the entry is not in the declared pattern).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analytic: Option<f64>,
+    pub finite_difference: f64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub relative_error: Option<f64>,
+}
+
+/// The derivative checker's machine-readable verdict (gh#990 item 3); the
+/// console report on stderr is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivativeCheckInfo {
+    /// `first-order`, `second-order` or `only-second-order`.
+    pub mode: String,
+    pub tolerance: f64,
+    pub perturbation: f64,
+    pub checked: usize,
+    pub suspicious: usize,
+    pub missing_structure: usize,
+    pub evaluations: usize,
+    /// Nothing flagged and something compared.
+    pub clean: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_rel_error_gradient: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_rel_error_jacobian: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_rel_error_hessian: Option<f64>,
+    /// The flagged entries (at most 200; `suspicious` is the exact count).
+    #[serde(default)]
+    pub flagged: Vec<DerivativeEntryInfo>,
+}
+
+/// The objective-scaling decision (gh#990 item 13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectiveScalingInfo {
+    /// The solver-computed objective scaling factor the run ended with
+    /// (excluding the caller's own `obj_scaling_factor`); `1` when none was
+    /// applied.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub factor: Option<f64>,
+    /// `max |grad f|` at the starting point, as gradient-based scaling
+    /// measured it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start_gradient_max: Option<f64>,
+    /// A strict termination certificate was refused because the objective
+    /// scaling masked it (gh#200), and the solve kept iterating.
+    #[serde(default)]
+    pub certificate_refused: bool,
+    /// Same, for an acceptable-level certificate.
+    #[serde(default)]
+    pub acceptable_certificate_refused: bool,
+}
+
+impl From<&pounce_nlp::derivative_test::DerivativeCheckSummary> for DerivativeCheckInfo {
+    fn from(c: &pounce_nlp::derivative_test::DerivativeCheckSummary) -> Self {
+        let fin = |v: Option<f64>| v.filter(|x| x.is_finite());
+        Self {
+            mode: c.mode.clone(),
+            tolerance: c.tolerance,
+            perturbation: c.perturbation,
+            checked: c.checked,
+            suspicious: c.suspicious,
+            missing_structure: c.missing_structure,
+            evaluations: c.evaluations,
+            clean: c.clean,
+            max_rel_error_gradient: fin(c.max_rel_error_gradient),
+            max_rel_error_jacobian: fin(c.max_rel_error_jacobian),
+            max_rel_error_hessian: fin(c.max_rel_error_hessian),
+            flagged: c
+                .flagged
+                .iter()
+                .map(|e| DerivativeEntryInfo {
+                    kind: e.kind.to_string(),
+                    block: e.block.clone(),
+                    row: e.row,
+                    col: e.col,
+                    analytic: fin(e.analytic),
+                    finite_difference: if e.finite_difference.is_finite() {
+                        e.finite_difference
+                    } else {
+                        0.0
+                    },
+                    relative_error: fin(e.relative_error),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Subset of `SolveStatistics` projected for the report. Mirrors the
 /// fields the existing console summary prints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,6 +741,17 @@ pub struct StatisticsInfo {
     /// changes the status. `serde(default)` so older reports still load.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// gh#990 item 3. The derivative checker's machine-readable verdict;
+    /// present only when `derivative_test` ran for this solve.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub derivative_check: Option<DerivativeCheckInfo>,
+    /// gh#990 item 13. The objective-scaling decision: the factor
+    /// gradient-based scaling chose, the gradient scale it measured, and
+    /// whether a termination certificate was refused because the scaling
+    /// masked it. Absent when none of that is known (a path that does not
+    /// scale the objective).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub objective_scaling: Option<ObjectiveScalingInfo>,
     /// Per-pass summary of a multi-pass solve (gh#987 item 6): one entry per
     /// ℓ₁ exact-penalty ρ pass, preceded by the unwrapped attempt when the ℓ₁
     /// fallback ran. Omitted on an ordinary single-pass solve. When present,
@@ -742,6 +860,24 @@ impl ReportBuilder {
             dual_divergence_signature: src.dual_divergence_signature,
             dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
             warnings: src.warnings.clone(),
+            derivative_check: src.derivative_check.as_ref().map(DerivativeCheckInfo::from),
+            objective_scaling: {
+                let fin = |v: f64| v.is_finite().then_some(v);
+                let (factor, start) = (
+                    fin(src.final_obj_scaling_factor),
+                    fin(src.start_obj_grad_max),
+                );
+                (factor.is_some()
+                    || start.is_some()
+                    || src.obj_scale_certificate_refused
+                    || src.obj_scale_acceptable_refused)
+                    .then_some(ObjectiveScalingInfo {
+                        factor,
+                        start_gradient_max: start,
+                        certificate_refused: src.obj_scale_certificate_refused,
+                        acceptable_certificate_refused: src.obj_scale_acceptable_refused,
+                    })
+            },
             passes: src.passes.clone(),
         };
         if matches!(self.detail, ReportDetail::Full) {
@@ -836,6 +972,8 @@ fn empty_stats() -> StatisticsInfo {
         dual_divergence_signature: false,
         dual_divergence_retry_promoted: false,
         warnings: Vec::new(),
+        derivative_check: None,
+        objective_scaling: None,
         passes: Vec::new(),
     }
 }

@@ -196,6 +196,19 @@ class QpResult:
         inaccurate — set only when the solve did not converge cleanly *and* the
         problem is in that ill-scaled regime, with an actionable remedy
         (rescale the objective, or cross-check with a reference solver).
+    tau, kappa:
+        The homogeneous scalars of the last HSDE (self-dual embedding) run in
+        the solve, or ``None`` when the answer came from a driver that has none
+        (the direct driver, the active-set engine). On a solvable problem
+        ``tau`` is positive and ``kappa`` is near zero; on an infeasible one
+        ``tau -> 0`` and ``kappa > 0``, and ``kappa / tau`` says how decisive
+        the verdict is. ``y``, ``z``, ``z_lb``, ``z_ub`` are the un-homogenized
+        ``(y, z) / tau``, which is why an infeasibility certificate is huge.
+    certificate_scale:
+        ``None`` unless ``status`` is ``primal_infeasible`` or
+        ``dual_infeasible``; then the inf-norm of the returned ray (``(y, z,
+        z_lb, z_ub)`` resp. ``x``). The ray is meaningful only up to positive
+        scaling: divide by this to get a unit-norm certificate.
     """
 
     status: str
@@ -209,6 +222,9 @@ class QpResult:
     residuals: Optional[dict] = None
     iterates: list = field(default_factory=list)
     scaling_warning: Optional[str] = None
+    tau: Optional[float] = None
+    kappa: Optional[float] = None
+    certificate_scale: Optional[float] = None
 
     @property
     def success(self) -> bool:
@@ -888,6 +904,9 @@ def _to_result(d: dict) -> QpResult:
         residuals=d.get("residuals"),
         iterates=list(d.get("iterates", [])),
         scaling_warning=d.get("scaling_warning"),
+        tau=d.get("tau"),
+        kappa=d.get("kappa"),
+        certificate_scale=d.get("certificate_scale"),
     )
 
 

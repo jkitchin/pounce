@@ -1417,6 +1417,7 @@ where
     }
 
     tally.report("hsde", iters);
+    crate::hsde_scalars::record(tau, kappa, iters);
     // Never hand back a success verdict without a usable solution (gh #222).
     let status = crate::ipm::demote_unusable(status, &x, obj);
     QpSolution {

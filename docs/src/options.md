@@ -237,6 +237,13 @@ checked one multiplier block at a time — `obj_factor = 1, λ = 0` against
 differences of `eval_grad_f`, then `obj_factor = 0, λ = eⱼ` against
 differences of row `j` of `eval_jac_g`.
 
+The report goes to stderr, and the verdict is also machine-readable: the
+Python `info["derivative_check"]` and the solve report's
+`statistics.derivative_check` carry `clean`, the counts, the largest relative
+error per derivative kind and the flagged entries (see
+[the report schema](schema/solve-report-v1.md)), so a notebook or a test can
+assert on it instead of scraping stderr.
+
 Entries that look wrong are marked `*`:
 
 ```

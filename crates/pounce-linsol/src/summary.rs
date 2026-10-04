@@ -12,6 +12,12 @@ pub struct LinearSolverSummary {
     /// Short identifier of the backend that produced this summary:
     /// `"feral"`, `"ma57"`, etc. Empty for the `Default` value.
     pub solver_name: String,
+    /// The `linear_solver` option as requested, when the frontend knows it
+    /// (gh#990 item 7). `solver_name` is the backend that actually factored;
+    /// the two differ when a requested backend was unavailable or unusable
+    /// (`ma57` falling back to FERAL), a fact that used to be visible only in
+    /// the console banner. `None` from a backend that never saw the option.
+    pub requested: Option<String>,
     /// Number of `factor()` calls completed (including those that
     /// reused the cached symbolic factorisation).
     pub n_factors: u64,
