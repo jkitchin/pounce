@@ -152,3 +152,46 @@ fn the_relaxation_notice_is_in_the_report_warnings() {
         "report warnings: {warnings:?}"
     );
 }
+
+/// gh#987 (remaining item a): `min (x0 - 0.3)^2 + x1  s.t. x0 + x1 >= 1`,
+/// x0 integer in [0, 2] and appearing ONLY nonlinearly (in the objective), so
+/// header line 7 reads `0 0 0 0 1` — `nbv = niv = 0`, `nlvoi = 1`. The
+/// relaxation optimum is the fractional x0 = 0.8. Reading only `nbv niv`
+/// reported this model as continuous: no warning, and `verify` passed it.
+const NL_INT: &str = "g3 1 1 0\n 2 1 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0 0 0 1\n 2 2\n 0 0\n 0 0 0 0 0\nC0\nn0\nO0 0\no5\no0\nv0\nn-0.3\nn2\nr\n2 1\nb\n0 0 2\n0 0 10\nk1\n1\nJ0 2\n0 1\n1 1\nG0 2\n0 0\n1 1\n";
+
+#[test]
+fn integers_appearing_only_nonlinearly_are_warned_about_and_checked() {
+    let nl = tmp("nlint.nl");
+    std::fs::write(&nl, NL_INT).unwrap();
+    let out = run(&[&nl], &["-AMPL", "--no-options-file"]);
+    let (_o, e) = text(&out);
+    assert!(
+        e.contains("RELAXATION") && e.contains("1 appearing nonlinearly"),
+        "a nonlinear integer must trigger the relaxation warning; stderr:\n{e}"
+    );
+    let sol = nl.with_extension("sol");
+    assert!(sol.exists(), "no .sol written");
+    let v = run(&[&PathBuf::from("verify"), &nl, &sol], &[]);
+    let (o, _e) = text(&v);
+    assert!(
+        o.contains("max distance to an integer") && o.contains("at x[0]"),
+        "verify must check the nonlinear integer column x0; stdout:\n{o}"
+    );
+    assert_eq!(
+        v.status.code(),
+        Some(20),
+        "the fractional relaxation point must be rejected; stdout:\n{o}"
+    );
+
+    // The integral point x = (1, 0) is accepted.
+    let isol = tmp("nlint_int.sol");
+    std::fs::write(
+        &isol,
+        "POUNCE: handmade\n\nOptions\n3\n1\n1\n0\n1\n1\n2\n2\n0\n1\n0\nobjno 0 0\n",
+    )
+    .unwrap();
+    let v = run(&[&PathBuf::from("verify"), &nl, &isol], &[]);
+    let (o, _) = text(&v);
+    assert_eq!(v.status.code(), Some(0), "stdout:\n{o}");
+}

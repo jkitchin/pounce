@@ -496,6 +496,22 @@ pub fn print_summary(
     stats: &SolveStatistics,
     counters: &EvalCounts,
 ) {
+    print_summary_with_widening(status, stats, counters, true);
+}
+
+/// [`print_summary`] told whether a `bound_relax_factor` widening was applied
+/// to the solved model. At `bound_relax_factor = 0` there is no widening, so
+/// the red "before the bound_relax_factor widening" line would attribute a
+/// gap to a widening that never happened — what it would actually be
+/// comparing is the user-unit declared violation against the *scaled*
+/// residual above it (gh#987). The line is printed only when
+/// `widening_applied` is true.
+pub fn print_summary_with_widening(
+    status: ApplicationReturnStatus,
+    stats: &SolveStatistics,
+    counters: &EvalCounts,
+    widening_applied: bool,
+) {
     println!();
     println!();
     println!("Number of Iterations....: {}", stats.iteration_count);
@@ -582,8 +598,18 @@ pub fn print_summary(
     // a point `9.84e-09` outside the declared model. Printed only when a
     // widening was applied and it actually moved the number, so the block
     // stays byte-identical to upstream's on everything else.
-    if stats.final_declared_constr_viol.is_finite()
-        && stats.final_declared_constr_viol > stats.final_constr_viol * 10.0
+    //
+    // gh#987: compared against BOTH residual columns. The declared number is
+    // in the caller's units and the scaled column is not, so under row
+    // scaling an equality-only model (which no widening touches) used to
+    // print this line with a gap that was purely the scale factor.
+    if widening_applied
+        && stats.final_declared_constr_viol.is_finite()
+        && stats.final_declared_constr_viol
+            > stats
+                .final_constr_viol
+                .max(stats.final_unscaled_constr_viol)
+                * 10.0
         && stats.final_declared_constr_viol > 0.0
     {
         print_declared_violation(stats.final_declared_constr_viol);

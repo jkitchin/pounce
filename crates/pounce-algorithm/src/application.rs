@@ -3657,7 +3657,19 @@ impl IpoptApplication {
             n_jac_g: stats.num_constr_jac_evals as u64,
             n_h: stats.num_hess_evals as u64,
         };
-        pounce_solve_report::console::print_summary(app_status, &stats, &counts);
+        // gh#987: no widening at `bound_relax_factor = 0`, so the console's
+        // "before the bound_relax_factor widening" line has nothing to report.
+        let widening_applied = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .map(|(v, _)| v > 0.0)
+            .unwrap_or(true);
+        pounce_solve_report::console::print_summary_with_widening(
+            app_status,
+            &stats,
+            &counts,
+            widening_applied,
+        );
         // The verdict belongs to the run, not to the attempt. Held back while
         // any retry driver is managing attempts; that driver prints it once,
         // with the status it actually returns.
@@ -5263,6 +5275,16 @@ impl IpoptApplication {
             // decision below does not read these fields — it reads
             // `feas` directly — so an active-scaling run is judged on the
             // user's rows either way.
+            // gh#987 (remaining item b): `final_declared_constr_viol` is the
+            // violation of the model AS THE USER DECLARED IT. The inner
+            // solve's value describes the wrapper's augmented rows, where
+            // the elastic slacks absorb any violation, so it read ~1e-12
+            // even at an infeasible point. Overwrite it with the measurement
+            // on the user's own rows and box (original units, the same
+            // quantity the non-l1 path reports); `NaN` when the model could
+            // not be evaluated, never the augmented number.
+            self.statistics.borrow_mut().final_declared_constr_viol =
+                feas.as_ref().map_or(Number::NAN, |f| f.max_violation);
             if let Some(f) = feas.as_ref() {
                 let scaled_may_mirror = self.row_scaling_active.get() == Some(false);
                 let mut stats = self.statistics.borrow_mut();

@@ -54,6 +54,28 @@ changes.
 
 ### Fixed
 
+- **Misleading verdicts, remaining items (gh#987).** (a) Integers that
+  appear only nonlinearly were invisible: header line 7's `nbv`/`niv` count
+  only *linear* discrete variables, and `nlvbi nlvci nlvoi` were summed but
+  not used, so a MINLP whose integers all appear nonlinearly got no
+  relaxation warning and `pounce verify` passed a fractional point. The census
+  now counts all five fields, the warning names the nonlinear count, and
+  `verify` locates every discrete column by Gay's variable ordering
+  (`DiscreteCensus::integer_columns`); `NOT CHECKED` only when the columns
+  genuinely cannot be identified. The receipt's `integrality` object gains
+  `nonlinear`. (b) Under `l1_exact_penalty_barrier=yes`,
+  `final_declared_constr_viol` described the wrapper's augmented rows
+  (`~1e-12` at a point infeasible by `O(1)`); it is now measured on the
+  caller's own rows and box at the returned point. (c) The red "Violation of
+  the model as declared (before the bound_relax_factor widening)" console line
+  no longer prints at `bound_relax_factor=0`, nor when the only gap is a row
+  scale factor (it now compares against both residual columns). (d)
+  `docs/src/verify.md`'s exit-code table lists the integrality rejection
+  (exit 20); stale "`NaN` when no widening applied" docs corrected. As noted
+  in the earlier gh#987 entries: `iteration_count` is the **total** over every
+  pass of a multi-pass solve, and `final_declared_constr_viol` is no longer
+  `NaN` as a "no widening" signal — compare it with `final_constr_viol`.
+
 - **The gh#983 scale audit no longer reads a warm start at an answer as a
   tiny objective.** The small-objective branch takes the model's gradient
   scale as `max(grad f(x0), grad f(x*))`; under `warm_start_init_point=yes`

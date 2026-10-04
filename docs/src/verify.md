@@ -70,7 +70,7 @@ pounce verify — independent solution check
 | Exit code | Meaning |
 |---|---|
 | `0` | `VERIFIED` — every violation within tolerance |
-| `20` | `REJECTED` — a constraint or bound violation exceeds tolerance |
+| `20` | `REJECTED` — a constraint or bound violation exceeds tolerance, a declared integer column is fractional (`not integer-feasible`), or, with `--require-optimal`, the stationarity residual exceeds `--opt-tol` |
 | `2` | usage / I/O error (missing file, malformed `.sol`, dimension mismatch) |
 
 A consumer (CI step, agent harness, Makefile) gates on the exit code.
@@ -88,14 +88,21 @@ A consumer (CI step, agent harness, Makefile) gates on the exit code.
 ### Integer variables
 
 pounce solves the continuous relaxation, so a `.sol` written for a `.nl` that
-declares binary / integer variables (header line 7, `nbv`/`niv`) can be
-feasible for every row and still fractional. The solve prints a warning
-saying so. `verify` checks the declared integer columns (the last
-`nbv + niv` columns) against `--feas-tol` and reports `REJECTED — not
-integer-feasible` for a fractional point. When a discrete variable also
-appears nonlinearly its column cannot be identified from the header, and the
-report says `integrality: NOT CHECKED` instead of passing silently. The JSON
-receipt carries an `integrality` object either way.
+declares binary / integer variables can be feasible for every row and still
+fractional. The solve prints a warning saying so (also in the solve report's
+`statistics.warnings`). Header line 7 carries the census in AMPL's convention:
+`nbv`/`niv` count the discrete variables that appear only **linearly**, and
+`nlvbi`/`nlvci`/`nlvoi` the ones that appear **nonlinearly** — a MINLP whose
+integers all appear nonlinearly has `nbv = niv = 0`, and both counts are
+read. `verify` locates the columns by Gay's variable ordering (the last
+`nlvbi` / `nlvci` / `nlvoi` columns of each nonlinear block, and the last
+`nbv + niv` columns of the model), checks them against `--feas-tol` and
+reports `REJECTED — not integer-feasible` (exit `20`) for a fractional point.
+When the columns cannot be identified (a nonlinear integer count with no
+usable line-5 census, or counts inconsistent with the block sizes) the report
+says `integrality: NOT CHECKED` instead of passing silently. The JSON receipt
+carries an `integrality` object either way, with `binary`, `integer` and
+`nonlinear` counts.
 
 When a feasible point is `VERIFIED` but its dual infeasibility / stationarity
 residual exceeds `--opt-tol`, a `CAVEAT` line says the verdict means
