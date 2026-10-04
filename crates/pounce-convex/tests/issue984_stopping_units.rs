@@ -364,11 +364,57 @@ fn a_shifted_variable_does_not_set_the_relative_scale() {
     let p = shifted_eta();
     let r = solve(&p, 1e-8);
     assert_eq!(r.status, QpStatus::Optimal);
+    // gh#984 review: to ~1e-8, not 1e-5, now that the verdict measure's
+    // floors are per entry (each residual excused only by its own terms).
     for (got, want) in r.x.iter().zip([64.0, 74.0, 63.0]) {
-        assert!((got - want).abs() < 1e-5, "u = {:?}", &r.x[..3]);
+        assert!((got - want).abs() < 1e-8, "u = {:?}", &r.x[..3]);
     }
     let k = kkt(&p, &r);
     assert!(k < 1e-3, "Optimal with kkt_error {k:e}");
+}
+
+/// gh#984 review, item 9: the verdict measure must not report `0` for a
+/// well-scaled solve whose raw residual is not `0`. Per-entry floors on rows
+/// and columns of ordinary magnitude are `~1e-13`, so the reported residual is
+/// the raw one to within that; the global floors of the second pass excused
+/// `5.7e-5` on the shifted model and reported `0.0` beside a raw `1.2e-9`.
+#[test]
+fn a_well_scaled_residual_is_reported_not_excused() {
+    let p = refinery();
+    let r = solve(&p, 1e-8);
+    let raw = r.kkt_residuals(&p);
+    let adj = r.kkt_residuals_above_floor(&p);
+    assert!(
+        (adj.primal_infeasibility - raw.primal_infeasibility).abs() <= 1e-12,
+        "primal: raw {} adj {}",
+        raw.primal_infeasibility,
+        adj.primal_infeasibility
+    );
+    // A deliberately perturbed well-scaled point reads at its raw residual.
+    let mut bad = r.clone();
+    bad.x[0] += 1e-7;
+    let raw_b = bad.kkt_residuals(&p).primal_infeasibility;
+    let adj_b = bad.kkt_residuals_above_floor(&p).primal_infeasibility;
+    assert!(
+        raw_b > 1e-8 && adj_b >= 0.99 * raw_b,
+        "raw {raw_b:e} adj {adj_b:e}"
+    );
+    // On the shifted model the excuse is bounded by the floor of the one row
+    // that carries the 1e9 shift, not granted to every residual.
+    let ps = shifted_eta();
+    let rs = solve(&ps, 1e-8);
+    eprintln!(
+        "shifted: raw {:?}\n         adj {:?}",
+        rs.kkt_residuals(&ps),
+        rs.kkt_residuals_above_floor(&ps)
+    );
+    let mut off = rs.clone();
+    off.x[0] += 1e-6; // a stationarity error in an ordinary column
+    let d = off.kkt_residuals_above_floor(&ps).dual_infeasibility;
+    assert!(
+        d > 1e-7,
+        "an ordinary column's stationarity error was excused: {d:e}"
+    );
 }
 
 /// Item 5. Scaling the objective by a positive constant leaves the minimizer

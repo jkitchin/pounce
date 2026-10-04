@@ -3314,6 +3314,28 @@ fn run_convex_qp(
         let _t = timing.solve.guard();
         ipm_solve(&qp, &solve_opts())
     };
+    // gh#984 review: the `Optimal` -> `OptimalInaccurate` rule
+    // (`kkt_residuals_above_floor` against `tol`) was applied inside the
+    // solver to the problem *it* was handed -- the presolved one, when
+    // presolve ran. The report below, the `.sol` and the reroute gate are
+    // about the extracted model, so judge the postsolved point there too. A
+    // demotion only: an `OptimalInaccurate` from the solver can have other
+    // causes (an uncertified `σ` path) this measure does not see. Measured on
+    // Maros-Meszaros QPILOTNO: `Optimal` on the reduced problem beside a
+    // constraint violation of `8.2e-7` on the model. The active-set engine
+    // keeps its own verdict.
+    let sol = if !use_active_set
+        && qp_opts.use_hsde
+        && sol.status == QpStatus::Optimal
+        && sol.kkt_residuals_above_floor(&qp).kkt_error() > qp_opts.tol
+    {
+        pounce_convex::QpSolution {
+            status: QpStatus::OptimalInaccurate,
+            ..sol
+        }
+    } else {
+        sol
+    };
     let elapsed = t0.elapsed().as_secs_f64();
 
     // gh #535: the convex path finished an LP without a certificate. An LP is
@@ -3327,11 +3349,14 @@ fn run_convex_qp(
     // purpose — everything below is the verdict, and the rerouted solve owns
     // it. See `lp_declines_to_nlp` for why each gate is there.
     if lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
-        let res = sol.kkt_residuals(&qp);
+        // gh#984 review: the number beside the verdict is the one the verdict
+        // was judged on (`kkt_residuals_above_floor`), raw beside it.
+        let res = sol.kkt_residuals_above_floor(&qp);
+        let raw = sol.kkt_residuals(&qp);
         eprintln!(
             "pounce: note: the convex ({}) solve did not certify a KKT point \
-             after {} iterations in {elapsed:.3}s (KKT error {:.2e} against \
-             tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
+             after {} iterations in {elapsed:.3}s (KKT error {:.2e}, raw {:.2e}, \
+             against tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
              being re-solved on the general NLP interior-point path, which \
              certifies the degenerate, rank-deficient and badly-scaled models \
              the interior path stalls on (gh #133, gh #535). Use \
@@ -3339,6 +3364,7 @@ fn run_convex_qp(
             class.name(),
             sol.iters,
             res.kkt_error(),
+            raw.kkt_error(),
             qp_opts.tol,
         );
         return None;
@@ -3427,6 +3453,16 @@ fn run_convex_qp(
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
     let res = sol.kkt_residuals(&qp);
+    // gh#984 review: and the measurement the `Optimal` / `OptimalInaccurate`
+    // verdict was judged on (each residual above its own finite-precision
+    // floor, stationarity / complementarity in the objective's unit). Printed
+    // as the `(scaled)` column beside the raw `(unscaled)` one, and written as
+    // the JSON report's `final_*` residuals, so the status and the number
+    // printed beside it are one measurement.
+    let verdict = sol.kkt_residuals_above_floor(&qp);
+    if let Some(note) = sol.unit_scaling_note(&qp, qp_opts.tol) {
+        eprintln!("pounce: {note}");
+    }
     // ... but `qp` is the model the SOLVER was handed, whose inequality rows
     // and variable box carry the `bound_relax_factor` widening
     // (`qp_extract::BoundRelax`). That is the right model for the convergence
@@ -3440,13 +3476,21 @@ fn run_convex_qp(
     let reported_res = pounce_cli::qp_extract::declared_residuals_qp(prob, &sol, bound_relax);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
-    print::print_convex_summary(
+    print::print_convex_summary_measured(
         sol.iters,
         reported_obj,
-        res.primal_infeasibility,
-        res.dual_infeasibility,
-        res.complementarity,
-        res.kkt_error(),
+        [
+            verdict.primal_infeasibility,
+            verdict.dual_infeasibility,
+            verdict.complementarity,
+            verdict.kkt_error(),
+        ],
+        [
+            res.primal_infeasibility,
+            res.dual_infeasibility,
+            res.complementarity,
+            res.kkt_error(),
+        ],
         // Ipopt's `Variable bound violation`, measured against the box the
         // caller declared when a widening was applied and against the solved
         // box otherwise — where the two are the same object, so it is one
@@ -3565,11 +3609,12 @@ fn run_convex_qp(
         note_integer_relaxation(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         // Real final KKT residuals (from pounce-convex, computed above), so the
-        // harness sees genuine convergence numbers rather than zeros.
-        builder.stats.final_constr_viol = res.primal_infeasibility;
-        builder.stats.final_dual_inf = res.dual_infeasibility;
-        builder.stats.final_compl = res.complementarity;
-        builder.stats.final_kkt_error = res.kkt_error();
+        // harness sees genuine convergence numbers rather than zeros -- the
+        // verdict's own measurement (gh#984 review, see `verdict`).
+        builder.stats.final_constr_viol = verdict.primal_infeasibility;
+        builder.stats.final_dual_inf = verdict.dual_infeasibility;
+        builder.stats.final_compl = verdict.complementarity;
+        builder.stats.final_kkt_error = verdict.kkt_error();
         // How far outside the model AS DECLARED the returned point sits —
         // `final_constr_viol` measures the `bound_relax_factor`-widened model
         // the solver was handed, which understates it by the widening.

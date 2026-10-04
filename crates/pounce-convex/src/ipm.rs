@@ -457,17 +457,14 @@ where
 /// Last in the pipeline, so no retry or repair path reads the demoted status.
 /// Orthant/box problems only: the conic entry points judge cone membership
 /// with their own residuals.
+///
+/// The warm-start entry applies it too, gated on the *caller's* `use_hsde`
+/// (gh#984 review: the Python docstring's "optimal only if `kkt_error <= tol`"
+/// was false on the warm path). The warm leg runs the direct driver whatever
+/// the caller asked for; a caller who chose the direct driver
+/// (`use_hsde = false`) keeps its equilibrated-metric verdict, cold or warm.
 fn demote_optimum_above_tol(prob: &QpProblem, sol: QpSolution, opts: &QpOptions) -> QpSolution {
     let tol = opts.tol;
-    if std::env::var("DBG984").is_ok() {
-        eprintln!(
-            "DBG984 {:?} it {} raw {:?} adj {:?} tol {tol:e}",
-            sol.status,
-            sol.iters,
-            sol.kkt_residuals(prob),
-            sol.kkt_residuals_above_floor(prob)
-        );
-    }
     if !opts.use_hsde
         || sol.status != QpStatus::Optimal
         || sol.kkt_residuals_above_floor(prob).kkt_error() <= tol
@@ -1304,9 +1301,15 @@ where
     });
     STALL_EXIT.with(|c| c.set(prev));
     // One gate over every exit of the body below — see [`finite_or_failed`].
-    finite_or_failed(
+    // A warm `Optimal` above `tol` in the verdict measure is demoted *here*,
+    // so the cold leg gets its chance at a clean answer (gh#984 review).
+    demote_optimum_above_tol(
         prob,
-        demote_uncertified_sigma_optimum(inner, sigma_uncertified),
+        finite_or_failed(
+            prob,
+            demote_uncertified_sigma_optimum(inner, sigma_uncertified),
+        ),
+        opts,
     )
 }
 
@@ -1403,7 +1406,9 @@ where
         // the frame", and leaving the one exception to be rediscovered is
         // how F8 happened.
         let mut make_backend = make_backend;
+        // The lifted reduced answer is judged again on the full problem.
         let framed = |sol: QpSolution| {
+            let sol = demote_optimum_above_tol(prob, sol, opts);
             if crate::deadline::expired() {
                 mark_timed_out(sol)
             } else {
@@ -4687,10 +4692,22 @@ fn run_ipm(
             break;
         }
 
-        if res < opts.tol
-            || scale_relative_stop(
-                prob, &x, &y, &z, &s, &r_p, &r_g, &r_d, mu, dir_unit_d, opts.tol,
-            )
+        // gh#984 review: on an orthant the largest complementarity product,
+        // not just their average `μ`, must be within the objective-unit `tol`
+        // before the direct driver stops -- the rule the HSDE loop applies
+        // (`comp_ok`, gh#984 item 3). The verdict measure reads `max sᵢzᵢ`, so
+        // without it a warm solve stopped at `μ < tol` beside a product above
+        // it and was then demoted, handing a converged point to the cold leg.
+        let comp_ok = !cone.is_orthant()
+            || s.iter()
+                .zip(&z)
+                .fold(0.0_f64, |m, (&si, &zi)| m.max((si * zi).abs()))
+                <= opts.tol * dir_unit_g;
+        if (res < opts.tol && comp_ok)
+            || (comp_ok
+                && scale_relative_stop(
+                    prob, &x, &y, &z, &s, &r_p, &r_g, &r_d, mu, dir_unit_d, opts.tol,
+                ))
         {
             status = QpStatus::Optimal;
             // Record the converged iterate so the trace *ends* at the

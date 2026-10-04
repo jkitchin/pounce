@@ -114,3 +114,43 @@ def test_item5_per_minute_variance_weights_do_not_depend_on_the_scale():
     for scale in (1.0, 1e-4, 1e-4 / 252, 1e-4 / (252 * 390)):
         r = solve_qp(P=2 * S * scale, **kw)
         assert np.abs(r.x - w_ref).max() < 1e-6, scale
+
+
+def _portfolio(scale):
+    mu = np.array([3.0, 4.5, 6.0, 9.0, 14.0])
+    sig = np.array([5.0, 8.0, 15.0, 20.0, 30.0])
+    rho = np.array([[1, .6, -.2, -.1, 0], [.6, 1, .3, .3, .2], [-.2, .3, 1, .3, .1],
+                    [-.1, .3, .3, 1, .5], [0, .2, .1, .5, 1]])
+    S = rho * np.outer(sig, sig)
+    return dict(P=2 * S * scale, c=np.zeros(5), A=np.ones((1, 5)), b=np.array([1.0]),
+                G=-mu[None, :], h=np.array([-10.0]), lb=np.zeros(5), ub=np.ones(5))
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e3, 1e6, 1e9])
+def test_review_optimal_never_beside_kkt_error_above_tol_cold_or_warm(scale):
+    # gh#984 review item 12: the promise holds on the warm path too.
+    kw = _portfolio(scale)
+    cold = solve_qp(**kw)
+    warm = solve_qp(**kw, warm_start=cold)
+    for r in (cold, warm):
+        res = r.residuals
+        assert {"primal_infeasibility_raw", "dual_infeasibility_raw",
+                "complementarity_raw", "kkt_error_raw"} <= set(res)
+        if r.status == "optimal":
+            assert res["kkt_error"] <= 1e-8, (scale, res)
+        # item 9: the raw residual is not hidden. Where only the objective's
+        # unit puts it within tol, scaling_warning says so.
+        if r.status == "optimal" and res["kkt_error_raw"] > 1e-8:
+            assert r.scaling_warning and "objective's unit" in r.scaling_warning
+
+
+def test_review_well_scaled_kkt_error_is_not_reported_as_zero():
+    # Item 9: per-entry floors; a model of ordinary magnitude reports its
+    # residual (the second pass's global floors read 0.0 beside a raw 1.2e-9).
+    A, b, c = _production_lp(52)
+    r = solve_qp(c=c, A=A.tocsc(), b=b, lb=np.zeros(A.shape[1]))
+    res = r.residuals
+    assert r.status == "optimal"
+    # The excuse on a row of magnitude ~1e3 is ~1e-11, nothing like the
+    # global 5.7e-5 of the second pass.
+    assert abs(res["primal_infeasibility"] - res["primal_infeasibility_raw"]) <= 1e-10, res

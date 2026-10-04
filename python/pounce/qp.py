@@ -170,16 +170,27 @@ class QpResult:
         ``kkt_error_raw``.
 
         For the LP/QP solvers (gh #984) the four numbers are the ones the
-        ``"optimal"`` verdict is judged on: each residual is read *above its
-        own finite-precision floor* (a row slack that is a difference of
-        ``1e9``-sized numbers cannot be known below ``~1e-7``, however well
-        the solve went) and stationarity / complementarity are divided by the
-        objective's unit ``max(‖P‖∞, ‖c‖∞)``, so they are the residuals of the
+        ``"optimal"`` verdict is judged on: each residual entry is read *above
+        the finite-precision floor of its own terms* (a row slack that is a
+        difference of ``1e9``-sized numbers cannot be known below ``~1e-7``,
+        however well the solve went; a row of ordinary magnitude has a floor
+        of ``~1e-13`` and reads as its raw residual) and stationarity /
+        complementarity are divided by the objective's unit
+        ``max(‖P‖∞, ‖c‖∞)``, so they are the residuals of the
         objective-normalized problem and do not change when ``c`` is rescaled
-        from dollars to cents. A result is ``"optimal"`` only if this
+        from dollars to cents. With ``method="ipm"`` -- cold or
+        ``warm_start=`` -- a result is ``"optimal"`` only if this
         ``kkt_error`` is ``<= tol``; otherwise it is ``"optimal_inaccurate"``.
-        ``kkt_error_raw`` is the plain absolute max of the three
-        un-normalized residuals, for comparison with an external solver.
+        With ``method="active-set"`` the status is the active-set engine's own
+        verdict (its working-set KKT test against ``tol``) and is *not*
+        re-judged on this measure, so ``kkt_error`` may exceed ``tol`` beside
+        ``"optimal"`` there. ``kkt_error_raw`` is the plain absolute max of
+        the three un-normalized residuals, for comparison with an external
+        solver, and ``primal_infeasibility_raw`` / ``dual_infeasibility_raw``
+        / ``complementarity_raw`` are its components. When the division by a
+        *large* objective unit is what puts a successful result within
+        ``tol`` (``P`` scaled by ``1e9``: raw dual residual ``4e3``),
+        ``scaling_warning`` says so.
         For a conic (:func:`solve_socp`) solve these are measured against
         the solve's own cones — cone-membership violation for the primal
         residual and the per-block inner product for complementarity —
@@ -190,7 +201,10 @@ class QpResult:
         ``dual_infeasibility``, ``mu``, ``alpha_primal``, ``alpha_dual``.
         Empty unless the solve was called with ``collect_iterates=True``.
     scaling_warning:
-        ``None`` on a cleanly-solved, well-scaled problem. Otherwise a
+        ``None`` on a cleanly-solved, well-scaled problem. On a successful
+        solve whose stationarity / complementarity are within ``tol`` only in
+        the objective's unit (see ``residuals``), a note giving the raw
+        values. Otherwise a
         human-readable warning that the objective curvature ``‖P‖`` is tiny
         relative to the problem data and the (non-``optimal``) result may be
         inaccurate — set only when the solve did not converge cleanly *and* the

@@ -56,6 +56,10 @@ def test_residuals_attached_and_kkt_error():
         "complementarity",
         "kkt_error",
         "kkt_error_raw",
+        # gh#984 review: the raw components beside the verdict's measure.
+        "primal_infeasibility_raw",
+        "dual_infeasibility_raw",
+        "complementarity_raw",
     }
     assert r.kkt_error == r.residuals["kkt_error"]
     assert r.kkt_error < 1e-6
@@ -135,6 +139,9 @@ def test_conic_solve_reports_cone_aware_residuals():
         "complementarity",
         "kkt_error",
         "kkt_error_raw",
+        "primal_infeasibility_raw",
+        "dual_infeasibility_raw",
+        "complementarity_raw",
     }
     # Converged ⇒ every component is at tolerance. In particular the primal
     # residual measures cone *membership*: an orthant reading of this same

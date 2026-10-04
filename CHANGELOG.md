@@ -425,6 +425,78 @@ changes.
   Tests: `crates/pounce-convex/tests/issue984_stopping_units.rs`,
   `python/tests/test_issue_984_stopping_units.py`.
 
+  **Review fixes.** The second pass's description of item 3 above overstated
+  the measure: its floors were *global* (`max|x_i|` over every boxed variable
+  for the primal, `|c·x| + |h·z| + |ub·z_ub|` excusing every complementarity
+  product), so one large term excused up to `5.7e-5` (500 ulps) anywhere in
+  the item-3 model, and a well-scaled solve with raw `kkt_error 1.2e-9`
+  reported `0.0` -- "a well-scaled solve is untouched" was false. (9) The
+  measure is now per entry: each stationarity component, row, bound and
+  product is excused only by `4·64·ε` times the magnitude of its *own* terms,
+  with no global gap allowance; a row of ordinary magnitude reads its raw
+  residual to `~1e-13`. Item 3 still ends `optimal` with `u` within `1e-8` of
+  `(64, 74, 63)` (reported complementarity `1.08e-9`, raw `1.19e-7` -- one ulp
+  of the `1e9` slack). Upward objective units (`P·1e6`, `P·1e9` on item 5)
+  still read stationarity in the objective's unit, which is what puts raw
+  dual residuals of `3.9` / `4041` within `tol`; that is now flagged rather
+  than hidden: `scaling_warning` (Python) and a stderr note (CLI) give the raw
+  values. (8) The CLI prints the verdict's measurement as the summary's
+  `(scaled)` column and the raw residuals as `(unscaled)`, and the JSON
+  report's `final_*` residuals are the verdict's measurement (they were the
+  raw ones, so `optimal` could sit beside `final_kkt_error > tol`); the
+  LP→NLP reroute note prints both. (10) The HSDE candidate stash ignored the
+  complementarity half (`comp_ok`) and, at loop end, overwrote any status --
+  a primal/dual infeasibility certificate, `TimeLimit` -- with `Optimal` (a
+  deadline became a success). A candidate must now satisfy `comp_ok`, is
+  restored only over `IterationLimit` / `NumericalFailure` with the deadline
+  unexpired, and the restored iterate is pushed as the trace's terminal
+  record. (11) With that, the first pass's relaxations of
+  `issue880_coupled_sigma_forward_error.rs` are reverted (status pins at
+  `cond >= 1e10` back to `OptimalInaccurate`, `an_active_bound_is_stiff_not_free`
+  back to `rel_x_err < 1e-8` at every `cond`; verified to fail without the
+  stash change) and `issue846`'s best-candidate test is back to `1e-12`
+  coincidence with the direct driver's answer. The `issue880` iteration pin
+  stays at 30. (12) The warm path (`solve_qp(warm_start=...)`) now applies the
+  same `optimal` -> `optimal_inaccurate` rule (inside the warm leg, so the
+  cold fallback gets its chance at a clean answer); `method="active-set"` is
+  documented as keeping the active-set engine's own verdict. The Python
+  `residuals` dict adds `primal_infeasibility_raw`, `dual_infeasibility_raw`,
+  `complementarity_raw`. (13) The `DBG984` stderr hook is removed, and
+  `POUNCE_SIMPLEX_DEBUG` on/off is pinned to return the bit-identical vertex
+  (`tests/issue984_simplex_debug_vertex.rs`).
+  Also: the direct driver (warm starts, `use_hsde=false`) now stops only
+  when its largest complementarity product, not just the average `mu`, is
+  within the objective-unit `tol` (the HSDE loop's `comp_ok`); without it a
+  warm `optimal` sat beside `max s_i z_i > tol` and was then demoted. A
+  pinned column (`lb == ub`) is an equality, so its `z_lb·(x - v)` products
+  are not read as complementarity (they charged the multiplier split, `3e-7`
+  on the gh#988 production LP). The CLI re-applies the demotion to the
+  postsolved point on the extracted model when presolve ran (QPILOTNO was
+  `optimal` on the reduced problem beside a model constraint violation of
+  `8.2e-7`).
+  Measured. Fixture sweep vs the pre-change binary (both legs, 206 lines):
+  one line moves on each leg, `scaled_feasible_b` 34 -> 36 iterations (it
+  stopped at complementarity `1.47e-8 > tol`, now `4.1e-11`), engine and
+  objective unchanged. Maros-Meszaros (`benchmarks/qp`, the 106 problems with
+  `n <= 5000`, default CLI): all 106 `SolveSucceeded` before and after; total
+  iterations 2542 -> 2279; six lines move. Routing: QCAPRI and QFORPLAN stay
+  on the convex arm (29 / 33 iterations; they used to stop on a stashed
+  candidate at raw KKT `8.3e-2` / `3.0`, get rerouted and take 299 / 139 on
+  the NLP arm); QPCBOEI2 is newly rerouted to the NLP arm (28 -> 133
+  iterations: the convex point it used to call `optimal` at raw KKT `3.0e-8`
+  is now `optimal_inaccurate` on the presolved problem's per-entry measure).
+  Trajectory: QFFFFF80 40 -> 43 (it stopped at raw KKT `4.5e-6`), QSCFXM2
+  30 -> 34 (`1.6e-6`), QSEBA 27 -> 28 (`2.3e-8`); objectives agree to
+  `5e-10` relative. `benchmarks/warmstart` `warm-qp-ipm`: 5074 -> 5677
+  iterations, no failures (`cold-qp-ipm` 8622): the cost of the warm path's
+  `optimal` meaning what the measure says -- on three families, 1314 without
+  either change, 1399 with the `comp_ok` stop alone, 2145 with the demotion
+  alone, 1682 with both. `issue414_cost_normalized_false_optimal.rs` and
+  `illconditioned_huge_scale.rs` pass unchanged.
+  `issue_689_direct_driver_scaled_feasible::the_default_route_reaches_the_same_optimum`
+  (`max_iter=4000`) fails identically on the pre-change binary (error in
+  step computation at 1563 iterations); not caused or fixed here.
+
 - **Status certified at non-stationary points (gh#983), items 1, 4, 5.**
   (1) An explicitly set `dual_inf_tol` is now honoured: the scale-relative
   floor of gh#532 is a default for callers who did not name a tolerance, and

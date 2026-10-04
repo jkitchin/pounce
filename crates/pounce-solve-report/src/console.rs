@@ -748,20 +748,48 @@ pub fn print_convex_summary(
     // (netlib `afiro`, gh #744/#745). `None` when no widening applied.
     declared_primal_inf: Option<f64>,
 ) {
+    let same = [primal_inf, dual_inf, complementarity, kkt_error];
+    print_convex_summary_measured(
+        iterations,
+        objective,
+        same,
+        same,
+        bound_violation,
+        declared_primal_inf,
+    );
+}
+
+/// [`print_convex_summary`] with the two columns distinct (gh#984 review):
+/// `(scaled)` is the measurement the convex arm's `Optimal` verdict is judged
+/// on -- each residual above its own finite-precision floor, stationarity and
+/// complementarity in the objective's unit
+/// (`QpSolution::kkt_residuals_above_floor`) -- and `(unscaled)` the plain
+/// absolute residuals. Ipopt's two columns have the same division of labour:
+/// its convergence test reads the scaled one. Each array is
+/// `[primal, dual, complementarity, kkt_error]`.
+pub fn print_convex_summary_measured(
+    iterations: usize,
+    objective: f64,
+    scaled: [f64; 4],
+    unscaled: [f64; 4],
+    bound_violation: f64,
+    declared_primal_inf: Option<f64>,
+) {
+    let primal_inf = scaled[0];
     println!();
     println!();
     println!("Number of Iterations....: {iterations}");
     println!();
     println!("                                   (scaled)                 (unscaled)");
-    let row = |label: &str, v: f64| {
-        println!("{label}:   {}    {}", fmt_ipopt(v), fmt_ipopt(v));
+    let row = |label: &str, a: f64, b: f64| {
+        println!("{label}:   {}    {}", fmt_ipopt(a), fmt_ipopt(b));
     };
-    row("Objective...............", objective);
-    row("Dual infeasibility......", dual_inf);
-    row("Constraint violation....", primal_inf);
-    row("Variable bound violation", bound_violation);
-    row("Complementarity.........", complementarity);
-    row("Overall NLP error.......", kkt_error);
+    row("Objective...............", objective, objective);
+    row("Dual infeasibility......", scaled[1], unscaled[1]);
+    row("Constraint violation....", scaled[0], unscaled[0]);
+    row("Variable bound violation", bound_violation, bound_violation);
+    row("Complementarity.........", scaled[2], unscaled[2]);
+    row("Overall NLP error.......", scaled[3], unscaled[3]);
     // Only when the widening actually moved the number: on the vast majority
     // of models the point satisfies the declared rows to the same order and
     // an extra line would be noise.

@@ -205,8 +205,12 @@ struct RelCandidate {
     kappa: f64,
     /// Worst residual-to-floor ratio at the stash.
     worst: f64,
+    /// The trace record of the stashed iterate, pushed as the terminal record
+    /// when the stash is what the solve returns (gh#984 review).
+    record: QpIterate,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_candidate(
     cand: &mut Option<RelCandidate>,
     x: &mut Vec<f64>,
@@ -215,8 +219,16 @@ fn restore_candidate(
     s: &mut Vec<f64>,
     tau: &mut f64,
     kappa: &mut f64,
+    trace: Option<&mut Vec<QpIterate>>,
 ) {
     if let Some(c) = cand.take() {
+        if let Some(t) = trace {
+            t.push(QpIterate {
+                alpha_primal: 0.0,
+                alpha_dual: 0.0,
+                ..c.record
+            });
+        }
         *x = c.x;
         *y = c.y;
         *z = c.z;
@@ -790,9 +802,24 @@ where
                     tau,
                     kappa,
                     worst,
+                    record: QpIterate {
+                        iter: it,
+                        objective: obj_hat,
+                        primal_infeasibility: pres,
+                        dual_infeasibility: dres,
+                        mu,
+                        alpha_primal: 0.0,
+                        alpha_dual: 0.0,
+                    },
                 });
             };
-            match (&rel_candidate, loose_ok) {
+            // gh#984 review: a candidate must satisfy the complementarity half
+            // (`comp_ok`) too. Stashing on `loose_ok` alone kept an iterate
+            // whose largest product `s_i z_i` was above `tol` and later
+            // returned it as `Optimal` -- exactly the item-3 point the
+            // complementarity test was added to refuse.
+            let candidate_ok = loose_ok && comp_ok;
+            match (&rel_candidate, candidate_ok) {
                 (None, true) => stash(&mut rel_candidate),
                 // Still relatively converged and still improving by at least
                 // 2x: keep going, holding the better point.
@@ -808,6 +835,7 @@ where
                         &mut s,
                         &mut tau,
                         &mut kappa,
+                        opts.collect_iterates.then_some(&mut trace),
                     );
                     status = QpStatus::Optimal;
                     break;
@@ -1313,7 +1341,19 @@ where
     // iterate and ended some other way (breakdown, iteration cap, a spurious
     // certificate). Hand back the stash: it is exactly what the relative rule
     // returned before it was asked to keep going.
-    if status != QpStatus::Optimal && rel_candidate.is_some() && !crate::debug_stop::requested() {
+    //
+    // gh#984 review: only over a status that concluded nothing about the
+    // problem -- `IterationLimit` or a `NumericalFailure` breakdown. A
+    // certificate is a verdict of its own, and a `TimeLimit` is the caller's
+    // budget running out: stamping `Optimal` over it turned a deadline into a
+    // success. (Every stash now satisfies `comp_ok`, see above.)
+    if matches!(
+        status,
+        QpStatus::IterationLimit | QpStatus::NumericalFailure
+    ) && !crate::deadline::expired()
+        && rel_candidate.is_some()
+        && !crate::debug_stop::requested()
+    {
         restore_candidate(
             &mut rel_candidate,
             &mut x,
@@ -1322,6 +1362,7 @@ where
             &mut s,
             &mut tau,
             &mut kappa,
+            opts.collect_iterates.then_some(&mut trace),
         );
         status = QpStatus::Optimal;
     }
