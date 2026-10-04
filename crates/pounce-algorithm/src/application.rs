@@ -140,40 +140,104 @@ enum ScaleAudit {
     /// Gradient-based scaling froze a tiny factor at a huge-gradient start:
     /// re-evaluate it at the returned point and solve again from there.
     Rescale,
-    /// The model's gradient is tiny and nothing scales up: multiply the
-    /// objective by the carried factor (`1 / max|grad f|` at the start).
+    /// The model's gradient is tiny and nothing scales it up: multiply the
+    /// objective by the carried factor (`1 / g`, `g` the gradient scale).
     Upscale(Number),
+    /// The same small-objective signature, but a re-solve would not move the
+    /// objective's scale materially (`1/g` below [`SCALE_AUDIT_MATERIAL`]):
+    /// warn, do not re-solve.
+    SmallObjective,
 }
 
-/// A complementarity above this fraction of the objective's own gradient
-/// scale is read as "the objective is too small for the absolute tolerances".
-/// `fs = 1e-6` of the issue's reactor model reads `2.5e-4`, `fs = 1e-3`
-/// (whose answer is good to `4e-7`) reads `2.5e-7`, `fs = 1` reads `2.5e-10`.
-const SCALE_AUDIT_COMPL_REL: Number = 1e-5;
+/// A complementarity above this fraction of the objective's own gradient scale
+/// is read as "the objective is too small for the absolute tolerances".
+///
+/// gh#983 review item 4: a single threshold, used both to re-solve and to
+/// warn, so there is no band in which a run gets neither. Measured on the
+/// issue's reactor model (`issue_983_review.rs::cstr_*`), whose relative
+/// objective error is `~1.9x` this ratio: `fs = 1` reads `2.5e-10` (error
+/// `3.5e-8`), `fs = 1e-3` `2.5e-7` (`4.3e-7`), `3e-4` `8.4e-7` (`1.5e-6`),
+/// `1e-4` `2.5e-6` (`4.7e-6`), `3e-5` `8.4e-6` (`1.6e-5`), `1e-6` `2.5e-4`
+/// (`4.7e-4`). The first-pass value `1e-5` left `fs` in `[3e-5, 1e-3]` with
+/// errors up to `1.6e-5` and no signal at all. `1e-7` is a tenth of the default
+/// `acceptable_tol`: every run whose objective is predicted to be good to
+/// worse than about `2e-7` relative is either re-solved or warned about.
+const SCALE_AUDIT_COMPL_REL: Number = 1e-7;
 /// The small-objective audit only applies when the caller's `tol` is at most
 /// this (the default is `1e-8`).
 const SCALE_AUDIT_MAX_TOL: Number = 1e-6;
 /// The re-solve never multiplies the objective by more than this.
 const SCALE_AUDIT_MAX_UPSCALE: Number = 1e10;
+/// gh#983 review item 2: a re-solve is spent only when it would change the
+/// objective's scale by at least this factor. Below it the re-solve is the
+/// same solve again -- the first pass measured `hs71` times `1e8` paying a
+/// declined re-solve whose factor, re-evaluated at the optimum, was the one
+/// it already had.
+const SCALE_AUDIT_MATERIAL: Number = 10.0;
 
-/// Does a success verdict need the gh#983 scale audit, and which kind?
-///
-/// Pure so the thresholds are unit-testable. `obj_scale` is the
-/// solver-computed (gradient-based) factor, `start_grad_max` the gradient
-/// scale it measured.
-fn scale_audit_trigger(
+/// What the audit reads off a success verdict.
+#[derive(Debug, Clone, Copy)]
+struct ScaleAuditInput {
+    /// The caller's `tol`.
     tol: Number,
+    /// The solver-computed (gradient-based) objective factor the run used.
     obj_scale: Number,
+    /// The factor gradient-based scaling would compute **at the returned
+    /// point** (`gradient_obj_scale(max|grad f(x*)|)`), `NaN` if unknown.
+    rescaled_obj_scale: Number,
+    /// `max|grad f|` at the starting point (`NaN` when not measured).
     start_grad_max: Number,
+    /// `max|grad f|` at the returned point (`NaN` when not measured).
+    final_grad_max: Number,
     unscaled_kkt: Number,
     unscaled_compl: Number,
     acceptable_tol: Number,
     masked_threshold: Number,
-) -> Option<ScaleAudit> {
+}
+
+impl ScaleAuditInput {
+    /// The objective's gradient scale: the larger of the two measurements, so
+    /// a start that happens to sit near a stationary point (`grad f(x0) ~
+    /// 1e-7`, `grad f(x*) ~ 1`) does not read as a tiny objective.
+    ///
+    /// A start gradient measured as exactly `0` is a start *at* a stationary
+    /// point, which carries no scale at all; the answer's gradient is then ~0
+    /// too wherever the optimum is unconstrained (`scaled_feasible_a`, a
+    /// zero-residual least squares whose `x0` is its minimizer, reads `2e-4`
+    /// there against data of `1e5`). So that case reports no scale (`0`, the
+    /// audit stays out). An *unmeasured* start (`NaN`: the caller owns the
+    /// scaling) defers to the returned point.
+    fn grad_scale(&self) -> Number {
+        let fin = |v: Number| if v.is_finite() && v > 0.0 { v } else { 0.0 };
+        if self.start_grad_max == 0.0 {
+            return 0.0;
+        }
+        fin(self.start_grad_max).max(fin(self.final_grad_max))
+    }
+}
+
+/// Does a success verdict need the gh#983 scale audit, and which kind?
+///
+/// Pure so the thresholds are unit-testable.
+///
+/// gh#983 review item 2: neither branch is a function of the objective's
+/// magnitude alone. The re-scale branch requires the factor re-evaluated at
+/// the returned point to differ materially from the frozen one (a
+/// legitimately large objective re-evaluates to the factor it already has),
+/// and the small-objective branch reads the gradient at both ends of the run.
+fn scale_audit_trigger(inp: ScaleAuditInput) -> Option<ScaleAudit> {
     use crate::conv_check::opt_error::certificate_masked;
-    if obj_scale.is_finite()
-        && unscaled_kkt.is_finite()
-        && certificate_masked(obj_scale, unscaled_kkt, masked_threshold, acceptable_tol)
+    if inp.obj_scale.is_finite()
+        && inp.obj_scale > 0.0
+        && inp.unscaled_kkt.is_finite()
+        && certificate_masked(
+            inp.obj_scale,
+            inp.unscaled_kkt,
+            inp.masked_threshold,
+            inp.acceptable_tol,
+        )
+        && inp.rescaled_obj_scale.is_finite()
+        && inp.rescaled_obj_scale >= SCALE_AUDIT_MATERIAL * inp.obj_scale
     {
         return Some(ScaleAudit::Rescale);
     }
@@ -181,16 +245,19 @@ fn scale_audit_trigger(
     // crude relative to the objective. A caller who loosened `tol` themselves
     // (`tol = 5e-2` in `test_loose_mu_reports_ambiguous`) asked for the
     // complementarity they got.
-    if tol <= SCALE_AUDIT_MAX_TOL
-        && start_grad_max.is_finite()
-        && start_grad_max > 0.0
-        && start_grad_max < 1.0
-        && unscaled_compl.is_finite()
-        && unscaled_compl / start_grad_max > SCALE_AUDIT_COMPL_REL
+    let g = inp.grad_scale();
+    if inp.tol <= SCALE_AUDIT_MAX_TOL
+        && g > 0.0
+        && g < 1.0
+        && inp.unscaled_compl.is_finite()
+        && inp.unscaled_compl / g > SCALE_AUDIT_COMPL_REL
     {
-        return Some(ScaleAudit::Upscale(
-            (1.0 / start_grad_max).min(SCALE_AUDIT_MAX_UPSCALE),
-        ));
+        let k = (1.0 / g).min(SCALE_AUDIT_MAX_UPSCALE);
+        return Some(if k >= SCALE_AUDIT_MATERIAL {
+            ScaleAudit::Upscale(k)
+        } else {
+            ScaleAudit::SmallObjective
+        });
     }
     None
 }
@@ -200,6 +267,7 @@ fn scale_audit_trigger(
 fn scale_audit_warning(
     kind: ScaleAudit,
     base: &SolveStatistics,
+    grad_scale: Number,
     acceptable_tol: Number,
     outcome: &str,
 ) -> String {
@@ -213,15 +281,27 @@ fn scale_audit_warning(
             base.final_obj_scaling_factor, base.final_unscaled_kkt_error, acceptable_tol
         ),
         ScaleAudit::Upscale(k) => format!(
-            "objective_scale_small: the objective gradient is at most {:.2e} at the start \
-             and nothing scales it up, so the unscaled complementarity {:.2e} is {:.1e} of \
-             that scale -- the objective is only good to about that relative error. A re-solve \
-             with the objective multiplied by {:.1e} {outcome}. Rescale the objective \
-             (e.g. obj_scaling_factor) to silence this.",
-            base.start_obj_grad_max,
+            "objective_scale_small: the objective gradient is at most {:.2e} (start and \
+             returned point) and nothing scales it up, so the unscaled complementarity {:.2e} \
+             is {:.1e} of that scale -- the objective is only good to about that relative \
+             error. A re-solve with the objective multiplied by {:.1e} {outcome}. Rescale the \
+             objective (e.g. obj_scaling_factor) to silence this.",
+            grad_scale,
             base.final_unscaled_compl,
-            base.final_unscaled_compl / base.start_obj_grad_max,
+            base.final_unscaled_compl / grad_scale,
             k
+        ),
+        ScaleAudit::SmallObjective => format!(
+            "objective_scale_small: the objective gradient is at most {:.2e} (start and \
+             returned point), so the unscaled complementarity {:.2e} is {:.1e} of that scale \
+             -- the objective is only good to about that relative error. No re-solve: \
+             scaling the objective up by {:.1e} is below the factor of {SCALE_AUDIT_MATERIAL} \
+             that would change the solve. Rescale the objective (e.g. obj_scaling_factor) or \
+             tighten tol to silence this.",
+            grad_scale,
+            base.final_unscaled_compl,
+            base.final_unscaled_compl / grad_scale,
+            1.0 / grad_scale
         ),
     }
 }
@@ -281,7 +361,36 @@ fn quality_warnings(
 }
 
 /// See [`quality_warnings`].
+///
+/// Also the bar for the gh#983 item-5 downgrade (`finalize_quality_verdict`).
+/// Measured population near it (gh#983 review), over the CLI fixture corpus on
+/// both sweep legs: six runs return `Solve_Succeeded` with the gh#884
+/// signature, at unscaled dual infeasibilities of `1.6e-9`
+/// (`linear_eq_collapsed_box`), `2.8e-9` (`autocorr_bern55-06`), `1.0e-8` /
+/// `1.1e-8` (`pooling_rt2stp`, both legs), `5.5e-8`
+/// (`mpcc_qpec_small_biactive`) and `3.6e-6` (`deb7`) -- the largest two and a
+/// half orders below the bar. The runs the bar exists for sit above it: the
+/// cusp with the floor opted back in at `1.44e-1`, and the first pass's
+/// toll-pricing report at `3.3e-2`. So the threshold falls in an empty band of
+/// the measured population; nothing between `3.6e-6` and `3.3e-2` was observed,
+/// and the corpus says nothing about how dense that band is elsewhere (the
+/// 400-model QPEC family of `dev-notes/mpcc-biactive-dual-divergence.md` was
+/// not re-measured for this).
 const UNSCALED_DUAL_WARN: Number = 1e-3;
+
+/// The code of a structured warning: the text before the first `:`.
+fn warning_code(w: &str) -> &str {
+    w.split(':').next().unwrap_or(w)
+}
+
+/// Push `w` unless a warning with the same code is already attached
+/// (gh#983 review item 7: `unscaled_dual_inf_above_acceptable` was pushed
+/// twice, once by the downgrade and once by the caveat list).
+fn push_warning_once(warnings: &mut Vec<String>, w: String) {
+    if !warnings.iter().any(|x| warning_code(x) == warning_code(&w)) {
+        warnings.push(w);
+    }
+}
 
 /// gh#983 item 4: a retry violation at or below this is arithmetic noise, not
 /// "primal slack". Rule 2 compared the retry's violation to the base's with no
@@ -291,6 +400,59 @@ const UNSCALED_DUAL_WARN: Number = 1e-3;
 /// the case rule 2 exists for, `scholtes4`, buys `6.6e-05` of objective with a
 /// violation of `1.09e-09` -- four orders above it, so it is still refused.
 const RETRY_VIOL_NOISE_FLOOR: Number = 1e-12;
+
+/// gh#983 review item 5: how many orders a retry's unscaled KKT error must sit
+/// below the base attempt's before it may be promoted without reaching
+/// `acceptable_tol` itself.
+const RETRY_DOMINANCE_ORDERS: Number = 1e-6;
+
+/// gh#983 review item 5: the second way conjunct 4 of the gh#884 promotion
+/// gate can hold.
+///
+/// Conjunct 4 demanded the retry's unscaled KKT error be at or below
+/// `acceptable_tol`. On the toll-pricing MPCC at `bound_relax_factor = 0` the
+/// base attempt returns `Solved_To_Acceptable_Level` at an unscaled dual
+/// infeasibility of `1.03e5` and the retry `Solve_Succeeded` at `1.69e-5`:
+/// ten orders better, and refused because `1.69e-5 > 1e-6`. That is a
+/// certificate an ordinary first solve would ship as `Solve_Succeeded`
+/// without a second look (it is under `1e-3`, the bar
+/// `finalize_quality_verdict` holds strict verdicts to), held to a stricter
+/// standard only because it was a retry, while the answer reported instead is
+/// one whose residual is the runaway itself.
+///
+/// So the retry's certificate also counts as real when **all** of:
+/// * it is at least six orders below the base attempt's
+///   (`RETRY_DOMINANCE_ORDERS`) -- not "better", *categorically* better;
+/// * it is at or below `UNSCALED_DUAL_WARN` (`1e-3`) in absolute terms, the
+///   same bar a strict verdict is held to everywhere else, so no promotion
+///   ships a residual the audit would flag on a first solve;
+/// * the retry's unscaled constraint violation is within `acceptable_tol`
+///   (the primal half is not relaxed at all).
+///
+/// The answer rules ([`retry_answer_is_admissible`]) and the `Solve_Succeeded`
+/// conjunct are unchanged and still apply. Why this does not let `ralph1`
+/// through: `ralph1`'s defect is that `perturb_always_cd` returns a wrong
+/// answer reported as success, and what keeps it out is that the retry is
+/// never *opened* there -- the detector's scale-relative step conjunct and
+/// the `1e2` dual floor on the reported answer
+/// (`runaway_is_the_whole_residual`), neither of which this touches. Within an
+/// opened retry the base residual is at least that floor, so the dominance
+/// conjunct alone would admit `1e-4`; the absolute `1e-3` cap and the
+/// unchanged answer rules are what bound it, and `issue884_*` pins both
+/// barriers (`ralph1` is in that corpus).
+fn retry_certificate_dominates(
+    base_unscaled_kkt: Number,
+    retry_unscaled_kkt: Number,
+    retry_viol: Number,
+    accept_tol: Number,
+) -> bool {
+    base_unscaled_kkt.is_finite()
+        && retry_unscaled_kkt.is_finite()
+        && retry_viol.is_finite()
+        && retry_unscaled_kkt <= RETRY_DOMINANCE_ORDERS * base_unscaled_kkt
+        && retry_unscaled_kkt <= UNSCALED_DUAL_WARN
+        && retry_viol <= accept_tol
+}
 
 /// Is the retry's answer admissible *as an answer*, next to the base
 /// attempt's — independent of which has the better multiplier?
@@ -1708,6 +1870,33 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
+        // gh#983 review item 1: warnings belong to this solve. Cleared here as
+        // well as per attempt, so a solve that returns before any attempt runs
+        // (an option refusal, a presolve proof) does not report the previous
+        // solve's.
+        self.statistics.borrow_mut().warnings.clear();
+        let status = self.optimize_tnlp_dispatch(tnlp, derivative_test_tnlp);
+        // Printed once, for the run whose point is returned. They used to be
+        // printed by every audited attempt, so a promoted retry's console
+        // carried the discarded base attempt's `WARNING:` lines too.
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if console_output {
+            for w in &self.statistics.borrow().warnings {
+                println!("WARNING: {w}");
+            }
+        }
+        status
+    }
+
+    /// The body of [`Self::optimize_tnlp_with_derivative_test_tnlp`].
+    fn optimize_tnlp_dispatch(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+        derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
+    ) -> ApplicationReturnStatus {
         // gh#884. Both belong to this solve, not to whatever ran before
         // it. Reset *here* rather than in `optimize_constrained`, which
         // runs once per attempt: the signature accumulates across the
@@ -1946,10 +2135,14 @@ impl IpoptApplication {
         // "base solve" is the whole standard dispatch below including the
         // μ flip — the signature is about a *solve*, and spending the μ
         // flip first is strictly cheaper than spending this one first.
-        if self.is_dual_divergence_retry_enabled() {
-            return self.run_with_dual_divergence_retry(tnlp);
-        }
-        self.dispatch_standard_solve(tnlp)
+        let status = if self.is_dual_divergence_retry_enabled() {
+            self.run_with_dual_divergence_retry(tnlp)
+        } else {
+            self.dispatch_standard_solve(tnlp)
+        };
+        // gh#983 review item 3: the verdict-level audit runs once, on the
+        // final verdict, after every retry and fallback has decided.
+        self.finalize_quality_verdict(status)
     }
 
     /// The standard solve dispatch: the μ-strategy fallback if it is
@@ -4195,8 +4388,15 @@ impl IpoptApplication {
         // in this file: the base attempt's defect *was* a status that its
         // own unscaled residual contradicts, so promoting on the status
         // alone would reproduce the bug one attempt later.
-        let claimed_success_is_real = retry_unscaled_kkt <= self.dual_divergence_retry_accept_tol()
-            && retry_viol <= self.dual_divergence_retry_accept_tol();
+        let accept_tol = self.dual_divergence_retry_accept_tol();
+        let claimed_success_is_real = (retry_unscaled_kkt <= accept_tol
+            && retry_viol <= accept_tol)
+            || retry_certificate_dominates(
+                base_unscaled_kkt,
+                retry_unscaled_kkt,
+                retry_viol,
+                accept_tol,
+            );
         // Conjuncts 6 and 7 — see `retry_answer_is_admissible`. Everything
         // above this line ranks the two attempts on their *certificates*;
         // this ranks them as *answers*, which is what a caller receives.
@@ -4377,6 +4577,9 @@ impl IpoptApplication {
         };
         let acceptable_tol = num("acceptable_tol", 1e-6);
         let masked_threshold = num("obj_scale_certificate_threshold", 1e-4);
+        // `equilibration-based` is registered but pounce runs it as
+        // gradient-based (see `algorithm_builder_from_options`), so it gets the
+        // gradient-based audit.
         let gradient_based = self
             .options
             .get_string_value("nlp_scaling_method", "")
@@ -4385,61 +4588,128 @@ impl IpoptApplication {
             .map(|v| v == "gradient-based" || v == "equilibration-based")
             .unwrap_or(true);
         let base = self.statistics.borrow().clone();
-        let trigger = scale_audit_trigger(
-            num("tol", 1e-8),
-            base.final_obj_scaling_factor,
-            base.start_obj_grad_max,
-            base.final_unscaled_kkt_error,
-            base.final_unscaled_compl,
+        // gh#983 review item 2: measure the objective gradient at the point
+        // being returned, so the audit asks what re-evaluating the scaling
+        // *there* would do instead of keying on the start alone.
+        let final_grad_max = self
+            .last_finalize
+            .borrow()
+            .as_ref()
+            .and_then(|f| {
+                let mut g = vec![0.0; f.x.len()];
+                tnlp.borrow_mut()
+                    .eval_grad_f(&f.x, true, &mut g)
+                    .then(|| g.iter().fold(0.0_f64, |m, v| m.max(v.abs())))
+            })
+            .unwrap_or(Number::NAN);
+        let rescaled_obj_scale = if final_grad_max.is_finite() {
+            pounce_nlp::orig_ipopt_nlp::gradient_obj_scale(
+                final_grad_max,
+                num("nlp_scaling_max_gradient", 100.0),
+                num("nlp_scaling_min_value", 1e-8),
+                num("nlp_scaling_obj_target_gradient", 0.0),
+            )
+        } else {
+            Number::NAN
+        };
+        let input = ScaleAuditInput {
+            tol: num("tol", 1e-8),
+            obj_scale: base.final_obj_scaling_factor,
+            rescaled_obj_scale,
+            start_grad_max: base.start_obj_grad_max,
+            final_grad_max,
+            unscaled_kkt: base.final_unscaled_kkt_error,
+            unscaled_compl: base.final_unscaled_compl,
             acceptable_tol,
             masked_threshold,
-        );
+        };
+        let grad_scale = input.grad_scale();
+        let trigger = scale_audit_trigger(input);
         let mut status = first_status;
-        if let Some(kind) = trigger.filter(|_| gradient_based) {
-            status = self.run_scale_retry(tnlp, first_status, kind);
-        } else if let Some(kind) = trigger {
-            // The caller owns the scaling (`none` / `user-scaling`): not ours
-            // to override, but the verdict still deserves its caveat.
-            self.statistics
-                .borrow_mut()
-                .warnings
-                .push(scale_audit_warning(
-                    kind,
-                    &base,
-                    acceptable_tol,
-                    "was not attempted: nlp_scaling_method is not gradient-based",
-                ));
+        match trigger {
+            Some(ScaleAudit::SmallObjective) => {
+                self.statistics
+                    .borrow_mut()
+                    .warnings
+                    .push(scale_audit_warning(
+                        ScaleAudit::SmallObjective,
+                        &base,
+                        grad_scale,
+                        acceptable_tol,
+                        "",
+                    ));
+            }
+            Some(kind) if gradient_based => {
+                status = self.run_scale_retry(tnlp, first_status, kind, grad_scale);
+            }
+            Some(kind) => {
+                // The caller owns the scaling (`none` / `user-scaling`): not ours
+                // to override, but the verdict still deserves its caveat.
+                self.statistics
+                    .borrow_mut()
+                    .warnings
+                    .push(scale_audit_warning(
+                        kind,
+                        &base,
+                        grad_scale,
+                        acceptable_tol,
+                        "was not attempted: nlp_scaling_method is not gradient-based",
+                    ));
+            }
+            None => {}
         }
-        // gh#983 item 5: a strict verdict on a run that saw the gh#884
-        // signature (a settled primal while a multiplier ran away) and whose
-        // returned point still carries an unscaled dual infeasibility above
-        // `max(acceptable_tol, 1e-3)` is not strict. Reached through the mu-strategy
-        // fallback, which promotes a retry on `Solve_Succeeded` alone: the
-        // toll-pricing MPCC with `bound_relax_factor=0` returned
-        // `Solve_Succeeded` at an unscaled dual infeasibility of `3.3e-2`
-        // against terms of size `3e14`. The gate that accepted it
-        // (`dual_inf_tol = 1`) is an absolute bound the failed constraint
-        // qualification slips under; `Solved_To_Acceptable_Level` is what the
-        // point has earned. The gh#884 retry is not widened to reopen for
-        // this: its floor (`1e2`) is the measured barrier that keeps
-        // `ralph1` out of `perturb_always_cd`.
+        status
+    }
+
+    /// gh#983 review items 1 and 3: the verdict-level half of the audit, run
+    /// **once**, on the run whose point is being returned -- after every
+    /// retry and fallback has decided.
+    ///
+    /// * The item-5 downgrade (a strict verdict on a run that saw the gh#884
+    ///   signature and still carries an unscaled dual infeasibility above
+    ///   `max(acceptable_tol, 1e-3)`) used to run inside each attempt, so it
+    ///   could turn a base `Solve_Succeeded` into the acceptable level *before*
+    ///   the gh#884 retry decided, reopening that retry for a case it was
+    ///   deliberately not widened to; and it read the cumulative signature, so
+    ///   a promoted mu-fallback run that never showed it was downgraded for its
+    ///   discarded sibling. It now reads
+    ///   `returned_run_dual_divergence_signature`, which the certificate floor
+    ///   saves and restores with the rest of the run's tally.
+    /// * The model-scale caveats ([`quality_warnings`]) are attached here, and
+    ///   deduplicated by code, so a code appears at most once.
+    fn finalize_quality_verdict(
+        &mut self,
+        status: ApplicationReturnStatus,
+    ) -> ApplicationReturnStatus {
+        if !self.is_solve_quality_audit_enabled() {
+            return status;
+        }
+        let acceptable_tol = self.dual_divergence_retry_accept_tol();
+        let mut status = status;
         if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
             let (sig, du) = {
                 let st = self.statistics.borrow();
-                (st.dual_divergence_signature, st.final_unscaled_dual_inf)
+                (
+                    st.returned_run_dual_divergence_signature,
+                    st.final_unscaled_dual_inf,
+                )
             };
+            // gh#983 item 5. `1e-3` is `UNSCALED_DUAL_WARN`; the measured
+            // population behind it is in that constant's doc.
             if sig && du.is_finite() && du > acceptable_tol.max(UNSCALED_DUAL_WARN) {
                 status = ApplicationReturnStatus::SolvedToAcceptableLevel;
-                self.statistics.borrow_mut().warnings.push(format!(
-                    "unscaled_dual_inf_above_acceptable: the run saw a settled primal with a runaway \
-                     multiplier (gh#884) and the returned point's unscaled dual infeasibility is \
-                     {du:.2e}, above {:.0e}; the status is downgraded \
-                     from Solve_Succeeded to Solved_To_Acceptable_Level",
-                    acceptable_tol.max(UNSCALED_DUAL_WARN)
-                ));
+                push_warning_once(
+                    &mut self.statistics.borrow_mut().warnings,
+                    format!(
+                        "unscaled_dual_inf_above_acceptable: the run saw a settled primal with a \
+                         runaway multiplier (gh#884) and the returned point's unscaled dual \
+                         infeasibility is {du:.2e}, above {:.0e}; the status is downgraded from \
+                         Solve_Succeeded to Solved_To_Acceptable_Level",
+                        acceptable_tol.max(UNSCALED_DUAL_WARN)
+                    ),
+                );
             }
         }
-        // Model-scale caveats that need no retry.
         let st = self.statistics.borrow().clone();
         let extra = quality_warnings(
             status,
@@ -4447,27 +4717,13 @@ impl IpoptApplication {
             st.final_unscaled_dual_scale,
             self.options
                 .get_numeric_value("dual_inf_tol", "")
-                .ok()
-                .and_then(|(v, f)| f.then_some(v))
+                .map(|(v, _)| v)
                 .unwrap_or(1.0),
             acceptable_tol,
         );
-        if !extra.is_empty() {
-            let mut sm = self.statistics.borrow_mut();
-            for w in extra {
-                if !sm.warnings.contains(&w) {
-                    sm.warnings.push(w);
-                }
-            }
-        }
-        let console_output = match self.options.get_integer_value("print_level", "") {
-            Ok((v, true)) => v >= 1,
-            _ => true,
-        };
-        if console_output {
-            for w in &self.statistics.borrow().warnings {
-                println!("WARNING: {w}");
-            }
+        let mut sm = self.statistics.borrow_mut();
+        for w in extra {
+            push_warning_once(&mut sm.warnings, w);
         }
         status
     }
@@ -4478,6 +4734,7 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         first_status: ApplicationReturnStatus,
         kind: ScaleAudit,
+        grad_scale: Number,
     ) -> ApplicationReturnStatus {
         let acceptable_tol = self.dual_divergence_retry_accept_tol();
         let solution_floor = self.last_finalize.borrow().clone();
@@ -4490,12 +4747,18 @@ impl IpoptApplication {
         let seeded: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(
             pounce_nlp::seeded_tnlp::SeededTnlp::new(Rc::clone(&tnlp), seed),
         ));
-        let prev_user_factor = self
+        // gh#983 review item 7: remember whether the caller *named* the
+        // factor, so the restore puts back absence as absence. Writing the
+        // default back with `found = true` left `obj_scaling_factor` reading as
+        // user-set after the audit, which every "did the caller name it" test
+        // downstream (`TERMINATION_POLICY_OPTIONS`, the gh#884 sense) then
+        // misread.
+        let prev_user = self
             .options
             .get_numeric_value("obj_scaling_factor", "")
             .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(1.0);
+            .and_then(|(v, f)| f.then_some(v));
+        let prev_user_factor = prev_user.unwrap_or(1.0);
         if let ScaleAudit::Upscale(k) = kind {
             let _ = self.options.set_numeric_value(
                 "obj_scaling_factor",
@@ -4509,9 +4772,16 @@ impl IpoptApplication {
              returned point.", first_status, kind);
         let retry_status = self.dispatch_standard_solve_inner(Rc::clone(&seeded));
         if matches!(kind, ScaleAudit::Upscale(_)) {
-            let _ =
-                self.options
-                    .set_numeric_value("obj_scaling_factor", prev_user_factor, true, false);
+            match prev_user {
+                Some(v) => {
+                    let _ = self
+                        .options
+                        .set_numeric_value("obj_scaling_factor", v, true, false);
+                }
+                None => {
+                    self.options.unset_value("obj_scaling_factor");
+                }
+            }
         }
         let retry = self.statistics.borrow().clone();
         let sense = if prev_user_factor < 0.0 { -1.0 } else { 1.0 };
@@ -4527,7 +4797,7 @@ impl IpoptApplication {
         };
         let better = match kind {
             ScaleAudit::Rescale => retry.final_unscaled_kkt_error < base.final_unscaled_kkt_error,
-            ScaleAudit::Upscale(_) => {
+            ScaleAudit::Upscale(_) | ScaleAudit::SmallObjective => {
                 retry.final_unscaled_compl < 0.1 * base.final_unscaled_compl
                     && retry.final_unscaled_kkt_error <= base.final_unscaled_kkt_error
             }
@@ -4589,7 +4859,13 @@ impl IpoptApplication {
         self.statistics
             .borrow_mut()
             .warnings
-            .push(scale_audit_warning(kind, &base, acceptable_tol, &detail));
+            .push(scale_audit_warning(
+                kind,
+                &base,
+                grad_scale,
+                acceptable_tol,
+                &detail,
+            ));
         first_status
     }
 
@@ -5026,6 +5302,17 @@ impl IpoptApplication {
         // makes the failure mode fail-closed: "not recorded" reads as
         // "cannot mirror", never as "scaling was off".
         self.row_scaling_active.set(None);
+        // gh#983 review item 1: the structured warnings describe the run whose
+        // point is returned, so each attempt starts with none. They used to
+        // accumulate on the application for its lifetime, and a promoted
+        // gh#884 retry (`Solve_Succeeded` at `du = 1.6e-7`) carried the
+        // discarded base attempt's `large_dual_scale ... 1.43e9`. A declined
+        // retry restores the floored attempt's own list via
+        // `SolutionCertificate`.
+        self.statistics.borrow_mut().warnings.clear();
+        self.statistics
+            .borrow_mut()
+            .returned_run_dual_divergence_signature = false;
 
         // `print_user_options yes` — dump the OptionsList before the
         // solve. Mirrors `IpoptApplication::call_optimize` (upstream
@@ -5760,6 +6047,7 @@ impl IpoptApplication {
             self.dual_divergence_signature
                 .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
+            stats.returned_run_dual_divergence_signature = alg.dual_divergence_signature();
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
             stats.derivative_check = self.derivative_check.borrow().clone();
             let (rs, ra) = self.obj_scale_refused.get();
@@ -6574,7 +6862,17 @@ impl IpoptApplication {
             // (a failed constraint qualification, which is not a reason to
             // loosen the test). Naming `dual_inf_scale_kappa` as well opts the
             // floor back in.
-            if read_num("dual_inf_scale_kappa").is_none() {
+            //
+            // gh#983 review: a value equal to the registered default is read
+            // as "not named". Front ends that echo every default (option
+            // files copied from Ipopt's documentation, wrappers that pass the
+            // full table) would otherwise lose the gh#532 floor without asking
+            // for anything. That is safe because the floor with the default
+            // tolerance IS the default behaviour; a caller who wants the
+            // absolute standard at `1` names `dual_inf_scale_kappa 0`, which
+            // the option help documents.
+            let default_tol = crate::alg_builder::ConvCheckOptions::default().dual_inf_tol;
+            if read_num("dual_inf_scale_kappa").is_none() && v != default_tol {
                 builder.conv_check.dual_inf_scale_kappa = 0.0;
             }
         }
@@ -8102,6 +8400,8 @@ struct SolutionCertificate {
     obj_scaling_factor: Number,
     start_obj_grad_max: Number,
     warnings: Vec<String>,
+    /// gh#983 review item 3: the detector's verdict on this run alone.
+    returned_run_signature: bool,
 }
 
 impl SolutionCertificate {
@@ -8139,6 +8439,7 @@ impl SolutionCertificate {
             obj_scaling_factor: s.final_obj_scaling_factor,
             start_obj_grad_max: s.start_obj_grad_max,
             warnings: s.warnings.clone(),
+            returned_run_signature: s.returned_run_dual_divergence_signature,
         }
     }
 
@@ -8171,6 +8472,7 @@ impl SolutionCertificate {
         s.final_obj_scaling_factor = self.obj_scaling_factor;
         s.start_obj_grad_max = self.start_obj_grad_max;
         s.warnings = self.warnings.clone();
+        s.returned_run_dual_divergence_signature = self.returned_run_signature;
     }
 }
 
@@ -10083,60 +10385,146 @@ mod tests {
         ));
     }
 
+    /// The audit input with every measurement given and the defaults for
+    /// the rest (`tol 1e-8`, `acceptable_tol 1e-6`, threshold `1e-4`).
+    #[allow(clippy::too_many_arguments)]
+    fn audit_in(
+        tol: Number,
+        obj_scale: Number,
+        rescaled: Number,
+        start_grad: Number,
+        final_grad: Number,
+        kkt: Number,
+        compl: Number,
+        th: Number,
+    ) -> ScaleAuditInput {
+        ScaleAuditInput {
+            tol,
+            obj_scale,
+            rescaled_obj_scale: rescaled,
+            start_grad_max: start_grad,
+            final_grad_max: final_grad,
+            unscaled_kkt: kkt,
+            unscaled_compl: compl,
+            acceptable_tol: 1e-6,
+            masked_threshold: th,
+        }
+    }
+
     /// gh#983: the audit's trigger branches on *which* scaling defect shows,
     /// and each branch needs its own row.
     #[test]
     fn the_scale_audit_trigger_takes_each_branch_and_neither_by_default() {
-        let (atol, th) = (1e-6, 1e-4);
-        // Frozen factor, non-stationary in the model's own units.
+        let th = 1e-4;
+        let t = |inp| scale_audit_trigger(inp);
+        // Frozen factor, non-stationary in the model's own units, and the
+        // factor re-evaluated at the returned point (gradient 2.9e-2 -> 1) is
+        // seven orders from the frozen one: re-scale.
         assert_eq!(
-            scale_audit_trigger(1e-8, 3e-7, 3e8, 2.9e-2, 1e-9, atol, th),
+            t(audit_in(1e-8, 3e-7, 1.0, 3e8, 2.9e-2, 2.9e-2, 1e-9, th)),
             Some(ScaleAudit::Rescale)
         );
+        // gh#983 review item 2(b): the same masked certificate on a
+        // legitimately large objective (`hs71 x 1e8`) re-evaluates to the
+        // factor it already has -- the re-solve would be the same solve.
+        assert_eq!(
+            t(audit_in(1e-8, 2.2e-7, 2.4e-7, 4.6e8, 4.2e8, 3e-6, 1e-9, th)),
+            None
+        );
         // Tiny gradient, complementarity 2.5e-4 of it (the reactor, fs = 1e-6).
-        match scale_audit_trigger(1e-8, 1.0, 1e-5, 2.5e-9, 2.5e-9, atol, th) {
+        match t(audit_in(1e-8, 1.0, 1.0, 1e-5, 1e-5, 2.5e-9, 2.5e-9, th)) {
             Some(ScaleAudit::Upscale(k)) => assert!((k - 1e5).abs() < 1.0),
             other => panic!("{other:?}"),
         }
-        // fs = 1e-3 (good to 4e-7) and fs = 1 are left alone.
+        // gh#983 review item 4: no band without a signal. fs = 3e-5 (gradient
+        // 3e-4, relative complementarity 8.4e-6) and fs = 1e-3 (2.5e-7) are
+        // both re-solved now; fs = 1 is left alone.
+        assert!(matches!(
+            t(audit_in(1e-8, 1.0, 1.0, 3e-4, 3e-4, 2.5e-9, 2.5e-9, th)),
+            Some(ScaleAudit::Upscale(_))
+        ));
+        assert!(matches!(
+            t(audit_in(1e-8, 1.0, 1.0, 1e-2, 1e-2, 2.5e-9, 2.5e-9, th)),
+            Some(ScaleAudit::Upscale(_))
+        ));
         assert_eq!(
-            scale_audit_trigger(1e-8, 1.0, 1e-2, 2.5e-9, 2.5e-9, atol, th),
+            t(audit_in(1e-8, 1.0, 1.0, 10.0, 10.0, 2.5e-9, 2.5e-9, th)),
             None
         );
+        // A gradient in [0.1, 1): the signature, but an up-scale below the
+        // material factor -- warn, do not re-solve.
         assert_eq!(
-            scale_audit_trigger(1e-8, 1.0, 10.0, 2.5e-9, 2.5e-9, atol, th),
+            t(audit_in(1e-8, 1.0, 1.0, 0.5, 0.5, 1e-6, 1e-6, th)),
+            Some(ScaleAudit::SmallObjective)
+        );
+        // gh#983 review item 2(a): a start near a stationary point
+        // (`grad f(x0) = 2e-7`) is not a tiny objective when the gradient at
+        // the answer is 1.
+        assert_eq!(
+            t(audit_in(1e-8, 1.0, 1.0, 2e-7, 1.0, 2.5e-9, 2.5e-9, th)),
             None
         );
+        // A start measured at a stationary point (gradient exactly 0) carries
+        // no scale: the audit stays out however small the answer's gradient.
+        assert_eq!(
+            t(audit_in(1e-8, 1.0, 1.0, 0.0, 2e-4, 6e-3, 2.5e-9, th)),
+            None
+        );
+        // An unmeasured start (caller-owned scaling) defers to the answer.
+        assert!(matches!(
+            t(audit_in(
+                1e-8,
+                f64::NAN,
+                f64::NAN,
+                f64::NAN,
+                1e-5,
+                2.5e-9,
+                2.5e-9,
+                th
+            )),
+            Some(ScaleAudit::Upscale(_))
+        ));
         // A big gradient never up-scales, whatever the complementarity.
         assert_eq!(
-            scale_audit_trigger(1e-8, 1.0, 50.0, 1e-3, 1e-3, atol, th),
+            t(audit_in(1e-8, 1.0, 1.0, 50.0, 50.0, 1e-3, 1e-3, th)),
             None
         );
         // An extreme factor at a stationary point is the honest case.
         assert_eq!(
-            scale_audit_trigger(1e-8, 1e-8, 1e9, 1e-9, 1e-12, atol, th),
+            t(audit_in(1e-8, 1e-8, 1e-8, 1e9, 1e9, 1e-9, 1e-12, th)),
             None
         );
         // The masked opt-out (threshold 0) disables the re-scale branch.
         assert_eq!(
-            scale_audit_trigger(1e-8, 3e-7, 3e8, 2.9e-2, 1e-9, atol, 0.0),
+            t(audit_in(1e-8, 3e-7, 1.0, 3e8, 2.9e-2, 2.9e-2, 1e-9, 0.0)),
             None
         );
         // A caller who loosened tol asked for the complementarity they got.
         assert_eq!(
-            scale_audit_trigger(5e-2, 1.0, 1e-5, 1e-2, 1e-2, atol, th),
+            t(audit_in(5e-2, 1.0, 1.0, 1e-5, 1e-5, 1e-2, 1e-2, th)),
             None
         );
         // NaN stays quiet.
-        assert_eq!(
-            scale_audit_trigger(1e-8, f64::NAN, f64::NAN, f64::NAN, f64::NAN, atol, th),
-            None
-        );
+        let nan = f64::NAN;
+        assert_eq!(t(audit_in(1e-8, nan, nan, nan, nan, nan, nan, th)), None);
         // The upscale is capped.
-        match scale_audit_trigger(1e-8, 1.0, 1e-14, 1.0, 1.0, atol, th) {
+        match t(audit_in(1e-8, 1.0, 1.0, 1e-14, 1e-14, 1.0, 1.0, th)) {
             Some(ScaleAudit::Upscale(k)) => assert_eq!(k, SCALE_AUDIT_MAX_UPSCALE),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// gh#983 review item 7: one warning per code.
+    #[test]
+    fn a_warning_code_is_attached_at_most_once() {
+        let mut w = vec!["unscaled_dual_inf_above_acceptable: downgraded".to_string()];
+        push_warning_once(
+            &mut w,
+            "unscaled_dual_inf_above_acceptable: verify in your units".to_string(),
+        );
+        push_warning_once(&mut w, "large_dual_scale: terms of 1e9".to_string());
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].ends_with("downgraded"));
     }
 
     /// gh#983: the structured warnings, by code, on success verdicts only.

@@ -195,6 +195,10 @@ class MinimaResult:
     status: str
     n_solves: int
     trace: list[dict] = field(default_factory=list)
+    #: gh#983 review: converged solves the ``kkt_tol`` filter rejected. When
+    #: every converged candidate was rejected and nothing was accepted, a
+    #: ``RuntimeWarning`` is raised as well, so an empty result is never silent.
+    n_kkt_rejected: int = 0
 
     @property
     def x(self):
@@ -222,6 +226,11 @@ class _Context:
     def __init__(self, fun, jac, hess, bounds, constraints, options, psd_tol,
                  kkt_tol=1e-4):
         self.kkt_tol = kkt_tol
+        self.n_kkt_rejected = 0
+        # gh#983 review: the problem's gradient scale, ``max |grad f(x0)|``;
+        # set by ``find_minima`` from ``jac``, else from the first solve's
+        # ``info["objective_scaling"]["start_gradient_max"]``.
+        self.grad_ref = None
         self.fun = fun
         self.jac = jac
         self.hess = hess
@@ -265,12 +274,33 @@ class _Context:
         # to certify points whose unscaled stationarity residual is ~1, and
         # without ``hess=`` nothing else here (``is_minimum``) looks at the
         # point. Veto on the unscaled residual the solver itself reports.
+        #
+        # gh#983 review: the bound is *relative* to the problem's gradient
+        # scale, floored at 1: ``kkt_tol * max(1, g0, dual_scale)``, with
+        # ``g0 = max |grad f|`` at the caller's ``x0`` (``self.grad_ref``) and
+        # ``dual_scale`` the terms the residual is assembled from at the
+        # returned point (``info["final_unscaled_dual_scale"]``). Both are
+        # needed: at an interior minimum the terms *are* ``grad f``, which is
+        # ~0 there, so the second alone reads the residual against itself. An
+        # absolute ``1e-4`` rejected every candidate of an objective whose
+        # gradients live at ``1e12`` (measured: 11 of 12 solves rejected, the
+        # one survivor the unsolved seed) and returned no signal. On an O(1)
+        # model the bound is the absolute one it was.
         if res.success and self.kkt_tol is not None:
             info = getattr(res, "info", None) or {}
             dual = info.get("final_unscaled_dual_inf")
-            if dual is not None and np.isfinite(dual) and dual > self.kkt_tol:
+            if self.grad_ref is None:
+                g0 = (info.get("objective_scaling") or {}).get("start_gradient_max")
+                if g0 is not None and np.isfinite(g0):
+                    self.grad_ref = float(g0)
+            scale = info.get("final_unscaled_dual_scale")
+            if scale is None or not np.isfinite(scale):
+                scale = 1.0
+            bound = self.kkt_tol * max(1.0, float(scale), self.grad_ref or 0.0)
+            if dual is not None and np.isfinite(dual) and dual > bound:
                 res.success = False
                 res["kkt_rejected"] = float(dual)
+                self.n_kkt_rejected += 1
         return res
 
     # Acceptance must tolerate the solver's bound relaxation: the IPM lets a
@@ -679,11 +709,17 @@ def find_minima(
     kkt_tol
         A converged local solve is rejected as a candidate when the solver's
         own **unscaled** dual infeasibility (``info["final_unscaled_dual_inf"]``)
-        exceeds this absolute bound (default ``1e-4``; ``None`` disables).
-        The solver's success verdict is judged in a scaled space, and this is
-        the model-units check that applies whether or not ``hess=`` is given
-        (gh#983). Raise it for objectives whose gradients legitimately live
-        at a large scale.
+        exceeds ``kkt_tol * max(1, g0, scale)``: ``g0`` is ``max |grad f|`` at
+        ``x0`` (the problem's gradient scale) and ``scale`` the magnitude of
+        the terms the residual is assembled from at the returned point
+        (``info["final_unscaled_dual_scale"]``: ``max |grad f|, |J^T lambda|,
+        |z|``). Default ``1e-4``; ``None`` disables. The solver's success
+        verdict is judged in a scaled space, and this is the model-units check
+        that applies whether or not ``hess=`` is given (gh#983). Being
+        relative, it does not reject every candidate of an objective whose
+        gradients legitimately live at a large scale. Rejections are counted
+        in ``MinimaResult.n_kkt_rejected``, and a ``RuntimeWarning`` is
+        raised when they emptied the result.
 
     Returns
     -------
@@ -723,6 +759,13 @@ def find_minima(
         distance = lambda a, b: float(np.linalg.norm((a - b) / L))
 
     ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol, kkt_tol)
+    if jac is not None and kkt_tol is not None:
+        try:
+            g0 = np.abs(np.asarray(jac(x0), dtype=float)).max()
+            if np.isfinite(g0):
+                ctx.grad_ref = float(g0)
+        except Exception:  # a jac that cannot take x0 is the solve's to report
+            pass
     ctx.max_solves = max_solves
     # Hard ceiling on sampled points for solve-gated strategies (MLSL): the
     # natural envelope is one round of samples per unit of solve budget.
@@ -741,6 +784,18 @@ def find_minima(
     except _Stop as stop:
         status = stop.status
 
+    if not archive.fs and ctx.n_kkt_rejected:
+        import warnings
+
+        warnings.warn(
+            f"find_minima: every converged candidate ({ctx.n_kkt_rejected}) was "
+            f"rejected by kkt_tol={kkt_tol!r} (unscaled dual infeasibility "
+            f"above kkt_tol * max(1, dual scale)); no minima are returned. "
+            f"Inspect the solves' info['final_unscaled_dual_inf'] or loosen "
+            f"kkt_tol.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     order = list(np.argsort(archive.fs)) if archive.fs else []
     return MinimaResult(
         minima=[archive.xs[i] for i in order],
@@ -749,4 +804,5 @@ def find_minima(
         status=status,
         n_solves=ctx.n_solves,
         trace=state.trace,
+        n_kkt_rejected=ctx.n_kkt_rejected,
     )

@@ -126,13 +126,30 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
 - `warnings` — list of structured solve-quality warnings about the returned
   point (`"<code>: <text>"`), empty on a clean run. Codes:
   `objective_scale_small`, `unscaled_stationarity_above_tol`,
-  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They never change
-  `status`; they say why a success verdict deserves a second look. An
-  objective whose gradient is tiny (profit in M$/L) or a start whose gradient
-  is huge (`3e8`) is re-solved once automatically from the returned point
-  (`solve_quality_audit`); the warning remains only when that did not fix it.
-  `find_minima` additionally rejects candidates whose unscaled stationarity
-  residual exceeds `kkt_tol` when no `hess=` is supplied.
+  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They describe the
+  run whose point is returned and say why a success verdict deserves a second
+  look; by themselves they do not change `status` (the one status change the
+  audit makes -- `Solve_Succeeded` reported as `Solved_To_Acceptable_Level` on a
+  run that showed the gh#884 runaway signature and still carries an unscaled
+  dual infeasibility above `max(acceptable_tol, 1e-3)` -- is announced by
+  `unscaled_dual_inf_above_acceptable`). An objective whose gradient is tiny
+  (profit in M$/L) or a start whose gradient is huge (`3e8`) is re-solved once
+  automatically from the returned point (`solve_quality_audit`); the warning
+  remains only when that did not fix it, or when a re-solve would not change
+  the scale materially. `find_minima` additionally rejects candidates, with or
+  without `hess=`, whose unscaled dual infeasibility exceeds
+  `kkt_tol * max(1, g0, info["final_unscaled_dual_scale"])` (`g0` the
+  gradient scale at `x0`), counts them in
+  `MinimaResult.n_kkt_rejected`, and warns when that emptied the result.
+- `final_unscaled_dual_scale` — the magnitude of the terms the unscaled
+  stationarity residual is assembled from (`max |grad f|, |J^T lambda|, |z|`
+  in the model's units): the yardstick `final_unscaled_dual_inf` is judged
+  against.
+- `iter_count` (and the report's `iteration_count`) counts the iterations of
+  the run that produced the returned point. When a retry replaced the first
+  attempt (`dual_divergence_retry_promoted`, or an audit re-solve), the
+  discarded attempt's iterations are not included; its own console summary
+  shows them.
 - `final_declared_constr_viol` — how far outside the model **as
   declared** the returned point sits, before the `bound_relax_factor`
   widening. `final_constr_viol` measures the widened model the solver was

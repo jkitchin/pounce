@@ -197,14 +197,17 @@ fn a_ladder_that_promotes_nothing_reports_the_kept_verdict_once() {
     );
 }
 
-/// A run that never retries is unaffected (`cresc4`, not `hs71_obj1e8`, which
-/// the gh#983 scale audit re-solves): one attempt, one verdict, one
-/// header. The deferral has to be *released* on this path too, and an
-/// unmatched acquire would silently cost the run its `EXIT:` line — which is
+/// A run that never retries is unaffected: one attempt, one verdict, one
+/// header. `hs71_obj1e8` again (gh#983 review): the first pass of the scale
+/// audit re-solved it -- a declined, pure-cost re-solve keyed on objective
+/// magnitude alone -- and this test was moved to `cresc4` to dodge that. The
+/// audit now re-solves only when the factor re-evaluated at the answer differs
+/// materially, so the large objective is back to one attempt. The deferral
+/// has to be *released* on this path too, and an unmatched acquire would silently cost the run its `EXIT:` line — which is
 /// exactly the failure mode a counter-based scheme has.
 #[test]
 fn a_single_attempt_run_still_reports_its_verdict() {
-    let run = Run::go("cresc4.nl", &[]);
+    let run = Run::go("hs71_obj1e8.nl", &[]);
     assert_eq!(run.attempts(), 1, "expected one attempt:\n{}", run.stdout);
     assert_eq!(run.count("EXIT:"), 1, "verdict lost:\n{}", run.stdout);
     assert_eq!(run.count("POUNCE 0"), 1, "verdict lost:\n{}", run.stdout);
@@ -262,7 +265,7 @@ fn a_debugger_resolve_still_reports_one_verdict() {
 /// exempt from it than the summary block it used to end.
 #[test]
 fn print_level_zero_reports_no_verdict_at_all() {
-    let run = Run::go("cresc4.nl", &["print_level=0"]);
+    let run = Run::go("hs71_obj1e8.nl", &["print_level=0"]);
     assert_eq!(run.count("EXIT:"), 0, "expected silence:\n{}", run.stdout);
     assert_eq!(
         run.count("POUNCE 0"),

@@ -201,10 +201,17 @@ pub struct SolveStatistics {
     /// scaling measured); `NaN` when it did not run. The model's own gradient
     /// scale, used as the yardstick for the small-objective warning.
     pub start_obj_grad_max: Number,
-    /// gh#983. Structured solve-quality warnings, each `"<code>: <text>"`.
-    /// Codes: `objective_scale_small`, `unscaled_stationarity_above_tol`,
-    /// `rescale_retry_declined`. Empty on a clean run. Never changes the
-    /// status; it says why a status the run earned deserves a second look.
+    /// gh#983. Structured solve-quality warnings, each `"<code>: <text>"`,
+    /// describing the run whose point is returned (a discarded attempt's
+    /// warnings are dropped with it). Each code appears at most once. Codes:
+    /// `objective_scale_small`, `unscaled_stationarity_above_tol`,
+    /// `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. Empty on a
+    /// clean run. A warning never changes the status by itself; the one
+    /// status change the audit makes (a strict success on a run that showed
+    /// the gh#884 signature and still carries an unscaled dual infeasibility
+    /// above `max(acceptable_tol, 1e-3)` is reported as
+    /// `Solved_To_Acceptable_Level`) is announced by the
+    /// `unscaled_dual_inf_above_acceptable` warning.
     pub warnings: Vec<String>,
     /// gh#990 item 3. The derivative checker's machine-readable verdict, when
     /// `derivative_test` ran for this solve (`None` otherwise). The console
@@ -352,6 +359,14 @@ pub struct SolveStatistics {
     /// promoted run that reported `false` here would say the retry's
     /// answer came from nowhere.
     pub dual_divergence_signature: bool,
+    /// gh#983 review item 3. The same detector, for the **one run whose point
+    /// is returned** only. `dual_divergence_signature` accumulates across the
+    /// attempts of a solve on purpose (above); a verdict about the returned
+    /// point must not read a discarded sibling's flag, so the item-5 downgrade
+    /// reads this one. Saved and restored with the rest of the run's tally
+    /// when a retry is declined.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub returned_run_dual_divergence_signature: bool,
     /// gh#884. A dual-divergence retry ran *and* replaced the base
     /// attempt's answer. `false` both when no retry ran and when one ran
     /// and lost — in the latter case the returned point, status and
@@ -475,6 +490,7 @@ impl Default for SolveStatistics {
             restoration_wall_secs: 0.0,
             quality_escalations: 0,
             dual_divergence_signature: false,
+            returned_run_dual_divergence_signature: false,
             dual_divergence_retry_promoted: false,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,

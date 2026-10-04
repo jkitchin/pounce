@@ -1285,9 +1285,12 @@ upstream Ipopt's bare-absolute bound. That is also the setting to reach
 for if you *tighten* `dual_inf_tol` and want that absolute standard
 honoured unconditionally — the floor is a floor, so it can override a
 tightened `dual_inf_tol` on a large-gradient model. Since gh#983 this is
-automatic: setting `dual_inf_tol` explicitly, without also naming
-`dual_inf_scale_kappa`, switches the floor off. Name both to keep the
-floor under a tolerance of your own.
+automatic: setting `dual_inf_tol` explicitly to a value other than its
+default `1`, without also naming `dual_inf_scale_kappa`, switches the floor
+off. Echoing the default (`dual_inf_tol 1`, as a front end passing the whole
+option table does) is read as not naming it and keeps the floor; use
+`dual_inf_scale_kappa 0` for the absolute standard at the default tolerance.
+Name both to keep the floor under a tolerance of your own.
 
 ### `s_max` — where `s_d` and `s_c` come from
 
@@ -1329,20 +1332,43 @@ side, and neither is visible in the scaled space (gh#983):
 With `solve_quality_audit=yes` (the default), a `Solve_Succeeded` /
 `Solved_To_Acceptable_Level` verdict that shows either signature is re-solved
 **once** from the returned point: the first with the scaling re-evaluated
-there, the second with the objective multiplied by `1/max|grad f|` (capped at
-`1e10`). The re-solve is promoted only if it returns a clean verdict, is no
+there, the second with the objective multiplied by `1/g` (capped at `1e10`),
+where `g` is the larger of `max|grad f|` at the start and at the returned
+point. A re-solve is spent only when it would change something:
+
+* the re-scale only when the factor gradient-based scaling computes **at the
+  returned point** is at least `10x` the frozen one (a legitimately large
+  objective, `hs71` times `1e8`, re-evaluates to the factor it already has and
+  is not re-solved);
+* the up-scale only when the unscaled complementarity exceeds `1e-7` of `g`
+  (on the reactor model the relative objective error is about twice that
+  ratio) and `1/g` is at least `10`. A start that happens to sit near a
+  stationary point does not read as a tiny objective, because `g` also reads
+  the gradient at the answer. When the ratio is exceeded but `1/g < 10`, or
+  the caller owns the scaling (`nlp_scaling_method` `none` /
+  `user-scaling`), the run gets the `objective_scale_small` warning instead of
+  a re-solve, so there is no band of objective scales that gets neither.
+
+The re-solve is promoted only if it returns a clean verdict, is no
 worse in the model's own units, strictly improves the quantity that triggered
 the audit, and is admissible next to the first answer (the same rule as the
 gh#884 retry); otherwise the first attempt's status, point and statistics are
-restored. It is skipped when `nlp_scaling_method` is not `gradient-based`:
-the caller owns the scaling. Cost: one extra solve, from a converged point,
-on a run that shows a signature.
+restored. `equilibration-based` scaling, which pounce currently runs as
+gradient-based, is audited as gradient-based. Cost: one extra solve, from a
+converged point, on a run that shows a signature.
 
 Whatever happens, the run carries **structured warnings**
 (`info["warnings"]`, the JSON report's `statistics.warnings`, `WARNING:`
 console lines): `objective_scale_small`, `unscaled_stationarity_above_tol`,
-`large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They never change
-the status.
+`large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They describe the run
+whose point is returned (a discarded retry's warnings go with it), each code
+appears at most once, and they are printed once per solve. A warning does not
+change the status, with one exception that the audit makes on the **final**
+verdict only, after every retry has decided: a `Solve_Succeeded` from a run
+that itself showed the gh#884 signature (a settled primal with a runaway
+multiplier) and still carries an unscaled dual infeasibility above
+`max(acceptable_tol, 1e-3)` is reported as `Solved_To_Acceptable_Level`, with
+`unscaled_dual_inf_above_acceptable` saying so.
 
 **Why the scale-relative floor is not capped.** An explicitly set
 `dual_inf_tol` is honoured (see `dual_inf_scale_kappa` above). For a caller

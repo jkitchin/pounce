@@ -1727,6 +1727,11 @@ pub(crate) fn build_info_dict<'py>(
     // is the plain max-norm of the three (no s_d/s_c optimality scaling).
     info.set_item("final_unscaled_kkt_error", stats.final_unscaled_kkt_error)?;
     info.set_item("final_unscaled_dual_inf", stats.final_unscaled_dual_inf)?;
+    // gh#983 review: the yardstick `final_unscaled_dual_inf` is judged
+    // against (`max |grad f|, |J^T lambda|, |z|` in the model's units), so a
+    // caller -- `find_minima`'s `kkt_tol` among them -- can read the residual
+    // relative to the scale of the terms it is made of.
+    info.set_item("final_unscaled_dual_scale", stats.final_unscaled_dual_scale)?;
     info.set_item(
         "final_unscaled_constr_viol",
         stats.final_unscaled_constr_viol,

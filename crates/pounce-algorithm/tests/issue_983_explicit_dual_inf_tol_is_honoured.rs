@@ -189,3 +189,21 @@ fn the_floor_is_still_on_when_nothing_is_named_and_off_when_the_tolerance_is() {
     assert_eq!(raw_status, ApplicationReturnStatus::SolveSucceeded);
     assert!(raw_res > 1e-2, "{raw_res:e}");
 }
+
+/// gh#983 review: echoing the default (`dual_inf_tol = 1`, as a front end that
+/// passes the whole option table does) is read as *not* naming it, so the
+/// gh#532 floor stays on -- the same verdict and residual as naming nothing.
+/// Audit off, so the gate's own verdict is what is compared.
+#[test]
+fn echoing_the_default_tolerance_keeps_the_floor() {
+    let (unnamed_status, unnamed_res) = run_audit(&[], false);
+    let (echo_status, echo_res) = run_audit(&[("dual_inf_tol", 1.0)], false);
+    assert_eq!(echo_status, unnamed_status);
+    assert_eq!(echo_res.to_bits(), unnamed_res.to_bits());
+    // ... and the floor is what produced it (the honoured tolerance reaches
+    // 9.2e-9 on this model, the floor certifies at 0.144).
+    assert!(echo_res > 1e-2, "{echo_res:e}");
+    // A non-default explicit value still switches it off.
+    let (_, tight_res) = run_audit(&[("dual_inf_tol", 0.5)], false);
+    assert!(tight_res < 0.5, "{tight_res:e}");
+}

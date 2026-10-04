@@ -54,6 +54,55 @@ changes.
 
 ### Fixed
 
+- **Solve-quality audit: one verdict per returned run, re-solves only when
+  they change something (gh#983 review).** (1) `statistics.warnings` /
+  `info["warnings"]` describe the run whose point is returned: they are cleared
+  per attempt and saved/restored with the rest of a floored attempt's tally,
+  each code appears once, and the `WARNING:` lines print once per solve. A
+  promoted gh#884 retry (`x*y = 0`: `Solve_Succeeded` at `du = 1.6e-7`) no
+  longer carries the discarded attempt's `large_dual_scale ... 1.43e9`, and a
+  second solve on one application no longer inherits the first's. (2) The
+  re-scale branch re-solves only when the factor gradient-based scaling
+  computes at the returned point is at least `10x` the frozen one, and the
+  small-objective branch reads the gradient at both ends of the run (a start
+  of exactly zero gradient carries no scale): `hs71_obj1e8` and a start a hair
+  from a stationary point are no longer re-solved, and a declined re-solve no
+  longer attaches a false "froze" warning. Across the CLI fixture corpus (both
+  sweep legs) the audit re-solved 11 fixture-legs (5 promoted, 6 declined) and
+  now re-solves none. (3) The item-5 downgrade (`Solve_Succeeded` ->
+  `Solved_To_Acceptable_Level` on a run that showed the gh#884 signature with
+  an unscaled dual infeasibility above `max(acceptable_tol, 1e-3)`) runs once,
+  on the final verdict, and reads the new
+  `returned_run_dual_divergence_signature` (the detector for the returned run
+  alone), so it can neither reopen the gh#884 retry nor downgrade a promoted run
+  for a discarded sibling's signature. (4) The small-objective trigger is
+  continuous: one threshold (`1e-7` of the gradient scale) both re-solves and,
+  where a re-solve would not change the scale (`1/g < 10`) or the caller owns
+  the scaling, warns -- the issue's reactor at `fs` in `[1e-6, 1e-3]` now ends
+  at a relative error of `3e-8` throughout (the first pass left `3e-5 .. 1e-3`
+  at up to `1.6e-5` with no signal). (5) A gh#884 retry whose unscaled KKT
+  error is at least six orders below the base attempt's and at most `1e-3`,
+  with its violation within `acceptable_tol`, is promoted (still subject to the
+  answer-admissibility rules): the toll-pricing MPCC at `bound_relax_factor=0`
+  now returns the retry's `Solve_Succeeded` at `1.69e-5` instead of the base
+  attempt's acceptable-level point at `1.03e5`. (6) `find_minima`'s `kkt_tol`
+  is relative (`kkt_tol * max(1, g0, final_unscaled_dual_scale)`, `g0` the
+  gradient scale at `x0`); at gradients of `1e12` it rejected 11 of 12 solves.
+  Rejections are counted in `MinimaResult.n_kkt_rejected` and a
+  `RuntimeWarning` says when they emptied the result; `info` gains
+  `final_unscaled_dual_scale`. (7) `dual_inf_tol` set to its default value is
+  read as not named (the gh#532 floor stays); the audit's `obj_scaling_factor`
+  restore puts absence back as absence; docs no longer say warnings never
+  change the status, list the real codes, and say `find_minima` filters with
+  or without `hess=`; `iter_count` is documented as the returned run's. Sweep
+  vs the pre-change binary (both legs): `jit1`/`jit1_boxed` exact 22 -> 24
+  and `jit1_boxed` lbfgs 18 -> 27 (no longer re-solved: the factor at the
+  answer is 7.5x the frozen one; the reported count is now the base attempt's,
+  objective unchanged to 10 digits), `hs71_obj1e8` lbfgs 11 -> 12 (no longer
+  re-solved: factor 0.82x; it now carries `large_dual_scale` /
+  `unscaled_dual_inf_above_acceptable` at `du = 2.4e-2` against terms of
+  `1.5e9`).
+
 - **Convex HSDE: the gap's noise-floor excuse reads the true row slack
   (gh#689 regression from gh#984's second pass).** `issue_689 ...
   the_default_route_reaches_the_same_optimum` failed at `max_iter=4000`:
