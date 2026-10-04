@@ -1250,14 +1250,59 @@ where
             // invariant the `record` assertion states is "every entry installs
             // the frame", and leaving the one exception to be rediscovered is
             // how F8 happened.
+            let mut make_backend = make_backend;
+            // gh #988: columns with `lb == ub` are removed by the cold path's
+            // fixed-variable handling, so a warm point off the pin only
+            // pushes the direct method away from the only feasible value.
+            let pinned;
+            let warm = if (0..prob.n).any(|i| {
+                prob.lb_of(i) == prob.ub_of(i) && warm.x.get(i).is_some_and(|&x| x != prob.lb_of(i))
+            }) {
+                let mut w = warm.clone();
+                for i in 0..prob.n {
+                    if prob.lb_of(i) == prob.ub_of(i) && i < w.x.len() {
+                        w.x[i] = prob.lb_of(i);
+                    }
+                }
+                pinned = w;
+                &pinned
+            } else {
+                warm
+            };
             let (inner, sigma_uncertified) = crate::sigma_verdict::tracking(|| {
-                solve_qp_ipm_warm_inner(prob, opts, warm, make_backend)
+                solve_qp_ipm_warm_inner(prob, opts, warm, &mut make_backend)
             });
             // One gate over every exit of the body below — see [`finite_or_failed`].
-            let sol = finite_or_failed(
+            let mut sol = finite_or_failed(
                 prob,
                 demote_uncertified_sigma_optimum(inner, sigma_uncertified),
             );
+            // gh #988: a warm start that cannot help must degrade to the cold
+            // path. The warm leg runs the direct infeasible-start method,
+            // which on an infeasible neighbour or a stiff fixed-column model
+            // ends in `NumericalFailure` / `IterationLimit` where the cold
+            // HSDE solve certifies or converges. Only a clean verdict (optimal
+            // or a certified infeasibility) is kept.
+            if !crate::deadline::expired()
+                && matches!(
+                    sol.status,
+                    QpStatus::NumericalFailure
+                        | QpStatus::IterationLimit
+                        | QpStatus::OptimalInaccurate
+                )
+            {
+                let cold = solve_qp_ipm(prob, opts, &mut make_backend);
+                let cold_clean = matches!(
+                    cold.status,
+                    QpStatus::Optimal | QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
+                );
+                let keep_inaccurate_warm = sol.status == QpStatus::OptimalInaccurate;
+                if cold_clean || !keep_inaccurate_warm {
+                    let warm_iters = sol.iters;
+                    sol = cold;
+                    sol.iters += warm_iters;
+                }
+            }
             if crate::deadline::expired() {
                 mark_timed_out(sol)
             } else {

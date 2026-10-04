@@ -1317,6 +1317,33 @@ to the specialized convex solvers (LP / convex QP / SOCP, see
 A positive factor is a pure conditioning knob; the convex path reports
 natural units either way, so it keeps the fast path.
 
+## Warm-starting an NLP after a parameter change
+
+`warm_start_init_point=yes` (or passing a `WarmStart` from Python) starts the
+solve from a supplied primal/dual iterate. Starting from a *nearby* solution
+does not by itself make the solve short: the barrier parameter still starts
+at `mu_init` (`0.1`) unless something lowers it, and the first iterations
+re-centre the point onto that barrier. A model that cold-solves in 7
+iterations can take 49 from a warm start whose multipliers have moved only
+modestly (gh#988: a two-product pricing problem, capacity 14 → 16, 1.41 →
+1.12 on the active row). `warm_start_recentering=none` does not change this;
+the cost is the barrier level, not the recentering pass.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `warm_start_init_point` | `no` | Use the supplied primal and dual iterate as the start. |
+| `warm_start_target_mu` | `0` | When `> 0`, start the barrier at exactly this `mu`, overriding `mu_init` and the recentering pass. **Recommended for small parameter changes: `1e-4`** (restores the cold iteration count, 7, on the gh#988 model). Leave at `0` for a stale or distant point, where a larger start `mu` is the safer choice. |
+| `warm_start_recentering` | `residual` | `residual` measures the supplied point and raises `mu` only for measured complementarity; `none` restores pre-gh#606 behaviour. |
+| `warm_start_bound_push`, `warm_start_bound_frac` | `0.001` | Primal push away from bounds (as `bound_push` / `bound_frac`). |
+| `warm_start_slack_bound_push`, `warm_start_slack_bound_frac` | `0.001` | Same for inequality slacks. |
+| `warm_start_mult_bound_push` | `0.001` | Floor on bound multipliers. |
+| `warm_start_mult_init_max` | `1e6` | Cap on supplied multiplier magnitudes. |
+
+The default is unchanged: lowering `mu` by default is a trajectory change
+that was not validated against the fixture sweep, and a distant point may do
+better from a larger start `mu`, so it is an opt-in. If a warm start is slower than a cold one, try
+`warm_start_target_mu=1e-4` first.
+
 ## Starting-point conditioning
 
 Three options displace the starting point before the barrier solve, and

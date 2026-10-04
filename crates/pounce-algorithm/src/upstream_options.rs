@@ -1389,7 +1389,12 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         ],
         "",
     )?;
-    r.add_number_option("warm_start_target_mu", "", 0.0, "Experimental!")?;
+    r.add_number_option(
+        "warm_start_target_mu",
+        "Barrier parameter to start a warm-started solve at (0 = use mu_init / the recentering pass).",
+        0.0,
+        "When > 0, overrides the initial barrier parameter of a warm-started solve outright. A small value (e.g. 1e-4) lets a warm start from a nearby solution begin near the central path instead of re-centering from mu_init; the default 0 keeps mu_init (or the value chosen by warm_start_recentering=residual). See docs/src/options.md, 'Warm-starting an NLP after a parameter change'.",
+    )?;
     r.add_string_option(
         "warm_start_recentering",
         "How the warm-start initializer adapts to the quality of the supplied iterate.",

@@ -11,6 +11,16 @@ changes.
 
 ### Fixed
 
+- **Warm starts no longer lose to cold starts (gh#988).** `solve_qp` /
+  `solve_qp_ipm_warm` now fall back to the cold HSDE path when the warm
+  (direct infeasible-start) leg ends in `numerical_failure`,
+  `iteration_limit` or `optimal_inaccurate`: an infeasible neighbour gets its
+  `primal_infeasible` certificate instead of 116-199 wasted iterations, and
+  the reported `iters` is the total spent. A warm point is also projected onto
+  pinned columns (`lb == ub`). The NLP warm-start options (notably
+  `warm_start_target_mu=1e-4` for small parameter changes) are documented in
+  `options.md`; the NLP default is unchanged (docs only: no fixture-sweep
+  evidence for changing it).
 - **Misleading verdicts and reports (gh#987).** (1) A `.nl` that declares
   binary / integer variables was solved as its relaxation with no word of it:
   the CLI now warns on stderr, and `pounce verify` checks the declared integer
