@@ -19,6 +19,15 @@
 //! applied — the quantity is not defined, so the two arms are not obliged to
 //! agree. The problem below has a genuine minimum, which is what makes the
 //! comparison meaningful.
+//!
+//! Since gh#983 the vetoed run no longer *ends* at the fallback point by
+//! default: the scale audit sees the frozen objective factor (the masked
+//! certificate's signature) and re-solves from the returned point with the
+//! scaling re-evaluated, which reaches the true minimum (`f ~ 4e-12` against
+//! the fallback's `0.148`) and is promoted. The fallback comparison is
+//! therefore run with `solve_quality_audit=no`, which is the mechanism it is
+//! about; the default path gets its own test below, pinning that the held
+//! factor then belongs to the promoted re-solve, i.e. to the returned point.
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -102,10 +111,15 @@ impl TNLP for MaskedQuartic {
     fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
-fn solve(
-    threshold: Number,
-    max_iter: i32,
-) -> (ApplicationReturnStatus, Number, i32, Option<Vec<Number>>) {
+struct Run {
+    status: ApplicationReturnStatus,
+    obj: Number,
+    iters: i32,
+    sens: Option<Vec<Number>>,
+    restored_from_floor: bool,
+}
+
+fn solve(threshold: Number, max_iter: i32, audit: bool) -> Run {
     let out: Rc<RefCell<Option<Vec<Number>>>> = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&out);
     let mut app = IpoptApplication::new();
@@ -120,6 +134,14 @@ fn solve(
         .unwrap();
     app.options_mut()
         .set_integer_value("max_iter", max_iter, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value(
+            "solve_quality_audit",
+            if audit { "yes" } else { "no" },
+            true,
+            false,
+        )
         .unwrap();
     app.initialize().unwrap();
     app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
@@ -136,20 +158,28 @@ fn solve(
     let status = app.optimize_tnlp(t);
     let s = app.statistics();
     let (obj, iters) = (s.final_objective, s.iteration_count);
+    let restored_from_floor = app.answer_restored_from_floor();
     drop(app);
-    (
+    Run {
         status,
         obj,
         iters,
-        Rc::try_unwrap(out).ok().and_then(|c| c.into_inner()),
-    )
+        sens: Rc::try_unwrap(out).ok().and_then(|c| c.into_inner()),
+        restored_from_floor,
+    }
 }
 
 #[test]
 fn sensitivity_after_a_masked_certificate_fallback_matches_the_unvetoed_run() {
     // The run that never vetoes: stops at the refused point, and its held
     // factor belongs to that point by construction.
-    let (base_status, base_obj, base_iters, base_sens) = solve(0.0, 300);
+    let Run {
+        status: base_status,
+        obj: base_obj,
+        iters: base_iters,
+        sens: base_sens,
+        ..
+    } = solve(0.0, 300, false);
     assert!(
         matches!(base_status, ApplicationReturnStatus::SolveSucceeded),
         "premise: baseline should stop with a certificate, got {base_status:?}"
@@ -158,7 +188,12 @@ fn sensitivity_after_a_masked_certificate_fallback_matches_the_unvetoed_run() {
 
     // The vetoed run, cut off at the baseline's own iteration count so it
     // cannot converge on its own and must fall back to that same point.
-    let (veto_status, veto_obj, _, veto_sens) = solve(1e-4, base_iters);
+    let Run {
+        status: veto_status,
+        obj: veto_obj,
+        sens: veto_sens,
+        ..
+    } = solve(1e-4, base_iters, false);
     let veto_sens = veto_sens.expect("sensitivity did not run after the fallback");
 
     eprintln!(
@@ -179,4 +214,39 @@ fn sensitivity_after_a_masked_certificate_fallback_matches_the_unvetoed_run() {
              solution"
         );
     }
+}
+
+/// The default path (`solve_quality_audit=yes`): the gh#983 audit re-solves
+/// the fallback point with the scaling re-evaluated and promotes the result.
+/// `on_converged` fires per attempt, so the held factor is the promoted
+/// re-solve's -- which is the point returned, as long as nothing was replayed
+/// from a floor afterwards. Pin both halves: the answer is the repaired one,
+/// and no floor replay separated it from the factor.
+#[test]
+fn sensitivity_after_the_scale_audit_repairs_the_fallback_belongs_to_the_returned_point() {
+    let base = solve(0.0, 300, false);
+    let audited = solve(1e-4, base.iters, true);
+    eprintln!(
+        "fallback-only f={:.6e}; audited {:?} f={:.6e} restored={}",
+        base.obj, audited.status, audited.obj, audited.restored_from_floor
+    );
+    assert!(
+        matches!(audited.status, ApplicationReturnStatus::SolveSucceeded),
+        "{:?}",
+        audited.status
+    );
+    assert!(
+        audited.obj < 1e-6 * base.obj,
+        "the audit should repair the fallback's answer: {:.6e} vs {:.6e}",
+        audited.obj,
+        base.obj
+    );
+    assert!(
+        !audited.restored_from_floor,
+        "a floor replay after the audit would leave the held factor on a discarded attempt"
+    );
+    let sens = audited
+        .sens
+        .expect("sensitivity ran on the promoted re-solve");
+    assert!(sens.iter().all(|v| v.is_finite()), "{sens:?}");
 }
