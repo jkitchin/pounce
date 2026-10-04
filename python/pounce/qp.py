@@ -1644,6 +1644,20 @@ class QpSensitivity:
         the active set and :meth:`parametric_step` returns a genuine *one-sided*
         derivative — the other direction has a different, equally correct value.
 
+        **The rule (gh#989).** A constraint is weakly active when it binds
+        (slack below ``1e-3`` of the primal scale; for a bound, ``x`` within
+        ``1e-3·max(‖x‖∞, 1)`` of it) **and** its multiplier is negligible next
+        to the other forces at the columns it touches: for inequality row
+        ``i``, ``z_i·‖G_i‖∞ ≤ 1e-3 · max_{j ∈ supp(G_i)} T_j``, and for a bound
+        on ``x_j``, ``z_j ≤ 1e-3 · T_j``, where ``T_j`` is the largest term of
+        the stationarity equation at column ``j`` — ``|c_j|``, ``|(Px)_j|``,
+        ``‖P[:,j]‖∞·max(‖x‖∞, 1)``, ``|(Aᵀy)_j|``, ``Σ_k |G_kj|·z_k`` and the
+        bound multipliers. The scale is per row: a large multiplier elsewhere
+        in the model (an equality multiplier, or another row's) does not lift
+        the threshold of an unrelated row, and the screen is invariant to
+        rescaling the objective or an individual row. On a conic model only
+        orthant rows are screened, and cone-block duals do not enter ``T``.
+
         Nothing returned by :meth:`parametric_step` is wrong when this is
         non-empty; both branches are real derivatives. What it means is that the
         predictor should not be assumed to extrapolate in both directions. Probe

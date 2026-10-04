@@ -50,6 +50,10 @@ enum Stop {
     TargetReached,
     Converged,
     BudgetExhausted,
+    /// MLSL's sample pool hit its cap before the solve budget was spent
+    /// (gh#989: this used to read `budget_exhausted`, naming the wrong
+    /// budget).
+    SampleCapReached,
 }
 
 impl Stop {
@@ -58,8 +62,67 @@ impl Stop {
             Stop::TargetReached => "target_reached",
             Stop::Converged => "converged",
             Stop::BudgetExhausted => "budget_exhausted",
+            Stop::SampleCapReached => "sample_cap_reached",
         }
     }
+}
+
+/// Default MLSL critical-radius scale (gh#989). With the radius formula in
+/// `run_mlsl`, `gamma = 2` gave `r ~ 1.1` of a `1.41` box diagonal in the
+/// first rounds on a 2-D box, so every sample had a better one "nearby" and
+/// almost no solve launched before the sample cap (six-hump camel: 2 solves).
+/// `0.5` is the same order as the Rinnooy Kan-Timmer critical radius and
+/// matches `pounce.find_minima`'s default.
+const MLSL_GAMMA: f64 = 0.5;
+
+/// For every pool point, whether a strictly better point lies within
+/// `radius` in the per-dimension-scaled metric.
+///
+/// The naive scan is `O(N²)` per round (gh#989: ~15 s at `max_solves = 300`
+/// in the Python twin). This sweeps the points sorted by their first scaled
+/// coordinate and only compares pairs whose first coordinates are within
+/// `radius` — the same answer, with the work bounded by the number of
+/// near pairs instead of all pairs.
+fn better_sample_within(xs: &[Vec<Number>], fs: &[Number], l: &[Number], radius: f64) -> Vec<bool> {
+    let m = xs.len();
+    let mut out = vec![false; m];
+    if m < 2 || xs[0].is_empty() {
+        return out;
+    }
+    let key = |i: usize| xs[i][0] / l[0];
+    let mut by_key: Vec<usize> = (0..m).collect();
+    by_key.sort_by(|&a, &b| {
+        key(a)
+            .partial_cmp(&key(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (pos, &i) in by_key.iter().enumerate() {
+        let ki = key(i);
+        let fi = fs[i];
+        let mut hit = false;
+        for &j in by_key[pos + 1..].iter() {
+            if key(j) - ki >= radius {
+                break;
+            }
+            if fs[j] < fi && scaled_distance(&xs[i], &xs[j], l) < radius {
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            for &j in by_key[..pos].iter().rev() {
+                if ki - key(j) >= radius {
+                    break;
+                }
+                if fs[j] < fi && scaled_distance(&xs[i], &xs[j], l) < radius {
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        out[i] = hit;
+    }
+    out
 }
 
 /// One local solve's outcome (the captured minimizer + whether it converged).
@@ -428,7 +491,7 @@ impl<'a> Driver<'a> {
     /// the loop (pounce#103). The sample budget gives it a hard ceiling.
     fn note_sample(&mut self) -> Result<(), Stop> {
         if self.n_samples >= self.max_samples {
-            return Err(Stop::BudgetExhausted);
+            return Err(Stop::SampleCapReached);
         }
         self.n_samples += 1;
         Ok(())
@@ -463,7 +526,7 @@ impl<'a> Driver<'a> {
 
     fn run_mlsl(&mut self) -> Result<(), Stop> {
         let batch = self.cfg.samples_per_round.unwrap_or(20);
-        let gamma = self.cfg.gamma.unwrap_or(2.0);
+        let gamma = self.cfg.gamma.unwrap_or(MLSL_GAMMA);
         let jitter = self.cfg.restart_jitter.unwrap_or(1.0);
         let n = self.n;
         let diag = (n as f64).sqrt();
@@ -485,6 +548,7 @@ impl<'a> Driver<'a> {
             let bign = pool_x.len();
             let ne = bign.max(2) as f64;
             let radius = gamma * diag * (ne.ln() / ne).powf(1.0 / n as f64);
+            let better_near = better_sample_within(&pool_x, &pool_f, &self.l_scale, radius);
             let mut order: Vec<usize> = (0..bign).collect();
             order.sort_by(|&a, &b| {
                 pool_f[a]
@@ -492,17 +556,11 @@ impl<'a> Driver<'a> {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             for i in order {
-                let si = pool_x[i].clone();
-                let fi = pool_f[i];
                 // Single-linkage: skip if a *better* sample is within radius.
-                let better_near = (0..bign).any(|j| {
-                    j != i
-                        && pool_f[j] < fi
-                        && scaled_distance(&si, &pool_x[j], &self.l_scale) < radius
-                });
-                if better_near || self.archive.near_any(&si, radius) {
+                if better_near[i] || self.archive.near_any(&pool_x[i], radius) {
                     continue;
                 }
+                let si = pool_x[i].clone();
                 let r = self.solve_seeded(&si, true)?;
                 self.consider(r.x, r.success, false)?;
             }
@@ -1066,7 +1124,33 @@ fn coord_in_bounds(xi: Number, lo: Number, hi: Number) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::coord_in_bounds;
+    use super::{better_sample_within, coord_in_bounds, scaled_distance};
+
+    /// The pruned sweep must give exactly the naive single-linkage answer.
+    #[test]
+    fn pruned_nearest_better_matches_the_naive_scan() {
+        let mut state = 12345u64;
+        let mut rnd = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let l = [6.0, 4.0, 1.0];
+        let xs: Vec<Vec<f64>> = (0..400)
+            .map(|_| vec![6.0 * rnd() - 3.0, 4.0 * rnd() - 2.0, rnd()])
+            .collect();
+        let fs: Vec<f64> = (0..400).map(|_| rnd()).collect();
+        for radius in [0.01, 0.1, 0.3, 2.0] {
+            let fast = better_sample_within(&xs, &fs, &l, radius);
+            for i in 0..xs.len() {
+                let naive = (0..xs.len()).any(|j| {
+                    j != i && fs[j] < fs[i] && scaled_distance(&xs[i], &xs[j], &l) < radius
+                });
+                assert_eq!(fast[i], naive, "radius {radius}, point {i}");
+            }
+        }
+    }
 
     #[test]
     fn accepts_interior_point() {

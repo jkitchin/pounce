@@ -54,6 +54,25 @@ changes.
 
 ### Fixed
 
+- **Python-level driver defects, remaining items (gh#989).** (e)
+  `QpSensitivity`'s weak-activity screen is now per row: a constraint's
+  multiplier is compared with the largest stationarity term at the columns it
+  touches (`|c_j|`, `|(Px)_j|`, `‖P[:,j]‖·max(‖x‖,1)`, `|(Aᵀy)_j|`, the
+  orthant rows' `|G_kj|·z_k`, the bound multipliers), not with a global max
+  over every inequality multiplier, so one large `z` no longer flags a
+  strongly active neighbour as weak (`x₀ ≥ 0` with `z = 1e4` next to `x₁ ≥ 1`
+  with `z = 1`), the screen is invariant to rescaling the objective, and on a
+  conic build cone-block duals no longer set the orthant threshold. The rule
+  is in the `weakly_active_indices` docstring. (f) CLI `--minima mlsl` at
+  parity with Python: default `--gamma` 0.5 (was 2, which launched 2 solves on
+  the six-hump camel), the sample cap reports `sample_cap_reached` (was
+  `budget_exhausted`), and the nearest-better scan is a pruned sweep instead
+  of the all-pairs `O(N²)` loop. (g) `partitioned_update_type=bfgs` applies
+  damped BFGS to the objective element only; constraint elements take SR1, so
+  without a declared Hessian pattern (`partitioned_structure=jacobian`, or a
+  Python problem without `hessian`) it converges on the Radau batch reactor
+  (N = 25 / 50: 16 / 23 iterations, as `sr1`) instead of hitting `max_iter`.
+
 - **Misleading verdicts, remaining items (gh#987).** (a) Integers that
   appear only nonlinearly were invisible: header line 7's `nbv`/`niv` count
   only *linear* discrete variables, and `nlvbi nlvci nlvoi` were summed but

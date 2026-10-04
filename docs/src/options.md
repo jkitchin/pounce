@@ -1648,7 +1648,7 @@ optimization above all.
 | option | default | values | what it does |
 |---|---|---|---|
 | `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
-| `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
+| `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block (`bfgs`: objective element only; constraint elements always SR1) |
 | `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each element along the model's declared Hessian sparsity and keep only its declared entries |
 | `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
 | `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
@@ -1727,13 +1727,15 @@ declared coupling, and on `benchmarks/large_scale` `laptime` (one
 3 280-variable component at N = 80) it hit the iteration cap where the
 contiguous blocks take 166.
 
-Not covered: `partitioned_update_type=bfgs` on a model **without** a
-declared Hessian structure (or with `partitioned_structure=jacobian`)
-still does not converge on the batch reactor, nor on `laptime` either
-way — a positive-semidefinite model of an indefinite `∇²c_j`, weighted by
-a multiplier of either sign. Modelling the Lagrangian element `λ_j c_j`
-instead was tried and diverged (damped) or froze (curvature-skipped).
-Use `sr1` there.
+Under `partitioned_update_type=bfgs`, constraint elements take **SR1**
+anyway (gh#989): damped BFGS is applied only to the objective element (and
+to the Lagrangian blocks of `elements=blocks`). A positive-semidefinite
+model of an indefinite `∇²c_j`, weighted by a multiplier of either sign,
+gave the assembled Hessian the wrong inertia, and on a model **without** a
+declared Hessian structure (or with `partitioned_structure=jacobian`) `bfgs`
+hit the iteration cap on the batch reactor at every mesh size. Now it
+matches `sr1` there (N = 25: 16 and 16; N = 50: 23 and 23 iterations, the
+same as `sr1` because that model's objective is linear).
 
 **`partitioned_max_element`.** An element with `k` nonzeros costs
 `k(k+1)/2` stored reals, so one wide constraint row would dominate the
