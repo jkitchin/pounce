@@ -998,7 +998,12 @@ so a value-dependent zero (`exp(-E/RT)` underflowing, a polynomial's second
 derivative vanishing at the probe points) can never drop an entry. It costs
 one vectorised sparse step per jaxpr equation (about 0.1 ms; the JAX trace
 usually dominates) and no AD pass, and a constant matrix such as a banded
-`A @ x` contributes only its nonzero pattern. A model it cannot bound
+`A @ x` contributes only its nonzero pattern. A `jax.custom_jvp` function is
+read through its JVP rule rather than its primal, because that rule is what
+AD differentiates (an implicit-function primal computed under
+`stop_gradient`, a straight-through estimator around `round`); a
+`jax.custom_vjp` function, whose backward rule is opaque, is bounded densely
+over its inputs. A model it cannot bound
 (`scan`/`while`/`cond`, `sort`, data-dependent indexing) or one so densely
 coupled that the dependency matrices pass ~2e7 entries falls back, per
 matrix, to the probes below; `pattern_detection="probe"` forces them, and

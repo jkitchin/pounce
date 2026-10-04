@@ -54,6 +54,31 @@ changes.
 
 ### Fixed
 
+- **`pounce.jax` jaxpr sparsity: custom derivatives, `reshape(dimensions=)`,
+  memory guard, batched warnings (gh#985 review).** `custom_jvp` /
+  `custom_vjp` functions were analysed through their *primal*, but AD uses
+  the user's rule, which can depend on inputs the primal does not: an
+  implicit-function primal under `stop_gradient` lost `dy/da` and the solve
+  reported `Solve_Succeeded` at objective 2.25 instead of 0.6248, and a
+  straight-through estimator gave an empty pattern. A `custom_jvp` is now read
+  through its JVP rule (run in value semantics with each input tangent carrying
+  its input's dependency, so `jax.nn.relu` stays diagonal), and a `custom_vjp`
+  (opaque backward) or unreadable rule is bounded densely over its inputs,
+  which is sound because a JVP/VJP is linear in the tangents. `reshape`
+  ignored its `dimensions` (transpose-first) parameter, which JAX emits for
+  `ravel(order="F")` and in the gradient of `prod(..., axis=k)`: the latter
+  dropped the pairwise Hessian blocks. `dot_general` built three `B*M*N` index
+  arrays before its budget check, and an implicit broadcast built one; both
+  now check first (a 5000-variable outer product falls back in 0.7 s and 2 MB
+  instead of 5 s and 1.2 GB). `vmap_solve` / `vmap_solve_parallel` (functions
+  and `JaxProblem` methods) report non-converged elements in **one**
+  `RuntimeWarning` naming the count, indices and statuses (`"raise"` in the
+  parallel path names all of them); per-element warnings collapsed to one
+  under Python's default filter. Docs: `solve`'s pattern text (jaxpr first,
+  probes as fallback), scatters listed as handled, `on_failure="raise"`
+  surfacing as `jax.errors.JaxRuntimeError` with a stderr traceback. Tests:
+  `python/tests/test_jax_gh985_review.py` (the repros, 27 more
+  primitive-mix superset cases checked against reverse-over-reverse AD).
 - **Python-level driver defects (gh#989, items 1-4 and 6).**
   (1) `trf_minimize` measures the step norm over the `w_index` (trust-region)
   block only, so a large-valued `y` no longer inflates the radius, and the

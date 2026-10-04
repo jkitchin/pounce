@@ -475,8 +475,9 @@ def from_jax(
         (``exp`` underflow, a polynomial's vanishing second derivative)
         can never drop an entry. Cost is one vectorised sparse step per
         jaxpr equation plus the dependency nnz; a model it cannot bound
-        (``scan``/``while``/``cond``, ``sort``, scatters, data-dependent
-        indexing) or one so densely coupled that the dependency matrices
+        (``scan``/``while``/``cond``, ``sort``, ``custom_linear_solve``,
+        gathers / scatters / dynamic slices with indices traced from ``x``)
+        or one so densely coupled that the dependency matrices
         pass ~2e7 entries falls back to the probes below, per matrix.
         ``"probe"`` forces the probes. ``problem.problem_obj.pattern_source``
         records which was used (``"user"``/``"jaxpr"``/``"probe"``).

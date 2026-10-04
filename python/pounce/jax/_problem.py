@@ -75,7 +75,12 @@ from ._build import (
     _to_np,
 )
 from . import _jaxpr_sparsity
-from ._diff import _check_forward_status, _check_on_failure
+from ._diff import (
+    _batch_failure_sink,
+    _check_forward_status,
+    _check_on_failure,
+    _report_batch_failures,
+)
 from .._pounce import Problem, Solver
 
 from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
@@ -1282,8 +1287,10 @@ class JaxProblem:
     on_failure : {"warn", "raise", "ignore"}
         What a differentiable forward solve does when the IPM does not
         converge (gh#985): ``"warn"`` (default) emits a ``RuntimeWarning``,
-        ``"raise"`` a ``RuntimeError`` (under ``jax.jit`` it surfaces as a
-        JAX runtime error from the host callback), ``"ignore"`` is the
+        ``"raise"`` a ``RuntimeError`` (raised inside the host callback,
+        so it reaches the caller as ``jax.errors.JaxRuntimeError`` -- a
+        ``RuntimeError`` subclass -- when the result is materialised, and
+        JAX logs the callback traceback to stderr), ``"ignore"`` is the
         pre-0.12 silent behaviour. The returned ``x*`` is never changed.
     factor_reuse : bool
         When ``True`` (default), the differentiable backward reuses the
@@ -2296,7 +2303,13 @@ class JaxProblem:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _host_solve(self, p_np: np.ndarray, x0_np: np.ndarray, register: bool = True):
+    def _host_solve(
+        self,
+        p_np: np.ndarray,
+        x0_np: np.ndarray,
+        register: bool = True,
+        sink=None,
+    ):
         """Forward solve. Returns ``(x, info_with_solver_id)`` — info
         carries a ``solver_id`` field that points into the per-JaxProblem
         Solver registry. Always allocates a fresh :class:`pounce.Solver`
@@ -2326,6 +2339,10 @@ class JaxProblem:
         registered for the bwd to back-solve against; otherwise the
         Solver is dropped inside the pinned closure so its
         unsendable Rust state never crosses thread boundaries.
+
+        ``sink``: a batched caller passes a callable that receives ``info``
+        in place of the per-element ``on_failure`` check, and reports the
+        batch's failures once (gh#985 review).
         """
         do_register = register and self._factor_reuse
 
@@ -2340,7 +2357,10 @@ class JaxProblem:
             return x_np, info, sid
 
         x_np, info, sid = self._run_pinned(_do) if register else _do()
-        _check_forward_status(info, self._on_failure)
+        if sink is not None:
+            sink(info)
+        else:
+            _check_forward_status(info, self._on_failure)
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -2537,19 +2557,26 @@ class JaxProblem:
         """Sequential batched solve over ``p_batch`` leading axis.
 
         Differentiable via per-element :meth:`solve`. ``x0`` may be a
-        single ``(n,)`` vector (broadcast) or a ``(B, n)`` batch.
+        single ``(n,)`` vector (broadcast) or a ``(B, n)`` batch. Under
+        ``on_failure="warn"`` non-converged elements are reported in one
+        ``RuntimeWarning`` (count, indices, statuses) after the batch.
         """
         p_batch = jnp.asarray(p_batch)
         B = p_batch.shape[0]
         x0_arr = jnp.asarray(x0)
         if x0_arr.ndim == 1:
             x0_arr = jnp.broadcast_to(x0_arr, (B, self._n))
+        sink, flush = _batch_failure_sink(self._on_failure)
+        fn = self._solve_fn(sink)
 
         def one(args):
             p_i, x0_i = args
-            return self.solve(p_i, x0_i)
+            return fn(p_i, x0_i)
 
-        return jax.lax.map(one, (p_batch, x0_arr))
+        out = jax.lax.map(one, (p_batch, x0_arr))
+        if flush is not None:
+            jax.debug.callback(flush, out)
+        return out
 
     def vmap_solve_parallel(self, p_batch, x0, workers: int | None = None):
         """Parallel batched solve via :class:`ThreadPoolExecutor` (pounce#74).
@@ -3317,7 +3344,7 @@ class JaxProblem:
 
     # ----- custom_vjp factories -----
 
-    def _solve_fn(self):
+    def _solve_fn(self, sink=None):
         f, g, n, m = self._f, self._g, self._n, self._m
         cl, cu = self._cl, self._cu
         jp = self
@@ -3325,11 +3352,11 @@ class JaxProblem:
 
         @jax.custom_vjp
         def solve_fn(p, x0):
-            x_star, _ = _pure_callback_solve(jp, p, x0)
+            x_star, _ = _pure_callback_solve(jp, p, x0, sink)
             return x_star
 
         def fwd(p, x0):
-            x_star, info = _pure_callback_solve(jp, p, x0)
+            x_star, info = _pure_callback_solve(jp, p, x0, sink)
             lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
             mult_xL = jnp.asarray(info["mult_x_L"])
             mult_xU = jnp.asarray(info["mult_x_U"])
@@ -3586,7 +3613,7 @@ class JaxProblem:
 # ----- pure_callback wrappers (module-level, closed over a JaxProblem) -----
 
 
-def _pure_callback_solve(jp: JaxProblem, p, x0):
+def _pure_callback_solve(jp: JaxProblem, p, x0, sink=None):
     n, m = jp._n, jp._m
     result_shapes = (
         jax.ShapeDtypeStruct((n,), jnp.float64),
@@ -3603,7 +3630,7 @@ def _pure_callback_solve(jp: JaxProblem, p, x0):
     )
 
     def host_call(p_h, x0_h):
-        x_np, info = jp._host_solve(np.asarray(p_h), np.asarray(x0_h))
+        x_np, info = jp._host_solve(np.asarray(p_h), np.asarray(x0_h), sink=sink)
         info_out = {
             "obj_val": np.float64(info["obj_val"]),
             "status": np.int32(info["status"]),
@@ -3733,14 +3760,20 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         zL_out = np.empty((B, n), dtype=np.float64)
         zU_out = np.empty((B, n), dtype=np.float64)
         sid_out = np.empty((B,), dtype=np.int64)
+        results = [(0, None)] * B
 
         def one(i):
+            def sink(info):
+                results[i] = (int(info["status"]), info.get("status_msg"))
+
             # register=False: the parallel bwd is JAX-vmapped over the
             # dense kernel and never consults the registry; skip the
             # hand-off so we don't pin B factors in the registry for
             # no benefit. The follow-up batched compound bwd (#76 (A))
             # will need a different host-side surface anyway.
-            x_np, info = jp._host_solve(p_np[i], x0_np[i], register=False)
+            x_np, info = jp._host_solve(
+                p_np[i], x0_np[i], register=False, sink=sink
+            )
             x_out[i] = x_np
             lam_out[i] = np.asarray(info["mult_g"], dtype=np.float64)
             zL_out[i] = np.asarray(info["mult_x_L"], dtype=np.float64)
@@ -3753,6 +3786,7 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         else:
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 list(pool.map(one, range(B)))
+        _report_batch_failures(results, jp._on_failure)
         return x_out, lam_out, zL_out, zU_out, sid_out
 
     return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)

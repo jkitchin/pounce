@@ -268,8 +268,9 @@ def _check_forward_status(info, on_failure) -> None:
 
     ``on_failure``: ``"warn"`` (default; ``RuntimeWarning``), ``"raise"``
     (``RuntimeError``) or ``"ignore"``. Never changes the return value, so
-    existing callers keep working. Under ``jax.jit`` the check runs in the
-    host callback, so ``"raise"`` surfaces as a JAX runtime error.
+    existing callers keep working. The check runs in the host callback,
+    so ``"raise"`` surfaces as ``jax.errors.JaxRuntimeError`` (a
+    ``RuntimeError`` subclass), with JAX's callback traceback on stderr.
     """
     if on_failure == "ignore":
         return
@@ -284,6 +285,57 @@ def _check_forward_status(info, on_failure) -> None:
     if on_failure == "raise":
         raise RuntimeError(msg)
     warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+
+def _report_batch_failures(results, on_failure) -> None:
+    """One aggregated warning / error for a batch (gh#985 review).
+
+    ``results`` is a per-element sequence of ``(status, status_msg)``.  A
+    per-element ``warnings.warn`` from the same line collapses to a single
+    message under Python's default filter, so five failing elements used to
+    read as one; this names the count and the failing indices instead.
+    """
+    if on_failure == "ignore":
+        return
+    bad = [
+        (i, int(s), msg) for i, (s, msg) in enumerate(results)
+        if int(s) not in _OK_STATUSES
+    ]
+    if not bad:
+        return
+    shown = ", ".join(f"{i} ({msg or s})" for i, s, msg in bad[:10])
+    more = f", ... and {len(bad) - 10} more" if len(bad) > 10 else ""
+    msg = (
+        f"pounce.jax batched forward solve: {len(bad)} of {len(results)} "
+        f"element(s) did not converge -- index (status): {shown}{more}; "
+        "those rows of x* are not optima and their gradients are meaningless"
+    )
+    if on_failure == "raise":
+        raise RuntimeError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+
+def _batch_failure_sink(on_failure):
+    """``(sink, flush)`` for a sequential (``lax.map``) batch under
+    ``on_failure="warn"``: each element's host callback calls ``sink(info)``
+    instead of warning, and ``flush(x_batch)`` -- attached with
+    ``jax.debug.callback`` on the batch output, so it runs after every
+    element -- emits the single aggregated warning.  ``"raise"`` keeps the
+    per-element raise (the first failure stops the batch); ``"ignore"``
+    needs nothing.  Returns ``(None, None)`` then."""
+    if on_failure != "warn":
+        return None, None
+    results = []
+
+    def sink(info):
+        results.append((int(info["status"]), info.get("status_msg")))
+
+    def flush(_x):
+        items = list(results)
+        results.clear()
+        _report_batch_failures(items, "warn")
+
+    return sink, flush
 
 
 def _check_on_failure(on_failure) -> None:
@@ -330,7 +382,11 @@ def _solve_once(
         for k, v in options.items():
             problem.add_option(k, v)
     x_np, info = problem.solve(x0=np.asarray(x0))
-    _check_forward_status(info, extra.get("on_failure", "warn"))
+    sink = extra.get("_sink")
+    if sink is not None:
+        sink(info)  # a batch reports its failures once, aggregated
+    else:
+        _check_forward_status(info, extra.get("on_failure", "warn"))
     return np.asarray(x_np), info
 
 
@@ -471,15 +527,24 @@ def solve(
         Known sparsity patterns, as in :func:`pounce.jax.from_jax`
         (Jacobian ``(m, n)``; lower triangle of the Lagrangian Hessian).
         Supplying one skips detection; it must be a superset of the true
-        structure. Without them the pattern is the union of probes at
-        ``x0``, inside ``[lb, ub]`` and at standard-normal points
-        (gh#985).
+        structure. Without them the pattern is read off the jaxpr of
+        ``f`` / ``g`` (structural, value-independent; see
+        :func:`pounce.jax.from_jax`'s ``pattern_detection``), falling back
+        per matrix to the union of probes at ``x0``, inside ``[lb, ub]``
+        and at standard-normal points for a model the jaxpr analysis
+        cannot bound (gh#985).
 
     ``on_failure`` : ``"warn"`` (default), ``"raise"`` or ``"ignore"``
         What to do when the forward solve does not converge (anything
         other than solved / acceptable / feasible point). The return
         value is unchanged; ``"warn"`` emits a ``RuntimeWarning`` and
-        ``"raise"`` a ``RuntimeError`` from the host callback.
+        ``"raise"`` a ``RuntimeError`` from the host callback. Because
+        that error crosses a ``jax.pure_callback`` it reaches the caller
+        as ``jax.errors.JaxRuntimeError`` (a ``RuntimeError`` subclass
+        whose message carries the original text), raised when the result
+        is materialised (``block_until_ready`` / ``np.asarray``), and JAX
+        also logs the callback's traceback to stderr. Catch
+        ``RuntimeError``, not a narrower type.
     """
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
     _check_on_failure(on_failure)
@@ -781,21 +846,29 @@ def vmap_solve(
     This helper instead loops in Python (or, when JAX provides a
     sequential map primitive, dispatches to that), preserving
     differentiability via :func:`solve`'s ``custom_vjp``.
+
+    ``on_failure`` behaves as in :func:`solve`, except that ``"warn"``
+    emits **one** ``RuntimeWarning`` for the whole batch naming how many
+    elements did not converge and which (index and status), after the
+    batch has run; ``"raise"`` raises at the first failing element.
     """
     p_batch = jnp.asarray(p_batch)
-    batch = p_batch.shape[0]
+    _check_on_failure(on_failure)
+    sink, flush = _batch_failure_sink(on_failure)
+    extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+                 on_failure=on_failure, _sink=sink)
+    static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
+    fn = _make_solve_custom_vjp(f, g, n, m, static_bounds, options, extra)
 
     def one(p_i):
-        return solve(
-            p_i, f=f, g=g, x0=x0, n=n, m=m,
-            lb=lb, ub=ub, cl=cl, cu=cu, options=options,
-            jac_pattern=jac_pattern, hess_pattern=hess_pattern,
-            on_failure=on_failure,
-        )
+        return fn(p_i, x0, dyn_bounds)
 
     # ``jax.lax.map`` runs sequentially under the hood (one element at
     # a time), which is exactly what we want for an impure callback.
-    return jax.lax.map(one, p_batch)
+    out = jax.lax.map(one, p_batch)
+    if flush is not None:
+        jax.debug.callback(flush, out)
+    return out
 
 
 def _solve_batch_threadpool(
@@ -819,15 +892,21 @@ def _solve_batch_threadpool(
     lam_out = np.empty((B, m), dtype=np.float64)
     zL_out = np.empty((B, n), dtype=np.float64)
     zU_out = np.empty((B, n), dtype=np.float64)
+    extra = dict(extra or {})
+    on_failure = extra.get("on_failure", "warn")
+    results = [(0, None)] * B
 
     def one(i):
+        def sink(info):
+            results[i] = (int(info["status"]), info.get("status_msg"))
+
         x_np, info = _solve_once(
             f=f, g=g,
             p=jnp.asarray(p_batch_np[i]),
             x0=jnp.asarray(x0_np[i]) if x0_np.ndim == 2 else jnp.asarray(x0_np),
             n=n, m=m, lb=lb, ub=ub, cl=cl, cu=cu,
             options=options,
-            extra=extra,
+            extra=dict(extra, _sink=sink),
         )
         x_out[i] = x_np
         lam_out[i] = np.asarray(info["mult_g"], dtype=np.float64)
@@ -840,6 +919,7 @@ def _solve_batch_threadpool(
     else:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             list(pool.map(one, range(B)))
+    _report_batch_failures(results, on_failure)
     return x_out, lam_out, zL_out, zU_out
 
 
@@ -967,8 +1047,10 @@ def vmap_solve_parallel(
 
     ``jac_pattern`` / ``hess_pattern`` / ``on_failure`` behave as in
     :func:`solve` (gh#985); the patterns are shared by every batch
-    element, so they must cover the structure at all of them. A
-    non-converged element triggers the warning / error for that element.
+    element, so they must cover the structure at all of them. Failures
+    are reported once for the whole batch, after every element has run:
+    one ``RuntimeWarning`` (or ``RuntimeError`` under ``"raise"``) naming
+    how many elements did not converge and which (index and status).
     """
     p_batch = jnp.asarray(p_batch)
     B = p_batch.shape[0]

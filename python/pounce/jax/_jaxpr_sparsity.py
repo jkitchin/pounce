@@ -24,7 +24,19 @@ shape ``(size, n)``).  Primitives are handled by structure:
   so ``A @ x`` with a banded ``A`` stays banded;
 * zero-derivative ops (comparisons, ``floor``, ``sign``, integer
   outputs, ``stop_gradient``) cut the dependency;
-* ``jit`` / ``custom_jvp`` / ``remat`` calls are analysed recursively.
+* ``scatter`` family with constant indices: each operand slot unions the
+  updates that can land on it;
+* ``jit`` / ``remat`` calls are analysed recursively;
+* ``custom_jvp`` functions are analysed through their **JVP rule**, not
+  their primal: the derivative AD uses can depend on inputs the primal
+  does not (an implicit-function primal computed under ``stop_gradient``,
+  a straight-through estimator around ``round``).  The rule's jaxpr is
+  run in value semantics (a ``stop_gradient`` inside the rule does not
+  cut) with each input tangent carrying its input's dependency.
+  ``custom_vjp`` (whose backward rule is opaque Python) and any rule that
+  cannot be read are bounded densely: every output element depends on
+  the union of every input element's dependency, which is sound because
+  a JVP/VJP is linear in the input tangents.
 
 The **Jacobian** pattern is the dependency matrix of ``g``'s outputs.
 The **Hessian** pattern is the Jacobian pattern of the *gradient program*
@@ -32,7 +44,9 @@ The **Hessian** pattern is the Jacobian pattern of the *gradient program*
 route — symmetrised and folded onto the lower triangle.
 
 Anything this module does not know how to bound (``scan``, ``while``,
-``cond``, ``sort``, ``scatter``, data-dependent indexing, ...) makes the
+``cond``, ``sort``, ``custom_linear_solve``, convolutions, data-dependent
+indexing such as a gather / scatter / ``dynamic_slice`` whose indices are
+traced from ``x``, ...) makes the
 analysis return ``None`` rather than guess, and the caller falls back to
 the union-of-probes detector.  The same happens when an intermediate
 dependency matrix would exceed ``_MAX_NNZ`` entries (a densely coupled
@@ -73,7 +87,7 @@ _ELEMENTWISE = frozenset(
     convert_element_type add_any copy copy_p real imag conj rem nextafter
     reduce_precision clamp igamma igammac igamma_grad_a random_gamma_grad
     bessel_i0e bessel_i1e polygamma zeta regularized_incomplete_beta
-    custom_lin mul_add""".split()
+    mul_add""".split()
 )
 
 # Derivative is zero a.e. / output not differentiable.
@@ -95,6 +109,19 @@ _CALLS = frozenset(
     """pjit jit closed_call core_call remat checkpoint remat2 custom_jvp_call
     custom_vjp_call custom_vjp_call_jaxpr xla_call named_call""".split()
 )
+
+# User-defined derivatives: the derivative AD uses is NOT the derivative
+# of the primal ``call_jaxpr`` (an implicit-function primal computed under
+# ``stop_gradient``; a straight-through estimator around ``round``), so
+# reading the primal's dependency would silently drop entries (gh#985
+# review).  These are analysed through their JVP rule, or bounded densely.
+_CUSTOM_JVP = frozenset("custom_jvp_call".split())
+_CUSTOM_VJP = frozenset("custom_vjp_call custom_vjp_call_jaxpr custom_lin".split())
+
+# Zero-derivative ops whose *value* still carries its input.  Inside a JVP
+# rule the rule is evaluated, not differentiated, so ``stop_gradient(t)``
+# is ``t`` there and these must propagate instead of cutting.
+_VALUE_PASS = frozenset("stop_gradient floor ceil round sign".split())
 
 
 def _sub_jaxpr(params):
@@ -146,6 +173,10 @@ def _take(D, ids, size):
     if ids.size == 0:
         return sp.csr_matrix((0, D.shape[1]), dtype=np.float32)
     lo, hi = int(ids.min()), int(ids.max())
+    # Bound the result's nnz from the row lengths before materialising it.
+    rn = np.diff(D.indptr)
+    if int(rn[np.maximum(ids, 0)].sum(dtype=np.int64)) > _MAX_NNZ:
+        raise _Unsupported("dependency matrix too large")
     if lo >= 0:
         if hi - lo + 1 == ids.size and (ids.size == 1 or (np.diff(ids) == 1).all()):
             R = D[lo : hi + 1]  # contiguous block
@@ -198,6 +229,10 @@ def _group_union(D, groups, size):
 class _Interp:
     def __init__(self, n):
         self.n = n
+        # False: dependencies mean "first derivative AD would produce"
+        # (``stop_gradient`` cuts, custom rules replace the primal).  True:
+        # plain value flow, used while evaluating a custom JVP rule.
+        self.value_mode = False
 
     # -- environment ------------------------------------------------------
 
@@ -274,7 +309,18 @@ class _Interp:
         if all(not _is_inexact(a) for a in avals):
             return [None] * nout, oknown
         if name in _ZERO_DERIVATIVE:
+            if self.value_mode and name in _VALUE_PASS:
+                return [self.elementwise(eqn, ins, tuple(avals[0].shape))], None
             return [None] * nout, oknown
+
+        if name in _CUSTOM_JVP or name in _CUSTOM_VJP:
+            if not self.value_mode:
+                if name in _CUSTOM_JVP:
+                    return self.custom_jvp(eqn, ins, ks), None
+                return self.dense_union(eqn, ins), None
+            if name == "custom_lin":
+                return self.dense_union(eqn, ins), None
+            # value mode: the primal is what gets evaluated -- fall through.
 
         if name in _CALLS:
             sub = _sub_jaxpr(eqn.params)
@@ -303,6 +349,81 @@ class _Interp:
             return [self.dot_general(eqn, ins, ks)], None
         return self.movement(eqn, ins, ks)
 
+    # -- custom derivatives ---------------------------------------------------
+
+    def dense_union(self, eqn, ins):
+        """Sound bound for an opaque derivative: a JVP / VJP is linear in
+        the input tangents, so every inexact output element depends at
+        most on the union of *all* input elements' dependencies."""
+        live = [D for D in ins if D is not None]
+        if not live:
+            return [None] * len(eqn.outvars)
+        cols = np.unique(np.concatenate([D.indices for D in live]))
+        U = _selector(np.zeros(cols.size, dtype=np.int64), cols, (1, self.n))
+        outs = []
+        for v in eqn.outvars:
+            if not _is_inexact(v.aval):
+                outs.append(None)
+                continue
+            sz = _size(tuple(v.aval.shape))
+            if sz * cols.size > _MAX_NNZ:
+                raise _Unsupported("dependency matrix too large")
+            outs.append(_take(U, np.zeros(sz, dtype=np.int64), 1))
+        return outs
+
+    def custom_jvp(self, eqn, ins, ks):
+        """``custom_jvp_call``: the dependency AD sees is the tangent flow
+        of the user's JVP rule, not the primal.  Evaluate the rule's jaxpr
+        with the primals held constant and each input tangent carrying its
+        input's dependency (value semantics: the rule is *run*, so a
+        ``stop_gradient`` inside it does not cut).  Anything unexpected
+        degrades to :meth:`dense_union`, never to the primal."""
+        p = eqn.params
+        nc = int(p.get("num_consts", 0) or 0)
+        prim_ins, prim_ks = ins[nc:], ks[nc:]
+        if any(D is not None for D in ins[:nc]):
+            return self.dense_union(eqn, ins)
+        fun = p.get("jvp_jaxpr_fun", p.get("jvp_jaxpr_thunk"))
+        if fun is None:
+            return self.dense_union(eqn, ins)
+        zeros = [False] * len(prim_ins)
+        try:
+            call = getattr(fun, "call_wrapped", fun)
+            jvp_jaxpr, consts, out_zeros = call(*zeros)
+        except Exception:
+            return self.dense_union(eqn, ins)
+        jaxpr = getattr(jvp_jaxpr, "jaxpr", jvp_jaxpr)
+        consts = list(getattr(jvp_jaxpr, "consts", ())) + list(consts or ())
+        out_zeros = list(out_zeros)
+        if (
+            len(jaxpr.invars) != 2 * len(prim_ins)
+            or len(consts) != len(jaxpr.constvars)
+            or len(out_zeros) != len(eqn.outvars)
+        ):
+            return self.dense_union(eqn, ins)
+
+        class _Closed:
+            pass
+
+        closed = _Closed()
+        closed.jaxpr, closed.consts = jaxpr, consts
+        in_deps = [None] * len(prim_ins) + list(prim_ins)
+        in_known = list(prim_ks) + [None] * len(prim_ins)
+        saved = self.value_mode
+        self.value_mode = True
+        try:
+            od, _ = self.run(closed, in_deps, in_known)
+        except _Unsupported:
+            return self.dense_union(eqn, ins)
+        finally:
+            self.value_mode = saved
+        tangents = iter(od[len(out_zeros):])
+        outs = [None if z else next(tangents, None) for z in out_zeros]
+        for v, D in zip(eqn.outvars, outs):
+            if D is not None and D.shape[0] != _size(tuple(v.aval.shape)):
+                return self.dense_union(eqn, ins)
+        return outs
+
     # -- element-wise -------------------------------------------------------
 
     def elementwise(self, eqn, ins, out_shape, skip=0):
@@ -317,6 +438,10 @@ class _Interp:
                 continue
             if len(sh) not in (0, len(out_shape)):
                 raise _Unsupported("implicit broadcast")
+            # Broadcasting repeats every source row N / size(sh) times; check
+            # the result's nnz before building the N-long index array.
+            if D.nnz * (N // max(_size(sh), 1)) > _MAX_NNZ:
+                raise _Unsupported("dependency matrix too large")
             try:
                 ids = np.broadcast_to(
                     np.arange(_size(sh), dtype=np.int64).reshape(sh), out_shape
@@ -368,6 +493,9 @@ class _Interp:
         M = _size([lsh[i] for i in lfree])
         N = _size([rsh[i] for i in rfree])
         K = _size([lsh[i] for i in lc])
+        if B * M * N > _MAX_NNZ:
+            # Check before building the (B*M*N)-long index arrays below.
+            raise _Unsupported("dot_general output too large")
 
         def arrange(shape, b, free, c, X):
             ids = np.arange(_size(shape), dtype=np.int64).reshape(shape)
@@ -378,32 +506,29 @@ class _Interp:
         Dl, Dr = ins
         kl, kr = ks
         both = Dl is not None and Dr is not None
-        bi, mi, ni = (
-            a.reshape(-1)
-            for a in np.meshgrid(np.arange(B), np.arange(M), np.arange(N), indexing="ij")
-        )
         parts = []
         if Dl is not None:
             mask = None if both or kr is None else (np.asarray(kr), rid)
-            parts.append(
-                self._dot_side(Dl, lid, _size(lsh), B, M, K, bi, mi, ni, mask, True)
-            )
+            parts.append(self._dot_side(Dl, lid, _size(lsh), B, M, N, K, mask, True))
         if Dr is not None:
             mask = None if both or kl is None else (np.asarray(kl), lid)
-            parts.append(
-                self._dot_side(Dr, rid, _size(rsh), B, N, K, bi, ni, mi, mask, False)
-            )
+            parts.append(self._dot_side(Dr, rid, _size(rsh), B, N, M, K, mask, False))
         return _union(parts)
 
     @staticmethod
-    def _dot_side(D, ids, size, B, X, K, bi, xi, yi, mask, x_is_m):
-        """Dependencies reaching ``out[b, m, n]`` through the x-dependent
-        operand ``D`` (index array ``ids`` of shape ``(B, X, K)``).  With a
-        constant partner (``mask = (values, partner_ids)``) only the
-        contracted positions where that constant is nonzero count."""
-        E = bi.size
+    def _dot_side(D, ids, size, B, X, Y, K, mask, x_is_m):
+        """Dependencies reaching ``out[b, m, n]`` (flattened row-major over
+        ``(B, M, N)``) through the x-dependent operand ``D``, whose index
+        array ``ids`` has shape ``(B, X, K)``; ``Y`` is the partner's free
+        size.  With a constant partner (``mask = (values, partner_ids)``)
+        only the contracted positions where that constant is nonzero count.
+        The ``B*M*N``-long index arrays are built only once the result is
+        known to fit the budget."""
+        E = B * X * Y
         if mask is not None and E * K <= 20_000_000:
             vals, pids = mask
+            g = np.indices((B, X, Y) if x_is_m else (B, Y, X)).reshape(3, -1)
+            bi, xi, yi = (g[0], g[1], g[2]) if x_is_m else (g[0], g[2], g[1])
             nz = vals.reshape(-1)[pids.reshape(-1)].reshape(pids.shape) != 0
             kmask = nz[bi, yi]  # (E, K)
             drows = ids[bi, xi]  # (E, K)
@@ -411,7 +536,18 @@ class _Interp:
             P = _selector(r, drows[r, k], (E, size))
             return _binarize(P @ D)
         R = _group_union(D, ids.reshape(B * X, K), size)
-        return _take(R, bi * X + xi, B * X)
+        # every R row is repeated Y times in the output: check first
+        if R.nnz * Y > _MAX_NNZ:
+            raise _Unsupported("dependency matrix too large")
+        if x_is_m:  # out (b, m, n) <- R[b*M + m]
+            rows = np.repeat(np.arange(B * X, dtype=np.int64), Y)
+        else:  # out (b, m, n) <- R[b*N + n]
+            rows = np.broadcast_to(
+                (np.arange(B, dtype=np.int64)[:, None, None] * X
+                 + np.arange(X, dtype=np.int64)[None, None, :]),
+                (B, Y, X),
+            ).reshape(-1)
+        return _take(R, rows, B * X)
 
     # -- data movement ------------------------------------------------------
 
@@ -433,7 +569,14 @@ class _Interp:
             return res
 
         if name in ("reshape", "squeeze", "expand_dims", "convert_element_type"):
-            ida = ids_of(0).reshape(eqn.outvars[0].aval.shape)
+            ida = ids_of(0)
+            dims = p.get("dimensions") if name == "reshape" else None
+            if dims is not None:
+                # lax.reshape(x, shape, dimensions=perm) transposes first
+                # (JAX emits it for ravel(order="F") and in the gradient
+                # of prod(..., axis=k)).
+                ida = np.transpose(ida, tuple(int(d) for d in dims))
+            ida = ida.reshape(eqn.outvars[0].aval.shape)
             return [_take(ins[0], ida, sizes[0])], None
         if name == "broadcast_in_dim":
             shape = tuple(p["shape"])
