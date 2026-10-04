@@ -63,6 +63,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .._pounce import Problem
+from . import _jaxpr_sparsity
 # Framework-neutral sparsity helpers shared with the PyTorch frontend
 # (pounce#109). Re-exported from this module so existing
 # ``from pounce.jax._build import _color_columns`` style imports (and the
@@ -159,7 +160,13 @@ class _JaxProblem:
         lb=None,
         ub=None,
         x0=None,
+        pattern_detection: str = "jaxpr",
     ):
+        if pattern_detection not in ("jaxpr", "probe"):
+            raise ValueError(
+                f"pattern_detection must be 'jaxpr' or 'probe', got {pattern_detection!r}"
+            )
+        use_jaxpr = pattern_detection == "jaxpr"
         self._f = jax.jit(f)
         self._grad_f = jax.jit(jax.grad(f))
         self._n = n
@@ -208,12 +215,20 @@ class _JaxProblem:
                     jnp.ones(m) if k % 3 == 1 else jnp.asarray(rng.standard_normal(m))
                 )
 
+        self.pattern_source = {"jac": "user" if jac_pattern is not None else None,
+                               "hess": "user" if hess_pattern is not None else None}
         if jac_pattern is not None:
             self._jac_rows, self._jac_cols = _normalize_user_pattern(
                 jac_pattern, "jac_pattern", m, n,
             )
         elif m > 0:
-            self._jac_rows, self._jac_cols = self._probe_jac(x_probes)
+            struct = _jaxpr_sparsity.jacobian_pattern(g, n, m) if use_jaxpr else None
+            if struct is not None:
+                self._jac_rows, self._jac_cols = struct
+                self.pattern_source["jac"] = "jaxpr"
+            else:
+                self._jac_rows, self._jac_cols = self._probe_jac(x_probes)
+                self.pattern_source["jac"] = "probe"
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
@@ -223,7 +238,21 @@ class _JaxProblem:
                 hess_pattern, "hess_pattern", n, n, lower=True,
             )
         else:
-            self._hess_rows, self._hess_cols = self._probe_hess(x_probes, lam_probes)
+            struct = None
+            if use_jaxpr:
+                if m > 0:
+                    args = (jnp.zeros(n), jnp.ones(m), jnp.asarray(1.0))
+                    gfun = lambda x, lam, sig: self._grad_lag(x, lam, sig)
+                else:
+                    args = (jnp.zeros(n), jnp.asarray(1.0))
+                    gfun = lambda x, sig: self._grad_lag(x, sig)
+                struct = _jaxpr_sparsity.hessian_lower_pattern(gfun, args, n)
+            if struct is not None:
+                self._hess_rows, self._hess_cols = struct
+                self.pattern_source["hess"] = "jaxpr"
+            else:
+                self._hess_rows, self._hess_cols = self._probe_hess(x_probes, lam_probes)
+                self.pattern_source["hess"] = "probe"
 
         # --- compressed (colored) AD callables, when requested ---
         if sparse:
@@ -404,6 +433,7 @@ def from_jax(
     jac_pattern=None,
     hess_pattern=None,
     x0=None,
+    pattern_detection: str = "jaxpr",
 ) -> Problem:
     """Build a pounce :class:`Problem` from JAX-traced functions.
 
@@ -437,9 +467,23 @@ def from_jax(
         This flag governs *per-eval* cost only. Detecting the pattern at
         build time costs ``O(n)`` AD passes either way (blocked, so
         memory stays bounded — see ``jac_pattern`` to skip it).
+    pattern_detection : {"jaxpr", "probe"}
+        How an unsupplied pattern is found (gh#985). ``"jaxpr"`` (default)
+        derives the *structural* pattern by index-set propagation through
+        the jaxpr of ``g`` (Jacobian) and of the gradient of the Lagrangian
+        (Hessian): no AD pass, no evaluation, and a value-dependent zero
+        (``exp`` underflow, a polynomial's vanishing second derivative)
+        can never drop an entry. Cost is one vectorised sparse step per
+        jaxpr equation plus the dependency nnz; a model it cannot bound
+        (``scan``/``while``/``cond``, ``sort``, scatters, data-dependent
+        indexing) or one so densely coupled that the dependency matrices
+        pass ~2e7 entries falls back to the probes below, per matrix.
+        ``"probe"`` forces the probes. ``problem.problem_obj.pattern_source``
+        records which was used (``"user"``/``"jaxpr"``/``"probe"``).
     n_probes : int or None
         Number of random probes whose nonzero patterns are unioned to
-        detect sparsity. ``None`` (default) uses 3 probes for the dense
+        detect sparsity *when the jaxpr analysis is unavailable or
+        ``pattern_detection="probe"``*. ``None`` (default) uses 3 probes for the dense
         path and 4 for ``sparse=True`` (a mis-probe under compression
         corrupts the seed structure, not just a reported nonzero, so
         hardening detection matters more there). Pass an explicit integer
@@ -485,7 +529,7 @@ def from_jax(
     obj = _JaxProblem(
         f=f, g=g, n=n, m=m, seed=seed, sparse=sparse, n_probes=n_probes,
         jac_pattern=jac_pattern, hess_pattern=hess_pattern,
-        lb=lb, ub=ub, x0=x0,
+        lb=lb, ub=ub, x0=x0, pattern_detection=pattern_detection,
     )
     return Problem(
         n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu,

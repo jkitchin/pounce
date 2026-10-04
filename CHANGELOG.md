@@ -99,25 +99,32 @@ changes.
   line search by design and is meant for LP / convex QP; a restoration failure
   under it now says so. Tracked in #986.
 
-- **`pounce.jax` sparsity probe dropped structural nonzeros, and the
-  function API hid non-converged solves (gh#985).** The pattern was read from
-  values at 1 (dense) / 3 (`sparse=True`) standard-normal points, ignoring the
-  box and `x0`, so `exp(-E/RT)` underflowing at `T ~ N(0,1)` or a polynomial
-  whose second derivative vanishes near 0 lost entries for the whole solve:
-  `Solve_Succeeded` at profit 0.022 instead of 5.352 (CSTR), and a Beckmann
-  traffic model that stopped at `Maximum_Iterations_Exceeded`. Detection now
-  unions the probes over `x0` (new `from_jax(x0=...)`; the function API passes
-  it), the box midpoint, several uniform points inside `[lb, ub]`, and
-  standard-normal points, with the default normal count raised to 3 / 4 and
-  alternating `lam` between normal and all-ones. This is still a union of
-  probes, not a jaxpr-structural analysis, so genuinely value-dependent
-  structure can still be missed; pass a pattern for that. `solve`,
-  `vmap_solve` and `vmap_solve_parallel` gain `jac_pattern` / `hess_pattern`
-  and `on_failure="warn" | "raise" | "ignore"`: a forward solve that is not
-  solved / acceptable / feasible now emits a `RuntimeWarning` by default
-  (or raises); return values are unchanged. Not done: `solve_with_warm` and
-  the other `pounce.jax` entry points were not given the new arguments.
-  Tests: `python/tests/test_jax_sparsity_gh985.py`.
+- **`pounce.jax` sparsity: structural detection from the jaxpr, patterns and
+  `on_failure` everywhere (gh#985).** The pattern was read from values at a
+  few standard-normal points, so `exp(-E/RT)` underflowing or a polynomial
+  second derivative vanishing there dropped entries for the whole solve
+  (`Solve_Succeeded` at profit 0.022 instead of 5.352; Beckmann stopping at
+  `Maximum_Iterations_Exceeded`). First pass unioned probes over `x0`, the box
+  and normal points. Now an unsupplied pattern is derived by index-set
+  propagation through the jaxpr (`pounce/jax/_jaxpr_sparsity.py`): the
+  Jacobian from `g`'s jaxpr, the Hessian from the Jacobian pattern of the
+  gradient program, symmetrised onto the lower triangle. It is independent of
+  every value, so a value-dependent zero cannot drop an entry; constant
+  (closed-over) matrices contribute only their nonzero pattern (a banded `A @ x`
+  stays banded). Cost is one vectorised sparse step per jaxpr equation (about
+  0.1 ms; 10^5 variables vectorised: 0.16 s; 2 000-interval unrolled clnlbeam:
+  about 9 s, dominated by JAX's own trace; a 300-interval unrolled clnlbeam builds in 7 s against 94 s probing) with no AD pass. A model it cannot
+  bound (`scan`/`while`/`cond`, `sort`, data-dependent indexing) or a
+  dependency matrix past ~2e7 entries falls back, per matrix, to the probe
+  union, so no model that worked stops working. `from_jax` / `JaxProblem` gain
+  `pattern_detection="jaxpr" | "probe"` and report the source in
+  `pattern_source`. `solve_with_warm` now takes `jac_pattern` / `hess_pattern`
+  / `on_failure`, `JaxProblem` takes `on_failure` (and `pattern_detection`),
+  and its parametric probe covers the box and standard-normal points as
+  `from_jax` does. Tests: `python/tests/test_jax_jaxpr_sparsity_gh985.py`
+  (CSTR and Beckmann true structure, 25 primitive-mix superset checks against
+  AD nonzeros, fallback, budget, every entry point), plus the first-pass
+  `test_jax_sparsity_gh985.py`.
 
 - **Convex IPM stopping depended on the units of `c` and `P` (gh#984),
   items 1, 2, 3, 5, 6.** The HSDE scale-relative arm granted every residual

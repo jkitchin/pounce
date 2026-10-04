@@ -505,6 +505,7 @@ def _solve_once_warm(
     zL_warm: np.ndarray,
     zU_warm: np.ndarray,
     mu_warm: float,
+    extra: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, dict]:
     """Forward solve with user-supplied dual (and optional μ) warm-start.
 
@@ -525,7 +526,13 @@ def _solve_once_warm(
     else:
         g_of_x = None
 
-    obj = _JaxProblem(f=f_of_x, g=g_of_x, n=n, m=m)
+    extra = extra or {}
+    obj = _JaxProblem(
+        f=f_of_x, g=g_of_x, n=n, m=m,
+        jac_pattern=extra.get("jac_pattern"),
+        hess_pattern=extra.get("hess_pattern"),
+        lb=lb, ub=ub, x0=x0,
+    )
     problem = Problem(n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu)
     merged = dict(options or {})
     merged.setdefault("warm_start_init_point", "yes")
@@ -543,6 +550,7 @@ def _solve_once_warm(
         zl=np.asarray(zL_warm),
         zu=np.asarray(zU_warm),
     )
+    _check_forward_status(info, extra.get("on_failure", "warn"))
     return (
         np.asarray(x_np, dtype=np.float64),
         np.asarray(info["mult_g"], dtype=np.float64),
@@ -555,7 +563,7 @@ def _solve_once_warm(
 
 def _pure_callback_warm_solve(
     f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
-    lam_warm, zL_warm, zU_warm, mu_warm,
+    lam_warm, zL_warm, zU_warm, mu_warm, extra=None,
 ):
     """Pure-callback wrapper around :func:`_solve_once_warm`.
 
@@ -582,6 +590,7 @@ def _pure_callback_warm_solve(
             options=options,
             lam_warm=lam_h, zL_warm=zL_h, zU_warm=zU_h,
             mu_warm=float(np.asarray(mu_h)),
+            extra=extra,
         )
         return x_np, lam_out, zL_out, zU_out, np.float64(mu_out)
 
@@ -598,19 +607,20 @@ def _make_solve_with_warm_custom_vjp(
     m: int,
     static_bounds,
     options: dict | None,
+    extra: dict | None = None,
 ):
     @jax.custom_vjp
     def solve_fn(p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds):
         x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
             f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
-            lam_warm, zL_warm, zU_warm, mu_warm,
+            lam_warm, zL_warm, zU_warm, mu_warm, extra,
         )
         return x_star, lam_out, zL_out, zU_out, mu_out
 
     def fwd(p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds):
         x_star, lam_out, zL_out, zU_out, mu_out = _pure_callback_warm_solve(
             f, g, p, x0, n, m, static_bounds, dyn_bounds, options,
-            lam_warm, zL_warm, zU_warm, mu_warm,
+            lam_warm, zL_warm, zU_warm, mu_warm, extra,
         )
         return (
             (x_star, lam_out, zL_out, zU_out, mu_out),
@@ -665,6 +675,9 @@ def solve_with_warm(
     cu=None,
     options: dict | None = None,
     warm_start: tuple | None = None,
+    jac_pattern=None,
+    hess_pattern=None,
+    on_failure: str = "warn",
 ):
     """Parametric solve that consumes and returns dual warm-state.
 
@@ -686,6 +699,10 @@ def solve_with_warm(
       mu_out))`` for a 4-tuple warm-start — the returned warm-state
       arity matches the input, so threading μ in gives μ back out.
 
+    ``jac_pattern`` / ``hess_pattern`` / ``on_failure`` behave as in
+    :func:`solve` (gh#985): explicit sparsity patterns skip detection, and
+    a non-converged forward solve warns (default), raises or is ignored.
+
     The forward call is differentiable w.r.t. ``p`` only — cotangents
     on the warm-output duals/μ and the warm-input duals/μ are dropped
     (zero), matching how :func:`solve` handles ``x0``. This is the
@@ -704,6 +721,9 @@ def solve_with_warm(
             )
             x0 = x_star  # primal warm-start for free
     """
+    _check_on_failure(on_failure)
+    extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
+                 on_failure=on_failure)
     want_mu = warm_start is not None and len(warm_start) == 4
     if warm_start is None:
         lam_warm = jnp.zeros(m, dtype=jnp.float64)
@@ -726,7 +746,9 @@ def solve_with_warm(
         )
 
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
-    fn = _make_solve_with_warm_custom_vjp(f, g, n, m, static_bounds, options)
+    fn = _make_solve_with_warm_custom_vjp(
+        f, g, n, m, static_bounds, options, extra
+    )
     x_star, lam_out, zL_out, zU_out, mu_out = fn(
         p, x0, lam_warm, zL_warm, zU_warm, mu_warm, dyn_bounds,
     )

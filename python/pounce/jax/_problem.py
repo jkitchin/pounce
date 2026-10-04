@@ -70,9 +70,12 @@ from ._build import (
     _color_columns,
     _detect_pattern_blocked,
     _normalize_user_pattern,
+    _probe_points,
     _seed_matrix,
     _to_np,
 )
+from . import _jaxpr_sparsity
+from ._diff import _check_forward_status, _check_on_failure
 from .._pounce import Problem, Solver
 
 from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
@@ -1252,10 +1255,18 @@ class JaxProblem:
         fed to the IPM — the differentiable backward (``factor_reuse`` /
         implicit diff) is unchanged. Defaults to ``False`` (dense, with
         forward/reverse mode chosen by shape).
+    pattern_detection : {"jaxpr", "probe"}
+        ``"jaxpr"`` (default) derives the structural Jacobian / Hessian
+        pattern by index-set propagation through the jaxpr (gh#985; see
+        :func:`pounce.jax.from_jax`), independent of ``p`` and of every
+        value, falling back to the probes below for a model it cannot
+        bound. ``"probe"`` forces the probes.
+        ``problem.pattern_source`` records the outcome per matrix.
     n_probes : int or None
-        Number of random probes whose nonzero patterns are unioned to
-        detect sparsity. ``None`` (default) uses 1 probe for the dense
-        path and 3 for ``sparse=True`` (a mis-probe under compression
+        Number of random probes (box midpoint / in-box / standard-normal)
+        whose nonzero patterns are unioned to detect sparsity when the
+        jaxpr analysis is unavailable. ``None`` (default) uses 1 probe for
+        the dense path and 3 for ``sparse=True`` (a mis-probe under compression
         corrupts the seed structure, not just a reported nonzero).
         Probes sweep the matrix a block of rows/columns at a time, so
         build memory is bounded regardless of ``n`` (issue #464).
@@ -1268,6 +1279,12 @@ class JaxProblem:
         must be a **superset** of the true structure — a missing entry is
         silently wrong, and nothing here evaluates the model to check.
         See :func:`pounce.jax.from_jax` for the full contract.
+    on_failure : {"warn", "raise", "ignore"}
+        What a differentiable forward solve does when the IPM does not
+        converge (gh#985): ``"warn"`` (default) emits a ``RuntimeWarning``,
+        ``"raise"`` a ``RuntimeError`` (under ``jax.jit`` it surfaces as a
+        JAX runtime error from the host callback), ``"ignore"`` is the
+        pre-0.12 silent behaviour. The returned ``x*`` is never changed.
     factor_reuse : bool
         When ``True`` (default), the differentiable backward reuses the
         IPM's converged compound KKT factor for the implicit-function
@@ -1360,9 +1377,17 @@ class JaxProblem:
         n_probes: int | None = None,
         jac_pattern=None,
         hess_pattern=None,
+        pattern_detection: str = "jaxpr",
+        on_failure: str = "warn",
     ):
+        _check_on_failure(on_failure)
+        self._on_failure = on_failure
         if m > 0 and g is None:
             raise ValueError("g must be provided when m > 0")
+        if pattern_detection not in ("jaxpr", "probe"):
+            raise ValueError(
+                f"pattern_detection must be 'jaxpr' or 'probe', got {pattern_detection!r}"
+            )
         self._f = f
         self._g = g
         self._n = n
@@ -1493,24 +1518,58 @@ class JaxProblem:
         # compression seed, not just a reported nonzero). Each probe is
         # swept a block of rows/columns at a time so the full (m, n) /
         # (n, n) matrix is never materialized (issue #464).
-        x_probes = [
-            jnp.asarray(rng.standard_normal(n)) for _ in range(self._n_probes)
-        ]
-        p_probes = [
-            jnp.asarray(rng.standard_normal(p_arr.shape))
-            for _ in range(self._n_probes)
-        ]
-        lam_probes = (
-            [jnp.asarray(rng.standard_normal(m)) for _ in range(self._n_probes)]
-            if m > 0 else []
-        )
+        use_jaxpr = pattern_detection == "jaxpr"
+        self.pattern_source = {
+            "jac": "user" if jac_pattern is not None else None,
+            "hess": "user" if hess_pattern is not None else None,
+        }
+        p_zero = jnp.asarray(p_arr)
+        need_probe_jac = jac_pattern is None and m > 0
+        jac_struct = hess_struct = None
+        if need_probe_jac and use_jaxpr:
+            jac_struct = _jaxpr_sparsity.jacobian_pattern(g, n, m, (p_zero,))
+        if hess_pattern is None and use_jaxpr:
+            if m > 0:
+                hargs = (jnp.zeros(n), jnp.ones(m), jnp.asarray(1.0), p_zero)
+            else:
+                hargs = (jnp.zeros(n), jnp.asarray(1.0), p_zero)
+            hess_struct = _jaxpr_sparsity.hessian_lower_pattern(
+                lambda *a: self._grad_lag(*a), hargs, n
+            )
+        x_probes = lam_probes = p_probes = None
+
+        def _probes():
+            # Fallback detector: unions probes at the box midpoint, inside
+            # [lb, ub] and standard-normal points (gh#985).
+            nonlocal x_probes, lam_probes, p_probes
+            if x_probes is None:
+                x_probes = [
+                    jnp.asarray(x)
+                    for x in _probe_points(rng, n, self._n_probes, lb, ub, None)
+                ]
+                p_probes = [
+                    p_zero if k % 2 == 0
+                    else jnp.asarray(rng.standard_normal(p_arr.shape))
+                    for k in range(len(x_probes))
+                ]
+                lam_probes = (
+                    [jnp.asarray(rng.standard_normal(m)) for _ in x_probes]
+                    if m > 0 else []
+                )
+            return x_probes, lam_probes, p_probes
 
         if jac_pattern is not None:
             self._jac_rows, self._jac_cols = _normalize_user_pattern(
                 jac_pattern, "jac_pattern", m, n,
             )
         elif m > 0:
-            self._jac_rows, self._jac_cols = self._probe_jac(x_probes, p_probes)
+            if jac_struct is not None:
+                self._jac_rows, self._jac_cols = jac_struct
+                self.pattern_source["jac"] = "jaxpr"
+            else:
+                xs, _, ps = _probes()
+                self._jac_rows, self._jac_cols = self._probe_jac(xs, ps)
+                self.pattern_source["jac"] = "probe"
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
@@ -1519,10 +1578,13 @@ class JaxProblem:
             self._hess_rows, self._hess_cols = _normalize_user_pattern(
                 hess_pattern, "hess_pattern", n, n, lower=True,
             )
+        elif hess_struct is not None:
+            self._hess_rows, self._hess_cols = hess_struct
+            self.pattern_source["hess"] = "jaxpr"
         else:
-            self._hess_rows, self._hess_cols = self._probe_hess(
-                x_probes, lam_probes, p_probes,
-            )
+            xs, ls, ps = _probes()
+            self._hess_rows, self._hess_cols = self._probe_hess(xs, ls, ps)
+            self.pattern_source["hess"] = "probe"
 
         # Colored/compressed forward closures (issue #83, option B).
         # Built after the probe because coloring needs the pattern.
@@ -2278,6 +2340,7 @@ class JaxProblem:
             return x_np, info, sid
 
         x_np, info, sid = self._run_pinned(_do) if register else _do()
+        _check_forward_status(info, self._on_failure)
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -2311,6 +2374,7 @@ class JaxProblem:
         # Register/drop happens inside the pinned closure so the
         # unsendable Solver never crosses thread boundaries.
         x_np, info, sid = self._run_pinned(_do)
+        _check_forward_status(info, self._on_failure)
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -2372,6 +2436,7 @@ class JaxProblem:
         # closure so the unsendable Solver never crosses thread
         # boundaries.
         X_np, info, sid = self._run_pinned(_do)
+        _check_forward_status(info, self._on_failure)
         x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
         lam_batch = (
             np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)
@@ -2430,6 +2495,7 @@ class JaxProblem:
             return X_np, info, sid
 
         X_np, info, sid = self._run_pinned(_do)
+        _check_forward_status(info, self._on_failure)
         x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
         lam_batch = (
             np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)
