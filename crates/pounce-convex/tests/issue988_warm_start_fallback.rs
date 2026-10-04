@@ -95,7 +95,7 @@ fn mpc(n_steps: usize, t0: f64) -> QpProblem {
     }
 }
 
-fn warm_vs_cold(n_steps: usize) -> Vec<(f64, QpStatus, QpStatus)> {
+fn warm_vs_cold(n_steps: usize) -> Vec<(f64, QpStatus, QpStatus, usize, usize)> {
     let opts = QpOptions::default();
     let base = solve_qp_ipm(&mpc(n_steps, 3.0), &opts, backend);
     assert_eq!(base.status, QpStatus::Optimal);
@@ -110,7 +110,7 @@ fn warm_vs_cold(n_steps: usize) -> Vec<(f64, QpStatus, QpStatus)> {
                 "N={n_steps} t0={t} cold {:?} {} warm {:?} {}",
                 cold.status, cold.iters, w.status, w.iters
             );
-            (t, cold.status, w.status)
+            (t, cold.status, w.status, cold.iters, w.iters)
         })
         .collect()
 }
@@ -118,11 +118,19 @@ fn warm_vs_cold(n_steps: usize) -> Vec<(f64, QpStatus, QpStatus)> {
 #[test]
 fn infeasible_neighbour_warm_start_matches_cold_verdict() {
     for n_steps in [20, 60, 200] {
-        for (t, cold, warm) in warm_vs_cold(n_steps) {
+        for (t, cold, warm, cold_it, warm_it) in warm_vs_cold(n_steps) {
             if t == 3.5 {
                 assert_eq!(cold, QpStatus::PrimalInfeasible, "N={n_steps} t0={t} cold");
             }
             assert_eq!(warm, cold, "N={n_steps} t0={t}: warm must not lose to cold");
+            // gh #988 (review): `iters` counts both legs. The stalled warm leg
+            // is handed to the cold solve within the stall detector's window
+            // (measured: at most 38 iterations over cold, at N=200 t0=-4); it
+            // used to run to `max_iter` first (133..219 against 14..19).
+            assert!(
+                warm_it <= cold_it + 45,
+                "N={n_steps} t0={t}: warm {warm_it} vs cold {cold_it}"
+            );
         }
     }
 }
@@ -200,7 +208,13 @@ fn pinned_column_is_eliminated_and_the_lift_is_a_kkt_point() {
     };
     let sol = solve_qp_ipm_warm(&prob, &opts, &warm, backend);
     assert_eq!(sol.status, QpStatus::Optimal, "{sol:?}");
-    assert!((sol.x[0] - 1.0).abs() < 1e-9, "pin restored: {:?}", sol.x);
+    // The pin is restored *bit for bit*: only the elimination writes it back
+    // exactly; the full-problem path (pins as a bound pair inside the
+    // interior-point iteration) lands within tolerance of it, never on it.
+    // So this is the evidence the reduction ran and its answer was returned.
+    assert_eq!(sol.x[0], 1.0, "pin restored exactly: {:?}", sol.x);
+    // And it ran on its own: a 2-column LP, no cold leg behind it.
+    assert!(sol.iters <= 20, "iters = {}", sol.iters);
     assert!(
         (sol.x[1] - 3.0).abs() < 1e-6 && sol.x[2].abs() < 1e-6,
         "{:?}",
@@ -219,4 +233,93 @@ fn pinned_column_is_eliminated_and_the_lift_is_a_kkt_point() {
         res.dual_infeasibility < 1e-6 && res.primal_infeasibility < 1e-6,
         "the lifted point must satisfy the FULL problem's KKT conditions: {res:?}"
     );
+}
+
+/// gh #988 (review), item 1. Two contradictory equality rows `x0 + x1 = 1`
+/// and `x0 + x1 = 1 + gap`, beside an unrelated row `x2 <= big`. The second
+/// pass's plateau exit, and the global scale-relative stop before it, read the
+/// primal residual against `1 + max(‖b‖, ‖h‖, ‖s‖)`, so the one large
+/// right-hand side excused the contradiction in the other two rows and the
+/// direct driver returned `Optimal` at `|Ax - b| = gap/2` (up to `0.25`).
+fn near_feasible_infeasible(gap: f64, big: f64) -> QpProblem {
+    QpProblem {
+        n: 3,
+        p_lower: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(2, 2, 1.0),
+        ],
+        c: vec![1.0, 2.0, -1.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(1, 0, 1.0),
+            Triplet::new(1, 1, 1.0),
+        ],
+        b: vec![1.0, 1.0 + gap],
+        g: vec![Triplet::new(0, 2, 1.0)],
+        h: vec![big],
+        lb: vec![],
+        ub: vec![],
+    }
+}
+
+const NEAR_FEASIBLE_CASES: [(f64, f64); 4] = [(1e-4, 1e4), (1e-3, 1e6), (0.5, 1e8), (1e-6, 1e9)];
+
+#[test]
+fn near_feasible_infeasible_is_never_optimal_from_a_warm_start() {
+    let opts = QpOptions::default();
+    for (gap, big) in NEAR_FEASIBLE_CASES {
+        let prob = near_feasible_infeasible(gap, big);
+        let cold = solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(
+            cold.status,
+            QpStatus::PrimalInfeasible,
+            "gap={gap} big={big} cold"
+        );
+        // Warm from the feasible neighbour (`gap = 0`).
+        let base = solve_qp_ipm(&near_feasible_infeasible(0.0, big), &opts, backend);
+        assert_eq!(base.status, QpStatus::Optimal);
+        let w = solve_qp_ipm_warm(&prob, &opts, &QpWarmStart::from_solution(&base), backend);
+        eprintln!(
+            "gap={gap} big={big} warm {:?} {} cold {}",
+            w.status, w.iters, cold.iters
+        );
+        assert_eq!(
+            w.status,
+            QpStatus::PrimalInfeasible,
+            "gap={gap} big={big}: warm must reach the cold verdict"
+        );
+        // One short warm leg (the stall window) plus the cold leg: measured
+        // 10-11 iterations over cold.
+        assert!(
+            w.iters <= cold.iters + 25,
+            "{} vs cold {}",
+            w.iters,
+            cold.iters
+        );
+    }
+}
+
+#[test]
+fn near_feasible_infeasible_is_never_optimal_on_the_direct_driver() {
+    let opts = QpOptions {
+        use_hsde: false,
+        ..QpOptions::default()
+    };
+    for (gap, big) in NEAR_FEASIBLE_CASES {
+        let prob = near_feasible_infeasible(gap, big);
+        let d = solve_qp_ipm(&prob, &opts, backend);
+        eprintln!("gap={gap} big={big} direct {:?} {}", d.status, d.iters);
+        assert_ne!(d.status, QpStatus::Optimal, "gap={gap} big={big}");
+        // The direct driver has no certificate of its own for most of these
+        // (its Farkas test needs `y` to outgrow the regularized drift), and its
+        // final verdict classifies the last point by its true KKT error: a
+        // contradiction of `1e-6` leaves `|Ax-b| = 5e-7`, which is "solved to
+        // reduced accuracy" by the `1e3·tol` rule and says so. Anything
+        // larger must not even be that.
+        if gap > 1e-5 {
+            assert_ne!(d.status, QpStatus::OptimalInaccurate, "gap={gap} big={big}");
+        }
+    }
 }

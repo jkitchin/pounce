@@ -486,7 +486,7 @@ class Continuation:
         snapshot = problem.options_snapshot() if ws is not None else None
         try:
             if ws is not None:
-                for key, val in ws.options().items():
+                for key, val in ws.overlay_options(snapshot).items():
                     problem.add_option(key, val)
             t0 = time.perf_counter()
             x, info = solver.solve(x0=x0, **kwargs)

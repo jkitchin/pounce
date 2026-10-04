@@ -1395,6 +1395,24 @@ coherent with the primal point (a corrupted `y`) are still refused by the
 gh#617 test and keep the barrier-sized fill, and the gate never touches
 variable-bound multipliers.
 
+The move is capped (gh#988 review): a slack is closed only when it is at most
+`0.5·max(1, |s|)` wide. Past that the bound has moved too far for "still
+active" to be the likely reading — capacity 14 → 100 would have closed an
+86-wide slack and started the solve 86 infeasible — and the capped split is
+used instead. `info["warm_start"]["primal_residual"]` is measured on the point
+the solve actually starts from (after the move), and `slacks_closed` /
+`slack_close_reverted` report what the move did. A row the carried point
+*violates* (a capacity tightened 14 → 12) is active by construction, so its
+slack multiplier takes the value the seeded `y_d` implies rather than the
+constant fill (24 → 4 iterations, cold 6). Across the reviewer's sweep
+K ∈ {8, …, 1e4} the warm start is now no slower than cold at every K.
+
+`warm_start_recentering` set on the `Problem` with `add_option` before a
+`solve(warm_start=...)` takes precedence over the `WarmStart`'s own
+`recentering` field (it used to be overwritten, so `none` silently ran
+`residual`). With `none` the K = 16 case takes 97 iterations — the
+reconstruction above is what makes it 4.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `warm_start_init_point` | `no` | Use the supplied primal and dual iterate as the start. |

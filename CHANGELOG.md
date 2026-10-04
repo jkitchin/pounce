@@ -193,6 +193,53 @@ changes.
   scenario optimum / x only / base plan = 32 / 31 / 36 iterations against 31
   cold (was 231 / 231 / 82, i.e. the iteration limit then a cold re-solve);
   textbook instance (T=52, K=60): 36 / 36 / 38 against 60 cold.
+- **gh#988 review fixes.** (1) The second pass's primal-plateau exit declared
+  primal-*infeasible* problems `optimal` from a warm start: it read the
+  residual against `1 + max(‖b‖, ‖h‖, ‖s‖)`, so one large right-hand side
+  excused every row (`x0+x1 = 1`, `x0+x1 = 1+gap` beside `x2 <= big`: warm
+  `optimal` at `|Ax-b|` up to `0.25` for gap/big = 1e-4/1e4, 1e-3/1e6,
+  0.5/1e8, where the cold solve certifies `primal_infeasible`). The exit is
+  removed. Traced per iteration, the production-LP "floor" was not a floor:
+  `‖dy‖ = pinf/δ_c` exactly (478 per iteration) while a bound multiplier of
+  6.7e3 on a violated shipment row walked down, and the accepted point had
+  complementarity `2.6e-4`. In its place a warm leg that *stalls* (primal
+  residual not halved over 5 iterations once `mu < tol`, or over 15
+  regardless) ends without a verdict and hands over to the cold HSDE leg; a
+  cold direct solve (`use_hsde=false`) never stops early, since the drift is
+  its Farkas ray growing. The direct driver's scale-relative stop, which had
+  the same global-norm flaw (the gap 0.5 / big 1e8 case came back `optimal`
+  even without the plateau), now excuses each row and column only by the
+  magnitude of its own terms. All four infeasible cases are now
+  `primal_infeasible` from a warm start (23-32 iterations, cold 17-21) and
+  never `optimal` on the direct driver. Pinned production LP: warm 57-62
+  iterations against 34 cold, `|Ax-b|` 3.4e-9 (cold 7.7e-9) and
+  complementarity 1.5e-9 (the second pass's 31-36 were the unsound accept).
+  (2) The plateau's "no improvement" (`>= 0.9·last` for 3 iterations) is
+  gone with it; the stall test asks for the residual to halve. (3) NLP: the
+  slack-closing move is capped at `0.5·max(1, |s|)` and re-measured after the
+  move (undone if the start is worse than the move accounts for);
+  `info["warm_start"]["primal_residual"]` describes the actual start (it read
+  `0` beside a start 86 infeasible at K=100) and `slacks_closed` /
+  `slack_close_reverted` are reported. A row the carried point violates
+  (capacity tightened 14 -> 12) takes the multiplier its seeded `y_d` implies
+  instead of the constant fill. Pricing sweep, warm / cold iterations: K=8
+  5/7 (was 9), K=12 4/6 (was 24), K=100 2/8 (was 11), K=1e4 3/8 (was 10);
+  warm <= cold at all 12 K. `benchmarks/warmstart` `warm-ipm`: 6244 -> 5974,
+  only `hanging_chain` (142/126/197 -> 47/83/109) and
+  `rosenbrock_ring_cycle` (93/88/101 -> 75/76/87) move, no failures;
+  `warm-qp-ipm` unchanged. (4) `warm_start_recentering` set on the Problem
+  now wins over the `WarmStart`'s own `recentering` (it was overwritten, so
+  `none` ran `residual`; with `none` honoured, K=16 takes 97 iterations).
+  (5) `solve_qp_ipm_warm` runs one warm leg and at most one cold leg; with
+  pinned columns both run on the reduced problem and the verdict is lifted,
+  an infeasibility certificate verified on the full problem before it is
+  returned (the second pass could chain four `max_iter` budgets). `iters` is
+  the total over every leg, including when an inaccurate warm result is
+  kept. (6) An all-pinned row is dropped when its violation is under `tol` or
+  under `64·ε` times its own terms (was `1e-9·max(1,|rhs|)`). (7) Tests
+  assert iteration bounds and that the pin elimination ran. Fixture sweep
+  (both legs, 206 lines): identical to the pre-change binary (the CLI's
+  convex arm runs HSDE; the direct driver only behind it).
 - **Misleading verdicts and reports (gh#987).** (1) A `.nl` that declares
   binary / integer variables was solved as its relaxation with no word of it:
   the CLI now warns on stderr, and `pounce verify` checks the declared integer

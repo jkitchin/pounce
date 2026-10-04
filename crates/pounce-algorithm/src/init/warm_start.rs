@@ -156,6 +156,15 @@ const MU_ESCALATION_TRIGGER: Number = 10.0;
 /// a primal point that is feasible to `1e-9`.
 const SEED_REJECTION_TRIGGER: Number = 10.0;
 
+/// Largest slack the gh#988 slack-closing move may close, as a multiple of
+/// `max(1, |s|)` at that entry (gh#988 review). Closing a slack costs a primal
+/// infeasibility of exactly its width; past this the bound has moved too far
+/// for "the same constraint, still active" to be the likely reading. Measured
+/// on the gh#988 pricing model (capacity 14 -> K, `|s| = 14`): K <= 20 closes
+/// (a 6-wide slack, 4-5 iterations against 7 cold), K >= 25 keeps the capped
+/// split (closing a 11..86-wide slack started the solve up to 86 infeasible).
+const SLACK_CLOSE_CAP: Number = 0.5;
+
 /// What the recentering pass measured about the point as *supplied*,
 /// before anything was rebuilt from it.
 ///
@@ -214,8 +223,11 @@ pub enum BlockVerdict {
 /// iterate actually starts at.
 #[derive(Debug, Clone)]
 pub struct WarmStartDiagnostics {
-    /// `‖c(x)‖_∞` of the supplied primal point, measured before any
-    /// dual reconstruction (it does not depend on the duals).
+    /// Primal infeasibility of the point the solve starts from. Measured on
+    /// the supplied point before any dual reconstruction (it does not depend
+    /// on the duals), and re-measured after the gh#988 slack-closing move
+    /// when that move ran, since it changes the slacks (gh#988 review: it
+    /// used to report the pre-move `0` beside a start 86 infeasible).
     pub primal_residual: Number,
     /// `‖∇_x L‖_∞` after reconstruction.
     pub dual_residual: Number,
@@ -246,6 +258,13 @@ pub struct WarmStartDiagnostics {
     /// `true` when `warm_start_recentering=none` turned all of the
     /// above off and the fields are the legacy constants.
     pub recentering_disabled: bool,
+    /// Inequality slacks closed onto their bound because the seeded
+    /// multiplier said the row is still active (gh#988), within the
+    /// [`SLACK_CLOSE_CAP`] move limit.
+    pub slacks_closed: usize,
+    /// `true` when that move was undone because the re-measured start was
+    /// more infeasible than the move itself accounts for (gh#988 review).
+    pub slack_close_reverted: bool,
 }
 
 impl Default for WarmStartDiagnostics {
@@ -263,6 +282,8 @@ impl Default for WarmStartDiagnostics {
             eq_duals_rejected: false,
             stationarity_split: false,
             recentering_disabled: false,
+            slacks_closed: 0,
+            slack_close_reverted: false,
         }
     }
 }
@@ -939,10 +960,20 @@ fn refine_bound_duals_from_stationarity(
         project(&*r_s, &*nlp_ref.pd_l(), 1.0, &curr.v_l),
         project(&*r_s, &*nlp_ref.pd_u(), -1.0, &curr.v_u),
     ];
+    // `|s|` at each bounded slack entry, the scale the gh#988 slack-closing
+    // move below is capped against.
+    let s_mag: [Option<Vec<Number>>; 2] = [
+        project(&*curr.s, &*nlp_ref.pd_l(), 1.0, &curr.v_l),
+        project(&*curr.s, &*nlp_ref.pd_u(), 1.0, &curr.v_u),
+    ];
     drop(nlp_ref);
 
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
     let mut rebuilt: [Option<Rc<dyn Vector>>; 4] = [None, None, None, None];
+    // gh#988 (review): the split each closed slack entry would have taken
+    // instead, so the whole move can be undone if the point it produces is
+    // worse off than the cap alone can tell.
+    let mut fallback_vals: [Option<Vec<Number>>; 4] = [None, None, None, None];
     // Per slack block: how far each entry's slack is closed (gh#988).
     let mut s_shift: [Option<Vec<Number>>; 2] = [None, None];
     for (i, block) in blocks.iter().enumerate() {
@@ -972,7 +1003,21 @@ fn refine_bound_duals_from_stationarity(
             // would have given it. Same principle [`final_mu`] applies
             // to μ, one level down: a residual is not a multiplier.
             if slack_is_swamped(sl[k], swamping) {
-                vals[k] = hard_floor.min(cap);
+                // gh#988 (review): except for an inequality slack whose
+                // seeded `y_d` (coherent, or `eq_seed_is_incoherent` would
+                // have returned above) asks for a multiplier. The slack
+                // being swamped means the row is *violated* at this point --
+                // a bound tightened past the carried point (capacity
+                // 14 -> 12) -- and a violated row is active: the multiplier
+                // its stationarity implies is the only one that does not
+                // start the solve with `|y_d|` of dual infeasibility. With
+                // the constant fill that was `1.41`, and the solve spent 24
+                // iterations, two of them restorations, against 6 cold.
+                vals[k] = if i >= 2 && target[k].is_finite() && target[k] > hard_floor {
+                    target[k].min(cap)
+                } else {
+                    hard_floor.min(cap)
+                };
                 continue;
             }
             let compl_floor = if sl[k].is_finite() && sl[k] > 0.0 {
@@ -1017,6 +1062,18 @@ fn refine_bound_duals_from_stationarity(
             // move costs is a primal infeasibility of the old slack,
             // which the first Newton step removes along the active
             // constraint.
+            //
+            // gh#988 (review): only when the move is *small against the
+            // constraint's own scale*. The move costs a primal infeasibility
+            // of exactly the slack it closes, and nothing bounded it: a
+            // capacity raised 14 -> 100 closed a slack of 86, so the solve
+            // started 86 infeasible (and was 11 iterations against 8 cold)
+            // while the diagnostics, measured before the move, said 0. A
+            // bound that moved by more than `SLACK_CLOSE_CAP · max(1, |s|)`
+            // is no longer "the same constraint, still active" with any
+            // confidence -- 14 -> 31 releases it entirely -- and keeps the
+            // capped split.
+            let capped_split = split.max(compl_floor).max(hard_floor).min(cap);
             if i >= 2
                 && target[k].is_finite()
                 && target[k] > SEED_REJECTION_TRIGGER * compl_floor
@@ -1025,12 +1082,23 @@ fn refine_bound_duals_from_stationarity(
             {
                 let v = target[k].max(hard_floor).min(cap);
                 let new_slack = (mu_hat / v).min(sl[k]);
-                vals[k] = v;
-                let shift = s_shift[i - 2].get_or_insert_with(|| vec![0.0; vals.len()]);
-                shift[k] = sl[k] - new_slack;
-                continue;
+                let scale = s_mag[i - 2]
+                    .as_ref()
+                    .and_then(|m| m.get(k))
+                    .map_or(1.0, |m| m.abs().max(1.0));
+                if sl[k] - new_slack <= SLACK_CLOSE_CAP * scale {
+                    vals[k] = v;
+                    let shift = s_shift[i - 2].get_or_insert_with(|| vec![0.0; vals.len()]);
+                    shift[k] = sl[k] - new_slack;
+                    let fb = fallback_vals[i].get_or_insert_with(|| vals.clone());
+                    fb[k] = capped_split;
+                    continue;
+                }
             }
-            vals[k] = split.max(compl_floor).max(hard_floor).min(cap);
+            vals[k] = capped_split;
+            if let Some(fb) = fallback_vals[i].as_mut() {
+                fb[k] = capped_split;
+            }
         }
         let mut out = block.make_new();
         if scatter(&mut *out, &vals) {
@@ -1066,6 +1134,7 @@ fn refine_bound_duals_from_stationarity(
         }
         s_new = Rc::from(s_copy);
     }
+    let closed = s_shift.iter().any(|v| v.is_some());
     let new_curr = IteratesVector::new(
         Rc::clone(&curr.x),
         s_new,
@@ -1077,6 +1146,55 @@ fn refine_bound_duals_from_stationarity(
         pick(3, &curr.v_u),
     );
     data.borrow_mut().set_curr(new_curr);
+    if closed {
+        // gh#988 (review): re-measure the point the solve will actually
+        // start from. The capped move adds at most its own size to the
+        // primal residual; if the measured residual came out worse than the
+        // cap allows (a slack shared with another bounded side, a layout
+        // this helper does not model) the move is undone and the capped
+        // split is used throughout. Either way the diagnostics describe the
+        // returned point, not the one before the move.
+        let max_shift = s_shift
+            .iter()
+            .flatten()
+            .flat_map(|v| v.iter().copied())
+            .fold(0.0_f64, f64::max);
+        let inf_after = cq.borrow().curr_primal_infeasibility_max();
+        let allowed = inf_pr.max(0.0) + max_shift * (1.0 + 1e-8);
+        if !(inf_after.is_finite() && inf_after <= allowed) {
+            let mut undo = rebuilt.clone();
+            for (i, fb) in fallback_vals.iter().enumerate() {
+                if let Some(fb) = fb {
+                    let mut out = blocks[i].make_new();
+                    if scatter(&mut *out, fb) {
+                        undo[i] = Some(Rc::from(out));
+                    }
+                }
+            }
+            let pick_undo = |i: usize, orig: &Rc<dyn Vector>| -> Rc<dyn Vector> {
+                undo[i].clone().unwrap_or_else(|| Rc::clone(orig))
+            };
+            let reverted = IteratesVector::new(
+                Rc::clone(&curr.x),
+                Rc::clone(&curr.s),
+                Rc::clone(&curr.y_c),
+                Rc::clone(&curr.y_d),
+                pick_undo(0, &curr.z_l),
+                pick_undo(1, &curr.z_u),
+                pick_undo(2, &curr.v_l),
+                pick_undo(3, &curr.v_u),
+            );
+            data.borrow_mut().set_curr(reverted);
+            diag.slack_close_reverted = true;
+        } else {
+            diag.slacks_closed = s_shift
+                .iter()
+                .flatten()
+                .map(|v| v.iter().filter(|&&d| d > 0.0).count())
+                .sum();
+        }
+        diag.primal_residual = cq.borrow().curr_primal_infeasibility_max();
+    }
     true
 }
 

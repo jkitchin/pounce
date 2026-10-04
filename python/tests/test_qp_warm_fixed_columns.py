@@ -7,11 +7,13 @@ production and overtime of the first FREEZE weeks pinned at the base plan.
 
 Before the second pass the warm leg (direct infeasible-start method) ran to
 the 199-iteration limit and the call returned that, or after the first-pass
-fallback a cold solve on top of it (231 iterations against 32 cold).  Two
-defects were behind it: pinned columns were left in as the row pair
-`x <= v, -x <= -v` (no interior), and the direct driver's absolute residual
-test could not be met on a primal residual that floors at `5e-8` on data of
-order `1e4`, so a converged iterate ran on to the limit.  Reduced instance
+fallback a cold solve on top of it (231 iterations against 32 cold).  Pinned
+columns were left in as the row pair `x <= v, -x <= -v` (no interior); they
+are now eliminated.  The second pass also let the direct driver accept a
+primal residual that "plateaued" at `5e-8` as optimal; the review traced that
+plateau to the equality regularization absorbing the residual while a large
+bound multiplier drifts (complementarity `2.6e-4` at the accepted point), so
+the stall is now handed to the cold leg instead.  Reduced instance
 (T=26, K=10, about 3500 columns, 135 pinned) takes a second.
 """
 
@@ -106,6 +108,19 @@ def test_warm_start_with_fixed_columns_is_optimal_and_not_much_slower_than_cold(
     # The pins are honoured exactly and the answer is the cold one.
     i = instance["pinned"]
     np.testing.assert_allclose(r.x[i], instance["fixed"]["lb"][i], atol=1e-8)
-    # A warm start that cannot help may cost a little; it may not cost the
-    # iteration limit (199) that the stalled direct leg used to burn.
-    assert r.iters <= cold.iters + 25, (which, r.iters, cold.iters)
+    # The returned point is as feasible as the cold one, measured on the full
+    # problem (the review of the second pass found it accepted at |Ax-b| =
+    # 4.8e-8 with complementarity 2.6e-4: a stall, not a floor).
+    f = instance["fixed"]
+    pinf = max(np.abs(f["A"] @ r.x - f["b"]).max(), max(0.0, (f["G"] @ r.x - f["h"]).max()))
+    cold_pinf = max(np.abs(f["A"] @ cold.x - f["b"]).max(), max(0.0, (f["G"] @ cold.x - f["h"]).max()))
+    assert pinf <= max(1e-8, 2 * cold_pinf), (which, pinf, cold_pinf)
+    assert r.residuals["kkt_error"] <= 1e-8, r.residuals
+    # Here the warm start does not help: the direct leg stalls at |Ax-b| =
+    # 4.8e-8 (a bound multiplier of 6.7e3 on a shipment row has to walk back
+    # to zero at pinf/delta_c = 478 per iteration), the stall detector hands
+    # over after its window, and the cold HSDE leg on the pin-eliminated
+    # problem finishes. `iters` counts both legs: measured 57-62 against 34
+    # cold. It may not cost the iteration limit (199) the stalled direct leg
+    # used to burn, nor the 231 of the first-pass fallback chain.
+    assert r.iters <= cold.iters + 35, (which, r.iters, cold.iters)

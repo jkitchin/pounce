@@ -1615,6 +1615,8 @@ pub(crate) fn build_info_dict<'py>(
         d.set_item("eq_duals_rejected", w.eq_duals_rejected)?;
         d.set_item("stationarity_split", w.stationarity_split)?;
         d.set_item("recentering_disabled", w.recentering_disabled)?;
+        d.set_item("slacks_closed", w.slacks_closed)?;
+        d.set_item("slack_close_reverted", w.slack_close_reverted)?;
         info.set_item("warm_start", d)?;
     }
     // gh#986 item 6: an `intermediate` callback that *raised* stops the
