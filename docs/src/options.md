@@ -1598,6 +1598,7 @@ optimization above all.
 |---|---|---|---|
 | `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
 | `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
+| `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each per-constraint element along the model's declared Hessian sparsity |
 | `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
 | `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
 | `partitioned_curvature_cap` | off (`inf`)      | > 0                        | cap on one update's movement. **Leave off** |
@@ -1623,6 +1624,29 @@ the indefiniteness would never reach the inertia correction.
 `elements=blocks` defaults to damped BFGS instead, since there the
 element *is* the Lagrangian restricted to a block, which is the object
 an interior-point method wants a positive-definite model of.
+
+**`partitioned_structure`.** A constraint row is linear in most of its
+support and nonlinear in a few small independent groups (a collocation
+row couples a state to the control at the same collocation point and to
+nothing else), so its Hessian is a handful of tiny blocks inside a
+dense-looking `k × k` pattern. One secant pair per iteration cannot
+determine a dense block, and the rank spent on pairs that do not couple
+appears as spurious entries (up to `1e2` against a true Hessian whose
+largest entry was `1e-3`, on a Radau-collocated batch reactor).
+`declared` (default) reads the Hessian sparsity the model already
+declares for `eval_h` — structure only, nothing is evaluated — gives
+each connected group its own element, and drops coordinates the pattern
+never couples. A model that declares no Hessian structure (a Python
+problem object without `hessian`, for instance) takes the `jacobian`
+behaviour, because an absent declaration is not evidence of linearity.
+Measured on the issue's batch reactor (225 variables): exact 18
+iterations, `jacobian` 30, `declared` 22. Not fixed: the iteration count
+still grows with the mesh (N = 400: exact 42, `declared` 82), and
+`partitioned_update_type=bfgs` does not converge per-constraint — a
+positive-semidefinite model of an indefinite `∇²c_j`, weighted by a
+multiplier of either sign, hands the IPM a wrong-inertia `W` and a
+regularization of `1e6` and up. Use `sr1`, or `partitioned_elements=blocks`
+(which pairs BFGS with a Lagrangian block, where it is sound).
 
 **`partitioned_max_element`.** An element with `k` nonzeros costs
 `k(k+1)/2` stored reals, so one wide constraint row would dominate the

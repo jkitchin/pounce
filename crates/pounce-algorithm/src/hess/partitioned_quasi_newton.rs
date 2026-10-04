@@ -277,6 +277,12 @@ pub struct PartitionedQuasiNewtonUpdater {
     /// update to an element block may reach
     /// (`partitioned_curvature_cap`). See [`DEFAULT_CURVATURE_CAP`].
     pub curvature_cap: Number,
+    /// The TNLP's declared Lagrangian Hessian sparsity, `(row >= col)` in the
+    /// compressed variable space. When present, each per-constraint (and
+    /// objective) element is split into the connected groups of that pattern
+    /// restricted to its support, and coordinates the pattern never couples
+    /// are dropped. See [`Self::push_split`].
+    pub declared_pattern: Option<Vec<(Index, Index)>>,
 
     /// Element table, built on the first call and fixed thereafter.
     elements: Vec<Element>,
@@ -320,6 +326,7 @@ impl PartitionedQuasiNewtonUpdater {
             init_val: 1.0,
             objective_vars: None,
             curvature_cap: DEFAULT_CURVATURE_CAP,
+            declared_pattern: None,
             elements: Vec::new(),
             space: None,
             diag_pos: Vec::new(),
@@ -382,6 +389,20 @@ impl PartitionedQuasiNewtonUpdater {
             return;
         }
 
+        // Declared-pattern adjacency (gh#989 item 5): coordinate -> every
+        // coordinate it is coupled to (itself included when the diagonal is
+        // declared), from the lower-triangle pairs.
+        let adjacency: Option<std::collections::HashMap<Index, Vec<Index>>> =
+            self.declared_pattern.as_ref().map(|pat| {
+                let mut m: std::collections::HashMap<Index, Vec<Index>> = Default::default();
+                for &(r, c) in pat {
+                    m.entry(r).or_default().push(c);
+                    if r != c {
+                        m.entry(c).or_default().push(r);
+                    }
+                }
+                m
+            });
         // ---- objective element -------------------------------------
         //
         // Every constraint element takes its support from a row of the
@@ -407,13 +428,17 @@ impl PartitionedQuasiNewtonUpdater {
                 .collect(),
         };
         if !obj_support.is_empty() {
-            elements.push(Self::make_element(
+            let mut sup = obj_support;
+            sup.sort_unstable();
+            sup.dedup();
+            self.push_split(
+                &mut elements,
+                adjacency.as_ref(),
                 ElementSource::Objective,
                 0,
-                obj_support,
+                sup,
                 Vec::new(),
-                self.max_element,
-            ));
+            );
         }
 
         // ---- one element per constraint row -------------------------
@@ -461,13 +486,14 @@ impl PartitionedQuasiNewtonUpdater {
                         (p, local)
                     })
                     .collect();
-                elements.push(Self::make_element(
+                self.push_split(
+                    &mut elements,
+                    adjacency.as_ref(),
                     source,
                     (r - 1) as u32,
                     cols,
                     entries,
-                    self.max_element,
-                ));
+                );
             }
         }
 
@@ -554,6 +580,98 @@ impl PartitionedQuasiNewtonUpdater {
 
         if std::env::var("POUNCE_PARTITIONED_DEBUG").is_ok() {
             eprintln!("partitioned-qn: {:?}", self.stats);
+        }
+    }
+
+    /// Push the element for `(source, row, support, entries)`, split along the
+    /// declared Hessian pattern when one is available (gh#989 item 5).
+    ///
+    /// `∇²c_j` lives in `support × support`, and the declared Lagrangian
+    /// pattern is a superset of it, so the connected components of the pattern
+    /// restricted to `support` are independent blocks of `∇²c_j`:
+    /// `y_comp = B_comp s_comp` holds exactly, one element per component is
+    /// the same model without the spurious cross-component entries a single
+    /// dense `k × k` block fills in, and a support coordinate the pattern never
+    /// couples (a linear one) belongs to no component and is dropped.
+    /// `entries` are `(Jacobian triplet position, local index)`; they are
+    /// remapped to each component's own local index.
+    fn push_split(
+        &self,
+        elements: &mut Vec<Element>,
+        adjacency: Option<&std::collections::HashMap<Index, Vec<Index>>>,
+        source: ElementSource,
+        row: u32,
+        support: Vec<Index>,
+        entries: Vec<(u32, u32)>,
+    ) {
+        let Some(adj) = adjacency else {
+            elements.push(Self::make_element(
+                source,
+                row,
+                support,
+                entries,
+                self.max_element,
+            ));
+            return;
+        };
+        let k = support.len();
+        // Union-find over local indices, joined by pattern pairs inside the
+        // support; `mentioned[a]` marks a coordinate with any in-support entry.
+        let mut parent: Vec<usize> = (0..k).collect();
+        fn find(parent: &mut [usize], mut a: usize) -> usize {
+            while parent[a] != a {
+                parent[a] = parent[parent[a]];
+                a = parent[a];
+            }
+            a
+        }
+        let mut mentioned = vec![false; k];
+        for a in 0..k {
+            if let Some(nbrs) = adj.get(&support[a]) {
+                for &c in nbrs {
+                    if let Ok(b) = support.binary_search(&c) {
+                        mentioned[a] = true;
+                        mentioned[b] = true;
+                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                        if ra != rb {
+                            parent[ra.max(rb)] = ra.min(rb);
+                        }
+                    }
+                }
+            }
+        }
+        // Group by root, in ascending order of the first member.
+        let mut group_of: Vec<Option<usize>> = vec![None; k];
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut root_to_group: std::collections::HashMap<usize, usize> = Default::default();
+        for a in 0..k {
+            if !mentioned[a] {
+                continue;
+            }
+            let r = find(&mut parent, a);
+            let g = *root_to_group.entry(r).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[g].push(a);
+            group_of[a] = Some(g);
+        }
+        let mut local_in_group = vec![0u32; k];
+        for g in &groups {
+            for (pos, &a) in g.iter().enumerate() {
+                local_in_group[a] = pos as u32;
+            }
+        }
+        let mut group_entries: Vec<Vec<(u32, u32)>> = vec![Vec::new(); groups.len()];
+        for &(p, local) in &entries {
+            if let Some(g) = group_of[local as usize] {
+                group_entries[g].push((p, local_in_group[local as usize]));
+            }
+        }
+        for (g, members) in groups.iter().enumerate() {
+            let sub: Vec<Index> = members.iter().map(|&a| support[a]).collect();
+            let ent = std::mem::take(&mut group_entries[g]);
+            elements.push(Self::make_element(source, row, sub, ent, self.max_element));
         }
     }
 
@@ -1144,6 +1262,49 @@ fn flat(v: &dyn Vector) -> Vec<Number> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#989 item 5: a row supported on `{0,1,2,3,4,5,6}` whose declared
+    /// Hessian couples `(0,1)` and `(2,3)` and carries `(4,4)` alone splits
+    /// into three elements, and coordinates 5 and 6 (no pattern entry: linear)
+    /// are dropped. The Jacobian entries follow their coordinates.
+    #[test]
+    fn declared_pattern_splits_an_element_into_its_independent_blocks() {
+        let u = PartitionedQuasiNewtonUpdater::new(UpdateType::Sr1);
+        let pat: Vec<(Index, Index)> = vec![(1, 0), (3, 2), (4, 4), (9, 9)];
+        let mut adj: std::collections::HashMap<Index, Vec<Index>> = Default::default();
+        for &(r, c) in &pat {
+            adj.entry(r).or_default().push(c);
+            if r != c {
+                adj.entry(c).or_default().push(r);
+            }
+        }
+        let mut els = Vec::new();
+        let entries: Vec<(u32, u32)> = (0..7).map(|i| (10 + i as u32, i as u32)).collect();
+        u.push_split(
+            &mut els,
+            Some(&adj),
+            ElementSource::EqRow,
+            3,
+            (0..7).collect(),
+            entries,
+        );
+        let sup: Vec<Vec<Index>> = els.iter().map(|e| e.support.clone()).collect();
+        assert_eq!(sup, vec![vec![0, 1], vec![2, 3], vec![4]]);
+        assert_eq!(els[1].entries, vec![(12, 0), (13, 1)]);
+        assert!(els.iter().all(|e| e.row == 3));
+        // Without a declared pattern the row stays one dense element.
+        let mut one = Vec::new();
+        u.push_split(
+            &mut one,
+            None,
+            ElementSource::EqRow,
+            3,
+            (0..7).collect(),
+            Vec::new(),
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].support.len(), 7);
+    }
 
     /// `packed_mult` agrees with a dense symmetric product, off-diagonal
     /// fan-out included.

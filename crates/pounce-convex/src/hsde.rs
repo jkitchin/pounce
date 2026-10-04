@@ -67,6 +67,26 @@ const REG_MIN: f64 = 1e-14;
 const IR_MAX_PASSES: usize = 5;
 const IR_RELTOL: f64 = 1e-12;
 
+/// Proximal-term stall guard (gh#989 item 7). A static `qp_reg` above
+/// [`PROX_STALL_ABOVE`] is not a roundoff guard but a Tikhonov perturbation of
+/// the `(x, x)` and equality blocks, and it is the same absolute number on
+/// every column. On a column whose curvature is far below it (the MPC control
+/// in J/min: reduced curvature ~1e-10 against `qp_reg = 1e-4`) the Newton step
+/// is damped by `curv / (curv + δ)` and the iteration crawls -- 199 iterations
+/// to a cost of 541 against 149.48 for the same model in K. No static
+/// per-column scale can see that (the nullspace curvature is a property of the
+/// reduced Hessian, not of any diagonal), so the guard watches progress
+/// instead: after [`PROX_STALL_ITERS`] iterations without the merit
+/// `max(residuals, mu)` improving by [`PROX_STALL_GAIN`], the proximal weight
+/// is cut by [`PROX_DECAY`] (floored at [`PROX_REF_REG`]) and a warning is
+/// logged. A solve that converges at the requested `qp_reg` never fires it, and
+/// the default `qp_reg = 1e-10` is below the threshold.
+const PROX_STALL_ABOVE: f64 = 1e-8;
+const PROX_STALL_ITERS: usize = 6;
+const PROX_STALL_GAIN: f64 = 0.9;
+const PROX_DECAY: f64 = 1e-2;
+const PROX_REF_REG: f64 = 1e-10;
+
 /// Dynamic-regularization schedule (Ipopt-style inertia/regularization
 /// correction; Clarabel's dynamic KKT regularization). When the factorization
 /// is singular, or the constant-direction solve cannot be refined below
@@ -428,6 +448,10 @@ where
     let mut ir_b = vec![0.0; kkt.dim];
     let mut ir_r = vec![0.0; kkt.dim];
     let mut ir_d = vec![0.0; kkt.dim];
+    // Effective static proximal weight; starts at `qp_reg`, decays on a stall.
+    let mut reg_static = opts.reg;
+    let mut prox_best = f64::INFINITY;
+    let mut prox_stall = 0usize;
 
     // Scratch + constants for the scale-relative convergence normalizers
     // (see the stopping test below). Dual side: ‖Aᵀŷ‖, ‖Gᵀẑ‖; primal side:
@@ -633,6 +657,30 @@ where
         } else {
             pres.max(dres).max(gap)
         };
+        // gh#989 item 7: proximal-stall guard, see `PROX_STALL_ABOVE`.
+        if opts.reg > PROX_STALL_ABOVE && reg_static > PROX_REF_REG {
+            let merit = res.max(mu);
+            if merit < prox_best * PROX_STALL_GAIN {
+                prox_best = merit;
+                prox_stall = 0;
+            } else {
+                prox_stall += 1;
+                if prox_stall >= PROX_STALL_ITERS {
+                    let next = (reg_static * PROX_DECAY).max(PROX_REF_REG);
+                    tracing::warn!(
+                        requested = opts.reg,
+                        from = reg_static,
+                        to = next,
+                        iter = it,
+                        "qp_reg is a proximal term far above the curvature of some block and the \
+                         solve stopped making progress; reducing the effective regularization"
+                    );
+                    reg_static = next;
+                    prox_stall = 0;
+                    prox_best = f64::INFINITY;
+                }
+            }
+        }
         // (`res` also feeds the debugger checkpoints below. The
         // reduced-accuracy salvage that used to read it here now runs *after*
         // the loop, against the true KKT residual — see `SALVAGE`.)
@@ -829,11 +877,11 @@ where
         // wrong inertia / singularity (see `DELTA_C_INIT` & co.). The (z,z)
         // slack block keeps `reg_eff`, whose iterate-norm scaling is correct
         // for full-rank large-dual problems (LISWET).
-        let mut delta_c = crate::ipm::adaptive_eq_reg(mu, opts.reg);
+        let mut delta_c = crate::ipm::adaptive_eq_reg(mu, reg_static);
         // δ_w on the (x,x) primal block. Starts at the static `opts.reg` — no
         // change from the previous behaviour on a healthy iterate — and is
         // escalated below only when the factorization reports a defect.
-        let mut delta_w = opts.reg;
+        let mut delta_w = reg_static;
         // Correct KKT inertia has one negative eigenvalue per equality and per
         // inequality row; the SOC auxiliary variables contribute positives
         // only. Too few negatives ⇒ the factor is an indefinite saddle.

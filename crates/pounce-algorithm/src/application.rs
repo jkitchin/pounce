@@ -5309,6 +5309,20 @@ impl IpoptApplication {
         ) {
             builder.objective_nonlinear_vars = adapter.borrow().objective_nonlinear_vars();
         }
+        // gh#989 item 5: the declared Lagrangian Hessian structure splits the
+        // partitioned elements into the independent blocks they really are.
+        if matches!(
+            builder.hessian_approximation,
+            HessianApproxChoice::Partitioned
+        ) {
+            let declared = !matches!(
+                self.options.get_string_value("partitioned_structure", ""),
+                Ok((ref v, true)) if v == "jacobian"
+            );
+            if declared {
+                builder.hessian_declared_pattern = adapter.borrow().lagrangian_hessian_pattern();
+            }
+        }
 
         // Which variables the limited-memory Hessian should span (gh#624).
         // Upstream's precedence: a TNLP that implements

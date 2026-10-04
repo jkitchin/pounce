@@ -48,8 +48,35 @@ changes.
   scan uses a KD-tree. (6) `Continuation.trace_arclength` halves a step whose
   corrector lands farther than `max_correction * ds` from the predictor or
   whose tangent turns past `min_tangent_cos`, instead of jumping branches.
-  Not addressed here: item 5 (partitioned-Hessian mesh growth; needs discopt)
-  and item 7 (`qp_reg` stall warning).
+  Items 5 and 7 are in the second-pass entry below.
+- **`qp_reg` proximal stall and partitioned-Hessian structure (gh#989, items 5
+  and 7).** (7) A proximal-sized `qp_reg` (above `1e-8`) is one absolute
+  number on every column, so on a column whose curvature is far below it the
+  Newton step is damped to a crawl: the CSTR MPC QP with the control in J/min
+  (`qp_reg=1e-4`) ran 200 iterations to a cost of 497.8 (N = 40; 544.8 at the
+  issue's N = 200) against 149.4066 / 149.4757. The HSDE driver now watches
+  `max(residuals, mu)` and, after six iterations without a 10% gain, cuts the
+  effective `qp_reg` by 100x (floored at `1e-10`) with a `tracing` warning;
+  both models now end `Optimal` (J/min: 66 iterations at N = 40, 93 at
+  N = 200). The default `qp_reg` is below the threshold and takes exactly the
+  path it did, so the fixture sweep (both legs) is empty. Cost, stated
+  plainly: the K-unit model, which used to be rescued by the equilibrated
+  retry at 16 iterations, now converges in the first attempt but takes 49
+  (13 -> 65 at N = 40). (5) `hessian_approximation=partitioned` splits each
+  per-constraint element along the model's *declared* Lagrangian Hessian
+  sparsity (new `partitioned_structure=declared`, default; `jacobian` restores
+  the old dense rows): a collocation row is a handful of independent 2x2
+  blocks inside a dense-looking pattern, and one secant pair per iteration
+  cannot determine the dense block. Batch reactor (Radau, 225 variables):
+  exact 18, `jacobian` 30, `declared` 22; at N = 100 53 -> 33. **Not fixed:**
+  the iteration count still grows with the mesh (N = 400: exact 42,
+  `declared` 82 against 79 before), `partitioned_update_type=bfgs` still does
+  not converge per-constraint (a PSD model of an indefinite `d2c_j` weighted by
+  a multiplier of either sign; measured: Powell-damping replaced by SR1 on
+  indefinite pairs, `|y|` and `max(y, 0)` weights, and a BFGS-ordered
+  `blocks` partition were each tried and were no better or worse), and
+  `blocks` still needs 85/161/500 iterations because discopt orders variables
+  by family, not stage.
 - **Warm starts no longer lose to cold starts (gh#988).** `solve_qp` /
   `solve_qp_ipm_warm` now fall back to the cold HSDE path when the warm
   (direct infeasible-start) leg ends in `numerical_failure`,

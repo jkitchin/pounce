@@ -263,6 +263,11 @@ pub struct AlgorithmBuilder {
     /// back on the first `∇f`'s nonzeros, which is value-derived; see
     /// that method for what it costs.
     pub objective_nonlinear_vars: Option<Vec<Index>>,
+    /// The TNLP's declared Lagrangian Hessian sparsity in the compressed
+    /// `x_var` space, `(row >= col)`, when it has one and
+    /// `partitioned_structure` is `declared` (gh#989 item 5). Consumed by the
+    /// partitioned updater to split each element along the pattern.
+    pub hessian_declared_pattern: Option<Vec<(Index, Index)>>,
     /// `partitioned_curvature_cap` — multiple of an element's implied
     /// curvature that one update may reach. See
     /// [`crate::hess::partitioned_quasi_newton`].
@@ -1229,6 +1234,7 @@ impl Default for AlgorithmBuilder {
             partitioned_update_type_was_set: false,
             partitioned_max_element: 64,
             objective_nonlinear_vars: None,
+            hessian_declared_pattern: None,
             partitioned_curvature_cap: Number::INFINITY,
             partitioned_elements: crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
             partitioned_block_size: 64,
@@ -1731,6 +1737,7 @@ impl AlgorithmBuilder {
                     );
                 u.max_element = self.partitioned_max_element;
                 u.objective_vars = self.objective_nonlinear_vars.clone();
+                u.declared_pattern = self.hessian_declared_pattern.clone();
                 u.curvature_cap = self.partitioned_curvature_cap;
                 u.mode = self.partitioned_elements;
                 u.block_size = self.partitioned_block_size;
@@ -1868,6 +1875,7 @@ mod tests {
                             partitioned_update_type_was_set: false,
                             partitioned_max_element: 64,
                             objective_nonlinear_vars: None,
+                            hessian_declared_pattern: None,
                             partitioned_curvature_cap: Number::INFINITY,
                             partitioned_elements:
                                 crate::hess::partitioned_quasi_newton::ElementMode::PerConstraint,
