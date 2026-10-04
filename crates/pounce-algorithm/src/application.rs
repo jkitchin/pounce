@@ -2796,9 +2796,10 @@ impl IpoptApplication {
              configure nothing. The `pounce` CLI reaches that engine on `.nl` \
              input (`solver_selection=lp-ipm` / `qp-ipm` / `socp`, or `auto` on \
              a model that classifies as one); the `qp_*` options themselves are \
-             read only there. From Python, `pounce.solve_qp` drives the engine \
-             directly with its own arguments (`tol`, `max_iter`, `time_limit`, \
-             `method`) — it never presolves and does not read `qp_*` options. \
+             read only there and by `pounce.solve_qp`. From Python, \
+             `pounce.solve_qp` drives the engine directly and takes `qp_presolve`, \
+             `qp_reg`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` as keyword \
+             arguments (presolve is off there unless asked for). \
              On this path, `solver_selection=qp-active-set` \
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
              `sqp_qp_*` options. Tracking issue: \
