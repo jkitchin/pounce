@@ -1605,7 +1605,7 @@ optimization above all.
 |---|---|---|---|
 | `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
 | `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
-| `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each per-constraint element along the model's declared Hessian sparsity |
+| `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each element along the model's declared Hessian sparsity and keep only its declared entries |
 | `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
 | `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
 | `partitioned_curvature_cap` | off (`inf`)      | > 0                        | cap on one update's movement. **Leave off** |
@@ -1616,7 +1616,9 @@ ordering, at the cost of as many blocks as there are constraints.
 `blocks` is the partition of Asprion, Chinellato and Guzzella: a direct
 collocation transcription orders its variables by stage, so the
 Lagrangian Hessian is close to block diagonal in contiguous blocks and
-the block count is the *stage* count. Set `partitioned_block_size` to
+the block count is the *stage* count. When the model declares its Hessian
+structure, the blocks come from that pattern instead — see
+`partitioned_structure` below. Set `partitioned_block_size` to
 what one stage contributes (states × collocation points, plus controls)
 — too small and the block misses genuine intra-stage coupling, too large
 and each block carries more parameters than its one curvature pair per
@@ -1646,14 +1648,48 @@ each connected group its own element, and drops coordinates the pattern
 never couples. A model that declares no Hessian structure (a Python
 problem object without `hessian`, for instance) takes the `jacobian`
 behaviour, because an absent declaration is not evidence of linearity.
-Measured on the issue's batch reactor (225 variables): exact 18
-iterations, `jacobian` 30, `declared` 22. Not fixed: the iteration count
-still grows with the mesh (N = 400: exact 42, `declared` 82), and
-`partitioned_update_type=bfgs` does not converge per-constraint — a
-positive-semidefinite model of an indefinite `∇²c_j`, weighted by a
-multiplier of either sign, hands the IPM a wrong-inertia `W` and a
-regularization of `1e6` and up. Use `sr1`, or `partitioned_elements=blocks`
-(which pairs BFGS with a Lagrangian block, where it is sound).
+Within each group only the *declared* entries are kept. A connected
+group is usually not complete — a collocation row's group is a star, the
+control coupled to each state at the same point with no state–state and
+no state-diagonal entries — and a dense SR1 or BFGS term writes curvature
+into every one of those structurally zero positions. Weighted by
+multipliers of either sign, those entries gave the assembled Hessian the
+wrong inertia, and the interior-point method spent the solve on a
+regularization `δ_w` decaying by a third per iteration. An element whose
+declared pattern is incomplete is therefore updated by the
+pattern-constrained minimum-change secant update (Toint's sparse PSB),
+from zero, whichever `partitioned_update_type` is set; on a star that
+determines the element Hessian from a single pair, so `sr1` and `bfgs`
+coincide there. `partitioned_update_type` still governs elements whose
+declared pattern is complete and models without a declared pattern.
+
+Radau-collocated batch reactor (gh#989 item 5; discopt model, `.nl`
+export, the issue's starting profile), iterations:
+
+| N | exact | limited-memory | partitioned | `bfgs` | `blocks` |
+|---|---|---|---|---|---|
+| 25 | 12 | 17 | 13 (was 14) | 13 (was cap) | 13 (was 88) |
+| 50 | 17 | 16 | 15 (was 22) | 15 (was cap) | 15 (was 122) |
+| 100 | 16 | 16 | 15 (was 54) | 15 (was cap) | 15 (was 139) |
+| 400 | 18 | 17 | 21 (was 74) | 21 (was cap) | 21 (was cap) |
+
+With `blocks`, a declared pattern whose connected components all fit in
+`partitioned_block_size` supplies the blocks: those components are the
+Lagrangian Hessian's exact diagonal blocks, whatever order the writer put
+the variables in (an AMPL `.nl` puts nonlinear variables first, so
+contiguous ranges are not stages there). A model whose pattern has a wider
+component keeps the contiguous partition — chunking a component cuts
+declared coupling, and on `benchmarks/large_scale` `laptime` (one
+3 280-variable component at N = 80) it hit the iteration cap where the
+contiguous blocks take 166.
+
+Not covered: `partitioned_update_type=bfgs` on a model **without** a
+declared Hessian structure (or with `partitioned_structure=jacobian`)
+still does not converge on the batch reactor, nor on `laptime` either
+way — a positive-semidefinite model of an indefinite `∇²c_j`, weighted by
+a multiplier of either sign. Modelling the Lagrangian element `λ_j c_j`
+instead was tried and diverged (damped) or froze (curvature-skipped).
+Use `sr1` there.
 
 **`partitioned_max_element`.** An element with `k` nonzeros costs
 `k(k+1)/2` stored reals, so one wide constraint row would dominate the

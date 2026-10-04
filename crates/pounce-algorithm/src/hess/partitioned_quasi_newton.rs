@@ -59,6 +59,23 @@
 //! `dev-notes/issue-131-monotone-lbfgs-stall.md` records the damped path
 //! hiding. [`UpdateType::Bfgs`] is accepted for comparison.
 //!
+//! # Elements with a declared, incomplete pattern
+//!
+//! When the model declares its Hessian structure, an element keeps only
+//! the declared entries of its support (`Element::allowed`), and neither
+//! formula above is used on it: a rank-one or rank-two term fills every
+//! position, including the ones the model says are structurally zero.
+//! Such an element takes [`sparse_secant_update`] (Toint's minimum-change
+//! symmetric secant update restricted to the pattern) from `B = 0`, with
+//! no `γI` seeding. On a collocation row the declared group is a star —
+//! `k` free entries on `k` coordinates — so one pair determines the
+//! element exactly. gh#989 item 5: the dense updates' spurious entries,
+//! weighted by multipliers of either sign, gave the assembled `W` the wrong
+//! inertia on a Radau batch reactor, and the IPM spent the solve on a
+//! `δ_w` decaying by `1/3` per iteration (16/28/86 iterations at
+//! N = 25/100/400 against exact 12/16/18; `bfgs` at the cap). With the
+//! pattern kept: 13/15/21, `bfgs` and `blocks` the same.
+//!
 //! # Bounded element size
 //!
 //! An element with `k` nonzeros costs `k(k+1)/2` stored reals. A row that
@@ -216,8 +233,17 @@ struct Element {
     /// triplet contract.
     entries: Vec<(u32, u32)>,
     /// Position in the assembled matrix's value array for each entry of
-    /// `b`, in the same packing.
+    /// `b`, in the same packing. `u32::MAX` marks a packed position the
+    /// element's declared pattern excludes (never assembled).
     map: Vec<u32>,
+    /// Which packed positions of `b` the model's declared Hessian pattern
+    /// allows, when the element came from [`PartitionedQuasiNewtonUpdater::push_split`]
+    /// and that pattern is **not** complete on the element. `None` means
+    /// every position is free (the dense formulas apply). When `Some`, the
+    /// element is updated with the pattern-constrained secant update
+    /// ([`sparse_secant_update`]) and the excluded entries stay exactly
+    /// zero (gh#989 item 5).
+    allowed: Option<Vec<bool>>,
 }
 
 impl Element {
@@ -372,6 +398,77 @@ impl PartitionedQuasiNewtonUpdater {
             // partition is then simply wrong for that model rather than
             // silently poor.
             let bs = self.block_size.max(1);
+            if let Some(pat) = self.declared_pattern.as_ref() {
+                // gh#989 item 5: with a declared Hessian pattern the blocks
+                // are not guessed from the variable order — they are the
+                // connected components of that pattern, which are exactly
+                // the Lagrangian Hessian's diagonal blocks (no declared entry
+                // crosses a component, so the block-diagonal model has no
+                // truncation error at all). A writer that does not order by
+                // stage — an AMPL `.nl`, which puts nonlinear variables
+                // first, is one — no longer breaks the partition: on the
+                // Radau batch reactor at N = 400 contiguous blocks of 64 hit
+                // the iteration cap. A variable no declared entry mentions is
+                // linear in the Lagrangian and belongs to no block.
+                //
+                // Only when EVERY component fits in `partitioned_block_size`.
+                // Chunking a wide component cuts declared coupling, and that
+                // was measured to be worse than the contiguous partition:
+                // `laptime` at N = 80 is one 3 280-variable component, and
+                // chunking it hit the iteration cap where contiguous blocks
+                // take 166. Such a model keeps the contiguous partition.
+                let mut parent: Vec<usize> = (0..n).collect();
+                fn root(parent: &mut [usize], mut a: usize) -> usize {
+                    while parent[a] != a {
+                        parent[a] = parent[parent[a]];
+                        a = parent[a];
+                    }
+                    a
+                }
+                let mut mentioned = vec![false; n];
+                let mut adj: std::collections::HashMap<Index, Vec<Index>> = Default::default();
+                for &(r, c) in pat {
+                    let (ru, cu) = (r as usize, c as usize);
+                    if ru >= n || cu >= n {
+                        continue;
+                    }
+                    mentioned[ru] = true;
+                    mentioned[cu] = true;
+                    adj.entry(r).or_default().push(c);
+                    if r != c {
+                        adj.entry(c).or_default().push(r);
+                    }
+                    let (a, b) = (root(&mut parent, ru), root(&mut parent, cu));
+                    if a != b {
+                        parent[a.max(b)] = a.min(b);
+                    }
+                }
+                let mut comp_of_root: std::collections::HashMap<usize, usize> = Default::default();
+                let mut comps: Vec<Vec<Index>> = Vec::new();
+                for (i, _) in mentioned.iter().enumerate().filter(|(_, m)| **m) {
+                    let r = root(&mut parent, i);
+                    let g = *comp_of_root.entry(r).or_insert_with(|| {
+                        comps.push(Vec::new());
+                        comps.len() - 1
+                    });
+                    comps[g].push(i as Index);
+                }
+                if comps.iter().all(|c| c.len() <= bs) {
+                    for comp in comps {
+                        let mut el = Self::make_element(
+                            ElementSource::LagrangianBlock,
+                            0,
+                            comp,
+                            Vec::new(),
+                            usize::MAX,
+                        );
+                        el.allowed = pattern_mask(&el.support, &adj);
+                        elements.push(el);
+                    }
+                    self.finish_structure(n, elements);
+                    return;
+                }
+            }
             let mut start = 0usize;
             while start < n {
                 let end = (start + bs).min(n);
@@ -517,7 +614,9 @@ impl PartitionedQuasiNewtonUpdater {
             if e.dense {
                 for a in 0..e.k() {
                     for c in 0..=a {
-                        pairs.push((e.support[a], e.support[c]));
+                        if e.allowed.as_ref().is_none_or(|m| m[a * (a + 1) / 2 + c]) {
+                            pairs.push((e.support[a], e.support[c]));
+                        }
                     }
                 }
             } else {
@@ -538,7 +637,17 @@ impl PartitionedQuasiNewtonUpdater {
                 let mut map = Vec::with_capacity(e.k() * (e.k() + 1) / 2);
                 for a in 0..e.k() {
                     for c in 0..=a {
-                        map.push(find(e.support[a], e.support[c]));
+                        // The full diagonal is always assembled, so a
+                        // diagonal position maps even when the declared
+                        // pattern excludes it (the BFGS convexification
+                        // shift writes there).
+                        let ok =
+                            a == c || e.allowed.as_ref().is_none_or(|m| m[a * (a + 1) / 2 + c]);
+                        map.push(if ok {
+                            find(e.support[a], e.support[c])
+                        } else {
+                            u32::MAX
+                        });
                     }
                 }
                 e.map = map;
@@ -671,7 +780,16 @@ impl PartitionedQuasiNewtonUpdater {
         for (g, members) in groups.iter().enumerate() {
             let sub: Vec<Index> = members.iter().map(|&a| support[a]).collect();
             let ent = std::mem::take(&mut group_entries[g]);
-            elements.push(Self::make_element(source, row, sub, ent, self.max_element));
+            let mut el = Self::make_element(source, row, sub, ent, self.max_element);
+            if el.dense {
+                // The declared pattern restricted to this group. A connected
+                // group is usually NOT complete — a collocation row's group
+                // is a star (the control coupled to each state, no
+                // state–state entries) — and a dense secant update fills the
+                // missing entries with values the true `∇²c_j` does not have.
+                el.allowed = pattern_mask(&el.support, adj);
+            }
+            elements.push(el);
         }
     }
 
@@ -696,8 +814,30 @@ impl PartitionedQuasiNewtonUpdater {
             seeded: false,
             entries,
             map: Vec::new(),
+            allowed: None,
         }
     }
+}
+
+/// The declared pattern restricted to `support`, packed like an element's
+/// `b` (`(a, c)`, `a >= c`, at `a(a+1)/2 + c`). `None` when the restriction
+/// is complete, so the dense update formulas apply unchanged.
+fn pattern_mask(
+    support: &[Index],
+    adj: &std::collections::HashMap<Index, Vec<Index>>,
+) -> Option<Vec<bool>> {
+    let k = support.len();
+    let mut allowed = vec![false; k * (k + 1) / 2];
+    let mut complete = true;
+    for a in 0..k {
+        let nbrs = adj.get(&support[a]);
+        for c in 0..=a {
+            let ok = nbrs.is_some_and(|v| v.contains(&support[c]));
+            allowed[a * (a + 1) / 2 + c] = ok;
+            complete &= ok;
+        }
+    }
+    if complete { None } else { Some(allowed) }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -733,6 +873,163 @@ fn dot(a: &[Number], b: &[Number]) -> Number {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+/// Pattern-constrained symmetric secant update (Toint, *Math. Comp.* 31,
+/// 1977; the sparse analogue of PSB). Finds the correction `E` of least
+/// Frobenius norm that is symmetric, vanishes outside `allowed`, and makes
+/// `(B + E) s = y`. Writing `E_ac = λ_a s_c + λ_c s_a` on the allowed
+/// positions, the secant condition is the `k × k` system
+///
+/// ```text
+///   Q λ = r,   r = y − B s,
+///   Q_aa = Σ_{c ∈ S_a} s_c² + [a ∈ S_a] s_a²,   Q_ac = s_a s_c  (c ∈ S_a, c ≠ a)
+/// ```
+///
+/// `Q` is positive semidefinite; it is solved in the minimum-norm least
+/// squares sense, so a row with no step component (`Q_aa = 0`) takes no
+/// correction instead of a division by zero.
+///
+/// Why this and not SR1 on these elements (gh#989 item 5): a collocation
+/// row's declared group is a *star* — the control coupled to each state,
+/// no state–state entries — so the true `∇²c_j` has `k` free entries on a
+/// `k`-coordinate support and one secant pair (`k` equations) determines
+/// it. The rank-1 term instead writes `w wᵀ/wᵀs` into all `k(k+1)/2`
+/// positions; those spurious entries, multiplied by a multiplier of either
+/// sign, are what gave the assembled `W` the wrong inertia on the batch
+/// reactor and the IPM a `δ_w` that decayed by `1/3` per iteration.
+///
+/// Returns `true` when a correction was applied.
+fn sparse_secant_update(
+    b: &mut [Number],
+    allowed: &[bool],
+    s: &[Number],
+    y: &[Number],
+    max_delta: Number,
+) -> bool {
+    let k = s.len();
+    let mut bs = vec![0.0; k];
+    packed_mult(b, s, &mut bs);
+    let r: Vec<Number> = y.iter().zip(bs.iter()).map(|(a, c)| a - c).collect();
+    let r_norm = dot(&r, &r).sqrt();
+    let y_norm = dot(y, y).sqrt();
+    if !r_norm.is_finite() || r_norm <= 1e-14 * y_norm.max(Number::MIN_POSITIVE) || r_norm == 0.0 {
+        return false;
+    }
+    let mut q = vec![0.0; k * k];
+    for a in 0..k {
+        for c in 0..=a {
+            if !allowed[a * (a + 1) / 2 + c] {
+                continue;
+            }
+            if a == c {
+                q[a * k + a] += 2.0 * s[a] * s[a];
+            } else {
+                q[a * k + a] += s[c] * s[c];
+                q[c * k + c] += s[a] * s[a];
+                q[a * k + c] += s[a] * s[c];
+                q[c * k + a] += s[a] * s[c];
+            }
+        }
+    }
+    let Some(lam) = min_norm_solve(&mut q, &r, k) else {
+        return false;
+    };
+    let mut e = vec![0.0; b.len()];
+    let mut e_max = 0.0_f64;
+    for a in 0..k {
+        for c in 0..=a {
+            let p = a * (a + 1) / 2 + c;
+            if allowed[p] {
+                let v = lam[a] * s[c] + lam[c] * s[a];
+                e[p] = v;
+                e_max = e_max.max(v.abs());
+            }
+        }
+    }
+    if !e_max.is_finite() || e_max > max_delta {
+        return false;
+    }
+    for (bv, ev) in b.iter_mut().zip(e.iter()) {
+        *bv += ev;
+    }
+    true
+}
+
+/// Minimum-norm solution of `Q x = r` for a small symmetric positive
+/// semidefinite `Q` (row-major, overwritten), by cyclic Jacobi
+/// eigendecomposition with eigenvalues below `1e-12 · λ_max` treated as
+/// zero. `None` only when `Q` is entirely zero or non-finite.
+fn min_norm_solve(q: &mut [Number], r: &[Number], k: usize) -> Option<Vec<Number>> {
+    let mut v = vec![0.0; k * k];
+    for i in 0..k {
+        v[i * k + i] = 1.0;
+    }
+    for _sweep in 0..60 {
+        let mut off = 0.0;
+        let mut diag = 0.0;
+        for i in 0..k {
+            diag += q[i * k + i] * q[i * k + i];
+            for j in 0..i {
+                off += q[i * k + j] * q[i * k + j];
+            }
+        }
+        if !(off.is_finite() && diag.is_finite()) {
+            return None;
+        }
+        if off <= 1e-30 * diag {
+            break;
+        }
+        for p in 0..k {
+            for qq in (p + 1)..k {
+                let apq = q[p * k + qq];
+                if apq == 0.0 {
+                    continue;
+                }
+                let app = q[p * k + p];
+                let aqq = q[qq * k + qq];
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let t = if theta == 0.0 { 1.0 } else { t };
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let sn = t * c;
+                for i in 0..k {
+                    let aip = q[i * k + p];
+                    let aiq = q[i * k + qq];
+                    q[i * k + p] = c * aip - sn * aiq;
+                    q[i * k + qq] = sn * aip + c * aiq;
+                }
+                for i in 0..k {
+                    let api = q[p * k + i];
+                    let aqi = q[qq * k + i];
+                    q[p * k + i] = c * api - sn * aqi;
+                    q[qq * k + i] = sn * api + c * aqi;
+                }
+                for i in 0..k {
+                    let vip = v[i * k + p];
+                    let viq = v[i * k + qq];
+                    v[i * k + p] = c * vip - sn * viq;
+                    v[i * k + qq] = sn * vip + c * viq;
+                }
+            }
+        }
+    }
+    let lmax = (0..k).map(|i| q[i * k + i].abs()).fold(0.0_f64, f64::max);
+    if lmax <= 0.0 || !lmax.is_finite() {
+        return None;
+    }
+    let mut x = vec![0.0; k];
+    for j in 0..k {
+        let lj = q[j * k + j];
+        if lj.abs() <= 1e-12 * lmax {
+            continue;
+        }
+        let coef: Number = (0..k).map(|i| v[i * k + j] * r[i]).sum::<Number>() / lj;
+        for i in 0..k {
+            x[i] += coef * v[i * k + j];
+        }
+    }
+    Some(x)
+}
+
 /// Apply one curvature pair to a single element. Returns `true` when the
 /// update was accepted.
 fn update_element(
@@ -757,6 +1054,16 @@ fn update_element(
     let s_norm = sts.sqrt();
     let implied = dot(y, y).sqrt() / s_norm;
     let max_delta = curvature_cap * implied;
+
+    // Pattern-constrained element: no scalar seeding (a `γI` start writes
+    // curvature onto diagonal entries the model declares structurally zero)
+    // and no rank-1 formula (which fills every excluded entry). The sparse
+    // secant update starts from `B = 0` and keeps the pattern exactly.
+    if let Some(allowed) = e.allowed.as_ref() {
+        let ok = sparse_secant_update(&mut e.b, allowed, s, y, max_delta);
+        e.seeded |= ok;
+        return ok;
+    }
 
     // One-time scalar seeding: `B_e ← γ I` with γ the `scalar1` ratio of
     // this element's own first pair, so the block starts at the right
@@ -1095,7 +1402,9 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                     continue;
                 }
                 for (p, &m) in e.map.iter().enumerate() {
-                    vals[m as usize] += weight * e.b[p];
+                    if m != u32::MAX {
+                        vals[m as usize] += weight * e.b[p];
+                    }
                 }
             }
             // Coordinates no element covers get the same nonzero floor
@@ -1306,6 +1615,146 @@ mod tests {
         assert_eq!(one[0].support.len(), 7);
     }
 
+    /// gh#989 item 5: on a *star* pattern — a control `T` coupled to two
+    /// states, no state–state or state diagonal entries, the shape of every
+    /// Radau collocation row's group — the pattern-constrained secant update
+    /// recovers the exact element Hessian from `B = 0` with a single pair,
+    /// and the excluded entries stay exactly zero. A dense SR1 term from the
+    /// same pair writes all six entries.
+    #[test]
+    fn sparse_secant_recovers_a_star_hessian_from_one_pair() {
+        // H = [[a, b1, b2], [b1, 0, 0], [b2, 0, 0]], packed lower triangle.
+        let (a, b1, b2) = (-3.0e-4, 2.0e-3, -7.0e-4);
+        let h = [a, b1, 0.0, b2, 0.0, 0.0];
+        let allowed = vec![true, true, false, true, false, false];
+        let s = vec![0.3, -1.2, 0.8];
+        let mut y = vec![0.0; 3];
+        packed_mult(&h, &s, &mut y);
+        let mut b = vec![0.0; 6];
+        assert!(sparse_secant_update(
+            &mut b,
+            &allowed,
+            &s,
+            &y,
+            Number::INFINITY
+        ));
+        for p in 0..6 {
+            assert!(
+                (b[p] - h[p]).abs() < 1e-15,
+                "packed entry {p}: {} vs {}",
+                b[p],
+                h[p]
+            );
+        }
+        // Already exact: a second pair along another direction is a no-op.
+        let s2 = vec![-0.5, 0.1, 0.4];
+        let mut y2 = vec![0.0; 3];
+        packed_mult(&h, &s2, &mut y2);
+        assert!(!sparse_secant_update(
+            &mut b,
+            &allowed,
+            &s2,
+            &y2,
+            Number::INFINITY
+        ));
+    }
+
+    /// The pattern-constrained update satisfies the secant equation and
+    /// never writes an excluded position, including when the pattern
+    /// cannot be determined by one pair; a coordinate with no step
+    /// component takes no correction rather than a division by zero.
+    #[test]
+    fn sparse_secant_keeps_the_pattern_and_the_secant_equation() {
+        // 4 coordinates, allowed: (0,0), (1,0), (2,1), (3,3), (2,2).
+        let k = 4;
+        let mut allowed = vec![false; k * (k + 1) / 2];
+        for (r, c) in [(0, 0), (1, 0), (2, 1), (3, 3), (2, 2)] {
+            allowed[r * (r + 1) / 2 + c] = true;
+        }
+        let mut b = vec![0.0; k * (k + 1) / 2];
+        b[0] = 1.0;
+        let s = vec![0.5, -0.25, 1.0, 0.0];
+        let y = vec![0.1, 0.7, -0.4, 0.0];
+        assert!(sparse_secant_update(
+            &mut b,
+            &allowed,
+            &s,
+            &y,
+            Number::INFINITY
+        ));
+        let mut bs = vec![0.0; k];
+        packed_mult(&b, &s, &mut bs);
+        for a in 0..k {
+            assert!(
+                (bs[a] - y[a]).abs() < 1e-12,
+                "row {a}: {} vs {}",
+                bs[a],
+                y[a]
+            );
+        }
+        for (p, &ok) in allowed.iter().enumerate() {
+            if !ok {
+                assert_eq!(b[p], 0.0, "excluded packed entry {p} was written");
+            }
+        }
+        assert_eq!(b[9], 0.0, "(3,3) has no step component and must stay 0");
+    }
+
+    /// `min_norm_solve` returns the minimum-norm solution on a singular
+    /// PSD system (a rank-one `Q = v vᵀ`), not a blow-up.
+    #[test]
+    fn min_norm_solve_handles_a_singular_system() {
+        let v = [1.0, 2.0, 0.0];
+        let mut q = vec![0.0; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                q[i * 3 + j] = v[i] * v[j];
+            }
+        }
+        // r in range(Q): r = Q x* with x* = v/|v|^2 * 5 -> r = 5 v.
+        let r = [5.0, 10.0, 0.0];
+        let x = min_norm_solve(&mut q, &r, 3).expect("solvable");
+        let want = [1.0, 2.0, 0.0];
+        for i in 0..3 {
+            assert!(
+                (x[i] - want[i]).abs() < 1e-12,
+                "{i}: {} vs {}",
+                x[i],
+                want[i]
+            );
+        }
+    }
+
+    /// gh#989 item 5: `partitioned_elements=blocks` with a declared pattern
+    /// takes its blocks from the pattern's connected components, not from
+    /// contiguous index ranges. Variables 0 and 3 are coupled, as are 1, 2
+    /// and 5 (a star on 2); variable 4 appears in no entry and is linear.
+    #[test]
+    fn blocks_follow_the_declared_components_not_the_index_order() {
+        let mut u = PartitionedQuasiNewtonUpdater::new(UpdateType::Bfgs);
+        u.mode = ElementMode::PrimalBlock;
+        u.block_size = 64;
+        u.declared_pattern = Some(vec![(3, 0), (2, 1), (2, 2), (5, 2)]);
+        let empty = |rows| {
+            GenTMatrix::new(pounce_linalg::triplet::GenTMatrixSpace::new(
+                rows,
+                6,
+                Vec::new(),
+                Vec::new(),
+            ))
+        };
+        u.build_structure(6, &[0.0; 6], &empty(0), &empty(0));
+        let sup: Vec<Vec<Index>> = u.elements.iter().map(|e| e.support.clone()).collect();
+        assert_eq!(sup, vec![vec![0, 3], vec![1, 2, 5]]);
+        assert_eq!(u.uncovered, vec![4]);
+        // The star keeps only its declared entries: (1,1), (5,5), (5,1) excluded.
+        let star = &u.elements[1];
+        assert_eq!(
+            star.allowed.as_deref(),
+            Some(&[false, true, true, false, true, false][..])
+        );
+    }
+
     /// `packed_mult` agrees with a dense symmetric product, off-diagonal
     /// fan-out included.
     #[test]
@@ -1342,6 +1791,7 @@ mod tests {
             seeded: true,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let s = vec![1.0, 0.5, -0.25];
         // A deliberately indefinite target: SR1 must not sanitize it.
@@ -1389,6 +1839,7 @@ mod tests {
             seeded: false,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let s = vec![1.0];
         let y = vec![-3.0];
@@ -1427,6 +1878,7 @@ mod tests {
             seeded: false,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let s = vec![1.0, 0.5];
         let y = vec![2.0, -4.0];
@@ -1466,6 +1918,7 @@ mod tests {
             seeded: false,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let (s1, y1) = (vec![1.0, 0.0], vec![2.0, 0.0]);
         let (s2, y2) = (vec![0.0, 1.0], vec![0.0, -4.0]);
@@ -1530,6 +1983,7 @@ mod tests {
             seeded: true,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let s = vec![1.0, -2.0, 0.5];
         let y = vec![0.5, 1.0, -3.0];
@@ -1565,6 +2019,7 @@ mod tests {
             seeded: true,
             entries: Vec::new(),
             map: Vec::new(),
+            allowed: None,
         };
         let before = e.b.clone();
         let s = vec![1.0, 1.0];

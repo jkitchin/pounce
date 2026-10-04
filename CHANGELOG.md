@@ -83,21 +83,35 @@ changes.
   path it did, so the fixture sweep (both legs) is empty. Cost, stated
   plainly: the K-unit model, which used to be rescued by the equilibrated
   retry at 16 iterations, now converges in the first attempt but takes 49
-  (13 -> 65 at N = 40). (5) `hessian_approximation=partitioned` splits each
-  per-constraint element along the model's *declared* Lagrangian Hessian
-  sparsity (new `partitioned_structure=declared`, default; `jacobian` restores
-  the old dense rows): a collocation row is a handful of independent 2x2
-  blocks inside a dense-looking pattern, and one secant pair per iteration
-  cannot determine the dense block. Batch reactor (Radau, 225 variables):
-  exact 18, `jacobian` 30, `declared` 22; at N = 100 53 -> 33. **Not fixed:**
-  the iteration count still grows with the mesh (N = 400: exact 42,
-  `declared` 82 against 79 before), `partitioned_update_type=bfgs` still does
-  not converge per-constraint (a PSD model of an indefinite `d2c_j` weighted by
-  a multiplier of either sign; measured: Powell-damping replaced by SR1 on
-  indefinite pairs, `|y|` and `max(y, 0)` weights, and a BFGS-ordered
-  `blocks` partition were each tried and were no better or worse), and
-  `blocks` still needs 85/161/500 iterations because discopt orders variables
-  by family, not stage.
+  (13 -> 65 at N = 40). (5) `hessian_approximation=partitioned` reads the
+  model's *declared* Lagrangian Hessian sparsity (new
+  `partitioned_structure=declared`, default; `jacobian` restores the old dense
+  rows), splits each per-constraint element into the connected groups of that
+  pattern, and keeps only the declared entries of each group. The mesh growth
+  was the dense update formulas writing into structurally zero entries: a
+  collocation row's group is a star (control coupled to each state, no
+  state-state or state-diagonal entries), SR1/BFGS and the `γI` seed filled all
+  of it, and those entries, weighted by multipliers of either sign, gave the
+  assembled `W` the wrong inertia — the IPM then ran on a `δ_w` decaying by a
+  third per iteration. An element whose declared pattern is incomplete now
+  takes the pattern-constrained minimum-change secant update (Toint) from zero,
+  for either `partitioned_update_type`; on a star one pair determines it. With
+  a declared pattern whose connected components all fit in
+  `partitioned_block_size`, `partitioned_elements=blocks` uses those
+  components (the Lagrangian's exact diagonal blocks) instead of contiguous
+  index ranges. Batch reactor (Radau, issue's starting profile), iterations
+  exact / partitioned / `bfgs` / `blocks`, before -> after: N = 25 12 /
+  14 -> 13 / cap -> 13 / 88 -> 13; N = 100 16 / 54 -> 15 / cap -> 15 /
+  139 -> 15; N = 400 18 / 74 -> 21 / cap -> 21 / cap -> 21. `laptime` (N = 80):
+  partitioned 587 -> 240 iterations, ending at a different local minimum
+  (65.460044 against exact's 65.462928; feasible to 1.5e-10, dual
+  infeasibility 8e-9); `blocks` unchanged at 166 (its one 3 280-variable
+  component keeps the contiguous partition). Fixture sweep (both legs)
+  identical. Still open: `bfgs` without a declared Hessian structure
+  (`partitioned_structure=jacobian`, or a Python problem with no `hessian`)
+  does not converge per-constraint, on the batch reactor or on `laptime`;
+  modelling the Lagrangian element `λ_j c_j` with damped BFGS was tried and
+  diverged, and skipping low-curvature pairs froze it.
 - **Warm starts no longer lose to cold starts (gh#988).** `solve_qp` /
   `solve_qp_ipm_warm` now fall back to the cold HSDE path when the warm
   (direct infeasible-start) leg ends in `numerical_failure`,
