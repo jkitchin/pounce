@@ -1277,7 +1277,10 @@ Set `dual_inf_scale_kappa = 0` to switch the floor off and restore
 upstream Ipopt's bare-absolute bound. That is also the setting to reach
 for if you *tighten* `dual_inf_tol` and want that absolute standard
 honoured unconditionally — the floor is a floor, so it can override a
-tightened `dual_inf_tol` on a large-gradient model.
+tightened `dual_inf_tol` on a large-gradient model. Since gh#983 this is
+automatic: setting `dual_inf_tol` explicitly, without also naming
+`dual_inf_scale_kappa`, switches the floor off. Name both to keep the
+floor under a tolerance of your own.
 
 ### `s_max` — where `s_d` and `s_c` come from
 

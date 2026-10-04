@@ -134,6 +134,15 @@ fn runaway_is_the_whole_residual(
         && viol.max(compl) <= DUAL_DIV_RETRY_DOMINANCE * dual_inf
 }
 
+/// gh#983 item 4: a retry violation at or below this is arithmetic noise, not
+/// "primal slack". Rule 2 compared the retry's violation to the base's with no
+/// floor, so a base at `3e-38` refused a retry at `2e-13` that halved the
+/// objective (`x*y == 0` from `(0.3, 0.3)`: base `f = 2` with unscaled dual
+/// infeasibility `1.4e9`, retry `f = 1`). The floor is a few hundred ulps of 1;
+/// the case rule 2 exists for, `scholtes4`, buys `6.6e-05` of objective with a
+/// violation of `1.09e-09` -- four orders above it, so it is still refused.
+const RETRY_VIOL_NOISE_FLOOR: Number = 1e-12;
+
 /// Is the retry's answer admissible *as an answer*, next to the base
 /// attempt's — independent of which has the better multiplier?
 ///
@@ -234,7 +243,7 @@ fn retry_answer_is_admissible(
     if retry_obj < base_obj - tol {
         // Rule 2: an improvement is admissible only if the retry did not
         // give up primal accuracy to get it.
-        return retry_viol.is_finite() && retry_viol <= base_viol;
+        return retry_viol.is_finite() && retry_viol <= base_viol.max(RETRY_VIOL_NOISE_FLOOR);
     }
     true
 }
@@ -5893,6 +5902,16 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("dual_inf_tol") {
             builder.conv_check.dual_inf_tol = v;
+            // gh#983 item 1: a caller who names `dual_inf_tol` has asked for
+            // that absolute standard. The scale-relative floor (gh#532) is a
+            // default for a caller who has not, and it let `1e-6` certify a
+            // point with `‖∇L‖∞ = 0.144` because the multipliers were 3.5e9
+            // (a failed constraint qualification, which is not a reason to
+            // loosen the test). Naming `dual_inf_scale_kappa` as well opts the
+            // floor back in.
+            if read_num("dual_inf_scale_kappa").is_none() {
+                builder.conv_check.dual_inf_scale_kappa = 0.0;
+            }
         }
         if let Some(v) = read_num("constr_viol_tol") {
             builder.conv_check.constr_viol_tol = v;
@@ -7373,7 +7392,7 @@ struct FinalizeSnapshot {
 ///   (`issue857_escalation_gated_quality_rung.rs`).
 ///
 /// So the certificate is floored and the cost is not.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SolutionCertificate {
     objective: Number,
     scaled_objective: Number,
@@ -7387,6 +7406,13 @@ struct SolutionCertificate {
     unscaled_kkt_error: Number,
     kkt_error_above_noise: Number,
     mu: Number,
+    /// gh#983 item 5: the iteration count and per-iteration rows of the
+    /// attempt being floored. A solve report reads both from the statistics,
+    /// so restoring the certificate without them left a report whose
+    /// numbers describe the returned point and whose iteration table
+    /// describes the declined retry.
+    iteration_count: Index,
+    iterations: Vec<pounce_nlp::solve_statistics::IterRecord>,
 }
 
 impl SolutionCertificate {
@@ -7404,6 +7430,8 @@ impl SolutionCertificate {
             unscaled_kkt_error: s.final_unscaled_kkt_error,
             kkt_error_above_noise: s.final_kkt_error_above_noise,
             mu: s.final_mu,
+            iteration_count: s.iteration_count,
+            iterations: s.iterations.clone(),
         }
     }
 
@@ -7420,6 +7448,8 @@ impl SolutionCertificate {
         s.final_unscaled_kkt_error = self.unscaled_kkt_error;
         s.final_kkt_error_above_noise = self.kkt_error_above_noise;
         s.final_mu = self.mu;
+        s.iteration_count = self.iteration_count;
+        s.iterations = self.iterations.clone();
     }
 }
 
@@ -9301,6 +9331,53 @@ mod tests {
         // convention `sigma_forward_error_is_small` uses for `norm(x)`.
         assert!(admissible(1.0e6, 0.0, 1.0e6 + 0.5, 0.0));
         assert!(!admissible(1.0e6, 0.0, 1.0e6 + 5.0, 0.0));
+    }
+
+    /// gh#983 item 4: `x*y == 0` from `(0.3, 0.3)`. The base attempt sits at
+    /// `f = 2` with a violation of `3e-38` and an unscaled dual infeasibility
+    /// of `1.4e9`; the retry reaches `f = 1` at `1.96e-13`, six orders inside
+    /// `constr_viol_tol`. Rule 2 compared the two violations bare and refused
+    /// it. The floor admits arithmetic noise and nothing above it: the
+    /// scholtes4 row (`1.09e-9`) is refused in the same breath.
+    #[test]
+    fn a_retry_violation_at_the_noise_floor_does_not_block_an_improvement() {
+        assert!(retry_answer_is_admissible(
+            2.0, 3.037e-38, 1.0, 1.9584e-13, ACCEPT, MIN
+        ));
+        assert!(retry_answer_is_admissible(
+            -2.0, 3.037e-38, -1.0, 1.9584e-13, ACCEPT, MAX
+        ));
+        // Just above the floor is still slack.
+        assert!(!retry_answer_is_admissible(
+            2.0,
+            3.037e-38,
+            1.0,
+            RETRY_VIOL_NOISE_FLOOR * 10.0,
+            ACCEPT,
+            MIN
+        ));
+        // ... and rule 1 is untouched by the floor.
+        assert!(!retry_answer_is_admissible(
+            1.0, 3.037e-38, 2.0, 1.0e-13, ACCEPT, MIN
+        ));
+    }
+
+    /// gh#983 item 5: flooring an attempt must floor everything a solve
+    /// report reads off the statistics, the iteration count and the row table
+    /// included, or the report describes the declined retry.
+    #[test]
+    fn the_certificate_floor_carries_the_iteration_trace() {
+        use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
+        let mut base = SolveStatistics::new();
+        base.iteration_count = 64;
+        base.iterations = vec![IterRecord::default(); 3];
+        let floor = SolutionCertificate::of(&base);
+        let mut retry = SolveStatistics::new();
+        retry.iteration_count = 15;
+        retry.iterations = vec![IterRecord::default(); 15];
+        floor.restore_into(&mut retry);
+        assert_eq!(retry.iteration_count, 64);
+        assert_eq!(retry.iterations.len(), 3);
     }
 
     /// An infeasible base attempt is not a point worth protecting, so

@@ -9,6 +9,29 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Status certified at non-stationary points (gh#983), items 1, 4, 5.**
+  (1) An explicitly set `dual_inf_tol` is now honoured: the scale-relative
+  floor of gh#532 is a default for callers who did not name a tolerance, and
+  setting `dual_inf_tol` without `dual_inf_scale_kappa` turns it off (naming
+  both keeps it). The cusp `min x1 s.t. x2 - x1^3 <= 0, x2 >= 0` reported
+  `Solve_Succeeded` at `|grad L|_inf = 0.144` under `dual_inf_tol=1e-6`
+  because multipliers of 3.5e9 raised the floor to ~35; it now reaches
+  `9e-9`. (4) The gh#884 retry's answer gate no longer refuses an
+  improvement for a violation that is arithmetic noise (`<= 1e-12`):
+  `x*y == 0` from `(0.3, 0.3)` returned the origin, `f = 2`, at an unscaled
+  dual infeasibility of `1.4e9` instead of promoting the retry's `f = 1`.
+  `scholtes4`'s `1.09e-9` is still refused. (5) A declined retry or
+  declined mu-strategy fallback now restores the iteration count and
+  iteration table along with the certificate, so the solve report describes
+  the run that produced the returned point. Fixture sweep: three lines move
+  (`mu_fallback_point_floor` exact and lbfgs, `eigenb2` lbfgs), the iteration
+  count only, now that of the returned attempt; status, objective and engine
+  are unchanged. Not fixed here: item 2 (small user objective scale, no
+  warning) and item 3 (veto/rescale on the unscaled residual), which need a
+  measured design; the default floor is not capped.
+
 ### Documentation
 
 - **`bound_relax_factor` × a large objective coefficient, and what
