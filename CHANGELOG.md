@@ -54,6 +54,25 @@ changes.
 
 ### Fixed
 
+- **The active-set QP engine reports a narrowly infeasible QP as infeasible,
+  not as an iteration limit (gh#991).** A convex QP whose constraints miss
+  each other by a small margin (for example `x0 + 2*x1 <= 2` together with
+  `x0 + 2*x1 >= 2 + 1e-5` on free variables) came back from
+  `solver_selection=qp-active-set` / `pounce.solve_qp(..., method="active-set")`
+  as `Maximum_Iterations_Exceeded` / `solve_result_num=400` / `iteration_limit`
+  after 3 iterations, the same at `max_iter=100000`, while `qp-ipm` and `nlp`
+  reported `Infeasible_Problem_Detected` / 200. The engine's phase-1 had
+  converged at the minimal violation, but its only infeasibility test could
+  not rule out penalty bias on a free variable, so the verdict was dropped.
+  It now checks a Farkas certificate from an objective-free phase-1 and
+  reports `Infeasible_Problem_Detected` / 200 / `primal_infeasible` when the
+  certificate holds. Gaps inside the solver's tolerances are deliberately not
+  certified: below `feas_tol` (`1e-9`) the model is feasible to tolerance and
+  solves, and a certificate margin under `1e-7` relative (the IPM's
+  `qp_infeas_tol` default) is not claimed. A genuinely exhausted
+  iteration budget still reports the iteration limit. The fixture sweep is
+  unchanged on both legs, at `auto` and at `solver_selection=qp-active-set`.
+
 - **Textbook checklist, remaining items (gh#990).** (h) The Python path for a
   problem without `hessian` pins `mu_strategy=monotone`, and that pin used to
   read as the caller naming a strategy, which switched off the default-on
