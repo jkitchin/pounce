@@ -14,12 +14,13 @@ verified infeasibility / unboundedness detection. ``P = 0`` gives an LP.
 
 .. note::
 
-   This Python path **never presolves**, and it runs the solver's default
-   regularization / HSDE / equilibration settings. The ``qp_presolve``,
-   ``qp_reg``, ``qp_hsde``, ``qp_equilibrate`` and ``qp_crossover`` options
-   are CLI-only (``pounce model.nl qp_presolve=no ...``); ``solve_qp`` exposes
-   ``tol``, ``max_iter``, ``time_limit``, ``tau`` and ``tau_max`` instead. To
-   presolve, write the model to ``.nl`` and run the CLI.
+   This Python path **does not presolve unless asked**: ``solve_qp`` takes
+   the CLI's ``qp_presolve``, ``qp_reg``, ``qp_hsde``, ``qp_equilibrate`` and
+   ``qp_crossover`` options (gh#990; asked for by discopt#1615), and leaving one out keeps what this
+   path did before they existed — no presolve, and the engine's default
+   regularization / HSDE / equilibration / crossover settings. Note the one
+   difference from the CLI, where ``qp_presolve`` defaults to ``yes``.
+   ``solve_qp_batch`` and ``solve_socp`` do not take them.
 
 This module is the friendly surface over the compiled ``_pounce``
 bindings: it accepts dense vectors and (optionally) scipy-sparse or dense
@@ -225,6 +226,23 @@ class QpResult:
         ``dual_infeasible``; then the inf-norm of the returned ray (``(y, z,
         z_lb, z_ub)`` resp. ``x``). The ray is meaningful only up to positive
         scaling: divide by this to get a unit-norm certificate.
+    presolve:
+        ``None`` unless the solve ran with ``qp_presolve=True``. Then a dict:
+        ``outcome`` is ``"reduced"`` (solved the reduced problem and
+        postsolved), ``"infeasible"`` or ``"unbounded"`` (presolve proved it
+        and no engine ran, so ``iters == 0``); ``reason`` names the screen
+        that proved infeasibility, or one whose unconfirmed infeasibility
+        claim was discarded; and on ``"reduced"`` the reduction counts
+        (``orig_vars``, ``reduced_vars``, ``orig_rows``, ``reduced_rows``,
+        ``fixed_vars``, ``forcing_rows``, ``dominated_cols``, ...), the
+        fixpoint ``rounds`` and its ``exit``.
+    crossover:
+        ``None`` unless ``qp_crossover=True`` ran a crossover (it runs on an
+        LP — ``P == 0`` — solved to optimality by the IPM). Then a dict:
+        ``engine``, ``accepted`` (whether the vertex replaced the interior
+        point; a rejected vertex leaves the IPM answer), ``superbasics``, the
+        ``pivots_push`` / ``pivots_phase1`` / ``pivots_phase2`` and ``flips``
+        counts, and ``kkt_error_before`` / ``kkt_error_after``.
     """
 
     status: str
@@ -241,6 +259,8 @@ class QpResult:
     tau: Optional[float] = None
     kappa: Optional[float] = None
     certificate_scale: Optional[float] = None
+    presolve: Optional[dict] = None
+    crossover: Optional[dict] = None
 
     @property
     def success(self) -> bool:
@@ -923,6 +943,8 @@ def _to_result(d: dict) -> QpResult:
         tau=d.get("tau"),
         kappa=d.get("kappa"),
         certificate_scale=d.get("certificate_scale"),
+        presolve=d.get("presolve"),
+        crossover=d.get("crossover"),
     )
 
 
@@ -1007,6 +1029,42 @@ def _validate_time_limit(time_limit, func: str) -> None:
         )
 
 
+def _yes_no(value, name: str, func: str) -> Optional[bool]:
+    """A CLI yes/no switch as ``solve_qp`` takes it: ``None`` (keep the
+    default), a bool, or the CLI's own spelling ``"yes"`` / ``"no"``.
+    Anything else is refused by name — ``1``, ``"true"`` and ``"on"`` are not
+    the CLI's vocabulary, and guessing at them is how a switch ends up meaning
+    the opposite of what was written."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str) and value in ("yes", "no"):
+        return value == "yes"
+    raise ValueError(
+        f"{func}: `{name}` must be True/False or 'yes'/'no' (the CLI's values), "
+        f"got {value!r}"
+    )
+
+
+def _qp_reg(value, func: str) -> Optional[float]:
+    """``qp_reg``: ``None`` keeps the engine's default δ; otherwise a finite,
+    non-negative number, as the CLI requires."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError(f"{func}: `qp_reg` must be a number, got {value!r}")
+    r = float(value)
+    if not np.isfinite(r) or r < 0.0:
+        raise ValueError(
+            f"{func}: `qp_reg` must be a finite, non-negative number (the static "
+            f"KKT regularization), got {value!r}"
+        )
+    return r
+
+
 def _warm_dict(warm):
     """Coerce a warm start (a :class:`QpResult` or a mapping) into the
     ``{x, y, z, z_lb, z_ub}`` dict the binding expects, or ``None``."""
@@ -1049,6 +1107,11 @@ def solve_qp(
     method: str = "ipm",
     tau: Optional[float] = None,
     tau_max: Optional[float] = None,
+    qp_presolve=None,
+    qp_reg: Optional[float] = None,
+    qp_hsde=None,
+    qp_equilibrate=None,
+    qp_crossover=None,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
@@ -1119,6 +1182,33 @@ def solve_qp(
     by more than an order of magnitude within a single solve. Honored by both
     ``method="ipm"`` and ``method="active-set"``. See the module docstring.
 
+    ``qp_presolve``, ``qp_reg``, ``qp_hsde``, ``qp_equilibrate`` and
+    ``qp_crossover`` are the CLI options of the same names, with the same
+    meaning (gh#990; asked for by discopt#1615). The switches take ``True``/``False`` or ``"yes"``/
+    ``"no"``; ``qp_reg`` is a non-negative number. Each defaults to ``None``,
+    which is what this function did before it took them — note that for
+    ``qp_presolve`` that is *no* presolve, unlike the CLI's ``yes``:
+
+    * ``qp_presolve`` — run the convex presolve (fixed columns, singleton and
+      forcing rows, dominated columns, bound tightening), solve the reduced
+      problem, postsolve. A problem presolve proves infeasible or unbounded
+      returns that status with ``iters == 0``. See ``QpResult.presolve``.
+    * ``qp_reg`` — the IPM's static KKT regularization δ (default ``1e-10``).
+    * ``qp_hsde`` — ``False`` runs the direct (non-embedded) IPM driver
+      instead of the homogeneous self-dual embedding; ``tau``/``kappa`` are
+      then ``None``.
+    * ``qp_equilibrate`` — Ruiz equilibration of the direct driver's problem
+      data, and the gate on the equilibrated retries of the HSDE and
+      active-set engines (default on).
+    * ``qp_crossover`` — after an optimal IPM solve of an LP (``P == 0``),
+      cross over to a basic (vertex) solution. A no-op on a QP. See
+      ``QpResult.crossover``.
+
+    ``method="active-set"`` reads ``qp_presolve`` and ``qp_equilibrate`` and
+    refuses the other three, which it has no counterpart for; with
+    ``warm_start=``, ``qp_presolve=True`` and ``qp_crossover=True`` are refused,
+    since the warm path solves the unreduced problem and runs no crossover.
+
     The returned :class:`QpResult` carries the final KKT ``residuals``;
     pass ``collect_iterates=True`` to also capture the per-iteration
     convergence trace in ``result.iterates``.
@@ -1127,6 +1217,13 @@ def solve_qp(
         raise ValueError("solve_qp: `c` is required")
     _validate_solver_opts(tol, max_iter, "solve_qp")
     _validate_time_limit(time_limit, "solve_qp")
+    switches = dict(
+        qp_presolve=_yes_no(qp_presolve, "qp_presolve", "solve_qp"),
+        qp_reg=_qp_reg(qp_reg, "solve_qp"),
+        qp_hsde=_yes_no(qp_hsde, "qp_hsde", "solve_qp"),
+        qp_equilibrate=_yes_no(qp_equilibrate, "qp_equilibrate", "solve_qp"),
+        qp_crossover=_yes_no(qp_crossover, "qp_crossover", "solve_qp"),
+    )
     # The guard is scoped to the engine that needs it (gh #786). It ran
     # unconditionally when `solve_qp` *was* the IPM; `method=` arrived later and
     # its scope was not revisited, so the one engine documented to handle an
@@ -1175,6 +1272,7 @@ def solve_qp(
             tau_max=tau_max,
             time_limit=None if time_limit is None else float(time_limit),
             hessian_inertia=hessian_inertia,
+            **switches,
         )
     )
 

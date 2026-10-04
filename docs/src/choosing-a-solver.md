@@ -83,6 +83,9 @@ rerouted to the general NLP engine — see
 for what still routes away and why.
 
 - Python: `pounce.qp.solve_qp` (and `solve_qp_batch`, `solve_qp_multi_rhs`).
+  `solve_qp` takes the CLI's `qp_presolve` / `qp_reg` / `qp_hsde` /
+  `qp_equilibrate` / `qp_crossover` as keyword arguments; presolve is off there
+  unless asked for (see [LP/QP routing](lp-qp-routing.md#tuning-the-convex-ipm)).
 
 ### Second-order, exponential, or power cones → **Convex IPM (conic)**
 

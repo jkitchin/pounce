@@ -283,6 +283,11 @@ compare timings or isolate a solver issue):
 pounce model.nl qp_presolve=no
 ```
 
+From Python, `pounce.qp.solve_qp(..., qp_presolve=True)` runs the same pass,
+solve, and postsolve, and reports what it did in `result.presolve`. There the
+default is **off**: `solve_qp` did not presolve before it took the option, and
+an omitted argument does not change a solve.
+
 ### Presolve on a convex QCQP
 
 The switch applies to the conic driver too — the one that solves convex
@@ -343,9 +348,16 @@ point that classifies a `.nl` model and routes it. **A library solve
 refuses a non-default value** rather than accepting one it would drop —
 `IpoptApplication` has no structure extraction, so it cannot route to the
 convex engines at all (the same reason `solver_selection=lp-ipm` errors
-there). From Python, `pounce.solve_qp` drives the engine directly with its
-own arguments (`tol`, `max_iter`, `time_limit`, `method`); it never presolves
-and does not read these `qp_*` options, which are CLI-only.
+there). From Python, `pounce.qp.solve_qp` drives the engine directly and takes
+`qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` as
+keyword arguments with the meanings above (`True`/`False` or `"yes"`/`"no"`
+for the switches). Each defaults to `None`, which keeps the table's default
+**except `qp_presolve`, which is off** unless asked for. `method="active-set"`
+reads `qp_presolve` and `qp_equilibrate` and refuses the other three, which
+it has no counterpart for; with `warm_start=`, `qp_presolve=True` and
+`qp_crossover=True` are refused. The result's `presolve` and `crossover`
+fields report those phases (`None` when they did not run). `solve_qp_batch`
+and `solve_socp` do not take these options.
 
 ## Scope and limitations
 

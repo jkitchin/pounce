@@ -10,6 +10,24 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`pounce.qp.solve_qp` takes the convex engine's CLI options (gh#990,
+  discopt#1615).** `qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and
+  `qp_crossover` were reachable only from the CLI, so a Python caller could not
+  presolve, ask the IPM for an exact LP vertex, or run the direct driver. They
+  are now keyword arguments of `solve_qp` and of the `_pounce.solve_qp` binding,
+  with the CLI's names and meanings: the switches take `True`/`False` or
+  `"yes"`/`"no"`, `qp_reg` a finite non-negative number, and anything else is
+  refused by name. Each defaults to `None`, which is the pre-existing behaviour
+  — in particular **no presolve**, unlike the CLI's `qp_presolve=yes`; omitting
+  all five is bitwise the same solve as before (checked on 80 LP/QP solves
+  against the previous build). `qp_presolve=True` runs the CLI's
+  presolve/solve/postsolve sequence, including the HSDE re-verification of the
+  postsolved point. New `QpResult.presolve` and `QpResult.crossover` report
+  those phases, `None` when they did not run. `method="active-set"` honours
+  `qp_presolve` and `qp_equilibrate` and refuses `qp_reg`, `qp_hsde` and
+  `qp_crossover`; `warm_start=` refuses `qp_presolve=True` and
+  `qp_crossover=True`, which the warm path cannot honour. `solve_qp_batch` and
+  `solve_socp` are unchanged.
 
 - **Docs and small API gaps from the textbook checklist (gh#990, partial).**
   `solve_nlp_batch`'s per-instance `info` now carries `wall_time` (seconds in
@@ -26,7 +44,8 @@ changes.
   certificate scale (1/tau), the `intermediate` callback's `inf_pr` and the
   JSON `solution.lambda` convention, `--debug-script` batch behaviour, the
   bundled `pounce` binary path, and the `pounce.qp` docstring (the Python QP
-  path never presolves; `qp_*` options are CLI-only).
+  path never presolves; `qp_*` options are CLI-only — superseded by the
+  `solve_qp` engine-options entry above).
 - **Textbook checklist, remaining items (gh#990, second pass).** (3) The
   derivative checker's verdict is programmatic: `info["derivative_check"]`
   (mode, counts, `clean`, largest relative error per gradient / Jacobian /
