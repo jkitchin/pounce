@@ -128,6 +128,17 @@ pub fn main() -> ExitCode {
     real_main()
 }
 
+/// Set once when the `.nl` declares discrete variables (gh#987 item 1); the
+/// report builders append it to `statistics.warnings`.
+static INTEGER_RELAXATION_WARNING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Push the integer-relaxation warning, if any, into a report's statistics.
+fn note_integer_relaxation(stats: &mut pounce_solve_report::StatisticsInfo) {
+    if let Some(w) = INTEGER_RELAXATION_WARNING.get() {
+        stats.warnings.push(w.clone());
+    }
+}
+
 fn real_main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
@@ -582,6 +593,11 @@ fn real_main() -> ExitCode {
                     // MIP verdict.
                     if let Some(w) = pounce_cli::verify::integrality_notice(prob.n_discrete) {
                         eprintln!("pounce: warning: {w}");
+                        // Also machine-readable: the solve report's
+                        // `statistics.warnings` carries it, so a consumer that
+                        // reads the JSON and not stderr still sees that the
+                        // `optimal` is a relaxation bound (gh#987 item 1).
+                        let _ = INTEGER_RELAXATION_WARNING.set(format!("integer_relaxation: {w}"));
                     }
                     let elapsed = t0.elapsed().as_secs_f64();
                     // Render the source constraint equations and hand them to
@@ -2428,6 +2444,7 @@ fn real_main() -> ExitCode {
             builder.solution.lambda = lambda;
         }
         builder.ingest_stats(&solve_stats);
+        note_integer_relaxation(&mut builder.stats);
         if let Some(linsol) = app.linear_solver_summary() {
             builder.set_linear_solver_summary(linsol);
         }
@@ -3521,6 +3538,7 @@ fn run_convex_qp(
         builder.solution.lambda = lambda.clone();
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
+        note_integer_relaxation(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         // Real final KKT residuals (from pounce-convex, computed above), so the
         // harness sees genuine convergence numbers rather than zeros.
@@ -3531,9 +3549,16 @@ fn run_convex_qp(
         // How far outside the model AS DECLARED the returned point sits —
         // `final_constr_viol` measures the `bound_relax_factor`-widened model
         // the solver was handed, which understates it by the widening.
+        //
+        // gh#987 item 4: with no widening applied the model handed to the
+        // solver IS the model as declared, so the violation `res` measured
+        // (on the extracted rows, in the caller's units) is the declared
+        // one. It used to read NaN there -- the common case -- so the
+        // field that exists to say "how far outside your model" said
+        // nothing on the solves where the answer is simplest.
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
-            .unwrap_or(f64::NAN);
+            .unwrap_or(res.primal_infeasibility);
         // Unconditional, unlike the line above: this is a summary *row*, not a
         // warning that only fires when a widening moved the answer, so it
         // carries a real number on every solve.
@@ -3911,6 +3936,7 @@ fn run_convex_socp(
         builder.solution.lambda = lambda.clone();
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
+        note_integer_relaxation(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         builder.stats.final_constr_viol = res.primal_infeasibility;
         builder.stats.final_dual_inf = res.dual_infeasibility;
@@ -3919,9 +3945,16 @@ fn run_convex_socp(
         // How far outside the model AS DECLARED the returned point sits —
         // `final_constr_viol` measures the `bound_relax_factor`-widened model
         // the solver was handed, which understates it by the widening.
+        //
+        // gh#987 item 4: with no widening applied the model handed to the
+        // solver IS the model as declared, so the violation `res` measured
+        // (on the extracted rows, in the caller's units) is the declared
+        // one. It used to read NaN there -- the common case -- so the
+        // field that exists to say "how far outside your model" said
+        // nothing on the solves where the answer is simplest.
         builder.stats.final_declared_constr_viol = reported_res
             .map(|d| d.primal_infeasibility)
-            .unwrap_or(f64::NAN);
+            .unwrap_or(res.primal_infeasibility);
         // Unconditional, unlike the line above: this is a summary *row*, not a
         // warning that only fires when a widening moved the answer, so it
         // carries a real number on every solve.

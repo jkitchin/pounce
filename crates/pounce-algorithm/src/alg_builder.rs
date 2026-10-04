@@ -491,6 +491,12 @@ pub struct AlgorithmBuilder {
     pub kkt_block_min_size: usize,
     pub kkt_schur_summary_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
+    /// Sink the standard augmented-system solver publishes the inertia of
+    /// its zero-regularization trials into (`last_inertia_unregularized`,
+    /// gh#987 item 3). Set only on the main-IPM builder, so a restoration
+    /// sub-solve's differently-shaped KKT system never overwrites it.
+    pub inertia_sink:
+        Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
     /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
@@ -1273,6 +1279,7 @@ impl Default for AlgorithmBuilder {
             kkt_blocks_shared: None,
             kkt_block_min_size: crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
             kkt_schur_summary_sink: None,
+            inertia_sink: None,
             quality_escalation_counter: None,
         }
     }
@@ -1354,7 +1361,11 @@ impl AlgorithmBuilder {
             }
         };
         let linsol = TSymLinearSolver::new(backend, make_scaling(), self.linear_scaling_on_demand);
-        let inner_aug = StdAugSystemSolver::new(linsol);
+        let with_inertia_sink = |aug: StdAugSystemSolver| match self.inertia_sink.clone() {
+            Some(sink) => aug.with_inertia_sink(sink),
+            None => aug,
+        };
+        let inner_aug = with_inertia_sink(StdAugSystemSolver::new(linsol));
         // Limited-memory mode publishes the Hessian as a
         // `LowRankUpdateSymMatrix`; wrap the standard solver in the
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
@@ -1377,7 +1388,7 @@ impl AlgorithmBuilder {
             );
             Box::new(LowRankAugSystemSolver::with_bypass_solver(
                 Box::new(inner_aug),
-                Box::new(StdAugSystemSolver::new(bypass_linsol)),
+                Box::new(with_inertia_sink(StdAugSystemSolver::new(bypass_linsol))),
             ))
         } else if let Some((labels, cfg)) = self.resolved_kkt_blocks() {
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
@@ -1909,6 +1920,7 @@ mod tests {
                             kkt_block_min_size:
                                 crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
                             kkt_schur_summary_sink: None,
+                            inertia_sink: None,
                             quality_escalation_counter: None,
                         }
                         .build();

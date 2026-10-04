@@ -437,6 +437,85 @@ pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
 /// this via [`IpoptApplication::set_restoration_factory_provider`].
 pub type RestorationFactoryProvider = Box<dyn FnMut() -> RestorationFactory>;
 
+/// Running totals over the passes of a multi-pass solve (the ℓ₁ exact-penalty
+/// ρ loop, and the plain attempt that precedes it under
+/// `l1_fallback_on_restoration_failure`). Every pass starts from reset
+/// statistics, so the passes are summed here and written back once, after
+/// the last, as the **total** `iteration_count` plus a `passes` summary
+/// (gh#987 item 6). Everything else in the statistics keeps describing the
+/// last pass — the one that produced the returned point.
+#[derive(Default)]
+struct MultiPassTotals {
+    iterations: Index,
+    rows: Vec<pounce_nlp::solve_statistics::IterRecord>,
+    obj_evals: Index,
+    constr_evals: Index,
+    grad_evals: Index,
+    jac_evals: Index,
+    hess_evals: Index,
+    restoration_calls: Index,
+    restoration_inner_iters: Index,
+    restoration_outer_iters: Index,
+    passes: Vec<pounce_nlp::SolvePassRecord>,
+}
+
+impl MultiPassTotals {
+    fn push_pass(
+        &mut self,
+        st: &SolveStatistics,
+        rho: Option<Number>,
+        status: ApplicationReturnStatus,
+    ) {
+        self.passes.push(pounce_nlp::SolvePassRecord {
+            rho,
+            iterations: st.iteration_count,
+            first_row: self.rows.len(),
+            slack_sum: None,
+            constraint_violation: None,
+            status: format!("{status:?}"),
+        });
+        self.iterations += st.iteration_count;
+        self.rows.extend(st.iterations.iter().cloned());
+        self.obj_evals += st.num_obj_evals;
+        self.constr_evals += st.num_constr_evals;
+        self.grad_evals += st.num_obj_grad_evals;
+        self.jac_evals += st.num_constr_jac_evals;
+        self.hess_evals += st.num_hess_evals;
+        self.restoration_calls += st.restoration_calls;
+        self.restoration_inner_iters += st.restoration_inner_iters;
+        self.restoration_outer_iters += st.restoration_outer_iters;
+    }
+
+    fn set_slack_sum(&mut self, v: Number) {
+        if let Some(p) = self.passes.last_mut() {
+            p.slack_sum = v.is_finite().then_some(v);
+        }
+    }
+
+    fn set_violation(&mut self, v: Number) {
+        if let Some(p) = self.passes.last_mut() {
+            p.constraint_violation = v.is_finite().then_some(v);
+        }
+    }
+
+    fn apply(&self, st: &mut SolveStatistics) {
+        if self.passes.is_empty() {
+            return;
+        }
+        st.iteration_count = self.iterations;
+        st.iterations = self.rows.clone();
+        st.num_obj_evals = self.obj_evals;
+        st.num_constr_evals = self.constr_evals;
+        st.num_obj_grad_evals = self.grad_evals;
+        st.num_constr_jac_evals = self.jac_evals;
+        st.num_hess_evals = self.hess_evals;
+        st.restoration_calls = self.restoration_calls;
+        st.restoration_inner_iters = self.restoration_inner_iters;
+        st.restoration_outer_iters = self.restoration_outer_iters;
+        st.passes = self.passes.clone();
+    }
+}
+
 /// Callback fired by [`IpoptApplication::optimize_constrained`] once
 /// the IPM has converged (status `SolveSucceeded` or
 /// `SolvedToAcceptableLevel`) and before the user TNLP's
@@ -3555,6 +3634,9 @@ impl IpoptApplication {
         if !is_l1_fallback_trigger(first_status) {
             return first_status;
         }
+        // gh#987 item 6: the plain attempt's iterations are part of what this
+        // call spent, and the retry's `optimize_constrained` resets them.
+        let first_attempt = self.statistics.borrow().clone();
         // Trigger fired. Flip the wrapper option for the retry and
         // restore it after — keeps the user's option-table view of the
         // session exactly as they left it.
@@ -3574,6 +3656,35 @@ impl IpoptApplication {
             true,
             false,
         );
+        // Fold the plain attempt in ahead of the retry's passes. A retry that
+        // never ran a pass (wrapper construction declined) leaves the plain
+        // attempt's own statistics standing untouched.
+        {
+            let mut st = self.statistics.borrow_mut();
+            if !st.passes.is_empty() {
+                let mut head = MultiPassTotals::default();
+                head.push_pass(&first_attempt, None, first_status);
+                let shift = head.rows.len();
+                let mut passes = head.passes;
+                passes.extend(st.passes.iter().cloned().map(|mut p| {
+                    p.first_row += shift;
+                    p
+                }));
+                let mut rows = head.rows;
+                rows.append(&mut st.iterations);
+                st.iterations = rows;
+                st.iteration_count += first_attempt.iteration_count;
+                st.num_obj_evals += first_attempt.num_obj_evals;
+                st.num_constr_evals += first_attempt.num_constr_evals;
+                st.num_obj_grad_evals += first_attempt.num_obj_grad_evals;
+                st.num_constr_jac_evals += first_attempt.num_constr_jac_evals;
+                st.num_hess_evals += first_attempt.num_hess_evals;
+                st.restoration_calls += first_attempt.restoration_calls;
+                st.restoration_inner_iters += first_attempt.restoration_inner_iters;
+                st.restoration_outer_iters += first_attempt.restoration_outer_iters;
+                st.passes = passes;
+            }
+        }
         if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
             retry_status
         } else {
@@ -4519,10 +4630,16 @@ impl IpoptApplication {
 
         let mut rho = rho_init;
         let mut last_status = ApplicationReturnStatus::InternalError;
+        // gh#987 item 6: every pass resets the statistics, so without this the
+        // report described only the last ρ — `iter_count` 26 for a solve that
+        // ran 18 + 22 + 22 + 26 iterations. Accumulated here, applied once
+        // after the loop.
+        let mut totals = MultiPassTotals::default();
         for _outer in 0..max_outer {
             wrapper_rc.borrow_mut().set_rho(rho);
             let dyn_tnlp: Rc<RefCell<dyn TNLP>> = wrapper_rc.clone();
             last_status = self.optimize_constrained(dyn_tnlp);
+            totals.push_pass(&self.statistics.borrow(), Some(rho), last_status);
 
             let w = wrapper_rc.borrow();
             if !w.has_solution() {
@@ -4534,6 +4651,7 @@ impl IpoptApplication {
             let y_eq_inf = w.last_y_eq_inf_norm();
             let x_here: Vec<Number> = w.last_x_trunc().to_vec();
             drop(w);
+            totals.set_slack_sum(slack_sum);
 
             // Termination decisions.
             let inner_ok = matches!(
@@ -4577,7 +4695,10 @@ impl IpoptApplication {
                         )
                     })
                     .flatten()
-                    .map(|f| f.negligible_at_tol)
+                    .map(|f| {
+                        totals.set_violation(f.max_violation);
+                        f.negligible_at_tol
+                    })
             };
             match feasible_here {
                 Some(true) => break,
@@ -4595,6 +4716,9 @@ impl IpoptApplication {
             let steer = tau * y_eq_inf + 1.0e-12;
             rho = geom.max(steer).min(rho_max);
         }
+
+        // gh#987 item 6: total iterations and the per-pass summary.
+        totals.apply(&mut self.statistics.borrow_mut());
 
         // Forward to the user's inner.finalize_solution exactly once.
         let w = wrapper_rc.borrow();
@@ -5293,6 +5417,9 @@ impl IpoptApplication {
         // `"resto."` when its caller mints the inner backend factory —
         // see `ma57_config_from_options`.
         let ma57_cfg = ma57_config_from_options(&self.options, "");
+        // gh#987 item 3: publish the unperturbed trials' inertia next to the
+        // backend's own per-factorization record.
+        builder.inertia_sink = Some(Arc::clone(&self.linsol_summary_sink));
         let factory = self.linear_backend_factory.take().unwrap_or_else(|| {
             default_backend_factory_with_sink(
                 feral_cfg,

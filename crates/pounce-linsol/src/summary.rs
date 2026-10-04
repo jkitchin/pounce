@@ -32,7 +32,23 @@ pub struct LinearSolverSummary {
     /// Maximum `|pivot|` observed across factors.
     pub max_abs_pivot: Option<f64>,
     /// Inertia of the final factorisation as `(positive, negative, zero)`.
+    ///
+    /// This is the inertia of the matrix **after** the interior-point
+    /// method's regularization (`delta_w`, `delta_c`) was added, so at a
+    /// non-convex stationary point it reads `(n, m, 0)` because the shift
+    /// made it so. See [`Self::last_inertia_unregularized`] for the verdict
+    /// the unperturbed system gave.
     pub last_inertia: Option<(usize, usize, usize)>,
+    /// Inertia `(positive, negative, zero)` of the most recent factorization
+    /// attempted with **no regularization at all** (`delta_x = delta_s =
+    /// delta_c = delta_d = 0`), i.e. what the KKT matrix itself looks like.
+    /// The interior-point loop tries this first on every iteration, so it is
+    /// the curvature verdict of the last iteration's direction computation
+    /// (gh#987 item 3): `(0, 2, 0)` at a local maximum where
+    /// [`Self::last_inertia`] reads `(2, 0, 0)` after the shift. `None` when
+    /// no unperturbed trial was recorded (backends that report no inertia,
+    /// or a solve that never factored).
+    pub last_inertia_unregularized: Option<(usize, usize, usize)>,
     /// `nnz(A)` of the final factorisation's matrix.
     pub last_nnz_a: Option<usize>,
     /// `nnz(L)` of the final factorisation.

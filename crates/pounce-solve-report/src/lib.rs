@@ -169,6 +169,11 @@ pub struct LinearSolverSummaryInfo {
     /// `(positive, negative, zero)` inertia of the final factorisation.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_inertia: Option<(usize, usize, usize)>,
+    /// `(positive, negative, zero)` inertia of the last factorization tried
+    /// with **no** regularization, i.e. the KKT matrix's own curvature
+    /// verdict (gh#987). `last_inertia` is the post-shift value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_inertia_unregularized: Option<(usize, usize, usize)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_nnz_a: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -248,6 +253,7 @@ impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
             min_abs_pivot: s.min_abs_pivot,
             max_abs_pivot: s.max_abs_pivot,
             last_inertia: s.last_inertia,
+            last_inertia_unregularized: s.last_inertia_unregularized,
             last_nnz_a: s.last_nnz_a,
             last_nnz_l: s.last_nnz_l,
             total_factor_secs: s.total_factor_secs,
@@ -628,6 +634,14 @@ pub struct StatisticsInfo {
     /// changes the status. `serde(default)` so older reports still load.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Per-pass summary of a multi-pass solve (gh#987 item 6): one entry per
+    /// ℓ₁ exact-penalty ρ pass, preceded by the unwrapped attempt when the ℓ₁
+    /// fallback ran. Omitted on an ordinary single-pass solve. When present,
+    /// `iteration_count` is the total across the passes and `iterations`
+    /// (at full detail) their concatenated rows; `first_row` in each entry
+    /// marks where a pass's rows start. Additive to `pounce.solve-report/v1`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passes: Vec<pounce_nlp::SolvePassRecord>,
 }
 
 /// Builder collecting the inputs for a [`SolveReport`]. The CLI
@@ -728,6 +742,7 @@ impl ReportBuilder {
             dual_divergence_signature: src.dual_divergence_signature,
             dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
             warnings: src.warnings.clone(),
+            passes: src.passes.clone(),
         };
         if matches!(self.detail, ReportDetail::Full) {
             self.iterations = src.iterations.clone();
@@ -821,6 +836,7 @@ fn empty_stats() -> StatisticsInfo {
         dual_divergence_signature: false,
         dual_divergence_retry_promoted: false,
         warnings: Vec::new(),
+        passes: Vec::new(),
     }
 }
 

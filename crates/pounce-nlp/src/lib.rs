@@ -46,7 +46,7 @@ pub use ipopt_nlp::{IpoptNlp, Nlp};
 pub use orig_ipopt_nlp::{ConstObjScaling, NlpScaling, NoScaling, OrigIpoptNlp};
 pub use quadratic::QuadraticStructure;
 pub use return_codes::{AlgorithmMode, ApplicationReturnStatus};
-pub use solve_statistics::SolveStatistics;
+pub use solve_statistics::{SolvePassRecord, SolveStatistics};
 pub use tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,

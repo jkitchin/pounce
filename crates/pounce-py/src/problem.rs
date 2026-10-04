@@ -1464,6 +1464,7 @@ fn linear_solver_dict<'py>(
     d.set_item("min_abs_pivot", s.min_abs_pivot)?;
     d.set_item("max_abs_pivot", s.max_abs_pivot)?;
     d.set_item("last_inertia", s.last_inertia)?;
+    d.set_item("last_inertia_unregularized", s.last_inertia_unregularized)?;
     d.set_item("last_nnz_a", s.last_nnz_a)?;
     d.set_item("last_nnz_l", s.last_nnz_l)?;
     d.set_item("total_factor_secs", s.total_factor_secs)?;

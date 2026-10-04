@@ -81,6 +81,38 @@ changes.
   curvature-classified minima. Deferred: (6) per-pass summary of the l1
   multi-pass report.
 
+- **Misleading verdicts and reports, second pass (gh#987).** (6) A
+  multi-pass solve now reports every pass. The l1 exact-penalty loop (and the
+  plain attempt that precedes it under `l1_fallback_on_restoration_failure`)
+  reset the statistics on each pass, so `iter_count` and the report kept only
+  the last one (a solve that ran 18 + 22 + 22 + 26 iterations reported 26).
+  `iter_count` / `statistics.iteration_count` is now the **total**, the
+  evaluation and restoration counters are summed the same way, `iterations`
+  holds every pass's rows, and a new `statistics.passes` array carries one
+  entry per pass (`rho`, `iterations`, `first_row`, `slack_sum`,
+  `constraint_violation` in the model's own units, `status`); it is omitted
+  on an ordinary solve. Every other `final_*` field still describes the last
+  pass, which produced the returned point. (3) `linear_solver` gains
+  `last_inertia_unregularized`: the inertia of the most recent factorization
+  tried with no regularization, so the origin of the Bistable repro reads
+  `(0, 2, 0)` where `last_inertia` reads `(2, 0, 0)` after the `delta_w` shift
+  (also `info["linear_solver"]` in Python); additive, `last_inertia` is
+  unchanged. (4) The convex arm's `final_declared_constr_viol` is the
+  user-unit violation on every solve (it was `NaN` whenever no
+  `bound_relax_factor` widening was applied, the common case). (1) The
+  integer-relaxation notice is also in the JSON report's `statistics.warnings`
+  (`integer_relaxation: ...`). A distinct `solve_result` for a MILP
+  relaxation was considered and **not** done: AMPL's convention reads the
+  0-99 band as "solved" and 100-199 as `solved?`, and Pyomo's `.sol` reader
+  maps those bands to termination conditions and solver statuses, so moving a
+  relaxation out of the solved band would change what existing Pyomo / AMPL
+  models do with an answer that is, for the relaxation, correct (this could
+  not be checked against a Pyomo install here, which is the reason to leave
+  the band alone). The stderr warning, the report warning and
+  `pounce verify`'s integrality check are the disclosure; pounce-pyomo keeps
+  its own `termination_condition` handling. Not changed: item 2 (documented
+  in the first pass), items 5, 7, 8 (first pass).
+
 - **Crashes on legal input (gh#986).** (1, 2) A long left-deep chain of
   binary `o0` nodes overflowed the CLI's stack and, past the reader's guard,
   killed the Python interpreter via `parse_nl_text`. The `.nl` reader now

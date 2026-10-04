@@ -119,3 +119,36 @@ fn feas_tol_is_relative_and_abs_feas_tol_is_absolute() {
         "absolute test must reject a violation of 1.0; stdout:\n{o}"
     );
 }
+
+/// gh#987 item 1, second pass. The relaxation notice is not stderr-only: the
+/// JSON report's `statistics.warnings` carries it as `integer_relaxation: ...`,
+/// so a consumer that reads the report (and not the console) still learns that
+/// `optimal` is a bound on the MIP optimum. The `solve_result_num` stays in
+/// the solved band on purpose -- see CHANGELOG.
+#[test]
+fn the_relaxation_notice_is_in_the_report_warnings() {
+    let nl = tmp("knap_report.nl");
+    std::fs::write(&nl, KNAP).unwrap();
+    let json = tmp("knap_report.json");
+    let out = run(
+        &[&nl],
+        &[
+            "-AMPL",
+            "--no-options-file",
+            "--json-output",
+            json.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "solve failed: {:?}", text(&out));
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let warnings = v["statistics"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|w| w.starts_with("integer_relaxation:") && w.contains("RELAXATION"))),
+        "report warnings: {warnings:?}"
+    );
+}

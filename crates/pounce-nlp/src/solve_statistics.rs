@@ -98,6 +98,38 @@ impl IterPhase {
     }
 }
 
+/// One pass of a multi-pass solve — an ℓ₁ exact-penalty ρ pass, or the
+/// unwrapped attempt that preceded the ℓ₁ fallback (gh#987 item 6).
+///
+/// `SolveStatistics::iteration_count` and `iterations` cover **all** passes;
+/// this is how a reader gets the per-pass split back.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SolvePassRecord {
+    /// Penalty parameter ρ of an ℓ₁ pass; `None` for the plain (unwrapped)
+    /// attempt that an `l1_fallback_on_restoration_failure` retry follows.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rho: Option<Number>,
+    /// Iterations this pass ran.
+    pub iterations: Index,
+    /// Index into `SolveStatistics::iterations` of this pass's first row
+    /// (rows of all passes are concatenated; each pass restarts its own
+    /// `iter` numbering at 0). Meaningful only when rows were collected.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub first_row: usize,
+    /// `Σ(p + n)` of the augmented slacks at the pass's end (the BNW
+    /// steering signal); `None` for an unwrapped pass.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub slack_sum: Option<Number>,
+    /// Max violation of the **model's own** constraints at the pass's end,
+    /// in the model's units; `None` when it could not be measured.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub constraint_violation: Option<Number>,
+    /// The pass's exit status, as the `ApplicationReturnStatus` variant name.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub status: String,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolveStatistics {
@@ -334,6 +366,16 @@ pub struct SolveStatistics {
     /// the binary's `--json-detail summary` mode). Populated in order
     /// by [`IpoptAlgorithm::iterate`] when enabled.
     pub iterations: Vec<IterRecord>,
+
+    /// Per-pass summary of a multi-pass solve: one entry per ℓ₁
+    /// exact-penalty ρ pass (preceded by the unwrapped attempt when the ℓ₁
+    /// fallback produced them). Empty on an ordinary single-pass solve.
+    ///
+    /// When non-empty, `iteration_count` is the **total** over these passes
+    /// and `iterations` is their rows concatenated (gh#987 item 6); every
+    /// other `final_*` field describes the last pass, which produced the
+    /// returned point.
+    pub passes: Vec<SolvePassRecord>,
 }
 
 /// The eight residual fields default to **NaN, not zero**.
@@ -422,6 +464,7 @@ impl Default for SolveStatistics {
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
             iterations: Vec::new(),
+            passes: Vec::new(),
         }
     }
 }

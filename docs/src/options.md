@@ -1882,6 +1882,13 @@ overriding:
 | `l1_slack_tol`                       | `1e-6`  | *Fallback* slack tolerance — see below.                    |
 | `l1_steering_factor`                 | `10.0`  | Steering-rule factor for ρ escalation.                     |
 
+Each ρ pass is a full solve. The reported `iteration_count` (`iter_count` in
+Python) is the **total over all passes**, `iterations` holds every pass's
+rows, and the solve report's `statistics.passes` lists one entry per pass —
+`rho`, `iterations`, the model's own `constraint_violation`, and the pass's
+`status` (gh#987). Other `final_*` fields describe the last pass, which
+produced the returned point.
+
 The wrapper solves an *augmented* problem, `c(x) − p + n = target` with
 `p, n ≥ 0`, whose equality rows the slacks satisfy to machine precision
 by construction. So neither the residual the inner solve converged nor
