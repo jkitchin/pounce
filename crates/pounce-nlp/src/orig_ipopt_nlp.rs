@@ -229,6 +229,9 @@ pub struct OrigIpoptNlp {
     /// The gradient-based factor alone (`df`), without the user's constant.
     /// See `IpoptNlp::computed_obj_scaling_factor`.
     computed_obj_scale: Cell<Number>,
+    /// gh#983: `max |grad f|` over the free variables at the starting point,
+    /// as gradient-based scaling measured it. `NaN` when it did not run.
+    start_obj_grad_max: Cell<Number>,
     /// Per-row scaling for equality constraints (`dc_`). `None` ↔
     /// `IsValid(dc) == false` — i.e. row-max gradient is below the
     /// `nlp_scaling_max_gradient` cutoff so no scaling is applied.
@@ -718,6 +721,7 @@ impl OrigIpoptNlp {
             scaling,
             obj_scale_factor: Cell::new(initial_obj_scal),
             computed_obj_scale: Cell::new(1.0),
+            start_obj_grad_max: Cell::new(Number::NAN),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
             declared_d_l: RefCell::new(None),
@@ -1206,6 +1210,7 @@ impl OrigIpoptNlp {
                     max_grad_f = v;
                 }
             }
+            self.start_obj_grad_max.set(max_grad_f);
             df = gradient_obj_scale(max_grad_f, max_gradient, min_value, obj_target_gradient);
         }
         self.computed_obj_scale.set(df);
@@ -2500,6 +2505,10 @@ impl IpoptNlp for OrigIpoptNlp {
 
     fn computed_obj_scaling_factor(&self) -> Number {
         self.computed_obj_scale.get()
+    }
+
+    fn start_obj_gradient_max(&self) -> Number {
+        self.start_obj_grad_max.get()
     }
 
     fn c_scale_vec(&self) -> Option<Vec<Number>> {

@@ -1302,6 +1302,52 @@ earlier. The scaled and unscaled numbers are both reported: `--json-output`
 carries `final_kkt_error` and `final_unscaled_kkt_error`, and their ratio
 is exactly what `s_max` controls.
 
+## Success verdicts and the model's own scale (`solve_quality_audit`)
+
+The strict convergence test runs on a *scaled* aggregate. Gradient-based
+scaling measures the objective gradient once, at the starting point, freezes
+the factor, and only ever scales **down**. Two failures follow, one on each
+side, and neither is visible in the scaled space (gh#983):
+
+* **Frozen at a huge-gradient start.** LJ7 from a start whose gradient is
+  `3e8` freezes a factor of `3e-7`; the scaled test passes at a point whose
+  unscaled stationarity residual is `2.9e-2`, and continuing under that
+  factor does not improve it. `pounce.find_minima` without `hess=` then
+  accepted gradients of `~1` as minima.
+* **Small user objective.** A profit in M$/L has a gradient of `1e-5` and
+  nothing scales it up, so the absolute complementarity floor (`~mu`) is
+  `2.5e-4` of the objective's own scale: `Solve_Succeeded` at `T = 359.9513`
+  against an active bound of `360`, `4.7e-4` (relative) off the optimum.
+
+With `solve_quality_audit=yes` (the default), a `Solve_Succeeded` /
+`Solved_To_Acceptable_Level` verdict that shows either signature is re-solved
+**once** from the returned point: the first with the scaling re-evaluated
+there, the second with the objective multiplied by `1/max|grad f|` (capped at
+`1e10`). The re-solve is promoted only if it returns a clean verdict, is no
+worse in the model's own units, strictly improves the quantity that triggered
+the audit, and is admissible next to the first answer (the same rule as the
+gh#884 retry); otherwise the first attempt's status, point and statistics are
+restored. It is skipped when `nlp_scaling_method` is not `gradient-based`:
+the caller owns the scaling. Cost: one extra solve, from a converged point,
+on a run that shows a signature.
+
+Whatever happens, the run carries **structured warnings**
+(`info["warnings"]`, the JSON report's `statistics.warnings`, `WARNING:`
+console lines): `objective_scale_small`, `unscaled_stationarity_above_tol`,
+`large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They never change
+the status.
+
+**Why the scale-relative floor is not capped.** An explicitly set
+`dual_inf_tol` is honoured (see `dual_inf_scale_kappa` above). For a caller
+who set nothing, the floor `kappa * tol * dual_scale` rises above
+`dual_inf_tol` only once the terms of the stationarity residual reach `1e8`.
+The cusp of gh#983 (multipliers `3.5e9`, residual `0.144`) would be rejected
+by a cap near `0.1`, but so would Vanderbei's `orthrds2` (residual `89.7` at
+scale `1.6e10`, stationary to nine digits relative to its scale). A cap
+cannot separate them by magnitude alone. Instead such a point carries the
+`large_dual_scale` warning, which is the symptom of the failed constraint
+qualification that produced the multipliers.
+
 ## Objective sense and `obj_scaling_factor`
 
 `obj_scaling_factor` multiplies the objective the IPM minimizes, so a

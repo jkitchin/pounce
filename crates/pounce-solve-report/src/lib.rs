@@ -621,6 +621,13 @@ pub struct StatisticsInfo {
     /// latter case every other field here describes the base attempt.
     #[serde(default)]
     pub dual_divergence_retry_promoted: bool,
+    /// gh#983. Structured solve-quality warnings about the returned point,
+    /// each `"<code>: <text>"` (`objective_scale_small`,
+    /// `unscaled_stationarity_above_tol`, `large_dual_scale`,
+    /// `unscaled_dual_inf_above_acceptable`). Empty on a clean run; never
+    /// changes the status. `serde(default)` so older reports still load.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Builder collecting the inputs for a [`SolveReport`]. The CLI
@@ -720,6 +727,7 @@ impl ReportBuilder {
             quality_escalations: src.quality_escalations,
             dual_divergence_signature: src.dual_divergence_signature,
             dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
+            warnings: src.warnings.clone(),
         };
         if matches!(self.detail, ReportDetail::Full) {
             self.iterations = src.iterations.clone();
@@ -812,6 +820,7 @@ fn empty_stats() -> StatisticsInfo {
         quality_escalations: 0,
         dual_divergence_signature: false,
         dual_divergence_retry_promoted: false,
+        warnings: Vec::new(),
     }
 }
 

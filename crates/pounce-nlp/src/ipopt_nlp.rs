@@ -457,6 +457,14 @@ pub trait IpoptNlp: Nlp {
         1.0
     }
 
+    /// gh#983: the largest objective-gradient entry at the starting point, as
+    /// gradient-based scaling measured it -- the model's own gradient scale,
+    /// independent of where the solve ends (an interior optimum has `grad f`
+    /// near zero there). `NaN` when no gradient-based scaling ran.
+    fn start_obj_gradient_max(&self) -> Number {
+        Number::NAN
+    }
+
     /// Per-row scaling vector for the equality block (`dc_` upstream):
     /// the factor each `c` row is multiplied by inside [`Self::eval_c`]
     /// / [`Self::eval_jac_c`]. `None` ⇔ no row scaling (all 1.0);

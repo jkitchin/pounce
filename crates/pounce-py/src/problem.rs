@@ -1655,6 +1655,9 @@ pub(crate) fn build_info_dict<'py>(
         stats.final_unscaled_constr_viol,
     )?;
     info.set_item("final_unscaled_compl", stats.final_unscaled_compl)?;
+    // gh#983: structured solve-quality warnings (`"<code>: <text>"`), empty
+    // on a clean run. Never changes the status.
+    info.set_item("warnings", stats.warnings.clone())?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /

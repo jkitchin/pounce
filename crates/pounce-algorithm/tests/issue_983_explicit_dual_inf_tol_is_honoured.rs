@@ -109,7 +109,19 @@ fn grad_l_inf(x: &[Number], lam: &[Number]) -> Number {
 }
 
 fn run(opts: &[(&str, Number)]) -> (ApplicationReturnStatus, Number) {
+    run_audit(opts, true)
+}
+
+fn run_audit(opts: &[(&str, Number)], audit: bool) -> (ApplicationReturnStatus, Number) {
     let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_string_value(
+            "solve_quality_audit",
+            if audit { "yes" } else { "no" },
+            true,
+            false,
+        )
+        .unwrap();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
@@ -156,10 +168,24 @@ fn the_floor_is_still_on_when_nothing_is_named_and_off_when_the_tolerance_is() {
         "named tolerance leaked through the floor: {named_res:e}"
     );
     // Measured: the floor certifies at 1.44e-1 when the caller opts it back in
-    // by naming kappa, and the honoured tolerance reaches 9.2e-9.
-    assert_eq!(kappa_status, ApplicationReturnStatus::SolveSucceeded);
+    // by naming kappa, and the honoured tolerance reaches 9.2e-9. The *gate*
+    // still accepts that point (gh#532); the second pass of gh#983 only stops
+    // the verdict from being strict -- multipliers of 3.5e9 are a failed
+    // constraint qualification -- so the status is the acceptable level, with
+    // the warnings in `statistics.warnings`.
+    assert_eq!(
+        kappa_status,
+        ApplicationReturnStatus::SolvedToAcceptableLevel
+    );
     assert!(
         kappa_res > 1e-2,
         "opting the floor back in must restore gh#532: {kappa_res:e}"
     );
+    // With the audit off the gate's own verdict is visible: strict.
+    let (raw_status, raw_res) = run_audit(
+        &[("dual_inf_tol", 1e-6), ("dual_inf_scale_kappa", 1.0)],
+        false,
+    );
+    assert_eq!(raw_status, ApplicationReturnStatus::SolveSucceeded);
+    assert!(raw_res > 1e-2, "{raw_res:e}");
 }

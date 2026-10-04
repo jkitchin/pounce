@@ -219,7 +219,9 @@ class _Stop(Exception):
 class _Context:
     """Holds the clean problem and the shared solve / polish / verify ops."""
 
-    def __init__(self, fun, jac, hess, bounds, constraints, options, psd_tol):
+    def __init__(self, fun, jac, hess, bounds, constraints, options, psd_tol,
+                 kkt_tol=1e-4):
+        self.kkt_tol = kkt_tol
         self.fun = fun
         self.jac = jac
         self.hess = hess
@@ -253,11 +255,23 @@ class _Context:
         if self.max_solves is not None and self.n_solves >= self.max_solves:
             raise _Stop("budget_exhausted")
         self.n_solves += 1
-        return minimize(
+        res = minimize(
             fun, x0, jac=jac, hess=hess,
             bounds=self.bounds, constraints=self.constraints,
             **(self.options or {}),
         )
+        # gh#983: ``Solve_Succeeded`` is a verdict in the solver's *scaled*
+        # space. Gradient scaling frozen at a huge-gradient start has been seen
+        # to certify points whose unscaled stationarity residual is ~1, and
+        # without ``hess=`` nothing else here (``is_minimum``) looks at the
+        # point. Veto on the unscaled residual the solver itself reports.
+        if res.success and self.kkt_tol is not None:
+            info = getattr(res, "info", None) or {}
+            dual = info.get("final_unscaled_dual_inf")
+            if dual is not None and np.isfinite(dual) and dual > self.kkt_tol:
+                res.success = False
+                res["kkt_rejected"] = float(dual)
+        return res
 
     # Acceptance must tolerate the solver's bound relaxation: the IPM lets a
     # converged primal sit up to ``bound_relax_factor * max(1, |bound|)``
@@ -613,6 +627,7 @@ def find_minima(
     patience: int = 8,
     dedup: float = 1e-4,
     psd_tol: float = 1e-6,
+    kkt_tol: float | None = 1e-4,
     options: Mapping[str, Any] | None = None,
     strategy_kw: Mapping[str, Any] | None = None,
     distance: Callable | None = None,
@@ -661,6 +676,14 @@ def find_minima(
         Note this is an **absolute** tolerance (scale-sensitive), unlike the
         scale-free dedup metric; scale ``psd_tol`` with your objective's
         curvature if needed.
+    kkt_tol
+        A converged local solve is rejected as a candidate when the solver's
+        own **unscaled** dual infeasibility (``info["final_unscaled_dual_inf"]``)
+        exceeds this absolute bound (default ``1e-4``; ``None`` disables).
+        The solver's success verdict is judged in a scaled space, and this is
+        the model-units check that applies whether or not ``hess=`` is given
+        (gh#983). Raise it for objectives whose gradients legitimately live
+        at a large scale.
 
     Returns
     -------
@@ -699,7 +722,7 @@ def find_minima(
     if distance is None:
         distance = lambda a, b: float(np.linalg.norm((a - b) / L))
 
-    ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol)
+    ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol, kkt_tol)
     ctx.max_solves = max_solves
     # Hard ceiling on sampled points for solve-gated strategies (MLSL): the
     # natural envelope is one round of samples per unit of solve budget.

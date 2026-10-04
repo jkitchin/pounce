@@ -107,6 +107,16 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
   residuals with the scaling divided back out, i.e. in your **original
   problem units**. Equal to the scaled values when no scaling activates.
+- `warnings` — list of structured solve-quality warnings about the returned
+  point (`"<code>: <text>"`), empty on a clean run. Codes:
+  `objective_scale_small`, `unscaled_stationarity_above_tol`,
+  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`. They never change
+  `status`; they say why a success verdict deserves a second look. An
+  objective whose gradient is tiny (profit in M$/L) or a start whose gradient
+  is huge (`3e8`) is re-solved once automatically from the returned point
+  (`solve_quality_audit`); the warning remains only when that did not fix it.
+  `find_minima` additionally rejects candidates whose unscaled stationarity
+  residual exceeds `kkt_tol` when no `hess=` is supplied.
 - `final_declared_constr_viol` — how far outside the model **as
   declared** the returned point sits, before the `bound_relax_factor`
   widening. `final_constr_viol` measures the widened model the solver was

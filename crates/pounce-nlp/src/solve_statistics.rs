@@ -155,6 +155,25 @@ pub struct SolveStatistics {
     /// `NaN` on a path that does not compute it.
     pub final_declared_box_viol: Number,
     pub final_unscaled_dual_inf: Number,
+    /// gh#983. Magnitude of the terms the unscaled stationarity residual is
+    /// assembled from (`max |∇f|, |Jᵀλ|, |z|` in user units), the yardstick
+    /// `final_unscaled_dual_inf` is judged against by the scale-relative
+    /// floor (gh#532) and by the solve-quality warnings. `NaN` on a path that
+    /// does not compute it.
+    pub final_unscaled_dual_scale: Number,
+    /// gh#983. The solver-computed (gradient-based) objective scaling factor
+    /// the run ended with, excluding the caller's own `obj_scaling_factor`;
+    /// `1` when none was applied, `NaN` on a path that does not compute it.
+    pub final_obj_scaling_factor: Number,
+    /// gh#983. `max |grad f|` at the starting point (what gradient-based
+    /// scaling measured); `NaN` when it did not run. The model's own gradient
+    /// scale, used as the yardstick for the small-objective warning.
+    pub start_obj_grad_max: Number,
+    /// gh#983. Structured solve-quality warnings, each `"<code>: <text>"`.
+    /// Codes: `objective_scale_small`, `unscaled_stationarity_above_tol`,
+    /// `rescale_retry_declined`. Empty on a clean run. Never changes the
+    /// status; it says why a status the run earned deserves a second look.
+    pub warnings: Vec<String>,
     pub final_unscaled_constr_viol: Number,
     pub final_unscaled_compl: Number,
     pub final_unscaled_kkt_error: Number,
@@ -372,6 +391,10 @@ impl Default for SolveStatistics {
             final_compl: Number::NAN,
             final_kkt_error: Number::NAN,
             final_unscaled_dual_inf: Number::NAN,
+            final_unscaled_dual_scale: Number::NAN,
+            final_obj_scaling_factor: Number::NAN,
+            start_obj_grad_max: Number::NAN,
+            warnings: Vec::new(),
             final_declared_constr_viol: Number::NAN,
             final_declared_box_viol: Number::NAN,
             final_unscaled_constr_viol: Number::NAN,

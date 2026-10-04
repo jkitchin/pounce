@@ -31,6 +31,7 @@ pub mod orig_ipopt_nlp;
 pub mod quadratic;
 pub mod return_codes;
 pub mod scaling_tnlp;
+pub mod seeded_tnlp;
 pub mod solve_statistics;
 pub mod start_conditioner;
 pub mod tnlp;

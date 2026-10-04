@@ -158,9 +158,62 @@ changes.
   the run that produced the returned point. Fixture sweep: three lines move
   (`mu_fallback_point_floor` exact and lbfgs, `eigenb2` lbfgs), the iteration
   count only, now that of the returned attempt; status, objective and engine
-  are unchanged. Not fixed here: item 2 (small user objective scale, no
-  warning) and item 3 (veto/rescale on the unscaled residual), which need a
-  measured design; the default floor is not capped.
+  are unchanged. Items 2 and 3 and the default floor: see the second-pass
+  entry below.
+
+- **Status certified at non-stationary points (gh#983), second pass: items
+  2, 3, 5 and the default floor.** New `solve_quality_audit` (default `yes`)
+  audits a `Solve_Succeeded` / `Solved_To_Acceptable_Level` verdict against the
+  model's own scale and re-solves once from the returned point when the
+  objective scaling is the defect. (3) Gradient scaling frozen at a
+  huge-gradient start (LJ7 from a start with gradient `3e8`: factor `3e-7`,
+  scaled KKT `9e-9`, unscaled `|grad E|` `2.9e-2`, and continuing under that
+  factor does not help) is re-scaled at the returned point and solved again:
+  unscaled residual `4.7e-9`. `find_minima` gains `kkt_tol` (default `1e-4`) and
+  rejects any local solve whose own unscaled dual infeasibility exceeds it,
+  with or without `hess=` (worst accepted gradient `0.96` -> `8.9e-5`).
+  (2) A small user objective (profit in M$/L, gradient `1e-5`, which nothing
+  scales up) is re-solved with the objective multiplied by `1/max|grad f|`:
+  relative objective error `4.7e-4` -> `3e-8`. The re-solve is promoted only
+  if clean, no worse in the model's units, strictly better in the quantity
+  that triggered it and admissible next to the first answer; otherwise the
+  first attempt is restored. (5) A strict verdict on a run that saw the
+  gh#884 signature, whose returned point has an unscaled dual infeasibility
+  above `1e-3` (the toll MPCC with `bound_relax_factor=0`, reached through the
+  mu-strategy fallback, `3.3e-2` against terms of `3e14`), is downgraded to
+  `Solved_To_Acceptable_Level`; the gh#884 retry is deliberately not widened,
+  its floor is the barrier that keeps `ralph1` out. The report fix is now
+  covered end to end (declined gh#884 retry and `deb7` at `max_iter=100`
+  report the returned run's iteration count; the old `deb7` test asserted the
+  declined retry's `100`, the returned run's own count is `116` including
+  restoration iterations). New structured `warnings` list
+  (`info["warnings"]`, JSON `statistics.warnings`, console `WARNING:` lines):
+  `objective_scale_small`, `unscaled_stationarity_above_tol`,
+  `large_dual_scale`, `unscaled_dual_inf_above_acceptable`; they never change
+  a status except the downgrade above. The scale-relative floor for callers
+  who set nothing is **not** capped: the cap that rejects the cusp (`~0.1`)
+  also rejects `orthrds2` (`89.7` at scale `1.6e10`, stationary to nine digits
+  relative to its scale); such points now carry `large_dual_scale`, and the
+  cusp's default-option verdict is the acceptable level. `SeededTnlp` moved
+  from `pounce-cli` to `pounce-nlp` (re-exported). `iteration_count` and the
+  iteration rows of a restored attempt are the returned run's, and so are the
+  evaluation counts, restoration tallies and `quality_escalations` (the old
+  `eigenb2` limited-memory report carried the losing retry's 86 objective
+  evaluations beside the base attempt's 47 iterations and 159 evaluations);
+  only the wall clock is the invocation's. Fixture sweep, both legs against a
+  baseline built from the pre-change HEAD: seven fixture-legs move, status,
+  objective (bar one) and engine unchanged, every one a promoted audit that
+  lowers the unscaled KKT error: `jit1` exact 24 -> 22 and `jit1_boxed` exact
+  24 -> 22 / lbfgs 27 -> 18, `issue880_sigma_uncertified` exact 2 -> 4 (KKT
+  `4.9e-4` -> `0`), `hs71_obj1e8` lbfgs 12 -> 11 (`2.4e-2` -> `9e-6`),
+  `sqp_tiny_objective_k1em20` exact 5 -> 6 with the objective `1e-20` -> `0`
+  (its true minimum), and `mu_fallback_point_floor` lbfgs `q` 1 -> 0 (the
+  returned run's escalation count). A further handful of fixtures
+  (`hs71_obj1e8` exact, `jit1` lbfgs, `jit1_node`) pay one declined re-solve
+  that the sweep cannot see. Pre-existing and not touched: the
+  `issue855_sqp_retry_reaches_the_fallback` tests spend minutes in
+  `algorithm=active-set-sqp` on `eigena2` identically at `ce17aa9`.
+
 
 ### Documentation
 

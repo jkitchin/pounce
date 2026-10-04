@@ -1716,6 +1716,11 @@ impl IpoptCalculatedQuantities {
         self.nlp.borrow().computed_obj_scaling_factor()
     }
 
+    /// See [`IpoptNlp::start_obj_gradient_max`].
+    pub fn start_obj_gradient_max(&self) -> Number {
+        self.nlp.borrow().start_obj_gradient_max()
+    }
+
     /// Overall **unscaled** max-norm KKT error — `max` of the unscaled dual
     /// infeasibility, primal infeasibility, and complementarity. This is the
     /// honest "distance from a KKT point in the user's own units", as
