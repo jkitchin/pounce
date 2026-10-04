@@ -132,14 +132,56 @@ changes.
   units of the objective when `max(|P|, |c|) < 1` (portfolio weights were off
   by `1.6e-2` at `P*1e-9`). LP crossover recomputes `x_B = B^-1(b - N x_N)`
   after the final pivot, and `POUNCE_SIMPLEX_DEBUG` no longer changes the
-  vertex (the recompute ran only under the flag). Not done: item 3's literal
-  "never `optimal` above `tol`" (conflicts with genuinely large-data optima
-  that only the relative arm certifies) and item 4 (iteration counts at 1e7
-  objective scale); the direct (`qp_hsde=no`) driver is unchanged. Sweep:
+  vertex (the recompute ran only under the flag). Sweep:
   `units_qp_convex` 20 -> 28 and `sqp_tiny_objective_convex` 8 -> 21
   iterations (tiny-objective normalization, objectives now more exact),
   `feasible_x0_{extreme_row,sentinel_bound,wide_scale}` and
   `scaled_feasible_b` +1 iteration each (one extra candidate iterate).
+
+  **Second pass: items 3 and 4, direct driver.** (3) An orthant solve now
+  also has to bring its largest complementarity product `max s_i z_i` within
+  the objective-unit tolerance before either HSDE arm may stop (the gap is a
+  difference of objective-sized sums and carries `eps*|objective|` noise a
+  product does not, so a `1e9` shifted variable let the gap floor wave through
+  a complementarity of `1.08e-5`); an iterate that cannot improve is returned
+  as before. The verdict is then made on the returned point's own residuals,
+  each read above its finite-precision floor (`4*64*eps` times the scale of its
+  own terms, per complementarity product the noise of its own slack) and with
+  stationarity/complementarity divided by the objective's unit
+  `max(|P|,|c|)`: `QpSolution::kkt_residuals_above_floor`. `optimal` becomes
+  `optimal_inaccurate` when that `kkt_error` exceeds `tol` (HSDE path only; the
+  direct driver judges in the equilibrated metric and is cross-checked against
+  the relative KKT as before). The Python `residuals` dict reports the same
+  four numbers, so `status == "optimal"` never sits beside
+  `residuals["kkt_error"] > tol`, and adds `kkt_error_raw`, the plain absolute
+  max, for comparison with other solvers. On the issue's repro the answer is
+  `optimal` with `kkt_error` 0 (raw 1.2e-7 -- one ulp of the `1e9` row slack,
+  which is unreachable below), and tightening `tol` no longer loosens it.
+  (4) The absolute gap test may now stop down to the gap's own
+  evaluation noise, `64*eps*|objective|`, provided the cancellation-free
+  half (every `s_i z_i` within `tol`) also holds. The gap is a sum of
+  objective-sized terms, so at a `2e7` objective its noise (5e-9) sat within a
+  factor of two of `tol = 1e-8` and the absolute test was met only by luck:
+  the dispatch LP took 37 iterations in dollars against 15 in k$ and the
+  3328-week production LP 199 against 17. Now 14/16 and 21/19. (A first
+  attempt that scaled the gap tolerance *up* with the objective's unit was
+  dropped: it stopped `issue745_netlib_problem` with a postsolved dual
+  infeasibility of 1.9e-4 and the stiff gh#846 box QP with `x` off by 1.)
+  Item 2 re-verified at the issue's own
+  `production_lp(208)` through Python: `||Ax-b||` is 5.5e-9 / 1.0e-9 /
+  1.7e-13 for scales 1 / 100 / 1e-3, all `optimal` (the issue: 5.5e-9 /
+  **4.9e-6** / 1.4e-13). The direct (`qp_hsde=no`) driver reads stationarity
+  and `mu` against the objective's unit when it is below 1, as the HSDE loop
+  does (portfolio weights were off by `1.2e-4` at `P*4e-7`); its LP iteration
+  counts were already identical to the digit across `c` scalings (45/45/45,
+  13/13/13), pinned by a test. Second-pass sweep vs the first-pass binary: only
+  `convex_qp_qscfxm1` (30 -> 26) and `scaled_feasible_b` (48 -> 34) move, both
+  legs, objective unchanged (the gap noise floor on a large internal
+  objective). Cost: one `issue880` iteration pin raised
+  25 -> 30 (the 1e10 case takes 28; the extra iterations are the complementarity
+  requirement).
+  Tests: `crates/pounce-convex/tests/issue984_stopping_units.rs`,
+  `python/tests/test_issue_984_stopping_units.py`.
 
 - **Status certified at non-stationary points (gh#983), items 1, 4, 5.**
   (1) An explicitly set `dual_inf_tol` is now honoured: the scale-relative

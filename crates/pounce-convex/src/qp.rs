@@ -542,6 +542,39 @@ impl QpResiduals {
     }
 }
 
+/// How many times the stopping rule's finite-precision cap the reported (and
+/// adjudicated) residuals are read above; see `kkt_residuals_above_floor`.
+const REPORT_FLOOR_FACTOR: f64 = 4.0;
+
+/// Smallest objective unit the stopping rule normalizes by.
+pub(crate) const COST_UNIT_FLOOR: f64 = 1e-15;
+
+/// The objective's own unit `max(‖P‖∞, ‖c‖∞)`.
+pub(crate) fn cost_unit(prob: &QpProblem) -> f64 {
+    let nc = prob.c.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    prob.p_lower.iter().fold(nc, |m, t| m.max(t.val.abs()))
+}
+
+/// `(unit_d, unit_g)`: the factors the stopping rule multiplies `tol` by for
+/// the dual residual and for the duality gap / complementarity (gh#984).
+///
+/// Both are in the units of `(P, c)`, so an absolute `tol` on them is a
+/// statement about the caller's choice of units: they tighten `tol` with the
+/// objective's unit when it is below 1 (`min(unit, 1)`, floored). A large unit
+/// is deliberately *not* used to loosen anything -- that is `hsde_cost_scale`'s
+/// regime, the presolve amplifies slack in the dual residual, and a stiff `P`
+/// makes a unit-scaled tolerance loose in `x` (gh#846). A zero objective has no
+/// unit: both are 1.
+pub(crate) fn objective_units(prob: &QpProblem) -> (f64, f64) {
+    let u = cost_unit(prob);
+    if u > 0.0 {
+        let g = u.clamp(COST_UNIT_FLOOR, 1.0);
+        (g, g)
+    } else {
+        (1.0, 1.0)
+    }
+}
+
 /// A tiny-curvature warning fires when `‖P‖∞` is more than this many orders of
 /// magnitude below the rest of the problem data. Six orders is comfortably past
 /// where a well-scaled convex QP sits (curvature commensurate with the linear
@@ -633,6 +666,139 @@ impl QpSolution {
     /// does not cover are treated as orthant rows.
     pub fn kkt_residuals_conic(&self, prob: &QpProblem, cones: &[ConeSpec]) -> QpResiduals {
         self.kkt_residuals_inner(prob, Some(cones))
+    }
+
+    /// [`Self::kkt_residuals`] with each residual read **above its own
+    /// finite-precision floor** (gh#984 item 3), the measure a status of
+    /// `Optimal` is judged on.
+    ///
+    /// An absolute residual cannot be driven below the rounding error of
+    /// *evaluating* it, `~ε·(the magnitude of the terms it is a difference
+    /// of)`. A variable shifted by `1e9` makes its row slack `h − Gx` a
+    /// difference of `1e9`-sized numbers, quantized at `1.2e-7`, and a
+    /// multiplier of `1` times that slack reads as complementarity `1.2e-7` at
+    /// the exact optimum: `kkt_error > tol = 1e-8` is *unreachable* in doubles,
+    /// not a sign of a bad point. Reporting that number beside `optimal` is
+    /// either a false alarm or, if the verdict is made to follow it, a
+    /// solver that can never succeed on a model with a large offset.
+    ///
+    /// So each component is reduced by `REL_FLOOR_KAPPA·ε` times the scale of
+    /// its own terms -- the stationarity terms `‖Px‖,‖c‖,‖Aᵀy‖,‖Gᵀz‖,‖z_b‖`,
+    /// the primal terms `‖Ax‖,‖Gx‖,‖b‖,‖h‖` (and `‖x‖` for the box), and per
+    /// complementarity product `zᵢ·(|hᵢ| + Σ|Gᵢⱼ||xⱼ|)` -- and floored at zero.
+    /// The constant is the stopping rule's (`hsde::REL_FLOOR_KAPPA`), so a
+    /// point the relative arm stopped on is read the way it was judged. A
+    /// well-scaled problem has floors `~1e-14` and reads identically to
+    /// [`Self::kkt_residuals`]; only data large enough to make the absolute
+    /// test unreachable is affected, and then by exactly the unreachable part.
+    ///
+    /// The stationarity and complementarity terms are then divided by the
+    /// objective's unit exactly as the stopping rule scales `tol` by it
+    /// ([`objective_units`]): they are in the units of `(P, c)`, so an absolute
+    /// bound on them is a statement about the caller's choice of units. The
+    /// stop rule, the `Optimal` verdict and this number are one measurement.
+    ///
+    /// Orthant/box problems only; a conic solve is returned unadjusted.
+    pub fn kkt_residuals_above_floor(&self, prob: &QpProblem) -> QpResiduals {
+        let raw = self.kkt_residuals(prob);
+        // Four times the stopping rule's cap: the loop judges the homogeneous
+        // residuals, this recomputes them from the returned point, and the
+        // two differ by a few ulps of the same scales.
+        let k = REPORT_FLOOR_FACTOR * crate::hsde::REL_FLOOR_KAPPA * f64::EPSILON;
+        let n = prob.n;
+        let nrm = |v: &[f64]| v.iter().fold(0.0_f64, |m, t| m.max(t.abs()));
+
+        // Stationarity scale.
+        let mut px = vec![0.0; n];
+        prob.p_mul(&self.x, &mut px);
+        let mut aty = vec![0.0; n];
+        prob.at_mul(&self.y, &mut aty);
+        let mut gtz = vec![0.0; n];
+        prob.gt_mul(&self.z, &mut gtz);
+        let scale_d = nrm(&px)
+            .max(nrm(&aty))
+            .max(nrm(&gtz))
+            .max(nrm(&prob.c))
+            .max(nrm(&self.z_lb))
+            .max(nrm(&self.z_ub));
+
+        // Primal scale.
+        let mut ax = vec![0.0; prob.m_eq()];
+        prob.a_mul(&self.x, &mut ax);
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(&self.x, &mut gx);
+        let boxed_x = (0..n)
+            .filter(|&i| prob.lb_of(i) > -1e19 || prob.ub_of(i) < 1e19)
+            .fold(0.0_f64, |m, i| m.max(self.x[i].abs()));
+        let scale_p = nrm(&ax)
+            .max(nrm(&gx))
+            .max(nrm(&prob.b))
+            .max(nrm(&prob.h))
+            .max(boxed_x);
+
+        // Complementarity: per product, the noise of its own slack.
+        let mut row_mag: Vec<f64> = prob.h.iter().map(|v| v.abs()).collect();
+        for t in &prob.g {
+            row_mag[t.row] += (t.val * self.x[t.col]).abs();
+        }
+        let mut comp = 0.0_f64;
+        for (i, (&zi, &hi)) in self.z.iter().zip(&prob.h).enumerate() {
+            let slack = hi - gx[i];
+            let noise = k * zi.abs() * row_mag[i];
+            comp = comp.max(((zi * slack).abs() - noise).max(0.0));
+        }
+        for i in 0..n {
+            let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
+            let xi = self.x[i];
+            if lb > -1e19 {
+                let noise = k * self.z_lb[i].abs() * (xi.abs() + lb.abs());
+                comp = comp.max(((self.z_lb[i] * (xi - lb)).abs() - noise).max(0.0));
+            }
+            if ub < 1e19 {
+                let noise = k * self.z_ub[i].abs() * (xi.abs() + ub.abs());
+                comp = comp.max(((self.z_ub[i] * (ub - xi)).abs() - noise).max(0.0));
+            }
+        }
+        // The duality gap is a sum of terms of this combined magnitude, so
+        // anything below `k` times it cannot be told from rounding; the
+        // stopping rule's gap floor is the same quantity, and a product of
+        // complementary terms is excused by it exactly as the gap is.
+        let mut xpx = 0.0;
+        for (&pi, &xi) in px.iter().zip(&self.x) {
+            xpx += pi * xi;
+        }
+        let dotabs =
+            |u: &[f64], v: &[f64]| u.iter().zip(v).map(|(a, b)| (a * b).abs()).sum::<f64>();
+        let mut scale_g = 0.5 * xpx.abs()
+            + dotabs(&prob.c, &self.x)
+            + dotabs(&prob.b, &self.y)
+            + dotabs(&prob.h, &self.z);
+        for i in 0..n {
+            if prob.lb_of(i) > -1e19 {
+                scale_g += (prob.lb_of(i) * self.z_lb[i]).abs();
+            }
+            if prob.ub_of(i) < 1e19 {
+                scale_g += (prob.ub_of(i) * self.z_ub[i]).abs();
+            }
+        }
+        let comp = (comp - k * scale_g).max(0.0);
+        // The objective-normalized problem's reading: both terms divided by the
+        // objective's unit, up as well as down. The stopping rule is stricter
+        // than this for a QP with a large unit (it keeps `tol` absolute there,
+        // gh#846), so this can only ever *excuse* a label, never move a point.
+        let u = cost_unit(prob);
+        let (unit_d, unit_g) = if u > 0.0 {
+            let g = u.max(COST_UNIT_FLOOR);
+            (g, g)
+        } else {
+            (1.0, 1.0)
+        };
+        QpResiduals {
+            primal_infeasibility: (raw.primal_infeasibility - k * scale_p).max(0.0),
+            bound_violation: (raw.bound_violation - k * boxed_x).max(0.0),
+            dual_infeasibility: (raw.dual_infeasibility - k * scale_d).max(0.0) / unit_d,
+            complementarity: comp / unit_g,
+        }
     }
 
     fn kkt_residuals_inner(&self, prob: &QpProblem, cones: Option<&[ConeSpec]>) -> QpResiduals {

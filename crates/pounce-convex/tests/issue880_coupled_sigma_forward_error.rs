@@ -629,8 +629,13 @@ fn an_active_bound_is_stiff_not_free() {
             "cond {cond:.0e}: x = {:?} against the closed form {exact:?}",
             sol.x
         );
+        // gh#984: the pin was 25. An orthant solve now also has to bring its
+        // largest complementarity product within `tol` before the relative arm
+        // may stop, which costs the 1e10 case three iterations (28). A spurious
+        // reject buys an un-normalized re-solve -- dozens more -- so 30 still
+        // separates the two.
         assert!(
-            sol.iters <= 25,
+            sol.iters <= 30,
             "cond {cond:.0e} took {} iterations; a bound whose Σ reads zero \
              inflates ‖Δ‖ and buys an un-normalized re-solve every time",
             sol.iters

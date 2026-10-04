@@ -166,7 +166,20 @@ class QpResult:
     residuals:
         Final KKT residuals as a dict with keys
         ``primal_infeasibility``, ``dual_infeasibility``,
-        ``complementarity``, and ``kkt_error`` (the max of the three).
+        ``complementarity``, and ``kkt_error`` (the max of the three), plus
+        ``kkt_error_raw``.
+
+        For the LP/QP solvers (gh #984) the four numbers are the ones the
+        ``"optimal"`` verdict is judged on: each residual is read *above its
+        own finite-precision floor* (a row slack that is a difference of
+        ``1e9``-sized numbers cannot be known below ``~1e-7``, however well
+        the solve went) and stationarity / complementarity are divided by the
+        objective's unit ``max(‖P‖∞, ‖c‖∞)``, so they are the residuals of the
+        objective-normalized problem and do not change when ``c`` is rescaled
+        from dollars to cents. A result is ``"optimal"`` only if this
+        ``kkt_error`` is ``<= tol``; otherwise it is ``"optimal_inaccurate"``.
+        ``kkt_error_raw`` is the plain absolute max of the three
+        un-normalized residuals, for comparison with an external solver.
         For a conic (:func:`solve_socp`) solve these are measured against
         the solve's own cones — cone-membership violation for the primal
         residual and the per-block inner product for complementarity —

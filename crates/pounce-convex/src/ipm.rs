@@ -440,7 +440,44 @@ where
         sol
     };
     let sol = demote_uncertified_sigma_optimum(sol, sigma_uncertified);
-    finite_or_failed(prob, sol)
+    demote_optimum_above_tol(prob, finite_or_failed(prob, sol), opts)
+}
+
+/// gh#984 item 3: never hand back `Optimal` beside a KKT error above `tol`.
+///
+/// The verdict is judged on [`QpSolution::kkt_residuals_above_floor`] -- the
+/// returned point's own residuals, each read above the rounding error of
+/// evaluating it -- which is also what the Python `residuals["kkt_error"]` and
+/// the CLI report, so the status and the number printed beside it are one
+/// measurement. A well-scaled solve is untouched (its floors are `~1e-14`); a
+/// point the scale-relative arm stopped on whose residual is *genuinely* above
+/// both `tol` and its floor becomes [`QpStatus::OptimalInaccurate`], a usable
+/// answer at reduced accuracy that does not claim what it did not reach.
+///
+/// Last in the pipeline, so no retry or repair path reads the demoted status.
+/// Orthant/box problems only: the conic entry points judge cone membership
+/// with their own residuals.
+fn demote_optimum_above_tol(prob: &QpProblem, sol: QpSolution, opts: &QpOptions) -> QpSolution {
+    let tol = opts.tol;
+    if std::env::var("DBG984").is_ok() {
+        eprintln!(
+            "DBG984 {:?} it {} raw {:?} adj {:?} tol {tol:e}",
+            sol.status,
+            sol.iters,
+            sol.kkt_residuals(prob),
+            sol.kkt_residuals_above_floor(prob)
+        );
+    }
+    if !opts.use_hsde
+        || sol.status != QpStatus::Optimal
+        || sol.kkt_residuals_above_floor(prob).kkt_error() <= tol
+    {
+        return sol;
+    }
+    QpSolution {
+        status: QpStatus::OptimalInaccurate,
+        ..sol
+    }
 }
 
 /// Strip `Optimal` from a `σ`-path answer the cascade could not certify.
@@ -4017,6 +4054,7 @@ fn run_ipm(
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
     let mut iterates: Vec<QpIterate> = Vec::new();
+    let (dir_unit_d, dir_unit_g) = crate::qp::objective_units(prob);
 
     for it in 0..opts.max_iter {
         iters = it;
@@ -4043,7 +4081,14 @@ fn run_ipm(
         let mu = cone.mu(&s, &z);
         let pinf = inf_norm(&r_p).max(inf_norm(&r_g));
         let dinf = inf_norm(&r_d);
-        let res = dinf.max(pinf).max(mu);
+        // gh#984: stationarity and `μ` are in the units of `(P, c)`, so an
+        // absolute `tol` on them depends on the caller's choice of units
+        // (`P·1e-9` stopped with the weights off by `1.6e-2`). Read against the
+        // objective's own unit when it is below 1 -- the same rule the HSDE loop
+        // applies (`hsde::solve_conic_hsde`), downward only: the direct driver
+        // is already unit-invariant for an LP (equilibration normalizes `c`)
+        // and a large unit is the scale-relative arm's.
+        let res = (dinf / dir_unit_d).max(pinf).max(mu / dir_unit_g);
         // Per-iteration objective, needed for the trace and for the
         // debugger's `objective()` accessor.
         let obj_it = if opts.collect_iterates || hook.is_some() {

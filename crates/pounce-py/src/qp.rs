@@ -218,12 +218,23 @@ fn solution_dict<'py>(
 
     // Final KKT residuals (see the doc comment).
     if let Some(p) = prob {
-        let r = sol.kkt_residuals_conic(p, cones);
+        // gh#984: for the orthant QP/LP path the four numbers are read above
+        // their own finite-precision floor and in the objective's units -- the
+        // measurement the `optimal` verdict is judged on -- so `status ==
+        // "optimal"` never sits beside `kkt_error > tol`. The plain absolute
+        // max is `kkt_error_raw`. Conic solves keep the plain residuals.
+        let raw = sol.kkt_residuals_conic(p, cones);
+        let r = if cones.is_empty() {
+            sol.kkt_residuals_above_floor(p)
+        } else {
+            raw
+        };
         let rd = PyDict::new_bound(py);
         rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
         rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
         rd.set_item("complementarity", r.complementarity)?;
         rd.set_item("kkt_error", r.kkt_error())?;
+        rd.set_item("kkt_error_raw", raw.kkt_error())?;
         d.set_item("residuals", rd)?;
 
         // gh #293 naive-caller guardrail: attach a tiny-curvature scaling

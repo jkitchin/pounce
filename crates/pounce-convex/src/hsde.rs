@@ -173,10 +173,7 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
 /// gh#984: how many rounding units of its own scale a residual must be inside
 /// before the scale-relative arm may stop on it. The same reading of "numerically
 /// zero" as `ipm::SLACK_NOISE_KAPPA`.
-const REL_FLOOR_KAPPA: f64 = 64.0;
-
-/// gh#984: smallest objective unit [`solve_conic_hsde`] normalizes `tol` by.
-const COST_UNIT_FLOOR: f64 = 1e-15;
+pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 
 /// A relatively-converged iterate set aside while the loop tries to do better.
 struct RelCandidate {
@@ -451,16 +448,17 @@ where
     // direction is handled here; a large objective is `hsde_cost_scale`'s.
     // Equivalent to solving the objective-normalized problem at `tol`, hence
     // argmin-invariant. A zero objective has no unit and is left alone.
-    let cost_unit = prob.p_lower.iter().fold(norm_c, |m, t| m.max(t.val.abs()));
-    let tol_cost = opts.tol
-        * if cost_unit > 0.0 && cost_unit < 1.0 {
-            cost_unit.max(COST_UNIT_FLOOR)
-        } else {
-            1.0
-        };
+    let (unit_d, unit_g) = crate::qp::objective_units(prob);
+    let tol_cost = opts.tol * unit_d;
+    let tol_gap = opts.tol * unit_g;
     // The relative arm's stash: the first iterate to satisfy it without being
     // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
     let mut rel_candidate: Option<RelCandidate> = None;
+    // Complementarity is only a clean product on the nonnegative orthant.
+    let orthant_only = cone
+        .specs()
+        .iter()
+        .all(|c| matches!(c, crate::ConeSpec::Nonneg(_)));
 
     // Direction buffers: p = constant direction, (dx,dy,dz) = the running
     // step, with affine slack/dual kept for the Mehrotra corrector.
@@ -692,14 +690,49 @@ where
         // improving on it (below).
         let cap_p = (REL_FLOOR_KAPPA * f64::EPSILON * scale_p).max(opts.tol);
         let cap_d = (REL_FLOOR_KAPPA * f64::EPSILON * scale_d).max(opts.tol);
-        let cap_g = (REL_FLOOR_KAPPA * f64::EPSILON * scale_g_raw).max(opts.tol);
+        let cap_g_floor = REL_FLOOR_KAPPA * f64::EPSILON * scale_g_raw;
+        let cap_g = cap_g_floor.max(opts.tol);
         let rel_ok =
             large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol;
-        let abs_ok = pres < opts.tol && dres < tol_cost && gap < tol_cost;
+        // gh#984 item 4: the gap is a *sum* of objective-sized terms, so its
+        // evaluation carries `eps*|objective|` noise that an absolute `tol` does
+        // not grow with. Costs in dollars put the dispatch LP's objective at
+        // 2.3e7: the noise (5e-9) sits within a factor of two of `tol = 1e-8`,
+        // the absolute gap test was met only by luck, and the loop ground on
+        // for 37 iterations where the same LP in k$ stopped in 15 (199 against
+        // 17 on the 3328-week production LP). So the gap may be accepted down
+        // to its own noise floor -- but only together with the
+        // cancellation-free half below (`comp_ok`: every product `s_i z_i`
+        // within `tol`), which is what actually certifies it; the floor excuses
+        // the *measurement*, never a large product.
+        let abs_ok = pres < opts.tol && dres < tol_cost && gap < tol_gap.max(cap_g_floor);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
-        let converged = abs_ok || rel_in_floor;
+        // gh#984 item 3: the duality gap is a *difference* of objective-sized
+        // sums, so on a large (or large-offset) objective it carries
+        // rounding noise `~ε·|objective|` that complementarity does not:
+        // `max sᵢzᵢ` is a product of two nonnegative numbers and can be driven
+        // to zero however large the objective is. A shifted variable (`1e9`)
+        // let the gap floor wave through a complementarity of `1.08e-5`
+        // against `tol = 1e-8`. So an orthant solve also needs its largest
+        // product within the objective-unit tolerance before either arm may
+        // stop. Short of that the iterate is a candidate, like the relative
+        // arm's, and is restored if the loop cannot improve on it.
+        let comp_max = if orthant_only {
+            s.iter()
+                .zip(&z)
+                .fold(0.0_f64, |m, (&si, &zi)| m.max((si * zi).abs()))
+                / (tau * tau)
+        } else {
+            0.0
+        };
+        let comp_ok = comp_max <= tol_gap;
+        let loose_ok = rel_ok || abs_ok;
+        let converged = (abs_ok || rel_in_floor) && comp_ok;
         if !converged {
-            let worst = (pres / cap_p).max(dres / cap_d).max(gap / cap_g);
+            let worst = (pres / cap_p)
+                .max(dres / cap_d)
+                .max(gap / cap_g)
+                .max(comp_max / tol_gap);
             let stash = |c: &mut Option<RelCandidate>| {
                 *c = Some(RelCandidate {
                     x: x.clone(),
@@ -711,7 +744,7 @@ where
                     worst,
                 });
             };
-            match (&rel_candidate, rel_ok) {
+            match (&rel_candidate, loose_ok) {
                 (None, true) => stash(&mut rel_candidate),
                 // Still relatively converged and still improving by at least
                 // 2x: keep going, holding the better point.

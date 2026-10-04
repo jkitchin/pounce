@@ -195,6 +195,53 @@ fn production_lp(t: usize, s: f64) -> QpProblem {
     }
 }
 
+/// Item 4: the 10-unit dispatch LP, `days` days, costs scaled by `s`.
+fn dispatch_lp(days: usize, s: f64) -> QpProblem {
+    let pmax = [
+        1200.0, 1200.0, 1000.0, 800.0, 800.0, 600.0, 500.0, 400.0, 300.0, 200.0,
+    ];
+    let cost = [12.0, 13.0, 18.0, 22.0, 24.0, 30.0, 35.0, 45.0, 60.0, 90.0];
+    let ramp = [
+        120.0, 120.0, 200.0, 240.0, 240.0, 300.0, 250.0, 400.0, 300.0, 200.0,
+    ];
+    let t = 24 * days;
+    let mut st = 4u64;
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for h in 0..t {
+        let hr = (h % 24) as f64;
+        let noise = 80.0 * 2.0 * (lcg(&mut st) - 0.5);
+        b.push(4200.0 + 1300.0 * (2.0 * std::f64::consts::PI * (hr - 8.0) / 24.0).sin() + noise);
+        for g in 0..10 {
+            a.push(Triplet::new(h, g * t + h, 1.0));
+        }
+    }
+    let mut g = Vec::new();
+    let mut hv = Vec::new();
+    for u in 0..10 {
+        for h in 1..t {
+            let r = hv.len();
+            g.push(Triplet::new(r, u * t + h, 1.0));
+            g.push(Triplet::new(r, u * t + h - 1, -1.0));
+            hv.push(ramp[u]);
+            g.push(Triplet::new(r + 1, u * t + h, -1.0));
+            g.push(Triplet::new(r + 1, u * t + h - 1, 1.0));
+            hv.push(ramp[u]);
+        }
+    }
+    QpProblem {
+        n: 10 * t,
+        p_lower: vec![],
+        c: (0..10 * t).map(|k| cost[k / t] * s).collect(),
+        a,
+        b,
+        g,
+        h: hv,
+        lb: vec![0.0; 10 * t],
+        ub: (0..10 * t).map(|k| pmax[k / t]).collect(),
+    }
+}
+
 fn primal_residual(p: &QpProblem, x: &[f64]) -> f64 {
     let mut ax = vec![0.0; p.m_eq()];
     p.a_mul(x, &mut ax);
@@ -227,6 +274,73 @@ fn tightening_tol_never_loosens_the_answer() {
         prev = e;
     }
     assert!(prev < 1e-7, "tol=1e-12 left kkt_error {prev:e}");
+}
+
+/// Item 3, literally: `Optimal` never co-occurs with a returned `kkt_error`
+/// above `tol`. The error is read above its own finite-precision floor
+/// (`kkt_residuals_above_floor`) -- on this model the exact optimum has a row
+/// slack that is a difference of `1e9`-sized numbers, quantized at `1.2e-7`,
+/// so the *raw* complementarity cannot go below that at `tol = 1e-8` and the
+/// verdict has to follow the floor-adjusted number or never be reachable.
+#[test]
+fn optimal_never_sits_beside_a_kkt_error_above_tol() {
+    let p = shifted_eta();
+    for tol in [1e-6, 1e-8, 1e-10] {
+        let r = solve(&p, tol);
+        let adj = r.kkt_residuals_above_floor(&p).kkt_error();
+        if r.status == QpStatus::Optimal {
+            assert!(adj <= tol, "tol={tol:e}: Optimal with kkt_error {adj:e}");
+        } else {
+            assert_eq!(r.status, QpStatus::OptimalInaccurate, "tol={tol:e}");
+        }
+        for (got, want) in r.x.iter().zip([64.0, 74.0, 63.0]) {
+            assert!((got - want).abs() < 1e-5, "tol={tol:e} u = {:?}", &r.x[..3]);
+        }
+    }
+    // A point that is not within its floor must not be called Optimal: hand
+    // the demotion a deliberately wrong point.
+    let r = solve(&p, 1e-8);
+    let mut bad = r.clone();
+    bad.x[0] += 1.0;
+    assert!(bad.kkt_residuals_above_floor(&p).kkt_error() > 1e-3);
+}
+
+/// Item 4. The iteration count must not depend on the units of `c`: the same
+/// LP in dollars, cents and k$ used to take 37 / ? / 15 (dispatch) and
+/// 199 / ? / 17 (3328-week production) iterations because the absolute gap
+/// test sat a factor of two above the rounding floor of a `2e7` objective.
+fn assert_iterations_comparable(label: &str, mk: &dyn Fn(f64) -> QpProblem) {
+    let scales = [1.0, 100.0, 1e-3];
+    let runs: Vec<(f64, QpSolution)> = scales.iter().map(|&s| (s, solve(&mk(s), 1e-8))).collect();
+    let its: Vec<usize> = runs.iter().map(|(_, r)| r.iters).collect();
+    println!("{label}: iterations {its:?} at scales {scales:?}");
+    let lo = *its.iter().min().unwrap() as f64;
+    let hi = *its.iter().max().unwrap() as f64;
+    for (s, r) in &runs {
+        assert_eq!(r.status, QpStatus::Optimal, "{label} s={s}");
+    }
+    assert!(
+        hi <= 1.5 * lo + 2.0,
+        "{label}: iteration counts {its:?} for scales {scales:?} differ by more than 1.5x"
+    );
+    let base = runs[0].1.obj / runs[0].0;
+    for (s, r) in &runs {
+        let o = r.obj / s;
+        assert!(
+            (o - base).abs() <= 1e-6 * base.abs().max(1.0),
+            "{label} s={s}: objective {o} vs {base}"
+        );
+    }
+}
+
+#[test]
+fn dispatch_lp_iterations_do_not_depend_on_the_cost_unit() {
+    assert_iterations_comparable("dispatch", &|s| dispatch_lp(14, s));
+}
+
+#[test]
+fn production_lp_iterations_do_not_depend_on_the_cost_unit() {
+    assert_iterations_comparable("production", &|s| production_lp(1500, s));
 }
 
 /// Item 2. Primal feasibility is measured against `A` and `b`, not `c`: the
@@ -324,4 +438,98 @@ fn crossover_returns_an_exact_vertex() {
         "crossover left kkt_error {:e} ({res:?})",
         res.kkt_error()
     );
+}
+
+/// Items 2, 4, 5, the direct driver (`qp_hsde=no`). A pure LP needs nothing
+/// from this change: equilibration already normalizes `c` (`σ`), so its
+/// iteration counts are identical to the digit across `c` scalings (45/45/45,
+/// 13/13/13), which the LP test below pins so a change to the equilibration
+/// that stops dividing the units out turns it red. A QP is different -- `σ`
+/// is deliberately not applied to one -- and the portfolio test is the
+/// measurement that it was not invariant (`P·4e-7` left the weights off by
+/// `1.2e-4`): the driver now reads stationarity and `μ` against the
+/// objective's unit when it is below 1, as the HSDE loop does.
+fn direct(tol: f64) -> QpOptions {
+    QpOptions {
+        tol,
+        use_hsde: false,
+        ..QpOptions::default()
+    }
+}
+
+#[test]
+fn the_direct_driver_is_unit_invariant_on_the_lps() {
+    for (label, mk) in [
+        (
+            "production",
+            Box::new(|s| production_lp(300, s)) as Box<dyn Fn(f64) -> QpProblem>,
+        ),
+        ("dispatch", Box::new(|s| dispatch_lp(7, s))),
+    ] {
+        let runs: Vec<(f64, QpSolution)> = [1.0, 100.0, 1e-3]
+            .iter()
+            .map(|&s| (s, solve_qp_ipm(&mk(s), &direct(1e-8), backend)))
+            .collect();
+        let its: Vec<usize> = runs.iter().map(|(_, r)| r.iters).collect();
+        println!("direct {label}: iterations {its:?}");
+        for (s, r) in &runs {
+            assert!(
+                matches!(r.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+                "{label} s={s}: {:?}",
+                r.status
+            );
+            let e = primal_residual(&mk(*s), &r.x);
+            assert!(e < 1e-6, "{label} s={s}: |Ax-b| = {e:e}");
+        }
+        let (lo, hi) = (
+            *its.iter().min().unwrap() as f64,
+            *its.iter().max().unwrap() as f64,
+        );
+        assert!(
+            hi <= 1.5 * lo + 2.0,
+            "{label}: direct iteration counts {its:?}"
+        );
+    }
+}
+
+#[test]
+fn the_direct_driver_is_unit_invariant_on_the_portfolio_qp() {
+    let w = solve_qp_ipm(&portfolio(1.0), &direct(1e-12), backend).x;
+    for sc in [1.0, 1e-4, 1e-4 / 252.0, 1e-4 / (252.0 * 390.0)] {
+        let r = solve_qp_ipm(&portfolio(sc), &direct(1e-8), backend);
+        let e =
+            r.x.iter()
+                .zip(&w)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+        println!(
+            "direct portfolio scale={sc:e}: {:?} iters {} err {e:e}",
+            r.status, r.iters
+        );
+        assert!(e < 1e-6, "direct, scale={sc:e}: weights off by {e:e}");
+    }
+}
+
+/// Item 3, the direct driver. Its verdict is made in the equilibrated metric,
+/// not the caller's, and is *not* re-judged on the floor-adjusted residuals
+/// (`demote_false_equilibrated_optimum` cross-checks it against the relative
+/// KKT instead). What is pinned is the user-visible half: on the shifted-`η`
+/// repro the point is the true optimum and any `Optimal` it reports sits
+/// beside a floor-adjusted `kkt_error` within `tol`.
+#[test]
+fn the_direct_driver_on_the_shifted_variable() {
+    let p = shifted_eta();
+    let r = solve_qp_ipm(&p, &direct(1e-8), backend);
+    println!(
+        "direct shifted: {:?} {:?}",
+        r.status,
+        r.kkt_residuals_above_floor(&p)
+    );
+    for (got, want) in r.x.iter().zip([64.0, 74.0, 63.0]) {
+        assert!((got - want).abs() < 1e-4, "u = {:?}", &r.x[..3]);
+    }
+    if r.status == QpStatus::Optimal {
+        let e = r.kkt_residuals_above_floor(&p).kkt_error();
+        assert!(e <= 1e-8, "direct Optimal with kkt_error {e:e}");
+    }
 }
