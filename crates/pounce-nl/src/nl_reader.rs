@@ -1066,6 +1066,54 @@ pub struct NlSuffixes {
     pub problem_real: BTreeMap<String, Number>,
 }
 
+/// Deepest expression nesting the reader will build (gh#986). On a thread
+/// whose stack is declared with [`set_parse_stack_budget`] the limit is
+/// lowered to what that stack holds at the worst-case frame size; the CLI
+/// runs on a 1 GiB thread and `pounce-py` on a 1 GiB worker (each falling
+/// back to a smaller reservation, and a correspondingly lower limit, when the
+/// OS refuses). A left-deep `o0` sum is read flat and does not count.
+pub const MAX_PARSE_DEPTH: u32 = 40_000;
+
+thread_local! {
+    /// Stack bytes the current thread offers the recursive reader
+    /// (gh#986), set by whoever spawned it with a known stack. `None` (the
+    /// default) means "unknown": only [`MAX_PARSE_DEPTH`] applies, as before.
+    static PARSE_STACK_BUDGET: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Tell the reader how much stack this thread has, so its depth guard fires
+/// before the stack does at *any* build profile (gh#986). Call it first thing
+/// on a thread created with an explicit stack size (the CLI's main thread, the
+/// Python worker); `None` clears it.
+pub fn set_parse_stack_budget(bytes: Option<usize>) {
+    PARSE_STACK_BUDGET.with(|b| b.set(bytes));
+}
+
+/// Stack the recursive reader (parse, tape build, drop glue) needs per
+/// nesting level, as a worst case over build profiles. Measured on a
+/// negation chain 39 900 deep: an unoptimised build (`opt-level = 0`, what
+/// `cargo build` / `maturin develop` produce) fails at 512 MiB and passes at
+/// 1 GiB, i.e. 13–26 KiB per level; optimised builds use well under 2 KiB.
+const PARSE_LEVEL_BYTES: usize = if cfg!(debug_assertions) {
+    32 * 1024
+} else {
+    4 * 1024
+};
+
+/// The depth limit for the current thread: [`MAX_PARSE_DEPTH`], lowered to
+/// what the thread's declared stack holds.
+fn parse_depth_limit() -> u32 {
+    match PARSE_STACK_BUDGET.with(|b| b.get()) {
+        Some(bytes) => ((bytes / PARSE_LEVEL_BYTES).min(MAX_PARSE_DEPTH as usize)) as u32,
+        None => MAX_PARSE_DEPTH,
+    }
+}
+
+/// A run of binary `o0` longer than this is read as one n-ary `Sum`
+/// (gh#986); shorter runs keep their binary tree.
+const SUM_CHAIN_FLATTEN_MIN: usize = 64;
+
 /// Parse an `.nl` file from disk.
 ///
 /// After parsing the `.nl` body, this also looks for AMPL's optional
@@ -1076,11 +1124,6 @@ pub struct NlSuffixes {
 /// malformed the names stay empty and every downstream consumer falls
 /// back to indices. Names are a diagnostic nicety, never load-blocking
 /// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
-/// Deepest expression nesting the reader will build (gh#986). Callers must
-/// run the reader on a stack that holds this many levels: the CLI runs on a
-/// 1 GiB thread and `pounce-py` on a 256 MiB worker.
-pub const MAX_PARSE_DEPTH: u32 = 40_000;
-
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
     // AMPL invokes a solver with an extensionless *stub* — e.g.
     // `pounce mymodel -AMPL` — and expects `mymodel.nl` to be read (and
@@ -1925,6 +1968,8 @@ struct Parser<'a> {
     cse_depth: Vec<u32>,
     /// Current recursion depth of `parse_expr` (gh#986).
     parse_depth: u32,
+    /// Depth at which `parse_expr` refuses (gh#986); see [`parse_depth_limit`].
+    max_depth: u32,
 }
 
 /// One pending operator on the streaming recognizer's stack.
@@ -1977,6 +2022,7 @@ impl<'a> Parser<'a> {
             cse_vars: Vec::new(),
             cse_depth: Vec::new(),
             parse_depth: 0,
+            max_depth: parse_depth_limit(),
         }
     }
 
@@ -2337,13 +2383,13 @@ impl<'a> Parser<'a> {
         // stack overflow is an abort, not an error return, so the reader
         // refuses past `MAX_PARSE_DEPTH` levels with a clean message at any
         // input depth instead of relying on the caller's stack size.
-        if self.parse_depth >= MAX_PARSE_DEPTH {
+        if self.parse_depth >= self.max_depth {
             return Err(format!(
-                "the model nests an expression more than {MAX_PARSE_DEPTH} levels \
-                 deep, which the recursive reader refuses rather than overflow the \
-                 stack. A `.nl` writer that emits `o0` (binary +) chains for a long \
-                 sum will do this; `o54` (n-ary sum) is one level whatever the term \
-                 count."
+                "the model nests an expression more than {} levels deep, which the \
+                 recursive reader refuses rather than overflow the stack (a long \
+                 left-deep `o0` sum is read flat and does not count; deep unary or \
+                 `o2`/`o3` nesting does)",
+                self.max_depth
             ));
         }
         self.parse_depth += 1;
@@ -2470,6 +2516,35 @@ impl<'a> Parser<'a> {
     fn parse_opcode(&mut self, code: i32) -> Result<Expr, String> {
         match code {
             0 => {
+                // gh#986: a left-deep run of binary `o0` — `o0 o0 o0 … a b c d`,
+                // what AMPL and discopt write for a long sum — is read as one
+                // n-ary `Sum`, so the tree is one level deep however many terms
+                // there are. Taken only past `SUM_CHAIN_FLATTEN_MIN` links, so
+                // an ordinary model keeps exactly the tree it always had.
+                // Each `o0`'s first child is the next line, so the `k + 1`
+                // operands that follow the run are, in order, the leaves of
+                // `((a + b) + c) + d`; `Sum` adds them left to right, the same
+                // order of operations.
+                let after_first = self.pos;
+                let mut k = 1usize;
+                loop {
+                    let before = self.pos;
+                    match self.next_line() {
+                        Some(l) if strip_comment(l).trim() == "o0" => k += 1,
+                        _ => {
+                            self.pos = before;
+                            break;
+                        }
+                    }
+                }
+                if k > SUM_CHAIN_FLATTEN_MIN {
+                    let mut terms = Vec::with_capacity(k + 1);
+                    for _ in 0..=k {
+                        terms.push(self.parse_expr()?);
+                    }
+                    return Ok(Expr::Sum(terms));
+                }
+                self.pos = after_first;
                 let a = self.parse_expr()?;
                 let b = self.parse_expr()?;
                 Ok(Expr::Binary(BinOp::Add, Box::new(a), Box::new(b)))
@@ -6611,59 +6686,117 @@ pub fn load_nl_as_tnlp(path: &Path) -> Result<Rc<RefCell<dyn TNLP>>, String> {
 
 #[cfg(test)]
 mod tests {
-    /// gh#986: a chain of binary `o0` nodes deeper than the reader's guard is
-    /// refused with an `Err`, at any depth, instead of overflowing the stack.
-    /// Runs on a big thread because the guard assumes callers provide one.
-    #[test]
-    fn gh986_deep_binary_chain_is_a_clean_error_not_a_stack_overflow() {
-        fn chain(n: usize) -> String {
-            let mut l = vec![
-                "g3 1 1 0".to_string(),
-                format!(" {n} 1 1 0 1"),
-                " 0 1".into(),
-                " 0 0".into(),
-                format!(" 0 {n} 0"),
-                " 0 0 0 1 0".into(),
-                " 0 0 0 0 0".into(),
-                format!(" {n} {n}"),
-                " 0 0".into(),
-                " 0 0 0 0 0".into(),
-                "C0".into(),
-                "n0".into(),
-                "O0 0".into(),
-            ];
-            l.extend(std::iter::repeat_n("o0".to_string(), 2 * n - 1));
-            for i in 0..n {
-                l.extend([
-                    "o44".into(),
-                    format!("v{i}"),
-                    "o2".into(),
-                    format!("v{i}"),
-                    format!("v{i}"),
-                ]);
-            }
-            l.extend(["r".into(), "4 0.5".into(), "b".into()]);
-            l.extend((0..n).map(|_| "0 -1.0 1.0".to_string()));
-            l.push(format!("k{}", n - 1));
-            l.extend((0..n - 1).map(|i| (i + 1).to_string()));
-            l.push(format!("J0 {n}"));
-            l.extend((0..n).map(|i| format!("{i} 1.0")));
-            l.push(format!("G0 {n}"));
-            l.extend((0..n).map(|i| format!("{i} 0.0")));
-            l.join("\n") + "\n"
+    /// `.nl` text for `min sum_i exp(x_i) + x_i^2` whose sum is a left-deep
+    /// chain of `2n - 1` binary `o0`, wrapped in `wraps` pairs of unary `o16`
+    /// (negation, an even count so the value is unchanged). The `o0` chain is
+    /// read as one n-ary `Sum`; the negations are what stays genuinely deep.
+    fn deep_sum_nl(n: usize, wraps: usize) -> String {
+        let mut l = vec![
+            "g3 1 1 0".to_string(),
+            format!(" {n} 1 1 0 1"),
+            " 0 1".into(),
+            " 0 0".into(),
+            format!(" 0 {n} 0"),
+            " 0 0 0 1 0".into(),
+            " 0 0 0 0 0".into(),
+            format!(" {n} {n}"),
+            " 0 0".into(),
+            " 0 0 0 0 0".into(),
+            "C0".into(),
+            "n0".into(),
+            "O0 0".into(),
+        ];
+        l.extend(std::iter::repeat_n("o16".to_string(), 2 * wraps));
+        l.extend(std::iter::repeat_n("o0".to_string(), 2 * n - 1));
+        for i in 0..n {
+            l.extend([
+                "o44".into(),
+                format!("v{i}"),
+                "o2".into(),
+                format!("v{i}"),
+                format!("v{i}"),
+            ]);
         }
-        let h = std::thread::Builder::new()
+        l.extend(["r".into(), "4 0.5".into(), "b".into()]);
+        l.extend((0..n).map(|_| "0 -1.0 1.0".to_string()));
+        l.push(format!("k{}", n - 1));
+        l.extend((0..n - 1).map(|i| (i + 1).to_string()));
+        l.push(format!("J0 {n}"));
+        l.extend((0..n).map(|i| format!("{i} 1.0")));
+        l.push(format!("G0 {n}"));
+        l.extend((0..n).map(|i| format!("{i} 0.0")));
+        l.join("\n") + "\n"
+    }
+
+    /// Run `f` on a thread with the stack the CLI and `pounce-py` provide.
+    fn on_big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
             .stack_size(1 << 30)
-            .spawn(|| {
-                // Past the guard: 2n - 1 + 2 levels > MAX_PARSE_DEPTH.
-                let deep = parse_nl_text(&chain(30_000));
-                let msg = deep.err().expect("past the guard must be an Err");
-                assert!(msg.contains("levels"), "{msg}");
-                // A legal depth below the guard still parses.
-                assert!(parse_nl_text(&chain(5_000)).is_ok());
-            })
+            .spawn(f)
+            .unwrap()
+            .join()
             .unwrap();
-        h.join().unwrap();
+    }
+
+    /// gh#986: a left-deep `o0` chain of any length is read as one n-ary
+    /// `Sum` — one level deep — so the issue's n = 20 000 (39 999 nested
+    /// `o0`) parses, and so does 100k, with the same value as the nested
+    /// binary tree would have had.
+    #[test]
+    fn gh986_long_o0_chain_is_read_as_a_flat_sum() {
+        on_big_stack(|| {
+            for n in [5_000usize, 20_000, 100_000] {
+                let prob = parse_nl_text(&deep_sum_nl(n, 0)).expect("a long o0 sum must parse");
+                let x: Vec<f64> = (0..n).map(|i| (i % 7) as f64 * 0.1).collect();
+                let want: f64 = x.iter().map(|v| v.exp() + v * v).sum();
+                let tree = prob.obj_expr();
+                assert!(expr_tree_depth(&tree) < 16, "n = {n}");
+                let got = eval_expr(&tree, &x);
+                assert!((got - want).abs() <= 1e-9 * want.abs(), "{got} vs {want}");
+            }
+        });
+    }
+
+    /// gh#986: the guard follows the stack the thread declares, so a thread
+    /// with an ordinary 8 MiB stack refuses deep nesting cleanly — in an
+    /// unoptimised build (the worst frame size) exactly as in an optimised
+    /// one — instead of overflowing it. This is the reliability the
+    /// `parse_nl_text` SIGBUS/SIGSEGV reports lacked.
+    #[test]
+    fn gh986_guard_follows_the_declared_stack() {
+        let stack = 8 << 20;
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                set_parse_stack_budget(Some(stack));
+                assert_eq!(parse_depth_limit() as usize, stack / PARSE_LEVEL_BYTES);
+                let msg = parse_nl_text(&deep_sum_nl(4, 20_000))
+                    .err()
+                    .expect("40 000 levels cannot fit 8 MiB");
+                assert!(msg.contains("levels"), "{msg}");
+                // and a shallow model on the same thread is fine
+                assert!(parse_nl_text(&deep_sum_nl(4, 50)).is_ok());
+                set_parse_stack_budget(None);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// gh#986: nesting that really is deep (negations) past the guard is
+    /// refused with an `Err`, at any depth, instead of overflowing the stack;
+    /// nesting just inside the guard still parses. Both on the stack the
+    /// callers provide, in debug as in release — the guard's headroom is
+    /// what this pins.
+    #[test]
+    fn gh986_deep_nesting_is_a_clean_error_past_the_guard_and_parses_inside_it() {
+        on_big_stack(|| {
+            let deep = parse_nl_text(&deep_sum_nl(4, 30_000));
+            let msg = deep.err().expect("past the guard must be an Err");
+            assert!(msg.contains("levels"), "{msg}");
+            let wraps = (MAX_PARSE_DEPTH as usize - 100) / 2;
+            assert!(parse_nl_text(&deep_sum_nl(4, wraps)).is_ok());
+        });
     }
 
     use super::*;

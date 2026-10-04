@@ -111,13 +111,13 @@ const DYN_REG_RES_TOL: f64 = 1e-8;
 /// iterations) but biases `pilot.we`'s objective by 12% while still
 /// certifying Optimal — the regularized problem is a different problem. Only
 /// the iterates that actually show a deficit should pay.
-const DELTA_W_INIT: f64 = 1e-8;
-const DELTA_W_FACTOR: f64 = 10.0;
-const DELTA_W_MAX: f64 = 1e-4;
+pub(crate) const DELTA_W_INIT: f64 = 1e-8;
+pub(crate) const DELTA_W_FACTOR: f64 = 10.0;
+pub(crate) const DELTA_W_MAX: f64 = 1e-4;
 
-const DELTA_C_INIT: f64 = 1e-8;
-const DELTA_C_FACTOR: f64 = 10.0;
-const DELTA_C_MAX: f64 = 1e-1;
+pub(crate) const DELTA_C_INIT: f64 = 1e-8;
+pub(crate) const DELTA_C_FACTOR: f64 = 10.0;
+pub(crate) const DELTA_C_MAX: f64 = 1e-1;
 const INERTIA_MAX_TRIES: usize = 20;
 
 /// Centering fallback for a collapsing step (gh #218).

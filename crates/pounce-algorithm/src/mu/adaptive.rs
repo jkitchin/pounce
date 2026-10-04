@@ -57,6 +57,23 @@ pub enum AdaptiveMuKktNorm {
     TwoNorm,
 }
 
+/// Primal infeasibility (scaled, max-norm) at or below which the probing
+/// iterate-quality guard recentres instead of requesting restoration
+/// (gh#986 item 5).
+const PROBING_GUARD_FEASIBLE_TOL: Number = 1e-8;
+
+/// What the probing iterate-quality guard does with an iterate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbingGuardAction {
+    /// Guard quiet: run the probing oracle.
+    Probe,
+    /// Guard fired on an infeasible iterate: request restoration.
+    Restoration,
+    /// Guard fired on an already-feasible iterate: restoration has nothing
+    /// to repair, take a centering (LOQO) step instead (gh#986).
+    Recenter,
+}
+
 pub struct AdaptiveMuUpdate {
     pub mu_oracle: MuOracleKind,
     pub adaptive_mu_globalization: AdaptiveMuGlobalization,
@@ -279,6 +296,14 @@ impl AdaptiveMuUpdate {
     /// gates (`factor > 0`, `curr_mu > 0`) keep the predicate
     /// well-defined when the guard is disabled or when an unusual
     /// μ-strategy zeroes `curr_mu`.
+    pub fn probing_guard_action(guard_fired: bool, primal_inf: Number) -> ProbingGuardAction {
+        match (guard_fired, primal_inf <= PROBING_GUARD_FEASIBLE_TOL) {
+            (false, _) => ProbingGuardAction::Probe,
+            (true, true) => ProbingGuardAction::Recenter,
+            (true, false) => ProbingGuardAction::Restoration,
+        }
+    }
+
     pub fn probing_iterate_guard_fires(
         factor: Number,
         curr_mu: Number,
@@ -980,11 +1005,38 @@ impl MuUpdate for AdaptiveMuUpdate {
                 // signalling restoration and keeping μ unchanged; the
                 // main loop in `ipopt_alg.rs` consumes the flag
                 // before the search-direction step.
-                if Self::probing_iterate_guard_fires(
+                let guard_fired = Self::probing_iterate_guard_fires(
                     self.probing_iterate_quality_factor,
                     curr_mu,
                     avrg_compl,
-                ) {
+                );
+                // gh#986 item 5. Restoration is the remedy for an iterate the
+                // oracle's `sigma * mu_curr` would throw out of the convergence
+                // neighborhood *because it is infeasible* (arki0012). At an
+                // already-feasible iterate restoration has nothing to do —
+                // it fails on entry — so the guard turned a merely off-centre
+                // feasible iterate into `Restoration_Failed`. That is exactly
+                // what `mehrotra_algorithm=yes` produces on a general NLP: the
+                // first probing step picks sigma ~ 0 (mu ~ 1e-11) while the
+                // iterate's complementarity is still ~1e-2 (clnlbeam: ratio
+                // 2e9 at iteration 1, `inf_pr` 2e-14). There the right move is
+                // a centering step: take mu from the iterate's own
+                // complementarity (the LOQO rule) for this iteration and let
+                // the probing oracle resume once the iterate is back on the
+                // central path.
+                if Self::probing_guard_action(guard_fired, primal_inf)
+                    == ProbingGuardAction::Recenter
+                {
+                    if std::env::var("POUNCE_DBG_ORACLE").is_ok() {
+                        tracing::debug!(target: "pounce::mu",
+                            "[PN_PROBE_GUARD] iter={} ratio={:.3e} but inf_pr={:.3e} is feasible → centering (loqo) instead of restoration",
+                            iter_count,
+                            avrg_compl / curr_mu,
+                            primal_inf,
+                        );
+                    }
+                    loqo_candidate()
+                } else if guard_fired {
                     if std::env::var("POUNCE_DBG_ORACLE").is_ok() {
                         tracing::debug!(target: "pounce::mu",
                             "[PN_PROBE_GUARD] iter={} curr_mu={:.3e} avrg_compl={:.3e} ratio={:.3e} > factor={:.3e} → request_resto",
@@ -1001,27 +1053,28 @@ impl MuUpdate for AdaptiveMuUpdate {
                     // iterate straight to restoration.
                     data.borrow_mut().request_resto = true;
                     return curr_mu;
-                }
-                match (nlp, pd_search_dir) {
-                    (Some(nlp), Some(sd)) => {
-                        let mut oracle = ProbingMuOracle {
-                            // Forward the user-set `sigma_max` (default 1e2),
-                            // matching upstream `IpProbingMuOracle.cpp`, which
-                            // reads `options.GetNumericValue("sigma_max", ...)`
-                            // and caps `sigma = Min(sigma, sigma_max_)`. This
-                            // was hard-coded to 100.0, so a user-set `sigma_max`
-                            // reached only the quality-function oracle (L3).
-                            sigma_max: self.sigma_max,
-                            mu_min,
-                            mu_max: self.mu_max,
-                            mu_curr: curr_mu,
-                            mu_aff: curr_mu,
-                        };
-                        oracle
-                            .calculate_mu_with_affine_step(data, cq, nlp, sd, 1.0)
-                            .unwrap_or_else(loqo_candidate)
+                } else {
+                    match (nlp, pd_search_dir) {
+                        (Some(nlp), Some(sd)) => {
+                            let mut oracle = ProbingMuOracle {
+                                // Forward the user-set `sigma_max` (default 1e2),
+                                // matching upstream `IpProbingMuOracle.cpp`, which
+                                // reads `options.GetNumericValue("sigma_max", ...)`
+                                // and caps `sigma = Min(sigma, sigma_max_)`. This
+                                // was hard-coded to 100.0, so a user-set `sigma_max`
+                                // reached only the quality-function oracle (L3).
+                                sigma_max: self.sigma_max,
+                                mu_min,
+                                mu_max: self.mu_max,
+                                mu_curr: curr_mu,
+                                mu_aff: curr_mu,
+                            };
+                            oracle
+                                .calculate_mu_with_affine_step(data, cq, nlp, sd, 1.0)
+                                .unwrap_or_else(loqo_candidate)
+                        }
+                        _ => loqo_candidate(),
                     }
-                    _ => loqo_candidate(),
                 }
             }
             MuOracleKind::QualityFunction => match (nlp, pd_search_dir) {
@@ -1505,6 +1558,26 @@ mod tests {
         assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
             1e4, curr_mu, avrg_compl
         ));
+    }
+
+    // gh#986 item 5: clnlbeam under `mehrotra_algorithm=yes` — ratio 2e9 at
+    // iteration 1 with `inf_pr` 2.3e-14. Restoration at a feasible point
+    // can only fail; the guard recentres instead. An infeasible iterate
+    // (arki0012's case) still goes to restoration.
+    #[test]
+    fn probing_guard_recentres_a_feasible_iterate_and_restores_an_infeasible_one() {
+        use ProbingGuardAction::*;
+        let fired = AdaptiveMuUpdate::probing_iterate_guard_fires(1e4, 2.575e-11, 5.358e-2);
+        assert!(fired);
+        assert_eq!(
+            AdaptiveMuUpdate::probing_guard_action(fired, 2.3e-14),
+            Recenter
+        );
+        assert_eq!(
+            AdaptiveMuUpdate::probing_guard_action(fired, 3e-3),
+            Restoration
+        );
+        assert_eq!(AdaptiveMuUpdate::probing_guard_action(false, 3e-3), Probe);
     }
 
     #[test]

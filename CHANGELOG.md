@@ -81,23 +81,46 @@ changes.
   curvature-classified minima. Deferred: (6) per-pass summary of the l1
   multi-pass report.
 
-- **Crashes on legal input (gh#986).** (1, 2) A deep left-deep chain of binary
-  `o0` nodes overflowed the CLI's stack and, past its own depth guard, killed
-  the Python interpreter via `parse_nl_text` (SIGBUS). The `.nl` expression
-  reader now carries its own recursion guard (`MAX_PARSE_DEPTH`, 40 000) and
-  returns a clean error at any depth; the CLI runs on a 1 GiB reserved-stack
-  thread (a 5 000-term `o0` sum solves) and the Python worker stack grows to
-  256 MiB. (3) A convex-engine `NumericalFailure` now maps to
-  `Error_In_Step_Computation` instead of "INTERNAL ERROR: Unknown SolverReturn
-  value". (4) An active-set SQP `working_set=` warm start whose dimensions no
-  longer fit (a child that fixes a variable) is dropped with a warning and the
-  solve runs cold, instead of `Internal_Error` with `x = 0`. (6) A cyipopt-style
-  `intermediate(self, *args)` is retried positionally when the keyword call is
-  refused, and a raising callback is logged as a callback failure. (5)
-  `mehrotra_algorithm=yes` on a general NLP (clnlbeam: `Restoration_Failed`
-  after 3 iterations at a feasible point) is not fixed: the option disables the
-  line search by design and is meant for LP / convex QP; a restoration failure
-  under it now says so. Tracked in #986.
+- **Crashes on legal input (gh#986).** (1, 2) A long left-deep chain of
+  binary `o0` nodes overflowed the CLI's stack and, past the reader's guard,
+  killed the Python interpreter via `parse_nl_text`. The `.nl` reader now
+  reads any left-deep `o0` run longer than 64 links as one n-ary `Sum` (same
+  left-to-right additions, one nesting level), so the issue's n = 20 000
+  (39 999 nested `o0`) -- and 100 000 -- parses and solves in the CLI and in
+  `parse_nl_text` (CLI: 0.3 s / 2 s). Genuinely deep nesting (unary / `o2` /
+  `o3`) keeps the recursive path, now bounded by a guard that follows the
+  stack the thread declared (`set_parse_stack_budget`: 32 KiB per level in an
+  unoptimised build, 4 KiB optimised, capped at 40 000), so it is a clean
+  error at any depth in debug and release builds alike -- the earlier
+  `test_parse_nl_text_depth_guard_fires_at_any_depth` crash was a 256 MiB
+  worker overflowing at ~13-26 KiB per unoptimised level. The CLI main thread
+  and the Python worker reserve 1 GiB and fall back to 256 / 64 MiB. (3) A
+  consistent duplicated equality row under `qp_presolve=no qp_reg=0` died at
+  iteration 0: the convex IPM's seed factorization hit a zero pivot with no
+  static regularization at all. With `qp_reg <= 0` the seed now carries a
+  1e-8 floor on the `(x, x)` and equality blocks (it only feeds the symbolic
+  analysis; any `qp_reg > 0`, the default included, seeds exactly as before),
+  and the per-iteration refactor gained the HSDE driver's staged delta_w /
+  delta_c rescue for a failed factorization. Nothing that factored before
+  moves (fixture sweep identical, both legs); the issue's 602-variable MPC
+  solves to 149.4757, and a convex `NumericalFailure` maps to
+  `Error_In_Step_Computation` rather than "INTERNAL ERROR: Unknown
+  SolverReturn value". (4) An active-set
+  SQP `working_set=` warm start whose dimensions no longer fit (a child that
+  fixes a variable) is dropped with a warning and the solve runs cold. (5)
+  `mehrotra_algorithm=yes` on clnlbeam ended `Restoration_Failed` at a feasible
+  point because the probing oracle's iterate-quality guard (ratio 2e9 at
+  iteration 1, `inf_pr` 2e-14) requested a restoration that cannot repair
+  anything; at a feasible iterate (`inf_pr <= 1e-8`) the guard now recentres
+  (LOQO mu) instead, and still restores an infeasible one. clnlbeam now solves
+  at ni = 1000 and 2000. Mehrotra stays unglobalised, so on this nonconvex
+  model it may stop at a different local solution than the default algorithm.
+  (6) A cyipopt-style `intermediate(self, *args)` is retried positionally; a
+  callback that **raises** now ends the solve with `info["status_msg"] ==
+  "Callback_Error"` (`info["status"] == -198`) and the exception text in
+  `info["callback_error"]` instead of `User_Requested_Stop`, which only a
+  deliberate `return False` reports (`minimize` still never upgrades it to
+  success).
 
 - **`pounce.jax` sparsity: structural detection from the jaxpr, patterns and
   `on_failure` everywhere (gh#985).** The pattern was read from values at a

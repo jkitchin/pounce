@@ -1370,6 +1370,7 @@ impl PyProblem {
             // `SolveStatistics` residual/objective defaults.
             final_obj: Number::NAN,
             final_status_code: 0,
+            callback_error: None,
         })
     }
 
@@ -1557,8 +1558,23 @@ pub(crate) fn build_info_dict<'py>(
         d.set_item("recentering_disabled", w.recentering_disabled)?;
         info.set_item("warm_start", d)?;
     }
-    info.set_item("status", status as i32)?;
-    info.set_item("status_msg", status_message(status))?;
+    // gh#986 item 6: an `intermediate` callback that *raised* stops the
+    // engine through the same `false` return a deliberate `return False`
+    // does, so the engine reports `User_Requested_Stop` for both. Tell them
+    // apart here: a broken callback gets its own status (`Callback_Error`,
+    // code `CALLBACK_ERROR_STATUS`) and the exception text in
+    // `info["callback_error"]`; `return False` stays `User_Requested_Stop`.
+    match (&bridge.state.callback_error, status) {
+        (Some(err), ApplicationReturnStatus::UserRequestedStop) => {
+            info.set_item("status", CALLBACK_ERROR_STATUS)?;
+            info.set_item("status_msg", "Callback_Error")?;
+            info.set_item("callback_error", err.as_str())?;
+        }
+        _ => {
+            info.set_item("status", status as i32)?;
+            info.set_item("status_msg", status_message(status))?;
+        }
+    }
     info.set_item("obj_val", bridge.state.final_obj)?;
     info.set_item("g", bridge.state.final_g.clone().into_pyarray_bound(py))?;
     info.set_item(
@@ -2008,6 +2024,11 @@ fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<
         Ok(out)
     })
 }
+
+/// `info["status"]` for a solve stopped by an `intermediate` callback that
+/// raised (gh#986 item 6). Outside the engine's `ApplicationReturnStatus`
+/// range, so it cannot collide with a real exit.
+pub(crate) const CALLBACK_ERROR_STATUS: i32 = -198;
 
 pub(crate) fn status_message(status: ApplicationReturnStatus) -> &'static str {
     use ApplicationReturnStatus::*;

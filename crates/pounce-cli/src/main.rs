@@ -102,22 +102,30 @@ fn curvature_scaling_requested(app: &pounce_algorithm::application::IpoptApplica
 pub fn main() -> ExitCode {
     // gh#986: the `.nl` reader, tape builder and drop glue recurse once per
     // level of expression nesting, and an overflow is an abort. Run on a
-    // thread with a large reserved (not committed) stack so a legal deep
-    // sum (a left-deep chain of binary `o0`) solves instead of crashing;
-    // the reader's own depth guard covers anything beyond.
-    const MAIN_STACK: usize = 1 << 30;
-    match std::thread::Builder::new()
-        .name("pounce-main".into())
-        .stack_size(MAIN_STACK)
-        .spawn(real_main)
-    {
-        Ok(h) => match h.join() {
-            Ok(code) => code,
-            Err(p) => std::panic::resume_unwind(p),
-        },
-        // Could not reserve the big stack: run in place rather than not at all.
-        Err(_) => real_main(),
+    // thread with a large reserved (not committed) stack, falling back to
+    // smaller reservations when the OS refuses, and tell the reader how much
+    // it got so its own depth guard fires first at any build profile. (A
+    // left-deep `o0` sum — the shape AMPL and discopt write for a long sum —
+    // is read flat and needs none of this.)
+    for stack in [1usize << 30, 256 << 20, 64 << 20] {
+        let spawned = std::thread::Builder::new()
+            .name("pounce-main".into())
+            .stack_size(stack)
+            .spawn(move || {
+                pounce_nl::nl_reader::set_parse_stack_budget(Some(stack));
+                real_main()
+            });
+        if let Ok(h) = spawned {
+            return match h.join() {
+                Ok(code) => code,
+                Err(p) => std::panic::resume_unwind(p),
+            };
+        }
     }
+    // Could not reserve any big stack: run in place (the platform's main
+    // thread stack, conservatively assumed small) rather than not at all.
+    pounce_nl::nl_reader::set_parse_stack_budget(Some(1 << 20));
+    real_main()
 }
 
 fn real_main() -> ExitCode {

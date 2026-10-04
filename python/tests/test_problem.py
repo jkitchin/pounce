@@ -542,10 +542,11 @@ def test_intermediate_no_return_continues():
     np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
 
 
-def test_intermediate_exception_aborts_with_user_stop():
-    # A raising `intermediate` aborts the solve (User_Requested_Stop) rather
-    # than crashing across the FFI boundary; post-fix it also logs a trace
-    # line (verified manually — the log goes through the Rust subscriber).
+def test_intermediate_exception_aborts_with_callback_error():
+    # A raising `intermediate` aborts the solve rather than crashing across
+    # the FFI boundary, and (gh#986) reports its own `Callback_Error` status
+    # with the exception text -- not the `User_Requested_Stop` a deliberate
+    # `return False` produces.
     class P:
         def objective(self, x):
             return float((x[0] - 3.0) ** 2)
@@ -561,7 +562,31 @@ def test_intermediate_exception_aborts_with_user_stop():
     )
     prob.add_option("print_level", 0)
     x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Callback_Error"
+    assert info["status"] == -198
+    assert "boom from intermediate" in info["callback_error"]
+    assert "RuntimeError" in info["callback_error"]
+
+
+def test_intermediate_return_false_stays_user_requested_stop():
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, **kw):
+            return kw["iter_count"] < 1
+
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[]
+    )
+    prob.add_option("print_level", 0)
+    _, info = prob.solve(x0=np.array([-5.0]))
     assert info["status_msg"] == "User_Requested_Stop"
+    assert info["status"] == 5
+    assert "callback_error" not in info
 
 
 def _noncontiguous(a):

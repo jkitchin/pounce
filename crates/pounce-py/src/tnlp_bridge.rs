@@ -86,6 +86,11 @@ pub(crate) struct PyTnlpInit {
     pub final_lambda: Vec<Number>,
     pub final_obj: Number,
     pub final_status_code: i32,
+    /// Set when the user's `intermediate` callback *raised* (gh#986 item 6):
+    /// the formatted exception. The engine sees only a `false` return and
+    /// reports `User_Requested_Stop`; the info builder uses this to tell a
+    /// broken callback from a deliberate `return False`.
+    pub callback_error: Option<String>,
 }
 
 /// Trait-impl side of the bridge.
@@ -451,6 +456,7 @@ impl TNLP for PyTnlp {
                     "pounce-py: intermediate() raised, so the solve is stopped \
                      (this is a callback failure, not a deliberate `return False`): {e}"
                 );
+                self.state.callback_error = Some(e.to_string());
                 false
             }
         }
