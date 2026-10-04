@@ -1447,7 +1447,9 @@ reconstruction above is what makes it 4.
 | `warm_start_bound_push`, `warm_start_bound_frac` | `0.001` | Primal push away from bounds (as `bound_push` / `bound_frac`). |
 | `warm_start_slack_bound_push`, `warm_start_slack_bound_frac` | `0.001` | Same for inequality slacks. |
 | `warm_start_mult_bound_push` | `0.001` | Floor on bound multipliers. |
-| `warm_start_mult_init_max` | `1e6` | Cap on supplied multiplier magnitudes. |
+| `warm_start_mult_init_max` | `1e6` | Upper clamp on the bound multipliers the warm-start initializer fills or reconstructs (`0` = no cap). An unseeded equality-multiplier block is reconstructed by the cold path's least-squares solve and capped by `constr_mult_init_max` instead. |
+| `warm_start_entire_iterate` | `no` | Ipopt's `GetWarmStartIterate` switch. Registered so an `ipopt.opt` parses; `yes` is **refused** (gh#606) — POUNCE has no such TNLP surface. Use `warm_start_init_point=yes`, which carries the primal point and all multiplier blocks. |
+| `warm_start_same_structure` | `no` | Ipopt's "same structure as the previous solve" switch. Registered; `yes` is **refused** for the same reason. Structure reuse across solves is the FERAL backend pool's job (e.g. `solve_nlp_batch(share_structure=True)`). |
 
 The default start `mu` is unchanged. The fix above is in how the supplied
 multipliers are reconciled with the slacks, not in a lower default barrier:
@@ -1509,7 +1511,10 @@ An explicit `mu_strategy` always wins. On a 10-variable Rosenbrock with L-BFGS
 the two rows differ as 117 iterations (adaptive) against 121 (monotone), so
 the rule is visible as an iteration count. Because `mu_strategy_fallback`
 defaults to on while `mu_strategy` is unset (gh#748), a stalled solve under
-either default is retried once under the other. The solve report does not
+either default is retried once under the other. The Python path's `monotone`
+pin counts as unset for this purpose — it is marked as POUNCE's choice, not
+the caller's (gh#990) — so the retry is on there too; an explicit
+`mu_strategy` or `mu_strategy_fallback=no` turns it off. The solve report does not
 record the strategy that was resolved; pin `mu_strategy` yourself when you
 need the run to be reproducible across call paths.
 
@@ -1648,7 +1653,7 @@ optimization above all.
 | option | default | values | what it does |
 |---|---|---|---|
 | `partitioned_elements`      | `per-constraint` | `per-constraint`, `blocks` | how the Lagrangian is split into elements |
-| `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block |
+| `partitioned_update_type`   | `sr1`            | `sr1`, `bfgs`              | update formula applied to each element block (`bfgs`: objective element only; constraint elements always SR1) |
 | `partitioned_structure`     | `declared`       | `declared`, `jacobian`     | split each element along the model's declared Hessian sparsity and keep only its declared entries |
 | `partitioned_max_element`   | `64`             | ≥ 1                        | widest element that keeps a dense block |
 | `partitioned_block_size`    | `64`             | ≥ 1                        | target block width, `elements=blocks` only |
@@ -1727,13 +1732,15 @@ declared coupling, and on `benchmarks/large_scale` `laptime` (one
 3 280-variable component at N = 80) it hit the iteration cap where the
 contiguous blocks take 166.
 
-Not covered: `partitioned_update_type=bfgs` on a model **without** a
-declared Hessian structure (or with `partitioned_structure=jacobian`)
-still does not converge on the batch reactor, nor on `laptime` either
-way — a positive-semidefinite model of an indefinite `∇²c_j`, weighted by
-a multiplier of either sign. Modelling the Lagrangian element `λ_j c_j`
-instead was tried and diverged (damped) or froze (curvature-skipped).
-Use `sr1` there.
+Under `partitioned_update_type=bfgs`, constraint elements take **SR1**
+anyway (gh#989): damped BFGS is applied only to the objective element (and
+to the Lagrangian blocks of `elements=blocks`). A positive-semidefinite
+model of an indefinite `∇²c_j`, weighted by a multiplier of either sign,
+gave the assembled Hessian the wrong inertia, and on a model **without** a
+declared Hessian structure (or with `partitioned_structure=jacobian`) `bfgs`
+hit the iteration cap on the batch reactor at every mesh size. Now it
+matches `sr1` there (N = 25: 16 and 16; N = 50: 23 and 23 iterations, the
+same as `sr1` because that model's objective is linear).
 
 **`partitioned_max_element`.** An element with `k` nonzeros costs
 `k(k+1)/2` stored reals, so one wide constraint row would dominate the
@@ -2250,7 +2257,9 @@ OptionsList.
 | `kahip`     | feral-kahip flow-based nested dissection with K1 preprocessing. Ties METIS on fill geomean at 4–6× per-call symbolic cost. Reach for it only when ND fill matters and per-call cost is amortized.                                                          |
 
 **`linear_solver.last_ordering` can differ from what you pinned.** FERAL
-uses an AMD *leaf* below `amd_switch` (default 120 rows): on a small matrix
+uses an AMD *leaf* below a nested-dissection switch size — an internal
+FERAL parameter, not a POUNCE option — of 120 rows for SCOTCH and 200 for
+METIS and KaHIP (feral 0.18 defaults): on a small matrix
 `feral_ordering=scotch` (or `metis`, `kahip`) still reports
 `last_ordering: "amd"`, because the nested-dissection recursion bottoms out
 in AMD at once. This is not a failed option. The ordering you pinned only
@@ -2610,7 +2619,7 @@ CLI, the C/Python frontends, and anything embedding the library.
 | `RUST_LOG` | e.g. `info`, `debug`, `pounce::restoration=debug` | Log verbosity / per-target filtering. Default `info`. Logs go to **stderr**. |
 | `POUNCE_LOG_FORMAT` | `text` (default) · `json` | `json` emits line-delimited JSON on stderr (incl. the per-iteration `pounce::iteration` stream) for Studio / CI ingestion. |
 | `NO_COLOR` | set to any value | Disables ANSI color in the iteration table **and** logs (see <https://no-color.org>). |
-| `CLICOLOR_FORCE` | set to any value | Forces color even when stdout is not a terminal. |
+| `CLICOLOR_FORCE` | set to any value | Forces color in the logs even when **stderr** (where they go) is not a terminal; it also forces the summary's red declared-violation line on stdout. |
 
 **Filtering by subsystem.** Solver internals log under namespaced targets
 — `pounce::algorithm`, `pounce::linsol`, `pounce::mu`, `pounce::sqp`,

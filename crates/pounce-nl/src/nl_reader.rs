@@ -1910,22 +1910,83 @@ fn parse_nl_counts(line3: &str, line5: &str) -> Option<NlCounts> {
 }
 
 /// Header line 7: `nbv niv nlvbi nlvci nlvoi` (gh#987).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// In AMPL's convention `nbv` and `niv` count only the discrete variables
+/// that appear **linearly**; a discrete variable that appears nonlinearly is
+/// counted in `nlvbi` / `nlvci` / `nlvoi` instead, *not* in `nbv + niv`. So a
+/// MINLP whose integers all appear nonlinearly has `nbv = niv = 0` — reading
+/// only those two fields reports it as continuous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiscreteCensus {
-    /// `nbv`: binary variables.
+    /// `nbv`: binary variables appearing only linearly.
     pub binary: usize,
-    /// `niv`: general-integer variables.
+    /// `niv`: other integer variables appearing only linearly.
     pub integer: usize,
-    /// `nlvbi + nlvci + nlvoi`: discrete variables that also appear
-    /// nonlinearly. These are ordered inside the nonlinear blocks, so while
-    /// any exist the integer columns cannot be recovered from the counts.
-    pub nonlinear_discrete: usize,
+    /// `nlvbi`: integer variables nonlinear in both constraints and objectives.
+    pub nl_both: usize,
+    /// `nlvci`: integer variables nonlinear in constraints only.
+    pub nl_cons: usize,
+    /// `nlvoi`: integer variables nonlinear in objectives only.
+    pub nl_objs: usize,
 }
 
 impl DiscreteCensus {
-    /// Total declared discrete variables (`nbv + niv`).
+    /// Total declared discrete variables, linear and nonlinear
+    /// (`nbv + niv + nlvbi + nlvci + nlvoi`).
     pub fn total(&self) -> usize {
-        self.binary + self.integer
+        self.binary + self.integer + self.nonlinear_discrete()
+    }
+
+    /// Discrete variables that appear nonlinearly (`nlvbi + nlvci + nlvoi`).
+    pub fn nonlinear_discrete(&self) -> usize {
+        self.nl_both + self.nl_cons + self.nl_objs
+    }
+
+    /// The 0-based columns of every discrete variable, from Gay's variable
+    /// ordering ("Writing .nl Files", table 4):
+    ///
+    /// 1. nonlinear in both constraints and objectives — `nlvb` columns, the
+    ///    last `nlvbi` of them integer;
+    /// 2. nonlinear in constraints only — `nlvc − nlvb` columns, the last
+    ///    `nlvci` integer;
+    /// 3. nonlinear in objectives only — `nlvo − nlvc` columns (when
+    ///    positive), the last `nlvoi` integer;
+    /// 4. linear variables, ending in `nbv` binary then `niv` integer, which
+    ///    are therefore the last `nbv + niv` columns of the model.
+    ///
+    /// `None` when the columns cannot be identified: a nonlinear integer
+    /// count is non-zero but the header's line-5 census is missing, or the
+    /// counts are inconsistent with the block sizes. Callers must report that
+    /// as *not checked*, never as passed.
+    pub fn integer_columns(&self, n: usize, counts: Option<NlCounts>) -> Option<Vec<usize>> {
+        let lin = self.binary + self.integer;
+        if lin > n {
+            return None;
+        }
+        let mut cols = Vec::with_capacity(self.total());
+        if self.nonlinear_discrete() > 0 {
+            let c = counts?;
+            let nlvb = c.nl_vars_both;
+            let nlvc = c.nl_vars_cons;
+            let nlvo = c.nl_vars_objs;
+            if nlvc < nlvb {
+                return None;
+            }
+            let b3 = nlvo.saturating_sub(nlvc);
+            let blocks = [
+                (0, nlvb, self.nl_both),
+                (nlvb, nlvc - nlvb, self.nl_cons),
+                (nlvc, b3, self.nl_objs),
+            ];
+            for (start, len, ints) in blocks {
+                if ints > len || start + len > n - lin {
+                    return None;
+                }
+                cols.extend(start + len - ints..start + len);
+            }
+        }
+        cols.extend(n - lin..n);
+        Some(cols)
     }
 }
 
@@ -2166,7 +2227,9 @@ impl<'a> Parser<'a> {
                     binary: v[0],
                     integer: v[1],
                     // `nlvbi nlvci nlvoi`; absent in a short header.
-                    nonlinear_discrete: v.iter().skip(2).take(3).sum(),
+                    nl_both: v.get(2).copied().unwrap_or(0),
+                    nl_cons: v.get(3).copied().unwrap_or(0),
+                    nl_objs: v.get(4).copied().unwrap_or(0),
                 });
             }
         }
@@ -7103,6 +7166,44 @@ mod tests {
     ///     o5 (o1 v0 n1) n2
     ///     o5 (o1 v1 n2) n2
     /// Then `b` segment: free for both.
+    /// gh#987: Gay's ordering places nonlinear integers at the END of each
+    /// nonlinear block and linear ones at the end of the model.
+    #[test]
+    fn discrete_census_locates_nonlinear_and_linear_integer_columns() {
+        // n = 10: nlvb = 2 (1 int), con-only 3 (1 int), obj-only 1 (1 int),
+        // then linear, ending in nbv = 1, niv = 1.
+        let d = DiscreteCensus {
+            binary: 1,
+            integer: 1,
+            nl_both: 1,
+            nl_cons: 1,
+            nl_objs: 1,
+        };
+        let c = NlCounts {
+            nl_cons: 1,
+            nl_objs: 1,
+            nl_vars_cons: 5,
+            nl_vars_objs: 6,
+            nl_vars_both: 2,
+        };
+        assert_eq!(d.total(), 5);
+        assert_eq!(d.integer_columns(10, Some(c)), Some(vec![1, 4, 5, 8, 9]));
+        // Without the line-5 census the nonlinear columns are unknowable.
+        assert_eq!(d.integer_columns(10, None), None);
+        // Linear-only integers need no census.
+        let lin = DiscreteCensus {
+            binary: 2,
+            ..Default::default()
+        };
+        assert_eq!(lin.integer_columns(4, None), Some(vec![2, 3]));
+        // Inconsistent counts: more nonlinear-in-both integers than columns.
+        let bad = DiscreteCensus {
+            nl_both: 3,
+            ..Default::default()
+        };
+        assert_eq!(bad.integer_columns(10, Some(c)), None);
+    }
+
     const SIMPLE: &str = "g3 0 1 0
 2 0 1 0 0
 0 1

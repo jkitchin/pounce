@@ -52,7 +52,10 @@ scale-free.
 
 The search stops at the first of: **`target_reached`** (`--n-minima` found),
 **`converged`** (`--patience` consecutive empty solves), or
-**`budget_exhausted`** (`--max-solves` reached).
+**`budget_exhausted`** (`--max-solves` reached), or, for `mlsl` only,
+**`sample_cap_reached`** (the sample pool hit its cap of
+`--max-solves × --samples-per-round` draws before the solve budget was spent —
+the clustering filter rejected nearly every sample; lower `--gamma`).
 
 ## Strategy knobs
 
@@ -64,7 +67,7 @@ from the bounds.
 |---|---|
 | `--sigma`, `--sigma-frac`, `--amplitude`, `--amp-margin` | `flooding` |
 | `--eta`, `--power`, `--soft`, `--length`, `--length-frac` | `deflation`, `tunneling` |
-| `--gamma`, `--samples-per-round` | `mlsl` |
+| `--gamma` (default 0.5), `--samples-per-round` (default 20) | `mlsl` |
 | `--step`, `--temperature` | `basinhopping` |
 | `--restart-jitter` | all (perturbation scale for restart fallbacks) |
 

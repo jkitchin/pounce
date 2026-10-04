@@ -122,3 +122,29 @@ fn declared_structure_beats_dense_rows() {
         "declared structure ({decl}) must beat dense rows ({jac})"
     );
 }
+
+/// gh#989 item 5, remaining half: `partitioned_update_type=bfgs` with **no**
+/// declared Hessian pattern (`partitioned_structure=jacobian`, also what a
+/// Python problem without `hessian` gets). Damped BFGS forced every
+/// constraint element positive definite while `y_j·∇²c_j` has either sign,
+/// and the assembled `W` had the wrong inertia: the cap at N = 25 and 50.
+/// Constraint elements now take SR1 under `bfgs` (only the objective element
+/// is damped BFGS), so `bfgs` converges within 2x of `sr1` (measured: equal,
+/// 16 and 23 iterations).
+#[test]
+fn bfgs_without_a_declared_pattern_converges_like_sr1() {
+    for n in [25, 50] {
+        let base = [
+            "hessian_approximation=partitioned",
+            "partitioned_structure=jacobian",
+        ];
+        let (sr1, ok_s) = iterations(n, &[base[0], base[1], "partitioned_update_type=sr1"]);
+        let (bfgs, ok_b) = iterations(n, &[base[0], base[1], "partitioned_update_type=bfgs"]);
+        assert!(ok_s, "sr1 must converge at N={n} ({sr1} iterations)");
+        assert!(ok_b, "bfgs must converge at N={n} ({bfgs} iterations)");
+        assert!(
+            bfgs <= 2 * sr1,
+            "N={n}: bfgs {bfgs} iterations against sr1 {sr1}"
+        );
+    }
+}

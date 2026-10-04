@@ -57,7 +57,12 @@
 //! carries the sign, and the indefiniteness reaches the IPM's inertia
 //! check, which is exactly what
 //! `dev-notes/issue-131-monotone-lbfgs-stall.md` records the damped path
-//! hiding. [`UpdateType::Bfgs`] is accepted for comparison.
+//! hiding. [`UpdateType::Bfgs`] is accepted, but it applies damped BFGS to
+//! the objective element (and the `blocks` mode's Lagrangian blocks) only:
+//! constraint elements take SR1 under it too (`element_update_type`,
+//! gh#989), because a PSD model of `∇²c_j` weighted by a negative multiplier
+//! gave the assembled `W` the wrong inertia and `bfgs` hit `max_iter` on a
+//! Radau batch reactor with no declared Hessian pattern.
 //!
 //! # Elements with a declared, incomplete pattern
 //!
@@ -1193,6 +1198,28 @@ fn update_element(
     }
 }
 
+/// The update an element actually takes under the requested
+/// `partitioned_update_type` (gh#989 item 5, remaining half).
+///
+/// Under `bfgs`, a **constraint** element (`EqRow` / `IneqRow`) takes SR1
+/// anyway. Its target `∇²c_j` has no sign structure, and the element is
+/// weighted by a multiplier of either sign, so Powell-damped BFGS — which
+/// forces every block positive definite — assembles a `W` whose
+/// constraint curvature carries the wrong sign wherever `y_j·∇²c_j` is
+/// negative definite. On the Radau batch reactor with no declared Hessian
+/// pattern (`partitioned_structure=jacobian`, or a Python problem without
+/// `hessian`) that hit `max_iter` at every mesh size. Damped BFGS is sound
+/// only where the target is the curvature of a function the method may
+/// treat as convex: the objective element, and the `blocks` mode's
+/// Lagrangian restrictions (Asprion et al.'s design). Elements with a
+/// declared incomplete pattern take the sparse secant update either way.
+fn element_update_type(requested: UpdateType, source: ElementSource) -> UpdateType {
+    match (requested, source) {
+        (UpdateType::Bfgs, ElementSource::EqRow | ElementSource::IneqRow) => UpdateType::Sr1,
+        (t, _) => t,
+    }
+}
+
 impl HessianUpdater for PartitionedQuasiNewtonUpdater {
     fn update_hessian(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) -> bool {
         let (curr_x, curr_y_c, curr_y_d) = match data.borrow().curr.as_ref() {
@@ -1323,11 +1350,12 @@ impl HessianUpdater for PartitionedQuasiNewtonUpdater {
                     });
                 }
                 let before = e.b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                let element_update = element_update_type(self.update_type, e.source);
                 if update_element(
                     e,
                     &s_loc,
                     &y_loc,
-                    self.update_type,
+                    element_update,
                     self.init_val_min,
                     self.init_val_max,
                     self.curvature_cap,

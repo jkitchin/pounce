@@ -236,9 +236,12 @@ pub struct StatisticsInfo {
     /// arm's `bound_relax_factor` widening (gh #744/#745). `final_constr_viol`
     /// measures the widened model the solver was handed — the right model for
     /// the convergence test, the wrong one to read as the caller's own
-    /// feasibility. `NaN` when no widening applied or the path does not
-    /// compute it. Additive: readers of `pounce.solve-report/v1` that predate
-    /// it are unaffected.
+    /// feasibility. Reported on every NLP-arm solve, widened or not (gh#987:
+    /// it is no longer `NaN` as a "no widening" signal — compare it with
+    /// `final_constr_viol` instead); `NaN` only when the path does not compute
+    /// it. Under `l1_exact_penalty_barrier` it is the caller's own rows, not
+    /// the wrapper's augmented ones. Additive: readers of
+    /// `pounce.solve-report/v1` that predate it are unaffected.
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_declared_constr_viol: f64,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]

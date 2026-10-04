@@ -1210,6 +1210,12 @@ impl PyProblem {
                 .set_integer_value(k, *v, true, false)
                 .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
         }
+        // gh#990: the `monotone` pin above is POUNCE's choice, not the
+        // caller's; say so, so the default-on `mu_strategy_fallback`
+        // (gh#748) stays on for this path as the docs promise.
+        if !self.has_hessian && !self.str_opts.iter().any(|(k, _)| k == "mu_strategy") {
+            app.mark_mu_strategy_pounce_chosen();
+        }
         app.initialize()
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
 

@@ -338,10 +338,14 @@ fn judge_row(args: &VerifyArgs, viol: Number, magnitude: Number) -> bool {
 pub fn integrality_notice(c: Option<DiscreteCensus>) -> Option<String> {
     let c = c.filter(|c| c.total() > 0)?;
     Some(format!(
-        "the .nl declares {} binary and {} integer variable(s); pounce is a \
-         continuous solver and solved the RELAXATION, so the result is a bound \
-         on the MIP optimum, not an integer-feasible solution",
-        c.binary, c.integer
+        "the .nl declares {} discrete variable(s) ({} binary and {} integer appearing \
+         linearly, {} appearing nonlinearly); pounce is a continuous solver and solved \
+         the RELAXATION, so the result is a bound on the MIP optimum, not an \
+         integer-feasible solution",
+        c.total(),
+        c.binary,
+        c.integer,
+        c.nonlinear_discrete()
     ))
 }
 
@@ -418,6 +422,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let con_names = prob.con_names.clone();
     let var_names = prob.var_names.clone();
     let prob_discrete = prob.n_discrete;
+    let prob_nl_counts = prob.nl_counts;
     let mut tnlp = nl_reader::NlTnlp::new(prob);
 
     let info = tnlp
@@ -511,17 +516,21 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     // wildly different magnitude answers a different question for each of them.
     // Integrality (gh#987). pounce solves the continuous relaxation, so a
     // `.sol` for a MIP `.nl` can be feasible for every row and still be
-    // fractional. Header line 7 says how many columns are binary / integer;
-    // they are the LAST `nbv + niv` columns unless some also appear
-    // nonlinearly (those are ordered inside the nonlinear blocks), in which
-    // case the columns cannot be identified and the check is skipped — the
-    // report says so rather than implying it passed.
+    // fractional. Header line 7 says how many columns are discrete — `nbv`
+    // and `niv` for those appearing only linearly, `nlvbi nlvci nlvoi` for
+    // those appearing nonlinearly — and Gay's variable ordering places them
+    // (see [`DiscreteCensus::integer_columns`]). When the columns cannot be
+    // identified the check is skipped and the report says NOT CHECKED rather
+    // than implying it passed.
     let discrete = prob_discrete;
     let integrality = discrete
-        .filter(|d| d.total() > 0 && d.nonlinear_discrete == 0 && d.total() <= n)
-        .map(|d| {
-            let mut worst = (0.0_f64, n - d.total());
-            for (j, &xj) in x.iter().enumerate().skip(n - d.total()) {
+        .filter(|d| d.total() > 0)
+        .and_then(|d| d.integer_columns(n, prob_nl_counts))
+        .filter(|cols| !cols.is_empty())
+        .map(|cols| {
+            let mut worst = (0.0_f64, cols[0]);
+            for j in cols {
+                let xj = x[j];
                 let dist = if xj.is_finite() {
                     (xj - xj.round()).abs()
                 } else {
@@ -1033,13 +1042,18 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
     );
     match (o.discrete.filter(|d| d.total() > 0), o.integrality) {
         (Some(d), Some((v, j))) => println!(
-            "    integrality ({} binary + {} integer columns): max distance to an integer {v:.3e} at x[{j}]",
-            d.binary, d.integer
+            "    integrality ({} discrete columns: {} binary + {} integer linear, {} nonlinear): \
+             max distance to an integer {v:.3e} at x[{j}]",
+            d.total(),
+            d.binary,
+            d.integer,
+            d.nonlinear_discrete()
         ),
         (Some(d), None) => println!(
-            "    integrality: NOT CHECKED — the .nl declares {} binary + {} integer variable(s) \
-             that also appear nonlinearly, so their columns cannot be identified from the header",
-            d.binary, d.integer
+            "    integrality: NOT CHECKED — the .nl declares {} discrete variable(s) ({} appearing \
+             nonlinearly) whose columns cannot be identified from the header",
+            d.total(),
+            d.nonlinear_discrete()
         ),
         (None, _) => {}
     }
@@ -1252,12 +1266,14 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
         "integrality": match (o.discrete, o.integrality) {
             (Some(d), Some((v, j))) if d.total() > 0 => json!({
                 "checked": true, "binary": d.binary, "integer": d.integer,
+                "nonlinear": d.nonlinear_discrete(),
                 "max_distance_to_integer": v, "worst_column": j,
             }),
             (Some(d), None) if d.total() > 0 => json!({
                 "checked": false, "binary": d.binary, "integer": d.integer,
+                "nonlinear": d.nonlinear_discrete(),
             }),
-            _ => json!({ "checked": false, "binary": 0, "integer": 0 }),
+            _ => json!({ "checked": false, "binary": 0, "integer": 0, "nonlinear": 0 }),
         },
         "feasibility": {
             "max_constraint_violation": o.max_con_violation,

@@ -584,3 +584,40 @@ fn a_large_row_magnitude_does_not_buy_success_on_an_infeasible_model() {
         );
     }
 }
+
+/// gh#987 (remaining item b): under `l1_exact_penalty_barrier=yes`
+/// `final_declared_constr_viol` described the wrapper's augmented rows, which
+/// the elastic slacks satisfy by construction — `~1e-12` on a model
+/// infeasible by `O(1)`. It must be the user's own violation, at
+/// `bound_relax_factor = 0` as much as anywhere, and stay small on a feasible
+/// variant of the same model.
+#[test]
+fn the_declared_violation_under_the_l1_penalty_is_the_users() {
+    for (gap, infeasible) in [(0.5, true), (-0.5, false)] {
+        let mut app = IpoptApplication::new();
+        {
+            let opts = app.options_mut();
+            let _ = opts.set_string_value("sb", "yes", true, false);
+            let _ = opts.set_integer_value("print_level", 0, true, false);
+            let _ = opts.set_string_value("l1_exact_penalty_barrier", "yes", true, false);
+            let _ = opts.set_numeric_value("bound_relax_factor", 0.0, true, false);
+            let _ = opts.set_string_value("solver_selection", "nlp", true, false);
+            let _ = opts.set_integer_value("max_iter", 500, true, false);
+        }
+        app.initialize().expect("initialize");
+        let _ = app.optimize_tnlp(Rc::new(RefCell::new(InfeasibleLargeRow { k: 1.0, gap })));
+        let declared = app.statistics().final_declared_constr_viol;
+        if infeasible {
+            assert!(
+                (declared - gap).abs() <= 1e-3,
+                "infeasible by {gap}: final_declared_constr_viol reads {declared:.3e}, \
+                 the augmented problem's residual rather than the model's"
+            );
+        } else {
+            assert!(
+                declared.is_finite() && declared <= 1e-6,
+                "feasible variant: final_declared_constr_viol reads {declared:.3e}"
+            );
+        }
+    }
+}

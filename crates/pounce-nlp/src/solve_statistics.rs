@@ -169,9 +169,12 @@ pub struct SolveStatistics {
     /// `8.68e-13`; on `25fv47` it is `1.97e-05` against `2.19e-11`.
     ///
     /// Reported so a caller can tell the two apart rather than reading the
-    /// widened number as its own model's feasibility. `NaN` when the solve
-    /// applied no widening (the two coincide) or on paths that do not
-    /// compute it.
+    /// widened number as its own model's feasibility. Reported on every
+    /// NLP-arm solve, widened or not, in the caller's units (gh#987 — it is
+    /// no longer `NaN` as a "no widening" signal); under
+    /// `l1_exact_penalty_barrier` it is measured on the caller's own rows,
+    /// not the wrapper's augmented ones. `NaN` on paths that do not compute
+    /// it, or when the model could not be evaluated at the returned point.
     pub final_declared_constr_viol: Number,
     /// How far the returned point sits outside the **declared** variable box
     /// — the box the caller wrote, before the `bound_relax_factor` widening.

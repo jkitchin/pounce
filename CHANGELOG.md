@@ -54,6 +54,75 @@ changes.
 
 ### Fixed
 
+- **Textbook checklist, remaining items (gh#990).** (h) The Python path for a
+  problem without `hessian` pins `mu_strategy=monotone`, and that pin used to
+  read as the caller naming a strategy, which switched off the default-on
+  `mu_strategy_fallback` stall retry (gh#748) there, contradicting the docs.
+  The pin is now marked as POUNCE's choice
+  (`IpoptApplication::mark_mu_strategy_pounce_chosen`), so the retry stays on
+  unless the caller sets `mu_strategy` or `mu_strategy_fallback=no`; the
+  schedule itself is unchanged. (i) Docs: FERAL's AMD-leaf switch is 120 rows
+  for SCOTCH and 200 for METIS / KaHIP (feral 0.18) and is not a POUNCE
+  option (`options.md`, `last_ordering` in the report schema). (j)
+  `statistics.derivative_check` / `info["derivative_check"]` is now filled on
+  the active-set SQP path and in the CLI convex route's report, not only on the
+  IPM path. (k) Docs: the second-opinion ladder has four rungs and four
+  `*_retry` options (`troubleshooting.md`); `with_boundcheck` is up to 16
+  passes over variable bounds, not single-pass; the `qp_*` refusal text no
+  longer names a nonexistent `pounce.solve_cone` or claims Python takes the
+  `qp_*` knobs; `CLICOLOR_FORCE` governs the logs on stderr; the
+  `derivative_check` key list includes `perturbation` and `evaluations`;
+  `warm_start_mult_init_max`, `warm_start_entire_iterate` and
+  `warm_start_same_structure` are documented. (l) `QpResult.tau` / `kappa`
+  now describe the HSDE run that produced the returned answer: when a recovery
+  path (the dual-infeasible reverify, the gh#846 repair, the sigma path's
+  direct-driver fallback) returns a direct-driver answer they are `None`, and a
+  discarded retry's or twin solve's scalars no longer leak into the result.
+  (m) The wiki page "Recovering from a bad start" still cannot be updated from
+  here (no push access to `jkitchin/pounce.wiki`); the corrected text remains
+  in `dev-notes/wiki-recovering-from-a-bad-start.md`.
+
+- **Python-level driver defects, remaining items (gh#989).** (e)
+  `QpSensitivity`'s weak-activity screen is now per row: a constraint's
+  multiplier is compared with the largest stationarity term at the columns it
+  touches (`|c_j|`, `|(Px)_j|`, `‖P[:,j]‖·max(‖x‖,1)`, `|(Aᵀy)_j|`, the
+  orthant rows' `|G_kj|·z_k`, the bound multipliers), not with a global max
+  over every inequality multiplier, so one large `z` no longer flags a
+  strongly active neighbour as weak (`x₀ ≥ 0` with `z = 1e4` next to `x₁ ≥ 1`
+  with `z = 1`), the screen is invariant to rescaling the objective, and on a
+  conic build cone-block duals no longer set the orthant threshold. The rule
+  is in the `weakly_active_indices` docstring. (f) CLI `--minima mlsl` at
+  parity with Python: default `--gamma` 0.5 (was 2, which launched 2 solves on
+  the six-hump camel), the sample cap reports `sample_cap_reached` (was
+  `budget_exhausted`), and the nearest-better scan is a pruned sweep instead
+  of the all-pairs `O(N²)` loop. (g) `partitioned_update_type=bfgs` applies
+  damped BFGS to the objective element only; constraint elements take SR1, so
+  without a declared Hessian pattern (`partitioned_structure=jacobian`, or a
+  Python problem without `hessian`) it converges on the Radau batch reactor
+  (N = 25 / 50: 16 / 23 iterations, as `sr1`) instead of hitting `max_iter`.
+
+- **Misleading verdicts, remaining items (gh#987).** (a) Integers that
+  appear only nonlinearly were invisible: header line 7's `nbv`/`niv` count
+  only *linear* discrete variables, and `nlvbi nlvci nlvoi` were summed but
+  not used, so a MINLP whose integers all appear nonlinearly got no
+  relaxation warning and `pounce verify` passed a fractional point. The census
+  now counts all five fields, the warning names the nonlinear count, and
+  `verify` locates every discrete column by Gay's variable ordering
+  (`DiscreteCensus::integer_columns`); `NOT CHECKED` only when the columns
+  genuinely cannot be identified. The receipt's `integrality` object gains
+  `nonlinear`. (b) Under `l1_exact_penalty_barrier=yes`,
+  `final_declared_constr_viol` described the wrapper's augmented rows
+  (`~1e-12` at a point infeasible by `O(1)`); it is now measured on the
+  caller's own rows and box at the returned point. (c) The red "Violation of
+  the model as declared (before the bound_relax_factor widening)" console line
+  no longer prints at `bound_relax_factor=0`, nor when the only gap is a row
+  scale factor (it now compares against both residual columns). (d)
+  `docs/src/verify.md`'s exit-code table lists the integrality rejection
+  (exit 20); stale "`NaN` when no widening applied" docs corrected. As noted
+  in the earlier gh#987 entries: `iteration_count` is the **total** over every
+  pass of a multi-pass solve, and `final_declared_constr_viol` is no longer
+  `NaN` as a "no widening" signal — compare it with `final_constr_viol`.
+
 - **The gh#983 scale audit no longer reads a warm start at an answer as a
   tiny objective.** The small-objective branch takes the model's gradient
   scale as `max(grad f(x0), grad f(x*))`; under `warm_start_init_point=yes`

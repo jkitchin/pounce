@@ -673,10 +673,12 @@ pub struct StatisticsInfo {
     /// `final_constr_viol` reads `8.68e-13`; `25fv47` reports `2.19e-11`
     /// against `1.97e-05`.
     ///
-    /// `NaN` when the solve applied no widening (the two coincide by
-    /// construction) or on a path that does not compute it — every NLP-arm
-    /// solve today. Additive to `pounce.solve-report/v1`: readers predating
-    /// it are unaffected.
+    /// Reported on every solve of the NLP and convex arms, widened or not
+    /// (gh#987: it is no longer `NaN` as a "no widening" signal); under
+    /// `l1_exact_penalty_barrier` it is the caller's own rows, not the
+    /// wrapper's augmented ones. `NaN` only on a path that does not compute
+    /// it. Additive to `pounce.solve-report/v1`: readers predating it are
+    /// unaffected.
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_declared_constr_viol: Number,
     /// How far the returned point sits outside the **declared** variable box —

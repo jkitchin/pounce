@@ -436,7 +436,7 @@ Multistart / find-minima (search for several local minima, not one):
   Strategy knobs (used only by the relevant --minima method; all optional):
     --sigma, --sigma-frac, --amplitude, --amp-margin   (flooding)
     --eta, --power, --soft, --length, --length-frac    (deflation/tunneling)
-    --gamma, --samples-per-round                       (mlsl)
+    --gamma (0.5), --samples-per-round (20)            (mlsl)
     --step, --temperature                              (basinhopping)
     --restart-jitter                                   (all restart fallbacks)
 

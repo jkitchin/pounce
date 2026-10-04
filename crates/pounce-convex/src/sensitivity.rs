@@ -1519,26 +1519,82 @@ pub struct QpSensitivity {
 /// is the one users hit.
 const WEAK_ACTIVE_REL: f64 = 1e-3;
 
-/// Dual scale for the weak-activity screen: the largest *inequality-side*
-/// multiplier (`z`, `z_lb`, `z_ub`), floored at 1.
+/// Per-row dual yardsticks for the weak-activity screen (gh#989).
 ///
-/// The screen asks whether an inequality's multiplier is negligible, so the
-/// yardstick must be a multiplier of the same kind. The equality multipliers
-/// `y` are deliberately excluded (gh#989): they are free-signed, carry the
-/// units of whatever the equalities enforce, and are unrelated in magnitude to
-/// the inequality duals. On a 200-step MPC the dynamics multipliers reach
-/// 6.6e3 while the inequality multipliers stay below 3, which lifted the
-/// threshold to 6.6 and flagged nine strongly active rows (`z` between 0.2 and
-/// 3.0) as weakly active. The rule is therefore: a row or bound is weakly
-/// active when it binds in the primal and `z_i <= WEAK_ACTIVE_REL *
-/// max(1, ||z||_inf, ||z_lb||_inf, ||z_ub||_inf)`. (The orthant guard keeps
-/// its own scale, which does include `y`.)
-fn weak_dual_scale(sol: &QpSolution) -> f64 {
+/// A row is weakly active when it binds in the primal **and its multiplier is
+/// negligible next to the other forces acting at the columns it touches**. The
+/// yardstick is local, not a global max: the first gh#989 fix took the max of
+/// every inequality-side multiplier, so one large `z` (a bound `x₀ ≥ 0` with
+/// `z = 1e4`) lifted the threshold for every other row (`x₁ ≥ 1` with `z = 1`
+/// was flagged weak), and on a conic build the cone-block duals set the orthant
+/// threshold.
+///
+/// For each column `j` the *force scale* is
+///
+/// ```text
+/// T_j = max( |c_j|, |(Px)_j|, ‖P[:,j]‖∞·max(‖x‖∞, 1), |(Aᵀy)_j|,
+///            Σ_{orthant rows k} |G_kj|·z_k, z_lb_j, z_ub_j )
+/// ```
+///
+/// — every term of the stationarity equation at that column (the curvature
+/// term so that a fully degenerate model, where every force collapses to
+/// `O(√μ)`, still has a yardstick). Then
+///
+/// * inequality row `i` is weakly active iff its slack is below
+///   `WEAK_ACTIVE_REL` of the primal scale and
+///   `z_i·‖G_i‖∞ ≤ WEAK_ACTIVE_REL · max_{j ∈ supp(G_i)} T_j`;
+/// * the bound on `x_j` is weakly active iff `x_j` sits on it (within
+///   `WEAK_ACTIVE_REL·max(‖x‖∞, 1)`) and its multiplier is
+///   `≤ WEAK_ACTIVE_REL · T_j`.
+///
+/// Every term scales with the objective, so the screen is invariant to
+/// rescaling it; `z_i·‖G_i‖∞` is invariant to rescaling row `i`. Only orthant
+/// rows (`orthant`, or every row when `None`) contribute to the `Gᵀz` term, so
+/// a cone block's duals never set an orthant row's threshold.
+fn weak_force_scales(prob: &QpProblem, sol: &QpSolution, orthant: Option<&[bool]>) -> Vec<f64> {
+    let n = prob.n;
     let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-    inf_norm(&sol.z)
-        .max(inf_norm(&sol.z_lb))
-        .max(inf_norm(&sol.z_ub))
-        .max(1.0)
+    let x_scale = inf_norm(&sol.x).max(1.0);
+    let mut t: Vec<f64> = (0..n)
+        .map(|j| prob.c.get(j).copied().unwrap_or(0.0).abs())
+        .collect();
+    let mut px = vec![0.0; n];
+    prob.p_mul_add(&sol.x, &mut px);
+    let mut pcol = vec![0.0_f64; n];
+    for tr in &prob.p_lower {
+        let a = tr.val.abs();
+        pcol[tr.col] = pcol[tr.col].max(a);
+        pcol[tr.row] = pcol[tr.row].max(a);
+    }
+    let mut aty = vec![0.0; n];
+    if !sol.y.is_empty() {
+        prob.at_mul_add(&sol.y, &mut aty);
+    }
+    let mut gz = vec![0.0_f64; n];
+    for tr in &prob.g {
+        if orthant.is_none_or(|o| o.get(tr.row).copied().unwrap_or(false)) {
+            gz[tr.col] += tr.val.abs() * sol.z.get(tr.row).copied().unwrap_or(0.0).abs();
+        }
+    }
+    for j in 0..n {
+        t[j] = t[j]
+            .max(px[j].abs())
+            .max(pcol[j] * x_scale)
+            .max(aty[j].abs())
+            .max(gz[j])
+            .max(sol.z_lb.get(j).copied().unwrap_or(0.0).abs())
+            .max(sol.z_ub.get(j).copied().unwrap_or(0.0).abs());
+    }
+    t
+}
+
+/// Whether inequality row `i`'s multiplier is negligible against the force
+/// scale at its own columns (see [`weak_force_scales`]).
+fn row_dual_is_negligible(rows: &[Vec<(usize, f64)>], t: &[f64], z: &[f64], i: usize) -> bool {
+    let row = &rows[i];
+    let g_norm = row.iter().fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
+    let local = row.iter().fold(0.0_f64, |m, &(j, _)| m.max(t[j]));
+    z[i] * g_norm <= WEAK_ACTIVE_REL * local
 }
 
 /// Relative margin for the orthant guard's three row-wise tests
@@ -2041,8 +2097,12 @@ impl QpSensitivity {
         // perturbation changes the active set and `dx/db` is a one-sided
         // derivative with another, equally valid, value on the other side.
         //
-        // Both tests are relative to the natural scale of their own quantity,
-        // so the screen is invariant to a rescaling of the problem data.
+        // The primal test is relative to the global primal scale; the dual
+        // test is per row, against the stationarity forces at the row's own
+        // columns (`weak_force_scales`, gh#989), which makes it invariant to
+        // rescaling the objective or the row. It is not invariant to an
+        // arbitrary rescaling of every datum (the primal floor of 1 is
+        // absolute).
         let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         let dual_scale = inf_norm(&sol.y)
             .max(inf_norm(&sol.z))
@@ -2059,11 +2119,16 @@ impl QpSensitivity {
         // accepted here and answered wrongly in silence.
         check_orthant_complementarity(prob, sol, &gx, primal_scale, dual_scale)?;
 
-        let dual_zero = WEAK_ACTIVE_REL * weak_dual_scale(sol);
+        // Per-row dual yardstick (gh#989): see `weak_force_scales`.
+        let force = weak_force_scales(prob, sol, None);
         let primal_zero = WEAK_ACTIVE_REL * primal_scale;
+        let all_g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
 
         let weakly_active_ineq: Vec<usize> = (0..prob.m_ineq())
-            .filter(|&i| (prob.h[i] - gx[i]).abs() <= primal_zero && sol.z[i] <= dual_zero)
+            .filter(|&i| {
+                (prob.h[i] - gx[i]).abs() <= primal_zero
+                    && row_dual_is_negligible(&all_g_rows, &force, &sol.z, i)
+            })
             .collect();
         let x_scale = inf_norm(&sol.x).max(1.0);
         let bound_zero = WEAK_ACTIVE_REL * x_scale;
@@ -2073,6 +2138,7 @@ impl QpSensitivity {
                 // is one inside the `BOUND_INF` sentinel band, matching
                 // `QpProblem::has_bounds`.
                 let (lb, ub) = (prob.lb_of(j), prob.ub_of(j));
+                let dual_zero = WEAK_ACTIVE_REL * force[j];
                 let lb_weak = lb > -BOUND_INF
                     && (sol.x[j] - lb).abs() <= bound_zero
                     && sol.z_lb[j] <= dual_zero;
@@ -2083,7 +2149,6 @@ impl QpSensitivity {
             })
             .collect();
 
-        let all_g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
         let active_rows: Vec<Vec<(usize, f64)>> =
             active_ineq.iter().map(|&i| all_g_rows[i].clone()).collect();
         Self::finish(
@@ -2153,18 +2218,29 @@ impl QpSensitivity {
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(&sol.x, &mut gx);
         let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
-        let dual_zero = WEAK_ACTIVE_REL * weak_dual_scale(sol);
+        // Per-row dual yardstick (gh#989), with only orthant rows feeding the
+        // `Gᵀz` term so a cone block's duals never set an orthant threshold.
+        let mut is_orthant = vec![false; prob.m_ineq()];
+        for &i in &orthant_rows {
+            is_orthant[i] = true;
+        }
+        let force = weak_force_scales(prob, sol, Some(&is_orthant));
+        let all_g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
         let primal_zero = WEAK_ACTIVE_REL * primal_scale;
         let weakly_active_ineq: Vec<usize> = orthant_rows
             .iter()
             .copied()
-            .filter(|&i| (prob.h[i] - gx[i]).abs() <= primal_zero && sol.z[i] <= dual_zero)
+            .filter(|&i| {
+                (prob.h[i] - gx[i]).abs() <= primal_zero
+                    && row_dual_is_negligible(&all_g_rows, &force, &sol.z, i)
+            })
             .collect();
         let x_scale = inf_norm(&sol.x).max(1.0);
         let bound_zero = WEAK_ACTIVE_REL * x_scale;
         let weakly_active_bound_vars: Vec<usize> = (0..n)
             .filter(|&j| {
                 let (lb, ub) = (prob.lb_of(j), prob.ub_of(j));
+                let dual_zero = WEAK_ACTIVE_REL * force[j];
                 let lb_weak = lb > -BOUND_INF
                     && (sol.x[j] - lb).abs() <= bound_zero
                     && sol.z_lb[j] <= dual_zero;
@@ -3186,6 +3262,12 @@ impl QpSensitivity {
     /// conservative (see `WEAK_ACTIVE_REL`) — a near-degenerate constraint is
     /// flagged too, which is the useful behaviour for a diagnostic.
     ///
+    /// The multiplier test is **per row** (gh#989): row `i` counts as
+    /// negligible when `z_i·‖G_i‖∞ ≤ 1e-3 · max_{j∈supp(G_i)} T_j`, `T_j` being
+    /// the largest stationarity term at column `j` (see `weak_force_scales`),
+    /// so a large multiplier elsewhere never lifts an unrelated row's
+    /// threshold, and the screen is invariant to rescaling the objective.
+    ///
     /// # On a conic build this screens the orthant rows only
     ///
     /// A `Nonneg` block inside a mixed partition is screened exactly as the
@@ -3840,6 +3922,183 @@ mod tests {
             sol.y[0].abs()
         );
         assert_eq!(sens.active_ineq(), &[0]);
+    }
+
+    /// gh#989 (remaining item e): one large multiplier must not lift the
+    /// threshold for a neighbouring row. `min 1e4·x₀ + ½x₁²` with `x₀ ≥ 0`
+    /// (multiplier 1e4) and `x₁ ≥ 1` (multiplier 1), once as variable bounds
+    /// and once as `G` rows. Both are strongly active. A global max over the
+    /// inequality-side multipliers gave a threshold of `1e-3·1e4 = 10` and
+    /// flagged the second; the per-row force scale at `x₁`'s column is `1`.
+    #[test]
+    fn a_large_multiplier_on_one_row_does_not_make_its_neighbour_weak() {
+        for scale in [1.0, 1e-3, 1e3] {
+            let as_bounds = QpProblem {
+                n: 2,
+                p_lower: vec![Triplet::new(1, 1, scale)],
+                c: vec![1.0e4 * scale, 0.0],
+                a: vec![],
+                b: vec![],
+                g: vec![],
+                h: vec![],
+                lb: vec![0.0, 1.0],
+                ub: vec![f64::INFINITY; 2],
+            };
+            let sol = solve_qp_ipm(&as_bounds, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal);
+            assert!((sol.z_lb[1] / scale - 1.0).abs() < 1e-3, "{:?}", sol.z_lb);
+            let sens = QpSensitivity::build_default(&as_bounds, &sol, backend).unwrap();
+            assert!(
+                sens.weakly_active_bound_vars().is_empty(),
+                "scale {scale}: strongly active bound flagged weak: {:?} (z_lb {:?})",
+                sens.weakly_active_bound_vars(),
+                sol.z_lb
+            );
+            let as_rows = QpProblem {
+                n: 2,
+                p_lower: vec![Triplet::new(1, 1, scale)],
+                c: vec![1.0e4 * scale, 0.0],
+                a: vec![],
+                b: vec![],
+                g: vec![Triplet::new(0, 0, -1.0), Triplet::new(1, 1, -1.0)],
+                h: vec![0.0, -1.0],
+                lb: vec![],
+                ub: vec![],
+            };
+            let sol = solve_qp_ipm(&as_rows, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal);
+            let sens = QpSensitivity::build_default(&as_rows, &sol, backend).unwrap();
+            assert!(
+                sens.weakly_active_ineq().is_empty(),
+                "scale {scale}: strongly active row flagged weak: {:?} (z {:?})",
+                sens.weakly_active_ineq(),
+                sol.z
+            );
+        }
+    }
+
+    /// gh#989: the screen is invariant to rescaling the objective. gh #219's
+    /// degenerate QP stays flagged at objective scales 1e-3 .. 1e3 (the old
+    /// rule floored the dual scale at an absolute 1).
+    #[test]
+    fn weak_activity_is_invariant_to_rescaling_the_objective() {
+        for scale in [1e-3, 1.0, 1e3] {
+            let mut prob = weakly_active_qp(-0.5);
+            for t in &mut prob.p_lower {
+                t.val *= scale;
+            }
+            let opts = QpOptions {
+                tol: 1e-10,
+                ..QpOptions::default()
+            };
+            let sol = solve_qp_ipm(&prob, &opts, backend);
+            assert_eq!(sol.status, QpStatus::Optimal);
+            let sens = QpSensitivity::build(&prob, &sol, &opts, 1e-7, backend).unwrap();
+            assert_eq!(sens.weakly_active_ineq(), &[0], "objective scale {scale}");
+        }
+    }
+
+    /// gh#989 item 3's model, at N = 40: linear MPC of a CSTR. The dynamics
+    /// multipliers reach ~6.6e3 while the inequality multipliers are O(1..80);
+    /// no strongly active row (z ≥ 0.1) may be flagged weak.
+    #[test]
+    fn the_mpc_of_issue_989_flags_no_strongly_active_row() {
+        const AD: [[f64; 2]; 2] = [
+            [0.8954074706996391, -0.0018975850269320378],
+            [11.117729114889276, 1.234393572893381],
+        ];
+        const BD: [f64; 2] = [-9.725211755444644e-05, 0.11658724898071166];
+        let nn = 40;
+        let nx = 2 * (nn + 1);
+        let n = nx + nn;
+        let (qx, r) = ([100.0, 1.0], 0.1);
+        let mut p_lower = Vec::new();
+        for k in 1..=nn {
+            p_lower.push(Triplet::new(2 * k, 2 * k, 2.0 * qx[0]));
+            p_lower.push(Triplet::new(2 * k + 1, 2 * k + 1, 2.0 * qx[1]));
+        }
+        for k in 0..nn {
+            p_lower.push(Triplet::new(nx + k, nx + k, 2.0 * r));
+        }
+        let mut a = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
+        let mut b = vec![-0.02, 3.0];
+        for k in 0..nn {
+            for i in 0..2 {
+                let row = 2 + 2 * k + i;
+                a.push(Triplet::new(row, 2 * (k + 1) + i, 1.0));
+                for j in 0..2 {
+                    a.push(Triplet::new(row, 2 * k + j, -AD[i][j]));
+                }
+                a.push(Triplet::new(row, nx + k, -BD[i]));
+                b.push(0.0);
+            }
+        }
+        let (lo, hi) = ([-0.5, -50.0], [0.5, 5.0]);
+        let (umax, du) = (10.0, 1.0);
+        let mut g = Vec::new();
+        let mut h = Vec::new();
+        let mut row = 0;
+        for j in 0..nx {
+            g.push(Triplet::new(row, j, 1.0));
+            h.push(hi[j % 2]);
+            row += 1;
+        }
+        for j in 0..nx {
+            g.push(Triplet::new(row, j, -1.0));
+            h.push(-lo[j % 2]);
+            row += 1;
+        }
+        for sign in [1.0, -1.0] {
+            for k in 0..nn {
+                g.push(Triplet::new(row, nx + k, sign));
+                h.push(umax);
+                row += 1;
+            }
+        }
+        for sign in [1.0, -1.0] {
+            for k in 0..nn {
+                g.push(Triplet::new(row, nx + k, sign));
+                if k > 0 {
+                    g.push(Triplet::new(row, nx + k - 1, -sign));
+                }
+                h.push(du);
+                row += 1;
+            }
+        }
+        let prob = QpProblem {
+            n,
+            p_lower,
+            c: vec![0.0; n],
+            a,
+            b,
+            g,
+            h,
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions {
+            tol: 1e-10,
+            ..QpOptions::default()
+        };
+        let sol = solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        // Premise: the equality multipliers dwarf the inequality ones, and
+        // there are strongly active rows with modest multipliers.
+        let ymax = sol.y.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        assert!(ymax > 1e3, "max|y| = {ymax}");
+        assert!(
+            sol.z.iter().any(|&z| z > 0.1 && z < 3.0),
+            "no modest strongly active row; z = {:?}",
+            sol.z
+        );
+        let sens = QpSensitivity::build(&prob, &sol, &opts, 1e-7, backend).unwrap();
+        for &i in sens.weakly_active_ineq() {
+            assert!(
+                sol.z[i] < 1e-2,
+                "row {i} with z = {} flagged weakly active",
+                sol.z[i]
+            );
+        }
     }
 
     #[test]

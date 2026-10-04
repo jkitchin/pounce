@@ -942,6 +942,12 @@ class _Racer:
         snapshot = problem.options_snapshot()
         try:
             problem.add_option("max_iter", int(max_iter))
+            # A rung is a deliberate budget: hitting its cap is the
+            # expected outcome, not a stall. The mu-strategy fallback
+            # fires on Maximum_Iterations_Exceeded and would spend a
+            # second budget on every capped rung (gh#990 item h made it
+            # the default on this path). The snapshot restores it.
+            problem.add_option("mu_strategy_fallback", "no")
             if resumed:
                 # The warm-start overlay belongs to this rung, not to the
                 # Problem: `add_option` is append-only, so without the
