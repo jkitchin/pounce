@@ -1542,6 +1542,7 @@ impl AlgorithmBuilder {
                 adaptive.qf_section_sigma_tol = self.mu.quality_function_section_sigma_tol;
                 adaptive.qf_section_qf_tol = self.mu.quality_function_section_qf_tol;
                 adaptive.probing_iterate_quality_factor = self.mu.probing_iterate_quality_factor;
+                adaptive.probing_guard_feasible_tol = self.conv_check.tol;
                 adaptive.adaptive_mu_safeguard_factor = self.mu.adaptive_mu_safeguard_factor;
                 adaptive.adaptive_mu_monotone_init_factor =
                     self.mu.adaptive_mu_monotone_init_factor;

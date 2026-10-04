@@ -812,6 +812,11 @@ _STATUS_RESULT = {
         (TerminationCondition.maxTimeLimit, SolverStatus.warning),
     "User_Requested_Stop":
         (TerminationCondition.userInterrupt, SolverStatus.aborted),
+    # gh#986: front-end status for an `intermediate` callback that raised
+    # (`pounce.Problem.solve` / the batch drivers report it as -198). An
+    # error in the caller's code, not a deliberate interrupt.
+    "Callback_Error":
+        (TerminationCondition.error, SolverStatus.error),
     # AMPL's 400 "limit" band, like the two above. `warning` is the band's
     # severity, and this is the ONE row whose severity differs from the
     # `(error, error)` default it used to take -- a stalled solve is a limit

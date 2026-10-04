@@ -593,6 +593,21 @@ enum Op {
 /// The walk is iterative. See the module docs for why that is a
 /// correctness property and not a style choice.
 pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
+    recognize_expr_seeded(e, &|_| None)
+}
+
+/// What a caller already knows about a `Cse` body's lowering: `None` "not
+/// known, walk it", `Some(None)` "known not to lower", `Some(Some(q))` "lowers
+/// to `q`".
+pub(crate) type QuadSeed<'s> = &'s dyn Fn(*const Expr) -> Option<Option<Quad2>>;
+
+/// [`recognize_expr`], with the lowering of earlier `Cse` bodies supplied by
+/// the caller (gh#986 review). The parse-time recognizer lowers every `V`
+/// segment once as it is read; without the seed each segment re-walked the
+/// whole chain of defined variables below it, which is quadratic over a long
+/// chain. Bitwise neutral for the same reason the in-walk memo is: a body's
+/// lowering is a function of the body.
+pub(crate) fn recognize_expr_seeded(e: &Expr, seed: QuadSeed<'_>) -> Option<Quad2> {
     let mut work: Vec<Step<'_>> = vec![Step::Visit(e)];
     let mut vals: Vec<Quad2> = Vec::new();
     // Lowered `Cse` bodies, by address. Only successes land here: a body
@@ -609,10 +624,17 @@ pub fn recognize_expr(e: &Expr) -> Option<Quad2> {
                     let key = std::sync::Arc::as_ptr(body);
                     match cse.get(&key) {
                         Some(q) => vals.push(q.clone()),
-                        None => {
-                            work.push(Step::Apply(Op::CacheCse(key)));
-                            work.push(Step::Visit(body));
-                        }
+                        None => match seed(key) {
+                            Some(Some(q)) => {
+                                cse.insert(key, q.clone());
+                                vals.push(q);
+                            }
+                            Some(None) => return None,
+                            None => {
+                                work.push(Step::Apply(Op::CacheCse(key)));
+                                work.push(Step::Visit(body));
+                            }
+                        },
                     }
                 }
                 Expr::Sum(items) => {
@@ -846,6 +868,16 @@ pub fn quad_form_readout(q: &Quad2) -> QuadForm {
 ///
 /// Iterative for the same reason [`recognize_expr`] is.
 pub fn is_expanded_quadratic(e: &Expr) -> bool {
+    is_expanded_quadratic_seeded(e, &|_, _| None)
+}
+
+/// A caller's verdict on a `Cse` body, in sum-spine (`false`) or monomial
+/// (`true`) mode; `None` "not known, walk it" (gh#986 review).
+pub(crate) type ShapeSeed<'s> = &'s dyn Fn(*const Expr, bool) -> Option<bool>;
+
+/// [`is_expanded_quadratic`] with earlier `Cse` verdicts supplied by the
+/// caller; see [`recognize_expr_seeded`] for why.
+pub(crate) fn is_expanded_quadratic_seeded(e: &Expr, seed: ShapeSeed<'_>) -> bool {
     // The sum spine: `Add`/`Sub`/`Neg`/`Sum` may nest freely, and every
     // leaf of that spine must be a monomial.
     let mut seen: BTreeSet<(*const Expr, bool)> = BTreeSet::new();
@@ -859,12 +891,17 @@ pub fn is_expanded_quadratic(e: &Expr) -> bool {
             }
             Expr::Unary(UnaryOp::Neg, a) => spine.push(a),
             Expr::Cse(body) => {
-                if seen.insert((std::sync::Arc::as_ptr(body), false)) {
-                    spine.push(body);
+                let key = std::sync::Arc::as_ptr(body);
+                if seen.insert((key, false)) {
+                    match seed(key, false) {
+                        Some(true) => {}
+                        Some(false) => return false,
+                        None => spine.push(body),
+                    }
                 }
             }
             other => {
-                if !is_monomial(other, &mut seen) {
+                if !is_monomial(other, &mut seen, seed) {
                     return false;
                 }
             }
@@ -880,8 +917,13 @@ pub fn is_expanded_quadratic(e: &Expr) -> bool {
 /// question about a `V`-segment body it has already parsed, and must
 /// answer it with *this* code rather than a second copy of the rule.
 pub fn is_monomial_expr(e: &Expr) -> bool {
+    is_monomial_expr_seeded(e, &|_, _| None)
+}
+
+/// [`is_monomial_expr`] with earlier `Cse` verdicts supplied by the caller.
+pub(crate) fn is_monomial_expr_seeded(e: &Expr, seed: ShapeSeed<'_>) -> bool {
     let mut seen: BTreeSet<(*const Expr, bool)> = BTreeSet::new();
-    is_monomial(e, &mut seen)
+    is_monomial(e, &mut seen, seed)
 }
 
 /// A single product term: constants and variables multiplied together, with
@@ -891,7 +933,7 @@ pub fn is_monomial_expr(e: &Expr) -> bool {
 /// Degree is not checked here — [`recognize_expr`] already refused anything
 /// past 2 by the time this runs, and duplicating the rule would only give
 /// the two a way to disagree.
-fn is_monomial(e: &Expr, seen: &mut BTreeSet<(*const Expr, bool)>) -> bool {
+fn is_monomial(e: &Expr, seen: &mut BTreeSet<(*const Expr, bool)>, seed: ShapeSeed<'_>) -> bool {
     let mut work: Vec<&Expr> = vec![e];
     while let Some(e) = work.pop() {
         match e {
@@ -901,8 +943,13 @@ fn is_monomial(e: &Expr, seen: &mut BTreeSet<(*const Expr, bool)>) -> bool {
             // key is "seen in monomial mode": a body cleared on the spine
             // has not been cleared here.
             Expr::Cse(body) => {
-                if seen.insert((std::sync::Arc::as_ptr(body), true)) {
-                    work.push(body);
+                let key = std::sync::Arc::as_ptr(body);
+                if seen.insert((key, true)) {
+                    match seed(key, true) {
+                        Some(true) => {}
+                        Some(false) => return false,
+                        None => work.push(body),
+                    }
                 }
             }
             Expr::Unary(UnaryOp::Neg, a) => work.push(a),
@@ -1089,7 +1136,7 @@ pub fn recognize_factored_quadratic(e: &Expr) -> Option<FactoredQuadratic> {
                     squares.push(admit_square(sign * weight, base)?);
                     continue;
                 }
-                if !is_monomial(leaf, &mut seen) {
+                if !is_monomial(leaf, &mut seen, &|_, _| None) {
                     return None;
                 }
                 let q = recognize_expr(leaf)?;

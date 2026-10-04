@@ -1077,7 +1077,7 @@ pub const MAX_PARSE_DEPTH: u32 = 40_000;
 thread_local! {
     /// Stack bytes the current thread offers the recursive reader
     /// (gh#986), set by whoever spawned it with a known stack. `None` (the
-    /// default) means "unknown": only [`MAX_PARSE_DEPTH`] applies, as before.
+    /// default) means "unknown": [`DEFAULT_ASSUMED_STACK`] is assumed.
     static PARSE_STACK_BUDGET: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
@@ -1101,13 +1101,28 @@ const PARSE_LEVEL_BYTES: usize = if cfg!(debug_assertions) {
     4 * 1024
 };
 
+/// Stack a thread is assumed to have when nobody declared one with
+/// [`set_parse_stack_budget`] (gh#986 review). The first pass gave such a
+/// thread the full [`MAX_PARSE_DEPTH`], sized for the CLI's 1 GiB thread, so a
+/// library caller of [`read_nl_file`] on an ordinary thread, or the wasm
+/// build, aborted on a stack overflow where the guard was meant to refuse.
+/// The assumption is the smallest stack such a caller normally runs on: Rust's
+/// default for a spawned thread (2 MiB, also what the test harness uses) on
+/// native targets, and the 1 MiB `rustc` gives a wasm32 module.
+const DEFAULT_ASSUMED_STACK: usize = if cfg!(target_arch = "wasm32") {
+    1 << 20
+} else {
+    2 << 20
+};
+
 /// The depth limit for the current thread: [`MAX_PARSE_DEPTH`], lowered to
-/// what the thread's declared stack holds.
+/// what the thread's declared stack holds -- or, undeclared, what
+/// [`DEFAULT_ASSUMED_STACK`] holds.
 fn parse_depth_limit() -> u32 {
-    match PARSE_STACK_BUDGET.with(|b| b.get()) {
-        Some(bytes) => ((bytes / PARSE_LEVEL_BYTES).min(MAX_PARSE_DEPTH as usize)) as u32,
-        None => MAX_PARSE_DEPTH,
-    }
+    let bytes = PARSE_STACK_BUDGET
+        .with(|b| b.get())
+        .unwrap_or(DEFAULT_ASSUMED_STACK);
+    ((bytes / PARSE_LEVEL_BYTES).min(MAX_PARSE_DEPTH as usize)) as u32
 }
 
 /// A run of binary `o0` longer than this is read as one n-ary `Sum`
@@ -1966,6 +1981,17 @@ struct Parser<'a> {
     cse_mono_ok: Vec<bool>,
     cse_vars: Vec<Vec<u32>>,
     cse_depth: Vec<u32>,
+    /// gh#986 review: the depth of every `V` body *through* the defined
+    /// variables it references (a `Cse` counting as its body), keyed by the
+    /// body's `Arc` pointer. Always kept, whatever `quad_enabled` says: it is
+    /// what bounds the recursion of every later pass that walks through a
+    /// `Cse` (tape build, `collect_vars`, evaluation, drop glue), and it makes
+    /// [`expr_tree_depth`] linear in the body rather than in the whole chain.
+    cse_depth_memo: std::collections::HashMap<*const Expr, u32>,
+    /// `V` body pointer -> its index in `cses` (and in the `cse_*` caches),
+    /// so the parse-time passes can read an earlier body's verdict instead of
+    /// re-walking it (gh#986 review).
+    cse_index: std::collections::HashMap<*const Expr, usize>,
     /// Current recursion depth of `parse_expr` (gh#986).
     parse_depth: u32,
     /// Depth at which `parse_expr` refuses (gh#986); see [`parse_depth_limit`].
@@ -2021,6 +2047,8 @@ impl<'a> Parser<'a> {
             cse_mono_ok: Vec::new(),
             cse_vars: Vec::new(),
             cse_depth: Vec::new(),
+            cse_depth_memo: std::collections::HashMap::new(),
+            cse_index: std::collections::HashMap::new(),
             parse_depth: 0,
             max_depth: parse_depth_limit(),
         }
@@ -2188,7 +2216,9 @@ impl<'a> Parser<'a> {
     /// the rows it is for.
     fn parse_body(&mut self) -> Result<NlBody, String> {
         if !self.quad_enabled {
-            return Ok(NlBody::Tree(self.parse_expr()?));
+            let e = self.parse_expr()?;
+            self.check_effective_depth(&e)?;
+            return Ok(NlBody::Tree(e));
         }
         let saved = self.pos;
         if let Some((form, vars, depth)) = self.parse_expr_quadratic() {
@@ -2203,7 +2233,30 @@ impl<'a> Parser<'a> {
             }
         }
         self.pos = saved;
-        Ok(NlBody::Tree(self.parse_expr()?))
+        let e = self.parse_expr()?;
+        self.check_effective_depth(&e)?;
+        Ok(NlBody::Tree(e))
+    }
+
+    /// gh#986 review: refuse a tree whose depth *through the defined
+    /// variables it references* exceeds the guard. `parse_expr` counts only
+    /// the syntactic nesting of the text it reads, and a `v<i>` reference to a
+    /// `V` segment is one token there; a chain of `V` segments each referencing
+    /// the previous is shallow to the parser and as deep as the chain to every
+    /// pass that walks through a `Cse` (the tape builder, `collect_vars`, drop
+    /// glue), so the stack the guard exists to protect was unguarded.
+    fn check_effective_depth(&self, e: &Expr) -> Result<u32, String> {
+        let d = expr_tree_depth(e, &self.cse_depth_memo);
+        if d > self.max_depth {
+            return Err(format!(
+                "the model nests an expression {d} levels deep counting the defined \
+                 variables (V segments) it references, more than the {} levels the \
+                 recursive reader accepts; a chain of defined variables each \
+                 referencing the previous counts once per link",
+                self.max_depth
+            ));
+        }
+        Ok(d)
     }
 
     /// Read one expression off the token stream as a degree-≤2 form,
@@ -2772,20 +2825,36 @@ impl<'a> Parser<'a> {
         // `V` tree exists at this point, so these are the *same* functions
         // `NlTnlp` applies to a whole row — the parse-time recognizer never
         // gets a second opinion about a CSE.
+        // gh#986 review: bound the chain before any pass walks through it.
+        let depth = self.check_effective_depth(&combined)?;
         if self.quad_enabled {
-            self.cse_quad
-                .push(crate::nl_quadratic::recognize_expr(&combined));
-            self.cse_sum_ok
-                .push(crate::nl_quadratic::is_expanded_quadratic(&combined));
-            self.cse_mono_ok
-                .push(crate::nl_quadratic::is_monomial_expr(&combined));
+            // gh#986 review: every earlier body's verdicts are already
+            // known, so each pass reads them instead of re-walking the chain
+            // of defined variables below this one (quadratic over a long
+            // chain otherwise).
+            let idx = &self.cse_index;
+            let (quad, sum_ok, mono_ok) = (&self.cse_quad, &self.cse_sum_ok, &self.cse_mono_ok);
+            let quad_seed = |k: *const Expr| idx.get(&k).map(|&i| quad[i].clone());
+            let shape_seed = |k: *const Expr, mono: bool| {
+                idx.get(&k)
+                    .map(|&i| if mono { mono_ok[i] } else { sum_ok[i] })
+            };
+            let q = crate::nl_quadratic::recognize_expr_seeded(&combined, &quad_seed);
+            let s_ok = crate::nl_quadratic::is_expanded_quadratic_seeded(&combined, &shape_seed);
+            let m_ok = crate::nl_quadratic::is_monomial_expr_seeded(&combined, &shape_seed);
             let mut vars: BTreeSet<usize> = BTreeSet::new();
-            collect_vars(&combined, &mut vars);
+            collect_vars_seeded(&combined, &mut vars, &self.cse_index, &self.cse_vars);
+            self.cse_quad.push(q);
+            self.cse_sum_ok.push(s_ok);
+            self.cse_mono_ok.push(m_ok);
             self.cse_vars
                 .push(vars.into_iter().map(|v| v as u32).collect());
-            self.cse_depth.push(expr_tree_depth(&combined));
+            self.cse_depth.push(depth);
         }
-        self.cses.push(Arc::new(combined));
+        let body = Arc::new(combined);
+        self.cse_index.insert(Arc::as_ptr(&body), self.cses.len());
+        self.cse_depth_memo.insert(Arc::as_ptr(&body), depth);
+        self.cses.push(body);
         Ok(())
     }
 }
@@ -2801,19 +2870,24 @@ impl<'a> Parser<'a> {
 /// counting one level above its body — the convention `pounce-py`'s
 /// `expr_depth` uses, since that is the guard the answer feeds.
 ///
-/// Recursive, and safe to be: this only ever runs on a tree
-/// [`Parser::parse_expr`] has just built *recursively* on this same stack,
-/// so a frame that fits the parser fits this.
-fn expr_tree_depth(e: &Expr) -> u32 {
+/// Recursive, and safe to be: it recurses only through the syntax of `e`,
+/// which [`Parser::parse_expr`] has just built *recursively* on this same
+/// stack, so a frame that fits the parser fits this. A `Cse` reference is
+/// read from `memo` (every `V` body is memoized when its segment is parsed,
+/// and a body can only reference earlier ones), so the walk never descends a
+/// chain of defined variables: linear in `e`, where it used to be linear in
+/// the whole chain on every `V` segment -- quadratic over a long chain, and
+/// as deep as it (gh#986 review).
+fn expr_tree_depth(e: &Expr, memo: &std::collections::HashMap<*const Expr, u32>) -> u32 {
     let deepest = |kids: &mut dyn Iterator<Item = &Expr>| {
-        kids.fold(0u32, |acc, k| acc.max(expr_tree_depth(k)))
+        kids.fold(0u32, |acc, k| acc.max(expr_tree_depth(k, memo)))
     };
     1 + match e {
         Expr::Const(_) | Expr::Var(_) => 0,
         Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
             deepest(&mut [&**a, &**b].into_iter())
         }
-        Expr::Unary(_, a) | Expr::Not(a) => expr_tree_depth(a),
+        Expr::Unary(_, a) | Expr::Not(a) => expr_tree_depth(a, memo),
         Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => deepest(&mut args.iter()),
         Expr::Cond { cond, then_, else_ } => {
             deepest(&mut [&**cond, &**then_, &**else_].into_iter())
@@ -2822,7 +2896,10 @@ fn expr_tree_depth(e: &Expr) -> u32 {
             FuncallArg::Real(inner) => Some(inner),
             FuncallArg::Str(_) => None,
         })),
-        Expr::Cse(body) => expr_tree_depth(body),
+        Expr::Cse(body) => match memo.get(&Arc::as_ptr(body)) {
+            Some(&d) => d,
+            None => expr_tree_depth(body, memo),
+        },
     }
 }
 
@@ -3188,6 +3265,49 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
 /// calls this on every solve (`get_variables_linearity`). Skipping a
 /// repeat visit cannot change the answer: `out` is a set, and a second
 /// walk of the same body inserts exactly the indices the first already did.
+/// [`collect_vars`] over a `V` body whose earlier `Cse` references already
+/// have their variable sets in `cse_vars` (indexed through `index`): those are
+/// read, not re-walked (gh#986 review). The recursion is through `e`'s own
+/// syntax only, which the parser has just built on this stack.
+fn collect_vars_seeded(
+    e: &Expr,
+    out: &mut BTreeSet<usize>,
+    index: &std::collections::HashMap<*const Expr, usize>,
+    cse_vars: &[Vec<u32>],
+) {
+    let mut kids: Vec<&Expr> = vec![e];
+    while let Some(e) = kids.pop() {
+        match e {
+            Expr::Const(_) => {}
+            Expr::Var(i) => {
+                out.insert(*i);
+            }
+            Expr::Cse(body) => match index.get(&Arc::as_ptr(body)) {
+                Some(&k) => out.extend(cse_vars[k].iter().map(|&v| v as usize)),
+                None => collect_vars(body, out),
+            },
+            Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+                kids.push(a);
+                kids.push(b);
+            }
+            Expr::Unary(_, a) | Expr::Not(a) => kids.push(a),
+            Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => kids.extend(args.iter()),
+            Expr::Cond { cond, then_, else_ } => {
+                kids.push(cond);
+                kids.push(then_);
+                kids.push(else_);
+            }
+            Expr::Funcall { args, .. } => {
+                for a in args {
+                    if let FuncallArg::Real(e) = a {
+                        kids.push(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
     // `HashSet::new` does not allocate until the first insert, so an
     // expression with no CSEs pays nothing for the memo.
@@ -6728,14 +6848,115 @@ mod tests {
         l.join("\n") + "\n"
     }
 
-    /// Run `f` on a thread with the stack the CLI and `pounce-py` provide.
+    /// Run `f` on a thread with the stack the CLI and `pounce-py` provide,
+    /// declared to the reader the way they declare it.
     fn on_big_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
             .stack_size(1 << 30)
-            .spawn(f)
+            .spawn(move || {
+                set_parse_stack_budget(Some(1 << 30));
+                f();
+                set_parse_stack_budget(None);
+            })
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// A model whose objective is the last of `len` defined variables, each
+    /// referencing the previous: `V_0 = x0^2`, `V_k = V_{k-1} + x0`, so the
+    /// objective is `x0^2 + (len - 1) x0`. Every `V` segment is one level
+    /// deep to the parser; the chain is `len` deep to anything that walks
+    /// through it.
+    fn v_chain_nl(len: usize) -> String {
+        let mut l = vec![
+            "g3 1 1 0".to_string(),
+            " 1 1 1 0 1".into(),
+            " 0 1".into(),
+            " 0 0".into(),
+            " 0 1 0".into(),
+            " 0 0 0 1 0".into(),
+            format!(" 0 0 {len} 0 0"),
+            " 1 1".into(),
+            " 0 0".into(),
+            " 0 0 0 0 0".into(),
+        ];
+        l.extend(["V1 0 0".into(), "o5".into(), "v0".into(), "n2".into()]);
+        for k in 1..len {
+            l.extend([
+                format!("V{} 0 0", k + 1),
+                "o0".into(),
+                format!("v{k}"),
+                "v0".into(),
+            ]);
+        }
+        l.extend(["C0".into(), "n0".into()]);
+        l.extend(["O0 0".into(), format!("v{len}")]);
+        l.extend(["r".into(), "4 0.5".into(), "b".into(), "0 -1.0 1.0".into()]);
+        l.extend(["k0".into(), "J0 1".into(), "0 1.0".into()]);
+        l.extend(["G0 1".into(), "0 0.0".into()]);
+        l.join("\n") + "\n"
+    }
+
+    /// gh#986 review item 9: a chain of defined variables is counted by the
+    /// depth guard. Each `V` segment is shallow to the parser, so the first
+    /// pass let a chain of any length through, and every pass that walks
+    /// through a `Cse` (`collect_vars`, the tape builder, drop glue) then
+    /// recursed once per link -- an abort on an ordinary stack. On a thread
+    /// that declared no stack (the default budget) a chain far past the guard
+    /// is now a clean `Err`.
+    #[test]
+    fn gh986_a_long_defined_variable_chain_is_refused_not_overflowed() {
+        let limit = parse_depth_limit() as usize;
+        let err = parse_nl_text(&v_chain_nl(limit + 50))
+            .err()
+            .expect("a V chain past the guard must be an Err");
+        assert!(err.contains("defined") && err.contains("levels"), "{err}");
+        // A short chain on the same thread is fine, and evaluates.
+        let prob = parse_nl_text(&v_chain_nl(limit / 2)).expect("inside the guard");
+        let x = [0.5];
+        let want = 0.25 + (limit / 2 - 1) as f64 * 0.5;
+        let got = eval_expr(&prob.obj_expr(), &x);
+        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+    }
+
+    /// gh#986 review item 9: the depth of a `V` body is memoized, so a long
+    /// chain inside the guard costs time linear in the chain (the first
+    /// pass's `expr_tree_depth` re-walked the whole chain on every segment).
+    #[test]
+    fn gh986_a_long_defined_variable_chain_inside_the_guard_parses() {
+        on_big_stack(|| {
+            // Two levels per link (the `o0` and the `Cse` reference), just
+            // inside this thread's limit.
+            let len = (parse_depth_limit() as usize - 100) / 2;
+            let t = std::time::Instant::now();
+            let prob = parse_nl_text(&v_chain_nl(len)).expect("inside the guard on a big stack");
+            let got = eval_expr(&prob.obj_expr(), &[0.5]);
+            let want = 0.25 + (len - 1) as f64 * 0.5;
+            assert!((got - want).abs() < 1e-6 * want, "{got} vs {want}");
+            // Linear. With only `expr_tree_depth` memoized, the parse-time
+            // quadratic passes still re-walked the chain per segment and this
+            // ran past 60 s (measured, test profile); seeded, ~50 ms.
+            let took = t.elapsed();
+            eprintln!("v chain {len}: parsed and evaluated in {took:?}");
+            assert!(took.as_secs() < 30, "{took:?}");
+        });
+    }
+
+    /// gh#986 review item 9: a thread that declares no stack is assumed to
+    /// have Rust's default thread stack (wasm: 1 MiB), not the CLI's 1 GiB.
+    #[test]
+    fn gh986_an_undeclared_stack_gets_the_default_assumption() {
+        std::thread::spawn(|| {
+            set_parse_stack_budget(None);
+            assert_eq!(
+                parse_depth_limit() as usize,
+                DEFAULT_ASSUMED_STACK / PARSE_LEVEL_BYTES
+            );
+            assert!((parse_depth_limit() as usize) < MAX_PARSE_DEPTH as usize);
+        })
+        .join()
+        .unwrap();
     }
 
     /// gh#986: a left-deep `o0` chain of any length is read as one n-ary
@@ -6750,7 +6971,7 @@ mod tests {
                 let x: Vec<f64> = (0..n).map(|i| (i % 7) as f64 * 0.1).collect();
                 let want: f64 = x.iter().map(|v| v.exp() + v * v).sum();
                 let tree = prob.obj_expr();
-                assert!(expr_tree_depth(&tree) < 16, "n = {n}");
+                assert!(expr_tree_depth(&tree, &Default::default()) < 16, "n = {n}");
                 let got = eval_expr(&tree, &x);
                 assert!((got - want).abs() <= 1e-9 * want.abs(), "{got} vs {want}");
             }
@@ -6794,7 +7015,10 @@ mod tests {
             let deep = parse_nl_text(&deep_sum_nl(4, 30_000));
             let msg = deep.err().expect("past the guard must be an Err");
             assert!(msg.contains("levels"), "{msg}");
-            let wraps = (MAX_PARSE_DEPTH as usize - 100) / 2;
+            // Just inside the limit this thread's declared stack gives
+            // (`MAX_PARSE_DEPTH` in an optimised build, 32 768 in an
+            // unoptimised one, whose worst-case frame is 32 KiB).
+            let wraps = (parse_depth_limit() as usize - 100) / 2;
             assert!(parse_nl_text(&deep_sum_nl(4, wraps)).is_ok());
         });
     }

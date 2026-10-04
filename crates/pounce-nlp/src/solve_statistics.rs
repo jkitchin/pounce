@@ -387,6 +387,12 @@ pub struct SolveStatistics {
     /// of magnitude, and on a QP-shaped NLP (one outer iteration by
     /// construction) it is the only thing that moves at all.
     pub sqp_qp_working_set_changes: Index,
+    /// gh#986 review item 10: the SQP solve started from a caller-supplied
+    /// working set (after mapping it through this problem's fixed-variable
+    /// elimination). `false` on a cold solve, on the IPM path, and when a
+    /// supplied working set had to be dropped -- which is also logged.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sqp_warm_working_set_applied: bool,
 
     /// Per-iteration trajectory. Empty when the consumer doesn't ask
     /// for it (`iter_history_enabled = false` on the application or
@@ -494,6 +500,7 @@ impl Default for SolveStatistics {
             dual_divergence_retry_promoted: false,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
+            sqp_warm_working_set_applied: false,
             iterations: Vec::new(),
             passes: Vec::new(),
         }

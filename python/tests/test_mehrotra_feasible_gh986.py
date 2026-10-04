@@ -45,19 +45,43 @@ def clnlbeam(ni, alpha=350.0):
     )
 
 
+#: The two stationary values of the beam problem that runs reach (default
+#: algorithm: 344.876 at every ni measured; unglobalised Mehrotra also stops at
+#: 346.496 on some ni -- measured 1000 and 2000).
+_BEAM_LOCAL_VALUES = (344.876, 346.496)
+
+
+def _solve(ni, **opts):
+    (x, info), = pounce.solve_nlp_batch(
+        [clnlbeam(ni)], options={"print_level": 0, **opts}, parallel=False,
+    )
+    return info
+
+
 @pytest.mark.parametrize("ni", [1000, 2000])
 def test_mehrotra_clnlbeam_is_not_sent_to_restoration_at_a_feasible_point(ni):
-    (x, info), = pounce.solve_nlp_batch(
-        [clnlbeam(ni)], options={"print_level": 0, "mehrotra_algorithm": "yes"},
-        parallel=False,
-    )
+    info = _solve(ni, mehrotra_algorithm="yes")
     assert info["status_msg"] != "Restoration_Failed"
     assert info["status_msg"] == "Solve_Succeeded"
     assert info["iter_count"] > 3
     assert info["final_constr_viol"] < 1e-6
-    # a genuine stationary point of the beam problem (default solves reach
-    # 344.876; unglobalised Mehrotra may stop at another local solution)
-    assert 300.0 < info["obj_val"] < 360.0
+    # A genuine stationary point of the beam problem, one of the two the runs
+    # reach (gh#986 review: the old 300..360 band admitted anything).
+    assert min(abs(info["obj_val"] - v) for v in _BEAM_LOCAL_VALUES) < 1e-2, info["obj_val"]
+
+
+def test_mehrotra_clnlbeam_reaches_the_default_local_solution():
+    """gh#986 review item 8, at the size where the stale-predictor fix moves the
+    answer: before it, the recentring step at iteration 1 built its corrector
+    from the PREVIOUS iterate's affine step, and ni = 500 stopped at 346.4972
+    (320 iterations); dropping the stale predictor reaches the default
+    algorithm's 344.8762 (336 iterations). ni = 500 rather than the issue's
+    1000/2000 for the tight band, because at those sizes unglobalised Mehrotra
+    still ends at the other local solution either way (measured)."""
+    ref = _solve(500)
+    info = _solve(500, mehrotra_algorithm="yes")
+    assert info["status_msg"] == "Solve_Succeeded"
+    assert abs(info["obj_val"] - ref["obj_val"]) < 1e-3, (info["obj_val"], ref["obj_val"])
 
 
 def test_default_algorithm_unchanged_on_clnlbeam():

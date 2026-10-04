@@ -323,11 +323,16 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
         convex_verdict_lines(&stdout).is_empty(),
         "the discarded convex attempt must not also report; stdout=\n{stdout}"
     );
-    assert_ne!(
-        report.solution.status,
-        ApplicationReturnStatus::ErrorInStepComputation,
-        "the uncertified convex result must not be the reported verdict; \
-         stdout=\n{stdout}\nstderr=\n{stderr}"
+    // gh#986 review: assert the *route*, not a status. The convex failure
+    // now maps to `ErrorInStepComputation`, which the NLP arm can also
+    // legitimately return, so "the status is not ErrorInStepComputation" was
+    // a proxy that would fail on a correct reroute and pass on a wrong one
+    // the day the convex mapping changes again. The report names the engine
+    // that produced the verdict.
+    assert_eq!(
+        report.solution.engine, "nlp",
+        "the verdict must come from the NLP arm the reroute hands the model \
+         to, not from the discarded convex attempt; stdout=\n{stdout}\nstderr=\n{stderr}"
     );
 }
 

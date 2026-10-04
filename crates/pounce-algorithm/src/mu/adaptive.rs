@@ -57,9 +57,8 @@ pub enum AdaptiveMuKktNorm {
     TwoNorm,
 }
 
-/// Primal infeasibility (scaled, max-norm) at or below which the probing
-/// iterate-quality guard recentres instead of requesting restoration
-/// (gh#986 item 5).
+/// Default for [`AdaptiveMuUpdate::probing_guard_feasible_tol`]: the default
+/// `tol`. The builder overwrites it with the caller's `tol` (gh#986 review).
 const PROBING_GUARD_FEASIBLE_TOL: Number = 1e-8;
 
 /// What the probing iterate-quality guard does with an iterate.
@@ -169,6 +168,14 @@ pub struct AdaptiveMuUpdate {
     /// any non-positive value to disable.
     pub probing_iterate_quality_factor: Number,
 
+    /// Scaled max-norm primal infeasibility at or below which the probing
+    /// iterate-quality guard treats the iterate as feasible and recentres
+    /// instead of requesting restoration (gh#986 item 5). Tied to the
+    /// convergence `tol` (gh#986 review): the first pass hard-coded `1e-8`,
+    /// which is `tol`'s default, so a caller who loosened or tightened `tol`
+    /// got a feasibility test that disagreed with their own convergence test.
+    pub probing_guard_feasible_tol: Number,
+
     /// Upstream tracks `init_*_inf` lazily — sentinel −1 means
     /// "not yet captured".
     init_dual_inf: Number,
@@ -268,6 +275,7 @@ impl Default for AdaptiveMuUpdate {
             qf_section_sigma_tol: 1e-2,
             qf_section_qf_tol: 0.0,
             probing_iterate_quality_factor: 1e4,
+            probing_guard_feasible_tol: PROBING_GUARD_FEASIBLE_TOL,
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
             max_free_returns: -1,
@@ -296,8 +304,12 @@ impl AdaptiveMuUpdate {
     /// gates (`factor > 0`, `curr_mu > 0`) keep the predicate
     /// well-defined when the guard is disabled or when an unusual
     /// μ-strategy zeroes `curr_mu`.
-    pub fn probing_guard_action(guard_fired: bool, primal_inf: Number) -> ProbingGuardAction {
-        match (guard_fired, primal_inf <= PROBING_GUARD_FEASIBLE_TOL) {
+    pub fn probing_guard_action(
+        guard_fired: bool,
+        primal_inf: Number,
+        feasible_tol: Number,
+    ) -> ProbingGuardAction {
+        match (guard_fired, primal_inf <= feasible_tol) {
             (false, _) => ProbingGuardAction::Probe,
             (true, true) => ProbingGuardAction::Recenter,
             (true, false) => ProbingGuardAction::Restoration,
@@ -1024,9 +1036,26 @@ impl MuUpdate for AdaptiveMuUpdate {
                 // complementarity (the LOQO rule) for this iteration and let
                 // the probing oracle resume once the iterate is back on the
                 // central path.
-                if Self::probing_guard_action(guard_fired, primal_inf)
-                    == ProbingGuardAction::Recenter
+                if Self::probing_guard_action(
+                    guard_fired,
+                    primal_inf,
+                    self.probing_guard_feasible_tol,
+                ) == ProbingGuardAction::Recenter
                 {
+                    // gh#986 review item 8: this branch computes no affine
+                    // step, and `delta_aff` used to survive from an earlier
+                    // iteration, so under `mehrotra_algorithm=yes` the
+                    // corrector (`pd_search_dir_calc.rs`) was built from the
+                    // PREVIOUS iterate's predictor at this recentred point.
+                    // A centering step has no predictor: drop it, so the
+                    // search direction is the plain step at the LOQO mu.
+                    //
+                    // Recomputing the affine step here instead (so the
+                    // corrector would be a genuine Mehrotra corrector around
+                    // the centering mu) was measured and is worse on
+                    // clnlbeam: ni = 500 / 1000 / 2000 took 1015 / 1251 / 774
+                    // iterations against 336 / 110 / 1063 for dropping it.
+                    data.borrow_mut().delta_aff = None;
                     if std::env::var("POUNCE_DBG_ORACLE").is_ok() {
                         tracing::debug!(target: "pounce::mu",
                             "[PN_PROBE_GUARD] iter={} ratio={:.3e} but inf_pr={:.3e} is feasible → centering (loqo) instead of restoration",
@@ -1570,14 +1599,23 @@ mod tests {
         let fired = AdaptiveMuUpdate::probing_iterate_guard_fires(1e4, 2.575e-11, 5.358e-2);
         assert!(fired);
         assert_eq!(
-            AdaptiveMuUpdate::probing_guard_action(fired, 2.3e-14),
+            AdaptiveMuUpdate::probing_guard_action(fired, 2.3e-14, 1e-8),
             Recenter
         );
         assert_eq!(
-            AdaptiveMuUpdate::probing_guard_action(fired, 3e-3),
+            AdaptiveMuUpdate::probing_guard_action(fired, 3e-3, 1e-8),
             Restoration
         );
-        assert_eq!(AdaptiveMuUpdate::probing_guard_action(false, 3e-3), Probe);
+        assert_eq!(
+            AdaptiveMuUpdate::probing_guard_action(false, 3e-3, 1e-8),
+            Probe
+        );
+        // gh#986 review: the feasibility bar is the caller's `tol`, not a
+        // fixed 1e-8 -- the same iterate is feasible at tol = 1e-2.
+        assert_eq!(
+            AdaptiveMuUpdate::probing_guard_action(fired, 3e-3, 1e-2),
+            Recenter
+        );
     }
 
     #[test]

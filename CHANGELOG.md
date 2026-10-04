@@ -54,6 +54,57 @@ changes.
 
 ### Fixed
 
+- **Crashes on legal input, review fixes (gh#986 review).** (8) Under
+  `mehrotra_algorithm=yes` the probing guard's recentring step computed no
+  affine step, and `delta_aff` -- which nothing ever cleared -- fed the
+  PREVIOUS iterate's predictor into the corrector at the recentred point. The
+  recentre now drops it (a plain step at the LOQO mu), and
+  `IpoptData::accept_trial_point` frees it with the trial point as upstream's
+  `AcceptTrialPoint` does. The guard's feasibility bar is the caller's `tol`
+  (was a fixed `1e-8`). Measured: the fixture sweep at default options and at
+  `mu_oracle=probing` is unchanged (probing without Mehrotra never reads
+  `delta_aff` in the search direction); under `mehrotra_algorithm=yes` 65 of
+  206 fixture-legs move, all from the recentre (freeing `delta_aff` at accept
+  moves none): 6 failures become successes (`issue981_cstr_dup_row` both legs,
+  `linear_eq_aggregation`, `linear_eq_aggregation_row_constant`,
+  `linear_eq_collapsed_box`, `hs71_obj1e8` lbfgs), none go the other way, 8
+  change which failure they report, and of 51 that keep their status 27 take
+  fewer iterations and 18 more (`square_flowsheet_resto` now needs the
+  `feral_increase_quality=no` rung, 4659 iterations in total against 223).
+  clnlbeam (Mehrotra, iterations / objective, before -> after): ni = 200 120 /
+  344.876 -> 1365 / 344.876, 500 320 / 346.497 -> 336 / 344.876, 1000 627 /
+  346.496 -> 110 / 346.496, 2000 320 / 346.496 -> 1063 / 346.496. The objective
+  reaches the default algorithm's 344.876 at ni = 500 (pinned by a tight test)
+  but not at 1000 / 2000: unglobalised Mehrotra on this nonconvex model still
+  stops at the other local solution there, and the iteration counts are not
+  uniformly better. The restoration-failure hint no longer claims Mehrotra
+  "can fail even from a feasible start". (9) The `.nl` reader's depth guard
+  assumes Rust's default 2 MiB thread stack (wasm32: 1 MiB) when no budget was
+  declared, instead of the CLI's 1 GiB; and it now counts chains of defined
+  variables: a `V` segment referencing the previous one is one level to the
+  parser and as deep as the chain to every pass that walks through a `Cse`
+  (`collect_vars`, the tape builder, drop glue), so a long chain is a clean
+  error past the guard instead of a stack overflow. The parse-time depth and
+  quadratic-shape passes read earlier `V` verdicts instead of re-walking the
+  chain (they were quadratic in its length): a 16 334-link chain parses in
+  ~50 ms. (10) SQP working sets are published in the caller's full variable
+  space (fixed variables `Fixed`) and warm starts are mapped through the
+  solve's fixed-variable elimination, so the issue's child that fixes `x1`
+  warm-starts from the parent's set (`info["working_set"]` is no longer `None`
+  there), and a sibling fixing `x2` gets it on the right column; a
+  reduced-space set from a different elimination is dropped with a warning.
+  New `statistics.sqp_warm_working_set_applied`. (11) `solve_problem_batch` /
+  `solve_nlp_batch` report a raising `intermediate` as `Callback_Error` (-198)
+  with `callback_error`, like `Problem.solve`; the Pyomo v2 and legacy tables
+  and the pip GAMS link map it (error termination, iterate kept; internal
+  error), with coverage tests. (12) `intermediate`'s calling convention is read
+  once from its signature (keywords if it names them all or takes `**kwargs`,
+  else cyipopt's positional order), so a callback body that raises `TypeError`
+  is no longer run twice. (13) The unreachable per-iteration refactor rescue is
+  removed; `issue_535`'s reroute test asserts the engine, not a status;
+  `issue_986_duplicate_equality_row`'s docstring is corrected (its 3-variable
+  model does reproduce, verified with the seed floor off).
+
 - **Solve-quality audit: one verdict per returned run, re-solves only when
   they change something (gh#983 review).** (1) `statistics.warnings` /
   `info["warnings"]` describe the run whose point is returned: they are cleared
@@ -376,9 +427,11 @@ changes.
   static regularization at all. With `qp_reg <= 0` the seed now carries a
   1e-8 floor on the `(x, x)` and equality blocks (it only feeds the symbolic
   analysis; any `qp_reg > 0`, the default included, seeds exactly as before),
-  and the per-iteration refactor gained the HSDE driver's staged delta_w /
-  delta_c rescue for a failed factorization. Nothing that factored before
-  moves (fixture sweep identical, both legs); the issue's 602-variable MPC
+  (a per-iteration delta_w / delta_c refactor rescue added alongside it was
+  never reached and has since been removed -- see the review entry). At
+  `qp_reg=0` the floor moves one fixture (`qcqp_columns_wellcond`, 25 -> 29
+  iterations, both legs, same objective; measured by sweeping with the floor on
+  and off); at any `qp_reg > 0` nothing moves. The issue's 602-variable MPC
   solves to 149.4757, and a convex `NumericalFailure` maps to
   `Error_In_Step_Computation` rather than "INTERNAL ERROR: Unknown
   SolverReturn value". (4) An active-set

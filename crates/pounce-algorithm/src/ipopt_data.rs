@@ -298,6 +298,15 @@ impl IpoptData {
         if let Some(trial) = self.trial.take() {
             self.curr = Some(trial);
         }
+        // Upstream `IpoptData::AcceptTrialPoint` frees the affine-scaling
+        // step with the trial point: it was computed at the iterate just
+        // left, and the Mehrotra corrector (`pd_search_dir_calc.rs`) reads it
+        // whenever it is present. pounce only ever set it, so any iteration
+        // whose oracle did not recompute it -- the probing guard's recentre
+        // (gh#986 review item 8), a fixed-mu iteration of the adaptive
+        // strategy, an oracle that fell back to LOQO -- fed the PREVIOUS
+        // iterate's predictor into the corrector.
+        self.delta_aff = None;
     }
 
     /// Set the trial iterate from a primal step `delta_x`/`delta_s`
@@ -341,6 +350,17 @@ mod tests {
     fn zero_iv() -> IteratesVector {
         let z = |n| StdRc::new(DenseVectorSpace::new(n).make_new_dense()) as StdRc<dyn Vector>;
         IteratesVector::new(z(2), z(1), z(1), z(1), z(2), z(2), z(1), z(1))
+    }
+
+    #[test]
+    fn accept_trial_point_drops_the_affine_step() {
+        // gh#986 review item 8: the predictor belongs to the iterate it was
+        // computed at; a corrector at the next iterate must not read it.
+        let mut d = IpoptData::new();
+        d.set_delta_aff(zero_iv());
+        d.set_trial(zero_iv());
+        d.accept_trial_point();
+        assert!(d.delta_aff.is_none());
     }
 
     #[test]

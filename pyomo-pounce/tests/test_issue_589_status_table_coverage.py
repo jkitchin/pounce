@@ -77,6 +77,12 @@ ENGINE_STATUSES = (
     "Internal_Error",
 )
 
+#: Statuses the Python front end reports that are not engine exits (so not in
+#: `return_codes.rs`): `Callback_Error` (-198) is a raising `intermediate`
+#: callback, which the engine sees only as a stop request (gh#986). They must
+#: be in both tables too -- falling to the defaults is the gh #589 failure.
+FRONTEND_STATUSES = ("Callback_Error",)
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 _RETURN_CODES_RS = os.path.join(
@@ -125,6 +131,19 @@ def test_sens_table_covers_every_engine_exit():
         f"(gh #589)")
 
 
+def test_sens_table_covers_every_frontend_status():
+    missing = [s for s in FRONTEND_STATUSES if s not in _STATUS_RESULT]
+    assert not missing
+
+
+def test_a_raising_callback_is_an_error_not_an_interrupt_on_the_legacy_route():
+    """gh#986: `Callback_Error` is the caller's code failing, not a deliberate
+    `return False` -- it must not read as `userInterrupt` / `aborted`."""
+    tc, status = _STATUS_RESULT["Callback_Error"]
+    assert tc is LegacyTerminationCondition.error
+    assert status is SolverStatus.error
+
+
 def test_restoration_failure_is_a_solver_error_on_the_legacy_route():
     """The reported exit, on the route that already behaved acceptably: a
     results object, with the severity and condition the `.sol` route reports
@@ -163,6 +182,21 @@ class TestV2Table:
         offenders = [name for name, (_tc, ss) in _V2_STATUS.items()
                      if ss is SolutionStatus.noSolution]
         assert not offenders
+
+    def test_v2_table_covers_every_frontend_status(self):
+        """gh#986: `Callback_Error` (-198) reaches the table by name and
+        reports an error with the iterate still loadable."""
+        from pyomo.contrib.solver.common.results import (
+            SolutionStatus,
+            TerminationCondition,
+        )
+        from pyomo_pounce.v2 import _V2_STATUS
+
+        missing = [s for s in FRONTEND_STATUSES if s not in _V2_STATUS]
+        assert not missing
+        tc, ss = _V2_STATUS["Callback_Error"]
+        assert tc is TerminationCondition.error
+        assert ss is SolutionStatus.unknown
 
     def test_restoration_failure_reports_a_loadable_iterate(self):
         """The fix for the reported symptom: a failed restoration is an error,

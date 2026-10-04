@@ -91,6 +91,69 @@ pub(crate) struct PyTnlpInit {
     /// reports `User_Requested_Stop`; the info builder uses this to tell a
     /// broken callback from a deliberate `return False`.
     pub callback_error: Option<String>,
+    /// gh#986 review item 11: where a *batch* solve reads `callback_error`
+    /// back. The batch moves each bridge onto a worker and gets only the
+    /// engine's result back, so the bridge's own field is gone by the time
+    /// the per-instance `info` is built; the batch keeps the other end of
+    /// this handle.
+    pub callback_error_sink: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// gh#986 review item 12: how `intermediate` is called, decided once
+    /// from its signature on the first call: `Some(true)` positionally
+    /// (cyipopt's order), `Some(false)` with keywords, `None` not yet known.
+    pub intermediate_positional: Option<bool>,
+}
+
+/// The keyword names `intermediate` is called with, in cyipopt's positional
+/// order.
+const INTERMEDIATE_ARGS: [&str; 11] = [
+    "alg_mod",
+    "iter_count",
+    "obj_value",
+    "inf_pr",
+    "inf_du",
+    "mu",
+    "d_norm",
+    "regularization_size",
+    "alpha_du",
+    "alpha_pr",
+    "ls_trials",
+];
+
+/// gh#986 review item 12: decide, from its signature, whether the user's
+/// `intermediate` takes pounce's keywords or must be called positionally the
+/// way cyipopt calls it. Keywords when it declares `**kwargs` or every one of
+/// the names; positionally otherwise (`*args`, or the cyipopt parameter list
+/// under other names). A signature that cannot be inspected (a builtin, a
+/// C-implemented callable) keeps the keyword call.
+///
+/// Decided up front rather than by retrying on a `TypeError`: the first pass
+/// retried positionally whenever the call raised `TypeError("... unexpected
+/// keyword argument ...")`, which a callback *body* can raise too, so such a
+/// body ran twice -- side effects and all -- before its error was reported.
+fn intermediate_is_positional(py: Python<'_>, method: &Bound<'_, PyAny>) -> bool {
+    let decided: PyResult<bool> = (|| {
+        let inspect = py.import_bound("inspect")?;
+        let sig = inspect.call_method1("signature", (method,))?;
+        let param_cls = inspect.getattr("Parameter")?;
+        let var_kw = param_cls.getattr("VAR_KEYWORD")?;
+        let kw_only = param_cls.getattr("KEYWORD_ONLY")?;
+        let pos_or_kw = param_cls.getattr("POSITIONAL_OR_KEYWORD")?;
+        let mut names: Vec<String> = Vec::new();
+        for p in sig.getattr("parameters")?.call_method0("values")?.iter()? {
+            let p = p?;
+            let kind = p.getattr("kind")?;
+            if kind.eq(&var_kw)? {
+                return Ok(false);
+            }
+            if kind.eq(&kw_only)? || kind.eq(&pos_or_kw)? {
+                names.push(p.getattr("name")?.extract()?);
+            }
+        }
+        Ok(!INTERMEDIATE_ARGS
+            .iter()
+            .all(|a| names.iter().any(|n| n == a)))
+    })();
+    decided.unwrap_or(false)
 }
 
 /// Trait-impl side of the bridge.
@@ -389,49 +452,45 @@ impl TNLP for PyTnlp {
             if !bound.hasattr("intermediate")? {
                 return Ok(None);
             }
-            let kwargs = PyDict::new_bound(py);
-            kwargs.set_item("alg_mod", stats.mode as i32)?;
-            kwargs.set_item("iter_count", stats.iter)?;
-            kwargs.set_item("obj_value", stats.obj_value)?;
-            kwargs.set_item("inf_pr", stats.inf_pr)?;
-            kwargs.set_item("inf_du", stats.inf_du)?;
-            kwargs.set_item("mu", stats.mu)?;
-            kwargs.set_item("d_norm", stats.d_norm)?;
-            kwargs.set_item("regularization_size", stats.regularization_size)?;
-            kwargs.set_item("alpha_du", stats.alpha_du)?;
-            kwargs.set_item("alpha_pr", stats.alpha_pr)?;
-            kwargs.set_item("ls_trials", stats.ls_trials)?;
-            let res =
-                match bound.call_method("intermediate", PyTuple::empty_bound(py), Some(&kwargs)) {
-                    Ok(r) => r,
-                    // gh#986: a cyipopt-style catch-all `intermediate(self, *args)`
-                    // cannot take keywords, and cyipopt calls it positionally.
-                    // Retry positionally (cyipopt's argument order) when the
-                    // failure is the signature refusing our keywords, not an
-                    // exception from inside the user's callback body.
-                    Err(e)
-                        if e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
-                            && e.value_bound(py)
-                                .to_string()
-                                .contains("unexpected keyword argument") =>
-                    {
-                        let args = (
-                            stats.mode as i32,
-                            stats.iter,
-                            stats.obj_value,
-                            stats.inf_pr,
-                            stats.inf_du,
-                            stats.mu,
-                            stats.d_norm,
-                            stats.regularization_size,
-                            stats.alpha_du,
-                            stats.alpha_pr,
-                            stats.ls_trials,
-                        );
-                        bound.call_method1("intermediate", args)?
-                    }
-                    Err(e) => return Err(e),
-                };
+            let method = bound.getattr("intermediate")?;
+            let positional = match self.state.intermediate_positional {
+                Some(p) => p,
+                None => {
+                    let p = intermediate_is_positional(py, &method);
+                    self.state.intermediate_positional = Some(p);
+                    p
+                }
+            };
+            let res = if positional {
+                // cyipopt's argument order (`INTERMEDIATE_ARGS`).
+                method.call1((
+                    stats.mode as i32,
+                    stats.iter,
+                    stats.obj_value,
+                    stats.inf_pr,
+                    stats.inf_du,
+                    stats.mu,
+                    stats.d_norm,
+                    stats.regularization_size,
+                    stats.alpha_du,
+                    stats.alpha_pr,
+                    stats.ls_trials,
+                ))?
+            } else {
+                let kwargs = PyDict::new_bound(py);
+                kwargs.set_item(INTERMEDIATE_ARGS[0], stats.mode as i32)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[1], stats.iter)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[2], stats.obj_value)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[3], stats.inf_pr)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[4], stats.inf_du)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[5], stats.mu)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[6], stats.d_norm)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[7], stats.regularization_size)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[8], stats.alpha_du)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[9], stats.alpha_pr)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[10], stats.ls_trials)?;
+                method.call((), Some(&kwargs))?
+            };
             if res.is_none() {
                 return Ok(Some(true));
             }
@@ -457,6 +516,9 @@ impl TNLP for PyTnlp {
                      (this is a callback failure, not a deliberate `return False`): {e}"
                 );
                 self.state.callback_error = Some(e.to_string());
+                if let Some(sink) = &self.state.callback_error_sink {
+                    *sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+                }
                 false
             }
         }

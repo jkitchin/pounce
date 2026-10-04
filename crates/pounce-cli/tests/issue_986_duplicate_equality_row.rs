@@ -1,18 +1,29 @@
 //! gh #986 item 3: a convex QP with a *consistent duplicated equality row*
 //! died at iteration 0 as "INTERNAL ERROR: Unknown SolverReturn value" under
-//! `qp_presolve=no qp_reg=0` (the issue's 602-variable MPC; the same defect
-//! reproduces at 3 variables). Two defects, both fixed:
+//! `qp_presolve=no qp_reg=0` (the issue's 602-variable MPC). Two defects, both
+//! fixed:
 //!
 //! * the seed factorization (`build_factorization`) is numeric as well as
 //!   symbolic, and with no regularization the duplicated row leaves a zero
-//!   pivot on a variable only the dependent rows touch. It is now retried with
-//!   δ_w, then δ_c raised along the HSDE driver's staged ladder;
+//!   pivot on a variable only the dependent rows touch. With `qp_reg <= 0` the
+//!   seed now carries a `1e-8` floor on the `(x, x)` and equality blocks;
+//!   every iteration still refactors with the caller's own regularization;
 //! * a convex numerical failure reached the console as `InternalError`, a
 //!   crash-shaped message; it now maps to `ErrorInStepComputation`.
 //!
 //! The model: `min x1^2 + x2^2  s.t.  x0 = 3,  2 x0 = 6,  -0.5 x0 + x1 + 0.1 x2 = 0`,
-//! `-10 <= x <= 10` — `x0` has no curvature, so with `qp_reg=0` nothing but the
+//! `-10 <= x <= 10` -- `x0` has no curvature, so with `qp_reg=0` nothing but the
 //! (dependent) equality rows pins it.
+//!
+//! **This 3-variable model reproduces the defect** (gh#986 review): the issue
+//! notes that *its* 3-variable QP with a duplicated row solved fine, but that
+//! model gave every variable curvature. Measured by disabling the seed floor:
+//! this one ends `Numerical failure (no verified KKT point) ... iters=0` /
+//! `Error in step computation` on both the HSDE and the direct (`qp_hsde=no`)
+//! route, and solves to `2.2277` in 9 / 6 iterations with it. (A
+//! per-iteration δ_w/δ_c rescue added alongside the floor was never reached --
+//! not here, not on the 602-variable MPC, not on two free-variable variants --
+//! and was removed.)
 
 use std::process::Command;
 

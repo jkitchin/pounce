@@ -4576,8 +4576,6 @@ fn run_ipm(
     let mut ds_aff = vec![0.0; m_ineq];
     let mut dz_aff = vec![0.0; m_ineq];
     let mut kkt_vals = kkt.values.clone();
-    // Set when the factorization rescue raised δ_w this iteration.
-    let mut primal_reg_raised = false;
 
     // Gondzio centrality-corrector scratch: one extra direction plus the
     // trial combined step, and the zero linear residual a corrector solve
@@ -4760,56 +4758,27 @@ fn run_ipm(
         // --- update the cone scaling block(s) and refactor (numeric-only;
         // the symbolic factor / ordering is reused). The one factorization
         // then backs both the predictor and corrector solves. ---
-        // Undo a previous iteration's rescue of the (x, x) block (below), so a
-        // single hard iterate never inflates δ_w for the rest of the solve.
-        if primal_reg_raised {
-            kkt.update_primal_reg(opts.reg, &mut kkt_vals);
-            primal_reg_raised = false;
-        }
         kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
         // Adaptive μ-scaled regularization on the equality block: bounds the
         // duals of a rank-deficient equality Jacobian so the primal residual
         // converges below `tol` (see `adaptive_eq_reg`). Reduces to the static
         // `opts.reg` at the tolerance, leaving already-converging LPs/QPs
         // unchanged at the optimum.
-        let mut delta_c = adaptive_eq_reg(mu, opts.reg);
+        let delta_c = adaptive_eq_reg(mu, opts.reg);
         kkt.update_eq_reg(delta_c, &mut kkt_vals);
-        // gh#986 item 3: with `qp_reg = 0` (or any reg below the roundoff
-        // floor) a *consistent duplicated equality row* leaves a zero pivot in
-        // the quasi-definite factorization — `(x, x)` carries `P_ii + reg = 0`
-        // on a variable only the dependent rows touch — and the solve died at
-        // iteration 0 as a `NumericalFailure`, 602 variables or 5. Only the
-        // factorization *failure* path changes: raise δ_w (then δ_c) in the
-        // HSDE driver's staged ladder, bounded, and refactor. A factorization
-        // that succeeds first time — every solve that converged before — takes
-        // exactly the path it always did.
+        // gh#986 review item 13: a per-iteration rescue (raise δ_w, then δ_c,
+        // and refactor) was added here for `qp_reg = 0` and is not reachable:
+        // measured on the issue's 602-variable MPC with the duplicated row,
+        // its 3-variable reduction (`issue_986_duplicate_equality_row.rs`)
+        // and two further free-variable variants, at `qp_hsde=no` with and
+        // without equilibration, no iteration's refactor ever failed -- the
+        // adaptive equality regularization (`adaptive_eq_reg`) keeps every
+        // per-iteration matrix factorable, and what failed was only the
+        // *seed* factorization, which `build_factorization` floors. Removed
+        // rather than kept untested.
         if fact.refactor(&kkt_vals).is_err() {
-            use crate::hsde::{
-                DELTA_C_FACTOR, DELTA_C_INIT, DELTA_C_MAX, DELTA_W_FACTOR, DELTA_W_INIT,
-                DELTA_W_MAX,
-            };
-            let mut delta_w = opts.reg;
-            let mut rescued = false;
-            for _ in 0..20 {
-                if delta_w < DELTA_W_MAX {
-                    delta_w = (delta_w.max(DELTA_W_INIT) * DELTA_W_FACTOR).min(DELTA_W_MAX);
-                } else if delta_c < DELTA_C_MAX {
-                    delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
-                } else {
-                    break;
-                }
-                kkt.update_primal_reg(delta_w, &mut kkt_vals);
-                primal_reg_raised = true;
-                kkt.update_eq_reg(delta_c, &mut kkt_vals);
-                if fact.refactor(&kkt_vals).is_ok() {
-                    rescued = true;
-                    break;
-                }
-            }
-            if !rescued {
-                status = QpStatus::NumericalFailure;
-                break;
-            }
+            status = QpStatus::NumericalFailure;
+            break;
         }
 
         // === Predictor (affine-scaling) step: σ = 0 ===

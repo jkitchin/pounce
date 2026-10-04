@@ -1371,6 +1371,8 @@ impl PyProblem {
             final_obj: Number::NAN,
             final_status_code: 0,
             callback_error: None,
+            callback_error_sink: None,
+            intermediate_positional: None,
         })
     }
 

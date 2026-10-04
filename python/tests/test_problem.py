@@ -515,7 +515,14 @@ def test_intermediate_star_args_catch_all_is_called_positionally():
     x, info = prob.solve(x0=np.array([-5.0]))
     assert info["status_msg"] == "Solve_Succeeded"
     assert seen and all(len(a) == 11 for a in seen)
-    assert [a[1] for a in seen] == sorted(a[1] for a in seen)  # iter_count slot
+    # gh#986 review: pin cyipopt's order slot by slot, not just "sorted":
+    # (alg_mod, iter_count, obj_value, inf_pr, inf_du, mu, d_norm,
+    #  regularization_size, alpha_du, alpha_pr, ls_trials).
+    assert [a[1] for a in seen] == list(range(len(seen)))  # iter_count
+    assert seen[0][2] == pytest.approx(64.0)  # obj_value = f(x0) = (-8)^2
+    assert all(a[0] in (0, 1) for a in seen)  # alg_mod
+    assert all(a[5] > 0 for a in seen)  # mu
+    assert all(isinstance(a[10], int) for a in seen)  # ls_trials
     np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
 
 

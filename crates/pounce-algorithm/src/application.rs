@@ -945,6 +945,12 @@ pub struct IpoptApplication {
     /// Stays valid until the next solve (which overwrites it).
     /// Accessed via [`Self::last_sqp_working_set`].
     sqp_last_working_set: Option<pounce_qp::WorkingSet>,
+    /// gh#986 review item 10: the fixed-variable elimination of the solve in
+    /// progress, `(x_not_fixed_map, n_full_x)`. Working sets are published in
+    /// the caller's full space (fixed variables marked `Fixed`) and warm
+    /// starts are mapped through it, so a working set recorded on one node
+    /// lands on the right columns of a node that fixes different variables.
+    x_elimination: Option<(Vec<Index>, usize)>,
     /// What the post-convergence crossover phase did on the most recent
     /// IPM solve (gh#612). `None` when `crossover=no` (the default) or
     /// when the solve did not converge — crossover only runs on a
@@ -1120,6 +1126,7 @@ impl IpoptApplication {
             last_iter_stats: Rc::new(RefCell::new(None)),
             sqp_warm_start: None,
             sqp_last_working_set: None,
+            x_elimination: None,
             crossover_report: None,
             warm_start_iterate: None,
             warm_start_diag: RefCell::new(None),
@@ -1875,6 +1882,7 @@ impl IpoptApplication {
         // (an option refusal, a presolve proof) does not report the previous
         // solve's.
         self.statistics.borrow_mut().warnings.clear();
+        self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
         let status = self.optimize_tnlp_dispatch(tnlp, derivative_test_tnlp);
         // Printed once, for the run whose point is returned. They used to be
         // printed by every audited attempt, so a promoted retry's console
@@ -2535,6 +2543,26 @@ impl IpoptApplication {
         self.sqp_last_working_set.as_ref()
     }
 
+    /// gh#986 review item 10: a working set computed in the solve's reduced
+    /// space (fixed variables eliminated), lifted to the caller's full
+    /// variable space. Fixed variables are `Fixed`; a working set that is not
+    /// reduced-sized is returned unchanged.
+    fn working_set_to_full(&self, ws: pounce_qp::WorkingSet) -> pounce_qp::WorkingSet {
+        match &self.x_elimination {
+            Some((map, n_full)) if ws.bounds.len() == map.len() && map.len() != *n_full => {
+                let mut bounds = vec![pounce_qp::BoundStatus::Fixed; *n_full];
+                for (k, &j) in map.iter().enumerate() {
+                    bounds[j as usize] = ws.bounds[k];
+                }
+                pounce_qp::WorkingSet {
+                    bounds,
+                    constraints: ws.constraints,
+                }
+            }
+            _ => ws,
+        }
+    }
+
     /// If `solver_selection` is explicitly set to a value whose routing lives
     /// only in the CLI's `.nl` dispatch, return  it; otherwise `None`.
     /// `optimize_tnlp` uses this to reject a forced convex selection a library
@@ -3118,6 +3146,63 @@ impl IpoptApplication {
         // `optimize_with_warm_start(warm=None)` is equivalent to
         // `optimize`, so cold callers see no change.
         let mut warm = self.sqp_warm_start.take();
+        // gh#986 review item 10: map a warm start given in the caller's full
+        // variable space through this problem's fixed-variable elimination.
+        // The working set this application publishes is in that space
+        // (`working_set_to_full`), and so is what Python's
+        // `solve(..., working_set=...)` decodes, so a child that fixes `x1`
+        // gets the parent's statuses for exactly the columns it still has.
+        // The first pass compared lengths only: a fixed variable made the
+        // full-space hint "the wrong size" and it was dropped (a cold solve
+        // and `info["working_set"] = None`), while a reduced-space hint from a
+        // sibling that fixed a *different* variable had the right size and was
+        // applied to the wrong columns.
+        let (x_map, n_full) = {
+            let a = adapter.borrow();
+            let cls = a.classification();
+            (cls.x_not_fixed_map.clone(), cls.n_full_x as usize)
+        };
+        let reduced = x_map.len() != n_full;
+        let prev_elimination = self.x_elimination.replace((x_map.clone(), n_full));
+        if let Some(w) = warm.as_mut() {
+            if reduced {
+                let pick = |v: &[Number]| -> Vec<Number> {
+                    x_map.iter().map(|&j| v[j as usize]).collect()
+                };
+                if w.x.len() == n_full {
+                    w.x = pick(&w.x);
+                }
+                if w.lambda_x.len() == n_full {
+                    w.lambda_x = pick(&w.lambda_x);
+                }
+                let mut drop_reason: Option<String> = None;
+                if let Some(ws) = w.working.as_mut() {
+                    if ws.bounds.len() == n_full {
+                        ws.bounds = x_map.iter().map(|&j| ws.bounds[j as usize]).collect();
+                    } else if ws.bounds.len() == x_map.len()
+                        && prev_elimination.as_ref() != Some(&(x_map.clone(), n_full))
+                    {
+                        // A reduced-space working set from a solve that
+                        // eliminated *different* variables: its columns do
+                        // not line up with this problem's, however equal the
+                        // count.
+                        drop_reason = Some(
+                            "its bound statuses are in the reduced space of a solve that \
+                             fixed different variables"
+                                .into(),
+                        );
+                    }
+                }
+                if let Some(why) = drop_reason {
+                    tracing::warn!(
+                        target: "pounce::sqp",
+                        "SQP warm-start working set dropped: {why}; pass the full-space \
+                         working set (last_sqp_working_set / info[\"working_set\"]) instead"
+                    );
+                    w.working = None;
+                }
+            }
+        }
         // gh#986: a warm start recorded on one problem is dimensioned for
         // that problem. A child that fixes a variable (branching) reaches
         // here with a smaller reduced `n` (and possibly `m`), where the
@@ -3147,6 +3232,7 @@ impl IpoptApplication {
                 warm = None;
             }
         }
+        let warm_working_set_applied = warm.as_ref().is_some_and(|w| w.working.is_some());
         let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
             Err(e) => {
@@ -3166,8 +3252,12 @@ impl IpoptApplication {
             }
         };
         // Stash the result's working set so the next solve in a
-        // sequence can fetch it via `last_sqp_working_set`.
-        self.sqp_last_working_set = res.working_set.clone();
+        // sequence can fetch it via `last_sqp_working_set` -- in the caller's
+        // full variable space (gh#986 review item 10).
+        self.sqp_last_working_set = res
+            .working_set
+            .clone()
+            .map(|ws| self.working_set_to_full(ws));
         // Populate the shared `SolveStatistics` so the Python /
         // C-API post-solve accessors (`GetIpoptIterCount`,
         // `info["iter_count"]`, etc.) report the SQP outer-iter
@@ -3184,6 +3274,7 @@ impl IpoptApplication {
             // saved work is inside the QPs — so both are reported.
             stats.sqp_qp_solves = res.n_qp_solves as Index;
             stats.sqp_qp_working_set_changes = res.n_qp_working_set_changes as Index;
+            stats.sqp_warm_working_set_applied = warm_working_set_applied;
             stats.final_objective = res.obj;
             // `final_scaled_objective` defaults to NaN; the SQP path does not
             // thread nlp_scaling through the objective (same as the residuals
@@ -3657,7 +3748,10 @@ impl IpoptApplication {
             // is the IPM → SQP handoff the active-set path never had: a
             // sequence whose first solve wants the interior method can now
             // feed the next `algorithm=active-set-sqp` solve a working set.
-            self.sqp_last_working_set = res.working_set.clone();
+            self.sqp_last_working_set = res
+                .working_set
+                .clone()
+                .map(|ws| self.working_set_to_full(ws));
         }
         tracing::debug!(target: "pounce::crossover", "crossover: {report:?}");
         self.crossover_report = Some(report);
@@ -5691,6 +5785,11 @@ impl IpoptApplication {
         // A model-space declaration (§45) is mapped to KKT indices here, where
         // the NLP layout — which variables survived fixing, how constraints
         // split into equalities and inequalities — is known.
+        {
+            let a = adapter.borrow();
+            let cls = a.classification();
+            self.x_elimination = Some((cls.x_not_fixed_map.clone(), cls.n_full_x as usize));
+        }
         let mapped = self.model_blocks.as_ref().and_then(|(v, c)| {
             let cls = adapter.borrow().classification().clone();
             match map_block_structure_to_kkt(&cls, v, c) {
@@ -6245,8 +6344,11 @@ impl IpoptApplication {
         let app_status = self.apply_kkt_fidelity_gate(solver_return_to_app_status(solver_status));
         // gh#986 item 5: `mehrotra_algorithm=yes` runs with no line search
         // (every trial step is accepted), which is sound on LP / convex QP and
-        // not on a general NLP — there it can walk off a feasible start and
-        // fail in restoration. Say so when that is what happened.
+        // not on a general NLP — there an unglobalized step can walk the
+        // iterate into an infeasible region that restoration then cannot
+        // leave. (A *feasible* iterate is no longer sent to restoration by the
+        // probing guard: it is recentred, gh#986 item 5, so this no longer
+        // fires on the guard's own account.) Say so when it happens.
         if app_status == ApplicationReturnStatus::RestorationFailed
             && matches!(
                 self.options.get_string_value("mehrotra_algorithm", ""),
@@ -6257,8 +6359,10 @@ impl IpoptApplication {
                 target: "pounce::algorithm",
                 "pounce: restoration failed under mehrotra_algorithm=yes. That option \
                  disables the line search and is intended for LPs and convex QPs; on a \
-                 general NLP it is unglobalized and can fail even from a feasible start. \
-                 Retry with the default (mehrotra_algorithm=no)."
+                 general NLP every trial step is accepted, so the iterate can leave the \
+                 region restoration can repair, and a successful run may stop at a \
+                 different local solution than the default algorithm finds. Retry with \
+                 the default (mehrotra_algorithm=no)."
             );
         }
 

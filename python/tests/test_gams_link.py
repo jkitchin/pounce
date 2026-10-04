@@ -1023,3 +1023,13 @@ def test_solver_time_is_omitted_rather_than_faked_when_absent():
     link._write_solution(object(), g, _TinyView(), np.zeros(2), info)
 
     assert g.gmoHresused not in g.head_n_tail
+
+
+def test_a_raising_callback_has_its_own_gams_status():
+    """gh#986: `Callback_Error` (-198) is a front-end status the C link never
+    sees; here it must not fall to the default and must not vouch for the
+    objective."""
+    assert "Callback_Error" in link._STATUS_MAP
+    assert link.status_to_gams("Callback_Error") == (
+        link.MODELSTAT_INFEASIBLE_INTERMED, link.SOLVESTAT_INTERNAL_ERR)
+    assert not link.reports_objective("Callback_Error", 1.0)
