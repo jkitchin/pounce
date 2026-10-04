@@ -79,6 +79,22 @@ changes.
   surfacing as `jax.errors.JaxRuntimeError` with a stderr traceback. Tests:
   `python/tests/test_jax_gh985_review.py` (the repros, 27 more
   primitive-mix superset cases checked against reverse-over-reverse AD).
+- **`curve_fit` active bounds and `trf_minimize` box radius (gh#989 review,
+  Python).** The gh#989 active-bound rule `z > slack` compared a multiplier
+  (objective per parameter unit) to a slack (parameter units), an absolute
+  threshold in parameter units: an interior slope of `3e-5` in `[0, 1]`,
+  determined to `5e-8`, was flagged active with `perr = 0`. A bound is now
+  active when `z / H_jj > slack` (`H` the Gauss-Newton diagonal: the distance
+  a Newton step would carry the parameter past the bound), invariant under
+  parameter and objective rescaling and independent of `slack * z = mu`, so it
+  holds at an acceptable-level exit; the `1e-6` window is the fallback only
+  without finite multipliers or curvature. It also catches the van Genuchten
+  `theta_r` bound under `sigma=10, absolute_sigma=True`, which `z > slack`
+  missed. `trf_minimize`'s region is a box `|dw_i| <= delta` but the step was
+  measured with the 2-norm: with four or more degrees of freedom a rejected
+  corner step "contracted" to `delta` and was retried until a false
+  `Stalled`, and an accepted one expanded by `2*sqrt(n)`. The step is now the
+  inf-norm of the dof block.
 - **Python-level driver defects (gh#989, items 1-4 and 6).**
   (1) `trf_minimize` measures the step norm over the `w_index` (trust-region)
   block only, so a large-valued `y` no longer inflates the radius, and the

@@ -810,7 +810,11 @@ def _solve_fit(
     s2 = 1.0 if absolute_sigma else reduced_chi2
 
     # --- covariance ----------------------------------------------------
-    active_mask = _active_bounds(popt, pr.lb, pr.ub, info)
+    try:
+        hess_diag = np.diag(np.atleast_2d(_to_array(pr.gn_hessian(popt))))
+    except Exception:  # noqa: BLE001 -- the verdict falls back to the window
+        hess_diag = None
+    active_mask = _active_bounds(popt, pr.lb, pr.ub, info, hess_diag)
     if pr.streaming:
         pcov, cov_source = _stream_covariance(
             solver, popt, pr.data_source, pr.model, pr.model_jac, pr.loss_fn,
@@ -1747,18 +1751,38 @@ def _make_problem_obj(objective, gradient, hess, n, m, g, jac_g):
     return type("_CurveFitProblem", (object,), members)()
 
 
-def _active_bounds(popt, lb, ub, info, tol=1e-6):
+def _active_bounds(popt, lb, ub, info, hess_diag=None, tol=1e-6):
     """Which variable bounds are active at ``popt``.
 
-    The verdict comes from the solver's own evidence: a bound is active when
-    its multiplier exceeds the slack to it (``z > slack``). On the central path
-    ``slack * z = mu``, so this is ``slack < sqrt(mu)`` for an active bound
-    (``z`` ~ O(1), slack ~ mu) and false for an interior one (slack ~ O(1),
-    ``z`` ~ mu); it needs no tolerance and so does not move with the solver's
-    ``tol`` (gh#989: at the default ``tol`` a bound the iterate sat 1e-6 from
-    was missed by a fixed window, and the reported standard error was a
-    barrier artefact). Only when the multipliers are unavailable or not finite
-    does it fall back to the fixed relative window ``tol``.
+    The verdict comes from the solver's own evidence, made scale-free. A bound
+    multiplier ``z`` is a force (objective units per parameter unit) and the
+    slack is a length (parameter units), so comparing them directly -- the
+    first gh#989 rule, ``z > slack`` -- is an absolute threshold in parameter
+    units: a well-determined interior parameter whose true value is small
+    (``a = 3e-5`` in ``[0, 1]``) has ``z = mu / slack`` comparable to its
+    slack and was flagged active, with a projected ``perr`` of 0 (gh#989
+    review). Dividing the multiplier by the curvature along that coordinate,
+    ``H_jj`` (the Gauss-Newton Hessian diagonal), turns it into the distance a
+    Newton step would carry the parameter *past* the bound if the bound were
+    removed. A bound is active when that distance exceeds the slack::
+
+        z_j / H_jj > slack_j
+
+    Both sides are in parameter units, so the verdict is invariant under a
+    rescaling of the parameter, and ``z`` and ``H`` scale together under a
+    rescaling of the objective (``sigma``, ``absolute_sigma``), so a large
+    ``sigma`` neither hides a truly active bound nor invents one. It needs no
+    tolerance, does not move with the solver's ``tol`` (the original gh#989
+    defect: a fixed 1e-6 window missed a bound the iterate sat 1e-6 from), and
+    does not assume ``slack * z = mu`` -- it holds at an acceptable-level exit
+    where the barrier has not converged. For an active bound the left side is
+    ``O(z / H)`` and the slack ``O(mu / z)``; for an interior one the left side
+    is ``O(mu / (slack * H))``, i.e. the rule reads ``slack < sqrt(mu / H_jj)``
+    -- a fraction of the parameter's own statistical scale, not of its units.
+
+    Only where the evidence is unavailable -- no finite multipliers, or no
+    positive finite curvature on that coordinate -- does it fall back to the
+    fixed relative window ``slack <= tol * max(1, |bound|)``.
     """
     n = popt.size
     mask = np.zeros(n, dtype=bool)
@@ -1774,15 +1798,28 @@ def _active_bounds(popt, lb, ub, info, tol=1e-6):
                 zl = v
             else:
                 zu = v
+    hd = None
+    if hess_diag is not None:
+        hd = np.asarray(hess_diag, dtype=float).ravel()
+        if hd.size != n:
+            hd = None
+    curv = (
+        np.zeros(n, dtype=bool) if hd is None
+        else np.isfinite(hd) & (hd > 0)
+    )
     for bound, z, sign in ((lb, zl, 1.0), (ub, zu, -1.0)):
         if bound is None:
             continue
+        bound = np.asarray(bound, dtype=float)
         fin = np.isfinite(bound)
-        slack = sign * (popt - bound)
-        if z is not None:
-            mask |= fin & (z > np.abs(slack))
-        else:
-            mask |= fin & (slack <= tol * np.maximum(1.0, np.abs(bound)))
+        slack = np.abs(sign * (popt - bound))
+        window = slack <= tol * np.maximum(1.0, np.abs(bound))
+        if z is None:
+            mask |= fin & window
+            continue
+        with np.errstate(invalid="ignore", over="ignore"):
+            evidence = (z > 0) & (z > np.where(curv, hd, 0.0) * slack)
+        mask |= fin & np.where(curv, evidence, window)
     return mask
 
 

@@ -567,3 +567,54 @@ class TestStepNormOverDofBlock:
         # The step is at most the radius in w; y moved by hundreds.
         assert first.step_norm <= 0.5 + 1e-8
         assert first.trust_radius < 10.0
+
+    def test_box_region_contracts_on_a_rejected_corner_step(self):
+        """gh#989 review: the region is a box |dw_i| <= delta, so the step that
+        drives contraction / expansion is measured with the inf-norm.  With
+        four degrees of freedom a corner step has 2-norm 2 * delta, so the
+        2-norm rule "contracted" a rejected corner step to 0.5 * 2 * delta =
+        delta: the same step was retried until the stall detector reported a
+        false Stalled."""
+        nw = 4
+        truth = lambda w: 100.0 * np.asarray(w) ** 2  # noqa: E731
+        truth_jac = lambda w: np.diag(200.0 * np.asarray(w))  # noqa: E731
+
+        def fun(x):
+            return float(np.sum((x[:nw] - 1.0) ** 2) + np.sum(x[nw:] ** 2))
+
+        def jac(x):
+            return np.concatenate([2 * (x[:nw] - 1.0), 2 * x[nw:]])
+
+        delta0 = 0.5
+        res = trf_minimize(
+            fun,
+            np.zeros(2 * nw),
+            truth,
+            w_index=list(range(nw)),
+            y_index=list(range(nw, 2 * nw)),
+            jac=jac,
+            truth_jac=truth_jac,
+            bounds=[(-3, 3)] * nw + [(-1e4, 1e4)] * nw,
+            basis="zero",
+            trust_radius=delta0,
+            theta_max=1e-2,  # the corner step's theta (~50) is rejected
+            max_iterations=200,
+        )
+        assert res.success, res.message
+        # The first trial is the corner (every |dw_i| = delta) and is rejected.
+        first = res.history[0]
+        assert first.kind == "rejected"
+        assert first.step_norm == pytest.approx(delta0, rel=1e-6)
+        # ... and the region genuinely contracts.
+        assert first.trust_radius == pytest.approx(0.5 * delta0, rel=1e-6)
+        radii = [delta0] + [h.trust_radius for h in res.history]
+        for prev, h, new in zip(radii, res.history, radii[1:]):
+            # the step never leaves the box (up to the IPM's bound relaxation)
+            assert h.step_norm <= prev * (1 + 1e-6) + 1e-7
+            if h.kind == "rejected":
+                assert new < prev
+            # expansion is by at most gamma_expand, not gamma_expand*sqrt(n)
+            assert new <= 2.0 * (prev * (1 + 1e-6) + 1e-7)
+        # the stationary point of sum (w-1)^2 + (100 w^2)^2, per coordinate
+        w = res.x[:nw]
+        np.testing.assert_allclose(2 * (w - 1) + 4e4 * w**3, 0.0, atol=1e-4)
