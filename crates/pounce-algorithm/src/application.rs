@@ -174,6 +174,23 @@ const SCALE_AUDIT_MAX_UPSCALE: Number = 1e10;
 /// declined re-solve whose factor, re-evaluated at the optimum, was the one
 /// it already had.
 const SCALE_AUDIT_MATERIAL: Number = 10.0;
+/// Under a warm start, an objective gradient measured at an *answer* (the
+/// seed, or the returned point) that is within this factor of the run's
+/// unscaled complementarity is what the barrier alone leaves behind
+/// (`grad f = z_L - z_U` with `z ~ mu / s`) and carries no model scale.
+///
+/// Measured on `pounce-rs`'s `session::tests::cold_then_warm_through_presolve`
+/// (an interior optimum, objective `(x0 - 2)^2`): the cold solve reads a start
+/// gradient of `4` and is left alone, while the warm re-solve of the identical
+/// model starts at that answer (`grad f = 1.0e-11`) and returns at
+/// `grad f = 3.73e-9` against a complementarity of `3.72e-9` -- a ratio of
+/// `1.001`, which read as a "tiny objective" and paid a `2.7e8` up-scaled
+/// re-solve that doubled the warm solve's iterations. The reactor population
+/// the small-objective branch exists for has an answer gradient at least
+/// `4e3` times its complementarity (`fs = 1e-6`: `1e-5` against `2.5e-9`), so
+/// `10` -- the audit's own predicted relative error of `0.1` -- separates the
+/// two by more than two orders.
+const SCALE_AUDIT_BARRIER_GRAD: Number = 10.0;
 
 /// What the audit reads off a success verdict.
 #[derive(Debug, Clone, Copy)]
@@ -193,6 +210,9 @@ struct ScaleAuditInput {
     unscaled_compl: Number,
     acceptable_tol: Number,
     masked_threshold: Number,
+    /// `warm_start_init_point=yes`: the start is an earlier answer, not an
+    /// independent measurement of the model.
+    warm_start: bool,
 }
 
 impl ScaleAuditInput {
@@ -207,10 +227,24 @@ impl ScaleAuditInput {
     /// there against data of `1e5`). So that case reports no scale (`0`, the
     /// audit stays out). An *unmeasured* start (`NaN`: the caller owns the
     /// scaling) defers to the returned point.
+    ///
+    /// Under a warm start both measurements are taken at answers, so the
+    /// same reasoning applies to each of them: one that sits at the barrier
+    /// level ([`SCALE_AUDIT_BARRIER_GRAD`] times the complementarity) is the
+    /// stationary point's noise, not the model's scale, and when neither
+    /// clears it the audit stays out. Without this the verdict depended on
+    /// the start rather than the model: a cold solve of an interior optimum
+    /// is left alone, and a warm re-solve of the *same* data from its answer
+    /// was up-scaled and re-solved.
     fn grad_scale(&self) -> Number {
         let fin = |v: Number| if v.is_finite() && v > 0.0 { v } else { 0.0 };
         if self.start_grad_max == 0.0 {
             return 0.0;
+        }
+        if self.warm_start && self.unscaled_compl.is_finite() {
+            let floor = SCALE_AUDIT_BARRIER_GRAD * self.unscaled_compl;
+            let answer = |v: Number| if fin(v) > floor { v } else { 0.0 };
+            return answer(self.start_grad_max).max(answer(self.final_grad_max));
         }
         fin(self.start_grad_max).max(fin(self.final_grad_max))
     }
@@ -4716,6 +4750,11 @@ impl IpoptApplication {
             unscaled_compl: base.final_unscaled_compl,
             acceptable_tol,
             masked_threshold,
+            warm_start: self
+                .options
+                .get_bool_value("warm_start_init_point", "")
+                .map(|(v, _)| v)
+                .unwrap_or(false),
         };
         let grad_scale = input.grad_scale();
         let trigger = scale_audit_trigger(input);
@@ -10512,7 +10551,77 @@ mod tests {
             unscaled_compl: compl,
             acceptable_tol: 1e-6,
             masked_threshold: th,
+            warm_start: false,
         }
+    }
+
+    /// `audit_in` for a warm start (`warm_start_init_point=yes`).
+    #[allow(clippy::too_many_arguments)]
+    fn audit_in_warm(
+        tol: Number,
+        obj_scale: Number,
+        rescaled: Number,
+        start_grad: Number,
+        final_grad: Number,
+        kkt: Number,
+        compl: Number,
+        th: Number,
+    ) -> ScaleAuditInput {
+        ScaleAuditInput {
+            warm_start: true,
+            ..audit_in(
+                tol, obj_scale, rescaled, start_grad, final_grad, kkt, compl, th,
+            )
+        }
+    }
+
+    /// gh#983 / CI: a warm start is an answer, so its gradient -- and the
+    /// returned point's -- carry the model's scale only above the barrier
+    /// level. Both branches of the warm rule need a row: the session's
+    /// interior optimum (gradient at the complementarity) stays out, and the
+    /// reactor warm-started at its answer (gradient `4e3` times it) is still
+    /// up-scaled.
+    #[test]
+    fn a_warm_start_at_an_answer_is_not_read_as_a_tiny_objective() {
+        let th = 1e-4;
+        let t = |inp| scale_audit_trigger(inp);
+        // `cold_then_warm_through_presolve`'s warm re-solve, measured.
+        assert_eq!(
+            t(audit_in_warm(
+                1e-8, 1.0, 1.0, 1.0e-11, 3.726e-9, 3.72e-9, 3.72e-9, th
+            )),
+            None
+        );
+        // The same numbers on a cold start are the tiny-objective signature:
+        // the rule is the warm start's, not a change to the cold branch.
+        assert!(matches!(
+            t(audit_in(
+                1e-8, 1.0, 1.0, 1.0e-11, 3.726e-9, 3.72e-9, 3.72e-9, th
+            )),
+            Some(ScaleAudit::Upscale(_))
+        ));
+        // The reactor (fs = 1e-6) warm-started from its answer: the active
+        // bound's multiplier keeps the gradient at 1e-5, the model's scale.
+        match t(audit_in_warm(
+            1e-8, 1.0, 1.0, 1e-5, 1e-5, 2.5e-9, 2.5e-9, th,
+        )) {
+            Some(ScaleAudit::Upscale(k)) => assert!((k - 1e5).abs() < 1.0),
+            other => panic!("{other:?}"),
+        }
+        // A barrier-level seed does not mask an answer that carries scale.
+        assert!(matches!(
+            t(audit_in_warm(
+                1e-8, 1.0, 1.0, 1e-11, 1e-5, 2.5e-9, 2.5e-9, th
+            )),
+            Some(ScaleAudit::Upscale(_))
+        ));
+        // The re-scale branch does not read the gradient scale at all.
+        assert_eq!(
+            t(audit_in_warm(
+                1e-8, 3e-7, 1.0, 3e8, 2.9e-2, 2.9e-2, 1e-9, th
+            )),
+            Some(ScaleAudit::Rescale)
+        );
     }
 
     /// gh#983: the audit's trigger branches on *which* scaling defect shows,

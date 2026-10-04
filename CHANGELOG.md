@@ -54,6 +54,19 @@ changes.
 
 ### Fixed
 
+- **The gh#983 scale audit no longer reads a warm start at an answer as a
+  tiny objective.** The small-objective branch takes the model's gradient
+  scale as `max(grad f(x0), grad f(x*))`; under `warm_start_init_point=yes`
+  both points are answers, and at an interior optimum both gradients are
+  barrier noise. A warm re-solve of unchanged data (`pounce-rs`'s
+  `TnlpPresolveSession::solve_warm_last`) read `grad f = 3.73e-9` against a
+  complementarity of `3.72e-9`, up-scaled the objective by `2.7e8`, and the
+  promoted re-solve's 6 iterations replaced the warm run's 3 -- the same count
+  as the cold solve, which the audit leaves alone (start gradient `4`). Under a
+  warm start an answer gradient within `10x` the complementarity now carries
+  no scale; when neither does, the audit stays out (the exact-zero rule's
+  reasoning). Cold starts are unchanged; the reactor warm-started at its
+  answer (gradient `4e3x` its complementarity) is still up-scaled.
 - **Crashes on legal input, review fixes (gh#986 review).** (8) Under
   `mehrotra_algorithm=yes` the probing guard's recentring step computed no
   affine step, and `delta_aff` -- which nothing ever cleared -- fed the
