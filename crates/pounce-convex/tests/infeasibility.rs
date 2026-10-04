@@ -580,3 +580,50 @@ fn feasible_unbounded_lp_keeps_dual_infeasible() {
         sol.iters
     );
 }
+
+/// gh#990 (remaining item l): the `tau`/`kappa` slot must describe the run
+/// that produced the returned answer. On the gh #293 tail model the HSDE run's
+/// `DualInfeasible` is overridden by the direct driver's `Optimal`, which has
+/// no homogeneous scalars — the slot used to keep the discarded run's (`tau`
+/// collapsing toward 0, an infeasibility signature beside an `Optimal`).
+#[test]
+fn a_direct_driver_answer_carries_no_hsde_scalars() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1e-20), Triplet::new(1, 1, 1e-20)],
+        c: vec![0.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![f64::INFINITY, f64::INFINITY],
+    };
+    pounce_convex::hsde_scalars::clear();
+    let sol = solve(&prob);
+    let scalars = pounce_convex::hsde_scalars::take();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_eq!(
+        scalars, None,
+        "the answer came from the direct driver; tau/kappa {scalars:?} belong \
+         to a discarded HSDE run"
+    );
+
+    // A plain HSDE solve still reports its own scalars.
+    let plain = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![-1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0],
+        ub: vec![f64::INFINITY],
+    };
+    pounce_convex::hsde_scalars::clear();
+    let sol = solve(&plain);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    let s = pounce_convex::hsde_scalars::take().expect("HSDE ran");
+    assert!(s.tau > 0.0, "{s:?}");
+}

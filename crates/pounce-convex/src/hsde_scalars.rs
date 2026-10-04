@@ -41,3 +41,24 @@ pub fn take() -> Option<HsdeScalars> {
 pub(crate) fn record(tau: f64, kappa: f64, iters: usize) {
     SLOT.with(|s| s.set(Some(HsdeScalars { tau, kappa, iters })));
 }
+
+/// Read the slot without emptying it.
+pub(crate) fn peek() -> Option<HsdeScalars> {
+    SLOT.with(|s| s.get())
+}
+
+/// Overwrite the slot — `None` to say "the returned answer did not come from
+/// an HSDE run". The recovery drivers in `ipm.rs` use this so that, whichever
+/// candidate they return, the slot describes *that* candidate's run and never
+/// a discarded one (gh#990).
+pub(crate) fn set(v: Option<HsdeScalars>) {
+    SLOT.with(|s| s.set(v));
+}
+
+/// Run `f` with the slot cleared first, and return its result together with
+/// the scalars of the HSDE run (if any) that `f` itself performed last.
+pub(crate) fn tracked<T>(f: impl FnOnce() -> T) -> (T, Option<HsdeScalars>) {
+    clear();
+    let r = f();
+    (r, peek())
+}

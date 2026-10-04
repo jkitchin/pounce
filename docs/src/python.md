@@ -108,8 +108,8 @@ downstream certificate (e.g. dual bound tightening). Two flavors:
   residuals with the scaling divided back out, i.e. in your **original
   problem units**. Equal to the scaled values when no scaling activates.
 - `derivative_check` — the derivative checker's verdict when `derivative_test`
-  was set, else `None` (gh#990): `mode`, `tolerance`, `checked`, `suspicious`,
-  `missing_structure`, `clean`, `max_rel_error_gradient` / `_jacobian` /
+  was set, else `None` (gh#990): `mode`, `tolerance`, `perturbation`,
+  `checked`, `suspicious`, `missing_structure`, `evaluations`, `clean`, `max_rel_error_gradient` / `_jacobian` /
   `_hessian`, and `flagged` (a list of `{kind, block, row, col, analytic,
   finite_difference, relative_error}`; the first 200). The report on stderr is
   unchanged; the same object is `statistics.derivative_check` in the solve

@@ -908,6 +908,10 @@ pub struct IpoptApplication {
     /// solve's count. Read out into
     /// [`SolveStatistics::quality_escalations`] once the solve returns.
     quality_escalations: Rc<std::cell::Cell<u64>>,
+    /// gh#990: the `mu_strategy` value in the option table was written by a
+    /// POUNCE frontend (the Python no-`hessian` path pins `monotone`), not by
+    /// the caller. See [`Self::mark_mu_strategy_pounce_chosen`].
+    mu_strategy_pounce_chosen: bool,
     /// gh#884. Set when the running [`IpoptAlgorithm`] observed the
     /// biactive dual-divergence signature — a converged primal, a step
     /// that has gone to zero on a scale-relative measure, and an
@@ -1151,6 +1155,7 @@ impl IpoptApplication {
             resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             kkt_blocks_published: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
+            mu_strategy_pounce_chosen: false,
             dual_divergence_signature: std::cell::Cell::new(false),
             derivative_check: RefCell::new(None),
             obj_scale_refused: std::cell::Cell::new((false, false)),
@@ -2406,8 +2411,26 @@ impl IpoptApplication {
     fn is_mu_strategy_fallback_enabled(&self) -> bool {
         match self.options.get_bool_value("mu_strategy_fallback", "") {
             Ok((v, true)) => v,
-            _ => !self.mu_strategy_was_set(),
+            _ => !self.mu_strategy_was_set() || self.mu_strategy_pounce_chosen,
         }
+    }
+
+    /// Record that the `mu_strategy` now in the option table was chosen by a
+    /// POUNCE frontend, not by the caller (gh#990).
+    ///
+    /// The Python path for a problem without `hessian` writes
+    /// `mu_strategy=monotone` so that gh#746's limited-memory -> adaptive
+    /// substitution does not read a barrier preference out of a Hessian
+    /// choice POUNCE made itself. Written as an ordinary option, that pin
+    /// also read as "the caller named a strategy" to
+    /// [`Self::is_mu_strategy_fallback_enabled`], which switched off the
+    /// default-on stall retry (gh#748) on exactly that path — the same
+    /// set-ness defect the second-opinion ladder's write-backs once had.
+    /// With this mark the pin still decides the schedule, and the fallback
+    /// stays on. A frontend calls it only when the caller's own options carry
+    /// no `mu_strategy`.
+    pub fn mark_mu_strategy_pounce_chosen(&mut self) {
+        self.mu_strategy_pounce_chosen = true;
     }
 
     /// Has the user set `algorithm = active-set-sqp`? Reads the
@@ -2772,9 +2795,11 @@ impl IpoptApplication {
              this entry point cannot route a model to it — the option would \
              configure nothing. The `pounce` CLI reaches that engine on `.nl` \
              input (`solver_selection=lp-ipm` / `qp-ipm` / `socp`, or `auto` on \
-             a model that classifies as one); from Python, `pounce.solve_qp` / \
-             `pounce.solve_cone` drive it directly and take the same knobs as \
-             typed arguments. On this path, `solver_selection=qp-active-set` \
+             a model that classifies as one); the `qp_*` options themselves are \
+             read only there. From Python, `pounce.solve_qp` drives the engine \
+             directly with its own arguments (`tol`, `max_iter`, `time_limit`, \
+             `method`) — it never presolves and does not read `qp_*` options. \
+             On this path, `solver_selection=qp-active-set` \
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
              `sqp_qp_*` options. Tracking issue: \
              https://github.com/jkitchin/pounce/issues/604"
@@ -2957,6 +2982,14 @@ impl IpoptApplication {
                 .and_then(|(v, f)| f.then_some(v))
                 .unwrap_or(false),
         }
+    }
+
+    /// The derivative checker's structured verdict from the most recent
+    /// [`Self::run_derivative_test`], or `None` when no test ran (gh#990).
+    /// The IPM and SQP drains copy it into `SolveStatistics`; a caller that
+    /// builds its own report (the CLI's convex route) reads it here.
+    pub fn derivative_check(&self) -> Option<pounce_nlp::derivative_test::DerivativeCheckSummary> {
+        self.derivative_check.borrow().clone()
     }
 
     /// Run the derivative checker, if requested, against `tnlp`.
@@ -3379,6 +3412,9 @@ impl IpoptApplication {
                     .declared_box_violation(&x_dv)
                     .unwrap_or(Number::NAN)
             };
+            // gh#990: the derivative checker's verdict reaches `info` and the
+            // report on this arm too; it was copied on the IPM drain only.
+            stats.derivative_check = self.derivative_check.borrow().clone();
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
         }
         let (app_status, solver_status) = match res.status {
@@ -9059,6 +9095,29 @@ mod tests {
 
         // An explicit "no" is honoured with no strategy set.
         let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy_fallback", "no", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+    }
+
+    /// gh#990: a `mu_strategy` a POUNCE frontend pinned (the Python
+    /// no-`hessian` path's `monotone`) is not the caller naming a strategy,
+    /// so the default-on stall retry stays on; an explicit `no` still wins.
+    #[test]
+    fn a_pounce_chosen_mu_strategy_keeps_the_fallback_on() {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, false)
+            .unwrap();
+        app.options_mut()
+            .set_string_value("mu_strategy", "monotone", true, false)
+            .unwrap();
+        assert!(!app.is_mu_strategy_fallback_enabled());
+        app.mark_mu_strategy_pounce_chosen();
+        assert!(app.is_mu_strategy_fallback_enabled());
+        // The pin still decides the schedule: no limited-memory -> adaptive.
+        assert!(!app.effective_mu_strategy_is_adaptive());
         app.options_mut()
             .set_string_value("mu_strategy_fallback", "no", true, false)
             .unwrap();

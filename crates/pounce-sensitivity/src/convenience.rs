@@ -290,12 +290,15 @@ impl SensSolve {
         self
     }
 
-    /// Enable single-pass bound clamping on the perturbed primal `x*
-    /// + Δx`: any coordinate that would exceed its declared
-    /// `[x_l, x_u]` by more than `eps` is clamped to the bound.
-    /// Mirrors the role of upstream `sens_boundcheck` (without the
-    /// iterative Schur-refinement loop — see [`crate::boundcheck`]).
-    /// Only applies when [`Self::with_deltas`] is also set.
+    /// Enable bound handling on the perturbed primal `x* + Δx`, the
+    /// role of upstream `sens_boundcheck`: any coordinate that would
+    /// leave its declared `[x_l, x_u]` by more than `eps` is pinned at
+    /// that bound and the step is re-solved, repeating while new
+    /// crossings appear — **up to 16 passes**, not a single clamp (see
+    /// [`crate::boundcheck`]). It covers **variable bounds only**; for
+    /// constraint rows that a step drives out of their bounds use
+    /// `parametric_step_bounded`. Only applies when [`Self::with_deltas`]
+    /// is also set.
     pub fn with_boundcheck(mut self, eps: Number) -> Self {
         self.boundcheck_eps = Some(eps);
         self

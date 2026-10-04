@@ -555,7 +555,12 @@ where
             hook,
         );
     }
-    let sol = solve_qp_ipm_unscaled(prob, opts, &mut make_backend, hook);
+    // gh#990: which HSDE run (if any) produced the answer this function
+    // returns. Every recovery solve below can overwrite the thread-local
+    // `tau`/`kappa` slot; when its candidate is discarded, or the answer comes
+    // from the direct driver, the slot is put back to describe the answer.
+    let (sol, sol_scalars) =
+        crate::hsde_scalars::tracked(|| solve_qp_ipm_unscaled(prob, opts, &mut make_backend, hook));
     // HSDE robustness fallback. The self-dual driver normally conditions itself
     // through its per-cone NT scaling and so deliberately skips Ruiz pre-scaling
     // (see the comment above). But on a *severely* ill-scaled system — e.g. the
@@ -648,13 +653,15 @@ where
         // certify and be discarded — which is the outcome the cap wants sooner.
         let mut retry_opts = opts.clone();
         retry_opts.max_iter = equilibrated_retry_budget(prob, sol.status, opts.max_iter);
-        let retry = equilibrated_solve(
-            prob,
-            &retry_opts,
-            /* use_hsde */ true,
-            &mut make_backend,
-            None,
-        );
+        let (retry, retry_scalars) = crate::hsde_scalars::tracked(|| {
+            equilibrated_solve(
+                prob,
+                &retry_opts,
+                /* use_hsde */ true,
+                &mut make_backend,
+                None,
+            )
+        });
         // An `Optimal` from this retry has to earn the same way the one in
         // [`verify_or_repair_optimum`] does (gh #712). This retry runs *inside*
         // the equilibrated metric, so its own absolute convergence test is
@@ -679,8 +686,10 @@ where
             _ => false,
         };
         if accept {
+            crate::hsde_scalars::set(retry_scalars);
             return retry;
         }
+        crate::hsde_scalars::set(sol_scalars);
     }
     // gh #414: the mirror image of the retry above — an HSDE solve that believes
     // it converged but did not. See [`verify_or_repair_optimum`]. Touches only
@@ -716,16 +725,23 @@ where
         if crate::deadline::expired() {
             return mark_timed_out(sol);
         }
-        let verify = equilibrated_solve(
-            prob,
-            opts,
-            /* use_hsde */ false,
-            &mut make_backend,
-            None,
-        );
+        let pre_verify = crate::hsde_scalars::peek();
+        let (verify, verify_scalars) = crate::hsde_scalars::tracked(|| {
+            equilibrated_solve(
+                prob,
+                opts,
+                /* use_hsde */ false,
+                &mut make_backend,
+                None,
+            )
+        });
         if verify.status == QpStatus::Optimal {
+            // The direct driver's answer: the discarded HSDE run's
+            // `tau`/`kappa` must not be reported beside it (gh#990).
+            crate::hsde_scalars::set(verify_scalars);
             return verify;
         }
+        crate::hsde_scalars::set(pre_verify);
     }
     // An unboundedness verdict on a problem that has no feasible point at all.
     //
@@ -770,9 +786,11 @@ where
             c: vec![0.0; prob.n],
             ..prob.clone()
         };
-        if solve_qp_ipm_unscaled(&twin, opts, &mut make_backend, None).status
-            == QpStatus::PrimalInfeasible
-        {
+        let pre_twin = crate::hsde_scalars::peek();
+        let twin_status = solve_qp_ipm_unscaled(&twin, opts, &mut make_backend, None).status;
+        // The twin only decides the label; the returned point is `sol`'s.
+        crate::hsde_scalars::set(pre_twin);
+        if twin_status == QpStatus::PrimalInfeasible {
             let mut infeasible = sol;
             infeasible.status = QpStatus::PrimalInfeasible;
             return infeasible;
@@ -1135,7 +1153,10 @@ where
     {
         return sol;
     }
-    let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend, None);
+    let sol_scalars = crate::hsde_scalars::peek();
+    let (retry, retry_scalars) = crate::hsde_scalars::tracked(|| {
+        equilibrated_solve(prob, opts, /* use_hsde */ true, make_backend, None)
+    });
     let genuine = |c: &QpSolution| {
         c.status == QpStatus::Optimal && optimum_is_genuine(prob, c, opts.tol, opts.obj_constant)
     };
@@ -1144,6 +1165,7 @@ where
     // unimpeachable -- this function's own first test says so -- so stop here
     // and pay nothing more. This is the common repair.
     if genuine(&retry) && err(&retry) <= opts.tol {
+        crate::hsde_scalars::set(retry_scalars);
         return retry;
     }
     // gh #846: otherwise the equilibrated *embedding* is not obviously the
@@ -1178,20 +1200,30 @@ where
     // function's neighbour already makes to refute a spurious unboundedness
     // certificate, on the same LP/QP-only entry point, so it carries no new
     // exposure to cone-carrying problems.
-    let direct = equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend, None);
-    let best = [retry, direct]
+    let (direct, direct_scalars) = crate::hsde_scalars::tracked(|| {
+        equilibrated_solve(prob, opts, /* use_hsde */ false, make_backend, None)
+    });
+    // gh#990: report the `tau`/`kappa` of whichever candidate is returned —
+    // `None` for a pure direct-driver answer, never the discarded run's.
+    let best = [(retry, retry_scalars), (direct, direct_scalars)]
         .into_iter()
-        .filter(genuine)
-        .min_by(|a, b| err(a).total_cmp(&err(b)));
+        .filter(|(c, _)| genuine(c))
+        .min_by(|(a, _), (b, _)| err(a).total_cmp(&err(b)));
     match best {
-        Some(c) => c,
+        Some((c, sc)) => {
+            crate::hsde_scalars::set(sc);
+            c
+        }
         // Neither could certify. The original verdict is demoted rather than
         // upgraded: the solver has no certified answer, and saying so is the
         // floor this function guarantees.
-        None => QpSolution {
-            status: QpStatus::NumericalFailure,
-            ..sol
-        },
+        None => {
+            crate::hsde_scalars::set(sol_scalars);
+            QpSolution {
+                status: QpStatus::NumericalFailure,
+                ..sol
+            }
+        }
     }
 }
 
@@ -3984,7 +4016,10 @@ where
                 kkt_error = sol.kkt_residuals(prob).kkt_error(),
                 "convex sigma: normalized optimum rejected, re-solving un-normalized"
             );
-            let plain = crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None);
+            let sol_scalars = crate::hsde_scalars::peek();
+            let (plain, plain_scalars) = crate::hsde_scalars::tracked(|| {
+                crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None)
+            });
             if plain.status == QpStatus::Optimal
                 && normalized_optimum_is_genuine(prob, cone, &plain, opts.tol)
             {
@@ -4046,11 +4081,15 @@ where
                 );
                 return plain;
             }
-            let direct = direct_driver_fallback(prob, opts, &mut make_backend);
+            let (direct, direct_scalars) = crate::hsde_scalars::tracked(|| {
+                direct_driver_fallback(prob, opts, &mut make_backend)
+            });
             if direct.status == QpStatus::Optimal
                 && normalized_optimum_is_genuine(prob, cone, &direct, opts.tol)
             {
                 tracing::debug!("convex sigma: direct-driver fallback accepted");
+                // gh#990: not the discarded embedding runs' `tau`/`kappa`.
+                crate::hsde_scalars::set(direct_scalars);
                 return direct;
             }
             // Nothing was certified. Rather than default to any one driver,
@@ -4083,6 +4122,8 @@ where
                         .total_cmp(&b.kkt_residuals(prob).kkt_error())
                 })
                 .map_or(1, |(i, _)| i);
+            // gh#990: the slot describes the candidate returned.
+            crate::hsde_scalars::set([sol_scalars, plain_scalars, direct_scalars][pick]);
             tracing::debug!(
                 pick,
                 kkt_error = candidates[pick].kkt_residuals(prob).kkt_error(),

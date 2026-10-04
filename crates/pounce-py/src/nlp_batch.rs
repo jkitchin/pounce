@@ -54,6 +54,9 @@ struct BatchOptions {
     str_opts: Vec<(String, String)>,
     int_opts: Vec<(String, Index)>,
     num_opts: Vec<(String, Number)>,
+    /// gh#990: the only `mu_strategy` entry is POUNCE's own `monotone` pin
+    /// (see `IpoptApplication::mark_mu_strategy_pounce_chosen`).
+    mu_strategy_pounce_chosen: bool,
 }
 
 /// Decode an options dict with the same value coercion as
@@ -113,6 +116,9 @@ fn apply_options(app: &mut IpoptApplication, opts: &BatchOptions) -> Result<(), 
         app.options_mut()
             .set_integer_value(k, *v, true, false)
             .map_err(|e| format!("option {k}={v}: {e}"))?;
+    }
+    if opts.mu_strategy_pounce_chosen {
+        app.mark_mu_strategy_pounce_chosen();
     }
     Ok(())
 }
@@ -496,6 +502,12 @@ pub fn solve_problem_batch<'py>(
         o.str_opts.extend(overlay.str_opts.iter().cloned());
         o.num_opts.extend(overlay.num_opts.iter().cloned());
         o.int_opts.extend(overlay.int_opts.iter().cloned());
+        o.mu_strategy_pounce_chosen = !pb.uses_exact_hessian()
+            && o.str_opts
+                .iter()
+                .filter(|(k, _)| k == "mu_strategy")
+                .count()
+                == 1;
         if !o.int_opts.iter().any(|(k, _)| k == "print_level")
             && !o.str_opts.iter().any(|(k, _)| k == "print_level")
         {

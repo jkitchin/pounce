@@ -343,8 +343,9 @@ point that classifies a `.nl` model and routes it. **A library solve
 refuses a non-default value** rather than accepting one it would drop —
 `IpoptApplication` has no structure extraction, so it cannot route to the
 convex engines at all (the same reason `solver_selection=lp-ipm` errors
-there). From Python, `pounce.solve_qp` / `pounce.solve_cone` drive the
-engine directly and take these knobs as typed arguments.
+there). From Python, `pounce.solve_qp` drives the engine directly with its
+own arguments (`tol`, `max_iter`, `time_limit`, `method`); it never presolves
+and does not read these `qp_*` options, which are CLI-only.
 
 ## Scope and limitations
 
@@ -498,9 +499,10 @@ like `1/τ`. On a two-variable infeasible LP the multipliers read `z ≈ 4.5e10`
 yourself if you need a unit-length certificate, and test it with the sign
 and residual conditions the verification step already applied. Python's
 `solve_qp` / `solve_socp` result carries what is needed: `tau` and `kappa`
-(the homogeneous scalars of the last HSDE run in the solve; `None` when the
-answer came from a driver that has none, e.g. the direct driver or the
-active-set engine), and `certificate_scale`, the inf-norm of the returned ray
+(the homogeneous scalars of the HSDE run that produced the returned answer;
+`None` when the answer came from a driver that has none, e.g. the direct
+driver - including a recovery that replaced an HSDE verdict with a
+direct-driver answer - or the active-set engine), and `certificate_scale`, the inf-norm of the returned ray
 (`(y, z, z_lb, z_ub)` for `primal_infeasible`, `x` for `dual_infeasible`,
 `None` on every other status) - divide by it for a unit-norm certificate.
 `kappa / tau` says how decisive the verdict is: `tau ≈ 4e-11`, `kappa ≈ 1.06`

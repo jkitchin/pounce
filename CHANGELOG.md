@@ -54,6 +54,34 @@ changes.
 
 ### Fixed
 
+- **Textbook checklist, remaining items (gh#990).** (h) The Python path for a
+  problem without `hessian` pins `mu_strategy=monotone`, and that pin used to
+  read as the caller naming a strategy, which switched off the default-on
+  `mu_strategy_fallback` stall retry (gh#748) there, contradicting the docs.
+  The pin is now marked as POUNCE's choice
+  (`IpoptApplication::mark_mu_strategy_pounce_chosen`), so the retry stays on
+  unless the caller sets `mu_strategy` or `mu_strategy_fallback=no`; the
+  schedule itself is unchanged. (i) Docs: FERAL's AMD-leaf switch is 120 rows
+  for SCOTCH and 200 for METIS / KaHIP (feral 0.18) and is not a POUNCE
+  option (`options.md`, `last_ordering` in the report schema). (j)
+  `statistics.derivative_check` / `info["derivative_check"]` is now filled on
+  the active-set SQP path and in the CLI convex route's report, not only on the
+  IPM path. (k) Docs: the second-opinion ladder has four rungs and four
+  `*_retry` options (`troubleshooting.md`); `with_boundcheck` is up to 16
+  passes over variable bounds, not single-pass; the `qp_*` refusal text no
+  longer names a nonexistent `pounce.solve_cone` or claims Python takes the
+  `qp_*` knobs; `CLICOLOR_FORCE` governs the logs on stderr; the
+  `derivative_check` key list includes `perturbation` and `evaluations`;
+  `warm_start_mult_init_max`, `warm_start_entire_iterate` and
+  `warm_start_same_structure` are documented. (l) `QpResult.tau` / `kappa`
+  now describe the HSDE run that produced the returned answer: when a recovery
+  path (the dual-infeasible reverify, the gh#846 repair, the sigma path's
+  direct-driver fallback) returns a direct-driver answer they are `None`, and a
+  discarded retry's or twin solve's scalars no longer leak into the result.
+  (m) The wiki page "Recovering from a bad start" still cannot be updated from
+  here (no push access to `jkitchin/pounce.wiki`); the corrected text remains
+  in `dev-notes/wiki-recovering-from-a-bad-start.md`.
+
 - **Python-level driver defects, remaining items (gh#989).** (e)
   `QpSensitivity`'s weak-activity screen is now per row: a constraint's
   multiplier is compared with the largest stationarity term at the columns it

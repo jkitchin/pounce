@@ -513,8 +513,8 @@ Things worth knowing:
   `mu_strategy=adaptive`) is skipped.
 - The extra solves are spent only on runs that would otherwise report
   failure. Nothing changes on a successful solve.
-- All three rungs are on by default; set them to `no` for upstream
-  IPOPT's behaviour of shipping the first verdict.
+- All four rungs are on by default; set all four `*_retry` options to
+  `no` for upstream IPOPT's behaviour of shipping the first verdict.
 - If a rung recovers the problem, that is a signal about your model as
   well as about the solver: the verdict was trajectory-dependent, so
   the starting point or the scaling of the formulation is worth a look.
@@ -522,7 +522,7 @@ Things worth knowing:
 #### The ladder is not a CLI feature
 
 Every ordinary single-solve entry point runs it, on by default and with
-the same three options: the CLI, the Python `Problem.solve`, the C
+the same four options: the CLI, the Python `Problem.solve`, the C
 `IpoptSolve`, and the `pounce-rs` builder. If you drive POUNCE from a
 modelling layer you are, if anything, the caller who needs it most — an
 uninitialized decision variable reaches the solver as a zero, and the

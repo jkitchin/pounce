@@ -211,9 +211,11 @@ class QpResult:
         problem is in that ill-scaled regime, with an actionable remedy
         (rescale the objective, or cross-check with a reference solver).
     tau, kappa:
-        The homogeneous scalars of the last HSDE (self-dual embedding) run in
-        the solve, or ``None`` when the answer came from a driver that has none
-        (the direct driver, the active-set engine). On a solvable problem
+        The homogeneous scalars of the HSDE (self-dual embedding) run that
+        produced the returned answer, or ``None`` when the answer came from a
+        driver that has none (the direct driver — including when a recovery
+        path replaced an HSDE verdict with a direct-driver answer — or the
+        active-set engine). A discarded HSDE run's scalars are never reported. On a solvable problem
         ``tau`` is positive and ``kappa`` is near zero; on an infeasible one
         ``tau -> 0`` and ``kappa > 0``, and ``kappa / tau`` says how decisive
         the verdict is. ``y``, ``z``, ``z_lb``, ``z_ub`` are the un-homogenized

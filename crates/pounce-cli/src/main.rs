@@ -139,6 +139,18 @@ fn note_integer_relaxation(stats: &mut pounce_solve_report::StatisticsInfo) {
     }
 }
 
+/// gh#990: the derivative checker's verdict on the convex route, where the
+/// report is hand-built and never sees the application's statistics drain.
+static CONVEX_DERIVATIVE_CHECK: std::sync::OnceLock<pounce_solve_report::DerivativeCheckInfo> =
+    std::sync::OnceLock::new();
+
+/// Copy the convex route's derivative-check verdict, if any, into a report.
+fn note_derivative_check(stats: &mut pounce_solve_report::StatisticsInfo) {
+    if let Some(d) = CONVEX_DERIVATIVE_CHECK.get() {
+        stats.derivative_check = Some(d.clone());
+    }
+}
+
 fn real_main() -> ExitCode {
     // Install the tracing subscriber first so even argument-parse
     // diagnostics and the iteration collector are active (pounce#71).
@@ -1038,6 +1050,10 @@ fn real_main() -> ExitCode {
             // `inner_tnlp` keeps the report in the user's own indices, and
             // running it here (not there) means it cannot fire twice.
             app.run_derivative_test(&inner_tnlp);
+            if let Some(d) = app.derivative_check() {
+                let _ =
+                    CONVEX_DERIVATIVE_CHECK.set(pounce_solve_report::DerivativeCheckInfo::from(&d));
+            }
             // Same reason, same place: `install_constant_derivative_hints`
             // lives behind `optimize_tnlp`, so on this route the four
             // constant-derivative hints are read by nothing. gh #588 Q6
@@ -2445,6 +2461,7 @@ fn real_main() -> ExitCode {
         }
         builder.ingest_stats(&solve_stats);
         note_integer_relaxation(&mut builder.stats);
+        note_derivative_check(&mut builder.stats);
         if let Some(linsol) = app.linear_solver_summary() {
             builder.set_linear_solver_summary(linsol);
         }
@@ -3607,6 +3624,7 @@ fn run_convex_qp(
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         note_integer_relaxation(&mut builder.stats);
+        note_derivative_check(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         // Real final KKT residuals (from pounce-convex, computed above), so the
         // harness sees genuine convergence numbers rather than zeros -- the
@@ -4006,6 +4024,7 @@ fn run_convex_socp(
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         note_integer_relaxation(&mut builder.stats);
+        note_derivative_check(&mut builder.stats);
         builder.stats.total_wallclock_time_secs = elapsed;
         builder.stats.final_constr_viol = res.primal_infeasibility;
         builder.stats.final_dual_inf = res.dual_infeasibility;

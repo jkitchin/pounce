@@ -217,7 +217,7 @@ fn solution_dict<'py>(
 
 /// [`solution_dict`] plus the HSDE homogeneous scalars (gh#990 item 9).
 ///
-/// `tau` and `kappa` are those of the last HSDE run in the solve (`None` when
+/// `tau` and `kappa` are those of the HSDE run that produced the answer (`None` when
 /// the answer came from a driver that has none). On `primal_infeasible` /
 /// `dual_infeasible` the returned `y`, `z`, `z_lb`, `z_ub` (resp. `x`) are a
 /// *ray* carrying the `1/tau` scale of the un-homogenized embedding; its
