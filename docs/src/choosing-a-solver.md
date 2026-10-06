@@ -170,7 +170,10 @@ space, and when it finds a feasible direction of negative curvature it follows
 it — to a better point, to an `unbounded` verdict if nothing blocks it, or to
 an honest non-`optimal` status if it runs out of budget. The driver then
 screens the result by *exhibition*, refusing a verdict only where it can walk a
-direction and hand you a strictly better feasible point; that one is not
+direction that is downhill from its first step and hand you a strictly better
+feasible point — a better point in another basin, reached by first climbing off
+a strongly active bound, does not refute a local minimum
+([issue #997](https://github.com/jkitchin/pounce/issues/997)); that one is not
 confined to the working set's null space, so it reaches negative curvature
 hidden behind a bound whose multiplier is exactly zero, which the first cannot
 see. What you do **not** get is a global minimum, or a guarantee in the case

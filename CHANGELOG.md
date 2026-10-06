@@ -73,6 +73,18 @@ changes.
 
 ### Fixed
 
+- **`qp-active-set` no longer refuses a strict local minimum of an indefinite
+  QP (gh#997).** The gh#848 screen demoted a claimed optimum whenever walking
+  a negative-curvature direction to the boundary reached a better point, which
+  tests *global* optimality. On `min −x² + 0.3x` over `[−1, 2]` the strict local
+  minimum `x = −1` (bound multiplier `2.3`) was reported `Internal_Error`
+  because the walk along `+1` ends at the global minimum `x = 2`, while
+  `pounce.solve_qp(method="active-set")` called the same point `optimal`. The
+  walk now refutes only along a direction whose first-order term `gᵀd` is
+  non-positive, so the better point it finds is arbitrarily close to `x`. The
+  CLI's "not a local minimum" note is now printed only when a second-order
+  refusal actually happened, not on every failed indefinite solve.
+
 - **The refusal for a `qp_*` option on a library solve no longer says the
   Python path ignores them (gh#990).** The message at the library entry point
   still told users that `pounce.solve_qp` "never presolves and does not read

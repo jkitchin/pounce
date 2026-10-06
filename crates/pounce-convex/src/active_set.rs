@@ -1578,6 +1578,9 @@ pub fn verify_status(
     // (`ray_certifies_unbounded`'s `dᵀPd < 0` branch, gh #791). Refusing that
     // one would discard the strongest verdict available.
     let refuted = second_order == SecondOrderVerdict::NegativeCurvature;
+    if refuted {
+        note_second_order_refusal();
+    }
     let solved_to = |e: f64| {
         if refuted {
             None
@@ -1632,6 +1635,28 @@ pub fn verify_status(
         ActiveSetStatus::TimeLimit => solved_to(err).unwrap_or(QpStatus::TimeLimit),
         ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
     }
+}
+
+thread_local! {
+    static SECOND_ORDER_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the last active-set solve on this thread refused its first-order
+/// verdict on **second-order** grounds — the engine's own witness of negative
+/// curvature, or [`refute_indefinite_optimum`] exhibiting a locally better
+/// point — and clear the record.
+///
+/// The CLI's gh #848 note says exactly that ("not a local minimum … a feasible
+/// direction of negative curvature"), and it used to be printed on any failed
+/// indefinite solve, so a `NumericalFailure` from anywhere else carried a
+/// second-order explanation nothing had established (gh #997). Same
+/// thread-local pattern as [`crate::crossover::take_report`].
+pub fn take_second_order_refusal() -> bool {
+    SECOND_ORDER_REFUSED.with(|c| c.replace(false))
+}
+
+fn note_second_order_refusal() {
+    SECOND_ORDER_REFUSED.with(|c| c.set(true));
 }
 
 /// Does `d` actually certify that `prob` is unbounded below?
@@ -1700,6 +1725,14 @@ pub fn verify_status(
 /// then **walks along it and evaluates the objective**: a feasible point with a
 /// strictly lower objective is a refutation that needs no theory at all, and is
 /// the first of the four oracles the issue offers.
+///
+/// It is a refutation of the *local* claim only when the walk is downhill from
+/// its first step — `gᵀd ≤ 0` at `x`, to tolerance — and the walk checks that
+/// before it evaluates (gh #997). Without it this was a test of **global**
+/// optimality: on `min −x² + 0.3x` over `[−1, 2]` the strict local minimum
+/// `x = −1` was refused because the walk along `+1`, which leaves the bound
+/// uphill at slope `2.3`, ended at the global minimum `x = 2`. A better point
+/// in another basin is not a counterexample to a local claim.
 ///
 /// The consequence that makes this design safe is the important one: the search
 /// for a direction can be as heuristic as it likes. A direction it misses
@@ -1789,6 +1822,30 @@ fn refute_indefinite_optimum(
     if !f_cur.is_finite() {
         return None;
     }
+    // The gradient at the claimed optimum, for the *local* gate on the walk
+    // below (gh #997). Exhibiting a better point is a refutation of
+    // **global** optimality; the engine's claim on an indefinite `P` is only
+    // ever local, so what has to be exhibited is a better point *arbitrarily
+    // close* to `x`. Along `x + t d` the objective is
+    // `f + t gᵀd + ½t² dᵀPd`: with `dᵀPd < 0` (every candidate here) and
+    // `gᵀd ≤ 0` it decreases on all of `(0, alpha]`, so the far point being
+    // better proves the near ones are. With `gᵀd > 0` it first *rises* and only
+    // turns down past `t = 2gᵀd / |dᵀPd|` — the direction leaves a strictly
+    // active bound uphill, and whatever it reaches beyond that is another
+    // basin. On `min −x² + 0.3x` over `[−1, 2]` the engine stops at the strict
+    // local minimum `x = −1` (`gᵀd = 2.3` along `+1`); the walk to `x = 2`
+    // finds `f = −3.4 < −1.3` and used to demote it, where the Python
+    // `solve_qp(method="active-set")` reported `optimal` on the same point.
+    let grad: Vec<f64> = {
+        let mut px = vec![0.0; n];
+        prob.p_mul(&sol.x, &mut px);
+        (0..n).map(|i| px[i] + prob.c[i]).collect()
+    };
+    let g_scale = 1.0 + inf_norm(&grad);
+    let locally_descending = |dir: &[f64]| {
+        let slope: f64 = (0..n).map(|i| grad[i] * dir[i]).sum();
+        slope.is_finite() && slope <= opts.tol * g_scale * inf_norm(dir)
+    };
 
     // The working-set walk (gh #871).
     //
@@ -1915,12 +1972,19 @@ fn refute_indefinite_optimum(
                 continue;
             };
             if alpha > 0.0 {
+                // Not a direction along which `x` fails to be a *local*
+                // minimum (see `locally_descending`). Neither a refutation nor
+                // a blocker to pin: it was not blocked, it is uphill.
+                if !locally_descending(&dir) {
+                    continue;
+                }
                 let trial: Vec<f64> = (0..n).map(|i| sol.x[i] + alpha * dir[i]).collect();
                 let f_new = f_at(&trial);
                 // Strictly better by more than the solve's own tolerance,
                 // measured relative to the objective's own scale so this
                 // cannot fire on rounding at a genuine optimum.
                 if f_new.is_finite() && f_new < f_cur - opts.tol * (1.0 + f_cur.abs()) {
+                    note_second_order_refusal();
                     return Some(QpStatus::NumericalFailure);
                 }
                 continue;
