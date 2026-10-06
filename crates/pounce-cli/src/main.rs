@@ -3054,6 +3054,7 @@ fn run_convex_qp(
     sens_may_decline: bool,
 ) -> Option<ExitCode> {
     pounce_convex::crossover::clear_report();
+    let _ = pounce_convex::active_set::take_second_order_refusal();
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
@@ -3446,7 +3447,12 @@ fn run_convex_qp(
     // `min x₀x₁ s.t. x₀ + x₁ ≥ 2` over `[0, 4]²`, where the engine settles on
     // `(1, 1)` at `f = 1` — a *maximum* along the active constraint, since
     // `f(1+t, 1−t) = 1 − t²` — while `(0, 2)` is feasible at `f = 0`.
-    if use_active_set && !ok && inertia == HessianInertia::Indefinite {
+    //
+    // Only when a second-order refusal is what actually happened (gh #997):
+    // a `NumericalFailure` from a singular factor or a residual that did not
+    // verify is not evidence the point is a saddle, and the note says it is.
+    let second_order_refused = pounce_convex::active_set::take_second_order_refusal();
+    if use_active_set && !ok && inertia == HessianInertia::Indefinite && second_order_refused {
         eprintln!(
             "pounce: note: the active-set engine reached a point that is not a \
              local minimum of this indefinite QP — a feasible direction of \
