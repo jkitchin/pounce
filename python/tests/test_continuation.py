@@ -165,6 +165,18 @@ def test_run_reports_every_counter_the_issue_asks_for():
     assert all(st.evals > 0 for st in trace.steps)
 
 
+def test_report_has_no_nan_when_no_predictor_residual_was_measured():
+    """gh#1001: a run with no measured predictor residual printed `nan`."""
+    obj = ParametricNLP()
+    trace = pounce.Continuation(make_update(obj), pins=PINS,
+                                bounds=bounds_at).run(theta_path(), x0=X0)
+    for st in trace.steps:
+        st.predictor_residual = None
+    text = trace.report()
+    assert "nan" not in text
+    assert "worst predictor residual n/a" in text
+
+
 # -- the tangent predictor, and the documented fallback ----------------
 
 

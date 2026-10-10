@@ -276,7 +276,9 @@ class ContinuationTrace:
         """One-line-per-counter summary, for a log or a notebook."""
         res = [st.predictor_residual for st in self.steps
                if st.predictor_residual is not None]
-        worst = max(res) if res else float("nan")
+        # No predictor residual is measured unless a point was reached
+        # (or tested) by the predictor, so say so rather than print nan.
+        worst = f"{max(res):.3e}" if res else "n/a (no predictor used)"
         return "\n".join([
             f"continuation: {self.status}",
             f"  points            {self.n_steps}",
@@ -285,7 +287,7 @@ class ContinuationTrace:
             f"  predictor accepts {self.n_predictor_accepts}",
             f"  step rejections   {self.n_rejections}",
             f"  active-set events {self.n_active_set_events}",
-            f"  worst predictor residual {worst:.3e}",
+            f"  worst predictor residual {worst}",
             f"  solver iterations {self.total_iters}",
             f"  total evaluations {self.total_evals}",
             f"  solve time        {self.total_time * 1e3:.1f} ms",
