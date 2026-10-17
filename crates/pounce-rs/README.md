@@ -144,7 +144,8 @@ flat surface could not carry both:
 | `convex` | `pounce_rs::convex` | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; symbolic-factorization reuse; QP sensitivity and reduced Hessian |
 | `qp` | `pounce_rs::qp`, `pounce_rs::sqp` | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed — plus the SQP working-set warm-start contract |
 | `sensitivity` | `pounce_rs::sensitivity` | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
-| `full` | — | all three |
+| `minima` | `pounce_rs::minima` | multistart / find-minima global search: several distinct local minima of one NLP, six strategies (the search `pounce --minima` runs) |
+| `full` | — | all four |
 
 ```toml
 [dependencies]
@@ -165,8 +166,8 @@ assert!(sols.iter().all(|s| s.status == QpStatus::Optimal));
 
 Enabling a feature widens what this crate *exports*; it is close to free at
 build time, because the default NLP path already pulls `pounce-qp`,
-`pounce-linsol`, and `pounce-feral` transitively. Only `convex` and
-`sensitivity` add crates to compile.
+`pounce-linsol`, and `pounce-feral` transitively. Only `convex`,
+`sensitivity` and `minima` add crates to compile.
 
 ## License
 

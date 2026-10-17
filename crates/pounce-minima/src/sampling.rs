@@ -67,7 +67,14 @@ impl Sampler {
                 .map(|j| {
                     let u = if self.sobol {
                         // One Owen-scrambled Sobol' coordinate per dimension.
-                        sobol_burley::sample(idx, j as u32, self.sobol_seed) as f64
+                        // `sobol_burley` has 256 dimensions and panics past
+                        // them; dimension `j` reuses `j mod 256` under a
+                        // scramble seed of its own per block of 256, the
+                        // crate's documented workaround. Block 0 keeps the
+                        // run's seed, so every n <= 256 search draws exactly
+                        // the starts it always did.
+                        let (block, dim) = (j as u32 / NUM_DIMS, j as u32 % NUM_DIMS);
+                        sobol_burley::sample(idx, dim, block_seed(self.sobol_seed, block)) as f64
                     } else {
                         self.uniform()
                     };
@@ -96,6 +103,22 @@ impl Sampler {
     }
 }
 
+/// Dimensions `sobol_burley` provides.
+const NUM_DIMS: u32 = sobol_burley::NUM_DIMENSIONS;
+
+/// The scramble seed for block `block` of [`NUM_DIMS`] dimensions: the run's
+/// own for block 0, a well-mixed derivative of it (splitmix64's finalizer)
+/// for the rest, so blocks are scrambled independently.
+fn block_seed(seed: u32, block: u32) -> u32 {
+    if block == 0 {
+        return seed;
+    }
+    let mut z = ((u64::from(seed) << 32) | u64::from(block)).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) as u32
+}
+
 /// Clip `x` into `[lo, hi]` when a finite box is known (no-op otherwise).
 pub fn clip(x: &mut [Number], lo: &[Number], hi: &[Number], has_box: bool) {
     if !has_box {
@@ -103,5 +126,41 @@ pub fn clip(x: &mut [Number], lo: &[Number], hi: &[Number], has_box: bool) {
     }
     for j in 0..x.len() {
         x[j] = x[j].clamp(lo[j], hi[j]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NUM_DIMS, Sampler, block_seed};
+
+    /// Past 256 dimensions the draw stays in the box, and the extra blocks
+    /// are not copies of the first (each has its own scramble seed).
+    #[test]
+    fn sobol_sampling_extends_past_256_dimensions() {
+        let n = 3 * NUM_DIMS as usize + 7;
+        let (lo, hi) = (vec![-1.0; n], vec![1.0; n]);
+        let mut s = Sampler::new(5, true);
+        for _ in 0..4 {
+            let x = s.sample(&vec![0.0; n], &lo, &hi, true, 1.0);
+            assert_eq!(x.len(), n);
+            assert!(x.iter().all(|v| (-1.0..=1.0).contains(v)));
+            let b = NUM_DIMS as usize;
+            assert_ne!(x[..b], x[b..2 * b], "block 1 repeats block 0");
+        }
+        assert_eq!(block_seed(42, 0), 42);
+        assert_ne!(block_seed(42, 1), block_seed(42, 2));
+    }
+
+    /// The first 256 dimensions draw what they always drew.
+    #[test]
+    fn the_first_256_dimensions_are_unchanged() {
+        let n = NUM_DIMS as usize;
+        let (lo, hi) = (vec![0.0; n], vec![1.0; n]);
+        let mut s = Sampler::new(9, true);
+        let x = s.sample(&vec![0.0; n], &lo, &hi, true, 1.0);
+        let seed = (9u64 ^ (9u64 >> 32)) as u32;
+        for (j, v) in x.iter().enumerate() {
+            assert_eq!(*v, sobol_burley::sample(0, j as u32, seed) as f64);
+        }
     }
 }

@@ -3,8 +3,11 @@
 Three composable building blocks (see ``docs/src/initialization.md``):
 
 * :func:`generate_starts` — draw N diverse starting points (Sobol /
-  uniform / jitter / bounds midpoint). This is the sampler that powers
-  :func:`pounce.find_minima`, exposed as a standalone primitive.
+  uniform / jitter / bounds midpoint), a standalone primitive. (It was
+  :func:`pounce.find_minima`'s sampler until that search moved to Rust,
+  gh#966; ``find_minima`` now draws from the same Owen-scrambled Sobol' /
+  ChaCha8 sampler as ``pounce --minima``, so a seed means the same starts
+  there and here, but not the same starts as ``generate_starts``.)
 * :func:`project_to_feasible` — min-norm repair of a candidate point
   onto the linearized constraints and bounds (one convex QP).
 * :func:`race_starts` — run a few solver iterations from each of N
@@ -15,8 +18,7 @@ Three composable building blocks (see ``docs/src/initialization.md``):
   pauses and resumes candidates instead of re-running them, much
   cheaper, but see the quality caveat in :func:`race_starts`).
 
-The sampling internals here are also imported by ``pounce._minima``;
-keep the private helpers' signatures stable.
+The sampling internals here are private to this module.
 """
 
 from __future__ import annotations
@@ -133,8 +135,7 @@ def generate_starts(
 ) -> np.ndarray:
     """Generate ``n_points`` starting points, shape ``(n_points, n)``.
 
-    This is the sampler behind :func:`pounce.find_minima`, exposed as a
-    composable primitive — feed the result to
+    A composable primitive — feed the result to
     :func:`pounce.solve_nlp_batch`, :func:`race_starts`, or a loop of
     :func:`pounce.minimize` calls.
 

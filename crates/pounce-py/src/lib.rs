@@ -27,6 +27,7 @@
 use pyo3::prelude::*;
 
 mod dense_lu;
+mod minima;
 mod nl_expr;
 mod nl_problem;
 mod nlp_batch;
@@ -99,6 +100,9 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nlp_batch::solve_nlp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(nlp_batch::solve_problem_batch, m)?)?;
     m.add_function(wrap_pyfunction!(warm_start::classify_working_set, m)?)?;
+    // The multistart / find-minima search on a Python `Problem` (gh#966),
+    // the same code `pounce --minima` runs.
+    m.add_function(wrap_pyfunction!(minima::find_minima, m)?)?;
     // Convex LP/QP solver (pounce-convex) bindings.
     m.add_class::<PyQpProblem>()?;
     m.add_class::<PyQpFactorization>()?;

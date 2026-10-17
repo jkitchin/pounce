@@ -25,14 +25,34 @@ result.values   # their objective values
 result.x        # the best (lowest) minimum
 result.status   # "target_reached" | "converged" | "budget_exhausted"
 result.n_solves # solver calls used
-result.trace    # per-solve diagnostics
+result.trace    # one entry per candidate considered
+result.seed     # the seed the run used (drawn at random when seed=None)
+result.lambdas  # constraint multipliers at each minimum
 ```
 
-Every method reuses `minimize`, so **bounds and constraints carry through
-unchanged**, and the acceptance test is shared: each candidate is polished
-on the clean objective, checked against the bounds, and — when a Hessian is
-supplied — certified as a true minimum (positive-semidefinite Hessian, so
-saddles and maxima are rejected) before being de-duplicated and recorded.
+The problem is built exactly as `minimize` builds it, so **bounds and
+constraints carry through unchanged**, and the acceptance test is shared:
+each candidate is polished on the clean objective, its solver-reported
+stationarity residual checked against `kkt_tol`, checked against the bounds,
+and — when a Hessian is supplied — certified as a true minimum
+(positive-semidefinite Hessian, so saddles and maxima are rejected) before
+being de-duplicated and recorded.
+
+The search loop itself runs in Rust: it is the same code as the CLI's
+[`--minima`](find-minima-cli.md) and Rust's
+[`pounce_rs::minima`](rust.md#multiple-minima), so the three give the same
+answer for the same model, options and seed. Only your `fun` / `jac` /
+`hess` (and `callback` / `distance`) are called back in Python.
+
+### Reproducibility
+
+`seed` drives the start sampler — an Owen-scrambled Sobol' sequence plus a
+ChaCha8 generator. The same seed reproduces the same search within a
+version, and runs the same search as `pounce model.nl --minima <method>
+--seed <S>`. With `seed=None` a seed is drawn at random and returned as
+`result.seed`, so any run can be replayed. A seed does **not** reproduce a run
+from POUNCE 0.12.0 or earlier, whose Python search drew from scipy's and
+NumPy's generators.
 
 The six methods fall into three families by *how* they escape a minimum
 they have already found.

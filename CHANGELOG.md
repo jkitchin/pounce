@@ -10,6 +10,30 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Multistart / find-minima search from Rust: `pounce_rs::minima` and the new
+  `pounce-minima` crate (gh#966).** `pounce-rs` had only a single local solve;
+  the `--minima` global search lived inside `pounce-cli`, reachable only by
+  spawning the binary. It now lives in `pounce-minima` and is exposed behind a
+  new `pounce-rs` feature, `minima` (also in `full`):
+  `find_minima(&tnlp, &mut IpoptLocalSolve::new(&mut app), &MinimaOptions {..})`
+  returns the distinct minima, ranked, each with the base problem's
+  constraint duals, plus the stop reason, solve count and `kkt_tol`
+  rejections. The six methods, their knobs and their defaults are the CLI's.
+  Local solves go through a `LocalSolve` trait, so a caller can solve starts
+  another way; `IpoptLocalSolve` is the implementation over one reused
+  `IpoptApplication`, and puts back any on-converged callback the caller had
+  registered (new: `IpoptApplication::take_on_converged`). `pounce --minima`
+  now calls this same function and only formats its result; the move changed
+  nothing it prints or writes — `scripts/sweep-minima.sh` diffs empty on all
+  54 lines, and stdout (modulo wall-clock), stderr and the ranked `.sol` files
+  are byte-identical. `pounce_cli::minima::{archive, penalty_tnlp, sampling}`
+  and `pounce_cli::cli::{MinimaMethod, MinimaArgs}` still resolve, as
+  re-exports. crates.io now receives 22 crates; `pounce-minima` is one new
+  name, inside the new-crate burst limit. `scripts/sweep-minima.sh` is new:
+  it runs each method over a small fixture set and records status, solve
+  count, every minimum found and the best point's duals, so a change to the
+  search can be diffed the way `scripts/sweep-fixtures.sh` diffs a single
+  solve (which never passes `--minima`).
 - **`intermediate_callback` and `GetIpoptCurrentIterate` on the active-set SQP
   arm (gh#1015).** `algorithm = active-set-sqp` never invoked the user's
   intermediate callback, so a C-API caller supplying the Lagrangian Hessian
@@ -95,6 +119,83 @@ changes.
   `dev-notes/wiki-recovering-from-a-bad-start.md`, ready to paste, and
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
+### Changed
+- **`pounce.find_minima` runs on the shared Rust search (gh#966).** The
+  pure-Python loop in `python/pounce/_minima.py` is gone: the problem is still
+  built exactly as `pounce.minimize` builds it (`_prepare_nlp` — bounds,
+  constraints, finite-difference warnings, option translation), and then
+  `pounce_minima::find_minima`, the code `pounce --minima` and
+  `pounce_rs::minima` run, drives it. The signature, `MinimaResult` and every
+  method, knob and default are unchanged; on six-hump camel and
+  `rastrigin` (2-D and 6-D), with and without `hess=`, all six methods over
+  five seeds, it is faster in every cell — 1.03× to 36× (6-D flooding without
+  a Hessian, 6.5 s → 0.18 s), the same minima found within seed noise. For
+  the same model, options and seed, Python and the CLI now return the same
+  search — status, solve count and every value — which
+  `python/tests/test_minima_cli_parity.py` asserts across all six methods.
+  What changes for a caller:
+  - **Start sequences.** The sampler is the CLI's (Owen-scrambled Sobol' +
+    ChaCha8), so a seed gives the same starts as `pounce --minima --seed`, and
+    *not* the starts it gave in 0.12.0 (scipy / NumPy).
+  - **`seed=None` is reported.** One is drawn at random as before, and now
+    returned as `MinimaResult.seed`, so any run can be replayed.
+  - **`MinimaResult.lambdas`** (new): each minimum's constraint multipliers,
+    recovered by a clean re-solve; `results[i].info["mult_g"]` carries the
+    same. `results[i]` is a recorded point for every method (it was the
+    polish solve's full `OptimizeResult` for the repulsion methods).
+  - **Unknown `strategy_kw` keys raise `ValueError`** (a typo used to run the
+    default silently), and `options={"solver_selection": ...}` other than
+    `"nlp"` raises: the repulsion methods change the objective, so the convex
+    routes cannot apply.
+  - **No second-opinion ladder per local solve.** It re-ran a failed start up
+    to three times, uncounted in `n_solves`; a failed start in a multistart
+    search is routine, and the CLI's search never ran it.
+  - **A local solve's success is its status** (`Solve_Succeeded` /
+    `Solved_To_Acceptable_Level`); `minimize`'s upgrade of other statuses whose
+    KKT error is within `acceptable_tol` no longer applies inside the search.
+  - **Tunneling's gradient is analytic** (it was finite-differenced), and its
+    and the constrained penalty solves' L-BFGS runs use `mu_strategy =
+    monotone` unless you set one — what the Python search's Hessian-less
+    subproblems always ran.
+  - **Constrained penalty solves are quasi-Newton** even with `hess=` (see the
+    next entry), and the saddle check is skipped above `n = 256`, with a
+    `RuntimeWarning`.
+  - The private helpers (`_gauss_terms`, `_pole_terms`, `_resolve_lengths`,
+    `_auto_amplitude`, `_Context`, `MinimaArchive`) are gone; their unit tests
+    moved to `crates/pounce-minima`.
+- **`--minima`'s L-BFGS subproblems pin `mu_strategy = monotone` when it is
+  unset (gh#966).** Tunneling and constrained penalty solves run L-BFGS
+  because the search chose it, and gh#746's rule — an unset `mu_strategy`
+  under limited-memory means `adaptive` — read a barrier preference out of
+  that choice. An explicit `mu_strategy` still wins, and exact solves are
+  untouched. Over seeds 0–9 (`--n-minima 6 --max-solves 30`): camel
+  tunneling mean minima found 3.2 → 3.9, `circle_parabola_t0p5` tunneling
+  both minima on 9 → 10 seeds, `haverly` deflation 9% fewer solves; wavy and
+  `haverly` tunneling find the same at 10–15% more solves, and
+  `circle_parabola_t0p5` deflation 8 → 7. `scripts/sweep-minima.sh` moves 5
+  of 54 lines, camel tunneling `converged`/3 → `target_reached`/6 among them.
+- **`--minima` skips the dual-recovery re-solve on a model with no
+  constraints (gh#966).** There are no duals to recover, and the re-solve,
+  started exactly at a minimum where `max |∇f|` is ~1e-10, tripped the gh#983
+  small-objective audit into re-solving with the objective multiplied by
+  ~1e10 — cheap under Newton, two `max_iter` runs under L-BFGS (6-D
+  Rastrigin from Python without `hess=`: 145 011 evaluations and 11 s for six
+  search solves). Nothing the search reports changes (sweep: 0 of 54).
+- **`--minima` flooding and deflation solve their penalty subproblems on the
+  exact Hessian when the model is unconstrained or bound-only (gh#966).** They
+  declined the augmented Hessian and ran L-BFGS; `pounce.find_minima(hess=...)`
+  always passed the analytic one, and the gap showed. Over seeds 0–9
+  (`--n-minima 6 --max-solves 30`), runs that found all six six-hump-camel
+  minima: deflation 1 → 10, in 232 solves against 255; flooding 7 → 9. The
+  base problem's Hessian plus the kernel's, as a dense lower triangle, is used
+  when the model has a Hessian and `n <= 256` (the saddle check's cap). A
+  model **with constraints keeps the quasi-Newton solve**, because there the
+  measurement went the other way: `circle_parabola_t0p5` deflation found both
+  its minima on 8 of 10 seeds under L-BFGS and 3 of 10 exact
+  (`haverly_multistart_t3_brf0` unchanged). `scripts/sweep-minima.sh` moves 5
+  of 54 lines, all unconstrained flooding / deflation ones. The CLI/Python
+  parity test's strict `xfail` on camel deflation is now a pass.
+
 ### Fixed
 - **LPs with duplicated, round-off-conflicting cuts solve again on both convex
   engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)
@@ -166,6 +267,47 @@ changes.
   rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
   fixture sweep (both legs) and Maros-Mészáros at the default routing are
   unchanged.
+- **`pounce --minima` no longer panics on a bounded model with more than 256
+  variables (gh#966).** The Sobol' sampler (`sobol_burley`) has 256
+  dimensions and asserted past them on the first sampled start. Dimension
+  `j` now reuses `j mod 256` under its own scramble seed per block of 256, as
+  the crate documents; a model with 256 variables or fewer draws exactly the
+  starts it did. `pounce.find_minima`, which used scipy's sampler until this
+  release, would otherwise have inherited the panic. Reported by @GermanHeim.
+- **`pounce --minima` honours `honor_original_bounds`, and reports the answer
+  the status describes (gh#966).** Each local solve's point and duals were
+  read from the application's on-converged hook, which sees the algorithm's
+  iterate rather than the reported answer. So `honor_original_bounds=yes` was
+  ignored (a bound-active minimum came back at `x = -8.7e-9` against a lower
+  bound of 0), and when a later attempt lost and an earlier answer was
+  restored from the floor — the mu fallback (pounce#870, on by default) or
+  the gh#884 retry — the archived point was the *discarded* attempt's while
+  the status described the winner's. The search now reads the
+  `finalize_solution` payload, which the floor restore re-delivers. At
+  default options nothing moves (`scripts/sweep-minima.sh`, 0 of 54 lines);
+  with `honor_original_bounds=yes`, 6 of 54 move, all on `haverly`, whose
+  minima now sit on their bounds.
+- **`pounce --minima` vetoes solver successes at non-stationary points, as
+  `find_minima` does (gh#966).** gh#983 added `find_minima(kkt_tol=1e-4)`:
+  a converged local solve is rejected when its *unscaled* dual infeasibility
+  exceeds `kkt_tol · max(1, max|∇f(x0)|, dual_scale)`, because the solver's
+  success verdict is judged in its scaled space. That landed in the Python
+  search only, so the CLI's `--minima` kept archiving such points. Measured
+  with the acceptable-level test opened wide enough that every solve returns
+  its own start as `Solved_To_Acceptable_Level`: the CLI returned four
+  starting points with `|∇f|` between 1.45 and 2.84 as minima, where
+  `find_minima` returned none. The CLI now applies the same bound, with the
+  same default; `--kkt-tol <t|none>` sets or disables it, rejections are
+  reported as `minima.n_kkt_rejected` in the JSON report, and a warning is
+  printed when they empty the result. Well-behaved models are unaffected:
+  the bound is relative, so a model whose gradients live at `1e12` vetoes
+  nothing. `python/tests/test_minima_cli_parity.py` now runs the two searches
+  against each other through the real binary (in the wheel-smoke CI job) and
+  goes red on the pre-fix CLI. Nothing in the single-solve path changes.
+  It also pins, as a strict `xfail`, a divergence that is not fixed here:
+  `deflation` finds all six six-hump-camel minima in 6 of 6 seeds through
+  `find_minima(hess=...)` but in 2 of 6 through the CLI, whose penalty solves
+  decline the augmented Hessian and run L-BFGS.
 - **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
   (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
   `n = 10…40` ran 3000 iterations and, at `n = 40`, returned

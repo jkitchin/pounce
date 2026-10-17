@@ -1458,6 +1458,13 @@ impl IpoptApplication {
         self.on_converged = Some(cb);
     }
 
+    /// Remove and return the registered on-converged callback, if any, so a
+    /// caller that installs its own for a while can put the previous one
+    /// back (`pounce_minima::IpoptLocalSolve` does, gh#966).
+    pub fn take_on_converged(&mut self) -> Option<ConvergedCallback> {
+        self.on_converged.take()
+    }
+
     /// Was the reported answer replayed from an earlier attempt's floor,
     /// after a later attempt lost?
     ///

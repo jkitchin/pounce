@@ -6,6 +6,10 @@ the same interior-point solver in a loop, escaping each minimum it finds, and
 collects the distinct local minima into a deduplicated archive. It is the
 pure-Rust counterpart of the Python [`find_minima`](find-minima.md) API and
 needs no Python — it works on built-in problems and on AMPL `.nl` files alike.
+It is the same search, not a port: Python's `find_minima` and Rust's
+[`pounce_rs::minima::find_minima`](rust.md#multiple-minima) run the same code,
+so for the same model, options and `--seed` they return the same minima in the
+same number of solves.
 
 ```console
 $ pounce model.nl --minima flooding --n-minima 10
@@ -39,14 +43,24 @@ unchanged to the CLI.
 | `--patience <N>` | 8 | stop after `N` solves in a row that find nothing new |
 | `--dedup <d>` | 1e-4 | minima within this per-dimension-scaled distance are the same |
 | `--psd-tol <t>` | 1e-6 | smallest Hessian eigenvalue tolerated by the saddle-rejection check |
+| `--kkt-tol <t\|none>` | 1e-4 | reject a converged solve whose unscaled dual infeasibility exceeds `t · max(1, g0, scale)`; `none` disables |
 | `--seed <S>` | 0 | seed for sampling / Sobol' scramble (runs are reproducible) |
 | `--sobol` / `--no-sobol` | on | use a scrambled Sobol' sequence for box sampling |
 
-A candidate is **accepted** when its solve converged, the point is finite and
-inside the bounds, its objective Hessian is positive semidefinite within
+A candidate is **accepted** when its solve converged, its unscaled
+stationarity residual is within `--kkt-tol`, the point is finite and inside the
+bounds, its objective Hessian is positive semidefinite within
 `--psd-tol` (saddle rejection; skipped when no Hessian is available or the
 problem is large), and it is not already within `--dedup` of an archived
-minimum. The dedup distance is measured in a per-dimension-scaled space
+minimum. The `--kkt-tol` check exists because a solver's success verdict
+is judged in its *scaled* space (gh#983): the bound is
+`kkt_tol · max(1, g0, scale)`, with `g0 = max |∇f|` at the starting point and
+`scale` the magnitude of the terms the residual is assembled from at the
+returned point, so an objective whose gradients legitimately live at a large
+scale is not rejected wholesale. Rejections are counted in the JSON report's
+`minima.n_kkt_rejected`, and a warning is printed when they empty the result.
+This is the same check, with the same default, as `find_minima(kkt_tol=...)`.
+The dedup distance is measured in a per-dimension-scaled space
 (`‖(a−b)/L‖`, with `L` the box width per variable), so a single tolerance is
 scale-free.
 

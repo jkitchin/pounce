@@ -399,6 +399,16 @@ jobs:
           # round-trip without needing an actual .nl input file.
           which pounce
           pounce --help | head -5
+      # gh#966: `pounce --minima` and `pounce.find_minima` are two
+      # implementations of one search, and gh#983's kkt_tol veto landed in
+      # only one of them. The guard that compares them has to drive the real
+      # binary, and this is the only job whose wheel bundles one -- in the
+      # python-test jobs the console script is a shim and the file skips.
+      - name: CLI / find_minima parity (gh#966)
+        run: |
+          python -m pip install pytest scipy
+          BIN=$(python -c "import pounce,os;print(os.path.join(os.path.dirname(pounce.__file__),'bin','pounce'))")
+          POUNCE_CLI="$BIN" python -m pytest python/tests/test_minima_cli_parity.py -q
       # The check the previous arrangement could not make. Everything above
       # runs on the host that built the binary, where a glibc floor is
       # invisible by construction (#452). Install the same wheel on a distro

@@ -8,52 +8,14 @@ import numpy as np
 import pytest
 
 import pounce
-from pounce._minima import _gauss_terms, _pole_terms, _resolve_lengths
 
-
-def test_resolve_lengths_auto_scalar_vector():
-    L = np.array([10.0, 0.1])
-    # auto -> frac * range, per dimension
-    np.testing.assert_allclose(
-        _resolve_lengths("auto", L, True, frac=0.1, fallback=0.5), [1.0, 0.01])
-    # no box -> fallback
-    np.testing.assert_allclose(
-        _resolve_lengths("auto", np.ones(2), False, frac=0.1, fallback=0.5),
-        [0.5, 0.5])
-    # scalar -> isotropic
-    np.testing.assert_allclose(
-        _resolve_lengths(0.3, L, True, frac=0.1, fallback=0.5), [0.3, 0.3])
-    # vector -> as given
-    np.testing.assert_allclose(
-        _resolve_lengths([2.0, 4.0], L, True, frac=0.1, fallback=0.5), [2.0, 4.0])
-
-
-@pytest.mark.parametrize("kernel", ["gauss", "pole"])
-def test_anisotropic_kernel_derivatives(kernel):
-    """Vector-width kernels have correct analytic grad/Hessian (vs FD)."""
-    rng = np.random.default_rng(0)
-    centers = [np.array([0.1, 0.2, 0.3, 0.4]), np.array([-0.2, 0.1, 0.0, 0.5])]
-    x = np.array([0.15, 0.25, 0.2, 0.35])      # near a center: kernel non-trivial
-    widths = np.array([0.3, 1.0, 5.0, 100.0])
-    if kernel == "gauss":
-        fn = lambda z: _gauss_terms(z, centers, 2.0, widths)
-    else:
-        fn = lambda z: _pole_terms(z, centers, 1.5, 2.0, 1e-3, widths)
-
-    v0, g0, H0 = fn(x)
-    eps = 1e-6
-    gfd = np.zeros(4)
-    Hfd = np.zeros((4, 4))
-    for i in range(4):
-        xp, xm = x.copy(), x.copy()
-        xp[i] += eps
-        xm[i] -= eps
-        gfd[i] = (fn(xp)[0] - fn(xm)[0]) / (2 * eps)
-        Hfd[:, i] = (fn(xp)[1] - fn(xm)[1]) / (2 * eps)
-    # Relative tolerance: pole Hessian entries can be large near a center.
-    scale = max(1.0, np.max(np.abs(H0)))
-    assert np.max(np.abs(g0 - gfd)) < 1e-6 * max(1.0, np.max(np.abs(g0)))
-    assert np.max(np.abs(H0 - 0.5 * (Hfd + Hfd.T))) < 1e-5 * scale
+# The unit tests of the width rule, the kernels' derivatives and the
+# curvature-based amplitude moved to Rust with the search (gh#966):
+# crates/pounce-minima/src/search.rs (`resolve_lengths_auto_scalar_vector`,
+# `auto_amplitude_from_curvature`) and src/penalty_tnlp.rs
+# (`kernel_gradients_match_finite_differences_of_the_value`,
+# `kernel_hessians_match_finite_differences_of_the_gradient`). What stays here
+# drives them end to end.
 
 
 def _stretched_camel(scale=1000.0):
@@ -126,19 +88,6 @@ def test_scaled_dedup_distinguishes_small_scale_minima():
         fun, [0.05, 0.0], dedup=0.5,
         distance=lambda a, b: float(np.linalg.norm(a - b)), **kw)
     assert len(r_raw) == 1
-
-
-def test_auto_amplitude_from_curvature():
-    """amp = margin × smallest generalized eigenvalue of (H, diag(1/σ²))."""
-    from pounce._minima import _auto_amplitude
-    hess = lambda x: np.diag([1.0, 100.0])
-    x = np.zeros(2)
-    # Isotropic σ: smallest eigenvalue is 1, so amp = margin·1.
-    assert _auto_amplitude(hess, x, np.array([1.0, 1.0]), margin=2.0) == pytest.approx(2.0)
-    # Narrow σ in the stiff direction rebalances the metric (S = diag([1,1])).
-    assert _auto_amplitude(hess, x, np.array([1.0, 0.1]), margin=2.0) == pytest.approx(2.0)
-    # No Hessian -> cannot derive an amplitude.
-    assert _auto_amplitude(None, x, np.array([1.0, 1.0]), margin=2.0) is None
 
 
 def test_auto_amplitude_handles_unknown_energy_scale():

@@ -56,13 +56,9 @@ serde_json = "1"
 tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
-# Multistart / find-minima sampling (`--minima`). `rand_chacha` gives a
-# seedable, portable PRNG (reproducible runs under `--seed`); `sobol_burley`
-# is an Owen-scrambled Sobol' source matching scipy's `qmc.Sobol(scramble=True)`
-# used by `pounce.find_minima`.
-rand = "0.8"
-rand_chacha = "0.3"
-sobol_burley = "0.5"
+# Multistart / find-minima (`--minima`): archive, sampler, penalty wrappers
+# and options (gh#966; the sampler's rand / sobol_burley deps moved with it).
+pounce-minima.workspace = true
 # Line editing for the interactive debugger REPL (`--debug`): history,
 # Ctrl-R search, and Tab completion. Only used on an interactive TTY;
 # piped input and `--debug-json` fall back to a plain line reader.

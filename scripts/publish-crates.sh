@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish POUNCE crates to crates.io in dependency order.
 #
-# The first publish of all 21 crates will hit the crates.io rate limit
+# The first publish of all 22 crates will hit the crates.io rate limit
 # for *new* crate names (5 burst then 1 per ~10 min). Before the initial
 # release email help@crates.io and ask for a temporary exemption for
 # this batch — they typically grant within a day. See
@@ -30,6 +30,8 @@
 # published as of 0.4.0 — the published pounce-cli took a hard dependency
 # on it, so the old "nothing published depends on studio" exclusion no
 # longer holds. pounce-nl is likewise required by pounce-cli and published.
+# pounce-minima (gh#966) depends on pounce-algorithm (its IpoptLocalSolve
+# drives the application), so it publishes after it.
 # (The benchmark crates pounce-cutest and pounce-large-scale were retired
 # when those suites moved to .nl.)
 
@@ -55,6 +57,7 @@ CRATES=(
   pounce-qp
   pounce-solve-report
   pounce-algorithm
+  pounce-minima
   pounce-restoration
   pounce-sensitivity
   pounce-cinterface

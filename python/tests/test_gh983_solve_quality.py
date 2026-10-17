@@ -69,32 +69,27 @@ def test_find_minima_without_hess_rejects_non_stationary_candidates():
 
 
 def test_find_minima_kkt_tol_filters_on_the_unscaled_residual():
-    """The filter itself, independent of the solver fix: a stub solve that
-    claims success at a point with a large unscaled residual is rejected, and
-    ``kkt_tol=None`` switches it off."""
-    from pounce import _minima
-
-    class R(dict):
-        __getattr__ = dict.get
-
-    def fake_minimize(fun, x0, **kw):
-        r = R(x=np.array([0.0]), fun=0.0, success=True, nit=1,
-              info={"final_unscaled_dual_inf": 0.5}, message="ok")
-        return r
-
-    orig = _minima.minimize
-    _minima.minimize = fake_minimize
-    try:
-        ctx = _minima._Context(lambda x: 0.0, None, None, None, None, None, 1e-6)
-        assert ctx.solve(ctx.fun, np.zeros(1)).success is False
-        ctx = _minima._Context(lambda x: 0.0, None, None, None, None, None, 1e-6,
-                               kkt_tol=None)
-        assert ctx.solve(ctx.fun, np.zeros(1)).success is True
-        ctx = _minima._Context(lambda x: 0.0, None, None, None, None, None, 1e-6,
-                               kkt_tol=1.0)
-        assert ctx.solve(ctx.fun, np.zeros(1)).success is True
-    finally:
-        _minima.minimize = orig
+    """The filter itself, independent of the solver fix: a solve that claims
+    success at a point with a large unscaled residual is rejected, and
+    ``kkt_tol=None`` (or a loose enough one) switches that off. The solves are
+    made to stop at their own starts as Solved_To_Acceptable_Level, with
+    |grad f| ~ 2-3 there. (This used to stub `_minima.minimize`; the search
+    runs in Rust now, gh#966.)"""
+    f = lambda x: float(np.sum(np.sin(3 * x) + 0.1 * x**2))
+    g = lambda x: 3 * np.cos(3 * x) + 0.2 * x
+    accept_anything = {"acceptable_tol": 100.0, "acceptable_compl_inf_tol": 100.0,
+                       "acceptable_obj_change_tol": 1e20, "acceptable_iter": 1}
+    kw = dict(method="multistart", jac=g, bounds=[(-5, 5)] * 2, n_minima=3,
+              max_solves=4, seed=0, options=accept_anything)
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", RuntimeWarning)
+        r = pounce.find_minima(f, np.array([0.3, -0.2]), **kw)
+    assert len(r) == 0 and r.n_kkt_rejected == r.n_solves
+    r = pounce.find_minima(f, np.array([0.3, -0.2]), kkt_tol=None, **kw)
+    assert len(r) > 0 and r.n_kkt_rejected == 0
+    r = pounce.find_minima(f, np.array([0.3, -0.2]), kkt_tol=10.0, **kw)
+    assert len(r) > 0 and r.n_kkt_rejected == 0
 
 
 jax = pytest.importorskip("jax")

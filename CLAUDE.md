@@ -16,7 +16,7 @@ topological order. Run it before tagging.
    publishes to PyPI. Version: `python/pyproject.toml`.
 2. **PyPI `pyomo-pounce`** — `.github/workflows/release-pyomo-pounce.yml`,
    triggered by a `pyomo-pounce-vX.Y.Z` tag. Version: `pyomo-pounce/pyproject.toml`.
-3. **crates.io — 21 workspace crates** — automated by
+3. **crates.io — 22 workspace crates** — automated by
    `.github/workflows/release-crates.yml`, triggered by a `vX.Y.Z` tag push
    (or run manually via `workflow_dispatch`, which defaults to a dry run). It
    runs `scripts/publish-crates.sh`, which publishes in topological order and
@@ -209,6 +209,21 @@ that caught it is not in the corpus at all. So a gate-touching change needs a
 purpose-built fixture that reaches an acceptable-level exit above
 `dual_inf_tol`; an empty sweep is not evidence about it. Full account:
 `dev-notes/mpcc-biactive-dual-divergence.md`.
+
+**The `--minima` search has its own sweep.** `scripts/sweep-fixtures.sh` never
+passes `--minima`, so a change to `crates/pounce-minima` or
+`crates/pounce-cli/src/minima` diffs it empty by construction. Run
+`scripts/sweep-minima.sh` against a baseline binary instead: six methods over a
+fixture set chosen per branch (constrained models for dual recovery, saddle
+models whose every line reads `found=0`, a model whose every candidate reaches
+the `kkt_tol` veto), recording status, solves, every minimum and the best
+point's duals. A pure move must diff empty; gh#966's extraction did, 54
+lines, both when the files moved and when the driver went behind `LocalSolve`.
+Python's `find_minima` runs the same crate, and
+`python/tests/test_minima_cli_parity.py` holds the two frontends to the same
+status, solve count and values for one seed across all six methods — a
+frontend that builds the problem, the options or the seed differently fails
+there, where no test of the crate alone can see it.
 
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory

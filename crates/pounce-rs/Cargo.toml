@@ -44,6 +44,8 @@ pounce-feral = { workspace = true, optional = true }
 # `pounce_qp::QpProblem` borrows its Hessian / Jacobian as pounce-linalg
 # triplet matrices, so the active-set surface is unusable without them.
 pounce-linalg = { workspace = true, optional = true }
+# The multistart / find-minima global search (gh#966).
+pounce-minima = { workspace = true, optional = true }
 
 [features]
 # Mirrors `pounce-cli`'s. The optional pounce-hsl dependency above is
@@ -59,8 +61,11 @@ convex = ["dep:pounce-convex", "dep:pounce-linsol", "dep:pounce-feral"]
 qp = ["dep:pounce-qp", "dep:pounce-linalg", "dep:pounce-linsol", "dep:pounce-feral"]
 # sIPOPT-style NLP sensitivity / reduced Hessian (`pounce_rs::sensitivity`).
 sensitivity = ["dep:pounce-sensitivity"]
+# Multistart / find-minima global search: six strategies over the NLP solver
+# (`pounce_rs::minima`).
+minima = ["dep:pounce-minima"]
 # Everything the facade curates.
-full = ["convex", "qp", "sensitivity"]
+full = ["convex", "qp", "sensitivity", "minima"]
 
 [package.metadata.docs.rs]
 # docs.rs must render the feature-gated modules; otherwise the published

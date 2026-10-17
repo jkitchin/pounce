@@ -77,53 +77,44 @@ def test_find_minima_kkt_tol_is_relative_to_the_gradient_scale(S):
     assert r.n_kkt_rejected == 0
 
 
+# The acceptable-level test opened so wide that every solve stops at iteration
+# 0 and returns its own start as Solved_To_Acceptable_Level: a solver success
+# at a non-stationary point, made deterministic. (These tests used to stub
+# `_minima.minimize`; the search runs in Rust now, gh#966, so they drive the
+# real veto instead.)
+_ACCEPT_ANYTHING = {
+    "acceptable_tol": 100.0,
+    "acceptable_compl_inf_tol": 100.0,
+    "acceptable_obj_change_tol": 1e20,
+    "acceptable_iter": 1,
+}
+
+
 def test_find_minima_warns_when_kkt_tol_empties_the_result():
-    from pounce import _minima
-
-    class R(dict):
-        __getattr__ = dict.get
-
-    def fake_minimize(fun, x0, **kw):
-        return R(x=np.asarray(x0, float), fun=0.0, success=True, nit=1,
-                 info={"final_unscaled_dual_inf": 0.5,
-                       "final_unscaled_dual_scale": 1.0}, message="ok")
-
-    orig = _minima.minimize
-    _minima.minimize = fake_minimize
-    try:
-        with pytest.warns(RuntimeWarning, match="kkt_tol"):
-            r = pounce.find_minima(lambda x: 0.0, np.zeros(1), method="multistart",
-                                   bounds=[(-1, 1)], n_minima=2, max_solves=3,
-                                   seed=0)
-        assert len(r) == 0
-        assert r.n_kkt_rejected == 3
-    finally:
-        _minima.minimize = orig
+    f, g = _wavy(1.0)
+    with pytest.warns(RuntimeWarning, match="kkt_tol"):
+        r = pounce.find_minima(f, np.array([0.3, -0.2]), method="multistart",
+                               jac=g, bounds=[(-5, 5)] * 2, n_minima=2,
+                               max_solves=3, seed=0, options=_ACCEPT_ANYTHING)
+    assert len(r) == 0
+    assert r.n_kkt_rejected == 3
 
 
 def test_find_minima_relative_bound_still_rejects_a_non_stationary_point():
-    """The relative bound is relative to a *gradient* scale, never to the
-    residual itself: a residual of 0.5 against a gradient scale of 1 is
-    rejected, the same residual against 1e6 is not."""
-    from pounce import _minima
-
-    class R(dict):
-        __getattr__ = dict.get
-
-    def make(scale):
-        def fake_minimize(fun, x0, **kw):
-            return R(x=np.zeros(1), fun=0.0, success=True, nit=1,
-                     info={"final_unscaled_dual_inf": 0.5,
-                           "final_unscaled_dual_scale": scale}, message="ok")
-        return fake_minimize
-
-    orig = _minima.minimize
-    try:
-        _minima.minimize = make(1.0)
-        ctx = _minima._Context(lambda x: 0.0, None, None, None, None, None, 1e-6)
-        assert ctx.solve(ctx.fun, np.zeros(1)).success is False
-        _minima.minimize = make(1e6)
-        ctx = _minima._Context(lambda x: 0.0, None, None, None, None, None, 1e-6)
-        assert ctx.solve(ctx.fun, np.zeros(1)).success is True
-    finally:
-        _minima.minimize = orig
+    """The bound is relative to a *gradient* scale, never to the residual
+    itself: a returned start with |grad f| ~ 2 against a gradient scale of
+    ~2 is rejected, although the residual is "small" relative to itself. The
+    genuine minima of the same model at gradient scales up to 1e14 are
+    accepted (`test_find_minima_kkt_tol_is_relative_to_the_gradient_scale`);
+    the bound's arithmetic, at a dual scale of 1e6 included, is
+    `kkt_bound_is_relative_to_the_gradient_scale` in pounce-minima. (A
+    scaled-up copy of this fixture does not reach the veto: gradient scaling
+    engages and the solve converges for real.)"""
+    f, g = _wavy(1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        r = pounce.find_minima(f, np.array([0.3, -0.2]), method="multistart",
+                               jac=g, bounds=[(-5, 5)] * 2, n_minima=2,
+                               max_solves=4, seed=0, options=_ACCEPT_ANYTHING)
+    assert len(r) == 0
+    assert r.n_kkt_rejected == r.n_solves == 4

@@ -17,7 +17,7 @@ pounce-rs = "0.9"
 The default build is the NLP path. The convex/conic, active-set QP, and
 sensitivity solvers are behind [feature flags](#feature-flags).
 
-> **Why one crate.** The solver is split across ~21 workspace crates
+> **Why one crate.** The solver is split across ~22 workspace crates
 > (`pounce-nlp`, `pounce-algorithm`, `pounce-convex`, …) whose boundaries move
 > as the code evolves. Depending on them directly couples you to that layout.
 > `pounce-rs` is the stability boundary; everything below is internal.
@@ -161,7 +161,8 @@ The two QP families both name their types `QpProblem` / `QpSolution` /
 | `convex` | `pounce_rs::convex` | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; symbolic-factorization reuse; QP sensitivity |
 | `qp` | `pounce_rs::qp`, `pounce_rs::sqp` | sparse **parametric active-set** QP, and the SQP working-set warm-start contract |
 | `sensitivity` | `pounce_rs::sensitivity` | sIPOPT-style `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
-| `full` | — | all three |
+| `minima` | `pounce_rs::minima` | multistart / find-minima global search: several distinct local minima of one NLP, six strategies (the search `pounce --minima` runs) |
+| `full` | — | all four |
 
 ```toml
 [dependencies]
@@ -171,7 +172,7 @@ pounce-rs = { version = "0.9", features = ["convex", "sensitivity"] }
 Enabling a feature widens what the crate **exports**, not what it builds: the
 default NLP path already compiles `pounce-qp`, `pounce-linsol`, and
 `pounce-feral` transitively, so `qp` costs nothing at build time and only
-`convex` and `sensitivity` add crates.
+`convex`, `sensitivity` and `minima` add crates.
 
 `convex` and `qp` also enable **`pounce_rs::linsol`**, which supplies the
 sparse symmetric factorization those solvers take as an argument —
@@ -341,6 +342,27 @@ A sensitivity-stage failure is reported through `result.error`, **not**
 `result.status` — the underlying solve can converge while the post-solve step
 fails. See [Sensitivity Analysis](sensitivity.md) and
 [Sessions](sessions.md).
+
+### Multiple minima
+
+```rust
+use pounce_rs::minima::{IpoptLocalSolve, Method, MinimaOptions, find_minima};
+
+let opts = MinimaOptions { method: Method::Multistart, n_minima: 6, ..Default::default() };
+let mut solver = IpoptLocalSolve::new(&mut app);
+let result = find_minima(&tnlp, &mut solver, &opts)?;
+for m in &result.minima {
+    println!("f = {:.6}  at {:?}", m.objective, m.x);   // best first
+}
+```
+
+This is the search the CLI runs for `--minima`, with the same methods,
+knobs and defaults — see [Finding Multiple Minima from the
+CLI](find-minima-cli.md) for what each method does and when a candidate is
+accepted. Every local solve runs on the one `app` you pass, so its options
+(tolerances, `print_level`, …) apply to all of them; to solve starts some
+other way, implement the `LocalSolve` trait. Starts are drawn from the
+TNLP's variable box, so bound the variables whose range you want explored.
 
 ## Presolve and restoration
 

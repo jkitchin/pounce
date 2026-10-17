@@ -153,121 +153,7 @@ pub struct Args {
     pub minima: Option<MinimaArgs>,
 }
 
-/// Global-search strategy for `--minima`. Mirrors the six methods of
-/// `pounce.find_minima` (`python/pounce/_minima.py`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MinimaMethod {
-    /// Random / Sobol' box sampling (restart).
-    Multistart,
-    /// Multi-Level Single Linkage clustering (Rinnooy Kan & Timmer 1987).
-    Mlsl,
-    /// Metropolis chain over minima (Wales & Doye 1997).
-    Basinhopping,
-    /// Repulsive Gaussian bumps (filled-function; Ge 1990).
-    Flooding,
-    /// Softened `1/‖x−x*‖^p` poles (deflation; Farrell et al. 2015).
-    Deflation,
-    /// Equal-height tunnel between descents (Levy & Montalvo 1985).
-    Tunneling,
-}
-
-impl MinimaMethod {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        Ok(match s {
-            "multistart" => Self::Multistart,
-            "mlsl" => Self::Mlsl,
-            "basinhopping" => Self::Basinhopping,
-            "flooding" => Self::Flooding,
-            "deflation" => Self::Deflation,
-            "tunneling" => Self::Tunneling,
-            other => {
-                return Err(format!(
-                    "unknown --minima method '{other}'; choose from \
-                     multistart, mlsl, basinhopping, flooding, deflation, tunneling"
-                ));
-            }
-        })
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Multistart => "multistart",
-            Self::Mlsl => "mlsl",
-            Self::Basinhopping => "basinhopping",
-            Self::Flooding => "flooding",
-            Self::Deflation => "deflation",
-            Self::Tunneling => "tunneling",
-        }
-    }
-}
-
-/// Parsed `--minima` configuration. Shared knobs have concrete defaults;
-/// strategy-specific knobs are `Option`s resolved per-method in the driver
-/// (so `"auto"` widths and curvature-based amplitudes match
-/// `pounce.find_minima`). Field semantics mirror `_minima.py` exactly.
-#[derive(Debug, Clone)]
-pub struct MinimaArgs {
-    pub method: MinimaMethod,
-    /// Target: stop once this many distinct minima are found (default 10).
-    pub n_minima: usize,
-    /// Budget: hard cap on solver calls (default `8 * n_minima`).
-    pub max_solves: Option<usize>,
-    /// Give-up: stop after this many solves in a row that find nothing new.
-    pub patience: usize,
-    /// Two minima within this scaled distance are the same (default 1e-4).
-    pub dedup: f64,
-    /// Smallest Hessian eigenvalue tolerated by saddle rejection (1e-6).
-    pub psd_tol: f64,
-    /// Seed for the sampler / Sobol' scramble (default 0; reproducible).
-    pub seed: u64,
-    /// Use a scrambled Sobol' sequence for box sampling (default true).
-    pub sobol: bool,
-    // ---- strategy-specific knobs (None ⇒ per-method default) ----
-    pub sigma: Option<f64>,
-    pub sigma_frac: Option<f64>,
-    pub amplitude: Option<f64>,
-    pub amp_margin: Option<f64>,
-    pub eta: Option<f64>,
-    pub power: Option<f64>,
-    pub soft: Option<f64>,
-    pub length: Option<f64>,
-    pub length_frac: Option<f64>,
-    pub gamma: Option<f64>,
-    pub samples_per_round: Option<usize>,
-    pub step: Option<f64>,
-    pub temperature: Option<f64>,
-    pub restart_jitter: Option<f64>,
-}
-
-impl Default for MinimaArgs {
-    fn default() -> Self {
-        Self {
-            // Matches `find_minima`'s default `method="deflation"`.
-            method: MinimaMethod::Deflation,
-            n_minima: 10,
-            max_solves: None,
-            patience: 8,
-            dedup: 1e-4,
-            psd_tol: 1e-6,
-            seed: 0,
-            sobol: true,
-            sigma: None,
-            sigma_frac: None,
-            amplitude: None,
-            amp_margin: None,
-            eta: None,
-            power: None,
-            soft: None,
-            length: None,
-            length_frac: None,
-            gamma: None,
-            samples_per_round: None,
-            step: None,
-            temperature: None,
-            restart_jitter: None,
-        }
-    }
-}
+pub use pounce_minima::{Method as MinimaMethod, MinimaOptions as MinimaArgs};
 
 /// Front end for the interactive solver debugger (`--debug*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,6 +316,9 @@ Multistart / find-minima (search for several local minima, not one):
                             are the same (default 1e-4)
   --psd-tol <t>             smallest Hessian eigenvalue tolerated by the
                             saddle-rejection check (default 1e-6)
+  --kkt-tol <t|none>        reject a converged solve whose unscaled dual
+                            infeasibility exceeds t*max(1, gradient scale)
+                            (default 1e-4; `none` disables)
   --seed <S>                seed for sampling / Sobol' scramble (default 0)
   --sobol / --no-sobol      use a scrambled Sobol' sequence for box
                             sampling (default: on)
@@ -638,6 +527,18 @@ Multistart / find-minima (search for several local minima, not one):
                 "--patience" => minima_num!("--patience", usize, patience),
                 "--dedup" => minima_num!("--dedup", f64, dedup),
                 "--psd-tol" => minima_num!("--psd-tol", f64, psd_tol),
+                "--kkt-tol" => {
+                    let v = flag_val!("--kkt-tol");
+                    let parsed = if v.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(v.parse::<f64>().map_err(|e| format!("--kkt-tol: {e}"))?)
+                    };
+                    minima.get_or_insert_with(MinimaArgs::default).kkt_tol = parsed;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--kkt-tol");
+                    }
+                }
                 "--seed" => minima_num!("--seed", u64, seed),
                 "--sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = true;
@@ -1308,6 +1209,18 @@ mod tests {
         assert_eq!(m.psd_tol, 1e-8);
         assert_eq!(m.seed, 7);
         assert!(!m.sobol);
+    }
+
+    #[test]
+    fn minima_kkt_tol_defaults_on_and_accepts_none() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, Some(1e-4));
+        let a =
+            Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart", "--kkt-tol", "1e-2"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, Some(1e-2));
+        let a =
+            Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart", "--kkt-tol", "none"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, None);
     }
 
     #[test]

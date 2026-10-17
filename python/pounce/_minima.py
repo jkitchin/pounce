@@ -29,92 +29,44 @@ Hopping — a Markov chain over minima:
 * ``"basinhopping"`` — perturb the current minimum, locally minimize, accept
   by Metropolis on the objective (Li & Scheraga 1987, Wales & Doye 1997).
 
-All methods reuse :func:`pounce.minimize`, so bounds and constraints carry
-through, and the acceptance test (polish on the clean objective, reject
-saddles via the Hessian) is shared. See ``docs/src/find-minima.md`` and the
-notebooks ``python/notebooks/15–17`` for walkthroughs and method selection.
+The search itself runs in Rust — ``pounce_minima::find_minima``, the same
+code ``pounce model.nl --minima <method>`` and ``pounce_rs::minima`` run
+(gh#966). This module builds the problem exactly as :func:`pounce.minimize`
+does (bounds, constraints, finite-difference warnings and option
+translation included), hands it over, and wraps the answer; only the
+model's own callbacks, and ``callback`` / ``distance``, call back into
+Python. See ``docs/src/find-minima.md`` and the notebooks
+``python/notebooks/15–17`` for walkthroughs and method selection.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from ._minimize import minimize, OptimizeResult, _validate_bounds_length
+from ._minimize import (
+    OptimizeResult,
+    _normalize_bounds,
+    _prepare_nlp,
+    _validate_bounds_length,
+    _wrap_constraints,
+)
 
 __all__ = ["find_minima", "MinimaResult"]
 
+_METHODS = ("basinhopping", "deflation", "flooding", "mlsl", "multistart", "tunneling")
 
-# --------------------------------------------------------------------------
-# Repulsion kernels (analytic value / gradient / Hessian).
-# --------------------------------------------------------------------------
-def _gauss_terms(x, centers, amplitude, sigma):
-    """Σ A·exp(−½‖(x−c)/σ‖²) and its gradient / Hessian contributions.
-
-    ``sigma`` is a per-dimension width vector (anisotropic Gaussian).
-    ``amplitude`` may be a scalar (shared) or one value per center.
-    """
-    n = x.size
-    val = 0.0
-    grad = np.zeros(n)
-    hess = np.zeros((n, n))
-    m = 1.0 / (np.asarray(sigma, float) ** 2)   # per-dimension 1/σ²
-    amps = np.atleast_1d(np.asarray(amplitude, float))
-    if amps.size == 1:
-        amps = np.full(len(centers), float(amps[0]))
-    for c, A in zip(centers, amps):
-        d = x - c
-        g = A * np.exp(-0.5 * float(np.sum(m * d * d)))
-        md = m * d
-        val += g
-        grad += -g * md
-        hess += g * (np.outer(md, md) - np.diag(m))
-    return val, grad, hess
-
-
-def _auto_amplitude(hess, x, sigma, margin, floor=1e-12):
-    """Curvature-based bump height for escaping the minimum at ``x``.
-
-    The bump turns the minimum into a saddle once its height exceeds the
-    smallest generalized eigenvalue ``μ_min`` of ``H v = μ·diag(1/σ²) v`` —
-    i.e. of ``S = diag(σ)·H·diag(σ)``. Returns ``margin · μ_min`` (a few ×
-    over threshold), or ``None`` when no Hessian is available.
-    """
-    if hess is None:
-        return None
-    H = np.asarray(hess(x), float)
-    H = 0.5 * (H + H.T)
-    s = np.asarray(sigma, float)
-    S = s[:, None] * H * s[None, :]
-    mu_min = float(np.linalg.eigvalsh(S)[0])
-    return margin * max(mu_min, floor)
-
-
-def _pole_terms(x, centers, eta, power, soft, length):
-    """Σ η·(‖(x−c)/ℓ‖²+soft)^(−p/2) and its gradient / Hessian contributions.
-
-    ``length`` is a per-dimension scale vector, so the pole is anisotropic.
-    A softened singular pole: huge near a found minimum, decaying like 1/r^p
-    away from it; ``soft`` keeps everything finite for the solver.
-    """
-    n = x.size
-    q = power / 2.0
-    val = 0.0
-    grad = np.zeros(n)
-    hess = np.zeros((n, n))
-    m = 1.0 / (np.asarray(length, float) ** 2)   # per-dimension 1/ℓ²
-    for c in centers:
-        d = x - c
-        r2 = float(np.sum(m * d * d)) + soft
-        p = m * d
-        val += eta * r2 ** (-q)
-        coef1 = -2.0 * q * eta * r2 ** (-q - 1.0)
-        grad += coef1 * p
-        hess += (4.0 * q * (q + 1.0) * eta * r2 ** (-q - 2.0)) * np.outer(p, p) \
-            - 2.0 * q * eta * r2 ** (-q - 1.0) * np.diag(m)
-    return val, grad, hess
+# ``strategy_kw`` keys the search reads. An unknown key used to be ignored
+# silently, so a typo (``"sigma_fac"``) ran the default; it now raises.
+_STRATEGY_KEYS = frozenset({
+    "sigma", "sigma_frac", "amplitude", "amp_margin", "amp_bump",
+    "amp_bump_cap", "amp_fallback", "eta", "power", "soft", "length",
+    "length_frac", "gamma", "samples_per_round", "max_samples", "step",
+    "temperature", "restart_jitter", "sobol", "seed",
+})
 
 
 # --------------------------------------------------------------------------
@@ -122,7 +74,8 @@ def _pole_terms(x, centers, eta, power, soft, length):
 # --------------------------------------------------------------------------
 def _scale_from_bounds(bounds, n):
     """Per-dimension length scale L (box width per variable) and whether a
-    finite box was available."""
+    finite box was available. The search computes the same from the
+    problem's bounds; :func:`pounce.find_critical_points` uses this one."""
     if bounds is not None and all(
         b is not None and b[0] is not None and b[1] is not None for b in bounds
     ):
@@ -132,54 +85,6 @@ def _scale_from_bounds(bounds, n):
         L[L <= 0] = 1.0
         return L, True
     return np.ones(n), False
-
-
-def _resolve_lengths(spec, L, has_box, frac, fallback):
-    """Turn a width spec into a per-dimension vector.
-
-    ``"auto"`` -> ``frac * L`` (a fraction of each variable's range) when a
-    box is known, else ``fallback``; a scalar -> isotropic; a vector -> used
-    as given.
-    """
-    n = L.size
-    if isinstance(spec, str) and spec == "auto":
-        return frac * L if has_box else np.full(n, fallback)
-    arr = np.asarray(spec, float)
-    if arr.ndim == 0:
-        return np.full(n, float(arr))
-    return arr
-
-
-# --------------------------------------------------------------------------
-# Archive of accepted minima.
-# --------------------------------------------------------------------------
-class MinimaArchive:
-    """Accepted minima plus dedup. ``distance`` is pluggable (PBC etc.)."""
-
-    def __init__(self, dedup, distance=None):
-        self.dedup = float(dedup)
-        self.distance = distance or (lambda a, b: float(np.linalg.norm(a - b)))
-        self.xs: list[np.ndarray] = []
-        self.fs: list[float] = []
-        self.results: list[OptimizeResult] = []
-
-    @property
-    def centers(self):
-        return self.xs
-
-    def is_known(self, x):
-        return any(self.distance(x, m) <= self.dedup for m in self.xs)
-
-    def near_any(self, x, radius):
-        return any(self.distance(x, m) <= radius for m in self.xs)
-
-    def add(self, x, f, result):
-        self.xs.append(np.array(x, dtype=float))
-        self.fs.append(float(f))
-        self.results.append(result)
-
-    def __len__(self):
-        return len(self.xs)
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +104,13 @@ class MinimaResult:
     #: every converged candidate was rejected and nothing was accepted, a
     #: ``RuntimeWarning`` is raised as well, so an empty result is never silent.
     n_kkt_rejected: int = 0
+    #: The seed the search ran with. With ``seed=None`` one is drawn at
+    #: random and reported here, so any run can be replayed exactly.
+    seed: int | None = None
+    #: Base-problem constraint multipliers at each minimum (same order as
+    #: ``minima``; empty arrays without constraints), recovered by a clean
+    #: re-solve from the minimum.
+    lambdas: list[np.ndarray] = field(default_factory=list)
 
     @property
     def x(self):
@@ -212,432 +124,27 @@ class MinimaResult:
         return len(self.minima)
 
 
-# --------------------------------------------------------------------------
-# Driver internals.
-# --------------------------------------------------------------------------
-class _Stop(Exception):
-    def __init__(self, status):
-        self.status = status
-
-
-class _Context:
-    """Holds the clean problem and the shared solve / polish / verify ops."""
-
-    def __init__(self, fun, jac, hess, bounds, constraints, options, psd_tol,
-                 kkt_tol=1e-4):
-        self.kkt_tol = kkt_tol
-        self.n_kkt_rejected = 0
-        # gh#983 review: the problem's gradient scale, ``max |grad f(x0)|``;
-        # set by ``find_minima`` from ``jac``, else from the first solve's
-        # ``info["objective_scaling"]["start_gradient_max"]``.
-        self.grad_ref = None
-        self.fun = fun
-        self.jac = jac
-        self.hess = hess
-        self.bounds = bounds
-        self.constraints = constraints
-        self.options = options
-        self.psd_tol = psd_tol
-        self.n_solves = 0
-        self.max_solves = None
-        # Sampling budget: strategies whose expensive work is *sampling*
-        # rather than solving (MLSL) count each drawn sample here, so the
-        # search is bounded even on rounds that trigger no local solve.
-        self.n_samples = 0
-        self.max_samples = None
-
-    def note_sample(self):
-        """Count one sampled point against the sampling budget.
-
-        MLSL grows a sample pool and runs an O(N²) single-linkage scan per
-        round; on a problem where almost every sample is filtered out, no
-        solve fires, so ``max_solves`` never bounds the loop (pounce#103).
-        Counting samples gives that loop a hard ceiling."""
-        if self.max_samples is not None and self.n_samples >= self.max_samples:
-            # Name the cap that actually tripped: ``budget_exhausted`` means
-            # ``max_solves`` was spent, and a run that stopped after 2 solves
-            # on that label sent users to raise the wrong knob (gh#989).
-            raise _Stop("sample_cap_reached")
-        self.n_samples += 1
-
-    def solve(self, fun, x0, jac=None, hess=None):
-        if self.max_solves is not None and self.n_solves >= self.max_solves:
-            raise _Stop("budget_exhausted")
-        self.n_solves += 1
-        res = minimize(
-            fun, x0, jac=jac, hess=hess,
-            bounds=self.bounds, constraints=self.constraints,
-            **(self.options or {}),
-        )
-        # gh#983: ``Solve_Succeeded`` is a verdict in the solver's *scaled*
-        # space. Gradient scaling frozen at a huge-gradient start has been seen
-        # to certify points whose unscaled stationarity residual is ~1, and
-        # without ``hess=`` nothing else here (``is_minimum``) looks at the
-        # point. Veto on the unscaled residual the solver itself reports.
-        #
-        # gh#983 review: the bound is *relative* to the problem's gradient
-        # scale, floored at 1: ``kkt_tol * max(1, g0, dual_scale)``, with
-        # ``g0 = max |grad f|`` at the caller's ``x0`` (``self.grad_ref``) and
-        # ``dual_scale`` the terms the residual is assembled from at the
-        # returned point (``info["final_unscaled_dual_scale"]``). Both are
-        # needed: at an interior minimum the terms *are* ``grad f``, which is
-        # ~0 there, so the second alone reads the residual against itself. An
-        # absolute ``1e-4`` rejected every candidate of an objective whose
-        # gradients live at ``1e12`` (measured: 11 of 12 solves rejected, the
-        # one survivor the unsolved seed) and returned no signal. On an O(1)
-        # model the bound is the absolute one it was.
-        if res.success and self.kkt_tol is not None:
-            info = getattr(res, "info", None) or {}
-            dual = info.get("final_unscaled_dual_inf")
-            if self.grad_ref is None:
-                g0 = (info.get("objective_scaling") or {}).get("start_gradient_max")
-                if g0 is not None and np.isfinite(g0):
-                    self.grad_ref = float(g0)
-            scale = info.get("final_unscaled_dual_scale")
-            if scale is None or not np.isfinite(scale):
-                scale = 1.0
-            bound = self.kkt_tol * max(1.0, float(scale), self.grad_ref or 0.0)
-            if dual is not None and np.isfinite(dual) and dual > bound:
-                res.success = False
-                res["kkt_rejected"] = float(dual)
-                self.n_kkt_rejected += 1
-        return res
-
-    # Acceptance must tolerate the solver's bound relaxation: the IPM lets a
-    # converged primal sit up to ``bound_relax_factor * max(1, |bound|)``
-    # outside a bound (the Ipopt default factor is 1e-8). On problems that
-    # bind a large-magnitude limit (e.g. ACOPF generator/flow limits in the
-    # hundreds), that legal slack dwarfs any fixed absolute tolerance, so a
-    # purely absolute test wrongly rejects every minimum (pounce#101). Use a
-    # bound-magnitude-relative tolerance, well above the relaxation but far
-    # below any real basin spacing.
-    _ATOL = 1e-9
-    _RTOL = 1e-6
-
-    def in_bounds(self, x):
-        if self.bounds is None:
-            return True
-        for xi, bd in zip(x, self.bounds):
-            if bd is None:
-                continue
-            lo, hi = bd
-            if lo is not None:
-                tol = self._ATOL + self._RTOL * max(1.0, abs(lo))
-                if xi < lo - tol:
-                    return False
-            if hi is not None:
-                tol = self._ATOL + self._RTOL * max(1.0, abs(hi))
-                if xi > hi + tol:
-                    return False
-        return True
-
-    def is_minimum(self, x):
-        """Reject saddles/maxima via the clean Hessian (when available)."""
-        if self.hess is None:
-            return True
-        H = np.asarray(self.hess(x), dtype=float)
-        H = 0.5 * (H + H.T)
-        return float(np.linalg.eigvalsh(H)[0]) >= -self.psd_tol
-
-
-class _State:
-    """Acceptance bookkeeping + termination."""
-
-    def __init__(self, ctx, archive, n_minima, patience, callback):
-        self.ctx = ctx
-        self.archive = archive
-        self.n_minima = n_minima
-        self.patience = patience
-        self.callback = callback
-        self.stagnant = 0
-        self.trace: list[dict] = []
-
-    def consider(self, x, success, polish):
-        ctx = self.ctx
-        cand = np.asarray(x, dtype=float)
-        if success and polish:
-            res_p = ctx.solve(ctx.fun, cand, jac=ctx.jac, hess=ctx.hess)
-            success = res_p.success
-            cand = np.asarray(res_p.x, dtype=float)
-        else:
-            res_p = None
-
-        fval = float(ctx.fun(cand))
-        # Reject non-finite candidates/values: a NaN point would never be
-        # "known" (NaN distance never compares <= dedup) and would flood the
-        # archive with duplicates; NaN also breaks the Hessian eigendecomp.
-        finite = bool(np.all(np.isfinite(cand)) and np.isfinite(fval))
-        accepted = (
-            success
-            and finite
-            and ctx.in_bounds(cand)
-            and ctx.is_minimum(cand)
-            and not self.archive.is_known(cand)
-        )
-        self.trace.append({
-            "x": cand, "f": fval, "success": bool(success),
-            "accepted": accepted, "n_found": len(self.archive),
-        })
-
-        if accepted:
-            result = res_p if res_p is not None else _mk_result(cand, fval)
-            self.archive.add(cand, fval, result)
-            self.stagnant = 0
-            if self.callback is not None:
-                self.callback(cand, fval)
-            if len(self.archive) >= self.n_minima:
-                raise _Stop("target_reached")
-        else:
-            self.stagnant += 1
-            if self.stagnant >= self.patience:
-                raise _Stop("converged")
-        return accepted
-
-
-def _mk_result(x, f):
+def _recorded(x, f, lam):
+    # The archive records points, not solves; ``info`` carries the minimum's
+    # constraint multipliers when there are any. An empty ``info`` must still
+    # repr cleanly (gh #340).
     return OptimizeResult(
         x=np.asarray(x), fun=float(f), success=True, status=0,
-        message="recorded", nit=0, info={},
+        message="recorded", nit=0,
+        info={"mult_g": np.asarray(lam)} if np.size(lam) else {},
     )
 
 
-# --------------------------------------------------------------------------
-# Start-point helpers — the implementations live in pounce._starts, where
-# they also power the public pounce.generate_starts.
-# --------------------------------------------------------------------------
-from ._starts import _box, _clip, _has_box, _make_sobol, _sample  # noqa: E402
-
-
-# --------------------------------------------------------------------------
-# Strategy loops (each runs until a _Stop is raised).
-# --------------------------------------------------------------------------
-def _augment(ctx, kernel):
-    """Build (fun, jac, hess) = clean + repulsion kernel at archive centers."""
-    fun, jac, hess = ctx.fun, ctx.jac, ctx.hess
-
-    def f2(x):
-        return float(fun(x)) + kernel(x)[0]
-
-    j2 = None
-    if jac is not None:
-        def j2(x):
-            return np.asarray(jac(x), float).ravel() + kernel(x)[1]
-
-    h2 = None
-    if hess is not None:
-        def h2(x):
-            return np.asarray(hess(x), float) + kernel(x)[2]
-
-    return f2, j2, h2
-
-
-def _run_flooding(ctx, state, x0, rng, kw):
-    L, has_box = kw["_L"], kw["_has_box"]
-    sigma = _resolve_lengths(kw.get("sigma", "auto"), L, has_box,
-                             frac=kw.get("sigma_frac", 0.1), fallback=0.5)
-    amp_spec = kw.get("amplitude", "auto")
-    margin = kw.get("amp_margin", 2.0)
-    bump_factor = kw.get("amp_bump", 3.0)
-    bump_cap = kw.get("amp_bump_cap", 1e3)
-    fallback_amp = kw.get("amp_fallback", 2.0)
-    jitter = kw.get("restart_jitter", 0.5)
-    sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
-
-    base_amp: list[float] = []   # per-center height
-    mult: list[float] = []       # per-center adaptive multiplier
-    start = x0.copy()
-    last_center = None           # the basin we are trying to escape from
-    fails = 0
-    while True:
-        centers = list(state.archive.centers)
-        while len(base_amp) < len(centers):
-            k = len(base_amp)
-            if amp_spec == "auto":
-                a = _auto_amplitude(ctx.hess, centers[k], sigma, margin)
-                base_amp.append(fallback_amp if a is None else a)
-            else:
-                base_amp.append(float(amp_spec))
-            mult.append(1.0)
-        eff = [base_amp[k] * mult[k] for k in range(len(centers))]
-        kernel = lambda x, _c=centers, _a=eff: _gauss_terms(x, _c, _a, sigma)
-        f2, j2, h2 = _augment(ctx, kernel)
-        res = ctx.solve(f2, start, j2, h2)
-        if state.consider(res.x, res.success, polish=bool(centers)):
-            start = state.archive.xs[-1].copy()
-            last_center = len(state.archive.xs) - 1
-            fails = 0
-        elif last_center is not None and mult[last_center] < bump_cap and fails < 8:
-            # Under-flooded the basin we started from: raise its bump and retry.
-            mult[last_center] *= bump_factor
-            start = centers[last_center] + 0.05 * sigma * rng.standard_normal(x0.shape)
-            fails += 1
-            continue
-        else:
-            start = _sample(ctx.bounds, x0, rng, jitter, sobol)
-            last_center = None
-            fails = 0
-
-
-def _run_deflation(ctx, state, x0, rng, kw):
-    L, has_box = kw["_L"], kw["_has_box"]
-    eta = kw.get("eta", 1.0)
-    power = kw.get("power", 2.0)
-    soft = kw.get("soft", 1e-3)
-    length = _resolve_lengths(kw.get("length", "auto"), L, has_box,
-                              frac=kw.get("length_frac", 0.1), fallback=0.5)
-    jitter = kw.get("restart_jitter", 0.5)
-    sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
-    start = x0.copy()
-    while True:
-        centers = list(state.archive.centers)
-        kernel = lambda x: _pole_terms(x, centers, eta, power, soft, length)
-        f2, j2, h2 = _augment(ctx, kernel)
-        # Start a small step off the pole so the first gradient is finite.
-        s = start
-        if centers and state.archive.is_known(s):
-            s = s + 0.1 * length * rng.standard_normal(s.shape)
-        res = ctx.solve(f2, s, j2, h2)
-        if state.consider(res.x, res.success, polish=bool(centers)):
-            start = state.archive.xs[-1].copy()
-        else:
-            start = _sample(ctx.bounds, x0, rng, jitter, sobol)
-
-
-def _run_tunneling(ctx, state, x0, rng, kw):
-    L, has_box = kw["_L"], kw["_has_box"]
-    eta = kw.get("eta", 1.0)
-    power = kw.get("power", 2.0)
-    soft = kw.get("soft", 1e-3)
-    length = _resolve_lengths(kw.get("length", "auto"), L, has_box,
-                              frac=kw.get("length_frac", 0.1), fallback=0.5)
-    jitter = kw.get("restart_jitter", 0.75)
-    # Seed: one clean descent.
-    res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
-    state.consider(res.x, res.success, polish=False)
-    while True:
-        centers = list(state.archive.centers)
-        # Tunnel at the height of the most-recently found minimum, away from
-        # all known minima — the classic monotone-descending tunnel.
-        f_ref = state.archive.fs[-1] if state.archive.fs else float(ctx.fun(x0))
-
-        def T(x, _c=centers, _r=f_ref):
-            pole = _pole_terms(x, _c, eta, power, soft, length)[0]
-            return (float(ctx.fun(x)) - _r) ** 2 + pole
-
-        # Start by stepping outward from the latest minimum.
-        anchor = state.archive.xs[-1] if state.archive.xs else x0
-        start = _clip(anchor + jitter * rng.standard_normal(anchor.shape),
-                      ctx.bounds)
-        res = ctx.solve(T, start)  # FD gradient; L-BFGS
-        state.consider(res.x, res.success, polish=True)
-
-
-def _run_multistart(ctx, state, x0, rng, kw):
-    jitter = kw.get("restart_jitter", 1.0)
-    sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
-    res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
-    state.consider(res.x, res.success, polish=False)
-    while True:
-        start = _sample(ctx.bounds, x0, rng, jitter, sobol)
-        res = ctx.solve(ctx.fun, start, ctx.jac, ctx.hess)
-        state.consider(res.x, res.success, polish=False)
-
-
-# Default critical-radius scale. With the radius formula below, gamma = 2 gives
-# r ~ 1.1 of a 1.41 box diagonal at the first rounds on a 2-D box, so every
-# sample has a better one "nearby" and no solve launches before the sample cap
-# (six-hump camel: 2 solves, gh#989). 0.5 is the same order as the
-# Rinnooy Kan-Timmer critical radius (sigma = 2) and launches solves from the
-# first round.
-_MLSL_GAMMA = 0.5
-
-
-def _run_mlsl(ctx, state, x0, rng, kw):
-    from scipy.spatial import cKDTree
-
-    batch = int(kw.get("samples_per_round", 20))
-    gamma = float(kw.get("gamma", _MLSL_GAMMA))
-    jitter = kw.get("restart_jitter", 1.0)
-    sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
-    n = x0.size
-    pool_x: list[np.ndarray] = []
-    pool_f: list[float] = []
-    # Work in the per-dimension scaled metric: the box is unit width per
-    # variable, so its diagonal is sqrt(n) and distances are scale-free.
-    L = kw["_L"]
-    sdist = lambda a, b: float(np.linalg.norm((a - b) / L))
-    diag = float(np.sqrt(n))
-    # Seed from x0.
-    res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
-    state.consider(res.x, res.success, polish=False)
-    while True:
-        # Grow the sample pool (each draw counts against the sample budget,
-        # so a round that solves nothing still makes the loop terminate).
-        for _ in range(batch):
-            ctx.note_sample()
-            s = _sample(ctx.bounds, x0, rng, jitter, sobol)
-            pool_x.append(s)
-            pool_f.append(float(ctx.fun(s)))
-        N = len(pool_x)
-        # Reduced radius shrinks as the pool grows (MLSL clustering rule).
-        # Guard N>=2: log(1)=0 would give radius 0 (no clustering at all).
-        Ne = max(N, 2)
-        radius = gamma * diag * (np.log(Ne) / Ne) ** (1.0 / n)
-        order = np.argsort(pool_f)
-        # Single-linkage test through a KD-tree instead of an O(N) interpreter
-        # loop per candidate (~15 s at max_solves=300; gh#989). A k-nearest
-        # query decides almost every point; a point whose k nearest are all
-        # inside ``radius`` and none better is the only one that needs the
-        # (potentially large) ball query.
-        PX = np.asarray(pool_x) / L
-        PF = np.asarray(pool_f)
-        tree = cKDTree(PX)
-        K = min(N, 8)
-        kd, ki = tree.query(PX, k=K)
-        kd, ki = kd.reshape(N, K), ki.reshape(N, K)
-        for i in order:
-            si, fi = pool_x[i], pool_f[i]
-            inside = kd[i] < radius
-            if np.any(inside & (PF[ki[i]] < fi)):
-                better_near = True
-            elif K == N or not inside.all():
-                better_near = False
-            else:
-                nb = np.asarray(tree.query_ball_point(PX[i], r=radius), dtype=int)
-                better_near = bool(nb.size and np.any(PF[nb] < fi))
-            if better_near or state.archive.near_any(si, radius):
-                continue
-            res = ctx.solve(ctx.fun, si, ctx.jac, ctx.hess)
-            state.consider(res.x, res.success, polish=False)
-
-
-def _run_basinhopping(ctx, state, x0, rng, kw):
-    step = float(kw.get("step", 0.5))
-    temperature = float(kw.get("temperature", 1.0))
-    res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
-    state.consider(res.x, res.success, polish=False)
-    cur = np.asarray(res.x, float)
-    cur_f = float(res.fun) if res.success else float(ctx.fun(cur))
-    while True:
-        trial = _clip(cur + step * rng.standard_normal(cur.shape), ctx.bounds)
-        res = ctx.solve(ctx.fun, trial, ctx.jac, ctx.hess)
-        if not res.success:
-            state.consider(res.x, False, polish=False)
-            continue
-        state.consider(res.x, True, polish=False)
-        new_f = float(res.fun)
-        if new_f < cur_f or rng.random() < np.exp(-(new_f - cur_f) / temperature):
-            cur, cur_f = np.asarray(res.x, float), new_f
-
-
-_STRATEGIES = {
-    "flooding": _run_flooding,
-    "deflation": _run_deflation,
-    "tunneling": _run_tunneling,
-    "multistart": _run_multistart,
-    "mlsl": _run_mlsl,
-    "basinhopping": _run_basinhopping,
-}
+def _width(spec, n, name):
+    """``"auto"`` / scalar / length-``n`` vector -> what the search takes."""
+    if spec is None or (isinstance(spec, str) and spec == "auto"):
+        return None
+    arr = np.asarray(spec, float)
+    if arr.ndim == 0:
+        return float(arr)
+    if arr.shape != (n,):
+        raise ValueError(f"strategy_kw[{name!r}] must be a scalar or have length {n}")
+    return arr
 
 
 # --------------------------------------------------------------------------
@@ -664,7 +171,7 @@ def find_minima(
     seed: int | None = None,
     callback: Callable | None = None,
 ) -> MinimaResult:
-    """Find multiple local minima of ``fun`` by driving ``minimize`` in a loop.
+    """Find multiple local minima of ``fun`` by driving the local solver in a loop.
 
     Parameters mirror :func:`pounce.minimize` (``fun``, ``jac``, ``hess``,
     ``bounds``, ``constraints``, ``options``) plus search controls:
@@ -693,33 +200,43 @@ def find_minima(
         scalar (isotropic) or a length-``n`` vector. The flooding
         ``amplitude`` is also ``"auto"`` by default — set per minimum from
         the local curvature (``amp_margin × μ_min``, the well-tempered
-        escape height) and raised adaptively if the solver returns to a
-        flooded basin — so no manual energy scale is needed (give a scalar
-        to override). Examples: ``sigma``/``amplitude`` (flooding),
-        ``eta``/``power``/``length`` (deflation), ``step``/``temperature``
-        (basinhopping), ``samples_per_round``/``gamma`` (mlsl).
+        escape height) and raised adaptively (``amp_bump``, up to
+        ``amp_bump_cap``) if the solver returns to a flooded basin, with
+        ``amp_fallback`` when there is no Hessian — so no manual energy
+        scale is needed (give a scalar to override). Examples:
+        ``sigma``/``amplitude`` (flooding), ``eta``/``power``/``length``
+        (deflation), ``step``/``temperature`` (basinhopping),
+        ``samples_per_round``/``gamma``/``max_samples`` (mlsl). An
+        unrecognised key raises ``ValueError``.
     distance
         Custom metric ``d(a, b) -> float`` for dedup (e.g. periodic boxes).
         Defaults to Euclidean distance in the per-dimension scaled space.
     psd_tol
-        Smallest Hessian eigenvalue tolerated by the saddle-rejection check.
-        Note this is an **absolute** tolerance (scale-sensitive), unlike the
-        scale-free dedup metric; scale ``psd_tol`` with your objective's
-        curvature if needed.
+        Smallest Hessian eigenvalue tolerated by the saddle-rejection check
+        (run when ``hess`` is given and ``n <= 256``). Note this is an
+        **absolute** tolerance (scale-sensitive), unlike the scale-free dedup
+        metric; scale ``psd_tol`` with your objective's curvature if needed.
     kkt_tol
         A converged local solve is rejected as a candidate when the solver's
-        own **unscaled** dual infeasibility (``info["final_unscaled_dual_inf"]``)
-        exceeds ``kkt_tol * max(1, g0, scale)``: ``g0`` is ``max |grad f|`` at
-        ``x0`` (the problem's gradient scale) and ``scale`` the magnitude of
-        the terms the residual is assembled from at the returned point
-        (``info["final_unscaled_dual_scale"]``: ``max |grad f|, |J^T lambda|,
-        |z|``). Default ``1e-4``; ``None`` disables. The solver's success
-        verdict is judged in a scaled space, and this is the model-units check
-        that applies whether or not ``hess=`` is given (gh#983). Being
-        relative, it does not reject every candidate of an objective whose
-        gradients legitimately live at a large scale. Rejections are counted
-        in ``MinimaResult.n_kkt_rejected``, and a ``RuntimeWarning`` is
-        raised when they emptied the result.
+        own **unscaled** dual infeasibility exceeds
+        ``kkt_tol * max(1, g0, scale)``: ``g0`` is ``max |grad f|`` at ``x0``
+        (the problem's gradient scale) and ``scale`` the magnitude of the
+        terms the residual is assembled from at the returned point
+        (``max |grad f|, |J^T lambda|, |z|``). Default ``1e-4``; ``None``
+        disables. The solver's success verdict is judged in a scaled space,
+        and this is the model-units check that applies whether or not
+        ``hess=`` is given (gh#983). Being relative, it does not reject every
+        candidate of an objective whose gradients legitimately live at a
+        large scale. Rejections are counted in ``MinimaResult.n_kkt_rejected``,
+        and a ``RuntimeWarning`` is raised when they emptied the result.
+    seed
+        Seeds the start sampler (scrambled Sobol' and a ChaCha8 PRNG — the
+        CLI's, so the same seed runs the same search from ``pounce --minima
+        --seed``). ``None`` draws one at random; ``MinimaResult.seed``
+        reports it either way.
+    callback
+        ``callback(x, f)``, called on each accepted minimum. An exception
+        raised in it ends the search and propagates.
 
     Returns
     -------
@@ -727,68 +244,89 @@ def find_minima(
         ``.minima`` / ``.values`` sorted by objective, ``.x`` the best,
         ``.status`` one of ``"target_reached" | "converged" |
         "budget_exhausted"`` (``max_solves`` spent) ``|
-        "sample_cap_reached"`` (MLSL ``max_samples`` hit)``, plus ``.n_solves`` and ``.trace``.
+        "sample_cap_reached"`` (MLSL ``max_samples`` hit), plus ``.n_solves``,
+        ``.trace``, ``.seed`` and ``.lambdas``.
     """
-    if method not in _STRATEGIES:
-        raise ValueError(
-            f"unknown method {method!r}; choose from {sorted(_STRATEGIES)}"
-        )
+    if method not in _METHODS:
+        raise ValueError(f"unknown method {method!r}; choose from {sorted(_METHODS)}")
     x0 = np.atleast_1d(np.asarray(x0, dtype=float))
-    _validate_bounds_length(bounds, x0.size)
+    n = x0.size
+    _validate_bounds_length(bounds, n)
     if n_minima < 1:
         raise ValueError(f"n_minima must be >= 1, got {n_minima}")
     if patience < 1:
         raise ValueError(f"patience must be >= 1, got {patience}")
     if max_solves is not None and max_solves < 1:
         raise ValueError(f"max_solves must be >= 1, got {max_solves}")
-    rng = np.random.default_rng(seed)
-    if max_solves is None:
-        # Generous default: repulsion methods spend a polish solve per
-        # accepted minimum, so the effective attempt budget is ~half this.
-        max_solves = 8 * n_minima
+    bad = np.where(~np.isfinite(x0))[0]
+    if bad.size:
+        raise ValueError(f"x0[{int(bad[0])}] is {x0[bad[0]]}; the starting point must be finite.")
+
     kw = dict(strategy_kw or {})
-    kw.setdefault("seed", seed)
+    unknown = sorted(set(kw) - _STRATEGY_KEYS)
+    if unknown:
+        raise ValueError(
+            f"find_minima: unknown strategy_kw key(s) {unknown}; "
+            f"expected some of {sorted(_STRATEGY_KEYS)}"
+        )
+    # `strategy_kw["seed"]` is the old spelling of `seed`; an explicit `seed=`
+    # wins.
+    if seed is None:
+        seed = kw.pop("seed", None)
+    else:
+        kw.pop("seed", None)
+    if seed is None:
+        seed = int(np.random.SeedSequence().generate_state(1, np.uint64)[0])
+    seed = int(seed)
 
-    # Per-dimension length scale (box width per variable). Drives the
-    # anisotropic bump widths and, unless the caller supplies its own
-    # ``distance``, the dedup metric — so flooding and de-duplication agree
-    # and ``dedup`` is in scale-free (fraction-of-range) units.
-    L, has_box = _scale_from_bounds(bounds, x0.size)
-    kw["_L"], kw["_has_box"] = L, has_box
-    if distance is None:
-        distance = lambda a, b: float(np.linalg.norm((a - b) / L))
+    opts = dict(options or {})
+    selection = str(opts.pop("solver_selection", "nlp")).lower()
+    if selection != "nlp":
+        raise ValueError(
+            "find_minima runs every local solve on the NLP path (the repulsion "
+            "methods change the objective, so the convex routes do not apply); "
+            f"got solver_selection={selection!r}."
+        )
+    opts.pop("route_tol", None)
+    disp = bool(opts.pop("disp", False))
+    opts.setdefault("print_level", 5 if disp else 0)
 
-    ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol, kkt_tol)
-    if jac is not None and kkt_tol is not None:
-        try:
-            g0 = np.abs(np.asarray(jac(x0), dtype=float)).max()
-            if np.isfinite(g0):
-                ctx.grad_ref = float(g0)
-        except Exception:  # a jac that cannot take x0 is the solve's to report
-            pass
-    ctx.max_solves = max_solves
-    # Hard ceiling on sampled points for solve-gated strategies (MLSL): the
-    # natural envelope is one round of samples per unit of solve budget.
-    # Termination is otherwise solve-gated, so a round whose clustering filter
-    # rejects every sample never advances `max_solves` or `patience`; this cap
-    # guarantees `max_solves` bounds wall-clock even when no solve ever fires
-    # (pounce#103). Overridable via strategy_kw["max_samples"].
-    batch = max(int(kw.get("samples_per_round", 20)), 1)
-    ctx.max_samples = int(kw.get("max_samples", max_solves * batch))
-    archive = MinimaArchive(dedup, distance)
-    state = _State(ctx, archive, n_minima, patience, callback)
+    lb, ub = _normalize_bounds(bounds, n)
+    m, g_comb, jac_comb, cl, cu, jrows, jcols = _wrap_constraints(constraints, n, x0)
+    problem, _, _ = _prepare_nlp(
+        fun=fun, n=n, m=m, args=(), jac=jac, hess=hess,
+        constraints=constraints, g_combined=g_comb, jac_combined=jac_comb,
+        jac_rows=jrows, jac_cols=jcols, lb=lb, ub=ub, cl=cl, cu=cu,
+        callback=None, options=opts, facade="pounce.find_minima",
+    )
 
-    status = "budget_exhausted"
-    try:
-        _STRATEGIES[method](ctx, state, x0, rng, kw)
-    except _Stop as stop:
-        status = stop.status
+    search = {
+        "method": method, "n_minima": int(n_minima),
+        "max_solves": None if max_solves is None else int(max_solves),
+        "patience": int(patience), "dedup": float(dedup),
+        "psd_tol": float(psd_tol),
+        "kkt_tol": None if kkt_tol is None else float(kkt_tol),
+        "seed": seed,
+    }
+    for key in ("sigma", "length"):
+        if key in kw:
+            search[key] = _width(kw.pop(key), n, key)
+    if "amplitude" in kw:
+        amp = kw.pop("amplitude")
+        search["amplitude"] = None if (isinstance(amp, str) and amp == "auto") else float(amp)
+    search.update(kw)
 
-    if not archive.fs and ctx.n_kkt_rejected:
-        import warnings
+    from ._pounce import find_minima as _native_find_minima
 
+    out = _native_find_minima(
+        problem, x0, search, callback=callback,
+        distance=None if distance is None else
+        (lambda a, b, _d=distance: float(_d(a, b))),
+    )
+
+    if not out["minima"] and out["n_kkt_rejected"]:
         warnings.warn(
-            f"find_minima: every converged candidate ({ctx.n_kkt_rejected}) was "
+            f"find_minima: every converged candidate ({out['n_kkt_rejected']}) was "
             f"rejected by kkt_tol={kkt_tol!r} (unscaled dual infeasibility "
             f"above kkt_tol * max(1, dual scale)); no minima are returned. "
             f"Inspect the solves' info['final_unscaled_dual_inf'] or loosen "
@@ -796,13 +334,20 @@ def find_minima(
             RuntimeWarning,
             stacklevel=2,
         )
-    order = list(np.argsort(archive.fs)) if archive.fs else []
+    for w in out["warnings"]:
+        warnings.warn(f"find_minima: {w}", RuntimeWarning, stacklevel=2)
+
+    minima = [np.asarray(x) for x in out["minima"]]
+    values = [float(v) for v in out["values"]]
+    lambdas = [np.asarray(lam) for lam in out["lambdas"]]
     return MinimaResult(
-        minima=[archive.xs[i] for i in order],
-        values=[archive.fs[i] for i in order],
-        results=[archive.results[i] for i in order],
-        status=status,
-        n_solves=ctx.n_solves,
-        trace=state.trace,
-        n_kkt_rejected=ctx.n_kkt_rejected,
+        minima=minima,
+        values=values,
+        results=[_recorded(x, f, lam) for x, f, lam in zip(minima, values, lambdas)],
+        status=out["status"],
+        n_solves=int(out["n_solves"]),
+        trace=list(out["trace"]),
+        n_kkt_rejected=int(out["n_kkt_rejected"]),
+        seed=seed,
+        lambdas=lambdas,
     )

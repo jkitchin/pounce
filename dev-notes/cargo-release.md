@@ -13,7 +13,7 @@ are documentation, not a second source of truth to keep hand-synced.
 ## What publishes, what does not
 
 The publishable set is exactly "every workspace member without
-`publish = false`". As of this writing that is these 21:
+`publish = false`". As of this writing that is these 22:
 
 | Crate                  | Publishes? | Role                                         |
 | ---------------------- | ---------- | -------------------------------------------- |
@@ -32,6 +32,7 @@ The publishable set is exactly "every workspace member without
 | `pounce-restoration`   | yes        | restoration phase                            |
 | `pounce-sensitivity`   | yes        | sIPOPT port / parametric warm-start          |
 | `pounce-solve-report`  | yes        | `pounce.solve-report/v1` JSON writer         |
+| `pounce-minima`        | yes        | multistart / find-minima search (gh#966)     |
 | `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
 | `pounce-convex`        | yes        | LP/QP/SOCP/SDP conic IPM                      |
 | `pounce-nl`            | yes        | `.nl` reader + AD tape; pounce-cli depends   |
@@ -61,7 +62,7 @@ Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
          `pounce-nl`, `pounce-observability`, `pounce-presolve`, `pounce-qp`,
          `pounce-solve-report`
 Layer 4: `pounce-algorithm`
-Layer 5: `pounce-restoration`, `pounce-sensitivity`
+Layer 5: `pounce-minima`, `pounce-restoration`, `pounce-sensitivity`
 Layer 6: `pounce-cinterface`, `pounce-cli`
 
 `pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on `pounce-common` +
@@ -85,6 +86,10 @@ As of 0.6.0, **all 19** crates are published (the last new name,
 `pounce-convex`, first published in 0.5.0). Every release since is a version
 bump of existing crates — 1/min, burst 30 — so the new-crate rate limit does
 not apply to a routine release.
+
+`pounce-minima` (gh#966) is a new name: the first release that carries it
+publishes one new crate, well inside the 5-burst limit, so it needs no
+exemption.
 
 The new-crate burst limit only matters if a future release introduces **new**
 crate names. If one does and you would exceed the 5-burst limit, either set
@@ -237,7 +242,7 @@ crates and drives `release-crates.yml`.)
 
 | Surface                 | Workflow                              | Trigger                  |
 | ----------------------- | ------------------------------------- | ------------------------ |
-| crates.io (21 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
+| crates.io (22 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
 | PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
 | PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
 | ghcr.io container images| `release-docker.yml`                  | `v*` tag / push to main  |

@@ -919,6 +919,7 @@ dependencies = [
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-minima",
  "pounce-nl",
  "pounce-nlp",
  "pounce-observability",
@@ -927,12 +928,9 @@ dependencies = [
  "pounce-sensitivity",
  "pounce-solve-report",
  "pounce-studio-core",
- "rand",
- "rand_chacha",
  "rustyline",
  "serde",
  "serde_json",
- "sobol_burley",
  "tracing",
 ]
 
@@ -1006,6 +1004,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-minima"
+version = "0.12.0"
+dependencies = [
+ "pounce-algorithm",
+ "pounce-common",
+ "pounce-linalg",
+ "pounce-nlp",
+ "rand",
+ "rand_chacha",
+ "sobol_burley",
+]
+
+[[package]]
 name = "pounce-nl"
 version = "0.12.0"
 dependencies = [
@@ -1062,6 +1073,7 @@ dependencies = [
  "pounce-feral",
  "pounce-hsl",
  "pounce-linsol",
+ "pounce-minima",
  "pounce-nl",
  "pounce-nlp",
  "pounce-observability",
@@ -1108,6 +1120,7 @@ dependencies = [
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-minima",
  "pounce-nlp",
  "pounce-observability",
  "pounce-presolve",

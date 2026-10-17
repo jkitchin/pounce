@@ -47,6 +47,8 @@ pounce-linsol.workspace = true
 pounce-sensitivity.workspace = true
 pounce-observability.workspace = true
 pounce-solve-report.workspace = true
+# `_pounce.find_minima`: the shared multistart / find-minima search (gh#966).
+pounce-minima.workspace = true
 tracing.workspace = true
 pyo3 = { version = "0.22", features = ["abi3-py39"] }
 numpy = "0.22"

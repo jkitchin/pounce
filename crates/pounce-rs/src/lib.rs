@@ -22,7 +22,8 @@
 //! | `convex` | [`convex`] | LP, convex QP, SOCP / exponential / power / PSD cones, SOS; batched and warm-started solves; QP sensitivity and reduced Hessian |
 //! | `qp` | [`qp`], [`sqp`] | sparse **parametric active-set** QP — the SQP / MPC / continuation engine, indefinite Hessians allowed — plus the SQP working-set warm-start contract |
 //! | `sensitivity` | [`sensitivity`] | sIPOPT-style NLP sensitivity: `∂x*/∂p` predictors, parametric warm starts, reduced Hessian |
-//! | `full` | — | all three |
+//! | `minima` | [`minima`] | multistart / find-minima global search: several distinct local minima of one NLP, six strategies |
+//! | `full` | — | all four |
 //!
 //! ```toml
 //! [dependencies]
@@ -34,8 +35,9 @@
 //!
 //! Enabling a feature widens what this crate *exports*; it is close to free
 //! at build time, because the default NLP path already pulls `pounce-qp`,
-//! `pounce-linsol`, and `pounce-feral` transitively. Only `convex` and
-//! `sensitivity` add crates to compile.
+//! `pounce-linsol`, and `pounce-feral` transitively. Only `convex`,
+//! `sensitivity` and `minima` add crates to compile (`minima` adds
+//! `pounce-minima` and its sampler's `rand` / `sobol_burley`).
 //!
 //! ## Example: HS071 (Hock–Schittkowski problem 71)
 //!
@@ -254,6 +256,8 @@ pub mod session;
 pub mod convex;
 #[cfg(any(feature = "convex", feature = "qp"))]
 pub mod linsol;
+#[cfg(feature = "minima")]
+pub mod minima;
 #[cfg(feature = "qp")]
 pub mod qp;
 #[cfg(feature = "sensitivity")]

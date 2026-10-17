@@ -275,3 +275,71 @@ def test_mlsl_sample_cap_status_names_the_cap():
     )
     assert r.status == "sample_cap_reached"
     assert r.n_solves < 60
+
+
+# --- gh#966: the search runs in Rust; what the Python surface promises -----
+def test_callback_exception_propagates():
+    fun, jac, hess, bounds = six_hump_camel()
+
+    class Stop(Exception):
+        pass
+
+    def cb(x, f):
+        raise Stop(f"at {f}")
+
+    with pytest.raises(Stop, match="at"):
+        pounce.find_minima(fun, [0.5, 0.5], method="multistart", jac=jac,
+                           hess=hess, bounds=bounds, n_minima=4, seed=0,
+                           options=OPTS, callback=cb)
+
+
+def test_distance_exception_propagates():
+    fun, jac, hess, bounds = six_hump_camel()
+
+    def bad(a, b):
+        raise KeyError("no metric")
+
+    with pytest.raises(KeyError, match="no metric"):
+        pounce.find_minima(fun, [0.5, 0.5], method="multistart", jac=jac,
+                           hess=hess, bounds=bounds, n_minima=4, seed=0,
+                           options=OPTS, distance=bad)
+
+
+def test_unknown_strategy_kw_raises():
+    fun, jac, hess, bounds = six_hump_camel()
+    with pytest.raises(ValueError, match="sigma_fac"):
+        pounce.find_minima(fun, [0.5, 0.5], method="flooding", jac=jac,
+                           hess=hess, bounds=bounds, options=OPTS,
+                           strategy_kw={"sigma_fac": 0.2})
+
+
+def test_seed_is_reported_and_replays():
+    """``seed=None`` draws a seed and reports it; that seed replays the run."""
+    fun, jac, hess, bounds = six_hump_camel()
+    kw = dict(method="multistart", jac=jac, hess=hess, bounds=bounds,
+              n_minima=6, max_solves=40, dedup=1e-3, options=OPTS)
+    r = pounce.find_minima(fun, [0.5, 0.5], **kw)
+    assert isinstance(r.seed, int)
+    again = pounce.find_minima(fun, [0.5, 0.5], seed=r.seed, **kw)
+    assert again.seed == r.seed
+    assert again.n_solves == r.n_solves
+    np.testing.assert_array_equal(again.values, r.values)
+
+
+def test_constrained_minima_carry_their_multipliers():
+    """Each minimum's base-problem constraint multipliers are recovered by a
+    clean re-solve, on ``MinimaResult.lambdas`` and ``results[i].info``."""
+    # min (x-1)^2 + (y-1)^2  s.t. x + y <= 1: the minimum is on the row,
+    # (0.5, 0.5), with multiplier 1 (scipy sign convention aside, |lambda| = 1).
+    fun = lambda z: float((z[0] - 1) ** 2 + (z[1] - 1) ** 2)
+    jac = lambda z: np.array([2 * (z[0] - 1), 2 * (z[1] - 1)])
+    cons = [{"type": "ineq", "fun": lambda z: 1.0 - z[0] - z[1],
+             "jac": lambda z: np.array([-1.0, -1.0])}]
+    r = pounce.find_minima(fun, [0.0, 0.0], method="multistart", jac=jac,
+                           bounds=[(-2, 2), (-2, 2)], constraints=cons,
+                           n_minima=2, max_solves=6, seed=0, options=OPTS)
+    assert len(r) == 1
+    np.testing.assert_allclose(r.x, [0.5, 0.5], atol=1e-6)
+    assert len(r.lambdas) == 1 and r.lambdas[0].shape == (1,)
+    assert abs(abs(r.lambdas[0][0]) - 1.0) < 1e-6
+    np.testing.assert_array_equal(r.results[0].info["mult_g"], r.lambdas[0])

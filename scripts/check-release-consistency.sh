@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Release consistency guard — run in CI before tagging, and locally before a
 # release. POUNCE ships to four surfaces (PyPI pounce-solver, PyPI
-# pyomo-pounce, 21 crates.io workspace crates, and the ghcr.io container
+# pyomo-pounce, 22 crates.io workspace crates, and the ghcr.io container
 # images); this script fails loudly if any of the facts a release depends on
 # have drifted apart:
 #
