@@ -1320,6 +1320,13 @@ fn run_inner_resto_impl(
     let acceptable_stop_at_feasible_point = !is_square_problem
         && matches!(status, SolverReturn::StopAtAcceptablePoint)
         && orig_inf_pr_scaled <= 1e2 * outer_tol;
+    if acceptable_stop_at_feasible_point {
+        tracing::debug!(target: "pounce::restoration",
+            "[PN_RESTO_ACCEPTABLE_FEASIBLE] inner stopped at its acceptable level at a point \
+             feasible to 1e2*tol (orig_inf_pr_scaled={:.3e}); marking it unreleased (gh#1042)",
+            orig_inf_pr_scaled,
+        );
+    }
 
     // `strict`'s condition with the square carve-out lifted, under the same
     // guards: the verdict this sub-solve earned and the carve-out withheld.
