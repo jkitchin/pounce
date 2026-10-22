@@ -543,10 +543,10 @@ impl SecondOpinionAvailability {
             pounce_feral::ScalingStrategy::Identity => Some("identity"),
             pounce_feral::ScalingStrategy::External(_) => None,
         };
-        let already_adaptive = options
-            .get_string_value("mu_strategy", "")
-            .map(|(v, _found)| v == "adaptive")
-            .unwrap_or(false);
+        // The *resolved* strategy, not the raw option: under a
+        // limited-memory Hessian an unset `mu_strategy` already runs
+        // adaptive (gh#746), and the rung would re-run the base solve.
+        let already_adaptive = crate::application::mu_strategy_resolves_to_adaptive(options);
         Self {
             trigger,
             scaling_retry_enabled: options
@@ -838,6 +838,44 @@ mod scaling_retry_tests {
             "{:?}",
             rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
         );
+    }
+
+    /// gh#1042 review: under a limited-memory Hessian an unset `mu_strategy`
+    /// already resolves to adaptive (gh#746), so the `mu_strategy=adaptive`
+    /// rung would re-run the base solve byte-for-byte. Measured on `deb7`
+    /// L-BFGS before this: base and "adaptive" rung both 1610 iterations,
+    /// `f = 99.636943584`. The ladder must read the resolved strategy.
+    #[test]
+    fn the_adaptive_rung_is_skipped_when_limited_memory_already_runs_adaptive() {
+        let labels = |opts: &OptionsList| {
+            let a = SecondOpinionAvailability::from_options(
+                opts,
+                SecondOpinionTrigger::StepComputationError,
+                0,
+            );
+            second_opinion_rungs(a)
+                .iter()
+                .map(|r| r.label)
+                .collect::<Vec<_>>()
+        };
+        let mut lbfgs = OptionsList::new();
+        lbfgs
+            .set_string_value("hessian_approximation", "limited-memory", true, true)
+            .unwrap();
+        assert!(
+            !labels(&lbfgs).contains(&"mu_strategy=adaptive"),
+            "limited-memory with mu_strategy unset already runs adaptive: {:?}",
+            labels(&lbfgs)
+        );
+        // An explicit monotone under limited-memory is a real alternative.
+        let mut pinned = lbfgs.clone();
+        pinned
+            .set_string_value("mu_strategy", "monotone", true, true)
+            .unwrap();
+        assert!(labels(&pinned).contains(&"mu_strategy=adaptive"));
+        // The exact arm, unset: monotone, so the rung is a different solve.
+        let exact = OptionsList::new();
+        assert!(labels(&exact).contains(&"mu_strategy=adaptive"));
     }
 
     /// The console gate, which both printing surfaces share. An explicit `0`
