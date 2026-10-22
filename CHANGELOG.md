@@ -10,6 +10,30 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **A restoration that ends on a feasible point it never released no longer
+  cycles when the outer phase cannot leave that point (gh #1042).** When the
+  restoration sub-problem converges at a feasible point that the outer filter
+  rejects (or that does not cut the violation by `kappa_resto`), upstream
+  reports `Restoration_Failed`. POUNCE hands the point back so the outer
+  phase gets one shot from it, which the `dallas*` models need. Nothing
+  bounded the case where the outer re-entered restoration from that same
+  point without accepting a step. Vanderbei `brainpc0`/`brainpc1` ran 2117
+  and 1073 iterations (121 and 52 restoration calls) before another cycle
+  detector stopped them, and then `mu_strategy=adaptive` solved them in 24
+  and 52. That re-entry now ends the base solve at once, with the same status
+  and acceptable-point rollback as the other restoration-cycle exits. Base
+  solves: `brainpc0` 2117 → 956, `brainpc1` 1073 → 378, `brainpc2` 561 → 258,
+  `ssebnln` 138 → 117 on arm64, and globallib `ex9_1_1` 99 → 74. Each
+  reaches the same final answer. No other model moves across the 733
+  Vanderbei models and 396 more from Mittelmann, globallib, grid, gas,
+  water, electrolyte, large-scale and QP. On x86_64 `brainpc0`–`brainpc9`
+  take different trajectories that never reach this shape, and none of them
+  moves. One fixture leg moves on both architectures:
+  `deb7` on L-BFGS fails either way, but its base solve now ends
+  `Error_In_Step_Computation` (1610 iterations on arm64, 982 on x86_64)
+  instead of `Restoration_Failed` (1893, 1206). That opens the
+  `mu_strategy=adaptive` rung instead of `start_point_perturbation`, which
+  fails too and costs 63 (arm64) and 226 (x86_64) more iterations in total.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

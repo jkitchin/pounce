@@ -624,6 +624,10 @@ fn run_inner_resto_impl(
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
     }
+    // gh#1042: set by layer 2 when it hands back a converged-to-feasible
+    // point layer 1 never released; surfaced on the result below.
+    let unreleased_feasible_point = Rc::new(std::cell::Cell::new(false));
+    adapter = adapter.with_unreleased_feasible_flag(Rc::clone(&unreleased_feasible_point));
     alg_bundle.conv_check =
         Box::new(adapter) as Box<dyn pounce_algorithm::conv_check::r#trait::ConvCheck>;
     alg_bundle.iter_output = Box::new(
@@ -891,6 +895,7 @@ fn run_inner_resto_impl(
             square_certificate_suppressed: false,
             user_requested_stop: true,
             feasible_point_found: false,
+            unreleased_feasible_point: false,
         });
     }
 
@@ -1364,6 +1369,7 @@ fn run_inner_resto_impl(
         locally_infeasible,
         user_requested_stop: false,
         square_certificate_suppressed,
+        unreleased_feasible_point: unreleased_feasible_point.get(),
     })
 }
 

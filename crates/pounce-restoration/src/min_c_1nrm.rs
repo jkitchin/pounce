@@ -109,6 +109,13 @@ pub struct RestoSolveResult {
     /// square (the PFIT3/PFIT4 "extra shots" carve-out). The driver counts
     /// these against [`SQUARE_CERTIFICATE_REPEATS`] (gh#1000).
     pub square_certificate_suppressed: bool,
+    /// `true` when the sub-solve ended on layer 2's
+    /// converged-to-feasible-point verdict and the point is being handed
+    /// back although layer 1 — the `kappa_resto` reduction and the outer
+    /// filter test — never released it (gh#1042). Upstream fails
+    /// restoration here; pounce resumes the outer phase from the point and
+    /// lets the outer loop judge whether that paid off.
+    pub unreleased_feasible_point: bool,
 }
 
 /// What one restoration sub-solve cost, and — when it produced one — what
@@ -223,6 +230,11 @@ pub struct MinC1NormRestoration {
     /// accepted main-phase steps: that reset is what left gh#1000's loop
     /// bounded only by `max_iter`.
     pub(crate) square_certificate: Option<(Vec<Number>, Index)>,
+    /// [`RestoSolveResult::unreleased_feasible_point`] of the most recent
+    /// call, reset on each call. Read by the outer loop through
+    /// [`pounce_algorithm::restoration::RestorationPhase::last_recovery_unreleased`]
+    /// (gh#1042).
+    pub(crate) last_recovery_unreleased: bool,
 }
 
 /// How many times the same point may be re-certified locally infeasible on
@@ -271,6 +283,7 @@ impl Default for MinC1NormRestoration {
             debug_hook: None,
             intermediate_tnlp: None,
             square_certificate: None,
+            last_recovery_unreleased: false,
         }
     }
 }
@@ -336,6 +349,10 @@ impl RestorationPhase for MinC1NormRestoration {
         self.last_inner_iter_count
     }
 
+    fn last_recovery_unreleased(&self) -> bool {
+        self.last_recovery_unreleased
+    }
+
     fn set_print_iter_output(&mut self, enabled: bool) {
         self.print_iter_output = enabled;
     }
@@ -376,6 +393,7 @@ impl RestorationPhase for MinC1NormRestoration {
         // off `result`, so a restoration that ground for hundreds of
         // iterations and then failed reported nothing at all.
         self.last_inner_iter_count = 0;
+        self.last_recovery_unreleased = false;
         // Upstream isolates the resto sub-IPM behind a separate
         // `IpoptData` (`IpRestoMinC_1Nrm.cpp:123`), so the outer's
         // `curr_mu` / `curr_tau` are untouched across the inner solve;
@@ -402,6 +420,7 @@ impl RestorationPhase for MinC1NormRestoration {
         let Some(result) = inner.result else {
             return RestorationOutcome::Failed;
         };
+        self.last_recovery_unreleased = result.unreleased_feasible_point;
         {
             let mut d = data.borrow_mut();
             d.curr_mu = saved_mu;
@@ -1194,6 +1213,7 @@ mod tests {
                 square_certificate_suppressed: false,
                 user_requested_stop: false,
                 feasible_point_found: false,
+                unreleased_feasible_point: false,
             }),
         });
 
