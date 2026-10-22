@@ -229,6 +229,14 @@ impl RestorationPhase for RestoAlgorithmBundle {
     ) -> RestorationOutcome {
         self.driver.perform_restoration(data, cq, nlp, aug_solver)
     }
+
+    fn last_inner_iter_count(&self) -> pounce_common::types::Index {
+        self.driver.last_inner_iter_count()
+    }
+
+    fn last_recovery_unreleased(&self) -> bool {
+        self.driver.last_recovery_unreleased()
+    }
 }
 
 #[cfg(test)]

@@ -432,13 +432,16 @@ pub struct IpoptAlgorithm {
     /// step.
     last_resto_recovery_x: Option<Box<dyn Vector>>,
     last_resto_recovery_s: Option<Box<dyn Vector>>,
-    /// Whether the recovery snapshotted in [`Self::last_resto_recovery_x`]
-    /// was a point restoration handed back without releasing it — layer 2's
+    /// The most recent restoration recovery, kept only when it was a point
+    /// restoration handed back without releasing it — layer 2's
     /// converged-to-feasible-point verdict, which upstream treats as a
     /// restoration failure (gh#1042, see
-    /// [`RestorationPhase::last_recovery_unreleased`]). Cleared with the
-    /// snapshot on any LS-accepted step.
-    last_resto_recovery_unreleased: bool,
+    /// [`RestorationPhase::last_recovery_unreleased`]). Unlike
+    /// [`Self::last_resto_recovery_x`] it is **not** cleared by an accepted
+    /// step: a watchdog that tries steps from the handed-back point and
+    /// rolls back to it has not left it either. Replaced at every recovery.
+    last_resto_unreleased_x: Option<Box<dyn Vector>>,
+    last_resto_unreleased_s: Option<Box<dyn Vector>>,
     /// Count of consecutive restoration entries on which the outer
     /// step (recovery → next-entry) was below the iterate-distance
     /// threshold. Cleared on any LS-accepted step. Limit chosen to
@@ -686,7 +689,8 @@ impl IpoptAlgorithm {
             last_resto_entry_x: None,
             last_resto_entry_s: None,
             last_resto_recovery_x: None,
-            last_resto_recovery_unreleased: false,
+            last_resto_unreleased_x: None,
+            last_resto_unreleased_s: None,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
@@ -3514,7 +3518,6 @@ impl IpoptAlgorithm {
                         self.last_resto_entry_s = None;
                         self.last_resto_recovery_x = None;
                         self.last_resto_recovery_s = None;
-                        self.last_resto_recovery_unreleased = false;
                         self.resto_no_outer_progress_count = 0;
                         // Intentionally *not* clearing
                         // `resto_near_feasible_count` here: DECONVBNE's
@@ -4095,44 +4098,86 @@ impl IpoptAlgorithm {
             false
         };
         // A handed-back converged-to-feasible point the outer could not
-        // leave (gh#1042). Restoration's layer 2 ended the previous call on
-        // `ConvergedToFeasiblePoint`: its sub-problem converged at a point
-        // feasible for the original NLP that layer 1 never released — the
+        // leave (gh#1042). Restoration ended a previous call on upstream's
+        // `RESTORATION_CONVERGED_TO_FEASIBLE_POINT` condition: layer 2's
+        // `ConvergedToFeasiblePoint` verdict (`IpRestoConvCheck.cpp:227-234`)
+        // or an inner stop at its acceptable level with the original NLP
+        // feasible to `1e2·tol` (`IpRestoMinC_1Nrm.cpp:278-287`). Either
+        // way the point was feasible but never released by layer 1 — the
         // outer filter rejected it, or it did not cut the violation by
-        // `kappa_resto`. Upstream fails restoration right there
-        // (`IpRestoConvCheck.cpp:227-234`); pounce instead hands the point
-        // back to give the outer phase one shot from it, which pays on the
-        // `dallas*` family (every hand-back there is followed by accepted
-        // steps). `recovery_cycle` says the shot was not taken: the outer is
-        // asking for restoration again from exactly the point it was handed,
-        // without one accepted step in between.
+        // `kappa_resto`. Upstream fails restoration right there; pounce
+        // hands the point back to give the outer phase one shot from it,
+        // which pays on the `dallas*` family (every hand-back there is
+        // followed by accepted steps, soft-restoration ones included).
+        //
+        // The shot was not taken when the outer asks for restoration again
+        // from that very point. That is either no accepted step at all, or
+        // steps a watchdog rolled back — so this compares positions, not
+        // `Outcome::Accepted`. A soft-restoration step moves the iterate and
+        // so counts as taking the shot (`dallasl`: `s s S`, then converges).
         //
         // One strike is the whole budget, and that is what separates this
         // from the 10-strike counter below. That counter's recoveries were
         // *released* — layer 1 judged them acceptable to the outer filter —
         // so a few immediate re-entries can still be the outer working its
-        // way out (OET7). These were not released; restoration has already
-        // certified it cannot do better than this point, and the outer has
-        // now shown it cannot move from it. Upstream would have stopped one
-        // restoration earlier.
+        // way out (OET7). These were not; restoration has certified it cannot
+        // do better than this point and the outer has shown it cannot leave
+        // it. This is the upstream verdict, one restoration late.
         //
-        // The status is `cycle_exit`, through the acceptable-point rollback,
-        // exactly as for the static and slow-progress exits above and below:
-        // this is one more shape of the same no-progress cycle, and before
-        // this check those exits are what ended it — later. Measured on
-        // Vanderbei brainpc1 (FERAL 0.21): the first such re-entry is outer
-        // iteration 378, after 13 restoration calls; without this exit the
-        // solve ran 39 more, to 1073. brainpc0: 956 after 31 calls, against
-        // 2117 after 121. Over the 733 Vanderbei models it moves exactly
-        // four (brainpc0/1/2, ssebnln), each to the same final answer.
-        if recovery_cycle && self.last_resto_recovery_unreleased {
+        // An entry forced by a non-finite Hessian is exempt, as it is from
+        // the gh#274 strike below: the factorization rejected `W` before the
+        // outer could try a step, so it says nothing about being stuck.
+        //
+        // The status is upstream's: `IpIpoptAlg.cpp:480-493` maps this
+        // exception to `RESTORATION_FAILURE` on a non-square problem, and it
+        // goes through the acceptable-point rollback the sibling exits use.
+        // One refinement, and it is the gh#508 rule rather than a new one:
+        // "feasible" in layer 2 means `θ ≤ 1e2·tol`, a KKT tolerance, and
+        // under a loose `tol` that admits a point the *user's*
+        // `constr_viol_tol` calls violated. Measured: `issue_508`'s
+        // `min (x−5)² s.t. x²+δ = 0` at `tol=1e-3`, `δ = 1e-4` reaches this
+        // exit at a violation of exactly `1e-4`, and the honest verdict there
+        // is `Infeasible_Problem_Detected`, not AMPL 500. So the same
+        // unscaled-vs-`constr_viol_tol` test `cycle_exit` uses picks the
+        // infeasible arm; below it, the point is feasible by the user's own
+        // declaration and the failure is restoration's. A point the user calls
+        // feasible is never certified infeasible here. A square problem never
+        // gets here — its feasible point leaves restoration as
+        // `FeasiblePointFound`.
+        //
+        // Measured on Vanderbei brainpc1 (FERAL 0.21): the first such
+        // re-entry is outer iteration 378, after 13 restoration calls;
+        // without this exit the solve ran 39 more, to 1073. brainpc0: 956
+        // after 31 calls, against 2117 after 121.
+        let unreleased_repeat = if let (Some(px), Some(ps)) = (
+            self.last_resto_unreleased_x.as_ref(),
+            self.last_resto_unreleased_s.as_ref(),
+        ) {
+            relative_distance(&*curr.x, &**px) <= 1e-10
+                && relative_distance(&*curr.s, &**ps) <= 1e-10
+        } else {
+            false
+        };
+        if unreleased_repeat && entry_nonfinite_w {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] re-entered restoration from an unreleased hand-back, but on a \
+                 non-finite Hessian; exempt from the gh#1042 exit.",
+            );
+        }
+        if unreleased_repeat && !entry_nonfinite_w {
+            let verdict =
+                if reference_theta_unscaled > 0.0 && reference_theta_unscaled >= cycle_viol_tol {
+                    SolverReturn::LocalInfeasibility
+                } else {
+                    SolverReturn::RestorationFailure
+                };
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] restoration handed back a converged-to-feasible point it never \
-                 released, and the outer re-entered restoration from it without an \
-                 accepted step; ending the no-progress cycle with {:?} (gh#1042).",
-                cycle_exit,
+                 released, and the outer re-entered restoration from it without leaving it \
+                 (accepted steps in between: {}); ending the solve with {:?} (gh#1042).",
+                !recovery_cycle, verdict,
             );
-            return self.terminate_acceptable_or(cycle_exit);
+            return self.terminate_acceptable_or(verdict);
         }
         if recovery_cycle {
             self.resto_no_outer_progress_count =
@@ -4359,7 +4404,13 @@ impl IpoptAlgorithm {
                     .clone();
                 self.last_resto_recovery_x = Some(recovered.x.make_new_copy());
                 self.last_resto_recovery_s = Some(recovered.s.make_new_copy());
-                self.last_resto_recovery_unreleased = recovery_unreleased;
+                if recovery_unreleased {
+                    self.last_resto_unreleased_x = Some(recovered.x.make_new_copy());
+                    self.last_resto_unreleased_s = Some(recovered.s.make_new_copy());
+                } else {
+                    self.last_resto_unreleased_x = None;
+                    self.last_resto_unreleased_s = None;
+                }
                 if recovery_unreleased {
                     tracing::debug!(target: "pounce::algorithm",
                         "[POUNCE] restoration converged to a feasible point it did not \
