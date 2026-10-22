@@ -1722,6 +1722,32 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         self.last_singular_certified
     }
 
+    fn analysis_count(&self) -> u64 {
+        self.solver.symbolic_call_count() as u64
+    }
+
+    /// Drop feral's cached symbolic analysis (jkitchin/feral#224).
+    ///
+    /// `Solver::invalidate_symbolic_cache` clears the pattern fingerprint
+    /// with it, so the next `factor` takes feral's *new pattern* branch
+    /// and resets everything it keys on the pattern: the ordering (whose
+    /// `LdltCompress` preprocess is an MC64 matching on the values), the
+    /// sticky `Auto` scaling pick, the MC64 scaling cache, the ordering
+    /// escalation latch and the cascade-break auto-arm. Every one of those
+    /// is a decision taken from the values of the first matrix factored,
+    /// which is why this is not gated on the resolved preprocess alone:
+    /// under pounce's default `scaling = Auto` the analysis is always
+    /// value-dependent. The last numeric factor is not touched, so a
+    /// back-solve issued before the next `factor` stays valid; pounce's
+    /// own triplet → CSC map is pattern-only and is kept too.
+    fn forget_analysis(&mut self) -> bool {
+        if self.solver.symbolic().is_none() {
+            return false;
+        }
+        self.solver.invalidate_symbolic_cache();
+        true
+    }
+
     fn matrix_format(&self) -> EMatrixFormat {
         EMatrixFormat::TripletFormat
     }
@@ -2005,6 +2031,52 @@ mod tests {
         assert_eq!(s.number_of_neg_evals(), 0);
         assert!(s.provides_inertia());
         assert_eq!(s.matrix_format(), EMatrixFormat::TripletFormat);
+    }
+
+    /// jkitchin/feral#224: `forget_analysis` drops the cached analysis so
+    /// the next factor of the *same* pattern re-analyses, keeps the last
+    /// numeric factor usable until then, and is a no-op with nothing
+    /// cached. `analysis_count` is the counter the IPM brackets its
+    /// initializer with, so it must move on exactly the re-analysis.
+    #[test]
+    fn forget_analysis_forces_a_fresh_analysis_on_the_same_pattern() {
+        let mut s = FeralSolverInterface::new();
+        assert!(
+            !s.forget_analysis(),
+            "nothing cached before the first factor"
+        );
+        assert_eq!(s.analysis_count(), 0);
+
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        s.initialize_structure(2, 3, &irn, &jcn);
+        let factor = |s: &mut FeralSolverInterface, v: [f64; 3]| {
+            s.values_array_mut().copy_from_slice(&v);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success
+            );
+        };
+        factor(&mut s, [2.0, 1.0, 3.0]);
+        assert_eq!(s.analysis_count(), 1);
+        factor(&mut s, [4.0, 1.0, 5.0]);
+        assert_eq!(s.analysis_count(), 1, "same pattern reuses the analysis");
+
+        assert!(s.forget_analysis());
+        assert!(!s.forget_analysis(), "a second forget has nothing to drop");
+        // The factor of [[4,1],[1,5]] is still the one a back-solve uses.
+        let mut rhs = [5.0, 6.0];
+        assert_eq!(
+            s.multi_solve(false, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 1.0).abs() < 1e-12);
+
+        factor(&mut s, [2.0, 1.0, 3.0]);
+        assert_eq!(s.analysis_count(), 2, "the next factor re-analyses");
+        factor(&mut s, [2.0, 1.0, 3.0]);
+        assert_eq!(s.analysis_count(), 2, "and that analysis is cached again");
     }
 
     /// Factor `[[0,1],[1,0]]` (a zero diagonal forces a 2×2 pivot) through

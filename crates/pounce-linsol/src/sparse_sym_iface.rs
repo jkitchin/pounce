@@ -129,6 +129,35 @@ pub trait SparseSymLinearSolverInterface {
         false
     }
 
+    /// How many symbolic analyses (orderings) this backend has run.
+    ///
+    /// A caller brackets a phase with two reads to learn whether the
+    /// phase's factorizations *created* the analysis the backend now
+    /// holds, as opposed to reusing one created earlier — see
+    /// [`Self::forget_analysis`]. Defaults to `0`: a backend that does not
+    /// count never reports a change, so the bracketing caller never asks
+    /// it to forget anything.
+    fn analysis_count(&self) -> u64 {
+        0
+    }
+
+    /// Drop the cached symbolic analysis and every pattern-bound decision
+    /// learned with it, so the next factorization analyses its own matrix
+    /// as if the pattern were new. Returns whether anything was dropped.
+    ///
+    /// For a backend whose analysis depends on the matrix *values* —
+    /// FERAL's MC64-based ordering preprocess and its sticky `Auto`
+    /// scaling pick — the first matrix factored on a pattern chooses the
+    /// ordering for every later one. The IPM's first factorization is
+    /// the least-squares multiplier system (`W = 0`, `D_x = D_s = I`),
+    /// not a KKT matrix, so the algorithm calls this once the iterate
+    /// initializer has run (jkitchin/feral#224). Defaults to a no-op
+    /// returning `false`, which is right for a backend whose analysis is
+    /// structural only (MA57).
+    fn forget_analysis(&mut self) -> bool {
+        false
+    }
+
     /// Whether a blocked `multi_solve` of `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
     /// against the same factor.

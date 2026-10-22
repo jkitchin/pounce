@@ -136,6 +136,34 @@ pub trait AugSystemSolver {
     /// solves share one. See `IpoptCq::curr_slack_based_s_scaling`.
     fn set_slack_scaling(&mut self, _nx: Index, _s_scale: &[Number]) {}
 
+    /// How many symbolic analyses the underlying linear solver(s) have
+    /// run. Read before and after a phase to learn whether the phase
+    /// created the analysis the solver now holds. Default `0` (never
+    /// changes, so nothing is ever forgotten); `StdAugSystemSolver`
+    /// forwards to its backend and composite solvers to every inner
+    /// solver. See `pounce_linsol::SparseSymLinearSolverInterface::analysis_count`.
+    fn analysis_count(&self) -> u64 {
+        0
+    }
+
+    /// Ask the solver that factors the *main* primal-dual system to drop
+    /// its cached symbolic analysis, so the next factorization analyses
+    /// its own matrix. Returns whether anything was dropped.
+    ///
+    /// Called by `IpoptAlgorithm` once the iterate initializer has run,
+    /// and only when the initializer's solves created the analysis: the
+    /// least-squares multiplier system (`W = 0`, `D_x = D_s = I`) is the
+    /// first matrix factored, and a value-dependent analysis chosen for
+    /// it would otherwise order every KKT system of the solve
+    /// (jkitchin/feral#224). Default no-op; `StdAugSystemSolver`
+    /// forwards to its backend. A composite solver forwards only to the
+    /// solver(s) that factor the main system — `LowRankAugSystemSolver`'s
+    /// dedicated bypass solver serves exactly the `W = 0` systems the
+    /// initializer built its analysis on, so it keeps it.
+    fn forget_analysis(&mut self) -> bool {
+        false
+    }
+
     /// Whether this solver can consume a `LowRankUpdateSymMatrix` as
     /// `coeffs.w` directly, applying it by Sherman-Morrison-Woodbury
     /// rather than needing an assembled triplet matrix.

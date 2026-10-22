@@ -352,6 +352,12 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     fn increase_quality(&mut self) -> bool {
         self.get().increase_quality()
     }
+    fn analysis_count(&self) -> u64 {
+        self.inner.as_ref().map_or(0, |s| s.analysis_count())
+    }
+    fn forget_analysis(&mut self) -> bool {
+        self.get().forget_analysis()
+    }
     fn provides_inertia(&self) -> bool {
         self.inner.as_ref().is_some_and(|s| s.provides_inertia())
     }

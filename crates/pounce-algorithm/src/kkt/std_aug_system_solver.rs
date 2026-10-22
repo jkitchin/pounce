@@ -708,6 +708,14 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.linsol.set_slack_scaling(nx, s_scale);
     }
 
+    fn analysis_count(&self) -> u64 {
+        self.linsol.analysis_count()
+    }
+
+    fn forget_analysis(&mut self) -> bool {
+        self.linsol.forget_analysis()
+    }
+
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
         self.timing = Some(timing);
     }

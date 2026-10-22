@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+- **The interior-point method's first KKT factorization now chooses its
+  own FERAL ordering, instead of inheriting the one chosen for the
+  multiplier-initialization system (jkitchin/feral#224).** The first
+  matrix the main linear solver factors is the least-squares multiplier
+  system (`W = 0`, `D_x = D_s = I`), not a KKT matrix. FERAL caches its
+  symbolic analysis per sparsity pattern, and that analysis depends on the
+  values: the default `OrderingPreprocess::Auto` resolves to an MC64-based
+  `LdltCompress` on KKT-shaped patterns, and the default `Auto` scaling pick
+  sticks per pattern. So every KKT system was being ordered for the init
+  matrix. POUNCE now drops that analysis once the initializer has run, if
+  the initializer is what created it. An analysis the initializer only
+  reused (a pooled batch backend) is kept. MA57's structural analysis is
+  unaffected, as is the L-BFGS path, whose init solves already run on a
+  dedicated solver. **This is a trajectory change, and on any one model it
+  can go either way.** The first KKT system is no more representative of
+  the late iterations than the init matrix was. Measured on arm64, with
+  LinearSystemFactorization summed over every solve:
+  - Faster: `qcqp1000-2c` 103 → 74 s (163 → 182 iterations);
+    `NARX_CFy` 127 → 89 s; `clnlbeam` 2465 → 514 base iterations (55 → 14 s).
+  - Slower: `qcqp1000-2nc` 13 → 24 s at identical iterations, because
+    nnz(L) grows by 40%; `qcqp1500-1c` 206 → 586 iterations (489 → 580 s);
+    `nql180` 50 → 62 s.
+  - Net over 26 models: wall time 1229 → 1196 s.
+  - Fixture sweep: `pooling_rt2stp` stops needing the second-opinion
+    rescue on both arm64 and x86_64. `deb7` improves on arm64 (180 → 147)
+    but on x86_64 now needs the `mu_strategy=adaptive` rung.
+  - `eigena2` still converges in 27 iterations, but its final dual residual
+    goes from 3.4e-10 to 5.2e-9. That is still within `tol`.
+
 ### Fixed
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
