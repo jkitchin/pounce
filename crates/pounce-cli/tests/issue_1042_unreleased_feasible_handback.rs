@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const HANDBACK: &str = "restoration converged to a feasible point it did not release";
-const EXIT: &str = "restoration failed (gh#1042)";
+const EXIT: &str = "re-entered restoration from it without leaving it";
 const NEAR_FEASIBLE_EXIT: &str = "near-feasible restoration re-entry";
 
 fn fixture(name: &str) -> PathBuf {

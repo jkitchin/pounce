@@ -4129,13 +4129,21 @@ impl IpoptAlgorithm {
         // outer could try a step, so it says nothing about being stuck.
         //
         // The status is upstream's: `IpIpoptAlg.cpp:480-493` maps this
-        // exception to `RESTORATION_FAILURE` on a non-square problem. It goes
-        // through the acceptable-point rollback the sibling exits use, and it
-        // is never `cycle_exit`, which could read `LocalInfeasibility` at a
-        // point restoration has just certified feasible (`θ ≤ 1e2·tol`, which
-        // can exceed `constr_viol_tol` under a loose `tol`). A square problem
-        // never gets here — its feasible point is the answer and leaves
-        // restoration as `FeasiblePointFound`.
+        // exception to `RESTORATION_FAILURE` on a non-square problem, and it
+        // goes through the acceptable-point rollback the sibling exits use.
+        // One refinement, and it is the gh#508 rule rather than a new one:
+        // "feasible" in layer 2 means `θ ≤ 1e2·tol`, a KKT tolerance, and
+        // under a loose `tol` that admits a point the *user's*
+        // `constr_viol_tol` calls violated. Measured: `issue_508`'s
+        // `min (x−5)² s.t. x²+δ = 0` at `tol=1e-3`, `δ = 1e-4` reaches this
+        // exit at a violation of exactly `1e-4`, and the honest verdict there
+        // is `Infeasible_Problem_Detected`, not AMPL 500. So the same
+        // unscaled-vs-`constr_viol_tol` test `cycle_exit` uses picks the
+        // infeasible arm; below it, the point is feasible by the user's own
+        // declaration and the failure is restoration's. A point the user calls
+        // feasible is never certified infeasible here. A square problem never
+        // gets here — its feasible point leaves restoration as
+        // `FeasiblePointFound`.
         //
         // Measured on Vanderbei brainpc1 (FERAL 0.21): the first such
         // re-entry is outer iteration 378, after 13 restoration calls;
@@ -4151,13 +4159,19 @@ impl IpoptAlgorithm {
             false
         };
         if unreleased_repeat && !entry_nonfinite_w {
+            let verdict =
+                if reference_theta_unscaled > 0.0 && reference_theta_unscaled >= cycle_viol_tol {
+                    SolverReturn::LocalInfeasibility
+                } else {
+                    SolverReturn::RestorationFailure
+                };
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] restoration handed back a converged-to-feasible point it never \
-                 released, and the outer re-entered restoration from it without leaving \
-                 it (accepted step since: {}); restoration failed (gh#1042).",
-                !recovery_cycle,
+                 released, and the outer re-entered restoration from it without leaving it \
+                 (accepted steps in between: {}); ending the solve with {:?} (gh#1042).",
+                !recovery_cycle, verdict,
             );
-            return self.terminate_acceptable_or(SolverReturn::RestorationFailure);
+            return self.terminate_acceptable_or(verdict);
         }
         if recovery_cycle {
             self.resto_no_outer_progress_count =
