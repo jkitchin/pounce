@@ -10,30 +10,45 @@ changes.
 ## [Unreleased]
 
 ### Fixed
-- **A restoration that ends on a feasible point it never released no longer
-  cycles when the outer phase cannot leave that point (gh #1042).** When the
-  restoration sub-problem converges at a feasible point that the outer filter
-  rejects (or that does not cut the violation by `kappa_resto`), upstream
-  reports `Restoration_Failed`. POUNCE hands the point back so the outer
-  phase gets one shot from it, which the `dallas*` models need. Nothing
-  bounded the case where the outer re-entered restoration from that same
-  point without accepting a step. Vanderbei `brainpc0`/`brainpc1` ran 2117
+- **A restoration that ends on a feasible point it never released now
+  fails, as upstream's does, once the outer phase shows it cannot leave
+  that point (gh #1042).** When the restoration sub-problem converges at a
+  feasible point that the outer filter rejects (or that does not cut the
+  violation by `kappa_resto`), upstream reports `Restoration_Failed`. POUNCE
+  hands the point back so the outer phase gets one shot from it, which the
+  `dallas*` models need. Nothing bounded the case where the outer re-entered
+  restoration from that same point. Vanderbei `brainpc0`/`brainpc1` ran 2117
   and 1073 iterations (121 and 52 restoration calls) before another cycle
-  detector stopped them, and then `mu_strategy=adaptive` solved them in 24
-  and 52. That re-entry now ends the base solve at once, with the same status
-  and acceptable-point rollback as the other restoration-cycle exits. Base
-  solves: `brainpc0` 2117 → 956, `brainpc1` 1073 → 378, `brainpc2` 561 → 258,
-  `ssebnln` 138 → 117 on arm64, and globallib `ex9_1_1` 99 → 74. Each
-  reaches the same final answer. No other model moves across the 733
-  Vanderbei models and 396 more from Mittelmann, globallib, grid, gas,
-  water, electrolyte, large-scale and QP. On x86_64 `brainpc0`–`brainpc9`
-  take different trajectories that never reach this shape, and none of them
-  moves. One fixture leg moves on both architectures:
-  `deb7` on L-BFGS fails either way, but its base solve now ends
-  `Error_In_Step_Computation` (1610 iterations on arm64, 982 on x86_64)
-  instead of `Restoration_Failed` (1893, 1206). That opens the
-  `mu_strategy=adaptive` rung instead of `start_point_perturbation`, which
-  fails too and costs 63 (arm64) and 226 (x86_64) more iterations in total.
+  detector stopped them.
+  - **The new exit.** That re-entry now ends the base solve at once, through
+    the acceptable-point rollback. The verdict is `Restoration_Failed`, or
+    `Infeasible_Problem_Detected` when the point violates the user's
+    `constr_viol_tol` (gh #508).
+  - **Positions, not steps.** The test compares where the outer is with
+    where it was handed the point, so a watchdog that rolls back to it
+    counts as not having left.
+  - **Exemption.** An entry forced by a non-finite Hessian is exempt.
+  - **Upstream's second throw site** is marked the same way: an inner stop
+    at its acceptable level, feasible to `1e2·tol`.
+  - **Base solves on arm64:** `brainpc0` 2117 → 956, `brainpc1` 1073 → 378,
+    `brainpc2` 561 → 258, `ssebnln` 138 → 117, globallib `ex9_1_1`
+    99 → 74.
+  - **Final answers.** All five reach the same objective. `ssebnln` now ends
+    `Optimal` (via `start_point_perturbation`) rather than
+    `Solved_To_Acceptable_Level`. No other model moves across the 733
+    Vanderbei models and 396 more from Mittelmann, globallib, grid, gas,
+    water, electrolyte, large-scale and QP.
+  - **x86_64.** `brainpc0`–`brainpc9` never reach this shape there and do
+    not move.
+- **The second-opinion ladder no longer re-runs an L-BFGS solve as its
+  `mu_strategy=adaptive` rung.** Under a limited-memory Hessian an unset
+  `mu_strategy` already resolves to adaptive (gh #746). The ladder read the
+  raw option, so the rung repeated the base solve byte-for-byte (`deb7`:
+  1610 iterations and `f = 99.636943584` both times). It now reads the
+  resolved strategy, as the μ-strategy fallback does.
+  - Every L-BFGS fixture leg that opened the ladder drops that rung, with no
+    change in verdict. For example, `eigena2` 478 → 239 total and
+    `issue_508_infeasible_gap_1em4` 346 → 267 total.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

@@ -109,8 +109,10 @@ pub struct RestoSolveResult {
     /// square (the PFIT3/PFIT4 "extra shots" carve-out). The driver counts
     /// these against [`SQUARE_CERTIFICATE_REPEATS`] (gh#1000).
     pub square_certificate_suppressed: bool,
-    /// `true` when the sub-solve ended on layer 2's
-    /// converged-to-feasible-point verdict and the point is being handed
+    /// `true` when the sub-solve ended where upstream throws
+    /// `RESTORATION_CONVERGED_TO_FEASIBLE_POINT` — layer 2's
+    /// converged-to-feasible-point verdict, or an inner stop at its
+    /// acceptable level feasible to `1e2·tol` — and the point is being handed
     /// back although layer 1 — the `kappa_resto` reduction and the outer
     /// filter test — never released it (gh#1042). Upstream fails
     /// restoration here; pounce resumes the outer phase from the point and
