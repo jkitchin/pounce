@@ -1180,6 +1180,10 @@ pub struct IpoptApplication {
     /// warm-start from", this one answers "was the active set I am about
     /// to trust actually identified, or merely inferred".
     crossover_report: Option<crate::crossover::CrossoverReport>,
+    /// What the interior-point → active-set handover did on the most recent
+    /// IPM solve (gh#1054). `None` when `ipm_sqp_handover=no` (the default).
+    /// Read via [`Self::handover_report`].
+    handover_report: Option<crate::handover::HandoverReport>,
     /// Full primal-dual warm-start iterate for the IPM path, captured by
     /// the interactive debugger's `resolve` command. When `Some`, the
     /// next `optimize_tnlp` installs this 8-vector (algorithm space)
@@ -1349,6 +1353,7 @@ impl IpoptApplication {
             sqp_last_working_set: None,
             x_elimination: None,
             crossover_report: None,
+            handover_report: None,
             warm_start_iterate: None,
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
@@ -2682,6 +2687,12 @@ impl IpoptApplication {
         self.crossover_report.as_ref()
     }
 
+    /// What the interior-point → active-set handover did on the most recent
+    /// solve (gh#1054); `None` unless `ipm_sqp_handover=yes`.
+    pub fn handover_report(&self) -> Option<&crate::handover::HandoverReport> {
+        self.handover_report.as_ref()
+    }
+
     /// Install a full primal-dual warm-start iterate for the next IPM
     /// `optimize_tnlp`. Captured by the debugger's `resolve` so the
     /// re-solve continues from the paused interior point. The caller is
@@ -3409,6 +3420,11 @@ impl IpoptApplication {
 
         let mut builder = self.algorithm_builder_snapshot();
         builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+        // `max_wall_time` / `max_cpu_time` on this arm (gh#1054). They were
+        // registered, documented as solve-wide, and read only by the
+        // interior-point convergence check, so an active-set solve stuck in
+        // its first QP ran until something outside POUNCE killed it.
+        builder.sqp.deadline = Some(self.solve_deadline());
         // Prefer a caller-installed factory, exactly as `optimize_constrained`
         // does, so an embedder that plugs its own backend gets it on both
         // arms. `take()` matches the IPM's one-shot semantics rather than
@@ -3756,6 +3772,16 @@ impl IpoptApplication {
                 ApplicationReturnStatus::UserRequestedStop,
                 pounce_nlp::SolverReturn::UserRequestedStop,
             ),
+            // gh#1054: the same verdicts the interior-point arm's
+            // convergence check gives on the same budgets.
+            crate::sqp::SqpStatus::WallTimeExceeded => (
+                ApplicationReturnStatus::MaximumWallTimeExceeded,
+                pounce_nlp::SolverReturn::WallTimeExceeded,
+            ),
+            crate::sqp::SqpStatus::CpuTimeExceeded => (
+                ApplicationReturnStatus::MaximumCpuTimeExceeded,
+                pounce_nlp::SolverReturn::CpuTimeExceeded,
+            ),
         };
 
         // Same gate as the IPM path: an infeasible-subproblem exit is a
@@ -4003,6 +4029,197 @@ impl IpoptApplication {
     /// Build a *copy* of the algorithm builder configured per the
     /// current options. The SQP path uses this so it gets a
     /// fresh builder without mutating the application's state.
+    /// Read the `ipm_sqp_handover*` option family into a
+    /// [`crate::handover::HandoverOptions`].
+    fn handover_options(&self) -> crate::handover::HandoverOptions {
+        let mut o = crate::handover::HandoverOptions::default();
+        if let Ok((v, true)) = self.options.get_bool_value("ipm_sqp_handover", "") {
+            o.enabled = v;
+        }
+        if let Ok((v, true)) = self.options.get_numeric_value("ipm_sqp_handover_tol", "") {
+            o.tol = v;
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_integer_value("ipm_sqp_handover_stall_iter", "")
+        {
+            o.stall_iter = v.max(0);
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_integer_value("ipm_sqp_handover_max_attempts", "")
+        {
+            o.max_attempts = v.max(0) as u32;
+        }
+        o
+    }
+
+    /// Install the interior-point → active-set handover hook on `alg` when
+    /// `ipm_sqp_handover=yes` (gh#1054; see [`crate::handover`]). Returns
+    /// the cells the hook reports into — the report, and the working set of
+    /// an accepted attempt — for [`Self::finish_handover`] to read after the
+    /// solve.
+    #[allow(clippy::type_complexity)]
+    fn install_handover(
+        &self,
+        alg: &mut IpoptAlgorithm,
+        nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+    ) -> Option<(
+        Rc<RefCell<crate::handover::HandoverReport>>,
+        Rc<RefCell<Option<pounce_qp::WorkingSet>>>,
+    )> {
+        let hopts = self.handover_options();
+        if !hopts.enabled {
+            return None;
+        }
+        let mut trigger = crate::handover::HandoverTrigger::new(hopts);
+        let xopts = crate::crossover::CrossoverOptions {
+            enabled: true,
+            ..self.crossover_options()
+        };
+        let snapshot = self.algorithm_builder_snapshot();
+        let qp_opts = snapshot.sqp_qp.clone();
+        let data = Rc::clone(&alg.data);
+        let nlp = Rc::clone(nlp_handle);
+        // One factory serves every backend the attempts build: a factory is
+        // reusable, but `build_sqp_with_backend` takes one by value, so the
+        // step-4 SQP gets a forwarding closure onto the shared one.
+        let backend = Rc::new(RefCell::new(self.make_backend_factory()));
+        let tols = self.user_tolerances();
+        let report = Rc::new(RefCell::new(crate::handover::HandoverReport::default()));
+        let working = Rc::new(RefCell::new(None));
+        let (report_out, working_out) = (Rc::clone(&report), Rc::clone(&working));
+        let (wall0, cpu0) = (
+            pounce_common::utils::wallclock_time(),
+            pounce_common::utils::cpu_time(),
+        );
+        alg.handover = Some(Box::new(move |curr, iter, err, mu| {
+            if !trigger.should_try(iter, err) {
+                return None;
+            }
+            let seed = crossover_seed(&nlp, curr);
+            let x = crate::crossover::CrossoverOptions {
+                primal_tol: crate::handover::identification_primal_tol(xopts.primal_tol, mu),
+                ..xopts.clone()
+            };
+            // An attempt may spend at most what the interior method has
+            // spent so far (floor 1 s), and never past the solve's own
+            // budget. Without a cap a declined attempt is unbounded: on
+            // `deb7` (813 variables) one ran the crossover fallback for
+            // minutes, against a 114-iteration interior solve. With it, a
+            // declined attempt costs at most a doubling — the right scale
+            // for a bet on shortening the tail.
+            let (wall_left, cpu_left) = data
+                .borrow()
+                .deadline
+                .as_ref()
+                .map_or((Number::INFINITY, Number::INFINITY), |d| {
+                    (d.remaining_wall(), d.remaining_cpu())
+                });
+            let spent_wall = (pounce_common::utils::wallclock_time() - wall0).max(1.0);
+            let spent_cpu = (pounce_common::utils::cpu_time() - cpu0).max(1.0);
+            let sqp_opts = crate::sqp::SqpOptions {
+                deadline: Some(pounce_common::timing::Deadline::new(
+                    spent_wall.min(wall_left),
+                    spent_cpu.min(cpu_left),
+                )),
+                ..snapshot.sqp.clone()
+            };
+            // Declared bounds, for the reason `maybe_crossover` gives.
+            let mut adapter =
+                crate::sqp::IpoptNlpAdapter::new_with_declared_bounds(Rc::clone(&nlp));
+            let (mut rep, mut accepted) = crate::crossover::run(
+                &mut adapter,
+                &seed,
+                &x,
+                &sqp_opts,
+                &qp_opts,
+                || (backend.borrow_mut())(crate::alg_builder::LinearSolverChoice::Feral),
+                |step4_opts| {
+                    let mut b = snapshot.clone();
+                    b.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+                    b.sqp = step4_opts;
+                    let shared = Rc::clone(&backend);
+                    b.build_sqp_with_backend(Box::new(move |c| (shared.borrow_mut())(c)))
+                },
+            );
+            // The interior-point verdict this replaces is issued in user
+            // units on the declared model; so is this one.
+            if let Some(res) = &accepted
+                && !meets_user_tolerances(&nlp, res, &rep, &tols)
+            {
+                rep = rep.decline(crate::crossover::CrossoverDecline::UserTolerances);
+                accepted = None;
+            }
+            tracing::info!(
+                target: "pounce::handover",
+                "IPM→SQP handover attempt {} at iteration {iter} (error {err:.2e}, mu {mu:.2e}): {}",
+                trigger.attempts(),
+                if rep.accepted() { "accepted" } else { "declined" }
+            );
+            tracing::debug!(target: "pounce::handover", "handover: {rep:?}");
+            let mut r = report.borrow_mut();
+            r.attempts = trigger.attempts();
+            r.last = Some(rep);
+            let res = accepted?;
+            let next = crossover_iterate(&nlp, curr, &res)?;
+            r.accepted_at_iter = Some(iter);
+            *working.borrow_mut() = res.working_set;
+            Some(next)
+        }));
+        Some((report_out, working_out))
+    }
+
+    /// After the solve: publish the handover report, and an accepted
+    /// attempt's working set as the next SQP solve's warm start (the same
+    /// hand-off crossover makes).
+    fn finish_handover(
+        &mut self,
+        nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+        cells: Option<(
+            Rc<RefCell<crate::handover::HandoverReport>>,
+            Rc<RefCell<Option<pounce_qp::WorkingSet>>>,
+        )>,
+    ) {
+        self.handover_report = None;
+        let Some((report, working)) = cells else {
+            return;
+        };
+        let report = report.borrow().clone();
+        if report.accepted_at_iter.is_some()
+            && let Some(ws) = working.borrow_mut().take()
+        {
+            self.sqp_last_working_set = Some(self.working_set_to_user(&*nlp_handle.borrow(), ws));
+        }
+        self.handover_report = Some(report);
+    }
+
+    /// The interior-point arm's user-unit tolerances, which a crossed-over
+    /// point must also meet (see [`meets_user_tolerances`]).
+    fn user_tolerances(&self) -> UserTolerances {
+        let read = |name: &str, default: Number| {
+            self.options
+                .get_numeric_value(name, "")
+                .map_or(default, |(v, _)| v)
+        };
+        UserTolerances {
+            constr_viol: read("constr_viol_tol", 1e-4),
+            dual_inf: read("dual_inf_tol", 1.0),
+            compl_inf: read("compl_inf_tol", 1e-4),
+        }
+    }
+
+    /// A [`pounce_common::timing::Deadline`] for `max_wall_time` /
+    /// `max_cpu_time`, starting now.
+    fn solve_deadline(&self) -> pounce_common::timing::Deadline {
+        let read = |name: &str| {
+            self.options
+                .get_numeric_value(name, "")
+                .map_or(1e6, |(v, _)| v)
+        };
+        pounce_common::timing::Deadline::new(read("max_wall_time"), read("max_cpu_time"))
+    }
+
     /// Read the `crossover*` option family into a [`CrossoverOptions`].
     fn crossover_options(&self) -> crate::crossover::CrossoverOptions {
         let mut o = crate::crossover::CrossoverOptions::default();
@@ -4046,7 +4263,19 @@ impl IpoptApplication {
         // describes this solve and not a previous one — the same reason
         // `crossover_report` is reset here rather than only written on
         // the accept path.
-        alg.data.borrow_mut().curr_from_crossover = false;
+        //
+        // Except when the in-solve handover installed the iterate (gh#1054):
+        // then the flag was set during *this* solve and is still true of the
+        // point in `curr` — clearing it here mislabelled the handover's
+        // declared-frame point as an interior one, and its complementarity
+        // was reported in the relaxed frame (`0.1` on `jit1`).
+        let handover_point = self
+            .handover_report
+            .as_ref()
+            .is_some_and(|h| h.accepted_at_iter.is_some());
+        if !handover_point {
+            alg.data.borrow_mut().curr_from_crossover = false;
+        }
         let xopts = self.crossover_options();
         if !xopts.enabled {
             return;
@@ -4061,25 +4290,20 @@ impl IpoptApplication {
             return;
         };
 
-        // Seed, in the algorithm's compressed / scaled space. The SQP
-        // adapter presents that same space, so nothing is translated here
-        // beyond repacking the bound duals: `λ_x = z_l − z_u`.
-        let seed = crate::crossover::CrossoverSeed {
-            x: dense_values(&*curr.x),
-            lambda_g: {
-                let mut v = dense_values(&*curr.y_c);
-                v.extend(dense_values(&*curr.y_d));
-                v
-            },
-            lambda_x: crate::sqp::ipopt_adapter::pack_bound_multipliers(
-                nlp_handle,
-                &dense_values(&*curr.z_l),
-                &dense_values(&*curr.z_u),
-            ),
-        };
+        let seed = crossover_seed(nlp_handle, &curr);
 
         let snapshot = self.algorithm_builder_snapshot();
-        let sqp_opts = snapshot.sqp.clone();
+        let mut sqp_opts = snapshot.sqp.clone();
+        // The interior-point phase's own deadline, not a fresh one:
+        // crossover is part of the same solve, so it spends what the IPM
+        // left of `max_wall_time` / `max_cpu_time` (gh#1054). Before this it
+        // had no budget at all and could outlive the solve's by any amount.
+        sqp_opts.deadline = alg
+            .data
+            .borrow()
+            .deadline
+            .clone()
+            .or_else(|| Some(self.solve_deadline()));
         let qp_opts = snapshot.sqp_qp.clone();
         // Declared bounds, not the live relaxed ones: crossover's whole claim
         // is that the returned point sits *on* the constraints the user
@@ -4110,6 +4334,14 @@ impl IpoptApplication {
             },
         );
 
+        let tols = self.user_tolerances();
+        let (report, accepted) = match accepted {
+            Some(res) if !meets_user_tolerances(nlp_handle, &res, &report, &tols) => (
+                report.decline(crate::crossover::CrossoverDecline::UserTolerances),
+                None,
+            ),
+            other => (report, other),
+        };
         if let Some(res) = accepted {
             self.install_crossover_iterate(alg, nlp_handle, &curr, &res);
             // Publish the identified set as the SQP warm-start output. This
@@ -4125,14 +4357,8 @@ impl IpoptApplication {
         self.crossover_report = Some(report);
     }
 
-    /// Write an accepted crossover result back onto the IPM iterate.
-    ///
-    /// All eight components have to move together: leaving `s`, `v_l` or
-    /// `v_u` describing the interior point while `x` and the duals describe
-    /// the crossed-over one would make the calculated quantities read off an
-    /// iterate that never existed, and the residuals reported to the user
-    /// would be neither point's. The slack relations are the barrier
-    /// problem's own — `s = d(x)` and `v_l − v_u = −y_d`.
+    /// Write an accepted crossover result back onto the IPM iterate (built by
+    /// [`crossover_iterate`]).
     fn install_crossover_iterate(
         &self,
         alg: &mut IpoptAlgorithm,
@@ -4140,43 +4366,11 @@ impl IpoptApplication {
         curr: &crate::iterates_vector::IteratesVector,
         res: &crate::sqp::SqpResult,
     ) {
-        let (m_c, m_d) = {
-            let b = nlp_handle.borrow();
-            (b.m_eq() as usize, b.m_ineq() as usize)
-        };
-        let y_c = &res.lambda_g[..m_c];
-        let y_d = &res.lambda_g[m_c..];
-        // `s = d(x)`: the adapter's combined constraint vector is `[c ; d]`,
-        // so the inequality block is its tail.
-        let mut adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(nlp_handle));
-        let c_all = crate::sqp::SqpProblemSpec::eval_c(&mut adapter, &res.x);
-        let s_new = &c_all[m_c..];
-        debug_assert_eq!(s_new.len(), m_d);
-        let (z_l, z_u) =
-            crate::sqp::ipopt_adapter::split_bound_multipliers(nlp_handle, &res.lambda_x);
-        let (v_l, v_u) = crate::sqp::ipopt_adapter::split_slack_multipliers(nlp_handle, y_d);
-
-        let mut out = curr.deep_copy();
-        let ok = set_dense(&mut *out.x, &res.x)
-            && set_dense(&mut *out.s, s_new)
-            && set_dense(&mut *out.y_c, y_c)
-            && set_dense(&mut *out.y_d, y_d)
-            && set_dense(&mut *out.z_l, &z_l)
-            && set_dense(&mut *out.z_u, &z_u)
-            && set_dense(&mut *out.v_l, &v_l)
-            && set_dense(&mut *out.v_u, &v_u);
-        if !ok {
-            // A non-dense backing or a length mismatch. POUNCE is dense-only,
-            // so this is defensive — but a partially-written iterate is worse
-            // than no crossover at all, so bail without touching `curr`.
-            tracing::warn!(
-                target: "pounce::crossover",
-                "crossover result did not fit the iterate; keeping the interior point"
-            );
+        let Some(out) = crossover_iterate(nlp_handle, curr, res) else {
             return;
-        }
+        };
         let mut d = alg.data.borrow_mut();
-        d.set_curr(out.freeze());
+        d.set_curr(out);
         // Mark which frame the installed iterate belongs to. It sits on the
         // *declared* bounds, and every barrier quantity built off `curr` —
         // slacks, and through them `Σ = z/s` — is measured against the
@@ -6631,7 +6825,9 @@ impl IpoptApplication {
             .record_iter_history
             .then(pounce_observability::IterCaptureGuard::start);
 
+        let handover_cells = self.install_handover(&mut alg, &nlp_handle);
         let solver_status = alg.optimize();
+        self.finish_handover(&nlp_handle, handover_cells);
         // Keep the initializer's feasibility diagnostics reachable
         // after the algorithm goes out of scope (gh#605).
         self.least_square_init_report = alg.least_square_init_report();
@@ -6862,11 +7058,24 @@ impl IpoptApplication {
                 // point the never-regress gate accepted on the declared-bound
                 // residuals, so this cannot dress up a worse iterate — the
                 // measurement it replaces is the artifact.
-                if let Some(report) = self.crossover_report.as_ref()
-                    && report.accepted()
-                    && report.compl_after.is_finite()
-                {
-                    let compl_declared = report.compl_after;
+                // The same holds for a point the in-solve handover installed
+                // (gh#1054) while it is still the iterate being reported —
+                // `curr_from_crossover` is cleared if the interior method
+                // moved on from it.
+                let declared_compl = self
+                    .crossover_report
+                    .as_ref()
+                    .filter(|r| r.accepted())
+                    .or_else(|| {
+                        self.handover_report
+                            .as_ref()
+                            .filter(|_| alg.data.borrow().curr_from_crossover)
+                            .and_then(|h| h.last.as_ref())
+                            .filter(|r| r.accepted())
+                    })
+                    .map(|r| r.compl_after)
+                    .filter(|c| c.is_finite());
+                if let Some(compl_declared) = declared_compl {
                     stats.final_compl = compl_declared;
                     stats.final_kkt_error =
                         cq.curr_nlp_error_with_complementarity(compl_declared, 0.0);
@@ -8966,6 +9175,126 @@ fn is_l1_fallback_trigger(status: ApplicationReturnStatus) -> bool {
 /// iterate is missing.
 /// Read a `dyn Vector`'s entries. Empty for a non-dense backing; POUNCE is
 /// dense-only, so that is defensive rather than a supported case.
+/// `constr_viol_tol`, `dual_inf_tol` and `compl_inf_tol`, as the user set
+/// them (unscaled).
+struct UserTolerances {
+    constr_viol: Number,
+    dual_inf: Number,
+    compl_inf: Number,
+}
+
+/// Whether a crossed-over point meets the user's tolerances in user units on
+/// the model as declared (gh#1054).
+///
+/// Crossover's own acceptance reads the SQP's residuals, which live in the
+/// scaled space. That is the right space for the never-regress comparison
+/// against the interior iterate, and the wrong one for "is this a solution of
+/// the user's problem": gradient-based scaling sized a row at a start point
+/// with `x₀ = 1e4`, and at `x = (2, 0)` a violation of `1` read `3.3e-7` —
+/// under every scaled tolerance, so `hs13_bigstart` came back
+/// `Solve_Succeeded` at an infeasible point with every printed residual `0`.
+/// The interior-point verdict is gated in user units (pounce#173); a point
+/// that replaces it is held to the same gate. Stationarity and
+/// complementarity unscale by `|df|`, as the calculated quantities do.
+fn meets_user_tolerances(
+    nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+    res: &crate::sqp::SqpResult,
+    report: &crate::crossover::CrossoverReport,
+    tols: &UserTolerances,
+) -> bool {
+    let adapter = crate::sqp::IpoptNlpAdapter::new_with_declared_bounds(Rc::clone(nlp_handle));
+    let (rows, bx) = adapter.declared_violation(&res.x);
+    let df = adapter.obj_scale();
+    let dual = res.final_stationarity / df;
+    let compl = report.compl_after / df;
+    let ok = rows <= tols.constr_viol
+        && bx.unwrap_or(0.0) <= tols.constr_viol
+        && dual <= tols.dual_inf
+        && (compl.is_nan() || compl <= tols.compl_inf);
+    if !ok {
+        tracing::debug!(
+            target: "pounce::crossover",
+            "crossed-over point fails the user tolerances: rows {rows:.2e}, box {bx:?}, \
+             dual {dual:.2e}, compl {compl:.2e}"
+        );
+    }
+    ok
+}
+
+/// The converged-or-not interior iterate `curr` as a crossover seed, in the
+/// algorithm's compressed / scaled space. The SQP adapter presents that same
+/// space, so nothing is translated beyond repacking the bound duals:
+/// `λ_x = z_l − z_u`.
+fn crossover_seed(
+    nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+    curr: &crate::iterates_vector::IteratesVector,
+) -> crate::crossover::CrossoverSeed {
+    crate::crossover::CrossoverSeed {
+        x: dense_values(&*curr.x),
+        lambda_g: {
+            let mut v = dense_values(&*curr.y_c);
+            v.extend(dense_values(&*curr.y_d));
+            v
+        },
+        lambda_x: crate::sqp::ipopt_adapter::pack_bound_multipliers(
+            nlp_handle,
+            &dense_values(&*curr.z_l),
+            &dense_values(&*curr.z_u),
+        ),
+    }
+}
+
+/// An accepted crossover result as an interior-point iterate.
+///
+/// All eight components have to move together: leaving `s`, `v_l` or `v_u`
+/// describing the interior point while `x` and the duals describe the
+/// crossed-over one would make the calculated quantities read off an iterate
+/// that never existed, and the residuals reported to the user would be
+/// neither point's. The slack relations are the barrier problem's own —
+/// `s = d(x)` and `v_l − v_u = −y_d`. `None` (with a warning) when the result
+/// does not fit the iterate's vectors.
+fn crossover_iterate(
+    nlp_handle: &Rc<RefCell<dyn IpoptNlp>>,
+    curr: &crate::iterates_vector::IteratesVector,
+    res: &crate::sqp::SqpResult,
+) -> Option<crate::iterates_vector::IteratesVector> {
+    let (m_c, m_d) = {
+        let b = nlp_handle.borrow();
+        (b.m_eq() as usize, b.m_ineq() as usize)
+    };
+    let y_c = &res.lambda_g[..m_c];
+    let y_d = &res.lambda_g[m_c..];
+    // `s = d(x)`: the adapter's combined constraint vector is `[c ; d]`,
+    // so the inequality block is its tail.
+    let mut adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(nlp_handle));
+    let c_all = crate::sqp::SqpProblemSpec::eval_c(&mut adapter, &res.x);
+    let s_new = &c_all[m_c..];
+    debug_assert_eq!(s_new.len(), m_d);
+    let (z_l, z_u) = crate::sqp::ipopt_adapter::split_bound_multipliers(nlp_handle, &res.lambda_x);
+    let (v_l, v_u) = crate::sqp::ipopt_adapter::split_slack_multipliers(nlp_handle, y_d);
+
+    let mut out = curr.deep_copy();
+    let ok = set_dense(&mut *out.x, &res.x)
+        && set_dense(&mut *out.s, s_new)
+        && set_dense(&mut *out.y_c, y_c)
+        && set_dense(&mut *out.y_d, y_d)
+        && set_dense(&mut *out.z_l, &z_l)
+        && set_dense(&mut *out.z_u, &z_u)
+        && set_dense(&mut *out.v_l, &v_l)
+        && set_dense(&mut *out.v_u, &v_u);
+    if !ok {
+        // A non-dense backing or a length mismatch. POUNCE is dense-only,
+        // so this is defensive — but a partially-written iterate is worse
+        // than no crossover at all, so bail without touching `curr`.
+        tracing::warn!(
+            target: "pounce::crossover",
+            "crossover result did not fit the iterate; keeping the interior point"
+        );
+        return None;
+    }
+    Some(out.freeze())
+}
+
 fn dense_values(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
     v.as_any()
         .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
@@ -9374,10 +9703,17 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     // limited-memory storage can still request it explicitly with
     // `sqp_hessian = "lbfgs"` below (read after this, so it wins).
     //
+    // ...up to `sqp_dense_hessian_max_n` variables (gh#1054). Above that the
+    // dense update is not a robust choice but an impossible one -- `n²`
+    // storage, and every QP factorization dense -- so `QuasiNewtonAuto`
+    // resolves per solve, from the model's `n`, to L-BFGS in the lifted
+    // low-rank form that keeps the QP sparse. The paragraph above still
+    // governs every model at or below the ceiling.
+    //
     // Read this before `sqp_hessian` so an explicit setting still wins.
     if let Ok((s, true)) = options.get_string_value("hessian_approximation", "") {
         if s == "limited-memory" {
-            opts.hessian = SqpHessianSource::DampedBfgs;
+            opts.hessian = SqpHessianSource::QuasiNewtonAuto;
         }
     }
     if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
@@ -9424,6 +9760,15 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
         if v >= 1 {
             opts.lbfgs_max_history = v as u32;
         }
+    }
+    // An explicit `sqp_qp_use_schur_updates` is the caller's choice and goes
+    // to the QP options as given (`apply_qp_subproblem_options`); only an
+    // unset one is left to the size rule.
+    if let Ok((_, true)) = options.get_string_value("sqp_qp_use_schur_updates", "") {
+        opts.qp_schur_min_dim = None;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_dense_hessian_max_n", "") {
+        opts.dense_hessian_max_n = usize::try_from(v).unwrap_or(0);
     }
 }
 
@@ -10410,6 +10755,29 @@ mod tests {
     /// that class of omission needs — it fails both if a key stops being
     /// registered and if a newly-read key is never registered at all.
     #[test]
+    fn issue_1054_schur_updates_follow_size_unless_set() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.qp_schur_min_dim,
+            Some(crate::sqp::options::DEFAULT_QP_SCHUR_MIN_DIM)
+        );
+        for v in ["yes", "no"] {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!(
+                "algorithm active-set-sqp\nsqp_qp_use_schur_updates {v}\n"
+            ))
+            .unwrap();
+            let snap = app.algorithm_builder_snapshot();
+            assert_eq!(snap.sqp.qp_schur_min_dim, None, "{v}: explicit wins");
+            assert_eq!(snap.sqp_qp.use_schur_updates, v == "yes");
+        }
+    }
+
+    #[test]
     fn application_sqp_qp_subproblem_options_are_registered_and_propagate() {
         use pounce_qp::AntiCyclingChoice;
 
@@ -10464,9 +10832,10 @@ mod tests {
         assert!((qp.feas_tol - defaults.feas_tol).abs() < 1e-20);
         assert!((qp.opt_tol - defaults.opt_tol).abs() < 1e-20);
         assert_eq!(qp.anti_cycling, defaults.anti_cycling);
-        // Default stays OFF, and that is a measured choice: enabling it breaks
-        // 9 of the 46 Maros-Meszaros instances the default path solves
-        // correctly. Do not flip this without re-running that comparison.
+        // Off in the base QP options: the SQP driver turns it on per solve
+        // from `n + m >= 500` (gh#1054; measured on Maros-Meszaros, see the
+        // option text). Do not move that threshold without re-running the
+        // comparison.
         assert!(!qp.use_schur_updates);
         assert_eq!(
             qp.max_schur_updates_before_refactor,
@@ -10552,9 +10921,19 @@ mod tests {
              hessian_approximation limited-memory\n",
         )
         .unwrap();
+        let snap = app.algorithm_builder_snapshot().sqp;
+        assert_eq!(snap.hessian, crate::sqp::SqpHessianSource::QuasiNewtonAuto);
+        // ...which is the dense update at or below the ceiling, and the
+        // lifted limited-memory one above it (gh#1054).
         assert_eq!(
-            app.algorithm_builder_snapshot().sqp.hessian,
+            snap.hessian
+                .resolve(snap.dense_hessian_max_n, snap.dense_hessian_max_n),
             crate::sqp::SqpHessianSource::DampedBfgs
+        );
+        assert_eq!(
+            snap.hessian
+                .resolve(snap.dense_hessian_max_n + 1, snap.dense_hessian_max_n),
+            crate::sqp::SqpHessianSource::Lbfgs
         );
 
         // An explicit `sqp_hessian = lbfgs` is still honored (it is read after

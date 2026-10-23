@@ -72,6 +72,16 @@ pub enum SqpStatus {
     /// The per-iteration hook (the user's `intermediate_callback`) returned
     /// `false`. Maps to `User_Requested_Stop`.
     UserRequestedStop,
+    /// `max_wall_time` ran out ([`crate::sqp::SqpOptions::deadline`]),
+    /// either between outer iterations or inside a step QP. Maps to
+    /// `Maximum_WallTime_Exceeded`, as on the interior-point arm.
+    ///
+    /// Before gh#1054 neither time limit reached this arm at all: an
+    /// active-set solve that stalled in its first QP ran until something
+    /// outside POUNCE killed it.
+    WallTimeExceeded,
+    /// `max_cpu_time` ran out. Maps to `Maximum_CpuTime_Exceeded`.
+    CpuTimeExceeded,
 }
 
 impl fmt::Display for SqpStatus {
@@ -86,6 +96,8 @@ impl fmt::Display for SqpStatus {
             SqpStatus::Unbounded => write!(f, "unbounded"),
             SqpStatus::InvalidNumber => write!(f, "invalid-number"),
             SqpStatus::UserRequestedStop => write!(f, "user-requested-stop"),
+            SqpStatus::WallTimeExceeded => write!(f, "wall-time-exceeded"),
+            SqpStatus::CpuTimeExceeded => write!(f, "cpu-time-exceeded"),
         }
     }
 }
@@ -103,6 +115,15 @@ impl fmt::Display for SqpError {
         match self {
             SqpError::QpFailure(e) => write!(f, "QP subproblem failure: {e}"),
             SqpError::DimensionMismatch(s) => write!(f, "dimension mismatch: {s}"),
+        }
+    }
+}
+
+impl From<pounce_common::timing::DeadlineKind> for SqpStatus {
+    fn from(kind: pounce_common::timing::DeadlineKind) -> Self {
+        match kind {
+            pounce_common::timing::DeadlineKind::Wall => SqpStatus::WallTimeExceeded,
+            pounce_common::timing::DeadlineKind::Cpu => SqpStatus::CpuTimeExceeded,
         }
     }
 }

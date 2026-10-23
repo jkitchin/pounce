@@ -153,6 +153,40 @@ impl IpoptNlpAdapter {
         me
     }
 
+    /// Constraint violation of the model **as the user declared it**, in
+    /// user units, at `x`: the general rows (unscaled, against the declared
+    /// bounds) and the variable box (`None` when the declared box was never
+    /// snapshotted). The SQP's own residuals are in the scaled space, where
+    /// gradient-based scaling can shrink a row's violation by orders of
+    /// magnitude (gh#1054: a violation of `1` read `3.3e-7`), so these are
+    /// what an acceptance decision about the user's problem has to read.
+    pub fn declared_violation(&self, x: &[Number]) -> (Number, Option<Number>) {
+        let x_dv = self.dv_from_slice(&self.x_space, x);
+        let mut c = self.c_space.make_new_dense();
+        let mut d = self.d_space.make_new_dense();
+        {
+            let mut nlp = self.nlp.borrow_mut();
+            if self.m_c > 0 {
+                nlp.eval_c(&x_dv, &mut c);
+            }
+            if self.m_d > 0 {
+                nlp.eval_d(&x_dv, &mut d);
+            }
+        }
+        let nlp = self.nlp.borrow();
+        let rows = crate::ipopt_cq::unscaled_nlp_constraint_violation_max(&*nlp, &c, &d);
+        (rows, nlp.declared_box_violation(&x_dv))
+    }
+
+    /// `|df|`, the objective scaling factor's magnitude (`1` when unset):
+    /// the divisor that takes a stationarity or complementarity residual
+    /// from the scaled space to user units, as
+    /// `IpoptCalculatedQuantities::curr_unscaled_dual_infeasibility_max` does.
+    pub fn obj_scale(&self) -> Number {
+        let df = self.nlp.borrow().obj_scaling_factor().abs();
+        if df == 0.0 { 1.0 } else { df }
+    }
+
     fn dv_from_slice(&self, space: &Rc<DenseVectorSpace>, s: &[Number]) -> DenseVector {
         let mut dv = space.make_new_dense();
         dv.set_values(s);
