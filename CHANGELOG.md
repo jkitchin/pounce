@@ -9,7 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The JSON report records `mu_strategy_fallback` re-solves (gh #1042)** as
+  `statistics.mu_strategy_fallback` (first attempt's status, iterations,
+  restoration calls and objective; the retry's; whether it was promoted).
+  `scripts/sweep-fixtures.sh` shows it in a new `mu=` column. Previously a
+  first attempt that got worse and was rescued by the fallback read as a
+  speed-up.
+
 ### Fixed
+- **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
+  at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
+  `|e|^(p+q)` (positive literal exponents, identical operands only; values
+  unchanged to rounding). `dallass` exact goes 123 → 28 iterations with no
+  restoration calls (v0.12.0: 41), and the limited-memory leg, which failed on
+  0.12.0 and 0.13.0, now solves.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

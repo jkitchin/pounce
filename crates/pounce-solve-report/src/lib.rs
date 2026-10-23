@@ -748,6 +748,16 @@ pub struct StatisticsInfo {
     /// latter case every other field here describes the base attempt.
     #[serde(default)]
     pub dual_divergence_retry_promoted: bool,
+    /// gh#1042 C1. What the `mu_strategy_fallback` retry did, when it ran:
+    /// the first attempt's status, iterations, restoration calls and
+    /// objective, the re-solve's status and iterations, and whether the
+    /// re-solve was promoted. On a promotion `iteration_count` and
+    /// `restoration_calls` above are the **re-solve's alone**, so this is the
+    /// only place the first attempt is visible — the gh#850 argument for
+    /// `second_opinion`, one mechanism over. Omitted when no retry ran;
+    /// additive to `pounce.solve-report/v1`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mu_strategy_fallback: Option<pounce_nlp::MuStrategyFallbackRecord>,
     /// gh#983. Structured solve-quality warnings about the returned point,
     /// each `"<code>: <text>"` (`objective_scale_small`,
     /// `unscaled_stationarity_above_tol`, `large_dual_scale`,
@@ -873,6 +883,7 @@ impl ReportBuilder {
             quality_escalations: src.quality_escalations,
             dual_divergence_signature: src.dual_divergence_signature,
             dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
+            mu_strategy_fallback: src.mu_strategy_fallback.clone(),
             warnings: src.warnings.clone(),
             derivative_check: src.derivative_check.as_ref().map(DerivativeCheckInfo::from),
             objective_scaling: {
@@ -988,6 +999,7 @@ fn empty_stats() -> StatisticsInfo {
         quality_escalations: 0,
         dual_divergence_signature: false,
         dual_divergence_retry_promoted: false,
+        mu_strategy_fallback: None,
         warnings: Vec::new(),
         derivative_check: None,
         objective_scaling: None,

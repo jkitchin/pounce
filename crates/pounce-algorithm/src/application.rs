@@ -1113,6 +1113,12 @@ pub struct IpoptApplication {
     /// attempt's answer. Copied into
     /// [`SolveStatistics::dual_divergence_retry_promoted`].
     dual_divergence_retry_promoted: std::cell::Cell<bool>,
+    /// gh#1042 C1. What the `mu_strategy_fallback` retry did in this solve,
+    /// if it ran. Copied into [`SolveStatistics::mu_strategy_fallback`] by
+    /// every attempt that follows it, and written into the statistics
+    /// directly once the retry has decided — so a promoted re-solve no
+    /// longer hides the first attempt's verdict and cost.
+    mu_strategy_fallback_record: RefCell<Option<pounce_nlp::MuStrategyFallbackRecord>>,
     /// Set when a losing retry's answer was thrown away and an earlier
     /// attempt's replayed through `FinalizeSnapshot::replay` — by the μ
     /// fallback (pounce#870) or the gh#884 dual-divergence retry.
@@ -1341,6 +1347,7 @@ impl IpoptApplication {
             derivative_check: RefCell::new(None),
             obj_scale_refused: std::cell::Cell::new((false, false)),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
+            mu_strategy_fallback_record: RefCell::new(None),
             answer_restored_from_floor: std::cell::Cell::new(false),
             retry_keeps_declared_box: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
@@ -2156,6 +2163,7 @@ impl IpoptApplication {
         self.dual_divergence_signature.set(false);
         self.obj_scale_refused.set((false, false));
         self.dual_divergence_retry_promoted.set(false);
+        *self.mu_strategy_fallback_record.borrow_mut() = None;
         self.answer_restored_from_floor.set(false);
         // Same scoping argument as the three above, for the same reason: the
         // memo suppresses a REPEATED header within one run, so it must not
@@ -4559,7 +4567,27 @@ impl IpoptApplication {
         let solution_floor = scope.last_finalize.borrow().clone();
         let certificate_floor = SolutionCertificate::of(&scope.statistics.borrow());
         let trace_floor = *scope.last_iter_stats.borrow();
+        // gh#1042 C1: the first attempt's verdict and cost, recorded before
+        // the re-solve overwrites the statistics. A promoted re-solve reports
+        // its own `iteration_count` and `restoration_calls` only, and without
+        // this nothing says the first attempt got worse.
+        let mut record = {
+            let st = scope.statistics.borrow();
+            pounce_nlp::MuStrategyFallbackRecord {
+                base_status: first_status.upstream_name().to_string(),
+                base_iteration_count: st.iteration_count,
+                base_restoration_calls: st.restoration_calls,
+                base_objective: st.final_objective,
+                retry_mu_strategy: flipped.to_string(),
+                ..Default::default()
+            }
+        };
+        *scope.mu_strategy_fallback_record.borrow_mut() = Some(record.clone());
         let retry_status = scope.optimize_constrained(Rc::clone(&tnlp));
+        record.retry_status = retry_status.upstream_name().to_string();
+        record.retry_iteration_count = scope.statistics.borrow().iteration_count;
+        record.promoted = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded);
+        *scope.mu_strategy_fallback_record.borrow_mut() = Some(record.clone());
         // Restore the user's original option-table view.
         let _ = scope.options.set_string_value(
             "mu_strategy",
@@ -4571,6 +4599,7 @@ impl IpoptApplication {
             false,
         );
         drop(scope);
+        self.statistics.borrow_mut().mu_strategy_fallback = Some(record);
         if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
             return retry_status;
         }
@@ -6711,6 +6740,7 @@ impl IpoptApplication {
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
             stats.returned_run_dual_divergence_signature = alg.dual_divergence_signature();
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
+            stats.mu_strategy_fallback = self.mu_strategy_fallback_record.borrow().clone();
             stats.derivative_check = self.derivative_check.borrow().clone();
             let (rs, ra) = self.obj_scale_refused.get();
             self.obj_scale_refused.set((

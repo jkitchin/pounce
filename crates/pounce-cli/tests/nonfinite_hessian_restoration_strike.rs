@@ -23,6 +23,19 @@
 //! and the static and recovery cycle detectors and `max_iter` still bound a real
 //! cycle. Revert the exemption in `IpoptAlgorithm::invoke_restoration` and this
 //! test reports `Error_In_Step_Computation`.
+//!
+//! **Which file it runs (gh#1042 R3).** Since the `.nl` reader merges
+//! `|x|^p·|x|^q` into `|x|^(p+q)` (`merge_abs_pow_product` in
+//! `pounce-nl`), `dallass.nl` no longer reaches a non-finite Hessian at all
+//! — it solves in 28 iterations with no restoration — so it stopped
+//! exercising the exemption. This test therefore runs
+//! `tests/data/dallass_kink_unmerged.nl`: `dallass.nl` with each
+//! `|x|^0.85` factor's operand written `x + 0`, which evaluates identically
+//! but is not the same expression to the merge, so the product rule and its
+//! `0·∞` Hessian come back. It reproduces the 0.13.0 run bit for bit (123
+//! iterations, 12 restoration calls, 11 of them non-finite-`W` entries,
+//! objective `-32393.225736201894`). It lives in `tests/data/`, not
+//! `tests/fixtures/`, so the fixture sweep does not run it twice.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,8 +47,8 @@ fn pounce_exe() -> PathBuf {
 fn fixture() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tests");
-    p.push("fixtures");
-    p.push("dallass.nl");
+    p.push("data");
+    p.push("dallass_kink_unmerged.nl");
     p
 }
 

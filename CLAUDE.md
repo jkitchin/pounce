@@ -169,6 +169,17 @@ produces no JSON at all — `deb7` on the L-BFGS leg under
 `Selected solver:` banner, so a change to that banner's wording moves the
 column on exactly those lines, with `NO_JSON` unchanged either side.
 
+The `mu=` column (gh#1042 C1) records the `mu_strategy_fallback` re-solve,
+read from the JSON's `statistics.mu_strategy_fallback`: `-`, or
+`<strategy>@<first status>/<first iters>,tot=N` when the re-solve was
+promoted — then `it=` is the re-solve's alone — or
+`kept(<strategy>:<retry status>/<retry iters>),tot=N` when it lost. A first
+attempt that gets worse and is rescued by the fallback moves only this column
+and reads as a speed-up in `it=`: gh#1042's R2b reported `pooling_rt2stp`
+492 → 109 while its first attempt went Optimal/492 → Acceptable/494. To diff
+against a sweep from before the column, drop it with
+`sed -E 's/ mu=[^ ]+ +/ /'`.
+
 What the corpus still cannot give you is **magnitude at benchmark scale**. The
 largest fixture of any class is `deb7` at 813 variables and the largest convex
 one is `lp_degen2` at 534, while `benchmarks/qp` reaches 93 263 (`BOYD2`). A

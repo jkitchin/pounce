@@ -130,6 +130,51 @@ pub struct SolvePassRecord {
     pub status: String,
 }
 
+/// What the `mu_strategy_fallback` retry (pounce#138 / pounce#748) did, when
+/// it ran (gh#1042 C1).
+///
+/// The retry re-solves with the opposite `mu_strategy` after a first attempt
+/// that ended `Solved_To_Acceptable_Level` or `Maximum_Iterations_Exceeded`,
+/// and promotes the re-solve only on `Solve_Succeeded`. On a promotion every
+/// other field of [`SolveStatistics`] — `iteration_count`,
+/// `restoration_calls`, the residuals — describes the **re-solve alone**, so
+/// without this record a first attempt that got *worse* reads as a large
+/// speed-up. That is how gh#1042's R2b was mis-scored: `pooling_rt2stp`'s
+/// first attempt went `Solve_Succeeded`/492 → `Solved_To_Acceptable_Level`/494
+/// and the report said 492 → 109, the re-solve's count. The second-opinion
+/// ladder's record (`second_opinion` in the solve report, gh#850) closed the
+/// same hole one mechanism over; this closes it for the μ flip.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MuStrategyFallbackRecord {
+    /// The first attempt's verdict, upstream spelling.
+    pub base_status: String,
+    /// Iterations the first attempt spent. Not in
+    /// `SolveStatistics::iteration_count` when the re-solve was promoted.
+    pub base_iteration_count: Index,
+    /// Restoration calls of the first attempt (same caveat).
+    pub base_restoration_calls: Index,
+    /// The first attempt's final objective (unscaled).
+    pub base_objective: Number,
+    /// The `mu_strategy` the re-solve ran under (`adaptive` / `monotone`).
+    pub retry_mu_strategy: String,
+    /// The re-solve's verdict, upstream spelling.
+    pub retry_status: String,
+    /// Iterations the re-solve spent.
+    pub retry_iteration_count: Index,
+    /// The re-solve's answer was returned. When `false` every other field of
+    /// the statistics describes the first attempt, and the re-solve's cost is
+    /// visible only here.
+    pub promoted: bool,
+}
+
+impl MuStrategyFallbackRecord {
+    /// First attempt plus re-solve: what the fallback path actually cost.
+    pub fn total_iteration_count(&self) -> Index {
+        self.base_iteration_count + self.retry_iteration_count
+    }
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolveStatistics {
@@ -382,6 +427,12 @@ pub struct SolveStatistics {
     /// and lost — in the latter case the returned point, status and
     /// residuals are the base attempt's.
     pub dual_divergence_retry_promoted: bool,
+    /// gh#1042 C1. The `mu_strategy_fallback` retry's record when it ran in
+    /// this solve, `None` otherwise. Sticky across the attempts of one solve
+    /// (like `dual_divergence_signature`): a later attempt an outer driver
+    /// spends still carries it, because the retry happened.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mu_strategy_fallback: Option<MuStrategyFallbackRecord>,
 
     // ---- Active-set SQP subproblem counters. ----
     //
@@ -509,6 +560,7 @@ impl Default for SolveStatistics {
             dual_divergence_signature: false,
             returned_run_dual_divergence_signature: false,
             dual_divergence_retry_promoted: false,
+            mu_strategy_fallback: None,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
             sqp_warm_working_set_applied: false,
