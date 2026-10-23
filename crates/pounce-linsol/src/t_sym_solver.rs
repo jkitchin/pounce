@@ -409,6 +409,18 @@ impl TSymLinearSolver {
     pub fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
         self.backend.multi_solve_matches_single_solve(nrhs)
     }
+
+    /// Pass-through to [`SparseSymLinearSolverInterface::analysis_count`].
+    pub fn analysis_count(&self) -> u64 {
+        self.backend.analysis_count()
+    }
+
+    /// Pass-through to [`SparseSymLinearSolverInterface::forget_analysis`].
+    /// The wrapper's own scaling factors are recomputed on every
+    /// refactorization, so it holds nothing pattern-bound to forget.
+    pub fn forget_analysis(&mut self) -> bool {
+        self.backend.forget_analysis()
+    }
 }
 
 impl SymLinearSolver for TSymLinearSolver {

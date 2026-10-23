@@ -982,6 +982,18 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         self.inner.set_slack_scaling(nx, s_scale);
     }
 
+    fn analysis_count(&self) -> u64 {
+        self.inner.analysis_count() + self.bypass.as_deref().map_or(0, |b| b.analysis_count())
+    }
+
+    fn forget_analysis(&mut self) -> bool {
+        // The main solver only. The bypass solver factors nothing but the
+        // Hessian-free `W = 0` systems (initializer, eq-mult estimates),
+        // which is the family its analysis was chosen on. Without a
+        // bypass the shared inner solver is the main one and forgets.
+        self.inner.forget_analysis()
+    }
+
     fn handles_low_rank_w(&self) -> bool {
         true
     }

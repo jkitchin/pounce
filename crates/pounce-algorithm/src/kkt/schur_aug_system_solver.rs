@@ -264,6 +264,14 @@ impl AugSystemSolver for SchurAugSystemSolver {
         self.inner.set_diagnostics(diag);
     }
 
+    fn analysis_count(&self) -> u64 {
+        self.inner.analysis_count()
+    }
+
+    fn forget_analysis(&mut self) -> bool {
+        self.inner.forget_analysis()
+    }
+
     fn solve(
         &mut self,
         coeffs: &AugSysCoeffs<'_>,

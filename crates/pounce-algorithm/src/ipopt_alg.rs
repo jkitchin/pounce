@@ -4956,10 +4956,34 @@ impl IpoptAlgorithm {
                 timing.initialize_iterates.start();
                 let mut pd_guard = sd.pd_solver_mut();
                 let aug_solver = pd_guard.aug_solver_mut();
+                let analyses_before = aug_solver.analysis_count();
                 let ok = self
                     .bundle
                     .init
                     .set_initial_iterates(&self.data, &self.cq, nlp, aug_solver);
+                // jkitchin/feral#224: the initializer's least-squares
+                // multiplier system (`W = 0`, `D_x = D_s = I`) is the
+                // first matrix this solver factors. When that solve is
+                // what created the backend's symbolic analysis, drop it:
+                // FERAL's analysis is value-dependent (MC64 ordering
+                // preprocess, sticky Auto scaling), and keeping it would
+                // order every KKT system of the solve by a matrix that is
+                // not one of them (qcqp1000-2c: LinearSystemFactorization
+                // 103 s -> 74 s). The first KKT system is not a perfect
+                // proxy for the late ones either, so the effect on a
+                // given model goes both ways (qcqp1000-2nc: 13 s -> 24 s);
+                // what this buys is that the ordering is chosen from a
+                // matrix of the family it is used on. Bracketed by the count so an
+                // analysis the init merely *reused* — a pooled backend, a
+                // second `optimize` on the same bundle — is left alone,
+                // and a backend with a structural analysis (MA57) never
+                // reports a change.
+                if aug_solver.analysis_count() != analyses_before && aug_solver.forget_analysis() {
+                    tracing::debug!(
+                        target: "pounce::linsol",
+                        "dropped the symbolic analysis built on the multiplier-init system",
+                    );
+                }
                 drop(pd_guard);
                 timing.initialize_iterates.end();
                 if !ok {
