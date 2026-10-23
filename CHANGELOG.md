@@ -10,6 +10,51 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **A restoration that ends on a feasible point it never released now
+  fails, as upstream's does, once the outer phase shows it cannot leave
+  that point (gh #1042).** When the restoration sub-problem converges at a
+  feasible point that the outer filter rejects (or that does not cut the
+  violation by `kappa_resto`), upstream reports `Restoration_Failed`. POUNCE
+  hands the point back so the outer phase gets one shot from it, which the
+  `dallas*` models need. Nothing bounded the case where the outer re-entered
+  restoration from that same point. Vanderbei `brainpc0`/`brainpc1` ran 2117
+  and 1073 iterations (121 and 52 restoration calls) before another cycle
+  detector stopped them.
+  - **The new exit.** That re-entry now ends the base solve at once, through
+    the acceptable-point rollback. The verdict is `Restoration_Failed`, or
+    `Infeasible_Problem_Detected` when the point violates the user's
+    `constr_viol_tol` (gh #508).
+  - **Positions, not steps.** The test compares where the outer is with
+    where it was handed the point, so a watchdog that rolls back to it
+    counts as not having left.
+  - **Exemption.** An entry forced by a non-finite Hessian is exempt.
+  - **Upstream's second throw site** is marked the same way: an inner stop
+    at its acceptable level, feasible to `1e2·tol`.
+  - **Fixture sweep, x86_64, both legs.** `ssebnln` (exact) now ends its
+    base solve `Restoration_Failed` at 117, where the near-feasible detector
+    ended it `Error_In_Step_Computation` at 138. That status routes the
+    ladder to `start_point_perturbation` rather than `mu_strategy=adaptive`:
+    the same objective, now `Optimal` rather than
+    `Solved_To_Acceptable_Level`, at 239 iterations in total against 179 — a
+    measured cost, tracked on gh #1042. `deb7` (L-BFGS) reaches the
+    acceptable-stop site and ends its base solve at 982 rather than 1206,
+    same status, 1738 → 1514 in total. No other fixture-leg moves, apart
+    from the ladder fix below.
+  - **Vanderbei `brainpc*`, measured on arm64 under the earlier
+    `Error_In_Step_Computation` status** (before the status change and the
+    position test): base solves `brainpc0` 2117 → 956, `brainpc1`
+    1073 → 378, `brainpc2` 561 → 258, each recovered by
+    `mu_strategy=adaptive`. `Restoration_Failed` does not open that rung, so
+    these need re-measuring before release.
+- **The second-opinion ladder no longer re-runs an L-BFGS solve as its
+  `mu_strategy=adaptive` rung.** Under a limited-memory Hessian an unset
+  `mu_strategy` already resolves to adaptive (gh #746). The ladder read the
+  raw option, so the rung repeated the base solve byte-for-byte (`deb7`
+  on arm64: 1610 iterations and `f = 99.636943584` both times). It now reads the
+  resolved strategy, as the μ-strategy fallback does.
+  - Thirteen L-BFGS fixture-legs drop that rung, each total falling by
+    exactly its base iteration count, with no change in verdict. For example, `eigena2` 478 → 239 total and
+    `issue_508_infeasible_gap_1em4` 346 → 267 total.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

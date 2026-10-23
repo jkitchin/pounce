@@ -455,6 +455,15 @@ pub struct RestoConvCheckAdapter {
     /// Bounded by construction (see [`resto_orig_verdict`]); tracked for
     /// the debug trace only.
     resto_tol_tightenings: i32,
+    /// Set when layer 2 renders [`RestoOrigVerdict::ConvergedToFeasiblePoint`]
+    /// and the recovered point is handed back to the outer phase anyway —
+    /// pounce's deliberate deviation from upstream's
+    /// `RESTORATION_CONVERGED_TO_FEASIBLE_POINT` throw (see
+    /// [`Self::orig_convergence_verdict`]). Shared with the restoration
+    /// driver, which reports it to the outer loop so that the outer can
+    /// tell a handed-back point layer 1 never released from an ordinary
+    /// recovery (gh#1042). Wired by [`Self::with_unreleased_feasible_flag`].
+    unreleased_feasible_point: Option<std::rc::Rc<std::cell::Cell<bool>>>,
 }
 
 impl RestoConvCheckAdapter {
@@ -492,6 +501,7 @@ impl RestoConvCheckAdapter {
             rel_viol_threshold: 1e-2,
             is_square_problem: false,
             resto_tol_tightenings: 0,
+            unreleased_feasible_point: None,
         }
     }
 
@@ -573,6 +583,19 @@ impl RestoConvCheckAdapter {
         self
     }
 
+    /// Wire the cell this adapter sets when layer 2 hands a
+    /// converged-to-feasible-point iterate back to the outer phase instead
+    /// of failing restoration as upstream does (gh#1042). The driver reads
+    /// it after the sub-solve; see
+    /// [`pounce_algorithm::restoration::RestorationPhase::last_recovery_unreleased`].
+    pub fn with_unreleased_feasible_flag(
+        mut self,
+        flag: std::rc::Rc<std::cell::Cell<bool>>,
+    ) -> Self {
+        self.unreleased_feasible_point = Some(flag);
+        self
+    }
+
     /// Layer 2 of `IpRestoConvCheck::CheckConvergence`
     /// (`IpRestoConvCheck.cpp:200-240`), evaluated once the restoration
     /// sub-problem's own convergence check has fired.
@@ -631,7 +654,19 @@ impl RestoConvCheckAdapter {
             // more useful than discarding it. Deliberate deviation, scoped
             // so that #438 changes only the arm that was missing a verdict
             // entirely.
-            RestoOrigVerdict::ConvergedToFeasiblePoint => None,
+            //
+            // The hand-back is marked, though (gh#1042). The point reaches
+            // this arm only because layer 1 did not release it — the outer
+            // filter rejected it, or the reduction it offers falls short of
+            // `kappa_resto` — so the outer phase resumes from a point its own
+            // globalization did not accept. Whether that pays off is only
+            // visible from the outer loop, which is where the flag is read.
+            RestoOrigVerdict::ConvergedToFeasiblePoint => {
+                if let Some(flag) = &self.unreleased_feasible_point {
+                    flag.set(true);
+                }
+                None
+            }
             RestoOrigVerdict::LocallyInfeasible => {
                 // Square problems are exempt. `MinC_1NrmRestorationPhase`
                 // returns the recovered point to the outer unconditionally

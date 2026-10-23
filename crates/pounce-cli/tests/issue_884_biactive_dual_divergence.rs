@@ -564,11 +564,20 @@ fn a_diverging_iterate_is_not_the_signature() {
 /// 1000-iteration solve and is declined on the answer (unscaled KKT
 /// `2.4e2` against the base attempt's `7.3e2`) — the same pure cost the
 /// paragraph above measured at 715 → 3000.
+///
+/// **gh#1042 moved it again, so the cap is now 900.** That leg reaches a
+/// converged-to-feasible restoration hand-back it cannot leave, and the
+/// gh#1042 exit ends it `Restoration_Failed` at 982 on x86_64 (1610 on
+/// arm64) — under a 1000 cap on x86_64, which made this test about the
+/// answer gate again. At 900 the detector has long fired (346) and the cap
+/// is still what ends the base solve on both architectures, measured on
+/// x86_64: `Maximum_Iterations_Exceeded` at 900, two summary blocks, no
+/// retry.
 #[test]
 fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
     let (r, stdout) = solve_stem(
         "deb7",
-        &["hessian_approximation=limited-memory", "max_iter=1000"],
+        &["hessian_approximation=limited-memory", "max_iter=900"],
     );
     assert_eq!(
         r.solution.status,
