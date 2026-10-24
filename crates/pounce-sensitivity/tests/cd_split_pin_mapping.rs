@@ -42,6 +42,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{RecordingTnlp, Relaxation, correct_outside, outside_engine};
+
 /// `p1`, `p2` are the nominal RHS values of the two parameter-fixing
 /// equalities g2, g3.
 struct LeadingInequalityTNLP {
@@ -287,4 +291,44 @@ fn reduced_hessian_errors_on_pinned_inequality() {
         res.is_err(),
         "reduced Hessian over a pinned inequality must error, got {res:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and hands the same step to the corrector over an engine built
+// from that report. These solves run at pounce's default `bound_relax_factor`,
+// so the outside engine measures its slacks against bounds relaxed the way
+// pounce relaxes them.
+
+#[test]
+fn correct_step_translates_pin_index_through_cd_split_over_an_outside_engine() {
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(LeadingInequalityTNLP {
+        p1: 1.0,
+        p2: 1.0,
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(make_app(), tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}"
+    );
+    let delta = 0.1;
+    let step = solver
+        .parametric_step_full(&[2], &[delta])
+        .expect("parametric_step_full ok");
+    let pounce = solver
+        .correct_step(&[2], &[delta], &step, 8)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::POUNCE_DEFAULT);
+    let outside = correct_outside(&eng, &[2], &[delta], &step, 8).expect("outside corrector");
+    assert_same_correction("pin behind an inequality", &pounce, &outside, Frame::Same);
 }

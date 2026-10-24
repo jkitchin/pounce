@@ -9,6 +9,193 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The JSON report records `mu_strategy_fallback` re-solves (gh #1042)** as
+  `statistics.mu_strategy_fallback` (first attempt's status, iterations,
+  restoration calls and objective; the retry's; whether it was promoted).
+  `scripts/sweep-fixtures.sh` shows it in a new `mu=` column. Previously a
+  first attempt that got worse and was rescued by the fallback read as a
+  speed-up.
+- **`ipm_sqp_handover`: the interior-point method can hand its iterate to the
+  active-set SQP before convergence (gh #1054).** Once the overall NLP error
+  reaches `ipm_sqp_handover_tol` (default `1e-4`), or has not halved in
+  `ipm_sqp_handover_stall_iter` iterations, the active set is identified from
+  the multipliers against the slacks and the SQP finishes from there. A point
+  is accepted only if it meets the stopping tolerances in user units and
+  passes the interior method's negative-curvature check; otherwise the
+  interior iteration continues unchanged. Off by default. Over the CLI
+  fixture corpus it shortens 73 of 234 solves and worsens no status. See
+  `docs/src/crossover.md`.
+- **The active-set SQP scales to large quasi-Newton models (gh #1054).** Above
+  `sqp_dense_hessian_max_n` (default 1000) variables, `sqp_hessian=lbfgs` is
+  handed to the step QP in a lifted low-rank form that keeps it sparse, and
+  `hessian_approximation=limited-memory` selects it there instead of the dense
+  damped BFGS. A 20 000-variable model solves in seconds; the dense matrix
+  alone would have been 1.6 GB.
+
+### Changed
+- **`--minima mlsl` no longer counts a repeat infeasible landing against
+  `patience` (gh #1042 R4c).** A launch that ends violating the constraints
+  at a point an earlier launch already ended at is one more sample of that
+  infeasible basin, not evidence that the landscape is exhausted. The first
+  hit of each infeasible point, every other failure, and every infeasible
+  landing before a minimum has been found still count. On
+  `circle_parabola_t0p5` (`--n-minima 6 --max-solves 30 --patience 8`, seeds
+  0–9) MLSL now finds both minima on 8 of 10 seeds (was 5; 0.12.0 7), at
+  19.5 mean solves (was 10.0). Applies to the CLI and `pounce.find_minima`
+  alike; other methods are unchanged.
+- **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
+  unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
+  Maros-Mészáros problems through `algorithm=active-set-sqp` the update path
+  solves 79 against 57, with no objective changed. Small models keep the
+  refactor path, where the two cost the same.
+- **The SQP step-QP iteration budget scales with the problem** (`10·(n + m)`,
+  between 200 and 200 000) unless `sqp_qp_max_iter` is set, as the direct
+  convex active-set driver's already did. The flat 200 made a cold first QP
+  with thousands of active bounds report `Maximum_Iterations_Exceeded`.
+
+- **The corrector and the activity classification run over an interior-point
+  result pounce did not compute.** Both now live in `pounce-sens-core`,
+  written against a second trait, `pounce_sens_core::barrier::BarrierIterate`,
+  which an engine implements beside `SensBacksolver`. It reports the block
+  layout of the compound iterate `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)`, the
+  converged point and the barrier level it sits on, the factor that converts
+  the natural frame to the engine's, the barrier KKT residual at a point, the
+  Newton operator at a predicted point (`corrector_operator`), and the
+  converged quantities the classification reads (`activity_data`).
+  `PdSensBacksolver` implements it from `IpoptData` with the code it ran
+  before, so every result over pounce's own solve is unchanged. The
+  sensitivity suite, the `parametric_cpp` golden output against sIPOPT
+  3.14.19, and `pounce_sens`'s `_sens_sol` output all pass as they were. An
+  engine outside pounce implements the trait from its own final iterate, its
+  own model callbacks and its own factorization of the KKT matrix, and calls
+  `pounce_sens_core::corrector::correct` and
+  `pounce_sens_core::activity::{compute, reduced_activity,
+  reduced_row_activity}` over it.
+
+  The barrier level an engine reports is the level of the complementarity
+  products of the multipliers and slacks it reports, in its own frame. The
+  classification's ratios do not depend on that frame, but its band edges are
+  set by the barrier level, so an engine gets pounce's classification when it
+  reports in the frame its own iteration ran in. For Ipopt that means the
+  multipliers of the `.sol` times the objective scaling factor Ipopt prints,
+  with the barrier parameter it prints.
+
+  The tests include such an engine (`tests/common/outside_engine.rs`), built
+  only from what a solve reports to its caller: the primal point, one
+  multiplier per row and the variable-bound multipliers. It fills in the
+  inequality slacks and their bound multipliers, which a report does not
+  carry, and factors the eight-block Newton matrix with a dense LU and
+  iterative refinement. Every existing corrector and classification test has a
+  second run that builds this engine from the solution pounce returned and
+  asserts the same corrector report, the same classification and the same
+  corrected point, with two exceptions. A limited-memory solve has a
+  quasi-Newton matrix a report does not carry, so that test checks that both
+  corrections reach the required accuracy. Where pounce's gh#737 ceiling caps
+  a barrier diagonal, the outside engine, which needs no cap, reaches a
+  different and more accurate point, so `issue_828_capped_bound_multipliers`
+  and `corrector_ceiling` check that it lands at least as close to the
+  re-solved truth. At `a = 1e-4` in the first, pounce lands `1.55e-4` from it
+  and the outside engine `1e-10`, and in the second `1.048e-2` and `1.356e-3`.
+  A cross-engine test runs both analyses over Ipopt 3.13.2's result on two
+  committed models, one of which Ipopt scales by `100/6180` (MA57, read back
+  from the `.sol`), and compares them with pounce's own run on the same model.
+  The statuses and flags of the classification agree exactly. The corrected
+  points agree to `2.2e-16` where both corrections reach roundoff, and to
+  `3.0e-8` where the corrector stops above it.
+
+- **Every calculation `Solver` makes over its converged factor runs over any
+  engine, and so do the statistics and the steps of `pounce.sensitivity`.**
+  `pounce_sens_core::converged::ConvergedSolve` holds an engine that
+  implements `SensBacksolver` and `BarrierIterate`, and its methods compute
+  the parametric steps in each mode and degeneracy treatment, the corrector,
+  the classification, the reduced Hessian, the KKT solves and the maps between
+  the model's indices and the engine's blocks. `Solver` is a wrapper over it,
+  and `Solver::with_converged` passes one to a caller's closure.
+  `BarrierIterate` gains the methods these read: `model_maps`, `scaling`,
+  `primal_bounds`, `kkt_perturbations` (by default `None`, which the
+  calculations read as no inertia correction) and `released_operator` (by
+  default one `solve_released` call per solve).
+
+  `pounce_sens_core::stats` (the covariance, the information matrix, the
+  correlation and the bounds a block is conditioned on) and
+  `pounce_sens_core::step` (the solution estimate, the solution report, the
+  active-set changes along a path step, the multiplier row of a model row and
+  the total derivative of the objective) are the numerics of
+  `pounce.sensitivity`'s `covariance`, `information`, `solution`,
+  `solution_report` and `active_set_changes`, ported to Rust. `faer` takes the
+  place of NumPy in `pounce_sens_core::dense`: the inverse and the solve fail
+  on an exactly zero pivot as LAPACK's do, the rank and the null space use
+  NumPy's tolerance, and the symmetric eigendecomposition reads the lower
+  triangle and makes each eigenvector's largest component positive. The ports
+  return each warning condition as a finding and each failure as a typed
+  error. `pounce-py` exposes them, and the Python front ends keep their
+  signatures and raise the warnings and exceptions they always raised, with
+  the same messages, in the same order except where "Changed" below says
+  otherwise. `SensSession.mult_entry` reads the
+  strictly-active gate from `step::multiplier_row`, and
+  `total_objective_derivative` contracts through
+  `step::total_objective_derivative`. Notebooks 26, 31 and 36 print the same
+  output as before, apart from the wall times they report.
+
+  `tests/notebook_calcs_over_engines.rs` runs every calculation of notebooks
+  26, 31 and 36 over pounce's solve, over the test engine built from what
+  pounce's solve returned, and over the test engine built from Ipopt 3.13.2's
+  `.sol`, on three committed models. Everything discrete agrees exactly. The
+  statistics agree with pounce's to `2.4e-8` and the steps to `4.1e-12`. The
+  exception is the information of a parameter held at its bound, which agrees
+  to `5.3e-5` over both engines. It is a reduced curvature, computed as a
+  difference against a barrier diagonal of `3.0e7` that cancels eight digits.
+  The same file checks every run against the closed forms of the two fits, to
+  `4.3e-8`, and checks each step against its definition. Five more models
+  reach cases the notebooks do not, among them a parameter with curvature
+  below the noise scale, a negative variance and a weakly active inequality
+  row. The test engine can report malformed maps, scaling or bounds, and the
+  calculations refuse each.
+  `pyomo-pounce/tests/test_covariance_messages.py` pins the names of the
+  residual groups in the reported variance and in errors, and the wording of
+  the warnings callers filter on.
+
+- `SolutionReport.refined_entries` lists every entry the report classified
+  again with the reduced curvature, one back-solve each, which are the
+  entries the cheap classifier called ambiguous. `refined` lists the ones
+  whose class changed.
+
+- `SensBacksolver::solve_many` has a default that solves one right-hand side
+  at a time. `PdSensBacksolver` routes it to its batched back-solve.
+
+### Changed
+- `pounce_sensitivity::corrector` is `pounce_sens_core::corrector`, re-exported,
+  and its errors are `CorrectorError`, which `Solver::correct_step` maps to the
+  same `SolverError` variants and messages as before. The classification types
+  and functions are re-exported from `pounce_sensitivity::activity`, so
+  `pounce_sensitivity::activity::WEAKLY_ACTIVE` and its siblings keep their
+  paths. `ReducedActivityError` and `ReducedRowActivityError` are public and
+  gain a `Data` variant for an engine that cannot supply consistent data.
+- `corrector::run` refuses a step or a converged iterate whose length is not
+  the KKT system's. `Solver::correct_step` already refused a short step, so this
+  changes nothing over pounce's own solve.
+- `pounce_sensitivity::index` is `pounce_sens_core::index`, re-exported.
+  `SolverError` and `BARRIER_SIGN` are defined in `pounce_sens_core::converged`
+  and re-exported from `pounce_sensitivity::solver`.
+- `covariance` with a per-group `sigma_sq` that misses a group raises before
+  the classification's warnings rather than after them.
+- `Covariance.conditioned_on` and `Information.conditioned_on` are found in
+  the same call as the matrix, from the classification that call already
+  ran, rather than on first access. A call takes one back-solve per
+  near-bound variable outside the block whether or not the caller reads them,
+  and a result no longer keeps the session and its factor alive.
+- Over an engine that does not report its inertia correction
+  (`BarrierIterate::kkt_perturbations` returning `None`), `max_pdpert` now
+  refuses with `BadOptions` rather than passing as if the correction were
+  zero, and `step::SolutionReport::perturbations` is an
+  `Option<[Number; 4]>` that is `None` there rather than four zeros. The
+  Python `SolutionReport.perturbations` is `None` in the same case. pounce
+  always reports its correction, so nothing changes over its own solve.
+- The `pounce-py` sensitivity bindings raise `ValueError` for a pin that does
+  not fit the core's index type, for a Jacobian structure entry that is not
+  a non-negative whole number, and for a Jacobian whose rows, columns and
+  values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
 - **A restoration that ends on a feasible point it never released now
   fails, as upstream's does, once the outer phase shows it cannot leave
@@ -55,6 +242,57 @@ changes.
   - Thirteen L-BFGS fixture-legs drop that rung, each total falling by
     exactly its base iteration count, with no change in verdict. For example, `eigena2` 478 → 239 total and
     `issue_508_infeasible_gap_1em4` 346 → 267 total.
+- **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
+  at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
+  `|e|^(p+q)` (positive literal exponents, identical operands only; values
+  unchanged to rounding). `dallass` exact goes 123 → 28 iterations with no
+  restoration calls (v0.12.0: 41), and the limited-memory leg, which failed on
+  0.12.0 and 0.13.0, now solves.
+- **`max_wall_time` and `max_cpu_time` now bound `algorithm=active-set-sqp`
+  and crossover (gh #1054).** Neither was read on those paths, so a stalled
+  QP ran until killed from outside. The SQP stops with
+  `Maximum_WallTime_Exceeded` / `Maximum_CpuTime_Exceeded`, each QP gets what
+  is left of the budget, and crossover declines and keeps the interior
+  solution.
+- **Crossover no longer accepts a point that is feasible only in scaled
+  units (gh #1054).** It now also requires `constr_viol_tol`, `dual_inf_tol`
+  and `compl_inf_tol` in user units on the model as declared; gradient scaling
+  can shrink a row's violation by orders of magnitude (a violation of 1 read
+  `3.3e-7` on `hs13_bigstart`).
+- **A convex QCQP with a large cost vector now solves on the conic path
+  (gh #1056).** `qcqp_ball` with its cost scaled to `(g, g)` ended
+  `Numerical failure` on the conic arm from `g = 1e15`, and across
+  `1e16 … 1e19` it ended `Maximum iterations exceeded` at a point outside
+  the feasible ball — which `solver_selection=auto` reported as is, since an
+  iteration limit does not trigger the NLP fallback. It now returns `Optimal`
+  at `−2√2·g` in 10 iterations at every scale tried (`1e8 … 1e300`). The
+  `σ` cost normalization solved the scaled problem correctly but then judged
+  the answer with orthant residuals, which read a second-order block row by
+  row (the pounce#209 mistake) and so rejected every normalized optimum on a
+  QCQP. The verdict and the fallback ranking now measure each cone block as
+  a cone; LP and QP solves are judged exactly as before.
+  An *anisotropic* cost (`(1e22, 1)`, and `(g, 1)` from `1e16` up) still
+  failed: the normalized point was within `1e-10` of `x*`, but row `x₁` sits
+  22 orders below the cost scale, so its residuals cannot resolve and the
+  per-row guards rejected it, after which a cone program had nothing left
+  but the failing un-normalized re-solve. The cone cascade now returns the
+  closest claimed optimum, as the orthant one already did, and its
+  forward-error check reads each second-order block's stiffness as the
+  inverse NT block `W⁻²` instead of declining. PSD programs keep the
+  historical behaviour.
+- **A convex quadratic constraint with a large constant now solves on the
+  conic path, in the CLI and in Python's router (gh #1056).**
+  `x₀² + x₁² ≤ 1e20` was emitted as the rotated cone `(s+1, s−1, 2x)` with
+  `s = 1e20`, and in doubles `1e20 ± 1` are the same number, so the declared
+  cone was empty: the CLI ended `Numerical failure`, and Python's
+  `solver_selection="socp"` returned a false *primal-infeasible* certificate.
+  Well before that the imbalance cost: an active ball of radius `1e4` already
+  failed, and an inactive one took ~150 iterations at `1e6`. The two factors
+  are now balanced, `(s/κ + κ, s/κ − κ)` with `κ` the power of two nearest
+  `√|b|` (unchanged when `|b| ≤ 1`), and the constraint multiplier is mapped
+  back as `(z₀ + z₁)/κ`. Every radius from `1e2` to `1e100` now solves; on the
+  active `R = 1e20` ball the conic arm returns `−5e10` and `λ = 2.5e-10`
+  where the NLP path itself stops at `Search Direction is becoming Too Small`.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)
@@ -64,6 +302,48 @@ changes.
   the constraint. The reformulation now completes the square first, in both
   the CLI and the Python router. Python's `auto` also now re-solves a conic
   `numerical_failure` on the NLP path, matching the CLI.
+- **`jax.vmap` of a `pounce.jax.odeint` / `solve_bvp` gradient over distinct
+  parameters now returns each lane's own gradient (gh #1049).**
+  `jax.vmap(jax.grad(f))(ks)` back-solved every lane against the first
+  lane's collocation Jacobian, because the `broadcast_all` IFT callback
+  collapsed the batch to lane 0 — correct only for `jax.jacobian` at one
+  primal. Lanes are now grouped by primal: each distinct problem is factored
+  once, and the fixed-primal `jacrev` case keeps its single multi-RHS solve.
+  The same lane-0 read sat in `JaxProblem`'s factor-reuse back-solve
+  (reached from `solve_with_warm(factor_reuse=True)`), latent only because
+  that forward cannot yet be vmapped; it now groups lanes by solver id, and
+  the stacked-factor callbacks raise on mixed ids instead of reading lane 0.
+- **`pounce.jax.solve_with_warm` and `JaxProblem.solve_with_warm` compose
+  with `jax.vmap`** (one host solve per lane), including `vmap(grad)` and
+  `vmap(jacrev)`; they raised `NotImplementedError` before (gh #1049).
+- **`pounce.jax.solve_bvp`, `odeint` and `daeint` work under `jax.jit` when
+  the mesh or initial guess is traced** — built with `jnp.*` inside the
+  jitted function, passed as a jitted argument, or vmapped (gh #1049). They
+  read the mesh as NumPy at trace time and raised
+  `TracerArrayConversionError`; `solve_bvp(method="ipm")` leaked the traced
+  mesh into its host callback. The mesh is now a callback operand and is
+  differentiable: `jax.grad` w.r.t. `x` / `t` returns the implicit-function
+  derivative of the collocation solution w.r.t. the node positions.
+- **`solve_bvp(method="ipm")` accepts a pytree `theta`**, as its docstring
+  said; it crashed inside the host callback (gh #1049). `pounce.jax.solve`
+  / `solve_with_warm` take an array `p` only and now say so with a
+  `TypeError` instead of a shape error from inside a callback.
+- **JAX sparsity detection recognises `one_minus_square` and `log2`.**
+  Newer JAX writes `tanh`'s derivative as `one_minus_square` and lowers
+  `jnp.log2` to `log2`; the jaxpr analysis did not know either, so any model
+  through `tanh` (including `jax.nn.gelu`) or `log2` silently fell back to
+  probing for its pattern. `lt_to` / `le_to` join `eq_to` as zero-derivative.
+- **Second-order-cone solves no longer stall next to an active cone
+  (gh #1050).** A 4-variable SOCP with a PSD objective ran `solve_socp` to
+  its 200-iteration cap (`kkt_error 3e-2`) where Clarabel takes 7; it now
+  solves in 9. The SOC Mehrotra corrector formed its second-order term in
+  unscaled space, which is not invariant under the cone's automorphisms and
+  is badly mis-sized near an active boundary; it is now formed in the
+  Nesterov–Todd-scaled space, as Clarabel, ECOS and CVXOPT do. On 600 random
+  instances of the issue's shape, failures fall from 8 to 0 and the median
+  iteration count from 13 to 9; every convex-QCQP fixture takes fewer
+  iterations at an unchanged objective, and `airport` now solves on the conic
+  arm instead of falling back to the NLP path.
 
 ## [0.13.0] - 2026-10-22
 

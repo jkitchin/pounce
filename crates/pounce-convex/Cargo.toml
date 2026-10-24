@@ -17,7 +17,8 @@ pounce-linsol.workspace = true
 # fix-relax / path / directional machinery built on it. This crate implements
 # the trait over the convex active-set KKT so the convex arm reaches the same
 # parametric machinery the NLP arm uses, without depending on the NLP engine.
-# Acyclic: pounce-sens-core depends only on pounce-common / pounce-linalg.
+# Acyclic: pounce-sens-core does not depend on pounce-convex or on the NLP
+# engine.
 pounce-sens-core.workspace = true
 # Dense symmetric eigensolver (cyclic Jacobi) for the QP reduced Hessian,
 # shared with the NLP sensitivity path.

@@ -8,6 +8,7 @@ import pyomo.environ as pyo
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import (sens_active_set_changes, declare_sens_param, sens_solution,
                           sens_solution_report)
+from pounce import _pounce
 from pounce.sensitivity._step import _NO_BOUND, _ratio_test
 from pyomo_pounce.sens import _perturbation_deltas, _session_for
 
@@ -31,6 +32,19 @@ def test_ratio_test_reads_the_no_bound_sentinel_as_no_bound():
     alpha, first = _ratio_test(base, step, lo, hi, ["z"])
     assert alpha == float("inf")
     assert first is None
+
+
+@pytest.mark.parametrize("arg", ["step", "lo", "hi", "live", "on_bound", "tol"])
+def test_ratio_test_refuses_an_argument_of_another_length(arg):
+    """The ratio test pairs its arguments entry by entry, so one shorter
+    than the base point would be read past its end."""
+    args = dict(base=np.zeros(2), step=np.ones(2), lo=-np.ones(2),
+                hi=np.ones(2), live=[True, True], on_bound=[False, False],
+                mu=1e-9, tol=np.full(2, 1e-9))
+    args[arg] = args[arg][:1]
+    with pytest.raises(ValueError,
+                       match=f"ratio test: {arg} has 1 entries for a base of 2"):
+        _pounce._ratio_test(**args)
 
 
 def test_ratio_test_clamps_a_coordinate_already_outside_its_bound():

@@ -317,6 +317,16 @@ efficient: ask for 6, find 2, try a few more times, and stop with
 returns however many minima it actually found — falling short of `n_minima`
 is not an error.
 
+Under `mlsl`, one kind of failed solve does not count against `patience`: a
+launch that ends at a point violating the constraints (by more than `1e-4`,
+Ipopt's default `constr_viol_tol`) **at a point an earlier launch already
+ended at**. Repeated hits of one infeasible attractor are one fact about that
+basin, not evidence that no further minima exist. The first hit of each
+distinct infeasible point is still a full strike, every other failure is too,
+and before any minimum has been found every infeasible landing counts — so a
+model infeasible from everywhere still stops at `patience`, and `max_solves`
+bounds the search either way.
+
 A solve is many function evaluations; `max_solves` counts *solver calls*. A
 true per-evaluation ceiling belongs inside each solve via
 `options={"max_iter": ...}`.

@@ -83,6 +83,43 @@ impl SecondOrderCone {
         (eta, w_bar)
     }
 
+    /// The block's barrier stiffness `Σ = W⁻²` at `(s, z)`, as the `(η, w̄)`
+    /// that [`Self::apply_stiffness`] takes — the second-order analogue of the
+    /// orthant's `zᵢ/sᵢ`, which is what the `σ` path's forward-error estimate
+    /// needs (gh #1056). `None` where the pair implies nothing usable: either
+    /// point not strictly inside the cone (`det ≤ 0` or a non-positive first
+    /// coordinate, which a converged active block reaches by rounding), or a
+    /// non-finite scaling. Same contract as the orthant's `barrier_ratio`:
+    /// the caller declines on `None`, it never substitutes a zero.
+    pub(crate) fn stiffness(s: &[f64], z: &[f64]) -> Option<(f64, Vec<f64>)> {
+        if s.is_empty() || !(s[0] > 0.0 && z[0] > 0.0) {
+            return None;
+        }
+        if !(Self::det(s) > 0.0 && Self::det(z) > 0.0) {
+            return None;
+        }
+        let (eta, w_bar) = Self::nt_scaling(s, z);
+        (eta.is_finite() && eta > 0.0 && w_bar.iter().all(|w| w.is_finite()))
+            .then_some((eta, w_bar))
+    }
+
+    /// Apply `W⁻² = η⁻²(2 (Jw̄)(Jw̄)ᵀ − J)`, the inverse of the block
+    /// [`Self::kkt_block`] assembles (`W̄⁻¹ = J W̄ J` for `det(w̄) = 1`).
+    pub(crate) fn apply_stiffness(eta: f64, w_bar: &[f64], v: &[f64], out: &mut [f64]) {
+        let inv2 = 1.0 / (eta * eta);
+        // (Jw̄)ᵀv = w̄₀v₀ − Σ w̄ₖvₖ.
+        let jwv: f64 = w_bar[0] * v[0]
+            - w_bar[1..]
+                .iter()
+                .zip(&v[1..])
+                .map(|(w, x)| w * x)
+                .sum::<f64>();
+        out[0] = inv2 * (2.0 * w_bar[0] * jwv - v[0]);
+        for k in 1..w_bar.len() {
+            out[k] = inv2 * (-2.0 * w_bar[k] * jwv + v[k]);
+        }
+    }
+
     /// Apply the scaling block `W² = η²(2 w̄ w̄ᵀ − J)` to a vector — the
     /// matrix-free form of the dense block returned by [`Self::kkt_block`],
     /// used in `recover_ds` so the recovered slack step is *exactly*
@@ -206,14 +243,67 @@ impl Cone for SecondOrderCone {
         sigma_mu: f64,
         out: &mut [f64],
     ) {
-        // s∘z + ds_aff∘dz_aff − σμ e (Mehrotra second-order term, Jordan).
-        let mut second = vec![0.0; self.m];
-        Self::jordan(s, z, out);
-        Self::jordan(ds_aff, dz_aff, &mut second);
-        for k in 0..self.m {
-            out[k] += second[k];
+        // Mehrotra second-order term, formed in the **NT-scaled** space
+        // (gh #1050), as Clarabel/ECOS/CVXOPT do. With `λ = W z = W⁻¹ s`, the
+        // scaled linearization of `s∘z = σμe` is
+        //   λ∘(W⁻¹Δs + WΔz) = −r̂,  r̂ = λ∘λ + (W⁻¹Δs_aff)∘(WΔz_aff) − σμe,
+        // whose slack step is `Δs = −W(λ \ r̂) − W²Δz`. The reduced system
+        // consumes `r_comp` as `Arw(z)⁻¹ r_comp` (`rhs_comp_term`,
+        // `recover_ds`), so we return `r_comp = z ∘ W(λ \ r̂)` — the exact
+        // unscaled image of the scaled residual.
+        //
+        // The scaled and unscaled forms agree on `s∘z − σμe` (the identity
+        // `W λ⁻¹ = z⁻¹`), so the predictor and the centering term are
+        // unchanged; they differ *only* in the second-order term, where the
+        // unscaled `Δs_aff∘Δz_aff` is not invariant under the cone's
+        // automorphisms. Near an active SOC boundary (`det s, det z → 0`,
+        // strictly complementary) that unscaled term is badly mis-sized: on
+        // gh #1050 it steered the iterate off the central path into a
+        // short-step cycle (α ≈ 0.3, 0.03, 0.6, …) that grew `μ` by four
+        // orders of magnitude per ten iterations and ended `IterationLimit`.
+        let m = self.m;
+        let (eta, w_bar) = Self::nt_scaling(s, z);
+        // W = η(2vvᵀ − J), v = (w̄ + e)/√(2(w̄₀ + 1)); W² = η²(2w̄w̄ᵀ − J) is
+        // the block `kkt_block` assembles. W⁻¹ = η⁻¹(2(Jv)(Jv)ᵀ − J).
+        let nv = (2.0 * (w_bar[0] + 1.0)).sqrt();
+        let mut v = vec![0.0; m];
+        v[0] = (w_bar[0] + 1.0) / nv;
+        for k in 1..m {
+            v[k] = w_bar[k] / nv;
         }
-        out[0] -= sigma_mu;
+        // y = scale·(2 q (qᵀu) − J u), with q = v (W) or q = Jv (W⁻¹).
+        let apply = |u: &[f64], inverse: bool, out: &mut [f64]| {
+            let scale = if inverse { 1.0 / eta } else { eta };
+            let sign = if inverse { -1.0 } else { 1.0 };
+            let mut qu = v[0] * u[0];
+            for k in 1..m {
+                qu += sign * v[k] * u[k];
+            }
+            out[0] = scale * (2.0 * v[0] * qu - u[0]);
+            for k in 1..m {
+                out[k] = scale * (2.0 * sign * v[k] * qu + u[k]);
+            }
+        };
+        let mut lambda = vec![0.0; m];
+        apply(z, false, &mut lambda);
+        let mut a = vec![0.0; m];
+        let mut b = vec![0.0; m];
+        apply(ds_aff, true, &mut a);
+        apply(dz_aff, false, &mut b);
+        let mut r_hat = vec![0.0; m];
+        let mut second = vec![0.0; m];
+        Self::jordan(&lambda, &lambda, &mut r_hat);
+        Self::jordan(&a, &b, &mut second);
+        for k in 0..m {
+            r_hat[k] += second[k];
+        }
+        r_hat[0] -= sigma_mu;
+        // t = λ \ r̂, then u = W t, then r_comp = z ∘ u.
+        let mut t = vec![0.0; m];
+        Self::arw_inv(&lambda, &r_hat, &mut t);
+        let mut u = vec![0.0; m];
+        apply(&t, false, &mut u);
+        Self::jordan(z, &u, out);
     }
 
     fn rhs_comp_term(&self, _s: &[f64], z: &[f64], r_comp: &[f64], out: &mut [f64]) {
@@ -364,6 +454,39 @@ mod tests {
         }
     }
 
+    /// gh #1056: `apply_stiffness` is the inverse of the assembled `W²`, so
+    /// `W⁻²·(W²·v) = v`, and on `W² z = s` it maps `s` back to `z`.
+    #[test]
+    fn stiffness_inverts_the_nt_block() {
+        let c = SecondOrderCone::new(4);
+        let s = [3.0, 1.0, -0.5, 0.5];
+        let z = [2.0, -0.3, 0.8, 0.1];
+        let w2 = dense(&c.kkt_block(&s, &z), 4);
+        let (eta, w_bar) = SecondOrderCone::stiffness(&s, &z).expect("interior pair");
+        let v = [0.7, -1.1, 0.2, 2.5];
+        let w2v: Vec<f64> = (0..4)
+            .map(|i| (0..4).map(|j| w2[i][j] * v[j]).sum())
+            .collect();
+        let mut back = [0.0; 4];
+        SecondOrderCone::apply_stiffness(eta, &w_bar, &w2v, &mut back);
+        for k in 0..4 {
+            assert!(
+                (back[k] - v[k]).abs() < 1e-12,
+                "k={k}: {} vs {}",
+                back[k],
+                v[k]
+            );
+        }
+        let mut zz = [0.0; 4];
+        SecondOrderCone::apply_stiffness(eta, &w_bar, &s, &mut zz);
+        for k in 0..4 {
+            assert!((zz[k] - z[k]).abs() < 1e-12, "k={k}: {} vs {}", zz[k], z[k]);
+        }
+        // Not strictly interior: no stiffness, never a made-up one.
+        assert!(SecondOrderCone::stiffness(&[1.0, 1.0, 0.0, 0.0], &z).is_none());
+        assert!(SecondOrderCone::stiffness(&s, &[-1.0, 0.0, 0.0, 0.0]).is_none());
+    }
+
     #[test]
     fn comp_residual_is_jordan_minus_sigma_mu_e() {
         let c = SecondOrderCone::new(3);
@@ -437,6 +560,128 @@ mod tests {
         for k in 0..4 {
             assert!(
                 (got[k] - want[k]).abs() < 1e-12,
+                "k={k}: {} vs {}",
+                got[k],
+                want[k]
+            );
+        }
+    }
+
+    /// gh #1050: with no affine step the scaled corrector residual is the
+    /// plain `s∘z − σμe` (the predictor/centering terms are frame-free), and
+    /// with one it is the *scaled* second-order term — `Arw(z)⁻¹ r_comp`
+    /// equals `W(λ \ r̂)` with `r̂ = λ∘λ + (W⁻¹Δs)∘(WΔz) − σμe`, checked here
+    /// against an independent dense construction of `W` from `W² = kkt_block`.
+    #[test]
+    fn corrector_forms_the_second_order_term_in_the_nt_scaled_space() {
+        let c = SecondOrderCone::new(4);
+        let s = [2.0, 0.5, -0.5, 0.3];
+        let z = [3.0, 1.0, 0.5, -0.2];
+        let zero = [0.0; 4];
+        let (mut plain, mut corr) = ([0.0; 4], [0.0; 4]);
+        c.comp_residual(&s, &z, 0.7, &mut plain);
+        c.comp_residual_corrector(&s, &z, &zero, &zero, 0.7, &mut corr);
+        for k in 0..4 {
+            assert!(
+                (plain[k] - corr[k]).abs() < 1e-12,
+                "k={k}: {} vs {}",
+                plain[k],
+                corr[k]
+            );
+        }
+
+        // Dense W as the symmetric PD square root of W² (Denman–Beavers
+        // iteration, independent of the closed form under test).
+        let w2 = dense(&c.kkt_block(&s, &z), 4);
+        let mul = |a: &[Vec<f64>], b: &[Vec<f64>]| -> Vec<Vec<f64>> {
+            (0..4)
+                .map(|i| {
+                    (0..4)
+                        .map(|j| (0..4).map(|k| a[i][k] * b[k][j]).sum())
+                        .collect()
+                })
+                .collect()
+        };
+        let inv = |a: &[Vec<f64>]| -> Vec<Vec<f64>> {
+            let mut m: Vec<Vec<f64>> = a.to_vec();
+            let mut r: Vec<Vec<f64>> = (0..4)
+                .map(|i| (0..4).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
+                .collect();
+            for col in 0..4 {
+                let p = (col..4)
+                    .max_by(|&x, &y| m[x][col].abs().total_cmp(&m[y][col].abs()))
+                    .unwrap();
+                m.swap(col, p);
+                r.swap(col, p);
+                let d = m[col][col];
+                for j in 0..4 {
+                    m[col][j] /= d;
+                    r[col][j] /= d;
+                }
+                for i in 0..4 {
+                    if i != col {
+                        let f = m[i][col];
+                        for j in 0..4 {
+                            m[i][j] -= f * m[col][j];
+                            r[i][j] -= f * r[col][j];
+                        }
+                    }
+                }
+            }
+            r
+        };
+        let (mut y, mut zz): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (
+            w2.clone(),
+            (0..4)
+                .map(|i| (0..4).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
+                .collect(),
+        );
+        for _ in 0..50 {
+            let (yi, zi) = (inv(&y), inv(&zz));
+            let ny = (0..4)
+                .map(|i| (0..4).map(|j| 0.5 * (y[i][j] + zi[i][j])).collect())
+                .collect();
+            let nz = (0..4)
+                .map(|i| (0..4).map(|j| 0.5 * (zz[i][j] + yi[i][j])).collect())
+                .collect();
+            y = ny;
+            zz = nz;
+        }
+        let w = y;
+        let w_inv = inv(&w);
+        let ww = mul(&w, &w);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!((ww[i][j] - w2[i][j]).abs() < 1e-10);
+            }
+        }
+        let lambda = matvec(&w, &z);
+        let lambda_s = matvec(&w_inv, &s);
+        for k in 0..4 {
+            assert!((lambda[k] - lambda_s[k]).abs() < 1e-10, "W z ≠ W⁻¹ s");
+        }
+
+        let ds = [0.4, -0.1, 0.3, 0.2];
+        let dz = [-0.2, 0.3, 0.1, -0.4];
+        let sigma_mu = 0.3;
+        let (a, b) = (matvec(&w_inv, &ds), matvec(&w, &dz));
+        let (mut r_hat, mut second) = ([0.0; 4], [0.0; 4]);
+        SecondOrderCone::jordan(&lambda, &lambda, &mut r_hat);
+        SecondOrderCone::jordan(&a, &b, &mut second);
+        for k in 0..4 {
+            r_hat[k] += second[k];
+        }
+        r_hat[0] -= sigma_mu;
+        let mut t = [0.0; 4];
+        SecondOrderCone::arw_inv(&lambda, &r_hat, &mut t);
+        let want = matvec(&w, &t);
+
+        c.comp_residual_corrector(&s, &z, &ds, &dz, sigma_mu, &mut corr);
+        let mut got = [0.0; 4];
+        c.rhs_comp_term(&s, &z, &corr, &mut got);
+        for k in 0..4 {
+            assert!(
+                (got[k] - want[k]).abs() < 1e-10,
                 "k={k}: {} vs {}",
                 got[k],
                 want[k]

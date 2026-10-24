@@ -69,6 +69,12 @@ use pounce_nlp::tnlp::{
     StartingPoint,
 };
 use pounce_sensitivity::Solver;
+
+mod common;
+use common::outside_engine::{
+    OutsideEngine, Relaxation, outside_engine, recorded_solve, same_classification_of,
+    same_reduced_activity, same_reduced_row_activity,
+};
 use pounce_sensitivity::activity::{AMBIGUOUS, FIXED, INACTIVE, STRONGLY_ACTIVE, WEAKLY_ACTIVE};
 
 /// Coupling between the pin and the kink variable. The one-sided
@@ -2178,5 +2184,114 @@ fn the_bound_multiplier_rows_follow_each_bound_space_not_var_x() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The same classifications over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Eleven tests above read the classification or its refinement, most of them
+// as one input to an invariance leg about something else. The three tests
+// below solve every configuration those tests solve, on a model that records
+// what pounce returned, and assert that the classification, the refinement of
+// every variable and the refinement of every row come out the same over an
+// engine built from that report. The outside engine reads every arm in the
+// model's own units, so a leg that holds over pounce holds over it as one
+// answer.
+
+/// The options [`solved`], [`solved_cap`] and [`solved_coupled_scaled`] share,
+/// with `user-scaling` where they set it.
+fn legs_app(user_scaling: bool) -> IpoptApplication {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    if user_scaling {
+        app.options_mut()
+            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .unwrap();
+    }
+    app.options_mut()
+        .set_numeric_value("tol", 1e-8, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    app
+}
+
+/// pounce's classification and refinements against the outside engine's,
+/// over every variable and every row of the model.
+fn all_the_same(label: &str, s: &Solver, eng: OutsideEngine) {
+    let rep = s.classify_activity().expect("pounce's classification");
+    let vars: Vec<usize> = (0..rep.var_status.len()).collect();
+    let rows: Vec<usize> = (0..rep.row_status.len()).collect();
+    same_classification_of(label, s, eng.clone());
+    same_reduced_activity(label, s, &eng, &vars);
+    same_reduced_row_activity(label, s, &eng, &rows);
+}
+
+#[test]
+fn the_kink_legs_classify_the_same_over_an_outside_engine() {
+    for (scaling, fixed) in [
+        (None, false),
+        (Some(D_PLAIN.to_vec()), false),
+        (None, true),
+        (Some(D_FIXED.to_vec()), true),
+    ] {
+        let label = format!("kink, scaling {scaling:?}, leading fixed {fixed}");
+        let (s, model, _) = recorded_solve(legs_app(true), KinkTnlp::new(scaling, fixed));
+        all_the_same(&label, &s, outside_engine(&model, Relaxation::None));
+    }
+}
+
+#[test]
+fn the_coupled_legs_classify_the_same_over_an_outside_engine() {
+    for rho in [1.0, 1.0e-1, 1.0e-2, 1.0e-3] {
+        let (s, model, _) = recorded_solve(legs_app(false), CoupledKinkTnlp { rho, g_scale: None });
+        all_the_same(
+            &format!("coupled, rho={rho:e}"),
+            &s,
+            outside_engine(&model, Relaxation::None),
+        );
+    }
+    for dg in [1.0, 1.0e-3, 1.0e-1, 1.0e1, 1.0e3] {
+        let (s, model, _) = recorded_solve(
+            legs_app(true),
+            CoupledKinkTnlp {
+                rho: RHO,
+                g_scale: Some(dg),
+            },
+        );
+        all_the_same(
+            &format!("coupled, row scale {dg:e}"),
+            &s,
+            outside_engine(&model, Relaxation::None),
+        );
+    }
+}
+
+#[test]
+fn the_cap_legs_classify_the_same_over_an_outside_engine() {
+    for (scaling, fixed) in [
+        (None, false),
+        (Some(D_CAP.to_vec()), false),
+        (None, true),
+        (Some(D_CAP_FIXED.to_vec()), true),
+    ] {
+        let label = format!("cap, scaling {scaling:?}, leading fixed {fixed}");
+        let (s, model, _) = recorded_solve(
+            legs_app(true),
+            CapTnlp {
+                x_scaling: scaling,
+                leading_fixed: fixed,
+            },
+        );
+        all_the_same(&label, &s, outside_engine(&model, Relaxation::None));
     }
 }

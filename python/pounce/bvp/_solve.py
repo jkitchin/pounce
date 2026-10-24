@@ -135,6 +135,55 @@ def ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star, v):
     return np.asarray(lu.solve_transpose(v), np.float64)
 
 
+def ift_solve_transpose_lanes(callables_of, x, n, m, k, z_star, theta, v, theta_ndim):
+    """:func:`ift_solve_transpose` for a ``vmap_method="broadcast_all"`` callback.
+
+    Under ``broadcast_all`` every operand arrives with the same leading batch
+    axes (``v.shape[:-1]``), and those lanes are of two kinds that the host
+    cannot tell apart from the shapes alone:
+
+    * ``jax.jacobian`` / ``jacrev`` vmaps the VJP over cotangents at **one**
+      primal, so ``z_star`` / ``theta`` / ``x`` are identical copies on every
+      lane;
+    * an outer ``jax.vmap`` over parameters (or meshes) batches **distinct**
+      primals, each needing its own collocation Jacobian.
+
+    Collapsing to the first lane fits only the first case and silently
+    back-solves every lane against lane 0's Jacobian (gh#1049). So lanes are
+    grouped by their exact ``(z_star, theta, x)``: each distinct primal is
+    factored once and its cotangents go through one multi-RHS solve — the
+    fixed-primal ``jacrev`` case stays a single factorization.
+
+    ``callables_of(theta_lane)`` returns ``(nfun, nbc)`` for one lane; ``x``
+    is the mesh ``(m,)``, batched like the other operands.
+    """
+    v = np.asarray(v, dtype=np.float64)
+    N = v.shape[-1]
+    batch_shape = v.shape[:-1]
+    if not batch_shape:
+        nfun, nbc = callables_of(np.asarray(theta))
+        return ift_solve_transpose(
+            nfun, nbc, np.asarray(x, np.float64), n, m, k, z_star, v,
+        )
+    B = int(np.prod(batch_shape))
+    theta = np.asarray(theta)
+    theta_shape = theta.shape[theta.ndim - theta_ndim:]
+    vs = v.reshape(B, N)
+    zs = np.broadcast_to(np.asarray(z_star, np.float64), batch_shape + (N,)).reshape(B, N)
+    ths = np.broadcast_to(theta, batch_shape + theta_shape).reshape((B,) + theta_shape)
+    xs = np.broadcast_to(np.asarray(x, np.float64), batch_shape + (m,)).reshape(B, m)
+    groups: dict[bytes, list[int]] = {}
+    for i in range(B):
+        key = zs[i].tobytes() + np.ascontiguousarray(ths[i]).tobytes() + xs[i].tobytes()
+        groups.setdefault(key, []).append(i)
+    out = np.empty((B, N), dtype=np.float64)
+    for idx in groups.values():
+        i0 = idx[0]
+        nfun, nbc = callables_of(ths[i0])
+        out[idx] = ift_solve_transpose(nfun, nbc, xs[i0], n, m, k, zs[i0], vs[idx])
+    return out.reshape(batch_shape + (N,))
+
+
 def _to_numpy(a):
     """Concrete NumPy view of a NumPy / JAX / detached-Torch array."""
     try:

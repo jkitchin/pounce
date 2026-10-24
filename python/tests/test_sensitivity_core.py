@@ -443,52 +443,42 @@ def test_the_refinement_is_spent_only_on_the_ambiguous_entries():
     ambiguous entries, never the default": the reduced normalizer is the
     reciprocal diagonal of an inverse, so classifying every bounded
     variable that way is `n` back-solves for a question almost none of them
-    raise. This asserts the indices actually asked for, which is the only
-    place that cost is visible.
+    raise. The report lists every entry it classified that way in
+    `refined_entries`, and this asserts that list is exactly the ambiguous
+    entries, which is where that cost is visible.
     """
     sess = _coupled_session(1e-3)
     cheap = sess.solver.classify_activity()
     ambiguous = [i for i, st in enumerate(cheap["var_status"])
                  if st == "ambiguous"]
+    ambiguous_rows = [j for j, st in enumerate(cheap["row_status"])
+                      if st == "ambiguous"]
     assert ambiguous, "the fixture must have something to refine"
     assert len(ambiguous) < len(cheap["var_status"]), (
         "and something NOT to refine, or asking for everything and asking "
         "for the ambiguous ones would be the same call")
 
-    asked = []
-    real = sess.solver
+    rep = solution_report(sess, [0], [1e-3], mode="linear")
 
-    class _Spy:
-        # The Rust-backed Solver forbids attribute assignment, so the spy
-        # wraps it rather than patching it. Everything else forwards.
-        def __getattr__(self, name):
-            return getattr(real, name)
-
-        def reduced_activity(self, idx):
-            asked.append(list(idx))
-            return real.reduced_activity(idx)
-
-    sess.solver = _Spy()
-    try:
-        solution_report(sess, [0], [1e-3], mode="linear")
-    finally:
-        sess.solver = real
-
-    assert asked == [ambiguous], (
-        f"the refinement must ask for the ambiguous entries and no others; "
-        f"asked for {asked}, ambiguous are {ambiguous}")
+    from pounce.sensitivity._session import user_row_names
+    row_names = user_row_names(sess)
+    expected = ([sess.var_names[i] for i in ambiguous]
+                + [row_names[j] for j in ambiguous_rows])
+    assert rep.refined_entries == expected, (
+        f"the refinement must classify the ambiguous entries and no others; "
+        f"it classified {rep.refined_entries}, ambiguous are {expected}")
 
 
 # ---------------------------------------------------------------------
 # The refinement's ROW branch, and what it does to the ratio test.
 #
-# Round 5 of #889: `_refine_ambiguous` branches on variables and on rows,
-# and every test above reaches only the variable one. The row branch's
-# exposure is not the accessor (`test_activity.py` owns that) but the
-# *wiring* — that `row_names`, `classify_activity`'s `row_status` and
-# `reduced_row_activity`'s user-space row indices are the same space in
-# the same order. Reading one as another returns a neighbouring row's
-# answer: plausible, and wrong.
+# Round 5 of #889: `pounce_sens_core::step::refine_ambiguous` branches
+# on variables and on rows, and every test above reaches only the
+# variable one. The row branch's exposure is not the accessor
+# (`test_activity.py` owns that) but the *wiring* — that `row_names`,
+# `classify_activity`'s `row_status` and `reduced_row_activity`'s
+# user-space row indices are the same space in the same order. Reading one as
+# another returns a neighbouring row's answer: plausible, and wrong.
 # ---------------------------------------------------------------------
 
 
@@ -521,10 +511,10 @@ def test_the_report_refines_a_coupled_ROW_kink_too(rho):
     """gh#804's misreading, through the report, on the row path.
 
     The variable branch above and this one are separate code paths in
-    `_refine_ambiguous` reading separate index spaces. A row index handed
-    to `reduced_row_activity` in the wrong space would come back with a
-    real, plausible, wrong row's verdict — so this asserts the *name* that
-    moved, not just that something did.
+    `pounce_sens_core::step::refine_ambiguous` reading separate index
+    spaces. A row index handed to `reduced_row_activity` in the wrong space
+    would come back with a real, plausible, wrong row's verdict — so this
+    asserts the *name* that moved, not just that something did.
     """
     sess = solve_for_sensitivity(
         _coupled_row_model(rho), pins={"p": 0},
@@ -543,6 +533,22 @@ def test_the_report_refines_a_coupled_ROW_kink_too(rho):
     off = solution_report(sess, [0], [1e-3], mode="linear",
                           refine_activity=False)
     assert off.refined == {}, "and the opt-out must reach the row branch too"
+
+
+def test_the_report_lists_the_row_it_classified_again():
+    """`refined_entries` names every entry the refinement spent a
+    back-solve on, rows included, and only those: on the coupled row kink
+    that is the ambiguous row alone."""
+    sess = solve_for_sensitivity(
+        _coupled_row_model(1e-3), pins={"p": 0},
+        options={"print_level": 0, "tol": 1e-10})
+    cheap = sess.solver.classify_activity()
+    assert [s for s in cheap["var_status"] if s == "ambiguous"] == []
+    rep = solution_report(sess, [0], [1e-3], mode="linear")
+    assert rep.refined_entries == ["kink_row"]
+    off = solution_report(sess, [0], [1e-3], mode="linear",
+                          refine_activity=False)
+    assert off.refined_entries == []
 
 
 def test_refinement_can_only_lengthen_alpha_never_shorten_it():

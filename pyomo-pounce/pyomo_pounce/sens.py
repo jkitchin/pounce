@@ -476,11 +476,10 @@ def sens_retain_kkt(model):
 
     The retention policy in one place: the factor is kept if anything
     is declared (declare_sens_param / declare_sens_fitted /
-    declare_sens_residual), or if sens_retain_kkt() was called; and a
-    Covariance/Information result whose lazy conditioned_on has not
-    been read keeps the session alive through its pending computation
-    until first access. sens_release_kkt(model) drops the held factor on
-    demand.
+    declare_sens_residual), or if sens_retain_kkt() was called. A
+    Covariance/Information result holds no reference to the session:
+    its conditioned_on is computed with the matrix.
+    sens_release_kkt(model) drops the held factor on demand.
 
     Like any declaration, this routes the solve through the
     in-process sensitivity path, whose solve() surface is not
@@ -499,13 +498,12 @@ def sens_release_kkt(model):
     the NEXT solve, which keeps its factor again. After release the
     accessors raise their no-session error until another solve.
 
-    Release drops the MODEL's hold, not a result's, and two kinds of
-    result hold their own reference to the session: a Covariance or
-    Information whose conditioned_on is still pending (until the
-    attribute is read), and a Jacobian handed back by sens_jacobian()
-    (which uses the session on every lookup). Such a result keeps
-    working after the release, and keeps the factor in memory until
-    it too is discarded.
+    Release drops the MODEL's hold, not a result's. A Jacobian handed
+    back by sens_jacobian() (which uses the session on every lookup)
+    holds its own reference to the session, so it keeps working after
+    the release and keeps the factor in memory until it too is
+    discarded. A Covariance or Information holds none: its
+    conditioned_on is computed with the matrix.
 
     Returns True if a factorization was held and is now released,
     False if there was nothing to release."""

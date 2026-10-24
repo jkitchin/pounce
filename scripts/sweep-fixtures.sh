@@ -88,6 +88,21 @@
 # alone, so the fixture's true cost is `131 + 54`, 3.4x what `it=` says. The
 # `2nd=` column carries both halves.
 #
+# THE mu= COLUMN (gh#1042 C1). The same blind spot one mechanism over:
+# `mu_strategy_fallback` (pounce#138/#748) re-solves under the opposite
+# `mu_strategy` after an Acceptable / MaxIter first attempt and promotes the
+# re-solve on `Solve_Succeeded`, and then `it=` (and the JSON's
+# `restoration_calls`) are the RE-SOLVE's alone. `-` when no retry ran;
+# `<retry mu_strategy>@<first status>/<first iters>,tot=N` when the re-solve
+# was promoted; `kept(<retry mu_strategy>:<retry status>/<retry iters>),tot=N`
+# when it ran and lost (then `it=` is the first attempt's). Read from the
+# JSON's `statistics.mu_strategy_fallback`; a binary predating the field
+# reads `-` everywhere, so a promoted fallback on it is invisible. gh#1042's
+# R2b is the case: `pooling_rt2stp` exact went Solve_Succeeded/492 to
+# Solved_To_Acceptable_Level/494 on the first attempt, and this sweep
+# reported `492 -> 109`, the fallback's count. To diff against a sweep taken
+# before the column existed, drop it first: `sed -E 's/ mu=[^ ]+ +/ /'`.
+#
 # THE ENGINE COLUMN (gh#760). Each line records which engine solved the model.
 # Status, objective and iteration count can all three be unchanged while a
 # model silently changes arms -- the JSON report does not name the engine, so
@@ -206,6 +221,24 @@ else:
         len(so.get("tried", [])),
         so.get("total_iteration_count", 0),
     )
+# What the mu_strategy_fallback retry did (gh#1042 C1); see the header.
+mf = st.get("mu_strategy_fallback")
+if not mf:
+    mu = "-"
+elif mf.get("promoted"):
+    mu = "%s@%s/%d,tot=%d" % (
+        mf.get("retry_mu_strategy", "?"),
+        mf.get("base_status", "?"),
+        mf.get("base_iteration_count", -1),
+        mf.get("base_iteration_count", 0) + mf.get("retry_iteration_count", 0),
+    )
+else:
+    mu = "kept(%s:%s/%d),tot=%d" % (
+        mf.get("retry_mu_strategy", "?"),
+        mf.get("retry_status", "?"),
+        mf.get("retry_iteration_count", -1),
+        mf.get("base_iteration_count", 0) + mf.get("retry_iteration_count", 0),
+    )
 # Successful linear-solver quality escalations (gh#857). An escalation
 # reroutes the rest of the solve -- FERAL's ladder changes which pivots are
 # taken and never steps back down -- so a line that moves ONLY here has
@@ -213,7 +246,7 @@ else:
 # answer, which is a trajectory change and is reportable as one. Defaults
 # to 0 rather than "?" so a baseline binary predating the field reads as
 # "did not report any" instead of moving every line in the diff.
-print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s obj=%s" % (
+print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s mu=%-56s obj=%s" % (
     sys.argv[3],
     sys.argv[2],
     sys.argv[4],
@@ -221,6 +254,7 @@ print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s obj=%s" % (
     st.get("iteration_count", "?"),
     st.get("quality_escalations", 0),
     second,
+    mu,
     "%.10g" % obj if obj is not None else "none",
 ))
 PY

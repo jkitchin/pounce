@@ -105,6 +105,9 @@ use pounce_nlp::tnlp::{
 use pounce_sensitivity::activity::UNIDENTIFIED;
 use pounce_sensitivity::{PathOperator, Solver};
 
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
+
 /// Column order is `[x, y, w, lam]`; the pin is constraint 1.
 const N: usize = 4;
 const PIN: Index = 1;
@@ -693,3 +696,37 @@ fn the_pin_is_stiff_not_infinite() {
 //   not an answer. That is a claim about the code path, not a
 //   measurement, and nothing here measures it.
 // * **Magnitude.** Four variables and one shared row.
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+#[test]
+fn the_classifier_is_blind_here_over_an_outside_engine() {
+    let (solver, model, status) = recorded_solve(
+        configured(),
+        TwoReleases {
+            lam: LAM0,
+            curv: [0.0; 3],
+        },
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}",
+    );
+    same_classification(
+        "two curvature-free releases",
+        &solver,
+        &model,
+        Relaxation::None,
+    );
+}

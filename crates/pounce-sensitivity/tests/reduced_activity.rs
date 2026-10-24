@@ -36,6 +36,12 @@ use pounce_nlp::tnlp::{
     StartingPoint,
 };
 use pounce_sensitivity::activity::{INACTIVE, STRONGLY_ACTIVE, UNBOUNDED};
+
+mod common;
+use common::outside_engine::{
+    Relaxation, outside_engine, outside_engine_minimizing, recorded_solve, same_classification,
+    same_classification_of, same_reduced_activity,
+};
 use pounce_sensitivity::{Solver, SolverError};
 
 /// ```text
@@ -507,4 +513,116 @@ fn the_classification_is_unmoved_by_a_negative_objective_scale() {
             "x{i}: q_sign must flip with the declared problem's curvature",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The same classifications over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification and its refinement by the
+// reduced curvature come out the same over an engine built from that report.
+// The refinement back-solves against each engine's own factorization, here
+// the outside engine's dense LU of the eight-block matrix.
+
+/// The options [`solved`] runs with.
+fn regime_app() -> IpoptApplication {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-8, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    app
+}
+
+#[test]
+fn the_reduced_normalizer_agrees_with_the_diagonal_on_a_decoupled_model_over_an_outside_engine() {
+    let (s, model, _) = recorded_solve(regime_app(), RegimeTnlp);
+    same_classification("regime", &s, &model, Relaxation::None);
+    let eng = outside_engine(&model, Relaxation::None);
+    same_reduced_activity("regime, x0 and x1", &s, &eng, &[0, 1]);
+}
+
+#[test]
+fn a_variable_with_no_finite_bound_carries_curvature_but_no_verdict_over_an_outside_engine() {
+    let (s, model, _) = recorded_solve(regime_app(), RegimeTnlp);
+    let eng = outside_engine(&model, Relaxation::None);
+    same_reduced_activity("regime, unbounded x2", &s, &eng, &[2]);
+}
+
+#[test]
+fn a_coordinate_an_equality_determines_has_no_direction_left_to_reduce_along_over_an_outside_engine()
+ {
+    let (s, model, _) = recorded_solve(regime_app(), RegimeTnlp);
+    same_classification("regime", &s, &model, Relaxation::None);
+    let eng = outside_engine(&model, Relaxation::None);
+    same_reduced_activity("regime, x3", &s, &eng, &[3]);
+}
+
+#[test]
+fn an_index_past_the_users_variable_count_is_an_error_over_an_outside_engine() {
+    let (_s, model, _) = recorded_solve(regime_app(), RegimeTnlp);
+    let eng = outside_engine(&model, Relaxation::None);
+    let err = pounce_sens_core::activity::reduced_activity(&eng, &[4])
+        .expect_err("index 4 of 4 is out of range");
+    assert_eq!(
+        err,
+        pounce_sens_core::activity::ReducedActivityError::OutOfRange {
+            got: 4,
+            n_full_x: 4
+        },
+    );
+}
+
+#[test]
+fn no_indices_is_an_empty_report_over_an_outside_engine() {
+    let (s, model, _) = recorded_solve(regime_app(), RegimeTnlp);
+    let eng = outside_engine(&model, Relaxation::None);
+    let red = pounce_sens_core::activity::reduced_activity(&eng, &[]).expect("reduced activity");
+    assert!(red.status.is_empty() && red.q_reduced.is_empty() && red.var.is_empty());
+    let pounce = s.reduced_activity(&[]).expect("pounce's reduced activity");
+    assert_eq!(red.mu, pounce.mu, "the same converged barrier level");
+}
+
+/// The maximizing arm is solved as `min −f` with `obj_scaling_factor = −1`,
+/// so its outside engine is told it minimized `−f`. pounce reports the
+/// multipliers in the model's own sense, negated from the ones it iterated
+/// with, and the outside engine negates them back.
+#[test]
+fn the_classification_is_unmoved_by_a_negative_objective_scale_over_an_outside_engine() {
+    let (plus, model_p, _) = recorded_solve(regime_app(), RegimeTnlp);
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-8, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("obj_scaling_factor", -1.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let (minus, model_m, _) = recorded_solve(app, NegatedRegimeTnlp);
+    let eng_p = outside_engine(&model_p, Relaxation::None);
+    let eng_m = outside_engine_minimizing(&model_m, Relaxation::None, -1.0);
+    same_classification_of("plus", &plus, eng_p.clone());
+    same_classification_of("minus", &minus, eng_m.clone());
+    same_reduced_activity("plus", &plus, &eng_p, &[0, 1]);
+    same_reduced_activity("minus", &minus, &eng_m, &[0, 1]);
 }

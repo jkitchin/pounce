@@ -144,6 +144,13 @@ mirror `SqpOptions::default()`.
 | `sqp_bt_min_alpha`      | `1e-12`     | minimum step before line-search failure            |
 | `sqp_print_level`       | `0`         | 0=silent, 1=per-iter summary, 2+=trace             |
 | `sqp_lbfgs_max_history` | `6`         | L-BFGS history size                                |
+| `sqp_dense_hessian_max_n` | `1000`    | largest `n` at which a quasi-Newton Hessian goes to the QP dense (see §6) |
+
+`max_wall_time` and `max_cpu_time` bound this path too (gh#1054): the budget
+is checked every outer iteration, and what is left of it is handed to each
+step QP, so a single QP cannot outlive the solve. They end the solve with
+`Maximum_WallTime_Exceeded` / `Maximum_CpuTime_Exceeded`, as on the
+interior-point path. Before gh#1054 neither reached this path at all.
 
 #### Confirming the engine actually ran
 
@@ -182,12 +189,12 @@ only on the SQP path.
 | ------------------------------------------- | -------- | ----------------------------------------------------------- |
 | `sqp_qp_feas_tol`                           | `1e-9`   | QP constraint-feasibility tolerance                          |
 | `sqp_qp_opt_tol`                            | `1e-9`   | QP optimality (KKT) tolerance                                |
-| `sqp_qp_max_iter`                           | `200`    | active-set pivots per QP solve                               |
+| `sqp_qp_max_iter`                           | scaled   | active-set pivots per QP solve; unset, `10·(n + m)` clamped to `[200, 200 000]` |
 | `sqp_qp_elastic_gamma`                      | `1e6`    | penalty on the elastic (phase-1) slacks                      |
 | `sqp_qp_anti_cycling`                       | `expand` | `expand` (Harris two-pass), `bland`, or `none`               |
 | `sqp_qp_certify_second_order`               | `no`     | check second-order optimality before certifying the QP       |
 | `sqp_qp_use_homotopy`                       | `no`     | trace the parametric homotopy on a cold QP solve             |
-| `sqp_qp_use_schur_updates`                  | `no`     | absorb working-set changes as rank-2 Schur updates           |
+| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` |
 | `sqp_qp_max_schur_updates_before_refactor`  | `50`     | updates to absorb before refactoring (Schur path only)       |
 
 Three of these are worth more than a table row.
@@ -226,14 +233,28 @@ active-set KKT and factors it from scratch — algorithmically identical,
 but every working-set change repeats the full symbolic analysis, which
 measured 32% of runtime on Q25FV47.
 
-Its default of `no` is a measured choice, not an oversight. On
-Maros-Meszaros the update path is 28–88× faster where it works
-(Q25FV47: 19.7 s → 0.5 s), but it is less robust: of the 46 instances
-the default path solves correctly, enabling updates breaks 9
-(`InternalError`, `TimeOut`, or a wrong objective), and total wall over
-that set rises 107 s → 251 s on the new timeouts. Treat it as opt-in for
-warm-started workloads where the speedup dominates, not as a general
-accelerator.
+Left unset, it follows the size of the step QP: on when `n + m ≥ 500`,
+off below (gh#1054). Measured on all 138 Maros-Mészáros problems through
+`algorithm=active-set-sqp`, each with `max_wall_time=60`:
+
+| `n + m`        | problems | solved, off | solved, on | wall where both solve (off → on) |
+| -------------- | -------- | ----------- | ---------- | -------------------------------- |
+| < 500          | 44       | 40          | 43         | 63 s → 26 s                      |
+| 500 – 2 000    | 36       | 8           | 19         | 93 s → 43 s                      |
+| 2 000 – 5 000  | 20       | 3           | 4          | 26 s → 20 s                      |
+| 5 000 – 20 000 | 13       | 1           | 4          | 39 s → 0.6 s                     |
+| ≥ 20 000       | 25       | 5           | 9          | 3.7 s → 10.4 s                   |
+
+No objective differs where both solve, and one problem is lost (`QPCBLEND`,
+below 500). The refactor path pays a full sparse factorization, symbolic
+analysis included, per working-set change, which is what made the cold first
+QP of a 15 000-variable model run for 30 minutes. Below 500 the two cost
+about the same, and that is where the Schur path loses on the CLI fixture
+corpus (`eigena2`, `qcqp_ball_cost_1e22` under `algorithm=active-set-sqp`), so
+small QPs keep the refactor path. An earlier measurement — updates breaking 9
+of the 46 instances the refactor path solved — predates the rank repair of
+the Schur reset and no longer reproduces. Set explicitly, `yes` or `no`
+applies at every size.
 
 **`sqp_qp_use_homotopy`** changes the cold-start path: the solve starts
 from the box-only relaxation (all general rows dropped, which the box
@@ -633,13 +654,41 @@ trial steps on a problem where the merit decreases steadily.
 | Source        | When to use                                                            |
 | ------------- | ---------------------------------------------------------------------- |
 | `exact`       | NLP provides `eval_h`; the QP's inertia-control handles indefinite ∇²L |
-| `damped-bfgs` | Dense `n×n` Powell-damped BFGS; guaranteed PSD; n ≤ a few hundred       |
-| `lbfgs`       | Limited-memory BFGS with `sqp_lbfgs_max_history` pairs; large `n`        |
+| `damped-bfgs` | Dense `n×n` Powell-damped BFGS; guaranteed PSD; small `n` only           |
+| `lbfgs`       | Limited-memory BFGS with `sqp_lbfgs_max_history` pairs; any `n`          |
 
-The default `exact` is fastest when reliable. Switch to
-`damped-bfgs` for ill-scaled nonconvex NLPs where the QP solver's
-inertia retries dominate the iteration cost. Use `lbfgs` only
-when the dense `n²` BFGS storage is the bottleneck (n ≥ ~1000).
+The default `exact` is fastest when reliable, and it is the only source whose
+QP keeps the model's own sparsity. Switch to `damped-bfgs` for ill-scaled
+nonconvex NLPs where the QP solver's inertia retries dominate the iteration
+cost — on small models.
+
+A BFGS matrix is dense, and that is the whole story at scale. Handed to the
+QP as a matrix it costs `n²` storage and turns every factorization of the step
+QP dense; at `n = 15 000` the first QP of a collocation model did not finish in
+30 minutes (gh#1054). So above `sqp_dense_hessian_max_n` (default 1000)
+`lbfgs` is posed in **product form**: `B = σI + Σᵢ ±vᵢvᵢᵀ`, two terms per
+stored pair, and the QP is lifted with one extra variable and one equality row
+per term, `wᵢ = vᵢᵀp`. The lifted QP's Hessian is diagonal and its extra rows
+are `2·sqp_lbfgs_max_history` dense rows, so the KKT stays sparse; eliminating
+`w` gives back exactly `½ pᵀBp`, so the step is the same one the dense matrix
+gives. At or below the ceiling nothing changed. `damped-bfgs`, asked for
+explicitly, is always dense.
+
+`hessian_approximation=limited-memory` — which `pounce.minimize`, the Python
+frontend and the CasADi plugin set on their own when no exact Hessian exists —
+selects `damped-bfgs` at or below the ceiling (the more robust update on small
+models, issue #358) and the lifted `lbfgs` above it. Before gh#1054 it selected
+the dense update at every size.
+
+What the lift does not change is the cost of an active-set walk. A cold QP
+needs about one pivot per constraint that becomes active, and each pivot is a
+sparse solve over the whole model, so a cold start on a model with thousands of
+active bounds is still thousands of solves — measured on a chain-coupled test
+model with ~0.3 active rows per variable: 8.8 s at `n = 2 000`, 36 s at
+`n = 4 000`, 176 s at `n = 8 000`, and 34 s at `n = 4 000` with the exact
+Hessian instead. Large
+models want a warm working set, from a previous SQP solve or from the
+interior-point method ([`ipm_sqp_handover`](crossover.md#handing-over-before-convergence-ipm_sqp_handover)).
 
 ## 7. Pitfalls
 

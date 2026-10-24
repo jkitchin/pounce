@@ -157,6 +157,13 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{
+    OutsideEngine, Relaxation, correct_outside, outside_engine, recorded_solve,
+    same_classification_of,
+};
+
 /// Tolerance of the base solve -- the one whose factor the steps are
 /// taken against.
 const BASE_TOL: Number = 1e-8;
@@ -1359,5 +1366,103 @@ fn leg_oracle_the_released_start_reaches_the_resolve() {
                  off by only {raw:e}",
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The same classifications and corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// The tests below solve both fixtures' base points as [`base`] does, on a
+// model that records what pounce returned, and assert that the classification
+// the tests above read and the corrections they make come out the same over an
+// engine built from that report. The corrections run over every perturbation
+// the corrector tests above use, from the plain step and, on the kink, from
+// the released start as well.
+
+/// [`base`], recorded, with the outside engine over it.
+fn recorded_base(fx: Fx) -> (Solver, OutsideEngine) {
+    let out: SeedOut = Rc::new(RefCell::new(None));
+    let app = configured(BASE_TOL, false);
+    let (s, eng) = match fx {
+        Fx::Kink => {
+            let (s, m, _) = recorded_solve(
+                app,
+                KinkTnlp {
+                    p_nominal: 0.0,
+                    seed_in: None,
+                    seed_out: out,
+                },
+            );
+            (s, outside_engine(&m, Relaxation::None))
+        }
+        Fx::Release => {
+            let (s, m, _) = recorded_solve(
+                app,
+                ReleaseTnlp {
+                    p_nominal: 0.0,
+                    seed_in: None,
+                    seed_out: out,
+                },
+            );
+            (s, outside_engine(&m, Relaxation::None))
+        }
+    };
+    assert!(s.converged().is_some(), "{fx:?} base solve failed");
+    (s, eng)
+}
+
+#[test]
+fn the_fixtures_classify_the_same_over_an_outside_engine() {
+    for fx in [Fx::Kink, Fx::Release] {
+        let (s, eng) = recorded_base(fx);
+        same_classification_of(&format!("{fx:?}"), &s, eng);
+    }
+}
+
+#[test]
+fn the_corrections_are_the_same_over_an_outside_engine() {
+    for (fx, deltas) in [
+        (Fx::Kink, vec![-1.0e-1, -1.0e-2, 1.0e-2, 1.0e-1]),
+        (Fx::Release, vec![0.3, 0.7, 1.0, 2.0]),
+    ] {
+        let (s, eng) = recorded_base(fx);
+        for delta in deltas {
+            let step = s.parametric_step_full(&[0], &[delta]).expect("full step");
+            let pounce = s
+                .correct_step(&[0], &[delta], &step, 8)
+                .expect("pounce's corrector");
+            let outside =
+                correct_outside(&eng, &[0], &[delta], &step, 8).expect("outside corrector");
+            assert_same_correction(
+                &format!("{fx:?} at {delta:e}"),
+                &pounce,
+                &outside,
+                Frame::Same,
+            );
+        }
+    }
+}
+
+#[test]
+fn the_released_start_corrects_the_same_over_an_outside_engine() {
+    let (s, eng) = recorded_base(Fx::Kink);
+    let n_x = s.converged().expect("converged").x.len();
+    for delta in [-1.0e-1, -1.0e-2, 1.0e-2, 1.0e-1] {
+        let mut start = s.parametric_step_full(&[0], &[delta]).expect("full step");
+        let (released, _) = s
+            .parametric_step_release_all(&[0], &[delta])
+            .expect("released step");
+        start[..n_x].copy_from_slice(&released);
+        let pounce = s
+            .correct_step(&[0], &[delta], &start, 8)
+            .expect("pounce's corrector");
+        let outside = correct_outside(&eng, &[0], &[delta], &start, 8).expect("outside corrector");
+        assert_same_correction(
+            &format!("released start at {delta:e}"),
+            &pounce,
+            &outside,
+            Frame::Same,
+        );
     }
 }

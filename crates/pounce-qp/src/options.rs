@@ -305,6 +305,10 @@ impl QpOptions {
     /// the constrained *maximum* as `Solve_Succeeded`. Making it the default
     /// needs the Hessian-modification path first; that is gh #856, not this
     /// change.
+    ///
+    /// Schur-complement updates stay off in this base; the SQP driver turns
+    /// them on per solve for large subproblems unless the caller chose
+    /// (`SqpOptions::qp_schur_min_dim`, gh#1054).
     #[must_use]
     pub fn sqp_subproblem() -> Self {
         Self {

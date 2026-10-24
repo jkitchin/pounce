@@ -44,6 +44,12 @@ use pounce_nlp::tnlp::{
     StartingPoint,
 };
 use pounce_sensitivity::activity::{AMBIGUOUS, EQUALITY, INACTIVE, STRONGLY_ACTIVE, WEAKLY_ACTIVE};
+
+mod common;
+use common::outside_engine::{
+    OutsideEngine, RecordingTnlp, Relaxation, outside_engine, outside_engine_minimizing,
+    recorded_solve, same_classification_of, same_reduced_row_activity,
+};
 use pounce_sensitivity::{Solver, SolverError};
 
 /// Gradient scale of the bounded rows. Not 1, so that every
@@ -892,4 +898,151 @@ fn the_slack_unit_vector_and_the_row_gradient_give_the_same_back_solve() {
         by_slack,
         1e-9,
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same classifications over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification and its row refinement come
+// out the same over an engine built from that report, whose refinement
+// back-solves against its own dense LU of the eight-block matrix.
+//
+// `a_relaxed_solve_is_refused` has no counterpart: the refusal is `Solver`'s,
+// made from the option the solve ran with, and the precondition is stated on
+// `pounce_sens_core::activity::compute` for an engine outside pounce to check.
+// `the_slack_unit_vector_and_the_row_gradient_give_the_same_back_solve`
+// checks `kkt_solve`, not the classification.
+
+/// A recorded solve under `app` (initialized here, as [`run`] does), the
+/// outside engine over it, and pounce's solver.
+fn recorded<T: TNLP + 'static>(
+    mut app: IpoptApplication,
+    model: T,
+    obj_factor: Number,
+) -> (Solver, OutsideEngine) {
+    app.initialize().unwrap();
+    let (s, m, st): (Solver, Rc<RefCell<RecordingTnlp<T>>>, _) = recorded_solve(app, model);
+    assert!(
+        matches!(
+            st,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "{st:?}"
+    );
+    let eng = if obj_factor == 1.0 {
+        outside_engine(&m, Relaxation::None)
+    } else {
+        outside_engine_minimizing(&m, Relaxation::None, obj_factor)
+    };
+    (s, eng)
+}
+
+fn decoupled() -> (Solver, OutsideEngine) {
+    recorded(
+        app_with_defaults(),
+        DecoupledRowTnlp { negated: false },
+        1.0,
+    )
+}
+
+fn coupled(rho: Number, g_scale: Option<Number>) -> (Solver, OutsideEngine) {
+    let mut app = app_with_defaults();
+    if g_scale.is_some() {
+        app.options_mut()
+            .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+            .unwrap();
+    }
+    recorded(app, CoupledKinkRowTnlp { rho, g_scale }, 1.0)
+}
+
+#[test]
+fn the_reduced_normalizer_agrees_with_the_directional_one_on_a_decoupled_model_over_an_outside_engine()
+ {
+    let (s, eng) = decoupled();
+    same_classification_of("decoupled", &s, eng.clone());
+    same_reduced_row_activity("decoupled, g1 and g2", &s, &eng, &[1, 2]);
+}
+
+#[test]
+fn a_full_g_index_is_not_read_as_an_inequality_position_over_an_outside_engine() {
+    let (s, eng) = decoupled();
+    same_reduced_row_activity("decoupled, by full-g index", &s, &eng, &[1, 2]);
+}
+
+#[test]
+fn an_equality_row_reports_the_reports_placeholder_over_an_outside_engine() {
+    let (s, eng) = decoupled();
+    same_classification_of("decoupled", &s, eng.clone());
+    same_reduced_row_activity("decoupled, the equality g0", &s, &eng, &[0]);
+}
+
+#[test]
+fn an_index_past_the_users_constraint_count_is_an_error_over_an_outside_engine() {
+    let (_s, eng) = decoupled();
+    let err = pounce_sens_core::activity::reduced_row_activity(&eng, &[3])
+        .expect_err("index 3 of 3 is out of range");
+    assert_eq!(
+        err,
+        pounce_sens_core::activity::ReducedRowActivityError::OutOfRange {
+            got: 3,
+            n_full_g: 3
+        },
+    );
+}
+
+#[test]
+fn no_indices_is_an_empty_row_report_over_an_outside_engine() {
+    let (s, eng) = decoupled();
+    let red = pounce_sens_core::activity::reduced_row_activity(&eng, &[]).expect("reduced rows");
+    assert!(red.status.is_empty() && red.q_reduced.is_empty() && red.row.is_empty());
+    let pounce = s.reduced_row_activity(&[]).expect("pounce's reduced rows");
+    assert_eq!(red.mu, pounce.mu, "the same converged barrier level");
+}
+
+/// The maximizing arm minimized `−f`, and its outside engine is told so.
+#[test]
+fn the_row_classification_is_unmoved_by_a_negative_objective_scale_over_an_outside_engine() {
+    let (plus, eng_p) = decoupled();
+    let mut app = app_with_defaults();
+    app.options_mut()
+        .set_numeric_value("obj_scaling_factor", -1.0, true, false)
+        .unwrap();
+    let (minus, eng_m) = recorded(app, DecoupledRowTnlp { negated: true }, -1.0);
+    same_classification_of("plus", &plus, eng_p.clone());
+    same_classification_of("minus", &minus, eng_m.clone());
+    same_reduced_row_activity("plus", &plus, &eng_p, &[1, 2]);
+    same_reduced_row_activity("minus", &minus, &eng_m, &[1, 2]);
+}
+
+#[test]
+fn the_coupled_row_fixture_carries_an_ambiguous_kink_over_an_outside_engine() {
+    let (s, eng) = coupled(RHO, None);
+    same_classification_of("coupled", &s, eng);
+}
+
+#[test]
+fn the_reduced_normalizer_certifies_a_coupled_row_kink_at_every_coupling_over_an_outside_engine() {
+    for rho in [1.0, 1.0e-1, 1.0e-2, 1.0e-3] {
+        let (s, eng) = coupled(rho, None);
+        let label = format!("rho={rho:e}");
+        same_classification_of(&label, &s, eng.clone());
+        same_reduced_row_activity(&label, &s, &eng, &[1]);
+    }
+}
+
+/// pounce solves each arm under its own row factor, and the outside engine
+/// reads every arm in the model's own units, so all of them are held to one
+/// answer.
+#[test]
+fn leg_scaling_the_reduced_row_curvature_is_unmoved_by_a_row_scaling_over_an_outside_engine() {
+    for dg in [1.0, 1.0e-3, 1.0e-1, 1.0e1, 1.0e3] {
+        let (s, eng) = coupled(RHO, Some(dg));
+        let label = format!("row scale {dg:e}");
+        same_classification_of(&label, &s, eng.clone());
+        same_reduced_row_activity(&label, &s, &eng, &[1]);
+    }
 }

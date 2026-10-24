@@ -40,7 +40,33 @@ pub trait SensBacksolver {
     /// Solve `K · lhs = rhs`. The implementation may use `rhs` as
     /// scratch; callers should treat it as moved-from on return.
     /// `lhs` must have length `self.dim()`.
+    ///
+    /// The solve has to be refined against the matrix, as Ipopt's and
+    /// pounce's are. At a converged barrier iterate a bound held on its
+    /// constraint gives `K` a diagonal entry many orders above the rest, and
+    /// the activity classification's reduced curvature is a difference taken
+    /// against that entry. An unrefined solve loses the digits that entry
+    /// costs. On a model whose diagonal reaches `1e11`, it kept two or three.
     fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool;
+
+    /// [`Self::solve`] for `n_rhs` right-hand sides at once, each
+    /// `self.dim()` long and stored one after another in `rhs` and
+    /// `lhs`.
+    ///
+    /// The default solves them one at a time. An engine that can
+    /// back-solve several right-hand sides in one pass overrides it, and
+    /// the activity classification's per-coordinate refinement is where
+    /// that pays off.
+    fn solve_many(&self, rhs: &[Number], lhs: &mut [Number], n_rhs: usize) -> bool {
+        let dim = self.dim();
+        if rhs.len() != n_rhs * dim || lhs.len() != n_rhs * dim {
+            return false;
+        }
+        rhs.chunks(dim.max(1))
+            .zip(lhs.chunks_mut(dim.max(1)))
+            .take(n_rhs)
+            .all(|(r, l)| self.solve(r, l))
+    }
 
     /// Per-row factor carrying a quantity read off the converged
     /// iterate into the units [`Self::solve`] answers in, indexed by
@@ -149,6 +175,47 @@ pub trait SensBacksolver {
     /// Whether [`Self::solve_released`] is implemented.
     fn supports_release(&self) -> bool {
         false
+    }
+}
+
+/// A borrowed engine is an engine, so the calculations that hold one by
+/// value, such as [`crate::sens_app::SensApplication`], take a reference to
+/// an engine the caller keeps. Every method forwards, the defaulted ones
+/// included, so a reference never answers with a default its engine
+/// overrides.
+impl<B: SensBacksolver + ?Sized> SensBacksolver for &B {
+    fn dim(&self) -> usize {
+        (**self).dim()
+    }
+    fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        (**self).solve(rhs, lhs)
+    }
+    fn solve_many(&self, rhs: &[Number], lhs: &mut [Number], n_rhs: usize) -> bool {
+        (**self).solve_many(rhs, lhs, n_rhs)
+    }
+    fn natural_units_factor(&self) -> Option<&[Number]> {
+        (**self).natural_units_factor()
+    }
+    fn bound_rows(&self) -> Option<&[BoundRow]> {
+        (**self).bound_rows()
+    }
+    fn solve_released(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        (**self).solve_released(released, rhs, lhs)
+    }
+    fn solve_released_step(&self, released: &[usize], rhs: &[Number], lhs: &mut [Number]) -> bool {
+        (**self).solve_released_step(released, rhs, lhs)
+    }
+    fn solve_released_pinned(
+        &self,
+        released: &[usize],
+        pinned: &[usize],
+        rhs: &[Number],
+        lhs: &mut [Number],
+    ) -> bool {
+        (**self).solve_released_pinned(released, pinned, rhs, lhs)
+    }
+    fn supports_release(&self) -> bool {
+        (**self).supports_release()
     }
 }
 

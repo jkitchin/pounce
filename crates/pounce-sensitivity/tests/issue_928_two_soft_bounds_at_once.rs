@@ -55,6 +55,9 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
 };
 use pounce_sensitivity::Solver;
+
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
 use pounce_sensitivity::activity::UNIDENTIFIED;
 
 /// Column order is `[x, y, w, lam]`; the pin is constraint 1.
@@ -586,3 +589,58 @@ fn a_firmly_held_bound_is_not_released_alongside_a_soft_one() {
 // * **Magnitude.** Four variables. The largest convex fixture in the
 //   corpus is 534 columns and `benchmarks/qp` reaches 93 263; nothing
 //   here bounds what happens there.
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+/// The classification `walk` reads at every base point of the grid that
+/// `no_walk_on_the_grid_ends_outside_the_box` and
+/// `the_walk_reproduces_the_resolve_on_the_whole_grid` cover.
+#[test]
+fn the_classification_on_the_grid_is_the_same_over_an_outside_engine() {
+    for (lam, _) in grid() {
+        let (solver, model, status) = recorded_solve(
+            configured(),
+            TwoSoftBounds {
+                lam,
+                curv: [0.0; 3],
+            },
+        );
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed: {status:?}",
+        );
+        same_classification(&format!("lam={lam}"), &solver, &model, Relaxation::None);
+    }
+}
+
+#[test]
+fn a_firmly_held_bound_is_not_released_alongside_a_soft_one_over_an_outside_engine() {
+    let lam = 2.0 - 1e-6;
+    let (solver, model, status) = recorded_solve(
+        configured(),
+        TwoSoftBounds {
+            lam,
+            curv: [0.0; 3],
+        },
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}",
+    );
+    same_classification("firm and soft", &solver, &model, Relaxation::None);
+}

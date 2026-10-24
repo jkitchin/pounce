@@ -545,17 +545,34 @@ def _kkt_backsolve_pure_callback(
 
     def host_call(sid_h, v_h):
         # Under ``vmap_method="broadcast_all"`` (pounce#77 follow-up),
-        # JAX prepends a leading batch axis to *every* input when this
-        # callback is hit through a vmap — most importantly ``jax.jacrev``
-        # over a JaxProblem solve, which fans out N cotangents and
-        # otherwise paid one FFI hop per fan-out. Here we accept either:
+        # JAX prepends the same leading batch axes to *every* input when
+        # this callback is hit through a vmap — most importantly
+        # ``jax.jacrev`` over a JaxProblem solve, which fans out N
+        # cotangents and otherwise paid one FFI hop per fan-out:
         #   - unbatched: ``sid_h`` scalar, ``v_h`` shape ``(n,)``
-        #   - batched:   ``sid_h`` shape ``(N,)``, ``v_h`` shape ``(N, n)``
-        # The solver_id is the same for every fan-out cotangent (jacrev
-        # holds the primal fixed and only varies cotangents), so we
-        # extract a single int via ``np.ravel(...)[0]``.
-        sid_arr = np.asarray(sid_h)
-        sid = int(sid_arr.reshape(-1)[0])
+        #   - batched:   ``sid_h`` shape ``batch``, ``v_h`` ``batch + (n,)``
+        # jacrev holds the primal fixed, so every lane carries one id; an
+        # outer ``jax.vmap`` over ``p`` carries one id *per lane*. Reading
+        # the first id for all of them back-solved every lane against lane
+        # 0's factor (the gh#1049 defect class), so rows are grouped by id
+        # and each group is one ``kkt_solve_many`` against its own factor.
+        v_all = np.asarray(v_h, dtype=np.float64)
+        batch_shape = v_all.shape[:-1]
+        v_all = v_all.reshape(-1, n)
+        sids = np.broadcast_to(
+            np.asarray(sid_h, dtype=np.int64), batch_shape
+        ).reshape(-1)
+        u_x_all = np.empty((v_all.shape[0], n), dtype=np.float64)
+        u_g_all = np.empty((v_all.shape[0], m), dtype=np.float64)
+        for sid_k in np.unique(sids):
+            rows = np.flatnonzero(sids == sid_k)
+            u_x_all[rows], u_g_all[rows] = _backsolve_one(int(sid_k), v_all[rows])
+        return (
+            u_x_all.reshape(batch_shape + (n,)),
+            u_g_all.reshape(batch_shape + (m,)),
+        )
+
+    def _backsolve_one(sid, v_np):
         solver = jp._lookup_solver(sid)
         if solver is None:
             # The registered Solver was evicted from the bounded LRU
@@ -584,13 +601,6 @@ def _kkt_backsolve_pure_callback(
         # ``kkt_solve`` call here to the same executor so JAX's
         # off-thread pure_callback dispatch (training loops, jit'd
         # outer wrappers, ...) doesn't trigger PyO3's unsendable panic.
-        v_np = np.asarray(v_h, dtype=np.float64)
-        # Unbatched: shape (n,). Batched (from jax.jacrev / jax.vmap of
-        # the bwd): shape (N, n). Normalise to a 2D (N, n) and remember
-        # whether to squeeze on return.
-        squeeze = v_np.ndim == 1
-        if squeeze:
-            v_np = v_np[None, :]
         N = v_np.shape[0]
 
         def _do_kkt():
@@ -670,8 +680,6 @@ def _kkt_backsolve_pure_callback(
             d_idx = np.flatnonzero(~is_eq)
             u_g_batch[:, c_idx] = u_y_c_batch
             u_g_batch[:, d_idx] = u_y_d_batch
-        if squeeze:
-            return u_x_batch[0], u_g_batch[0]
         return u_x_batch, u_g_batch
 
     # vmap_method="broadcast_all" lets JAX hand us a batched RHS in a
@@ -748,6 +756,26 @@ def _bwd_batched_factor_reuse(
     )
 
 
+def _single_solver_id(sid_h) -> int:
+    """The one solver id behind a ``broadcast_all`` batch of ids.
+
+    The stacked-factor callbacks pack their whole batch into one RHS for
+    one factor, which is right only when every lane carries the same id
+    (``jacrev`` / a vmap over directions). Distinct ids mean an outer vmap
+    over distinct solves; reading lane 0 would back-solve every lane
+    against the first factor and return plausible wrong numbers (gh#1049).
+    """
+    sids = np.unique(np.asarray(sid_h, dtype=np.int64))
+    if sids.size != 1:
+        raise NotImplementedError(
+            "pounce.jax: a stacked-factor back-solve was batched over "
+            f"{sids.size} distinct solves; jax.vmap over batched_solve / "
+            "batched_jvp_from_state is not supported. Fold the outer batch "
+            "into p_batch instead."
+        )
+    return int(sids[0])
+
+
 def _kkt_backsolve_batched_pure_callback(
     jp: "JaxProblem",
     B: int,
@@ -792,9 +820,10 @@ def _kkt_backsolve_batched_pure_callback(
         #   - unbatched: ``sid_h`` scalar,   ``cot_h`` shape ``(B, n)``
         #   - batched:   ``sid_h`` (N,),     ``cot_h`` shape ``(N, B, n)``
         # solver_id is constant across cotangents in a jacrev (one
-        # primal, N varying cotangents); pull the first.
-        sid_arr = np.asarray(sid_h)
-        sid_int = int(sid_arr.reshape(-1)[0])
+        # primal, N varying cotangents). Lanes holding different ids
+        # would each need their own stacked factor; refuse rather than
+        # back-solve them all against lane 0's (gh#1049).
+        sid_int = _single_solver_id(sid_h)
         solver = jp._lookup_solver(sid_int)
         if solver is None:
             raise RuntimeError(
@@ -932,7 +961,7 @@ def _kkt_jvp_batched_pure_callback(
     )
 
     def host_call(sid_h, rx_h, rg_h):
-        sid_int = int(np.asarray(sid_h).reshape(-1)[0])
+        sid_int = _single_solver_id(sid_h)
         solver = jp._lookup_solver(sid_int)
         if solver is None:
             raise RuntimeError(
@@ -3879,8 +3908,12 @@ def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm)
             np.int64(info["solver_id"]),
         )
 
+    # ``sequential``: under ``jax.vmap`` each element is its own host solve
+    # with its own held factor (and id); the factor-reuse backward groups
+    # its rows by that id (:func:`_kkt_backsolve_pure_callback`).
     return jax.pure_callback(
         host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm,
+        vmap_method="sequential",
     )
 
 

@@ -13,6 +13,12 @@ categories = ["mathematics", "algorithms", "science"]
 [dependencies]
 pounce-common.workspace = true
 pounce-linalg.workspace = true
+# The directional derivative decides which weakly active bounds hold by
+# solving a small reduced QP over them, with FERAL under the QP engine.
+pounce-feral.workspace = true
+pounce-qp.workspace = true
+# Dense algebra on the statistics' parameter-sized blocks.
+faer.workspace = true
 
 [lints]
 workspace = true

@@ -192,6 +192,9 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
+
 /// Column order is `[x, lam]`; the pin is constraint 0 and the cap is
 /// constraint 1.
 const N: usize = 2;
@@ -1052,4 +1055,29 @@ fn leg_scaling_a_row_limit_is_released_at_the_same_place_under_a_row_scaling() {
         pa[0].0,
         pb[0].0,
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+#[test]
+fn the_three_base_points_reach_three_different_states_over_an_outside_engine() {
+    for lam in [0.8, 1.0, 1.3] {
+        let (solver, model, status) = recorded_solve(configured(), RowLimit { lam, scaling: None });
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed: {status:?}",
+        );
+        same_classification(&format!("lam={lam}"), &solver, &model, Relaxation::None);
+    }
 }

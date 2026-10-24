@@ -28,5 +28,9 @@ pounce-nlp.workspace = true
 pounce-sens-core.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+# The cross-engine test reads the model Ipopt solved from the same `.nl`.
+pounce-nl.workspace = true
+
 [lints]
 workspace = true

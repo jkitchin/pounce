@@ -23,6 +23,7 @@ use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_sensitivity::activity;
+use pounce_sensitivity::pounce_sens_core;
 use pounce_sensitivity::{Solver as RustSolver, SolverError};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -67,23 +68,41 @@ struct SessionState {
 }
 
 /// The activity status vocabulary both classifiers report in, shared
-/// so `classify_activity` and `reduced_activity` cannot drift apart on
-/// the spelling of a class.
+/// so `classify_activity`, `reduced_activity` and the statistics cannot
+/// drift apart on the spelling of a class.
+pub(crate) fn status_name(c: i8) -> &'static str {
+    match c {
+        activity::UNBOUNDED => "unbounded",
+        activity::INACTIVE => "inactive",
+        activity::WEAKLY_ACTIVE => "weakly_active",
+        activity::STRONGLY_ACTIVE => "strongly_active",
+        activity::AMBIGUOUS => "ambiguous",
+        activity::UNIDENTIFIED => "unidentified",
+        activity::FIXED => "fixed",
+        activity::EQUALITY => "equality",
+        _ => unreachable!("unknown activity status code {c}"),
+    }
+}
+
 fn status_str(codes: &[i8]) -> Vec<&'static str> {
-    codes
-        .iter()
-        .map(|&c| match c {
-            activity::UNBOUNDED => "unbounded",
-            activity::INACTIVE => "inactive",
-            activity::WEAKLY_ACTIVE => "weakly_active",
-            activity::STRONGLY_ACTIVE => "strongly_active",
-            activity::AMBIGUOUS => "ambiguous",
-            activity::UNIDENTIFIED => "unidentified",
-            activity::FIXED => "fixed",
-            activity::EQUALITY => "equality",
-            _ => unreachable!("unknown activity status code {c}"),
-        })
-        .collect()
+    codes.iter().map(|&c| status_name(c)).collect()
+}
+
+impl PySolver {
+    /// The calculations over the held factor, for the functions
+    /// `crate::sens_port` exposes.
+    pub(crate) fn with_converged<R>(
+        &self,
+        f: impl FnOnce(
+            &pounce_sens_core::converged::ConvergedSolve<'_, pounce_sensitivity::PdSensBacksolver>,
+        ) -> Result<R, SolverError>,
+    ) -> PyResult<R> {
+        let s = self
+            .state
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no converged factor (call solve() first)"))?;
+        s.inner.with_converged(f).map_err(solver_error_to_py)
+    }
 }
 
 #[pymethods]
@@ -1439,7 +1458,7 @@ fn validate_pins(pin_constraint_indices: &[i64], m: usize) -> PyResult<Vec<Index
         .collect()
 }
 
-fn solver_error_to_py(e: SolverError) -> PyErr {
+pub(crate) fn solver_error_to_py(e: SolverError) -> PyErr {
     match e {
         SolverError::NotConverged => PyRuntimeError::new_err("Solver: not converged"),
         SolverError::BadShape {

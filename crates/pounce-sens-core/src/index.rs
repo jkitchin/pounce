@@ -24,8 +24,7 @@
 //!
 //! So the newtype earns its cost at exactly one shape: **a conversion
 //! whose result feeds a direct array index, in a scope where the other
-//! space is also live.** Measured over `pounce-sensitivity`, that is
-//! two sites, both in `solver.rs`:
+//! space is also live.** That is two sites, both in `converged.rs`:
 //!
 //! * the kappa computation's `var_sigma` read, whose `unwrap_or(0.0)`
 //!   turns a miss into a zero that silently drops the row from the
@@ -40,11 +39,11 @@
 //! * `activity.rs` has four scatter loops (`var_full[full_of(i)] = e`)
 //!   where the index is converted at the point of use and only one
 //!   space is live — there is nothing to mix up.
-//! * `algorithm_backsolver.rs:871` resolves through a checked
-//!   `get_mut(..).ok_or_else(..)` and then sweeps for an unfilled NaN
-//!   sentinel; it fails loudly twice over.
-//! * `solver.rs:1686` and the `full_x_to_var_x` accessors *produce*
-//!   indices for a caller rather than indexing with them.
+//! * `pounce-sensitivity`'s `algorithm_backsolver.rs` fills its var-x
+//!   vector through a checked `get_mut(..).ok_or_else(..)` and then
+//!   sweeps for an unfilled NaN sentinel; it fails loudly twice over.
+//! * `ConvergedSolve::x_primal_rows` and the `full_x_to_var_x` accessors
+//!   *produce* indices for a caller rather than indexing with them.
 //!
 //! # What this does and does not buy
 //!
@@ -104,7 +103,7 @@ use pounce_common::types::Index;
 /// kink on purpose.
 ///
 /// ```
-/// use pounce_sensitivity::index::VarX;
+/// use pounce_sens_core::index::VarX;
 /// assert_eq!(VarX::new(3).get(), 3);
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -112,13 +111,13 @@ pub struct VarX(usize);
 
 /// An index into the **model's** variable space, fixed variables
 /// included: the space of every `ActivityReport` per-variable array,
-/// and the length [`crate::solver::Solver::n_full_x`] reports.
+/// and the length [`crate::converged::ConvergedSolve::n_full_x`] reports.
 ///
 /// A `FullX` is obtainable only by converting a [`VarX`] through
 /// [`VarToFull`] -- there is no public constructor, by design:
 ///
 /// ```
-/// use pounce_sensitivity::index::{VarToFull, VarX};
+/// use pounce_sens_core::index::{VarToFull, VarX};
 /// // full-x 0 is `make_parameter`-removed, so var-x k is full-x k+1
 /// let map = VarToFull::build(3, |v| v.get() + 1);
 /// assert_eq!(map.full_of(VarX::new(0)).unwrap().get(), 1);
@@ -265,7 +264,7 @@ impl<'a, T: Copy> FullXSlice<'a, T> {
 /// A var-x row cannot be used where a full-x index is expected:
 ///
 /// ```compile_fail
-/// use pounce_sensitivity::index::{FullX, VarX};
+/// use pounce_sens_core::index::{FullX, VarX};
 /// fn full_only(_: FullX) {}
 /// full_only(VarX::new(0));
 /// ```
@@ -274,7 +273,7 @@ impl<'a, T: Copy> FullXSlice<'a, T> {
 /// above is about the types and not about the spelling:
 ///
 /// ```
-/// use pounce_sensitivity::index::{FullX, VarToFull, VarX};
+/// use pounce_sens_core::index::{FullX, VarToFull, VarX};
 /// fn full_only(_: FullX) {}
 /// let map = VarToFull::build(1, |v| v.get());
 /// full_only(map.full_of(VarX::new(0)).unwrap());
@@ -284,21 +283,21 @@ impl<'a, T: Copy> FullXSlice<'a, T> {
 /// keeps the guarantee above from being one short line wide:
 ///
 /// ```compile_fail
-/// use pounce_sensitivity::index::{FullX, VarX};
+/// use pounce_sens_core::index::{FullX, VarX};
 /// let _ = FullX::new(VarX::new(0).get());
 /// ```
 ///
 /// A full-x index cannot be used where a var-x row is expected:
 ///
 /// ```compile_fail
-/// use pounce_sensitivity::index::{VarToFull, VarX};
+/// use pounce_sens_core::index::{VarToFull, VarX};
 /// fn var_only(_: VarX) {}
 /// let map = VarToFull::build(1, |v| v.get());
 /// var_only(map.full_of(VarX::new(0)).unwrap());
 /// ```
 ///
 /// ```
-/// use pounce_sensitivity::index::{VarToFull, VarX};
+/// use pounce_sens_core::index::{VarToFull, VarX};
 /// fn var_only(_: VarX) {}
 /// let map = VarToFull::build(1, |v| v.get());
 /// var_only(VarX::new(0));
@@ -310,14 +309,14 @@ impl<'a, T: Copy> FullXSlice<'a, T> {
 /// type error:
 ///
 /// ```compile_fail
-/// use pounce_sensitivity::index::{FullXSlice, VarX};
+/// use pounce_sens_core::index::{FullXSlice, VarX};
 /// let status = [0i8, 1, 2];
 /// let full = FullXSlice::new(&status);
 /// full.at(VarX::new(1));
 /// ```
 ///
 /// ```
-/// use pounce_sensitivity::index::{FullXSlice, VarToFull, VarX};
+/// use pounce_sens_core::index::{FullXSlice, VarToFull, VarX};
 /// let status = [0i8, 1, 2];
 /// let full = FullXSlice::new(&status);
 /// let map = VarToFull::build(2, |v| v.get() + 1);
@@ -329,7 +328,7 @@ impl<'a, T: Copy> FullXSlice<'a, T> {
 /// in from a caller:
 ///
 /// ```compile_fail
-/// use pounce_sensitivity::index::FullXSlice;
+/// use pounce_sens_core::index::FullXSlice;
 /// let status = [0i8, 1, 2];
 /// FullXSlice::new(&status).at(1usize);
 /// ```

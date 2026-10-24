@@ -6,9 +6,9 @@ produced the KKT system.
 
 ## What is here
 
-Everything in this crate is written against one trait — `SensBacksolver`,
+Everything in the table below is written against one trait, `SensBacksolver`,
 whose entire required surface is `dim()` and `solve(rhs, lhs)`. Any engine
-that can back-solve against its converged factor gets the rest for free:
+that can back-solve against its converged factor gets these modules:
 
 | module | what it provides |
 |---|---|
@@ -18,27 +18,44 @@ that can back-solve against its converged factor gets the rest for free:
 | `p_calculator`, `schur_data`, `schur_driver`, `step_calc`, `reduced_hessian` | the `P = K⁻¹A` / Schur-complement stack |
 
 Two consumers exist in tree. [`pounce-sensitivity`](../pounce-sensitivity)
-implements the trait over the NLP filter-IPM's KKT factor;
+implements the trait over the NLP filter-IPM's KKT factor, and
 [`pounce-convex`](../pounce-convex) implements it over the convex active-set
-KKT. Neither depends on the other, and this crate depends on neither — only
-on `pounce-common` and `pounce-linalg`.
+KKT. Neither depends on the other, and this crate depends on neither. It
+depends on `pounce-common` and `pounce-linalg`, on `pounce-qp` and
+`pounce-feral` for the reduced QP the directional derivative solves, and on
+`faer` for the dense algebra of the statistics.
 
-## What is deliberately not here
+## Barrier iterates
 
-Two parts of the NLP arm's sensitivity layer are genuinely engine-coupled and
-stay in `pounce-sensitivity`, so the boundary is a decision rather than an
-oversight:
+The corrector and the activity classification need more than a back-solve.
+They read the interior-point iterate itself, so they are written against a
+second trait, `BarrierIterate`, which an engine implements beside
+`SensBacksolver`:
 
-- **The corrector.** Its entry points take the concrete `PdSensBacksolver` and
-  reach for `activity_handles()`, `offsets_public()`, `block_dims()`,
-  `pack_natural()` and `corrector_sigma()` — none on the trait, several
-  meaningful only for the filter-IPM's eight-block compound iterate.
-- **Activity classification's plumbing.** It reads the filter-IPM's own
-  iterate (`z_l`, `z_u`, `v_l`, `v_u`) out of an `IpoptData` handle. Its pure
-  decision rule is portable; the plumbing around it is not.
+| module | what it provides |
+|---|---|
+| `barrier` | the `BarrierIterate` contract: the block layout of the compound iterate `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)`, the converged point and its barrier level, the barrier KKT residual at a point, the Newton operator at a predicted point, and the converged quantities the classification reads (`ActivityData`) |
+| `corrector` | the corrector, which re-solves the barrier KKT conditions from a parametric step's predicted point |
+| `activity` | the activity classification of every bound and inequality row, and the reduced reports over a chosen set of variables or rows |
+| `converged` | `ConvergedSolve`, every calculation over a converged factor: the parametric steps in each mode and degeneracy treatment, the corrector, the classification, the reduced Hessian, the KKT solves and the maps between the model and the engine's blocks |
+| `stats` | the covariance and the information matrix of a fit, the correlation, and the bounds a block is conditioned on |
+| `step` | the solution estimate at perturbed parameters, the report of what its step does at the bounds, the active-set changes along a path step, the multiplier row of a model row, and the total derivative of the objective |
+| `model` | `ModelFunctions`, the model's bounds, constraints, Jacobian and objective gradient, which a step report evaluates at the moved point |
+| `dense` | the dense algebra of `stats`: the inverse, the solve, the rank and null space at NumPy's tolerance, and the symmetric eigendecomposition with each eigenvector's largest component positive |
+| `index` | index newtypes for the model's variables (full-x) and the factor's (var-x), used where a conversion between the two feeds a direct array index |
 
-Generalizing either means abstracting `IpoptData` / `CalculatedQuantities`
-access behind another trait — a larger project than this crate.
+`pounce-sensitivity` implements `BarrierIterate` over the filter-IPM's
+`IpoptData`, and its `Solver` is a wrapper over `ConvergedSolve`. An engine
+outside pounce implements the trait from its own final iterate, its own model
+callbacks and its own factorization of the KKT matrix, and gets the same
+calculations through `ConvergedSolve::new`. The classification assumes the
+solve ran with `bound_relax_factor = 0`, which pounce's `Solver` checks and an
+outside engine must ensure itself.
+
+The statistics and the steps are the numerics behind `pounce.sensitivity`'s
+`covariance`, `information`, `solution`, `solution_report` and
+`active_set_changes`. They return each warning condition as a finding and
+each failure as a typed error, and the Python front ends write the messages.
 
 ## Algorithmic reference
 
@@ -61,8 +78,11 @@ The port follows the upstream sIPOPT contrib at
 | `src/p_calculator.rs` — `PCalculator` trait  | [`SensPCalculator.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensPCalculator.hpp) (lines 17–133) |
 | `src/backsolver.rs` — `SensBacksolver` trait | [`SensBacksolver.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensBacksolver.hpp)                |
 
-Every public item in this crate documents the upstream symbol it mirrors,
-with line numbers when they're stable.
+Every public item ported from sIPOPT documents the upstream symbol it
+mirrors, with line numbers when they're stable. `barrier`, `converged`,
+`stats`, `step`, `model` and `dense` are not ports: they hold pounce's own
+calculations, moved here from `pounce-sensitivity` and the Python front end,
+and say so inline where one follows sIPOPT.
 
 ## License
 

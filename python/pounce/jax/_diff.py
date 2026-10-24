@@ -622,6 +622,24 @@ def _pure_callback_solve(
     )
 
 
+def _check_array_p(p, who: str):
+    """``p`` must be one array (or scalar); a pytree is not supported.
+
+    The host callback converts ``p`` with ``asarray`` and the implicit
+    backward contracts ``jacrev`` over it with ``tensordot``, so a tuple or
+    dict otherwise fails deep inside a ``pure_callback`` with an unrelated
+    shape error. Say what to do instead.
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(p)
+    if len(leaves) != 1 or treedef.num_nodes != 1:
+        raise TypeError(
+            f"pounce.jax.{who}: `p` must be a single array or scalar, got a "
+            f"{type(p).__name__} pytree. Flatten it first, e.g. "
+            "`q, unravel = jax.flatten_util.ravel_pytree(p)`, solve with `q`, "
+            "and call `unravel(q)` inside `f` / `g`."
+        )
+
+
 def solve(
     p,
     *,
@@ -691,6 +709,7 @@ def solve(
         also logs the callback's traceback to stderr. Catch
         ``RuntimeError``, not a narrower type.
     """
+    _check_array_p(p, "solve")
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
     _check_on_failure(on_failure)
     extra = dict(jac_pattern=jac_pattern, hess_pattern=hess_pattern,
@@ -804,9 +823,12 @@ def _pure_callback_warm_solve(
         )
         return x_np, lam_out, zL_out, zU_out, np.float64(mu_out)
 
+    # ``sequential``: under ``jax.vmap`` each batch element is its own
+    # host solve, as in :func:`_pure_callback_solve`. The backward is plain
+    # JAX over the per-lane residuals, so it batches without help.
     return jax.pure_callback(
         host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm, mu_warm,
-        dyn_bounds,
+        dyn_bounds, vmap_method="sequential",
     )
 
 
@@ -955,6 +977,7 @@ def solve_with_warm(
             jnp.nan if mu_seed is None else mu_seed, dtype=jnp.float64
         )
 
+    _check_array_p(p, "solve_with_warm")
     static_bounds, dyn_bounds = _split_bounds(lb, ub, cl, cu)
     fn = _make_solve_with_warm_custom_vjp(
         f, g, n, m, static_bounds, options, extra

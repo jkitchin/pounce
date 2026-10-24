@@ -20,27 +20,37 @@
 //! Two consumers exist in tree. `pounce-sensitivity` implements the trait over
 //! the NLP filter-IPM's KKT factor (`PdSensBacksolver`); `pounce-convex`
 //! implements it over the convex active-set KKT. Neither depends on the other,
-//! and this crate depends on neither — it needs only `pounce-common` and
-//! `pounce-linalg`.
+//! and this crate depends on neither. It needs `pounce-common` and
+//! `pounce-linalg`, `pounce-qp` and `pounce-feral` for the reduced QP the
+//! directional derivative solves, and `faer` for the dense algebra of the
+//! statistics.
 //!
-//! # What deliberately did not move here
+//! # Barrier iterates
 //!
-//! Two parts of the NLP arm's sensitivity layer are genuinely engine-coupled
-//! and stay in `pounce-sensitivity`, so this boundary is a decision rather
-//! than an oversight:
+//! Most of the NLP arm needs more of the engine than a back-solve: it reads
+//! the interior-point iterate itself. That part is written against a second
+//! trait, [`barrier::BarrierIterate`], which an engine implements beside
+//! `SensBacksolver`:
 //!
-//! * **The corrector.** Its entry points take the concrete `PdSensBacksolver`
-//!   and reach for `activity_handles()`, `offsets_public()`, `block_dims()`,
-//!   `pack_natural()` and `corrector_sigma()` — none of which are on the
-//!   trait, and several of which only mean anything for the filter-IPM's
-//!   eight-block compound iterate.
-//! * **Activity classification's plumbing.** It reads the filter-IPM's own
-//!   iterate (`z_l`, `z_u`, `v_l`, `v_u`) out of an `IpoptData` handle. Its
-//!   pure decision rule is portable and is expected to land here later; the
-//!   plumbing around it is not.
+//! * [`corrector`]: Newton iterations on the barrier system from a
+//!   parametric step.
+//! * [`activity`]: the per-bound classification, and its refinement by the
+//!   reduced curvature.
+//! * [`converged`]: [`converged::ConvergedSolve`], every calculation over a
+//!   converged factor: the parametric steps in each mode and degeneracy
+//!   treatment, the reduced Hessian, and the maps between the model and
+//!   the engine's blocks.
+//! * [`stats`]: the covariance and information matrix of a fit.
+//! * [`step`]: the solution estimate at perturbed parameters and the report
+//!   of what its step does at the bounds.
+//! * [`model`] and [`dense`]: the model callbacks a step report evaluates,
+//!   and the dense algebra of the statistics.
 //!
-//! Generalizing either would mean abstracting `IpoptData` / `CalculatedQuantities`
-//! access behind another trait, which is a larger project than this crate.
+//! `pounce-sensitivity` implements `BarrierIterate` over pounce's own
+//! converged iterate. An interior-point engine outside pounce, such as Ipopt,
+//! implements it from its own final iterate, its own model callbacks and its
+//! own factorization of the KKT matrix, and gets the same calculations over
+//! its result through `ConvergedSolve::new`.
 //!
 //! # Provenance
 //!
@@ -52,15 +62,24 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod activity;
 pub mod activity_kernel;
 pub mod backsolver;
+pub mod barrier;
 pub mod boundcheck;
+pub mod converged;
+pub mod corrector;
+pub mod dense;
+pub mod index;
+pub mod model;
 pub mod p_calculator;
 pub mod reduced_hessian;
 pub mod rowlimit;
 pub mod schur_data;
 pub mod schur_driver;
 pub mod sens_app;
+pub mod stats;
+pub mod step;
 pub mod step_calc;
 
 // Root re-exports. These are not a convenience: several moved modules refer to
@@ -70,6 +89,7 @@ pub mod step_calc;
 // re-exports the same names, which is what keeps its published API unchanged
 // across this extraction.
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
+pub use barrier::{ActivityData, BarrierIterate, BoundSide, EngineScaling, KktOperator, ModelMaps};
 pub use p_calculator::{IndexPCalculator, PCalculator};
 pub use reduced_hessian::compute_reduced_hessian;
 pub use schur_data::{IndexSchurData, SchurData};

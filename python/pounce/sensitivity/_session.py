@@ -12,6 +12,8 @@ against either, because each reads only the attributes declared here.
 """
 import numpy as np
 
+from .. import _pounce
+
 
 def objective_sign(nl):
     """+1 if the model was written as a minimization, -1 for a maximization.
@@ -254,8 +256,11 @@ class SensSession:
         with a NEIGHBOURING variable's sensitivity from the first fixed
         variable on -- gh#450 and gh#672 finding 1, the same defect
         twice. `sens_invariance_legs` leg 3 is the guard.
+        `pounce_sens_core::step::total_objective_derivative` does the
+        contraction.
         """
-        return float(self.objective_gradient() @ self.scatter_x(col))
+        return float(_pounce._sens_total_derivative(
+            self.solver, self.objective_gradient(), np.asarray(col)))
 
     def column(self, pin_idx):
         """Full KKT-space derivative column for a unit perturbation."""
@@ -314,10 +319,10 @@ class SensSession:
         except KeyError:
             raise ValueError(
                 f"{con_name}: not a constraint of the solved model") from None
-        row = self.solver.multiplier_rows([g])[0]
-        if row is not None:
-            return row
-        return self._inequality_mult_entry(con_name, g)
+        gate = _pounce._sens_multiplier_row(self.solver, int(g))
+        if gate[0] == "row":
+            return gate[1]
+        return self._inequality_refusal(con_name, g, gate)
 
     #: What the strictly-active gate says about each regime it turns
     #: away. Keyed by `reduced_row_activity` status; the value is the
@@ -350,19 +355,18 @@ class SensSession:
             "differentiate"),
     }
 
-    def _inequality_mult_entry(self, con_name, g):
-        """`mult_entry`'s `y_d` half: the strictly-active gate."""
-        row = self.solver.inequality_multiplier_rows([g])[0]
-        if row is None:
+    def _inequality_refusal(self, con_name, g, gate):
+        """`mult_entry`'s refusal for an inequality the strictly-active
+        gate of `pounce_sens_core::step::multiplier_row` turned away."""
+        if gate[0] == "no_block":
             # neither block claims it, which the c/d split makes
             # impossible for a row of the solved model -- so this is a
             # map disagreement, not a user error
             raise ValueError(
                 f"{con_name}: constraint row {g} is in neither the "
                 "equality nor the inequality multiplier block")
-        try:
-            status = self.solver.reduced_row_activity([g])["status"][0]
-        except Exception as exc:
+        if gate[0] == "unclassified":
+            exc = gate[1]
             # the classifier's own refusals name the option they are
             # about -- a relaxed solve is the one a caller actually
             # meets -- and not the question that reached it, so the
@@ -371,8 +375,7 @@ class SensSession:
                 f"{con_name}: an inequality's multiplier sensitivity is "
                 "gated on the row's activity regime, which could not be "
                 f"classified: {exc}") from exc
-        if status == "strongly_active":
-            return row
+        status = gate[1]
         why = self._INEQUALITY_REFUSAL.get(
             status, f"the row classified as {status!r}")
         raise ValueError(

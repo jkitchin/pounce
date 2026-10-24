@@ -33,6 +33,7 @@ mod nl_problem;
 mod nlp_batch;
 mod problem;
 mod qp;
+mod sens_port;
 mod solver;
 mod sos;
 mod sparse_lu;
@@ -88,6 +89,20 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sparse_lu::PySparseLu>()?;
     m.add_class::<dense_lu::PyDenseLu>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_covariance, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_information, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sym_eigen, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_correlation, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_solution, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_solution_report, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_active_set_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_multiplier_row, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_sens_total_derivative, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_classify_ratio, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_indefinite, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_rank_deficient, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_pin_eigenvector_signs, m)?)?;
+    m.add_function(wrap_pyfunction!(sens_port::_ratio_test, m)?)?;
     // In-memory model construction (#469): `.nl` text without a temp
     // file, and an expression builder that bypasses `.nl` entirely.
     m.add_function(wrap_pyfunction!(parse_nl_text, m)?)?;

@@ -46,7 +46,6 @@ set -euo pipefail
 CRATES=(
   pounce-common
   pounce-linalg
-  pounce-sens-core
   pounce-linsol
   pounce-feral
   pounce-hsl
@@ -55,6 +54,7 @@ CRATES=(
   pounce-observability
   pounce-presolve
   pounce-qp
+  pounce-sens-core
   pounce-solve-report
   pounce-algorithm
   pounce-minima

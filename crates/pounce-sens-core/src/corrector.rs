@@ -22,19 +22,26 @@
 //! the achievable accuracy varies by problem, from the held-μ offset
 //! of about `1e-7` on some models to `1e-9` on others.
 //!
-//! The residual comes from the algorithm's own calculated quantities
-//! by way of the trial iterate, so scaling, fixed variables, and the
-//! bound expansions are handled exactly as the solve handles them.
-//! Setting a trial point leaves `curr` alone, and `curr` is what the
-//! held factorization was built from, so nothing here disturbs the
-//! factor or any other consumer of the session.
-
-use std::rc::Rc;
+//! The engine evaluates the residual and builds the operator, through
+//! [`BarrierIterate`], so scaling, fixed variables, and the bound
+//! expansions are handled exactly as the engine's own solve handles them.
+//! Everything else here is the engine-independent half: where the
+//! iterations start, which bounds the step takes out of or brings into
+//! the active set, the fraction-to-boundary rule, and the stopping rule.
 
 use pounce_common::types::Number;
 
-use crate::backsolver::SensBacksolver;
-use crate::solver::SolverError;
+use crate::barrier::BarrierIterate;
+
+/// Why a correction could not be made.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CorrectorError {
+    /// The correction could not be set up or did not produce a finite
+    /// point. The message says which.
+    Failed(String),
+    /// A solve against the operator failed.
+    Backsolve,
+}
 
 /// How far a step may travel toward a bound, as a fraction of the
 /// distance remaining. The barrier's own rule, at the value the
@@ -136,14 +143,14 @@ fn residual_norm(v: &[Number]) -> Number {
     worst
 }
 
-pub(crate) fn residual_at(
-    bs: &crate::algorithm_backsolver::PdSensBacksolver,
+pub(crate) fn residual_at<E: BarrierIterate + ?Sized>(
+    bs: &E,
     flat: &[Number],
     pin_rows: &[usize],
     deltas: &[Number],
     mu: Number,
     out: &mut [Number],
-) -> Result<(), SolverError> {
+) -> Result<(), CorrectorError> {
     // `flat` is in natural units, the frame the step and the bounds are
     // in. The algorithm's own iterate is scaled, so undo `F` before
     // handing it back. `solve` post-multiplies by the same vector.
@@ -155,39 +162,15 @@ pub(crate) fn residual_at(
             .map(|(&v, &s)| if s == 0.0 { v } else { v / s })
             .collect(),
     };
-    let iv = bs
-        .pack_public(&scaled)
-        .map_err(|_| SolverError::SensComputationFailed("corrector: pack failed".into()))?;
-    let (data, cq, _) = bs.activity_handles();
-    data.borrow_mut().set_trial(iv.freeze());
+    bs.barrier_residual(&scaled, out)
+        .map_err(CorrectorError::Failed)?;
 
-    let off = bs.offsets_public();
-    let cqb = cq.borrow();
-    let blocks: [(usize, std::rc::Rc<dyn pounce_linalg::Vector>, Number); 8] = [
-        (0, cqb.trial_grad_lag_x(), 0.0),
-        (1, cqb.trial_grad_lag_s(), 0.0),
-        (2, cqb.trial_c(), 0.0),
-        (3, cqb.trial_d_minus_s(), 0.0),
-        (4, cqb.trial_compl_x_l(), mu),
-        (5, cqb.trial_compl_x_u(), mu),
-        (6, cqb.trial_compl_s_l(), mu),
-        (7, cqb.trial_compl_s_u(), mu),
-    ];
-    for (i, v, shift) in blocks {
-        let vals = crate::vec_util::dense_to_vec(&*v);
-        let (a, b) = (off[i], off[i + 1]);
-        if vals.len() != b - a {
-            return Err(SolverError::SensComputationFailed(format!(
-                "corrector: block {i} is {} long, expected {}",
-                vals.len(),
-                b - a
-            )));
-        }
-        for (o, val) in out[a..b].iter_mut().zip(vals) {
-            *o = val - shift;
-        }
+    // The complementarity products are measured against the barrier
+    // level, so the four multiplier blocks are shifted by `mu`.
+    let off = bs.offsets();
+    for o in &mut out[off[4]..off[8]] {
+        *o -= mu;
     }
-    drop(cqb);
 
     // The perturbation moves the pinned equalities' right-hand sides,
     // so the residual there is measured against the moved value.
@@ -201,7 +184,7 @@ pub(crate) fn residual_at(
     let (yc_a, yc_b) = (off[2], off[3]);
     for (&r, &d) in pin_rows.iter().zip(deltas) {
         if r < yc_a || r >= yc_b {
-            return Err(SolverError::SensComputationFailed(format!(
+            return Err(CorrectorError::Failed(format!(
                 "corrector: pin row {r} is outside the equality block"
             )));
         }
@@ -381,6 +364,48 @@ fn clamp_multipliers(
     }
 }
 
+/// Runs the corrector from `start` at the engine's own converged point and
+/// barrier level, which it reads through [`BarrierIterate::converged_iterate`]
+/// and [`BarrierIterate::barrier_mu`]. See [`run`] for the rest.
+#[allow(clippy::too_many_arguments)]
+pub fn correct<E: BarrierIterate + ?Sized>(
+    bs: &E,
+    start: &[Number],
+    pin_rows: &[usize],
+    deltas: &[Number],
+    lo: &[Number],
+    hi: &[Number],
+    max_iter: usize,
+    exact_hessian: bool,
+) -> Result<(Vec<Number>, CorrectorReport), CorrectorError> {
+    // `>= 0`, not `> 0`: a point whose bound multipliers a terminating
+    // path set to zero sits at barrier level exactly zero, and that is a
+    // barrier level, not a missing one. The complementarity rows are then
+    // already satisfied where they stand, which is what the corrector
+    // should measure.
+    let mu = bs.barrier_mu();
+    if !(mu >= 0.0 && mu.is_finite()) {
+        return Err(CorrectorError::Failed(
+            "corrector: the solve reported no barrier parameter".into(),
+        ));
+    }
+    let mut base = vec![0.0; bs.dim()];
+    bs.converged_iterate(&mut base)
+        .map_err(|_| CorrectorError::Failed("corrector: converged iterate unavailable".into()))?;
+    run(
+        bs,
+        &base,
+        start,
+        pin_rows,
+        deltas,
+        lo,
+        hi,
+        mu,
+        max_iter,
+        exact_hessian,
+    )
+}
+
 /// Run the corrector.
 ///
 /// `start` is the caller's compound step, `base` the converged
@@ -394,8 +419,8 @@ fn clamp_multipliers(
 /// must leave, and settling into a cycle where the fraction rule
 /// alternates between two points.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run(
-    bs: &crate::algorithm_backsolver::PdSensBacksolver,
+pub fn run<E: BarrierIterate + ?Sized>(
+    bs: &E,
     base_scaled: &[Number],
     start: &[Number],
     pin_rows: &[usize],
@@ -405,16 +430,24 @@ pub(crate) fn run(
     mu: Number,
     max_iter: usize,
     exact_hessian: bool,
-) -> Result<(Vec<Number>, CorrectorReport), SolverError> {
+) -> Result<(Vec<Number>, CorrectorReport), CorrectorError> {
     let dim = bs.dim();
-    let off = bs.offsets_public();
+    if base_scaled.len() != dim || start.len() != dim {
+        return Err(CorrectorError::Failed(format!(
+            "corrector: the step is {} long and the converged iterate {}, but the KKT \
+             system is {dim}",
+            start.len(),
+            base_scaled.len()
+        )));
+    }
+    let off = bs.offsets();
     let n_x = bs.block_dims()[0];
     // The primal prefix: `x` then `s`, contiguous. Bound rows carry a
     // primal KKT row, so a constraint's own limit lands in the second
     // half, and `bound_context`'s box spans exactly this range.
     let n_p = n_x + bs.block_dims()[1];
     if lo.len() != n_p || hi.len() != n_p {
-        return Err(SolverError::SensComputationFailed(format!(
+        return Err(CorrectorError::Failed(format!(
             "corrector: the box spans {} entries, but the primal prefix (x then s) \
              is {n_p}. The bound rows carry primal KKT rows, so the box must cover \
              both blocks.",
@@ -423,7 +456,7 @@ pub(crate) fn run(
     }
     let rows = bs
         .bound_rows()
-        .ok_or_else(|| SolverError::SensComputationFailed("corrector: no bound rows".into()))?
+        .ok_or_else(|| CorrectorError::Failed("corrector: no bound rows".into()))?
         .to_vec();
 
     // The barrier needs every bounded coordinate strictly inside its
@@ -467,91 +500,26 @@ pub(crate) fn run(
     for &r in &released {
         iterate[r] = 0.0;
     }
-    // The operator is assembled at the PREDICTED point: the current
-    // iterate is swapped to it for the duration of the correction, so
-    // every block evaluates there. The Hessian and the constraint
-    // Jacobians at the stepped point with the step's own multipliers
-    // as clamped above, the bound rows with the stepped slacks and
-    // multipliers, and the barrier diagonal from the same frame
-    // (built below, after the swap), so the one factorization the
-    // correction pays is of one consistent operator. A chord
-    // iteration contracts at the rate the distance between its
-    // operator and the true Jacobian sets, and the predicted point is
-    // where the truth is. The clamp above bounds every multiplier
-    // into the kappa-sigma band at the stepped slacks, and the box
-    // put-back leaves a positive margin on every coordinate, so the
-    // rebuilt diagonal is large exactly where the step holds a
-    // coordinate on a bound and finite everywhere.
-    let (data_h, cq_h, _) = bs.activity_handles();
-    let predicted = bs.pack_natural(&iterate).ok_or_else(|| {
-        SolverError::SensComputationFailed("corrector: packing the predicted point failed".into())
-    })?;
-    struct RestoreCurr<'a> {
-        data: &'a pounce_algorithm::ipopt_data::IpoptDataHandle,
-        saved: Option<pounce_algorithm::iterates_vector::IteratesVector>,
-        saved_w: Option<Rc<dyn pounce_linalg::SymMatrix>>,
-        restore_w: bool,
-    }
-    impl Drop for RestoreCurr<'_> {
-        fn drop(&mut self) {
-            if let Some(c) = self.saved.take() {
-                self.data.borrow_mut().set_curr(c);
-            }
-            if self.restore_w {
-                self.data.borrow_mut().w = self.saved_w.take();
-            }
-        }
-    }
-    let mut restore = RestoreCurr {
-        data: data_h,
-        saved: data_h.borrow().curr.clone(),
-        saved_w: None,
-        restore_w: false,
-    };
-    data_h.borrow_mut().set_curr(predicted);
-    // The solve below takes its Hessian from `IpoptData::w`, the
-    // matrix the algorithm last stored, so moving the iterate alone
-    // moves only the Jacobians and slacks. Under an exact-Hessian
-    // solve the matrix is re-evaluated at the predicted point, with
-    // the step's own multipliers as clamped above. A limited-memory
-    // solve keeps its quasi-Newton matrix: there is no exact Hessian
-    // to evaluate anywhere.
-    if exact_hessian {
-        restore.saved_w = data_h.borrow().w.clone();
-        restore.restore_w = true;
-        let w = cq_h.borrow().curr_exact_hessian();
-        data_h.borrow_mut().w = Some(w);
-    }
-    let _restore = restore;
+    // The operator is assembled at the PREDICTED point: the Hessian and
+    // the constraint Jacobians at the stepped point with the step's own
+    // multipliers as clamped above, the bound rows with the stepped
+    // slacks and multipliers, and the barrier diagonal from the same
+    // frame, so the one factorization the correction pays is of one
+    // consistent operator. A chord iteration contracts at the rate the
+    // distance between its operator and the true Jacobian sets, and the
+    // predicted point is where the truth is. The clamp above bounds every
+    // multiplier into the kappa-sigma band at the stepped slacks, and the
+    // box put-back leaves a positive margin on every coordinate, so the
+    // diagonal is large exactly where the step holds a coordinate on a
+    // bound and finite everywhere.
+    //
+    // The operator is held to the end of this function. An engine that
+    // moved its own state to build it restores that state when it drops.
+    let op = bs
+        .corrector_operator(&iterate, &pinned, exact_hessian)
+        .map_err(CorrectorError::Failed)?;
+    let solve = |rhs: &[Number], lhs: &mut [Number]| -> bool { op.solve(rhs, lhs) };
 
-    // Built AFTER the swap, so both diagonal blocks read the
-    // predicted point: the stored base-point pair, which the ceiling
-    // (gh#737) or crossover (gh#654) would otherwise freeze, is never
-    // consulted, and the frame rule and the ceiling are re-derived at
-    // the predicted point instead. See `corrector_sigma`.
-    let op = bs.corrector_sigma(&pinned).ok_or_else(|| {
-        SolverError::SensComputationFailed("corrector: operator diagonal unavailable".into())
-    })?;
-
-    let solve = |rhs: &[Number], lhs: &mut [Number]| -> bool {
-        // The same Rc every call: the factorization cache keys on its
-        // tag, so the predicted point's operator is factored once and
-        // every later solve is a back-solve.
-        // The ratios go with the diagonals: the chord operator
-        // eliminates each bound row into a diagonal the gh#737 ceiling
-        // may have softened, so the row is read back through the same
-        // cap (gh#828). A no-op wherever the ceiling did not bind,
-        // which is every corrector fixture that predates it.
-        bs.solve_released_prebuilt(
-            &released,
-            Rc::clone(&op.sigma_x),
-            Some(Rc::clone(&op.sigma_s)),
-            Some((&op.ratio_x, &op.ratio_s)),
-            rhs,
-            lhs,
-            false,
-        )
-    };
     // A released bound has no equation left, so its row does not count
     // toward the residual the stopping rule reads.
     let clear = |v: &mut [Number]| {
@@ -569,7 +537,7 @@ pub(crate) fn run(
         // The starting point itself is outside the domain of the
         // model's own functions, so there is no residual to reduce and
         // nothing to hand back. Say so rather than iterate on NaN.
-        return Err(SolverError::SensComputationFailed(
+        return Err(CorrectorError::Failed(
             "corrector: the barrier residual is not finite at the point the \
              iterations start from, so the predicted point is outside the \
              domain of the model's functions (an unbounded variable driven \
@@ -611,7 +579,7 @@ pub(crate) fn run(
             }
         }
         if !solve(&rhs, &mut dir) {
-            return Err(SolverError::BacksolveFailed);
+            return Err(CorrectorError::Backsolve);
         }
         iterations += 1;
 
@@ -673,7 +641,7 @@ pub(crate) fn run(
     // whole of gh#845 was a NaN reaching a caller wearing a report that
     // said it had not, and a screen here is one pass over `dim`.
     if !step.iter().all(|v| v.is_finite()) {
-        return Err(SolverError::SensComputationFailed(
+        return Err(CorrectorError::Failed(
             "corrector: the corrected step is not finite. The predicted \
              point is outside the domain of the model's functions (an \
              unbounded variable driven into a log, a sqrt or a reciprocal, \

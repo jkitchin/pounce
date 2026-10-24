@@ -107,6 +107,10 @@ fn solve_output(fixture: &str, scaling: &str) -> String {
         .arg(&json)
         .arg(format!("linear_system_scaling={scaling}"))
         .arg("linear_scaling_on_demand=no")
+        // The option scales the NLP arm's KKT system. `airport` is a convex
+        // QCQP that `auto` now solves on the conic arm (gh#1050), where it
+        // has nothing to act on, so the arm is named rather than inferred.
+        .arg("solver_selection=nlp")
         .arg("print_level=0")
         .output()
         .expect("run pounce");

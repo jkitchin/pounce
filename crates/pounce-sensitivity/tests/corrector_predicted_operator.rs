@@ -22,6 +22,12 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{
+    RecordingTnlp, Relaxation, correct_outside, correct_outside_holding, outside_engine,
+};
+
 /// ```text
 /// min  exp(x) - p x
 /// s.t. p = 1
@@ -121,6 +127,22 @@ impl TNLP for ExpCurvature {
 }
 
 fn solved_with(limited_memory: bool) -> (Solver, Rc<Cell<usize>>) {
+    let app = app(limited_memory);
+    let h_evals = Rc::new(Cell::new(0_usize));
+    let tnlp = ExpCurvature {
+        h_evals: Rc::clone(&h_evals),
+    };
+    let mut solver = Solver::new(app, Rc::new(RefCell::new(tnlp)));
+    let status = solver.solve();
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "base solve failed (limited_memory={limited_memory}): {status:?}",
+    );
+    (solver, h_evals)
+}
+
+/// The options every solve of this fixture runs with.
+fn app(limited_memory: bool) -> IpoptApplication {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -140,17 +162,22 @@ fn solved_with(limited_memory: bool) -> (Solver, Rc<Cell<usize>>) {
             .unwrap();
     }
     app.initialize().unwrap();
-    let h_evals = Rc::new(Cell::new(0_usize));
-    let tnlp = ExpCurvature {
-        h_evals: Rc::clone(&h_evals),
-    };
-    let mut solver = Solver::new(app, Rc::new(RefCell::new(tnlp)));
+    app
+}
+
+/// [`solved_with`] with the model wrapped to record what the solve returns.
+fn solved_recorded(limited_memory: bool) -> (Solver, Rc<RefCell<RecordingTnlp<ExpCurvature>>>) {
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(ExpCurvature {
+        h_evals: Rc::new(Cell::new(0_usize)),
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app(limited_memory), tnlp);
     let status = solver.solve();
     assert!(
         matches!(status, ApplicationReturnStatus::SolveSucceeded),
         "base solve failed (limited_memory={limited_memory}): {status:?}",
     );
-    (solver, h_evals)
+    (solver, model)
 }
 
 fn solved() -> Solver {
@@ -235,4 +262,64 @@ fn a_limited_memory_solve_corrects_without_an_exact_hessian() {
         err < predictor_err / 100.0,
         "eight iterations against the held quasi-Newton matrix still          close two orders of the curvature gap: {err:e} from a          predictor error of {predictor_err:e}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and hands the same step to the corrector over an engine built
+// from that report.
+
+#[test]
+fn the_corrector_closes_curvature_the_base_operator_cannot_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(false);
+    let delta = 0.5;
+    let step = solver
+        .parametric_step_full(&[0], &[delta])
+        .expect("full step");
+    let pounce = solver
+        .correct_step(&[0], &[delta], &step, 6)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::None);
+    let outside = correct_outside(&eng, &[0], &[delta], &step, 6).expect("outside corrector");
+    assert_same_correction("exact Hessian", &pounce, &outside, Frame::Same);
+}
+
+/// The operator of a limited-memory solve keeps the solve's quasi-Newton
+/// matrix, and a report carries no such matrix, so an engine outside pounce
+/// cannot rebuild that operator. What it holds instead is its own: here the
+/// exact Hessian at the converged point, kept rather than re-evaluated, which
+/// is what `exact_hessian = false` asks of an engine. The two corrections
+/// iterate against different operators and are not the same point. Both
+/// have to close the curvature gap as the test above requires.
+#[test]
+fn a_limited_memory_solve_corrects_without_an_exact_hessian_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(true);
+    let base_x = solver.converged().expect("converged").x[0];
+    let delta = 0.5;
+    let exact = (1.0_f64 + delta).ln();
+    let step = solver
+        .parametric_step_full(&[0], &[delta])
+        .expect("full step");
+    let predictor_err = (base_x + step[0] - exact).abs();
+    let (pounce, _) = solver
+        .correct_step(&[0], &[delta], &step, 8)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::None);
+    let (outside, report) =
+        correct_outside_holding(&eng, &[0], &[delta], &step, 8, false).expect("outside corrector");
+    assert!(
+        report.improved(),
+        "the outside corrector must report improvement"
+    );
+    for (who, refined) in [("pounce", &pounce), ("outside", &outside)] {
+        let err = (base_x + refined[0] - exact).abs();
+        assert!(
+            err < predictor_err / 100.0,
+            "{who}: {err:e} from a predictor error of {predictor_err:e}",
+        );
+    }
 }

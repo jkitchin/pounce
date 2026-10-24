@@ -20,23 +20,22 @@ That is why this work is a few hundred lines of adapter and several thousand
 lines of test rather than the reverse.
 
 `pounce-sens-core` is the extraction: the trait, `boundcheck`, the
-`P = K⁻¹A` / Schur stack, and the activity **rule**. Both arms depend on it;
-neither depends on the other; it depends only on `pounce-common` and
-`pounce-linalg`.
+`P = K⁻¹A` / Schur stack, the activity **rule**, and, behind the
+`BarrierIterate` trait, everything the NLP arm computes over a converged
+factor (`ConvergedSolve`), with the statistics and steps behind
+`pounce.sensitivity`. Both arms depend on it, and neither depends on the
+other. Its own dependencies are `pounce-common` and `pounce-linalg`,
+`pounce-qp` and `pounce-feral` for the directional derivative's reduced QP,
+and `faer` for the statistics' dense algebra.
 
 ## What deliberately did not unify
 
-- **The corrector.** Its entry points take the concrete `PdSensBacksolver`
-  and reach for `activity_handles()`, `offsets_public()`, `block_dims()`,
-  `pack_natural()`, `corrector_sigma()` — none on the trait, several
-  meaningless outside the filter-IPM's eight-block iterate.
-- **Activity classification's plumbing.** The *rule* moved
-  (`activity_kernel`); deriving `Σ`, `q` and `μ` did not. The NLP arm reads
-  them off the barrier iterate through an `IpoptData` handle; the convex arm
-  reconstructs them from `(problem, solution)` because `QpSolution` carries
-  no iterate. Sharing the rule is what stops the arms disagreeing about what
-  a kink is; sharing the plumbing would mean abstracting `IpoptData` behind
-  another trait.
+- **Activity classification's plumbing across the two arms.** The *rule*
+  moved (`activity_kernel`), and so did the NLP arm's classification, which
+  reads `Σ`, `q` and `μ` through the `BarrierIterate` trait. The convex arm
+  does not implement that trait. It reconstructs the same quantities from
+  `(problem, solution)` because `QpSolution` carries no iterate. Sharing the
+  rule is what stops the arms disagreeing about what a kink is.
 - **The two reduced Hessians.** sIPOPT's Schur route and a null-space
   projection are different computations behind one word. They stay separate,
   and the CLI routes `--compute-red-hessian` to the NLP arm for that reason.

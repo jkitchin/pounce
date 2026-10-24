@@ -1756,17 +1756,15 @@ sens_release_kkt(m)          # done asking: give the memory back now
 | `sens_retain_kkt()` + `declare_sens_fitted(S)` | yes | over S | over T |
 
 The retention policy in one place: the factor is kept if anything is
-declared or `sens_retain_kkt()` was called, and a `Covariance` or
-`Information` result whose lazy `conditioned_on` has not been read
-keeps the session alive through its pending computation until first
-access. `sens_release_kkt(model)` is the exit: it drops the model's hold
-on the factor immediately, freeing the memory, while declarations and
-the retain flag still apply to the next solve. Release drops the
-model's hold, not a result's: a `Covariance` or `Information` with a
-pending `conditioned_on`, and a `Jacobian` (which reads the factor on
-every lookup), each hold their own reference, so they keep working
-across the release and keep the factor in memory until they are
-discarded. Noise is a separate question: `sens_retain_kkt()` keeps the
+declared or `sens_retain_kkt()` was called. A `Covariance` or
+`Information` result holds no reference to the session: its
+`conditioned_on` is computed with the matrix. `sens_release_kkt(model)`
+is the exit: it drops the model's hold on the factor immediately,
+freeing the memory, while declarations and the retain flag still apply
+to the next solve. Release drops the model's hold, not a result's: a
+`Jacobian` (which reads the factor on every lookup) holds its own
+reference, so it keeps working across the release and keeps the factor
+in memory until it is discarded. Noise is a separate question: `sens_retain_kkt()` keeps the
 factor, not a noise model, and with nothing declared fitted the
 degrees of freedom for a noise ESTIMATE are unknown, so
 `sens_covariance()` under retain-only needs `sigma_sq=`; the estimation

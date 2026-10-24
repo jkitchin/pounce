@@ -39,6 +39,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{RecordingTnlp, Relaxation, correct_outside, outside_engine};
+
 const G: Number = -0.28;
 const A0: Number = 0.18;
 const A1: Number = 1.10;
@@ -208,6 +212,23 @@ fn solved_inner(
     row_scale: Number,
     method: Option<&str>,
 ) -> Solver {
+    let app = app(method);
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp {
+        x_scaling,
+        g_scaling,
+        row_scale,
+    }));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "base solve failed: {status:?}",
+    );
+    solver
+}
+
+/// The options every solve of this fixture runs with.
+fn app(method: Option<&str>) -> IpoptApplication {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
@@ -234,18 +255,30 @@ fn solved_inner(
             .unwrap();
     }
     app.initialize().unwrap();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParamQp {
+    app
+}
+
+/// [`solved_inner`] with the model wrapped to record what the solve
+/// returns, for the runs that build an outside engine from it.
+fn solved_recorded(
+    x_scaling: Option<[Number; 3]>,
+    g_scaling: Option<[Number; 1]>,
+    row_scale: Number,
+    method: Option<&str>,
+) -> (Solver, Rc<RefCell<RecordingTnlp<ParamQp>>>) {
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(ParamQp {
         x_scaling,
         g_scaling,
         row_scale,
-    }));
-    let mut solver = Solver::new(app, tnlp);
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app(method), tnlp);
     let status = solver.solve();
     assert!(
         matches!(status, ApplicationReturnStatus::SolveSucceeded),
         "base solve failed: {status:?}",
     );
-    solver
+    (solver, model)
 }
 
 /// The solution with both bounds inactive, from the 2x2 system the
@@ -637,5 +670,143 @@ fn the_correction_is_the_same_under_derived_constraint_scaling() {
             report.initial_residual,
             report.residual,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned. It hands the same step to pounce's corrector and to the corrector
+// over an engine built from that report alone, and asserts the two agree.
+
+/// pounce's correction and the outside engine's, from the same step.
+fn both(
+    solver: &Solver,
+    model: &Rc<RefCell<RecordingTnlp<ParamQp>>>,
+    dp: Number,
+    step: &[Number],
+    max_iter: usize,
+) -> (
+    (Vec<Number>, pounce_sensitivity::corrector::CorrectorReport),
+    (Vec<Number>, pounce_sensitivity::corrector::CorrectorReport),
+) {
+    let pounce = solver
+        .correct_step(&[0], &[dp], step, max_iter)
+        .expect("pounce's corrector");
+    let eng = outside_engine(model, Relaxation::None);
+    let outside =
+        correct_outside(&eng, &[0], &[dp], step, max_iter).expect("the outside corrector");
+    (pounce, outside)
+}
+
+#[test]
+fn the_corrector_releases_a_bound_the_solve_held_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(None, None, 1.0, None);
+    let step = fix_relax_step(&solver, RELEASE_DP);
+    let (a, b) = both(&solver, &model, RELEASE_DP, &step, 12);
+    assert_same_correction("release", &a, &b, Frame::Same);
+    assert_eq!((b.1.released, b.1.pinned), (1, 0));
+}
+
+#[test]
+fn a_release_the_step_hides_is_followed_partway_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(None, None, 1.0, None);
+    let step = solver
+        .parametric_step_full(&[0], &[RELEASE_DP])
+        .expect("parametric step");
+    let (a, b) = both(&solver, &model, RELEASE_DP, &step, 12);
+    assert_same_correction("hidden release", &a, &b, Frame::Same);
+}
+
+#[test]
+fn the_corrector_leaves_an_exact_step_alone_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(None, None, 1.0, None);
+    let step = solver
+        .parametric_step_full(&[0], &[0.05])
+        .expect("parametric step");
+    let (a, b) = both(&solver, &model, 0.05, &step, 8);
+    assert_same_correction("exact step", &a, &b, Frame::Same);
+}
+
+#[test]
+fn the_corrector_reduces_the_residual_where_the_step_is_wrong_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(None, None, 1.0, None);
+    let step = solver
+        .parametric_step_full(&[0], &[1.0])
+        .expect("parametric step");
+    let (a, b) = both(&solver, &model, 1.0, &step, 12);
+    assert_same_correction("pinned bound", &a, &b, Frame::Same);
+    assert_eq!((b.1.released, b.1.pinned), (0, 1));
+}
+
+#[test]
+fn a_zero_budget_measures_the_step_without_iterating_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(None, None, 1.0, None);
+    let step = solver
+        .parametric_step_full(&[0], &[1.0])
+        .expect("parametric step");
+    let (a, b) = both(&solver, &model, 1.0, &step, 0);
+    assert_same_correction("zero budget", &a, &b, Frame::Same);
+    assert_eq!(b.1.iterations, 0);
+}
+
+#[test]
+fn the_corrector_rejects_a_step_of_the_wrong_length_over_an_outside_engine() {
+    let (_solver, model) = solved_recorded(None, None, 1.0, None);
+    let eng = outside_engine(&model, Relaxation::None);
+    let err = correct_outside(&eng, &[0], &[1.0], &[0.0; 3], 4)
+        .expect_err("a short step should be refused");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("step"), "unhelpful error: {msg}");
+}
+
+#[test]
+fn the_correction_is_the_same_under_variable_scaling_over_an_outside_engine() {
+    for d in [1.0, 2.0, 10.0] {
+        let scaling = (d != 1.0).then_some([d, d, d]);
+        let method = scaling.is_some().then_some("user-scaling");
+        let (solver, model) = solved_recorded(scaling, None, 1.0, method);
+        let step = fix_relax_step(&solver, RELEASE_DP);
+        let (a, b) = both(&solver, &model, RELEASE_DP, &step, 12);
+        let frame = if d == 1.0 { Frame::Same } else { Frame::Scaled };
+        assert_same_correction(&format!("variable scale {d}"), &a, &b, frame);
+    }
+}
+
+#[test]
+fn the_correction_is_the_same_under_constraint_scaling_over_an_outside_engine() {
+    for c in [1.0, 1.0e3, 1.0e4] {
+        let scaling = (c != 1.0).then_some([c]);
+        let method = scaling.is_some().then_some("user-scaling");
+        let (solver, model) = solved_recorded(None, scaling, 1.0, method);
+        let step = fix_relax_step(&solver, RELEASE_DP);
+        let (a, b) = both(&solver, &model, RELEASE_DP, &step, 12);
+        let frame = if c == 1.0 { Frame::Same } else { Frame::Scaled };
+        assert_same_correction(&format!("row scale {c}"), &a, &b, frame);
+    }
+}
+
+#[test]
+fn the_correction_is_the_same_under_derived_constraint_scaling_over_an_outside_engine() {
+    for row_scale in [1.0, 1.0e3, 1.0e4] {
+        let (solver, model) = solved_recorded(None, None, row_scale, Some("gradient-based"));
+        let delta = RELEASE_DP * row_scale;
+        let mut step = solver
+            .parametric_step_full(&[0], &[delta])
+            .expect("parametric step");
+        let (primal, _, _) = solver
+            .parametric_step_bounded(&[0], &[delta], 16, None)
+            .expect("fix_relax step");
+        step[..primal.len()].copy_from_slice(&primal);
+        let (a, b) = both(&solver, &model, delta, &step, 12);
+        let frame = if row_scale > 100.0 {
+            Frame::Scaled
+        } else {
+            Frame::Same
+        };
+        assert_same_correction(&format!("derived row scale {row_scale}"), &a, &b, frame);
     }
 }

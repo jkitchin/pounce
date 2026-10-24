@@ -65,6 +65,11 @@ impl Stop {
     }
 }
 
+/// A failed launch whose landing point violates the base constraints by more
+/// than this (absolute, unscaled) ended infeasible: Ipopt's default
+/// `constr_viol_tol`. See `Driver::is_repeat_infeasible_landing` (gh#1042 R4c).
+const INFEASIBLE_VIOL: Number = 1e-4;
+
 /// Default MLSL critical-radius scale (gh#989). With the radius formula in
 /// `run_mlsl`, `gamma = 2` gave `r ~ 1.1` of a `1.41` box diagonal in the
 /// first rounds on a 2-D box, so every sample had a better one "nearby" and
@@ -185,12 +190,21 @@ struct Driver<'a> {
     x0: Vec<Number>,
     x_l: Vec<Number>,
     x_u: Vec<Number>,
+    /// The base problem's constraint bounds, for [`Self::constraint_violation`].
+    g_l: Vec<Number>,
+    g_u: Vec<Number>,
     has_box: bool,
     /// Per-dimension scale `L` (box width, 1.0 for unbounded dims).
     l_scale: Vec<Number>,
     sampler: Sampler,
     archive: Archive,
     stagnant: usize,
+    /// Landing points of failed launches that end infeasible (gh#1042 R4c):
+    /// never archived, never reported, never a candidate. A later failed
+    /// launch landing within `dedup` of one is a repeat hit of a known
+    /// infeasible attractor and costs no `patience` strike; see
+    /// [`Self::is_repeat_infeasible_landing`].
+    infeasible_landings: Vec<Vec<Number>>,
     n_solves: usize,
     max_solves: usize,
     /// Sampled points drawn so far (only MLSL counts against this).
@@ -240,6 +254,36 @@ impl<'a> Driver<'a> {
         // acceptance needs success.
         let success = out.converged && !self.kkt_rejects(&out);
         Ok(SolveOut { success, x: out.x })
+    }
+
+    /// Largest violation of the base problem's constraint bounds at `x`,
+    /// `max_j max(g_l_j − g_j(x), g_j(x) − g_u_j, 0)`, unscaled. `None` when
+    /// `x` is not a full-length point or `eval_g` fails; `Some(0.0)` with no
+    /// constraints.
+    fn constraint_violation(&mut self, x: &[Number]) -> Option<Number> {
+        if x.len() != self.n || x.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        if self.m == 0 {
+            return Some(0.0);
+        }
+        let mut g = vec![0.0; self.m];
+        if !self.base.borrow_mut().eval_g(x, true, &mut g) {
+            return None;
+        }
+        let mut worst: Number = 0.0;
+        for ((&gj, &lo), &hi) in g.iter().zip(&self.g_l).zip(&self.g_u) {
+            if !gj.is_finite() {
+                return None;
+            }
+            if lo > -BOUND_INF {
+                worst = worst.max(lo - gj);
+            }
+            if hi < BOUND_INF {
+                worst = worst.max(gj - hi);
+            }
+        }
+        Some(worst)
     }
 
     /// gh#983: veto a converged solve whose **unscaled** stationarity residual
@@ -559,6 +603,9 @@ impl<'a> Driver<'a> {
             });
         }
         if !accepted {
+            if !success && self.is_repeat_infeasible_landing(&x) {
+                return Ok(false);
+            }
             return self.reject();
         }
         let fval = fval.unwrap_or(Number::NAN);
@@ -594,6 +641,72 @@ impl<'a> Driver<'a> {
             Some(d) => self.archive.xs.iter().any(|m| d(x, m) <= radius),
             None => self.archive.near_any(x, radius),
         }
+    }
+
+    /// gh#1042 R4c: is this failed launch a *repeat* hit of an infeasible
+    /// point the search has already seen? Records the point when it is a
+    /// first hit.
+    ///
+    /// `patience` counts consecutive draws that found nothing new, as
+    /// evidence the landscape is exhausted. A launch that lands on an
+    /// infeasible attractor the search has already seen is not such
+    /// evidence — it is one more sample of that attractor's basin. Measured
+    /// on `circle_parabola_t0p5` (MLSL, seeds 0–9, gamma 0.5): every failed
+    /// launch on every seed ends `Converged to a point of local
+    /// infeasibility` at one point, (0, −1), and on seeds 1, 2, 4 six of the
+    /// eight strikes that stopped the search were repeats of it, with the
+    /// second minimum reachable at solve 10–17 of 30.
+    ///
+    /// "Infeasible" is read from the point, not the solver's status: the
+    /// base constraints are violated by more than [`INFEASIBLE_VIOL`] (Ipopt's
+    /// default `constr_viol_tol`, the solver's own line between feasible and
+    /// not). A failed launch that ends feasible (`MaxIter`, `ErrorInStep` at
+    /// a feasible iterate) keeps its full strike. Over the R4c classifier
+    /// check (the 10-seed grid at patience 8 and 1000 plus the
+    /// `sweep-minima.sh` runs, 1848 solves) this flags exactly the 229
+    /// launches whose exit was local infeasibility (violation 1.5) and none
+    /// of the 19 feasible failures (worst violation 5.3e-5, a `MaxIter`).
+    ///
+    /// MLSL only. Multistart is the other independent-draw strategy, and was
+    /// measured with the rule on: `circle_parabola_t0p5` seeds 0–9 found
+    /// both minima on 7/10 seeds either way while mean solves rose 10.8 →
+    /// 14.5, so it buys multistart nothing (plausibly because MLSL's
+    /// clustering filter keeps samples near an archived minimum from
+    /// launching, leaving its launches dominated by the infeasible basin;
+    /// not measured further). The repulsion strategies' next start depends
+    /// on the last result, and their failed solves are on an augmented
+    /// problem.
+    ///
+    /// The first hit of each distinct infeasible point is still a full
+    /// strike, so launches that go infeasible in many different places still
+    /// exhaust `patience`; and until a minimum is archived every hit counts,
+    /// so a model infeasible from everywhere the sampler reaches still stops
+    /// at `patience`. `max_solves` and the sample cap bound the loop either
+    /// way.
+    fn is_repeat_infeasible_landing(&mut self, x: &[Number]) -> bool {
+        if self.cfg.method != Method::Mlsl {
+            return false;
+        }
+        if !self
+            .constraint_violation(x)
+            .is_some_and(|v| v > INFEASIBLE_VIOL)
+        {
+            return false;
+        }
+        let dedup = self.cfg.dedup;
+        let l = &self.l_scale;
+        let seen = match self.hooks.distance.as_mut() {
+            Some(d) => self.infeasible_landings.iter().any(|p| d(x, p) <= dedup),
+            None => self
+                .infeasible_landings
+                .iter()
+                .any(|p| scaled_distance(x, p, l) <= dedup),
+        };
+        if !seen {
+            self.infeasible_landings.push(x.to_vec());
+            return false;
+        }
+        !self.archive.is_empty()
     }
 
     fn reject(&mut self) -> Result<bool, Stop> {
@@ -1052,11 +1165,14 @@ pub fn find_minima_with<'a>(
         x0,
         x_l: x_l.clone(),
         x_u: x_u.clone(),
+        g_l,
+        g_u,
         has_box,
         l_scale: l_scale.clone(),
         sampler: Sampler::new(cfg.seed, cfg.sobol),
         archive: Archive::new(cfg.dedup, l_scale.clone()),
         stagnant: 0,
+        infeasible_landings: Vec::new(),
         n_solves: 0,
         max_solves,
         n_samples: 0,

@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..bvp import _core
-from ..bvp._solve import _make_spline, ift_solve_transpose
+from ..bvp._solve import _make_spline, ift_solve_transpose_lanes
 from ..ode._solve import mesh_initial_guess
 
 
@@ -64,6 +64,10 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
     t : array (m,)
         Output / collocation mesh (monotonic). The solution is returned at
         these points; refine it to resolve the dynamics.
+        May be traced (built under ``jax.jit``, a jitted argument, or
+        vmapped) and is differentiable: the gradient is the
+        implicit-function derivative of the collocation solution w.r.t.
+        the node times.
     theta : array-like or None
         ODE parameters threaded into ``fun``. Differentiable.
     tol : float
@@ -78,7 +82,8 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
     n = int(y0.shape[0])
     tj = jnp.asarray(t, dtype=jnp.float64)
     m = int(tj.shape[0])
-    t_np = np.asarray(tj, dtype=np.float64)
+    # ``t`` is a callback operand, never read as numpy at trace time, so it
+    # may be a tracer (built under ``jax.jit``, a jitted argument, vmapped).
 
     has_theta = theta is not None
     if has_theta:
@@ -103,13 +108,13 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             return fun(xi, yi, th) if has_theta else fun(xi, yi)
         return jax.vmap(col, in_axes=(0, 1), out_axes=1)(xx, YY)
 
-    def residual_jax(z, p):
+    def residual_jax(z, p, t_):
         th, y0v = _split(p)
         nfun = lambda xx, YY, pp: _vec_rhs(xx, YY, th)
         nbc = lambda ya, yb, pp: ya - y0v
         Y = z[: n * m].reshape(n, m)
         pp = z[n * m:]
-        return _core.collocation_residual(nfun, nbc, tj, Y, pp, jnp.concatenate)
+        return _core.collocation_residual(nfun, nbc, t_, Y, pp, jnp.concatenate)
 
     def _np_callables(p_np):
         th, y0v = _split(p_np)
@@ -123,10 +128,11 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             return np.asarray(ya, dtype=np.float64) - y0v
         return nfun, nbc, y0v
 
-    def _host_solve(p_np):
+    def _host_solve(p_np, t_np):
         from ..bvp._jac import CollocationJacobian
         from ..bvp._newton import newton_solve, STATUS_CONVERGED
         p_np = np.asarray(p_np, dtype=np.float64)
+        t_np = np.asarray(t_np, dtype=np.float64)
         nfun, nbc, y0v = _np_callables(p_np)
 
         def fun_np(ti, yi):
@@ -153,46 +159,44 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             )
         return np.asarray(z_star, dtype=np.float64)
 
-    def _host_btran(z_star_np, p_np, v_np):
-        z_star_np = np.asarray(z_star_np, np.float64)
-        p_np = np.asarray(p_np, np.float64)
-        v_np = np.asarray(v_np, np.float64)
-        if z_star_np.ndim == 2:
-            z_star_np = z_star_np[0]
-        if p_np.ndim == 2:
-            p_np = p_np[0]
-        nfun, nbc, _ = _np_callables(p_np)
-        return ift_solve_transpose(nfun, nbc, t_np, n, m, 0, z_star_np, v_np)
+    def _host_btran(z_star_np, p_np, t_np, v_np):
+        # broadcast_all lanes may carry distinct primals (an outer vmap over
+        # parameters or meshes), not just distinct cotangents; see gh#1049.
+        return ift_solve_transpose_lanes(
+            lambda pl: _np_callables(np.asarray(pl, np.float64))[:2],
+            t_np, n, m, 0, z_star_np, p_np, v_np, 1,
+        )
 
     N = n * m
 
-    @jax.custom_vjp
-    def solve_fn(p):
+    def _forward(p, t_):
         return jax.pure_callback(
-            _host_solve, jax.ShapeDtypeStruct((N,), jnp.float64), p,
+            _host_solve, jax.ShapeDtypeStruct((N,), jnp.float64), p, t_,
             vmap_method="sequential",
         )
 
-    def fwd(p):
-        z_star = jax.pure_callback(
-            _host_solve, jax.ShapeDtypeStruct((N,), jnp.float64), p,
-            vmap_method="sequential",
-        )
-        return z_star, (z_star, p)
+    @jax.custom_vjp
+    def solve_fn(p, t_):
+        return _forward(p, t_)
+
+    def fwd(p, t_):
+        z_star = _forward(p, t_)
+        return z_star, (z_star, p, t_)
 
     def bwd(res, v):
-        z_star, p = res
+        z_star, p, t_ = res
         u = jax.pure_callback(
             _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, p, v, vmap_method="broadcast_all",
+            z_star, p, t_, v, vmap_method="broadcast_all",
         )
-        _, vjp_p = jax.vjp(lambda pp: residual_jax(z_star, pp), p)
-        (dp,) = vjp_p(-u)
-        return (dp,)
+        # The collocation solution at fixed nodes depends on where the
+        # nodes are, so t gets its implicit-function cotangent too.
+        _, vjp_res = jax.vjp(lambda pp, tt: residual_jax(z_star, pp, tt), p, t_)
+        return vjp_res(-u)
 
     solve_fn.defvjp(fwd, bwd)
 
-    z_star = solve_fn(combined)
+    z_star = solve_fn(combined, tj)
     Y_star = z_star.reshape(n, m)
     th, _ = _split(combined)
     # yp / sol are non-differentiable diagnostics. yp is recomputed outside

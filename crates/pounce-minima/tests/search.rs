@@ -22,6 +22,10 @@
 //! | `the_trace_records_every_candidate` | `Hooks::trace`, on and off |
 //! | `ipopt_local_solve_leaves_the_callers_options_alone` | the adapter's `hessian_approximation` / `mu_strategy` writes, unset and caller-set |
 //! | `a_bounded_search_above_256_variables_samples` | box sampling past `sobol_burley`'s 256 dimensions |
+//! | `mlsl_repeat_infeasible_landings_do_not_exhaust_patience` | gh#1042 R4c: a repeat infeasible landing under MLSL is not a strike; multistart keeps the strike |
+//! | `mlsl_distinct_infeasible_landings_still_exhaust_patience` | R4c's first-hit clause |
+//! | `mlsl_repeat_feasible_failures_still_exhaust_patience` | R4c's feasibility test: a feasible failure keeps its strike |
+//! | `mlsl_with_nothing_found_counts_every_infeasible_landing` | R4c's empty-archive guard |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -766,4 +770,215 @@ impl LocalSolve for ScriptedN {
             quality: SolveQuality::default(),
         }
     }
+}
+
+/// gh#1042 R4c fixture: `f ≡ 0` on `[-1,1]²` with one row
+/// `-1.5 <= x0 + x1 <= 1.5` and no Hessian. A constant objective gives no
+/// sample a strictly better neighbour, so MLSL launches every pooled sample
+/// that is not near an archived minimum — the launches are the sampler's
+/// draws, and the scripted solver decides where each one lands.
+struct Pinned;
+
+impl TNLP for Pinned {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 1,
+            nnz_jac_g: 2,
+            nnz_h_lag: 0,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[-1.0, -1.0]);
+        b.x_u.copy_from_slice(&[1.0, 1.0]);
+        b.g_l[0] = -1.5;
+        b.g_u[0] = 1.5;
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&PINNED_X0);
+        true
+    }
+    fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(0.0)
+    }
+    fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g.fill(0.0);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] + x[1];
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _new_x: bool, m: SparsityRequest<'_>) -> bool {
+        match m {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => values.fill(1.0),
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        _of: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        _mode: SparsityRequest<'_>,
+    ) -> bool {
+        false
+    }
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+const PINNED_X0: [Number; 2] = [-0.5, -0.5];
+
+/// Where a scripted launch that does not reach a minimum lands.
+#[derive(Clone, Copy)]
+enum Landing {
+    /// Always (1, 1): `x0 + x1 = 2`, infeasible by 0.5.
+    OneInfeasible,
+    /// A new infeasible point every time: (1, 1 − 0.01·k).
+    DistinctInfeasible,
+    /// Always (0.2, 0.2): feasible, the solve just failed (a `MaxIter`).
+    OneFeasible,
+}
+
+/// Scripted solver over [`Pinned`]: the start `PINNED_X0` converges there
+/// (minimum 1) unless `x0_fails`; a start with `s0 > second_min_above` and
+/// `s1 > 0` converges to (0.95, 0.5) (minimum 2); every other start fails at its
+/// [`Landing`].
+struct TwoBasins {
+    landing: Landing,
+    second_min_above: Number,
+    x0_fails: bool,
+    failed: usize,
+}
+
+impl LocalSolve for TwoBasins {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, _mode: HessianMode) -> LocalOutcome {
+        let mut s = vec![0.0; 2];
+        let (mut zl, mut zu, mut lam) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 1]);
+        problem.borrow_mut().get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut s,
+            init_z: false,
+            z_l: &mut zl,
+            z_u: &mut zu,
+            init_lambda: false,
+            lambda: &mut lam,
+        });
+        let at = |x: Vec<Number>, converged: bool| LocalOutcome {
+            converged,
+            x,
+            lambda: vec![0.0],
+            z_l: vec![0.0; 2],
+            z_u: vec![0.0; 2],
+            quality: SolveQuality::default(),
+        };
+        if s == PINNED_X0 && !self.x0_fails {
+            return at(PINNED_X0.to_vec(), true);
+        }
+        if s[0] > self.second_min_above && s[1] > 0.0 {
+            return at(vec![0.95, 0.5], true);
+        }
+        let k = self.failed as Number;
+        self.failed += 1;
+        let x = match self.landing {
+            Landing::OneInfeasible => vec![1.0, 1.0],
+            Landing::DistinctInfeasible => vec![1.0, 1.0 - 0.01 * k],
+            Landing::OneFeasible => vec![0.2, 0.2],
+        };
+        at(x, false)
+    }
+}
+
+fn two_basins(landing: Landing, second_min_above: Number, x0_fails: bool) -> TwoBasins {
+    TwoBasins {
+        landing,
+        second_min_above,
+        x0_fails,
+        failed: 0,
+    }
+}
+
+fn pinned_run(method: Method, solver: &mut TwoBasins) -> pounce_minima::MinimaResult {
+    let base: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Pinned));
+    let cfg = MinimaOptions {
+        patience: 8,
+        ..opts(method, 2, 60)
+    };
+    find_minima(&base, solver, &cfg).unwrap()
+}
+
+/// gh#1042 R4c, the rule's own branch: most of the box drains into one
+/// infeasible point, and only the corner `s0 > 0.9, s1 > 0` reaches the
+/// second minimum — first drawn at launch 40 of seed 0's MLSL pool. Under
+/// MLSL a repeat landing on the known infeasible point is not a `patience`
+/// strike, so the search keeps drawing until it finds minimum 2; without
+/// the rule eight landings stop it at one. Multistart does not take the
+/// rule (measured: it bought multistart nothing), so the same script stops
+/// it at `patience`.
+#[test]
+fn mlsl_repeat_infeasible_landings_do_not_exhaust_patience() {
+    let mut solver = two_basins(Landing::OneInfeasible, 0.9, false);
+    let r = pinned_run(Method::Mlsl, &mut solver);
+    assert_eq!(
+        r.minima.len(),
+        2,
+        "stop {:?} after {} solves",
+        r.stop,
+        r.n_solves
+    );
+    assert_eq!(r.stop, Stop::TargetReached);
+    assert!(
+        r.n_solves > 1 + 8,
+        "the second minimum must lie past the patience horizon, or this \
+         test does not reach the rule: {} solves",
+        r.n_solves
+    );
+
+    let mut solver = two_basins(Landing::OneInfeasible, 0.9, false);
+    let r = pinned_run(Method::Multistart, &mut solver);
+    assert_eq!(r.stop, Stop::Converged);
+    assert_eq!(r.minima.len(), 1);
+}
+
+/// The first-hit clause: every failed launch lands on a *different*
+/// infeasible point, so each is a full strike and the search still stops at
+/// `patience` (minimum 2 is unreachable).
+#[test]
+fn mlsl_distinct_infeasible_landings_still_exhaust_patience() {
+    let mut solver = two_basins(Landing::DistinctInfeasible, 2.0, false);
+    let r = pinned_run(Method::Mlsl, &mut solver);
+    assert_eq!(r.stop, Stop::Converged);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(r.n_solves, 1 + 8);
+}
+
+/// A failed launch that ends *feasible* keeps its full strike, however often
+/// it repeats: the rule reads infeasibility from the point.
+#[test]
+fn mlsl_repeat_feasible_failures_still_exhaust_patience() {
+    let mut solver = two_basins(Landing::OneFeasible, 2.0, false);
+    let r = pinned_run(Method::Mlsl, &mut solver);
+    assert_eq!(r.stop, Stop::Converged);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(r.n_solves, 1 + 8);
+}
+
+/// Until a minimum is archived every infeasible landing is a strike, so a
+/// model infeasible from everywhere the sampler reaches stops at `patience`
+/// instead of spending the whole budget.
+#[test]
+fn mlsl_with_nothing_found_counts_every_infeasible_landing() {
+    let mut solver = two_basins(Landing::OneInfeasible, 2.0, true);
+    let r = pinned_run(Method::Mlsl, &mut solver);
+    assert_eq!(r.stop, Stop::Converged);
+    assert!(r.minima.is_empty());
+    assert_eq!(r.n_solves, 8);
 }
