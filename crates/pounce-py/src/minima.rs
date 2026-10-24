@@ -49,6 +49,10 @@ impl LocalSolve for PyLocalSolve<'_> {
     fn has_exact_hessian(&self) -> bool {
         self.has_hessian
     }
+
+    fn should_stop(&self) -> bool {
+        self.inner.should_stop()
+    }
 }
 
 fn get<'py, T: FromPyObject<'py>>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<T>> {

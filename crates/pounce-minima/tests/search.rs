@@ -35,6 +35,7 @@ use pounce_nlp::tnlp::{
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// An unconstrained two-variable model on a box, from plain functions.
 struct Box2 {
@@ -277,6 +278,277 @@ impl LocalSolve for Scripted {
             },
         }
     }
+}
+
+/// A solver that converges at a fixed point (or the problem's start) and asks
+/// the search to cancel after a scripted number of solves or `should_stop`
+/// polls.
+struct Cancelling {
+    x: Option<Vec<Number>>,
+    solves: Cell<usize>,
+    polls: Cell<usize>,
+    stop_after_solves: Option<usize>,
+    stop_after_polls: Option<usize>,
+    external_cancel: Option<Rc<Cell<bool>>>,
+}
+
+impl Cancelling {
+    fn new(x: Option<Vec<Number>>) -> Self {
+        Self {
+            x,
+            solves: Cell::new(0),
+            polls: Cell::new(0),
+            stop_after_solves: None,
+            stop_after_polls: None,
+            external_cancel: None,
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.external_cancel.as_ref().is_some_and(|flag| flag.get())
+            || self
+                .stop_after_solves
+                .is_some_and(|n| self.solves.get() >= n)
+            || self.stop_after_polls.is_some_and(|n| self.polls.get() >= n)
+    }
+}
+
+impl LocalSolve for Cancelling {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, _mode: HessianMode) -> LocalOutcome {
+        self.solves.set(self.solves.get() + 1);
+        let x = match &self.x {
+            Some(x) => x.clone(),
+            None => {
+                let mut x = vec![0.0; 2];
+                let (mut zl, mut zu, mut lam) = (vec![0.0; 2], vec![0.0; 2], vec![]);
+                problem.borrow_mut().get_starting_point(StartingPoint {
+                    init_x: true,
+                    x: &mut x,
+                    init_z: false,
+                    z_l: &mut zl,
+                    z_u: &mut zu,
+                    init_lambda: false,
+                    lambda: &mut lam,
+                });
+                x
+            }
+        };
+        LocalOutcome {
+            converged: true,
+            x,
+            lambda: Vec::new(),
+            z_l: Vec::new(),
+            z_u: Vec::new(),
+            quality: SolveQuality::default(),
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        self.cancelled()
+    }
+}
+
+/// `IpoptLocalSolve` with a cancellation flag that trips after a scripted
+/// number of solves.
+struct CancelAfter<'a> {
+    inner: IpoptLocalSolve<'a>,
+    stop_after: usize,
+    solves: usize,
+}
+
+impl LocalSolve for CancelAfter<'_> {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
+        self.solves += 1;
+        self.inner.solve(problem, mode)
+    }
+
+    fn should_stop(&self) -> bool {
+        self.solves >= self.stop_after
+    }
+}
+
+/// Forwards to `inner` and counts objective / gradient evaluations.
+struct CountingTnlp {
+    inner: Rc<RefCell<dyn TNLP>>,
+    evals: Rc<Cell<usize>>,
+    grad_evals: Rc<Cell<usize>>,
+    cancel_at: usize,
+    cancelled: Rc<Cell<bool>>,
+}
+
+impl TNLP for CountingTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        self.inner.borrow_mut().get_nlp_info()
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        self.inner.borrow_mut().get_bounds_info(b)
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.inner.borrow_mut().get_starting_point(sp)
+    }
+
+    fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+        let f = self.inner.borrow_mut().eval_f(x, new_x);
+        let n = self.evals.get() + 1;
+        self.evals.set(n);
+        if n >= self.cancel_at {
+            self.cancelled.set(true);
+        }
+        f
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+        self.grad_evals.set(self.grad_evals.get() + 1);
+        self.inner.borrow_mut().eval_grad_f(x, new_x, g)
+    }
+
+    fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+        self.inner.borrow_mut().eval_g(x, new_x, g)
+    }
+
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, m: SparsityRequest<'_>) -> bool {
+        self.inner.borrow_mut().eval_jac_g(x, new_x, m)
+    }
+
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        new_x: bool,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        self.inner
+            .borrow_mut()
+            .eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
+    }
+
+    fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+        self.inner.borrow_mut().finalize_solution(sol, d, q)
+    }
+}
+
+fn mlsl_cancellation_cfg() -> MinimaOptions {
+    MinimaOptions {
+        method: Method::Mlsl,
+        n_minima: 6,
+        max_solves: Some(10_000),
+        samples_per_round: Some(10_000),
+        gamma: Some(1e10),
+        kkt_tol: None,
+        ..MinimaOptions::default()
+    }
+}
+
+#[test]
+fn cancellation_after_the_first_minimum_keeps_it_and_skips_extra_solves() {
+    let mut solver = Cancelling::new(Some(vec![0.0, 0.3]));
+    solver.stop_after_solves = Some(1);
+    let r = find_minima(&bound_active(), &mut solver, &mlsl_cancellation_cfg()).unwrap();
+    assert_eq!(r.stop, Stop::Cancelled);
+    assert_eq!(r.stop.as_str(), "cancelled");
+    assert_eq!(r.n_solves, 1);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(r.minima[0].x, vec![0.0, 0.3]);
+    assert_eq!(solver.solves.get(), 1);
+    assert!(r.minima[0].z_l.is_empty());
+}
+
+#[test]
+fn cancellation_stops_a_large_mlsl_sample_batch() {
+    let cancelled = Rc::new(Cell::new(false));
+    let evals = Rc::new(Cell::new(0));
+    let grad_evals = Rc::new(Cell::new(0));
+    let base: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CountingTnlp {
+        inner: bowl(),
+        evals: Rc::clone(&evals),
+        grad_evals,
+        cancel_at: 3,
+        cancelled: Rc::clone(&cancelled),
+    }));
+
+    let mut solver = Cancelling::new(None);
+    solver.external_cancel = Some(cancelled);
+    let r = find_minima(&base, &mut solver, &mlsl_cancellation_cfg()).unwrap();
+    assert_eq!(r.stop, Stop::Cancelled);
+    assert_eq!(r.n_solves, 1);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(solver.solves.get(), 1);
+    assert_eq!(evals.get(), 3);
+}
+
+#[test]
+fn ipopt_local_solve_zero_time_limit_cancels_before_any_solve() {
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app).with_time_limit(Duration::ZERO);
+    let r = find_minima(&bowl(), &mut solver, &opts(Method::Multistart, 1, 4)).unwrap();
+    assert_eq!(r.stop, Stop::Cancelled);
+    assert_eq!(r.n_solves, 0);
+    assert!(r.minima.is_empty());
+}
+
+#[test]
+fn already_cancelled_search_skips_the_initial_gradient() {
+    let cancelled = Rc::new(Cell::new(true));
+    let evals = Rc::new(Cell::new(0));
+    let grad_evals = Rc::new(Cell::new(0));
+    let base: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CountingTnlp {
+        inner: bowl(),
+        evals: Rc::clone(&evals),
+        grad_evals: Rc::clone(&grad_evals),
+        cancel_at: usize::MAX,
+        cancelled: Rc::clone(&cancelled),
+    }));
+
+    let mut solver = Cancelling::new(None);
+    solver.external_cancel = Some(cancelled);
+    let r = find_minima(&base, &mut solver, &opts(Method::Multistart, 1, 4)).unwrap();
+    assert_eq!(r.stop, Stop::Cancelled);
+    assert_eq!(r.n_solves, 0);
+    assert!(r.minima.is_empty());
+    assert_eq!(solver.solves.get(), 0);
+    assert_eq!(evals.get(), 0);
+    assert_eq!(grad_evals.get(), 0);
+}
+
+#[test]
+fn reaching_the_target_takes_precedence_over_cancellation() {
+    let mut app = quiet_app();
+    let mut solver = CancelAfter {
+        inner: IpoptLocalSolve::new(&mut app),
+        stop_after: 1,
+        solves: 0,
+    };
+    let r = find_minima(
+        &bound_active(),
+        &mut solver,
+        &opts(Method::Multistart, 1, 4),
+    )
+    .unwrap();
+    assert_eq!(r.stop, Stop::TargetReached);
+    assert_eq!(r.n_solves, 1);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(solver.solves, 2);
+    let z_l = &r.minima[0].z_l;
+    assert_eq!(z_l.len(), 2);
+    assert!((z_l[0] - 2.0).abs() < 1e-6, "{z_l:?}");
+    assert!(z_l[1].abs() < 1e-6, "{z_l:?}");
+}
+
+#[test]
+fn cancellation_keeps_known_zero_duals_for_an_interior_bound_only_minimum() {
+    let mut solver = Cancelling::new(Some(vec![1.0, -0.5]));
+    solver.stop_after_solves = Some(1);
+    let r = find_minima(&bowl(), &mut solver, &mlsl_cancellation_cfg()).unwrap();
+    assert_eq!(r.stop, Stop::Cancelled);
+    assert_eq!(r.n_solves, 1);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(solver.solves.get(), 1);
+    assert_eq!(r.minima[0].z_l, vec![0.0, 0.0]);
+    assert_eq!(r.minima[0].z_u, vec![0.0, 0.0]);
 }
 
 #[test]

@@ -361,8 +361,12 @@ knobs and defaults — see [Finding Multiple Minima from the
 CLI](find-minima-cli.md) for what each method does and when a candidate is
 accepted. Every local solve runs on the one `app` you pass, so its options
 (tolerances, `print_level`, …) apply to all of them; to solve starts some
-other way, implement the `LocalSolve` trait. Starts are drawn from the
-TNLP's variable box, so bound the variables whose range you want explored.
+other way, implement the `LocalSolve` trait. Its `should_stop` hook lets a
+custom solver cancel the search cooperatively (for example at a deadline),
+keeping the minima accepted so far. The shipped `IpoptLocalSolve` exposes the
+same hook through `with_time_limit(Duration)`; the CLI and Python frontends do
+not expose a whole-search time limit yet. Starts are drawn from the TNLP's
+variable box, so bound the variables whose range you want explored.
 
 ## Presolve and restoration
 
