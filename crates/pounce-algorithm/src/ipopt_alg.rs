@@ -4161,8 +4161,12 @@ impl IpoptAlgorithm {
         // outer filter rejected it, or it did not cut the violation by
         // `kappa_resto`. Upstream fails restoration right there; pounce
         // hands the point back to give the outer phase one shot from it,
-        // which pays on the `dallas*` family (every hand-back there is
+        // which paid on the `dallas*` family (every hand-back there is
         // followed by accepted steps, soft-restoration ones included).
+        // Since the `.nl` reader merges `|x|^2·|x|^0.85` (gh#1042 R3),
+        // `dallasl` and `dallasm` never enter restoration on either leg
+        // and `dallass` hands back once, on L-BFGS only; the hand-backs
+        // above survive in `tests/data/dallass_kink_unmerged.nl`.
         //
         // The shot was not taken when the outer asks for restoration again
         // from that very point. That is either no accepted step at all, or

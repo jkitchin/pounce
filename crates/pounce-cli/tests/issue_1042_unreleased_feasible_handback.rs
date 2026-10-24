@@ -29,10 +29,14 @@
 //! * `ssebnln` (Vanderbei, 194 variables): a hand-back at outer iteration 86,
 //!   then a re-entry from the same point at 117. Before this change the base
 //!   solve ran on to 138 and ended at the near-feasible re-entry detector.
-//! * `dallass`: hand-backs followed by steps that leave the point, so the
-//!   rule must not fire and the solve converges where it always did. Its
-//!   re-entries are all forced by a non-finite Hessian (`|x|^2.85` at 0),
-//!   which is exempt on its own.
+//! * `dallass_kink_unmerged` (`tests/data/`): hand-backs followed by steps
+//!   that leave the point, so the rule must not fire and the solve converges
+//!   where it always did. Its re-entries are all forced by a non-finite
+//!   Hessian (`|x|^2 * |x|^0.85` at 0), which is exempt on its own. It is
+//!   `dallass.nl` written so the `.nl` reader's `|e|^p * |e|^q` merge (gh#1042
+//!   R3) declines; `dallass.nl` itself now has a finite Hessian at the kink
+//!   and never enters restoration on the exact leg, so it reaches no
+//!   hand-back at all.
 //! * `eigena2` on L-BFGS: hand-backs, then steps that leave the point, then
 //!   ordinary line-search re-entries. This is the fixture that shows the
 //!   position test is what keeps the rule quiet.
@@ -58,9 +62,13 @@ const EXIT: &str = "re-entered restoration from it without leaving it";
 const NEAR_FEASIBLE_EXIT: &str = "near-feasible restoration re-entry";
 
 fn fixture(name: &str) -> PathBuf {
+    test_file("fixtures", name)
+}
+
+fn test_file(dir: &str, name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tests");
-    p.push("fixtures");
+    p.push(dir);
     p.push(name);
     p
 }
@@ -81,13 +89,17 @@ fn solve(name: &str, tag: &str) -> Run {
 }
 
 fn solve_with(name: &str, tag: &str, env: &[(&str, &str)], opts: &[&str]) -> Run {
+    solve_path(fixture(name), name, tag, env, opts)
+}
+
+fn solve_path(path: PathBuf, name: &str, tag: &str, env: &[(&str, &str)], opts: &[&str]) -> Run {
     let json = std::env::temp_dir().join(format!(
         "pounce_issue_1042_{tag}_{}.json",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&json);
     let out = Command::new(env!("CARGO_BIN_EXE_pounce"))
-        .arg(fixture(name))
+        .arg(&path)
         .arg("--no-sol")
         .arg("--no-options-file")
         .arg("--json-output")
@@ -166,15 +178,22 @@ fn a_handback_the_outer_cannot_leave_fails_restoration() {
 }
 
 /// The branch the change must leave alone: a hand-back the outer *does*
-/// leave. `dallass` (exact) converges after its hand-backs, but every
-/// re-entry there is forced by a non-finite Hessian and so exempt on its own.
+/// leave. `dallass_kink_unmerged` (exact) converges after its hand-backs, but
+/// every re-entry there is forced by a non-finite Hessian and so exempt on its
+/// own.
 /// `eigena2` on L-BFGS re-enters through ordinary line-search failures after
 /// leaving each handed-back point, so it is the case that only the position
 /// test keeps quiet. It fails either way (`Error_In_Step_Computation`, as on
 /// main), and the exit must not be what ends it.
 #[test]
 fn a_handback_the_outer_leaves_is_kept() {
-    let dallass = solve("dallass.nl", "dallass");
+    let dallass = solve_path(
+        test_file("data", "dallass_kink_unmerged.nl"),
+        "dallass_kink_unmerged.nl",
+        "dallass",
+        &[],
+        &[],
+    );
     let eigena2 = solve_with(
         "eigena2.nl",
         "eigena2_lbfgs",
@@ -217,7 +236,7 @@ fn a_handback_the_outer_leaves_is_kept() {
 /// every re-entry from it is the gh#1042 shape *and* exempt. The exit must
 /// not claim it; the solve ends where it does on main (78 + 39 iterations,
 /// `Error_In_Step_Computation` after the `mu_strategy=adaptive` rung).
-/// `dallass` cannot witness this on its own: the position test already keeps
+/// `dallass_kink_unmerged` cannot witness this on its own: the position test already keeps
 /// it quiet, so dropping the exemption leaves it green.
 #[test]
 fn a_reentry_forced_by_a_nonfinite_hessian_is_exempt() {

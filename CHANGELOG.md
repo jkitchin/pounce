@@ -203,7 +203,8 @@ changes.
   feasible point that the outer filter rejects (or that does not cut the
   violation by `kappa_resto`), upstream reports `Restoration_Failed`. POUNCE
   hands the point back so the outer phase gets one shot from it, which the
-  `dallas*` models need. Nothing bounded the case where the outer re-entered
+  `dallas*` models needed before the `|x|^p·|x|^q` merge below (with it,
+  `dallasl` and `dallasm` never enter restoration). Nothing bounded the case where the outer re-entered
   restoration from that same point. Vanderbei `brainpc0`/`brainpc1` ran 2117
   and 1073 iterations (121 and 52 restoration calls) before another cycle
   detector stopped them.
