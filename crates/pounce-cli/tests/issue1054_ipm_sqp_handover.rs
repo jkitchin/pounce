@@ -31,8 +31,15 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn solve(name: &str, tag: &str, opts: &[&str]) -> SolveReport {
+    // The sequence number keeps the path unique within this binary: tests run
+    // in parallel in one process, and two of them solve `airport.nl` tagged
+    // `plain`, so a pid-and-fixture name had one test delete the other's
+    // report before it was read (a `NotFound` on a file just written).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let json = std::env::temp_dir().join(format!(
-        "pounce-issue1054-ho-{}-{}-{tag}.json",
+        "pounce-issue1054-ho-{}-{seq}-{}-{tag}.json",
         std::process::id(),
         name.replace('.', "-"),
     ));

@@ -15,6 +15,21 @@ thread_local! {
     static SCOPE_START: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: when set, `expired` reports `true` once it has been asked
+    /// this many more times, inside a scope or not. Lets a test cut a solve
+    /// off at a chosen point instead of racing a wall clock.
+    static EXPIRE_AFTER_CHECKS: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Test-only: make the deadline expire on the `n`-th next check (`None`
+/// clears it). See `EXPIRE_AFTER_CHECKS`.
+#[cfg(test)]
+pub(crate) fn expire_after_checks(n: Option<u64>) {
+    EXPIRE_AFTER_CHECKS.with(|c| c.set(n));
+}
+
 pub(crate) struct Guard {
     owner: bool,
 }
@@ -45,6 +60,13 @@ impl Drop for Guard {
 
 #[inline]
 pub(crate) fn expired() -> bool {
+    #[cfg(test)]
+    if let Some(k) = EXPIRE_AFTER_CHECKS.with(Cell::get) {
+        if k == 0 {
+            return true;
+        }
+        EXPIRE_AFTER_CHECKS.with(|c| c.set(Some(k - 1)));
+    }
     DEADLINE.with(|slot| {
         slot.get()
             .is_some_and(|deadline| Instant::now() >= deadline)

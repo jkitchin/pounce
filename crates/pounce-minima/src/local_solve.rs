@@ -11,8 +11,9 @@ use pounce_algorithm::application::{ConvergedCallback, IpoptApplication};
 use pounce_common::types::Number;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Which Hessian a local solve should use. The search asks for
 /// [`QuasiNewton`](Self::QuasiNewton) on the augmented penalty / tunnel
@@ -79,7 +80,20 @@ pub struct LocalOutcome {
 /// it) and, for the repulsion strategies, already augmented. Calls are
 /// sequential and the search counts them against its own budget.
 pub trait LocalSolve {
+    fn begin_search(&mut self) {}
+
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome;
+
+    /// Cooperative cancellation: the search polls this between units of work
+    /// (before solves, while sampling, clustering, and filtering starts) and
+    /// returns the archive accumulated so far when it returns `true`.
+    ///
+    /// It cannot interrupt a solve or an objective evaluation already under
+    /// way; those must return before the search can stop. The default keeps
+    /// existing solvers running to completion.
+    fn should_stop(&self) -> bool {
+        false
+    }
 
     /// Whether the problem's `eval_h` is its real Hessian. A frontend that
     /// declares a Hessian structure only to give L-BFGS a workspace, and fills
@@ -134,6 +148,10 @@ pub struct IpoptLocalSolve<'a> {
     /// The caller's own `hessian_approximation`, if they set one; every solve
     /// overwrites it, and `Drop` puts it back (or unsets it again).
     caller_hessian: Option<String>,
+    /// Whole-search time limit; `None` keeps the search unbounded.
+    time_limit: Option<Duration>,
+    /// When the current search began (or first polled outside a search).
+    started: Cell<Option<Instant>>,
 }
 
 impl<'a> IpoptLocalSolve<'a> {
@@ -152,11 +170,41 @@ impl<'a> IpoptLocalSolve<'a> {
             previous_hook,
             pin_mu,
             caller_hessian,
+            time_limit: None,
+            started: Cell::new(None),
         }
+    }
+
+    /// Stop the search cooperatively once `limit` of wall clock has elapsed.
+    /// The budget restarts at each call to [`find_minima`](crate::find_minima)
+    /// or [`find_minima_with`](crate::find_minima_with), including setup time.
+    pub fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.time_limit = Some(limit);
+        self.started.set(None);
+        self
     }
 }
 
 impl LocalSolve for IpoptLocalSolve<'_> {
+    fn begin_search(&mut self) {
+        self.started.set(Some(Instant::now()));
+    }
+
+    fn should_stop(&self) -> bool {
+        let Some(limit) = self.time_limit else {
+            return false;
+        };
+        let now = Instant::now();
+        let started = match self.started.get() {
+            Some(t) => t,
+            None => {
+                self.started.set(Some(now));
+                now
+            }
+        };
+        now.duration_since(started) >= limit
+    }
+
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
         let line = match mode {
             HessianMode::Exact => "hessian_approximation exact\n",

@@ -108,7 +108,8 @@
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
-    BoundStatus, ConsStatus, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus, WorkingSet,
+    BoundStatus, ConsStatus, ParametricActiveSetSolver, QpError, QpOptions, QpSolver, QpStatus,
+    WorkingSet,
 };
 
 use crate::sqp::iterates::SqpIterates;
@@ -196,7 +197,7 @@ pub enum CrossoverDecline {
     /// set to identify.
     NothingToIdentify,
     /// The EQP-equivalent QP did not solve, and step 4 was disabled or also
-    /// failed.
+    /// failed. [`CrossoverReport::eqp`] says how it ended.
     QpFailed,
     /// The penalty line search could not accept a step from the interior
     /// iterate.
@@ -218,6 +219,31 @@ pub enum CrossoverDecline {
     /// every other decline: crossover refines a converged solve, so running
     /// out of time is never a reason to fail it.
     TimeLimit,
+}
+
+/// What the §7 step-3 QP did (gh#1061).
+///
+/// [`CrossoverDecline::QpFailed`] covers every way that QP can fail to reach
+/// `Optimal` — an iteration cap, an infeasible verdict, a hard linear-solver
+/// error — and on a large model those call for different responses. This is
+/// the detail behind it, kept on accepted reports too, so a slow crossover can
+/// be attributed: working-set changes, refactorizations and rank tests against the
+/// wall time they cost.
+#[derive(Debug, Clone)]
+pub struct EqpReport {
+    /// The QP's status, or the hard error it returned instead of one.
+    pub outcome: Result<QpStatus, QpError>,
+    /// Working-set changes (adds + drops). `0` when the QP returned an error.
+    pub working_set_changes: u32,
+    /// Base-KKT refactorizations. `0` when the QP returned an error.
+    pub refactors: u32,
+    /// Schur-complement updates between refactorizations. `0` when the QP
+    /// returned an error.
+    pub schur_updates: u32,
+    /// Linear-independence rank tests, counted on errors too.
+    pub rank_guard_calls: u32,
+    /// Wall time of the QP call.
+    pub time: std::time::Duration,
 }
 
 /// What crossover did. Retrieved from
@@ -266,6 +292,9 @@ pub struct CrossoverReport {
     /// converged run as `Overall NLP error` above `tol` (#646). The caller
     /// substitutes this figure when the point was accepted.
     pub compl_after: Number,
+    /// The §7 step-3 QP, when it ran. `None` when crossover declined before
+    /// building it.
+    pub eqp: Option<EqpReport>,
 }
 
 impl CrossoverReport {
@@ -281,7 +310,13 @@ impl CrossoverReport {
             kkt_before: Number::NAN,
             kkt_after: Number::NAN,
             compl_after: Number::NAN,
+            eqp: None,
         }
+    }
+
+    fn with_eqp(mut self, eqp: &EqpReport) -> Self {
+        self.eqp = Some(eqp.clone());
+        self
     }
 
     /// This report, turned into a decline for `reason` after the fact,
@@ -564,8 +599,18 @@ where
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
+    let eqp_started = std::time::Instant::now();
     let eqp = qp_solver.solve_with_working_set(&qp, &working, &eqp_opts);
     n_qp_solves += 1;
+    let eqp_report = EqpReport {
+        outcome: eqp.as_ref().map(|sol| sol.status).map_err(Clone::clone),
+        working_set_changes: eqp.as_ref().map_or(0, |s| s.stats.n_working_set_changes),
+        refactors: eqp.as_ref().map_or(0, |s| s.stats.n_refactor),
+        schur_updates: eqp.as_ref().map_or(0, |s| s.stats.n_schur_updates),
+        rank_guard_calls: qp_solver.rank_guard_calls(),
+        time: eqp_started.elapsed(),
+    };
+    tracing::debug!(target: "pounce::crossover", "crossover step 3 QP: {eqp_report:?}");
 
     let mut step3_failure = match &eqp {
         Ok(sol) if sol.status == QpStatus::TimeLimit => CrossoverDecline::TimeLimit,
@@ -647,6 +692,7 @@ where
                         kkt_before: kkt_before.stationarity.max(kkt_before.constr_viol),
                         kkt_after: kkt_after.stationarity.max(kkt_after.constr_viol),
                         compl_after,
+                        eqp: Some(eqp_report),
                     },
                     Some(SqpResult {
                         x: cand.x,
@@ -676,10 +722,16 @@ where
             .as_ref()
             .is_some_and(|d| d.exceeded().is_some())
     {
-        return (CrossoverReport::declined(CrossoverDecline::TimeLimit), None);
+        return (
+            CrossoverReport::declined(CrossoverDecline::TimeLimit).with_eqp(&eqp_report),
+            None,
+        );
     }
     if opts.max_iter == 0 {
-        return (CrossoverReport::declined(step3_failure), None);
+        return (
+            CrossoverReport::declined(step3_failure).with_eqp(&eqp_report),
+            None,
+        );
     }
     let step4_opts = SqpOptions {
         max_iter: opts.max_iter,
@@ -687,14 +739,20 @@ where
         ..sqp_opts.clone()
     };
     let Some(mut sqp) = make_sqp(step4_opts) else {
-        return (CrossoverReport::declined(step3_failure), None);
+        return (
+            CrossoverReport::declined(step3_failure).with_eqp(&eqp_report),
+            None,
+        );
     };
     iter.working = Some(working);
     let res = match sqp.optimize_with_warm_start(nlp, Some(iter)) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(target: "pounce::crossover", "crossover step 4 failed: {e:?}");
-            return (CrossoverReport::declined(step3_failure), None);
+            return (
+                CrossoverReport::declined(step3_failure).with_eqp(&eqp_report),
+                None,
+            );
         }
     };
     n_qp_solves += res.n_qp_solves;
@@ -707,11 +765,17 @@ where
         } else {
             CrossoverDecline::ActiveSetNotConverged
         };
-        return (CrossoverReport::declined(reason), None);
+        return (
+            CrossoverReport::declined(reason).with_eqp(&eqp_report),
+            None,
+        );
     }
     let after = (res.final_stationarity, res.final_constr_viol, res.obj);
     if !accepts(before, after, sqp_opts) {
-        return (CrossoverReport::declined(CrossoverDecline::Regressed), None);
+        return (
+            CrossoverReport::declined(CrossoverDecline::Regressed).with_eqp(&eqp_report),
+            None,
+        );
     }
     let identified = identify_at(nlp, &res.x, m_eq, &xl, &xu, &bl_c, &bu_c);
     let (active_bounds, active_constraints) = count_active(&identified);
@@ -741,6 +805,7 @@ where
         kkt_before: kkt_before.stationarity.max(kkt_before.constr_viol),
         kkt_after: res.final_stationarity.max(res.final_constr_viol),
         compl_after,
+        eqp: Some(eqp_report),
     };
     (report, Some(res))
 }

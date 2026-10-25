@@ -743,7 +743,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          iteration exactly where it was, and it continues. Meant for models \
          whose interior-point tail is long once the active set is settled \
          (gh#1054: pseudospectral optimal control). Only on the interior-point \
-         path.",
+         path. THE DEFAULT IS CONDITIONAL: under algorithm=active-set-sqp \
+         (or solver_selection=qp-active-set) on a model with n + m >= 5000, \
+         leaving this unset runs the interior point with the handover on \
+         rather than a cold active-set SQP, whose first step QP needs about \
+         one iteration per active constraint (gh#1061: on four 9-20 k-variable \
+         NLPs none finished in 300 s). Set it to no to keep the cold \
+         active-set SQP at any size.",
     )?;
     r.add_lower_bounded_number_option(
         "ipm_sqp_handover_tol",

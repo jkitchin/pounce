@@ -48,6 +48,15 @@ fn objective(stdout: &str) -> f64 {
         .unwrap_or_else(|| panic!("no objective line:\n{stdout}"))
 }
 
+fn iterations(stdout: &str) -> u64 {
+    stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("Number of Iterations"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no iteration line:\n{stdout}"))
+}
+
 fn solved(stdout: &str) -> bool {
     stdout.contains("EXIT: Optimal Solution Found.")
         || stdout.contains("EXIT: Solved To Acceptable Level.")
@@ -73,10 +82,25 @@ fn convex_qp_share1b_is_solved_by_the_active_set_engine() {
 /// and every recovery after it ran its full budget (past 1100 s for the first
 /// attempt alone). As an LP it now takes the simplex seed first. `main`
 /// reported `Internal_Error` after 286 s. Oracle: the IPM's `-1435.178`.
+///
+/// The iteration bound is gh#1061. The seed used to stop at a merely feasible
+/// vertex, from which the active-set engine could not walk a degenerate LP
+/// down: its first attempt spent the whole 8 530-iteration budget with the dual
+/// infeasibility frozen, and the solve was found by a later cold attempt, 4 865
+/// iterations and 190–430 s in, or not at all depending on which member of
+/// each dependent set the rank guard dropped. For an LP the seed now runs
+/// simplex phase 2 as well, with bound perturbation against degenerate
+/// stalling, and returns the verified vertex: 2 026 simplex pivots, a fifth of
+/// a second.
 #[test]
 fn lp_degen2_is_solved_by_the_active_set_engine() {
     let out = run("lp_degen2.nl");
     assert!(solved(&out), "{out}");
     let f = objective(&out);
     assert!((f - -1435.178).abs() < 1e-6 * 1435.178, "f = {f}");
+    let it = iterations(&out);
+    assert!(
+        it < 3000,
+        "{it} iterations: the LP was not solved by the simplex"
+    );
 }

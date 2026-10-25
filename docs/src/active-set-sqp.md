@@ -690,6 +690,17 @@ Hessian instead. Large
 models want a warm working set, from a previous SQP solve or from the
 interior-point method ([`ipm_sqp_handover`](crossover.md#handing-over-before-convergence-ipm_sqp_handover)).
 
+Since gh#1061 that is the default above `n + m = 5000`: with
+`algorithm=active-set-sqp` and `ipm_sqp_handover` left unset, a model that size
+runs the interior point with the handover on, and the banner says so
+("interior point, handing over to active-set SQP"). On four 9–20 k-variable
+equality-heavy NLPs no cold first QP finished in 300 s; started from the
+interior point, `ubh5` solves in 1 s and `robot_1600` in 6 s. The report's
+`engine` field reads `sqp-active-set` when a handover attempt was accepted and
+the active-set SQP gave the answer, and `nlp` when every attempt declined and
+the converged interior point did. Set `ipm_sqp_handover=no` to get the cold
+active-set SQP regardless of size.
+
 ## 7. Pitfalls
 
 - **Calling `Problem.solve(working_set=…)` with a stale working set

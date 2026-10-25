@@ -1986,6 +1986,13 @@ fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
 /// working set goes in lifted and the solution comes out unlifted, so the
 /// rest of the loop never sees the extra variables. On an unlifted
 /// subproblem both maps are the identity.
+///
+/// Each solve is logged at debug level under `pounce::sqp::qp` with its
+/// outcome, working-set changes, refactorizations, Schur updates, rank tests
+/// and wall time (gh#1061). A QP that takes minutes is otherwise one opaque
+/// number, and the remedies differ: many working-set changes say the working
+/// set moved a lot, a refactor count says the Schur path kept resetting, and
+/// a rank-test count says it spent its time pruning dependent rows.
 fn solve_step_qp(
     solver: &mut ParametricActiveSetSolver,
     data: &SqpQpData,
@@ -1993,11 +2000,25 @@ fn solve_step_qp(
     opts: &QpOptions,
 ) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
     let qp = data.as_qp();
+    let started = std::time::Instant::now();
+    let guards_before = solver.rank_guard_calls();
     let sol = match warm {
-        Some(w) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts)?,
-        None => solver.solve(&qp, None, opts)?,
+        Some(w) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
+        None => solver.solve(&qp, None, opts),
     };
-    Ok(data.unlift_solution(sol))
+    let rank_guard_calls = solver.rank_guard_calls() - guards_before;
+    match &sol {
+        Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
+            "step QP (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
+             {} refactors, {} Schur updates, {} rank tests, phase1={}",
+            qp.n, qp.m, warm.is_some(), s.status, started.elapsed(),
+            s.stats.n_working_set_changes, s.stats.n_refactor, s.stats.n_schur_updates,
+            rank_guard_calls, s.stats.used_phase1),
+        Err(e) => tracing::debug!(target: "pounce::sqp::qp",
+            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests",
+            qp.n, qp.m, warm.is_some(), started.elapsed(), rank_guard_calls),
+    }
+    Ok(data.unlift_solution(sol?))
 }
 
 /// What is left of `deadline`, as the wall-clock duration a step QP can take

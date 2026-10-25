@@ -941,6 +941,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Smallest `n + m` at which `algorithm=active-set-sqp` starts from the
+/// interior point; see [`IpoptApplication::sqp_auto_handover`]. The fixture
+/// corpus (largest model 813 variables) sits far below it.
+pub const AUTO_HANDOVER_MIN_DIM: usize = 5_000;
+
 pub struct IpoptApplication {
     options: OptionsList,
     /// Diagnostics from the safeguarded `least_square_init_primal`
@@ -1190,6 +1195,9 @@ pub struct IpoptApplication {
     /// IPM solve (gh#1054). `None` when `ipm_sqp_handover=no` (the default).
     /// Read via [`Self::handover_report`].
     handover_report: Option<crate::handover::HandoverReport>,
+    /// Whether the current solve is an `algorithm=active-set-sqp` request
+    /// run as interior point plus handover; see [`Self::sqp_auto_handover`].
+    auto_handover: std::cell::Cell<bool>,
     /// Full primal-dual warm-start iterate for the IPM path, captured by
     /// the interactive debugger's `resolve` command. When `Some`, the
     /// next `optimize_tnlp` installs this 8-vector (algorithm space)
@@ -1361,6 +1369,7 @@ impl IpoptApplication {
             x_elimination: None,
             crossover_report: None,
             handover_report: None,
+            auto_handover: std::cell::Cell::new(false),
             warm_start_iterate: None,
             warm_start_diag: RefCell::new(None),
             external_ordering: None,
@@ -2319,7 +2328,27 @@ impl IpoptApplication {
         };
 
         if self.is_sqp_algorithm_selected() {
-            return self.optimize_sqp_tnlp(tnlp);
+            let dims = tnlp
+                .borrow_mut()
+                .get_nlp_info()
+                .map(|i| (i.n.max(0) as usize, i.m.max(0) as usize));
+            let auto = dims.is_some_and(|(n, m)| self.sqp_auto_handover(n, m));
+            self.auto_handover.set(auto);
+            if !auto {
+                return self.optimize_sqp_tnlp(tnlp);
+            }
+            use pounce_common::journalist::JournalCategory;
+            self.journalist.print(
+                JournalLevel::J_SUMMARY,
+                JournalCategory::J_MAIN,
+                &format!(
+                    "pounce: active-set SQP on a model this size (n + m ≥ {AUTO_HANDOVER_MIN_DIM}) \
+                     starts from the interior point and hands over \
+                     (ipm_sqp_handover=no for a cold active-set SQP).\n"
+                ),
+            );
+        } else {
+            self.auto_handover.set(false);
         }
         let info = match tnlp.borrow_mut().get_nlp_info() {
             Some(info) => info,
@@ -3311,6 +3340,56 @@ impl IpoptApplication {
         algo_sqp || selection_sqp
     }
 
+    /// Whether an active-set SQP request on a model with `n` variables and
+    /// `m` constraints runs as the interior point with the IPM→SQP handover
+    /// and post-convergence crossover, instead of a cold active-set SQP
+    /// (gh#1061).
+    ///
+    /// A primal active-set QP started cold changes its working set one row or
+    /// bound per iteration, so the SQP's first step QP needs on the order of
+    /// one iteration per active constraint, each a KKT update the size of the
+    /// model. Measured on four 9–20 k-variable equality-heavy NLPs
+    /// (`brainpc2`, `robot_1600`, `WM_CFy`, `ubh5`): not one first QP finished
+    /// in 300 s. Started from the interior point instead, `ubh5` solves in
+    /// 0.5 s and `robot_1600` in 6 s. The active-set SQP produces the answer
+    /// when a handover attempt is accepted; when every attempt declines, the
+    /// converged interior point is the answer, exactly as under
+    /// `ipm_sqp_handover=yes`. Post-convergence `crossover` is not turned on
+    /// as well: measured, it bought `robot_1600` its active-set answer for
+    /// 6 s → 41 s, and on `brainpc2` declined after a 194 s step-3 QP, past
+    /// the wall-time limit.
+    ///
+    /// Only above [`AUTO_HANDOVER_MIN_DIM`], where a cold SQP is the problem,
+    /// and only when `ipm_sqp_handover` was not set: `ipm_sqp_handover=no`
+    /// asks for the cold active-set SQP and gets it.
+    pub fn sqp_auto_handover(&self, n: usize, m: usize) -> bool {
+        self.is_sqp_algorithm_selected()
+            && n + m >= AUTO_HANDOVER_MIN_DIM
+            && !matches!(
+                self.options.get_bool_value("ipm_sqp_handover", ""),
+                Ok((_, true))
+            )
+    }
+
+    /// Whether the most recent solve was run as interior point plus handover
+    /// under [`Self::sqp_auto_handover`].
+    pub fn auto_handover_ran(&self) -> bool {
+        self.auto_handover.get()
+    }
+
+    /// Whether the active-set SQP produced the most recent solve's point:
+    /// always on the cold SQP route, and on the auto-handover route when a
+    /// handover attempt (or a crossover the user asked for) was accepted.
+    pub fn answer_from_active_set_sqp(&self) -> bool {
+        if !self.auto_handover.get() {
+            return self.is_sqp_algorithm_selected();
+        }
+        self.handover_report
+            .as_ref()
+            .is_some_and(|r| r.accepted_at_iter.is_some())
+            || self.crossover_report.as_ref().is_some_and(|r| r.accepted())
+    }
+
     /// Phase 5b SQP entry point. Builds the same NLP chain
     /// (`TNLPAdapter` → `OrigIpoptNlp` → `IpoptNlpAdapter`) the
     /// IPM uses, then runs `SqpAlgorithm::optimize`. Maps the
@@ -4035,6 +4114,8 @@ impl IpoptApplication {
     /// [`crate::handover::HandoverOptions`].
     fn handover_options(&self) -> crate::handover::HandoverOptions {
         let mut o = crate::handover::HandoverOptions::default();
+        // `sqp_auto_handover` only fires when this option was not set.
+        o.enabled = self.auto_handover.get();
         if let Ok((v, true)) = self.options.get_bool_value("ipm_sqp_handover", "") {
             o.enabled = v;
         }
@@ -10423,6 +10504,40 @@ mod tests {
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
         assert!(!app.is_sqp_algorithm_selected());
+    }
+
+    /// gh#1061: `algorithm=active-set-sqp` starts from the interior point at
+    /// `n + m ≥ AUTO_HANDOVER_MIN_DIM` — and only there, only when the user
+    /// asked for the active-set SQP, and never when they set
+    /// `ipm_sqp_handover` themselves.
+    #[test]
+    fn active_set_sqp_hands_over_from_the_interior_point_at_size() {
+        let big = (AUTO_HANDOVER_MIN_DIM - 1000, 1000);
+        let small = (AUTO_HANDOVER_MIN_DIM - 1000, 999);
+        let with = |opts: &str| {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(opts).unwrap();
+            app
+        };
+        let sqp = with("algorithm active-set-sqp\n");
+        assert!(sqp.sqp_auto_handover(big.0, big.1));
+        assert!(!sqp.sqp_auto_handover(small.0, small.1));
+        assert!(with("solver_selection qp-active-set\n").sqp_auto_handover(big.0, big.1));
+        let ipm = with("");
+        assert!(
+            !ipm.sqp_auto_handover(big.0, big.1),
+            "the IPM is not rerouted"
+        );
+        for set in ["no", "yes"] {
+            let app = with(&format!(
+                "algorithm active-set-sqp\nipm_sqp_handover {set}\n"
+            ));
+            assert!(
+                !app.sqp_auto_handover(big.0, big.1),
+                "ipm_sqp_handover={set} was set, so the user decides"
+            );
+        }
     }
 
     #[test]

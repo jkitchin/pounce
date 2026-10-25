@@ -44,7 +44,9 @@
 //! [`IpoptLocalSolve`] runs every local solve on the one application you hand
 //! it, toggling `hessian_approximation` per solve, so the application's other
 //! options (tolerances, `print_level`, …) apply to all of them. To solve
-//! starts some other way, implement [`LocalSolve`].
+//! starts some other way, implement [`LocalSolve`]; overriding
+//! [`LocalSolve::should_stop`] lets it cancel the search cooperatively (for
+//! example at a deadline), keeping the minima accepted so far.
 //!
 //! [`find_minima_with`] takes [`Hooks`]: a callback on each accepted minimum
 //! (which can stop the search), a custom dedup metric such as a periodic

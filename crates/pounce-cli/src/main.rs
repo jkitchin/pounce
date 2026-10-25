@@ -1052,7 +1052,11 @@ fn real_main() -> ExitCode {
             // `algorithm` option alone does not license this branch.
             let reaches_nlp_route = decline_convex || matches!(choice, SolverChoice::Nlp);
             let described = if reaches_nlp_route {
-                if app.is_sqp_algorithm_selected() {
+                if nl_dims.is_some_and(|(n, m)| app.sqp_auto_handover(n, m)) {
+                    // gh#1061: a cold active-set SQP at this size is not a
+                    // solve that finishes; see `sqp_auto_handover`.
+                    "NLP filter line-search interior point, handing over to active-set SQP"
+                } else if app.is_sqp_algorithm_selected() {
                     "active-set SQP (pounce-qp subproblems)"
                 } else {
                     SolverChoice::Nlp.describe()
@@ -2646,7 +2650,10 @@ fn real_main() -> ExitCode {
         // only `2nd=` in the sweep and hide which algorithm produced `x`.
         builder.solution.engine = if square_system_promoted {
             "square-lm"
-        } else if app.is_sqp_algorithm_selected() {
+        } else if app.answer_from_active_set_sqp() {
+            // On the auto-handover route (gh#1061) the active-set SQP answered
+            // only if the handover or crossover was accepted; otherwise the
+            // interior point did, and the column says so.
             "sqp-active-set"
         } else {
             "nlp"

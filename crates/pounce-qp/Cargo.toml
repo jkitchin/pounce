@@ -14,12 +14,11 @@ categories = ["mathematics", "science"]
 pounce-common.workspace = true
 pounce-linalg.workspace = true
 pounce-linsol.workspace = true
-
-[dev-dependencies]
-# FERAL backs the in-tree unit tests so the analytical ladder runs
-# end-to-end without external solvers. Production callers
-# (pounce-algorithm, pounce-sensitivity) construct their own backend
-# and pass it to `ParametricActiveSetSolver::new`.
+# The linear-independence guard's sparse rank-reveal, whatever backend the
+# caller passes for the KKT factorizations (gh#1061). FERAL also backs the
+# in-tree unit tests; production callers (pounce-algorithm,
+# pounce-sensitivity) construct their own KKT backend and pass it to
+# `ParametricActiveSetSolver::new`.
 pounce-feral.workspace = true
 
 [lints]

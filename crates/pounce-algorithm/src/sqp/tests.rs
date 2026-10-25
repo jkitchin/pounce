@@ -1637,6 +1637,120 @@ fn issue_1054_crossover_declines_on_a_spent_budget_and_keeps_the_interior_point(
     assert_eq!(report.n_qp_solves, 0);
 }
 
+/// A KKT backend whose every factorization is a hard failure, so the step-3
+/// QP cannot end `Optimal`.
+struct AlwaysFatal;
+
+impl pounce_linsol::SparseSymLinearSolverInterface for AlwaysFatal {
+    fn initialize_structure(
+        &mut self,
+        _dim: Index,
+        _nonzeros: Index,
+        _ia: &[Index],
+        _ja: &[Index],
+    ) -> pounce_linsol::ESymSolverStatus {
+        pounce_linsol::ESymSolverStatus::FatalError
+    }
+    fn values_array_mut(&mut self) -> &mut [Number] {
+        &mut []
+    }
+    fn multi_solve(
+        &mut self,
+        _new_matrix: bool,
+        _ia: &[Index],
+        _ja: &[Index],
+        _nrhs: Index,
+        _rhs_vals: &mut [Number],
+        _check_neg_evals: bool,
+        _number_of_neg_evals: Index,
+    ) -> pounce_linsol::ESymSolverStatus {
+        pounce_linsol::ESymSolverStatus::FatalError
+    }
+    fn number_of_neg_evals(&self) -> Index {
+        0
+    }
+    fn increase_quality(&mut self) -> bool {
+        false
+    }
+    fn provides_inertia(&self) -> bool {
+        true
+    }
+    fn matrix_format(&self) -> pounce_linsol::EMatrixFormat {
+        pounce_linsol::EMatrixFormat::TripletFormat
+    }
+}
+
+/// gh#1061: `QpFailed` folds every non-optimal step-3 outcome together, so
+/// the report carries the QP's own verdict and what it spent.
+#[test]
+fn issue_1061_crossover_reports_why_the_step3_qp_failed() {
+    use crate::crossover::{CrossoverDecline, CrossoverOptions, CrossoverSeed};
+    let seed = CrossoverSeed {
+        x: vec![1.0, 1.0],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0, 0.0],
+    };
+    let mut nlp = NonlinearEqNlp;
+    let (report, accepted) = crate::crossover::run(
+        &mut nlp,
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            max_iter: 0,
+            ..CrossoverOptions::default()
+        },
+        &SqpOptions::default(),
+        &QpOptions::sqp_subproblem(),
+        || Box::new(AlwaysFatal),
+        |_| panic!("step 4 is disabled"),
+    );
+    assert!(accepted.is_none());
+    assert_eq!(report.declined, Some(CrossoverDecline::QpFailed));
+    let eqp = report.eqp.expect("the step-3 QP ran, so it is reported");
+    assert!(
+        matches!(eqp.outcome, Err(pounce_qp::QpError::LinearSolverFailure(_))),
+        "the hard error must survive, not fold into QpFailed: {:?}",
+        eqp.outcome
+    );
+}
+
+/// The accepted path reports the step-3 QP too, so a slow crossover that
+/// succeeded can still be attributed.
+#[test]
+fn issue_1061_an_accepted_crossover_reports_its_step3_qp() {
+    use crate::crossover::{CrossoverOptions, CrossoverSeed};
+    let mut nlp = NonlinearEqNlp;
+    let solved = sqp_with_deadline(pounce_common::timing::Deadline::new(1e20, 1e20))
+        .optimize(&mut nlp)
+        .unwrap();
+    assert_eq!(solved.status, SqpStatus::Optimal);
+    let seed = CrossoverSeed {
+        x: solved.x.clone(),
+        lambda_g: solved.lambda_g.clone(),
+        lambda_x: solved.lambda_x.clone(),
+    };
+    let (report, accepted) = crate::crossover::run(
+        &mut nlp,
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            ..CrossoverOptions::default()
+        },
+        &SqpOptions::default(),
+        &QpOptions::sqp_subproblem(),
+        || Box::new(pounce_feral::FeralSolverInterface::new()),
+        |o| {
+            Some(SqpAlgorithm::new(
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+                o,
+            ))
+        },
+    );
+    assert!(accepted.is_some(), "{report:?}");
+    let eqp = report.eqp.expect("the step-3 QP ran, so it is reported");
+    assert_eq!(eqp.outcome, Ok(QpStatus::Optimal));
+}
+
 // ─────────────────────────────────────────────────────────────────
 // gh#1054: L-BFGS in lifted low-rank form.
 // ─────────────────────────────────────────────────────────────────

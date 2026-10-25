@@ -959,6 +959,64 @@ where
             crate::simplex::SeedOutcome::NoSeed => None,
         }
     };
+    // An LP whose simplex phase 2 finished is solved: return the vertex and
+    // its basis duals once they pass the same status verification as an
+    // active-set answer (gh#1061). Certifying it with the active-set engine
+    // instead is what failed: on Mészáros `aircraft` (n = 7 517, 3 754
+    // equalities) the engine, started on the optimal vertex, wandered to its
+    // iteration cap 35.5 infeasible. A vertex that does not verify is still a
+    // feasible seed, and the active-set solve below takes it from there.
+    let vertex = match vertex {
+        Some(mut v) => match v.lp_optimum.take() {
+            Some(opt) => {
+                let mut candidate = QpSolution {
+                    status: QpStatus::Optimal,
+                    x: opt.x,
+                    y: opt.y,
+                    z: opt.z,
+                    z_lb: opt.z_lb,
+                    z_ub: opt.z_ub,
+                    obj: opt.obj,
+                    iters: opt.stats.pivots_phase1 + opt.stats.pivots_phase2,
+                    iterates: Vec::new(),
+                };
+                candidate.status = verify_status(
+                    ActiveSetStatus::Optimal,
+                    None,
+                    SecondOrderVerdict::NotChecked,
+                    &candidate,
+                    prob,
+                    opts,
+                );
+                debug_trace(|| {
+                    format!(
+                        "LP simplex optimum -> {:?} kkt_err={:.3e}",
+                        candidate.status,
+                        candidate.kkt_residuals(prob).kkt_error()
+                    )
+                });
+                // The pivots are this route's iterations, and the budget the
+                // user set for them (`max_iter`, `sqp_qp_max_iter`) is the one
+                // the engine would have spent: a phase 2 that needed more than
+                // that reports the limit, as the engine does when it runs out,
+                // rather than ignoring the cap.
+                if candidate.status == QpStatus::Optimal
+                    && candidate.iters > qopts.max_iter as usize
+                {
+                    candidate.status = QpStatus::IterationLimit;
+                }
+                if matches!(
+                    candidate.status,
+                    QpStatus::Optimal | QpStatus::IterationLimit
+                ) {
+                    return Attempt::opaque(candidate);
+                }
+                Some(v)
+            }
+            None => Some(v),
+        },
+        None => None,
+    };
     let seed = vertex.map(|v| {
         use crate::simplex::AtBound;
         let mut working = WorkingSet::cold(n, m);
@@ -1029,6 +1087,19 @@ where
             qopts.max_iter,
         )
     });
+    #[cfg(test)]
+    std::thread::sleep(tests::AFTER_SEED_DELAY.with(std::cell::Cell::get));
+    // The budget the active-set solve gets is what is left *now*, not what
+    // was left before the simplex seed: `pounce-qp` starts its own clock at
+    // `now + time_limit` when the solve begins, so the snapshot taken in
+    // `engine_options` handed it the whole budget again after the seed had
+    // spent its share. Measured on NETLIB `gen` (seed 83% of the run):
+    // `max_wall_time = 30` stopped at 61 s, `= 300` at 496 s, and `gen4` at
+    // 602 s against 300 (gh#1061).
+    let qopts = ActiveSetOptions {
+        time_limit: crate::deadline::remaining(),
+        ..qopts
+    };
     let mut solver = ParametricActiveSetSolver::new(make_backend());
     let qsol = match solver.solve(&native.problem(), seed.as_ref(), &qopts) {
         Ok(q) => q,
@@ -3023,6 +3094,124 @@ mod tests {
     /// objective `−12.5`. Stationarity `Px + c + Gᵀz = 0` gives
     /// `(−1, −1) + z(1, 1) = 0 ⇒ z = 1`, which pins the **dual sign**: a
     /// flipped transform would clamp `z` to 0.
+    thread_local! {
+        /// Test-only: how long `solve_translated` sleeps between building
+        /// the simplex seed and starting the active-set solve, standing in
+        /// for a seed that spends part of the budget.
+        pub(super) static AFTER_SEED_DELAY: std::cell::Cell<std::time::Duration> =
+            const { std::cell::Cell::new(std::time::Duration::ZERO) };
+    }
+
+    /// A FERAL backend that sleeps on every solve, so a QP that is handed
+    /// time keeps using it.
+    struct Slow(pounce_feral::FeralSolverInterface);
+
+    impl SparseSymLinearSolverInterface for Slow {
+        fn initialize_structure(
+            &mut self,
+            dim: pounce_common::types::Index,
+            nonzeros: pounce_common::types::Index,
+            ia: &[pounce_common::types::Index],
+            ja: &[pounce_common::types::Index],
+        ) -> pounce_linsol::ESymSolverStatus {
+            self.0.initialize_structure(dim, nonzeros, ia, ja)
+        }
+        fn values_array_mut(&mut self) -> &mut [f64] {
+            self.0.values_array_mut()
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn multi_solve(
+            &mut self,
+            new_matrix: bool,
+            ia: &[pounce_common::types::Index],
+            ja: &[pounce_common::types::Index],
+            nrhs: pounce_common::types::Index,
+            rhs_vals: &mut [f64],
+            check_neg_evals: bool,
+            number_of_neg_evals: pounce_common::types::Index,
+        ) -> pounce_linsol::ESymSolverStatus {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            self.0.multi_solve(
+                new_matrix,
+                ia,
+                ja,
+                nrhs,
+                rhs_vals,
+                check_neg_evals,
+                number_of_neg_evals,
+            )
+        }
+        fn number_of_neg_evals(&self) -> pounce_common::types::Index {
+            self.0.number_of_neg_evals()
+        }
+        fn increase_quality(&mut self) -> bool {
+            self.0.increase_quality()
+        }
+        fn provides_inertia(&self) -> bool {
+            self.0.provides_inertia()
+        }
+        fn matrix_format(&self) -> pounce_linsol::EMatrixFormat {
+            self.0.matrix_format()
+        }
+    }
+
+    /// gh#1061: `max_wall_time` covers the simplex seed *and* the
+    /// active-set solve after it. The solve's budget was snapshotted before
+    /// the seed ran, and `pounce-qp` starts its own clock when the solve
+    /// begins, so it got the whole budget again — NETLIB `gen` stopped at 61
+    /// s for a 30 s limit. Here the "seed" spends the entire 200 ms budget,
+    /// so the solve must stop at once; before the fix it ran a fresh 200 ms
+    /// on a backend that needs far more (15 ms a solve).
+    #[test]
+    fn the_active_set_solve_gets_what_the_seed_left_of_the_budget() {
+        let n = 30;
+        let rows = 60;
+        let mut g = Vec::new();
+        for i in 0..rows {
+            for j in 0..n {
+                let v = (((i * 31 + j * 17) % 23) as f64 - 11.0) / 11.0;
+                if v.abs() > 0.3 {
+                    g.push(Triplet::new(i, j, v));
+                }
+            }
+        }
+        let prob = QpProblem {
+            n,
+            p_lower: (0..n).map(|j| Triplet::new(j, j, 1.0)).collect(),
+            c: (0..n).map(|j| -(((j * 13) % 7) as f64) - 1.0).collect(),
+            a: vec![],
+            b: vec![],
+            g,
+            h: (0..rows).map(|i| 1.0 + (i % 3) as f64).collect(),
+            lb: vec![-10.0; n],
+            ub: vec![10.0; n],
+        };
+        let budget = std::time::Duration::from_millis(200);
+        let opts = QpOptions {
+            time_limit: Some(budget),
+            ..QpOptions::default()
+        };
+        AFTER_SEED_DELAY.with(|d| d.set(budget));
+        let started = std::time::Instant::now();
+        let sol = solve_qp_active_set(
+            &prob,
+            &opts,
+            &ActiveSetOverrides::default(),
+            &mut || -> Box<dyn SparseSymLinearSolverInterface> {
+                Box::new(Slow(pounce_feral::FeralSolverInterface::new()))
+            },
+        );
+        let elapsed = started.elapsed();
+        AFTER_SEED_DELAY.with(|d| d.set(std::time::Duration::ZERO));
+        assert_eq!(sol.status, QpStatus::TimeLimit);
+        // The fixed path is the 200 ms "seed" plus a solve that stops at its
+        // first deadline check; the old one is the seed plus a fresh 200 ms.
+        assert!(
+            elapsed < budget.mul_f64(1.6),
+            "a {budget:?} budget took {elapsed:?}"
+        );
+    }
+
     fn projection_qp() -> QpProblem {
         QpProblem {
             n: 2,

@@ -41,6 +41,9 @@ const PSD_MAX_N: usize = 256;
 /// Why the search stopped (mirrors `MinimaResult.status`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
+    /// The target `n_minima` was reached.
+    /// This takes precedence when the same accepted minimum also arrives
+    /// with a cancellation request.
     TargetReached,
     Converged,
     BudgetExhausted,
@@ -50,6 +53,10 @@ pub enum Stop {
     SampleCapReached,
     /// A [`Hooks::on_accept`] callback returned `ControlFlow::Break`.
     Aborted,
+    /// The local solver asked the search to cancel via
+    /// [`LocalSolve::should_stop`]. The minima accepted before the
+    /// cancellation are kept.
+    Cancelled,
 }
 
 impl Stop {
@@ -61,6 +68,7 @@ impl Stop {
             Stop::BudgetExhausted => "budget_exhausted",
             Stop::SampleCapReached => "sample_cap_reached",
             Stop::Aborted => "aborted",
+            Stop::Cancelled => "cancelled",
         }
     }
 }
@@ -86,11 +94,20 @@ const MLSL_GAMMA: f64 = 0.5;
 /// coordinate and only compares pairs whose first coordinates are within
 /// `radius` — the same answer, with the work bounded by the number of
 /// near pairs instead of all pairs.
-fn better_sample_within(xs: &[Vec<Number>], fs: &[Number], l: &[Number], radius: f64) -> Vec<bool> {
+///
+/// Returns `None` as soon as `should_stop` asks for cancellation, so a large
+/// clustering pass does not have to finish first.
+fn better_sample_within(
+    xs: &[Vec<Number>],
+    fs: &[Number],
+    l: &[Number],
+    radius: f64,
+    should_stop: &dyn Fn() -> bool,
+) -> Option<Vec<bool>> {
     let m = xs.len();
     let mut out = vec![false; m];
     if m < 2 || xs[0].is_empty() {
-        return out;
+        return Some(out);
     }
     let key = |i: usize| xs[i][0] / l[0];
     let mut by_key: Vec<usize> = (0..m).collect();
@@ -100,6 +117,9 @@ fn better_sample_within(xs: &[Vec<Number>], fs: &[Number], l: &[Number], radius:
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for (pos, &i) in by_key.iter().enumerate() {
+        if should_stop() {
+            return None;
+        }
         let ki = key(i);
         let fi = fs[i];
         let mut hit = false;
@@ -125,7 +145,7 @@ fn better_sample_within(xs: &[Vec<Number>], fs: &[Number], l: &[Number], radius:
         }
         out[i] = hit;
     }
-    out
+    Some(out)
 }
 
 /// One local solve's outcome (the captured minimizer + whether it converged).
@@ -227,14 +247,25 @@ struct Driver<'a> {
 impl<'a> Driver<'a> {
     // ---- shared local-solver ops -------------------------------------
 
+    /// Check if the local solver has asked the search to stop.
+    fn check_cancel(&self) -> Result<(), Stop> {
+        if self.solver.should_stop() {
+            Err(Stop::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Run one solve of `solve_tnlp` in the given Hessian mode and return the
     /// converged minimizer. Returns `Err(Stop::BudgetExhausted)` once the
-    /// solve budget is spent.
+    /// solve budget is spent, or [`Stop::Cancelled`] when the solver asks to
+    /// cancel before the solve starts.
     fn run_solve(
         &mut self,
         solve_tnlp: Rc<RefCell<dyn TNLP>>,
         exact_hessian: bool,
     ) -> Result<SolveOut, Stop> {
+        self.check_cancel()?;
         if self.n_solves >= self.max_solves {
             return Err(Stop::BudgetExhausted);
         }
@@ -311,6 +342,16 @@ impl<'a> Driver<'a> {
         }
     }
 
+    /// The duals recorded when the optional recovery solve was skipped
+    /// because the search was cancelled before reaching the target.
+    fn duals_without_recovery(&self) -> Duals {
+        Duals {
+            lambda: vec![0.0; self.m],
+            z_l: Vec::new(),
+            z_u: Vec::new(),
+        }
+    }
+
     /// Recover the base-problem multipliers at an accepted minimum `x`: the
     /// constraint duals and the bound multipliers. The accepting solve may
     /// have run on an augmented (penalty / tunnel) objective, whose
@@ -320,6 +361,8 @@ impl<'a> Driver<'a> {
     /// Budget-exempt: the point is already kept, so this does not consume a
     /// `--max-solves` slot. Falls back to zeros if the recovery solve does not
     /// converge or the nlp exposes no user-facing duals (length ≠ `m` / `n`).
+    /// A pending cancellation skips the solve unless this accept reaches
+    /// `n_minima`; that result reports success, so it gets the same duals.
     ///
     /// With no constraints the re-solve is skipped unless `x` sits on a finite
     /// bound: it was not free. Started exactly at an interior minimum, where
@@ -345,6 +388,9 @@ impl<'a> Driver<'a> {
                 lambda: Vec::new(),
                 ..zeros()
             };
+        }
+        if self.solver.should_stop() && self.archive.len() + 1 < self.cfg.n_minima {
+            return self.duals_without_recovery();
         }
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(
             Rc::clone(&self.base),
@@ -558,11 +604,18 @@ impl<'a> Driver<'a> {
     }
 
     /// Draw a fresh start from the box (Sobol'/uniform) or jitter around x0.
-    fn sample(&mut self, jitter: f64) -> Vec<Number> {
+    fn sample(&mut self, jitter: f64) -> Result<Vec<Number>, Stop> {
+        self.check_cancel()?;
         let x0 = self.x0.clone();
         let lo = self.x_l.clone();
         let hi = self.x_u.clone();
-        self.sampler.sample(&x0, &lo, &hi, self.has_box, jitter)
+        Ok(self.sampler.sample(&x0, &lo, &hi, self.has_box, jitter))
+    }
+
+    /// Perturb `anchor` by `scale * N(0, I)`.
+    fn perturb(&mut self, anchor: &[Number], scale: &[Number]) -> Result<Vec<Number>, Stop> {
+        self.check_cancel()?;
+        Ok(self.sampler.perturb(anchor, scale))
     }
 
     // ---- acceptance --------------------------------------------------
@@ -578,6 +631,7 @@ impl<'a> Driver<'a> {
         polish: bool,
     ) -> Result<bool, Stop> {
         if success && polish {
+            self.check_cancel()?;
             let r = self.solve_seeded(&x, true)?;
             success = r.success;
             x = r.x;
@@ -624,6 +678,9 @@ impl<'a> Driver<'a> {
         }
         if self.archive.len() >= self.cfg.n_minima {
             return Err(Stop::TargetReached);
+        }
+        if self.solver.should_stop() {
+            return Err(Stop::Cancelled);
         }
         Ok(true)
     }
@@ -710,6 +767,8 @@ impl<'a> Driver<'a> {
     }
 
     fn reject(&mut self) -> Result<bool, Stop> {
+        // An expired deadline must not be reported as patience convergence.
+        self.check_cancel()?;
         self.stagnant += 1;
         if self.stagnant >= self.cfg.patience {
             return Err(Stop::Converged);
@@ -751,7 +810,8 @@ impl<'a> Driver<'a> {
         let r = self.solve_seeded(&x0, true)?;
         self.consider(r.x, r.success, false)?;
         loop {
-            let s = self.sample(jitter);
+            self.check_cancel()?;
+            let s = self.sample(jitter)?;
             let r = self.solve_seeded(&s, true)?;
             self.consider(r.x, r.success, false)?;
         }
@@ -769,11 +829,13 @@ impl<'a> Driver<'a> {
         let r = self.solve_seeded(&x0, true)?;
         self.consider(r.x, r.success, false)?;
         loop {
+            self.check_cancel()?;
             // Grow the pool; each draw counts against the sample budget, so a
             // round that solves nothing still drives the loop to terminate.
             for _ in 0..batch {
+                self.check_cancel()?;
                 self.note_sample()?;
-                let s = self.sample(jitter);
+                let s = self.sample(jitter)?;
                 let f = self.clean_f(&s).unwrap_or(f64::INFINITY);
                 pool_x.push(s);
                 pool_f.push(f);
@@ -781,7 +843,11 @@ impl<'a> Driver<'a> {
             let bign = pool_x.len();
             let ne = bign.max(2) as f64;
             let radius = gamma * diag * (ne.ln() / ne).powf(1.0 / n as f64);
-            let better_near = better_sample_within(&pool_x, &pool_f, &self.l_scale, radius);
+            let better_near =
+                better_sample_within(&pool_x, &pool_f, &self.l_scale, radius, &|| {
+                    self.solver.should_stop()
+                })
+                .ok_or(Stop::Cancelled)?;
             let mut order: Vec<usize> = (0..bign).collect();
             order.sort_by(|&a, &b| {
                 pool_f[a]
@@ -789,6 +855,7 @@ impl<'a> Driver<'a> {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             for i in order {
+                self.check_cancel()?;
                 // Single-linkage: skip if a *better* sample is within radius.
                 if better_near[i] || self.near_any(&pool_x[i], radius) {
                     continue;
@@ -809,7 +876,8 @@ impl<'a> Driver<'a> {
         let mut cur_f = self.clean_f(&cur).unwrap_or(f64::INFINITY);
         self.consider(r.x, r.success, false)?;
         loop {
-            let mut trial = self.sampler.perturb(&cur, &[step]);
+            self.check_cancel()?;
+            let mut trial = self.perturb(&cur, &[step])?;
             clip(&mut trial, &self.x_l, &self.x_u, self.has_box);
             let r = self.solve_seeded(&trial, true)?;
             if !r.success {
@@ -849,6 +917,7 @@ impl<'a> Driver<'a> {
         let mut last_center: Option<usize> = None;
         let mut fails = 0usize;
         loop {
+            self.check_cancel()?;
             let centers = self.archive.xs.clone();
             while base_amp.len() < centers.len() {
                 let k = base_amp.len();
@@ -885,15 +954,15 @@ impl<'a> Driver<'a> {
                     // Under-flooded the basin we started from: bump and retry.
                     mult[lc] *= bump_factor;
                     let scale: Vec<f64> = sigma.iter().map(|&s| 0.05 * s).collect();
-                    start = self.sampler.perturb(&centers[lc], &scale);
+                    start = self.perturb(&centers[lc], &scale)?;
                     fails += 1;
                     continue;
                 }
-                start = self.sample(jitter);
+                start = self.sample(jitter)?;
                 last_center = None;
                 fails = 0;
             } else {
-                start = self.sample(jitter);
+                start = self.sample(jitter)?;
                 last_center = None;
                 fails = 0;
             }
@@ -916,13 +985,14 @@ impl<'a> Driver<'a> {
         let q = power / 2.0;
         let mut start = self.x0.clone();
         loop {
+            self.check_cancel()?;
             let centers = self.archive.xs.clone();
             let polish = !centers.is_empty();
             // Step a little off the pole so the first gradient is finite.
             let mut s = start.clone();
             if !centers.is_empty() && self.is_known(&s) {
                 let scale: Vec<f64> = length.iter().map(|&l| 0.1 * l).collect();
-                s = self.sampler.perturb(&s, &scale);
+                s = self.perturb(&s, &scale)?;
             }
             let solve_out = if centers.is_empty() {
                 self.solve_seeded(&s, true)?
@@ -942,7 +1012,7 @@ impl<'a> Driver<'a> {
                     start = last.clone();
                 }
             } else {
-                start = self.sample(jitter);
+                start = self.sample(jitter)?;
             }
         }
     }
@@ -966,6 +1036,7 @@ impl<'a> Driver<'a> {
         let r = self.solve_seeded(&x0, true)?;
         self.consider(r.x, r.success, false)?;
         loop {
+            self.check_cancel()?;
             let centers = self.archive.xs.clone();
             // Tunnel at the height of the most-recent minimum, away from all
             // known minima — the classic monotone-descending tunnel.
@@ -980,7 +1051,7 @@ impl<'a> Driver<'a> {
                 .cloned()
                 .unwrap_or_else(|| x0.clone());
             let jit = vec![jitter; self.n];
-            let mut start = self.sampler.perturb(&anchor, &jit);
+            let mut start = self.perturb(&anchor, &jit)?;
             clip(&mut start, &self.x_l, &self.x_u, self.has_box);
             let kernel = Kernel::Pole {
                 centers: centers.clone(),
@@ -1082,6 +1153,7 @@ pub fn find_minima_with<'a>(
     cfg: &'a MinimaOptions,
     hooks: Hooks<'a>,
 ) -> Result<MinimaResult, MinimaError> {
+    solver.begin_search();
     let info = base
         .borrow_mut()
         .get_nlp_info()
@@ -1124,12 +1196,16 @@ pub fn find_minima_with<'a>(
 
     // The gradient scale `max |∇f(x0)|` the `kkt_tol` bound is relative to
     // (gh#983), as `find_minima` takes it from `jac(x0)`.
-    let grad_ref = cfg.kkt_tol.and_then(|_| {
-        let mut g = vec![0.0; n];
-        let ok = base.borrow_mut().eval_grad_f(&x0, true, &mut g);
-        let g0 = g.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        (ok && g0.is_finite()).then_some(g0)
-    });
+    let grad_ref = if solver.should_stop() {
+        None
+    } else {
+        cfg.kkt_tol.and_then(|_| {
+            let mut g = vec![0.0; n];
+            let ok = base.borrow_mut().eval_grad_f(&x0, true, &mut g);
+            let g0 = g.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            (ok && g0.is_finite()).then_some(g0)
+        })
+    };
 
     // Per-dimension scale and box availability (mirror `_scale_from_bounds`).
     let has_box = (0..n).all(|i| x_l[i] > -BOUND_INF && x_u[i] < BOUND_INF);
@@ -1351,6 +1427,8 @@ mod tests {
     /// The pruned sweep must give exactly the naive single-linkage answer.
     #[test]
     fn pruned_nearest_better_matches_the_naive_scan() {
+        use std::cell::Cell;
+
         let mut state = 12345u64;
         let mut rnd = || {
             state = state
@@ -1364,7 +1442,13 @@ mod tests {
             .collect();
         let fs: Vec<f64> = (0..400).map(|_| rnd()).collect();
         for radius in [0.01, 0.1, 0.3, 2.0] {
-            let fast = better_sample_within(&xs, &fs, &l, radius);
+            let polls = Cell::new(0);
+            let fast = better_sample_within(&xs, &fs, &l, radius, &|| {
+                polls.set(polls.get() + 1);
+                false
+            })
+            .unwrap();
+            assert_eq!(polls.get(), xs.len(), "radius {radius}");
             for i in 0..xs.len() {
                 let naive = (0..xs.len()).any(|j| {
                     j != i && fs[j] < fs[i] && scaled_distance(&xs[i], &xs[j], &l) < radius
@@ -1372,6 +1456,21 @@ mod tests {
                 assert_eq!(fast[i], naive, "radius {radius}, point {i}");
             }
         }
+    }
+
+    #[test]
+    fn clustering_stops_when_cancelled() {
+        use std::cell::Cell;
+        let l = [1.0, 1.0];
+        let xs: Vec<Vec<f64>> = (0..200).map(|i| vec![i as f64 * 0.01, 0.0]).collect();
+        let fs: Vec<f64> = (0..200).map(|i| i as f64).collect();
+        let polls = Cell::new(0);
+        let should_stop = || {
+            polls.set(polls.get() + 1);
+            polls.get() > 10
+        };
+        assert!(better_sample_within(&xs, &fs, &l, 0.05, &should_stop).is_none());
+        assert!(polls.get() > 10);
     }
 
     #[test]

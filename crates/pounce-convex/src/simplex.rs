@@ -68,8 +68,14 @@ const DUAL_TOL: f64 = 1e-9;
 /// Rebuild the LU from scratch after this many `update`s (caps update fill /
 /// drift even when feral does not itself ask for a refactor).
 const REFACTOR_INTERVAL: usize = 100;
-/// Consecutive degenerate (≈ zero-length) pivots before latching Bland's rule.
+/// Consecutive degenerate (≈ zero-length) pivots before latching Bland's rule
+/// — or, in phase 2, before perturbing the basic bounds first.
 const STALL_LIMIT: u32 = 50;
+/// Relative size of the phase-2 bound perturbation, times a pseudo-random
+/// factor in `[1, 2)`: far above [`FEAS_TOL`], so a perturbed degenerate
+/// vertex takes real steps, and far below any tolerance the answer is judged
+/// at, which only ever sees the unperturbed bounds.
+const PERTURB: f64 = 1e-7;
 /// A warm-start structural within this distance of a bound is snapped onto it
 /// (nonbasic); farther in is treated as a superbasic for the push to resolve.
 const BOUND_SNAP: f64 = 1e-9;
@@ -186,6 +192,9 @@ pub(crate) struct FeasibleVertex {
     /// Per-row activity (length `m = m_eq + m_ineq`, same row order as
     /// `[A_eq ; G]`). A row is active iff its logical is nonbasic.
     pub row_at: Vec<AtBound>,
+    /// For an LP whose phase 2 finished: the optimal vertex with the basis
+    /// duals, for the caller to verify and return as the answer.
+    pub lp_optimum: Option<VertexSolution>,
 }
 
 /// What a cold simplex phase-1 found: a feasible vertex, a candidate proof
@@ -217,6 +226,19 @@ pub(crate) enum SeedOutcome {
 /// running this engine's phase-1 only — phase-2 would optimize the *linear*
 /// objective, which is the wrong objective for a QP (any feasible vertex is an
 /// equally valid warm start, so the extra work buys nothing).
+///
+/// **Except for an LP**, where the linear objective *is* the objective: there
+/// phase 2 runs too and the vertex comes back with its basis duals in
+/// [`FeasibleVertex::lp_optimum`], for the caller to verify and return
+/// (gh#1061). From a merely feasible vertex that
+/// engine had to walk the optimum down itself, and on a degenerate LP it
+/// cannot: NETLIB `DEGEN2` from the phase-1 vertex spent its whole
+/// 8 530-iteration budget with the dual infeasibility frozen at 47.57, almost
+/// every step a zero-length add, and was solved only by a later cold attempt —
+/// which reached it or not depending on which member of each dependent set
+/// the rank guard happened to drop. If phase 2 breaks down (iteration cap,
+/// an unbounded direction, a factorization failure) the phase-1 vertex is the
+/// seed, exactly as before, and the active-set engine decides the rest.
 ///
 /// Exists because [`crate::active_set`] needs a feasible seed and cannot get
 /// one from `pounce-qp`'s own cold start: that engine's l1-elastic phase-1 does
@@ -278,16 +300,65 @@ pub(crate) fn simplex_seed(prob: &QpProblem) -> SeedOutcome {
     stage!(s.push_superbasics(), "push_superbasics");
     stage!(s.run_phase1(), "run_phase1");
 
-    let x: Vec<f64> = (0..s.n).map(|j| s.xval[j]).collect();
     // `run_phase1` returning `Some` means it stopped, not that it succeeded —
     // confirm the point really is feasible before offering it as a seed.
-    if !feasible_at(prob, &x) {
+    let Some(phase1) = feasible_vertex(prob, &s) else {
         if dbg {
             eprintln!("[seed] run_phase1 returned but point is INFEASIBLE");
         }
         return SeedOutcome::NoSeed;
+    };
+    let is_lp = prob.p_lower.iter().all(|t| t.val == 0.0);
+    if !is_lp {
+        return SeedOutcome::Vertex(phase1);
     }
+    // Phase 2 keeps primal feasibility pivot by pivot, but a breakdown can
+    // leave the basis mid-update: re-verify the point it stops at, and keep
+    // the phase-1 vertex unless phase 2 both finished and stayed feasible.
+    //
+    // A phase 2 that finishes can still stop a few ulps outside a bound: its
+    // ratio test accepts `FEAS_TOL` of drift, and `extract` recomputes the
+    // basics exactly from the factor. Measured on Mészáros `small005`: phase
+    // 2 optimal after 542 pivots, the recomputed vertex rejected as
+    // infeasible, the seed back on the phase-1 vertex. That residual is what
+    // phase 1 removes, so clean it up and optimize again, twice at most.
+    let mut optimal = None;
+    for _ in 0..2 {
+        if s.run_phase2().is_none() {
+            break;
+        }
+        let sol = s.extract(prob);
+        if let Some(v) = feasible_vertex(prob, &s) {
+            optimal = Some(FeasibleVertex {
+                lp_optimum: Some(sol),
+                ..v
+            });
+            break;
+        }
+        if s.run_phase1().is_none() {
+            break;
+        }
+    }
+    if dbg {
+        eprintln!(
+            "[seed] LP phase 2: {}",
+            if optimal.is_some() {
+                "optimal vertex"
+            } else {
+                "gave up; phase-1 vertex"
+            }
+        );
+    }
+    SeedOutcome::Vertex(optimal.unwrap_or(phase1))
+}
 
+/// The vertex the simplex `s` currently sits at, or `None` when its point is
+/// not feasible for `prob`.
+fn feasible_vertex(prob: &QpProblem, s: &Simplex) -> Option<FeasibleVertex> {
+    let x: Vec<f64> = (0..s.n).map(|j| s.xval[j]).collect();
+    if !feasible_at(prob, &x) {
+        return None;
+    }
     let at = |v: usize| -> AtBound {
         if s.slot_of[v] != usize::MAX {
             return AtBound::Free; // basic
@@ -301,10 +372,11 @@ pub(crate) fn simplex_seed(prob: &QpProblem) -> SeedOutcome {
         }
     };
 
-    SeedOutcome::Vertex(FeasibleVertex {
+    Some(FeasibleVertex {
         struct_at: (0..s.n).map(at).collect(),
         row_at: (0..s.m).map(|i| at(s.n + i)).collect(),
         x,
+        lp_optimum: None,
     })
 }
 
@@ -391,6 +463,11 @@ struct Simplex {
     /// Bland anti-cycling latch + degenerate-step counter.
     bland: bool,
     stall: u32,
+    /// The bounds as they were before a phase-2 perturbation, while one is in
+    /// force; see [`Self::run_phase2`].
+    unperturbed: Option<(Vec<f64>, Vec<f64>)>,
+    /// Whether a phase-2 stall may perturb rather than latch Bland's rule.
+    may_perturb: bool,
     /// Pivot census and the stage (1 or 2) the pricing loop is in.
     stats: SimplexStats,
     phase: u8,
@@ -474,6 +551,8 @@ impl Simplex {
             since_refactor: 0,
             bland: false,
             stall: 0,
+            unperturbed: None,
+            may_perturb: false,
             stats: SimplexStats::default(),
             phase: 0,
             phase1_stuck_pi: None,
@@ -926,7 +1005,76 @@ impl Simplex {
         None
     }
 
+    /// Phase 2: optimize `cost` from a feasible basis.
+    ///
+    /// Degeneracy is met with **bound perturbation** first and Bland's rule
+    /// only after (gh#1061). Bland's rule cannot cycle, but on a heavily
+    /// degenerate LP it can pivot for ever without moving: NETLIB `DEGEN2`
+    /// latched it after 50 degenerate pivots and then took 25 000 pivots
+    /// through 25 000 distinct bases with the objective frozen at −881.9
+    /// (optimum −1435.178), until the iteration cap. Production simplex codes
+    /// perturb instead: relax each basic variable's bounds by a tiny
+    /// pseudo-random amount, so the vertex is no longer degenerate and
+    /// ordinary pricing makes progress.
+    ///
+    /// At the perturbed optimum the true bounds come back: nonbasic variables
+    /// snap onto them, the basics are recomputed, phase 1 removes whatever
+    /// infeasibility the snap left, and phase 2 runs once more unperturbed —
+    /// with Bland's rule as its stall escape, so the answer is always a vertex
+    /// of the *original* problem.
     fn run_phase2(&mut self) -> Option<()> {
+        self.may_perturb = true;
+        let first = self.run_phase2_pass();
+        self.may_perturb = false;
+        if self.unperturbed.is_some() {
+            self.remove_perturbation()?;
+            first?;
+            self.run_phase1()?;
+            return self.run_phase2_pass();
+        }
+        first
+    }
+
+    /// Relax every basic variable's finite bounds outward by
+    /// `PERTURB·r·(1 + |bound|)`, `r ∈ [1, 2)` pseudo-random per variable,
+    /// remembering the originals.
+    fn perturb_basic_bounds(&mut self) {
+        self.unperturbed = Some((self.lo.clone(), self.hi.clone()));
+        let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+        for slot in 0..self.m {
+            let v = self.basis[slot];
+            h ^= h << 13;
+            h ^= h >> 7;
+            h ^= h << 17;
+            let r = 1.0 + (h % 1024) as f64 / 1024.0;
+            if self.lo[v].is_finite() {
+                self.lo[v] -= PERTURB * r * (1.0 + self.lo[v].abs());
+            }
+            if self.hi[v].is_finite() {
+                self.hi[v] += PERTURB * r * (1.0 + self.hi[v].abs());
+            }
+        }
+    }
+
+    /// Put the true bounds back, move every nonbasic onto its (true) bound,
+    /// and recompute the basics from them.
+    fn remove_perturbation(&mut self) -> Option<()> {
+        let (lo, hi) = self.unperturbed.take()?;
+        self.lo = lo;
+        self.hi = hi;
+        for v in 0..self.nv {
+            if self.slot_of[v] == usize::MAX {
+                match self.nb[v] {
+                    NbStatus::AtLower => self.xval[v] = self.lo[v],
+                    NbStatus::AtUpper => self.xval[v] = self.hi[v],
+                    NbStatus::FreeZero | NbStatus::Superbasic => {}
+                }
+            }
+        }
+        self.recompute_basics()
+    }
+
+    fn run_phase2_pass(&mut self) -> Option<()> {
         self.phase = 2;
         let max_iter = 20 * (self.m + self.nv) + 1000;
         self.bland = false;
@@ -1285,7 +1433,12 @@ impl Simplex {
                 if theta.abs() <= FEAS_TOL {
                     self.stall += 1;
                     if self.stall >= STALL_LIMIT {
-                        self.bland = true;
+                        if self.may_perturb && self.unperturbed.is_none() {
+                            self.perturb_basic_bounds();
+                            self.stall = 0;
+                        } else {
+                            self.bland = true;
+                        }
                     }
                 } else {
                     self.stall = 0;

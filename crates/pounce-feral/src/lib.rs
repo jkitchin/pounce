@@ -1563,6 +1563,142 @@ fn relative_residual(
     Some(r_norm / b_norm)
 }
 
+/// Find the dependent rows of a constraint Jacobian `J` (an
+/// `n_rows × n_cols` matrix given as a 1-based triplet) by
+/// rank-revealing the scaled augmented system
+///
+/// ```text
+///     M = [ s·I_n   Jᵀ ]    s = max(1, max|J|),  d = n_cols + n_rows
+///         [   J     0  ]
+/// ```
+///
+/// `M` is symmetric with `rank(M) = n_cols + rank(J)`, so it has
+/// exactly `n_rows − rank(J)` singular pivots — one per dependent
+/// row. Scaling the identity block by `s ≥ max|J|` keeps every
+/// `x`-column's diagonal an acceptable pivot, so the singular pivots
+/// fall in the `J`-row block `[n_cols, d)` and `perm[k] − n_cols` is
+/// the dependent row for each singular pivot position `k`. Working off
+/// the well-conditioned augmented system (rather than `JJᵀ`, whose
+/// squared conditioning blurs near-dependent rows) is the standard
+/// Ipopt `DetermineDependentRows` recipe.
+///
+/// The LU is threshold-Markowitz at feral's default `u = 0.1` (gh#1061).
+/// It was Gilbert–Peierls in an AMD order with strict partial pivoting,
+/// which on the step QPs of 10⁴-row NLPs filled the factor 400–1000× (26–89
+/// million entries from 60–83 thousand) and took 1.7–24 s a call — the whole
+/// budget of the IPM→SQP handover's step-3 QP. And it was wrong as well as
+/// slow: against dense SVD of guard Jacobians captured from `brainpc2` it
+/// dropped 165 rows of which 90 were dependent and still left the kept set
+/// singular, and on another it dropped 2 of 3. On 660 generated
+/// dynamic-optimization Jacobians with dependencies built in it was wrong on
+/// about two thirds, over- and under-dropping both. Markowitz on the same
+/// corpus: no under-drop, one over-drop, at 0.07–0.25 s on the captured ones.
+/// `determine_dependent_rows_on_recurrence_jacobians_matches_dense_rank`
+/// pins 60 more of that shape (the old probe gets 47 of them wrong).
+///
+/// What Markowitz gives up is the partial-pivoting argument above: it picks
+/// pivot columns by fill, so a dependency's singular pivot *can* land on an
+/// `x`-row, and is then skipped (an under-report). Measured, that is the
+/// `u = 0.01` failure mode (0.3–15% of the corpus by size) and not
+/// `u = 0.1`'s; it is the reason the threshold is not lowered for sparsity. The extra rows
+/// `u = 0.1` drops on real Jacobians are rows whose singular value sits
+/// below ~3·10⁻⁵ of the largest, which is the band `dep_tol` below already
+/// calls dependent (a pivot scales like `σ²/s`).
+///
+/// Independent of any factorization state, so it is a free function: the
+/// active-set QP calls it directly when its KKT backend (MA57) has no sparse
+/// rank-reveal, instead of falling back to `O(k²·n)` dense Gram-Schmidt
+/// (gh#1061).
+pub fn determine_dependent_rows(
+    n_rows: Index,
+    n_cols: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+    c_deps: &mut Vec<Index>,
+) -> ESymSolverStatus {
+    use feral::{LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu};
+
+    c_deps.clear();
+    let n_rows = n_rows as usize;
+    let n_cols = n_cols as usize;
+    if n_rows == 0 {
+        return ESymSolverStatus::Success;
+    }
+    let nnz = vals.len();
+    if irn.len() != nnz || jcn.len() != nnz {
+        return ESymSolverStatus::FatalError;
+    }
+
+    // Identity-block scale: dominate every J entry so the x-columns
+    // pivot on their own diagonal (see method doc).
+    let a_max = vals.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let s = a_max.max(1.0);
+
+    // Build M column-by-column: cols[col] = list of (row, value).
+    let d = n_cols + n_rows;
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
+    for c in 0..n_cols {
+        cols[c].push((c, s)); // s·I_n on the leading x-columns
+    }
+    for t in 0..nnz {
+        let i = (irn[t] - 1) as usize; // 0-based J row
+        let c = (jcn[t] - 1) as usize; // 0-based J col
+        if i >= n_rows || c >= n_cols {
+            return ESymSolverStatus::FatalError; // malformed triplet
+        }
+        let v = vals[t];
+        cols[c].push((n_cols + i, v)); // J in the bottom-left block
+        cols[n_cols + i].push((c, v)); // Jᵀ in the top-right block
+    }
+
+    let m = match SparseColMatrix::from_sparse_columns(d, &cols) {
+        Ok(m) => m,
+        Err(_) => return ESymSolverStatus::FatalError,
+    };
+    // feral computes its singularity floor as ztol = zero_pivot_tol·max|M|
+    // (= zero_pivot_tol·s, since the identity scale dominates J) and
+    // perturbs singular pivots up to `abs_floor`; setting abs_floor = ztol
+    // keeps a perturbed pivot at the floor so it is detectable below.
+    let zero_pivot_tol = 1e-13;
+    let ztol = zero_pivot_tol * s;
+    let params = LuParams {
+        on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
+        scaling: LuScaling::None,
+        zero_pivot_tol,
+        // Threshold-Markowitz at feral's default `markowitz_threshold`
+        // (0.1): see the function doc for what this replaced and why the
+        // threshold is not lower.
+        pivoting: LuPivoting::Markowitz,
+        ..LuParams::default()
+    };
+    let lu = match SparseLu::factor_markowitz(&m, params) {
+        Ok(lu) => lu,
+        Err(_) => return ESymSolverStatus::FatalError,
+    };
+
+    // A pivot position is singular when its U diagonal sits at/below the
+    // detection floor; independent pivots are O(s) ≫ this floor. The
+    // s-scaling normally maps singular pivots to J-rows (perm[k] ≥
+    // n_cols), but a near-zero pivot can land on an x-row (see the
+    // function doc). We only collect J-row dependencies, so an x-row
+    // singular pivot is skipped, and that is an under-report: the pruning
+    // callers re-prune, but `factor_pinned_primal`'s masked-deficiency
+    // guard reads "nothing dropped" as full rank, so it is not free.
+    let dep_tol = 1e-9 * s;
+    let perm = lu.perm();
+    for k in 0..d {
+        if lu.u_dense(k, k).abs() <= dep_tol {
+            let r = perm[k];
+            if r >= n_cols {
+                c_deps.push((r - n_cols) as Index);
+            }
+        }
+    }
+    c_deps.sort_unstable();
+    ESymSolverStatus::Success
+}
+
 impl Default for FeralSolverInterface {
     fn default() -> Self {
         Self::new()
@@ -1730,26 +1866,8 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         true
     }
 
-    /// Find the dependent rows of a constraint Jacobian `J` (an
-    /// `n_rows × n_cols` matrix given as a 1-based triplet) by
-    /// rank-revealing the scaled augmented system
-    ///
-    /// ```text
-    ///     M = [ s·I_n   Jᵀ ]    s = max(1, max|J|),  d = n_cols + n_rows
-    ///         [   J     0  ]
-    /// ```
-    ///
-    /// `M` is symmetric with `rank(M) = n_cols + rank(J)`, so it has
-    /// exactly `n_rows − rank(J)` singular pivots — one per dependent
-    /// row. Scaling the identity block by `s ≥ max|J|` makes every
-    /// `x`-column's diagonal the column maximum, so feral's threshold
-    /// partial pivoting pins each of the first `n_cols` rows on its own
-    /// column; the singular pivots therefore fall exclusively in the
-    /// `J`-row block `[n_cols, d)`, and `perm[k] − n_cols` is the
-    /// dependent row for each singular pivot position `k`. Working off
-    /// the well-conditioned augmented system (rather than `JJᵀ`, whose
-    /// squared conditioning blurs near-dependent rows) is the standard
-    /// Ipopt `DetermineDependentRows` recipe.
+    /// See [`determine_dependent_rows`] — stateless; the free function is
+    /// what backends without a rank-reveal of their own borrow (gh#1061).
     fn determine_dependent_rows(
         &mut self,
         n_rows: Index,
@@ -1759,106 +1877,7 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         vals: &[Number],
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
-        use feral::{
-            LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu,
-            SparseLuSymbolic,
-        };
-
-        c_deps.clear();
-        let n_rows = n_rows as usize;
-        let n_cols = n_cols as usize;
-        if n_rows == 0 {
-            return ESymSolverStatus::Success;
-        }
-        let nnz = vals.len();
-        if irn.len() != nnz || jcn.len() != nnz {
-            return ESymSolverStatus::FatalError;
-        }
-
-        // Identity-block scale: dominate every J entry so the x-columns
-        // pivot on their own diagonal (see method doc).
-        let a_max = vals.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
-        let s = a_max.max(1.0);
-
-        // Build M column-by-column: cols[col] = list of (row, value).
-        let d = n_cols + n_rows;
-        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
-        for c in 0..n_cols {
-            cols[c].push((c, s)); // s·I_n on the leading x-columns
-        }
-        for t in 0..nnz {
-            let i = (irn[t] - 1) as usize; // 0-based J row
-            let c = (jcn[t] - 1) as usize; // 0-based J col
-            if i >= n_rows || c >= n_cols {
-                return ESymSolverStatus::FatalError; // malformed triplet
-            }
-            let v = vals[t];
-            cols[c].push((n_cols + i, v)); // J in the bottom-left block
-            cols[n_cols + i].push((c, v)); // Jᵀ in the top-right block
-        }
-
-        let m = match SparseColMatrix::from_sparse_columns(d, &cols) {
-            Ok(m) => m,
-            Err(_) => return ESymSolverStatus::FatalError,
-        };
-        // Fill-reducing (AMD) order — `natural` blows up on large augmented
-        // systems (gen: d≈6000). The dependent-row mapping below is unaffected:
-        // it reads the *row pivot* permutation `perm()`, and the s-scaling pins
-        // each x-column to its own x-row diagonal regardless of column order.
-        //
-        // This symbolic is only honoured because `params` below pins
-        // `LuPivoting::GilbertPeierls`. feral 0.16 (feral#171) made
-        // `Markowitz` the default, and Markowitz chooses its column order
-        // during the factorization and ignores the symbolic argument outright
-        // — the AMD claim in the paragraph above would quietly stop being
-        // true about the factor this function actually reads.
-        let symbolic = match SparseLuSymbolic::analyze(&m) {
-            Ok(sym) => sym,
-            Err(_) => return ESymSolverStatus::FatalError,
-        };
-
-        // feral computes its singularity floor as ztol = zero_pivot_tol·max|M|
-        // (= zero_pivot_tol·s, since the identity scale dominates J) and
-        // perturbs singular pivots up to `abs_floor`; setting abs_floor = ztol
-        // keeps a perturbed pivot at the floor so it is detectable below.
-        let zero_pivot_tol = 1e-13;
-        let ztol = zero_pivot_tol * s;
-        let params = LuParams {
-            on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
-            scaling: LuScaling::None,
-            zero_pivot_tol,
-            // See the `SparseLuSymbolic::analyze` comment above: the
-            // dependent-row scan is written against the AMD order, so the
-            // symbolic has to be the thing that decides it.
-            pivoting: LuPivoting::GilbertPeierls,
-            ..LuParams::default()
-        };
-        let lu = match SparseLu::factor(&m, &symbolic, params) {
-            Ok(lu) => lu,
-            Err(_) => return ESymSolverStatus::FatalError,
-        };
-
-        // A pivot position is singular when its U diagonal sits at/below the
-        // detection floor; independent pivots are O(s) ≫ this floor. The
-        // s-scaling normally maps singular pivots to J-rows (perm[k] ≥
-        // n_cols), but under heavy degeneracy (e.g. the elastic phase-1
-        // vertices of NETLIB afiro/gen) AMD fill-in plus the Jᵀ coupling can
-        // push a near-zero pivot onto an x-row. That is not an invariant
-        // violation — we only collect J-row dependencies, so an x-row
-        // singular pivot is simply skipped. Under-reporting here is safe:
-        // the caller re-prunes / inertia-shifts on the next iteration.
-        let dep_tol = 1e-9 * s;
-        let perm = lu.perm();
-        for k in 0..d {
-            if lu.u_dense(k, k).abs() <= dep_tol {
-                let r = perm[k];
-                if r >= n_cols {
-                    c_deps.push((r - n_cols) as Index);
-                }
-            }
-        }
-        c_deps.sort_unstable();
-        ESymSolverStatus::Success
+        determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
     }
 
     /// Walk feral's per-supernode `NodeFactors` to assemble the LDLᵀ
@@ -2967,6 +2986,142 @@ mod tests {
             "one dependency among 3 rows, got {c_deps:?}"
         );
         assert!(c_deps[0] <= 2, "row index in range: {c_deps:?}");
+    }
+
+    /// gh#1061: dynamic-optimization-shaped Jacobians with dependencies built
+    /// in — an `ns`-state recurrence over `steps` steps with one control, plus
+    /// rows that sum long runs of it (long-range dependents), scaled
+    /// duplicates and unit (bound) rows, which is what an SQP step QP's active
+    /// set looks like on a collocation model. Against an exact dense rank,
+    /// the dropped rows must be exactly the surplus and the kept rows
+    /// independent.
+    ///
+    /// Gilbert–Peierls in an AMD order with strict partial pivoting — what
+    /// this probe was before gh#1061 — gets 47 of these 60 wrong: 33
+    /// over-drops, 8 under-drops, and 6 with the right count but a kept set
+    /// that is still singular, which is the one thing the guard is for.
+    /// Threshold-Markowitz at `u = 0.1` gets none wrong.
+    #[test]
+    fn determine_dependent_rows_on_recurrence_jacobians_matches_dense_rank() {
+        let mut wrong = Vec::new();
+        for seed in 1..=60u64 {
+            let (n_rows, n_cols, rows) = recurrence_jacobian(seed, 4, 25);
+            let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, row) in rows.iter().enumerate() {
+                for &(c, v) in row {
+                    irn.push(i as Index + 1);
+                    jcn.push(c as Index + 1);
+                    vals.push(v);
+                }
+            }
+            let mut deps = Vec::new();
+            let st = determine_dependent_rows(
+                n_rows as Index,
+                n_cols as Index,
+                &irn,
+                &jcn,
+                &vals,
+                &mut deps,
+            );
+            assert_eq!(st, ESymSolverStatus::Success, "seed {seed}");
+            let surplus = n_rows - dense_rank(n_cols, &rows);
+            let kept: Vec<Vec<(usize, f64)>> = (0..n_rows)
+                .filter(|i| !deps.contains(&(*i as Index)))
+                .map(|i| rows[i].clone())
+                .collect();
+            if deps.len() != surplus || dense_rank(n_cols, &kept) != kept.len() {
+                wrong.push((seed, deps.len(), surplus));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "(seed, dropped, surplus) where the probe was wrong: {wrong:?}"
+        );
+    }
+
+    /// Rows `(col, value)` of the gh#1061 recurrence Jacobian for `seed`.
+    fn recurrence_jacobian(
+        seed: u64,
+        ns: usize,
+        steps: usize,
+    ) -> (usize, usize, Vec<Vec<(usize, f64)>>) {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() % 1_000_000) as f64 / 1_000_000.0;
+        let nx = ns * (steps + 1);
+        let n_cols = nx + steps;
+        let x = |t: usize, s: usize| t * ns + s;
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        for t in 0..steps {
+            for s in 0..ns {
+                rows.push(vec![
+                    (x(t + 1, s), 1.0),
+                    (x(t, s), -1.0 - 0.1 * unit()),
+                    (x(t, (s + 1) % ns), -0.1 * unit()),
+                    (nx + t, -0.05 - 0.1 * unit()),
+                ]);
+            }
+        }
+        let base = rows.len();
+        let pick = |u: f64, n: usize| ((u * n as f64) as usize).min(n - 1);
+        let n_agg = 1 + pick(unit(), 6);
+        let n_dup = pick(unit(), 8);
+        let n_bnd = pick(unit(), ns * steps / 4 + 1);
+        for _ in 0..n_agg {
+            let start = pick(unit(), base / 2);
+            let len = base / 4 + pick(unit(), base / 4);
+            let mut acc = std::collections::BTreeMap::<usize, f64>::new();
+            for row in &rows[start..(start + len).min(base)] {
+                let w = 0.5 + unit();
+                for &(c, v) in row {
+                    *acc.entry(c).or_default() += w * v;
+                }
+            }
+            rows.push(acc.into_iter().filter(|e| e.1 != 0.0).collect());
+        }
+        for _ in 0..n_dup {
+            let i = pick(unit(), base);
+            let w = 1.0 + 3.0 * unit();
+            let row = rows[i].iter().map(|&(c, v)| (c, w * v)).collect();
+            rows.push(row);
+        }
+        for _ in 0..n_bnd {
+            rows.push(vec![(pick(unit(), n_cols), 1.0)]);
+        }
+        (rows.len(), n_cols, rows)
+    }
+
+    /// Numerical rank of `rows` by modified Gram-Schmidt with one
+    /// reorthogonalization pass.
+    fn dense_rank(n_cols: usize, rows: &[Vec<(usize, f64)>]) -> usize {
+        let scale = rows
+            .iter()
+            .flat_map(|r| r.iter().map(|e| e.1.abs()))
+            .fold(1.0_f64, f64::max);
+        let mut basis: Vec<Vec<f64>> = Vec::new();
+        for r in rows {
+            let mut v = vec![0.0; n_cols];
+            for &(c, x) in r {
+                v[c] += x;
+            }
+            for _ in 0..2 {
+                for q in &basis {
+                    let d: f64 = q.iter().zip(&v).map(|(a, b)| a * b).sum();
+                    v.iter_mut().zip(q).for_each(|(a, b)| *a -= d * b);
+                }
+            }
+            let nv = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if nv > 1e-9 * scale {
+                v.iter_mut().for_each(|x| *x /= nv);
+                basis.push(v);
+            }
+        }
+        basis.len()
     }
 
     // ---------------------------------------------------------------

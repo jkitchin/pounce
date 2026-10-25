@@ -327,6 +327,11 @@ if let Some(r) = app.crossover_report() {
     println!("estimated {} active before pivoting", r.estimated_active);
     println!("KKT {:e} -> {:e}", r.kkt_before, r.kkt_after);
     println!("complementarity (declared frame): {:e}", r.compl_after);
+    if let Some(q) = &r.eqp {                     // the step-3 QP, when it ran
+        println!("step-3 QP: {:?} in {:?}", q.outcome, q.time);
+        println!("  {} working-set changes, {} refactors, {} rank tests",
+                 q.working_set_changes, q.refactors, q.rank_guard_calls);
+    }
 }
 
 // The identified set, ready to seed an `algorithm=active-set-sqp` solve.
@@ -337,6 +342,12 @@ let ws = app.last_sqp_working_set();
 about a solve, and the reason `crossover_report()` distinguishes them: a
 consumer reasoning about active-set certainty must not read a declined
 crossover as a confirmed active set.
+
+A `QpFailed` decline covers every way the step-3 QP can miss `Optimal`: an
+iteration cap, an infeasible verdict, a hard linear-solver error. `eqp.outcome`
+says which one happened, and its counters show where a slow QP spent its time
+(gh#1061). The same report is printed at debug level under the
+`pounce::crossover` target.
 
 `estimated_active` versus `active_bounds + active_constraints` is the
 measurement the phase exists to make. They differ exactly where the
@@ -351,7 +362,9 @@ as long as it took.
 ## Handing over before convergence (`ipm_sqp_handover`)
 
 ```
-ipm_sqp_handover               yes | no   (default: no)
+ipm_sqp_handover               yes | no   (default: no; yes under
+                                          algorithm=active-set-sqp at
+                                          n + m ≥ 5000, gh#1061)
 ipm_sqp_handover_tol           number     (default: 1e-4)
 ipm_sqp_handover_stall_iter    integer    (default: 0, off)
 ipm_sqp_handover_max_attempts  integer    (default: 3)
