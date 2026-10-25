@@ -21,7 +21,11 @@
 //!
 //! `IpoptAlgorithm::invoke_restoration` now ends that on the first re-entry
 //! from the handed-back point and reports upstream's verdict,
-//! `Restoration_Failed`, through the acceptable-point rollback.
+//! `Restoration_Failed`, through the acceptable-point rollback. The solve
+//! statistics flag the exit (`unreleased_handback_exit`), and the
+//! second-opinion ladder opens `mu_strategy=adaptive` on that one
+//! `Restoration_Failed` ahead of the displaced start every restoration
+//! failure gets (`SecondOpinionTrigger::UnreleasedHandback`).
 //!
 //! Each fixture reaches a different branch of the rule. A fixture that only
 //! takes one says nothing about the others:
@@ -127,7 +131,7 @@ fn solve_path(path: PathBuf, name: &str, tag: &str, env: &[(&str, &str)], opts: 
 /// The branch the change adds. The base solve must end on the new exit, with
 /// upstream's verdict, and not on the near-feasible detector that used to end
 /// it 21 iterations later. The second-opinion ladder must still recover the
-/// model from there.
+/// model from there, and must reach `mu_strategy=adaptive` to do it.
 #[test]
 fn a_handback_the_outer_cannot_leave_fails_restoration() {
     let run = solve("ssebnln.nl", "ssebnln");
@@ -166,9 +170,25 @@ fn a_handback_the_outer_cannot_leave_fails_restoration() {
          of where the near-feasible detector used to stop the solve (138); got {}",
         so.base_iteration_count
     );
-    assert!(
-        so.promoted_by.is_some(),
-        "the ladder must still recover ssebnln"
+    // The ladder routing (gh#1042 "ladder routing"). `Restoration_Failed`
+    // alone opens only the displaced start; this exit's opens
+    // `mu_strategy=adaptive` ahead of it, which is the rung that recovered
+    // brainpc0/1/2 on arm64 while the exit still reported
+    // `Error_In_Step_Computation`. On ssebnln it recovers the model in 41
+    // (158 in total), where the displaced start took 122 (239).
+    // Mutation-checked: reading `for_status` instead of `for_solve` in the
+    // ladder driver promotes `start_point_perturbation=1e-2` here.
+    assert_eq!(
+        so.tried.first().map(String::as_str),
+        Some("mu_strategy=adaptive"),
+        "this exit's Restoration_Failed must open the barrier rung first; \
+         ladder tried {:?}",
+        so.tried
+    );
+    assert_eq!(
+        so.promoted_by.as_deref(),
+        Some("mu_strategy=adaptive"),
+        "the ladder must still recover ssebnln, through the barrier rung"
     );
     assert!(matches!(
         run.report.solution.status,

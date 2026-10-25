@@ -463,6 +463,9 @@ pub struct IpoptAlgorithm {
     /// rolls back to it has not left it either. Replaced at every recovery.
     last_resto_unreleased_x: Option<Box<dyn Vector>>,
     last_resto_unreleased_s: Option<Box<dyn Vector>>,
+    /// Set when the gh#1042 exit below ended this solve (see
+    /// [`Self::unreleased_handback_exit`]). Never cleared within a solve.
+    unreleased_handback_exit: bool,
     /// Count of consecutive restoration entries on which the outer
     /// step (recovery → next-entry) was below the iterate-distance
     /// threshold. Cleared on any LS-accepted step. Limit chosen to
@@ -713,6 +716,7 @@ impl IpoptAlgorithm {
             last_resto_recovery_x: None,
             last_resto_unreleased_x: None,
             last_resto_unreleased_s: None,
+            unreleased_handback_exit: false,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
             resto_decline_deferrals: DEFAULT_RESTO_DECLINE_DEFERRALS,
@@ -3723,6 +3727,15 @@ impl IpoptAlgorithm {
         self.dual_divergence_signature
     }
 
+    /// Whether this solve ended on the gh#1042 exit: the outer re-entered
+    /// restoration from an unreleased converged-to-feasible hand-back
+    /// without leaving it. Read by the second-opinion ladder, which opens
+    /// its `mu_strategy=adaptive` rung on that `Restoration_Failed` and on
+    /// no other (see `SecondOpinionTrigger::UnreleasedHandback`).
+    pub fn unreleased_handback_exit(&self) -> bool {
+        self.unreleased_handback_exit
+    }
+
     /// gh#990 item 13: whether a strict termination certificate was refused
     /// because the objective scaling masked it (sticky for the solve).
     pub fn obj_scale_certificate_refused(&self) -> bool {
@@ -4203,6 +4216,13 @@ impl IpoptAlgorithm {
         // gets here — its feasible point leaves restoration as
         // `FeasiblePointFound`.
         //
+        // The exit also sets `unreleased_handback_exit`, which the
+        // second-opinion ladder reads: this `Restoration_Failed`, and no other,
+        // opens `mu_strategy=adaptive` ahead of the displaced start
+        // (`SecondOpinionTrigger::UnreleasedHandback`). Before the status was
+        // upstream's, this exit reported `Error_In_Step_Computation`, whose one
+        // rung is adaptive, and that rung is what recovered brainpc0/1/2.
+        //
         // Measured on Vanderbei brainpc1 (FERAL 0.21): the first such
         // re-entry is outer iteration 378, after 13 restoration calls;
         // without this exit the solve ran 39 more, to 1073. brainpc0: 956
@@ -4235,6 +4255,7 @@ impl IpoptAlgorithm {
                  (accepted steps in between: {}); ending the solve with {:?} (gh#1042).",
                 !recovery_cycle, verdict,
             );
+            self.unreleased_handback_exit = true;
             return self.terminate_acceptable_or(verdict);
         }
         if recovery_cycle {

@@ -72,6 +72,27 @@ pub enum SecondOpinionTrigger {
     /// this is a statement about the trajectory the solve happened to take,
     /// not about the model; see [`SecondOpinionTrigger::for_status`].
     RestorationFailure,
+    /// `Restoration_Failed` from one exit only: gh#1042's unreleased
+    /// hand-back, where restoration converged to a point feasible for the
+    /// original problem that it never released, handed it back, and the
+    /// outer re-entered restoration from that very point
+    /// (`SolveStatistics::unreleased_handback_exit`). Every rung
+    /// [`Self::RestorationFailure`] opens, plus `mu_strategy=adaptive` ahead
+    /// of them.
+    ///
+    /// The extra rung is measured, not reasoned. Before the exit reported
+    /// upstream's status it reported `Error_In_Step_Computation`, which
+    /// opens the adaptive rung alone, and on arm64 that rung recovered
+    /// Vanderbei `brainpc0` / `brainpc1` / `brainpc2` (2117 → 956 base,
+    /// 1073 → 378, 561 → 258, each then solved by adaptive), while
+    /// `brainpc0` under `start_point_perturbation` ran to 3000 iterations
+    /// and failed. Opening it on every `Restoration_Failed` would instead
+    /// change the ladder of the whole gh#815 family, where the displaced
+    /// start is the measured winner (13 of 15 against adaptive's 4), so the
+    /// trigger is this exit's alone. It is produced only by
+    /// [`Self::for_solve`]; [`Self::for_status`] never returns it, because
+    /// the status alone cannot tell the two `Restoration_Failed`s apart.
+    UnreleasedHandback,
     /// `Error_In_Step_Computation` — the step computation broke down: the
     /// KKT system could not be made to yield a usable step, even after
     /// regularization. Like a restoration failure and unlike a budget exit,
@@ -276,7 +297,12 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     // usable, and a different μ schedule is a different trajectory. See
     // `SecondOpinionTrigger::StepComputationError` for the deb7 numbers.
     if avail.baseline_scaling.is_some()
-        && (infeasible || avail.trigger == SecondOpinionTrigger::StepComputationError)
+        && (infeasible
+            || matches!(
+                avail.trigger,
+                SecondOpinionTrigger::StepComputationError
+                    | SecondOpinionTrigger::UnreleasedHandback
+            ))
         && avail.mu_retry_enabled
         && !avail.already_adaptive
     {
@@ -328,6 +354,7 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     if matches!(
         avail.trigger,
         SecondOpinionTrigger::RestorationFailure
+            | SecondOpinionTrigger::UnreleasedHandback
             | SecondOpinionTrigger::IterationLimit
             | SecondOpinionTrigger::LocalInfeasibility
     ) && avail.increase_quality_retry_enabled
@@ -425,7 +452,9 @@ impl SecondOpinionTrigger {
     ///
     /// Only rung 3 opens on this trigger; rungs 1 and 2 stay gated on
     /// [`SecondOpinionTrigger::LocalInfeasibility`], so a restoration failure
-    /// costs exactly one extra solve. That is the measured ordering, not
+    /// costs exactly one extra solve. (One exit's `Restoration_Failed` is the
+    /// exception, and the status cannot show it: see
+    /// [`SecondOpinionTrigger::UnreleasedHandback`] and [`Self::for_solve`].) That is the measured ordering, not
     /// caution for its own sake: over the KRONOS corpus the displaced start
     /// recovered 13 of 15 where `mu_strategy=adaptive` recovered 4 (see
     /// `start_point_retry`'s option text).
@@ -474,6 +503,24 @@ impl SecondOpinionTrigger {
         }
     }
 
+    /// [`Self::for_status`], refined by what the finished solve reports about
+    /// how it got there. The one refinement: a `Restoration_Failed` that the
+    /// gh#1042 exit produced is [`Self::UnreleasedHandback`], which opens the
+    /// `mu_strategy=adaptive` rung no other restoration failure opens.
+    pub fn for_solve(
+        status: ApplicationReturnStatus,
+        statistics: &SolveStatistics,
+    ) -> Option<Self> {
+        match Self::for_status(status) {
+            Some(SecondOpinionTrigger::RestorationFailure)
+                if statistics.unreleased_handback_exit =>
+            {
+                Some(SecondOpinionTrigger::UnreleasedHandback)
+            }
+            other => other,
+        }
+    }
+
     /// The verdict alone, with no claim about how the solve got there —
     /// for a console line that does not depend on an escalation having
     /// happened (the square-system stage opens on a budget exit that never
@@ -494,6 +541,9 @@ impl SecondOpinionTrigger {
             SecondOpinionTrigger::LocalInfeasibility => "local infeasibility",
             SecondOpinionTrigger::InvalidNumber => "invalid number",
             SecondOpinionTrigger::RestorationFailure => "restoration failure",
+            SecondOpinionTrigger::UnreleasedHandback => {
+                "restoration failure at an unreleased feasible hand-back"
+            }
             SecondOpinionTrigger::StepComputationError => "step computation breakdown",
             SecondOpinionTrigger::IterationLimit => {
                 "iteration limit after a factorization escalation"
@@ -946,6 +996,86 @@ mod scaling_retry_tests {
             rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
             ["start_point_perturbation=1e-2", "feral_increase_quality=no",],
         );
+    }
+
+    /// gh#1042. The one `Restoration_Failed` that also opens the barrier
+    /// rung: the unreleased-hand-back exit. Adaptive goes first — it is what
+    /// recovered Vanderbei `brainpc0`/`1`/`2` on arm64 when this exit still
+    /// reported `Error_In_Step_Computation`, where the displaced start ran
+    /// `brainpc0` to 3000 iterations and failed — and every rung a plain
+    /// restoration failure opens follows it, in the same order.
+    #[test]
+    fn an_unreleased_handback_exit_opens_the_barrier_rung_first() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::UnreleasedHandback,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["mu_strategy=adaptive", "start_point_perturbation=1e-2"],
+        );
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::UnreleasedHandback,
+            baseline_quality_escalations: 2,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            [
+                "mu_strategy=adaptive",
+                "start_point_perturbation=1e-2",
+                "feral_increase_quality=no",
+            ],
+        );
+        // Under L-BFGS an unset strategy is already adaptive (gh#746), so
+        // the rung would repeat the base solve; the trigger does not
+        // override that skip.
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::UnreleasedHandback,
+            already_adaptive: true,
+            ..avail()
+        });
+        assert_eq!(
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["start_point_perturbation=1e-2"],
+        );
+    }
+
+    /// The refinement is the exit's alone: `for_solve` names
+    /// `UnreleasedHandback` only for a `Restoration_Failed` whose statistics
+    /// carry the exit's flag, and changes nothing else — not a plain
+    /// restoration failure, and not another status that happens to carry
+    /// the flag (the exit's `Infeasible_Problem_Detected` arm, or an
+    /// acceptable-point rollback).
+    #[test]
+    fn only_the_unreleased_handback_exit_refines_a_restoration_failure() {
+        use ApplicationReturnStatus as A;
+        let flagged = SolveStatistics {
+            unreleased_handback_exit: true,
+            ..SolveStatistics::default()
+        };
+        let plain = SolveStatistics::default();
+        assert_eq!(
+            SecondOpinionTrigger::for_solve(A::RestorationFailed, &flagged),
+            Some(SecondOpinionTrigger::UnreleasedHandback),
+        );
+        assert_eq!(
+            SecondOpinionTrigger::for_solve(A::RestorationFailed, &plain),
+            Some(SecondOpinionTrigger::RestorationFailure),
+        );
+        for status in [
+            A::InfeasibleProblemDetected,
+            A::SolvedToAcceptableLevel,
+            A::ErrorInStepComputation,
+            A::MaximumIterationsExceeded,
+            A::InvalidNumberDetected,
+        ] {
+            assert_eq!(
+                SecondOpinionTrigger::for_solve(status, &flagged),
+                SecondOpinionTrigger::for_status(status),
+                "{status:?}: the flag must not change this verdict's ladder"
+            );
+        }
     }
 
     /// The whole ladder on a budget exit is rung 4, and it is there only

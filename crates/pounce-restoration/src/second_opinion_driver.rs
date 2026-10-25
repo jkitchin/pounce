@@ -168,7 +168,7 @@ pub fn run_second_opinion_ladder(
         }};
     }
 
-    let Some(trigger) = SecondOpinionTrigger::for_status(status) else {
+    let Some(trigger) = SecondOpinionTrigger::for_solve(status, &statistics) else {
         finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     };
     let avail = SecondOpinionAvailability::from_options(

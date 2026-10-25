@@ -6922,6 +6922,8 @@ impl IpoptApplication {
             // own `PdFullSpaceSolver`, so restoration sub-solves — which
             // run their own solver instance — are included.
             stats.quality_escalations = self.quality_escalations.get() as Index;
+            // gh#1042: which `Restoration_Failed` this is, for the ladder.
+            stats.unreleased_handback_exit = alg.unreleased_handback_exit();
             // gh#884. Read off the algorithm that just ran, so
             // `run_with_dual_divergence_retry` — which sits above this
             // call — can see what it observed.

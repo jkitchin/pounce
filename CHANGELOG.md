@@ -218,31 +218,46 @@ changes.
   - **Exemption.** An entry forced by a non-finite Hessian is exempt.
   - **Upstream's second throw site** is marked the same way: an inner stop
     at its acceptable level, feasible to `1e2·tol`.
+  - **Ladder routing.** A plain `Restoration_Failed` opens only the
+    displaced-start rung (gh #815), but this exit's opens
+    `mu_strategy=adaptive` ahead of it, and only this exit's: the solve
+    statistics carry an `unreleased_handback_exit` flag and the ladder's
+    trigger is refined from it. Before the status change this exit reported
+    `Error_In_Step_Computation`, whose one rung is adaptive, and on arm64
+    that rung recovered Vanderbei `brainpc0`/`1`/`2`, while
+    `start_point_perturbation` ran `brainpc0` to 3000 iterations and failed.
+    Every other `Restoration_Failed` keeps its ladder unchanged. Under
+    L-BFGS the rung is skipped as before, because the strategy is already
+    adaptive.
   - **Fixture sweep, x86_64, both legs.** `ssebnln` (exact) now ends its
     base solve `Restoration_Failed` at 117, where the near-feasible detector
-    ended it `Error_In_Step_Computation` at 138. That status routes the
-    ladder to `start_point_perturbation` rather than `mu_strategy=adaptive`:
-    the same objective, now `Optimal` rather than
-    `Solved_To_Acceptable_Level`, at 239 iterations in total against 179 — a
-    measured cost, tracked on gh #1042. `deb7` (L-BFGS) reaches the
-    acceptable-stop site and ends its base solve at 982 rather than 1206,
-    same status, 1738 → 1514 in total. No other fixture-leg moves, apart
-    from the ladder fix below.
-  - **Vanderbei `brainpc*`, measured on arm64 under the earlier
-    `Error_In_Step_Computation` status** (before the status change and the
-    position test): base solves `brainpc0` 2117 → 956, `brainpc1`
-    1073 → 378, `brainpc2` 561 → 258, each recovered by
-    `mu_strategy=adaptive`. `Restoration_Failed` does not open that rung, so
-    these need re-measuring before release.
+    ended it `Error_In_Step_Computation` at 138; the adaptive rung then
+    recovers it to the same objective (16170599.81,
+    `Solved_To_Acceptable_Level`) in 41, 158 iterations in total against 179.
+    `deb7` (L-BFGS) reaches the acceptable-stop site and ends its base solve
+    at 982 rather than 1206, same status, 1738 → 1514 in total. No other
+    fixture-leg moves, apart from the ladder fix below.
+  - **Vanderbei `brainpc0`–`brainpc9`, x86_64, both legs.** The exit fires
+    on `brainpc9` (L-BFGS) only, ending the base solve
+    `Solved_To_Acceptable_Level` at 1232 through the acceptable-point
+    rollback, where `main` fails it `Error_In_Step_Computation` at 1283
+    (2566 with the ladder). Every other model and leg reproduces `main`.
+    On arm64, measured under the earlier `Error_In_Step_Computation` status
+    (before the status change and the position test), base solves went
+    `brainpc0` 2117 → 956, `brainpc1` 1073 → 378, `brainpc2` 561 → 258, each
+    recovered by adaptive; the routing above keeps that rung reachable, and
+    the arm64 numbers on this head are still to be re-measured.
 - **The second-opinion ladder no longer re-runs an L-BFGS solve as its
   `mu_strategy=adaptive` rung.** Under a limited-memory Hessian an unset
   `mu_strategy` already resolves to adaptive (gh #746). The ladder read the
   raw option, so the rung repeated the base solve byte-for-byte (`deb7`
   on arm64: 1610 iterations and `f = 99.636943584` both times). It now reads the
   resolved strategy, as the μ-strategy fallback does.
-  - Thirteen L-BFGS fixture-legs drop that rung, each total falling by
-    exactly its base iteration count, with no change in verdict. For example, `eigena2` 478 → 239 total and
-    `issue_508_infeasible_gap_1em4` 346 → 267 total.
+  - Twelve L-BFGS fixture-legs drop that rung, each total falling by
+    exactly its base iteration count, with no change in verdict. For
+    example, `eigena2` 478 → 239 total and `issue_508_infeasible_gap_1em4`
+    346 → 267 total. (Thirteen before the `|x|^p·|x|^q` merge below:
+    `dallass` no longer reaches the ladder.)
 - **The active-set QP engine no longer cycles on an over-full active set
   that FERAL 0.21 factors without complaint (gh #1042).** Bisected to the
   FERAL 0.21 upgrade (#1038): on NETLIB `DEGEN2` (`lp_degen2`) under
