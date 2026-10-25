@@ -5032,7 +5032,12 @@ impl IpoptAlgorithm {
                 // second `optimize` on the same bundle — is left alone,
                 // and a backend with a structural analysis (MA57) never
                 // reports a change.
-                if aug_solver.analysis_count() != analyses_before && aug_solver.forget_analysis() {
+                // EXPERIMENT: off unless `POUNCE_EXP_FORGET_INIT=1`, so one
+                // binary measures both `main` (unset) and PR #1046 (`=1`).
+                if std::env::var("POUNCE_EXP_FORGET_INIT").ok().as_deref() == Some("1")
+                    && aug_solver.analysis_count() != analyses_before
+                    && aug_solver.forget_analysis()
+                {
                     tracing::debug!(
                         target: "pounce::linsol",
                         "dropped the symbolic analysis built on the multiplier-init system",

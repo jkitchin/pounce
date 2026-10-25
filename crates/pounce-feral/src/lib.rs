@@ -1049,6 +1049,12 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
     // carry heap `External` variants and are no longer `Copy`.
     solver = solver.with_ordering(cfg.ordering.clone());
     solver = solver.with_scaling(cfg.scaling.clone());
+    // EXPERIMENT (feral#227): `POUNCE_FERAL_REANALYSIS=on_stale` builds every
+    // FERAL backend with `ReanalysisPolicy::OnStale(default)`; anything else
+    // keeps feral's default `Never`.
+    if std::env::var("POUNCE_FERAL_REANALYSIS").ok().as_deref() == Some("on_stale") {
+        solver = solver.with_reanalysis(feral::ReanalysisPolicy::OnStale(Default::default()));
+    }
     solver
 }
 

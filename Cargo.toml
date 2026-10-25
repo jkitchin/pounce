@@ -370,3 +370,10 @@ debug = 1
 # still assert everything they did before.
 [profile.test]
 opt-level = 2
+
+# EXPERIMENT BRANCH ONLY -- never merge (a git dep blocks the crates.io
+# publish). Builds pounce against jkitchin/feral#228 (ReanalysisPolicy,
+# feral#227) at its head commit so OnStale can be measured end to end
+# before any feral release. See EXPERIMENT-feral-onstale.md.
+[patch.crates-io]
+feral = { git = "https://github.com/jkitchin/feral.git", rev = "58e2a46738302a4a9891f82c3e6c67108e5f4a3c" }
