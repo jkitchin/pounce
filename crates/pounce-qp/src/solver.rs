@@ -143,10 +143,11 @@ pub struct ParametricActiveSetSolver {
 }
 
 /// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
-/// has removed during one Schur pass.
+/// has removed during one Schur pass, and whether it has stood down.
 #[derive(Default)]
 struct CountPrune {
     removed: Vec<bool>,
+    off: bool,
 }
 
 impl ParametricActiveSetSolver {
@@ -3380,34 +3381,28 @@ impl ParametricActiveSetSolver {
             // slot 721, the next step re-added it at `α = 0`, the following add
             // made the set over-full again, and the prune dropped 721 again: a
             // three-iteration cycle until the iteration limit, on a QP the
-            // unpruned loop solves (QFFFFF80 the same). So a prune that would
-            // remove a slot an earlier prune in this pass already removed --
-            // one the loop has since re-admitted -- is not applied: the set is
-            // factored as it stands, as before the counting trigger existed.
-            // Prunes of other slots still run. Standing the trigger down for
-            // the rest of the pass instead was measured and rejected: it broke
-            // QGFRDXPN (`ErrorInStepComputation`, where main and this rule end
-            // acceptable). The factorization-failure repair below is
-            // unaffected.
-            if ac > qp.n && *budget > 0 {
-                let before = working.clone();
-                let changes_before = *n_changes;
+            // unpruned loop solves (QFFFFF80 the same). So the first time a
+            // prune removes a slot it already removed in this pass, the
+            // counting trigger stands down for the rest of the pass; the
+            // factorization-failure repair below is unaffected. Skipping only
+            // the repeated prune and letting later ones run was measured and
+            // rejected: it keeps QGFRDXPN but loses CVXQP3_M (main: optimal,
+            // 326 s; then the 600 s wall limit) and makes QCAPRI 20x and QSEBA
+            // 6x slower. This rule's cost is QGFRDXPN (gh#1042).
+            if ac > qp.n && *budget > 0 && !self.count_prune.off {
+                let was_active = active_slots(qp, working);
                 if self.prune_dependent_active(qp, working, n_changes) {
+                    *budget -= 1;
+                    *pruned = true;
+                    ac = active_slot_count(working);
                     let now_active = active_slots(qp, working);
-                    let was_active = active_slots(qp, &before);
                     let seen = &mut self.count_prune.removed;
                     seen.resize(qp.m + qp.n, false);
-                    let removed: Vec<usize> = (0..qp.m + qp.n)
-                        .filter(|&k| was_active[k] && !now_active[k])
-                        .collect();
-                    if removed.iter().any(|&k| seen[k]) {
-                        *working = before;
-                        *n_changes = changes_before;
-                    } else {
-                        removed.iter().for_each(|&k| seen[k] = true);
-                        *budget -= 1;
-                        *pruned = true;
-                        ac = active_slot_count(working);
+                    for k in (0..qp.m + qp.n).filter(|&k| was_active[k] && !now_active[k]) {
+                        if seen[k] {
+                            self.count_prune.off = true;
+                        }
+                        seen[k] = true;
                     }
                 }
             }
@@ -7523,19 +7518,20 @@ mod over_n_rank_repair_tests {
 
     /// A slot the counting prune removes and the loop re-admits must not be
     /// removed again: on QFORPLAN that was a drop/re-add cycle to the
-    /// iteration limit (gh#1042). The repeat is not applied, and the
-    /// unflagged over-full set is factored as the unpruned loop had it, with
-    /// no budget spent. Mutation-checked: applying the repeat prunes every
-    /// round and spends a unit each time.
+    /// iteration limit (gh#1042). The second prune of the same slot is the
+    /// signal, and from then on the counting trigger stands down for the pass,
+    /// leaving the unflagged over-full set as the unpruned loop had it.
+    /// Mutation-checked: without the stand-down the third round prunes too
+    /// and spends a third budget unit.
     #[test]
-    fn the_counting_prune_does_not_remove_a_slot_twice() {
+    fn the_counting_prune_stands_down_once_it_repeats_a_slot() {
         let r0 = vec![0.1, 0.3];
         let r1 = vec![0.7, 0.2];
         let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
         let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], 3);
         assert_eq!(rounds[0], (2, true, 1));
-        assert_eq!(rounds[1], (3, false, 1), "the repeat is not applied");
-        assert_eq!(rounds[2], (3, false, 1));
+        assert_eq!(rounds[1], (2, true, 2), "the repeat itself still prunes");
+        assert_eq!(rounds[2], (3, false, 2), "then the trigger stands down");
     }
 
     /// Generic dense rows, one more than `n` — the shape of DEGEN2's

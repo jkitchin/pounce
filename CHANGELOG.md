@@ -324,20 +324,28 @@ changes.
     default and `algorithm=active-set-sqp` sweeps do not move. Needs a
     `benchmarks/qp` run before release: the degenerate Maros-Mészáros
     family is where this branch is reached.
-  - **The prune never removes the same slot twice in one pass.**
-    `benchmarks/qp` showed it turning two solved QPs into `MaxIter`: on
-    `QFORPLAN` it dropped slot 721, the next step re-added it at `α = 0`,
-    the next add made the set over-full again, and the prune dropped 721
-    again, a three-iteration cycle to the limit (`QFFFFF80` the same). The
-    row the probe calls dependent need not be dependent at the ratio test's
-    tolerance. A prune that would remove a slot an earlier prune in the same
-    Schur pass already removed is now not applied, and the set is factored
-    as it stands; prunes of other slots still run. Turning the prune off for
-    the rest of the pass at the first repeat fixed those two and broke
-    `QGFRDXPN` (`ErrorInStepComputation`), so it was rejected. Measured
-    alone: `QFORPLAN` `Optimal` (7.4566e9, as on main), `QFFFFF80` and
-    `QGFRDXPN` acceptable (as on main); `QSCTAP2` solves (1735.03; main
-    times out); `QSIERRA` and `QSCFXM2` keep their speed-ups.
+  - **The prune stands down once it repeats itself.** `benchmarks/qp`
+    showed it turning two solved QPs into `MaxIter`: on `QFORPLAN` it
+    dropped slot 721, the next step re-added it at `α = 0`, the next add
+    made the set over-full again, and the prune dropped 721 again, a
+    three-iteration cycle to the limit. The row the probe calls dependent
+    need not be dependent at the ratio test's tolerance. The first time a
+    prune removes a slot it already removed in the same Schur pass, the
+    counting trigger is off for the rest of that pass. Measured alone:
+    `QFORPLAN` `MaxIter` → `Optimal` (7.4566e9, as on main), `QFFFFF80`
+    `MaxIter` → `Optimal` (main: acceptable). The wins stay: `QSCTAP2`
+    solves (1735.03; times out on main), and `QSIERRA` takes 47 s and
+    `QSCFXM2` 163 s, against 104 s and 288 s with the prune removed.
+    `QSCTAP3` times out, as on main.
+    Full `benchmarks/qp` (138, `solver_selection=qp-active-set`, against
+    main): solved 120 = 120; `QSCTAP2` gained; `DUALC8`, `QFFFFF80` and
+    `QSHIP12L` go from acceptable to optimal; wall over the common solves
+    8937 s → 7104 s; slowest movers `QSCTAP1` 11 → 28 s, `QSCRS8` 25 → 59 s,
+    `QCAPRI` 20 → 46 s. **Known regression:** `QGFRDXPN`, acceptable on main
+    (26 s), ends `ErrorInStepComputation`; tracked on gh#1042. The
+    alternative, skipping only the repeated prune, keeps `QGFRDXPN` but loses
+    `CVXQP3_M` (optimal on main) to the wall limit and slows `QCAPRI` 17× and
+    `QSEBA` 5×, so it was rejected as the larger cost.
   - Other prune selections were measured before the gh #1061 merge: keeping
     the most recent slots, keeping the oldest, and pruning only the `ac − n`
     excess. Every one did more work on `share1b` (4349 to 12 016 changes) or
