@@ -86,6 +86,20 @@ pub trait RestorationPhase {
         0
     }
 
+    /// Whether the most recent `perform_restoration` call returned
+    /// [`RestorationOutcome::Recovered`] with a point its own convergence
+    /// check never released (gh#1042): the restoration sub-problem
+    /// converged at a point feasible for the original NLP, but that point
+    /// either failed the outer filter / reference-iterate test or did not
+    /// cut the violation by `kappa_resto`. Upstream fails restoration there
+    /// (`RESTORATION_CONVERGED_TO_FEASIBLE_POINT`,
+    /// `IpRestoConvCheck.cpp:227-234`); pounce hands the point back, and
+    /// the outer loop uses this to tell when that hand-back did not pay
+    /// off. Default `false`.
+    fn last_recovery_unreleased(&self) -> bool {
+        false
+    }
+
     /// Drive a feasibility-restoration sub-solve. The impl reads the
     /// outer iterate from `data.curr`, the original NLP from `nlp`,
     /// uses `aug_solver` for any post-success multiplier-recomputation

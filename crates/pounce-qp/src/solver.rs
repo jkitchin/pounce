@@ -137,6 +137,17 @@ pub struct ParametricActiveSetSolver {
     /// Set only while [`Self::solve_elastic_rows`] runs its phase-1 solve:
     /// enables the Schur loop's pin repair (see `solve_general_schur`).
     pin_repair: bool,
+    /// The counting prune's memory for the Schur pass in progress (see
+    /// [`Self::schur_reset_rank_repaired`]); each pass starts with its own.
+    count_prune: CountPrune,
+}
+
+/// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
+/// has removed during one Schur pass, and whether it has stood down.
+#[derive(Default)]
+struct CountPrune {
+    removed: Vec<bool>,
+    off: bool,
 }
 
 impl ParametricActiveSetSolver {
@@ -144,6 +155,7 @@ impl ParametricActiveSetSolver {
         Self {
             linsol: LinearSolver::new(backend),
             pin_repair: false,
+            count_prune: CountPrune::default(),
         }
     }
 
@@ -1310,6 +1322,19 @@ impl ParametricActiveSetSolver {
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
+        let out = self.solve_general_pass(qp, ws, opts);
+        #[cfg(test)]
+        pass_ledger::record(ws.is_some(), &out);
+        out
+    }
+
+    /// [`Self::solve_general`]'s body: one refactor-path pass.
+    fn solve_general_pass(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
         let m = qp.m;
@@ -2078,7 +2103,10 @@ impl ParametricActiveSetSolver {
         // and ended in a false `Unbounded` further away (5.5e3). `solve_general*`
         // bypass this audit, so this cannot recurse, and a repair that does not
         // land feasible and `Optimal` falls through to elastic exactly as before.
-        if let Some(repaired) = self.repin_and_resolve(qp, &sol, opts)? {
+        // Whichever point is returned below, the audited solve and a repin
+        // that did not land were both run, and are charged to it (gh#1042).
+        let mut spent = sol.stats.clone();
+        if let Some(repaired) = self.repin_and_resolve(qp, &sol, opts, &mut spent)? {
             return Ok(repaired);
         }
         // Never-regress on the recovery. Elastic phase-1 is a *repair* for a
@@ -2096,7 +2124,7 @@ impl ParametricActiveSetSolver {
         // it does its job — driving the slacks out — which is the case this
         // path exists for.
         let before = max_violation(qp, &sol.x);
-        let repaired = self.solve_elastic(qp, opts)?;
+        let mut repaired = self.solve_elastic(qp, opts)?;
         let after = max_violation(qp, &repaired.x);
         if after <= before {
             // NOTE (gh#958): a repair that is "no worse" is not necessarily
@@ -2119,6 +2147,7 @@ impl ParametricActiveSetSolver {
             // with its own measurement — not a rider on this one. The gh#958
             // fixes in `schur.rs` mean this model no longer reaches here at
             // all; the gap is real and recorded, not closed.
+            repaired.stats.add_work(&spent);
             return Ok(repaired);
         }
         // Repair regressed feasibility: keep the audited point, but do not
@@ -2126,6 +2155,8 @@ impl ParametricActiveSetSolver {
         // what the audit established.
         let mut kept = sol;
         kept.status = QpStatus::MaxIter;
+        spent.add_work(&repaired.stats);
+        kept.stats.set_work(&spent);
         Ok(kept)
     }
 
@@ -2198,6 +2229,7 @@ impl ParametricActiveSetSolver {
         qp: &QpProblem,
         sol: &QpSolution,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> Result<Option<QpSolution>, QpError> {
         // Least-change correction, not a re-solve: `min ½‖y − x‖²` over the
         // working set's rows, i.e. the pinned KKT with `H = I`, `g = −x`.
@@ -2260,7 +2292,13 @@ impl ParametricActiveSetSolver {
                 Ok(Some(r))
             }
             Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
-            _ => Ok(None),
+            // The re-solve ran and its point is discarded; the caller charges
+            // its work to whatever it returns instead (gh#1042).
+            Ok(r) => {
+                spent.add_work(&r.stats);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
         }
     }
 
@@ -2300,10 +2338,13 @@ impl ParametricActiveSetSolver {
     /// polish was reached by none of the issue generator's 200 seeds, so it is
     /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
-        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows)? {
+        let mut spent = QpStats::default();
+        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows, &mut spent)? {
             return Ok(sol);
         }
-        self.solve_elastic_rows(qp, opts)
+        let mut sol = self.solve_elastic_rows(qp, opts)?;
+        sol.stats.add_work(&spent);
+        Ok(sol)
     }
 
     /// Run `inner` on `qp` with its linearly dependent equality rows taken
@@ -2315,11 +2356,16 @@ impl ParametricActiveSetSolver {
     /// answer must satisfy every dropped row. `Infeasible` needs no check — a
     /// subset of the rows admitting no point proves the full set admits
     /// none — and a timeout claims nothing and must not start a second solve.
+    ///
+    /// A reduced run that is not decisive still did its work: it is added to
+    /// `spent`, for the caller to charge to the full-row solve it runs next
+    /// (gh#1042). A decisive one carries its own counts out.
     fn solve_pruned(
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
         mut inner: impl FnMut(&mut Self, &QpProblem, &QpOptions) -> Result<QpSolution, QpError>,
+        spent: &mut QpStats,
     ) -> Result<Option<QpSolution>, QpError> {
         let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
             return Ok(None);
@@ -2333,7 +2379,11 @@ impl ParametricActiveSetSolver {
             }
             _ => false,
         };
-        Ok(decisive.then(|| pruned.expand(qp, red)))
+        if !decisive {
+            spent.add_work(&red.stats);
+            return Ok(None);
+        }
+        Ok(Some(pruned.expand(qp, red)))
     }
 
     /// l1-elastic mode — §4.3. Builds an
@@ -2408,6 +2458,16 @@ impl ParametricActiveSetSolver {
         };
         self.pin_repair = outer_pin_repair;
         let sol_aug = sol_aug?;
+        // Every pass below adds its work here, and every exit reports it: the
+        // returned stats are the whole recovery, not the one pass whose point
+        // is handed back. They used to be: when phase-1 ended infeasible, the
+        // seed passes and the Farkas probe were never counted, and a
+        // successful recovery reported only its own changes — NETLIB `SHARE1B`
+        // under `qp-active-set` reported 2004 for 4125 (gh#1042). Nothing
+        // reads these counts to decide anything; every budget on this path is
+        // the inner solve's own counter.
+        let mut spent = QpStats::default();
+        spent.add_work(&sol_aug.stats);
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -2422,9 +2482,9 @@ impl ParametricActiveSetSolver {
             return Ok(time_limit_solution(
                 qp,
                 Some(&x),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2484,9 +2544,9 @@ impl ParametricActiveSetSolver {
                     _ => QpStatus::MaxIter,
                 },
                 stats: QpStats {
-                    n_working_set_changes: sol_aug.stats.n_working_set_changes,
-                    n_refactor: sol_aug.stats.n_refactor,
-                    n_schur_updates: sol_aug.stats.n_schur_updates,
+                    n_working_set_changes: spent.n_working_set_changes,
+                    n_refactor: spent.n_refactor,
+                    n_schur_updates: spent.n_schur_updates,
                     used_phase1: true,
                     time: started.elapsed(),
                     ..Default::default()
@@ -2541,14 +2601,14 @@ impl ParametricActiveSetSolver {
         // from it routinely polishes the last few ulps that the proximal
         // term's bias left behind. Only `witness` — its *verified*
         // feasibility — is allowed to speak to the certificate.
-        let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts);
+        let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts, &mut spent);
         if crate::deadline::expired() {
             return Ok(time_limit_solution(
                 qp,
                 p1_point.as_deref().or(Some(x.as_slice())),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2601,13 +2661,14 @@ impl ParametricActiveSetSolver {
                 Err(QpError::DeadlineExpired) => return Err(QpError::DeadlineExpired),
                 Err(_) => continue,
             };
+            spent.add_work(&rec.stats);
             if rec.status == QpStatus::TimeLimit || crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
                     Some(&rec.x),
-                    rec.stats.n_refactor,
-                    rec.stats.n_working_set_changes,
-                    rec.stats.n_schur_updates,
+                    spent.n_refactor,
+                    spent.n_working_set_changes,
+                    spent.n_schur_updates,
                     true,
                 ));
             }
@@ -2615,6 +2676,7 @@ impl ParametricActiveSetSolver {
                 && self.original_qp_feasible(qp, &rec.x, opts.feas_tol)
             {
                 let mut rec = rec;
+                rec.stats.set_work(&spent);
                 rec.stats.used_phase1 = true;
                 rec.stats.time = started.elapsed();
                 return Ok(rec);
@@ -2668,7 +2730,7 @@ impl ParametricActiveSetSolver {
             // downstream re-derivation (`pounce_convex::active_set::
             // verify_status`) is checking the vectors that prove the claim.
             QpStatus::Optimal if p1_verdict.is_none() && !have_feasible_witness => {
-                match self.farkas_infeasibility_certificate(qp, opts) {
+                match self.farkas_infeasibility_certificate(qp, opts, &mut spent) {
                     Some((y, z)) => {
                         lambda_g = y;
                         lambda_x = z;
@@ -2684,9 +2746,9 @@ impl ParametricActiveSetSolver {
             return Ok(time_limit_solution(
                 qp,
                 Some(&x),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2699,9 +2761,9 @@ impl ParametricActiveSetSolver {
             obj,
             status,
             stats: QpStats {
-                n_working_set_changes: sol_aug.stats.n_working_set_changes,
-                n_refactor: sol_aug.stats.n_refactor,
-                n_schur_updates: sol_aug.stats.n_schur_updates,
+                n_working_set_changes: spent.n_working_set_changes,
+                n_refactor: spent.n_refactor,
+                n_schur_updates: spent.n_schur_updates,
                 used_phase1: true,
                 time: started.elapsed(),
                 ..Default::default()
@@ -2907,6 +2969,7 @@ impl ParametricActiveSetSolver {
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> (Option<Vec<Number>>, Option<bool>) {
         let n = qp.n;
         let idx: Vec<Index> = (1..=n as Index).collect();
@@ -2984,6 +3047,9 @@ impl ParametricActiveSetSolver {
                 // refutation turn into a hard error.
                 Err(_) => break,
             };
+            // Each pass is work done whatever this function concludes from
+            // it; the caller reports the sum (gh#1042).
+            spent.add_work(&sol.stats);
 
             let x = sol.x[..n].to_vec();
             if sol.status == QpStatus::TimeLimit || crate::deadline::expired() {
@@ -3105,6 +3171,7 @@ impl ParametricActiveSetSolver {
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> Option<(Vec<Number>, Vec<Number>)> {
         let n = qp.n;
         let m = qp.m;
@@ -3150,6 +3217,7 @@ impl ParametricActiveSetSolver {
         };
         self.pin_repair = outer_pin_repair;
         let sol = sol.ok()?;
+        spent.add_work(&sol.stats);
         let y = sol.lambda_g.get(..m)?.to_vec();
         let z = sol.lambda_x.get(..n)?.to_vec();
         let gap = farkas_gap(qp, &y)?;
@@ -3270,6 +3338,11 @@ impl ParametricActiveSetSolver {
     /// is removed. Deactivating a bound does not move `x`, so the iterate stays
     /// feasible throughout.
     ///
+    /// A repair runs on either of two signals: the factorization reporting a
+    /// recoverable failure, or — before factoring at all — more active slots
+    /// than variables, which is rank-deficient by counting whether or not the
+    /// backend flags it (FERAL 0.21 does not, on DEGEN2; see the loop).
+    ///
     /// Each repair strictly shrinks the active set, so the inner loop
     /// terminates. `budget` additionally caps how many repairs one *solve* may
     /// perform: the ratio test can re-admit a pruned row on a later iteration.
@@ -3287,7 +3360,52 @@ impl ParametricActiveSetSolver {
         pruned: &mut bool,
     ) -> Result<(), QpError> {
         loop {
-            let ac = active_slot_count(working);
+            let mut ac = active_slot_count(working);
+            // More active slots than variables is rank-deficient by counting,
+            // whatever the factorization reports: whether a pivot that small
+            // is *flagged* is the backend's call and moves with its version.
+            // On Netlib DEGEN2 (`lp_degen2`, `solver_selection=qp-active-set`)
+            // FERAL 0.21 factored a 474-slot set on 473 variables without
+            // complaint; the next drop's step carried `‖A_W p‖ ≈ 0.4‖p‖`, the
+            // dropped row re-entered at `α = 0`, and the drop/re-add two-cycle
+            // ran into the gh#974 cycle guard as `MaxIter`, sending a solvable
+            // LP to three cold recoveries of 8530 iterations each (8 s under
+            // FERAL 0.20 → over 300 s). So prune to a maximal independent
+            // subset first, as a reported singularity would have, at the cost
+            // of one budget unit like any other repair (gh#1042).
+            //
+            // The prune is only sound while what it drops stays out. Which row
+            // of a dependent set the probe flags is its pivoting's choice, and
+            // a row it calls dependent need not be dependent at the ratio
+            // test's tolerance. On Maros-Meszaros QFORPLAN the probe dropped
+            // slot 721, the next step re-added it at `α = 0`, the following add
+            // made the set over-full again, and the prune dropped 721 again: a
+            // three-iteration cycle until the iteration limit, on a QP the
+            // unpruned loop solves (QFFFFF80 the same). So the first time a
+            // prune removes a slot it already removed in this pass, the
+            // counting trigger stands down for the rest of the pass; the
+            // factorization-failure repair below is unaffected. Skipping only
+            // the repeated prune and letting later ones run was measured and
+            // rejected: it keeps QGFRDXPN but loses CVXQP3_M (main: optimal,
+            // 326 s; then the 600 s wall limit) and makes QCAPRI 20x and QSEBA
+            // 6x slower. This rule's cost is QGFRDXPN (gh#1042).
+            if ac > qp.n && *budget > 0 && !self.count_prune.off {
+                let was_active = active_slots(qp, working);
+                if self.prune_dependent_active(qp, working, n_changes) {
+                    *budget -= 1;
+                    *pruned = true;
+                    ac = active_slot_count(working);
+                    let now_active = active_slots(qp, working);
+                    let seen = &mut self.count_prune.removed;
+                    seen.resize(qp.m + qp.n, false);
+                    for k in (0..qp.m + qp.n).filter(|&k| was_active[k] && !now_active[k]) {
+                        if seen[k] {
+                            self.count_prune.off = true;
+                        }
+                        seen[k] = true;
+                    }
+                }
+            }
             match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_recoverable_factorization_failure() => {
@@ -3366,8 +3484,26 @@ impl ParametricActiveSetSolver {
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
+        let out = self.solve_general_schur_pass(qp, ws, opts);
+        #[cfg(test)]
+        pass_ledger::record(ws.is_some(), &out);
+        out
+    }
+
+    /// [`Self::solve_general_schur`]'s body: one Schur-path pass, polish
+    /// included.
+    fn solve_general_schur_pass(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         let mut pre_polish = None;
+        // Passes nest (the elastic phase solves through this path too), so
+        // the outer pass's counting-prune memory is set aside, not cleared.
+        let outer_prune = std::mem::take(&mut self.count_prune);
         let res = self.solve_general_schur_inner(qp, ws, opts, &mut pre_polish);
+        self.count_prune = outer_prune;
         let Some(mut pre) = pre_polish else {
             return res;
         };
@@ -4278,6 +4414,15 @@ fn farkas_gap(qp: &QpProblem, y: &[Number]) -> Option<FarkasGap> {
 fn active_slot_count(working: &WorkingSet) -> usize {
     working.constraints.iter().filter(|s| s.is_active()).count()
         + working.bounds.iter().filter(|s| s.is_active()).count()
+}
+
+/// Which slots are active, indexed rows first (`0..m`) then bounds (`m..m+n`),
+/// the numbering `SchurState::apply_change` uses.
+fn active_slots(qp: &QpProblem, working: &WorkingSet) -> Vec<bool> {
+    (0..qp.m)
+        .map(|i| working.constraints[i].is_active())
+        .chain((0..qp.n).map(|j| working.bounds[j].is_active()))
+        .collect()
 }
 
 /// Relative tolerance for the modified-Gram-Schmidt rank test in
@@ -5427,12 +5572,30 @@ impl ParametricActiveSetSolver {
         // that may not come; the recursion is on a strictly smaller row set,
         // and the full-row solve below still runs whenever the reduced answer
         // is not decisive.
+        let mut spent = QpStats::default();
         if ws.is_none() {
-            if let Some(sol) = self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o))? {
+            if let Some(sol) =
+                self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o), &mut spent)?
+            {
                 return Ok(sol);
             }
         }
+        // A reduced solve that was not decisive is still work this call did;
+        // the full-row solve's stats carry it (gh#1042).
+        let mut sol = self.solve_scoped_full_rows(qp, ws, opts)?;
+        sol.stats.add_work(&spent);
+        Ok(sol)
+    }
 
+    /// [`Self::solve_scoped`] past its dependent-equality pre-solve: the
+    /// homotopy, the general and fast paths, and the feasibility audit, on
+    /// the problem's own row set.
+    fn solve_scoped_full_rows(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         // Cold + general rows: try the parametric homotopy first. It returns
         // `Ok(None)` when the path cannot be started (no rows, or the box
         // relaxation is unbounded), which is a fall-through signal rather than a
@@ -7232,5 +7395,289 @@ mod issue1061_precedence_tests {
         let lost: Vec<usize> = (0..m_eq).filter(|i| !kept.contains(i)).collect();
         assert!(lost.is_empty(), "equality rows dropped: {lost:?}");
         assert_eq!(kept.len(), m_eq, "kept {kept:?}");
+    }
+}
+
+#[cfg(test)]
+mod over_n_rank_repair_tests {
+    //! `schur_reset_rank_repaired` on an active set with more slots than
+    //! variables (gh#1042, lp_degen2 under FERAL 0.21). Such a set is
+    //! rank-deficient by counting, but whether the factorization *flags* the
+    //! singular KKT is the backend's call: FERAL 0.21 factors every set below
+    //! without complaint except the exactly-representable one, so the
+    //! error-driven repair never runs on them. The test pins the invariant the
+    //! counting guard adds — the reset never leaves more than `n` slots
+    //! active — for both outcomes of the backend's call.
+    use super::*;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use std::rc::Rc;
+
+    /// `rows` all active at their lower bound, plus the listed variable
+    /// lower bounds, on an LP (`H = 0`). Returns the active slot count after
+    /// the repaired reset, whether it pruned, and the budget it spent.
+    fn reset_over_n(n: usize, rows: &[Vec<Number>], bounds_active: &[usize]) -> (usize, bool, u32) {
+        let (ac, pruned, spent) = reset_over_n_rounds(n, rows, bounds_active, 1)[0];
+        (ac, pruned, spent)
+    }
+
+    /// [`reset_over_n`] `rounds` times on one solver and one Schur pass,
+    /// re-activating every slot between resets, as the ratio test re-admitting
+    /// what the prune removed would. Returns each round's result, the budget
+    /// spent counted from the start.
+    fn reset_over_n_rounds(
+        n: usize,
+        rows: &[Vec<Number>],
+        bounds_active: &[usize],
+        rounds: usize,
+    ) -> Vec<(usize, bool, u32)> {
+        let m = rows.len();
+        let (mut ir, mut jc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, r) in rows.iter().enumerate() {
+            for (j, &x) in r.iter().enumerate() {
+                if x != 0.0 {
+                    ir.push(i as Index + 1);
+                    jc.push(j as Index + 1);
+                    v.push(x);
+                }
+            }
+        }
+        let mut a = GenTMatrix::new(Rc::clone(&GenTMatrixSpace::new(
+            m as Index, n as Index, ir, jc,
+        )));
+        a.set_values(&v);
+        let h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, Vec::new(), Vec::new()));
+        let g = vec![1.0; n];
+        let (bl, bu) = (vec![0.0; m], vec![1e20; m]);
+        let (xl, xu) = (vec![0.0; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let over_full = || {
+            let mut working = WorkingSet::cold(n, m);
+            for c in working.constraints.iter_mut() {
+                *c = ConsStatus::AtLower;
+            }
+            for &j in bounds_active {
+                working.bounds[j] = BoundStatus::AtLower;
+            }
+            assert!(
+                active_slot_count(&working) > n,
+                "fixture must start over-full"
+            );
+            working
+        };
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let mut schur = crate::schur::SchurState::new(n, m);
+        let mut n_changes = 0u32;
+        let budget0 = 10u32;
+        let mut budget = budget0;
+        (0..rounds)
+            .map(|_| {
+                let mut working = over_full();
+                let mut pruned = false;
+                solver
+                    .schur_reset_rank_repaired(
+                        &mut schur,
+                        &qp,
+                        &mut working,
+                        &QpOptions::default(),
+                        &mut n_changes,
+                        &mut budget,
+                        &mut pruned,
+                    )
+                    .expect("a rank-repaired reset of a consistent vertex must factor");
+                (active_slot_count(&working), pruned, budget0 - budget)
+            })
+            .collect()
+    }
+
+    /// Three rows on two variables, the third `0.3·r₀ + 0.9·r₁` in floating
+    /// point. FERAL 0.21 factors this KKT without flagging it, so only the
+    /// counting guard prunes it. Mutation-checked: without the guard the
+    /// reset returns `Ok` with all three slots active.
+    #[test]
+    fn an_unflagged_over_full_set_is_pruned_before_the_reset() {
+        let r0 = vec![0.1, 0.3];
+        let r1 = vec![0.7, 0.2];
+        let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
+        let (ac, pruned, spent) = reset_over_n(2, &[r0, r1, r2], &[]);
+        assert_eq!(ac, 2);
+        assert!(pruned);
+        assert_eq!(spent, 1, "the counting guard costs one budget unit");
+    }
+
+    /// A slot the counting prune removes and the loop re-admits must not be
+    /// removed again: on QFORPLAN that was a drop/re-add cycle to the
+    /// iteration limit (gh#1042). The second prune of the same slot is the
+    /// signal, and from then on the counting trigger stands down for the pass,
+    /// leaving the unflagged over-full set as the unpruned loop had it.
+    /// Mutation-checked: without the stand-down the third round prunes too
+    /// and spends a third budget unit.
+    #[test]
+    fn the_counting_prune_stands_down_once_it_repeats_a_slot() {
+        let r0 = vec![0.1, 0.3];
+        let r1 = vec![0.7, 0.2];
+        let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
+        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], 3);
+        assert_eq!(rounds[0], (2, true, 1));
+        assert_eq!(rounds[1], (2, true, 2), "the repeat itself still prunes");
+        assert_eq!(rounds[2], (3, false, 2), "then the trigger stands down");
+    }
+
+    /// Generic dense rows, one more than `n` — the shape of DEGEN2's
+    /// 474-slot set on 473 variables, small. Also unflagged by FERAL 0.21.
+    #[test]
+    fn a_generic_dense_over_full_set_is_pruned_to_n() {
+        let mut s: u64 = 12345;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) % 1000) as Number / 997.0 + 0.01
+        };
+        let n = 8;
+        let rows: Vec<Vec<Number>> = (0..n + 1)
+            .map(|_| (0..n).map(|_| next()).collect())
+            .collect();
+        let (ac, pruned, _) = reset_over_n(n, &rows, &[]);
+        assert!(ac <= n, "{ac} slots left active on {n} variables");
+        assert!(pruned);
+    }
+
+    /// Control: the exactly-representable case FERAL 0.21 *does* flag
+    /// (`x₀ + x₁ ≥ 0` with both bounds active) ends in the same place through
+    /// the error-driven repair, so it passes with or without the guard.
+    #[test]
+    fn a_flagged_over_full_set_ends_the_same() {
+        let (ac, pruned, _) = reset_over_n(2, &[vec![1.0, 1.0]], &[0, 1]);
+        assert_eq!(ac, 2);
+        assert!(pruned);
+    }
+}
+
+/// Test-only record of every warm inner pass (`solve_general` /
+/// `solve_general_schur` handed a warm start) and the working-set changes it
+/// returned. Written at the passes themselves, not where their counts are
+/// summed, so a test can hold the reported total to the work actually done
+/// without trusting the accounting it checks (gh#1042). Cold calls are left
+/// out: the cold entry into elastic wraps the passes below it, and its stats
+/// are already theirs.
+#[cfg(test)]
+pub(crate) mod pass_ledger {
+    use super::{QpError, QpSolution};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LEDGER: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn start() {
+        LEDGER.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub(crate) fn take() -> Vec<u32> {
+        LEDGER.with(|l| l.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(crate) fn record(warm: bool, out: &Result<QpSolution, QpError>) {
+        if let (true, Ok(sol)) = (warm, out) {
+            LEDGER.with(|l| {
+                if let Some(v) = l.borrow_mut().as_mut() {
+                    v.push(sol.stats.n_working_set_changes);
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod issue1042_elastic_accounting_tests {
+    //! gh#1042: a solve that recovers through the l1-elastic phase-1 reports
+    //! the work of every pass it ran — phase-1, the convex feasibility passes,
+    //! the Farkas probe and every recovery re-solve — not just the pass whose
+    //! point it returns. `convex_qp_share1b` under `qp-active-set` reported
+    //! 2004 working-set changes for 4125 done.
+    //!
+    //! The oracle is [`super::pass_ledger`], which records each warm inner
+    //! pass where it returns, independently of the sums under test.
+    use super::{ParametricActiveSetSolver, pass_ledger};
+    use crate::QpSolver;
+    use crate::{HessianInertia, QpOptions, QpProblem, QpStatus};
+    use pounce_common::types::Number;
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    const INF: Number = 1e20;
+
+    /// gh#991's sliver: `x₀ + 2x₁ ≤ 2` and `x₀ + 2x₁ ≥ 2 + ε` on free
+    /// variables, so elastic phase-1 ends with residual slacks and the whole
+    /// infeasible branch runs: feasibility passes, recoveries, Farkas.
+    fn solve_sliver(opts: &QpOptions) -> (crate::QpSolution, Vec<u32>) {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2, 2], vec![1, 1, 2]));
+        h.set_values(&[2.0, 1.0, 2.0]);
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(
+            2,
+            2,
+            vec![1, 1, 2, 2],
+            vec![1, 2, 1, 2],
+        ));
+        a.set_values(&[1.0, 2.0, -1.0, -2.0]);
+        let g = [-1.0, 2.0];
+        let (bl, bu) = ([-INF, -INF], [2.0, -(2.0 + 1e-5)]);
+        let (xl, xu) = ([-INF, -INF], [INF, INF]);
+        let qp = QpProblem {
+            n: 2,
+            m: 2,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        pass_ledger::start();
+        let sol = solver.solve(&qp, None, opts).expect("solve");
+        (sol, pass_ledger::take())
+    }
+
+    #[test]
+    fn an_infeasible_phase1_reports_every_pass_it_ran() {
+        for schur in [false, true] {
+            let opts = QpOptions {
+                use_schur_updates: schur,
+                use_homotopy: false,
+                ..QpOptions::default()
+            };
+            let (sol, passes) = solve_sliver(&opts);
+            assert_eq!(sol.status, QpStatus::Infeasible, "schur={schur}");
+            assert!(sol.stats.used_phase1, "schur={schur}");
+            // Phase-1 plus at least one more pass, or this fixture is not
+            // reaching the branch the test is about.
+            assert!(passes.len() >= 2, "schur={schur}: passes {passes:?}");
+            let total: u32 = passes.iter().sum();
+            assert!(
+                total > passes[0],
+                "schur={schur}: only phase-1 did any work ({passes:?}), so the \
+                 test cannot tell its count from the sum"
+            );
+            assert_eq!(
+                sol.stats.n_working_set_changes, total,
+                "schur={schur}: reported {} for passes {passes:?}",
+                sol.stats.n_working_set_changes
+            );
+        }
     }
 }

@@ -624,6 +624,10 @@ fn run_inner_resto_impl(
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
     }
+    // gh#1042: set by layer 2 when it hands back a converged-to-feasible
+    // point layer 1 never released; surfaced on the result below.
+    let unreleased_feasible_point = Rc::new(std::cell::Cell::new(false));
+    adapter = adapter.with_unreleased_feasible_flag(Rc::clone(&unreleased_feasible_point));
     alg_bundle.conv_check =
         Box::new(adapter) as Box<dyn pounce_algorithm::conv_check::r#trait::ConvCheck>;
     alg_bundle.iter_output = Box::new(
@@ -891,6 +895,7 @@ fn run_inner_resto_impl(
             square_certificate_suppressed: false,
             user_requested_stop: true,
             feasible_point_found: false,
+            unreleased_feasible_point: false,
         });
     }
 
@@ -1303,6 +1308,26 @@ fn run_inner_resto_impl(
     let locally_infeasible = !solver_would_call_it_feasible
         && (verdict_locally_infeasible || reconstructed_locally_infeasible);
 
+    // Upstream's second `RESTORATION_CONVERGED_TO_FEASIBLE_POINT` throw
+    // (`IpRestoMinC_1Nrm.cpp:278-287`): an inner solve that stopped at its
+    // acceptable level, with the recovered point feasible for the original
+    // NLP to `resto_failure_feasibility_threshold = 1e2·tol` (scaled max
+    // norm, as upstream measures it). Upstream fails restoration; pounce
+    // counts the inner acceptable stop as a recovery, so it marks the point
+    // the way layer 2's verdict does and leaves the judgement to the outer
+    // loop (gh#1042). The tiny-step half of that throw needs no mark: a
+    // tiny-step inner already fails restoration here, as upstream's does.
+    let acceptable_stop_at_feasible_point = !is_square_problem
+        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && orig_inf_pr_scaled <= 1e2 * outer_tol;
+    if acceptable_stop_at_feasible_point {
+        tracing::debug!(target: "pounce::restoration",
+            "[PN_RESTO_ACCEPTABLE_FEASIBLE] inner stopped at its acceptable level at a point \
+             feasible to 1e2*tol (orig_inf_pr_scaled={:.3e}); marking it unreleased (gh#1042)",
+            orig_inf_pr_scaled,
+        );
+    }
+
     // `strict`'s condition with the square carve-out lifted, under the same
     // guards: the verdict this sub-solve earned and the carve-out withheld.
     // The driver honours it once the same point has been certified
@@ -1364,6 +1389,8 @@ fn run_inner_resto_impl(
         locally_infeasible,
         user_requested_stop: false,
         square_certificate_suppressed,
+        unreleased_feasible_point: unreleased_feasible_point.get()
+            || acceptable_stop_at_feasible_point,
     })
 }
 

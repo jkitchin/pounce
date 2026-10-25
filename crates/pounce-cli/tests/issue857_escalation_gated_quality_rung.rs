@@ -456,7 +456,11 @@ fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
 /// Appended, not prepended — the ordering claim, measured.
 ///
 /// `circle_parabola_t0p5` on the lbfgs leg exits `Infeasible_Problem_Detected`
-/// at 48 having escalated, so all four rungs are open, rung 4 last. Rung 1
+/// at 48 having escalated, so every rung that is a different trajectory is
+/// open, rung 4 last. That is three, not four: under L-BFGS an unset
+/// `mu_strategy` already resolves to adaptive (gh#746), so the
+/// `mu_strategy=adaptive` rung would re-run the base solve byte-for-byte and
+/// is not offered (gh#1042 review). Rung 1
 /// (`feral_scaling=mc64`) runs first and promotes at 77, so the leg reaches
 /// the same answer at the same cost it would without rung 4: 48 in the base
 /// solve plus 77 in the rung, 125 total — identical on FERAL 0.20 and 0.21.
@@ -476,12 +480,11 @@ fn the_new_rung_is_last_so_an_earlier_promotion_is_unchanged() {
     let lines = ladder_lines(&run.out);
     assert!(
         lines.iter().any(|l| l.contains(
-            "local infeasibility — re-solving along 4 different trajectories \
+            "local infeasibility — re-solving along 3 different trajectories \
              before believing it (second-opinion ladder: feral_scaling=mc64, \
-             mu_strategy=adaptive, start_point_perturbation=1e-2, \
-             feral_increase_quality=no)"
+             start_point_perturbation=1e-2, feral_increase_quality=no)"
         )),
-        "all four rungs should be open, rung 4 last:\n{lines:#?}"
+        "every distinct rung should be open, rung 4 last:\n{lines:#?}"
     );
     assert!(
         lines
