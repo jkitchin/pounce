@@ -156,7 +156,13 @@ pub struct QpSolution {
 /// §8.5 warm-start sweep.
 #[derive(Debug, Clone, Default)]
 pub struct QpStats {
-    /// Total active-set changes (adds + drops) across the solve.
+    /// Total active-set changes (adds + drops) across the solve — every pass
+    /// the solve ran, not only the one whose point is returned. A solve that
+    /// recovers through the l1-elastic phase-1 also counts that phase-1, the
+    /// convex feasibility passes behind it, the Farkas probe and every
+    /// recovery re-solve; one the feasibility audit repaired also counts the
+    /// solve it audited (gh#1042). The same holds for `n_refactor` and
+    /// `n_schur_updates`.
     pub n_working_set_changes: u32,
     /// Number of times the cached factorization was discarded and
     /// the base KKT was refactored (the §4.2 reset cycle).
@@ -200,6 +206,28 @@ pub struct QpStats {
     ///
     /// [`pounce-convex`'s `verify_status`]: https://github.com/jkitchin/pounce
     pub second_order: SecondOrderVerdict,
+}
+
+impl QpStats {
+    /// Charge `other`'s work — working-set changes, refactorizations and
+    /// Schur updates — to `self`. For a pass whose point is discarded: its
+    /// work was still done, and the returned stats must say so (gh#1042).
+    /// Touches nothing else, so no verdict-bearing field moves.
+    pub(crate) fn add_work(&mut self, other: &QpStats) {
+        self.n_working_set_changes = self
+            .n_working_set_changes
+            .saturating_add(other.n_working_set_changes);
+        self.n_refactor = self.n_refactor.saturating_add(other.n_refactor);
+        self.n_schur_updates = self.n_schur_updates.saturating_add(other.n_schur_updates);
+    }
+
+    /// Replace `self`'s work counts with `total`'s: for a returned pass whose
+    /// own counts are already part of a running `total`.
+    pub(crate) fn set_work(&mut self, total: &QpStats) {
+        self.n_working_set_changes = total.n_working_set_changes;
+        self.n_refactor = total.n_refactor;
+        self.n_schur_updates = total.n_schur_updates;
+    }
 }
 
 /// [`crate::negcurv::SecondOrder`] reduced to a verdict, for

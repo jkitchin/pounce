@@ -298,27 +298,46 @@ changes.
   maximal independent subset whenever more slots are active than there are
   variables, before factoring, rather than waiting for the backend to report
   the singularity. `lp_degen2`: 2009 iterations, `-1435.178`, about 10 s.
-  - **Fixture sweep under `solver_selection=qp-active-set`, both legs:**
-    `lp_degen2` no report (timeout) → `SolveSucceeded`/2009;
-    `convex_qp_qscfxm1` 2195 → 396; `convex_qp_share1b` 2004 → 2924
-    (same objective). The default and `algorithm=active-set-sqp`
-    sweeps do not move. Needs a `benchmarks/qp` run before release: the
-    degenerate Maros-Mészáros family is where this branch is reached.
-  - **`convex_qp_share1b`'s 2004 → 2924 is a reporting change, not more
-    work.** The reported count leaves out work on one path. When the
-    elastic phase-1 ends infeasible, `solve_elastic_rows` runs a feasibility
-    seed and then a recovery solve, and returns the recovery's count alone.
-    Before this change `share1b` went that way. The homotopy path took 1995
-    changes, the dropped phase-1 and seed passes took 2121, and the recovery
-    took 9, so the report said 2004 for 4125 changes of work (FERAL 0.20 at
-    `f1197ef3`: 1711 reported, 4031 done). With the prune, phase-1 ends
-    feasible and its 929 changes are counted, so 2924 is the whole cost. Wall
-    time fell from 15.2 s to 9.9 s. `convex_qp_qscfxm1` is undercounted on
-    both sides as well: 17 848 → 10 576 changes done, 278 s → 143 s wall.
-    Other prune selections were measured: keeping the most recent slots,
-    keeping the oldest, and pruning only the `ac − n` excess. Some of them
-    report fewer than 2004 iterations on `share1b` (1425), but every one does
-    more work there (4349 to 12 016 changes) or loses `lp_degen2`.
+  - **Since gh #1061, `lp_degen2` no longer reaches this branch.** Main now
+    answers an LP on the active-set arm with the simplex (0.4 s, 2026
+    pivots, with or without the prune), so the pruned sets are QPs':
+    `convex_qp_share1b` and `convex_qp_qscfxm1`. Measured on the merge with
+    main, under `solver_selection=qp-active-set`, counting every pass (see
+    the next entry): `share1b` 3465 → 2299 working-set changes (11.8 s →
+    7.4 s), `qscfxm1` 6644 → 3748 (89 s → 81 s), same objectives. The
+    default and `algorithm=active-set-sqp` sweeps do not move. Needs a
+    `benchmarks/qp` run before release: the degenerate Maros-Mészáros
+    family is where this branch is reached.
+  - Other prune selections were measured before the gh #1061 merge: keeping
+    the most recent slots, keeping the oldest, and pruning only the `ac − n`
+    excess. Every one did more work on `share1b` (4349 to 12 016 changes) or
+    lost `lp_degen2`, which then still reached this branch.
+- **The active-set QP's iteration count now includes every pass it ran
+  (gh #1042).** Under `solver_selection=qp-active-set`, `iteration_count`
+  left work out in two places, both reporting only: no budget, cap or cycle
+  guard reads these counts.
+  - When the l1-elastic phase-1 ended infeasible, `pounce-qp` ran convex
+    feasibility passes, a Farkas probe and recovery re-solves, and returned
+    the count of the recovery that landed, or of phase-1 alone. A reduced
+    solve that `solve_pruned` discarded, and the solve the feasibility audit
+    replaced, were dropped the same way. Every pass is now added in, as the
+    homotopy and the second-order escape already were.
+  - The convex active-set driver ran up to four attempts (an LP's simplex
+    seed, unscaled, Ruiz-equilibrated, seeded last resort) plus a
+    feasibility probe, and returned the winning attempt's count. It now
+    returns their sum, the rule the convex IPM's warm/cold pair follows
+    (gh #988). The simplex seed's pivots still count only when the simplex
+    itself answers an LP.
+  - On `f1197ef3`, `share1b` reported 1711 for 4031 changes done; on main
+    before this branch, 1462 for 3465, and `qscfxm1` 2663 for 6644. The
+    fixture sweep under `qp-active-set` moves on three fixtures, both legs,
+    with status, objective and engine unchanged: `mu_fallback_point_floor`
+    34 → 87 (three attempts: 34 + 36 + 17), `nonconvex_qp_eq` 2 → 4,
+    `sqp_tiny_objective_k1em20` 0 → 1. `share1b` and `qscfxm1` do not move on
+    this branch: with the prune they no longer take the dropped paths. The
+    default and `algorithm=active-set-sqp` sweeps do not move.
+  - `POUNCE_AS_DEBUG=1` prints each driver attempt's own count as
+    `engine_iters=`.
 - **The active-set QP's rank check is correct, and 25–350× faster (gh
   #1061).** It rank-revealed the active rows with a Gilbert–Peierls LU in an
   AMD order under strict partial pivoting, which on 10⁴-row step QPs filled

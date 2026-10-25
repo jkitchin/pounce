@@ -1310,6 +1310,19 @@ impl ParametricActiveSetSolver {
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
+        let out = self.solve_general_pass(qp, ws, opts);
+        #[cfg(test)]
+        pass_ledger::record(ws.is_some(), &out);
+        out
+    }
+
+    /// [`Self::solve_general`]'s body: one refactor-path pass.
+    fn solve_general_pass(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
         let m = qp.m;
@@ -2078,7 +2091,10 @@ impl ParametricActiveSetSolver {
         // and ended in a false `Unbounded` further away (5.5e3). `solve_general*`
         // bypass this audit, so this cannot recurse, and a repair that does not
         // land feasible and `Optimal` falls through to elastic exactly as before.
-        if let Some(repaired) = self.repin_and_resolve(qp, &sol, opts)? {
+        // Whichever point is returned below, the audited solve and a repin
+        // that did not land were both run, and are charged to it (gh#1042).
+        let mut spent = sol.stats.clone();
+        if let Some(repaired) = self.repin_and_resolve(qp, &sol, opts, &mut spent)? {
             return Ok(repaired);
         }
         // Never-regress on the recovery. Elastic phase-1 is a *repair* for a
@@ -2096,7 +2112,7 @@ impl ParametricActiveSetSolver {
         // it does its job — driving the slacks out — which is the case this
         // path exists for.
         let before = max_violation(qp, &sol.x);
-        let repaired = self.solve_elastic(qp, opts)?;
+        let mut repaired = self.solve_elastic(qp, opts)?;
         let after = max_violation(qp, &repaired.x);
         if after <= before {
             // NOTE (gh#958): a repair that is "no worse" is not necessarily
@@ -2119,6 +2135,7 @@ impl ParametricActiveSetSolver {
             // with its own measurement — not a rider on this one. The gh#958
             // fixes in `schur.rs` mean this model no longer reaches here at
             // all; the gap is real and recorded, not closed.
+            repaired.stats.add_work(&spent);
             return Ok(repaired);
         }
         // Repair regressed feasibility: keep the audited point, but do not
@@ -2126,6 +2143,8 @@ impl ParametricActiveSetSolver {
         // what the audit established.
         let mut kept = sol;
         kept.status = QpStatus::MaxIter;
+        spent.add_work(&repaired.stats);
+        kept.stats.set_work(&spent);
         Ok(kept)
     }
 
@@ -2198,6 +2217,7 @@ impl ParametricActiveSetSolver {
         qp: &QpProblem,
         sol: &QpSolution,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> Result<Option<QpSolution>, QpError> {
         // Least-change correction, not a re-solve: `min ½‖y − x‖²` over the
         // working set's rows, i.e. the pinned KKT with `H = I`, `g = −x`.
@@ -2260,7 +2280,13 @@ impl ParametricActiveSetSolver {
                 Ok(Some(r))
             }
             Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
-            _ => Ok(None),
+            // The re-solve ran and its point is discarded; the caller charges
+            // its work to whatever it returns instead (gh#1042).
+            Ok(r) => {
+                spent.add_work(&r.stats);
+                Ok(None)
+            }
+            Err(_) => Ok(None),
         }
     }
 
@@ -2300,10 +2326,13 @@ impl ParametricActiveSetSolver {
     /// polish was reached by none of the issue generator's 200 seeds, so it is
     /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
-        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows)? {
+        let mut spent = QpStats::default();
+        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows, &mut spent)? {
             return Ok(sol);
         }
-        self.solve_elastic_rows(qp, opts)
+        let mut sol = self.solve_elastic_rows(qp, opts)?;
+        sol.stats.add_work(&spent);
+        Ok(sol)
     }
 
     /// Run `inner` on `qp` with its linearly dependent equality rows taken
@@ -2315,11 +2344,16 @@ impl ParametricActiveSetSolver {
     /// answer must satisfy every dropped row. `Infeasible` needs no check — a
     /// subset of the rows admitting no point proves the full set admits
     /// none — and a timeout claims nothing and must not start a second solve.
+    ///
+    /// A reduced run that is not decisive still did its work: it is added to
+    /// `spent`, for the caller to charge to the full-row solve it runs next
+    /// (gh#1042). A decisive one carries its own counts out.
     fn solve_pruned(
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
         mut inner: impl FnMut(&mut Self, &QpProblem, &QpOptions) -> Result<QpSolution, QpError>,
+        spent: &mut QpStats,
     ) -> Result<Option<QpSolution>, QpError> {
         let Some(pruned) = PrunedEqualities::build(&mut self.linsol, qp) else {
             return Ok(None);
@@ -2333,7 +2367,11 @@ impl ParametricActiveSetSolver {
             }
             _ => false,
         };
-        Ok(decisive.then(|| pruned.expand(qp, red)))
+        if !decisive {
+            spent.add_work(&red.stats);
+            return Ok(None);
+        }
+        Ok(Some(pruned.expand(qp, red)))
     }
 
     /// l1-elastic mode — §4.3. Builds an
@@ -2408,6 +2446,16 @@ impl ParametricActiveSetSolver {
         };
         self.pin_repair = outer_pin_repair;
         let sol_aug = sol_aug?;
+        // Every pass below adds its work here, and every exit reports it: the
+        // returned stats are the whole recovery, not the one pass whose point
+        // is handed back. They used to be: when phase-1 ended infeasible, the
+        // seed passes and the Farkas probe were never counted, and a
+        // successful recovery reported only its own changes — NETLIB `SHARE1B`
+        // under `qp-active-set` reported 2004 for 4125 (gh#1042). Nothing
+        // reads these counts to decide anything; every budget on this path is
+        // the inner solve's own counter.
+        let mut spent = QpStats::default();
+        spent.add_work(&sol_aug.stats);
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -2422,9 +2470,9 @@ impl ParametricActiveSetSolver {
             return Ok(time_limit_solution(
                 qp,
                 Some(&x),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2484,9 +2532,9 @@ impl ParametricActiveSetSolver {
                     _ => QpStatus::MaxIter,
                 },
                 stats: QpStats {
-                    n_working_set_changes: sol_aug.stats.n_working_set_changes,
-                    n_refactor: sol_aug.stats.n_refactor,
-                    n_schur_updates: sol_aug.stats.n_schur_updates,
+                    n_working_set_changes: spent.n_working_set_changes,
+                    n_refactor: spent.n_refactor,
+                    n_schur_updates: spent.n_schur_updates,
                     used_phase1: true,
                     time: started.elapsed(),
                     ..Default::default()
@@ -2541,14 +2589,14 @@ impl ParametricActiveSetSolver {
         // from it routinely polishes the last few ulps that the proximal
         // term's bias left behind. Only `witness` — its *verified*
         // feasibility — is allowed to speak to the certificate.
-        let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts);
+        let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts, &mut spent);
         if crate::deadline::expired() {
             return Ok(time_limit_solution(
                 qp,
                 p1_point.as_deref().or(Some(x.as_slice())),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2601,13 +2649,14 @@ impl ParametricActiveSetSolver {
                 Err(QpError::DeadlineExpired) => return Err(QpError::DeadlineExpired),
                 Err(_) => continue,
             };
+            spent.add_work(&rec.stats);
             if rec.status == QpStatus::TimeLimit || crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
                     Some(&rec.x),
-                    rec.stats.n_refactor,
-                    rec.stats.n_working_set_changes,
-                    rec.stats.n_schur_updates,
+                    spent.n_refactor,
+                    spent.n_working_set_changes,
+                    spent.n_schur_updates,
                     true,
                 ));
             }
@@ -2615,6 +2664,7 @@ impl ParametricActiveSetSolver {
                 && self.original_qp_feasible(qp, &rec.x, opts.feas_tol)
             {
                 let mut rec = rec;
+                rec.stats.set_work(&spent);
                 rec.stats.used_phase1 = true;
                 rec.stats.time = started.elapsed();
                 return Ok(rec);
@@ -2668,7 +2718,7 @@ impl ParametricActiveSetSolver {
             // downstream re-derivation (`pounce_convex::active_set::
             // verify_status`) is checking the vectors that prove the claim.
             QpStatus::Optimal if p1_verdict.is_none() && !have_feasible_witness => {
-                match self.farkas_infeasibility_certificate(qp, opts) {
+                match self.farkas_infeasibility_certificate(qp, opts, &mut spent) {
                     Some((y, z)) => {
                         lambda_g = y;
                         lambda_x = z;
@@ -2684,9 +2734,9 @@ impl ParametricActiveSetSolver {
             return Ok(time_limit_solution(
                 qp,
                 Some(&x),
-                sol_aug.stats.n_refactor,
-                sol_aug.stats.n_working_set_changes,
-                sol_aug.stats.n_schur_updates,
+                spent.n_refactor,
+                spent.n_working_set_changes,
+                spent.n_schur_updates,
                 true,
             ));
         }
@@ -2699,9 +2749,9 @@ impl ParametricActiveSetSolver {
             obj,
             status,
             stats: QpStats {
-                n_working_set_changes: sol_aug.stats.n_working_set_changes,
-                n_refactor: sol_aug.stats.n_refactor,
-                n_schur_updates: sol_aug.stats.n_schur_updates,
+                n_working_set_changes: spent.n_working_set_changes,
+                n_refactor: spent.n_refactor,
+                n_schur_updates: spent.n_schur_updates,
                 used_phase1: true,
                 time: started.elapsed(),
                 ..Default::default()
@@ -2907,6 +2957,7 @@ impl ParametricActiveSetSolver {
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> (Option<Vec<Number>>, Option<bool>) {
         let n = qp.n;
         let idx: Vec<Index> = (1..=n as Index).collect();
@@ -2984,6 +3035,9 @@ impl ParametricActiveSetSolver {
                 // refutation turn into a hard error.
                 Err(_) => break,
             };
+            // Each pass is work done whatever this function concludes from
+            // it; the caller reports the sum (gh#1042).
+            spent.add_work(&sol.stats);
 
             let x = sol.x[..n].to_vec();
             if sol.status == QpStatus::TimeLimit || crate::deadline::expired() {
@@ -3105,6 +3159,7 @@ impl ParametricActiveSetSolver {
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        spent: &mut QpStats,
     ) -> Option<(Vec<Number>, Vec<Number>)> {
         let n = qp.n;
         let m = qp.m;
@@ -3150,6 +3205,7 @@ impl ParametricActiveSetSolver {
         };
         self.pin_repair = outer_pin_repair;
         let sol = sol.ok()?;
+        spent.add_work(&sol.stats);
         let y = sol.lambda_g.get(..m)?.to_vec();
         let z = sol.lambda_x.get(..n)?.to_vec();
         let gap = farkas_gap(qp, &y)?;
@@ -3383,6 +3439,20 @@ impl ParametricActiveSetSolver {
     /// pre-polish solution is kept aside, and whatever the polished run ends
     /// in — a worse optimum, a limit, an error — it is what comes back.
     fn solve_general_schur(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        let out = self.solve_general_schur_pass(qp, ws, opts);
+        #[cfg(test)]
+        pass_ledger::record(ws.is_some(), &out);
+        out
+    }
+
+    /// [`Self::solve_general_schur`]'s body: one Schur-path pass, polish
+    /// included.
+    fn solve_general_schur_pass(
         &mut self,
         qp: &QpProblem,
         ws: Option<&QpWarmStart>,
@@ -5449,12 +5519,30 @@ impl ParametricActiveSetSolver {
         // that may not come; the recursion is on a strictly smaller row set,
         // and the full-row solve below still runs whenever the reduced answer
         // is not decisive.
+        let mut spent = QpStats::default();
         if ws.is_none() {
-            if let Some(sol) = self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o))? {
+            if let Some(sol) =
+                self.solve_pruned(qp, opts, |s, q, o| s.solve_scoped(q, None, o), &mut spent)?
+            {
                 return Ok(sol);
             }
         }
+        // A reduced solve that was not decisive is still work this call did;
+        // the full-row solve's stats carry it (gh#1042).
+        let mut sol = self.solve_scoped_full_rows(qp, ws, opts)?;
+        sol.stats.add_work(&spent);
+        Ok(sol)
+    }
 
+    /// [`Self::solve_scoped`] past its dependent-equality pre-solve: the
+    /// homotopy, the general and fast paths, and the feasibility audit, on
+    /// the problem's own row set.
+    fn solve_scoped_full_rows(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
         // Cold + general rows: try the parametric homotopy first. It returns
         // `Ok(None)` when the path cannot be started (no rows, or the box
         // relaxation is unbounded), which is a fall-through signal rather than a
@@ -7380,5 +7468,122 @@ mod over_n_rank_repair_tests {
         let (ac, pruned, _) = reset_over_n(2, &[vec![1.0, 1.0]], &[0, 1]);
         assert_eq!(ac, 2);
         assert!(pruned);
+    }
+}
+
+/// Test-only record of every warm inner pass (`solve_general` /
+/// `solve_general_schur` handed a warm start) and the working-set changes it
+/// returned. Written at the passes themselves, not where their counts are
+/// summed, so a test can hold the reported total to the work actually done
+/// without trusting the accounting it checks (gh#1042). Cold calls are left
+/// out: the cold entry into elastic wraps the passes below it, and its stats
+/// are already theirs.
+#[cfg(test)]
+pub(crate) mod pass_ledger {
+    use super::{QpError, QpSolution};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LEDGER: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn start() {
+        LEDGER.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub(crate) fn take() -> Vec<u32> {
+        LEDGER.with(|l| l.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(crate) fn record(warm: bool, out: &Result<QpSolution, QpError>) {
+        if let (true, Ok(sol)) = (warm, out) {
+            LEDGER.with(|l| {
+                if let Some(v) = l.borrow_mut().as_mut() {
+                    v.push(sol.stats.n_working_set_changes);
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod issue1042_elastic_accounting_tests {
+    //! gh#1042: a solve that recovers through the l1-elastic phase-1 reports
+    //! the work of every pass it ran — phase-1, the convex feasibility passes,
+    //! the Farkas probe and every recovery re-solve — not just the pass whose
+    //! point it returns. `convex_qp_share1b` under `qp-active-set` reported
+    //! 2004 working-set changes for 4125 done.
+    //!
+    //! The oracle is [`super::pass_ledger`], which records each warm inner
+    //! pass where it returns, independently of the sums under test.
+    use super::{ParametricActiveSetSolver, pass_ledger};
+    use crate::QpSolver;
+    use crate::{HessianInertia, QpOptions, QpProblem, QpStatus};
+    use pounce_common::types::Number;
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    const INF: Number = 1e20;
+
+    /// gh#991's sliver: `x₀ + 2x₁ ≤ 2` and `x₀ + 2x₁ ≥ 2 + ε` on free
+    /// variables, so elastic phase-1 ends with residual slacks and the whole
+    /// infeasible branch runs: feasibility passes, recoveries, Farkas.
+    fn solve_sliver(opts: &QpOptions) -> (crate::QpSolution, Vec<u32>) {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2, 2], vec![1, 1, 2]));
+        h.set_values(&[2.0, 1.0, 2.0]);
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(
+            2,
+            2,
+            vec![1, 1, 2, 2],
+            vec![1, 2, 1, 2],
+        ));
+        a.set_values(&[1.0, 2.0, -1.0, -2.0]);
+        let g = [-1.0, 2.0];
+        let (bl, bu) = ([-INF, -INF], [2.0, -(2.0 + 1e-5)]);
+        let (xl, xu) = ([-INF, -INF], [INF, INF]);
+        let qp = QpProblem {
+            n: 2,
+            m: 2,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        pass_ledger::start();
+        let sol = solver.solve(&qp, None, opts).expect("solve");
+        (sol, pass_ledger::take())
+    }
+
+    #[test]
+    fn an_infeasible_phase1_reports_every_pass_it_ran() {
+        for schur in [false, true] {
+            let opts = QpOptions {
+                use_schur_updates: schur,
+                use_homotopy: false,
+                ..QpOptions::default()
+            };
+            let (sol, passes) = solve_sliver(&opts);
+            assert_eq!(sol.status, QpStatus::Infeasible, "schur={schur}");
+            assert!(sol.stats.used_phase1, "schur={schur}");
+            // Phase-1 plus at least one more pass, or this fixture is not
+            // reaching the branch the test is about.
+            assert!(passes.len() >= 2, "schur={schur}: passes {passes:?}");
+            let total: u32 = passes.iter().sum();
+            assert!(
+                total > passes[0],
+                "schur={schur}: only phase-1 did any work ({passes:?}), so the \
+                 test cannot tell its count from the sum"
+            );
+            assert_eq!(
+                sol.stats.n_working_set_changes, total,
+                "schur={schur}: reported {} for passes {passes:?}",
+                sol.stats.n_working_set_changes
+            );
+        }
     }
 }

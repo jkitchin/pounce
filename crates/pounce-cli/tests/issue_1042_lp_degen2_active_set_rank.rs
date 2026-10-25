@@ -25,8 +25,12 @@
 //! 2071, 2009) and far below one cold recovery's 8530; the wall cap is set so
 //! a regression fails in bounded time rather than taking the suite with it.
 //!
-//! Mutation-checked: with the pre-factor prune removed, this test fails on the
-//! wall cap (the solve is killed) on x86_64.
+//! Mutation-checked before gh#1061: with the pre-factor prune removed, this
+//! test failed on the wall cap (the solve was killed) on x86_64. Since gh#1061
+//! an LP on the active-set arm is answered by the simplex (0.4 s, 2026
+//! pivots, prune or no prune), so this file no longer reaches the prune and
+//! guards only the magnitude; `over_n_rank_repair_tests` pins the prune
+//! itself.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

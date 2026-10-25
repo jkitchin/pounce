@@ -2484,6 +2484,92 @@ const BIAS_QP_WITNESS: [f64; 3] = [
     1.1096278255655565, 0.09990985992069845, -2.530165115509102,
 ];
 
+/// gh#1042: the step QP above is the witness for elastic's *recovery*
+/// exit. Its nonconvex phase-1 stops at a local point carrying residual
+/// slacks, the convex feasibility passes find a feasible point, and a
+/// recovery re-solve lands — and that exit returned the recovery's own
+/// working-set changes, dropping phase-1 and the feasibility passes. Held
+/// to the sum of every warm inner pass, recorded where each returns
+/// (`crate::solver::pass_ledger`).
+#[test]
+fn nonconvex_step_qp_recovery_reports_every_elastic_pass() {
+    let (n, m) = (4usize, 2usize);
+    let (mut h_irows, mut h_jcols) = (Vec::new(), Vec::new());
+    for i in 0..n {
+        for j in 0..=i {
+            h_irows.push(i as i32 + 1);
+            h_jcols.push(j as i32 + 1);
+        }
+    }
+    let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, h_irows, h_jcols));
+    h.set_values(&HS071_STEP_QP_H);
+    let (mut a_irows, mut a_jcols) = (Vec::new(), Vec::new());
+    for i in 0..m {
+        for j in 0..n {
+            a_irows.push(i as i32 + 1);
+            a_jcols.push(j as i32 + 1);
+        }
+    }
+    let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, a_irows, a_jcols));
+    a.set_values(&HS071_STEP_QP_A);
+    let g = HS071_STEP_QP_G.to_vec();
+    let bl = vec![-0.005270924065303717, -0.00948700098781785];
+    let bu = vec![NLP_UPPER_BOUND_INF, -0.00948700098781785];
+    let xl = vec![
+        0.0,
+        -3.743999637927625,
+        -2.8211499836197276,
+        -0.37940829307835244,
+    ];
+    let xu = vec![
+        4.0,
+        0.256000362072375,
+        1.1788500163802724,
+        3.6205917069216476,
+    ];
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+    // The refactor path only: on the Schur path this QP's phase-1 ends
+    // slack-feasible and never reaches the recovery (measured). Refactor:
+    // phase-1 7, feasibility passes 3 and 0, recoveries 6 and 6 — 22, where
+    // the report used to say 6.
+    let schur = false;
+    let opts = QpOptions {
+        use_schur_updates: schur,
+        ..QpOptions::default()
+    };
+    let mut solver = new_solver();
+    crate::solver::pass_ledger::start();
+    let sol = solver.solve(&qp, None, &opts).unwrap();
+    let passes = crate::solver::pass_ledger::take();
+    assert_eq!(sol.status, QpStatus::Optimal, "schur={schur}");
+    assert!(sol.stats.used_phase1, "schur={schur}: elastic did not run");
+    assert!(
+        passes.len() >= 2,
+        "schur={schur}: passes {passes:?} — the recovery exit is not reached"
+    );
+    let total: u32 = passes.iter().sum();
+    assert!(
+        passes.iter().all(|&p| p < total),
+        "schur={schur}: one pass did all the work ({passes:?})"
+    );
+    assert_eq!(
+        sol.stats.n_working_set_changes, total,
+        "schur={schur}: reported {} for passes {passes:?}",
+        sol.stats.n_working_set_changes
+    );
+}
+
 #[test]
 fn penalty_bias_is_not_an_infeasibility_certificate() {
     let n = 3usize;
