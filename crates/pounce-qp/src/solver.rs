@@ -137,6 +137,17 @@ pub struct ParametricActiveSetSolver {
     /// Set only while [`Self::solve_elastic_rows`] runs its phase-1 solve:
     /// enables the Schur loop's pin repair (see `solve_general_schur`).
     pin_repair: bool,
+    /// The counting prune's memory for the Schur pass in progress (see
+    /// [`Self::schur_reset_rank_repaired`]); each pass starts with its own.
+    count_prune: CountPrune,
+}
+
+/// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
+/// has removed during one Schur pass, and whether it has stood down.
+#[derive(Default)]
+struct CountPrune {
+    removed: Vec<bool>,
+    off: bool,
 }
 
 impl ParametricActiveSetSolver {
@@ -144,6 +155,7 @@ impl ParametricActiveSetSolver {
         Self {
             linsol: LinearSolver::new(backend),
             pin_repair: false,
+            count_prune: CountPrune::default(),
         }
     }
 
@@ -3361,10 +3373,34 @@ impl ParametricActiveSetSolver {
             // FERAL 0.20 → over 300 s). So prune to a maximal independent
             // subset first, as a reported singularity would have, at the cost
             // of one budget unit like any other repair (gh#1042).
-            if ac > qp.n && *budget > 0 && self.prune_dependent_active(qp, working, n_changes) {
-                *budget -= 1;
-                *pruned = true;
-                ac = active_slot_count(working);
+            //
+            // The prune is only sound while what it drops stays out. Which row
+            // of a dependent set the probe flags is its pivoting's choice, and
+            // a row it calls dependent need not be dependent at the ratio
+            // test's tolerance. On Maros-Meszaros QFORPLAN the probe dropped
+            // slot 721, the next step re-added it at `α = 0`, the following add
+            // made the set over-full again, and the prune dropped 721 again: a
+            // three-iteration cycle until the iteration limit, on a QP the
+            // unpruned loop solves (QFFFFF80 the same). So the first time a
+            // prune removes a slot it already removed in this pass, the
+            // counting trigger stands down for the rest of the pass; the
+            // factorization-failure repair below is unaffected.
+            if ac > qp.n && *budget > 0 && !self.count_prune.off {
+                let was_active = active_slots(qp, working);
+                if self.prune_dependent_active(qp, working, n_changes) {
+                    *budget -= 1;
+                    *pruned = true;
+                    ac = active_slot_count(working);
+                    let now_active = active_slots(qp, working);
+                    let seen = &mut self.count_prune.removed;
+                    seen.resize(qp.m + qp.n, false);
+                    for k in (0..qp.m + qp.n).filter(|&k| was_active[k] && !now_active[k]) {
+                        if seen[k] {
+                            self.count_prune.off = true;
+                        }
+                        seen[k] = true;
+                    }
+                }
             }
             match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
                 Ok(()) => return Ok(()),
@@ -3459,7 +3495,11 @@ impl ParametricActiveSetSolver {
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
         let mut pre_polish = None;
+        // Passes nest (the elastic phase solves through this path too), so
+        // the outer pass's counting-prune memory is set aside, not cleared.
+        let outer_prune = std::mem::take(&mut self.count_prune);
         let res = self.solve_general_schur_inner(qp, ws, opts, &mut pre_polish);
+        self.count_prune = outer_prune;
         let Some(mut pre) = pre_polish else {
             return res;
         };
@@ -4370,6 +4410,15 @@ fn farkas_gap(qp: &QpProblem, y: &[Number]) -> Option<FarkasGap> {
 fn active_slot_count(working: &WorkingSet) -> usize {
     working.constraints.iter().filter(|s| s.is_active()).count()
         + working.bounds.iter().filter(|s| s.is_active()).count()
+}
+
+/// Which slots are active, indexed rows first (`0..m`) then bounds (`m..m+n`),
+/// the numbering `SchurState::apply_change` uses.
+fn active_slots(qp: &QpProblem, working: &WorkingSet) -> Vec<bool> {
+    (0..qp.m)
+        .map(|i| working.constraints[i].is_active())
+        .chain((0..qp.n).map(|j| working.bounds[j].is_active()))
+        .collect()
 }
 
 /// Relative tolerance for the modified-Gram-Schmidt rank test in
@@ -7363,6 +7412,20 @@ mod over_n_rank_repair_tests {
     /// lower bounds, on an LP (`H = 0`). Returns the active slot count after
     /// the repaired reset, whether it pruned, and the budget it spent.
     fn reset_over_n(n: usize, rows: &[Vec<Number>], bounds_active: &[usize]) -> (usize, bool, u32) {
+        let (ac, pruned, spent) = reset_over_n_rounds(n, rows, bounds_active, 1)[0];
+        (ac, pruned, spent)
+    }
+
+    /// [`reset_over_n`] `rounds` times on one solver and one Schur pass,
+    /// re-activating every slot between resets, as the ratio test re-admitting
+    /// what the prune removed would. Returns each round's result, the budget
+    /// spent counted from the start.
+    fn reset_over_n_rounds(
+        n: usize,
+        rows: &[Vec<Number>],
+        bounds_active: &[usize],
+        rounds: usize,
+    ) -> Vec<(usize, bool, u32)> {
         let m = rows.len();
         let (mut ir, mut jc, mut v) = (Vec::new(), Vec::new(), Vec::new());
         for (i, r) in rows.iter().enumerate() {
@@ -7394,35 +7457,44 @@ mod over_n_rank_repair_tests {
             xu: &xu,
             hessian_inertia: HessianInertia::Psd,
         };
-        let mut working = WorkingSet::cold(n, m);
-        for c in working.constraints.iter_mut() {
-            *c = ConsStatus::AtLower;
-        }
-        for &j in bounds_active {
-            working.bounds[j] = BoundStatus::AtLower;
-        }
-        assert!(
-            active_slot_count(&working) > n,
-            "fixture must start over-full"
-        );
+        let over_full = || {
+            let mut working = WorkingSet::cold(n, m);
+            for c in working.constraints.iter_mut() {
+                *c = ConsStatus::AtLower;
+            }
+            for &j in bounds_active {
+                working.bounds[j] = BoundStatus::AtLower;
+            }
+            assert!(
+                active_slot_count(&working) > n,
+                "fixture must start over-full"
+            );
+            working
+        };
         let mut solver =
             ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
         let mut schur = crate::schur::SchurState::new(n, m);
-        let (mut n_changes, mut pruned) = (0u32, false);
+        let mut n_changes = 0u32;
         let budget0 = 10u32;
         let mut budget = budget0;
-        solver
-            .schur_reset_rank_repaired(
-                &mut schur,
-                &qp,
-                &mut working,
-                &QpOptions::default(),
-                &mut n_changes,
-                &mut budget,
-                &mut pruned,
-            )
-            .expect("a rank-repaired reset of a consistent vertex must factor");
-        (active_slot_count(&working), pruned, budget0 - budget)
+        (0..rounds)
+            .map(|_| {
+                let mut working = over_full();
+                let mut pruned = false;
+                solver
+                    .schur_reset_rank_repaired(
+                        &mut schur,
+                        &qp,
+                        &mut working,
+                        &QpOptions::default(),
+                        &mut n_changes,
+                        &mut budget,
+                        &mut pruned,
+                    )
+                    .expect("a rank-repaired reset of a consistent vertex must factor");
+                (active_slot_count(&working), pruned, budget0 - budget)
+            })
+            .collect()
     }
 
     /// Three rows on two variables, the third `0.3·r₀ + 0.9·r₁` in floating
@@ -7438,6 +7510,24 @@ mod over_n_rank_repair_tests {
         assert_eq!(ac, 2);
         assert!(pruned);
         assert_eq!(spent, 1, "the counting guard costs one budget unit");
+    }
+
+    /// A slot the counting prune removes and the loop re-admits must not be
+    /// removed again: on QFORPLAN that was a drop/re-add cycle to the
+    /// iteration limit (gh#1042). The second prune of the same slot is the
+    /// signal, and from then on the counting trigger stands down for the pass,
+    /// leaving the unflagged over-full set as the unpruned loop had it.
+    /// Mutation-checked: without the stand-down the third round prunes too
+    /// and spends a third budget unit.
+    #[test]
+    fn the_counting_prune_stands_down_once_it_repeats_a_slot() {
+        let r0 = vec![0.1, 0.3];
+        let r1 = vec![0.7, 0.2];
+        let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
+        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], 3);
+        assert_eq!(rounds[0], (2, true, 1));
+        assert_eq!(rounds[1], (2, true, 2), "the repeat itself still prunes");
+        assert_eq!(rounds[2], (3, false, 2), "then the trigger stands down");
     }
 
     /// Generic dense rows, one more than `n` — the shape of DEGEN2's

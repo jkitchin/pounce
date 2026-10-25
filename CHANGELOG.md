@@ -324,6 +324,19 @@ changes.
     default and `algorithm=active-set-sqp` sweeps do not move. Needs a
     `benchmarks/qp` run before release: the degenerate Maros-Mészáros
     family is where this branch is reached.
+  - **The prune stands down once it repeats itself.** `benchmarks/qp`
+    showed it turning two solved QPs into `MaxIter`: on `QFORPLAN` it
+    dropped slot 721, the next step re-added it at `α = 0`, the next add
+    made the set over-full again, and the prune dropped 721 again, a
+    three-iteration cycle to the limit. The row the probe calls dependent
+    need not be dependent at the ratio test's tolerance. The first time a
+    prune removes a slot it already removed in the same Schur pass, the
+    counting trigger is off for the rest of that pass. Measured alone:
+    `QFORPLAN` `MaxIter` → `Optimal` (7.4566e9, as on main), `QFFFFF80`
+    `MaxIter` → `Optimal` (main: acceptable). The wins stay: `QSCTAP2`
+    solves (1735.03; times out on main), and `QSIERRA` takes 47 s and
+    `QSCFXM2` 163 s, against 104 s and 288 s with the prune removed.
+    `QSCTAP3` times out, as on main.
   - Other prune selections were measured before the gh #1061 merge: keeping
     the most recent slots, keeping the oldest, and pruning only the `ac − n`
     excess. Every one did more work on `share1b` (4349 to 12 016 changes) or
