@@ -94,4 +94,4 @@ done
 
 echo
 echo "== $TSV"
-column -t -s $'\t' "$TSV"
+if command -v column >/dev/null; then column -t -s $'\t' "$TSV"; else cat "$TSV"; fi
