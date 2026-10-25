@@ -153,6 +153,12 @@ impl ParametricActiveSetSolver {
         self.linsol.rank_guard_calls()
     }
 
+    /// Where this solver's linear algebra spent its time, across every solve
+    /// since it was built. See [`LinearSolver::time_split`].
+    pub fn linsol_time_split(&self) -> crate::factor::LinsolTimes {
+        self.linsol.time_split()
+    }
+
     /// §4.5 inertia-controlled factorization. Tries the factor
     /// without shift first; on `WrongInertia` or `Singular`, shifts
     /// the H-block diagonal by progressively larger δ and re-tries.
@@ -4517,6 +4523,18 @@ pub(crate) fn independent_active_subset(
 /// sparse probe failed and the dense fallback is over
 /// [`DENSE_GUARD_FLOP_BUDGET`] (gh#1061).
 pub(crate) fn checked_independent_active_subset(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let started = Instant::now();
+    let res = checked_independent_active_subset_inner(linsol, qp, active_cons, active_bounds);
+    linsol.note_rank_test_time(started.elapsed());
+    res
+}
+
+fn checked_independent_active_subset_inner(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],

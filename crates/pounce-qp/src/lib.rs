@@ -67,7 +67,7 @@ mod tests;
 
 pub use elastic::ElasticReformulation;
 pub use error::{QpError, QpStatus};
-pub use factor::LinearSolver;
+pub use factor::{LinearSolver, LinsolTimes};
 pub use kkt::{
     KktTriplet, a_times_x, assemble_active_set_kkt, assemble_box_with_active,
     assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,

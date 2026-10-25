@@ -1993,6 +1993,14 @@ fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
 /// number, and the remedies differ: many working-set changes say the working
 /// set moved a lot, a refactor count says the Schur path kept resetting, and
 /// a rank-test count says it spent its time pruning dependent rows.
+///
+/// The wall time is split as well: factorization, back-solves (with their
+/// count), rank tests, and `other` — everything outside the linear solver,
+/// which is KKT assembly, the ratio and drop tests and the SMW correction's
+/// dense arithmetic. Counts say what the QP did; the split says which of it
+/// cost the time. It was a large `other` with a modest `factor` that would
+/// have named the Schur path's `O(m·nnz(A))` reset assembly at once (gh#1061:
+/// 2.2 s per Schur-path refactorization against 0.57 s off it).
 fn solve_step_qp(
     solver: &mut ParametricActiveSetSolver,
     data: &SqpQpData,
@@ -2002,21 +2010,29 @@ fn solve_step_qp(
     let qp = data.as_qp();
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
+    let split_before = solver.linsol_time_split();
     let sol = match warm {
         Some(w) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
         None => solver.solve(&qp, None, opts),
     };
+    let elapsed = started.elapsed();
     let rank_guard_calls = solver.rank_guard_calls() - guards_before;
+    let t = solver.linsol_time_split().since(&split_before);
+    let other = elapsed.saturating_sub(t.factor + t.resolve + t.rank_test);
     match &sol {
         Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
             "step QP (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
-             {} refactors, {} Schur updates, {} rank tests, phase1={}",
-            qp.n, qp.m, warm.is_some(), s.status, started.elapsed(),
+             {} refactors, {} Schur updates, {} rank tests, phase1={}; \
+             time: factor {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
+            qp.n, qp.m, warm.is_some(), s.status, elapsed,
             s.stats.n_working_set_changes, s.stats.n_refactor, s.stats.n_schur_updates,
-            rank_guard_calls, s.stats.used_phase1),
+            rank_guard_calls, s.stats.used_phase1,
+            t.factor, t.n_resolve, t.resolve, t.rank_test, other),
         Err(e) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests",
-            qp.n, qp.m, warm.is_some(), started.elapsed(), rank_guard_calls),
+            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests; \
+             time: factor {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
+            qp.n, qp.m, warm.is_some(), elapsed, rank_guard_calls,
+            t.factor, t.n_resolve, t.resolve, t.rank_test, other),
     }
     Ok(data.unlift_solution(sol?))
 }
