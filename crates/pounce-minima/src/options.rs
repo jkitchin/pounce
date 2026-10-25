@@ -56,7 +56,7 @@ impl Method {
 /// strategy-specific knobs are `Option`s resolved per-method in the driver
 /// (so `"auto"` widths and curvature-based amplitudes match
 /// `pounce.find_minima`). Field semantics mirror `_minima.py` exactly.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MinimaOptions {
     pub method: Method,
     /// Target: stop once this many distinct minima are found (default 10).
