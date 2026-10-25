@@ -351,22 +351,24 @@ impl SensSolve {
         // callback closure outlives the call frame.
         let outbox: Rc<RefCell<CallbackOut>> = Rc::new(RefCell::new(CallbackOut::default()));
         let outbox_cb = Rc::clone(&outbox);
+        // `set_on_converged` fires once per converged *attempt*, and when a
+        // later attempt loses (the mu fallback, the gh#884 retry, the gh#983
+        // scale audit) the reported answer is replayed from an earlier one.
+        // `outbox` holds the firing in progress; each earlier firing is filed
+        // here under its id, and the solve's reported firing is picked once
+        // it returns. Writing every firing into one outbox handed back the
+        // DISCARDED attempt's point and step beside the winner's status.
+        let filed: Rc<RefCell<Vec<(u64, CallbackOut)>>> = Rc::new(RefCell::new(Vec::new()));
+        let current: Rc<std::cell::Cell<Option<u64>>> = Rc::new(std::cell::Cell::new(None));
+        let filed_cb = Rc::clone(&filed);
+        let current_cb = Rc::clone(&current);
 
-        // NOTE (gh#884 follow-up): `set_on_converged` fires once per
-        // *attempt*. When a later attempt loses and an earlier one's answer
-        // is replayed through the three-sink floor -- the mu fallback
-        // (pounce#870, on by DEFAULT) or the gh#884 dual-divergence retry --
-        // the converged KKT state this closure reads belongs to the
-        // DISCARDED attempt, while the status, objective and statistics
-        // reported alongside it are the winner's.
-        // `IpoptApplication::answer_restored_from_floor()` reports that this
-        // happened; the CLI's main path consults it and re-reads the point
-        // from the `finalize_solution` payload. This site does not, because
-        // what it needs is the factorization and the KKT state, which the
-        // payload does not carry and which cannot be rewound. Pre-existing
-        // and unfixed: a sensitivity result taken across a floored solve
-        // describes the attempt that lost.
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
+            let id = data.borrow().on_converged_id;
+            if let Some(prev) = current_cb.replace(id) {
+                let done = std::mem::take(&mut *outbox_cb.borrow_mut());
+                filed_cb.borrow_mut().push((prev, done));
+            }
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
                 None => {
@@ -664,7 +666,17 @@ impl SensSolve {
         }));
 
         let status = crate::optimize_tnlp_for_sensitivity(app, tnlp);
-        let out = outbox.borrow();
+        if let Some(last) = current.take() {
+            let done = std::mem::take(&mut *outbox.borrow_mut());
+            filed.borrow_mut().push((last, done));
+        }
+        let reported = app.reported_on_converged_id();
+        let out = filed
+            .borrow_mut()
+            .drain(..)
+            .find(|(id, _)| Some(*id) == reported)
+            .map(|(_, o)| o)
+            .unwrap_or_default();
         SensResult {
             status,
             error: out.error.clone(),

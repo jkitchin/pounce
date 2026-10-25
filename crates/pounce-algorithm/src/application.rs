@@ -1019,6 +1019,13 @@ pub struct IpoptApplication {
     /// before the user TNLP's `finalize_solution`. See
     /// [`ConvergedCallback`].
     on_converged: Option<ConvergedCallback>,
+    /// Re-evaluate `W` at the converged point before `on_converged` fires.
+    /// See [`Self::set_on_converged_refreshes_hessian`].
+    on_converged_refreshes_hessian: bool,
+    /// Ids handed out so far to `on_converged` firings; the next firing gets
+    /// one more. Never reset, so an id is unique over the application's life.
+    /// See [`IpoptData::on_converged_id`](crate::ipopt_data::IpoptData).
+    on_converged_fired: std::cell::Cell<u64>,
     /// When `true`, the per-iteration `IterRecord` trajectory is
     /// captured into [`SolveStatistics::iterations`] for downstream
     /// consumers (the JSON solve report in pounce-cli, pounce#8). Off
@@ -1145,7 +1152,8 @@ pub struct IpoptApplication {
     /// carries the answer being reported — which is why the fix is to tell
     /// the caller "prefer that payload", not to re-run the callback (the
     /// converged KKT state the callback borrows belongs to the retry by
-    /// then, and cannot be rewound).
+    /// then, and cannot be rewound). Consumers of that state select the
+    /// reported attempt's firing through [`Self::reported_on_converged_id`].
     answer_restored_from_floor: std::cell::Cell<bool>,
     /// Set only for the duration of the gh#983 scale audit's re-solve: the
     /// interior-point arm then widens the inequality rows by
@@ -1159,7 +1167,10 @@ pub struct IpoptApplication {
     ///
     /// Written by [`finalize_via_orig_nlp`] and [`finalize_via_sqp`], which are
     /// free functions and so take this as a sink rather than reaching for
-    /// `self`. Read only by [`Self::run_with_mu_strategy_fallback`].
+    /// `self`, and by [`Self::restore_floor`] when a floor is replayed, so it
+    /// always holds the answer currently delivered. Cleared at the start of
+    /// each solve. Read by the retry wrappers (each floors to it) and by
+    /// [`Self::reported_on_converged_id`].
     last_finalize: RefCell<Option<FinalizeSnapshot>>,
     /// The last `IterStats` sent to the user's `intermediate_callback`
     /// (pounce#870), shared with the running `IpoptAlgorithm`.
@@ -1346,6 +1357,8 @@ impl IpoptApplication {
             debug_hook: None,
             restoration_factory_provider: None,
             on_converged: None,
+            on_converged_refreshes_hessian: true,
+            on_converged_fired: std::cell::Cell::new(0),
             record_iter_history: false,
             option_file_resolved: false,
             convex_routing_available: false,
@@ -1615,6 +1628,24 @@ impl IpoptApplication {
         self.on_converged.take()
     }
 
+    /// Whether `data.w` is re-evaluated at the converged point `w*` before
+    /// the [`Self::set_on_converged`] hook fires. On by default.
+    ///
+    /// The main loop checks convergence before it updates the Hessian, so at
+    /// that moment `data.w` is still `W(w_k)` from the final Newton step,
+    /// while the Jacobians, slacks, multipliers and `Σ` are read at `w*`. A
+    /// hook that factors the KKT matrix (post-optimal sensitivity) needs the
+    /// Hessian at `w*` too, or it factors a hybrid of two iterates.
+    ///
+    /// The refresh costs one Hessian evaluation, counted in the solve's
+    /// statistics like any other. A hook that only reads the iterate and
+    /// never factors (the CLI collecting duals for a `.sol` file) can turn it
+    /// off so a plain solve reports the same evaluation counts with or
+    /// without the hook installed.
+    pub fn set_on_converged_refreshes_hessian(&mut self, refresh: bool) {
+        self.on_converged_refreshes_hessian = refresh;
+    }
+
     /// Was the reported answer replayed from an earlier attempt's floor,
     /// after a later attempt lost?
     ///
@@ -1635,19 +1666,54 @@ impl IpoptApplication {
     /// its own lift; getting that backwards squares the factor, which is a
     /// silent wrong answer of exactly the shape this flag exists to remove.
     ///
-    /// **Not consulted, and known not to be**: the three other
-    /// [`Self::set_on_converged`] consumers —
-    /// `pounce-sensitivity/src/{solver,convenience}.rs` and
-    /// `pounce-cli/src/minima/mod.rs` — read the converged KKT state and the
-    /// factorization, which the `finalize_solution` payload does not carry
-    /// and which cannot be rewound. After any floor replay their result
-    /// describes the attempt that lost. Pre-existing, unfixed, and annotated
-    /// at each site.
+    /// A [`Self::set_on_converged`] consumer that needs more than the point --
+    /// the converged KKT state and its factorization, which the payload does
+    /// not carry and which cannot be rewound -- uses
+    /// [`Self::reported_on_converged_id`] instead: it keeps each firing under
+    /// its id and holds the one the solve reported, whose handles keep that
+    /// attempt's state alive. `pounce-sensitivity`'s `Solver` and `SensSolve`
+    /// and the CLI's hook do.
     ///
     /// `false` on every solve that never spent a second attempt, which is
     /// almost all of them, so the ordinary path is unaffected.
     pub fn answer_restored_from_floor(&self) -> bool {
         self.answer_restored_from_floor.get()
+    }
+
+    /// The [`Self::set_on_converged`] firing whose attempt produced the
+    /// answer the last solve reported, or `None` if that attempt did not fire
+    /// the hook (it did not converge, or it was not the interior-point arm).
+    ///
+    /// The hook fires once per converged attempt, and when a later attempt
+    /// loses the answer is replayed from an earlier one, so the most recent
+    /// firing is not necessarily the reported one. A hook that keeps state
+    /// files it under [`IpoptData::on_converged_id`](crate::ipopt_data::IpoptData)
+    /// and keeps the firing this names; everything else it captured describes
+    /// an attempt the solver discarded.
+    pub fn reported_on_converged_id(&self) -> Option<u64> {
+        self.last_finalize
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.on_converged_id)
+    }
+
+    /// Put a losing retry's floor back: re-deliver the winning attempt's
+    /// payload to the user's TNLP and make it the recorded answer again.
+    ///
+    /// Recording it matters beyond this call. The retries nest -- the gh#884
+    /// retry wraps the μ fallback and the scale audit -- and each takes its
+    /// floor from `last_finalize`, so a replay that only re-delivered the
+    /// payload left the *losing* inner retry's payload there for the outer
+    /// wrapper to floor to, and to deliver as the answer: measured on
+    /// `mpcc_scholtes4_biactive` with `mu_strategy_fallback=yes`, a declined
+    /// μ retry and then a declined gh#884 retry
+    /// (`pounce-sensitivity/tests/floored_solve_retry_wrappers.rs`).
+    /// `reported_on_converged_id` reads it too, so without the record even a
+    /// single declined retry would name its own firing.
+    fn restore_floor(&self, floor: &FinalizeSnapshot, tnlp: &Rc<RefCell<dyn TNLP>>) {
+        floor.replay(tnlp);
+        *self.last_finalize.borrow_mut() = Some(floor.clone());
+        self.answer_restored_from_floor.set(true);
     }
 
     /// Enable per-iteration trajectory capture. After the solve
@@ -2179,6 +2245,10 @@ impl IpoptApplication {
         self.dual_divergence_retry_promoted.set(false);
         *self.mu_strategy_fallback_record.borrow_mut() = None;
         self.answer_restored_from_floor.set(false);
+        // The answer this solve reports is whatever it finalizes; a payload
+        // left from an earlier solve must not stand in for one this solve
+        // never wrote, since `reported_on_converged_id` reads it.
+        *self.last_finalize.borrow_mut() = None;
         // Same scoping argument as the three above, for the same reason: the
         // memo suppresses a REPEATED header within one run, so it must not
         // carry across runs. A library caller solving twice on one
@@ -4887,8 +4957,7 @@ impl IpoptApplication {
                  ({:?} is not Solve_Succeeded); restoring the first attempt's \
                  solution and statistics alongside its status (pounce#870).",
                 retry_status);
-            floor.replay(&tnlp);
-            self.answer_restored_from_floor.set(true);
+            self.restore_floor(&floor, &tnlp);
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             // Third sink: the per-iteration trace. Consumers accumulate that
             // themselves from `intermediate_callback` — the CasADi plugin
@@ -5265,8 +5334,7 @@ impl IpoptApplication {
                  {:.3e} vs base {:.3e}); restoring the first attempt's solution \
                  and statistics alongside its status.",
                 retry_status, retry_unscaled_kkt, base_unscaled_kkt);
-            floor.replay(&tnlp);
-            self.answer_restored_from_floor.set(true);
+            self.restore_floor(&floor, &tnlp);
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             // The signature belongs to the attempt whose numbers are now
             // reported, and `certificate_floor` does not carry it.
@@ -5771,8 +5839,7 @@ impl IpoptApplication {
             return retry_status;
         }
         if let Some(floor) = solution_floor {
-            floor.replay(&tnlp);
-            self.answer_restored_from_floor.set(true);
+            self.restore_floor(&floor, &tnlp);
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             self.statistics.borrow_mut().dual_divergence_signature |=
                 retry.dual_divergence_signature;
@@ -7256,8 +7323,28 @@ impl IpoptApplication {
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         ) {
             if let Some(cb) = self.on_converged.as_mut() {
+                // `data.w` is one iterate behind here: the main loop checks
+                // convergence before it updates the Hessian, so it still holds
+                // `W(w_k)` from the final Newton step while every other block
+                // the hook factors (Jacobians, slacks, multipliers, `Σ`) is
+                // read at the converged point `w*`. Re-evaluate it so the
+                // sensitivity matrix is the KKT Jacobian at `w*` rather than a
+                // hybrid of two iterates. Updaters with no `W` to re-evaluate
+                // (the quasi-Newton ones) answer `None` and keep theirs.
+                // See `set_on_converged_refreshes_hessian`.
+                if self.on_converged_refreshes_hessian
+                    && let Some(w) = alg.bundle.hess.hessian_at_current(&alg.data, &alg.cq)
+                {
+                    alg.data.borrow_mut().w = Some(w);
+                }
                 if let Some(sd) = alg.search_dir.as_mut() {
                     let pd = sd.pd_solver_rc();
+                    // Tag the firing before it runs, so the hook can file what
+                    // it keeps under the id `finalize_via_orig_nlp` then
+                    // stamps on this attempt's payload.
+                    let id = self.on_converged_fired.get() + 1;
+                    self.on_converged_fired.set(id);
+                    alg.data.borrow_mut().on_converged_id = Some(id);
                     cb(&alg.data, &alg.cq, &nlp_handle, pd);
                 }
             }
@@ -9442,6 +9529,10 @@ struct FinalizeSnapshot {
     g: Vec<Number>,
     lambda: Vec<Number>,
     obj_value: Number,
+    /// The `on_converged` firing of the attempt that produced this payload,
+    /// `None` if the hook did not fire for it. Travels with the payload, so a
+    /// floor replay brings the matching firing back with the answer.
+    on_converged_id: Option<u64>,
 }
 
 /// The option-table overrides (and the box flag) one retry applies for its
@@ -9755,6 +9846,7 @@ fn finalize_via_orig_nlp(
         g: g_final,
         lambda,
         obj_value: f_final,
+        on_converged_id: alg.data.borrow().on_converged_id,
     };
     snap.replay(tnlp);
     *sink.borrow_mut() = Some(snap);
@@ -10289,6 +10381,8 @@ fn finalize_via_sqp(
         g: g_final,
         lambda,
         obj_value: f_final,
+        // The SQP arm has no `on_converged` firing.
+        on_converged_id: None,
     };
     snap.replay(tnlp);
     *sink.borrow_mut() = Some(snap);
@@ -11641,6 +11735,39 @@ mod tests {
         }
 
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// A floor replay makes the floor the recorded answer again, firing id
+    /// included. The retries nest and each floors to `last_finalize`, so a
+    /// replay that only re-delivered the payload left the inner retry's
+    /// discarded payload there for an outer wrapper to floor to, and for
+    /// `reported_on_converged_id` to name.
+    #[test]
+    fn restoring_a_floor_records_it_as_the_answer() {
+        let snap = |x: Number, id: Option<u64>| FinalizeSnapshot {
+            status: SolverReturn::Success,
+            x: vec![x],
+            z_l: vec![0.0],
+            z_u: vec![0.0],
+            g: vec![],
+            lambda: vec![],
+            obj_value: x * x,
+            on_converged_id: id,
+        };
+        let app = IpoptApplication::new();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ExactQuadratic));
+        let base = snap(1.0, Some(1));
+        // The retry's payload is the last one written, as after an inner
+        // retry that lost.
+        *app.last_finalize.borrow_mut() = Some(snap(2.0, Some(2)));
+        assert_eq!(app.reported_on_converged_id(), Some(2));
+
+        app.restore_floor(&base, &tnlp);
+        assert!(app.answer_restored_from_floor());
+        assert_eq!(app.reported_on_converged_id(), Some(1));
+        // What an outer wrapper would take as its own floor.
+        let outer_floor = app.last_finalize.borrow().clone().unwrap();
+        assert_eq!(outer_floor.x, base.x);
     }
 
     fn derivative_test_verdict(extra: &str) -> pounce_nlp::derivative_test::DerivativeTestReport {

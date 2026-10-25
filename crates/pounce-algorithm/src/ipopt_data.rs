@@ -156,6 +156,19 @@ pub struct IpoptData {
     /// returned and no further step is taken.
     pub curr_from_crossover: bool,
 
+    /// Identifies this attempt's firing of the post-optimal
+    /// `IpoptApplication::set_on_converged` hook: `Some(id)` while the hook
+    /// runs, `None` before it. Ids are unique over the application's life.
+    ///
+    /// A hook fires once per converged *attempt*, and a solve can spend
+    /// several (the `mu_strategy_fallback` re-solve, the gh#884 retry, the
+    /// gh#983 scale audit). When a later attempt loses, the reported answer is
+    /// replayed from an earlier one, so "the last firing" is not necessarily
+    /// the answer. A consumer that keeps state from the hook records this id
+    /// beside it and, after the solve, keeps the firing
+    /// `IpoptApplication::reported_on_converged_id` names.
+    pub on_converged_id: Option<u64>,
+
     /// Line-search reset request from the μ-update layer (pounce#510).
     /// Upstream's μ updates hold a `linesearch_` handle and call
     /// `linesearch_->Reset()` themselves at fixed points
@@ -259,6 +272,7 @@ impl IpoptData {
             inf_pr_floor: InfPrFloor::default(),
             warm_start_diagnostics: None,
             curr_from_crossover: false,
+            on_converged_id: None,
             request_ls_reset: false,
             request_tiny_step_stop: false,
             info_alpha_primal_char: ' ',

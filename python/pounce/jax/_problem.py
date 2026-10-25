@@ -756,24 +756,120 @@ def _bwd_batched_factor_reuse(
     )
 
 
-def _single_solver_id(sid_h) -> int:
-    """The one solver id behind a ``broadcast_all`` batch of ids.
+def _stacked_kkt_solve_host(
+    jp: "JaxProblem",
+    B: int,
+    n: int,
+    m: int,
+    sid_h,
+    rx_h,
+    rg_h,
+    *,
+    missing_msg: str,
+    no_factor_msg: str,
+):
+    """``K⁻¹ [rx; rg]`` against held *stacked* factors, grouped by id.
 
-    The stacked-factor callbacks pack their whole batch into one RHS for
-    one factor, which is right only when every lane carries the same id
-    (``jacrev`` / a vmap over directions). Distinct ids mean an outer vmap
-    over distinct solves; reading lane 0 would back-solve every lane
-    against the first factor and return plausible wrong numbers (gh#1049).
+    Host body shared by :func:`_kkt_backsolve_batched_pure_callback`
+    (``rg_h is None``: cotangent on the x-block only) and
+    :func:`_kkt_jvp_batched_pure_callback`. Under
+    ``vmap_method="broadcast_all"`` every input gains the same leading
+    batch axes, one per enclosing ``vmap`` (including the one ``jacrev``
+    adds): ``sid_h`` is ``batch``, ``rx_h`` is ``batch + (B, n)`` and
+    ``rg_h`` is ``batch + (B, m)``.
+
+    ``jacrev`` at one primal gives every lane the same id; an outer
+    ``jax.vmap`` over ``batched_solve`` gives each lane its own stacked
+    solve and so its own id (gh#1052). Reading lane 0's id for all of
+    them back-solved every lane against the first factor — the gh#1049
+    defect class — so rows are grouped by id, and each group is one
+    ``kkt_solve_many`` against its own factor, with the block-major
+    de-interleave run per group.
+
+    Returns ``(w_x batch + (B, n), w_g batch + (B, m))``, the x-block and
+    the constraint-multiplier block (in user g-order) of the solution.
     """
-    sids = np.unique(np.asarray(sid_h, dtype=np.int64))
-    if sids.size != 1:
-        raise NotImplementedError(
-            "pounce.jax: a stacked-factor back-solve was batched over "
-            f"{sids.size} distinct solves; jax.vmap over batched_solve / "
-            "batched_jvp_from_state is not supported. Fold the outer batch "
-            "into p_batch instead."
-        )
-    return int(sids[0])
+    rx_all = np.asarray(rx_h, dtype=np.float64)
+    batch_shape = rx_all.shape[:-2]
+    rx_all = rx_all.reshape(-1, B, n)
+    N_all = rx_all.shape[0]
+    rg_all = (
+        None if rg_h is None
+        else np.asarray(rg_h, dtype=np.float64).reshape(N_all, B, m)
+    )
+    sids = np.broadcast_to(
+        np.asarray(sid_h, dtype=np.int64), batch_shape
+    ).reshape(-1)
+
+    is_eq = np.asarray(jp._cl_for_classify) == np.asarray(jp._cu_for_classify)
+    c_idx = np.flatnonzero(is_eq)
+    d_idx = np.flatnonzero(~is_eq)
+
+    out_x = np.empty((N_all, B, n), dtype=np.float64)
+    out_g = np.zeros((N_all, B, m), dtype=np.float64)
+    for sid_k in np.unique(sids):
+        rows = np.flatnonzero(sids == sid_k)
+        solver = jp._lookup_solver(int(sid_k))
+        if solver is None:
+            raise RuntimeError(missing_msg.format(sid=int(sid_k)))
+
+        # Pin all PySolver access to the executor thread that built the
+        # stacked solver (pounce#77) so XLA-thread pure_callback dispatch
+        # in training loops doesn't trip PyO3 unsendable.
+        def _do_kkt(solver=solver, rows=rows):
+            dims = solver.block_dims
+            if dims is None:
+                raise RuntimeError(no_factor_msg)
+            n_x, n_s, n_y_c, n_y_d = dims[0], dims[1], dims[2], dims[3]
+            kkt_dim = solver.kkt_dim
+            # The stacked NLP has n_x = B * n_per_block by construction
+            # (no fixed-variable treatment is exposed on the batched path).
+            if n_x != B * n:
+                raise RuntimeError(
+                    f"pounce.jax: stacked solver n_x={n_x} != "
+                    f"B*n={B * n} (B={B}, n={n}). Internal invariant "
+                    "violated — please file an issue."
+                )
+            N = rows.size
+            y_c_off = n_x + n_s
+            y_d_off = y_c_off + n_y_c
+            # Block-major flatten per row: row k of ``rhs`` is
+            # ``[rx^(1)_k; ...; rx^(B)_k; 0_s; rg_c; rg_d; 0_z...]``. The
+            # stacked constraints are block-major (``[g^(1); ...; g^(B)]``)
+            # with ``cl`` / ``cu`` tiled per block, so the classified
+            # y_c / y_d blocks keep block k's rows contiguous before
+            # block k+1's.
+            rhs = np.zeros((N, kkt_dim), dtype=np.float64)
+            rhs[:, :n_x] = rx_all[rows].reshape(N, n_x)
+            if rg_all is not None:
+                rg = rg_all[rows]
+                if c_idx.size:
+                    rhs[:, y_c_off:y_c_off + n_y_c] = (
+                        rg[:, :, c_idx].reshape(N, n_y_c)
+                    )
+                if d_idx.size:
+                    rhs[:, y_d_off:y_d_off + n_y_d] = (
+                        rg[:, :, d_idx].reshape(N, n_y_d)
+                    )
+            w = np.asarray(
+                solver.kkt_solve_many(rhs.reshape(-1), N), dtype=np.float64,
+            ).reshape(N, kkt_dim)
+            w_g = np.zeros((N, B, m), dtype=np.float64)
+            if c_idx.size:
+                w_g[:, :, c_idx] = w[:, y_c_off:y_c_off + n_y_c].reshape(
+                    N, B, c_idx.size
+                )
+            if d_idx.size:
+                w_g[:, :, d_idx] = w[:, y_d_off:y_d_off + n_y_d].reshape(
+                    N, B, d_idx.size
+                )
+            return w[:, :n_x].reshape(N, B, n).copy(), w_g
+
+        out_x[rows], out_g[rows] = jp._run_pinned(_do_kkt)
+    return (
+        out_x.reshape(batch_shape + (B, n)),
+        out_g.reshape(batch_shape + (B, m)),
+    )
 
 
 def _kkt_backsolve_batched_pure_callback(
@@ -795,14 +891,14 @@ def _kkt_backsolve_batched_pure_callback(
     * ``u_y_c_batch`` from the stacked y_c-block, reshaped ``(B, n_c)``.
     * ``u_y_d_batch`` from the stacked y_d-block, reshaped ``(B, n_d)``.
 
-    The stacked y_c / y_d sub-blocks are block-major because the
-    stacked problem's constraints are block-major (`[g^(1), g^(2),
-    ..., g^(B)]`) and ``cl``/``cu`` are tiled per-block, so the
-    classified ``c_map`` / ``d_map`` keeps block-k's equality
-    multipliers contiguous before block-(k+1)'s.
-
     Then scatters per block back to user g-order via the per-block
     ``cl == cu`` mask cached on the parent JaxProblem.
+
+    ``vmap_method="broadcast_all"`` lets ``jax.jacrev`` over
+    ``batched_solve`` (N = B*n cotangents, one id) arrive as one
+    dispatch and one ``kkt_solve_many``; an outer ``jax.vmap`` over
+    ``batched_solve`` arrives with one id per lane and is grouped by id
+    (:func:`_stacked_kkt_solve_host`, gh#1052).
 
     Returns ``(u_x_batch (B, n), u_g_batch (B, m))``.
     """
@@ -812,105 +908,27 @@ def _kkt_backsolve_batched_pure_callback(
     )
 
     def host_call(sid_h, cot_h):
-        # Under ``vmap_method="broadcast_all"`` (pounce#77 follow-up),
-        # both inputs gain a leading batch axis when this callback is
-        # invoked through a vmap — most importantly ``jax.jacrev`` over
-        # ``batched_solve``, which fans out N = B*n cotangents.
-        # Accept either:
-        #   - unbatched: ``sid_h`` scalar,   ``cot_h`` shape ``(B, n)``
-        #   - batched:   ``sid_h`` (N,),     ``cot_h`` shape ``(N, B, n)``
-        # solver_id is constant across cotangents in a jacrev (one
-        # primal, N varying cotangents). Lanes holding different ids
-        # would each need their own stacked factor; refuse rather than
-        # back-solve them all against lane 0's (gh#1049).
-        sid_int = _single_solver_id(sid_h)
-        solver = jp._lookup_solver(sid_int)
-        if solver is None:
-            raise RuntimeError(
-                f"pounce.jax: missing stacked Solver for batched backward "
-                f"(id={sid_int}). The stacked factor was evicted from the "
+        return _stacked_kkt_solve_host(
+            jp, B, n, m, sid_h, cot_h, None,
+            missing_msg=(
+                "pounce.jax: missing stacked Solver for batched backward "
+                "(id={sid}). The stacked factor was evicted from the "
                 "LRU registry. Bump `_solver_registry_capacity` (or "
                 "`_solver_registry_target`, if this factor's backward had "
                 "already read it once — gh#942), run grads closer to the "
                 "fwd, or use `factor_reuse=False`."
-            )
-        cot_np = np.asarray(cot_h, dtype=np.float64)
-        squeeze = cot_np.ndim == 2  # (B, n) unbatched; (N, B, n) batched
-        if squeeze:
-            cot_np = cot_np[None, ...]
-        N = cot_np.shape[0]
-
-        # Pin all PySolver access to the executor thread that built
-        # the stacked solver (pounce#77) so XLA-thread pure_callback
-        # dispatch in training loops doesn't trip PyO3 unsendable.
-        def _do_kkt():
-            dims = solver.block_dims
-            if dims is None:
-                raise RuntimeError(
-                    "pounce.jax: factor-reuse batched backward "
-                    "requires a converged IPM factor on the stacked "
-                    "solve, but the stacked IPM did not produce one. "
-                    "Either tighten the stacked solve (loosen `tol`, "
-                    "supply a better `x0`, rescale the problem), or "
-                    "rebuild the `JaxProblem` with `factor_reuse="
-                    "False` to fall back to the dense per-element JAX "
-                    "backward."
-                )
-            n_x_ = dims[0]
-            n_s_ = dims[1]
-            n_y_c_ = dims[2]
-            n_y_d_ = dims[3]
-            kkt_dim_ = solver.kkt_dim
-            # The stacked NLP has n_x = B * n_per_block by construction
-            # (no fixed-variable treatment is exposed on the batched path).
-            if n_x_ != B * n:
-                raise RuntimeError(
-                    f"pounce.jax: stacked solver n_x={n_x_} != "
-                    f"B*n={B * n} (B={B}, n={n}). Internal invariant "
-                    "violated — please file an issue."
-                )
-            # Block-major flatten per cotangent: each row k of
-            # ``rhs_flat`` is ``[cot^(1)_k; cot^(2)_k; ...; cot^(B)_k;
-            # 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``. One
-            # ``kkt_solve_many`` against the held stacked LDLᵀ factor
-            # amortises FFI / executor-pin overhead across the N
-            # cotangents from ``jax.jacrev``.
-            rhs_flat = np.zeros((N, kkt_dim_), dtype=np.float64)
-            rhs_flat[:, :n_x_] = cot_np.reshape(N, B * n)
-            u_flat = np.asarray(
-                solver.kkt_solve_many(rhs_flat.reshape(-1), N),
-                dtype=np.float64,
-            ).reshape(N, kkt_dim_)
-            return n_x_, n_s_, n_y_c_, n_y_d_, u_flat
-
-        n_x, n_s, n_y_c, n_y_d, u_mat = jp._run_pinned(_do_kkt)
-
-        u_x_batch = u_mat[:, :n_x].reshape(N, B, n).copy()
-
-        u_g_batch = np.zeros((N, B, m), dtype=np.float64)
-        if m > 0:
-            cl_arr = jp._cl_for_classify
-            cu_arr = jp._cu_for_classify
-            is_eq = cl_arr == cu_arr
-            n_c_per = int(np.sum(is_eq))
-            n_d_per = m - n_c_per
-            y_c_off = n_x + n_s
-            y_d_off = y_c_off + n_y_c
-            if n_c_per > 0:
-                u_y_c_batch = u_mat[:, y_c_off : y_c_off + n_y_c].reshape(
-                    N, B, n_c_per
-                )
-                c_idx = np.flatnonzero(is_eq)
-                u_g_batch[:, :, c_idx] = u_y_c_batch
-            if n_d_per > 0:
-                u_y_d_batch = u_mat[:, y_d_off : y_d_off + n_y_d].reshape(
-                    N, B, n_d_per
-                )
-                d_idx = np.flatnonzero(~is_eq)
-                u_g_batch[:, :, d_idx] = u_y_d_batch
-        if squeeze:
-            return u_x_batch[0], u_g_batch[0]
-        return u_x_batch, u_g_batch
+            ),
+            no_factor_msg=(
+                "pounce.jax: factor-reuse batched backward "
+                "requires a converged IPM factor on the stacked "
+                "solve, but the stacked IPM did not produce one. "
+                "Either tighten the stacked solve (loosen `tol`, "
+                "supply a better `x0`, rescale the problem), or "
+                "rebuild the `JaxProblem` with `factor_reuse="
+                "False` to fall back to the dense per-element JAX "
+                "backward."
+            ),
+        )
 
     return jax.pure_callback(
         host_call, result_shapes, sid, cot_x_batch, vmap_method="broadcast_all",
@@ -949,11 +967,13 @@ def _kkt_jvp_batched_pure_callback(
     Inputs are per-block, leading-batch (``rhs_x_batch (B, n)``,
     ``rhs_g_batch (B, m)``); ``vmap_method="broadcast_all"`` also accepts
     a leading direction axis so the JVP can be vmapped over several
-    ``dp`` directions in one FFI hop. Returns ``(w_x_batch (B, n),
-    w_g_batch (B, m))`` — the primal block and the constraint-multiplier
-    block of ``w`` (the latter scattered back to user-g order), so the
-    caller can form both ``J @ dp = -w_x`` and the dual sensitivity
-    ``∂λ*/∂θ · dp = -w_g`` (pounce#90 predicts the duals too).
+    ``dp`` directions in one FFI hop, and lanes carrying different
+    anchors' ids are grouped by id (gh#1052). Returns ``(w_x_batch (B,
+    n), w_g_batch (B, m))`` — the primal block and the
+    constraint-multiplier block of ``w`` (the latter scattered back to
+    user-g order), so the caller can form both ``J @ dp = -w_x`` and the
+    dual sensitivity ``∂λ*/∂θ · dp = -w_g`` (pounce#90 predicts the
+    duals too).
     """
     result_shapes = (
         jax.ShapeDtypeStruct((B, n), jnp.float64),
@@ -961,94 +981,21 @@ def _kkt_jvp_batched_pure_callback(
     )
 
     def host_call(sid_h, rx_h, rg_h):
-        sid_int = _single_solver_id(sid_h)
-        solver = jp._lookup_solver(sid_int)
-        if solver is None:
-            raise RuntimeError(
-                f"pounce.jax: missing stacked Solver for batched JVP "
-                f"(id={sid_int}). The held factor was released — the "
+        return _stacked_kkt_solve_host(
+            jp, B, n, m, sid_h, rx_h, rg_h,
+            missing_msg=(
+                "pounce.jax: missing stacked Solver for batched JVP "
+                "(id={sid}). The held factor was released — the "
                 "AnchorState was closed or evicted. Re-anchor with "
                 "jp.anchor(...) before calling batched_jvp_from_state."
-            )
-        rx = np.asarray(rx_h, dtype=np.float64)
-        rg = np.asarray(rg_h, dtype=np.float64)
-        squeeze = rx.ndim == 2  # (B, n) unbatched; (N, B, n) batched
-        if squeeze:
-            rx = rx[None, ...]
-            rg = rg[None, ...]
-        N = rx.shape[0]
-
-        def _do_kkt():
-            dims = solver.block_dims
-            if dims is None:
-                raise RuntimeError(
-                    "pounce.jax: JVP-from-state requires a converged IPM "
-                    "factor on the anchor solve, but the stacked IPM did "
-                    "not produce one. Tighten the anchor solve or rebuild "
-                    "the problem."
-                )
-            n_x_, n_s_, n_y_c_, n_y_d_ = dims[0], dims[1], dims[2], dims[3]
-            kkt_dim_ = solver.kkt_dim
-            if n_x_ != B * n:
-                raise RuntimeError(
-                    f"pounce.jax: stacked solver n_x={n_x_} != B*n={B * n} "
-                    f"(B={B}, n={n}). Internal invariant violated."
-                )
-            rhs_flat = np.zeros((N, kkt_dim_), dtype=np.float64)
-            rhs_flat[:, :n_x_] = rx.reshape(N, B * n)
-            if m > 0:
-                # Scatter the constraint-side RHS from user g-order into
-                # the stacked block-major y_c / y_d blocks — the inverse
-                # of the reverse path's de-interleave.
-                cl_arr = jp._cl_for_classify
-                cu_arr = jp._cu_for_classify
-                is_eq = cl_arr == cu_arr
-                n_c_per = int(np.sum(is_eq))
-                y_c_off = n_x_ + n_s_
-                y_d_off = y_c_off + n_y_c_
-                rg_arr = rg.reshape(N, B, m)
-                if n_c_per > 0:
-                    c_idx = np.flatnonzero(is_eq)
-                    rhs_flat[:, y_c_off : y_c_off + n_y_c_] = (
-                        rg_arr[:, :, c_idx].reshape(N, n_y_c_)
-                    )
-                if (m - n_c_per) > 0:
-                    d_idx = np.flatnonzero(~is_eq)
-                    rhs_flat[:, y_d_off : y_d_off + n_y_d_] = (
-                        rg_arr[:, :, d_idx].reshape(N, n_y_d_)
-                    )
-            w_flat = np.asarray(
-                solver.kkt_solve_many(rhs_flat.reshape(-1), N),
-                dtype=np.float64,
-            ).reshape(N, kkt_dim_)
-            return n_x_, n_s_, n_y_c_, n_y_d_, w_flat
-
-        n_x, n_s, n_y_c, n_y_d, w_mat = jp._run_pinned(_do_kkt)
-        w_x_batch = w_mat[:, :n_x].reshape(N, B, n).copy()
-
-        # De-interleave the constraint-multiplier blocks (block-major,
-        # like the reverse path) and scatter back to user-g order.
-        w_g_batch = np.zeros((N, B, m), dtype=np.float64)
-        if m > 0:
-            cl_arr = jp._cl_for_classify
-            cu_arr = jp._cu_for_classify
-            is_eq = cl_arr == cu_arr
-            n_c_per = int(np.sum(is_eq))
-            y_c_off = n_x + n_s
-            y_d_off = y_c_off + n_y_c
-            if n_c_per > 0:
-                w_y_c = w_mat[:, y_c_off : y_c_off + n_y_c].reshape(
-                    N, B, n_c_per
-                )
-                w_g_batch[:, :, np.flatnonzero(is_eq)] = w_y_c
-            if (m - n_c_per) > 0:
-                w_y_d = w_mat[:, y_d_off : y_d_off + n_y_d].reshape(
-                    N, B, m - n_c_per
-                )
-                w_g_batch[:, :, np.flatnonzero(~is_eq)] = w_y_d
-        if squeeze:
-            return w_x_batch[0], w_g_batch[0]
-        return w_x_batch, w_g_batch
+            ),
+            no_factor_msg=(
+                "pounce.jax: JVP-from-state requires a converged IPM "
+                "factor on the anchor solve, but the stacked IPM did "
+                "not produce one. Tighten the anchor solve or rebuild "
+                "the problem."
+            ),
+        )
 
     return jax.pure_callback(
         host_call, result_shapes, sid, rhs_x_batch, rhs_g_batch,
@@ -3943,7 +3890,15 @@ def _pure_callback_batched_solve(jp: JaxProblem, B: int, p_batch, x0_batch):
     def host_call(p_h, x0_h):
         return jp._host_batched_solve(np.asarray(p_h), np.asarray(x0_h))
 
-    return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
+    # ``sequential`` (gh#1052): under an outer ``jax.vmap`` each lane is
+    # its own stacked solve with its own held factor and id; the stacked
+    # back-solve groups its rows by that id (:func:`_stacked_kkt_solve_host`).
+    # Not ``broadcast_all``: the solver is stateful and pinned to one
+    # thread (pounce#77), and folding lanes into one larger stack would
+    # share a barrier homotopy the caller did not ask for.
+    return jax.pure_callback(
+        host_call, result_shapes, p_batch, x0_batch, vmap_method="sequential",
+    )
 
 
 def _pure_callback_batched_warm_solve(
@@ -3977,9 +3932,12 @@ def _pure_callback_batched_warm_solve(
             np.asarray(lam_h), np.asarray(zL_h), np.asarray(zU_h),
         )
 
+    # ``sequential``: one stacked solve per outer-vmap lane, as in
+    # :func:`_pure_callback_batched_solve` (gh#1052).
     return jax.pure_callback(
         host_call, result_shapes,
         p_batch, x0_batch, lam_warm, zL_warm, zU_warm,
+        vmap_method="sequential",
     )
 
 
@@ -4032,4 +3990,12 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         _report_batch_failures(results, jp._on_failure)
         return x_out, lam_out, zL_out, zU_out, sid_out
 
-    return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
+    # ``sequential`` (gh#1052): an outer ``jax.vmap`` runs one host_call
+    # per outer lane, one after another, so pools never nest and
+    # ``workers`` bounds the threads of each inner batch of ``B`` solves —
+    # the same meaning it has without the outer vmap. The backward is the
+    # dense JAX kernel and never reads the registry, so nothing here holds
+    # factors across lanes.
+    return jax.pure_callback(
+        host_call, result_shapes, p_batch, x0_batch, vmap_method="sequential",
+    )

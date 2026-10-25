@@ -857,6 +857,43 @@ from the last `finalize_solution` payload. That payload is always the
 answer being reported, on this path and the ordinary one, because the
 floor restores the winner *by* calling `finalize_solution`.
 
+The KKT state itself — what the sensitivity layer and the CLI's sIPOPT step
+and reduced Hessian factor — is not in that payload, and for a while this was
+left open: those results were taken about the losing retry's point. It is now
+closed by keeping rather than rewinding. Each `on_converged` firing carries an
+id (`IpoptData::on_converged_id`), the id travels with its attempt's
+`finalize_solution` payload into the floor, and
+`IpoptApplication::reported_on_converged_id()` names the firing behind the
+answer actually reported. Consumers keep every firing and hold that one; each
+attempt's own `Rc` handles keep its factor alive. Pinned end to end by
+`pounce-sensitivity/tests/floored_solve_sensitivity.rs` and
+`pounce-cli/tests/floored_solve_sens_suffix.rs`, both on the μ fallback's
+floor.
+
+A replay also re-records the floor as the current answer. Before, it only
+re-delivered the payload, so after an inner retry lost, `last_finalize` still
+held that retry's discarded payload — and the wrappers nest (this retry wraps
+the μ fallback and the gh#983 scale audit), each taking its floor from
+`last_finalize`. An outer wrapper that then declined its own retry floored to
+the inner loser, and **delivered that loser's point** as the answer, beside the
+base attempt's statistics. That is a wrong answer in the reported point, not
+only in sensitivity, and it predates the `on_converged` work.
+
+Measured on `mpcc_scholtes4_biactive` at `bound_relax_factor=0 tol=1e-8
+mu_strategy_fallback=yes`: the base attempt exits `Solved_To_Acceptable_Level`
+with this retry's signature, the μ fallback retries that acceptable exit and
+declines (its retry is also only acceptable), and then this retry runs and
+declines. With replay alone the model received the declined μ retry's
+`[1.68e-13, 1.68e-13, -1.8175e-9]` against the base attempt's `[2.91e-13,
+2.91e-13, -1.8170e-9]` — close on this model, unbounded in general. An earlier
+draft of this note said no fixture reaches two declined retries in series,
+reasoning that this detector does not fire on acceptable-level exits; that was
+generalized from a probe at `tol=1e-30`, and scholtes4 at `tol=1e-8` is the
+counterexample. Pinned by
+`pounce-sensitivity/tests/floored_solve_retry_wrappers.rs` (which also covers
+this retry's and the gh#983 audit's floors singly) and, at unit level, by
+`restoring_a_floor_records_it_as_the_answer` in `application.rs`.
+
 ### Reproducing the family
 
 ```python

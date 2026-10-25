@@ -183,26 +183,24 @@ impl Solver {
             .map(|(v, _)| v == "exact")
             .expect("hessian_approximation is a registered core option");
 
-        let state_cb = Rc::clone(&self.state);
-        // NOTE (gh#884 follow-up): `set_on_converged` fires once per
-        // *attempt*. When a later attempt loses and an earlier one's answer
-        // is replayed through the three-sink floor -- the mu fallback
-        // (pounce#870, on by DEFAULT) or the gh#884 dual-divergence retry --
-        // the converged KKT state this closure reads belongs to the
-        // DISCARDED attempt, while the status, objective and statistics
-        // reported alongside it are the winner's.
-        // `IpoptApplication::answer_restored_from_floor()` reports that this
-        // happened; the CLI's main path consults it and re-reads the point
-        // from the `finalize_solution` payload. This site does not, because
-        // what it needs is the factorization and the KKT state, which the
-        // payload does not carry and which cannot be rewound. Pre-existing
-        // and unfixed: a sensitivity result taken across a floored solve
-        // describes the attempt that lost.
+        // `set_on_converged` fires once per converged *attempt*, and when a
+        // later attempt loses (the mu fallback, the gh#884 retry, the gh#983
+        // scale audit) the reported answer is replayed from an earlier one.
+        // Keeping only the last firing therefore held the DISCARDED attempt's
+        // point and factor beside the winner's status. Every firing is kept
+        // under its id until the solve says which one it reported; the KKT
+        // state cannot be rewound, but each attempt's own handles keep it
+        // alive.
+        let attempts: Rc<RefCell<Vec<(u64, ConvergedState)>>> = Rc::new(RefCell::new(Vec::new()));
+        let state_cb = Rc::clone(&attempts);
         self.app
             .set_on_converged(Box::new(move |data, cq, nlp, pd| {
-                let curr = match data.borrow().curr.clone() {
-                    Some(c) => c,
-                    None => return,
+                let (curr, id) = {
+                    let d = data.borrow();
+                    match (d.curr.clone(), d.on_converged_id) {
+                        (Some(c), Some(id)) => (c, id),
+                        _ => return,
+                    }
                 };
                 let backsolver = match PdSensBacksolver::new(data, cq, nlp, Rc::clone(&pd)) {
                     Ok(b) => b,
@@ -230,20 +228,32 @@ impl Solver {
                 let obj_val = cq.borrow_mut().curr_f();
                 // Status is overwritten with the real value after
                 // optimize_tnlp returns.
-                *state_cb.borrow_mut() = Some(ConvergedState {
-                    status: ApplicationReturnStatus::InternalError,
-                    x,
-                    obj_val,
-                    bound_relax_factor: brf,
-                    exact_hessian,
-                    backsolver,
-                });
+                state_cb.borrow_mut().push((
+                    id,
+                    ConvergedState {
+                        status: ApplicationReturnStatus::InternalError,
+                        x,
+                        obj_val,
+                        bound_relax_factor: brf,
+                        exact_hessian,
+                        backsolver,
+                    },
+                ));
             }));
 
         let status = crate::optimize_tnlp_for_sensitivity(&mut self.app, Rc::clone(&self.tnlp));
-        if let Some(s) = self.state.borrow_mut().as_mut() {
-            s.status = status;
-        }
+        // Hold the firing whose attempt produced the reported answer; drop the
+        // rest, which describe attempts the solver discarded.
+        let reported = self.app.reported_on_converged_id();
+        let held = attempts
+            .borrow_mut()
+            .drain(..)
+            .find(|(id, _)| Some(*id) == reported)
+            .map(|(_, mut s)| {
+                s.status = status;
+                s
+            });
+        *self.state.borrow_mut() = held;
         status
     }
 

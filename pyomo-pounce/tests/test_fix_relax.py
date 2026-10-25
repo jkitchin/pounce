@@ -390,13 +390,25 @@ def test_the_step_carries_the_barrier_correction():
     perturbation, read from its `sens_sol_state_1` suffix through
     pyomo.contrib.sensitivity_toolbox at the same solver tolerance. A
     loose tolerance is what makes this test able to fail: without the
-    correction pounce differs from sIPOPT by 9e-6 here, and the assert
-    is two orders tighter than that.
+    correction pounce differs from sIPOPT by 8.7e-6 here.
+
+    The band is not tighter because pounce and sIPOPT no longer factor
+    the same matrix. sIPOPT factors with the Hessian left from the final
+    Newton step, W(w_k); pounce re-evaluates it at the converged point,
+    so its K is the KKT Jacobian at w* (crates/pounce-sensitivity/tests/
+    converged_hessian_at_w_star.rs). At tol=1e-3 that last step is
+    large. Measured against sIPOPT:
+
+        pounce, K(w*), with the correction     -5.2e-7
+        pounce, W(w_k), with the correction    -2.4e-7  (the old pin, 5e-7)
+        pounce, K(w*), correction removed      +8.7e-6
+
+    2e-6 passes the first with 3.8x margin and fails the third by 4.3x.
     """
     m = nonlinear()
     pyo.SolverFactory("pounce").solve(m, options={"tol": 1e-3})
     got = sens_solution(m, [(m.p, 1.0 + 1e-3)])[m.x]
-    assert got == pytest.approx(1.046643388715, abs=5e-7)
+    assert got == pytest.approx(1.046643388715, abs=2e-6)
 
 
 def test_the_correction_is_below_notice_at_a_converged_tolerance():

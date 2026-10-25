@@ -1554,7 +1554,35 @@ fn real_main() -> ExitCode {
     > = Rc::new(RefCell::new(None));
     let red_hessian_capture: Rc<RefCell<Option<sens::RedHessianResult>>> =
         Rc::new(RefCell::new(None));
+    // `on_converged` fires once per converged *attempt*, and when a later
+    // attempt loses (the mu fallback, the gh#884 retry, the gh#983 scale
+    // audit) the reported answer is replayed from an earlier one. The four
+    // captures above hold the firing in progress; each earlier firing's are
+    // filed here under its id and the reported firing's are put back once the
+    // solve -- ladder included -- is over. Overwriting them in place shipped
+    // the discarded attempt's sensitivity step and reduced Hessian beside the
+    // winner's point.
+    let filed_captures: Rc<RefCell<Vec<(u64, ConvergedCaptures)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let current_firing: Rc<std::cell::Cell<Option<u64>>> = Rc::new(std::cell::Cell::new(None));
+    let take_captures = {
+        let (cap, sens_cap, bmult_cap, rh_cap) = (
+            Rc::clone(&nominal_capture),
+            Rc::clone(&sens_capture),
+            Rc::clone(&bound_mult_capture),
+            Rc::clone(&red_hessian_capture),
+        );
+        move || ConvergedCaptures {
+            nominal: cap.borrow_mut().take(),
+            sens: sens_cap.borrow_mut().take(),
+            bound_mults: bmult_cap.borrow_mut().take(),
+            red_hessian: rh_cap.borrow_mut().take(),
+        }
+    };
     if args.json_output.is_some() || sol_path.is_some() || sens_active || wants_red_hessian {
+        let filed_cb = Rc::clone(&filed_captures);
+        let current_cb = Rc::clone(&current_firing);
+        let take_cb = take_captures.clone();
         let cap = Rc::clone(&nominal_capture);
         let sens_cap = Rc::clone(&sens_capture);
         let bmult_cap = Rc::clone(&bound_mult_capture);
@@ -1589,7 +1617,14 @@ fn real_main() -> ExitCode {
         let release_eps = pounce_sensitivity::release_floor_from_options(app.options());
         let sens_opts_cb = sens_options;
         let fixed_var_duals = app.reports_fixed_var_duals();
+        // Only the sensitivity and reduced-Hessian paths factor the KKT
+        // matrix in this hook; a `.sol` / JSON capture only reads the iterate,
+        // and should not cost (or report) an extra Hessian evaluation.
+        app.set_on_converged_refreshes_hessian(sens_active || wants_red_hessian);
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
+            if let Some(prev) = current_cb.replace(data.borrow().on_converged_id) {
+                filed_cb.borrow_mut().push((prev, take_cb()));
+            }
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
                 None => return,
@@ -2024,6 +2059,25 @@ fn real_main() -> ExitCode {
         }
         SecondOpinionOutcome::unchanged(status, solve_stats.clone())
     };
+    // Put back the captures of the firing whose attempt is being reported
+    // (see `filed_captures`). The ladder only runs on statuses no converged
+    // attempt reports, and a converged rung promotes, so the application's
+    // last solve names the right firing either way; `None` means the reported
+    // attempt never fired and nothing it captured stands.
+    if let Some(last) = current_firing.take() {
+        filed_captures.borrow_mut().push((last, take_captures()));
+    }
+    let reported_firing = app.reported_on_converged_id();
+    if let Some((_, c)) = filed_captures
+        .borrow_mut()
+        .drain(..)
+        .find(|(id, _)| Some(*id) == reported_firing)
+    {
+        *nominal_capture.borrow_mut() = c.nominal;
+        *sens_capture.borrow_mut() = c.sens;
+        *bound_mult_capture.borrow_mut() = c.bound_mults;
+        *red_hessian_capture.borrow_mut() = c.red_hessian;
+    }
     // gh #508's arbiter used to live here: every rung printed its own
     // `EXIT:` banner, so when nothing was promoted the terminal's last word
     // was the last REJECTED rung's, while the `.sol`, the summary and the JSON
@@ -5047,4 +5101,19 @@ mod nlp_exit_code_tests {
             );
         }
     }
+}
+
+/// What the CLI's `on_converged` hook captures from one firing. See
+/// `filed_captures` in `main`.
+struct ConvergedCaptures {
+    nominal: Option<(
+        Vec<pounce_common::types::Number>,
+        Vec<pounce_common::types::Number>,
+    )>,
+    sens: Option<Vec<pounce_common::types::Number>>,
+    bound_mults: Option<(
+        Vec<pounce_common::types::Number>,
+        Vec<pounce_common::types::Number>,
+    )>,
+    red_hessian: Option<sens::RedHessianResult>,
 }
