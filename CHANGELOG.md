@@ -274,9 +274,24 @@ changes.
   - **Fixture sweep under `solver_selection=qp-active-set`, both legs:**
     `lp_degen2` no report (timeout) → `SolveSucceeded`/2009;
     `convex_qp_qscfxm1` 2195 → 396; `convex_qp_share1b` 2004 → 2924
-    (+46%, same objective). The default and `algorithm=active-set-sqp`
+    (same objective). The default and `algorithm=active-set-sqp`
     sweeps do not move. Needs a `benchmarks/qp` run before release: the
     degenerate Maros-Mészáros family is where this branch is reached.
+  - **`convex_qp_share1b`'s 2004 → 2924 is a reporting change, not more
+    work.** The reported count leaves out work on one path. When the
+    elastic phase-1 ends infeasible, `solve_elastic_rows` runs a feasibility
+    seed and then a recovery solve, and returns the recovery's count alone.
+    Before this change `share1b` went that way. The homotopy path took 1995
+    changes, the dropped phase-1 and seed passes took 2121, and the recovery
+    took 9, so the report said 2004 for 4125 changes of work (FERAL 0.20 at
+    `f1197ef3`: 1711 reported, 4031 done). With the prune, phase-1 ends
+    feasible and its 929 changes are counted, so 2924 is the whole cost. Wall
+    time fell from 15.2 s to 9.9 s. `convex_qp_qscfxm1` is undercounted on
+    both sides as well: 17 848 → 10 576 changes done, 278 s → 143 s wall.
+    Other prune selections were measured: keeping the most recent slots,
+    keeping the oldest, and pruning only the `ac − n` excess. Some of them
+    report fewer than 2004 iterations on `share1b` (1425), but every one does
+    more work there (4349 to 12 016 changes) or loses `lp_degen2`.
 - **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
   at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
   `|e|^(p+q)` (positive literal exponents, identical operands only; values
