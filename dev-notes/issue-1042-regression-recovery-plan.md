@@ -44,7 +44,7 @@ iterations after a now-*correct* inertia report.
 | **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5). Alternate routes: **R1b–R1e** below |
 | **R1b** | `scaled_feasible_a` (sibling of R1) | retry it 20 → 120: `mu` 5.0e-19 → 3.2e-117 while `true_comp` 2.6e5 → 9.8e3 | HSDE centering: the `σμ` target is driven on an internal `s` that has decoupled from `h − Gx̂`, so `mu` collapses ~8×/iteration while the true complementarity crawls linearly | **candidate** — floor `σμ` at the true-slack complementarity (in homogenized units); convex-arm-wide trajectory change | todo (`needs benchmarks/qp before merge` at best) |
 | **R1c** | `scaled_feasible_a` (sibling of R1) | both HSDE solves run at `τ ≈ 1e-10` to represent `‖x̂‖ = 5e9` from the unit self-dual start | cold start not sized to the data; the direct driver's gh#689 Mehrotra recentering took the same model 175 → 27 | **candidate** — seed the embedding from the recentered cold seed at `τ = 1`; the largest blast radius of the R1 family | todo (`needs benchmarks/qp before merge` at best) |
-| **R1d** | `scaled_feasible_a` (sibling of R1) | first, unequilibrated HSDE solve burns 200 it to `true_kkt 0.149` before the gh#293 retry: 400 HSDE it for a reported 200 | no early-failure detection: `τ` creeps linearly 1.6e-9 → 7.6e-8 over it 19–199 with `mu ~1e-37` | **candidate** — hand the retry the budget early; independent value (halves the work) even if R1b/c land, reported count unchanged | todo (`needs benchmarks/qp before merge` at best) |
+| **R1d** | `scaled_feasible_a` (sibling of R1) | first, unequilibrated HSDE solve burns 200 it to `true_kkt 0.149` before the gh#293 retry: 400 HSDE it for a reported 200 | no early-failure detection: `τ` creeps linearly 1.6e-9 → 7.6e-8 over it 19–199 with `mu ~1e-37` | **candidate** — hand the retry the budget early; independent value (halves the work) even if R1b/c land, reported count unchanged | **swept — needs benchmarks/qp before merge** (2026-10-25, x86_64, branch `claude/hsde-first-attempt-cutoff` off `a18af517`: first attempt cut at iteration **36** — `τ` frozen-product crawl detector, armed only for the first attempt, uncut re-run if the retry is rejected — so HSDE work 200 + 200 → **36 + 200**, wall 0.15 → 0.08 s; reported cvx-qp / SolveSucceeded / 200 / obj 0 unchanged on both legs; fires on no other loop of the corpus (auto, qp-ipm, lp-ipm, brf0); sweep **empty** at auto and at `qp-ipm`; see log) |
 | **R1e** | `scaled_feasible_a` (sibling of R1) | retry it 165 → 200 is certifiable (`true_kkt 8.6e-9`) but the loop waits on `pres < tol`, unreachable at 4 ulp of `5e9` | stopping test has no exit for an iterate whose only unmet term is pinned at its rounding floor | **partial** — ≤ 17% of this model's count; R1 declined it as insufficient alone; kept as a sibling because it composes with R1b/c and may have corpus-wide value | todo (lowest priority in the family) |
 | **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below. ~~Family target met on x86 by R2b~~ **Correction (R2e iteration): the target is not met; R2b reverted in C1** — pooling exact is back to 0.13.0's single-attempt 492. R2b's reported 109 is the `mu_strategy_fallback` re-solve; its base solve is **494 it, `Solved_To_Acceptable_Level`, −4336.99 (not an optimum), 22 resto calls**, against 0.13.0's single `Solve_Succeeded` 492 — total 603 iterations / 25 resto calls, and neither the JSON report nor the sweep shows the first attempt (R2e log). Every member is now terminal (§4 rule 6: R2/R2c/R2d/R2e not recoverable, R2b swept), so the family is closed **by status with its target unmet**; R2b needs the owner's (or a correction iteration's) re-measurement before anything is built on it |
 | **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | **reverted — first solve regressed** (C1, 2026-10-22: with the fallback visible, R2b turned 0.13.0's single `Solve_Succeeded`/492 (24 resto) into a first attempt `Solved_To_Acceptable_Level`/494 at −4336.99 (unscaled dual inf 5.3e6, 22 resto) rescued by `mu_strategy_fallback`'s 109 — total 603 it / 25 resto. No narrowing exists inside the lever: its census population is one matrix, and the `refuted` / `dc0` / `refuted_dc0` variants were byte-identical to the split, so every variant either takes that decision (494 Acceptable) or is the revert (492 Optimal). Code `git revert`ed; its §3 text and §6 log are kept as the record. As first recorded: "swept — needs vanderbei before merge", exact 492 → 109 — that 109 was the fallback's) |
@@ -151,6 +151,9 @@ to the rest of a family once one member recovers the target.
    by construction it only touches solves that end `IterationLimit`
    anyway; reported counts unchanged, so the fixture sweep must diff
    **empty**. Independent value even if R1b/c land.
+   **Swept 2026-10-25** (branch `claude/hsde-first-attempt-cutoff`): 400 →
+   236 HSDE iterations on `scaled_feasible_a`, sweep empty; needs
+   `benchmarks/qp` before merge (§6 R1d log).
 9. **R1e** the post-165 tail — stopping-test exit for a certifiable iterate
    whose only unmet term is pinned at its rounding floor; lowest value in
    the family (≤ 17% of this model's count), kept because it composes with
@@ -3811,3 +3814,136 @@ dallasl lbfgs 51 → 146, splits from main at iteration 4 on a rounding-level
 difference; perturbing one start value by 1e-14 moves that leg 51–345 on main
 and 22–380 on the PR, while the exact leg stays 22–30 with no restoration on
 the PR (main 40–314, always restoring). Not measured: arm64.
+
+### R1d — 2026-10-25 — swept — needs benchmarks/qp before merge
+
+Measured on x86_64 (4 CPUs), branch `claude/hsde-first-attempt-cutoff` off
+`origin/main` `a18af517`. `p-prev` = release `pounce` from `a18af517` in its
+own worktree and `CARGO_TARGET_DIR`; `p-new` = this commit, built the same
+way. `POUNCE_BENCH_DATA` unset (checked once). Sibling rule: no R1 sibling
+(R1b/c/e) has landed, so R1d is not re-baselined.
+
+**Reproduce (`p-prev`, plus an env-gated `eprintln!` probe in `hsde.rs` /
+`ipm.rs`, never committed).** Both legs: `cvx-qp`, `SolveSucceeded`, 200 it,
+obj 0, `mu=-`, no second opinion. Inside the call:
+
+| solve | status (loop → verdict) | iterations | `true_kkt` at exit |
+|---|---|---|---|
+| first, unequilibrated | IterationLimit → IterationLimit | 200 | 1.48e-1 |
+| gh #293 retry (budget 200, `P ≠ 0`) | IterationLimit → Optimal (post-loop) | 200 | 2.5e-14 |
+| total | | **400** | |
+
+At `max_iter = 400` the first attempt still ends IterationLimit at 400
+(`true_kkt` 7.1e-2) and the retry certifies at 230 — the "converges at 230"
+of the R1 log is the retry's count, so the first attempt is hopeless at any
+budget measured. Its trace from iteration 19: `τ` +4.6e-10 per iteration
+(1.6e-9 → 7.6e-8), `μ` 1e-37…1e-43, `κ` → 1e-31, internal `max sᵢzᵢ/τ²`
+~1e-22 while the true complementarity is O(0.1–1), and `τ · true_kkt` =
+1.155e-8 at 20, 30 and 40 and 1.139e-8 at 199 — the homogeneous point is
+frozen and only `τ` moves.
+
+**Measure first (population).** The probe over all 121 fixtures at
+`solver_selection=auto`, `qp-ipm`, `lp-ipm`, and auto / `qp-ipm` at
+`bound_relax_factor=0`, recording `τ`, `μ`, `true_kkt_error` per iteration
+of **every** HSDE loop (first attempts, the retry, SOCP-path and verify
+loops). auto: 58 loops — 41 first attempts on the QP path (40 `cvx-qp`
+lines + `issue880_sigma_uncertified`, which declines to NLP; the other 6
+`cvx-qp` lines are presolve verdicts with no HSDE loop), **1** gh #293
+retry (scaled_feasible_a's — the only one in the corpus), 16 SOCP/other.
+`qp-ipm` 44 loops, `lp-ipm` 14, brf0 identical to the default runs.
+Loops that ever spend a full 10-iteration window inside `τ < 1e-6, μ <
+tol²`: four.
+
+| loop | ends | min window spread of `τ·true_kkt` | max window `τ` growth (where spread ≤ 1.1) |
+|---|---|---|---|
+| scaled_feasible_a first | IterationLimit 200 | **1.0005** | 4.63 |
+| scaled_feasible_a retry | Optimal (cert. at 165) | 1.044 | **1.0** (`τ` flat at 9.784e-11) |
+| feasible_x0_wide_scale first | Optimal 26 | 7.2e4 | — |
+| scaled_feasible_b first | Optimal 36 | 1.4e9 | — |
+
+The plan's candidate (k = 20, `τ < 1e-6`, `μ < tol²`, `true_kkt` falls < 2×)
+fires on scaled_feasible_a's first attempt at 54 — but also on its **retry**
+at 38, a loop that certifies; a budget projection on `true_kkt`'s own rate
+fires on the retry at 28. That loop sits ~100 iterations in the same regime,
+then blows its slacks up (`pres` 5e-6 → 4.8e9 at 130–150) and converges in
+15. So "τ tiny, μ collapsed, no KKT progress" is **not** a hopelessness
+signature by itself; what separates the two scaled_feasible_a loops is that
+in the first only `τ` moves (frozen product, `τ` growing) and in the retry
+`τ` does not move at all. The admitted rule therefore keys on the frozen
+product **and** a growing `τ`, and is armed only for the first attempt.
+
+**Implemented.** `crates/pounce-convex/src/hsde_cutoff.rs` (rule, thresholds
+and the population above in the module doc) + the loop check in `hsde.rs`
+after the convergence test: over the last 10 iterations `τ < 1e-6`, `μ <
+tol²`, no relative-candidate stash, `max/min(τ·true_kkt) ≤ 1.1`, `τ` growth ≥
+1.01, `true_kkt > 1e3·tol`, and a geometric extrapolation of the window's `τ`
+growth (optimistic against the measured linear crawl) needs more than the
+remaining budget to reach `1e3·tol` (the post-loop `OptimalInaccurate`
+band) → `IterationLimit` now. `true_kkt_error` is computed only inside the
+`τ`/`μ` gate, so an ordinary solve pays nothing. Arming
+(`solve_qp_ipm_core`): first attempt only, only when the gh #293 retry is
+reachable (`use_hsde && equilibrate`), never with a debugger hook, consumed
+by the first HSDE loop (nested loops are not armed), disarmed on the `σ`
+cost-normalization path (gh #414 guards untouched). If the retry is then
+**rejected**, the first attempt is re-run uncut, so the reported status and
+iterate are the old ones exactly; the cut iterations are the only cost.
+`retry_on`, `equilibrated_retry_budget`, the gh #712 acceptance rule and the
+gh #989 proximal-stall guard are unchanged. Public diagnostic
+`pounce_convex::hsde_cutoff::{clear, take}` (like `hsde_scalars`).
+
+**After (`p-new`).** scaled_feasible_a, both legs:
+
+| | first attempt | retry | total HSDE it | reported | wall (5-run mean) |
+|---|---|---|---|---|---|
+| `p-prev` | IterationLimit 200 (`true_kkt` 0.148) | Optimal 200 | 400 | cvx-qp SolveSucceeded 200, obj 0 | 0.151 / 0.135 s |
+| `p-new` | IterationLimit **36** (`true_kkt` 1.22, projected 174 > 163 left) | Optimal 200 (same trajectory, `true_kkt` 2.5e-14) | **236** | cvx-qp SolveSucceeded 200, obj 0 | 0.082 / 0.087 s |
+
+`max_iter = 400`: cut at 48, retry 230 → reported 230 unchanged (total 800
+→ 278). scaled_feasible_b: 36, single attempt, not cut. The probe re-run on
+`p-new` over the same five populations: **1** cut in each of auto,
+`qp-ipm`, brf0 (scaled_feasible_a), 0 in `lp-ipm` — the built rule fires
+exactly where the offline replay said.
+
+**`scripts/sweep-fixtures.sh` `p-prev` vs `p-new`:** 242 lines (121 exact,
+121 lbfgs; engine split 92 cvx-qp / 24 cvx-qcqp / 125 nlp / 1 square-lm),
+**empty**. With `solver_selection=qp-ipm` (94 cvx-qp lines): **empty**. As
+the item predicted, the sweep reads the retry's count; the hidden cost moved
+(first-attempt iterations 200 → 36), which the C1 rule asks to report and
+the table above does. `qp-active-set` not swept (active-set arm, detector
+unreachable).
+
+**Tests.** New `crates/pounce-convex/tests/issue1042_hsde_first_attempt_cutoff.rs`
+(scaled_feasible_a / _b data as the CLI hands them to `solve_qp_ipm`):
+`the_frozen_first_attempt_is_cut_and_the_retry_certifies` (cut ≤ 60, total ≤
+260, Optimal, caller objective ≤ 1e-3, kkt < 1e-8, reported 200),
+`a_first_attempt_that_converges_is_untouched` (b: no cut, 36),
+`a_cut_whose_retry_is_rejected_reports_the_uncut_first_attempt`
+(`max_iter = 100`: cut fires, retry rejected, reported count 100); and in
+`ipm.rs` `hsde_cutoff_recovering_loop_tests::a_flat_tau_loop_that_recovers_is_not_cut`
+(the equilibrated retry loop, armed directly: no cut, Optimal).
+Mutations: detector off → the first and third red; no re-run after a
+rejected retry → the third red; growth clause dropped and a non-growing `τ`
+read as unbounded need → the ipm.rs test red (cut at 136). Dropping the
+growth clause alone, or the frozen and growth clauses together, leaves all
+green: on the recovering loop `τ` is flat-to-shrinking so the projection is
+already non-positive, and b is excluded by both clauses — b is a control,
+not a branch test. `cargo test -p pounce-convex -p pounce-cli
+--no-fail-fast`: 243 binaries, 1696 passed, 0 failed (incl.
+`issue414_cost_normalized_false_optimal`, `issue414_varscale_false_optimal`,
+`illconditioned_huge_scale`, `issue984_stopping_units`, `issue_1000_*`,
+`issue_689_*`, `declared_optimum_sentinel`). `cargo fmt --all -- --check`
+clean; clippy (§4 command) passes.
+
+**Not run / what `benchmarks/qp` must confirm.** No corpus here. The
+fixture corpus has exactly one gh #293 retry, so it bounds almost nothing
+about the rule's population. On `benchmarks/qp` (0.13.0: 137 optimal, total
+2998): (1) no status flip and no change in any reported iteration count —
+by construction a cut can only change what is reported when its retry is
+accepted where the uncut first attempt would have certified, i.e. a fire on
+a first attempt that would have ended `Optimal`; any moved count is that
+and is a stop; (2) how many first attempts it cuts and the HSDE iterations
+saved — the retries the gh #293 comment lists (`QSCFXM1/2/3`, `Q25FV47`
+accepted at 131–168; the LP retries `gen`, `gen1`, … rejected at the cap)
+are the population to read; a cut on a rejected-retry LP **costs** its cut
+iterations (re-run), which the A/B wall column must show is small; (3)
+wall time. Python tests not run (extension not built here).

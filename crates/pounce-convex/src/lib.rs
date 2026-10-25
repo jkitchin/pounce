@@ -46,6 +46,7 @@ pub(crate) mod debug;
 mod debug_stop;
 pub(crate) mod equilibrate;
 pub mod hsde;
+pub mod hsde_cutoff;
 pub mod hsde_nonsym;
 pub mod hsde_scalars;
 pub mod ipm;

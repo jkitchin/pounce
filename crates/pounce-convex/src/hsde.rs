@@ -506,6 +506,9 @@ where
     if crate::deadline::expired() {
         return timed_out(prob);
     }
+    // gh#1042 R1d: consumed here, so only the first HSDE loop of an armed
+    // first attempt can be cut (see `crate::hsde_cutoff`).
+    let cutoff_armed = crate::hsde_cutoff::take_armed() && hook.is_none();
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -628,6 +631,10 @@ where
     // Only the *decision* is carried across iterations — the δ values
     // themselves still reset, unlike a regularization warm start.
     let mut dw_exhausted = false;
+    // gh#1042 R1d: `(τ, true_kkt_error)` over the current run of consecutive
+    // iterations inside the `τ`/`μ` gate (at most `WINDOW + 1` of them).
+    let mut cutoff_win: std::collections::VecDeque<(f64, f64)> =
+        std::collections::VecDeque::with_capacity(crate::hsde_cutoff::WINDOW + 1);
     for it in 0..opts.max_iter {
         iters = it;
         if crate::deadline::expired() {
@@ -1067,6 +1074,70 @@ where
                 });
             }
             break;
+        }
+
+        // gh#1042 R1d: the first, unequilibrated attempt has frozen at a
+        // collapsed `τ` that is crawling up by a constant step, and cannot
+        // reach even the `OptimalInaccurate` band inside its budget — end it
+        // now so the gh #293 equilibrated retry runs sooner. Armed only for
+        // that attempt; rule, thresholds and the measured population in
+        // `crate::hsde_cutoff`. Never over a stashed relative candidate,
+        // which the post-loop restore would return as `Optimal`.
+        if cutoff_armed {
+            use crate::hsde_cutoff as hc;
+            let in_gate = tau < hc::TAU_MAX && mu < opts.tol * opts.tol && rel_candidate.is_none();
+            let tk = if in_gate {
+                true_kkt_error(prob, cone, &x, &y, &z, tau).filter(|e| e.is_finite() && *e > 0.0)
+            } else {
+                None
+            };
+            match tk {
+                None => cutoff_win.clear(),
+                Some(e) => {
+                    if cutoff_win.len() == hc::WINDOW + 1 {
+                        cutoff_win.pop_front();
+                    }
+                    cutoff_win.push_back((tau, e));
+                }
+            }
+            if cutoff_win.len() == hc::WINDOW + 1 {
+                let (lo, hi) = cutoff_win
+                    .iter()
+                    .fold((f64::INFINITY, 0.0_f64), |(lo, hi), &(t, e)| {
+                        (lo.min(t * e), hi.max(t * e))
+                    });
+                let (tau0, _) = cutoff_win[0];
+                let (tau1, e1) = cutoff_win[hc::WINDOW];
+                let growth = tau1 / tau0;
+                let target = hc::TARGET_FACTOR * opts.tol;
+                if hi <= hc::FROZEN_SPREAD * lo && growth >= hc::MIN_TAU_GROWTH && e1 > target {
+                    // Geometric extrapolation of the window's `τ` growth, with
+                    // `true_kkt_error ∝ 1/τ` (the frozen product): optimistic
+                    // against the linear crawl actually measured.
+                    let need = hc::WINDOW as f64 * (e1 / target).ln() / growth.ln();
+                    let remaining = opts.max_iter.saturating_sub(it + 1);
+                    if need > remaining as f64 {
+                        hc::fired(hc::HsdeCutoff {
+                            iter: it,
+                            max_iter: opts.max_iter,
+                            tau,
+                            true_kkt: e1,
+                            projected_iters: need,
+                        });
+                        tracing::debug!(
+                            iter = it,
+                            tau,
+                            true_kkt = e1,
+                            projected = need,
+                            remaining,
+                            "hsde: first attempt frozen at a crawling tau; ending it for the \
+                             equilibrated retry"
+                        );
+                        status = QpStatus::IterationLimit;
+                        break;
+                    }
+                }
+            }
         }
 
         // --- infeasibility (the embedding drives the iterate onto the

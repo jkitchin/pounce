@@ -51,6 +51,22 @@ changes.
   that cost it.
 
 ### Changed
+- **A frozen first HSDE attempt hands its budget to the equilibrated retry
+  (gh #1042 R1d).** On a convex QP, the first (unequilibrated) HSDE attempt
+  now ends `IterationLimit` early when, over 10 iterations, `τ < 1e-6`,
+  `μ < tol²`, `τ · true_kkt_error` holds within 10% (the homogeneous point is
+  frozen), `τ` grows by at least 1%, and even a geometric extrapolation of
+  that growth cannot reach `1e3·tol` before `max_iter`. The gh #293
+  equilibrated retry then runs as it would have at the cap. Only that first
+  attempt is armed (not the retry, the `σ` cost-normalized path, or a
+  debugger-attached solve), and if the retry does not certify, the first
+  attempt is re-run uncut so the reported result is exactly the old one.
+  `scaled_feasible_a`: 200 + 200 → 36 + 200 HSDE iterations, wall about
+  halved; reported status, objective and `iteration_count` (200) unchanged.
+  Across the fixture corpus (auto, `qp-ipm`, `lp-ipm`, `bound_relax_factor=0`)
+  it fires on that one solve only, and `scripts/sweep-fixtures.sh` diffs
+  empty. Not yet measured on `benchmarks/qp`. New diagnostic:
+  `pounce_convex::hsde_cutoff::{clear, take}`.
 - **The post-optimal KKT factor uses the Hessian at the converged point.**
   The main loop checks convergence before it updates the Hessian, so the
   sensitivity layer used to factor `W(w_k)` from the final Newton step

@@ -559,8 +559,27 @@ where
     // returns. Every recovery solve below can overwrite the thread-local
     // `tau`/`kappa` slot; when its candidate is discarded, or the answer comes
     // from the direct driver, the slot is put back to describe the answer.
-    let (sol, sol_scalars) =
-        crate::hsde_scalars::tracked(|| solve_qp_ipm_unscaled(prob, opts, &mut make_backend, hook));
+    //
+    // gh#1042 R1d: when the gh #293 retry below is available, the first
+    // attempt runs with `crate::hsde_cutoff` armed, which may end it early
+    // once it is provably unable to certify within its budget. Not under a
+    // debugger (the hook must see the solve the caller asked for).
+    let arm_cutoff =
+        opts.use_hsde && opts.equilibrate && hook.is_none() && !crate::debug_stop::requested();
+    let ((mut sol, mut sol_scalars), first_cut) = if arm_cutoff {
+        crate::hsde_cutoff::armed(|| {
+            crate::hsde_scalars::tracked(|| {
+                solve_qp_ipm_unscaled(prob, opts, &mut make_backend, None)
+            })
+        })
+    } else {
+        (
+            crate::hsde_scalars::tracked(|| {
+                solve_qp_ipm_unscaled(prob, opts, &mut make_backend, hook)
+            }),
+            false,
+        )
+    };
     // HSDE robustness fallback. The self-dual driver normally conditions itself
     // through its per-cone NT scaling and so deliberately skips Ruiz pre-scaling
     // (see the comment above). But on a *severely* ill-scaled system — e.g. the
@@ -688,6 +707,17 @@ where
         if accept {
             crate::hsde_scalars::set(retry_scalars);
             return retry;
+        }
+        // gh#1042 R1d: the cut was a bet on the retry. It lost, so the first
+        // attempt's own honest answer is what stands — and that is the
+        // *uncut* run's status and iterate, not the early one's. Re-run it
+        // unarmed (deterministic), so a rejected retry reports exactly what
+        // it did before the detector existed; the cut iterations are the
+        // only cost.
+        if first_cut && !crate::deadline::expired() {
+            (sol, sol_scalars) = crate::hsde_scalars::tracked(|| {
+                solve_qp_ipm_unscaled(prob, opts, &mut make_backend, None)
+            });
         }
         crate::hsde_scalars::set(sol_scalars);
     }
@@ -4128,6 +4158,9 @@ where
         // **bit-for-bit unchanged** (`σ = 1`, the wrapper is a no-op).
         let sigma = hsde_cost_scale(prob, opts.tol);
         if sigma != 1.0 {
+            // gh#1042 R1d: the first-attempt cutoff is not measured against
+            // the `σ` path's verdict guards (gh #414), so it never runs there.
+            crate::hsde_cutoff::disarm();
             let scaled = prob.scaled_objective(1.0 / sigma);
             // The normalized objective is the original divided by `σ`; the
             // caller's objective constant is in the original metric, so it is
@@ -8000,5 +8033,75 @@ mod sigma_crossover_rerecord_tests {
             1e-8,
             false
         ));
+    }
+}
+
+/// gh#1042 R1d: the branch of the first-attempt cutoff that its integration
+/// test (`tests/issue1042_hsde_first_attempt_cutoff.rs`) cannot reach through
+/// the public door. `scaled_feasible_a`'s *equilibrated* solve — the gh #293
+/// retry — sits for ~100 iterations at a flat `τ = 9.784e-11` with `τ ·
+/// true_kkt_error` within 4.4% over a window and `μ` far below `tol²`, then
+/// re-inflates its slacks and certifies at 165. The frozen-product test
+/// alone passes it; what keeps the rule off is that `τ` is not growing
+/// (`MIN_TAU_GROWTH`, and the projection, which is non-positive for a flat or
+/// shrinking `τ`). Arm the detector on it directly: it must not fire, and the
+/// solve must still end `Optimal`. Mutation "drop the `τ`-growth clause and
+/// read a non-growing `τ` as an unbounded need" fails here (cut at iteration
+/// 136, `projected_iters = inf`).
+#[cfg(test)]
+mod hsde_cutoff_recovering_loop_tests {
+    use super::*;
+    use crate::qp::Triplet;
+    use pounce_feral::FeralSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    #[test]
+    fn a_flat_tau_loop_that_recovers_is_not_cut() {
+        let prob = QpProblem {
+            n: 4,
+            p_lower: (0..4).map(|i| Triplet::new(i, i, 2.0)).collect(),
+            c: vec![7.6150526394493205, -1000000.0, -1.0, -999998.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -100000000.0),
+                Triplet::new(0, 1, 100000000.0),
+                Triplet::new(0, 2, 100000000.0),
+                Triplet::new(0, 3, -100000000.0),
+                Triplet::new(1, 1, -46903904.763146296),
+                Triplet::new(1, 3, 100000000.0),
+            ],
+            h: vec![530752631.97246605, 26547947618426.85],
+            lb: vec![-3.8075263202246603, 0.0, 0.0, -1.0],
+            ub: vec![
+                -3.8075263192246602,
+                500057.6278671611,
+                1.0,
+                500056.1278671606,
+            ],
+        };
+        let opts = QpOptions {
+            obj_constant: 499999000015.74725,
+            ..QpOptions::default()
+        };
+        let mut mk = backend;
+        crate::hsde_cutoff::clear();
+        let (sol, fired) = crate::hsde_cutoff::armed(|| {
+            equilibrated_solve(&prob, &opts, /* use_hsde */ true, &mut mk, None)
+        });
+        assert!(
+            !fired,
+            "cut a loop that certifies: {:?}",
+            crate::hsde_cutoff::take()
+        );
+        assert_eq!(
+            sol.status,
+            QpStatus::Optimal,
+            "after {} iterations",
+            sol.iters
+        );
     }
 }
