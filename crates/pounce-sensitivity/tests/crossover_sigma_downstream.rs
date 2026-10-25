@@ -51,6 +51,9 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::outside_engine::{Relaxation, outside_engine, recorded_solve, same_classification_of};
+
 const Q: [[Number; 3]; 3] = [[4.0, 1.0, 2.0], [1.0, 3.0, 1.0], [2.0, 1.0, 5.0]];
 /// Linear term; only `w` carries one, and it is what pushes `w` into
 /// its cap hard enough to leave a multiplier of `4.5`.
@@ -312,3 +315,26 @@ fn the_reduced_hessian_error_tracks_one_over_sigma() {
 // `crossover_sigma_frame.rs`, which pins the same comparison from the
 // other side — that the two runs now *agree* — across a range of bound
 // multipliers rather than at the single `z ≈ 4.5` this fixture reaches.
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+#[test]
+fn the_reduced_hessian_error_tracks_one_over_sigma_over_an_outside_engine() {
+    for crossover in [false, true] {
+        let (solver, model, _) = recorded_solve(app(crossover, 0.0), Fixture);
+        let eng = outside_engine(&model, Relaxation::None);
+        let eng = if crossover {
+            eng.after_crossover()
+        } else {
+            eng
+        };
+        same_classification_of(&format!("crossover {crossover}"), &solver, eng);
+    }
+}

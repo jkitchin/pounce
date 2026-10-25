@@ -87,15 +87,19 @@ _ELEMENTWISE = frozenset(
     convert_element_type add_any copy copy_p real imag conj rem nextafter
     reduce_precision clamp igamma igammac igamma_grad_a random_gamma_grad
     bessel_i0e bessel_i1e polygamma zeta regularized_incomplete_beta
-    mul_add""".split()
+    mul_add one_minus_square log2""".split()
 )
+# ``one_minus_square`` (``1 - x**2``) is how newer JAX writes the derivative
+# of ``tanh``; without it every second-order pattern through ``tanh`` (and so
+# ``jax.nn.gelu``) fell back to probing. ``log2`` is what ``jnp.log2`` lowers
+# to in the same releases.
 
 # Derivative is zero a.e. / output not differentiable.
 _ZERO_DERIVATIVE = frozenset(
     """lt le gt ge eq ne sign floor ceil round is_finite not and or xor
     argmax argmin iota stop_gradient population_count shift_left
     shift_right_logical shift_right_arithmetic clz random_bits random_seed
-    random_wrap random_unwrap threefry2x32 eq_to""".split()
+    random_wrap random_unwrap threefry2x32 eq_to lt_to le_to""".split()
 )
 
 _REDUCTIONS = frozenset(

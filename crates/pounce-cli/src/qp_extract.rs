@@ -499,10 +499,14 @@ pub enum ConSocpMap {
     },
     /// Convex quadratic inequality `g(x) ≤ g_u`, reformulated to one
     /// second-order cone. The first two cone rows both carry the linear
-    /// coefficient vector `a = ∇(linear part)`, so the original constraint
-    /// multiplier is recovered as `z[r0] + z[r1]` (see
-    /// [`recover_socp_duals`]).
-    Quad { z_row0: usize, z_row1: usize },
+    /// coefficient vector `a/κ`, so the original constraint multiplier is
+    /// recovered as `(z[r0] + z[r1])/κ` (see [`recover_socp_duals`]; `κ` is
+    /// the rotated cone's balancing factor, `1` unless `|b| > 1`).
+    Quad {
+        z_row0: usize,
+        z_row1: usize,
+        kappa: f64,
+    },
 }
 
 /// A deferred second-order-cone block, built after the nonnegative `G` rows
@@ -627,6 +631,7 @@ pub fn extract_socp_with_map(
             con_map.push(ConSocpMap::Quad {
                 z_row0: 0,
                 z_row1: 0,
+                kappa: 1.0,
             }); // patched in the SOC pass below
             soc_blocks.push(SocBlock {
                 con_idx,
@@ -703,18 +708,21 @@ pub fn extract_socp_with_map(
         // Complete the square: `a = Fᵀw + a_⊥`, `b = b_eff − ½‖w‖²`.
         let (a_perp, w) = centre_soc(&blk.f_rows, &blk.a);
         let b_c = blk.b_eff - 0.5 * w.iter().map(|v| v * v).sum::<f64>();
+        // Balance the rotated cone's two factors (gh #1056): see
+        // [`rotated_cone_balance`]. `κ = 1` is the historical `(s+1, s−1)`.
+        let kappa = rotated_cone_balance(b_c);
         let row0 = next_row(&h);
-        // s0 = (1 − b) − a_⊥ᵀx  →  G row = a_⊥, h = 1 − b.
+        // s0 = s/κ + κ, s = −b − a_⊥ᵀx  →  G row = a_⊥/κ, h = −b/κ + κ.
         for &(var, coef) in &a_perp {
-            g.push(Triplet::new(row0, var, coef));
+            g.push(Triplet::new(row0, var, coef / kappa));
         }
-        h.push(1.0 - b_c);
+        h.push(-b_c / kappa + kappa);
         let row1 = next_row(&h);
-        // s1 = −(1 + b) − a_⊥ᵀx  →  G row = a_⊥, h = −(1 + b).
+        // s1 = s/κ − κ  →  G row = a_⊥/κ, h = −b/κ − κ.
         for &(var, coef) in &a_perp {
-            g.push(Triplet::new(row1, var, coef));
+            g.push(Triplet::new(row1, var, coef / kappa));
         }
-        h.push(-(1.0 + b_c));
+        h.push(-b_c / kappa - kappa);
         // s_{2+k} = √2·(Fx + w)_k  →  G row = −√2·F_k, h = √2·w_k.
         let sqrt2 = std::f64::consts::SQRT_2;
         for (f, &wk) in blk.f_rows.iter().zip(&w) {
@@ -728,6 +736,7 @@ pub fn extract_socp_with_map(
         con_map[blk.con_idx] = ConSocpMap::Quad {
             z_row0: row0,
             z_row1: row1,
+            kappa,
         };
     }
 
@@ -776,9 +785,39 @@ pub fn recover_socp_duals(
                 let zl = lower.map(|r| z[r]).unwrap_or(0.0);
                 sign * (zu - zl)
             }
-            ConSocpMap::Quad { z_row0, z_row1 } => sign * (z[*z_row0] + z[*z_row1]),
+            ConSocpMap::Quad {
+                z_row0,
+                z_row1,
+                kappa,
+            } => sign * (z[*z_row0] + z[*z_row1]) / kappa,
         })
         .collect()
+}
+
+/// The balancing factor `κ` for a rotated cone whose constant is `b`
+/// (gh #1056).
+///
+/// `½‖y‖² ≤ s` is the rotated cone `2·u·v ≥ ‖y‖²` with `u·v = s`, emitted as
+/// the standard cone `(u + v, u − v, √2·y)`. Taking `v = 1` — the historical
+/// `(s + 1, s − 1)` — puts the whole magnitude of `s` in one factor, and in
+/// doubles `1e20 ± 1` are both `1e20`: on `x₀² + x₁² ≤ 1e20` the row was
+/// `(1e20, 1e20, 2x₀, 2x₁)`, whose determinant is `−4‖x‖²`, so the declared
+/// cone was empty but for `x = 0` and the conic IPM ended `Numerical
+/// failure`. Well before the `1` vanishes the imbalance costs: the same
+/// inactive ball takes 159 iterations at `1e6`, and an *active* ball of
+/// radius `1e4` already failed.
+///
+/// `u = s/κ`, `v = κ` keeps `4uv = 4s`, so cone membership is unchanged, and
+/// with `κ ≈ √|b|` the two factors are the same size wherever `s` is near its
+/// constant. A power of two, so `s/κ` and `a/κ` are exact; `1` when
+/// `|b| ≤ 1`, which leaves every such row exactly as it was. The multiplier
+/// maps back as `(z₀ + z₁)/κ` ([`recover_socp_duals`]).
+pub(crate) fn rotated_cone_balance(b: f64) -> f64 {
+    if !(b.abs() > 1.0) || !b.is_finite() {
+        return 1.0;
+    }
+    let k = 2.0_f64.powi((0.5 * b.abs().log2()).round() as i32);
+    if k.is_finite() && k > 0.0 { k } else { 1.0 }
 }
 
 /// Split a quadratic row's linear part `a` into `Fᵀw + a_⊥` (gh #1041),
@@ -847,13 +886,25 @@ fn centre_soc(f_rows: &[Vec<(usize, f64)>], a: &[(usize, f64)]) -> (Vec<(usize, 
         .collect();
     // Cholesky M = L Lᵀ in place (lower triangle), then two triangular solves.
     for j in 0..r {
-        let mut d = m[j * r + j];
+        let diag = m[j * r + j];
+        let mut d = diag;
         for k in 0..j {
             d -= m[j * r + k] * m[j * r + k];
         }
-        if !(d > 0.0) {
+        // A dependent row's pivot is the difference of `diag` and what the
+        // earlier rows explain of it, so it lands at roundoff of `diag` —
+        // often just *above* zero — not at zero. Testing `d <= 0` alone let
+        // that through and solved with a pivot of pure noise.
+        if d.is_nan() || d <= 16.0 * f64::EPSILON * diag {
             // Numerically rank-deficient factor: leave the cone uncentred,
-            // which is exactly the pre-gh#1041 reformulation.
+            // which is exactly the pre-gh#1041 reformulation. Traced, because
+            // an offset ball that lands here is back to the conditioning
+            // gh#1041 fixed and would otherwise fail with no clue why.
+            tracing::debug!(
+                target: "pounce::socp",
+                rank = r, pivot = j, value = d,
+                "centre_soc: FFᵀ not positive definite; SOC block left uncentred"
+            );
             return (a.to_vec(), vec![0.0; r]);
         }
         let d = d.sqrt();
@@ -1629,6 +1680,31 @@ mod tests {
         );
     }
 
+    /// gh #1056: the rotated cone's two leading rows are `h₀ = −b/κ + κ` and
+    /// `h₁ = −b/κ − κ`, and their whole job is `h₀² − h₁² = −4b`. With the
+    /// historical `κ = 1`, at `b = −1e20` both round to `1e20` and the
+    /// difference is `0` — the declared cone is empty. Balanced, it is exact,
+    /// and `κ` is a power of two (so `a/κ` is exact) and `1` for `|b| ≤ 1`.
+    #[test]
+    fn the_rotated_cone_keeps_its_constant_at_any_magnitude() {
+        for b in [-0.5, -1.0, 1.0, -4.0, -1e6, -1e20, -1e100, 3e40] {
+            let k = super::rotated_cone_balance(b);
+            assert!(k > 0.0 && k.log2().fract() == 0.0, "b = {b:e}: κ = {k}");
+            if b.abs() <= 1.0 {
+                assert_eq!(k, 1.0, "b = {b:e}");
+            }
+            let (h0, h1) = (-b / k + k, -b / k - k);
+            let got = (h0 - h1) * (h0 + h1);
+            assert!(
+                ((got + 4.0 * b) / (4.0 * b)).abs() < 1e-12,
+                "b = {b:e}, κ = {k}: h₀² − h₁² = {got:e}, want {:e}",
+                -4.0 * b
+            );
+        }
+        // What κ = 1 did.
+        assert_eq!(1.0 - -1e20, -(1.0 + -1e20));
+    }
+
     /// gh #1041: `centre_soc` must split `a` into `Fᵀw + a_⊥` exactly, on
     /// both of its branches — the diagonal closed form and the normal
     /// equations — and leave `a_⊥` zero where `a` is in range.
@@ -1678,6 +1754,20 @@ mod tests {
             .collect::<Vec<Vec<(usize, f64)>>>();
         let a_perp = check(&f, &[(0, -4000.0), (1, -4000.0), (2, -1.0)], 3);
         assert_eq!(a_perp, vec![(2, -1.0)], "roundoff in range must be dropped");
+    }
+
+    /// The fallback branch of `centre_soc`: factor rows that are linearly
+    /// dependent make `FFᵀ` singular, and the block must come back exactly
+    /// uncentred (`a_⊥ = a`, `w = 0`). Before the pivot test was relative,
+    /// this case's second pivot came out at roundoff *above* zero and the
+    /// solve returned `w = (48, −2048)` from a pivot of pure noise.
+    #[test]
+    fn centre_soc_falls_back_to_uncentred_on_a_singular_gram() {
+        let row = vec![(0, 1.0), (1, 1.0)];
+        let a = [(0, -2000.0), (1, -2000.0)];
+        let (a_perp, w) = centre_soc(&[row.clone(), row], &a);
+        assert_eq!(a_perp, a.to_vec());
+        assert_eq!(w, vec![0.0, 0.0]);
     }
 
     /// min (x0)^2 + (x1)^2 s.t. x0 + x1 = 2, no var bounds → (1,1), f*=2.

@@ -216,10 +216,9 @@ def test_sens_release_kkt_keeps_the_retain_flag_for_the_next_solve():
         SIGMA**2 * C[0, 0], rel=1e-9)
 
 
-def test_sens_release_kkt_pending_conditioned_on_survives():
-    # a result created before release holds its own reference through
-    # the pending conditioned_on computation, so reading it afterwards
-    # still works: release drops the model's hold, not the result's
+def test_sens_release_kkt_leaves_a_result_readable():
+    # a result carries its conditioned_on from the call that made it, so
+    # reading it after release works without the factor
     x, y, X = linear_data()
     m = linear_model(x, y)
     pyo.SolverFactory("pounce").solve(m)

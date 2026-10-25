@@ -44,11 +44,9 @@ $S = H_{AA} - H_{AF} H_{FF}^{-1} H_{FA}$ the reduction onto $A$.
 | `sens_retain_kkt()` only | yes | error, no default | over T |
 | `sens_retain_kkt()` + `declare_sens_fitted(S)` | yes | over S | over T |
 
-One more rule completes retention: a `Covariance` or `Information` result whose
-`conditioned_on` has not been read keeps the session, and with it the
-factor, alive until first access, as does a live `Jacobian` (it reads
-the factor on every lookup); `sens_release_kkt` drops the model's hold, not
-an outstanding result's.
+One more rule completes retention: a live `Jacobian` keeps the session, and
+with it the factor, alive, since it reads the factor on every lookup.
+`sens_release_kkt` drops the model's hold, not an outstanding result's.
 
 Explicit call-time forms (`solve(m, fitted=..., residuals=...)`) are
 deliberately solve-local, so repeated solves of one model do not
@@ -318,8 +316,8 @@ build-dependent, so no structural condition is guarded by catching
   block. Their barrier weight stays in the held factor and drives
   the coupling through them to zero as mu falls, so the block's
   numbers are conditional on those bounds, not marginal over them.
-  Computed on first access and cached; until then the pending
-  computation keeps the session alive.
+  The call that returns the matrix finds them, at one back-solve per
+  near-bound candidate, so a result holds no reference to the session.
 
 ## Validation
 

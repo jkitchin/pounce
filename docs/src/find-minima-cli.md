@@ -70,6 +70,9 @@ The search stops at the first of: **`target_reached`** (`--n-minima` found),
 **`sample_cap_reached`** (the sample pool hit its cap of
 `--max-solves × --samples-per-round` draws before the solve budget was spent —
 the clustering filter rejected nearly every sample; lower `--gamma`).
+Under `mlsl` a launch that ends infeasible at a point an earlier launch
+already ended at is not one of the `--patience` empty solves (see
+[Termination](find-minima.md#termination)).
 
 ## Strategy knobs
 

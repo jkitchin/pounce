@@ -180,6 +180,18 @@ const NEG_CURV_BACKTRACK_FACTOR: Number = 0.5;
 /// first-order model's.
 const NEG_CURV_ARMIJO: Number = 0.1;
 
+/// See [`IpoptAlgorithm::handover`].
+/// Arguments: the current iterate, the iteration count, the overall NLP
+/// error and the barrier parameter.
+pub type HandoverHook = Box<
+    dyn FnMut(
+        &crate::iterates_vector::IteratesVector,
+        Index,
+        Number,
+        Number,
+    ) -> Option<crate::iterates_vector::IteratesVector>,
+>;
+
 pub struct IpoptAlgorithm {
     pub data: IpoptDataHandle,
     pub cq: IpoptCqHandle,
@@ -218,6 +230,15 @@ pub struct IpoptAlgorithm {
     ///    truth: there is no current iterate of the user's problem
     ///    while the subproblem is being solved.
     pub fires_as_restoration: bool,
+    /// Interior-point → active-set handover (gh#1054), installed by the
+    /// driver when `ipm_sqp_handover=yes`. Called at every convergence
+    /// check that did not converge, with the current iterate, the
+    /// iteration count, the overall NLP error and `μ`; it decides itself
+    /// whether to try (see `crate::handover`). `Some(point)` is an iterate
+    /// that already meets the stopping tolerances: it replaces `curr` and
+    /// the solve ends `Success`. `None` leaves the interior iteration
+    /// exactly as it was, which is the fallback the request asked for.
+    pub handover: Option<HandoverHook>,
     /// Whether the live iterate handed to the intermediate callback
     /// recovers the bound multipliers of fixed variables, as the final
     /// solution does. Set from `fixed_variable_treatment` by the driver
@@ -647,6 +668,7 @@ impl IpoptAlgorithm {
             bundle,
             nlp: None,
             tnlp: None,
+            handover: None,
             fires_as_restoration: false,
             live_iterate_fixed_var_duals: true,
             search_dir,
@@ -2847,6 +2869,38 @@ impl IpoptAlgorithm {
         if converged_success && !self.cq.borrow().curr_f().is_finite() {
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
+        }
+        if conv_status == ConvergenceStatus::Continue
+            && let Some(hook) = self.handover.as_mut()
+        {
+            let (curr, mu) = {
+                let d = self.data.borrow();
+                (d.curr.clone(), d.curr_mu)
+            };
+            if let Some(next) = curr.and_then(|c| hook(&c, iter_count, nlp_err, mu)) {
+                timing.check_convergence.end();
+                let mut d = self.data.borrow_mut();
+                d.set_curr(next);
+                // Same frame marker crossover sets: the point sits on the
+                // declared bounds, not inside the relaxed ones (gh#654).
+                d.curr_from_crossover = true;
+                drop(d);
+                // The handed-over point is a first-order KKT point, which a
+                // saddle of a nonconvex model also is — and the SQP's step-3
+                // path certifies it without any curvature test. The interior
+                // method's own success exit runs the gh #797 escape first;
+                // this one does too, so the handover cannot report a point
+                // the interior method would have left (measured: on
+                // `nonconvex_qp` / `nonconvex_qp_ineq` / `nonconvex_two_escapes`
+                // it otherwise ended at the stationary point the IPM
+                // escapes, objective `1` against `≈ 0`).
+                if self.try_neg_curv_escape(iter_count) {
+                    // The iterate is the interior method's again.
+                    self.data.borrow_mut().curr_from_crossover = false;
+                    return IterateOutcome::Continue;
+                }
+                return IterateOutcome::Terminate(SolverReturn::Success);
+            }
         }
         match conv_status {
             ConvergenceStatus::Continue => {}

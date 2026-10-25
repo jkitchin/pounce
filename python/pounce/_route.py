@@ -67,6 +67,18 @@ class QpExtract:
     ub: np.ndarray | None
 
 
+def _rotated_cone_balance(b):
+    """The rotated cone's balancing factor for constant ``b`` (gh #1056): the
+    power of two nearest ``√|b|``, or ``1`` when ``|b| ≤ 1``. Mirrors
+    ``rotated_cone_balance`` in the CLI's ``qp_extract.rs``; see there."""
+    b = abs(float(b))
+    if not (b > 1.0) or not np.isfinite(b):
+        return 1.0
+    # floor(x + ½), not round(): Rust's `round` is half-away-from-zero.
+    k = 2.0 ** int(np.floor(0.5 * np.log2(b) + 0.5))
+    return k if np.isfinite(k) and k > 0.0 else 1.0
+
+
 @dataclass
 class SocpExtract:
     """A convex QCQP recovered from the callable problem, reformulated to a
@@ -629,11 +641,16 @@ def classify_and_extract_socp(
                 )
                 a_vec[np.abs(a_vec) <= roundoff] = 0.0
                 b_eff = b_eff - 0.5 * float(w @ w)
-            # s0 = (1 − b_eff) − a·x ;  s1 = −(1 + b_eff) − a·x.
-            G_rows.append(a_vec.copy())
-            h_vals.append(1.0 - b_eff)
-            G_rows.append(a_vec.copy())
-            h_vals.append(-(1.0 + b_eff))
+            # Balance the rotated cone (gh #1056): s0 = s/κ + κ, s1 = s/κ − κ
+            # with s = −b_eff − a·x. s0² − s1² = 4s, so membership is unchanged,
+            # but neither factor carries all of |b_eff|. With κ = 1, `1e20 ± 1`
+            # both round to 1e20 and the declared cone is empty. Same as the
+            # CLI's `rotated_cone_balance`; κ = 1 for |b_eff| ≤ 1.
+            kappa = _rotated_cone_balance(b_eff)
+            G_rows.append(a_vec / kappa)
+            h_vals.append(-b_eff / kappa + kappa)
+            G_rows.append(a_vec / kappa)
+            h_vals.append(-b_eff / kappa - kappa)
             # s_{2+k} = √2·(Fx + w)_k  ⇒  G row = −√2·F_k, h = √2·w_k.
             for f, wk in zip(f_rows, w):
                 G_rows.append(-sqrt2 * np.asarray(f, dtype=np.float64))

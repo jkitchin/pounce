@@ -71,10 +71,10 @@
 
 pub mod activity;
 pub mod algorithm_backsolver;
+mod barrier_iterate;
 pub mod convenience;
-pub mod corrector;
 pub mod diff_handoff;
-pub mod index;
+pub use pounce_sens_core::index;
 pub mod options;
 pub mod solver;
 mod vec_util;
@@ -97,8 +97,8 @@ pub use pounce_sens_core;
 // and `corrector.rs` needed no edit at all.
 pub use pounce_sens_core::boundcheck::PathOperator;
 pub use pounce_sens_core::{
-    backsolver, boundcheck, p_calculator, reduced_hessian, rowlimit, schur_data, schur_driver,
-    sens_app, step_calc,
+    backsolver, barrier, boundcheck, corrector, p_calculator, reduced_hessian, rowlimit,
+    schur_data, schur_driver, sens_app, step_calc,
 };
 
 pub use algorithm_backsolver::PdSensBacksolver;

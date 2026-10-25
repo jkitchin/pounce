@@ -206,6 +206,18 @@ pub enum CrossoverDecline {
     /// A point was produced but it is not at least as good a KKT point as the
     /// interior iterate (see [`accepts`]).
     Regressed,
+    /// The point meets the SQP's tolerances in the scaled space but not the
+    /// user's `constr_viol_tol` / `dual_inf_tol` / `compl_inf_tol` on the
+    /// model as declared (gh#1054). Scaling can shrink a row's violation by
+    /// orders of magnitude, so a point can be a scaled KKT point and an
+    /// infeasible one at once; the interior-point verdict reads user units,
+    /// and so does this gate.
+    UserTolerances,
+    /// The solve's `max_wall_time` / `max_cpu_time` ran out before
+    /// crossover finished (gh#1054). The interior solution stands, as on
+    /// every other decline: crossover refines a converged solve, so running
+    /// out of time is never a reason to fail it.
+    TimeLimit,
 }
 
 /// What crossover did. Retrieved from
@@ -270,6 +282,15 @@ impl CrossoverReport {
             kkt_after: Number::NAN,
             compl_after: Number::NAN,
         }
+    }
+
+    /// This report, turned into a decline for `reason` after the fact,
+    /// keeping its counts and residuals — what the attempt cost and found
+    /// stays visible when a later gate refuses its point.
+    pub(crate) fn decline(mut self, reason: CrossoverDecline) -> Self {
+        self.phase = None;
+        self.declined = Some(reason);
+        self
     }
 
     /// Did crossover replace the interior iterate?
@@ -518,11 +539,38 @@ where
         hessian_inertia,
     );
     let qp = qp_data.as_qp();
+    // The step-3 QP gets whatever the solve has left (gh#1054); a QP that
+    // stops on it comes back `TimeLimit`, which is a decline like any other.
+    if sqp_opts
+        .deadline
+        .as_ref()
+        .is_some_and(|d| d.exceeded().is_some())
+    {
+        return (CrossoverReport::declined(CrossoverDecline::TimeLimit), None);
+    }
+    let eqp_opts = QpOptions {
+        time_limit: sqp_opts
+            .deadline
+            .as_ref()
+            .map(|d| crate::sqp::sqp_alg::deadline_remaining(d).0)
+            .map_or(qp_opts.time_limit, |left| {
+                Some(qp_opts.time_limit.map_or(left, |own| own.min(left)))
+            }),
+        // The SQP driver's size rule for Schur updates (gh#1054), so the
+        // step-3 QP of a large model does not refactor per pivot.
+        use_schur_updates: sqp_opts
+            .qp_schur_min_dim
+            .map_or(qp_opts.use_schur_updates, |d| n + m >= d),
+        ..qp_opts.clone()
+    };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
-    let eqp = qp_solver.solve_with_working_set(&qp, &working, qp_opts);
+    let eqp = qp_solver.solve_with_working_set(&qp, &working, &eqp_opts);
     n_qp_solves += 1;
 
-    let mut step3_failure = CrossoverDecline::QpFailed;
+    let mut step3_failure = match &eqp {
+        Ok(sol) if sol.status == QpStatus::TimeLimit => CrossoverDecline::TimeLimit,
+        _ => CrossoverDecline::QpFailed,
+    };
     if let Ok(sol) = eqp
         && sol.status == QpStatus::Optimal
     {
@@ -622,6 +670,14 @@ where
     }
 
     // ---- §7 step 4: full active-set run from the interior iterate ----
+    if step3_failure == CrossoverDecline::TimeLimit
+        || sqp_opts
+            .deadline
+            .as_ref()
+            .is_some_and(|d| d.exceeded().is_some())
+    {
+        return (CrossoverReport::declined(CrossoverDecline::TimeLimit), None);
+    }
     if opts.max_iter == 0 {
         return (CrossoverReport::declined(step3_failure), None);
     }
@@ -643,10 +699,15 @@ where
     };
     n_qp_solves += res.n_qp_solves;
     if res.status != SqpStatus::Optimal {
-        return (
-            CrossoverReport::declined(CrossoverDecline::ActiveSetNotConverged),
-            None,
-        );
+        let reason = if matches!(
+            res.status,
+            SqpStatus::WallTimeExceeded | SqpStatus::CpuTimeExceeded
+        ) {
+            CrossoverDecline::TimeLimit
+        } else {
+            CrossoverDecline::ActiveSetNotConverged
+        };
+        return (CrossoverReport::declined(reason), None);
     }
     let after = (res.final_stationarity, res.final_constr_viol, res.obj);
     if !accepts(before, after, sqp_opts) {

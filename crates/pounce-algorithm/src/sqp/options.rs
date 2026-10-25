@@ -4,6 +4,7 @@
 //! through `pounce_qp::QpOptions` (which `SqpAlgorithm` owns).
 
 use pounce_common::Number;
+use pounce_common::timing::Deadline;
 
 /// Choice of SQP globalization strategy. Defaults to filter
 /// (Fletcher-Leyffer 2002) per the design note §4.1; l1-elastic
@@ -25,13 +26,41 @@ pub enum SqpGlobalization {
 /// - `Lbfgs`: limited-memory BFGS with a circular `(s, y)` buffer
 ///   of `lbfgs_max_history` pairs (Nocedal-Wright §7.2; Byrd-
 ///   Nocedal-Schnabel 1994). See [`crate::sqp::lbfgs::LBfgs`].
+/// - `QuasiNewtonAuto`: what `hessian_approximation=limited-memory`
+///   selects — `DampedBfgs` up to [`SqpOptions::dense_hessian_max_n`]
+///   variables, `Lbfgs` above it, decided per solve from the problem's
+///   `n` (gh#1054). The dense update is the more robust of the two on
+///   small models (issue #358) but needs `n²` storage and makes every QP
+///   factorization dense, which a 15 000-variable model cannot afford.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqpHessianSource {
     #[default]
     Exact,
     DampedBfgs,
     Lbfgs,
+    QuasiNewtonAuto,
 }
+
+impl SqpHessianSource {
+    /// The concrete source a solve of `n` variables uses: resolves
+    /// `QuasiNewtonAuto`, passes every other source through.
+    pub fn resolve(self, n: usize, dense_hessian_max_n: usize) -> Self {
+        match self {
+            Self::QuasiNewtonAuto if n <= dense_hessian_max_n => Self::DampedBfgs,
+            Self::QuasiNewtonAuto => Self::Lbfgs,
+            other => other,
+        }
+    }
+
+    /// Whether this source approximates the Hessian (and is therefore
+    /// positive definite by construction) rather than evaluating it.
+    pub fn is_quasi_newton(self) -> bool {
+        !matches!(self, Self::Exact)
+    }
+}
+
+/// Default for [`SqpOptions::qp_schur_min_dim`].
+pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct SqpOptions {
@@ -81,6 +110,39 @@ pub struct SqpOptions {
     /// `limited_memory_max_history` default of 6 (Nocedal-Wright
     /// recommends 3–20). Ignored for `Exact` and `DampedBfgs`.
     pub lbfgs_max_history: u32,
+
+    /// Largest `n` at which a quasi-Newton Hessian is handed to the QP as a
+    /// dense matrix (`sqp_dense_hessian_max_n`). Above it, `Lbfgs` poses the
+    /// QP in its lifted low-rank form
+    /// ([`crate::sqp::SqpQpData::build_low_rank`]) and `QuasiNewtonAuto`
+    /// resolves to `Lbfgs` rather than `DampedBfgs`. At or below it nothing
+    /// changes from before gh#1054. Default 1000.
+    pub dense_hessian_max_n: usize,
+
+    /// Size from which the step QP uses Schur-complement updates
+    /// (gh#1054): when `Some(d)`, each solve sets
+    /// `QpOptions::use_schur_updates` to `n + m ≥ d`; `None` leaves the QP
+    /// options as given. The driver reads `sqp_qp_use_schur_updates` only
+    /// when it is set explicitly, and then passes `None` here.
+    ///
+    /// Why size: the refactor path pays a full sparse factorization per
+    /// working-set change, which is what made the cold first QP of a
+    /// 15 000-variable model run for 30 minutes, while on small models the
+    /// two paths cost the same and the Schur path is the less robust one
+    /// (measured on the CLI fixture corpus under `algorithm=active-set-sqp`).
+    /// See `docs/src/active-set-sqp.md` for the Maros-Mészáros comparison
+    /// behind the default.
+    pub qp_schur_min_dim: Option<usize>,
+
+    /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the
+    /// same [`Deadline`] the interior-point arm checks. `None` means
+    /// unlimited and is the default for a directly constructed driver.
+    ///
+    /// A shared handle rather than two durations, because the SQP is not
+    /// always the first thing a solve runs: crossover hands it the
+    /// interior-point phase's own deadline, and a duration measured from
+    /// `optimize` would grant it a fresh budget (gh#1054).
+    pub deadline: Option<Deadline>,
 }
 
 impl Default for SqpOptions {
@@ -99,6 +161,9 @@ impl Default for SqpOptions {
             bt_min_alpha: 1e-12,
             print_level: 0,
             lbfgs_max_history: 6,
+            dense_hessian_max_n: 1000,
+            qp_schur_min_dim: Some(DEFAULT_QP_SCHUR_MIN_DIM),
+            deadline: None,
         }
     }
 }

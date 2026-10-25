@@ -213,7 +213,7 @@ struct EffectiveSigma {
 /// bound row into a *capped* diagonal has to read that row back
 /// through the same cap, and separating the two is exactly the gh#828
 /// defect. See [`PdSensBacksolver::rescale_bound_multipliers`].
-pub(crate) struct CorrectorOperator {
+pub(crate) struct CorrectorSigma {
     /// `x`-block diagonal at the predicted point.
     pub(crate) sigma_x: Rc<dyn pounce_linalg::Vector>,
     /// `s`-block diagonal at the predicted point.
@@ -1251,10 +1251,10 @@ impl PdSensBacksolver {
     /// factorization cache keys on their tags and a cached vector
     /// could resolve to a factor built at another iterate. How much of
     /// each entry the ceiling left standing comes back with them, in
-    /// the same [`CorrectorOperator`], because the solve that folds a
+    /// the same [`CorrectorSigma`], because the solve that folds a
     /// bound row into one of these diagonals has to read that row back
     /// through the same cap (gh#828).
-    pub(crate) fn corrector_sigma(&self, pinned: &[(usize, Number)]) -> Option<CorrectorOperator> {
+    pub(crate) fn corrector_sigma(&self, pinned: &[(usize, Number)]) -> Option<CorrectorSigma> {
         use pounce_linalg::dense_vector::DenseVectorSpace;
         let dense = |v: Rc<dyn pounce_linalg::Vector>| -> Option<Vec<Number>> {
             v.as_any()
@@ -1334,7 +1334,7 @@ impl PdSensBacksolver {
             out.values_mut().copy_from_slice(&vals);
             Rc::new(out) as Rc<dyn pounce_linalg::Vector>
         };
-        Some(CorrectorOperator {
+        Some(CorrectorSigma {
             ratio_x: surviving_fraction(&base_x, &x),
             ratio_s: surviving_fraction(&base_s, &s),
             sigma_x: pack(x),
@@ -2372,7 +2372,7 @@ fn cap_ratio(sigma: &Rc<dyn pounce_linalg::Vector>, cap: &dyn Fn(usize) -> Numbe
 
 /// `used / base` entrywise, and `1.0` wherever the two agree or the
 /// base carries no ratio to take (gh#828). The shared kernel behind
-/// [`cap_ratio`] and [`CorrectorOperator::ratio_x`].
+/// [`cap_ratio`] and [`CorrectorSigma::ratio_x`].
 fn surviving_fraction(base: &[Number], used: &[Number]) -> Vec<Number> {
     base.iter()
         .zip(used)
@@ -2631,6 +2631,10 @@ impl PdSensBacksolver {
 impl SensBacksolver for PdSensBacksolver {
     fn dim(&self) -> usize {
         self.dims.iter().sum()
+    }
+
+    fn solve_many(&self, rhs: &[Number], lhs: &mut [Number], n_rhs: usize) -> bool {
+        PdSensBacksolver::solve_many(self, rhs, lhs, n_rhs)
     }
 
     /// `F` itself, the vector [`Self::solve`] post-multiplies its

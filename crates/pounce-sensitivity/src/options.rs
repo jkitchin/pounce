@@ -184,20 +184,6 @@ impl SensOptionOverrides {
     }
 }
 
-/// Whether a `sens_max_pdpert` of `limit` turns this factor down, and
-/// the worst correction it read, as `(refuse, worst)`.
-///
-/// `perturbations` is `(δ_x, δ_s, δ_c, δ_d)` as
-/// [`crate::PdSensBacksolver::kkt_perturbations`] reports it. `worst`
-/// is the largest of them in absolute value, and the factor is turned
-/// down when it is strictly above `limit`.
-///
-/// Two surfaces make this comparison and it has to come out the same
-/// on both. The CLI reaches it through
-/// [`SensOptionOverrides::pdpert_refusal`] and the pyomo interface
-/// through the `Solver.pdpert_verdict` binding, which
-/// `pyomo_pounce.sens._refuse_on_pdpert` calls. Each of them words its
-/// own message from `worst`.
 /// The refinement's release threshold read off an options list, for the
 /// two callers that have one rather than a converged state.
 ///
@@ -212,12 +198,22 @@ pub fn release_floor_from_options(options: &OptionsList) -> Number {
     crate::boundcheck::release_floor(brf)
 }
 
-pub fn pdpert_verdict(perturbations: &[Number; 4], limit: Number) -> (bool, Number) {
-    let worst = perturbations
-        .iter()
-        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    (worst > limit, worst)
-}
+/// Whether a `sens_max_pdpert` of `limit` turns this factor down, and
+/// the worst correction it read, as `(refuse, worst)`.
+///
+/// `perturbations` is `(δ_x, δ_s, δ_c, δ_d)` as
+/// [`crate::PdSensBacksolver::kkt_perturbations`] reports it. `worst`
+/// is the largest of them in absolute value, and the factor is turned
+/// down when it is strictly above `limit`.
+///
+/// Two surfaces make this comparison and it has to come out the same
+/// on both. The CLI reaches it through
+/// [`SensOptionOverrides::pdpert_refusal`] and the pyomo interface
+/// through the `Solver.pdpert_verdict` binding, which
+/// `pyomo_pounce.sens._refuse_on_pdpert` calls. Each of them words its
+/// own message from `worst`. The statistics and the steps in
+/// `pounce_sens_core` refuse a perturbed factor through the same function.
+pub use pounce_sens_core::step::pdpert_verdict;
 
 #[cfg(test)]
 mod tests {

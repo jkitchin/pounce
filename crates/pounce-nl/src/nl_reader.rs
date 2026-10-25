@@ -2693,7 +2693,7 @@ impl<'a> Parser<'a> {
             2 => {
                 let a = self.parse_expr()?;
                 let b = self.parse_expr()?;
-                Ok(Expr::Binary(BinOp::Mul, Box::new(a), Box::new(b)))
+                Ok(merge_abs_pow_product(a, b))
             }
             3 => {
                 let a = self.parse_expr()?;
@@ -3069,6 +3069,127 @@ fn parse_body_fragment(txt: &str, n: usize, cses: &[Arc<Expr>]) -> Result<Expr, 
     p.n = n;
     p.cses = cses.to_vec();
     p.parse_expr()
+}
+
+/// `a·b` for an `o2` node, with one rewrite: when a factor `|e|^p` on the
+/// left meets a factor `|e|^q` on the right (same operand `e`, constant
+/// `p, q > 0`), the two become the single factor `|e|^(p+q)` (gh#1042 R3).
+///
+/// **Why.** Vanderbei's `dallas*` models write a head-loss term as
+/// `(k·|x|^2)·|x|^0.85`. Differentiated as written, the product rule meets
+/// `|x|^0.85` at `x = 0`, where its slope `0.85·|x|^-0.15` is `∞` and its
+/// second derivative `-0.1275·|x|^-1.15` is `-∞`, against co-factors
+/// `k·|x|^2 = 0` and `2k·|x| = 0`: the Hessian of the term is `0·∞ = NaN`
+/// (the gradient survives, measured `0`), though the term is `k·|x|^2.85`,
+/// whose second derivative at `0` is `0`. The NaN Hessian fails the KKT
+/// factorization and forces a restoration entry each time a flow lands on
+/// exactly zero — 11 of `dallass`'s 12 restoration calls on 0.13.0. Merged,
+/// the tape differentiates `|x|^2.85` directly and every derivative at the
+/// kink is the finite, correct one.
+///
+/// **Why it is exact.** `|e| ≥ 0`, so `|e|^p·|e|^q = |e|^(p+q)` holds for
+/// every real `e` and every `p, q > 0` — including `e = 0` (`0·0 = 0`),
+/// `|e| = ∞` (`∞·∞ = ∞`) and `e = NaN` (NaN either way); the two sides
+/// differ by rounding only. The restrictions are what keep it exact:
+///
+/// * the base must be `abs(·)` — for a bare `e < 0` and non-integer
+///   powers `e^0.5·e^0.5` is `NaN·NaN` while `e^1` is `e`;
+/// * both exponents must be positive literals — `|e|^-1·|e|^2` is
+///   `∞·0 = NaN` at `e = 0` but `|e|^1 = 0`, so a negative or zero power
+///   would change a value, not only a derivative;
+/// * the operands must be the *same* expression (same variable, same
+///   shared `Cse` body, or structurally identical) — see [`same_operand`].
+///
+/// Away from `e = 0` the derivatives are unchanged mathematically:
+/// `d/de |e|^(p+q)` and the product rule on `|e|^p·|e|^q` are the same
+/// function there. Only the evaluation at the kink changes, from `NaN` to
+/// the limit.
+///
+/// **Scope.** Only the two operands of this `o2` and, at most, one `Mul`
+/// level inside each are inspected, which is what an AMPL left-associated
+/// `k*abs(x)^2*abs(x)^0.85` produces; a pair inside one operand was already
+/// merged when that operand was read. When nothing matches, the node is
+/// built exactly as before (`Mul(a, b)`), so a model without the pattern
+/// gets an identical tree and tape.
+fn merge_abs_pow_product(a: Expr, b: Expr) -> Expr {
+    fn factors(e: &Expr) -> Vec<&Expr> {
+        match e {
+            Expr::Binary(BinOp::Mul, x, y) => vec![&**x, &**y],
+            other => vec![other],
+        }
+    }
+    fn into_factors(e: Expr) -> Vec<Expr> {
+        match e {
+            Expr::Binary(BinOp::Mul, x, y) => vec![*x, *y],
+            other => vec![other],
+        }
+    }
+    let hit = {
+        let (fa, fb) = (factors(&a), factors(&b));
+        let mut hit = None;
+        'outer: for (i, x) in fa.iter().enumerate() {
+            let Some((ex, px)) = abs_pow_parts(x) else {
+                continue;
+            };
+            for (j, y) in fb.iter().enumerate() {
+                if let Some((ey, py)) = abs_pow_parts(y)
+                    && (px + py).is_finite()
+                    && same_operand(ex, ey)
+                {
+                    hit = Some((i, j, px + py));
+                    break 'outer;
+                }
+            }
+        }
+        hit
+    };
+    let Some((i, j, p)) = hit else {
+        return Expr::Binary(BinOp::Mul, Box::new(a), Box::new(b));
+    };
+    let mut fa = into_factors(a);
+    let mut fb = into_factors(b);
+    fb.remove(j);
+    let Expr::Binary(BinOp::Pow, base, _) = std::mem::replace(&mut fa[i], Expr::Const(0.0)) else {
+        unreachable!("abs_pow_parts matched a Pow node");
+    };
+    fa[i] = Expr::Binary(BinOp::Pow, base, Box::new(Expr::Const(p)));
+    let mut it = fa.into_iter().chain(fb);
+    let first = it.next().expect("at least the merged factor");
+    it.fold(first, |acc, f| {
+        Expr::Binary(BinOp::Mul, Box::new(acc), Box::new(f))
+    })
+}
+
+/// `Some((e, p))` when `x` is `|e|^p` with a finite literal `p > 0`.
+fn abs_pow_parts(x: &Expr) -> Option<(&Expr, f64)> {
+    match x {
+        Expr::Binary(BinOp::Pow, base, exp) => match (&**base, &**exp) {
+            (Expr::Unary(UnaryOp::Abs, e), Expr::Const(p)) if p.is_finite() && *p > 0.0 => {
+                Some((&**e, *p))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Conservative structural identity for [`merge_abs_pow_product`]: `true`
+/// only when `x` and `y` are certainly the same function of the variables —
+/// the same variable, the same shared `Cse` body (pointer identity), a
+/// bit-identical constant, or the same unary/binary operator over operands
+/// that are themselves identical. Anything else (sums, calls, logic,
+/// conditionals) answers `false`, which only ever declines a merge.
+fn same_operand(x: &Expr, y: &Expr) -> bool {
+    match (x, y) {
+        (Expr::Var(i), Expr::Var(j)) => i == j,
+        (Expr::Const(a), Expr::Const(b)) => a.to_bits() == b.to_bits(),
+        (Expr::Cse(a), Expr::Cse(b)) => Arc::ptr_eq(a, b),
+        (Expr::Unary(oa, a), Expr::Unary(ob, b)) => oa == ob && same_operand(a, b),
+        (Expr::Binary(oa, a1, a2), Expr::Binary(ob, b1, b2)) => {
+            oa == ob && same_operand(a1, b1) && same_operand(a2, b2)
+        }
+        _ => false,
+    }
 }
 
 fn strip_comment(s: &str) -> &str {
@@ -10748,5 +10869,197 @@ G0 3
         t.hessian_vector_product(&[1.0], &[1.0], 1.0, None, &mut out)
             .expect("hvp");
         assert!((out[0] + 2.0).abs() < 1e-12, "out = {out:?}");
+    }
+
+    // ---- gh#1042 R3: `|e|^p · |e|^q` merged at parse time ----------------
+
+    /// An unconstrained `.nl` model over `n` variables whose objective is
+    /// the given expression-token body (one token per line).
+    fn abs_pow_nl(n: usize, body: &[&str]) -> String {
+        let mut s = format!(
+            "g3 0 1 0\n {n} 0 1 0 0\n 0 1\n 0 0\n 0 {n} 0\n 0 0 0 1\n 0 0 0 0 0\n 0 0\n 0 0\n 0 0 0 0 0\nO0 0\n"
+        );
+        for t in body {
+            s.push_str(t);
+            s.push('\n');
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        s
+    }
+
+    /// `(3·|x|^2)·|x|^0.85` as Vanderbei's `dallass` writes its head-loss
+    /// terms. Read as written, the tape's product rule forms `0·∞` at
+    /// `x = 0` and the Hessian is NaN there (measured; the gradient reads
+    /// `0`), which fails the
+    /// KKT factorization and forces a restoration entry (11 of `dallass`'s
+    /// 12 on 0.13.0). Merged into `3·|x|^2.85` every value is unchanged and
+    /// the derivatives at the kink are the finite limits, `0` and `0`.
+    #[test]
+    fn abs_pow_product_is_merged_and_its_derivatives_are_finite_at_the_kink() {
+        let txt = abs_pow_nl(
+            1,
+            &[
+                "o2", "o2", "n3", "o5", "o15", "v0", "n2", "o5", "o15", "v0", "n0.85",
+            ],
+        );
+        let p = parse_nl_text(&txt).expect("parse");
+        // The tree is `Mul(3, Pow(Abs(x0), 2.85))`.
+        match &*p.obj_expr() {
+            Expr::Binary(BinOp::Mul, k, f) => {
+                assert!(matches!(**k, Expr::Const(c) if c == 3.0), "{k:?}");
+                assert!(
+                    matches!(abs_pow_parts(f), Some((Expr::Var(0), q)) if q == 2.85),
+                    "{f:?}"
+                );
+            }
+            other => panic!("not merged: {other:?}"),
+        }
+
+        let mut t = NlTnlp::new(p);
+        let info = t.get_nlp_info().unwrap();
+        assert_eq!(info.nnz_h_lag, 1);
+        let f = |t: &mut NlTnlp, x: f64| t.eval_f(&[x], true).unwrap();
+        let g = |t: &mut NlTnlp, x: f64| {
+            let mut g = [0.0];
+            assert!(t.eval_grad_f(&[x], true, &mut g));
+            g[0]
+        };
+        let h = |t: &mut NlTnlp, x: f64| {
+            let mut v = [0.0];
+            assert!(t.eval_h(
+                Some(&[x]),
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Values { values: &mut v }
+            ));
+            v[0]
+        };
+        let (pw, k) = (2.85_f64, 3.0_f64);
+        for &x in &[-2.0, -0.7, -1e-3, 0.0, 1e-3, 0.7, 2.0, 1e3] {
+            let a = f64::abs(x);
+            // The value is the product's: `k·|x|^2·|x|^0.85`.
+            let want_f = k * a.powi(2) * a.powf(0.85);
+            let want_g = k * pw * a.powf(pw - 1.0) * x.signum() * f64::from(u8::from(x != 0.0));
+            let want_h = k * pw * (pw - 1.0) * a.powf(pw - 2.0);
+            let (gf, gg, gh) = (f(&mut t, x), g(&mut t, x), h(&mut t, x));
+            assert!(
+                gf.is_finite() && gg.is_finite() && gh.is_finite(),
+                "x={x}: {gf} {gg} {gh}"
+            );
+            let tol = |w: f64| 1e-13 * w.abs().max(1e-300);
+            assert!(
+                (gf - want_f).abs() <= tol(want_f),
+                "f({x}) = {gf}, want {want_f}"
+            );
+            assert!(
+                (gg - want_g).abs() <= tol(want_g),
+                "g({x}) = {gg}, want {want_g}"
+            );
+            assert!(
+                (gh - want_h).abs() <= tol(want_h),
+                "h({x}) = {gh}, want {want_h}"
+            );
+        }
+        // At the kink: exactly zero, not NaN.
+        assert_eq!(
+            (f(&mut t, 0.0), g(&mut t, 0.0), h(&mut t, 0.0)),
+            (0.0, 0.0, 0.0)
+        );
+        // The Hessian matches a central difference of the gradient on both
+        // sides of the kink.
+        for &x in &[-1e-3, 1e-3] {
+            let e = 1e-8;
+            let fd = (g(&mut t, x + e) - g(&mut t, x - e)) / (2.0 * e);
+            let hx = h(&mut t, x);
+            assert!(
+                (fd - hx).abs() <= 1e-6 * hx.abs(),
+                "x={x}: fd {fd} vs h {hx}"
+            );
+        }
+    }
+
+    /// Every near miss keeps the tree it always had: `Mul` of the two
+    /// operands exactly as read. Different operands, a non-positive power, a
+    /// bare (signed) base and a variable exponent are each a case where the
+    /// merge would change a value, not only a derivative, or is not known to
+    /// be the same function.
+    #[test]
+    fn abs_pow_near_misses_build_the_unmerged_tree() {
+        let cases: [(&[&str], &[&str]); 5] = [
+            // different operands
+            (&["o5", "o15", "v0", "n2"], &["o5", "o15", "v1", "n0.85"]),
+            // a negative power: `|0|^-1·|0|^2` is NaN, `|0|^1` is not
+            (&["o5", "o15", "v0", "n-1"], &["o5", "o15", "v0", "n2"]),
+            // a zero power
+            (&["o5", "o15", "v0", "n0"], &["o5", "o15", "v0", "n2"]),
+            // no abs: `x^0.5·x^0.5` is NaN for x < 0, `x^1` is not
+            (&["o5", "v0", "n0.5"], &["o5", "v0", "n0.5"]),
+            // a variable exponent
+            (&["o5", "o15", "v0", "v1"], &["o5", "o15", "v0", "n2"]),
+        ];
+        for (a, b) in cases {
+            let mut body = vec!["o2"];
+            body.extend_from_slice(a);
+            body.extend_from_slice(b);
+            let p = parse_nl_text(&abs_pow_nl(2, &body)).expect("parse");
+            let frag = |toks: &[&str]| {
+                let txt: String = toks.iter().map(|t| format!("{t}\n")).collect();
+                parse_body_fragment(&txt, 2, &[]).expect("fragment")
+            };
+            let want = Expr::Binary(BinOp::Mul, Box::new(frag(a)), Box::new(frag(b)));
+            assert_eq!(
+                format!("{:?}", p.obj_expr()),
+                format!("{want:?}"),
+                "near miss {body:?} was rewritten"
+            );
+        }
+    }
+
+    /// The merge reaches into one `Mul` level on either side and keeps the
+    /// remaining factors, so `|x|^2·(|x|^0.85·y)` and `(|x|^0.5·y)·|x|^1.5`
+    /// become `|x|^2.85·y` and `|x|^2·y` — the latter lowered to a mul chain
+    /// by the tape — with values unchanged.
+    #[test]
+    fn abs_pow_merge_keeps_the_other_factors() {
+        for (body, pw) in [
+            (
+                &[
+                    "o2", "o5", "o15", "v0", "n2", "o2", "o5", "o15", "v0", "n0.85", "v1",
+                ][..],
+                2.85,
+            ),
+            (
+                &[
+                    "o2", "o2", "o5", "o15", "v0", "n0.5", "v1", "o5", "o15", "v0", "n1.5",
+                ][..],
+                2.0,
+            ),
+        ] {
+            let p = parse_nl_text(&abs_pow_nl(2, body)).expect("parse");
+            match &*p.obj_expr() {
+                Expr::Binary(BinOp::Mul, l, r) => {
+                    assert!(
+                        matches!(abs_pow_parts(l), Some((Expr::Var(0), q)) if q == pw),
+                        "{l:?}"
+                    );
+                    assert!(matches!(**r, Expr::Var(1)), "{r:?}");
+                }
+                other => panic!("not merged: {other:?}"),
+            }
+            let mut t = NlTnlp::new(p);
+            for &(x, y) in &[(-1.3, 0.4), (0.0, 2.0), (2.5, -1.0)] {
+                let want = f64::abs(x).powf(pw) * y;
+                let got = t.eval_f(&[x, y], true).unwrap();
+                assert!(
+                    (got - want).abs() <= 1e-13 * want.abs(),
+                    "{body:?} at ({x},{y}): {got} vs {want}"
+                );
+            }
+        }
     }
 }

@@ -3028,7 +3028,7 @@ fn normalized_optimum_is_genuine(
     // to `tol` in the caller's own coordinates is optimal by the definition the
     // caller was given, whatever `σ` was. Every well- and moderately-scaled
     // solve leaves here, paying one residual evaluation.
-    if sol.kkt_residuals(prob).kkt_error() <= tol {
+    if cone_residuals(prob, cone, sol).kkt_error() <= tol {
         return true;
     }
     // Relative arm, admissible only where the embedding's own relative stop
@@ -3038,7 +3038,7 @@ fn normalized_optimum_is_genuine(
     let cut = sigma_path_rel_tol(tol);
     let (rstat, dscale) = stationarity_rows(prob, sol);
     crate::hsde::relative_stop_permitted(gscale.max(pscale), tol)
-        && unscaled_relative_kkt(prob, sol) <= cut
+        && unscaled_relative_kkt(prob, Some(cone), sol) <= cut
         // ... and the same question asked one row at a time, because
         // `gscale` and `pscale` are aggregates and an aggregate cannot see a
         // flat direction (gh #846, gh #875). Strictly two further conjuncts:
@@ -3054,7 +3054,7 @@ fn normalized_optimum_is_genuine(
         // ... and then the same question asked as a *distance*, because both
         // of the above are per-row ratios and a per-row ratio cannot see a
         // coupled spectrum (gh #880). Also strictly a further conjunct.
-        && sigma_forward_error_is_small(prob, sol, cut)
+        && sigma_forward_error_is_small_in(prob, Some(cone), sol, cut)
 }
 
 /// Row `i` of the stationarity equation, decomposed into the residual
@@ -3334,7 +3334,26 @@ pub(crate) fn dot_compensated(a: &[f64], b: &[f64]) -> f64 {
 /// stay wrong after this fix, with a different wrong answer. That is not a
 /// regression and not a fix; it is the guard doing its job into a destination
 /// that cannot yet serve it.
+///
+/// **Cone blocks** (gh #1056). A second-order block's stiffness is not a
+/// diagonal: it is `W⁻²`, the inverse of the Nesterov–Todd block the KKT
+/// assembly uses, which is stiff along the boundary normal and carries the
+/// cone's curvature (`≈ z₀/s₀`) tangentially. [`sigma_forward_error_is_small_in`]
+/// takes the cone and applies it per block; this orthant entry point reads
+/// every row as `zⱼ/sⱼ`, which on an SOC row is meaningless (a negative `zⱼ`
+/// declines). PSD blocks still decline.
 fn sigma_forward_error_is_small(prob: &QpProblem, sol: &QpSolution, cut: f64) -> bool {
+    sigma_forward_error_is_small_in(prob, None, sol, cut)
+}
+
+/// [`sigma_forward_error_is_small`] with the inequality rows read in `cone`
+/// (`None`: the orthant). On a pure orthant the two are the same computation.
+fn sigma_forward_error_is_small_in(
+    prob: &QpProblem,
+    cone: Option<&CompositeCone>,
+    sol: &QpSolution,
+    cut: f64,
+) -> bool {
     // Equalities need the saddle system, not a diagonal; see the doc comment.
     if prob.m_eq() > 0 {
         return true;
@@ -3386,10 +3405,11 @@ fn sigma_forward_error_is_small(prob: &QpProblem, sol: &QpSolution, cut: f64) ->
     }
     // A `None` anywhere is "no usable stiffness", which declines; see
     // [`barrier_ratio`] for why that is the accepting direction here.
-    let (Some(sigma_bnd), Some(sigma_row)) = (
-        barrier_diagonal_bounds(prob, sol),
-        barrier_diagonal_rows(prob, sol),
-    ) else {
+    let rows = match cone {
+        Some(cone) if !cone.is_orthant() => barrier_rows_conic(prob, cone, sol),
+        _ => barrier_diagonal_rows(prob, sol).map(RowStiffness::diagonal),
+    };
+    let (Some(sigma_bnd), Some(sigma_row)) = (barrier_diagonal_bounds(prob, sol), rows) else {
         return true;
     };
     let delta = match forward_error_step(prob, &rhs, &sigma_bnd, &sigma_row) {
@@ -3471,6 +3491,85 @@ fn barrier_diagonal_rows(prob: &QpProblem, sol: &QpSolution) -> Option<Vec<f64>>
         .collect()
 }
 
+/// `Σ_row` as an operator on the inequality rows: `zⱼ/sⱼ` per orthant row,
+/// and `W⁻²` on each second-order block (gh #1056). A pure orthant has no
+/// blocks and is exactly the historical diagonal.
+struct RowStiffness {
+    /// Per-row stiffness; `0` on rows a block below owns.
+    diag: Vec<f64>,
+    /// `(offset, η, w̄)` per second-order block — see
+    /// [`crate::cones::soc::SecondOrderCone::stiffness`].
+    soc: Vec<(usize, f64, Vec<f64>)>,
+}
+
+impl RowStiffness {
+    fn diagonal(diag: Vec<f64>) -> Self {
+        RowStiffness {
+            diag,
+            soc: Vec::new(),
+        }
+    }
+
+    /// `v ← Σ_row v`.
+    fn apply(&self, v: &mut [f64]) {
+        let blocks: Vec<Vec<f64>> = self
+            .soc
+            .iter()
+            .map(|(off, eta, w)| {
+                let mut out = vec![0.0; w.len()];
+                crate::cones::soc::SecondOrderCone::apply_stiffness(
+                    *eta,
+                    w,
+                    &v[*off..off + w.len()],
+                    &mut out,
+                );
+                out
+            })
+            .collect();
+        for (vi, d) in v.iter_mut().zip(&self.diag) {
+            *vi *= d;
+        }
+        for ((off, _, _), out) in self.soc.iter().zip(blocks) {
+            v[*off..off + out.len()].copy_from_slice(&out);
+        }
+    }
+}
+
+/// [`barrier_diagonal_rows`] over a product cone: orthant rows as there,
+/// each second-order block as its `W⁻²`. `None` — decline, which accepts —
+/// on any block whose pair is unusable (see
+/// [`crate::cones::soc::SecondOrderCone::stiffness`]) and on any PSD block,
+/// for which nothing here builds a stiffness.
+fn barrier_rows_conic(
+    prob: &QpProblem,
+    cone: &CompositeCone,
+    sol: &QpSolution,
+) -> Option<RowStiffness> {
+    use crate::cones::ConeKind;
+    let m = prob.m_ineq();
+    let mut gx = vec![0.0; m];
+    prob.g_mul(&sol.x, &mut gx);
+    let slack: Vec<f64> = prob.h.iter().zip(&gx).map(|(h, g)| h - g).collect();
+    let mut rows = RowStiffness::diagonal(vec![0.0; m]);
+    for (off, kind) in cone.blocks() {
+        let dim = kind.dim();
+        let (sb, zb) = (&slack[*off..off + dim], &sol.z[*off..off + dim]);
+        match kind {
+            ConeKind::Nonneg(_) => {
+                for (k, (&sj, &zj)) in sb.iter().zip(zb).enumerate() {
+                    rows.diag[off + k] = barrier_ratio(zj, sj)?;
+                }
+            }
+            ConeKind::SecondOrder(_) => {
+                let (eta, w) = crate::cones::soc::SecondOrderCone::stiffness(sb, zb)?;
+                rows.soc.push((*off, eta, w));
+            }
+            ConeKind::Psd(_) => return None,
+        }
+    }
+    Some(rows)
+}
+
 /// Conjugate gradients on `(P + Gᵀ Σ_row G + Σ_bnd) Δ = r`, from `Δ = 0`.
 ///
 /// Returns `None` when the operator is not usable as a positive-definite one
@@ -3481,7 +3580,7 @@ fn forward_error_step(
     prob: &QpProblem,
     r: &[f64],
     sigma_bnd: &[f64],
-    sigma_row: &[f64],
+    sigma_row: &RowStiffness,
 ) -> Option<Vec<f64>> {
     let n = prob.n;
     let m = prob.m_ineq();
@@ -3500,9 +3599,7 @@ fn forward_error_step(
             if m > 0 {
                 scratch_row.iter_mut().for_each(|s| *s = 0.0);
                 prob.g_mul(v, scratch_row);
-                for (s, sig) in scratch_row.iter_mut().zip(sigma_row) {
-                    *s *= sig;
-                }
+                sigma_row.apply(scratch_row);
                 scratch_col.iter_mut().for_each(|s| *s = 0.0);
                 prob.gt_mul(scratch_row, scratch_col);
                 for (yi, ci) in y.iter_mut().zip(scratch_col.iter()) {
@@ -3870,10 +3967,42 @@ fn sigma_verdict_after_crossover(
     }
 }
 
+/// The un-normalized KKT residuals of `sol`, each cone block measured as a
+/// cone (gh #1056).
+///
+/// [`QpSolution::kkt_residuals`] reads every inequality row as an orthant row,
+/// which on a second-order block is pounce#209: a converged SOC block has
+/// rows with `Gx > h` and `zᵢsᵢ ≠ 0` — only `s₀ ≥ ‖s₁‖` and the *block*
+/// product `⟨s, z⟩` are conditions. Asked that way, the `σ` verdict rejected
+/// every normalized optimum a QCQP produced, since its per-row
+/// "complementarity" is `O(‖z‖·‖s‖)` and `z` carries the full cost scale:
+/// on `qcqp_ball` with cost `(1e14, 1e14)` the certified point read
+/// `kkt_error ≈ 4.4e14`. The cascade then fell through to the un-normalized
+/// embedding, which is exactly the solve `σ` exists to avoid, and from a cost
+/// of `1e15` up that one fails — `IterationLimit` at an infeasible point, or
+/// `NumericalFailure`.
+///
+/// On a pure orthant this is the orthant measure itself, so every QP and LP
+/// that reaches the `σ` path is judged exactly as before.
+fn cone_residuals(prob: &QpProblem, cone: &CompositeCone, sol: &QpSolution) -> QpResiduals {
+    if cone.is_orthant() {
+        sol.kkt_residuals(prob)
+    } else {
+        sol.kkt_residuals_conic(prob, &cone.specs())
+    }
+}
+
 /// Each un-normalized KKT residual of `sol` over the natural magnitude of its
 /// own terms — the ratio both `σ`-path cuts are applied to.
-fn unscaled_relative_kkt(prob: &QpProblem, sol: &QpSolution) -> f64 {
-    let res = sol.kkt_residuals(prob);
+///
+/// `cone` is the product cone the inequality rows live in; `None` is the
+/// orthant, which is all the equilibrated-path caller ever sees. See
+/// [`cone_residuals`] for why a cone-carrying caller must pass it.
+fn unscaled_relative_kkt(prob: &QpProblem, cone: Option<&CompositeCone>, sol: &QpSolution) -> f64 {
+    let res = match cone {
+        Some(cone) => cone_residuals(prob, cone, sol),
+        None => sol.kkt_residuals(prob),
+    };
     let (gscale, pscale) = unscaled_residual_scales(prob, sol);
     (res.dual_infeasibility / gscale)
         .max(res.primal_infeasibility / pscale)
@@ -3918,7 +4047,7 @@ fn unscaled_residual_scales(prob: &QpProblem, sol: &QpSolution) -> (f64, f64) {
 ///   relative `1e-10` and an absolute residual just past `tol`; gating this
 ///   caller demotes it.
 fn normalized_optimum_is_genuine_relative(prob: &QpProblem, sol: &QpSolution) -> bool {
-    unscaled_relative_kkt(prob, sol) <= FALSE_OPTIMUM_REL_TOL
+    unscaled_relative_kkt(prob, None, sol) <= FALSE_OPTIMUM_REL_TOL
 }
 
 /// Solve `prob` the way `qp_hsde=no` would — the direct driver, Ruiz-
@@ -4038,7 +4167,7 @@ where
             }
             tracing::debug!(
                 sigma,
-                kkt_error = sol.kkt_residuals(prob).kkt_error(),
+                kkt_error = cone_residuals(prob, cone, &sol).kkt_error(),
                 "convex sigma: normalized optimum rejected, re-solving un-normalized"
             );
             let sol_scalars = crate::hsde_scalars::peek();
@@ -4095,16 +4224,58 @@ where
             // agree on. So on anything but a pure orthant this fallback does
             // not exist, and the un-normalized re-solve stands exactly as it
             // did before gh #846.
-            if !cone
-                .blocks()
-                .iter()
-                .all(|(_, k)| matches!(k, crate::cones::ConeKind::Nonneg(_)))
-            {
-                tracing::debug!(
-                    "convex sigma: non-orthant cone, keeping the un-normalized \
-                     re-solve"
+            //
+            // gh #1056: what *does* exist on a second-order cone is the last
+            // step below without the direct driver — return the closest claimed
+            // optimum and let the forward-error arm decide its status. Before,
+            // the un-normalized re-solve was returned whatever it was, and on
+            // `qcqp_ball` with cost `(1e22, 1)` it is `NumericalFailure` while
+            // the normalized solve sits `8.4e-11` from `x*`: rejected only
+            // because row `x₁`'s scale (`c₁ = 1`) is 22 orders below `σ`, where
+            // neither its stationarity nor its box multipliers can resolve.
+            // The forward-error arm reads that point as `‖Δ‖ = 8.4e-11`, which
+            // is its actual error in `x₀`. PSD blocks have no stiffness for that arm to read
+            // (it would decline, i.e. accept everything), so they keep the
+            // historical return.
+            if !cone.is_orthant() {
+                let has_psd = cone
+                    .blocks()
+                    .iter()
+                    .any(|(_, k)| matches!(k, crate::cones::ConeKind::Psd(_)));
+                if has_psd {
+                    tracing::debug!("convex sigma: PSD cone, keeping the un-normalized re-solve");
+                    return plain;
+                }
+                let mut candidates = vec![sol, plain];
+                let pick = candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.status == QpStatus::Optimal)
+                    .min_by(|(_, a), (_, b)| {
+                        cone_residuals(prob, cone, a)
+                            .kkt_error()
+                            .total_cmp(&cone_residuals(prob, cone, b).kkt_error())
+                    })
+                    .map_or(1, |(i, _)| i);
+                crate::hsde_scalars::set([sol_scalars, plain_scalars][pick]);
+                let far_from_optimal = !sigma_forward_error_is_small_in(
+                    prob,
+                    Some(cone),
+                    &candidates[pick],
+                    SIGMA_DEMOTION_MARGIN * sigma_path_rel_tol(opts.tol),
                 );
-                return plain;
+                tracing::debug!(
+                    pick,
+                    far_from_optimal,
+                    status = ?candidates[pick].status,
+                    "convex sigma: cone program, nothing certified, returning \
+                     the closest claimed optimum"
+                );
+                // The same narrow bit the orthant cascade records below.
+                crate::sigma_verdict::record(
+                    candidates[pick].status == QpStatus::Optimal && far_from_optimal,
+                );
+                return candidates.swap_remove(pick);
             }
             let (direct, direct_scalars) = crate::hsde_scalars::tracked(|| {
                 direct_driver_fallback(prob, opts, &mut make_backend)
@@ -4142,16 +4313,16 @@ where
                 .enumerate()
                 .filter(|(_, c)| c.status == QpStatus::Optimal)
                 .min_by(|(_, a), (_, b)| {
-                    a.kkt_residuals(prob)
+                    cone_residuals(prob, cone, a)
                         .kkt_error()
-                        .total_cmp(&b.kkt_residuals(prob).kkt_error())
+                        .total_cmp(&cone_residuals(prob, cone, b).kkt_error())
                 })
                 .map_or(1, |(i, _)| i);
             // gh#990: the slot describes the candidate returned.
             crate::hsde_scalars::set([sol_scalars, plain_scalars, direct_scalars][pick]);
             tracing::debug!(
                 pick,
-                kkt_error = candidates[pick].kkt_residuals(prob).kkt_error(),
+                kkt_error = cone_residuals(prob, cone, &candidates[pick]).kkt_error(),
                 status = ?candidates[pick].status,
                 "convex sigma: nothing certified, returning the closest \
                  claimed optimum"
@@ -6729,6 +6900,59 @@ mod forward_error_operator_tests {
             lb: vec![f64::NEG_INFINITY],
             ub: vec![1.0],
         }
+    }
+
+    /// gh #1056: on a second-order block the estimate reads the block's
+    /// `W⁻²`, and it has to *discriminate* — a cone-aware arm that accepted
+    /// everything would pass every integration test, because the cone
+    /// cascade only consults it after two answers were already rejected.
+    ///
+    /// `min 3x₀ + 4x₁ s.t. (2, x₀, x₁) ∈ Q³`: `x* = (−1.2, −1.6)`, held by
+    /// `z = (5, 3, 4)`. A converged point (`1e-10` inside, `z` `1e-10` inside)
+    /// reads small; the same multipliers at a point rotated `0.01` rad along
+    /// the boundary — feasible, `x` off by `0.02` — read large. With the SOC
+    /// stiffness made to decline, the second assertion fails.
+    #[test]
+    fn a_second_order_block_reads_its_own_stiffness() {
+        use super::sigma_forward_error_is_small_in;
+        use crate::cones::{CompositeCone, ConeSpec};
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![3.0, 4.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(1, 0, -1.0), Triplet::new(2, 1, -1.0)],
+            h: vec![2.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = CompositeCone::from_specs(&[ConeSpec::SecondOrder(3)]);
+        let z = vec![5.0 * (1.0 + 1e-10), 3.0, 4.0];
+        let shrink = 1.0 - 1e-10;
+        let good = at(
+            &prob,
+            vec![-1.2 * shrink, -1.6 * shrink],
+            vec![],
+            vec![],
+            z.clone(),
+        );
+        assert!(
+            sigma_forward_error_is_small_in(&prob, Some(&cone), &good, 1e-6),
+            "the converged SOC optimum must read as close"
+        );
+        let theta = (-1.6_f64).atan2(-1.2) + 0.01;
+        let bad = at(
+            &prob,
+            vec![2.0 * shrink * theta.cos(), 2.0 * shrink * theta.sin()],
+            vec![],
+            vec![],
+            z,
+        );
+        assert!(
+            !sigma_forward_error_is_small_in(&prob, Some(&cone), &bad, 1e-6),
+            "a point 0.02 along the boundary from x* must read as far"
+        );
     }
 
     /// **`Σ_bnd` is load-bearing.** At `x = 1` the right-hand side `−(Px + c)`

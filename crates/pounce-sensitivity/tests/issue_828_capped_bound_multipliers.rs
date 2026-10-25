@@ -90,6 +90,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{RecordingTnlp, Relaxation, correct_outside, outside_engine};
+
 const P0: Number = 1.0;
 const DELTA: Number = 0.2;
 
@@ -250,20 +254,7 @@ fn solved_with(
     mirror: bool,
     x_scaling: Option<Vec<Number>>,
 ) -> Solver {
-    let mut app = IpoptApplication::new();
-    {
-        let o = app.options_mut();
-        o.set_integer_value("print_level", 0, true, false).unwrap();
-        o.set_string_value("sb", "yes", true, false).unwrap();
-        o.set_numeric_value("bound_relax_factor", 0.0, true, false)
-            .unwrap();
-        o.set_numeric_value("tol", 1e-10, true, false).unwrap();
-        if x_scaling.is_some() {
-            o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
-                .unwrap();
-        }
-    }
-    app.initialize().unwrap();
+    let app = app(x_scaling.is_some());
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Fixture {
         a,
         p0,
@@ -282,6 +273,54 @@ fn solved_with(
         "a={a:e}: {st:?}"
     );
     solver
+}
+
+/// The options every solve of this fixture runs with.
+fn app(user_scaling: bool) -> IpoptApplication {
+    let mut app = IpoptApplication::new();
+    {
+        let o = app.options_mut();
+        o.set_integer_value("print_level", 0, true, false).unwrap();
+        o.set_string_value("sb", "yes", true, false).unwrap();
+        o.set_numeric_value("bound_relax_factor", 0.0, true, false)
+            .unwrap();
+        o.set_numeric_value("tol", 1e-10, true, false).unwrap();
+        if user_scaling {
+            o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
+                .unwrap();
+        }
+    }
+    app.initialize().unwrap();
+    app
+}
+
+/// [`solved_with`] from the default start, with the model wrapped to record
+/// what the solve returns.
+fn solved_recorded(
+    a: Number,
+    mirror: bool,
+    x_scaling: Option<Vec<Number>>,
+) -> (Solver, Rc<RefCell<RecordingTnlp<Fixture>>>) {
+    let user_scaling = x_scaling.is_some();
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(Fixture {
+        a,
+        p0: P0,
+        start: None,
+        mirror,
+        x_scaling,
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app(user_scaling), tnlp);
+    let st = solver.solve();
+    assert!(
+        matches!(
+            st,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "a={a:e}: {st:?}"
+    );
+    (solver, model)
 }
 
 fn truth(p: Number) -> Vec<Number> {
@@ -515,4 +554,107 @@ fn the_capped_correction_survives_a_change_of_variables() {
     let dims = s.block_dims().expect("block dims");
     let dz = s.parametric_step_full(&[0], &[DELTA]).expect("step")[capped_dz_row(&dims)];
     assert!(dz.abs() > 1e-7, "the ceiling did not bind: dz={dz:e}");
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and hands the same step to the corrector over an engine built
+// from that report.
+//
+// The sweep is a sweep of the gh#737 ceiling, and the ceiling belongs to
+// pounce's factorization, not to the point. pounce factors the augmented
+// system, where `x2`'s barrier diagonal `z/s` sits beside a constraint row of
+// coefficient `a`, and above the ceiling that factorization loses the step,
+// so pounce caps the diagonal. The outside engine factors the eight-block
+// matrix, which keeps `z` and `s` apart, and needs no cap. Measured over
+// eight iterations, distance from the re-solved truth:
+//
+// ```text
+// a        pounce     outside
+// 1e-4     1.553e-4   1.000e-10
+// 1e-3     4.736e-8   1.000e-10
+// 1e-2     4.817e-10  1.000e-10
+// 1e-1     1.000e-10  1.000e-10
+// 1e0      1.000e-10  1.000e-10
+// ```
+//
+// So where the ceiling does not bind the two are the same correction, and
+// where it binds the outside engine is the closer to the truth, by what the
+// cap costs. The mirrored fixture measures the same to every digit.
+
+/// The coefficients at and above which the ceiling leaves `x2`'s diagonal
+/// alone.
+const UNCAPPED_FROM: Number = 1e-1;
+
+/// pounce's correction and the outside engine's from the same step, with
+/// what each is distant from the truth.
+fn compare_at(a: Number, mirror: bool, x_scaling: Option<Vec<Number>>) {
+    let scaled = x_scaling.is_some();
+    let (s, model) = solved_recorded(a, mirror, x_scaling);
+    let base = s.converged().expect("converged").x.clone();
+    let n = base.len();
+    let want = truth(P0 + DELTA);
+    let step = s.parametric_step_full(&[0], &[DELTA]).expect("step");
+    let plain: Vec<Number> = base.iter().zip(&step[..n]).map(|(&b, &d)| b + d).collect();
+    let plain_err = dist(&plain, &want);
+    let pounce = s
+        .correct_step(&[0], &[DELTA], &step, 8)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::None);
+    let outside = correct_outside(&eng, &[0], &[DELTA], &step, 8).expect("outside corrector");
+    let err = |o: &[Number]| -> Number {
+        let x: Vec<Number> = base.iter().zip(&o[..n]).map(|(&b, &d)| b + d).collect();
+        dist(&x, &want)
+    };
+    let (ea, eb) = (err(&pounce.0), err(&outside.0));
+    let label = format!("a={a:e}, mirror {mirror}, scaled {scaled}");
+    if a >= UNCAPPED_FROM {
+        let frame = if scaled { Frame::Scaled } else { Frame::Same };
+        assert_same_correction(&label, &pounce, &outside, frame);
+    } else {
+        assert_eq!(
+            (pounce.1.released, pounce.1.pinned),
+            (outside.1.released, outside.1.pinned),
+            "{label}: the active-set decision differs",
+        );
+        assert!(
+            eb <= ea,
+            "{label}: the outside engine lands {eb:e} from the truth, pounce {ea:e}",
+        );
+    }
+    assert!(
+        outside.1.improved() && eb < plain_err / 100.0,
+        "{label}: outside {eb:e} against predicted {plain_err:e}",
+    );
+}
+
+#[test]
+fn the_corrector_makes_progress_under_the_ceiling_over_an_outside_engine() {
+    for a in COEFFS {
+        compare_at(a, false, None);
+    }
+}
+
+#[test]
+fn an_uncapped_bound_is_untouched_by_the_ratio_over_an_outside_engine() {
+    compare_at(1.0, false, None);
+}
+
+#[test]
+fn the_upper_bound_branch_is_read_back_through_its_cap_too_over_an_outside_engine() {
+    for a in COEFFS {
+        compare_at(a, true, None);
+    }
+}
+
+#[test]
+fn the_capped_correction_survives_a_change_of_variables_over_an_outside_engine() {
+    let d = vec![2.0, 0.5, 4.0, 0.25, 1.0];
+    for a in COEFFS {
+        compare_at(a, false, Some(d.clone()));
+    }
 }

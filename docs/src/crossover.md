@@ -134,6 +134,17 @@ against the interior iterate:
   tolerance;
 - the objective did not increase beyond a small relative slack.
 
+It must also be a solution of **your** model, in your units: the
+crossed-over point has to meet `constr_viol_tol`, `dual_inf_tol` and
+`compl_inf_tol` unscaled, against the bounds and rows as you declared them
+(gh#1054). The three comparisons above read the SQP's residuals, which live in
+POUNCE's internally scaled space, and gradient-based scaling can shrink a row's
+violation by orders of magnitude: on `hs13_bigstart` (started at `x₀ = 1e4`)
+the SQP's degenerate tail jumped to a point that violates the declared row by
+`1` and read `3.3e-7` in the scaled space. The interior-point verdict is issued
+in user units, so the point that replaces it is held to the same gate; a point
+that fails it is declined with `UserTolerances`.
+
 Any failure returns the interior solution untouched. The tolerances rather
 than the raw residuals are the comparison point on purpose: crossover puts
 the iterate *on* the active constraints, which can move a residual from
@@ -331,8 +342,82 @@ crossover as a confirmed active set.
 measurement the phase exists to make. They differ exactly where the
 tolerance test on the interior iterate was wrong.
 
+Crossover spends the solve's own `max_wall_time` / `max_cpu_time`: what the
+interior-point phase left, not a fresh budget. When it runs out, crossover
+declines with `TimeLimit` and the interior solution stands. Before gh#1054 it
+had no budget at all, and a large model could sit in crossover's first QP for
+as long as it took.
+
+## Handing over before convergence (`ipm_sqp_handover`)
+
+```
+ipm_sqp_handover               yes | no   (default: no)
+ipm_sqp_handover_tol           number     (default: 1e-4)
+ipm_sqp_handover_stall_iter    integer    (default: 0, off)
+ipm_sqp_handover_max_attempts  integer    (default: 3)
+```
+
+Crossover runs after the interior method has converged, so it cannot shorten
+a long interior-point tail — and on large optimal-control models that tail is
+where the time goes: the reporter of gh#1054 measured the objective within
+0.1 % of final after ~40 % of the iterations, the rest spent with the dual
+infeasibility oscillating and the filter backtracking. `ipm_sqp_handover=yes`
+offers the *unconverged* iterate to the same bridge:
+
+- **When**: once the overall NLP error is at or below `ipm_sqp_handover_tol`
+  (a loosened `tol`), or — with `ipm_sqp_handover_stall_iter = k > 0` — once
+  the best error has not halved in `k` iterations, whatever its value.
+- **What**: the active set is read off the multipliers against the slacks.
+  At an interior iterate `s·z ≈ μ`, so `√μ` separates active from inactive and
+  the primal tolerance is `max(crossover_primal_tol, √μ)`; the equality rows
+  are always in. One QP step is taken over that set, and if it does not meet
+  the stopping tolerances the active-set SQP runs from that working set for
+  up to `crossover_max_iter` iterations — the same two phases as above.
+- **Accepting**: only a point that meets the stopping tolerances, in the
+  scaled space *and* in user units on the declared model (see
+  [It cannot make a solve worse](#it-cannot-make-a-solve-worse)). The solve
+  then ends `Solve_Succeeded` at that point, and its working set is published
+  through `last_sqp_working_set()` for the next SQP solve.
+- **Falling back**: a declined attempt changes nothing the interior method
+  carries, so it simply continues from the iterate it was at. The next attempt
+  waits until the error is ten times smaller, or another stall window has
+  passed, and at most `ipm_sqp_handover_max_attempts` are made.
+
+Swept over the CLI fixture corpus at the defaults (both legs, 234
+fixture-legs), against the same binary with it off: 73 finish in fewer
+interior-point iterations, 3 report more, 158 are unchanged, and no status gets
+worse. The three that report more are models whose plain solve is re-run by the
+quality audit (`csfi2`: 35 + 21 iterations; the sweep records the last solve
+only) and finish in one solve with the handover (30). Two move from
+`Solved_To_Acceptable_Level` to `Solve_Succeeded` (`mu_fallback_point_floor`,
+55 → 5 iterations). Every objective that moves goes *down* — the handover lands
+on the declared bounds rather than `O(μ)` inside them, and on nonconvex models
+it sometimes reaches a better point (`mpcc_worse_local_solution`: −13.0 →
+−84.3) — except `jit1`, where it is `4e-6` higher, because the interior method
+solved the problem with its bounds widened by `bound_relax_factor` and the
+handover solves the problem as declared. `app.handover_report()` (Rust) says
+how many attempts were made, at which iteration one was accepted, and the
+crossover report of the last one.
+
+An accepted point is also put through the interior method's own
+negative-curvature escape before it is certified, exactly as its convergence
+exit does: the SQP's one-step path has no curvature test, and without the
+escape the handover ended at the stationary point the interior method leaves
+on `nonconvex_qp`, `nonconvex_qp_ineq` and `nonconvex_two_escapes`. And each
+attempt may spend at most the interior-point time used so far (at least one
+second), within the solve's own budget — on `deb7` an unbounded attempt ran the
+full-SQP fallback for minutes against a 114-iteration interior solve.
+
+What it does not change is the cost of the QP itself. An attempt is one
+active-set QP over the whole model warm-started from the identified set, so it
+costs about one sparse factorization plus one pivot per misidentified row: it
+pays where the active set is settled and the interior tail is long, and an
+attempt at a point where the set is still moving is a QP solve thrown away.
+That is what the back-off and the attempt cap bound.
+
 ## Scope
 
-Crossover is an opt-in post-convergence phase. It does not add SLQP as an
-algorithm, is not a default, and changes nothing about the interior
-iteration itself.
+Crossover is an opt-in post-convergence phase, and the handover an opt-in
+use of the same bridge before convergence. Neither adds SLQP as an
+algorithm, neither is a default, and with both off nothing about the
+interior iteration changes.

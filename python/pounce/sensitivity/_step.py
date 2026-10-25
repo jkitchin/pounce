@@ -10,12 +10,19 @@ Everything here takes a :class:`~pounce.sensitivity.SensSession` and
 addresses parameters by the full-g row of the defining equality each is
 pinned by. `who` names the caller in diagnostics, so a wrapper can keep
 its own function name in the messages its users see.
+
+The steps and their measurements are `pounce_sens_core::step`, written
+against the engine traits so they run over any interior-point engine,
+and the moved point is measured with the session's own `nl` functions.
+This module checks the arguments, hands them to that code, and turns
+what it reports into the results and the warnings below.
 """
 import warnings
 from collections import namedtuple
 
 import numpy as np
 
+from .. import _pounce
 from ._session import user_row_names
 
 def weakly_active(session):
@@ -65,25 +72,17 @@ def check_margins(bound_eps, max_pdpert, who):
                 f"{who}: {name} must be a positive number, got {value!r}")
 
 
-def _bound_margin(session, bound_eps):
-    """How far outside a bound a coordinate has to end to count as
-    having left it.
-
-The refinement pins against this margin and `solution()` clamps
-    against it. `solution_report()` measures `crossed` against the same
-    number whenever the caller sets one, since deciding it twice is
-    what let `refine_stop == "settled"` come back beside a coordinate
-    reported 2.0 outside its bound.
-
-    Unset it is how far outside the solve itself was willing to settle,
-    floored so an unrelaxed solve does not pin on roundoff. The report
-    keeps the floor there instead, because a coordinate the SOLVE left
-    outside its bound is one of the things `crossed` exists to name,
-    and the relaxation is exactly how far out it is.
-    """
-    if bound_eps is not None:
-        return float(bound_eps)
-    return max(abs(session.solver.bound_relax_factor or 0.0), 1e-9)
+def pdpert_error(who, worst, perturbations, max_pdpert):
+    """The refusal for a factor carrying more inertia correction than
+    `max_pdpert`."""
+    pert = [abs(float(v)) for v in perturbations]
+    return ValueError(
+        f"{who}: the converged KKT factor carries a perturbation of "
+        f"{worst:.3e} (dx={pert[0]:.3e}, ds={pert[1]:.3e}, "
+        f"dc={pert[2]:.3e}, dd={pert[3]:.3e}), above the requested "
+        f"max_pdpert={max_pdpert:.3e}. The factor the step would "
+        f"invert is not this problem's KKT matrix. Raise max_pdpert "
+        f"to accept it anyway.")
 
 
 def refuse_on_pdpert(session, max_pdpert, who):
@@ -96,7 +95,7 @@ def refuse_on_pdpert(session, max_pdpert, who):
     reports them either way, and this is the caller choosing to stop
     rather than to read them.
 
-    The comparison comes from `pounce_sensitivity::pdpert_verdict`,
+    The comparison comes from `pounce_sens_core::step::pdpert_verdict`,
     which `sens_max_pdpert` reads too, so the two surfaces cannot drift
     apart on what counts as too perturbed. The message is written here
     rather than taken from there, since that one names a CLI option and
@@ -107,60 +106,132 @@ def refuse_on_pdpert(session, max_pdpert, who):
         return
     refuse, worst = session.solver.pdpert_verdict(float(max_pdpert))
     if refuse:
-        pert = [abs(float(v)) for v in session.solver.kkt_perturbations]
-        raise ValueError(
-            f"{who}: the converged KKT factor carries a perturbation of "
-            f"{worst:.3e} (dx={pert[0]:.3e}, ds={pert[1]:.3e}, "
-            f"dc={pert[2]:.3e}, dd={pert[3]:.3e}), above the requested "
-            f"max_pdpert={max_pdpert:.3e}. The factor the step would "
-            f"invert is not this problem's KKT matrix. Raise max_pdpert "
-            f"to accept it anyway.")
+        raise pdpert_error(who, worst, session.solver.kkt_perturbations,
+                           max_pdpert)
 
 
 def _degeneracy_iter(degeneracy_iter, degeneracy, who):
-    """Resolve the budget's default and warn when it is inert: only
-    the "directional" decision spends back-solves, so a budget passed
-    under another option changes nothing, the same shape as bound_eps
-    under a mode that runs no refinement."""
-    if degeneracy_iter is None:
-        return 16
-    if degeneracy != "directional":
+    """Warn when the budget is inert: only the "directional" decision
+    spends back-solves, so a budget passed under another option changes
+    nothing, the same shape as bound_eps under a mode that runs no
+    refinement."""
+    if degeneracy_iter is not None and degeneracy != "directional":
         warnings.warn(
             f"{who}: degeneracy_iter budgets the directional decision's "
             f"back-solves and degeneracy={degeneracy!r} makes no "
             "decision, so it changes nothing here.")
-    return degeneracy_iter
 
 
-def _correct(session, pin_idx, deltas, step, corrector_iter):
-    """Refine a step by Newton iterations on the barrier system.
+#: Findings the core reports that this module has already raised as
+#: warnings itself, in the order it always raised them, from the
+#: arguments alone.
+_ARGUMENT_FINDINGS = ("degeneracy_iter_inert", "bound_eps_inert")
 
-    Returns the refined primal step and what the iterations did.
 
-    The corrector starts from a point, so it needs the multipliers as
-    well as the primal step, and only the plain parametric step reports
-    both. Every mode refines the same underlying step, so the start is
-    the mode's own primal block carrying the plain step's multipliers.
-    The iterations correct the multipliers from there, which is what
-    they are for.
+def _raise(err, who, max_pdpert):
+    kind = err[0]
+    if kind == "raise":
+        raise err[1]
+    if kind == "pdpert":
+        raise pdpert_error(who, err[1], err[2], max_pdpert)
+    if kind == "not_positive":
+        raise ValueError(
+            f"{who}: {err[1]} must be a positive number, got {err[2]!r}")
+    raise AssertionError(f"unknown error {err!r}")
 
-    Two consequences worth naming. This spends a second solve even under
-    mode="linear" with degeneracy="one_sided", where the primal block it
-    then overwrites is the one it just computed. And under
-    degeneracy="directional" the multipliers come from the one-sided
-    step rather than the directional one that produced `step`, since
-    there is no directional full step to ask. Under
-    degeneracy="release_all" the mismatch is sharper still: the held
-    factorization supplies bound multipliers at exactly the bounds the
-    step just released to zero, over the maximal weak set rather than
-    a decided subset.
-    """
-    full = np.asarray(session.solver.parametric_step_full(pin_idx, deltas))
-    n_x = len(step)
-    full[:n_x] = np.asarray(step)
-    out, info = session.solver.correct_step(
-        pin_idx, deltas, list(full), corrector_iter)
-    return np.asarray(out)[:n_x], dict(info)
+
+def _warn_step_findings(session, findings, who, mode, predictor_iter,
+                        record=False):
+    """Each finding of the core, as the warning this package has always
+    raised for it."""
+    for f in findings:
+        kind = f[0]
+        if kind in _ARGUMENT_FINDINGS:
+            continue
+        if kind == "directional_fallback":
+            what = "record" if record else "step"
+            warnings.warn(
+                f"{who}: {f[1]}. Falling back to the one-sided "
+                f"{what}, the degeneracy='one_sided' behavior.")
+        elif kind == "corrector_weak":
+            c = f[1]
+            warnings.warn(
+                f"{who}: the corrector spent "
+                f"{c['iterations']} back-solve(s) and moved the "
+                f"residual from {c['initial_residual']:.2e} to "
+                f"{c['residual']:.2e}, measured from the point the "
+                "iterations start at rather than from the step handed in, "
+                "so the estimate is close to the uncorrected step. One "
+                "cause is a bound that must leave the active set with "
+                "nothing else for the iterations to reduce; "
+                "mode=\"fix_relax\" and mode=\"path\" decide such releases "
+                "where the step shows them.")
+        elif kind == "still_outside":
+            _, vars_, pinned, changes, clamped = f
+            names = [session.var_names[i] for i in vars_]
+            if mode == "fix_relax":
+                n_pinned, stop = pinned
+                did = f"pinned {n_pinned} variable(s)"
+                # The refinement says why it stopped rather than the
+                # count being read as a proxy for it: a pass pins every
+                # crossing it sees, so the number of pins says nothing
+                # about whether predictor_iter bound the work (gh#732).
+                why = {
+                    "iteration_limit":
+                        "the safety limit of %d pass(es) was reached, so "
+                        "raising predictor_iter may finish it" % predictor_iter,
+                    "degrees_of_freedom":
+                        "holding them all would need more pins than the "
+                        "problem has degrees of freedom, so no step does",
+                    "worse_than_plain":
+                        "the refinement ended further outside the bounds "
+                        "than the plain step, which was returned instead",
+                }.get(stop, "the refinement settled here")
+            else:
+                n_changes = changes
+                did = f"applied {n_changes} active-set change(s)"
+                why = ("the limit of %d was reached, so raising "
+                       "predictor_iter may finish it" % predictor_iter
+                       if n_changes >= predictor_iter else
+                       "the path settled the active set here")
+            warnings.warn(
+                f"{who}: {mode} {did} and "
+                f"still leaves the bounds for {names}, because {why}."
+                + (" The values were clamped, which breaks the constraints "
+                   "the pins were solved against." if clamped else
+                   " The values are returned unclamped."))
+        elif kind == "linear_clamped":
+            names = [session.var_names[i] for i in f[1]]
+            warnings.warn(
+                f"{who}: linear step leaves the variable bounds for "
+                f"{names}; values were clamped and the active set likely "
+                "changed, so the estimate is unreliable there. mode="
+                "'fix_relax' pins them and re-solves instead.")
+        else:
+            raise AssertionError(f"unknown finding {f!r}")
+
+
+def _check_step_args(mode, degeneracy, degeneracy_iter, bound_eps,
+                     max_pdpert, who):
+    if mode not in ("linear", "fix_relax", "path"):
+        raise ValueError(
+            f"{who}: mode must be 'linear', 'fix_relax' or 'path', got "
+            f"{mode!r}")
+    if degeneracy not in ("directional", "one_sided", "release_all"):
+        raise ValueError(
+            f"{who}: degeneracy must be 'directional', 'one_sided' or "
+            f"'release_all', got {degeneracy!r}")
+    _degeneracy_iter(degeneracy_iter, degeneracy, who)
+    check_margins(bound_eps, max_pdpert, who)
+    if bound_eps is not None and mode != "fix_relax":
+        warnings.warn(
+            f"{who}: bound_eps is the margin the fix_relax refinement "
+            f"pins against and mode={mode!r} runs no refinement, so it "
+            "changes nothing here.")
+
+
+def _opt(v):
+    return None if v is None else float(v)
 
 
 def solution(session, pin_rows, deltas, clamp=True, mode="linear",
@@ -285,187 +356,20 @@ def solution(session, pin_rows, deltas, clamp=True, mode="linear",
     here and raises no clamp warning; the step already respects it to
     first order.
     """
-    if mode not in ("linear", "fix_relax", "path"):
-        raise ValueError(
-            f"{who}: mode must be 'linear', 'fix_relax' or 'path', got "
-            f"{mode!r}")
-    if degeneracy not in ("directional", "one_sided", "release_all"):
-        raise ValueError(
-            f"{who}: degeneracy must be 'directional', 'one_sided' or "
-            f"'release_all', got {degeneracy!r}")
-    degeneracy_iter = _degeneracy_iter(
-        degeneracy_iter, degeneracy, who)
-    check_margins(bound_eps, max_pdpert, who)
-    if bound_eps is not None and mode != "fix_relax":
-        warnings.warn(
-            f"{who}: bound_eps is the margin the fix_relax refinement "
-            f"pins against and mode={mode!r} runs no refinement, so it "
-            "changes nothing here.")
-    refuse_on_pdpert(session, max_pdpert, who)
-
-    pin_idx, deltas = list(pin_rows), list(deltas)
-
-    # parametric_step returns the factor's x block (var-x); base_x and
-    # everything below it (nl.x_l/x_u, var_names) are full-x
-    segments = []
-    fell_back = False
-    if degeneracy == "directional":
-        # At a degenerate base point the weakly active bounds are
-        # decided by the directional-derivative QP for this
-        # perturbation's own direction; at a clean base point these are
-        # the plain calls at no extra solve cost. A failed decision
-        # (budget exhausted, no sign-consistent working set) falls back
-        # to the one-sided step and says so.
-        try:
-            step, held_rows, _ = (
-                session.solver.parametric_step_directional(
-                    pin_idx, deltas, degeneracy_iter))
-            if mode == "fix_relax":
-                step, pinned, stop = (
-                    session.solver.parametric_step_bounded_decided(
-                        pin_idx, deltas, held_rows, predictor_iter,
-                        bound_eps))
-            elif mode == "path":
-                step, segments = (
-                    session.solver.parametric_step_path_decided(
-                        pin_idx, deltas, held_rows, predictor_iter))
-        except RuntimeError as e:
-            if "directional derivative" not in str(e):
-                raise
-            warnings.warn(
-                f"{who}: {e}. Falling back to the one-sided step, "
-                "the degeneracy='one_sided' behavior.")
-            fell_back = True
-    if degeneracy == "release_all":
-        # Every weakly active bound is released undecided, at one
-        # back-solve and no QP: the bounds this perturbation actually
-        # holds come back as crossings for the mode or a correction to
-        # handle. fix_relax and path run their own machinery under the
-        # all-released treatment, the decided variants' empty held set.
-        if mode == "fix_relax":
-            step, pinned, stop = (
-                session.solver.parametric_step_bounded_decided(
-                    pin_idx, deltas, [], predictor_iter, bound_eps))
-        elif mode == "path":
-            step, segments = (
-                session.solver.parametric_step_path_decided(
-                    pin_idx, deltas, [], predictor_iter))
-        else:
-            step, _released = session.solver.parametric_step_release_all(
-                pin_idx, deltas)
-    if degeneracy == "one_sided" or fell_back:
-        if mode == "fix_relax":
-            step, pinned, stop = session.solver.parametric_step_bounded(
-                pin_idx, deltas, predictor_iter, bound_eps)
-        elif mode == "path":
-            step, segments = session.solver.parametric_step_path(
-                pin_idx, deltas, predictor_iter)
-        else:
-            step = session.solver.parametric_step(pin_idx, deltas)
-    corrector = None
-    if corrector_iter:
-        step, corrector = _correct(
-            session, pin_idx, deltas, step, corrector_iter)
-        # A correction that works drives the residual down by orders;
-        # one whose Newton direction finds nothing to reduce shaves a
-        # few percent off and leaves the estimate where it was.
-        # Halving is a low bar that separates them cleanly, and saying
-        # nothing would let the second case pass for the first.
-        # Written as `not (<=)` rather than `>`, so a non-finite
-        # residual warns instead of comparing false and passing in
-        # silence. gh#845 was exactly that: the corrector normed an
-        # all-NaN residual to 0.0, `0.0 > 0.5 * 6.09` was false, and
-        # `solution()` returned {x: nan} with nothing said. The Rust
-        # side no longer produces that number, and this side no longer
-        # depends on it not doing so.
-        if corrector is not None and not (
-                corrector["residual"] <= 0.5 * corrector[
-                    "initial_residual"]):
-            warnings.warn(
-                f"{who}: the corrector spent "
-                f"{corrector['iterations']} back-solve(s) and moved the "
-                f"residual from {corrector['initial_residual']:.2e} to "
-                f"{corrector['residual']:.2e}, measured from the point the "
-                "iterations start at rather than from the step handed in, "
-                "so the estimate is close to the uncorrected step. One "
-                "cause is a bound that must leave the active set with "
-                "nothing else for the iterations to reduce; "
-                "mode=\"fix_relax\" and mode=\"path\" decide such releases "
-                "where the step shows them.")
-
-    dx = session.scatter_x(np.asarray(step))
-    x_new = session.base_x + dx
-
-    lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    if mode in ("fix_relax", "path"):
-        # The refinement holds each pinned coordinate AT its bound and
-        # lets the others move, so a coordinate can still be left
-        # outside one, either because the pass budget ran out or because
-        # the pins have exhausted the problem's degrees of freedom.
-        # `clamp` decides what happens then, exactly as it does under
-        # `linear`, and the warning says which of the two stopped it.
-        #
-        # One tolerance for "outside its bound", taken from the solve
-        # rather than chosen here: it was willing to leave a converged
-        # point `bound_relax_factor` outside, so anything within that is
-        # on the bound. The refinement pins against the same number.
-        # The comparison is absolute, as the refinement's own is, so the
-        # clamp and the pins agree on a coordinate of any magnitude.
-        eps = _bound_margin(
-            session, bound_eps if mode == "fix_relax" else None)
-        out = np.where((x_new < lo - eps) | (x_new > hi + eps))[0]
-        if out.size:
-            names = [session.var_names[i] for i in out]
-            if mode == "fix_relax":
-                did = f"pinned {len(pinned)} variable(s)"
-                # The refinement says why it stopped rather than the
-                # count being read as a proxy for it: a pass pins every
-                # crossing it sees, so the number of pins says nothing
-                # about whether predictor_iter bound the work (gh#732).
-                why = {
-                    "iteration_limit":
-                        "the safety limit of %d pass(es) was reached, so "
-                        "raising predictor_iter may finish it" % predictor_iter,
-                    "degrees_of_freedom":
-                        "holding them all would need more pins than the "
-                        "problem has degrees of freedom, so no step does",
-                    "worse_than_plain":
-                        "the refinement ended further outside the bounds "
-                        "than the plain step, which was returned instead",
-                }.get(stop, "the refinement settled here")
-            else:
-                n_changes = len(segments)
-                did = f"applied {n_changes} active-set change(s)"
-                why = ("the limit of %d was reached, so raising "
-                       "predictor_iter may finish it" % predictor_iter
-                       if n_changes >= predictor_iter else
-                       "the path settled the active set here")
-            warnings.warn(
-                f"{who}: {mode} {did} and "
-                f"still leaves the bounds for {names}, because {why}."
-                + (" The values were clamped, which breaks the constraints "
-                   "the pins were solved against." if clamp else
-                   " The values are returned unclamped."))
-            if clamp:
-                x_new = np.clip(x_new, lo, hi)
-    elif clamp:
-        # `linear` takes the step as the predictor gives it, so a
-        # crossing shows up as a value outside its bound and clamping is
-        # all this mode can do about it. The active set changed and the
-        # step does not know, which is what `fix_relax` addresses.
-        # The comparison is absolute, as the refinement's own is.
-        eps = _bound_margin(session, None)
-        clamped = (x_new < lo - eps) | (x_new > hi + eps)
-        if clamped.any():
-            names = [session.var_names[i] for i in np.where(clamped)[0]]
-            warnings.warn(
-                f"{who}: linear step leaves the variable bounds for "
-                f"{names}; values were clamped and the active set likely "
-                "changed, so the estimate is unreliable there. mode="
-                "'fix_relax' pins them and re-solves instead.")
-        x_new = np.clip(x_new, lo, hi)
-
-    return x_new
+    _check_step_args(mode, degeneracy, degeneracy_iter, bound_eps,
+                     max_pdpert, who)
+    res = _pounce._sens_solution(
+        session.solver, session.nl, session.base_x,
+        [int(p) for p in pin_rows], [float(d) for d in deltas], mode,
+        int(predictor_iter), degeneracy,
+        None if degeneracy_iter is None else int(degeneracy_iter),
+        int(corrector_iter), _opt(bound_eps), _opt(max_pdpert), bool(clamp))
+    if res["error"] is not None and res["error"][0] == "pdpert":
+        _raise(res["error"], who, max_pdpert)
+    _warn_step_findings(session, res["findings"], who, mode, predictor_iter)
+    if res["error"] is not None:
+        _raise(res["error"], who, max_pdpert)
+    return np.asarray(res["x"])
 
 
 class SolutionReport:
@@ -537,11 +441,17 @@ class SolutionReport:
         `refine_activity=False`. A caller who wants to know whether a
         verdict is the cheap one or the refined one reads this rather
         than guessing from the class.
-    perturbations : list
+    refined_entries : list
+        Solve-space names of every entry the reduced normalizer
+        classified, variables first: the entries the cheap classifier
+        called "ambiguous", at one back-solve each. `refined` holds the
+        ones whose class changed. Empty when `refine_activity=False`.
+    perturbations : list or None
         The held factor's inertia-correction perturbations. Any
         non-zero entry means the factor is regularized, so the step is
         taken against a modified matrix and differs from the exact
-        active-set answer by that much.
+        active-set answer by that much. None when the engine does not
+        report them, which is not the same as all zero.
     corrector : dict or None
         What `corrector_iter` iterations did, None when none were run.
         Holds the back-solves spent under `iterations`, the residual
@@ -581,7 +491,7 @@ class SolutionReport:
     def __init__(self, alpha, first, first_kind, crossed, crossed_rows,
                  violation, mu, activity, row_activity, perturbations,
                  bounds_relaxed, corrector=None, refine_stop=None,
-                 refined=None):
+                 refined=None, refined_entries=None):
         self.alpha = alpha
         self.first = first
         self.first_kind = first_kind
@@ -596,83 +506,21 @@ class SolutionReport:
         self.corrector = corrector
         self.refine_stop = refine_stop
         self.refined = {} if refined is None else refined
+        self.refined_entries = [] if refined_entries is None else refined_entries
 
     def __repr__(self):
         n = len(self.crossed) + len(self.crossed_rows)
         where = f", first {self.first_kind} {self.first}" if self.first else ""
         flags = "".join([
-            ", regularized" if any(self.perturbations) else "",
+            ", regularized" if self.perturbations and any(self.perturbations)
+            else ", perturbations unreported" if self.perturbations is None
+            else "",
             ", bounds relaxed" if self.bounds_relaxed else "",
             f", refined {len(self.refined)}" if self.refined else "",
         ])
         return (f"SolutionReport(alpha={self.alpha:.6g}{where}, "
                 f"crossed={n}, violation={self.violation:.3e}, "
                 f"mu={self.mu:.3e}{flags})")
-
-
-#: The class the cheap classifier reports when it cannot decide, and the
-#: only one the reduced normalizer is spent on. See `SolutionReport` for
-#: why a genuine kink lands here.
-_AMBIGUOUS = "ambiguous"
-
-
-def _refine_ambiguous(session, var_status, row_status, var_names, row_names):
-    """Re-classify the ambiguous entries with the reduced normalizer.
-
-    Returns `(var_status, row_status, refined)` with the two lists
-    updated in place-equivalent copies and `refined` mapping each
-    changed name to `(before, after)`.
-
-    The cheap classifier divides a variable's barrier diagonal by the
-    Hessian's **diagonal** and a row's by the curvature along the row's
-    own gradient. Neither is the curvature that generated the
-    multiplier: the other free coordinates re-optimize, so the true
-    ratio is `reduced/diagonal` for a variable and `reduced/directional`
-    for a row, and both equal 1 only when the coordinate or row is
-    decoupled. Couple it and a genuine kink lands in "ambiguous" -- at
-    every tolerance, since that ratio does not move with mu. That is
-    gh#763 and gh#804, and reading the class as "probably not a kink"
-    is the inference that shipped the defect.
-
-    The reduced normalizer answers it exactly, at one back-solve per
-    entry. Spending that on every bounded variable would be `n`
-    back-solves for a question almost none of them raise, so it is
-    spent here on the entries that actually raised it -- which is the
-    "on demand, over the ambiguous entries" shape CLAUDE.md prescribes.
-    """
-    refined = {}
-    var_idx = [i for i, s in enumerate(var_status) if s == _AMBIGUOUS]
-    row_idx = [j for j, s in enumerate(row_status) if s == _AMBIGUOUS]
-    if not var_idx and not row_idx:
-        return var_status, row_status, refined
-
-    var_status = list(var_status)
-    row_status = list(row_status)
-    if var_idx:
-        red = session.solver.reduced_activity(var_idx)
-        for k, i in enumerate(var_idx):
-            after = red["status"][k]
-            if after != var_status[i]:
-                refined[var_names[i]] = (var_status[i], after)
-                var_status[i] = after
-    if row_idx:
-        red = session.solver.reduced_row_activity(row_idx)
-        for k, j in enumerate(row_idx):
-            after = red["status"][k]
-            if after != row_status[j]:
-                refined[row_names[j]] = (row_status[j], after)
-                row_status[j] = after
-    return var_status, row_status, refined
-
-
-def _row_step(session, dx):
-    """Jacobian at the base point times the step, in row order."""
-    rows, cols = session.nl.jacobian_structure()
-    vals = np.asarray(session.nl.jacobian(session.base_x))
-    return np.bincount(np.asarray(rows),
-                       weights=vals * dx[np.asarray(cols)],
-                       minlength=len(session.con_names))
-
 
 
 #: No bound at all reaches here as the reader's sentinel rather than an
@@ -699,72 +547,28 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
     A coordinate the full step carries past a bound is always scored,
     whatever the exclusion would otherwise say. That case IS a crossing,
     at a fraction below one by construction, and the caller reads it in
-    `crossed` off the same predicate and the same tolerance. Deciding it
-    twice is what let the two disagree, reporting that 998 times the
-    perturbation fits while naming a coordinate the single step leaves
-    its bound by 0.25.
+    `crossed` off the same predicate and the same tolerance.
 
-    So the exclusion below only ever applies to coordinates that do not
-    cross, and cannot cost a crossing. Two things drive it. `on_bound`
-    carries the classification, which is exact where the classifier
-    commits, applied per SIDE rather than per coordinate, since a
-    coordinate held at one bound can still be carried across its other
-    one.
-
-    The distance test covers the coordinates the classifier declines to
-    rule on, where the label cannot answer the question because
-    `ambiguous` spans both a coordinate near its bound with room left
-    and one already on it. What separates those is the size of the
-    remaining gap, which is O(mu) at a strongly active bound and
-    O(sqrt(mu)) at a weakly active one, against O(1) room in the
-    interior. So the threshold scales with sqrt(mu), measured four
-    orders of magnitude clear of the interior case. It is capped
-    because it is applied relative to the coordinate's own magnitude,
-    and a loose `mu` at termination would otherwise widen it without
-    limit. Without a classification there is no `mu` either, and it
-    falls back to a fixed threshold.
-
-    Coordinates whose step is below the roundoff of their own magnitude
-    also take no part, since dividing by one puts the crossing at an
-    enormous multiple of the perturbation, which is not a finding.
+    `on_bound` carries the classification, which is exact where the
+    classifier commits, applied per SIDE rather than per coordinate,
+    since a coordinate held at one bound can still be carried across
+    its other one. A distance test scaled by sqrt(mu) rules on the
+    coordinates the classifier declines to, capped because it is
+    applied relative to the coordinate's own magnitude, and without a
+    classification it falls back to a fixed threshold. Coordinates
+    whose step is below the roundoff of their own magnitude take no
+    part. `pounce_sens_core::step::ratio_test`.
     """
-    scale = np.maximum(1.0, np.abs(base))
-    toward_hi = step > 0
-    bound = np.where(toward_hi, hi, lo)
-    distance = bound - base
-    present = np.abs(bound) < _NO_BOUND
-    moving = np.abs(step) > 1e-12 * scale
-
-    # The same predicate, and the same tolerance, that fills `crossed`
-    # or `crossed_rows`. The caller passes the tolerance it fills with,
-    # and the default is the rows' own.
-    reached = base + step
-    if tol is None:
-        tol = 1e-9 * np.maximum(1.0, np.abs(reached))
-    crosses = present & moving & np.where(
-        toward_hi, reached > bound + tol, reached < bound - tol)
-
-    floor = 1e-9 if not np.isfinite(mu) else min(
-        1e-2, max(1e-9, 10.0 * mu ** 0.5))
-    interior = np.abs(distance) > floor * scale
-    if on_bound is not None:
-        # the nearer bound is the one the coordinate is held at, and it
-        # is only that side the classification rules out
-        at_hi = (hi - base) <= (base - lo)
-        interior &= ~(on_bound & (toward_hi == at_hi))
-
-    ok = present & moving & (crosses | interior)
-    if live is not None:
-        ok &= live
-    if not ok.any():
-        return float("inf"), None
-    fraction = np.full(base.shape, np.inf)
-    # a relaxed solve can settle outside a bound, which leaves no room
-    # to move rather than a negative amount of it
-    fraction[ok] = np.maximum(distance[ok] / step[ok], 0.0)
-    i = int(np.argmin(fraction))
-    return float(fraction[i]), names[i]
-
+    base = np.asarray(base, dtype=float)
+    if tol is not None:
+        tol = np.broadcast_to(np.asarray(tol, dtype=float), base.shape)
+    frac, i = _pounce._ratio_test(
+        base, np.asarray(step, dtype=float), np.asarray(lo, dtype=float),
+        np.asarray(hi, dtype=float),
+        None if live is None else [bool(v) for v in np.asarray(live)],
+        None if on_bound is None else [bool(v) for v in np.asarray(on_bound)],
+        float(mu), tol)
+    return float(frac), (None if i is None else names[i])
 
 
 #: Classifications that put a coordinate ON its bound. Both have the
@@ -776,10 +580,6 @@ def _ratio_test(base, step, lo, hi, names, live=None, on_bound=None,
 #: says only that the curvature is below scale, so neither label
 #: answers the question. `_ratio_test`'s distance test rules on those.
 _AT_BOUND = ("strongly_active", "weakly_active")
-
-
-def _on_bound(statuses):
-    return np.array([s in _AT_BOUND for s in statuses])
 
 
 def solution_report(session, pin_rows, deltas, max_iter=None,
@@ -897,23 +697,17 @@ def solution_report(session, pin_rows, deltas, max_iter=None,
     grounds, because the perturbation moves their right-hand sides by
     construction.
     """
-    if mode not in ("linear", "fix_relax", "path"):
-        raise ValueError(
-            f"{who}: mode must be 'linear', 'fix_relax' or "
-            f"'path', got {mode!r}")
-    if degeneracy not in ("directional", "one_sided", "release_all"):
-        raise ValueError(
-            f"{who}: degeneracy must be 'directional', "
-            f"'one_sided' or 'release_all', got {degeneracy!r}")
-    degeneracy_iter = _degeneracy_iter(
-        degeneracy_iter, degeneracy, who)
-    check_margins(bound_eps, max_pdpert, who)
-    if bound_eps is not None and mode != "fix_relax":
-        warnings.warn(
-            f"{who}: bound_eps is the margin the fix_relax "
-            f"refinement pins against and mode={mode!r} runs no "
-            "refinement, so it changes nothing here.")
-    refuse_on_pdpert(session, max_pdpert, who)
+    _check_step_args(mode, degeneracy, degeneracy_iter, bound_eps,
+                     max_pdpert, who)
+    res = _pounce._sens_solution_report(
+        session.solver, session.nl, session.base_x,
+        [int(p) for p in pin_rows], [float(d) for d in deltas], mode,
+        int(predictor_iter), degeneracy,
+        None if degeneracy_iter is None else int(degeneracy_iter),
+        int(corrector_iter), _opt(bound_eps), _opt(max_pdpert),
+        bool(refine_activity))
+    if res["error"] is not None and res["error"][0] == "pdpert":
+        _raise(res["error"], who, max_pdpert)
     if max_iter is not None:
         warnings.warn(
             f"{who}: max_iter no longer does anything "
@@ -921,158 +715,51 @@ def solution_report(session, pin_rows, deltas, max_iter=None,
             "ignored; it used to budget the directional decision, which "
             "degeneracy_iter budgets now. Pass degeneracy_iter instead.",
             DeprecationWarning, stacklevel=2)
-    pin_idx, deltas = list(pin_rows), list(deltas)
-    # the same dispatch `solution()` runs, so the step measured here is
-    # the step it takes for these arguments
-    fell_back = False
-    refine_stop = None
-    if degeneracy == "directional":
-        try:
-            step, held_rows, _ = session.solver.parametric_step_directional(
-                pin_idx, deltas, degeneracy_iter)
-            if mode == "fix_relax":
-                step, _, refine_stop = (
-                    session.solver.parametric_step_bounded_decided(
-                        pin_idx, deltas, held_rows, predictor_iter,
-                        bound_eps))
-            elif mode == "path":
-                step, _ = session.solver.parametric_step_path_decided(
-                    pin_idx, deltas, held_rows, predictor_iter)
-        except RuntimeError as e:
-            if "directional derivative" not in str(e):
-                raise
-            warnings.warn(
-                f"{who}: {e}. Falling back to the one-sided "
-                "step, the degeneracy='one_sided' behavior.")
-            fell_back = True
-    if degeneracy == "release_all":
-        if mode == "fix_relax":
-            step, _, refine_stop = (
-                session.solver.parametric_step_bounded_decided(
-                    pin_idx, deltas, [], predictor_iter, bound_eps))
-        elif mode == "path":
-            step, _ = session.solver.parametric_step_path_decided(
-                pin_idx, deltas, [], predictor_iter)
-        else:
-            step, _released = session.solver.parametric_step_release_all(
-                pin_idx, deltas)
-    if degeneracy == "one_sided" or fell_back:
-        if mode == "fix_relax":
-            step, _, refine_stop = session.solver.parametric_step_bounded(
-                pin_idx, deltas, predictor_iter, bound_eps)
-        elif mode == "path":
-            step, _ = session.solver.parametric_step_path(
-                pin_idx, deltas, predictor_iter)
-        else:
-            step = session.solver.parametric_step(pin_idx, deltas)
-    dx = session.scatter_x(np.asarray(step))
-    base = np.asarray(session.base_x)
-    x_new = base + dx
-
-    lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    g_l, g_u = np.asarray(session.nl.g_l), np.asarray(session.nl.g_u)
-
-    # The margin the refinement pinned against, so `alpha` and `crossed`
-    # answer with the number that decided the step. It is absolute, as
-    # the refinement's own test is, so a coordinate of order 1e4 does not
-    # get a tolerance the refinement never gave it. Unset keeps the
-    # fixed floor rather than the solve's relaxation: `crossed` reports
-    # a coordinate the SOLVE left outside its bound, and the relaxation
-    # is exactly how far out that is, so taking it as the margin would
-    # hide the case this report exists to name.
-    eps = (1e-9 if bound_eps is None or mode != "fix_relax"
-           else float(bound_eps))
-    # The refinement pins variable bounds only, so a constraint row
-    # keeps its floor whatever margin the caller set: a wide margin has
-    # no say over a row the step carries past its limit. Its tolerance
-    # is set beside the row ratio test below.
+    _warn_step_findings(session, res["findings"], who, mode, predictor_iter)
+    if res["error"] is not None:
+        _raise(res["error"], who, max_pdpert)
 
     row_names = user_row_names(session)
 
-    # The classifier raises for a solve that relaxed its bounds, since
-    # relaxed bounds shift the slacks it reads. Ask the solve what it
-    # ran under instead of provoking that and reading the message, and
-    # report it as the fact it is. The rest of the report is still
-    # measured, where a diagnostic that raised would give the caller
-    # nothing exactly when they are trying to find out why the estimate
-    # disagrees with a re-solve. `mu` comes from the classifier, so it
-    # is unavailable on that path too.
-    mu, activity, row_status = float("nan"), {}, {}
-    var_on_bound = row_on_bound = None
-    bounds_relaxed = bool(session.solver.bound_relax_factor)
-    refined = {}
-    if not bounds_relaxed:
-        act = session.solver.classify_activity()
-        mu = float(act["mu"])
-        var_st, row_st = list(act["var_status"]), list(act["row_status"])
-        if refine_activity:
-            var_st, row_st, refined = _refine_ambiguous(
-                session, var_st, row_st, session.var_names, row_names)
-        activity = dict(zip(session.var_names, var_st))
-        row_status = dict(zip(row_names, row_st))
-        # The ratio test reads "is this coordinate sitting on its bound",
-        # which is the refined answer too -- a kink the cheap rule could
-        # not call is still a coordinate on its bound.
-        var_on_bound = _on_bound(var_st)
-        row_on_bound = _on_bound(row_st)
+    def name_of(target):
+        kind, idx = target
+        return session.var_names[idx] if kind == "variable" else row_names[idx]
 
-    alpha, first = _ratio_test(base, dx, lo, hi, session.var_names, tol=eps,
-                               on_bound=var_on_bound, mu=mu)
-    first_kind = None if first is None else "variable"
-    dg = _row_step(session, dx)
-    g_base = np.asarray(session.nl.constraints(base))
-    # an equality constraint is held to first order and cannot change
-    # activity, and a pin constraint moves by construction
-    live = g_l < g_u
-    live[list(pin_idx)] = False
-    g_pred = g_base + dg
-    gtol = 1e-9 * np.maximum(1.0, np.abs(g_pred))
-    a_row, f_row = _ratio_test(g_base, dg, g_l, g_u, row_names, live=live,
-                               on_bound=row_on_bound, mu=mu, tol=gtol)
-    if a_row < alpha:
-        alpha, first, first_kind = a_row, f_row, "constraint"
-
+    first = None if res["first"] is None else name_of(res["first"])
+    first_kind = None if res["first"] is None else res["first"][0]
     crossed = session.new_keymap()
-    for i in np.where((x_new < lo - eps) | (x_new > hi + eps))[0]:
+    for i, dist in res["crossed"]:
         ov = session.var_key(i)
         if ov is not None:
-            crossed[ov] = float(max(lo[i] - x_new[i], x_new[i] - hi[i]))
+            crossed[ov] = float(dist)
     crossed_rows = session.new_keymap()
-    out_of_bounds = (g_pred < g_l - gtol) | (g_pred > g_u + gtol)
-    rows_out = np.where(live & out_of_bounds)[0]
-    # resolved only when a row actually crossed: the resolution is
-    # once per session, but the common case has nothing to resolve for
-    row_data = session.user_row_data() if rows_out.size else ()
-    for j in rows_out:
+    # resolved only when a row actually crossed: the resolution is once
+    # per session, but the common case has nothing to resolve for
+    row_data = session.user_row_data() if res["crossed_rows"] else ()
+    for j, dist in res["crossed_rows"]:
         oc = row_data[j]
         if oc is not None:
-            crossed_rows[oc] = float(
-                max(g_l[j] - g_pred[j], g_pred[j] - g_u[j]))
-
-    # the perturbation IS the shift of the pin constraints' right-hand
-    # sides, so the violation is measured against the shifted ones
-    gl_p, gu_p = g_l.copy(), g_u.copy()
-    for pin, d in zip(pin_idx, deltas):
-        gl_p[pin] += d
-        gu_p[pin] += d
-    g_at = np.asarray(session.nl.constraints(x_new))
-    violation = float(np.max(np.maximum.reduce(
-        [gl_p - g_at, g_at - gu_p, np.zeros_like(g_at)])))
-
-    corrector = None
-    if corrector_iter:
-        _, corrector = _correct(
-            session, pin_idx, deltas, np.asarray(step), corrector_iter)
-
+            crossed_rows[oc] = float(dist)
+    bounds_relaxed = bool(res["bounds_relaxed"])
+    if bounds_relaxed:
+        activity, row_status = {}, {}
+    else:
+        activity = dict(zip(session.var_names, res["var_status"]))
+        row_status = dict(zip(row_names, res["row_status"]))
+    refined = {name_of(t): (before, after)
+               for t, before, after in res["refined"]}
+    refined_entries = [name_of(t) for t in res["refined_entries"]]
     return SolutionReport(
-        alpha=alpha, first=first, first_kind=first_kind,
-        crossed=crossed, crossed_rows=crossed_rows, violation=violation,
-        mu=mu, activity=activity, row_activity=row_status,
-        perturbations=np.asarray(session.solver.kkt_perturbations).tolist(),
-        bounds_relaxed=bounds_relaxed, corrector=corrector,
-        refine_stop=refine_stop, refined=refined,
+        alpha=float(res["alpha"]), first=first, first_kind=first_kind,
+        crossed=crossed, crossed_rows=crossed_rows,
+        violation=float(res["violation"]), mu=float(res["mu"]),
+        activity=activity, row_activity=row_status,
+        perturbations=(None if res["perturbations"] is None
+                       else [float(v) for v in res["perturbations"]]),
+        bounds_relaxed=bounds_relaxed, corrector=res["corrector"],
+        refine_stop=res["refine_stop"], refined=refined,
+        refined_entries=refined_entries,
     )
-
 
 
 #: One active-set change along `solution(mode="path")`'s path.
@@ -1147,68 +834,33 @@ def active_set_changes(session, pin_rows, deltas, predictor_iter=16,
         raise ValueError(
             f"{who}: degeneracy must be 'directional', "
             f"'one_sided' or 'release_all', got {degeneracy!r}")
-    degeneracy_iter = _degeneracy_iter(
-        degeneracy_iter, degeneracy, who)
+    _degeneracy_iter(degeneracy_iter, degeneracy, who)
     check_margins(None, max_pdpert, who)
-    refuse_on_pdpert(session, max_pdpert, who)
-    pin_idx, deltas = list(pin_rows), list(deltas)
-    if degeneracy == "directional":
-        try:
-            _, held_rows, _ = (
-                session.solver.parametric_step_directional(
-                    pin_idx, deltas, degeneracy_iter))
-            _, segments = session.solver.parametric_step_path_decided(
-                pin_idx, deltas, held_rows, predictor_iter)
-        except RuntimeError as e:
-            if "directional derivative" not in str(e):
-                raise
-            warnings.warn(
-                f"{who}: {e}. Falling back to the "
-                "one-sided record, the degeneracy='one_sided' behavior.")
-            _, segments = session.solver.parametric_step_path(
-                pin_idx, deltas, predictor_iter)
-    elif degeneracy == "release_all":
-        _, segments = session.solver.parametric_step_path_decided(
-            pin_idx, deltas, [], predictor_iter)
-    else:
-        _, segments = session.solver.parametric_step_path(
-            pin_idx, deltas, predictor_iter)
-
-    # A segment names its bounded quantity by PRIMAL KKT row, and the
-    # primal blocks are x then s. Below n_x it is a variable, in var-x
-    # (var_names is full-x, so invert the map scatter_x applies). At or
-    # above it the limit is a constraint's own -- g(x) <= cap bounds
-    # the row's slack, not any variable -- and resolving it against the
-    # variable map would return a NEIGHBOURING variable, the gh#450
-    # hazard. gh#928 is what made the second case reachable.
-    n_x = session.solver.block_dims[0]
-    full_of = {row: full
-               for full, row in enumerate(session._primal_row_map())
-               if row is not None}
-    slack_of = None
+    res = _pounce._sens_active_set_changes(
+        session.solver, [int(p) for p in pin_rows],
+        [float(d) for d in deltas], int(predictor_iter), degeneracy,
+        None if degeneracy_iter is None else int(degeneracy_iter),
+        _opt(max_pdpert))
+    if res["error"] is not None and res["error"][0] == "pdpert":
+        _raise(res["error"], who, max_pdpert)
+    _warn_step_findings(session, res["findings"], who, "path",
+                        predictor_iter, record=True)
+    if res["error"] is not None:
+        _raise(res["error"], who, max_pdpert)
     out = []
-    for frac, row, lower, pinned in segments:
-        if row < n_x:
-            full = full_of[row]
-            key = session.var_key(full)
+    for frac, (kind, idx), lower, reaches in res["changes"]:
+        if kind == "variable":
+            key = session.var_key(idx)
             if key is None:
-                key = session.var_names[full]
+                key = session.var_names[idx]
         else:
-            if slack_of is None:
-                # Built only when a row limit actually moves, so the
-                # common all-variables path costs no extra call.
-                slack_of = {
-                    r: g
-                    for g, r in enumerate(session.solver.slack_rows(
-                        list(range(len(session.con_names)))))
-                    if r is not None}
-            key = session.row_key(slack_of[row])
+            key = session.row_key(idx)
             if key is None:
-                key = session.con_names[slack_of[row]]
+                key = session.con_names[idx]
         out.append(ActiveSetChange(
             fraction=float(frac),
             var=key,
             bound="lower" if lower else "upper",
-            action="reaches" if pinned else "leaves",
+            action="reaches" if reaches else "leaves",
         ))
     return out

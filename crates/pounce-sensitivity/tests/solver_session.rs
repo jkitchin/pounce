@@ -19,6 +19,9 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::{SensSolve, Solver};
 
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
+
 /// Same NLP as `tests/parametric_cpp.rs::ParametricTNLP` /
 /// `tests/convenience_api.rs::ParametricTNLP`. Replicated to keep
 /// test binaries independent.
@@ -476,4 +479,29 @@ fn classify_activity_refuses_a_solve_that_relaxed_its_bounds() {
         ),
         "clearing the option must not retroactively un-relax the held slacks",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+/// The unrelaxed solve the guard accepts. Its companion,
+/// `classify_activity_refuses_a_solve_that_relaxed_its_bounds`, has no
+/// counterpart here: the refusal is `Solver`'s, made from the option the
+/// solve ran with, and an engine outside pounce has no `Solver` to make it.
+/// The precondition is stated on `pounce_sens_core::activity::compute` for
+/// that engine to check.
+#[test]
+fn classify_activity_guards_the_solves_bound_relax_factor_over_an_outside_engine() {
+    let mut app = make_app();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    let (solver, model, _) = recorded_solve(app, ParametricTNLP::new(5.0, 1.0));
+    same_classification("unrelaxed", &solver, &model, Relaxation::None);
 }

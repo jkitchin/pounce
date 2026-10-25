@@ -70,6 +70,9 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
+
 /// Where the parameter row holds `p`, and equally `x`'s upper bound.
 const PIN: Number = 1.0;
 /// The perturbation asked of the parameter row.
@@ -338,4 +341,37 @@ fn a_point_that_never_needed_the_ceiling_is_unchanged() {
             dx[i],
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+#[test]
+fn the_barrier_diagonal_stays_under_the_ceiling_over_an_outside_engine() {
+    let mut app = IpoptApplication::new();
+    {
+        let o = app.options_mut();
+        o.set_integer_value("print_level", 0, true, false).unwrap();
+        o.set_string_value("sb", "yes", true, false).unwrap();
+        o.set_numeric_value("bound_relax_factor", 0.0, true, false)
+            .unwrap();
+        o.set_string_value("crossover", "no", true, false).unwrap();
+    }
+    app.initialize().unwrap();
+    let (solver, model, status) = recorded_solve(app, PinnedToBound { t: 2.0 });
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}",
+    );
+    same_classification("pinned to its bound", &solver, &model, Relaxation::None);
 }

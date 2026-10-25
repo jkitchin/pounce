@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 
 from . import solve as _pounce_solve
 from ..bvp import _core
@@ -55,29 +56,33 @@ class JaxBVPSolution:
     sol: Callable
 
 
-def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
+def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
     """First-order-differentiable feral-Newton solve (``method="newton"``).
 
-    Forward: damped Newton on ``R(z, theta) = 0`` factoring the ``N x N``
-    collocation Jacobian with FERAL's sparse LU (host ``pure_callback``).
-    Backward: the implicit-function-theorem VJP. For a cotangent ``v`` on
-    ``z*``, ``dL/dtheta = -(dR/dtheta)^T u`` where ``R_z^T u = v`` is solved
-    with the *same* sparse LU (``solve_transpose``), and the
-    ``(dR/dtheta)^T`` product is taken by JAX VJP over the traceable
+    Returns ``solve_fn(theta, x, z0) -> z*``. Forward: damped Newton on
+    ``R(z, theta, x) = 0`` factoring the ``N x N`` collocation Jacobian with
+    FERAL's sparse LU (host ``pure_callback``). Backward: the
+    implicit-function-theorem VJP. For a cotangent ``v`` on ``z*``,
+    ``dL/d(theta, x) = -(dR/d(theta, x))^T u`` where ``R_z^T u = v`` is
+    solved with the *same* sparse LU (``solve_transpose``), and the
+    ``(dR/d(theta, x))^T`` product is taken by JAX VJP over the traceable
     residual at the converged ``z*``. Both directions stay on the ``N``
     system — no ``2N`` saddle — so it is the fast path. First-order only
     (the forward is an opaque callback); use ``method="ipm",
     second_order=True`` for higher-order derivatives.
+
+    The mesh ``x`` and the initial guess ``z0`` are callback *operands*,
+    not values read at trace time, so either may be a tracer — built
+    inside ``jax.jit``, passed in as a jitted argument, or vmapped. ``z*``
+    does not depend on ``z0`` (a root is a root), so its cotangent is an
+    exact zero.
     """
     import numpy as np
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
-    from ..bvp._solve import ift_solve_transpose
+    from ..bvp._solve import ift_solve_transpose_lanes
 
-    x_np = np.asarray(x, dtype=np.float64)
-    z0_np = np.asarray(z0, dtype=np.float64)
-
-    def residual_jax(z, theta):
+    def residual_jax(z, theta, x):
         nfun, nbc = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)
         Y, pp = _core.unpack_z(z, n, m)
         return _core.collocation_residual(nfun, nbc, x, Y, pp, jnp.concatenate)
@@ -88,7 +93,9 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
         nbc = lambda ya, yb, pp: np.asarray(nbc_j(ya, yb, pp), dtype=np.float64)
         return nfun, nbc
 
-    def _host_newton(theta_np):
+    def _host_newton(theta_np, x_np, z0_np):
+        x_np = np.asarray(x_np, dtype=np.float64)
+        z0_np = np.asarray(z0_np, dtype=np.float64)
         nfun, nbc = _np_normalized(theta_np)
 
         def residual_fn(z):
@@ -100,51 +107,48 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
         )
         return np.asarray(z_star, dtype=np.float64)
 
-    def _host_btran(z_star_np, theta_np, v_np):
-        # Under vmap_method="broadcast_all" (jax.jacobian / batched VJP), all
-        # inputs arrive with a leading batch axis. ``z_star`` / ``theta`` are
-        # identical across the batch (the primal is fixed), so collapse them;
-        # ``v`` carries the distinct cotangents (one factorization, multi-RHS).
-        v_np = np.asarray(v_np, np.float64)
-        z_star_np = np.asarray(z_star_np, np.float64)
-        theta_np = np.asarray(theta_np)
-        if z_star_np.ndim == 2:
-            z_star_np = z_star_np[0]
-        if theta_np.ndim == theta_ndim + 1:
-            theta_np = theta_np[0]
-        nfun, nbc = _np_normalized(theta_np)
-        return ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star_np, v_np)
+    def _host_btran(z_star_np, theta_np, x_np, v_np):
+        # Under vmap_method="broadcast_all" every operand gains the same
+        # leading batch axes. Lanes may share one primal (jax.jacobian) or
+        # carry distinct ones (an outer vmap over theta or the mesh), so the
+        # helper groups them by primal rather than collapsing to lane 0
+        # (gh#1049).
+        return ift_solve_transpose_lanes(
+            _np_normalized, x_np, n, m, k, z_star_np, theta_np, v_np, theta_ndim,
+        )
 
     N = n * m + k
 
-    @jax.custom_vjp
-    def solve_fn(theta):
+    def _forward(theta, x, z0):
         return jax.pure_callback(
-            _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
+            _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta, x, z0,
             vmap_method="sequential",
         )
 
-    def fwd(theta):
-        z_star = jax.pure_callback(
-            _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
-            vmap_method="sequential",
-        )
-        return z_star, (z_star, theta)
+    @jax.custom_vjp
+    def solve_fn(theta, x, z0):
+        return _forward(theta, x, z0)
+
+    def fwd(theta, x, z0):
+        z_star = _forward(theta, x, z0)
+        return z_star, (z_star, theta, x)
 
     def bwd(res, v):
-        z_star, theta = res
+        z_star, theta, x = res
         # jax.jacobian vmaps the VJP over output basis vectors, which vmaps
         # this callback. vmap_method="broadcast_all" hands the whole cotangent
-        # batch to one callback invocation, so R_z is factored once and the
-        # back-solves run as a single multi-RHS solve_transpose_many.
+        # batch to one callback invocation, so R_z is factored once per
+        # distinct primal and the back-solves run as multi-RHS
+        # solve_transpose_many.
         u = jax.pure_callback(
             _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, theta, v, vmap_method="broadcast_all",
+            z_star, theta, x, v, vmap_method="broadcast_all",
         )
-        # dL/dtheta = -(dR/dtheta)^T u, via VJP of the residual at z*.
-        _, vjp_theta = jax.vjp(lambda th: residual_jax(z_star, th), theta)
-        (dtheta,) = vjp_theta(-u)
-        return (dtheta,)
+        # dL/d(theta, x) = -(dR/d(theta, x))^T u, via VJP of the residual
+        # at z*.
+        _, vjp_res = jax.vjp(lambda th, xx: residual_jax(z_star, th, xx), theta, x)
+        dtheta, dx = vjp_res(-u)
+        return dtheta, dx, jnp.zeros((N,), dtype=jnp.float64)
 
     solve_fn.defvjp(fwd, bwd)
     return solve_fn
@@ -163,9 +167,13 @@ def solve_bvp(
         ``bc(ya, yb, p, theta) -> (n + k,)`` (drop ``p`` if there are no
         unknown parameters). JAX-traceable.
     x : array (m,)
-        Fixed mesh.
+        Fixed mesh (not adapted). May be traced — built under ``jax.jit``,
+        a jitted argument, or vmapped — and is differentiable: the
+        gradient is the implicit-function derivative of the collocation
+        solution w.r.t. the node positions.
     y : array (n, m)
-        Initial guess for the node states (not differentiated through).
+        Initial guess for the node states. May be traced; its gradient is
+        an exact zero (the root does not depend on where Newton starts).
     p : array (k,) or None
         Initial guess for unknown parameters, or ``None``.
     theta : array-like
@@ -213,15 +221,24 @@ def solve_bvp(
     k = int(p0.shape[0])
     N = _core.num_unknowns(n, m, k)
 
-    def f(z, th):
+    # The ipm path hands the solve one flat parameter vector carrying both
+    # ``theta`` (any pytree) and the mesh ``x``. Closing ``g`` over ``x``
+    # instead leaks it out of the trace when the mesh is built under
+    # ``jax.jit`` (the host evaluates ``g``), and ``pounce.jax.solve``
+    # differentiates w.r.t. an array ``p`` only — so flattening is what
+    # makes a structured ``theta`` work and the mesh differentiable.
+    q, _unravel_q = ravel_pytree((theta, x))
+
+    def f(z, q_):
         # Pure feasibility: zero objective (kept dependent on z so the
         # trace has the right shape; grad is identically zero).
         return 0.0 * jnp.sum(z)
 
-    def g(z, th):
+    def g(z, q_):
+        th, xx = _unravel_q(q_)
         nfun, nbc = _core._make_normalized(fun, bc, theta=th, uses_p=uses_p)
         Y, pp = _core.unpack_z(z, n, m)
-        return _core.collocation_residual(nfun, nbc, x, Y, pp, jnp.concatenate)
+        return _core.collocation_residual(nfun, nbc, xx, Y, pp, jnp.concatenate)
 
     z0 = _core.pack_z(y, p0, jnp.concatenate)
     cl = jnp.zeros(N, dtype=jnp.float64)
@@ -239,16 +256,16 @@ def solve_bvp(
                 "first-order differentiable)."
             )
         solve_root = _make_newton_vjp(
-            fun, bc, x, n, m, k, uses_p, z0, tol, int(jnp.ndim(theta))
+            fun, bc, n, m, k, uses_p, tol, int(jnp.ndim(theta))
         )
-        z_star = solve_root(theta)
+        z_star = solve_root(theta, x, z0)
     elif method == "ipm":
         if second_order:
             solve_root = _make_root_solver_jvp(f, g, z0, N, cl, cu, opts)
-            z_star = solve_root(theta)
+            z_star = solve_root(q)
         else:
             z_star = _pounce_solve(
-                theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
+                q, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
             )
     else:
         raise ValueError(f"unknown method {method!r}; use 'newton' or 'ipm'.")

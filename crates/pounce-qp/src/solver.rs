@@ -3142,21 +3142,18 @@ impl ParametricActiveSetSolver {
     /// inner-loop cost: one cached resolve + small dense Schur solve
     /// per iteration, plus two cached resolves per working-set change.
     ///
-    /// Caveat (indefinite reduced Hessian only): the refactor path
-    /// runs `factorize_with_inertia_control` — re-checking inertia
-    /// and applying a δ-shift — on *every* iteration, whereas this
-    /// path only runs inertia control inside `SchurState::reset`
-    /// (at init and every `max_schur_updates_before_refactor`
-    /// working-set changes). The rank-2 SMW update in `apply_change`
-    /// does *not* re-check inertia. A DROP enlarges the active-set
-    /// null space and can expose negative curvature that the cached
-    /// factor does not regularize until the next reset; an ADD only
-    /// shrinks the null space and cannot introduce new negative
-    /// curvature. For the convex default (`HessianInertia::Psd`,
-    /// which is what the SQP driver feeds) the reduced Hessian is
-    /// always PD, so the two paths are identical; the gap is latent
-    /// for indefinite inputs on the opt-in `use_schur_updates = true`
-    /// path. See code-review item M10.
+    /// Inertia: the refactor path runs `factorize_with_inertia_control`
+    /// — re-checking inertia and applying a δ-shift — on *every*
+    /// iteration, while the rank-2 SMW update in `apply_change` does
+    /// not re-check it. An ADD only shrinks the active-set null space
+    /// and cannot introduce new negative curvature, so it always takes
+    /// the update. A DROP enlarges the null space and can expose
+    /// negative curvature, so on a Hessian not known PSD
+    /// (`HessianInertia::Indefinite` / `Unknown` — the SQP driver's
+    /// exact-Hessian QP) a drop refactors through `SchurState::reset`,
+    /// which does run inertia control. On a PSD Hessian the reduced
+    /// Hessian is PD on every null space and drops keep the update.
+    /// (Code-review item M10 named the gap; gh#1054 closed it.)
     /// Reset the Schur base factor, **repairing a rank-deficient active set**
     /// rather than failing on it.
     ///
@@ -3692,6 +3689,32 @@ impl ParametricActiveSetSolver {
                             active_slot_count(&working),
                             p_inf
                         );
+                    }
+                    // A drop enlarges the null space of the active rows, and on
+                    // a Hessian not known PSD that can expose negative
+                    // curvature the cached factor was never checked against:
+                    // the rank-2 update does not re-run inertia control, so the
+                    // next "Newton step" would be a saddle direction. Refactor
+                    // instead, which runs §4.5 inertia control on the new set
+                    // (gh#1054; this was the documented gap that kept the
+                    // Schur path opt-in on the SQP arm, whose exact Hessian is
+                    // `Indefinite`). Adds only shrink the null space and keep
+                    // the cheap update; on a PSD Hessian, drops do too.
+                    if qp.hessian_inertia != HessianInertia::Psd {
+                        self.schur_reset_rank_repaired(
+                            &mut schur,
+                            qp,
+                            &mut working,
+                            opts,
+                            &mut n_changes,
+                            &mut rank_repair_budget,
+                            &mut pruned,
+                        )?;
+                        n_refactor += 1;
+                        n_changes += 1;
+                        prev_was_null_step = false;
+                        floor_refactored = false;
+                        continue;
                     }
                     // Degenerate rank-2 update ⇒ refactor instead. `working`
                     // already carries this drop, so resetting against it

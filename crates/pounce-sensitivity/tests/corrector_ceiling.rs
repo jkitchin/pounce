@@ -48,6 +48,12 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction, assert_same_correction_to};
+use common::outside_engine::{
+    RecordingTnlp, Relaxation, correct_outside, outside_engine, same_classification_of,
+};
+
 /// Where the parameter row holds `pv`, and equally `x`'s upper bound.
 const PIN: Number = 1.0;
 /// The second parameter row's base value.
@@ -264,29 +270,7 @@ fn solved_in_frame(
     relax: Number,
     x_scaling: Option<[Number; 6]>,
 ) -> Solver {
-    let mut app = IpoptApplication::new();
-    {
-        let o = app.options_mut();
-        o.set_integer_value("print_level", 0, true, false).unwrap();
-        o.set_string_value("sb", "yes", true, false).unwrap();
-        o.set_numeric_value("bound_relax_factor", relax, true, false)
-            .unwrap();
-        if x_scaling.is_some() {
-            o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
-                .unwrap();
-        }
-        o.set_string_value(
-            "crossover",
-            if crossover { "yes" } else { "no" },
-            true,
-            false,
-        )
-        .unwrap();
-        if let Some(tol) = tol {
-            o.set_numeric_value("tol", tol, true, false).unwrap();
-        }
-    }
-    app.initialize().unwrap();
+    let app = app(crossover, tol, relax, x_scaling.is_some());
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(CeilingWithWorkload {
         t,
         q0,
@@ -307,8 +291,68 @@ fn solved_in_frame(
     solver
 }
 
-/// The perturbed problem's solution at tol 1e-10, warm-started from
-/// the base point, the same truth the re-solve oracle uses.
+/// The options every solve of this fixture runs with.
+fn app(
+    crossover: bool,
+    tol: Option<Number>,
+    relax: Number,
+    user_scaling: bool,
+) -> IpoptApplication {
+    let mut app = IpoptApplication::new();
+    {
+        let o = app.options_mut();
+        o.set_integer_value("print_level", 0, true, false).unwrap();
+        o.set_string_value("sb", "yes", true, false).unwrap();
+        o.set_numeric_value("bound_relax_factor", relax, true, false)
+            .unwrap();
+        if user_scaling {
+            o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
+                .unwrap();
+        }
+        o.set_string_value(
+            "crossover",
+            if crossover { "yes" } else { "no" },
+            true,
+            false,
+        )
+        .unwrap();
+        if let Some(tol) = tol {
+            o.set_numeric_value("tol", tol, true, false).unwrap();
+        }
+    }
+    app.initialize().unwrap();
+    app
+}
+
+/// [`solved_in_frame`] at `t = 2`, `q0 = Q0` from the default start, with
+/// the model wrapped to record what the solve returns.
+fn solved_recorded(
+    bounded: bool,
+    crossover: bool,
+    relax: Number,
+    x_scaling: Option<[Number; 6]>,
+) -> (Solver, Rc<RefCell<RecordingTnlp<CeilingWithWorkload>>>) {
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(CeilingWithWorkload {
+        t: 2.0,
+        q0: Q0,
+        bounded,
+        x_scaling,
+        start: None,
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app(crossover, None, relax, x_scaling.is_some()), tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "fixture must converge; got {status:?}",
+    );
+    (solver, model)
+}
+
 fn truth(t: Number, bounded: bool, base_x: &[Number]) -> Vec<Number> {
     let s = solved(
         t,
@@ -618,5 +662,227 @@ fn the_declared_frame_survives_a_point_outside_the_declared_box() {
         rep_n.improved() && corrected < plain / 10.0,
         "the declared frame must still correct at the default \
          bound_relax_factor: {plain:e} -> {corrected:e}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the corrector, handed the same step, and the
+// classification come out the same over an engine built from that report.
+
+fn relaxation(relax: Number) -> Relaxation {
+    if relax == 0.0 {
+        Relaxation::None
+    } else {
+        Relaxation::Pounce {
+            factor: relax,
+            cap: 1e-4,
+        }
+    }
+}
+
+fn both_corrections(
+    solver: &Solver,
+    model: &Rc<RefCell<RecordingTnlp<CeilingWithWorkload>>>,
+    relax: Number,
+    delta: Number,
+    budget: usize,
+    frame: Frame,
+    label: &str,
+) {
+    let step = solver
+        .parametric_step_full(&[3], &[delta])
+        .expect("full step");
+    let pounce = solver
+        .correct_step(&[3], &[delta], &step, budget)
+        .expect("pounce's corrector");
+    let eng = outside_engine(model, relaxation(relax));
+    let outside =
+        correct_outside(&eng, &[3], &[delta], &step, budget).expect("the outside corrector");
+    assert_same_correction(label, &pounce, &outside, frame);
+}
+
+/// pounce's classification and the outside engine's, the engine marked as
+/// reading a crossover vertex when the solve ran crossover.
+fn both_classifications(
+    solver: &Solver,
+    model: &Rc<RefCell<RecordingTnlp<CeilingWithWorkload>>>,
+    relax: Number,
+    crossover: bool,
+    label: &str,
+) {
+    let eng = outside_engine(model, relaxation(relax));
+    let eng = if crossover {
+        eng.after_crossover()
+    } else {
+        eng
+    };
+    same_classification_of(label, solver, eng);
+}
+
+/// pounce caps `x0`'s barrier diagonal at its gh#737 ceiling, `7.0e13`,
+/// where `z/s` is `6.9e27`, because its augmented factorization loses the
+/// step above the ceiling. The outside engine factors the eight-block matrix,
+/// which keeps `z` and `s` apart, and needs no cap.
+///
+/// After one iteration the two corrected steps agree to `1e-6`, and both
+/// land `1.048e-2` from the re-solved truth, from a plain step `1.478e-1`
+/// away. After that they part. pounce's second iteration fails to improve on
+/// its first, so it stops there at `1.048e-2`. The outside engine goes on to
+/// `1.356e-3` by its third iteration, the point the crossover solve below
+/// reaches with no cap, and its residual falls to `5.1e-9` by the eighth.
+/// The ceiling costs pounce a factor of `7.7` in the answer here.
+///
+/// `Frame::Scaled` leaves the residuals out of the budget-1 comparison,
+/// since the cap moves them by a few parts in a hundred thousand.
+#[test]
+fn a_ceiling_solve_corrects_at_the_predicted_point_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(true, false, 0.0, None);
+    both_classifications(&solver, &model, 0.0, false, "ceiling");
+    let base = solver.converged().expect("converged").x.clone();
+    let n = base.len();
+    let want = truth(2.0, true, &base);
+    let step = solver
+        .parametric_step_full(&[3], &[DELTA])
+        .expect("full step");
+    let eng = outside_engine(&model, Relaxation::None);
+    let a = solver
+        .correct_step(&[3], &[DELTA], &step, 1)
+        .expect("pounce's corrector");
+    let b = correct_outside(&eng, &[3], &[DELTA], &step, 1).expect("outside corrector");
+    assert_same_correction_to("ceiling, budget 1", &a, &b, Frame::Scaled, 1e-4);
+
+    let a = solver
+        .correct_step(&[3], &[DELTA], &step, 8)
+        .expect("pounce's corrector");
+    let b = correct_outside(&eng, &[3], &[DELTA], &step, 8).expect("outside corrector");
+    assert_eq!(
+        (a.1.iterations, a.1.converged, b.1.iterations, b.1.converged),
+        (2, true, 8, false),
+        "the iterations end where the doc above measured them",
+    );
+    let (da, db) = (
+        dist(&add(&base, &a.0[..n]), &want),
+        dist(&add(&base, &b.0[..n]), &want),
+    );
+    assert!(
+        da > 5.0 * db,
+        "the ceiling no longer costs pounce the measured factor of 7.7: pounce lands {da:e} \
+         from the truth and the outside engine {db:e}",
+    );
+}
+
+#[test]
+fn the_same_workload_without_the_ceiling_corrects_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(false, false, 0.0, None);
+    both_classifications(&solver, &model, 0.0, false, "no ceiling");
+    both_corrections(&solver, &model, 0.0, DELTA, 8, Frame::Same, "no ceiling");
+}
+
+/// Equal to roundoff at every budget.
+///
+/// `x0` is held at its upper bound by two equality rows, and crossover parks
+/// it there with no relaxation, so the diagonal pounce factors is the
+/// declared frame's (gh#654) and the ceiling does not bind. The second
+/// iteration lands `x0` exactly on the bound, since `1 - 5e-17` rounds to
+/// `1.0`. From there its slack is zero, and the fraction-to-boundary rule
+/// cuts the whole primal step to zero whenever `x0`'s direction is positive.
+/// That direction is zero in exact arithmetic and roundoff-sized in practice,
+/// so the two engines continue alike only while their solves give it the
+/// same sign. With iterative refinement in the outside engine's solve they
+/// do, and both run all eight iterations to the same point, `1.356e-3` from
+/// the re-solved truth.
+#[test]
+fn a_crossover_solve_corrects_at_the_predicted_point_over_an_outside_engine() {
+    let (solver, model) = solved_recorded(true, true, 0.0, None);
+    both_classifications(&solver, &model, 0.0, true, "crossover");
+    for budget in [1_usize, 2, 3, 8] {
+        let label = format!("crossover, budget {budget}");
+        both_corrections(&solver, &model, 0.0, DELTA, budget, Frame::Same, &label);
+    }
+}
+
+#[test]
+fn the_declared_frame_follows_the_iterate_under_a_change_of_variables_over_an_outside_engine() {
+    const D: [Number; 6] = [1.0e2, 1.0e-2, 5.0, 1.0e-1, 2.0, 1.0e1];
+    // Budget 2, before the iterate lands exactly on `x0`'s bound: see
+    // `a_crossover_solve_corrects_at_the_predicted_point_over_an_outside_engine`.
+    //
+    // The outside engine works in natural units, so it gives one answer for
+    // both arms. pounce's two arms differ from each other at this point, which
+    // violates LICQ, by `1.3e-5` in the corrected step, and the test above
+    // allows that, asking only that their errors agree within a factor of
+    // ten. So the outside engine is held to pounce's unscaled arm to
+    // roundoff, and to the scaled one to the size of that difference.
+    let (solver_u, model_u) = solved_recorded(true, true, 0.0, None);
+    both_classifications(&solver_u, &model_u, 0.0, true, "crossover, unscaled");
+    both_corrections(
+        &solver_u,
+        &model_u,
+        0.0,
+        DELTA,
+        2,
+        Frame::Same,
+        "crossover, unscaled",
+    );
+    let (solver_s, model_s) = solved_recorded(true, true, 0.0, Some(D));
+    both_classifications(&solver_s, &model_s, 0.0, true, "crossover, scaled");
+    let step = solver_s
+        .parametric_step_full(&[3], &[DELTA])
+        .expect("full step");
+    let pounce_scaled = solver_s
+        .correct_step(&[3], &[DELTA], &step, 2)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model_s, relaxation(0.0));
+    let outside = correct_outside(&eng, &[3], &[DELTA], &step, 2).expect("outside corrector");
+    assert_same_correction_to(
+        "crossover, scaled",
+        &pounce_scaled,
+        &outside,
+        Frame::Scaled,
+        1e-4,
+    );
+    let step_u = solver_u
+        .parametric_step_full(&[3], &[DELTA])
+        .expect("full step");
+    let pounce_unscaled = solver_u
+        .correct_step(&[3], &[DELTA], &step_u, 2)
+        .expect("pounce's corrector");
+    assert_same_correction(
+        "crossover, the scaled report against pounce's unscaled arm",
+        &pounce_unscaled,
+        &outside,
+        Frame::Same,
+    );
+}
+
+#[test]
+fn the_declared_frame_survives_a_point_outside_the_declared_box_over_an_outside_engine() {
+    const RELAX: Number = 1e-8;
+    const WIDE: Number = -0.9;
+    // No classification: it needs `bound_relax_factor = 0`, and pounce
+    // refuses it here, as the test above never asks for it.
+    let (solver, model) = solved_recorded(true, true, RELAX, None);
+    both_corrections(
+        &solver,
+        &model,
+        RELAX,
+        WIDE,
+        8,
+        Frame::Same,
+        "relaxed crossover, wide",
+    );
+    both_corrections(
+        &solver,
+        &model,
+        RELAX,
+        DELTA,
+        8,
+        Frame::Same,
+        "relaxed crossover",
     );
 }

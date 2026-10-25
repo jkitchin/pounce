@@ -37,6 +37,10 @@ struct PyLocalSolve<'a> {
 }
 
 impl LocalSolve for PyLocalSolve<'_> {
+    fn begin_search(&mut self) {
+        self.inner.begin_search();
+    }
+
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
         let mode = if self.has_hessian {
             mode
@@ -48,6 +52,10 @@ impl LocalSolve for PyLocalSolve<'_> {
 
     fn has_exact_hessian(&self) -> bool {
         self.has_hessian
+    }
+
+    fn should_stop(&self) -> bool {
+        self.inner.should_stop()
     }
 }
 

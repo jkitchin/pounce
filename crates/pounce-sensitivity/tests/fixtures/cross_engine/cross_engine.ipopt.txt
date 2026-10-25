@@ -1,0 +1,10 @@
+Excerpt of the output of
+  ipopt cross_engine.nl -AMPL linear_solver=ma57 bound_relax_factor=0 print_level=8
+(IDAES Ipopt 3.13.2 build, MA57 linked in). The test reads the objective
+scaling factor from the line that names it, and the barrier parameter of the
+last iteration from the last line below that names it.
+
+This is Ipopt version 3.13.2, running with linear solver ma57.
+Scaling parameter for objective function = 1.000000e+00
+Current barrier parameter mu = 2.5059035596800618e-09
+EXIT: Optimal Solution Found.

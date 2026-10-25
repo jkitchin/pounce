@@ -102,7 +102,9 @@ fn restoration_factorizations_are_reported_separately() {
 
 #[test]
 fn a_solve_without_restoration_reports_none() {
-    let r = solve_report("no_resto", "airport.nl", &[]);
+    // `nlp`: under `auto`, airport solves on the conic arm (gh#1050), whose
+    // report carries no NLP restoration statistics.
+    let r = solve_report("no_resto", "airport.nl", &["solver_selection=nlp"]);
     assert_eq!(u(&r["statistics"], "restoration_calls"), 0);
     let ls = &r["linear_solver"];
     assert!(u(ls, "n_factors") >= 1);

@@ -40,6 +40,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{RecordingTnlp, Relaxation, correct_outside, outside_engine};
+
 /// The pinned row's index in `g`, and the base point's `x`.
 const PIN: Index = 1;
 const BASE_X: Number = 4.0;
@@ -277,4 +281,93 @@ fn a_perturbation_inside_the_domain_is_untouched() {
         BASE_X + dp,
         base[0] + out[0]
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and hands the same step to the corrector over an engine built
+// from that report. These solves run at pounce's default `bound_relax_factor`,
+// so the outside engine measures its slacks against bounds relaxed the way
+// pounce relaxes them.
+
+fn solved_recorded() -> (Solver, Rc<RefCell<RecordingTnlp<LogDomain>>>) {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-10, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(LogDomain)));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "base solve failed: {status:?}",
+    );
+    (solver, model)
+}
+
+#[test]
+fn a_non_finite_residual_is_a_failure_not_a_perfect_score_over_an_outside_engine() {
+    let (solver, model) = solved_recorded();
+    let step = solver
+        .parametric_step_full(&[PIN], &[DP])
+        .expect("parametric step");
+    let eng = outside_engine(&model, Relaxation::POUNCE_DEFAULT);
+    let pounce = solver.correct_step(&[PIN], &[DP], &step, 4);
+    let outside = correct_outside(&eng, &[PIN], &[DP], &step, 4);
+    let (Err(a), Err(b)) = (&pounce, &outside) else {
+        panic!(
+            "both correctors should refuse a point outside the model's domain: \
+             pounce {:?}, outside {:?}",
+            pounce.as_ref().map(|r| &r.1),
+            outside.as_ref().map(|r| &r.1),
+        );
+    };
+    for msg in [format!("{a:?}"), format!("{b:?}")] {
+        assert!(
+            msg.contains("finite"),
+            "the error should name the non-finite residual: {msg}"
+        );
+    }
+}
+
+#[test]
+fn a_correction_never_hands_back_a_non_finite_step_over_an_outside_engine() {
+    let (solver, model) = solved_recorded();
+    let step = solver
+        .parametric_step_full(&[PIN], &[DP])
+        .expect("parametric step");
+    let eng = outside_engine(&model, Relaxation::POUNCE_DEFAULT);
+    if let Ok((out, report)) = correct_outside(&eng, &[PIN], &[DP], &step, 4) {
+        assert!(
+            out.iter().all(|v| v.is_finite()) && report.residual.is_finite(),
+            "the outside corrector returned a non-finite result: {report:?}",
+        );
+    }
+}
+
+#[test]
+fn a_perturbation_inside_the_domain_is_untouched_over_an_outside_engine() {
+    let (solver, model) = solved_recorded();
+    let dp = 0.5;
+    let step = solver
+        .parametric_step_full(&[PIN], &[dp])
+        .expect("parametric step");
+    let pounce = solver
+        .correct_step(&[PIN], &[dp], &step, 8)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::POUNCE_DEFAULT);
+    let outside = correct_outside(&eng, &[PIN], &[dp], &step, 8).expect("outside corrector");
+    assert_same_correction("inside the domain", &pounce, &outside, Frame::Same);
 }

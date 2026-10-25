@@ -27,6 +27,9 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::{SensSolve, Solver};
 
+mod common;
+use common::outside_engine::{Relaxation, recorded_solve, same_classification};
+
 /// The `parametric_cpp` / `solver_session` fixture, plus a
 /// `get_scaling_parameters` that hands back per-variable factors. Five
 /// variables, five rows, two of them the parameter pins; `x[0..3]` are
@@ -482,4 +485,36 @@ fn the_sens_solve_builder_reports_in_the_models_units() {
         want.mult_x_u.as_ref().expect("mult_x_u"),
         1e-6,
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same classification over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and asserts that the classification over an engine built from
+// that report is the same as pounce's.
+
+/// Both arms against the outside engine, which works in the model's units
+/// and so gives one classification for both.
+#[test]
+fn activity_classification_is_unmoved_by_the_change_of_variables_over_an_outside_engine() {
+    for scaling in [None, Some(D)] {
+        let (solver, model, status) = recorded_solve(make_app(), ParametricTNLP::new(scaling));
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed: {status:?}",
+        );
+        same_classification(
+            &format!("scaling {scaling:?}"),
+            &solver,
+            &model,
+            Relaxation::None,
+        );
+    }
 }

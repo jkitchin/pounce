@@ -94,6 +94,7 @@ CASES = {
     "einsum": lambda x: jnp.einsum("i,j->ij", x[:3], x[3:]).sum(1),
     "checkpoint": lambda x: jax.checkpoint(lambda y: jnp.sin(y[:3]) * y[3:])(x),
     "gelu": lambda x: jax.nn.gelu(x)[:2] * x[2:4],
+    "log2": lambda x: jnp.log2(1.0 + x[:3] ** 2) * x[3:],
 }
 
 

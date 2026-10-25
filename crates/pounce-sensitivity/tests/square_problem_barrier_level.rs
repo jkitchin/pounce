@@ -50,6 +50,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_sensitivity::Solver;
 
+mod common;
+use common::compare::{Frame, assert_same_correction};
+use common::outside_engine::{RecordingTnlp, Relaxation, correct_outside, outside_engine};
+
 struct SquareTNLP {
     p0: Number,
     p1: Number,
@@ -251,4 +255,57 @@ fn square_problem_exact_step_starts_at_the_barrier_floor() {
         report.initial_residual < 1e-6,
         "an exact step should start at the barrier floor: {report:?}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The same corrections over an outside engine
+// ---------------------------------------------------------------------------
+//
+// Each test below repeats the setup of the test above it with the same name
+// minus `_over_an_outside_engine`, on a solve whose model records what pounce
+// returned, and hands the same step to the corrector over an engine built
+// from that report. These solves run at pounce's default `bound_relax_factor`,
+// so the outside engine measures its slacks against bounds relaxed the way
+// pounce relaxes them.
+
+#[test]
+fn square_problem_exact_step_starts_at_the_barrier_floor_over_an_outside_engine() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let model = Rc::new(RefCell::new(RecordingTnlp::new(SquareTNLP {
+        p0: 1.0,
+        p1: 2.0,
+    })));
+    let tnlp: Rc<RefCell<dyn TNLP>> = model.clone();
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "solve failed: {status:?}"
+    );
+    let delta = 0.25;
+    let step = solver
+        .parametric_step_full(&[0], &[delta])
+        .expect("parametric_step_full ok");
+    let pounce = solver
+        .correct_step(&[0], &[delta], &step, 8)
+        .expect("pounce's corrector");
+    let eng = outside_engine(&model, Relaxation::POUNCE_DEFAULT);
+    assert_eq!(
+        eng.mu(),
+        0.0,
+        "every bound multiplier of this report is zero, so the point sits on no barrier path",
+    );
+    let outside = correct_outside(&eng, &[0], &[delta], &step, 8).expect("outside corrector");
+    assert_same_correction("square problem", &pounce, &outside, Frame::Same);
 }

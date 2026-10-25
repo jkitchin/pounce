@@ -673,41 +673,64 @@ def test_both_bounds_rewritten_are_both_recorded():
 # without needing the solver. The value-correctness of the fan-out path is
 # already covered by test_sens_jacobian_object_for_containers.
 
-def _fake_session(names, cons, row_offset=1000, d_offset=None,
-                  row_class="strongly_active", **kw):
-    """A `_Session` over a stub solver, for the row-map contract alone.
-
-    `row_offset=None` makes every row an inequality, which sends
-    `mult_entry` down the `y_d` half added by gh#910: `d_offset` is
-    then the row it reports and `row_class` the regime the gate reads
-    off `reduced_row_activity`.
-    """
+def _fake_session(names, cons, **kw):
+    """A `_Session` over a stub solver, for the name maps alone: the
+    lookups these tests make raise or return before reaching the solver."""
     from pyomo_pounce.sens import _Session
 
     class _Solver:
-        def multiplier_rows(self, gs):
-            return [None if row_offset is None else gs[0] + row_offset]
-
-        def inequality_multiplier_rows(self, gs):
-            return [None if d_offset is None else gs[0] + d_offset]
-
-        def reduced_row_activity(self, gs):
-            return {"status": [row_class] * len(gs)}
+        pass
 
     return _Session(None, None, _Solver(), names, cons, {},
                     {"orig.c": cons[-1]}, **kw)
 
 
+def _solved_session(m):
+    """The session pounce's solve of `m` left behind, with one declared
+    parameter so the solve takes the sensitivity path."""
+    from pyomo_pounce.sens import _model_session
+    declare_sens_param(m.p)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pyo.SolverFactory("pounce").solve(m)
+    return _model_session(m, "no session")
+
+
+def build_wide(p=0.0):
+    """Two hundred and two variables and three equality rows, one of them
+    on a sub-block, so the row maps have something to scan."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=p, mutable=True)
+    m.I = pyo.RangeSet(0, 199)
+    m.x = pyo.Var(m.I, initialize=0.0)
+    m.y = pyo.Var(initialize=0.0)
+    m.z = pyo.Var(initialize=0.0)
+    m.c1 = pyo.Constraint(expr=m.x[0] + m.y == 1.0 + m.p)
+    m.c2 = pyo.Constraint(expr=m.x[1] + m.z == 2.0)
+    m.blk = pyo.Block()
+    m.blk.c = pyo.Constraint([3], rule=lambda b, i: m.x[2] + m.y + m.z == 3.0)
+    m.obj = pyo.Objective(
+        expr=sum((m.x[i] - i / 200.0) ** 2 for i in m.I)
+        + (m.y - 1.0) ** 2 + (m.z - 2.0) ** 2)
+    return m
+
+
 def test_row_maps_agree_with_the_list_scan_they_replaced():
-    names = [f"x[{i}]" for i in range(200)] + ["y", "z"]
-    cons = ["c1", "c2", "blk.c[3]"]
-    s = _fake_session(names, cons)
+    from pyomo_pounce.sens import _Session
+    solved = _solved_session(build_wide())
+    names, cons = solved.var_names, solved.con_names
+    dims = solved.solver.block_dims
+    # every row is an equality, so a row's multiplier is its position
+    # in the `y_c` block, which starts after `x` and `s`
+    y_c = dims[0] + dims[1]
+    s = _Session(None, None, solved.solver, names, cons, {},
+                 {"orig.c": "blk.c[3]"})
 
     assert isinstance(s._var_row, dict)          # a map, not a scan
     assert all(s.var_entry(n) == names.index(n) for n in names)
-    assert s.mult_entry("c2") == cons.index("c2") + 1000
+    assert s.mult_entry("c2") == y_c + cons.index("c2")
     # the con_alias translation still happens before the lookup
-    assert s.mult_entry("orig.c") == cons.index("blk.c[3]") + 1000
+    assert s.mult_entry("orig.c") == y_c + cons.index("blk.c[3]")
 
 
 def test_row_maps_are_reused_when_the_caller_supplies_them():
@@ -728,27 +751,43 @@ def test_unknown_name_raises_value_error_not_key_error():
         s.mult_entry("nope")
 
 
+def build_centred(centre):
+    """[`build_cap`] with the objective's `u` centre at `centre`.
+
+    `lambda_cap = (centre - u)/2` with `u = 1`, so the centre sets the
+    cap's regime: 5 makes it strictly active, 1.002 gives a multiplier of
+    1e-3, small enough that its barrier-to-curvature ratio sits between
+    the strictly active and the inactive thresholds, and 1 makes it a
+    kink. The decoy row is decades slack throughout.
+    """
+    m = build_cap()
+    m.obj.set_value(0.5 * (m.u - centre) ** 2 + 0.5 * (m.w - 2.0) ** 2)
+    return m
+
+
 def test_a_strictly_active_inequality_is_answered_from_the_y_d_block():
-    """gh#910: the row exists, and the gate lets a strict one through."""
-    s = _fake_session(["a"], ["c"], row_offset=None, d_offset=2000)
-    assert s.mult_entry("c") == 2000
+    """gh#910: the row exists, and the gate lets a strict one through.
+    `cap` is the first inequality row, so its multiplier is the first row
+    of the `y_d` block."""
+    s = _solved_session(build_centred(5.0))
+    dims = s.solver.block_dims
+    assert s.mult_entry("cap") == dims[0] + dims[1] + dims[2]
 
 
-@pytest.mark.parametrize("row_class,message", [
-    ("inactive", "inactive at the solved point"),
-    ("weakly_active", "weakly active at the solved point"),
-    ("ambiguous", "could not be resolved"),
+@pytest.mark.parametrize("centre,row,message", [
+    (5.0, "decoy", "inactive at the solved point"),
+    (1.0, "cap", "weakly active at the solved point"),
+    (1.002, "cap", "could not be resolved"),
 ])
 def test_a_non_strict_inequality_is_refused_by_naming_its_regime(
-        row_class, message):
+        centre, row, message):
     """The other two regimes hold a `y_d` entry and no derivative, and
     the refusal names which -- an inactive row's answer really is zero,
     while a kink needs a direction, so they call for different things
     from the caller."""
-    s = _fake_session(["a"], ["c"], row_offset=None, d_offset=2000,
-                      row_class=row_class)
+    s = _solved_session(build_centred(centre))
     with pytest.raises(ValueError, match=message):
-        s.mult_entry("c")
+        s.mult_entry(row)
 
 
 def test_options_reach_the_sens_path():

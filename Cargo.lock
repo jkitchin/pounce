@@ -1133,8 +1133,11 @@ dependencies = [
 name = "pounce-sens-core"
 version = "0.13.0"
 dependencies = [
+ "faer",
  "pounce-common",
+ "pounce-feral",
  "pounce-linalg",
+ "pounce-qp",
 ]
 
 [[package]]
@@ -1146,6 +1149,7 @@ dependencies = [
  "pounce-feral",
  "pounce-hsl",
  "pounce-linalg",
+ "pounce-nl",
  "pounce-nlp",
  "pounce-qp",
  "pounce-sens-core",
