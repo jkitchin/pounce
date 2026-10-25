@@ -243,6 +243,25 @@ changes.
   - Thirteen L-BFGS fixture-legs drop that rung, each total falling by
     exactly its base iteration count, with no change in verdict. For example, `eigena2` 478 → 239 total and
     `issue_508_infeasible_gap_1em4` 346 → 267 total.
+- **The active-set QP engine no longer cycles on an over-full active set
+  that FERAL 0.21 factors without complaint (gh #1042).** Bisected to the
+  FERAL 0.21 upgrade (#1038): on NETLIB `DEGEN2` (`lp_degen2`) under
+  `solver_selection=qp-active-set`, `pounce-qp`'s Schur loop reached 474
+  active slots on 473 variables. FERAL 0.20 flagged that KKT singular and the
+  rank repair pruned it; FERAL 0.21 does not flag it, so nothing pruned, the
+  next drop's step was garbage, and a drop/re-add two-cycle ran into the
+  gh #974 cycle guard as `MaxIter` — then three cold recoveries of 8530
+  iterations each (8 s and 1971 iterations before; over 300 s on the CLI,
+  about 1205 s for the `issue974` test). The Schur reset now prunes to a
+  maximal independent subset whenever more slots are active than there are
+  variables, before factoring, rather than waiting for the backend to report
+  the singularity. `lp_degen2`: 2009 iterations, `-1435.178`, about 10 s.
+  - **Fixture sweep under `solver_selection=qp-active-set`, both legs:**
+    `lp_degen2` no report (timeout) → `SolveSucceeded`/2009;
+    `convex_qp_qscfxm1` 2195 → 396; `convex_qp_share1b` 2004 → 2924
+    (+46%, same objective). The default and `algorithm=active-set-sqp`
+    sweeps do not move. Needs a `benchmarks/qp` run before release: the
+    degenerate Maros-Mészáros family is where this branch is reached.
 - **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
   at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
   `|e|^(p+q)` (positive literal exponents, identical operands only; values

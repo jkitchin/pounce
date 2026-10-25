@@ -3180,6 +3180,11 @@ impl ParametricActiveSetSolver {
     /// is removed. Deactivating a bound does not move `x`, so the iterate stays
     /// feasible throughout.
     ///
+    /// A repair runs on either of two signals: the factorization reporting a
+    /// recoverable failure, or — before factoring at all — more active slots
+    /// than variables, which is rank-deficient by counting whether or not the
+    /// backend flags it (FERAL 0.21 does not, on DEGEN2; see the loop).
+    ///
     /// Each repair strictly shrinks the active set, so the inner loop
     /// terminates. `budget` additionally caps how many repairs one *solve* may
     /// perform: the ratio test can re-admit a pruned row on a later iteration.
@@ -3197,7 +3202,24 @@ impl ParametricActiveSetSolver {
         pruned: &mut bool,
     ) -> Result<(), QpError> {
         loop {
-            let ac = active_slot_count(working);
+            let mut ac = active_slot_count(working);
+            // More active slots than variables is rank-deficient by counting,
+            // whatever the factorization reports: whether a pivot that small
+            // is *flagged* is the backend's call and moves with its version.
+            // On Netlib DEGEN2 (`lp_degen2`, `solver_selection=qp-active-set`)
+            // FERAL 0.21 factored a 474-slot set on 473 variables without
+            // complaint; the next drop's step carried `‖A_W p‖ ≈ 0.4‖p‖`, the
+            // dropped row re-entered at `α = 0`, and the drop/re-add two-cycle
+            // ran into the gh#974 cycle guard as `MaxIter`, sending a solvable
+            // LP to three cold recoveries of 8530 iterations each (8 s under
+            // FERAL 0.20 → over 300 s). So prune to a maximal independent
+            // subset first, as a reported singularity would have, at the cost
+            // of one budget unit like any other repair (gh#1042).
+            if ac > qp.n && *budget > 0 && self.prune_dependent_active(qp, working, n_changes) {
+                *budget -= 1;
+                *pruned = true;
+                ac = active_slot_count(working);
+            }
             match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_recoverable_factorization_failure() => {
@@ -6602,5 +6624,131 @@ mod precedence_tests {
             dependent_cases > 100,
             "only {dependent_cases} cases had a dependence"
         );
+    }
+}
+
+#[cfg(test)]
+mod over_n_rank_repair_tests {
+    //! `schur_reset_rank_repaired` on an active set with more slots than
+    //! variables (gh#1042, lp_degen2 under FERAL 0.21). Such a set is
+    //! rank-deficient by counting, but whether the factorization *flags* the
+    //! singular KKT is the backend's call: FERAL 0.21 factors every set below
+    //! without complaint except the exactly-representable one, so the
+    //! error-driven repair never runs on them. The test pins the invariant the
+    //! counting guard adds — the reset never leaves more than `n` slots
+    //! active — for both outcomes of the backend's call.
+    use super::*;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use std::rc::Rc;
+
+    /// `rows` all active at their lower bound, plus the listed variable
+    /// lower bounds, on an LP (`H = 0`). Returns the active slot count after
+    /// the repaired reset, whether it pruned, and the budget it spent.
+    fn reset_over_n(n: usize, rows: &[Vec<Number>], bounds_active: &[usize]) -> (usize, bool, u32) {
+        let m = rows.len();
+        let (mut ir, mut jc, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, r) in rows.iter().enumerate() {
+            for (j, &x) in r.iter().enumerate() {
+                if x != 0.0 {
+                    ir.push(i as Index + 1);
+                    jc.push(j as Index + 1);
+                    v.push(x);
+                }
+            }
+        }
+        let mut a = GenTMatrix::new(Rc::clone(&GenTMatrixSpace::new(
+            m as Index, n as Index, ir, jc,
+        )));
+        a.set_values(&v);
+        let h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, Vec::new(), Vec::new()));
+        let g = vec![1.0; n];
+        let (bl, bu) = (vec![0.0; m], vec![1e20; m]);
+        let (xl, xu) = (vec![0.0; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut working = WorkingSet::cold(n, m);
+        for c in working.constraints.iter_mut() {
+            *c = ConsStatus::AtLower;
+        }
+        for &j in bounds_active {
+            working.bounds[j] = BoundStatus::AtLower;
+        }
+        assert!(
+            active_slot_count(&working) > n,
+            "fixture must start over-full"
+        );
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let mut schur = crate::schur::SchurState::new(n, m);
+        let (mut n_changes, mut pruned) = (0u32, false);
+        let budget0 = 10u32;
+        let mut budget = budget0;
+        solver
+            .schur_reset_rank_repaired(
+                &mut schur,
+                &qp,
+                &mut working,
+                &QpOptions::default(),
+                &mut n_changes,
+                &mut budget,
+                &mut pruned,
+            )
+            .expect("a rank-repaired reset of a consistent vertex must factor");
+        (active_slot_count(&working), pruned, budget0 - budget)
+    }
+
+    /// Three rows on two variables, the third `0.3·r₀ + 0.9·r₁` in floating
+    /// point. FERAL 0.21 factors this KKT without flagging it, so only the
+    /// counting guard prunes it. Mutation-checked: without the guard the
+    /// reset returns `Ok` with all three slots active.
+    #[test]
+    fn an_unflagged_over_full_set_is_pruned_before_the_reset() {
+        let r0 = vec![0.1, 0.3];
+        let r1 = vec![0.7, 0.2];
+        let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
+        let (ac, pruned, spent) = reset_over_n(2, &[r0, r1, r2], &[]);
+        assert_eq!(ac, 2);
+        assert!(pruned);
+        assert_eq!(spent, 1, "the counting guard costs one budget unit");
+    }
+
+    /// Generic dense rows, one more than `n` — the shape of DEGEN2's
+    /// 474-slot set on 473 variables, small. Also unflagged by FERAL 0.21.
+    #[test]
+    fn a_generic_dense_over_full_set_is_pruned_to_n() {
+        let mut s: u64 = 12345;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) % 1000) as Number / 997.0 + 0.01
+        };
+        let n = 8;
+        let rows: Vec<Vec<Number>> = (0..n + 1)
+            .map(|_| (0..n).map(|_| next()).collect())
+            .collect();
+        let (ac, pruned, _) = reset_over_n(n, &rows, &[]);
+        assert!(ac <= n, "{ac} slots left active on {n} variables");
+        assert!(pruned);
+    }
+
+    /// Control: the exactly-representable case FERAL 0.21 *does* flag
+    /// (`x₀ + x₁ ≥ 0` with both bounds active) ends in the same place through
+    /// the error-driven repair, so it passes with or without the guard.
+    #[test]
+    fn a_flagged_over_full_set_ends_the_same() {
+        let (ac, pruned, _) = reset_over_n(2, &[vec![1.0, 1.0]], &[0, 1]);
+        assert_eq!(ac, 2);
+        assert!(pruned);
     }
 }
