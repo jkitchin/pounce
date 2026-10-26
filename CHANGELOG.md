@@ -244,6 +244,12 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The CLI no longer panics on a `.nl` whose AMPL external functions
+  `$AMPLFUNC` cannot resolve (gh #1069).** The solve path and `pounce verify`
+  built the model with the panicking `NlTnlp::new`, so an unset `AMPLFUNC` or
+  a missing library exited 101 with a backtrace hint. Both now call
+  `NlTnlp::try_new` and report it like any other load error (message on
+  stderr, exit 2); so does `load_nl_as_tnlp`.
 - **`build_nl_problem` no longer takes time exponential in depth on a
   shared node multiplied by itself in a constraint (gh #1066).** The hybrid
   constraint tape's funcall pre-scan walked every path through shared
