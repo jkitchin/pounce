@@ -167,6 +167,18 @@ pub struct SecondOpinionAvailability {
     /// their exact legs, one gaining the solve and one losing it, so no
     /// count separates them; the verdict does.
     pub baseline_quality_escalations: u64,
+    /// `infeasibility_saddle_escape_retry`, rung 5's own enable.
+    pub saddle_escape_retry_enabled: bool,
+    /// The failing solve's point is **not** a local minimizer of the
+    /// max-norm violation: [`crate::infeasibility_saddle::infeasibility_saddle_escape`]
+    /// found a nearby point with less of it.
+    ///
+    /// Like `baseline_quality_escalations` this is a measurement of the
+    /// solve, not a reading of its options, and it is `false` until the
+    /// driver has run the probe. The probe needs the verdict's point, which
+    /// only the application holds after the solve, so it cannot be computed
+    /// in [`SecondOpinionAvailability::from_options`].
+    pub baseline_saddle_escape_found: bool,
     /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy.
     /// `None` under `ScalingStrategy::External`, which drops rungs 2 and 3.
     ///
@@ -276,6 +288,20 @@ pub struct SecondOpinionAvailability {
 ///    no reported number — which is also why the fixture sweep is
 ///    byte-identical across that change.
 ///
+/// 5. **`restart_from_infeasibility_saddle` — restart beside the verdict's
+///    point** (`infeasibility_saddle_escape_retry`, on by default). Local
+///    infeasibility only, and only when
+///    [`crate::infeasibility_saddle::infeasibility_saddle_escape`] finds a
+///    point near the verdict's point with less max-norm violation, which
+///    shows the verdict's point is not a local minimizer of the violation.
+///    The solve restarts from that point. Rungs 1–4 vary how the solve gets
+///    somewhere; this one starts the solve from the other side of where it
+///    got stuck, which is the only thing that helps when the end point is a
+///    saddle every trajectory is attracted to. Measured on `discs` under
+///    `feral_scaling=mc64`: discs 8 and 9 end on the same centre, the
+///    tangency row between them reads `0 = 4` with an exactly zero gradient,
+///    and rungs 2–4 all end at the same kind of point.
+///
 /// Rungs are **not** cumulative: the driver restores the baseline before each
 /// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
 /// earlier knob. That reset is load-bearing, not tidiness: on gh #524's
@@ -364,6 +390,21 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
         rungs.push(SecondOpinionRung {
             label: "feral_increase_quality=no",
             assignments: vec!["feral_increase_quality no\n".to_string()],
+        });
+    }
+    // 5. Restart from beside an infeasibility saddle.
+    //
+    // Local infeasibility only, and only when the probe refuted the verdict's
+    // claim that its point minimizes the violation. It carries no option
+    // assignment: the driver starts this solve from the probe's point instead
+    // of the model's. Appended last, so every ladder that a rung above
+    // already settles runs exactly as before; on a genuinely infeasible model
+    // whose verdict point is a strict minimizer the probe finds nothing and
+    // this rung never exists.
+    if infeasible && avail.saddle_escape_retry_enabled && avail.baseline_saddle_escape_found {
+        rungs.push(SecondOpinionRung {
+            label: crate::infeasibility_saddle::SADDLE_ESCAPE_RUNG_LABEL,
+            assignments: Vec::new(),
         });
     }
     rungs
@@ -630,6 +671,11 @@ impl SecondOpinionAvailability {
                 .map(|(v, _found)| !v)
                 .unwrap_or(false),
             baseline_quality_escalations,
+            saddle_escape_retry_enabled: options
+                .get_bool_value("infeasibility_saddle_escape_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true),
+            baseline_saddle_escape_found: false,
             baseline_scaling,
             // `mu_strategy` has exactly two registered values, so "not
             // adaptive" is "monotone" and there is no third case to guess at.
@@ -664,6 +710,11 @@ mod scaling_retry_tests {
             // that are about rung 4 raise it explicitly, which is also how
             // they document that the count is the thing doing the work.
             baseline_quality_escalations: 0,
+            saddle_escape_retry_enabled: true,
+            // False for the same reason the escalation count is zero: rung 5
+            // is gated on a measurement, and the tests written before it keep
+            // asserting the ladders they asserted then.
+            baseline_saddle_escape_found: false,
             baseline_scaling: Some("auto"),
         }
     }
@@ -1167,6 +1218,55 @@ mod scaling_retry_tests {
              test, and must not pay for a solve: {:?}",
             rungs.iter().map(|r| r.label).collect::<Vec<_>>(),
         );
+    }
+
+    /// Rung 5 opens only on a local-infeasibility verdict whose point the
+    /// probe showed is not a minimizer of the violation, and it comes last.
+    #[test]
+    fn the_saddle_rung_needs_the_probe_and_comes_last() {
+        let label = crate::infeasibility_saddle::SADDLE_ESCAPE_RUNG_LABEL;
+        let labels = |a: SecondOpinionAvailability| -> Vec<&'static str> {
+            second_opinion_rungs(a).iter().map(|r| r.label).collect()
+        };
+        let found = SecondOpinionAvailability {
+            baseline_saddle_escape_found: true,
+            ..avail()
+        };
+        assert_eq!(labels(found).last(), Some(&label));
+        assert!(
+            second_opinion_rungs(found)
+                .last()
+                .unwrap()
+                .assignments
+                .is_empty()
+        );
+        // Not found: the ladder is exactly what it was before rung 5.
+        assert!(!labels(avail()).contains(&label));
+        // Switched off.
+        assert!(
+            !labels(SecondOpinionAvailability {
+                saddle_escape_retry_enabled: false,
+                ..found
+            })
+            .contains(&label)
+        );
+        // Only local infeasibility: the probe is about that verdict's claim.
+        for trigger in [
+            SecondOpinionTrigger::InvalidNumber,
+            SecondOpinionTrigger::RestorationFailure,
+            SecondOpinionTrigger::StepComputationError,
+            SecondOpinionTrigger::IterationLimit,
+        ] {
+            assert!(
+                !labels(SecondOpinionAvailability {
+                    trigger,
+                    baseline_quality_escalations: 3,
+                    ..found
+                })
+                .contains(&label),
+                "{trigger:?}"
+            );
+        }
     }
 
     /// The displacement rung does **not** open on a budget exit, even an

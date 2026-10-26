@@ -100,8 +100,14 @@ fn run(args: &[&str]) -> (String, String, Option<i32>) {
 /// Same, but capturing the JSON report — the reported *status* is what a
 /// caller sees, and it is where gh #724 showed up as `InternalError`.
 fn run_json(args: &[&str]) -> (String, String, SolveReport) {
+    // Two tests below run the same arguments, and the harness runs them
+    // concurrently in one process, so pid plus arguments is not a unique
+    // name: one test's `remove_file` could delete the report before the other
+    // read it (seen on CI as `read JSON report: NotFound`).
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let json = std::env::temp_dir().join(format!(
-        "pounce_535_{}_{}.json",
+        "pounce_535_{}_{seq}_{}.json",
         std::process::id(),
         args.join("_").replace(['=', '.', '/'], "-")
     ));

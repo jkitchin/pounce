@@ -298,13 +298,29 @@ pounce-minima = { path = "crates/pounce-minima", version = "0.13.0" }
 # from 1e-10 to `DEFAULT_CASCADE_BREAK_EPS` (1e-14). The fixture sweep and
 # the re-pinned tests are recorded in the commit that made this the pin.
 #
-# 0.21.0 is the current pin. If you ever need to develop against an unreleased
+# 0.22.0 (feral#225, #228) is a speed-up plus an opt-in policy. #225 is a
+# bit-identical performance change to the factorization kernels. #228 adds
+# `ReanalysisPolicy` {Never, OnStale, Always}, which decides whether a refactor
+# re-runs the value-dependent analysis when the stored one has gone stale; the
+# default `Never` keeps 0.21's behaviour exactly. The one breaking change is new
+# `FactorStats` fields, which pounce does not construct. Measured against 0.21.0
+# on arm64 (1489 corpus .nl models, the fixture sweep's 246 fixture-legs, and
+# 168 models re-timed serially twice per leg): status, iterations and objective
+# are identical everywhere and 0 sweep lines move, while total wall time falls
+# 3030 -> 2718 s (-10.3%) and total factor time -16.8%, with no model more than
+# 10% slower (qcqp1500-1c 500 -> 353 s, qcqp1000-2c 108 -> 72 s). pounce does
+# not set the policy, so it runs `Never`. `OnStale` is not the default: one model
+# accounts for nearly all of its gain (qcqp1500-1c 353 -> 125 s) while the
+# typical model is about 1-2% slower, and 8 models are 11-49% slower at identical
+# iterations (feral#228 discussion).
+#
+# 0.22.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.21.0" }
+feral = { version = "0.22.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
