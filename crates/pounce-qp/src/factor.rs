@@ -69,6 +69,8 @@ pub struct LinsolTimes {
     /// Symbolic analysis plus numeric factorization, including every
     /// inertia-control retry.
     pub factor: Duration,
+    /// Number of factorizations, inertia-control retries included.
+    pub n_factor: u64,
     /// Back-solves against a cached factor: the Schur path's per-iteration
     /// solve, its refinement passes, and the two per rank-2 update.
     pub resolve: Duration,
@@ -83,6 +85,7 @@ impl LinsolTimes {
     pub fn since(&self, earlier: &LinsolTimes) -> LinsolTimes {
         LinsolTimes {
             factor: self.factor.saturating_sub(earlier.factor),
+            n_factor: self.n_factor.saturating_sub(earlier.n_factor),
             resolve: self.resolve.saturating_sub(earlier.resolve),
             n_resolve: self.n_resolve.saturating_sub(earlier.n_resolve),
             rank_test: self.rank_test.saturating_sub(earlier.rank_test),
@@ -138,6 +141,7 @@ impl LinearSolver {
         let started = Instant::now();
         let res = self.factorize_and_solve_inner(kkt, rhs, expected_neg_evals);
         self.times.factor += started.elapsed();
+        self.times.n_factor += 1;
         res
     }
 

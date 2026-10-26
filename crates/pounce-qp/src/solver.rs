@@ -1397,6 +1397,19 @@ impl ParametricActiveSetSolver {
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
         // Consecutive degenerate adds; see `DEGENERATE_BATCH_STREAK`.
         let mut degenerate_streak: u32 = 0;
+        // Null-iteration guard, the refactor path's half of the one
+        // `solve_general_schur` documents: after a full unblocked step the
+        // next `‖p‖∞` is round-off in exact arithmetic, so one that does not
+        // at least halve says the iterate is stationary for this working set
+        // to attainable precision. Without it this loop repeated the same
+        // no-op until `max_iter` — gh#1061 sweep: `infeasible_equalities`'s
+        // `γ = 1e6` elastic step QP, 2 variables, `‖p‖∞ = 1.907e-6` on each of
+        // 197 iterations against `opt_tol = 1e-9`. Every iteration here
+        // factors afresh, so the Schur path's first remedy (refactor) is
+        // already spent and the guard accepts at once.
+        let mut prev_was_null_step = false;
+        let mut prev_p_inf = Number::INFINITY;
+        const NULL_STEP_GAIN: Number = 0.5;
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1504,8 +1517,11 @@ impl ParametricActiveSetSolver {
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
+            let floor = prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf;
+            prev_was_null_step = false;
+            prev_p_inf = p_inf;
 
-            if p_inf <= opts.opt_tol {
+            if p_inf <= opts.opt_tol || floor {
                 // KKT-stationary for current W. Pick a wrong-sign
                 // active row to drop.
                 //
@@ -1820,10 +1836,19 @@ impl ParametricActiveSetSolver {
                 tabu_bounds.iter_mut().for_each(|t| *t = false);
             }
 
+            if trace && blocker.is_none() {
+                eprintln!(
+                    "[qp] it={_iter} NOBLOCK alpha={alpha:.3e} pinf={p_inf:.3e} obj={:.12e} nact={} ncand={} delta={delta:.1e}",
+                    quad_objective(qp, &x),
+                    active_slot_count(&working),
+                    candidates.len()
+                );
+            }
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
 
+            prev_was_null_step = blocker.is_none();
             if let Some(blk) = blocker {
                 match blk {
                     BlockerTarget::Bound(i, status) => {
