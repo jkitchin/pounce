@@ -211,12 +211,20 @@ fn the_ladder_respects_print_level_zero() {
 /// `infeasibility_perturbed_start_retry=no` is *for*, and it is also the
 /// mutation guard for the test above — if rung 3 were not the thing doing the
 /// work, this assertion would not flip.
+///
+/// Rung 5 goes off too. HS008 from the origin ends with an exactly zero
+/// constraint gradient, which is a saddle of the violation, so with rung 3 off
+/// the saddle rung recovers it on its own (`Optimal`, restarting 256 probe
+/// steps out); the upstream verdict needs both off.
 #[test]
 fn turning_the_start_rung_off_gives_the_upstream_verdict_back() {
     let (log, sol) = run(
         "degenerate_start_hs008.nl",
         "hs008_off",
-        &["infeasibility_perturbed_start_retry=no"],
+        &[
+            "infeasibility_perturbed_start_retry=no",
+            "infeasibility_saddle_escape_retry=no",
+        ],
     );
     assert!(
         !log.contains("start_point_perturbation=1e-2"),

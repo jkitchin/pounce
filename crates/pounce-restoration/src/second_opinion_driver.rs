@@ -38,6 +38,7 @@ use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory_with_sink, feral_config_from_options,
     ma57_config_from_options,
 };
+use pounce_algorithm::infeasibility_saddle::SADDLE_ESCAPE_RUNG_LABEL;
 use pounce_algorithm::second_opinion::{
     SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
     scaling_retry_promoted, second_opinion_rungs,
@@ -171,11 +172,22 @@ pub fn run_second_opinion_ladder(
     let Some(trigger) = SecondOpinionTrigger::for_solve(status, &statistics) else {
         finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     };
-    let avail = SecondOpinionAvailability::from_options(
+    let mut avail = SecondOpinionAvailability::from_options(
         app.options(),
         trigger,
         statistics.quality_escalations.max(0) as u64,
     );
+    // Rung 5's gate is a measurement of the verdict's point, so it is taken
+    // here, after the solve, and only where the rung could open. It costs at
+    // most 48 constraint evaluations.
+    let saddle_escape = if trigger == SecondOpinionTrigger::LocalInfeasibility
+        && avail.saddle_escape_retry_enabled
+    {
+        app.local_infeasibility_saddle_escape(&tnlp)
+    } else {
+        None
+    };
+    avail.baseline_saddle_escape_found = saddle_escape.is_some();
     let rungs = second_opinion_rungs(avail);
     // The last stage, for a square constant-objective model only: solve
     // `c(x) = 0` directly once every option rung has failed. Probed before
@@ -245,6 +257,21 @@ pub fn run_second_opinion_ladder(
         for assignment in &rung.assignments {
             let _ = app.options_mut().read_from_str(assignment, true);
         }
+        // Rung 5 changes no option: it starts from the probe's point. Set for
+        // this rung only, and cleared by the next rung's line.
+        let escape_start = (rung.label == SADDLE_ESCAPE_RUNG_LABEL)
+            .then(|| saddle_escape.as_ref())
+            .flatten();
+        if let Some(e) = escape_start {
+            report(&format!(
+                "pounce: the infeasibility verdict's point is not a local minimizer of the \
+                 constraint violation — a relative step of {:.0e} lowers the max violation \
+                 from {:.6e}, and {} times that step reaches {:.6e}; restarting from there.",
+                e.step, e.theta_at_verdict, e.multiple, e.theta_escaped,
+            ));
+        }
+        gate.borrow()
+            .set_start_override(escape_start.map(|e| e.x.clone()));
         // Rebuild the restoration provider at this rung's options — see the
         // module docs.
         let feral_cfg = feral_config_from_options(app.options());
@@ -289,6 +316,7 @@ pub fn run_second_opinion_ladder(
         ));
     }
     app.set_in_retry_sequence(false);
+    gate.borrow().set_start_override(None);
     // The option rungs above each write one knob; the square-system stage
     // reads `tol`, `constr_viol_tol`, the scaling options and the `feral_*`
     // configuration, and must read the caller's, not the last rung's.
@@ -499,6 +527,10 @@ pub struct SecondOpinionTnlp {
     inner: Rc<RefCell<dyn TNLP>>,
     /// Number of `finalize_solution` calls suppressed, for tests.
     suppressed: Cell<u32>,
+    /// The primal starting point for the current rung in place of the
+    /// model's, when the rung sets one (rung 5). Multipliers still come from
+    /// the model.
+    start_override: RefCell<Option<Vec<Number>>>,
 }
 
 /// Does a solve that ended in this `SolverReturn` get to speak to the caller?
@@ -517,12 +549,19 @@ impl SecondOpinionTnlp {
         Self {
             inner,
             suppressed: Cell::new(0),
+            start_override: RefCell::new(None),
         }
     }
 
     /// How many rejected rungs were kept away from the caller.
     pub fn suppressed_finalizations(&self) -> u32 {
         self.suppressed.get()
+    }
+
+    /// Start the next solve from `x` instead of the model's starting point,
+    /// or from the model's again with `None`.
+    pub fn set_start_override(&self, x: Option<Vec<Number>>) {
+        *self.start_override.borrow_mut() = x;
     }
 }
 
@@ -536,7 +575,32 @@ impl TNLP for SecondOpinionTnlp {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
-        self.inner.borrow_mut().get_starting_point(sp)
+        let StartingPoint {
+            init_x,
+            x,
+            init_z,
+            z_l,
+            z_u,
+            init_lambda,
+            lambda,
+        } = sp;
+        let ok = self.inner.borrow_mut().get_starting_point(StartingPoint {
+            init_x,
+            x: &mut *x,
+            init_z,
+            z_l,
+            z_u,
+            init_lambda,
+            lambda,
+        });
+        if init_x
+            && let Some(start) = self.start_override.borrow().as_ref()
+            && start.len() == x.len()
+        {
+            x.copy_from_slice(start);
+            return true;
+        }
+        ok
     }
 
     fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
@@ -941,6 +1005,8 @@ mod tests {
             // rungs it names; `each_restoration_rung_starts_from_the_baseline`
             // is where the fourth knob's set-ness is checked.
             baseline_quality_escalations: 0,
+            saddle_escape_retry_enabled: true,
+            baseline_saddle_escape_found: false,
             baseline_scaling: Some("auto"),
         });
         assert_eq!(rungs.len(), 3, "{:?}", rung_labels(&rungs));
@@ -997,6 +1063,8 @@ mod tests {
             increase_quality_retry_enabled: true,
             already_no_increase_quality: false,
             baseline_quality_escalations: 2,
+            saddle_escape_retry_enabled: true,
+            baseline_saddle_escape_found: false,
             baseline_scaling: Some("auto"),
         });
         assert_eq!(rungs.len(), 2, "{:?}", rung_labels(&rungs));

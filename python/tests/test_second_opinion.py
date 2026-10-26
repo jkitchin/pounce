@@ -53,6 +53,9 @@ LADDER_OFF = {
     # but "the whole ladder off" has to name it regardless, or the one model
     # here that does escalate still pays for a solve with the ladder off.
     "feral_increase_quality_retry": "no",
+    # Rung 5 opens only when the probe finds a saddle, which no model here
+    # has, but "the whole ladder off" names it for the same reason.
+    "infeasibility_saddle_escape_retry": "no",
 }
 
 #: The rungs the ladder always has, in order.

@@ -397,7 +397,8 @@ def _infeasible_parabolas(ladder):
         for rung in ("feral_infeasibility_scaling_retry",
                      "infeasibility_mu_strategy_retry",
                      "infeasibility_perturbed_start_retry",
-                     "feral_increase_quality_retry"):
+                     "feral_increase_quality_retry",
+                     "infeasibility_saddle_escape_retry"):
             prob.add_option(rung, "no")
     _x, info = prob.solve(x0=np.array([0.5, 0.3]))
     return info
