@@ -312,6 +312,25 @@ changes.
   feral wrapper left the trait default in place, so every pooled solve told the
   perturbation handler `false` (gh #981's classification) where a fresh backend
   said otherwise. It also forwards `multi_solve_matches_single_solve` now.
+- **Maros-Meszaros `QGFRDXPN` solves again under
+  `solver_selection=qp-active-set` (gh #1076).** The active-set QP's counting
+  prune (an over-full working set is pruned before it is factored) used to
+  stand down for the rest of a Schur pass the first time it removed a slot
+  twice. On `QGFRDXPN` that happened at iteration 73 of the first elastic
+  phase-1 pass. The stationarity prune then ran the same drop / re-add cycle
+  992 times, out of the cycle guard's sight, until the rank-repair budget
+  ran out and the pass ended in a hard singular-KKT error. The solve reported
+  `ErrorInStepComputation` after 11445 iterations. The counting prune now
+  stands down after 32 prunes in a pass instead, repeats included. `QGFRDXPN`
+  is optimal in 3553 iterations (5.6 s). Over the 138 Maros-Meszaros problems
+  under `qp-active-set` (arm64), no problem is lost and `QGFRDXPN` is gained.
+  Timed serially over the 36 common solves whose trajectory moved, plus two
+  whose iterations did not, wall time falls from 3432 s to 2778 s: `QFFFFF80` 455 → 161 s, `CVXQP3_M` 445 → 261 s,
+  `QSCTAP2` 346 → 193 s, `QSCSD8` 360 → 162 s. Three are more than 2× slower:
+  `QSCFXM3` 227 → 484 s, `QSCSD6` 18 → 45 s and `QBANDM` 15 → 34 s. The cap
+  is a measured value, and the outcome is not monotone in it: `QFORPLAN`
+  solves at caps 16, 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and
+  64, and `QGFRDXPN` needs at least 24.
 - **A false `Infeasible_Problem_Detected` at a saddle of the constraint
   violation is now re-solved from beside it.** The infeasibility verdict claims
   the solve stopped at a local minimizer of the violation, and every gate that

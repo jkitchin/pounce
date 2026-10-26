@@ -142,13 +142,19 @@ pub struct ParametricActiveSetSolver {
     count_prune: CountPrune,
 }
 
-/// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
-/// has removed during one Schur pass, and whether it has stood down.
+/// How many times the counting prune in
+/// [`ParametricActiveSetSolver::schur_reset_rank_repaired`] has run during one
+/// Schur pass; it stands down at [`COUNT_PRUNE_CAP`].
 #[derive(Default)]
 struct CountPrune {
-    removed: Vec<bool>,
-    off: bool,
+    prunes: u32,
 }
+
+/// Counting prunes one Schur pass may perform before the counting trigger
+/// stands down for the rest of the pass (gh#1076). See
+/// [`ParametricActiveSetSolver::schur_reset_rank_repaired`] for why it is a
+/// cap and for the measurements behind the value.
+const COUNT_PRUNE_CAP: u32 = 32;
 
 impl ParametricActiveSetSolver {
     pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
@@ -3376,34 +3382,43 @@ impl ParametricActiveSetSolver {
             //
             // The prune is only sound while what it drops stays out. Which row
             // of a dependent set the probe flags is its pivoting's choice, and
-            // a row it calls dependent need not be dependent at the ratio
-            // test's tolerance. On Maros-Meszaros QFORPLAN the probe dropped
-            // slot 721, the next step re-added it at `α = 0`, the following add
-            // made the set over-full again, and the prune dropped 721 again: a
-            // three-iteration cycle until the iteration limit, on a QP the
-            // unpruned loop solves (QFFFFF80 the same). So the first time a
-            // prune removes a slot it already removed in this pass, the
-            // counting trigger stands down for the rest of the pass; the
-            // factorization-failure repair below is unaffected. Skipping only
-            // the repeated prune and letting later ones run was measured and
-            // rejected: it keeps QGFRDXPN but loses CVXQP3_M (main: optimal,
-            // 326 s; then the 600 s wall limit) and makes QCAPRI 20x and QSEBA
-            // 6x slower. This rule's cost is QGFRDXPN (gh#1042).
-            if ac > qp.n && *budget > 0 && !self.count_prune.off {
-                let was_active = active_slots(qp, working);
+            // at a degenerate vertex the row it drops is routinely a genuine
+            // blocker for the next direction: the following drop releases one
+            // of the rows that implied it, it re-enters at `α = 0` (measured:
+            // 507 of 509 re-entries on Maros-Meszaros QGFRDXPN and 1052 of
+            // 1058 on QFORPLAN carry a rate far above the `TABU_DRIFT_REL`
+            // drift band, most of them the largest component of `p`), the next
+            // add makes the set over-full again, and the prune drops it again.
+            //
+            // Left unguarded, that cycle runs to the iteration limit when it
+            // spans objective progress, which the gh#974 cycle guard (it keys
+            // on an unchanged objective) cannot see: QFORPLAN and QFFFFF80
+            // ended `MaxIter` on a QP the unpruned loop solves. #1047 stood
+            // the trigger down the first time a prune removed a slot it had
+            // already removed in the pass. That lost QGFRDXPN: its elastic
+            // phase-1 repeats a slot at iteration 73 of its first pass, and
+            // with the counting prune off the over-full set factors, its
+            // multipliers fail stationarity, and the stationarity prune below
+            // takes over the same cycle — 992 times, out of sight of the cycle
+            // guard because that branch `continue`s, until the rank-repair
+            // budget is gone and the pass ends in a hard singular-KKT error
+            // (`ErrorInStepComputation`, 11445 iterations). Unguarded, each of
+            // that phase-1's passes instead ends `MaxIter` at the cycle guard
+            // within 24 prunes and the phase-2 solve from there is optimal.
+            //
+            // So the trigger stands down after `COUNT_PRUNE_CAP` prunes in a
+            // pass rather than on the first repeat. This is a measured bound,
+            // not a derived one, and the outcome is not monotone in it
+            // (gh#1076): QGFRDXPN needs at least 24; QFORPLAN solves at 16,
+            // 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and 64. 32
+            // is the value measured over all 138 Maros-Meszaros problems.
+            // The factorization-failure repair below is unaffected.
+            if ac > qp.n && *budget > 0 && self.count_prune.prunes < COUNT_PRUNE_CAP {
                 if self.prune_dependent_active(qp, working, n_changes) {
                     *budget -= 1;
                     *pruned = true;
                     ac = active_slot_count(working);
-                    let now_active = active_slots(qp, working);
-                    let seen = &mut self.count_prune.removed;
-                    seen.resize(qp.m + qp.n, false);
-                    for k in (0..qp.m + qp.n).filter(|&k| was_active[k] && !now_active[k]) {
-                        if seen[k] {
-                            self.count_prune.off = true;
-                        }
-                        seen[k] = true;
-                    }
+                    self.count_prune.prunes += 1;
                 }
             }
             match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
@@ -4414,15 +4429,6 @@ fn farkas_gap(qp: &QpProblem, y: &[Number]) -> Option<FarkasGap> {
 fn active_slot_count(working: &WorkingSet) -> usize {
     working.constraints.iter().filter(|s| s.is_active()).count()
         + working.bounds.iter().filter(|s| s.is_active()).count()
-}
-
-/// Which slots are active, indexed rows first (`0..m`) then bounds (`m..m+n`),
-/// the numbering `SchurState::apply_change` uses.
-fn active_slots(qp: &QpProblem, working: &WorkingSet) -> Vec<bool> {
-    (0..qp.m)
-        .map(|i| working.constraints[i].is_active())
-        .chain((0..qp.n).map(|j| working.bounds[j].is_active()))
-        .collect()
 }
 
 /// Relative tolerance for the modified-Gram-Schmidt rank test in
@@ -7479,7 +7485,7 @@ mod over_n_rank_repair_tests {
             ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
         let mut schur = crate::schur::SchurState::new(n, m);
         let mut n_changes = 0u32;
-        let budget0 = 10u32;
+        let budget0 = 2 * COUNT_PRUNE_CAP;
         let mut budget = budget0;
         (0..rounds)
             .map(|_| {
@@ -7516,22 +7522,34 @@ mod over_n_rank_repair_tests {
         assert_eq!(spent, 1, "the counting guard costs one budget unit");
     }
 
-    /// A slot the counting prune removes and the loop re-admits must not be
-    /// removed again: on QFORPLAN that was a drop/re-add cycle to the
-    /// iteration limit (gh#1042). The second prune of the same slot is the
-    /// signal, and from then on the counting trigger stands down for the pass,
-    /// leaving the unflagged over-full set as the unpruned loop had it.
-    /// Mutation-checked: without the stand-down the third round prunes too
-    /// and spends a third budget unit.
+    /// The counting prune runs at most `COUNT_PRUNE_CAP` times in one Schur
+    /// pass, repeats included, and then stands down for the rest of the pass,
+    /// leaving the unflagged over-full set as the unpruned loop had it
+    /// (gh#1076). Repeats are allowed because on QGFRDXPN's elastic phase-1
+    /// they are the productive path: the cycle guard ends them as `MaxIter`
+    /// within 24 prunes, whereas standing down on the first repeat handed the
+    /// cycle to the stationarity prune and ended the solve in a hard error.
+    /// Mutation-checked: the #1047 rule (stand down on the first repeat) fails
+    /// at round 2, and an uncapped trigger fails at the last round.
     #[test]
-    fn the_counting_prune_stands_down_once_it_repeats_a_slot() {
+    fn the_counting_prune_stands_down_after_its_per_pass_cap() {
         let r0 = vec![0.1, 0.3];
         let r1 = vec![0.7, 0.2];
         let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
-        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], 3);
-        assert_eq!(rounds[0], (2, true, 1));
-        assert_eq!(rounds[1], (2, true, 2), "the repeat itself still prunes");
-        assert_eq!(rounds[2], (3, false, 2), "then the trigger stands down");
+        let cap = COUNT_PRUNE_CAP as usize;
+        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], cap + 1);
+        for (k, round) in rounds[..cap].iter().enumerate() {
+            assert_eq!(
+                *round,
+                (2, true, k as u32 + 1),
+                "round {k}: every prune up to the cap runs, repeats included"
+            );
+        }
+        assert_eq!(
+            rounds[cap],
+            (3, false, COUNT_PRUNE_CAP),
+            "past the cap the trigger stands down"
+        );
     }
 
     /// Generic dense rows, one more than `n` — the shape of DEGEN2's

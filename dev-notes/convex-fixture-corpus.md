@@ -196,3 +196,10 @@ no `NumericalFailure` on the corpus as it stood.
   `dev-notes/qp-bound-relax-iteration-cost.md`.
 * `dev-notes/trajectory-regressions-and-the-fixture-sweep.md` — why the sweep
   exists at all (gh#544, gh#592).
+* gh#1076 — `convex_qp_qgfrdxpn` (Maros–Mészáros `QGFRDXPN`, 1092 columns,
+  616 rows, copied unmodified from the benchmark's `nl/QGFRDXPN.nl`). It is
+  here for the active-set arm, not the IPM: under the default
+  `solver_selection=auto` both sweep legs route it to `cvx-qp` and it does
+  not move. Under `solver_selection=qp-active-set` it is the witness for the
+  counting prune's per-pass cap in `pounce-qp`
+  (`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`).
