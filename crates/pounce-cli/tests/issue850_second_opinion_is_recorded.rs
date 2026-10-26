@@ -218,6 +218,9 @@ fn the_base_solver_alone_does_not_solve_this_fixture() {
             "infeasibility_mu_strategy_retry=no",
             "infeasibility_perturbed_start_retry=no",
             "feral_increase_quality_retry=no",
+            // Rung 5: HS008 from the origin is a saddle of the violation, and
+            // this rung recovers it with every other rung off.
+            "infeasibility_saddle_escape_retry=no",
             "square_system_recovery=no",
         ],
     );

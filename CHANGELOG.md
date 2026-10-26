@@ -254,6 +254,24 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **A false `Infeasible_Problem_Detected` at a saddle of the constraint
+  violation is now re-solved from beside it.** The infeasibility verdict claims
+  the solve stopped at a local minimizer of the violation, and every gate that
+  issues it checks that only to first order. On Vanderbei `discs` a perturbed
+  trajectory ends with two discs on the same centre: their tangency row reads
+  `0 = 4` with an exactly zero gradient, the radii sit on their bound, and the
+  solve reports a feasible model infeasible. Under `feral_scaling=mc64` every
+  rung of the second-opinion ladder failed there, and upstream Ipopt 3.14.19
+  (MUMPS) reports the same verdict at default options. A new last rung,
+  `restart_from_infeasibility_saddle`, probes the verdict's point with seeded
+  steps on the face of the box it sits on and counts a direction only when
+  both signs lower the max-norm violation. That is a decrease even in the
+  step, so a minimizer of the solver's own ℓ₁ or ℓ₂ measure, or a point
+  converged only to tolerance, does not pass. When one passes, the solve
+  restarts from beyond it; it is promoted only if it converges. `discs` under
+  `mc64` now ends `Optimal`. None of the 8 infeasibility fixtures opens the
+  rung, on either leg, with or without `mc64`. `infeasibility_saddle_escape_retry=no`
+  turns it off.
 - **The CLI no longer panics on a `.nl` whose AMPL external functions
   `$AMPLFUNC` cannot resolve (gh #1069).** The solve path and `pounce verify`
   built the model with the panicking `NlTnlp::new`, so an unset `AMPLFUNC` or

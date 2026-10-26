@@ -1697,6 +1697,33 @@ impl IpoptApplication {
             .and_then(|s| s.on_converged_id)
     }
 
+    /// When the last solve ended in local infeasibility, probe the point it
+    /// reported for a nearby point with less constraint violation
+    /// ([`crate::infeasibility_saddle`]). `None` when the last solve reported
+    /// anything else, or when the probe finds no such point.
+    ///
+    /// The point probed is the payload the user's TNLP was handed, so it is
+    /// the reported point after any retry's floor; it is cleared at the start
+    /// of every solve, so a stale point cannot be probed. `tnlp` must be the
+    /// TNLP that solve ran on. Read by the second-opinion ladder.
+    pub fn local_infeasibility_saddle_escape(
+        &self,
+        tnlp: &Rc<RefCell<dyn TNLP>>,
+    ) -> Option<crate::infeasibility_saddle::SaddleEscape> {
+        let x = self
+            .last_finalize
+            .borrow()
+            .as_ref()
+            .filter(|s| s.status == SolverReturn::LocalInfeasibility)
+            .map(|s| s.x.clone())?;
+        crate::infeasibility_saddle::infeasibility_saddle_escape(
+            tnlp,
+            &x,
+            self.nlp_lower_bound_inf(),
+            self.nlp_upper_bound_inf(),
+        )
+    }
+
     /// Put a losing retry's floor back: re-deliver the winning attempt's
     /// payload to the user's TNLP and make it the recorded answer again.
     ///

@@ -32,6 +32,7 @@ pub mod handover;
 pub mod hess;
 pub mod inf_pr_floor;
 pub mod infeasibility_refutation;
+pub mod infeasibility_saddle;
 pub mod init;
 pub mod intermediate;
 pub mod ipopt_alg;
