@@ -4865,12 +4865,12 @@ impl HessColorIndex {
 impl NlTnlp {
     /// Build the TNLP, panicking if AMPL external-function resolution fails.
     ///
-    /// Kept for the many infallible call sites (CLI, tests) that operate on
-    /// `.nl` models known to need no external libraries. Surfaces that can be
-    /// handed an arbitrary user model — notably the Python `read_nl` binding —
-    /// must call [`Self::try_new`] instead so a missing `$AMPLFUNC` library
-    /// becomes a catchable error rather than an uncatchable panic across the
-    /// pyo3 boundary.
+    /// Kept for the many infallible call sites (tests) that operate on `.nl`
+    /// models known to need no external libraries. Surfaces that can be
+    /// handed an arbitrary user model — the CLI solve and `verify` paths, the
+    /// Python `read_nl` binding — must call [`Self::try_new`] instead so a
+    /// missing `$AMPLFUNC` library becomes an ordinary error rather than a
+    /// panic (gh#1069: the CLI exited 101 with a backtrace hint).
     pub fn new(prob: NlProblem) -> Self {
         Self::try_new(prob)
             .unwrap_or_else(|e| panic!("failed to resolve AMPL external functions: {e}"))
@@ -7037,7 +7037,7 @@ impl TNLP for NlTnlp {
 /// Convenience: read an `.nl` file and build a TNLP-compatible Rc.
 pub fn load_nl_as_tnlp(path: &Path) -> Result<Rc<RefCell<dyn TNLP>>, String> {
     let prob = read_nl_file(path)?;
-    Ok(Rc::new(RefCell::new(NlTnlp::new(prob))))
+    Ok(Rc::new(RefCell::new(NlTnlp::try_new(prob)?)))
 }
 
 #[cfg(test)]
