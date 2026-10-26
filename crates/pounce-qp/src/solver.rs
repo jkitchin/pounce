@@ -140,6 +140,11 @@ pub struct ParametricActiveSetSolver {
     /// The counting prune's memory for the Schur pass in progress (see
     /// [`Self::schur_reset_rank_repaired`]); each pass starts with its own.
     count_prune: CountPrune,
+    /// Cleared only while [`Self::solve_with_working_set_if_feasible`] pins
+    /// its hint: a hint whose pinned KKT does not factor, or factors only with
+    /// an inertia shift, is then reported unusable at once instead of
+    /// rank-tested and pruned (see `pin_working_set`, `factor_pinned_primal`).
+    pin_prunes: bool,
 }
 
 /// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
@@ -156,6 +161,7 @@ impl ParametricActiveSetSolver {
             linsol: LinearSolver::new(backend),
             pin_repair: false,
             count_prune: CountPrune::default(),
+            pin_prunes: true,
         }
     }
 
@@ -301,6 +307,16 @@ impl ParametricActiveSetSolver {
         // the one outcome this guard exists to prevent. Report it as the same
         // recoverable failure; the callers' prune then finds nothing to drop
         // either and moves to its next recovery.
+        // A caller that will not prune (`pin_prunes` off) has no use for the
+        // verdict either: a pin that needed a shift is unusable to it, and it
+        // falls back to `solve_with_working_set`, which runs this guard, if its
+        // own route declines.
+        if delta > 0.0 && !self.pin_prunes {
+            return Err(QpError::LinearSolverFailure(
+                "pinned KKT needed an inertia shift; not rank-checked for a non-pruning caller"
+                    .into(),
+            ));
+        }
         if delta > 0.0 {
             match checked_independent_active_subset(
                 &mut self.linsol,
@@ -391,6 +407,11 @@ impl ParametricActiveSetSolver {
             opts,
         ) {
             Ok(x) => Ok((x, working.clone())),
+            // A caller with another way to a feasible point does not want the
+            // rank prune: each sparse rank test over gh#1061's ~11 000 active
+            // rows cost ~13 s, and the correction QP's hint spent 40 s in three
+            // of them before turning out infeasible anyway.
+            Err(e) if e.is_recoverable_factorization_failure() && !self.pin_prunes => Err(e),
             Err(e) if e.is_recoverable_factorization_failure() => {
                 // Shrink until the pinned set factors. Terminates: every pass
                 // either factors, returns, or strictly shrinks `kc ∪ kb`.
@@ -5916,6 +5937,8 @@ impl ParametricActiveSetSolver {
     /// [`QpSolver::solve_with_working_set`], except that a working set whose
     /// pinned point is infeasible for `qp`, even after the pin repair, comes
     /// back `Ok(None)` instead of going to the ℓ1-elastic phase 1 (gh#1061).
+    /// So does one whose pinned KKT does not factor, without the rank prune
+    /// `solve_with_working_set` would run to rescue it.
     ///
     /// For a caller with a better way to a feasible point than that phase,
     /// which on a large model costs a pivot per row it has to bring in.
@@ -5930,9 +5953,15 @@ impl ParametricActiveSetSolver {
         opts: &QpOptions,
     ) -> Result<Option<QpSolution>, QpError> {
         let _deadline = crate::deadline::enter(opts.time_limit);
-        let ws = match self.warm_start_from_working_set(qp, working, opts) {
+        self.pin_prunes = false;
+        let pinned = self.warm_start_from_working_set(qp, working, opts);
+        self.pin_prunes = true;
+        let ws = match pinned {
             Ok(Ok(ws)) => ws,
             Ok(Err(timed_out)) => return Ok(Some(timed_out)),
+            // A hint whose pinned KKT does not factor is as unusable here as
+            // one that pins infeasible.
+            Err(e) if e.is_recoverable_factorization_failure() => return Ok(None),
             Err(e) => return soften_deadline(qp, None, Err(e)).map(Some),
         };
         // The same test `solve` applies before it routes a warm start to

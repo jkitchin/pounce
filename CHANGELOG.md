@@ -66,7 +66,15 @@ changes.
   minutes; it now takes about 5 s. A warm step QP whose working set pins to
   an infeasible point is seeded the same way instead of going through the
   elastic phase 1: the reporter's second step QP hit a 300 s cap there and
-  now solves in about 13 s.
+  now solves in about 13 s. The line search's second-order-correction QP goes
+  through the same seeding, logs its own `SOC QP` line, and takes its time
+  limit from the remaining wall budget when it is called rather than at the
+  start of the iteration (it had overshot the cap by that iteration's step
+  QP). Checking whether a warm working set pins feasibly no longer runs the
+  pin's rank prune — a hint that does not factor is reported unusable and
+  seeded instead: on the reporter's correction QP that check went from 44 s
+  (40 s of it three sparse rank tests) to 3 s, and the QP solves seeded in
+  15 s to IPOPT's objective (666.85076 vs 666.85066).
 - **An infeasible step QP no longer ends the active-set SQP (gh #1061).** The
   SQP takes the QP's minimum-violation step instead (Sℓ1QP) and reports local
   infeasibility only when no step can reduce the linearized violation. `deb7`

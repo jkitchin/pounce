@@ -757,11 +757,8 @@ impl SqpAlgorithm {
             // stops on it is reported as that budget and not as the
             // subproblem's own iteration limit.
             let qp_budget = self.opts.deadline.as_ref().map(deadline_remaining);
-            let qp_time_limit = match (qp_budget, self.qp_opts.time_limit) {
-                (Some((left, _)), Some(own)) => Some(left.min(own)),
-                (Some((left, _)), None) => Some(left),
-                (None, own) => own,
-            };
+            let qp_time_limit =
+                qp_time_limit_now(self.opts.deadline.as_ref(), self.qp_opts.time_limit);
 
             let qp_data = match low_rank.as_ref() {
                 Some(b) => SqpQpData::build_low_rank(
@@ -1253,11 +1250,9 @@ impl SqpAlgorithm {
             let mut soc_working: Option<WorkingSet> = None;
             let ls = {
                 let qp_solver = &mut self.qp_solver;
-                let soc_opts = QpOptions {
-                    time_limit: qp_time_limit,
-                    ..self.qp_opts.clone()
-                };
-                let qp_opts = &soc_opts;
+                let qp_opts = &self.qp_opts;
+                let deadline = self.opts.deadline.as_ref();
+                let ipm_cold_start = self.ipm_cold_start;
                 let qp_data_ref = &qp_data;
                 let c_curr_ref = &c_vals;
                 let a_p_ref = &a_p;
@@ -1282,14 +1277,24 @@ impl SqpAlgorithm {
                     // `bl` / `bu` carry the lifted rows (if any) past `mm`;
                     // only the NLP's own rows are re-centred.
                     let qp_soc = qp_data_ref.as_qp_with_row_bounds(&bl_soc, &bu_soc);
-                    let sol_soc = qp_solver
-                        .solve_with_working_set(
-                            &qp_soc,
-                            &qp_data_ref.lift_working_set(sol_working),
-                            qp_opts,
-                        )
-                        .ok()?;
-                    let sol_soc = qp_data_ref.unlift_solution(sol_soc);
+                    // What is left of the solve's budget now, not at the top of
+                    // the iteration: the step QP and the trial points have
+                    // spent part of it since (gh#1061: the correction QP ran
+                    // 40–142 s past a wall cap on that stale figure).
+                    let soc_opts = QpOptions {
+                        time_limit: qp_time_limit_now(deadline, qp_opts.time_limit),
+                        ..qp_opts.clone()
+                    };
+                    let sol_soc = solve_subproblem_qp(
+                        qp_solver,
+                        qp_data_ref,
+                        qp_soc,
+                        Some(sol_working),
+                        &soc_opts,
+                        ipm_cold_start,
+                        "SOC QP",
+                    )
+                    .ok()?;
                     *n_soc += 1;
                     if sol_soc.status == QpStatus::Optimal {
                         *soc_working_slot = Some(sol_soc.working);
@@ -2116,7 +2121,37 @@ fn solve_step_qp(
     opts: &QpOptions,
     ipm_cold_start: bool,
 ) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
-    let qp = data.as_qp();
+    solve_subproblem_qp(
+        solver,
+        data,
+        data.as_qp(),
+        warm,
+        opts,
+        ipm_cold_start,
+        "step QP",
+    )
+}
+
+/// [`solve_step_qp`] for a QP built on `data` with other row bounds — the
+/// second-order-correction QP, which re-centres them on the trial point —
+/// logged as `kind`.
+///
+/// The correction QP used to call the solver directly, so it had none of
+/// the step QP's handling: no seeding for a warm start that pins infeasible,
+/// and no log line. gh#1061: on the reporter's model the SQP reached
+/// iteration 2, rejected the full step, and the correction QP sat in the
+/// elastic phase for the rest of the wall budget (585 pivots in 345 s,
+/// objective frozen) without a line in the log. Solved alone, the same QP
+/// is optimal from the interior point in 32 s.
+fn solve_subproblem_qp(
+    solver: &mut ParametricActiveSetSolver,
+    data: &SqpQpData,
+    qp: pounce_qp::QpProblem<'_>,
+    warm: Option<&WorkingSet>,
+    opts: &QpOptions,
+    ipm_cold_start: bool,
+    kind: &str,
+) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
     let split_before = solver.linsol_time_split();
@@ -2157,7 +2192,7 @@ fn solve_step_qp(
     let other = elapsed.saturating_sub(t.factor + t.resolve + t.rank_test);
     match &sol {
         Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
+            "{kind} (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
              {} refactors, {} Schur updates, {} rank tests, phase1={}; \
              time: {} factorizations {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
             qp.n, qp.m, warm.is_some(), s.status, elapsed,
@@ -2165,7 +2200,7 @@ fn solve_step_qp(
             rank_guard_calls, s.stats.used_phase1,
             t.n_factor, t.factor, t.n_resolve, t.resolve, t.rank_test, other),
         Err(e) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests; \
+            "{kind} (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests; \
              time: {} factorizations {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
             qp.n, qp.m, warm.is_some(), elapsed, rank_guard_calls,
             t.n_factor, t.factor, t.n_resolve, t.resolve, t.rank_test, other),
@@ -2336,6 +2371,19 @@ const IPM_SEED_MAX_ITER: usize = 50;
 /// orders of that and an inactive one, at a nondegenerate solution, well
 /// outside it.
 const IPM_ACTIVE_TOL: Number = 1e-6;
+
+/// A subproblem QP's time limit: what is left of the solve's `deadline` at
+/// this moment, or the QP's `own` limit if that is tighter.
+fn qp_time_limit_now(
+    deadline: Option<&pounce_common::timing::Deadline>,
+    own: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (deadline.map(deadline_remaining), own) {
+        (Some((left, _)), Some(own)) => Some(left.min(own)),
+        (Some((left, _)), None) => Some(left),
+        (None, own) => own,
+    }
+}
 
 /// What is left of `deadline`, as the wall-clock duration a step QP can take
 /// as its `time_limit`, with the budget that set it (gh#1054).

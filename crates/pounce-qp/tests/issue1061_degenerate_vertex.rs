@@ -169,6 +169,26 @@ fn an_infeasible_pin_is_reported_instead_of_going_elastic() {
         out.map(|s| s.x)
     );
 
+    // A dependent working set — the equality plus both bounds it already
+    // implies at `(1, 0)` — does not factor. Here it is reported unusable
+    // without the rank prune `solve_with_working_set` would run: on
+    // gh#1061's correction QP that prune was three sparse rank tests and 40
+    // of the 44 s spent before the hint turned out infeasible anyway.
+    let mut dependent = WorkingSet::cold(2, 2);
+    dependent.constraints[0] = ConsStatus::Equality;
+    dependent.bounds[0] = BoundStatus::AtUpper;
+    dependent.bounds[1] = BoundStatus::AtLower;
+    let guards = solver.rank_guard_calls();
+    let out = solver
+        .solve_with_working_set_if_feasible(&qp, &dependent, &opts)
+        .unwrap();
+    assert!(
+        out.is_none(),
+        "a dependent pin was solved: {:?}",
+        out.map(|s| s.x)
+    );
+    assert_eq!(solver.rank_guard_calls(), guards, "the pin ran a rank test");
+
     let mut good = WorkingSet::cold(2, 2);
     good.constraints[0] = ConsStatus::Equality;
     let sol = solver
