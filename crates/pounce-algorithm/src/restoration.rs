@@ -38,6 +38,24 @@ use std::rc::Rc;
 /// reference `(theta, barr)` snapshotted in the closure.
 pub type OrigProgressCallback = Box<dyn Fn(Number, Number) -> bool>;
 
+/// Restoration's release test as the restoration phase consumes it: given a
+/// restoration iterate's `(x, s)` in the **outer** problem's space, may the
+/// outer phase resume from it?
+///
+/// Built by the outer algorithm, which owns the quantities the outer filter
+/// holds. It evaluates the outer problem's own barrier objective and 1-norm
+/// constraint violation at `(x, s)` (`trial_barrier_obj`,
+/// `trial_constraint_violation`, at the outer `mu`), exactly as upstream's
+/// `IpRestoFilterConvCheck::TestOrigProgress` does by setting the original
+/// problem's trial point, and hands that pair to the
+/// [`OrigProgressCallback`]. The restoration crate cannot compute the pair
+/// itself without re-deriving the barrier terms, damping included, that the
+/// filter's entries were made with; it used to pass the plain objective and
+/// the max-norm violation instead, which the filter does not hold
+/// (gh#1042).
+pub type OrigProgressCheck =
+    Box<dyn Fn(&dyn pounce_linalg::Vector, &dyn pounce_linalg::Vector) -> bool>;
+
 /// Outcome of a restoration attempt. Mirrors upstream's `bool` return
 /// from `RestorationPhase::PerformRestoration` plus the in-band
 /// `info_skip_output` / `iter_count` side-effects that the impl writes
@@ -153,7 +171,7 @@ pub trait RestorationPhase {
     /// `IpRestoFilterConvCheck::SetOrigLSAcceptor` (the outer line
     /// search hands its acceptor to the resto conv check at restoration
     /// entry). Default no-op so non-filter-aware drivers compose.
-    fn set_orig_progress_check(&mut self, _cb: Option<OrigProgressCallback>) {}
+    fn set_orig_progress_check(&mut self, _cb: Option<OrigProgressCheck>) {}
 
     /// Propagate the outer algorithm's per-iteration print gate to the
     /// restoration driver so the nested restoration IPM honors
