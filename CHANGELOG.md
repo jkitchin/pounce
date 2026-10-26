@@ -10,6 +10,10 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`pounce_minima::MinimaOptions` implements `PartialEq`, `Eq` and `Hash`
+  (#1065)**, so the options can key a cache. Every field takes part; floats
+  compare by bit pattern, so options holding a `NaN` equal themselves.
+  `Method` gains `Hash`.
 - **Cooperative cancellation hook for `pounce-minima` local solvers.**
   `LocalSolve::should_stop` (default `false`) lets a local solver cancel the
   search before a solve, while sampling, during MLSL clustering and start

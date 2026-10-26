@@ -6,7 +6,7 @@
 
 /// Global-search strategy for `--minima`. Mirrors the six methods of
 /// `pounce.find_minima` (`python/pounce/_minima.py`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Method {
     /// Random / Sobol' box sampling (restart).
     Multistart,
@@ -56,7 +56,11 @@ impl Method {
 /// strategy-specific knobs are `Option`s resolved per-method in the driver
 /// (so `"auto"` widths and curvature-based amplitudes match
 /// `pounce.find_minima`). Field semantics mirror `_minima.py` exactly.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality and hashing compare every field, floats by bit pattern, so the
+/// options can key a cache: `NaN == NaN`, and
+/// `0.0 != -0.0` (a spurious miss, never a stale hit).
+#[derive(Debug, Clone)]
 pub struct MinimaOptions {
     pub method: Method,
     /// Target: stop once this many distinct minima are found (default 10).
@@ -109,6 +113,76 @@ pub struct MinimaOptions {
 }
 
 impl MinimaOptions {
+    /// Every field, floats as bits. The destructuring is exhaustive, so a
+    /// new field is a compile error here until it joins the comparison.
+    fn key(&self) -> OptionsKey {
+        let bits = |v: &Option<f64>| v.map(f64::to_bits);
+        let vec_bits =
+            |v: &Option<Vec<f64>>| v.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect());
+        let Self {
+            method,
+            n_minima,
+            max_solves,
+            patience,
+            dedup,
+            psd_tol,
+            kkt_tol,
+            seed,
+            sobol,
+            sigma,
+            sigma_frac,
+            amplitude,
+            amp_margin,
+            eta,
+            power,
+            soft,
+            length,
+            length_frac,
+            gamma,
+            samples_per_round,
+            step,
+            temperature,
+            restart_jitter,
+            sigma_per_dim,
+            length_per_dim,
+            max_samples,
+            amp_bump,
+            amp_bump_cap,
+            amp_fallback,
+        } = self;
+        OptionsKey {
+            method: *method,
+            n_minima: *n_minima,
+            max_solves: *max_solves,
+            patience: *patience,
+            dedup: dedup.to_bits(),
+            psd_tol: psd_tol.to_bits(),
+            kkt_tol: bits(kkt_tol),
+            seed: *seed,
+            sobol: *sobol,
+            sigma: bits(sigma),
+            sigma_frac: bits(sigma_frac),
+            amplitude: bits(amplitude),
+            amp_margin: bits(amp_margin),
+            eta: bits(eta),
+            power: bits(power),
+            soft: bits(soft),
+            length: bits(length),
+            length_frac: bits(length_frac),
+            gamma: bits(gamma),
+            samples_per_round: *samples_per_round,
+            step: bits(step),
+            temperature: bits(temperature),
+            restart_jitter: bits(restart_jitter),
+            sigma_per_dim: vec_bits(sigma_per_dim),
+            length_per_dim: vec_bits(length_per_dim),
+            max_samples: *max_samples,
+            amp_bump: bits(amp_bump),
+            amp_bump_cap: bits(amp_bump_cap),
+            amp_fallback: bits(amp_fallback),
+        }
+    }
+
     /// The solve budget: `max_solves`, or `8 * n_minima` when unset.
     pub fn max_solves_or_default(&self) -> usize {
         self.max_solves.unwrap_or(8 * self.n_minima)
@@ -149,5 +223,54 @@ impl Default for MinimaOptions {
             amp_bump_cap: None,
             amp_fallback: None,
         }
+    }
+}
+
+/// [`MinimaOptions`] with every `f64` replaced by its bit pattern, so that
+/// equality is reflexive and `Eq` / `Hash` can be derived.
+#[derive(PartialEq, Eq, Hash)]
+struct OptionsKey {
+    method: Method,
+    n_minima: usize,
+    max_solves: Option<usize>,
+    patience: usize,
+    dedup: u64,
+    psd_tol: u64,
+    kkt_tol: Option<u64>,
+    seed: u64,
+    sobol: bool,
+    sigma: Option<u64>,
+    sigma_frac: Option<u64>,
+    amplitude: Option<u64>,
+    amp_margin: Option<u64>,
+    eta: Option<u64>,
+    power: Option<u64>,
+    soft: Option<u64>,
+    length: Option<u64>,
+    length_frac: Option<u64>,
+    gamma: Option<u64>,
+    samples_per_round: Option<usize>,
+    step: Option<u64>,
+    temperature: Option<u64>,
+    restart_jitter: Option<u64>,
+    sigma_per_dim: Option<Vec<u64>>,
+    length_per_dim: Option<Vec<u64>>,
+    max_samples: Option<usize>,
+    amp_bump: Option<u64>,
+    amp_bump_cap: Option<u64>,
+    amp_fallback: Option<u64>,
+}
+
+impl PartialEq for MinimaOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for MinimaOptions {}
+
+impl std::hash::Hash for MinimaOptions {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
     }
 }
