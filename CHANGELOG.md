@@ -55,6 +55,16 @@ changes.
   that cost it.
 
 ### Changed
+- **FERAL 0.22.0: the same results, about 10% faster.** FERAL's
+  factorization kernels are faster (feral#225), and the new
+  `ReanalysisPolicy` (feral#228) stays at its default `Never`, which keeps
+  0.21's behaviour exactly. On arm64, over 1489 corpus `.nl` models and the
+  fixture sweep's 246 fixture-legs, status, iterations and objective are
+  identical everywhere. Over 168 models re-timed serially, total wall time
+  falls from 3030 to 2718 s (−10.3%) and factor time by 16.8%, with no model
+  more than 10% slower: `qcqp1500-1c` 500 → 353 s, `qcqp1000-2c` 108 → 72 s,
+  `eigenc2` 0.71×. Small models barely change (median −1.8%). Not yet
+  measured on x86_64.
 - **The post-optimal KKT factor uses the Hessian at the converged point.**
   The main loop checks convergence before it updates the Hessian, so the
   sensitivity layer used to factor `W(w_k)` from the final Newton step
