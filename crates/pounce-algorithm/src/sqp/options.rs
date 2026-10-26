@@ -140,10 +140,13 @@ pub struct SqpOptions {
     /// behind the default.
     pub qp_schur_min_dim: Option<usize>,
 
-    /// NLP size `n + m` from which a step QP solved without a working set
-    /// is first solved by the convex interior point, when its Hessian is
-    /// PSD, and the active-set solver warm-started from the working set
-    /// that solution identifies (gh#1061). `None` never does.
+    /// NLP size `n + m` from which a step QP solved without a working set,
+    /// or with one that pins to an infeasible point, is first solved by the
+    /// convex interior point, when its Hessian is PSD, and the active-set
+    /// solver warm-started from the working set that solution identifies
+    /// (gh#1061). `None` never does. The warm case: the reporter's second
+    /// step QP went to the ℓ1-elastic phase 1 from its infeasible warm start
+    /// and reached a 300 s cap after 564 working-set changes; seeded, 12.5 s.
     ///
     /// A cold active-set start builds its working set one pivot at a time,
     /// and on a large model that is the whole cost: gh#1061's first step QP

@@ -710,7 +710,10 @@ and its multipliers; the interior point only chooses where it starts, and
 anything short of an interior-point optimum falls back to the plain cold start.
 On gh#1061's first step QP (15 000 variables, 10 818 equalities, `H = I`) the
 cold active-set start had not finished after 30 minutes; seeded, it took 4.5 s
-and no working-set changes.
+and no working-set changes. A warm step QP whose working set pins to a point
+that violates another row is seeded the same way rather than sent to the
+ℓ1-elastic phase 1: gh#1061's second step QP, warm-started from the first one's
+working set, reached a 300 s cap in that phase and solves seeded in 12.5 s.
 
 A step QP whose linearization is infeasible does not end the solve. The QP's
 elastic phase returns the step that minimizes the linearized ℓ1 violation, and

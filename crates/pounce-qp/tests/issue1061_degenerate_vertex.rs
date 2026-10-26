@@ -117,3 +117,68 @@ fn the_refactor_path_leaves_a_degenerate_apex() {
     );
     assert!(refactor.obj < -0.15, "still at the apex: {}", refactor.obj);
 }
+
+/// `solve_with_working_set_if_feasible` (gh#1061): a working set whose pinned
+/// point violates another row, even after the pin repair, comes back `None`
+/// for the caller to seed another way; one that pins feasible is solved as
+/// `solve_with_working_set` would. The reporter's second SQP step QP is the
+/// first case at scale — warm-started from the previous QP's working set it
+/// went to the elastic phase 1 and reached a 300 s cap.
+///
+/// `min x₁² + x₂²  s.t.  x₁ + x₂ = 1,  x₁ − x₂ ≤ 0,  0 ≤ x ≤ 1`, optimum
+/// `(½, ½)`. Pinning `x₁` at its upper bound with the equality puts the point
+/// at `(1, 0)`, which violates the inequality, and pinning that too leaves
+/// three rows on two variables that no point satisfies.
+#[test]
+fn an_infeasible_pin_is_reported_instead_of_going_elastic() {
+    use pounce_qp::{BoundStatus, ConsStatus};
+    let h_space = SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]);
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&[2.0, 2.0]);
+    let a_space = GenTMatrixSpace::new(2, 2, vec![1, 1, 2, 2], vec![1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&[1.0, 1.0, 1.0, -1.0]);
+    let g = [0.0, 0.0];
+    let (bl, bu) = ([1.0, -1e20], [1.0, 0.0]);
+    let (xl, xu) = ([0.0, 0.0], [1.0, 1.0]);
+    let qp = QpProblem {
+        n: 2,
+        m: 2,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+    let opts = QpOptions::default();
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+
+    let mut bad = WorkingSet::cold(2, 2);
+    bad.constraints[0] = ConsStatus::Equality;
+    bad.bounds[0] = BoundStatus::AtUpper;
+    let out = solver
+        .solve_with_working_set_if_feasible(&qp, &bad, &opts)
+        .unwrap();
+    assert!(
+        out.is_none(),
+        "an infeasible pin was solved: {:?}",
+        out.map(|s| s.x)
+    );
+
+    let mut good = WorkingSet::cold(2, 2);
+    good.constraints[0] = ConsStatus::Equality;
+    let sol = solver
+        .solve_with_working_set_if_feasible(&qp, &good, &opts)
+        .unwrap()
+        .expect("a feasible pin is solved");
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!(
+        (sol.x[0] - 0.5).abs() < 1e-8 && (sol.x[1] - 0.5).abs() < 1e-8,
+        "{:?}",
+        sol.x
+    );
+}

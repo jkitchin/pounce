@@ -63,7 +63,10 @@ changes.
   point first, and the active-set solver finishes from the working set that
   solution identifies. On the reporter's first step QP (15 000 variables,
   10 818 equalities) the cold active-set start had not finished after 30
-  minutes; it now takes about 5 s.
+  minutes; it now takes about 5 s. A warm step QP whose working set pins to
+  an infeasible point is seeded the same way instead of going through the
+  elastic phase 1: the reporter's second step QP hit a 300 s cap there and
+  now solves in about 13 s.
 - **An infeasible step QP no longer ends the active-set SQP (gh #1061).** The
   SQP takes the QP's minimum-violation step instead (Sℓ1QP) and reports local
   infeasibility only when no step can reduce the linearized violation. `deb7`

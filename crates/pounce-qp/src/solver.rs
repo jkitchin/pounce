@@ -5906,10 +5906,57 @@ impl ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
+        let ws = match self.warm_start_from_working_set(qp, working, opts)? {
+            Ok(ws) => ws,
+            Err(timed_out) => return Ok(timed_out),
+        };
+        self.solve(qp, Some(&ws), opts)
+    }
+
+    /// [`QpSolver::solve_with_working_set`], except that a working set whose
+    /// pinned point is infeasible for `qp`, even after the pin repair, comes
+    /// back `Ok(None)` instead of going to the ℓ1-elastic phase 1 (gh#1061).
+    ///
+    /// For a caller with a better way to a feasible point than that phase,
+    /// which on a large model costs a pivot per row it has to bring in.
+    /// gh#1061's second SQP step QP (n = 14 952, 10 818 equalities, feasible:
+    /// IPOPT 128.990447) was warm-started from the first QP's working set,
+    /// pinned infeasible, and reached the 300 s cap in the elastic phase after
+    /// 564 working-set changes.
+    pub fn solve_with_working_set_if_feasible(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<Option<QpSolution>, QpError> {
+        let _deadline = crate::deadline::enter(opts.time_limit);
+        let ws = match self.warm_start_from_working_set(qp, working, opts) {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(timed_out)) => return Ok(Some(timed_out)),
+            Err(e) => return soften_deadline(qp, None, Err(e)).map(Some),
+        };
+        // The same test `solve` applies before it routes a warm start to
+        // the elastic phase.
+        if !point_is_feasible_scaled(qp, &ws.x, opts.feas_tol) {
+            return Ok(None);
+        }
+        soften_deadline(qp, None, self.solve(qp, Some(&ws), opts)).map(Some)
+    }
+
+    /// The warm start [`QpSolver::solve_with_working_set`] hands to `solve`:
+    /// the hint made well-formed for `qp`, pinned, and repaired if its pinned
+    /// point violates another row. `Ok(Err(sol))` is a deadline that expired
+    /// before any of that ran.
+    fn warm_start_from_working_set(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<Result<QpWarmStart, QpSolution>, QpError> {
         qp.validate()?;
         working.validate_dims(qp.n, qp.m)?;
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, None, 0, 0, 0, false));
+            return Ok(Err(time_limit_solution(qp, None, 0, 0, 0, false)));
         }
 
         // Make the hint well-formed for `qp` before anything trusts it.
@@ -5960,13 +6007,12 @@ impl ParametricActiveSetSolver {
         // The inner loop recomputes multipliers each iteration from a
         // fresh KKT solve, so the warm-start multipliers are unused;
         // pass zeros and let `solve_general` drive from `(x, working)`.
-        let ws = QpWarmStart {
+        Ok(Ok(QpWarmStart {
             x: x_init,
             lambda_g: vec![0.0; qp.m],
             lambda_x: vec![0.0; qp.n],
             working: fwd_working,
-        };
-        self.solve(qp, Some(&ws), opts)
+        }))
     }
 
     /// Refuse to certify a saddle point as a solution, and get off it when

@@ -2126,6 +2126,28 @@ fn solve_step_qp(
     };
     let sol = match (seeded, warm) {
         (Some(sol), _) => Ok(sol),
+        // A warm start that pins to an infeasible point would go to the
+        // ℓ1-elastic phase 1, which at this size is the cold start's cost
+        // again. gh#1061's second step QP (warm from the seeded first one,
+        // feasible: IPOPT 128.990447) reached the 300 s cap there after 564
+        // working-set changes; seeded like a cold QP it is optimal in 12.5 s
+        // with 2. The elastic path stays for when the seed declines.
+        (None, Some(w)) if ipm_cold_start => {
+            let lifted = data.lift_working_set(w);
+            match solver.solve_with_working_set_if_feasible(&qp, &lifted, opts) {
+                Ok(Some(sol)) => Ok(sol),
+                Ok(None) => {
+                    tracing::debug!(target: "pounce::sqp::qp",
+                        "warm start pins infeasible (n={}, m={}); seeding from the interior point",
+                        qp.n, qp.m);
+                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts) {
+                        Some(sol) => Ok(sol),
+                        None => solver.solve_with_working_set(&qp, &lifted, opts),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
         (None, Some(w)) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
         (None, None) => solver.solve(&qp, None, opts),
     };
@@ -2151,10 +2173,11 @@ fn solve_step_qp(
     Ok(data.unlift_solution(sol?))
 }
 
-/// A cold step QP solved by the convex interior point and finished by the
+/// A step QP solved by the convex interior point and finished by the
 /// active-set solver from the working set that solution identifies, or `None`
-/// to solve it from cold as before (see
-/// [`SqpOptions::qp_ipm_cold_start_min_dim`]).
+/// to fall back to the active-set path as before (see
+/// [`SqpOptions::qp_ipm_cold_start_min_dim`]). Used for a cold QP, and for a
+/// warm one whose working set pins to an infeasible point.
 ///
 /// `None` unless every stage succeeds: the Hessian is certified PSD (an
 /// interior point is not a method for an indefinite QP), the interior point
@@ -2245,6 +2268,7 @@ fn ipm_seeded_step_qp(
     };
     let ipm_opts = pounce_convex::QpOptions {
         time_limit: opts.time_limit,
+        max_iter: IPM_SEED_MAX_ITER,
         ..pounce_convex::QpOptions::default()
     };
     let ipm = pounce_convex::solve_qp_ipm(&prob, &ipm_opts, feral);
@@ -2297,6 +2321,14 @@ fn ipm_seeded_step_qp(
         sol.stats.time, sol.stats.n_working_set_changes);
     (sol.status == QpStatus::Optimal).then_some(sol)
 }
+
+/// Iteration cap on the seeding interior point, against its own default of
+/// 200. gh#1061's step QPs took 16 and 19; a QP the interior point cannot
+/// solve in a few times that goes back to the active-set path rather than
+/// spending the budget here. Measured on a borderline-feasible emulation of
+/// the second step QP, the uncapped interior point ran 57 iterations to a
+/// 300 s limit.
+const IPM_SEED_MAX_ITER: usize = 50;
 
 /// Relative activity tolerance for reading a working set off an
 /// interior-point solution in [`ipm_seeded_step_qp`]. The interior point stops
