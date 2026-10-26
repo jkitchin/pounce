@@ -874,6 +874,7 @@ dependencies = [
  "anstyle",
  "faer",
  "pounce-common",
+ "pounce-convex",
  "pounce-feral",
  "pounce-hsl",
  "pounce-l1penalty",

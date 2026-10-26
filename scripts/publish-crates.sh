@@ -31,7 +31,9 @@
 # on it, so the old "nothing published depends on studio" exclusion no
 # longer holds. pounce-nl is likewise required by pounce-cli and published.
 # pounce-minima (gh#966) depends on pounce-algorithm (its IpoptLocalSolve
-# drives the application), so it publishes after it.
+# drives the application), so it publishes after it. pounce-convex
+# publishes before pounce-algorithm, whose SQP seeds large cold step QPs with
+# its interior point (gh#1061).
 # (The benchmark crates pounce-cutest and pounce-large-scale were retired
 # when those suites moved to .nl.)
 
@@ -56,12 +58,12 @@ CRATES=(
   pounce-qp
   pounce-sens-core
   pounce-solve-report
+  pounce-convex
   pounce-algorithm
   pounce-minima
   pounce-restoration
   pounce-sensitivity
   pounce-cinterface
-  pounce-convex
   pounce-nl
   pounce-studio-core
   pounce-cli

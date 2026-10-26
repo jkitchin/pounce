@@ -1996,3 +1996,246 @@ fn issue_1054_quasi_newton_at_twenty_thousand_variables() {
         assert!((res.x[i] - 0.8).abs() < 1e-6, "x[{i}] = {}", res.x[i]);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1061 sweep: an infeasible linearization is not an infeasible NLP.
+//
+// `min x  s.t.  x² = 4,  0 ≤ x ≤ 3`, started at `x = 0.25`. The only
+// feasible point is `x = 2`. At the start the linearized row asks for
+// `0.0625 + 0.5 d = 4`, i.e. `x + d = 8.125`, past the bound at 3: the step
+// QP is infeasible, and is certified so. The SQP used to stop there with
+// `InfeasibleSubproblem` — `Infeasible_Problem_Detected` to every frontend —
+// which is what `deb7` (813 variables, feasible, 97.56) got under
+// `algorithm=active-set-sqp`. The QP's elastic step goes to the bound,
+// cutting the linearized violation from 3.94 to 2.56, and from `x = 3` the
+// linearization is consistent.
+// ─────────────────────────────────────────────────────────────────
+
+struct InfeasibleLinearizationNlp;
+
+impl SqpProblemSpec for InfeasibleLinearizationNlp {
+    fn n(&self) -> usize {
+        1
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.25]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![3.0])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![4.0], vec![4.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x[0]
+    }
+    fn eval_grad_f(&mut self, _x: &[f64]) -> Vec<f64> {
+        vec![1.0]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] * x[0]]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 1,
+            irow: vec![1],
+            jcol: vec![1],
+            vals: vec![2.0 * x[0]],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 1,
+            irow: vec![1],
+            jcol: vec![1],
+            vals: vec![2.0 * lambda_g[0]],
+        }
+    }
+}
+
+#[test]
+fn an_infeasible_step_qp_takes_its_elastic_step() {
+    for glob in [SqpGlobalization::L1Elastic, SqpGlobalization::Filter] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let opts = SqpOptions {
+            globalization: glob,
+            ..SqpOptions::default()
+        };
+        let mut alg = SqpAlgorithm::new(qp_solver, opts);
+        let res = alg.optimize(&mut InfeasibleLinearizationNlp).unwrap();
+        assert_eq!(
+            res.status,
+            SqpStatus::Optimal,
+            "{glob:?}: status {:?} at x = {:?} after {} iterations",
+            res.status,
+            res.x,
+            res.n_iter
+        );
+        assert!((res.x[0] - 2.0).abs() < 1e-6, "{glob:?}: x = {}", res.x[0]);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1061: a large cold step QP is seeded by the convex interior point.
+//
+// The gate (`qp_ipm_cold_start_min_dim`, default 5000) keeps every model in
+// this file on the old path, so these tests lower it to 0. On the reporter's
+// first step QP (n = 14 952, 10 818 equalities, H = I) the seeded solve took
+// 4.5 s with zero working-set changes, against a cold active-set start that
+// had not finished after 30 minutes; that model is not small enough to live
+// here, so these pin the contract on small ones instead.
+// ─────────────────────────────────────────────────────────────────
+
+/// A convex QP-shaped NLP: the interior point hands the active-set solve the
+/// right working set, so the cold solve that `sqp_reports_qp_working_set_
+/// changes_and_warm_start_removes_them` shows paying for its search pays
+/// nothing, and lands on the same point.
+#[test]
+fn ipm_seeded_cold_step_qp_finds_the_working_set() {
+    let solve = |gate: Option<usize>| {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let opts = SqpOptions {
+            qp_ipm_cold_start_min_dim: gate,
+            ..SqpOptions::default()
+        };
+        SqpAlgorithm::new(qp_solver, opts)
+            .optimize(&mut SimplexProjNlp)
+            .unwrap()
+    };
+    let cold = solve(None);
+    let seeded = solve(Some(0));
+    assert_eq!(seeded.status, SqpStatus::Optimal);
+    assert!(cold.n_qp_working_set_changes > 0);
+    assert_eq!(
+        seeded.n_qp_working_set_changes, 0,
+        "the interior point should have supplied the working set"
+    );
+    for (a, b) in seeded.x.iter().zip(&cold.x) {
+        assert!(
+            (a - b).abs() < 1e-8,
+            "seeded {:?} vs cold {:?}",
+            seeded.x,
+            cold.x
+        );
+    }
+}
+
+/// A nonconvex NLP under the exact Hessian. Where the Hessian is not PSD the
+/// certificate declines and the step QP is solved from cold exactly as
+/// before, so the answer cannot change; where an iterate's Hessian happens to
+/// be PSD, the seeded solve must reach the same local minimum.
+#[test]
+fn ipm_seeded_cold_step_qp_leaves_a_nonconvex_solve_alone() {
+    for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+        let solve = |gate: Option<usize>| {
+            let qp_solver =
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+            let opts = SqpOptions {
+                hessian: SqpHessianSource::Exact,
+                globalization: glob,
+                qp_ipm_cold_start_min_dim: gate,
+                ..SqpOptions::default()
+            };
+            SqpAlgorithm::new(qp_solver, opts)
+                .optimize(&mut DoubleWellChainNlp { n: 12 })
+                .unwrap()
+        };
+        let cold = solve(None);
+        let seeded = solve(Some(0));
+        assert_eq!(seeded.status, cold.status, "{glob:?}");
+        assert!(
+            (seeded.obj - cold.obj).abs() < 1e-8,
+            "{glob:?}: seeded f = {}, cold f = {}",
+            seeded.obj,
+            cold.obj
+        );
+    }
+}
+
+/// The other half of `an_infeasible_step_qp_takes_its_elastic_step`: on an
+/// NLP that really is infeasible, elastic steps lead to a point where none
+/// reduces the linearized violation, and the verdict stands. The CLI fixture
+/// `infeasible_equalities` — `min x₀² + x₁²` with `x₀³ + x₁³` asked to be
+/// both 1 and 2, started at `(10⁴, 10⁴)`. Taking elastic steps, its step QPs
+/// reached a `γ = 1e6` elastic point whose next step stayed at
+/// `‖p‖∞ = 1.9e-6` on every iteration, above `opt_tol`, and the refactor path,
+/// which lacked the Schur path's null-iteration guard, ran its whole budget
+/// on that no-op: the SQP ended `QpIterationLimit` where it had said
+/// infeasible.
+struct InfeasibleCubicsNlp;
+
+impl SqpProblemSpec for InfeasibleCubicsNlp {
+    fn n(&self) -> usize {
+        2
+    }
+    fn m(&self) -> usize {
+        2
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![1e4, 1e4]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![NLP_UPPER_BOUND_INF; 2])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![1.0, 2.0], vec![1.0, 2.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x[0] * x[0] + x[1] * x[1]
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![2.0 * x[0], 2.0 * x[1]]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        let s = x[0].powi(3) + x[1].powi(3);
+        vec![s, s]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        let (a, b) = (3.0 * x[0] * x[0], 3.0 * x[1] * x[1]);
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 1, 2, 2],
+            jcol: vec![1, 2, 1, 2],
+            vals: vec![a, b, a, b],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], lambda_g: &[f64]) -> Triplet {
+        let l = lambda_g[0] + lambda_g[1];
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 2],
+            jcol: vec![1, 2],
+            vals: vec![2.0 + 6.0 * l * x[0], 2.0 + 6.0 * l * x[1]],
+        }
+    }
+}
+
+#[test]
+fn an_infeasible_nlp_is_still_reported_infeasible() {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let opts = SqpOptions {
+        hessian: SqpHessianSource::Exact,
+        ..SqpOptions::default()
+    };
+    let res = SqpAlgorithm::new(qp_solver, opts)
+        .optimize(&mut InfeasibleCubicsNlp)
+        .unwrap();
+    assert_eq!(
+        res.status,
+        SqpStatus::InfeasibleSubproblem,
+        "status {:?} at x = {:?} after {} iterations",
+        res.status,
+        res.x,
+        res.n_iter
+    );
+}
