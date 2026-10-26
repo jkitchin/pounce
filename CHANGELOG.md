@@ -240,6 +240,12 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **`build_nl_problem` no longer takes time exponential in depth on a
+  shared node multiplied by itself in a constraint (gh #1066).** The hybrid
+  constraint tape's funcall pre-scan walked every path through shared
+  common subexpressions rather than every node, so a single-shooting chain
+  `e = e + h*(u - e*e)` cost about 3x per step (K = 20: 17 s; K = 40 never
+  returned). It now visits each shared body once; K = 40 builds in ~2 ms.
 - **A restoration that ends on a feasible point it never released now
   fails, as upstream's does, once the outer phase shows it cannot leave
   that point (gh #1042).** When the restoration sub-problem converges at a
