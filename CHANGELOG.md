@@ -52,9 +52,26 @@ changes.
   Every active-set SQP step QP, including those in crossover's step 4 and the
   IPM→SQP handover, now logs the same figures at debug level
   (`RUST_LOG=pounce::sqp::qp=debug`), so a slow SQP can be traced to the QP
-  that cost it.
+  that cost it. That line now also splits the QP's wall time into
+  factorizations, back-solves, rank tests and everything else, and
+  `CrossoverReport::eqp` carries the same split (`linsol_times`).
 
 ### Changed
+- **A large cold step QP of the active-set SQP starts from an interior point
+  (gh #1061).** At `n + m ≥ 5000`, a step QP with no working set to start from
+  and a positive semidefinite Hessian is solved by the convex QP interior
+  point first, and the active-set solver finishes from the working set that
+  solution identifies. On the reporter's first step QP (15 000 variables,
+  10 818 equalities) the cold active-set start had not finished after 30
+  minutes; it now takes about 5 s.
+- **An infeasible step QP no longer ends the active-set SQP (gh #1061).** The
+  SQP takes the QP's minimum-violation step instead (Sℓ1QP) and reports local
+  infeasibility only when no step can reduce the linearized violation. `deb7`
+  (feasible) was reported `Infeasible_Problem_Detected` at iteration 0; it
+  now solves in nine iterations. `circle_parabola_t1p5`, which is infeasible,
+  now ends `Search_Direction_Becomes_Too_Small` under the active-set SQP
+  rather than with an infeasibility claim the first linearization did not
+  support; the default interior-point arm still reports it infeasible.
 - **The post-optimal KKT factor uses the Hessian at the converged point.**
   The main loop checks convergence before it updates the Hessian, so the
   sensitivity layer used to factor `W(w_k)` from the final Newton step
@@ -244,6 +261,17 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
+  Schur path's base factorization scanned the whole constraint matrix once per
+  active row; on the reporter's model it is now ~3× faster, and a warm step
+  QP that took 202 s takes 115 s. The refactor path's anti-cycling switch to
+  Bland's rule fired on the 50th blocking step of every solve (a `NaN`
+  comparison), which could leave a degenerate QP pivoting at zero step length
+  until its iteration limit. Long runs of degenerate pivots now add up to 16
+  tight rows per step, and the refactor path stops repeating a full step that
+  makes no further progress.
+- **The active-set SQP reports a non-finite objective as
+  `Invalid_Number_Detected`** instead of a step-size stall.
 - **The CLI no longer panics on a `.nl` whose AMPL external functions
   `$AMPLFUNC` cannot resolve (gh #1069).** The solve path and `pounce verify`
   built the model with the panicking `NlTnlp::new`, so an unset `AMPLFUNC` or
