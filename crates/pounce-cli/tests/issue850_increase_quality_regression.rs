@@ -200,7 +200,8 @@ fn the_exact_leg_is_no_longer_lost_to_the_rung() {
 }
 
 /// The lbfgs leg, which is worse and which no ladder was rescuing when gh#850
-/// was filed: with the rung on, the base solve runs to the 3000-iteration cap.
+/// was filed: with the rung on, the base solve runs to the 3000-iteration cap
+/// (since gh#1076 it fails in restoration at 250 instead; see below).
 /// The L-BFGS path is not exotic coverage — the Python frontend and the CasADi
 /// plugin both select `limited-memory` on their own whenever no exact
 /// Lagrangian Hessian is available.
@@ -222,10 +223,16 @@ fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
         "feral_increase_quality_retry=no",
         "square_system_recovery=no",
     ]);
+    // gh#1076 moved how this run fails, not whether it does. Until then it
+    // ran to the 3000 cap. With a zero pivot read under a reused MC64 scaling
+    // now refactored under a fresh one, it stops in restoration at 250
+    // instead (arm64). Both are a lost base
+    // solve, which is the premise this test needs; the second run, with the
+    // rung off, is unmoved.
     assert!(
-        iters >= 1000,
-        "premise: with the rung on this leg is expected to run to the cap; it \
-         stopped at {iters} ({exit:?}), so the regression has moved"
+        !exit.starts_with("Optimal Solution Found"),
+        "premise: with the rung on this leg is expected to lose the base \
+         solve; it reached {exit:?} at {iters}, so the regression has moved"
     );
 
     let (_out, exit, iters) = solve(&[

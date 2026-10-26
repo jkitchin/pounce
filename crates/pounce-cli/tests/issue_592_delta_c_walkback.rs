@@ -299,3 +299,54 @@ fn the_walkback_does_not_cost_the_certificate() {
         );
     }
 }
+
+/// gh#1076: the base solve reaches a known optimum on its own, without the
+/// second-opinion ladder or the `mu_strategy` fallback.
+///
+/// Through 0.13.0 it did not. The base solve ended
+/// `Error_In_Step_Computation` at iteration 157 and `mu_strategy=adaptive`
+/// rescued it at 85 (242 in all, arm64). The cause was the linear solver, not
+/// the perturbation handler: feral's value-bounded MC64 scaling cache reused
+/// an earlier matrix's scaling, the factorization read a zero pivot that a
+/// fresh scaling does not, and the `δ_x` ladder ran to `1e20` against it six
+/// times. `pounce_feral` now confirms such a zero pivot under the matrix's own
+/// scaling before reporting it.
+///
+/// The iteration count is NOT pinned tighter than the 500 above, on purpose.
+/// This model is chaotic in rounding: under the round-off screen in this
+/// file's header (17 values of `mu_init` within `1e-11` of `0.1`) the fixed
+/// build takes 85..628 iterations at a median of 224, with every run solved
+/// and none rescued. Before the fix the same screen read 4 of 17 rescued and
+/// 1 of 17 at `Maximum_Iterations_Exceeded`. The rescue-free verdict is the
+/// robust fact; one draw's iteration count is not. Measured arm64 only;
+/// x86_64 has not been measured.
+#[test]
+fn pooling_base_solve_needs_no_rescue() {
+    let r = solve(&[]);
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "pooling_rt2stp lost its certificate (dual inf {:e})",
+        r.statistics.final_dual_inf,
+    );
+    assert!(
+        is_known_optimum(r.solution.objective),
+        "pooling_rt2stp did not reach a known optimum: {}",
+        r.solution.objective,
+    );
+    assert!(
+        r.second_opinion.is_none(),
+        "the base solve needed the second-opinion ladder again: {:?}",
+        r.second_opinion,
+    );
+    assert!(
+        r.statistics.mu_strategy_fallback.is_none(),
+        "the base solve needed the mu_strategy fallback: {:?}",
+        r.statistics.mu_strategy_fallback,
+    );
+    assert!(
+        r.statistics.iteration_count < 500,
+        "pooling_rt2stp took {} iterations",
+        r.statistics.iteration_count,
+    );
+}
