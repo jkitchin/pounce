@@ -463,6 +463,22 @@ pub struct IpoptAlgorithm {
     /// rolls back to it has not left it either. Replaced at every recovery.
     last_resto_unreleased_x: Option<Box<dyn Vector>>,
     last_resto_unreleased_s: Option<Box<dyn Vector>>,
+    /// Unscaled max-norm violation of the original NLP at
+    /// [`Self::last_resto_unreleased_x`] — what the gh#1042 exit judges its
+    /// verdict on (gh#1076). Meaningful only while that point is held.
+    last_resto_unreleased_theta_unscaled: Number,
+    /// An unreleased hand-back whose shot the outer has not yet taken
+    /// (gh#1076). Set by every unreleased recovery; cleared by the first
+    /// step the line search accepts on the *original* criterion — anything
+    /// but a soft-restoration `s` step, which is accepted precisely because
+    /// the original filter would not take it. Consumed at the next
+    /// restoration entry.
+    unreleased_shot_pending: bool,
+    /// Consecutive restoration entries at which
+    /// [`Self::unreleased_shot_pending`] was still set (gh#1076). Cleared
+    /// by any step the original globalization accepts and by a released
+    /// recovery.
+    unreleased_shot_strikes: u32,
     /// Set when the gh#1042 exit below ended this solve (see
     /// [`Self::unreleased_handback_exit`]). Never cleared within a solve.
     unreleased_handback_exit: bool,
@@ -749,6 +765,9 @@ impl IpoptAlgorithm {
             last_resto_recovery_x: None,
             last_resto_unreleased_x: None,
             last_resto_unreleased_s: None,
+            last_resto_unreleased_theta_unscaled: 0.0,
+            unreleased_shot_pending: false,
+            unreleased_shot_strikes: 0,
             unreleased_handback_exit: false,
             last_resto_recovery_s: None,
             resto_no_outer_progress_count: 0,
@@ -900,6 +919,15 @@ impl IpoptAlgorithm {
     /// instant `|x|` crosses the threshold) is preserved, while a low
     /// user threshold no longer fires on the way to a finite optimum.
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
+    /// gh#1076: consecutive restoration re-entries, each after an unreleased
+    /// hand-back from which the outer accepted only soft-restoration `s`
+    /// steps, before the gh#1042 exit ends the solve. One is not enough:
+    /// `mpcc_qpec_small_biactive` under `issue_884`'s `REPRO` options takes
+    /// one `s` step from its first hand-back, re-enters, and converges after
+    /// the second (Optimal at 97, unscaled dual 1.3e-10); ending it at the
+    /// first strike sends it through a retry (69 + 19). Vanderbei brainpc0
+    /// strikes 45 times in a row, so the budget costs it two cycles.
+    const UNRELEASED_SHOT_STRIKES: u32 = 3;
     /// Most consecutive iterations the primal divergence guard will defer
     /// to a watchdog sequence before checking the iterate anyway. Upstream's
     /// `watchdog_trial_iter_max` default is 3; one spare covers the
@@ -3677,6 +3705,14 @@ impl IpoptAlgorithm {
         //     `IpoptAlgorithm::AcceptTrialPoint`, `IpIpoptAlg.cpp:664-706`).
         self.adjust_variable_bounds_for_small_slacks();
 
+        // An unreleased hand-back's shot is taken by the first step the
+        // original globalization accepts (gh#1076); a soft-restoration `s`
+        // step is accepted on the primal-dual error instead, because the
+        // filter rejected it.
+        if self.data.borrow().info_alpha_primal_char != 's' {
+            self.unreleased_shot_pending = false;
+            self.unreleased_shot_strikes = 0;
+        }
         self.data.borrow_mut().accept_trial_point();
 
         // 8. Bound multiplier kappa_sigma reset.
@@ -4260,7 +4296,32 @@ impl IpoptAlgorithm {
         // re-entry is outer iteration 378, after 13 restoration calls;
         // without this exit the solve ran 39 more, to 1073. brainpc0: 956
         // after 31 calls, against 2117 after 121.
-        let unreleased_repeat = if let (Some(px), Some(ps)) = (
+        //
+        // **The shot not taken, away from the point (gh#1076).** Comparing
+        // positions catches an outer that cannot move. It misses one that
+        // moves only on soft-restoration `s` steps — accepted on the
+        // primal-dual error *because* the original filter rejects them —
+        // and drifts back into restoration from somewhere else. That is the
+        // same verdict: no step the outer's own globalization accepts was
+        // ever taken from the hand-back. It became the common case once the
+        // release test read the filter's real quantities (#1075): Vanderbei
+        // brainpc0 then hands back a point at f ≈ 8e5 against a filter
+        // holding f ≈ 0.38, takes `s s s` back to f ≈ 0.378, re-enters, and
+        // repeats 45 times with the hand-back drifting (8.3e5 → 1.06e6), so
+        // no position test fires, until a restoration sub-solve's layer-2
+        // verdict misreads one of those feasible points as infeasible at
+        // iteration 1678. Upstream fails restoration at the first of them
+        // ("converged to a feasible point that is unacceptable to the
+        // filter", 236 iterations on 3.14.19). An `S` step — soft
+        // restoration that *also* satisfies the original criterion — or any
+        // ordinary `f`/`h`/`w` step takes the shot (`dallasl`: `s s S`).
+        //
+        // The verdict is judged on the handed-back point, not the re-entry
+        // point: the outer drifted away from a point restoration certified
+        // feasible, so the re-entry's violation says nothing about the
+        // model's feasibility. On the same-point arm the two coincide.
+        let shot_not_taken = std::mem::take(&mut self.unreleased_shot_pending);
+        let unreleased_same_point = if let (Some(px), Some(ps)) = (
             self.last_resto_unreleased_x.as_ref(),
             self.last_resto_unreleased_s.as_ref(),
         ) {
@@ -4269,6 +4330,14 @@ impl IpoptAlgorithm {
         } else {
             false
         };
+        // Counted, not one-shot: see [`Self::UNRELEASED_SHOT_STRIKES`]. A
+        // non-finite-W entry neither counts nor clears the run.
+        if shot_not_taken && !entry_nonfinite_w {
+            self.unreleased_shot_strikes += 1;
+        }
+        let shot_not_taken =
+            shot_not_taken && self.unreleased_shot_strikes >= Self::UNRELEASED_SHOT_STRIKES;
+        let unreleased_repeat = unreleased_same_point || shot_not_taken;
         if unreleased_repeat && entry_nonfinite_w {
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] re-entered restoration from an unreleased hand-back, but on a \
@@ -4276,18 +4345,28 @@ impl IpoptAlgorithm {
             );
         }
         if unreleased_repeat && !entry_nonfinite_w {
-            let verdict =
-                if reference_theta_unscaled > 0.0 && reference_theta_unscaled >= cycle_viol_tol {
-                    SolverReturn::LocalInfeasibility
-                } else {
-                    SolverReturn::RestorationFailure
-                };
-            tracing::debug!(target: "pounce::algorithm",
-                "[POUNCE] restoration handed back a converged-to-feasible point it never \
-                 released, and the outer re-entered restoration from it without leaving it \
-                 (accepted steps in between: {}); ending the solve with {:?} (gh#1042).",
-                !recovery_cycle, verdict,
-            );
+            let handback_theta = self.last_resto_unreleased_theta_unscaled;
+            let verdict = if handback_theta > 0.0 && handback_theta >= cycle_viol_tol {
+                SolverReturn::LocalInfeasibility
+            } else {
+                SolverReturn::RestorationFailure
+            };
+            if unreleased_same_point {
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] restoration handed back a converged-to-feasible point it never \
+                     released, and the outer re-entered restoration from it without leaving it \
+                     (accepted steps in between: {}); ending the solve with {:?} (gh#1042).",
+                    !recovery_cycle, verdict,
+                );
+            } else {
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] restoration handed back a converged-to-feasible point it never \
+                     released, and the outer re-entered restoration without the original \
+                     globalization accepting a step from it (soft-restoration steps only); \
+                     ending the solve with {:?} (gh#1076).",
+                    verdict,
+                );
+            }
             self.unreleased_handback_exit = true;
             return self.terminate_acceptable_or(verdict);
         }
@@ -4497,6 +4576,43 @@ impl IpoptAlgorithm {
                 // where upstream would not. See
                 // `BacktrackingLineSearch::reset_after_restoration`.
                 self.bundle.line_search.reset_after_restoration();
+                // An unreleased hand-back from a restoration that a
+                // non-finite Hessian forced at a point already feasible to
+                // `tol` restarts the filter (gh#1076). Pounce enters
+                // restoration there only to move off the kink; upstream
+                // stops (MA57: `Invalid_Number_Detected`), and would not hand
+                // a point that feasible to restoration in any case
+                // (`IpBacktrackingLineSearch.cpp:580`). Restoration has no
+                // violation to reduce, so its iterates can only *raise* the
+                // barrier objective against the entry, and the outer filter
+                // holds that entry's envelope at `θ ≈ 0` — which dominates
+                // every feasible point with a higher φ. The release test is
+                // unsatisfiable by construction, and so is every outer step
+                // from the point handed back in its place: the one shot the
+                // hand-back exists to give cannot be taken. Under the old
+                // release quantities (max-norm θ against the filter's 1-norm,
+                // plain f against the barrier objective) such points were
+                // released by accident and the question never arose. The
+                // reset is upstream's own `FilterLSAcceptor::Reset`, the one
+                // a μ decrease performs. Measured on `dallass_kink_unmerged`:
+                // Optimal at 61 with no ladder (65 on main), where the
+                // corrected test alone ended the base solve
+                // `Error_In_Step_Computation` at 116.
+                //
+                // It is scoped to the non-finite-W entry on purpose. Applied
+                // to every feasible entry it also rescues `ssebnln` (Optimal
+                // at 125 instead of the gh#1042 exit at 117 + 41), but it
+                // costs `issue_884`'s reproducer its answer: under `REPRO`
+                // options `mpcc_qpec_small_biactive` then converges with an
+                // unscaled dual infeasibility of 3.4e-4 instead of 1.3e-10.
+                if recovery_unreleased && entry_nonfinite_w && reference_theta <= outer_tol {
+                    tracing::debug!(target: "pounce::algorithm",
+                        "[POUNCE] unreleased hand-back from a restoration entered at a \
+                         feasible point (theta {:.3e} <= tol); restarting the filter (gh#1076).",
+                        reference_theta,
+                    );
+                    self.bundle.line_search.reset();
+                }
                 // The driver has staged the recovered point on
                 // `data.trial`; apply the safe-slack bound adjustment
                 // (as the main accept path does), then promote it and
@@ -4517,9 +4633,15 @@ impl IpoptAlgorithm {
                     .clone();
                 self.last_resto_recovery_x = Some(recovered.x.make_new_copy());
                 self.last_resto_recovery_s = Some(recovered.s.make_new_copy());
+                self.unreleased_shot_pending = recovery_unreleased;
+                if !recovery_unreleased {
+                    self.unreleased_shot_strikes = 0;
+                }
                 if recovery_unreleased {
                     self.last_resto_unreleased_x = Some(recovered.x.make_new_copy());
                     self.last_resto_unreleased_s = Some(recovered.s.make_new_copy());
+                    self.last_resto_unreleased_theta_unscaled =
+                        self.cq.borrow().curr_unscaled_primal_infeasibility_max();
                 } else {
                     self.last_resto_unreleased_x = None;
                     self.last_resto_unreleased_s = None;
