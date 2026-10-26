@@ -169,7 +169,7 @@ pub type RestoInnerSolver = Box<
         &IpoptDataHandle,
         &IpoptCqHandle,
         &Rc<RefCell<dyn IpoptNlp>>,
-        Option<pounce_algorithm::restoration::OrigProgressCallback>,
+        Option<pounce_algorithm::restoration::OrigProgressCheck>,
         // Suppress the nested IPM's `r`-suffixed per-iteration table when
         // false. Outer driver forwards `print_level == 0` via
         // `RestorationPhase::set_print_iter_output`.
@@ -200,7 +200,7 @@ pub struct MinC1NormRestoration {
     /// every `perform_restoration` invocation. `None` when the outer
     /// acceptor doesn't expose a filter (penalty / cg-penalty) or when
     /// the test fixture didn't wire one up.
-    pub(crate) orig_progress: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    pub(crate) orig_progress: Option<pounce_algorithm::restoration::OrigProgressCheck>,
     /// The inner IPM's `iter_count` at the end of the most recent
     /// `perform_restoration` invocation — **absolute**, in the shared
     /// numbering the `r`-suffix rows print, not the sub-solve's length
@@ -342,7 +342,7 @@ impl MinC1NormRestoration {
 impl RestorationPhase for MinC1NormRestoration {
     fn set_orig_progress_check(
         &mut self,
-        cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+        cb: Option<pounce_algorithm::restoration::OrigProgressCheck>,
     ) {
         self.orig_progress = cb;
     }

@@ -670,6 +670,39 @@ impl IpoptAlgorithm {
         self.bundle.init.least_square_report()
     }
 
+    /// Restoration's release test, evaluated in the outer filter's own
+    /// quantities. Mirrors upstream `IpRestoFilterConvCheck::TestOrigProgress`,
+    /// which sets the original problem's trial point to the restoration
+    /// iterate's `(x, s)` and reads `trial_barrier_obj()` and
+    /// `trial_constraint_violation()` from it: the barrier objective at the
+    /// outer `mu` (damping included) and the 1-norm violation, the same pair
+    /// [`Self`]'s filter entries and reference point were made with.
+    ///
+    /// The outer trial point is put back afterwards. Nothing else reads it
+    /// during restoration, but the line search that follows sets it anew and
+    /// must not find a stale restoration iterate there.
+    fn orig_progress_check(
+        &self,
+        accept: crate::restoration::OrigProgressCallback,
+    ) -> crate::restoration::OrigProgressCheck {
+        let data = Rc::clone(&self.data);
+        let cq = Rc::clone(&self.cq);
+        Box::new(move |x: &dyn Vector, s: &dyn Vector| {
+            let Some(curr) = data.borrow().curr.clone() else {
+                return false;
+            };
+            let mut probe = curr.with_x(Rc::from(x.make_new_copy()));
+            probe.s = Rc::from(s.make_new_copy());
+            let saved = data.borrow_mut().trial.replace(probe);
+            let (barr, theta) = {
+                let cq = cq.borrow();
+                (cq.trial_barrier_obj(), cq.trial_constraint_violation())
+            };
+            data.borrow_mut().trial = saved;
+            barr.is_finite() && accept(barr, theta)
+        })
+    }
+
     pub fn new(data: IpoptDataHandle, cq: IpoptCqHandle, mut bundle: AlgorithmBundle) -> Self {
         // The builder may pre-populate `bundle.search_dir` when given a
         // `LinearBackendFactory`; lift it onto the algorithm so the
@@ -4362,11 +4395,12 @@ impl IpoptAlgorithm {
             .acceptor_mut()
             .prepare_resto_phase_start(reference_theta, reference_barr);
 
-        let orig_progress_cb = self.bundle.line_search.acceptor().make_orig_progress_check(
-            reference_theta,
-            reference_barr,
-            5.0,
-        );
+        let orig_progress_cb = self
+            .bundle
+            .line_search
+            .acceptor()
+            .make_orig_progress_check(reference_theta, reference_barr, 5.0)
+            .map(|accept| self.orig_progress_check(accept));
 
         let (Some(nlp), Some(sd), Some(resto)) = (
             self.nlp.as_ref(),
