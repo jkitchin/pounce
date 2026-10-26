@@ -355,6 +355,24 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     fn provides_inertia(&self) -> bool {
         self.inner.as_ref().is_some_and(|s| s.provides_inertia())
     }
+    // gh#1076: the two hooks below have defaults on the trait, so leaving
+    // them out compiled and silently answered `false` for every pooled
+    // solve. `singularity_certified` is what the perturbation handler reads
+    // to decide whether a post-walk-back `Singular` refutes the `δ_c`
+    // withdrawal (gh#981), so a pooled batch member took a different
+    // ladder from the same model solved on a fresh backend. A wrapper that
+    // claims to delegate verbatim has to forward every method the backend
+    // overrides, not only the required ones.
+    fn singularity_certified(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|s| s.singularity_certified())
+    }
+    fn multi_solve_matches_single_solve(&self, nrhs: usize) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|s| s.multi_solve_matches_single_solve(nrhs))
+    }
     fn matrix_format(&self) -> EMatrixFormat {
         match &self.inner {
             Some(s) => s.matrix_format(),
@@ -1092,6 +1110,58 @@ mod tests {
                 cold2[i].stats.iteration_count
             );
         }
+    }
+
+    /// gh#1076: the pooled wrapper answers every hook the bare feral
+    /// backend answers. `singularity_certified` was missing and fell back
+    /// to the trait's `false`, so on a matrix with a genuine zero pivot a
+    /// pooled batch member told the perturbation handler the opposite of
+    /// what a fresh backend tells it (gh#981).
+    #[test]
+    fn pooled_backend_forwards_singularity_certified() {
+        use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
+        // [[1 1 0] [1 1 0] [0 0 1]]: rank 2, one exact zero pivot.
+        let ia: [Index; 4] = [1, 2, 2, 3];
+        let ja: [Index; 4] = [1, 1, 2, 3];
+        let vals = [1.0, 1.0, 1.0, 1.0];
+        fn factor(
+            b: &mut dyn SparseSymLinearSolverInterface,
+            ia: &[Index],
+            ja: &[Index],
+            v: &[f64],
+        ) {
+            assert_eq!(
+                b.initialize_structure(3, 4, ia, ja),
+                pounce_linsol::ESymSolverStatus::Success
+            );
+            b.values_array_mut().copy_from_slice(v);
+            let mut rhs = [1.0, 1.0, 1.0];
+            assert_eq!(
+                b.multi_solve(true, ia, ja, 1, &mut rhs, true, 1),
+                pounce_linsol::ESymSolverStatus::Singular
+            );
+        }
+        let cfg = pounce_feral::FeralConfig {
+            parallel: Some(false),
+            ..pounce_feral::FeralConfig::default()
+        };
+        let mut fresh = pounce_feral::FeralSolverInterface::with_config(cfg.clone());
+        factor(&mut fresh, &ia, &ja, &vals);
+        assert!(
+            fresh.singularity_certified(),
+            "the bare backend must certify an exact zero pivot, or this test proves nothing"
+        );
+        let pool = FeralBackendPool::serial(cfg);
+        let mut pooled = pool.acquire();
+        factor(&mut pooled, &ia, &ja, &vals);
+        assert_eq!(
+            pooled.singularity_certified(),
+            fresh.singularity_certified()
+        );
+        assert_eq!(
+            pooled.multi_solve_matches_single_solve(1),
+            fresh.multi_solve_matches_single_solve(1)
+        );
     }
 
     /// A dimension-mismatched warm entry falls back to that instance's
