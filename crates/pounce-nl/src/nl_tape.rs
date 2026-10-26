@@ -2702,21 +2702,6 @@ impl HybridTape {
     }
 }
 
-/// Pass-1 helper: per-root walk that increments `counts[ptr]` the
-/// first time a Cse pointer is encountered in this root. Recursing
-/// into the body is gated on the first visit to avoid quadratic
-/// blowup on heavily shared CSE DAGs.
-/// True when `expr` (or any subexpression) is an AMPL external function
-/// call. The hybrid summand path rejects funcalls outright, but the
-/// *promoted*-CSE branch emits a shared CSE body via `build_recursive`
-/// with an **empty** `ExternalResolver::default()` — it has no resolver
-/// of its own. Without this pre-scan a funcall buried in a promoted CSE
-/// would reach `build_recursive`'s `Expr::Funcall` arm and panic with the
-/// misleading `unresolved AMPL funcall id <n>` message, instead of the
-/// clear "not supported on the hybrid path" message the non-promoted
-/// summand path raises. Pre-scanning makes both paths report the same
-/// reason. (Funcalls are unsupported on the hybrid path regardless of
-/// whether the id would resolve, so this never rejects a buildable tape.)
 /// Whether [`HybridTape::build_multi`] can build `exprs`, i.e. none of
 /// them uses an opcode the hybrid (partial-separability) path rejects:
 /// comparisons, AND/OR/NOT, if-then-else, min/max lists, or AMPL external
@@ -2757,26 +2742,61 @@ pub fn hybrid_supported(exprs: &[Expr]) -> bool {
     true
 }
 
-fn cse_contains_funcall(expr: &Expr) -> bool {
-    match expr {
-        Expr::Funcall { .. } => true,
-        Expr::Const(_) | Expr::Var(_) => false,
-        Expr::Binary(_, a, b) => cse_contains_funcall(a) || cse_contains_funcall(b),
-        Expr::Unary(_, a) => cse_contains_funcall(a),
-        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
-            args.iter().any(cse_contains_funcall)
+/// True when `expr` (or any subexpression) is an AMPL external function
+/// call. The hybrid summand path rejects funcalls outright, but the
+/// *promoted*-CSE branch emits a shared CSE body via `build_recursive`
+/// with an **empty** `ExternalResolver::default()` — it has no resolver
+/// of its own. Without this pre-scan a funcall buried in a promoted CSE
+/// would reach `build_recursive`'s `Expr::Funcall` arm and panic with the
+/// misleading `unresolved AMPL funcall id <n>` message, instead of the
+/// clear "not supported on the hybrid path" message the non-promoted
+/// summand path raises. Pre-scanning makes both paths report the same
+/// reason. (Funcalls are unsupported on the hybrid path regardless of
+/// whether the id would resolve, so this never rejects a buildable tape.)
+///
+/// Walks with an explicit stack and visits each `Cse` body once, so the
+/// cost is linear in the DAG rather than in its unfolding (gh#1066: a
+/// chain `e = e + h*(u - e*e)` has `2^K` paths over `O(K)` nodes, and the
+/// unmemoized walk never returned at K = 40). It also stops at a body
+/// already in `built` — the prelude map — because that body was emitted
+/// by `build_recursive` under the empty resolver, which would have
+/// panicked on a funcall in it. Across one `build_multi` that bounds the
+/// total scan by the DAG too, not by DAG times promoted bodies.
+fn cse_contains_funcall(expr: &Expr, built: &HashMap<*const Expr, usize>) -> bool {
+    let mut stack: Vec<&Expr> = vec![expr];
+    let mut seen: HashSet<*const Expr> = HashSet::new();
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Funcall { .. } => return true,
+            Expr::Const(_) | Expr::Var(_) => {}
+            Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            Expr::Unary(_, a) | Expr::Not(a) => stack.push(a),
+            Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
+                stack.extend(args.iter())
+            }
+            Expr::Cond { cond, then_, else_ } => {
+                stack.push(cond);
+                stack.push(then_);
+                stack.push(else_);
+            }
+            Expr::Cse(body) => {
+                let key = Arc::as_ptr(body);
+                if !built.contains_key(&key) && seen.insert(key) {
+                    stack.push(body);
+                }
+            }
         }
-        Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-            cse_contains_funcall(a) || cse_contains_funcall(b)
-        }
-        Expr::Not(a) => cse_contains_funcall(a),
-        Expr::Cond { cond, then_, else_ } => {
-            cse_contains_funcall(cond) || cse_contains_funcall(then_) || cse_contains_funcall(else_)
-        }
-        Expr::Cse(body) => cse_contains_funcall(body),
     }
+    false
 }
 
+/// Pass-1 helper: per-root walk that increments `counts[ptr]` the
+/// first time a Cse pointer is encountered in this root. Recursing
+/// into the body is gated on the first visit to avoid quadratic
+/// blowup on heavily shared CSE DAGs.
 fn count_cse_appearances(
     e: &Expr,
     seen_in_root: &mut HashSet<*const Expr>,
@@ -2938,7 +2958,7 @@ fn build_into_summand(
                 // the clear hybrid-unsupported message the non-promoted summand
                 // path (and the `Expr::Funcall` arm at the bottom) raises.
                 // Reject it up front so both CSE paths report the same reason.
-                if cse_contains_funcall(body) {
+                if cse_contains_funcall(body, prelude_map) {
                     panic!(
                         "HybridTape: AMPL external function calls are not supported on the \
                          hybrid (partial-separability) tape path. Build with \
@@ -5231,6 +5251,62 @@ mod tests {
             add(Expr::Cse(body.clone()), cnst(2.0)),
         ];
         HybridTape::build_multi(&exprs);
+    }
+
+    /// The single-shooting chain `e_{i+1} = e_i + 0.1*(x_i - e_i*e_i)` as
+    /// `build_nl_problem` hands it over (gh#1066): each `e_i` one shared
+    /// `Cse` body, the top level split into two summands so the bodies
+    /// are promoted. `leaf` is the innermost operand.
+    fn shooting_chain_roots(k: usize, leaf: Expr) -> Vec<Expr> {
+        let step = |e: &Expr, i: usize| {
+            let sq = mul(e.clone(), e.clone());
+            mul(cnst(0.1), add(var(i), mul(cnst(-1.0), sq)))
+        };
+        let mut e = leaf;
+        for i in 0..k - 1 {
+            e = Expr::Cse(Arc::new(add(e.clone(), step(&e, i))));
+        }
+        let last = step(&e, k - 1);
+        vec![e, last]
+    }
+
+    /// gh#1066: the promoted-CSE funcall pre-scan walked every path through
+    /// the shared bodies, `2^K` of them on this chain — K = 20 took 17 s
+    /// and K = 40 never returned. It is linear in the DAG now, so K = 64
+    /// builds at once (an exponential walk would need ~`3^64` visits).
+    #[test]
+    fn hybrid_build_of_a_shared_square_chain_is_linear() {
+        let k = 64;
+        let roots = shooting_chain_roots(k, cnst(0.5));
+        let tape = HybridTape::build_multi(&roots);
+        // The value agrees with the flat tape of the whole expression.
+        let x: Vec<f64> = (0..k).map(|i| 0.01 * i as f64).collect();
+        let flat = Tape::build(&add(roots[0].clone(), roots[1].clone())).eval(&x);
+        let mut prelude = vec![0.0; tape.n_prelude_ops()];
+        tape.forward_prelude(&x, &mut prelude);
+        let mut local = vec![0.0; tape.max_summand_ops()];
+        let mut hybrid = 0.0;
+        for s in &tape.summands {
+            tape.forward_summand(s, &x, &prelude, &mut local);
+            hybrid += tape.root_value(s, &local);
+        }
+        assert!(
+            (hybrid - flat).abs() <= 1e-12 * flat.abs().max(1.0),
+            "{hybrid} vs {flat}"
+        );
+    }
+
+    /// The linear scan must still see a funcall at the bottom of the same
+    /// chain: stopping at already-built bodies and at revisits may skip
+    /// work, never a body that was not checked.
+    #[test]
+    #[should_panic(expected = "external function calls are not supported on the")]
+    fn hybrid_funcall_under_a_shared_square_chain_still_reports() {
+        let leaf = Expr::Funcall {
+            id: 0,
+            args: vec![FuncallArg::Real(var(0))],
+        };
+        HybridTape::build_multi(&shooting_chain_roots(64, leaf));
     }
 
     /// The directional hybrid Hessian (issue #557) against the flat
