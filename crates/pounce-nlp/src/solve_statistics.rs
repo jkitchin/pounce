@@ -396,6 +396,16 @@ pub struct SolveStatistics {
     /// driver, before any promotion, so the gate is unaffected.
     pub quality_escalations: Index,
 
+    /// gh#1042. This solve ended on the unreleased-hand-back exit: the
+    /// restoration phase handed back a converged-to-feasible point it never
+    /// released, and the outer phase re-entered restoration from that very
+    /// point. The status is upstream's `Restoration_Failed` (or
+    /// `Infeasible_Problem_Detected` under the gh#508 rule), and this flag is
+    /// what lets the second-opinion ladder tell that `Restoration_Failed`
+    /// from every other one: it alone opens the `mu_strategy=adaptive` rung.
+    /// Describes the returned attempt only, like `quality_escalations`.
+    pub unreleased_handback_exit: bool,
+
     /// gh#884. The solve observed the biactive dual-divergence signature:
     /// at one and the same iterate, a converged primal
     /// (`inf_pr <= dual_divergence_retry_primal_tol`), a scale-relative
@@ -557,6 +567,7 @@ impl Default for SolveStatistics {
             restoration_outer_iters: 0,
             restoration_wall_secs: 0.0,
             quality_escalations: 0,
+            unreleased_handback_exit: false,
             dual_divergence_signature: false,
             returned_run_dual_divergence_signature: false,
             dual_divergence_retry_promoted: false,

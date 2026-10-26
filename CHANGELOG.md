@@ -10,6 +10,10 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`pounce_minima::MinimaOptions` implements `PartialEq`, `Eq` and `Hash`
+  (#1065)**, so the options can key a cache. Every field takes part; floats
+  compare by bit pattern, so options holding a `NaN` equal themselves.
+  `Method` gains `Hash`.
 - **Cooperative cancellation hook for `pounce-minima` local solvers.**
   `LocalSolve::should_stop` (default `false`) lets a local solver cancel the
   search before a solve, while sampling, during MLSL clustering and start
@@ -240,6 +244,154 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The CLI no longer panics on a `.nl` whose AMPL external functions
+  `$AMPLFUNC` cannot resolve (gh #1069).** The solve path and `pounce verify`
+  built the model with the panicking `NlTnlp::new`, so an unset `AMPLFUNC` or
+  a missing library exited 101 with a backtrace hint. Both now call
+  `NlTnlp::try_new` and report it like any other load error (message on
+  stderr, exit 2); so does `load_nl_as_tnlp`.
+- **`build_nl_problem` no longer takes time exponential in depth on a
+  shared node multiplied by itself in a constraint (gh #1066).** The hybrid
+  constraint tape's funcall pre-scan walked every path through shared
+  common subexpressions rather than every node, so a single-shooting chain
+  `e = e + h*(u - e*e)` cost about 3x per step (K = 20: 17 s; K = 40 never
+  returned). It now visits each shared body once; K = 40 builds in ~2 ms.
+- **A restoration that ends on a feasible point it never released now
+  fails, as upstream's does, once the outer phase shows it cannot leave
+  that point (gh #1042).** When the restoration sub-problem converges at a
+  feasible point that the outer filter rejects (or that does not cut the
+  violation by `kappa_resto`), upstream reports `Restoration_Failed`. POUNCE
+  hands the point back so the outer phase gets one shot from it, which the
+  `dallas*` models needed before the `|x|^p·|x|^q` merge below (with it,
+  `dallasl` and `dallasm` never enter restoration). Nothing bounded the case where the outer re-entered
+  restoration from that same point. Vanderbei `brainpc0`/`brainpc1` ran 2117
+  and 1073 iterations (121 and 52 restoration calls) before another cycle
+  detector stopped them.
+  - **The new exit.** That re-entry now ends the base solve at once, through
+    the acceptable-point rollback. The verdict is `Restoration_Failed`, or
+    `Infeasible_Problem_Detected` when the point violates the user's
+    `constr_viol_tol` (gh #508).
+  - **Positions, not steps.** The test compares where the outer is with
+    where it was handed the point, so a watchdog that rolls back to it
+    counts as not having left.
+  - **Exemption.** An entry forced by a non-finite Hessian is exempt.
+  - **Upstream's second throw site** is marked the same way: an inner stop
+    at its acceptable level, feasible to `1e2·tol`.
+  - **Ladder routing.** A plain `Restoration_Failed` opens only the
+    displaced-start rung (gh #815), but this exit's opens
+    `mu_strategy=adaptive` ahead of it, and only this exit's: the solve
+    statistics carry an `unreleased_handback_exit` flag and the ladder's
+    trigger is refined from it. Before the status change this exit reported
+    `Error_In_Step_Computation`, whose one rung is adaptive, and on arm64
+    that rung recovered Vanderbei `brainpc0`/`1`/`2`, while
+    `start_point_perturbation` ran `brainpc0` to 3000 iterations and failed.
+    Every other `Restoration_Failed` keeps its ladder unchanged. Under
+    L-BFGS the rung is skipped as before, because the strategy is already
+    adaptive.
+  - **Fixture sweep, x86_64, both legs.** `ssebnln` (exact) now ends its
+    base solve `Restoration_Failed` at 117, where the near-feasible detector
+    ended it `Error_In_Step_Computation` at 138; the adaptive rung then
+    recovers it to the same objective (16170599.81,
+    `Solved_To_Acceptable_Level`) in 41, 158 iterations in total against 179.
+    `deb7` (L-BFGS) reaches the acceptable-stop site and ends its base solve
+    at 982 rather than 1206, same status, 1738 → 1514 in total. No other
+    fixture-leg moves, apart from the ladder fix below.
+  - **Vanderbei `brainpc0`–`brainpc9`, x86_64, both legs.** The exit fires
+    on `brainpc9` (L-BFGS) only, ending the base solve
+    `Solved_To_Acceptable_Level` at 1232 through the acceptable-point
+    rollback, where `main` fails it `Error_In_Step_Computation` at 1283
+    (2566 with the ladder). Every other model and leg reproduces `main`.
+    On arm64, measured under the earlier `Error_In_Step_Computation` status
+    (before the status change and the position test), base solves went
+    `brainpc0` 2117 → 956, `brainpc1` 1073 → 378, `brainpc2` 561 → 258, each
+    recovered by adaptive; the routing above keeps that rung reachable, and
+    the arm64 numbers on this head are still to be re-measured.
+- **The second-opinion ladder no longer re-runs an L-BFGS solve as its
+  `mu_strategy=adaptive` rung.** Under a limited-memory Hessian an unset
+  `mu_strategy` already resolves to adaptive (gh #746). The ladder read the
+  raw option, so the rung repeated the base solve byte-for-byte (`deb7`
+  on arm64: 1610 iterations and `f = 99.636943584` both times). It now reads the
+  resolved strategy, as the μ-strategy fallback does.
+  - Twelve L-BFGS fixture-legs drop that rung, each total falling by
+    exactly its base iteration count, with no change in verdict. For
+    example, `eigena2` 478 → 239 total and `issue_508_infeasible_gap_1em4`
+    346 → 267 total. (Thirteen before the `|x|^p·|x|^q` merge below:
+    `dallass` no longer reaches the ladder.)
+- **The active-set QP engine no longer cycles on an over-full active set
+  that FERAL 0.21 factors without complaint (gh #1042).** Bisected to the
+  FERAL 0.21 upgrade (#1038): on NETLIB `DEGEN2` (`lp_degen2`) under
+  `solver_selection=qp-active-set`, `pounce-qp`'s Schur loop reached 474
+  active slots on 473 variables. FERAL 0.20 flagged that KKT singular and the
+  rank repair pruned it; FERAL 0.21 does not flag it, so nothing pruned, the
+  next drop's step was garbage, and a drop/re-add two-cycle ran into the
+  gh #974 cycle guard as `MaxIter` — then three cold recoveries of 8530
+  iterations each (8 s and 1971 iterations before; over 300 s on the CLI,
+  about 1205 s for the `issue974` test). The Schur reset now prunes to a
+  maximal independent subset whenever more slots are active than there are
+  variables, before factoring, rather than waiting for the backend to report
+  the singularity. `lp_degen2`: 2009 iterations, `-1435.178`, about 10 s.
+  - **Since gh #1061, `lp_degen2` no longer reaches this branch.** Main now
+    answers an LP on the active-set arm with the simplex (0.4 s, 2026
+    pivots, with or without the prune), so the pruned sets are QPs':
+    `convex_qp_share1b` and `convex_qp_qscfxm1`. Measured on the merge with
+    main, under `solver_selection=qp-active-set`, counting every pass (see
+    the next entry): `share1b` 3465 → 2299 working-set changes (11.8 s →
+    7.4 s), `qscfxm1` 6644 → 3748 (89 s → 81 s), same objectives. The
+    default and `algorithm=active-set-sqp` sweeps do not move. Needs a
+    `benchmarks/qp` run before release: the degenerate Maros-Mészáros
+    family is where this branch is reached.
+  - **The prune stands down once it repeats itself.** `benchmarks/qp`
+    showed it turning two solved QPs into `MaxIter`: on `QFORPLAN` it
+    dropped slot 721, the next step re-added it at `α = 0`, the next add
+    made the set over-full again, and the prune dropped 721 again, a
+    three-iteration cycle to the limit. The row the probe calls dependent
+    need not be dependent at the ratio test's tolerance. The first time a
+    prune removes a slot it already removed in the same Schur pass, the
+    counting trigger is off for the rest of that pass. Measured alone:
+    `QFORPLAN` `MaxIter` → `Optimal` (7.4566e9, as on main), `QFFFFF80`
+    `MaxIter` → `Optimal` (main: acceptable). The wins stay: `QSCTAP2`
+    solves (1735.03; times out on main), and `QSIERRA` takes 47 s and
+    `QSCFXM2` 163 s, against 104 s and 288 s with the prune removed.
+    `QSCTAP3` times out, as on main.
+    Full `benchmarks/qp` (138, `solver_selection=qp-active-set`, against
+    main): solved 120 = 120; `QSCTAP2` gained; `DUALC8`, `QFFFFF80` and
+    `QSHIP12L` go from acceptable to optimal; wall over the common solves
+    8937 s → 7104 s; slowest movers `QSCTAP1` 11 → 28 s, `QSCRS8` 25 → 59 s,
+    `QCAPRI` 20 → 46 s. **Known regression:** `QGFRDXPN`, acceptable on main
+    (26 s), ends `ErrorInStepComputation`; tracked on gh#1042. The
+    alternative, skipping only the repeated prune, keeps `QGFRDXPN` but loses
+    `CVXQP3_M` (optimal on main) to the wall limit and slows `QCAPRI` 17× and
+    `QSEBA` 5×, so it was rejected as the larger cost.
+  - Other prune selections were measured before the gh #1061 merge: keeping
+    the most recent slots, keeping the oldest, and pruning only the `ac − n`
+    excess. Every one did more work on `share1b` (4349 to 12 016 changes) or
+    lost `lp_degen2`, which then still reached this branch.
+- **The active-set QP's iteration count now includes every pass it ran
+  (gh #1042).** Under `solver_selection=qp-active-set`, `iteration_count`
+  left work out in two places, both reporting only: no budget, cap or cycle
+  guard reads these counts.
+  - When the l1-elastic phase-1 ended infeasible, `pounce-qp` ran convex
+    feasibility passes, a Farkas probe and recovery re-solves, and returned
+    the count of the recovery that landed, or of phase-1 alone. A reduced
+    solve that `solve_pruned` discarded, and the solve the feasibility audit
+    replaced, were dropped the same way. Every pass is now added in, as the
+    homotopy and the second-order escape already were.
+  - The convex active-set driver ran up to four attempts (an LP's simplex
+    seed, unscaled, Ruiz-equilibrated, seeded last resort) plus a
+    feasibility probe, and returned the winning attempt's count. It now
+    returns their sum, the rule the convex IPM's warm/cold pair follows
+    (gh #988). The simplex seed's pivots still count only when the simplex
+    itself answers an LP.
+  - On `f1197ef3`, `share1b` reported 1711 for 4031 changes done; on main
+    before this branch, 1462 for 3465, and `qscfxm1` 2663 for 6644. The
+    fixture sweep under `qp-active-set` moves on three fixtures, both legs,
+    with status, objective and engine unchanged: `mu_fallback_point_floor`
+    34 → 87 (three attempts: 34 + 36 + 17), `nonconvex_qp_eq` 2 → 4,
+    `sqp_tiny_objective_k1em20` 0 → 1. `share1b` and `qscfxm1` do not move on
+    this branch: with the prune they no longer take the dropped paths. The
+    default and `algorithm=active-set-sqp` sweeps do not move.
+  - `POUNCE_AS_DEBUG=1` prints each driver attempt's own count as
+    `engine_iters=`.
 - **Sensitivity across a floored solve describes the reported answer, not the
   retry that lost.** `on_converged` fires once per converged attempt, and when
   a retry converges but is declined (the `mu_strategy_fallback` re-solve, the

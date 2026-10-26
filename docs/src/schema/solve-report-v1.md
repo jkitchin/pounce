@@ -195,7 +195,7 @@ the per-iteration history (which lives at the top level when present).
 
 | Field | Type | Notes |
 |---|---|---|
-| `iteration_count` | integer | Number of accepted outer iterations. On a multi-pass solve (the ℓ₁ exact-penalty ρ loop, or the plain attempt plus the ℓ₁ retry) it is the **total across all passes** (gh#987); `passes` gives the split. |
+| `iteration_count` | integer | Number of accepted outer iterations. On a multi-pass solve (the ℓ₁ exact-penalty ρ loop, or the plain attempt plus the ℓ₁ retry) it is the **total across all passes** (gh#987); `passes` gives the split. On the convex active-set arm (`solver_selection=qp-active-set`, engine `qp-active-set`) it counts active-set working-set changes, totalled the same way over every attempt the driver ran (unscaled, Ruiz-equilibrated retry, seeded last resort, and the feasibility probe) and, inside each, every l1-elastic pass — phase-1, the convex feasibility passes, the Farkas probe and each recovery re-solve — not only the pass whose point is returned (gh#1042). Simplex pivots are counted only when the simplex itself answers an LP (gh#1061); a simplex seed handed on to the active-set engine is not. No split is reported for these; `POUNCE_AS_DEBUG=1` prints each attempt's own count as `engine_iters=`. |
 | `final_objective` | float \| null | Unscaled. Matches `solution.objective`. `null` if never computed — see below. |
 | `final_scaled_objective` | float \| null | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. `null` if never computed. |
 | `final_dual_inf` | float \| null | `||∇L||∞` at termination. `null` if never computed — see below. |

@@ -397,6 +397,14 @@ where
     // box-relaxed minimizer. Nothing about a QP's route changes here.
     let lp_seeded_first =
         prob.p_lower.iter().all(|t| t.val == 0.0) && engine.use_homotopy != Some(false);
+    // Every attempt below is work this call did, whichever one is returned:
+    // the returned `iters` is their sum, the rule the IPM's warm/cold pair
+    // already follows ([`crate::ipm`]'s `merge_warm_cold`, gh #988). Charged
+    // through [`charged`] at each exit; nothing here reads `iters` to choose
+    // between attempts — [`outranks`] and [`is_final`] look at the status
+    // only (gh#1042: Maros-Meszaros `QSCFXM1` ran two attempts and reported
+    // the second's alone).
+    let mut spent: usize = 0;
     let mut lp_seeded = None;
     if lp_seeded_first {
         let seeded_engine = ActiveSetOverrides {
@@ -411,11 +419,12 @@ where
             make_backend,
             FeasibilityProbe::Allowed,
         );
+        spent += seeded.sol.iters;
         if is_final(seeded.sol.status) {
-            return seeded;
+            return charged(seeded, spent);
         }
         if crate::deadline::expired() {
-            return timed_out(seeded);
+            return charged(timed_out(seeded), spent);
         }
         lp_seeded = Some(seeded);
     }
@@ -428,15 +437,16 @@ where
         make_backend,
         FeasibilityProbe::Allowed,
     );
+    spent += att.sol.iters;
     let mut best = match lp_seeded {
         Some(seeded) if outranks(&seeded.sol, &att.sol) => seeded,
         _ => att,
     };
     if is_final(best.sol.status) {
-        return best;
+        return charged(best, spent);
     }
     if crate::deadline::expired() {
-        return timed_out(best);
+        return charged(timed_out(best), spent);
     }
 
     if opts.equilibrate {
@@ -460,6 +470,7 @@ where
         // over on the strength of the wrong problem's numbers.
         retry.sol.status =
             reverify_after_unscale(retry.sol.status, &retry.sol, prob, opts, make_backend);
+        spent += retry.sol.iters;
         // Keep the original failure when the retry also fails, so the reported
         // status describes the attempt made on the problem as the user posed it.
         // `PrimalInfeasible` and `DualInfeasible` count as wins here because
@@ -474,10 +485,10 @@ where
             best = retry;
         }
         if is_final(best.sol.status) {
-            return best;
+            return charged(best, spent);
         }
         if crate::deadline::expired() {
-            return timed_out(best);
+            return charged(timed_out(best), spent);
         }
     }
 
@@ -507,7 +518,7 @@ where
     // attempt was seeded and there is nothing new to try.
     if engine.use_homotopy != Some(false) && !lp_seeded_first {
         if crate::deadline::expired() {
-            return timed_out(best);
+            return charged(timed_out(best), spent);
         }
         let seeded_engine = ActiveSetOverrides {
             use_homotopy: Some(false),
@@ -521,12 +532,21 @@ where
             make_backend,
             FeasibilityProbe::Allowed,
         );
+        spent += seeded.sol.iters;
         if outranks(&seeded.sol, &best.sol) {
-            return seeded;
+            return charged(seeded, spent);
         }
     }
 
-    best
+    charged(best, spent)
+}
+
+/// `att`, reporting `spent` — the iterations of every attempt the driver ran,
+/// the returned one included — as its own. Reporting only: the solution, its
+/// status and its engine pair are untouched (gh#1042).
+fn charged(mut att: Attempt, spent: usize) -> Attempt {
+    att.sol.iters = spent;
+    att
 }
 
 /// Is this attempt's verdict one no later rung could improve on? Every
@@ -1178,7 +1198,7 @@ where
     if qsol.status == ActiveSetStatus::Infeasible
         && sol.status == QpStatus::NumericalFailure
         && probe == FeasibilityProbe::Allowed
-        && let Some((y, z)) = feasibility_probe(prob, opts, engine, make_backend)
+        && let Some((y, z)) = feasibility_probe(prob, opts, engine, make_backend, &mut sol.iters)
     {
         // Carry the *certifying* multipliers out, replacing the
         // objective-carrying ones that proved nothing. This keeps the invariant
@@ -1198,13 +1218,17 @@ where
     }
     debug_trace(|| {
         format!(
-            "engine={:?} -> reported={:?} kkt_err={:.3e} [{:?}] p1={} obj={:.6e}",
+            "engine={:?} -> reported={:?} kkt_err={:.3e} [{:?}] p1={} obj={:.6e} engine_iters={}",
             qsol.status,
             sol.status,
             sol.kkt_residuals(prob).kkt_error(),
             sol.kkt_residuals(prob),
             qsol.stats.used_phase1,
             sol.obj,
+            // This attempt's own engine count, before any feasibility probe
+            // is added to it: summed over every `[as]` line it is the work
+            // the driver did (gh#1042's accounting test reads it).
+            qsol.stats.n_working_set_changes,
         )
     });
     Attempt {
@@ -1390,11 +1414,15 @@ pub fn back_translate_verified_inertia(
 /// multipliers came up empty. A feasible problem reaches it only via a false
 /// `Infeasible` claim (the `DUALC1` hazard), and then the twin solve finds the
 /// feasible set is non-empty and certifies nothing — the claim stays demoted.
+///
+/// The twin solve's iterations are added to `iters`, the attempt's count,
+/// whether or not it certifies (gh#1042).
 fn feasibility_probe<F>(
     prob: &QpProblem,
     opts: &QpOptions,
     engine: &ActiveSetOverrides,
     make_backend: &mut F,
+    iters: &mut usize,
 ) -> Option<(Vec<f64>, Vec<f64>)>
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -1416,6 +1444,7 @@ where
         FeasibilityProbe::Forbidden,
     )
     .sol;
+    *iters += sol.iters;
     certifies_primal_infeasible(prob, &sol.y, &sol.z, opts).then_some((sol.y, sol.z))
 }
 

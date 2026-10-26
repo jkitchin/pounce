@@ -2699,13 +2699,7 @@ impl IpoptApplication {
     /// flipping the registered default under limited-memory would
     /// "retry" with the strategy that just failed.
     fn effective_mu_strategy_is_adaptive(&self) -> bool {
-        if let Ok((v, true)) = self.options.get_string_value("mu_strategy", "") {
-            return v == "adaptive";
-        }
-        matches!(
-            self.options.get_string_value("hessian_approximation", ""),
-            Ok((ref v, true)) if v == "limited-memory"
-        )
+        mu_strategy_resolves_to_adaptive(&self.options)
     }
 
     /// Read the μ-strategy auto-fallback switch (pounce#138).
@@ -7076,6 +7070,8 @@ impl IpoptApplication {
             // own `PdFullSpaceSolver`, so restoration sub-solves — which
             // run their own solver instance — are included.
             stats.quality_escalations = self.quality_escalations.get() as Index;
+            // gh#1042: which `Restoration_Failed` this is, for the ladder.
+            stats.unreleased_handback_exit = alg.unreleased_handback_exit();
             // gh#884. Read off the algorithm that just ran, so
             // `run_with_dual_divergence_retry` — which sits above this
             // call — can see what it observed.
@@ -10391,6 +10387,34 @@ fn finalize_via_sqp(
     snap.replay(tnlp);
     *sink.borrow_mut() = Some(snap);
     Ok(f_final)
+}
+
+/// Whether `options` resolve to the adaptive μ strategy, by the rules
+/// `IpoptApplication::algorithm_builder_from_options` applies:
+/// `mehrotra_algorithm=yes` forces adaptive; otherwise an explicit
+/// `mu_strategy` wins; otherwise a limited-memory Hessian takes upstream's
+/// quasi-Newton default, adaptive (gh#746), and anything else the registered
+/// `monotone`.
+///
+/// Anything that asks "would this solve already run adaptive?" must ask this,
+/// not read the raw `mu_strategy` string: under L-BFGS the string is unset and
+/// the solve is adaptive. The second-opinion ladder read the string, so its
+/// `mu_strategy=adaptive` rung re-ran a limited-memory base solve
+/// byte-for-byte (`deb7`, 1610 iterations and `f = 99.636943584` both times).
+pub fn mu_strategy_resolves_to_adaptive(options: &OptionsList) -> bool {
+    if matches!(
+        options.get_string_value("mehrotra_algorithm", ""),
+        Ok((ref v, true)) if v == "yes"
+    ) {
+        return true;
+    }
+    if let Ok((v, true)) = options.get_string_value("mu_strategy", "") {
+        return v == "adaptive";
+    }
+    matches!(
+        options.get_string_value("hessian_approximation", ""),
+        Ok((ref v, true)) if v == "limited-memory"
+    )
 }
 
 #[cfg(test)]

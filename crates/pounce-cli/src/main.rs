@@ -635,7 +635,7 @@ fn real_main() -> ExitCode {
                     // culprit constraint's algebra — the named-equation
                     // diagnostic of Lee et al. (2024,
                     // https://doi.org/10.69997/sct.147875). Built before
-                    // `NlTnlp::new` moves `prob`.
+                    // `NlTnlp::try_new` moves `prob`.
                     if let Some(hook) = debug_hook.as_ref() {
                         let book = pounce_cli::debug_repl::EquationBook::new(
                             prob.con_names.clone(),
@@ -675,7 +675,17 @@ fn real_main() -> ExitCode {
                     // be moved into `NlTnlp`). Saves a second full parse in the
                     // LP/QP dispatch block below.
                     nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
-                    let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    // `try_new`, not `new`: a model naming AMPL external
+                    // functions that `$AMPLFUNC` cannot resolve is a load
+                    // error like any other, not a panic (gh#1069).
+                    let nl_tnlp = match nl_reader::NlTnlp::try_new(prob) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("pounce: failed to load {}: {e}", path.display());
+                            return ExitCode::from(2);
+                        }
+                    };
+                    let nl_rc = Rc::new(RefCell::new(nl_tnlp));
                     // gh #703: `nlp_scaling_method=curvature-based` derives
                     // its factors from the model's coefficients, so it has
                     // to be switched on here — while the handle is still

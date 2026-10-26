@@ -427,7 +427,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     // bound blocks are `sigma*z_L` / `-sigma*z_U` (gh#959); the exact
     // dual-infeasibility check has to bring them into the same frame.
     let obj_sigma: Number = if prob.minimize { 1.0 } else { -1.0 };
-    let mut tnlp = nl_reader::NlTnlp::new(prob);
+    let mut tnlp = nl_reader::NlTnlp::try_new(prob)?;
 
     let info = tnlp
         .get_nlp_info()
