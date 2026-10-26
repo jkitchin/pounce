@@ -1,21 +1,26 @@
-//! gh#1061: one pivot per tight row at a degenerate vertex.
+//! gh#1061: a degenerate apex the refactor path could not leave.
 //!
 //! The reporter's cold step QP sat at a vertex where thousands of rows were
 //! tight and added them one at a time — 466 adds in 300 s, every step
 //! `α ≈ 1e-26`, the objective frozen. With Schur updates off it also stalled.
-//! Two defects, both reproduced here on a cone QP that starts at its apex,
-//! where every row is tight:
+//! Reproduced here on a cone QP that starts at its apex, where every row is
+//! tight, the Schur-off half had a defect of its own:
 //!
-//! 1. **The refactor path's anti-stall latch fired on every solve.** Its
-//!    improvement test compared against `best_obj = +∞` as `∞ − ∞ = NaN`, so
-//!    nothing ever counted as progress and Bland's rule latched on the 50th
-//!    blocking step. Bland has no EXPAND floor: from there each degenerate
-//!    pivot was a literal `α = 0`, and the 50-variable cone below ran its
-//!    whole 100 000-iteration budget at `x = 0` while the Schur path solved it
-//!    in 130 changes.
-//! 2. **One working-set change per tight row.** After
-//!    `DEGENERATE_BATCH_STREAK` degenerate adds in a row, each step now also
-//!    adds up to `DEGENERATE_BATCH_MAX` of the other rows it lands on.
+//! **The refactor path's anti-stall latch fired on every solve.** Its
+//! improvement test compared against `best_obj = +∞` as `∞ − ∞ = NaN`, so
+//! nothing ever counted as progress and Bland's rule latched on the 50th
+//! blocking step. Bland has no EXPAND floor: from there each degenerate pivot
+//! was a literal `α = 0`, and a 50-variable cone of this family ran its whole
+//! 100 000-iteration budget at `x = 0` while the Schur path solved it in 130
+//! changes.
+//!
+//! The one-pivot-per-row cost itself is not fixed here. Adding the other
+//! tight rows in batches was tried and measured: it took a 3000-variable
+//! cone from 13.4 s to 2.1 s, and it took Maros-Meszaros `QSCFXM1` from 4012
+//! to 7829 iterations and the first step QP of `deb7` from a certificate to
+//! its iteration cap, depending on when it fired. The reporter's QP is now
+//! started from an interior point instead (`pounce-algorithm`,
+//! `qp_ipm_cold_start_min_dim`), which gets it to 0 working-set changes.
 //!
 //! Counts, not times, are asserted: the counts are deterministic and say the
 //! same thing.
@@ -93,13 +98,11 @@ fn cone_solve(n: usize, m: usize, schur: bool, max_iter: u32) -> QpSolution {
     solver.solve(&qp, Some(&ws), &opts).unwrap()
 }
 
-/// Defect 1. With the latch firing on the 50th blocking step this cone runs
+/// With the latch firing on the 50th blocking step this cone runs
 /// out of any budget at the apex (measured: past 120 s, against 0.47 s and
 /// 418 working-set changes with the fix); the Schur path, which has no latch,
 /// always reached the optimum. Now both do, to the same objective — the two
-/// paths agree to ~1e-8 relative, QP-tolerance noise. The batch alone does
-/// not hide this one: at `50 × 100` it gets off the apex even with the latch
-/// broken, here it does not.
+/// paths agree to ~1e-8 relative, QP-tolerance noise.
 #[test]
 fn the_refactor_path_leaves_a_degenerate_apex() {
     let refactor = cone_solve(100, 200, false, 3000);
@@ -113,23 +116,4 @@ fn the_refactor_path_leaves_a_degenerate_apex() {
         schur.obj
     );
     assert!(refactor.obj < -0.15, "still at the apex: {}", refactor.obj);
-}
-
-/// Defect 2, on the reporter's regime: many tight rows, working set well short
-/// of `n`. Without the batch this took 423 refactorizations on the refactor
-/// path and 2082 back-solves on the Schur path; with it, 60 and 781, to the
-/// same objective (`-92.49386824945` unbatched).
-#[test]
-fn a_long_degenerate_streak_is_added_in_batches() {
-    let refactor = cone_solve(1000, 500, false, 20_000);
-    let schur = cone_solve(1000, 500, true, 20_000);
-    for sol in [&refactor, &schur] {
-        assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.stats);
-        assert!(
-            (sol.obj - -92.49386824945).abs() <= 1e-8 * 92.5,
-            "objective {}",
-            sol.obj
-        );
-    }
-    assert!(refactor.stats.n_refactor <= 150, "{:?}", refactor.stats);
 }

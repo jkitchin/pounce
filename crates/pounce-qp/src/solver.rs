@@ -1420,8 +1420,6 @@ impl ParametricActiveSetSolver {
         // same whichever path took it (gh#1061: the Schur-off run printed
         // nothing).
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
-        // Consecutive degenerate adds; see `DEGENERATE_BATCH_STREAK`.
-        let mut degenerate_streak: u32 = 0;
         // Null-iteration guard, the refactor path's half of the one
         // `solve_general_schur` documents: after a full unblocked step the
         // next `‖p‖∞` is round-off in exact arithmetic, so one that does not
@@ -1873,7 +1871,11 @@ impl ParametricActiveSetSolver {
                 *xi += alpha * pi;
             }
 
-            prev_was_null_step = blocker.is_none();
+            // Only an unshifted Newton step lands on the working set's
+            // minimizer; a δ-shifted one is a proximal step, and the next one
+            // from where it lands is no round-off. Arming the guard on it
+            // stopped a gh#1042 elastic pass short at `‖p‖∞ = 4.4e-4`.
+            prev_was_null_step = blocker.is_none() && delta == 0.0;
             if let Some(blk) = blocker {
                 match blk {
                     BlockerTarget::Bound(i, status) => {
@@ -1903,30 +1905,6 @@ impl ParametricActiveSetSolver {
                     );
                 }
                 n_changes += 1;
-                if blocker_is_degenerate(&candidates, blk, opts.feas_tol) {
-                    degenerate_streak += 1;
-                } else {
-                    degenerate_streak = 0;
-                }
-                if degenerate_streak >= DEGENERATE_BATCH_STREAK {
-                    let room = n
-                        .saturating_sub(active_slot_count(&working))
-                        .min(DEGENERATE_BATCH_MAX);
-                    let co = degenerate_co_blockers(&candidates, blk, alpha, room, opts.feas_tol);
-                    if trace && !co.is_empty() {
-                        eprintln!(
-                            "[qp] it={_iter} BATCH +{} nact={}",
-                            co.len(),
-                            active_slot_count(&working) + co.len()
-                        );
-                    }
-                    for c in co {
-                        add_blocker(qp, &mut x, &mut working, c);
-                        n_changes += 1;
-                    }
-                }
-            } else {
-                degenerate_streak = 0;
             }
 
             // EXPAND τ growth / hard reset. Per Gill-Murray-
@@ -3720,8 +3698,6 @@ impl ParametricActiveSetSolver {
         let mut streak_obj = Number::NAN;
         let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
-        // Consecutive degenerate adds; see `DEGENERATE_BATCH_STREAK`.
-        let mut degenerate_streak: u32 = 0;
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
@@ -4280,7 +4256,21 @@ impl ParametricActiveSetSolver {
                 *xi += alpha * pi;
             }
             if let Some(blk) = blocker {
-                let slot = add_blocker(qp, &mut x, &mut working, blk);
+                let slot = match blk {
+                    BlockerTarget::Bound(i, status) => {
+                        match status {
+                            BoundStatus::AtLower => x[i] = qp.xl[i],
+                            BoundStatus::AtUpper => x[i] = qp.xu[i],
+                            _ => unreachable!(),
+                        }
+                        working.bounds[i] = status;
+                        m + i
+                    }
+                    BlockerTarget::Cons(i, status) => {
+                        working.constraints[i] = status;
+                        i
+                    }
+                };
                 if trace {
                     eprintln!(
                         "[qp] it={_iter} ADD  slot={slot} alpha={alpha:.3e} obj={:.12e} nact={} pinf={:.2e}",
@@ -4289,71 +4279,37 @@ impl ParametricActiveSetSolver {
                         p_inf
                     );
                 }
-                let mut slots = vec![slot];
-                if blocker_is_degenerate(&candidates, blk, opts.feas_tol) {
-                    degenerate_streak += 1;
-                } else {
-                    degenerate_streak = 0;
+                // Same recovery as the drop side: `working` already carries this
+                // add, so a reset against it reproduces the intended state.
+                if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, true) {
+                    if !e.is_recoverable_factorization_failure() {
+                        return Err(e);
+                    }
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                        &mut pruned,
+                    )?;
+                    n_refactor += 1;
                 }
-                if degenerate_streak >= DEGENERATE_BATCH_STREAK {
-                    let room = n
-                        .saturating_sub(active_slot_count(&working))
-                        .min(DEGENERATE_BATCH_MAX);
-                    let co = degenerate_co_blockers(&candidates, blk, alpha, room, opts.feas_tol);
-                    if trace && !co.is_empty() {
-                        eprintln!(
-                            "[qp] it={_iter} BATCH +{} nact={}",
-                            co.len(),
-                            active_slot_count(&working) + co.len()
-                        );
-                    }
-                    for c in co {
-                        slots.push(add_blocker(qp, &mut x, &mut working, c));
-                    }
+                n_changes += 1;
+                n_schur_updates += 1;
+                if schur.needs_reset(opts) {
+                    self.schur_reset_rank_repaired(
+                        &mut schur,
+                        qp,
+                        &mut working,
+                        opts,
+                        &mut n_changes,
+                        &mut rank_repair_budget,
+                        &mut pruned,
+                    )?;
+                    n_refactor += 1;
                 }
-                // A reset factors `working`, which already carries every add of
-                // the batch, so once one happens the rest need no update.
-                let refactors_before = n_refactor;
-                for slot in slots {
-                    if n_refactor != refactors_before {
-                        n_changes += 1;
-                        continue;
-                    }
-                    // Same recovery as the drop side: `working` already carries
-                    // this add, so a reset against it reproduces the intended
-                    // state.
-                    if let Err(e) = schur.apply_change(&mut self.linsol, qp, slot, true) {
-                        if !e.is_recoverable_factorization_failure() {
-                            return Err(e);
-                        }
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
-                        n_refactor += 1;
-                    }
-                    n_changes += 1;
-                    n_schur_updates += 1;
-                    if schur.needs_reset(opts) {
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
-                        n_refactor += 1;
-                    }
-                }
-            } else {
-                degenerate_streak = 0;
             }
 
             // EXPAND τ growth / hard reset (same semantics as in
@@ -5402,111 +5358,6 @@ fn direction_scaled_blockers(
         }
     }
     candidates
-}
-
-/// Consecutive degenerate blocking steps after which the ratio test adds every
-/// co-blocker at once ([`degenerate_co_blockers`]).
-///
-/// A degenerate step is one whose blocker was already on its bound, so the
-/// step moves `x` by round-off and only the working set changes. A handful in
-/// a row is ordinary at any vertex where more rows meet than the working set
-/// holds, and adding those one by one is what the method does: each fresh
-/// direction can leave some of the tight rows behind. A long streak is the
-/// gh#1061 shape instead, one pivot per tight row, each a full iteration (466
-/// in 300 s, `α ≈ 1e-26`, on a step QP with ~10 800 equalities). The gate
-/// leaves every shorter run of degenerate pivots exactly as it was.
-const DEGENERATE_BATCH_STREAK: u32 = 8;
-
-/// Most co-blockers one degenerate step adds ([`degenerate_co_blockers`]).
-///
-/// Not every tight row belongs in the working set: the next direction leaves
-/// some of them, and each of those costs a drop — on an exact-Hessian QP a
-/// refactorization — to take back out. Adding every tight row at once
-/// overshoots by exactly that set. Measured on a sparse cone QP
-/// (`n = 3000`, 1500 rows tight at the start, 1140 active at the optimum,
-/// refactor path): uncapped, one step added 1404 rows, refactorizations fell
-/// 1236 → 639 and wall time *rose* 13.5 s → 20.9 s on the larger systems and
-/// the ~300 drops. Capped at 4 / 16 / 64: 10.5 s / 2.1 s / 2.4 s
-/// (refactorizations 837 / 139 / 122). 16 is the knee; the same cap took
-/// `n = 1000` from 1.49 s to 0.20 s and a 300-variable, 600-row vertex from
-/// 16.0 s to 11.8 s, to the same optimum.
-const DEGENERATE_BATCH_MAX: usize = 16;
-
-/// Put `blk` in the working set, snapping `x` onto it when it is a bound (a
-/// row is left where the step put it). Returns its Schur slot index.
-fn add_blocker(
-    qp: &QpProblem,
-    x: &mut [Number],
-    working: &mut WorkingSet,
-    blk: BlockerTarget,
-) -> usize {
-    match blk {
-        BlockerTarget::Bound(i, status) => {
-            match status {
-                BoundStatus::AtLower => x[i] = qp.xl[i],
-                BoundStatus::AtUpper => x[i] = qp.xu[i],
-                _ => unreachable!(),
-            }
-            working.bounds[i] = status;
-            qp.m + i
-        }
-        BlockerTarget::Cons(i, status) => {
-            working.constraints[i] = status;
-            i
-        }
-    }
-}
-
-/// Whether the blocker `chosen` was already on its bound: its distance to the
-/// bound along `p`, `ratio · |rate|`, is within `feas_tol`.
-fn blocker_is_degenerate(
-    candidates: &[(BlockerTarget, Number, Number)],
-    chosen: BlockerTarget,
-    feas_tol: Number,
-) -> bool {
-    let key = blocker_index_key(chosen);
-    candidates
-        .iter()
-        .find(|c| blocker_index_key(c.0) == key)
-        .is_some_and(|&(_, r, rate)| (r * rate).abs() <= feas_tol)
-}
-
-/// The candidates besides `chosen` that a degenerate step of length `alpha`
-/// also lands on: already within `feas_tol` of their bound, and still within
-/// it after the step. Largest rate first (the Harris preference, so the rows
-/// the direction presses hardest go in), at most `room` of them.
-///
-/// Adding them with the blocker is what one pivot per tight row would reach
-/// if each new direction kept pressing the same rows, in one working-set
-/// change. Each is satisfied at the new `x` to `feas_tol`, so the iterate
-/// stays feasible. A row the next direction would have left behind comes in
-/// with a multiplier of the wrong sign, and the drop test removes it on the
-/// next stationary iteration. Rows that turn out dependent are pruned by the
-/// same rank repair a degenerate single add already triggers. `room` keeps
-/// the working set at or below `n`, the most an independent set can hold.
-fn degenerate_co_blockers(
-    candidates: &[(BlockerTarget, Number, Number)],
-    chosen: BlockerTarget,
-    alpha: Number,
-    room: usize,
-    feas_tol: Number,
-) -> Vec<BlockerTarget> {
-    let key = blocker_index_key(chosen);
-    let mut co: Vec<(BlockerTarget, Number)> = candidates
-        .iter()
-        .filter(|c| blocker_index_key(c.0) != key)
-        .filter_map(|&(target, r, rate)| {
-            let before = r * rate;
-            let after = before - alpha * rate;
-            (before.abs() <= feas_tol && after.abs() <= feas_tol).then_some((target, rate))
-        })
-        .collect();
-    co.sort_by(|a, b| {
-        b.1.total_cmp(&a.1)
-            .then_with(|| blocker_index_key(a.0).cmp(&blocker_index_key(b.0)))
-    });
-    co.truncate(room);
-    co.into_iter().map(|(t, _)| t).collect()
 }
 
 fn select_blocker(

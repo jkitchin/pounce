@@ -267,9 +267,8 @@ changes.
   QP that took 202 s takes 115 s. The refactor path's anti-cycling switch to
   Bland's rule fired on the 50th blocking step of every solve (a `NaN`
   comparison), which could leave a degenerate QP pivoting at zero step length
-  until its iteration limit. Long runs of degenerate pivots now add up to 16
-  tight rows per step, and the refactor path stops repeating a full step that
-  makes no further progress.
+  until its iteration limit. The refactor path also stops repeating a full
+  step that makes no further progress.
 - **The active-set SQP reports a non-finite objective as
   `Invalid_Number_Detected`** instead of a step-size stall.
 - **The CLI no longer panics on a `.nl` whose AMPL external functions
