@@ -2502,8 +2502,7 @@ impl ParametricActiveSetSolver {
         // returned as a feasible optimum: the convex driver demoted it to
         // `NumericalFailure` and the attempt was lost. Checking the original
         // rows directly sends such a point to the recovery below instead.
-        let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol)
-            && point_is_feasible_scaled(qp, &x, opts.feas_tol);
+        let feasible = elastic_point_is_feasible(&reform, qp, &sol_aug.x, opts.feas_tol);
         if feasible {
             // Elastic drove every slack to zero ⇒ the recovered `x` is
             // feasible for the original QP, and optimal for it iff the
@@ -3572,6 +3571,10 @@ impl ParametricActiveSetSolver {
         // see `schur_reset_rank_repaired` on why a cap is needed here and not
         // on the refactor path.
         let mut rank_repair_budget: u32 = (qp.n + qp.m).min(1000) as u32;
+        #[cfg(test)]
+        if let Some(b) = issue1076_tests::budget_override() {
+            rank_repair_budget = b;
+        }
         // Set by a rank repair; tells the pin repair to re-freeze its reference
         // residuals (see there).
         let mut pruned = false;
@@ -3666,9 +3669,7 @@ impl ParametricActiveSetSolver {
         // two of its prunes the loop takes ordinary iterations whose
         // objective drifts in the last bits, and each such drift clears the
         // main guard's record (gh#1076).
-        let mut prune_streak_obj = Number::NAN;
-        let mut prune_seen_sets: std::collections::HashMap<u64, u32> =
-            std::collections::HashMap::new();
+        let mut prune_cycle = PruneCycleGuard::default();
         // A mid-pass reset that fails after the rank-repair budget is spent
         // ends the pass the way the cycle guard does: `MaxIter` at the
         // current iterate, which every caller treats as "unfinished" and
@@ -3690,9 +3691,7 @@ impl ParametricActiveSetSolver {
                     &mut pruned,
                 ) {
                     Ok(()) => {}
-                    Err(e)
-                        if rank_repair_budget == 0 && e.is_recoverable_factorization_failure() =>
-                    {
+                    Err(e) if reset_failure_ends_pass(&e, rank_repair_budget) => {
                         break $lbl;
                     }
                     Err(e) => return Err(e),
@@ -3927,21 +3926,8 @@ impl ParametricActiveSetSolver {
                 n_refactor += 1;
                 prev_was_null_step = false;
                 floor_refactored = false;
-                // Cycle guard for this branch (see `prune_seen_sets`). On
-                // QGFRDXPN's elastic phase-1 under #1047's stand-down rule it
-                // pruned 992 times in one pass, 990 of them back to the same
-                // working set, at an objective that moved only in its last
-                // bits, until the repair budget ran out.
-                let obj_now = quad_objective(qp, &x);
-                if !same_to_roundoff(obj_now, prune_streak_obj) {
-                    prune_streak_obj = obj_now;
-                    prune_seen_sets.clear();
-                }
-                let count = prune_seen_sets
-                    .entry(working_set_key(&working))
-                    .or_insert(0);
-                *count += 1;
-                if *count >= CYCLE_REPEAT_LIMIT {
+                // Cycle guard for this branch (see `PruneCycleGuard`).
+                if prune_cycle.closes(quad_objective(qp, &x), working_set_key(&working)) {
                     break;
                 }
                 continue;
@@ -4455,6 +4441,58 @@ const CYCLE_REPEAT_LIMIT: u32 = 5;
 /// drifting by about 50 ulps (QGFRDXPN, gh#1076).
 fn same_to_roundoff(a: Number, b: Number) -> bool {
     (a - b).abs() <= 64.0 * Number::EPSILON * a.abs().max(b.abs()).max(1.0)
+}
+
+/// The Schur loop's cycle guard for its stationarity prune (gh#1076).
+///
+/// That branch `continue`s before the loop's main guard, so its iterations
+/// were never recorded. Recording them there would not be enough: on
+/// QGFRDXPN's elastic phase-1 under #1047's stand-down rule it pruned 992
+/// times in one pass, 990 of them back to the same working set, but the
+/// ordinary iterations between two prunes moved the objective by about 50
+/// ulps, and the main guard (bit-for-bit) cleared its record each time. So
+/// this guard keeps its own record and compares objectives with
+/// [`same_to_roundoff`].
+#[derive(Default)]
+struct PruneCycleGuard {
+    obj: Option<Number>,
+    seen: std::collections::HashMap<u64, u32>,
+}
+
+impl PruneCycleGuard {
+    /// Record a prune that left working set `key` at objective `obj`; true
+    /// once the same set has been met `CYCLE_REPEAT_LIMIT` times with the
+    /// objective unchanged to round-off, which ends the pass as `MaxIter`.
+    fn closes(&mut self, obj: Number, key: u64) -> bool {
+        if !self.obj.is_some_and(|o| same_to_roundoff(o, obj)) {
+            self.obj = Some(obj);
+            self.seen.clear();
+        }
+        let count = self.seen.entry(key).or_insert(0);
+        *count += 1;
+        *count >= CYCLE_REPEAT_LIMIT
+    }
+}
+
+/// Whether a reset failure inside the Schur loop ends the pass as `MaxIter`
+/// rather than propagating (gh#1076): a recoverable factorization failure
+/// once the rank-repair budget is spent. The budget is a limit like
+/// `max_iter`, and is reported like one; any other failure still propagates.
+fn reset_failure_ends_pass(e: &QpError, budget: u32) -> bool {
+    budget == 0 && e.is_recoverable_factorization_failure()
+}
+
+/// Whether the elastic phase-1's point is feasible for the original QP
+/// (gh#1076). Zero slacks prove it only if the augmented rows hold at the
+/// point, and a Schur pass can return a point that has left its own active
+/// rows, so the original rows are checked directly as well.
+fn elastic_point_is_feasible(
+    reform: &crate::elastic::ElasticReformulation,
+    qp: &QpProblem,
+    x_aug: &[Number],
+    feas_tol: Number,
+) -> bool {
+    reform.is_feasible(x_aug, feas_tol) && point_is_feasible_scaled(qp, &x_aug[..qp.n], feas_tol)
 }
 
 /// A hash of which rows and bounds `working` holds active, and on which side.
@@ -7709,5 +7747,260 @@ mod issue1042_elastic_accounting_tests {
                 sol.stats.n_working_set_changes
             );
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod issue1076_tests {
+    //! gh#1076: the three defects on QGFRDXPN's failing path under
+    //! `qp-active-set`, each pinned on a constructed problem. None of them is
+    //! reached by the Maros-Meszaros corpus under the shipped prune cap, so
+    //! these are the only tests that execute them.
+    use super::*;
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    thread_local! {
+        static BUDGET: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// The rank-repair budget a Schur pass starts with, when a test set one.
+    pub(crate) fn budget_override() -> Option<u32> {
+        BUDGET.with(Cell::get)
+    }
+
+    /// `n = 2`, `H = I`, `g = (−1, −1)`, one row `x₀ + x₁ ≤ 0.5`, `x ≥ 0`.
+    /// The unconstrained minimizer `(1, 1)` violates the row, so a pass
+    /// started at the origin with nothing active adds the row.
+    fn one_row_qp<R>(f: impl FnOnce(&QpProblem) -> R) -> R {
+        let mut a = GenTMatrix::new(Rc::clone(&GenTMatrixSpace::new(
+            1,
+            2,
+            vec![1, 1],
+            vec![1, 2],
+        )));
+        a.set_values(&[1.0, 1.0]);
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]));
+        h.set_values(&[1.0, 1.0]);
+        let g = vec![-1.0, -1.0];
+        let (bl, bu) = (vec![-1e20], vec![0.5]);
+        let (xl, xu) = (vec![0.0, 0.0], vec![1e20, 1e20]);
+        let qp = QpProblem {
+            n: 2,
+            m: 1,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        f(&qp)
+    }
+
+    fn origin_start() -> QpWarmStart {
+        QpWarmStart {
+            x: vec![0.0, 0.0],
+            lambda_g: vec![0.0],
+            lambda_x: vec![0.0, 0.0],
+            working: WorkingSet::cold(2, 1),
+        }
+    }
+
+    fn reset_every_change() -> QpOptions {
+        QpOptions {
+            use_schur_updates: true,
+            max_schur_updates_before_refactor: 1,
+            ..QpOptions::default()
+        }
+    }
+
+    // ---- fix 3: phase-1 feasibility checks the rows, not only the slacks ----
+
+    /// A phase-1 point whose elastic slacks are all zero but which violates an
+    /// original row must not be called feasible. `ElasticReformulation::
+    /// is_feasible` alone (the pre-gh#1076 test) says it is: that is the
+    /// QGFRDXPN phase-1 point, with every slack at zero and the rows off by
+    /// 5.2e4. Mutation-checked: with the row check removed from
+    /// `elastic_point_is_feasible` the second assertion fails.
+    #[test]
+    fn zero_slacks_with_violated_rows_are_not_feasible() {
+        one_row_qp(|qp| {
+            let reform = crate::elastic::ElasticReformulation::build(qp, 1e6);
+            let mut x_aug = vec![0.0; reform.n_aug];
+            // x₀ + x₁ = 2 against the row's upper bound 0.5; slacks stay 0.
+            x_aug[0] = 1.0;
+            x_aug[1] = 1.0;
+            assert!(
+                reform.is_feasible(&x_aug, 1e-9),
+                "fixture: the slack-only test calls this point feasible"
+            );
+            assert!(
+                !elastic_point_is_feasible(&reform, qp, &x_aug, 1e-9),
+                "zero slacks at a point that violates its row are not feasibility"
+            );
+            // Control: a point that does satisfy the row is still feasible.
+            x_aug[0] = 0.25;
+            x_aug[1] = 0.25;
+            assert!(elastic_point_is_feasible(&reform, qp, &x_aug, 1e-9));
+        });
+    }
+
+    // ---- fix 1: the stationarity prune's cycle guard ----
+
+    /// The same working set met `CYCLE_REPEAT_LIMIT` times, with the
+    /// objective drifting only at round-off between visits, closes the cycle.
+    /// That drift is what the main guard's bit-for-bit comparison reset on
+    /// QGFRDXPN (about 50 ulps of 1.17e11). Mutation-checked: with
+    /// `same_to_roundoff` replaced by `==` this fails.
+    #[test]
+    fn a_prune_cycle_at_a_roundoff_drifting_objective_closes() {
+        let base = 1.169_328_133_459_321_9e11;
+        let ulp = base * Number::EPSILON;
+        let mut guard = PruneCycleGuard::default();
+        let drift = [0.0, 30.0, -12.0, 45.0, 3.0];
+        for (k, d) in drift.iter().enumerate() {
+            let closed = guard.closes(base + d * ulp, 0xC0FFEE);
+            assert_eq!(
+                closed,
+                k + 1 == CYCLE_REPEAT_LIMIT as usize,
+                "visit {k}: closes on the CYCLE_REPEAT_LIMIT-th visit only"
+            );
+        }
+    }
+
+    /// Real progress between visits, or a different working set, is not a
+    /// cycle: the guard must not end a pass that is getting somewhere.
+    #[test]
+    fn a_moving_objective_or_new_sets_do_not_close() {
+        let mut guard = PruneCycleGuard::default();
+        for k in 0..3 * CYCLE_REPEAT_LIMIT {
+            let obj = 100.0 - 1e-6 * Number::from(k);
+            assert!(!guard.closes(obj, 7), "objective moved at visit {k}");
+        }
+        let mut guard = PruneCycleGuard::default();
+        for k in 0..3 * CYCLE_REPEAT_LIMIT {
+            assert!(!guard.closes(5.0, u64::from(k)), "new set at visit {k}");
+        }
+    }
+
+    // ---- fix 2: an exhausted rank-repair budget ends the pass ----
+
+    /// Delegates to FERAL, but every *fresh* factorization after the first
+    /// `ok` reports the KKT singular: a backend that turns every mid-pass
+    /// reset into a recoverable failure.
+    struct SingularAfter {
+        inner: FeralSolverInterface,
+        ok: usize,
+        factored: usize,
+    }
+
+    impl SparseSymLinearSolverInterface for SingularAfter {
+        fn initialize_structure(
+            &mut self,
+            dim: Index,
+            nonzeros: Index,
+            ia: &[Index],
+            ja: &[Index],
+        ) -> ESymSolverStatus {
+            self.inner.initialize_structure(dim, nonzeros, ia, ja)
+        }
+        fn values_array_mut(&mut self) -> &mut [Number] {
+            self.inner.values_array_mut()
+        }
+        fn multi_solve(
+            &mut self,
+            new_matrix: bool,
+            ia: &[Index],
+            ja: &[Index],
+            nrhs: Index,
+            rhs_vals: &mut [Number],
+            check_neg_evals: bool,
+            number_of_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            if new_matrix {
+                self.factored += 1;
+                if self.factored > self.ok {
+                    return ESymSolverStatus::Singular;
+                }
+            }
+            self.inner.multi_solve(
+                new_matrix,
+                ia,
+                ja,
+                nrhs,
+                rhs_vals,
+                check_neg_evals,
+                number_of_neg_evals,
+            )
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            self.inner.number_of_neg_evals()
+        }
+        fn increase_quality(&mut self) -> bool {
+            self.inner.increase_quality()
+        }
+        fn provides_inertia(&self) -> bool {
+            self.inner.provides_inertia()
+        }
+        fn matrix_format(&self) -> EMatrixFormat {
+            self.inner.matrix_format()
+        }
+    }
+
+    fn singular_after_first() -> ParametricActiveSetSolver {
+        ParametricActiveSetSolver::new(Box::new(SingularAfter {
+            inner: FeralSolverInterface::new(),
+            ok: 1,
+            factored: 0,
+        }))
+    }
+
+    /// A Schur pass whose mid-pass reset fails with the rank-repair budget
+    /// already spent ends `MaxIter` at its current, feasible iterate. It used
+    /// to propagate the backend's singular-KKT error, which ended the whole
+    /// attempt (QGFRDXPN's elastic phase-1, `ErrorInStepComputation`).
+    /// Mutation-checked: with `reset_failure_ends_pass` returning `false` the
+    /// pass returns `Err(LinearSolverFailure)` and this fails.
+    #[test]
+    fn an_exhausted_repair_budget_ends_the_pass_as_max_iter() {
+        one_row_qp(|qp| {
+            let mut solver = singular_after_first();
+            BUDGET.with(|b| b.set(Some(0)));
+            let out = solver.solve_general_schur(qp, Some(&origin_start()), &reset_every_change());
+            BUDGET.with(|b| b.set(None));
+            let sol = out.expect("an exhausted budget is a limit, not a hard error");
+            assert_eq!(sol.status, QpStatus::MaxIter);
+            assert!(point_is_feasible(qp, &sol.x, 1e-9), "x = {:?}", sol.x);
+        });
+    }
+
+    /// Control for the fixture above: with budget left, the same backend's
+    /// failure is not swallowed. The repair finds nothing dependent to drop
+    /// (one row on two variables), so the error still propagates.
+    #[test]
+    fn a_reset_failure_with_budget_left_still_propagates() {
+        one_row_qp(|qp| {
+            let mut solver = singular_after_first();
+            let out = solver.solve_general_schur(qp, Some(&origin_start()), &reset_every_change());
+            assert!(
+                matches!(&out, Err(e) if e.is_recoverable_factorization_failure()),
+                "{out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn only_a_recoverable_failure_with_no_budget_ends_the_pass() {
+        let singular = QpError::LinearSolverFailure("KKT matrix is singular".into());
+        let other = QpError::LinearSolverFailure("backend fatal".into());
+        assert!(reset_failure_ends_pass(&singular, 0));
+        assert!(!reset_failure_ends_pass(&singular, 1));
+        assert!(!reset_failure_ends_pass(&other, 0));
     }
 }
