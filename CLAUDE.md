@@ -252,9 +252,11 @@ It surfaced as a CI wall-clock timeout, was misattributed, the cap was raised
 for good reasons, and the underlying defect shipped and came back as gh#592.
 
 Related: a measured regression that gets recorded as "an accepted cost of the
-fix" needs an issue and an owner. Without one it is indistinguishable from
-noise to the next reader — which is how 206 → 812 sat in a commit message
-through a release.
+fix" needs an issue and an owner — or, when nobody plans to work on it, an
+entry in `dev-notes/known-limitations.md` with the measurements, what was
+tried, and how to tell whether a fix works. The tracker holds planned work
+only. Without either it is indistinguishable from noise to the next reader —
+which is how 206 → 812 sat in a commit message through a release.
 
 Full post-mortem: `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`.
 
