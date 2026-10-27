@@ -1801,9 +1801,10 @@ where
     let mut y: Vec<f64> = y.iter().map(|v| v * inv).collect();
     let mut z: Vec<f64> = z.iter().map(|v| v * inv).collect();
 
-    // Active-set polish (gh#1085). The loop above cannot take an exp-cone
-    // model much past a scale-relative residual of ~1e-7, where the objective
-    // is right but the minimizer can be off by 1e-4. Newton on the KKT
+    // Active-set polish (gh#1085). The loop above cannot take an exp- or
+    // power-cone model much past a scale-relative residual of ~1e-7, where the
+    // objective is right but the minimizer can be off by 1e-4 (exp) or 7e-3
+    // (power). Newton on the KKT
     // equations of the active set the IPM identified reaches machine
     // precision. The proposal replaces the IPM point only when it certifies
     // tighter on the same scale-relative conic certificate (which includes
@@ -1811,7 +1812,7 @@ where
     // certificate under the same `PROMOTE_REL_TOL_FACTOR·tol` gate.
     if matches!(status, QpStatus::Optimal | QpStatus::OptimalInaccurate)
         && let Some((px, py, pz)) =
-            crate::nonsym_polish::polish_exp(prob, specs, &x, &y, &z, &mut make_backend)
+            crate::nonsym_polish::polish_nonsym(prob, specs, &x, &y, &z, &mut make_backend)
     {
         let before = true_kkt_scale_rel(prob, &cone, &x, &y, &z, 1.0);
         let after = true_kkt_scale_rel(prob, &cone, &px, &py, &pz, 1.0);
