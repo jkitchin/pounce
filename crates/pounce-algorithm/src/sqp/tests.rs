@@ -2239,3 +2239,79 @@ fn an_infeasible_nlp_is_still_reported_infeasible() {
         res.n_iter
     );
 }
+
+/// gh#1061: a warm start that pins feasibly but is far from its answer is
+/// given a budget of `WARM_ITERS_PER_SEED_ITER` active-set iterations per
+/// iteration the last interior-point seed took, and is seeded once it runs
+/// over. On the reporter's model such warm step QPs took 68–350
+/// working-set changes and up to 263 s each, where a seed takes ~20 s.
+///
+/// `min ½‖x‖² − cᵀx  s.t.  Σx ≤ 100,  0 ≤ x ≤ 1`, `0 < c < 1`, warm-started
+/// with every lower bound active: `n` drops warm, none seeded.
+#[test]
+fn a_warm_step_qp_over_its_budget_is_seeded() {
+    use crate::sqp::sqp_alg::{IpmSeed, solve_subproblem_qp};
+    use pounce_qp::{BoundStatus, WorkingSet};
+    let n = 20;
+    let c: Vec<Number> = (0..n)
+        .map(|i| 0.1 + 0.8 * i as Number / n as Number)
+        .collect();
+    let grad: Vec<Number> = c.iter().map(|v| -v).collect();
+    let idx: Vec<Index> = (1..=n as Index).collect();
+    let data = SqpQpData::build(
+        &vec![0.0; n],
+        &grad,
+        &[0.0],
+        &[NLP_LOWER_BOUND_INF],
+        &[100.0],
+        &vec![0.0; n],
+        &vec![1.0; n],
+        Triplet {
+            n_rows: 1,
+            n_cols: n,
+            irow: vec![1; n],
+            jcol: idx.clone(),
+            vals: vec![1.0; n],
+        },
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow: idx.clone(),
+            jcol: idx,
+            vals: vec![1.0; n],
+        },
+        HessianInertia::Indefinite,
+    );
+    let mut warm = WorkingSet::cold(n, 1);
+    warm.bounds.fill(BoundStatus::AtLower);
+    let opts = QpOptions {
+        use_schur_updates: false,
+        ..QpOptions::sqp_subproblem()
+    };
+    let solve = |last_seed: Option<usize>| {
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let seed = IpmSeed::default();
+        seed.last_iters.set(last_seed);
+        let sol = solve_subproblem_qp(
+            &mut solver,
+            &data,
+            data.as_qp(),
+            Some(&warm),
+            &opts,
+            Some(&seed),
+            "step QP",
+        )
+        .unwrap();
+        assert_eq!(sol.status, QpStatus::Optimal);
+        for (xi, ci) in sol.x.iter().zip(&c) {
+            assert!((xi - ci).abs() < 1e-7, "{:?}", sol.x);
+        }
+        sol
+    };
+    // No seed yet, so no budget: the warm solve drops every bound.
+    assert_eq!(solve(None).stats.n_working_set_changes, n as u32);
+    // A one-iteration seed allows four iterations: two drops, then the seed,
+    // whose working set is already right.
+    assert_eq!(solve(Some(1)).stats.n_working_set_changes, 0);
+}

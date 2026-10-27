@@ -718,7 +718,12 @@ The line search's second-order-correction QP is solved the same way. Deciding
 whether a warm working set pins feasibly skips the rank prune
 `solve_with_working_set` would run on a set that does not factor: such a set
 is reported unusable and seeded instead, which on gh#1061's correction QP cut
-the check from 44 s to 3 s.
+the check from 44 s to 1.3 s. A warm start that does pin feasibly gets a
+budget of four active-set iterations per iteration the last seed took, and is
+seeded if it runs over: an active-set iteration costs about one factorization,
+so past that point the warm solve has spent what a seed would have. gh#1061's
+handover QP needs 156 working-set changes warm (72 s, or 126 s with Schur
+updates); budgeted and then seeded it takes 34 s.
 
 A step QP whose linearization is infeasible does not end the solve. The QP's
 elastic phase returns the step that minimizes the linearized ℓ1 violation, and

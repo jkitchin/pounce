@@ -145,6 +145,23 @@ pub struct ParametricActiveSetSolver {
     /// an inertia shift, is then reported unusable at once instead of
     /// rank-tested and pruned (see `pin_working_set`, `factor_pinned_primal`).
     pin_prunes: bool,
+    /// The KKT the pinned hint was just factored on, unshifted, so the
+    /// general pass's first iteration can back-solve against it instead of
+    /// factoring the same matrix again (see `factor_pinned_primal`).
+    pinned_factor: Option<PinnedFactor>,
+}
+
+/// What identifies the factor `factor_pinned_primal` left cached: the active
+/// rows and bounds in assembly order, the matrices they were assembled from,
+/// and the factor and rank-test counts when it was made. Any other
+/// factorization or rank test since, or another problem, and it is stale.
+struct PinnedFactor {
+    cons: Vec<usize>,
+    bounds: Vec<usize>,
+    h: *const SymTMatrix,
+    a: *const GenTMatrix,
+    n_factor: u64,
+    rank_guard_calls: u32,
 }
 
 /// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
@@ -162,6 +179,7 @@ impl ParametricActiveSetSolver {
             pin_repair: false,
             count_prune: CountPrune::default(),
             pin_prunes: true,
+            pinned_factor: None,
         }
     }
 
@@ -281,8 +299,28 @@ impl ParametricActiveSetSolver {
         }
         rhs[n..n + k_c].copy_from_slice(cons_targets);
         rhs[n + k_c..n + k_c + k_b].copy_from_slice(bound_targets);
-        let delta =
-            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?;
+        self.pinned_factor = None;
+        // A caller that will not prune (`pin_prunes` off) rejects a pin that
+        // needs an inertia shift, so it gets one unshifted attempt rather
+        // than the ladder: gh#1061's correction QP spent 13 factorizations
+        // (1 + 12 shifts, 5.3 s) before declining a hint it could not use.
+        let delta = if self.pin_prunes {
+            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?
+        } else {
+            self.linsol
+                .factorize_and_solve(&kkt, &mut rhs, Some((k_c + k_b) as i32))?;
+            0.0
+        };
+        if delta == 0.0 {
+            self.pinned_factor = Some(PinnedFactor {
+                cons: active_cons.to_vec(),
+                bounds: active_bounds.to_vec(),
+                h: qp.h,
+                a: qp.a,
+                n_factor: self.linsol.time_split().n_factor,
+                rank_guard_calls: self.linsol.rank_guard_calls(),
+            });
+        }
 
         // Masked-rank-deficiency guard. No H-block δ·I shift can repair a
         // rank-deficient *constraint* block — but a large enough δ can grow
@@ -307,16 +345,8 @@ impl ParametricActiveSetSolver {
         // the one outcome this guard exists to prevent. Report it as the same
         // recoverable failure; the callers' prune then finds nothing to drop
         // either and moves to its next recovery.
-        // A caller that will not prune (`pin_prunes` off) has no use for the
-        // verdict either: a pin that needed a shift is unusable to it, and it
-        // falls back to `solve_with_working_set`, which runs this guard, if its
-        // own route declines.
-        if delta > 0.0 && !self.pin_prunes {
-            return Err(QpError::LinearSolverFailure(
-                "pinned KKT needed an inertia shift; not rank-checked for a non-pruning caller"
-                    .into(),
-            ));
-        }
+        // A caller that will not prune (`pin_prunes` off) never gets here
+        // with a shift: its single attempt above reports the failure instead.
         if delta > 0.0 {
             match checked_independent_active_subset(
                 &mut self.linsol,
@@ -1455,6 +1485,10 @@ impl ParametricActiveSetSolver {
         let mut prev_p_inf = Number::INFINITY;
         const NULL_STEP_GAIN: Number = 0.5;
         let mut factor_reusable = false;
+        // The pinned hint's factor, if it is of the matrix the first
+        // iteration is about to assemble (gh#1061: one factorization, about
+        // 0.5 s on the reporter's model, per warm-started QP).
+        let mut pinned = self.pinned_factor.take();
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1489,9 +1523,18 @@ impl ParametricActiveSetSolver {
             // and picks the next drop, so it was half of every drop's cost:
             // gh#1061's warm step QP took 306 factorizations for 156
             // working-set changes.
+            let pin_matches = pinned.take().is_some_and(|f| {
+                f.cons == active_cons
+                    && f.bounds == active_bounds
+                    && std::ptr::eq(f.h, qp.h)
+                    && std::ptr::eq(f.a, qp.a)
+                    && f.n_factor == self.linsol.time_split().n_factor
+                    && f.rank_guard_calls == self.linsol.rank_guard_calls()
+            });
             // A back-solve that fails falls through to the fresh factor.
-            let reused =
-                std::mem::take(&mut factor_reusable) && self.linsol.has_cached_factor() && {
+            let reused = (std::mem::take(&mut factor_reusable) || pin_matches)
+                && self.linsol.has_cached_factor()
+                && {
                     let mut solved = rhs.clone();
                     let ok = self.linsol.resolve(&mut solved).is_ok();
                     if ok {

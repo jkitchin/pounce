@@ -158,6 +158,13 @@ pub struct SqpOptions {
     /// active-set solve still has the last word, so the step and its
     /// multipliers are what the active-set method certifies, and anything
     /// short of an interior-point `Optimal` falls back to the cold start.
+    ///
+    /// At the same size a warm start that pins feasibly is given a budget of
+    /// four active-set iterations per iteration the last seed took, and is
+    /// seeded once it runs over. gh#1061's warm step QPs took 68–350
+    /// working-set changes and 51–263 s each at about one factorization per
+    /// change; on the handover QP the budget and the seed together take 34 s
+    /// against 72 s warm (126 s with Schur updates).
     pub qp_ipm_cold_start_min_dim: Option<usize>,
 
     /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the

@@ -73,8 +73,18 @@ changes.
   QP). Checking whether a warm working set pins feasibly no longer runs the
   pin's rank prune — a hint that does not factor is reported unusable and
   seeded instead: on the reporter's correction QP that check went from 44 s
-  (40 s of it three sparse rank tests) to 3 s, and the QP solves seeded in
+  (40 s of it three sparse rank tests) to 1.3 s, and the QP solves seeded in
   15 s to IPOPT's objective (666.85076 vs 666.85066).
+- **A large warm step QP that is far from its answer is seeded instead
+  (gh #1061).** At `n + m ≥ 5000`, where step QPs are already seeded from
+  the interior point, a warm start now gets a budget of four active-set
+  iterations per iteration the last seed took, and is seeded when it runs
+  over. On the reporter's model warm step QPs took up to 350 working-set
+  changes and 263 s each; on their handover QP the budget and the seed take
+  34 s against 72 s warm (126 s with Schur updates, the default at that
+  size). Deciding that a warm working set is unusable also no longer tries
+  inertia shifts it would reject (13 factorizations to 1), and
+  the warm solve reuses the factor that decision already computed.
 - **The active-set QP's refactor path factors once per working-set change,
   not twice (gh #1061).** After a full step that nothing blocked, the next
   iteration factored the same KKT matrix again only to read the multipliers

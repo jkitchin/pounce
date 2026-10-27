@@ -179,6 +179,7 @@ fn an_infeasible_pin_is_reported_instead_of_going_elastic() {
     dependent.bounds[0] = BoundStatus::AtUpper;
     dependent.bounds[1] = BoundStatus::AtLower;
     let guards = solver.rank_guard_calls();
+    let factors = solver.linsol_time_split().n_factor;
     let out = solver
         .solve_with_working_set_if_feasible(&qp, &dependent, &opts)
         .unwrap();
@@ -188,6 +189,14 @@ fn an_infeasible_pin_is_reported_instead_of_going_elastic() {
         out.map(|s| s.x)
     );
     assert_eq!(solver.rank_guard_calls(), guards, "the pin ran a rank test");
+    // Nor the inertia-shift ladder, which cannot repair a singular
+    // constraint block and which this caller would reject a shift from
+    // anyway: one factorization, not 1 + `inertia_max_shifts`.
+    assert_eq!(
+        solver.linsol_time_split().n_factor - factors,
+        1,
+        "the pin ran the shift ladder"
+    );
 
     let mut good = WorkingSet::cold(2, 2);
     good.constraints[0] = ConsStatus::Equality;
@@ -266,5 +275,22 @@ fn an_unblocked_step_reuses_its_factor() {
         "{} factorizations for {} drops",
         sol.stats.n_refactor,
         n
+    );
+
+    // Through `solve_with_working_set` the hint is pinned first, and that
+    // factor is of the matrix the first iteration assembles: it is reused
+    // too, so the pin costs no factorization of its own. The one beyond the
+    // drops' is the second-order check `solve` runs on an `Indefinite` QP.
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve_with_working_set(&qp, &ws.working, &opts)
+        .unwrap();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_eq!(sol.stats.n_working_set_changes, n as u32, "{:?}", sol.stats);
+    let factors = solver.linsol_time_split().n_factor;
+    assert!(
+        factors <= n as u64 + 2,
+        "{factors} factorizations, the pin's included, for {n} drops"
     );
 }
