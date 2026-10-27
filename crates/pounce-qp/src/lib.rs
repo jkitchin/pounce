@@ -80,5 +80,5 @@ pub use problem::{
     SecondOrderVerdict,
 };
 pub use qps::{QpsModel, parse_qps};
-pub use solver::{ParametricActiveSetSolver, QpSolver};
+pub use solver::{ParametricActiveSetSolver, QpSolver, SOFT_DROP_MIN_DIM};
 pub use working_set::{BoundStatus, ConsStatus, WorkingSet};

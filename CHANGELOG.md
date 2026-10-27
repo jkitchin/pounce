@@ -10,6 +10,15 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The agent skill, slash commands and pounce-studio MCP server install
+  with [knowhow](https://github.com/jkitchin/knowhow).** The Claude skill
+  moved from `studio/skill/` to `skills/pounce/` (the directory now matches
+  the skill's `name`, as the Agent Skills spec requires), so `uvx knowhow add
+  jkitchin/pounce --skill pounce` (or `npx skills add`) finds it.
+  `mcp/pounce-studio.json` declares the MCP server for `--mcp pounce-studio`;
+  it is not a root `.mcp.json`, which Claude Code would load as this repo's
+  own project config. `/adversary` and `/sens-review` gain `description`
+  frontmatter. CI runs `knowhow validate .` (pinned to a commit).
 - **`pounce_minima::MinimaOptions` implements `PartialEq`, `Eq` and `Hash`
   (#1065)**, so the options can key a cache. Every field takes part; floats
   compare by bit pattern, so options holding a `NaN` equal themselves.
@@ -57,6 +66,25 @@ changes.
   `CrossoverReport::eqp` carries the same split (`linsol_times`).
 
 ### Changed
+- **Warm-started exact-Hessian step QPs of the active-set SQP leave Schur
+  updates off at `n + m ≥ 5000` (gh #1083).** An exact Hessian makes the
+  step QP indefinite, and there every drop refactors anyway, so only adds take
+  the rank-2 update; a warm step QP is mostly drops, and paid for the larger
+  `K_max` for nothing (on the reporter's handover QP: 126 s with updates,
+  72 s without). Cold step QPs, which are add-dominated and on a nonconvex
+  model not seeded from the interior point, keep the size rule, as do
+  quasi-Newton Hessians and an explicit `sqp_qp_use_schur_updates`. On the 38
+  Maros-Mészáros problems at that size under `algorithm=active-set-sqp`, no
+  status changes.
+- **Drops on the active-set QP's refactor path reuse the symbolic analysis
+  (gh #1083).** From `n + m ≥ 5000`, a dropped row stays in the KKT pattern
+  as an inert sentinel until a row the pattern does not hold is added, so
+  each drop after the first refactors on the same pattern and FERAL skips
+  its ordering and MC64 matching, about half of every factorization at the
+  reporter's size (0.59 s → 0.24 s per drop, measured in the issue). A
+  pattern that fails to factor or needs an inertia shift sends the rest of
+  that QP solve back to the compact KKT. Below that size nothing changes: swept at every size, the change moved 12 small
+  fixture-legs and made two worse.
 - **A large cold step QP of the active-set SQP starts from an interior point
   (gh #1061).** At `n + m ≥ 5000`, a step QP with no working set to start from
   and a positive semidefinite Hessian is solved by the convex QP interior
@@ -340,6 +368,31 @@ changes.
   for a solve that spent 3402 (rung 4's flip, 82 iterations). New
   `SolveStatistics::spent_iteration_count()`. Fixture sweep: that `tot=` is
   the one line that moves.
+- **Exp- and power-cone solves return an accurate minimizer, not only an
+  accurate objective (gh #1085).** On a cond-18 Poisson regression the non-symmetric
+  HSDE driver reported `optimal` with the coefficients `1.8e-4` from the
+  minimizer, and tightening `tol` stalled at `1.5e-5`. Below `μ ~ 1e-8` its
+  dense 3×3 exp-cone scaling block loses its smallest eigenvalue to rounding,
+  so the IPM cannot go further. It now finishes with an active-set **polish**:
+  Newton on the KKT equations of the active set the IPM identified, with each
+  active exp block as the smooth equality `ψ(s) = 0`. The polished point
+  replaces the IPM's only when it certifies tighter on the same scale-relative
+  conic KKT certificate. An active power block is held on
+  `ψ(s) = s₁^α s₂^{1−α} − sign(s₀)·s₀ = 0`, which is smooth wherever
+  `s₁, s₂ > 0`. Products with a second-order block, and blocks at a cone's
+  non-smooth faces, are left as the IPM returned them. On a 20-model exp
+  corpus (Poisson, logistic, entropy, log-sum-exp; references from Clarabel at
+  `1e-13`) the median `x` error goes from `1.7e-5` to `5e-13`, and the
+  statuses go from 18 `optimal` / 2 `optimal_inaccurate` to 20 `optimal`. On
+  a 15-model power corpus (CES utility, quad-over-lin, `p`-norm regression)
+  it goes from `2.9e-5` to `1.1e-11`. That includes the adversary's CES model,
+  which returned `optimal` with `x` `6.6e-3` from its closed form. At
+  `tol = 1e-10` the power statuses go from 1 `optimal` / 14
+  `optimal_inaccurate` to 15 `optimal`. The IPM trajectory and iteration
+  counts are unchanged. That certificate's
+  dual-cone closure test also had two defects, both fixed. It required an
+  orthant multiplier `≥ +1e-9` instead of `≥ −1e-9`. It read an exp/power
+  block's exact zero multiplier as outside `K*` (`log(0/0)`).
 - **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
   Schur path's base factorization scanned the whole constraint matrix once per
   active row; on the reporter's model it is now ~3× faster, and a warm step

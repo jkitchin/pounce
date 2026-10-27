@@ -927,7 +927,12 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          the CLI fixture corpus is where they lost (eigena2, \
          qcqp_ball_cost_1e22), so small QPs keep the refactor path. An earlier \
          measurement (9 of 46 instances broken) predates the rank repair of \
-         the Schur reset and no longer reproduces. Set explicitly, yes or no \
+         the Schur reset and no longer reproduces. With an exact Hessian \
+         (sqp_hessian=exact) updates are off again for a warm-started step QP \
+         from n + m >= 5000 (gh#1083): the step QP is then indefinite, so \
+         every drop refactors anyway and only adds take the update, and warm \
+         step QPs are mostly drops (reporter's handover QP: 126 s on, 72 s \
+         off). Cold step QPs keep the size rule. Set explicitly, yes or no \
          applies at every size.",
     )?;
     r.add_lower_bounded_integer_option(

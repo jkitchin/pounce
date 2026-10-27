@@ -772,3 +772,19 @@ jobs:
 
       - name: Compile against every codegen-memory shape
         run: python3 casadi/tests/codegen_mem_compat/run.py
+
+  # `skills/pounce`, the commands in `.claude/commands/` and the server in
+  # `mcp/pounce-studio.json` are installable from this repo with
+  # `uvx knowhow add jkitchin/pounce ...`. knowhow's validator checks the
+  # skill against the Agent Skills spec (name matches its directory, a
+  # description that says when to use it) and how installers will see the
+  # repo (hidden or duplicate skills, links that break once the skill folder
+  # is copied out on its own). Pinned to a commit: this runs code from
+  # another repository.
+  agent-skills:
+    name: Validate agent skills (knowhow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx --from git+https://github.com/jkitchin/knowhow@f31e0767de9d2d8eee6f87f99c69e8609c2e672b knowhow validate .

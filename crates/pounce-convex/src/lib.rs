@@ -49,6 +49,7 @@ pub mod hsde;
 pub mod hsde_nonsym;
 pub mod hsde_scalars;
 pub mod ipm;
+pub(crate) mod nonsym_polish;
 mod options;
 pub mod presolve;
 mod psd_certificate;

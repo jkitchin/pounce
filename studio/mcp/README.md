@@ -5,7 +5,7 @@ MCP client (Claude Code, Claude Desktop, Cursor, Zed, ...) load a
 `pounce.solve-report/v1` JSON file and ask questions about convergence,
 restoration, stalls, and per-iteration state.
 
-> **Lighter-weight alternative:** [`studio/skill/`](../skill/) ships the
+> **Lighter-weight alternative:** [`skills/pounce/`](../../skills/pounce/) ships the
 > same analysis surface as a Claude skill that drives the `pounce-studio`
 > CLI directly — no Python venv, no MCP registration, one-line install
 > via `make install-skill`. Use the MCP server if you want structured
@@ -178,6 +178,24 @@ Restart the app after editing the config.
 Cursor, Zed, and Continue all consume the same `mcpServers` object —
 check each client's docs for the file path. The `command` value is
 always `pounce-studio-mcp` (or an absolute path).
+
+### Any agent, via knowhow
+
+[`mcp/pounce-studio.json`](../../mcp/pounce-studio.json) declares the
+server in the portable `.mcp.json` format, so
+[knowhow](https://github.com/jkitchin/knowhow) can write it into each
+agent's own config (Claude Code, VS Code, Cursor, Codex, Gemini CLI,
+OpenCode, ...):
+
+```bash
+uvx knowhow add jkitchin/pounce --mcp pounce-studio -a claude-code -a vscode
+```
+
+That only registers the server; `pounce-studio-mcp` must already be on
+`PATH` (build it with `./install.sh` above). The file lives in `mcp/`
+rather than a root `.mcp.json` on purpose: Claude Code loads a root
+`.mcp.json` as this repository's own project config, which would offer
+every contributor a server they have not built.
 
 ### Example prompts
 
