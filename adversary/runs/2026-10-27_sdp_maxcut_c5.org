@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: Goemans-Williamson MAX-CUT SDP on C5 (odd cycle, non-tight)
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: PSD cone + unit-diagonal equalities
+:SOURCE: Goemans & Williamson, J. ACM 42(6) 1995; Delorme & Poljak, Math. Prog. 62 (1993): cycle value (n/2)(1-cos(pi(n-1)/n))
+:KNOWN_OPTIMAL: 5(5+sqrt5)/8 = 4.5225424859
+:N_VARIABLES: 15 (svec of 5x5)
+:N_CONSTRAINTS: 5 equalities + psd(5)
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_sdp_maxcut_c5.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | optimal | 4.5225424841 | 0.0075 |
+| cvxpy/Clarabel | - | 4.5225424660 | 0.0082 |
+
+Known optimal: 5(5+sqrt5)/8 = 4.5225424859
+
+* Cross-check / Verification
+rel err vs closed form 4.0e-10, vs Clarabel 4.0e-9; recovered X has unit diagonal and lambda_min 1.0e-10. The first draft of the script carried an arithmetic slip in the reference (25(5+sqrt5)/32 = 5.65); both solvers agreed on 4.5225 and the slip was corrected in the script (FORMULATION/REFERENCE error of the probe, not of pounce). Complements the logged C4 (bipartite, tight) run: here the relaxation is strictly above the integer cut 4.
+
+* Verdict
+PASS

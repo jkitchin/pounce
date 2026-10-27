@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: Weighted sum |x_i-a_i|^1.25 s.t. sum x = 0 (alpha = 0.8)
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: fractional-p epigraph, alpha=0.8 untested before
+:SOURCE: closed-form KKT: d_i = -k w_i^{-1/(p-1)}, f* = S^p/(sum w^{-1/(p-1)})^{p-1}
+:KNOWN_OPTIMAL: 2.017734840098
+:N_VARIABLES: 10
+:N_CONSTRAINTS: 5 pow(0.8) triples + 1 equality
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_power_weighted_p125_deviation.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | optimal | 2.017734831543 | 0.0056 |
+| cvxpy/Clarabel | - | 2.017734840243 | 0.0036 |
+
+Known optimal: 2.017734840098
+
+* Cross-check / Verification
+obj rel err 4.2e-9 vs closed form; x inf err 1.6e-5 (Clarabel 4.5e-6). The x-precision gap the log has noted on the power cone since 2026-08-02 is visible again (flat objective near p=1), within the 1e-4 x tolerance.
+
+* Verdict
+PASS

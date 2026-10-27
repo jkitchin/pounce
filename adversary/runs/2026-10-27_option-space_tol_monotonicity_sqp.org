@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: Tolerance monotonicity + Schur kill-switch over the fixture corpus, IPM and active-set-SQP arms
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: option-space
+:CLASS: tolerance monotonicity (feasible direction) + kill-switch
+:SOURCE: dev-notes/termination-status-invariants.md; PRs #1074/#1082 (gh#1061)
+:KNOWN_OPTIMAL: verdict must not enter the 200/500 bands
+:N_VARIABLES: corpus
+:N_CONSTRAINTS: corpus
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_option-space_tol_monotonicity_sqp.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | - | 3318 cells: 3207 Succeeded, 63 Acceptable, 45 SearchDirTooSmall (400), 2 RestorationFailed, 1 Infeasible | 26 s wall (8 threads) |
+| own-arm baseline; Ipopt 3.14 on the flagged cells | - | - | - |
+
+Known optimal: verdict must not enter the 200/500 bands
+
+* Cross-check / Verification
+90 (fixture, arm) pairs that solve at defaults (51 ipm, 39 sqp) x 6 tolerances x 6 values, + sqp_qp_use_schur_updates yes/no. Three cells cross a band. (1) square_flowsheet_resto at tol=1e-10/1e-12 -> RestorationFailed (500): restoration parks at cv 3.1e-10 on a square model, pounce returns the pre-restoration point (cv 1.1e5, pounce verify REJECTED) while Ipopt reports 'Feasible point for square problem found' at 6.8e-10. Suspect: conv_check.rs layer-1 square target min(tol, constr_viol_tol). Filed #1084; note issue_815_restoration_ladder.rs pins this outcome at tol=1e-11 as intended, so the issue is framed as a contract question. (2) circle_parabola_t0p5 at tol<=1e-11 -> InfeasibleProblemDetected: NOT filed. The base trajectory ends infeasible at every tol (default success is the mu_strategy=adaptive ladder rung); at tol<=1e-11 that rung no longer recovers; the saddle-escape rung finds no descent at (0,-1) (strict local minimizer of the violation); Ipopt stops at the same point at every tol. The 400-band cells (tol=1e-12 almost everywhere) are allowed downgrades. No SQP-arm cell and no Schur kill-switch cell crossed a band.
+
+* Verdict
+SOLVER_BUG (filed #1084) + 1 REVIEW

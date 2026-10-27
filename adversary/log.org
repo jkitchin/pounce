@@ -10,18 +10,18 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |     15 | 2026-08-06 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
+| nlp             |     16 | 2026-10-27 |  #1084 OPEN 2026-10-27 (tol=1e-10 on square_flowsheet_resto -> Restoration_Failed 500, a 3e-10-feasible point discarded; Ipopt succeeds); #1086 OPEN 2026-10-27 (console-script shim ~175 ms package import, Pyomo solves ~30x Ipopt); #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6); #495 (Phase 6 reports no bound multiplier for an eliminated column whose bound is active — pre-existing, off-by-default option); #496 FIXED 2026-08-06 (LP IPM false primal-infeasible on rank-deficient equalities inconsistent by 1 ULP; the row-constant-fold probe's baseline-skip count goes 1 -> 0 at seed 987654321); #508 FIXED 2026-08-06 (infeasible models returned solve_result_num=500 because the ipopt_alg.rs cycle-exit threshold was built from tol, not constr_viol_tol; probe re-run on the fix: 20 failing cells -> 0) |
 | lp              |     14 | 2026-08-11 | —             |
 | qp              |     14 | 2026-08-11 | —             |
-| qp-active-set   |     14 | 2026-08-05 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
+| qp-active-set   |     15 | 2026-10-27 | both probes now CLEAN. Fixed this run: false-Infeasible (14 -> 0), `Optimal` at violating points, rank-deficiency hard errors, unvalidated working-set status codes, and IpoptGet/SetWorkingSet reporting the SQP's internal row order instead of the caller's. Nothing open. |
 | socp            |     14 | 2026-08-11 | —             |
-| exp             |     13 | 2026-08-12 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |     13 | 2026-08-12 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
-| sdp             |     14 | 2026-08-11 | —             |
-| sos             |     13 | 2026-08-09 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
-| autoroute       |     13 | 2026-08-12 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, linear-objective ball SOCP (dual-norm), and the warm_start+auto routing-decision contract)  |
-| batch           |     13 | 2026-08-12 | —             |
-| diff            |     14 | 2026-08-11 | — (all PASS; near-LICQ degradation expected, not filed; two independent same-day probes: QP layer dx/dc (closed-form+FD 3-way agreement) and SOCP layer dx/dh; torch CPU wheel still untested) |
+| exp             |     14 | 2026-10-27 |  #1085 OPEN 2026-10-27 (Poisson GLM: beta accurate to ~1e-4 at status optimal on a cond-18 problem; tightening stalls at 1.5e-5); #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |     14 | 2026-10-27 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
+| sdp             |     15 | 2026-10-27 | — |
+| sos             |     14 | 2026-10-27 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders); certified-bound tol/order sweep (2026-08-09) confirms `certified` contract holds, and independently reproduces the documented uncertified-bound-can-exceed-true-min failure mode on an unconstrained non-SOS polynomial (expected per sos.py docstring, not filed) |
+| autoroute       |     14 | 2026-10-27 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, bounds-only diagonal QP, an equality+inactive-inequality non-box QP, linear-objective ball SOCP (dual-norm), and the warm_start+auto routing-decision contract) |
+| batch           |     14 | 2026-10-27 | — |
+| diff            |     15 | 2026-10-27 |  torch side probed 2026-10-27 (simplex projection, gradcheck + JAX parity) PASS; — (all PASS; near-LICQ degradation expected, not filed; two independent same-day probes: QP layer dx/dc (closed-form+FD 3-way agreement) and SOCP layer dx/dh; torch CPU wheel still untested) |
 | sensitivity     |     13 | 2026-08-12 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean; envelope-theorem dObj/db=-y* confirmed 2026-08-08; kkt_cond_estimate/ill_conditioned two-clause #328 contract reproduced clean 2026-08-12) |
 
 * Problem Index
@@ -5819,5 +5819,165 @@ the documented design). No defect -- positive confirmation of #328's fix.
 :ORACLE: none needed — internal consistency against a per-family baseline
 :VERDICT: PASS for 6 of 8 switches; 2 opt-in costs unrecorded in their option docs
 :REPORT: [[file:runs/2026-08-31_optionsweep_kill_switches.py]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Goemans-Williamson MAX-CUT SDP on C5 (odd cycle, non-tight) (sdp/PSD cone + unit-diagonal equalities) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Goemans & Williamson, J. ACM 42(6) 1995; Delorme & Poljak, Math. Prog. 62 (1993): cycle value (n/2)(1-cos(pi(n-1)/n))
+:KNOWN_OPTIMAL: 5(5+sqrt5)/8 = 4.5225424859
+:POUNCE_OBJECTIVE: 4.5225424841
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0075
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 4.5225424660
+:ORACLE_TIME: 0.0082
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_sdp_maxcut_c5.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Weighted sum |x_i-a_i|^1.25 s.t. sum x = 0 (alpha = 0.8) (power/fractional-p epigraph) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: closed-form KKT: d_i = -k w_i^{-1/(p-1)}, f* = S^p/(sum w^{-1/(p-1)})^{p-1}
+:KNOWN_OPTIMAL: 2.017734840098
+:POUNCE_OBJECTIVE: 2.017734831543
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0056
+:ORACLE: cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 2.017734840243
+:ORACLE_TIME: 0.0036
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_power_weighted_p125_deviation.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Poisson regression MLE via exp cones (m=8) (exp/GLM log-likelihood) - FAIL
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: McCullagh & Nelder, Generalized Linear Models, 2nd ed., sec 6.2
+:KNOWN_OPTIMAL: no closed form; Newton reference beta* (grad 9e-17), f*=2.868797215
+:POUNCE_OBJECTIVE: 2.868797162 (f(beta)=2.868797284)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0034
+:ORACLE: cvxpy/Clarabel + scipy/Newton
+:ORACLE_OBJECTIVE: 2.868797227
+:ORACLE_TIME: 0.0069
+:VERDICT: SOLVER_LIMITATION (filed #1085)
+:REPORT: [[file:runs/2026-10-27_exp_poisson_regression.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Dixon-Price n=3 global polynomial min (sos/unconstrained quartic) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: Dixon & Price, JOTA 61(3) 1989; Jamil & Yang 2013 fn 48
+:KNOWN_OPTIMAL: 0
+:POUNCE_OBJECTIVE: lower_bound 1.53e-7 (certified=False)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0164
+:ORACLE: multistart BFGS (343 starts)
+:ORACLE_OBJECTIVE: 3.2e-16
+:ORACLE_TIME: 0.80
+:VERDICT: PASS (TOLERANCE note)
+:REPORT: [[file:runs/2026-10-27_sos_dixon_price_n3.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] torch QP layer: projection onto a simplex, full Jacobians dx/dc, dx/db, dx/dh (diff/torch layer (first torch-side probe)) - PASS
+:PROPERTIES:
+:FAMILY: diff
+:SOURCE: Held, Wolfe & Crowder 1974; Duchi et al. ICML 2008 (closed-form Jacobians on the support)
+:KNOWN_OPTIMAL: closed-form x* and Jacobians
+:POUNCE_OBJECTIVE: x err 3.9e-9
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0083 (fwd), 0.023 (3 Jacobians)
+:ORACLE: closed form + central FD re-solve + JAX layer
+:ORACLE_OBJECTIVE: -
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_diff_torch_simplex_projection.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] solve_qp_batch over interleaved LPs (P=None) and QPs (batch/heterogeneous P-presence incl. degenerate LP vertex and non-unique LP face) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: Hillier & Lieberman Wyndor Glass (LP0=36); degenerate vertex LP1=-2/3; face LP2=1; QP items oracle-only
+:KNOWN_OPTIMAL: -36, -2/3, 1 (LPs)
+:POUNCE_OBJECTIVE: all 6 optimal
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0031 (batch) / 0.0061 (single)
+:ORACLE: scipy linprog (HiGHS) + cvxpy/Clarabel
+:ORACLE_OBJECTIVE: matching
+:ORACLE_TIME: 0.0131
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_batch_mixed_lp_qp.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Auto-routing on a QP with a fixed variable and a duplicated equality row (autoroute/QP -> qp-ipm) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: closed-form projection, x*=(1,0.1,0.4,0.5), f*=0.2
+:KNOWN_OPTIMAL: 0.2
+:POUNCE_OBJECTIVE: 0.200000000204
+:POUNCE_STATUS: success (route qp-ipm)
+:POUNCE_TIME: 0.0018
+:ORACLE: forced nlp + cvxpy/Clarabel
+:ORACLE_OBJECTIVE: 0.200000000138
+:ORACLE_TIME: 0.0028
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_autoroute_fixed_var_dup_eq_qp.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Projection onto a cone apex with 12 active constraints in R^6 (dual non-unique) (qp-active-set/primal- and dual-degenerate vertex (gh#1061 / PR #1082 territory)) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: Moreau decomposition (Moreau 1962): proj_K(x0)=0 iff x0 in polar cone
+:KNOWN_OPTIMAL: 1/2||x0||^2 = 1.4025, x*=0
+:POUNCE_OBJECTIVE: 1.4025000000 (x err 5e-27)
+:POUNCE_STATUS: optimal / SolveSucceeded
+:POUNCE_TIME: 0.0019
+:ORACLE: cvxpy/Clarabel + IPM paths + pounce verify
+:ORACLE_OBJECTIVE: 1.4025000008
+:ORACLE_TIME: 0.0027
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-10-27_qp-active-set_degenerate_vertex_projection.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Tolerance monotonicity + Schur kill-switch over the fixture corpus, IPM and active-set-SQP arms (option-space/tolerance monotonicity (feasible direction) + kill-switch) - FAIL
+:PROPERTIES:
+:FAMILY: option-space
+:SOURCE: dev-notes/termination-status-invariants.md; PRs #1074/#1082 (gh#1061)
+:KNOWN_OPTIMAL: verdict must not enter the 200/500 bands
+:POUNCE_OBJECTIVE: 3318 cells: 3207 Succeeded, 63 Acceptable, 45 SearchDirTooSmall (400), 2 RestorationFailed, 1 Infeasible
+:POUNCE_STATUS: -
+:POUNCE_TIME: 26 s wall (8 threads)
+:ORACLE: own-arm baseline; Ipopt 3.14 on the flagged cells
+:ORACLE_OBJECTIVE: -
+:ORACLE_TIME: -
+:VERDICT: SOLVER_BUG (filed #1084) + 1 REVIEW
+:REPORT: [[file:runs/2026-10-27_option-space_tol_monotonicity_sqp.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-10-27] Hock-Schittkowski 100 (nlp/inequality-constrained nonconvex polynomial) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: Hock & Schittkowski, LNEMS 187 (1981), problem 100, p.111
+:KNOWN_OPTIMAL: 680.6300573
+:POUNCE_OBJECTIVE: 680.6300559283
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.36 (Pyomo) / 0.007 (binary)
+:ORACLE: Ipopt 3.14 via Pyomo + pounce verify
+:ORACLE_OBJECTIVE: 680.6300559283
+:ORACLE_TIME: 0.011
+:VERDICT: PASS (correctness) + PERFORMANCE_REGRESSION (filed #1086)
+:REPORT: [[file:runs/2026-10-27_nlp_hs100.org]]
 :COVERAGE_TARGET: -
 :END:

@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: solve_qp_batch over interleaved LPs (P=None) and QPs
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: heterogeneous P-presence incl. degenerate LP vertex and non-unique LP face
+:SOURCE: Hillier & Lieberman Wyndor Glass (LP0=36); degenerate vertex LP1=-2/3; face LP2=1; QP items oracle-only
+:KNOWN_OPTIMAL: -36, -2/3, 1 (LPs)
+:N_VARIABLES: 2-5 per item
+:N_CONSTRAINTS: 1-5 per item
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_batch_mixed_lp_qp.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | optimal | all 6 optimal | 0.0031 (batch) / 0.0061 (single) |
+| scipy linprog (HiGHS) + cvxpy/Clarabel | - | matching | 0.0131 |
+
+Known optimal: -36, -2/3, 1 (LPs)
+
+* Cross-check / Verification
+Max rel err vs oracle 1.2e-9; batch and single solve_qp bit-identical (|xb-xs| = 0) on every item, including the degenerate and non-unique-face LPs.
+
+* Verdict
+PASS

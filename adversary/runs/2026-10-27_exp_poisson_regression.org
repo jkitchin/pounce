@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: Poisson regression MLE via exp cones (m=8)
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: GLM log-likelihood, one Kexp triple per observation
+:SOURCE: McCullagh & Nelder, Generalized Linear Models, 2nd ed., sec 6.2
+:KNOWN_OPTIMAL: no closed form; Newton reference beta* (grad 9e-17), f*=2.868797215
+:N_VARIABLES: 11
+:N_CONSTRAINTS: 8 exp triples
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_exp_poisson_regression.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | optimal | 2.868797162 (f(beta)=2.868797284) | 0.0034 |
+| cvxpy/Clarabel + scipy/Newton | - | 2.868797227 | 0.0069 |
+
+Known optimal: no closed form; Newton reference beta* (grad 9e-17), f*=2.868797215
+
+* Cross-check / Verification
+Objective agrees to 2e-8, but beta is off by 1.8e-4 with first-order residual 4.3e-4 at status optimal, on a Hessian of condition number 18. tol=1e-10/1e-12 both stall at optimal_inaccurate, x err 1.5e-5 (identical). Clarabel tightened reaches 1.2e-8 and SCS eps=1e-10 reaches 1.6e-14. Exp-cone counterpart of the power-cone x-precision gap; filed as #1085 (enhancement).
+
+* Verdict
+SOLVER_LIMITATION (filed #1085)

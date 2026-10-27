@@ -1,0 +1,34 @@
+#+TITLE: Adversary Run: Hock-Schittkowski 100
+#+DATE: <2026-10-27>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: inequality-constrained nonconvex polynomial, via Pyomo/.nl
+:SOURCE: Hock & Schittkowski, LNEMS 187 (1981), problem 100, p.111
+:KNOWN_OPTIMAL: 680.6300573
+:N_VARIABLES: 7
+:N_CONSTRAINTS: 4 inequalities
+:SELECTED_BY: log-rotation (no coverage report present: target/coverage-combined/core.txt missing)
+:COVERAGE_TARGET: -
+:END:
+
+Script: [[file:2026-10-27_nlp_hs100.py]] (the docstring holds the formulation).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver | Status | Objective | Wall Time (s) |
+|--------+--------+-----------+---------------|
+| pounce | optimal | 680.6300559283 | 0.36 (Pyomo) / 0.007 (binary) |
+| Ipopt 3.14 via Pyomo + pounce verify | - | 680.6300559283 | 0.011 |
+
+Known optimal: 680.6300573
+
+* Cross-check / Verification
+pounce and Ipopt agree to 1e-16 in x; pounce verify exit 0. Wall time via Pyomo is 0.36 s vs Ipopt 0.011 s; the binary takes 0.007 s. The cost is the console script pounce._cli:main importing the pounce package (~175 ms, scipy included) before exec, paid twice per Pyomo solve (version probe + solve). Applies to released wheels. Filed #1086.
+
+* Verdict
+PASS (correctness) + PERFORMANCE_REGRESSION (filed #1086)
