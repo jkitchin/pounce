@@ -39,6 +39,17 @@ struct Recording {
     inner: FeralSolverInterface,
     current: Pattern,
     factored: Arc<Mutex<Vec<Pattern>>>,
+    /// `Some(n)`: report `Singular` for every factorization whose pattern
+    /// carries a diagonal entry past the `n` H rows, which only a pattern
+    /// holding sentinels does.
+    fail_sentinels: Option<usize>,
+}
+
+/// Whether `p` carries a diagonal entry past the first `n` rows.
+fn has_sentinel_diagonal(p: &Pattern, n: usize) -> bool {
+    p.0.iter()
+        .zip(&p.1)
+        .any(|(&i, &j)| i == j && i as usize > n)
 }
 
 impl SparseSymLinearSolverInterface for Recording {
@@ -67,6 +78,12 @@ impl SparseSymLinearSolverInterface for Recording {
     ) -> ESymSolverStatus {
         if new_matrix {
             self.factored.lock().unwrap().push(self.current.clone());
+            if self
+                .fail_sentinels
+                .is_some_and(|n| has_sentinel_diagonal(&self.current, n))
+            {
+                return ESymSolverStatus::Singular;
+            }
         }
         self.inner.multi_solve(
             new_matrix,
@@ -98,6 +115,11 @@ impl SparseSymLinearSolverInterface for Recording {
 /// With `cap` large nothing else ever blocks, so the run is drops only; with
 /// `cap` binding, the general row is added part-way through.
 fn solve(c: &[Number], cap: Number, schur: bool) -> (QpSolution, Vec<Pattern>) {
+    solve_with(c, cap, schur, false)
+}
+
+/// [`solve`], with the backend failing every sentinel pattern when `fail`.
+fn solve_with(c: &[Number], cap: Number, schur: bool, fail: bool) -> (QpSolution, Vec<Pattern>) {
     let n = c.len();
     let idx: Vec<Index> = (1..=n as Index).collect();
     let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, idx.clone(), idx.clone()));
@@ -132,6 +154,7 @@ fn solve(c: &[Number], cap: Number, schur: bool) -> (QpSolution, Vec<Pattern>) {
         inner: FeralSolverInterface::new(),
         current: (Vec::new(), Vec::new()),
         factored: Arc::clone(&factored),
+        fail_sentinels: fail.then_some(n),
     }));
     let opts = QpOptions {
         use_schur_updates: schur,
@@ -228,4 +251,30 @@ fn small_qps_keep_the_compact_pattern() {
     assert_eq!(sol.status, QpStatus::Optimal);
     assert_eq!(patterns.len(), drops + 1, "factorizations");
     assert_eq!(pattern_changes(&patterns), drops);
+}
+
+/// A sentinel pattern the backend will not factor costs one inertia ladder per
+/// pass, not one per drop: the first failure sends the rest of the pass to the
+/// compact path, and the answer is the compact path's.
+#[test]
+fn a_failing_sentinel_pattern_falls_back_once_per_pass() {
+    let c = padded(SOFT_DROP_MIN_DIM);
+    let (sol, patterns) = solve_with(&c, 1e3, false, true);
+    let (schur, _) = solve(&c, 1e3, true);
+    assert_same_answer(&sol, &schur);
+
+    let n = c.len();
+    let soft: Vec<bool> = patterns
+        .iter()
+        .map(|p| has_sentinel_diagonal(p, n))
+        .collect();
+    let attempts = soft.iter().filter(|&&s| s).count();
+    let runs = soft.windows(2).filter(|w| !w[0] && w[1]).count();
+    assert!(attempts >= 1, "the first drop tried a sentinel pattern");
+    assert_eq!(runs, 1, "and no later drop did: {soft:?}");
+    let ladder = 1 + QpOptions::default().inertia_max_shifts as usize;
+    assert!(
+        attempts <= ladder,
+        "{attempts} attempts, one ladder is {ladder}"
+    );
 }

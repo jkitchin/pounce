@@ -62,11 +62,14 @@ impl SqpHessianSource {
 /// Default for [`SqpOptions::qp_schur_min_dim`].
 pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 500;
 
-/// Default for [`SqpOptions::qp_schur_exact_max_dim`]: the size from which
-/// cold step QPs are seeded from the interior point
-/// ([`DEFAULT_QP_IPM_COLD_START_MIN_DIM`]), which leaves the warm,
-/// drop-dominated ones.
-pub const DEFAULT_QP_SCHUR_EXACT_MAX_DIM: usize = DEFAULT_QP_IPM_COLD_START_MIN_DIM;
+/// Default for [`SqpOptions::qp_schur_exact_max_dim`]. The rule applies to
+/// warm step QPs only, so it does not depend on whether cold ones are seeded;
+/// the value is the size `algorithm=active-set-sqp` already treats as large
+/// (the interior-point handover and cold-start seed start here too), and it
+/// matches `pounce_qp::SOFT_DROP_MIN_DIM`, so a warm exact-Hessian QP moved to
+/// the refactor path gets the soft drops as well. The reporter's QP is
+/// `n + m = 28 950`; nothing measured places the crossover more precisely.
+pub const DEFAULT_QP_SCHUR_EXACT_MAX_DIM: usize = 5000;
 
 /// Default for [`SqpOptions::qp_ipm_cold_start_min_dim`]: the size at which
 /// `algorithm=active-set-sqp` already starts from the interior point and
@@ -146,9 +149,9 @@ pub struct SqpOptions {
     /// behind the default.
     pub qp_schur_min_dim: Option<usize>,
 
-    /// Size from which an exact-Hessian step QP goes back to the refactor
-    /// path, overriding [`Self::qp_schur_min_dim`] (gh#1083). `None` never
-    /// does; quasi-Newton Hessians are not affected.
+    /// Size from which a *warm-started* exact-Hessian step QP goes back to the
+    /// refactor path, overriding [`Self::qp_schur_min_dim`] (gh#1083). `None`
+    /// never does; cold solves and quasi-Newton Hessians are not affected.
     ///
     /// An exact Hessian makes the step QP's inertia hint `Indefinite`, and
     /// on such a QP every *drop* refactors anyway (a rank-2 update cannot
@@ -157,10 +160,15 @@ pub struct SqpOptions {
     /// Schur updates against 4181 working-set changes over a 3600 s run. It
     /// then pays for the larger `K_max` — dearer factorizations, back-solves
     /// about 5× the small KKT's — and gets almost nothing back; on its
-    /// handover QP the Schur path took 126 s, the refactor path 72 s. The
-    /// add-dominated QPs the Schur path does win on, cold ones, are seeded
-    /// from the interior point at this size
-    /// ([`Self::qp_ipm_cold_start_min_dim`]) and barely pivot.
+    /// handover QP the Schur path took 126 s, the refactor path 72 s.
+    ///
+    /// Cold solves keep the size rule because they are the add-dominated
+    /// ones the Schur path wins on, and at this size they are not all seeded
+    /// from the interior point: the seed needs a Hessian certified PSD
+    /// (`ipm_seeded_step_qp`), so on a nonconvex model a cold step QP still
+    /// builds its working set one add at a time. The lifted L-BFGS step QP
+    /// (`n > sqp_dense_hessian_max_n`) is `Indefinite` too, so its drops also
+    /// refactor; it is left out because nothing here measures it.
     pub qp_schur_exact_max_dim: Option<usize>,
 
     /// NLP size `n + m` from which a step QP solved without a working set,
@@ -227,14 +235,21 @@ impl Default for SqpOptions {
 }
 
 impl SqpOptions {
-    /// Whether a step QP of size `n + m = dim` under `hessian` uses Schur
-    /// updates, by [`Self::qp_schur_min_dim`] and
-    /// [`Self::qp_schur_exact_max_dim`]; `None` when the caller chose
-    /// (`qp_schur_min_dim` unset), which leaves the QP options as given.
-    pub fn step_qp_schur_updates(&self, dim: usize, hessian: SqpHessianSource) -> Option<bool> {
+    /// Whether a step QP of size `n + m = dim` under `hessian`, warm-started
+    /// from a working set when `warm`, uses Schur updates, by
+    /// [`Self::qp_schur_min_dim`] and [`Self::qp_schur_exact_max_dim`];
+    /// `None` when the caller chose (`qp_schur_min_dim` unset), which leaves
+    /// the QP options as given.
+    pub fn step_qp_schur_updates(
+        &self,
+        dim: usize,
+        hessian: SqpHessianSource,
+        warm: bool,
+    ) -> Option<bool> {
         let min = self.qp_schur_min_dim?;
-        let exact_off =
-            !hessian.is_quasi_newton() && self.qp_schur_exact_max_dim.is_some_and(|d| dim >= d);
+        let exact_off = warm
+            && !hessian.is_quasi_newton()
+            && self.qp_schur_exact_max_dim.is_some_and(|d| dim >= d);
         Some(dim >= min && !exact_off)
     }
 }
@@ -243,42 +258,40 @@ impl SqpOptions {
 mod tests {
     use super::*;
 
-    /// gh#1083: from the exact-Hessian ceiling on, an exact-Hessian step QP
-    /// is back on the refactor path; a quasi-Newton one keeps its updates,
-    /// and an explicit choice (`qp_schur_min_dim = None`) is left alone.
+    /// gh#1083: from the exact-Hessian ceiling on, a warm-started
+    /// exact-Hessian step QP is back on the refactor path. A cold one keeps
+    /// its updates (it is the add-dominated case, and not seeded on a
+    /// nonconvex model), as does a quasi-Newton one, and an explicit choice
+    /// (`qp_schur_min_dim = None`) is left alone.
     #[test]
-    fn exact_hessian_step_qps_leave_schur_updates_off_at_size() {
+    fn warm_exact_hessian_step_qps_leave_schur_updates_off_at_size() {
         let o = SqpOptions::default();
         let (lo, hi) = (DEFAULT_QP_SCHUR_MIN_DIM, DEFAULT_QP_SCHUR_EXACT_MAX_DIM);
         assert!(lo < hi);
         for h in [SqpHessianSource::Exact, SqpHessianSource::DampedBfgs] {
-            assert_eq!(o.step_qp_schur_updates(lo - 1, h), Some(false), "{h:?}");
-            assert_eq!(o.step_qp_schur_updates(lo, h), Some(true), "{h:?}");
-            assert_eq!(o.step_qp_schur_updates(hi - 1, h), Some(true), "{h:?}");
+            for warm in [false, true] {
+                let at = |d| o.step_qp_schur_updates(d, h, warm);
+                assert_eq!(at(lo - 1), Some(false), "{h:?} warm={warm}");
+                assert_eq!(at(lo), Some(true), "{h:?} warm={warm}");
+                assert_eq!(at(hi - 1), Some(true), "{h:?} warm={warm}");
+            }
         }
-        assert_eq!(
-            o.step_qp_schur_updates(hi, SqpHessianSource::Exact),
-            Some(false)
-        );
+        let exact = SqpHessianSource::Exact;
+        assert_eq!(o.step_qp_schur_updates(hi, exact, true), Some(false));
+        assert_eq!(o.step_qp_schur_updates(hi, exact, false), Some(true));
         for h in [SqpHessianSource::DampedBfgs, SqpHessianSource::Lbfgs] {
-            assert_eq!(o.step_qp_schur_updates(hi, h), Some(true), "{h:?}");
+            assert_eq!(o.step_qp_schur_updates(hi, h, true), Some(true), "{h:?}");
         }
 
         let unset = SqpOptions {
             qp_schur_exact_max_dim: None,
             ..SqpOptions::default()
         };
-        assert_eq!(
-            unset.step_qp_schur_updates(hi, SqpHessianSource::Exact),
-            Some(true)
-        );
+        assert_eq!(unset.step_qp_schur_updates(hi, exact, true), Some(true));
         let chosen = SqpOptions {
             qp_schur_min_dim: None,
             ..SqpOptions::default()
         };
-        assert_eq!(
-            chosen.step_qp_schur_updates(hi, SqpHessianSource::Exact),
-            None
-        );
+        assert_eq!(chosen.step_qp_schur_updates(hi, exact, true), None);
     }
 }

@@ -221,14 +221,14 @@ impl SqpAlgorithm {
         // The step-QP iteration budget scales with the problem unless the
         // caller set one (gh#1054). Restored afterwards, so a reused driver
         // re-derives it for the next problem's size.
-        // Schur updates likewise follow the size, and the Hessian source,
-        // when the caller left them to the driver
-        // (`SqpOptions::step_qp_schur_updates`).
+        // Schur updates likewise follow the size when the caller left them
+        // to the driver (`SqpOptions::step_qp_schur_updates`). This is the
+        // cold rule; a warm-started step QP may override it (`warm_qp_opts`).
         let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
-        if let Some(on) = self
-            .opts
-            .step_qp_schur_updates(nlp.n() + nlp.m(), self.opts.hessian)
+        if let Some(on) =
+            self.opts
+                .step_qp_schur_updates(nlp.n() + nlp.m(), self.opts.hessian, false)
         {
             self.qp_opts.use_schur_updates = on;
         }
@@ -869,11 +869,12 @@ impl SqpAlgorithm {
                 // The cold error is still propagated: if a clean start fails
                 // too, the failure is not about the working set and there is
                 // nothing further to try here.
+                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m);
                 match solve_step_qp(
                     &mut self.qp_solver,
                     &qp_data,
                     Some(prev_w),
-                    &self.qp_opts,
+                    warm_opts.as_ref().unwrap_or(&self.qp_opts),
                     self.ipm_cold_start.then_some(&self.ipm_seed),
                 ) {
                     Ok(v) => v,
@@ -1265,8 +1266,10 @@ impl SqpAlgorithm {
             // original QP's set, which belongs to the rejected step).
             let mut soc_working: Option<WorkingSet> = None;
             let ls = {
+                // Warm-started from the step QP's own working set.
+                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m);
                 let qp_solver = &mut self.qp_solver;
-                let qp_opts = &self.qp_opts;
+                let qp_opts = warm_opts.as_ref().unwrap_or(&self.qp_opts);
                 let deadline = self.opts.deadline.as_ref();
                 let seed = self.ipm_cold_start.then_some(&self.ipm_seed);
                 let qp_data_ref = &qp_data;
@@ -1442,6 +1445,19 @@ impl SqpAlgorithm {
             final_constr_viol,
             working_set: iter.working,
         })
+    }
+
+    /// `base` with Schur updates set for a warm-started step QP of size
+    /// `dim` (`SqpOptions::step_qp_schur_updates`), or `None` when that is
+    /// what `base` already says. `base` carries the cold rule.
+    fn warm_qp_opts(&self, base: &QpOptions, dim: usize) -> Option<QpOptions> {
+        self.opts
+            .step_qp_schur_updates(dim, self.opts.hessian, true)
+            .filter(|&on| on != base.use_schur_updates)
+            .map(|on| QpOptions {
+                use_schur_updates: on,
+                ..base.clone()
+            })
     }
 
     fn hessian_inertia(&self) -> HessianInertia {

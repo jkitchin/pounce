@@ -176,9 +176,11 @@ struct PinnedFactor {
 /// regressions: `pooling_rt2stp` went from `MaximumIterationsExceeded` to a
 /// local-infeasibility verdict on both legs, and the SQP stopped solving
 /// `square_flowsheet_resto` (exact), which fell through to `square-lm`.
-/// 5000 is the size from which an exact-Hessian step QP is on this path by
-/// default (`pounce-algorithm`'s `qp_schur_exact_max_dim`), which is where
-/// the drop-dominated QPs the change is for are solved.
+/// 5000 is the size from which a warm-started exact-Hessian step QP is on
+/// this path by default (`pounce-algorithm`'s `qp_schur_exact_max_dim`),
+/// which is where the drop-dominated QPs the change is for are solved. The
+/// two are separate constants measured on different `n + m`: this one the
+/// QP's (an elastic or lifted QP is larger than its NLP), that one the NLP's.
 pub const SOFT_DROP_MIN_DIM: usize = 5000;
 
 /// Whether every entry of the ascending list `sub` occurs in the ascending
@@ -1525,6 +1527,11 @@ impl ParametricActiveSetSolver {
         // symbolic analysis (`assemble_soft_active_set_kkt`). Rebuilt from
         // the working set whenever an active row is missing from it.
         let mut pattern: Option<(Vec<usize>, Vec<usize>)> = None;
+        // Cleared for the rest of the pass the first time a pattern holding
+        // sentinels fails to factor or needs an inertia shift: from then on
+        // the pass is the compact path, so the backend's view of that matrix
+        // costs at most one inertia ladder per pass.
+        let mut soft_ok = n + m >= SOFT_DROP_MIN_DIM;
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1544,9 +1551,17 @@ impl ParametricActiveSetSolver {
                 (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k_c = active_cons.len();
             let k_b = active_bounds.len();
-            if n + m < SOFT_DROP_MIN_DIM
+            // Rebuilt when an active row is missing from the pattern, and when
+            // sentinels outnumber a quarter of it: each keeps its row's
+            // dimension and fill in every factorization and back-solve, so on
+            // a long run of drops they would eat the saving.
+            if !soft_ok
                 || !pattern.as_ref().is_some_and(|(pc, pb)| {
-                    is_sorted_subset(&active_cons, pc) && is_sorted_subset(&active_bounds, pb)
+                    let held = pc.len() + pb.len();
+                    // The subset test first: it is what makes `held ≥ k_c + k_b`.
+                    is_sorted_subset(&active_cons, pc)
+                        && is_sorted_subset(&active_bounds, pb)
+                        && 4 * (held - k_c - k_b) <= held
                 })
             {
                 pattern = Some((active_cons.clone(), active_bounds.clone()));
@@ -1631,6 +1646,7 @@ impl ParametricActiveSetSolver {
                 // Whatever the failure, the compact pattern gets the first
                 // say, exactly as before gh#1083.
                 Err(e) if e.is_recoverable_factorization_failure() && !compact => {
+                    soft_ok = false;
                     pattern = None;
                     continue;
                 }
@@ -1697,6 +1713,15 @@ impl ParametricActiveSetSolver {
             };
             if !reused {
                 n_refactor += 1;
+            }
+            // A shift the compact matrix may not have needed: the explicit
+            // zeros a sentinel pattern carries can move the backend's inertia
+            // verdict (`assemble_soft_active_set_kkt`). The compact pattern
+            // decides instead.
+            if delta > 0.0 && !compact {
+                soft_ok = false;
+                pattern = None;
+                continue;
             }
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(

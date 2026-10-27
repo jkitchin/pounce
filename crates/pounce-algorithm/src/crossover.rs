@@ -595,9 +595,10 @@ where
                 Some(qp_opts.time_limit.map_or(left, |own| own.min(left)))
             }),
         // The SQP driver's rule for Schur updates (gh#1054, gh#1083), so the
-        // step-3 QP of a large model does not refactor per pivot.
+        // step-3 QP of a large model does not refactor per pivot. It is
+        // warm-started from the estimated working set.
         use_schur_updates: sqp_opts
-            .step_qp_schur_updates(n + m, sqp_opts.hessian)
+            .step_qp_schur_updates(n + m, sqp_opts.hessian, true)
             .unwrap_or(qp_opts.use_schur_updates),
         ..qp_opts.clone()
     };

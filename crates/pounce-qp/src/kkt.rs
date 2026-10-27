@@ -366,6 +366,16 @@ pub(crate) fn assemble_soft_active_set_kkt(
     let n = qp.n;
     let k_c = pattern_cons.len();
     let k_b = pattern_bounds.len();
+    // With every row live this is `assemble_active_set_kkt`'s matrix
+    // exactly: an explicit zero on the diagonal of a live row is not inert
+    // to FERAL. A fixture whose elastic phase 1 reached a square vertex
+    // (190 rows, `n = 190`) factored it without one and exhausted inertia
+    // control, to `δ = 1e14`, with one. So the diagonals arrive with the
+    // first sentinel, whose factorization is the one drop that pays a
+    // symbolic analysis.
+    if cons_live.iter().chain(bounds_live.iter()).all(|&l| l) {
+        return assemble_active_set_kkt(qp, pattern_cons, pattern_bounds);
+    }
     let mut kkt = assemble_active_set_kkt(qp, pattern_cons, pattern_bounds);
 
     // `assemble_active_set_kkt` emits the A_W entries in triplet order and
@@ -386,16 +396,6 @@ pub(crate) fn assemble_soft_active_set_kkt(
         }
     }
 
-    // With every row live this is `assemble_active_set_kkt`'s matrix
-    // exactly: an explicit zero on the diagonal of a live row is not inert
-    // to FERAL. A fixture whose elastic phase 1 reached a square vertex
-    // (190 rows, `n = 190`) factored it without one and exhausted inertia
-    // control, to `δ = 1e14`, with one. So the diagonals arrive with the
-    // first sentinel, whose factorization is the one drop that pays a
-    // symbolic analysis.
-    if cons_live.iter().chain(bounds_live.iter()).all(|&l| l) {
-        return kkt;
-    }
     let live = cons_live.iter().chain(bounds_live.iter());
     for (j, &live) in live.enumerate() {
         let p = (n + j + 1) as Index;
