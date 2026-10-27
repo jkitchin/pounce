@@ -49,6 +49,13 @@
 //!   exemption, which nothing else in the corpus reaches.
 //! * `degenerate_start_infeasible`: immediate re-entries from *released*
 //!   recoveries. Those belong to the 10-strike counter, not this rule.
+//! * Vanderbei `brainpc0` (not in the repository; the ignored test below runs
+//!   it when `POUNCE_VANDERBEI_NL` names a directory holding it): the gh#1076
+//!   arm. The outer leaves each hand-back on soft-restoration `s` steps alone
+//!   and re-enters restoration from elsewhere, so the position test never
+//!   fires. No fixture in the corpus reaches that arm. `dallass_kink_unmerged`
+//!   above also pins gh#1076's filter restart: without it the base solve ends
+//!   `Error_In_Step_Computation` at 116 and needs the ladder.
 //!
 //! Upstream's second throw site — an inner acceptable stop at a feasible
 //! point — is reached by `deb7` on L-BFGS and by nothing else in the corpus,
@@ -64,6 +71,7 @@ use std::process::Command;
 const HANDBACK: &str = "restoration converged to a feasible point it did not release";
 const EXIT: &str = "re-entered restoration from it without leaving it";
 const NEAR_FEASIBLE_EXIT: &str = "near-feasible restoration re-entry";
+const SHOT_EXIT: &str = "without the original globalization accepting a step from it";
 
 fn fixture(name: &str) -> PathBuf {
     test_file("fixtures", name)
@@ -322,4 +330,59 @@ fn a_released_recovery_the_outer_cannot_leave_is_not_claimed() {
         run.report.solution.status,
         pounce_nlp::return_codes::ApplicationReturnStatus::InfeasibleProblemDetected
     ));
+}
+
+/// The gh#1076 arm, on the model it was built for. Vanderbei `brainpc0` is
+/// 6905 variables and not in the repository, so this runs only with
+/// `POUNCE_VANDERBEI_NL` naming a directory that holds `brainpc0.nl`
+/// (`cargo test -- --ignored`).
+///
+/// Its restorations are entered at infeasible points and hand back points
+/// feasible to ~1e-7 at f ≈ 8e5, which the outer filter, holding f ≈ 0.38,
+/// rejects. The outer leaves each on `s` steps alone and re-enters from
+/// elsewhere, so the position test never fires; without the arm that cycle ran
+/// 45 restoration calls to a false `Infeasible_Problem_Detected` at 1678 (108
+/// s in total on arm64). The arm must end the base solve with upstream's
+/// verdict, `Restoration_Failed`, judged on the feasible hand-back rather than
+/// the re-entry point, so the ladder opens `mu_strategy=adaptive` first, which
+/// recovers it (365 + 24 iterations). Judging it on the re-entry point reads
+/// `Infeasible_Problem_Detected` and opens `feral_scaling=mc64` first (+403).
+#[test]
+#[ignore = "needs Vanderbei brainpc0.nl via POUNCE_VANDERBEI_NL"]
+fn a_handback_left_on_soft_restoration_steps_alone_fails_restoration() {
+    let Some(dir) = std::env::var_os("POUNCE_VANDERBEI_NL") else {
+        eprintln!("POUNCE_VANDERBEI_NL is not set; skipping");
+        return;
+    };
+    let run = solve_path(
+        PathBuf::from(dir).join("brainpc0.nl"),
+        "brainpc0.nl",
+        "brainpc0",
+        &[],
+        &[],
+    );
+    assert!(run.count(HANDBACK) >= 1, "{}", run.log);
+    assert_eq!(
+        run.count(SHOT_EXIT),
+        1,
+        "the base solve must end on the gh#1076 arm, exactly once\n{}",
+        run.log
+    );
+    let so = run
+        .report
+        .second_opinion
+        .as_ref()
+        .expect("a restoration failure opens the second-opinion ladder");
+    assert_eq!(so.base_status, "Restoration_Failed");
+    assert!(
+        so.base_iteration_count < 1678,
+        "the arm must end the cycle ahead of the false infeasibility verdict \
+         at 1678; got {}",
+        so.base_iteration_count
+    );
+    assert_eq!(
+        so.tried.first().map(String::as_str),
+        Some("mu_strategy=adaptive")
+    );
+    assert_eq!(so.promoted_by.as_deref(), Some("mu_strategy=adaptive"));
 }

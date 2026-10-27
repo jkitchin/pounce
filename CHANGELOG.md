@@ -254,6 +254,41 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Restoration's release test now reads the outer filter's own quantities,
+  and the two hand-back paths that the old quantities were masking are closed
+  (gh#1076 §2; supersedes #1075).** The callback that decides whether
+  restoration may hand a point back was given the max-norm violation and the
+  unscaled plain objective, while the filter and reference point hold the
+  1-norm violation and the scaled barrier objective. The outer algorithm now
+  evaluates its own `trial_barrier_obj()` / `trial_constraint_violation()` at
+  restoration's `(x, s)`, as upstream's `TestOrigProgress` does. Judged
+  correctly, restoration stops releasing points by accident, which exposed
+  two consequences of pounce's (deliberate) hand-back of an *unreleased*
+  feasible point, which upstream reports as a restoration failure:
+  - A restoration forced by a non-finite Hessian at a point already
+    feasible to `tol` can never be released (it can only raise the barrier
+    objective against the entry, whose filter envelope dominates every such
+    point), and the outer then cannot step from the hand-back either. Such a
+    hand-back now restarts the filter. `dallass_kink_unmerged`: Optimal at 61
+    with no ladder (65 on main; `Error_In_Step_Computation` at 116 with the
+    corrected test alone).
+  - The gh#1042 exit fired only on a re-entry from the very point handed back.
+    An outer that leaves the hand-back on soft-restoration `s` steps alone and
+    re-enters from elsewhere now counts as not having taken its shot; three
+    such re-entries in a row end the solve with `Restoration_Failed` (judged on
+    the feasible hand-back, so the ladder opens `mu_strategy=adaptive` first).
+    Vanderbei `brainpc0` was cycling 45 restorations to a false
+    `Infeasible_Problem_Detected` at 1678 iterations; it now ends at 365 and is
+    recovered at 24 (11 s against 55 s on main, which reached the same answer
+    through the gh#884 cold retry after a failed 956-iteration base solve).
+  Over the 733 Vanderbei models at default options: 0 lost, 1 gained
+  (`cresc132`, Infeasible → Optimal via the `mu_strategy=adaptive` rung),
+  139679 → 135768 total iterations. `brainpc1`'s base solve now converges
+  directly (123 iterations, a different local minimum; main failed at 378 and
+  was rescued). Fixture sweep, both legs: 2 of 248 lines move, both L-BFGS and
+  failing either way (`dallass` 214 → 218, `deb7` `Restoration_Failed` →
+  `Maximum_Iterations_Exceeded`). Measured on arm64 only; x86_64 is
+  unmeasured.
 - **A false `Infeasible_Problem_Detected` at a saddle of the constraint
   violation is now re-solved from beside it.** The infeasibility verdict claims
   the solve stopped at a local minimizer of the violation, and every gate that
