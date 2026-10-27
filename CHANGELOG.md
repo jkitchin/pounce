@@ -75,6 +75,15 @@ changes.
   seeded instead: on the reporter's correction QP that check went from 44 s
   (40 s of it three sparse rank tests) to 3 s, and the QP solves seeded in
   15 s to IPOPT's objective (666.85076 vs 666.85066).
+- **The active-set QP's refactor path factors once per working-set change,
+  not twice (gh #1061).** After a full step that nothing blocked, the next
+  iteration factored the same KKT matrix again only to read the multipliers
+  and choose the next drop; it now back-solves against the factor it has.
+  Same iterates, same answers. On the reporter's warm step QP
+  (`sqp_qp_use_schur_updates no`) 308 factorizations became 159 for the same
+  156 working-set changes, and the QP went from 93 s to 72 s. The ones removed
+  were the cheaper half (the same structure, factored again), so the time
+  falls by about a fifth rather than a half.
 - **An infeasible step QP no longer ends the active-set SQP (gh #1061).** The
   SQP takes the QP's minimum-violation step instead (Sℓ1QP) and reports local
   infeasibility only when no step can reduce the linearized violation. `deb7`

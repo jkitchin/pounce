@@ -1454,6 +1454,7 @@ impl ParametricActiveSetSolver {
         let mut prev_was_null_step = false;
         let mut prev_p_inf = Number::INFINITY;
         const NULL_STEP_GAIN: Number = 0.5;
+        let mut factor_reusable = false;
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1474,21 +1475,37 @@ impl ParametricActiveSetSolver {
             let k_c = active_cons.len();
             let k_b = active_bounds.len();
 
-            let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
-
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + k_c + k_b];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            let delta = match self.factorize_with_inertia_control(
-                kkt,
-                &mut rhs,
-                (k_c + k_b) as i32,
-                qp.n,
-                opts,
-            ) {
+            // After an unshifted step nothing blocked, the working set — and
+            // so the KKT matrix — is the one just factored; only `x`, and with
+            // it the right-hand side, moved. Back-solve against that factor
+            // instead of factoring the same matrix again. This iteration is
+            // almost always the stationary check that reads the multipliers
+            // and picks the next drop, so it was half of every drop's cost:
+            // gh#1061's warm step QP took 306 factorizations for 156
+            // working-set changes.
+            // A back-solve that fails falls through to the fresh factor.
+            let reused =
+                std::mem::take(&mut factor_reusable) && self.linsol.has_cached_factor() && {
+                    let mut solved = rhs.clone();
+                    let ok = self.linsol.resolve(&mut solved).is_ok();
+                    if ok {
+                        rhs = solved;
+                    }
+                    ok
+                };
+            let factored = if reused {
+                Ok(0.0)
+            } else {
+                let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
+                self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)
+            };
+            let delta = match factored {
                 Ok(d) => d,
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     // The active set went rank-deficient: at a degenerate
@@ -1548,7 +1565,9 @@ impl ParametricActiveSetSolver {
                 }
                 Err(e) => return Err(e),
             };
-            n_refactor += 1;
+            if !reused {
+                n_refactor += 1;
+            }
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
@@ -1897,6 +1916,9 @@ impl ParametricActiveSetSolver {
             // from where it lands is no round-off. Arming the guard on it
             // stopped a gh#1042 elastic pass short at `‖p‖∞ = 4.4e-4`.
             prev_was_null_step = blocker.is_none() && delta == 0.0;
+            // The same condition leaves the working set, and so the factor,
+            // unchanged for the next iteration.
+            factor_reusable = prev_was_null_step;
             if let Some(blk) = blocker {
                 match blk {
                     BlockerTarget::Bound(i, status) => {

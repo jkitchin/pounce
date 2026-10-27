@@ -202,3 +202,69 @@ fn an_infeasible_pin_is_reported_instead_of_going_elastic() {
         sol.x
     );
 }
+
+/// A full step that nothing blocks leaves the working set, and so the KKT
+/// matrix, unchanged; the refactor path back-solves against the factor it
+/// has instead of factoring that matrix again (gh#1061). The next iteration
+/// is the stationary check that picks the next drop, so before this every
+/// drop cost two factorizations: the reporter's warm step QP took 306 for
+/// 156 working-set changes, and 157 now, on the same path to the same
+/// objective.
+///
+/// `min ½‖x‖² − cᵀx  s.t.  Σx ≤ 100,  0 ≤ x ≤ 1`, `0 < c < 1`, warm-started
+/// at `x = 0` with every lower bound in the working set. Each bound's
+/// multiplier has the wrong sign and each drop's step lands inside the box,
+/// so the solve is `n` drops and `n` unblocked steps.
+#[test]
+fn an_unblocked_step_reuses_its_factor() {
+    let n = 20;
+    let idx: Vec<i32> = (1..=n as i32).collect();
+    let h_space = SymTMatrixSpace::new(n as i32, idx.clone(), idx.clone());
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&vec![1.0; n]);
+    let a_space = GenTMatrixSpace::new(1, n as i32, vec![1; n], idx);
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&vec![1.0; n]);
+    let c: Vec<f64> = (0..n).map(|i| 0.1 + 0.8 * i as f64 / n as f64).collect();
+    let g: Vec<f64> = c.iter().map(|v| -v).collect();
+    let (bl, bu) = ([-1e20], [100.0]);
+    let (xl, xu) = (vec![0.0; n], vec![1.0; n]);
+    let qp = QpProblem {
+        n,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+    let mut working = WorkingSet::cold(n, 1);
+    working.bounds.fill(pounce_qp::BoundStatus::AtLower);
+    let ws = QpWarmStart {
+        x: vec![0.0; n],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0; n],
+        working,
+    };
+    let opts = QpOptions {
+        use_schur_updates: false,
+        ..QpOptions::default()
+    };
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver.solve(&qp, Some(&ws), &opts).unwrap();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    for (xi, ci) in sol.x.iter().zip(&c) {
+        assert!((xi - ci).abs() < 1e-9, "{:?}", sol.x);
+    }
+    assert_eq!(sol.stats.n_working_set_changes, n as u32, "{:?}", sol.stats);
+    assert!(
+        sol.stats.n_refactor <= n as u32 + 1,
+        "{} factorizations for {} drops",
+        sol.stats.n_refactor,
+        n
+    );
+}
