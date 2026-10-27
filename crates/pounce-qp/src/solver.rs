@@ -175,7 +175,8 @@ struct CountPrune {
 /// Counting prunes one Schur pass may perform before the counting trigger
 /// stands down for the rest of the pass (gh#1076). See
 /// [`ParametricActiveSetSolver::schur_reset_rank_repaired`] for why it is a
-/// cap and for the measurements behind the value.
+/// cap and for the measurements behind the value. What the cap costs, and
+/// what a rule replacing it has to solve, is in `dev-notes/known-limitations.md`.
 const COUNT_PRUNE_CAP: u32 = 32;
 
 impl ParametricActiveSetSolver {
