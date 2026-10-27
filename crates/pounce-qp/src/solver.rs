@@ -1606,6 +1606,15 @@ impl ParametricActiveSetSolver {
             };
             let delta = match factored {
                 Ok(d) => d,
+                // A pattern holding sentinels carries explicit zeros the
+                // compact one does not, and those can change what the
+                // backend makes of the matrix (`assemble_soft_active_set_kkt`).
+                // Whatever the failure, the compact pattern gets the first
+                // say, exactly as before gh#1083.
+                Err(e) if e.is_recoverable_factorization_failure() && !compact => {
+                    pattern = None;
+                    continue;
+                }
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     // The active set went rank-deficient: at a degenerate
                     // vertex more binding rows than variables can be linearly

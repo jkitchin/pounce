@@ -346,10 +346,11 @@ pub fn assemble_active_set_kkt(
 /// A live row is assembled as there. A dropped row keeps its entries
 /// structurally, at value 0, and carries the `(p, p) = 1` sentinel of
 /// [`crate::schur`]'s K_max, which decouples it from `x` and makes its
-/// multiplier `rhs_p`; every pattern row carries the diagonal entry, at 0 when
-/// live. So the triplet pattern is a function of the pattern rows alone, and
-/// a drop changes values only: the backend's symbolic analysis, about half
-/// of every factorization on the gh#1083 model, is reused across it.
+/// multiplier `rhs_p`; once any row is dropped, every pattern row carries the
+/// diagonal entry, at 0 when live. So from the first drop on the triplet
+/// pattern is a function of the pattern rows alone, and each further drop
+/// changes values only: the backend's symbolic analysis, about half of every
+/// factorization on the gh#1083 model, is reused across it.
 ///
 /// Each sentinel adds one positive eigenvalue and no negative one, so the
 /// expected inertia counts the live rows only.
@@ -385,6 +386,16 @@ pub(crate) fn assemble_soft_active_set_kkt(
         }
     }
 
+    // With every row live this is `assemble_active_set_kkt`'s matrix
+    // exactly: an explicit zero on the diagonal of a live row is not inert
+    // to FERAL. A fixture whose elastic phase 1 reached a square vertex
+    // (190 rows, `n = 190`) factored it without one and exhausted inertia
+    // control, to `δ = 1e14`, with one. So the diagonals arrive with the
+    // first sentinel, whose factorization is the one drop that pays a
+    // symbolic analysis.
+    if cons_live.iter().chain(bounds_live.iter()).all(|&l| l) {
+        return kkt;
+    }
     let live = cons_live.iter().chain(bounds_live.iter());
     for (j, &live) in live.enumerate() {
         let p = (n + j + 1) as Index;

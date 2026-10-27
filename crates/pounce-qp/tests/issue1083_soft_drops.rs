@@ -8,6 +8,12 @@
 //! values-only refactor and the backend's pattern-fingerprint cache reuses its
 //! symbolic analysis (measured there: 0.59 s → 0.24 s per drop).
 //!
+//! The diagonal entries the sentinels need are added with the first one, so a
+//! pattern with every row live is assembled exactly as before, and the first
+//! drop after each rebuild is the one that pays the symbolic analysis: an
+//! explicit zero on a live row's diagonal is not inert to FERAL (it cost a
+//! fixture its elastic phase 1, see `assemble_soft_active_set_kkt`).
+//!
 //! What is asserted is the pattern itself, recorded at every factorization by
 //! a pass-through backend, because that is the property the saving rests on
 //! and it is backend-independent; the time it saves is FERAL's to deliver.
@@ -167,8 +173,11 @@ fn drops_refactor_on_one_pattern() {
     // One factorization of the warm start, one per drop: the step after
     // each drop is unblocked, so its stationary check back-solves.
     assert_eq!(patterns.len(), drops + 1, "factorizations");
-    // Before gh#1083 each of these was a pattern of its own (`drops`).
-    assert_eq!(pattern_changes(&patterns), 0);
+    // Before gh#1083 each of these was a pattern of its own (`drops`). The
+    // first drop still moves it once: the diagonal entries the sentinels
+    // need arrive with the first sentinel, so a pattern with every row live
+    // is assembled exactly as it was.
+    assert_eq!(pattern_changes(&patterns), 1);
 
     let (schur, _) = solve(&C, 1e3, true);
     assert_same_answer(&sol, &schur);
@@ -180,9 +189,11 @@ fn drops_refactor_on_one_pattern() {
 }
 
 /// `Σx ≤ 8` binds after the first two drops (5 + 4 > 8), so the run adds a row
-/// the pattern does not hold: that add, and only that, starts a new pattern,
-/// and the drops after it reuse it. The multiplier of the added row is read
-/// from its position in a pattern that still holds sentinels.
+/// the pattern does not hold. The pattern moves three times — at the first
+/// drop, at that add, and at the first drop after it — where before gh#1083
+/// it moved at every one of the five factorizations after the first. The
+/// multiplier of the added row is read from its position in a pattern that
+/// holds sentinels again by the end.
 #[test]
 fn an_add_starts_the_next_pattern() {
     let (sol, patterns) = solve(&C, 8.0, false);
@@ -190,10 +201,6 @@ fn an_add_starts_the_next_pattern() {
     assert_same_answer(&sol, &schur);
     assert!(sol.working.constraints[0].is_active(), "the cap binds");
     assert!(sol.lambda_g[0].abs() > 1e-3, "and carries a multiplier");
-    assert_eq!(
-        pattern_changes(&patterns),
-        1,
-        "{} factorizations",
-        patterns.len()
-    );
+    assert_eq!(patterns.len(), 6, "factorizations");
+    assert_eq!(pattern_changes(&patterns), 3);
 }
