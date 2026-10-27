@@ -701,6 +701,38 @@ the active-set SQP gave the answer, and `nlp` when every attempt declined and
 the converged interior point did. Set `ipm_sqp_handover=no` to get the cold
 active-set SQP regardless of size.
 
+At the same size, a step QP that has no working set to start from (the first
+QP of a cold active-set SQP, or a re-solve after a warm start failed) is itself
+started from an interior point when its Hessian is positive semidefinite: the
+convex QP interior point solves it, and the active-set solver finishes from the
+working set that solution sits on. The active-set solve still produces the step
+and its multipliers; the interior point only chooses where it starts, and
+anything short of an interior-point optimum falls back to the plain cold start.
+On gh#1061's first step QP (15 000 variables, 10 818 equalities, `H = I`) the
+cold active-set start had not finished after 30 minutes; seeded, it took 4.5 s
+and no working-set changes. A warm step QP whose working set pins to a point
+that violates another row is seeded the same way rather than sent to the
+ℓ1-elastic phase 1: gh#1061's second step QP, warm-started from the first one's
+working set, reached a 300 s cap in that phase and solves seeded in 12.5 s.
+The line search's second-order-correction QP is solved the same way. Deciding
+whether a warm working set pins feasibly skips the rank prune
+`solve_with_working_set` would run on a set that does not factor: such a set
+is reported unusable and seeded instead, which on gh#1061's correction QP cut
+the check from 44 s to 1.3 s. A warm start that does pin feasibly gets a
+budget of four active-set iterations per iteration the last seed took, and is
+seeded if it runs over: an active-set iteration costs about one factorization,
+so past that point the warm solve has spent what a seed would have. gh#1061's
+handover QP needs 156 working-set changes warm (72 s, or 126 s with Schur
+updates); budgeted and then seeded it takes 34 s.
+
+A step QP whose linearization is infeasible does not end the solve. The QP's
+elastic phase returns the step that minimizes the linearized ℓ1 violation, and
+the SQP takes it under its line search (Fletcher's Sℓ1QP); only a step that
+cannot reduce that violation is reported as local infeasibility. Before
+gh#1061 the first infeasible step QP did, and `deb7` (813 variables, feasible)
+came back `Infeasible_Problem_Detected` at iteration 0; it now solves in nine
+iterations.
+
 ## 7. Pitfalls
 
 - **Calling `Problem.solve(working_set=…)` with a stale working set
