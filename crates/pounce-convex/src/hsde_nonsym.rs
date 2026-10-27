@@ -386,12 +386,25 @@ impl NsCone {
     pub(crate) fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
         for &(off, b) in &self.blocks {
             let ok = match b {
-                NsBlock::Orthant(d) => z[off..off + d].iter().all(|&v| v >= -tol),
+                // `tol` is a permissive slack here in either sign: a positive
+                // one (the Farkas test) and a negative one (the closure test
+                // `true_kkt_scale_rel` asks for) both mean `zᵢ ≥ −|tol|`.
+                // Reading a negative one as `zᵢ ≥ +|tol|` rejected the exact
+                // zero of every inactive row (gh#1085).
+                NsBlock::Orthant(d) => z[off..off + d].iter().all(|&v| v >= -tol.abs()),
                 // SOC is self-dual ⇒ its `in_dual_cone` is the membership test.
                 NsBlock::SecondOrder(m) => {
                     SecondOrderCone::new(m).in_dual_cone(&z[off..off + m], tol)
                 }
-                NsBlock::Nonsym(c) => c.in_dual_cone(&z[off..off + 3], tol),
+                // A negative `tol` asks for the closure `cl(K*)`, which holds
+                // the origin — the exact dual of an inactive block, and what
+                // the active-set polish returns for one (gh#1085). The cones'
+                // own tests evaluate `log(−u/w)` there and read NaN as
+                // "outside".
+                NsBlock::Nonsym(c) => {
+                    let zb = &z[off..off + 3];
+                    (tol < 0.0 && inf_norm(zb) <= -tol) || c.in_dual_cone(zb, tol)
+                }
             };
             if !ok {
                 return false;
@@ -1787,6 +1800,46 @@ where
     let mut x: Vec<f64> = x.iter().map(|v| v * inv).collect();
     let mut y: Vec<f64> = y.iter().map(|v| v * inv).collect();
     let mut z: Vec<f64> = z.iter().map(|v| v * inv).collect();
+
+    // Active-set polish (gh#1085). The loop above cannot take an exp-cone
+    // model much past a scale-relative residual of ~1e-7, where the objective
+    // is right but the minimizer can be off by 1e-4. Newton on the KKT
+    // equations of the active set the IPM identified reaches machine
+    // precision. The proposal replaces the IPM point only when it certifies
+    // tighter on the same scale-relative conic certificate (which includes
+    // `ẑ ∈ K*`) that judges promotion above, and `Optimal` then needs that
+    // certificate under the same `PROMOTE_REL_TOL_FACTOR·tol` gate.
+    if matches!(status, QpStatus::Optimal | QpStatus::OptimalInaccurate)
+        && let Some((px, py, pz)) =
+            crate::nonsym_polish::polish_exp(prob, specs, &x, &y, &z, &mut make_backend)
+    {
+        let before = true_kkt_scale_rel(prob, &cone, &x, &y, &z, 1.0);
+        let after = true_kkt_scale_rel(prob, &cone, &px, &py, &pz, 1.0);
+        // Without a certificate for the IPM point (its `ẑ` fell just outside
+        // `K*`) there is nothing to compare against, so the proposal must
+        // clear the promotion gate on its own.
+        let gate = PROMOTE_REL_TOL_FACTOR * opts.tol;
+        if let Some(e) = after
+            && before.map_or(e < gate, |b| e < b)
+        {
+            x = px;
+            y = py;
+            z = pz;
+            // Keep the post-mortem's slack consistent with the returned point
+            // (τ = 1: it is already un-homogenized).
+            for v in s.iter_mut() {
+                *v = 0.0;
+            }
+            prob.g_mul(&x, &mut s);
+            for (si, hi) in s.iter_mut().zip(&prob.h) {
+                *si = hi - *si;
+            }
+            tau = 1.0;
+            if e < gate {
+                status = QpStatus::Optimal;
+            }
+        }
+    }
     let mut px = vec![0.0; n];
     prob.p_mul(&x, &mut px);
     let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);

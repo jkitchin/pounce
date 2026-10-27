@@ -310,6 +310,24 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Exp-cone solves return an accurate minimizer, not only an accurate
+  objective (gh #1085).** On a cond-18 Poisson regression the non-symmetric
+  HSDE driver reported `optimal` with the coefficients `1.8e-4` from the
+  minimizer, and tightening `tol` stalled at `1.5e-5`. Below `μ ~ 1e-8` its
+  dense 3×3 exp-cone scaling block loses its smallest eigenvalue to rounding,
+  so the IPM cannot go further. It now finishes with an active-set **polish**:
+  Newton on the KKT equations of the active set the IPM identified, with each
+  active exp block as the smooth equality `ψ(s) = 0`. The polished point
+  replaces the IPM's only when it certifies tighter on the same scale-relative
+  conic KKT certificate. Orthant and exp blocks only; a product with a
+  second-order or power block is left as the IPM returned it. On a 20-model
+  exp corpus (Poisson, logistic, entropy, log-sum-exp; references from
+  Clarabel at `1e-13`) the median `x` error goes from `1.7e-5` to `5e-13`, and
+  the statuses go from 18 `optimal` / 2 `optimal_inaccurate` to 20 `optimal`.
+  The IPM trajectory and iteration counts are unchanged. That certificate's
+  dual-cone closure test also had two defects, both fixed. It required an
+  orthant multiplier `≥ +1e-9` instead of `≥ −1e-9`. It read an exp/power
+  block's exact zero multiplier as outside `K*` (`log(0/0)`).
 - **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
   Schur path's base factorization scanned the whole constraint matrix once per
   active row; on the reporter's model it is now ~3× faster, and a warm step
