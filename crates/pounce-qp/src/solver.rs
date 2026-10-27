@@ -13,8 +13,8 @@ use crate::error::{QpError, QpStatus};
 use crate::factor::LinearSolver;
 use crate::kkt::{
     KktTriplet, a_times_x, assemble_active_set_kkt, assemble_box_with_active,
-    assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,
-    is_pure_equality_no_bounds, rhs_equality_only,
+    assemble_equality_plus_bounds, assemble_soft_active_set_kkt, h_times_x,
+    is_all_equality_constraints, is_pure_box, is_pure_equality_no_bounds, rhs_equality_only,
 };
 use crate::negcurv::SecondOrder;
 use crate::options::{AntiCyclingChoice, QpOptions};
@@ -162,6 +162,32 @@ struct PinnedFactor {
     a: *const GenTMatrix,
     n_factor: u64,
     rank_guard_calls: u32,
+}
+
+/// QP size `n + m` from which the refactor path keeps dropped rows in the KKT
+/// pattern (gh#1083); below it every iteration assembles the compact
+/// active-set KKT, as before.
+///
+/// Reusing the symbolic analysis is the whole gain, and on a small KKT it is
+/// worth nothing, while the trajectory still moves: the new pattern orders
+/// the factorization differently, and round-off then goes its own way. Swept
+/// ungated over the CLI fixture corpus under `algorithm=active-set-sqp`, it
+/// moved 12 fixture-legs, every one a QP below 500. Two of them were
+/// regressions: `pooling_rt2stp` went from `MaximumIterationsExceeded` to a
+/// local-infeasibility verdict on both legs, and the SQP stopped solving
+/// `square_flowsheet_resto` (exact), which fell through to `square-lm`.
+/// 5000 is the size from which a warm-started exact-Hessian step QP is on
+/// this path by default (`pounce-algorithm`'s `qp_schur_exact_max_dim`),
+/// which is where the drop-dominated QPs the change is for are solved. The
+/// two are separate constants measured on different `n + m`: this one the
+/// QP's (an elastic or lifted QP is larger than its NLP), that one the NLP's.
+pub const SOFT_DROP_MIN_DIM: usize = 5000;
+
+/// Whether every entry of the ascending list `sub` occurs in the ascending
+/// list `sup`.
+fn is_sorted_subset(sub: &[usize], sup: &[usize]) -> bool {
+    let mut it = sup.iter();
+    sub.iter().all(|x| it.any(|y| y == x))
 }
 
 /// How many times the counting prune in
@@ -1496,6 +1522,17 @@ impl ParametricActiveSetSolver {
         // iteration is about to assemble (gh#1061: one factorization, about
         // 0.5 s on the reporter's model, per warm-started QP).
         let mut pinned = self.pinned_factor.take();
+        // The rows the KKT pattern holds (gh#1083): the working set as of the
+        // last add, plus any row dropped since, kept as an inert sentinel so a
+        // drop refactors on the same pattern and the backend reuses its
+        // symbolic analysis (`assemble_soft_active_set_kkt`). Rebuilt from
+        // the working set whenever an active row is missing from it.
+        let mut pattern: Option<(Vec<usize>, Vec<usize>)> = None;
+        // Cleared for the rest of the pass the first time a pattern holding
+        // sentinels fails to factor or needs an inertia shift: from then on
+        // the pass is the compact path, so the backend's view of that matrix
+        // costs at most one inertia ladder per pass.
+        let mut soft_ok = n + m >= SOFT_DROP_MIN_DIM;
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1515,9 +1552,49 @@ impl ParametricActiveSetSolver {
                 (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k_c = active_cons.len();
             let k_b = active_bounds.len();
+            // Rebuilt when an active row is missing from the pattern, and when
+            // sentinels outnumber a quarter of it: each keeps its row's
+            // dimension and fill in every factorization and back-solve, so on
+            // a long run of drops they would eat the saving.
+            if !soft_ok
+                || !pattern.as_ref().is_some_and(|(pc, pb)| {
+                    let held = pc.len() + pb.len();
+                    // The subset test first: it is what makes `held ≥ k_c + k_b`.
+                    is_sorted_subset(&active_cons, pc)
+                        && is_sorted_subset(&active_bounds, pb)
+                        && 4 * (held - k_c - k_b) <= held
+                })
+            {
+                pattern = Some((active_cons.clone(), active_bounds.clone()));
+            }
+            let (pattern_cons, pattern_bounds) = pattern.as_ref().expect("set just above");
+            let cons_live: Vec<bool> = pattern_cons
+                .iter()
+                .map(|&i| working.constraints[i].is_active())
+                .collect();
+            let bounds_live: Vec<bool> = pattern_bounds
+                .iter()
+                .map(|&i| working.bounds[i].is_active())
+                .collect();
+            // Each active row's position in the KKT solution.
+            let cons_pos: Vec<(usize, usize)> = pattern_cons
+                .iter()
+                .zip(&cons_live)
+                .enumerate()
+                .filter(|(_, (_, live))| **live)
+                .map(|(j, (&i, _))| (i, n + j))
+                .collect();
+            let bounds_pos: Vec<(usize, usize)> = pattern_bounds
+                .iter()
+                .zip(&bounds_live)
+                .enumerate()
+                .filter(|(_, (_, live))| **live)
+                .map(|(j, (&i, _))| (i, n + pattern_cons.len() + j))
+                .collect();
+            let compact = pattern_cons.len() == k_c && pattern_bounds.len() == k_b;
 
             let hx = h_times_x(qp.h, &x);
-            let mut rhs = vec![0.0; n + k_c + k_b];
+            let mut rhs = vec![0.0; n + pattern_cons.len() + pattern_bounds.len()];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
@@ -1531,7 +1608,8 @@ impl ParametricActiveSetSolver {
             // gh#1061's warm step QP took 306 factorizations for 156
             // working-set changes.
             let pin_matches = pinned.take().is_some_and(|f| {
-                f.cons == active_cons
+                compact
+                    && f.cons == active_cons
                     && f.bounds == active_bounds
                     && std::ptr::eq(f.h, qp.h)
                     && std::ptr::eq(f.a, qp.a)
@@ -1552,11 +1630,27 @@ impl ParametricActiveSetSolver {
             let factored = if reused {
                 Ok(0.0)
             } else {
-                let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
+                let kkt = assemble_soft_active_set_kkt(
+                    qp,
+                    pattern_cons,
+                    &cons_live,
+                    pattern_bounds,
+                    &bounds_live,
+                );
                 self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)
             };
             let delta = match factored {
                 Ok(d) => d,
+                // A pattern holding sentinels carries explicit zeros the
+                // compact one does not, and those can change what the
+                // backend makes of the matrix (`assemble_soft_active_set_kkt`).
+                // Whatever the failure, the compact pattern gets the first
+                // say, exactly as before gh#1083.
+                Err(e) if e.is_recoverable_factorization_failure() && !compact => {
+                    soft_ok = false;
+                    pattern = None;
+                    continue;
+                }
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     // The active set went rank-deficient: at a degenerate
                     // vertex more binding rows than variables can be linearly
@@ -1599,6 +1693,9 @@ impl ParametricActiveSetSolver {
                             n_changes += 1;
                         }
                     }
+                    // The pruned rows are not drops to keep: the pattern
+                    // restarts from the independent subset, as before gh#1083.
+                    pattern = None;
                     continue;
                 }
                 // The deadline fired inside the factorization: a timeout, and
@@ -1617,6 +1714,15 @@ impl ParametricActiveSetSolver {
             };
             if !reused {
                 n_refactor += 1;
+            }
+            // A shift the compact matrix may not have needed: the explicit
+            // zeros a sentinel pattern carries can move the backend's inertia
+            // verdict (`assemble_soft_active_set_kkt`). The compact pattern
+            // decides instead.
+            if delta > 0.0 && !compact {
+                soft_ok = false;
+                pattern = None;
+                continue;
             }
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
@@ -1694,8 +1800,8 @@ impl ParametricActiveSetSolver {
                         }
                     };
 
-                for (j, &i) in active_cons.iter().enumerate() {
-                    let lam = rhs[n + j];
+                for &(i, pos) in &cons_pos {
+                    let lam = rhs[pos];
                     let viol = match working.constraints[i] {
                         ConsStatus::AtLower => lam,
                         ConsStatus::AtUpper => -lam,
@@ -1704,8 +1810,8 @@ impl ParametricActiveSetSolver {
                     };
                     consider(&mut worst, DropTarget::Cons(i), viol);
                 }
-                for (j, &i) in active_bounds.iter().enumerate() {
-                    let lam = rhs[n + k_c + j];
+                for &(i, pos) in &bounds_pos {
+                    let lam = rhs[pos];
                     let viol = match working.bounds[i] {
                         BoundStatus::AtLower => lam,
                         BoundStatus::AtUpper => -lam,
@@ -1738,12 +1844,12 @@ impl ParametricActiveSetSolver {
                 }
 
                 let mut lambda_g = vec![0.0; m];
-                for (j, &i) in active_cons.iter().enumerate() {
-                    lambda_g[i] = rhs[n + j];
+                for &(i, pos) in &cons_pos {
+                    lambda_g[i] = rhs[pos];
                 }
                 let mut lambda_x = vec![0.0; n];
-                for (j, &i) in active_bounds.iter().enumerate() {
-                    lambda_x[i] = -rhs[n + k_c + j];
+                for &(i, pos) in &bounds_pos {
+                    lambda_x[i] = -rhs[pos];
                 }
 
                 return Ok(QpSolution {

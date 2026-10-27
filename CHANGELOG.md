@@ -66,6 +66,25 @@ changes.
   `CrossoverReport::eqp` carries the same split (`linsol_times`).
 
 ### Changed
+- **Warm-started exact-Hessian step QPs of the active-set SQP leave Schur
+  updates off at `n + m ≥ 5000` (gh #1083).** An exact Hessian makes the
+  step QP indefinite, and there every drop refactors anyway, so only adds take
+  the rank-2 update; a warm step QP is mostly drops, and paid for the larger
+  `K_max` for nothing (on the reporter's handover QP: 126 s with updates,
+  72 s without). Cold step QPs, which are add-dominated and on a nonconvex
+  model not seeded from the interior point, keep the size rule, as do
+  quasi-Newton Hessians and an explicit `sqp_qp_use_schur_updates`. On the 38
+  Maros-Mészáros problems at that size under `algorithm=active-set-sqp`, no
+  status changes.
+- **Drops on the active-set QP's refactor path reuse the symbolic analysis
+  (gh #1083).** From `n + m ≥ 5000`, a dropped row stays in the KKT pattern
+  as an inert sentinel until a row the pattern does not hold is added, so
+  each drop after the first refactors on the same pattern and FERAL skips
+  its ordering and MC64 matching, about half of every factorization at the
+  reporter's size (0.59 s → 0.24 s per drop, measured in the issue). A
+  pattern that fails to factor or needs an inertia shift sends the rest of
+  that QP solve back to the compact KKT. Below that size nothing changes: swept at every size, the change moved 12 small
+  fixture-legs and made two worse.
 - **A large cold step QP of the active-set SQP starts from an interior point
   (gh #1061).** At `n + m ≥ 5000`, a step QP with no working set to start from
   and a positive semidefinite Hessian is solved by the convex QP interior
