@@ -594,11 +594,11 @@ where
             .map_or(qp_opts.time_limit, |left| {
                 Some(qp_opts.time_limit.map_or(left, |own| own.min(left)))
             }),
-        // The SQP driver's size rule for Schur updates (gh#1054), so the
+        // The SQP driver's rule for Schur updates (gh#1054, gh#1083), so the
         // step-3 QP of a large model does not refactor per pivot.
         use_schur_updates: sqp_opts
-            .qp_schur_min_dim
-            .map_or(qp_opts.use_schur_updates, |d| n + m >= d),
+            .step_qp_schur_updates(n + m, sqp_opts.hessian)
+            .unwrap_or(qp_opts.use_schur_updates),
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());

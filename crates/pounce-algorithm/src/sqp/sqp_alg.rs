@@ -221,12 +221,16 @@ impl SqpAlgorithm {
         // The step-QP iteration budget scales with the problem unless the
         // caller set one (gh#1054). Restored afterwards, so a reused driver
         // re-derives it for the next problem's size.
-        // Schur updates likewise follow the size when the caller left them
-        // to the driver (`SqpOptions::qp_schur_min_dim`).
+        // Schur updates likewise follow the size, and the Hessian source,
+        // when the caller left them to the driver
+        // (`SqpOptions::step_qp_schur_updates`).
         let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
-        if let Some(d) = self.opts.qp_schur_min_dim {
-            self.qp_opts.use_schur_updates = nlp.n() + nlp.m() >= d;
+        if let Some(on) = self
+            .opts
+            .step_qp_schur_updates(nlp.n() + nlp.m(), self.opts.hessian)
+        {
+            self.qp_opts.use_schur_updates = on;
         }
         self.ipm_cold_start = self
             .opts
