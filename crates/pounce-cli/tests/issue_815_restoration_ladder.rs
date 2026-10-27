@@ -33,33 +33,30 @@
 //! rung 3 recovered it in 54. Ipopt 3.13.2 solves the same model in 34.
 //!
 //! **FERAL 0.21 solves it outright** — `Optimal` in 95 at the default `tol`,
-//! with no ladder at all — so the default run no longer reaches the branch
-//! this file is about. What still reaches it is a `tol` below what this
-//! model's arithmetic can represent: [`TOL`] is `1e-11`, and the restoration
-//! sub-problem parks at a constraint violation of about `3.1e-10`, which is
-//! round-off on rows that carry `3e6` Pa (`eps · 3e6 ≈ 6.7e-10`). Every `tol`
-//! from `3e-10` down fails the same way, in the same 108 iterations (3 outer,
-//! then 105 inside restoration), so the witness sits thirty-fold under the
-//! floor rather than on its edge. It is a genuine restoration failure — the
-//! sub-problem has nowhere left to go — on the same feasible-by-construction
-//! model, not a status induced by switching something off.
+//! with no ladder at all — so the exact-Hessian default run no longer reaches
+//! the branch this file is about. Until gh#1084 the witness was a `tol` below
+//! the model's round-off floor (`tol=1e-11`): restoration parked at a
+//! violation of about `3.1e-10`, round-off on rows that carry `3e6` Pa, and
+//! the sub-solve's next step failed. That was **not** a restoration failure.
+//! It was a square model at a point feasible to `constr_viol_tol` by six
+//! orders, which upstream reports as `Feasible point for square problem
+//! found`, and pounce now does too (`issue_1084_square_round_off_floor.rs`).
 //!
-//! **What it no longer witnesses is the recovery.** At that `tol` nothing on
-//! the ladder can recover the model either, because the floor is a property
-//! of the model, not of the trajectory: rung 3 fails in 91, rung 4 (now open,
-//! since the base solve escalated four times) in 126, and the square-system
-//! stage collapses its trust region. No `Restoration_Failed` fixture-leg in the
-//! corpus is recovered by rung 3 on 0.21 — the only other one, `deb7` on the
-//! L-BFGS leg, keeps its verdict too. Rung 3 recovering a model is pinned on
-//! the local-infeasibility trigger in `degenerate_start_ladder.rs`, through the
-//! same driver and the same promotion path; what is specific to this trigger,
-//! and what this file still pins, is that `Restoration_Failed` opens the
-//! ladder, that the displaced start is its first rung, and that rungs 1 and 2
-//! stay shut.
+//! [`LEG`] is the witness now: the L-BFGS leg at the default `tol`. There the
+//! base solve fails in restoration for real, 250 iterations in at a violation
+//! of order `1e5`, nowhere near feasible. The ladder opens on that verdict
+//! with the displaced start first. The displaced start and rung 4 fail, and
+//! the square-system stage recovers the model in 8 iterations. That gives
+//! this trigger a recovery to pin again, which the round-off witness never
+//! had: rung 3 recovering a model is still pinned on the local-infeasibility
+//! trigger in `degenerate_start_ladder.rs`, and what is specific to this
+//! trigger, and what this file pins, is that `Restoration_Failed` opens the
+//! ladder, that the displaced start is its first rung, and that rungs 1 and
+//! 2 stay shut.
 //!
 //! # What this file is *not* evidence about
 //!
-//! One fixture, one linear solver (the FERAL default), one leg. It pins that
+//! One fixture, one linear solver (the FERAL default), one leg (L-BFGS). It pins that
 //! the trigger is wired and that rung 3 is the first rung it opens; it says
 //! nothing about how often a displaced start rescues a restoration failure in
 //! general — `start_point_retry`'s option text carries that measurement (13
@@ -70,9 +67,10 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// Below this model's round-off floor; see the module comment. At the default
-/// `tol` FERAL 0.21 solves the fixture and no ladder opens.
-const TOL: &str = "tol=1e-11";
+/// The leg on which this model genuinely fails in restoration; see the module
+/// comment. On the exact-Hessian leg FERAL 0.21 solves the fixture and no
+/// ladder opens.
+const LEG: &str = "hessian_approximation=limited-memory";
 
 fn run(extra: &[&str]) -> String {
     let mut model = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -84,7 +82,7 @@ fn run(extra: &[&str]) -> String {
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
         .arg(&model)
         .arg(&sol)
-        .arg(TOL)
+        .arg(LEG)
         .args(extra)
         .output()
         .expect("spawn pounce");
@@ -96,11 +94,10 @@ fn run(extra: &[&str]) -> String {
     )
 }
 
-/// The fix, end to end, as far as FERAL 0.21 leaves a fixture for it. The
-/// baseline solve fails in restoration; the ladder opens on that verdict, and
-/// the displaced start is the first rung it spends. (On 0.20 it was also the
-/// rung that recovered the model, in 54; see the module comment for why no
-/// restoration failure in the corpus is recoverable now.)
+/// The fix, end to end. The baseline solve fails in restoration; the ladder
+/// opens on that verdict, and the displaced start is the first rung it
+/// spends. (On FERAL 0.20 it was also the rung that recovered the model, in
+/// 54; on this leg the square-system stage recovers it instead.)
 #[test]
 fn a_restoration_failure_opens_the_ladder_with_the_displaced_start_first() {
     let log = run(&[]);
@@ -146,10 +143,11 @@ fn a_restoration_failure_opens_the_ladder_with_the_displaced_start_first() {
     );
     assert!(
         log.contains("start_point_perturbation=1e-2 re-solve did not recover")
-            && log.contains("Status: Restoration_Failed"),
-        "below the round-off floor no rung can recover the model, and the \
-         original verdict ships. If the displaced start now recovers it, \
-         restore the recovery assertion this test carried on FERAL 0.20:\n{log}"
+            && log.contains("square_system_lm recovered the problem")
+            && log.contains("Status: Solve_Succeeded"),
+        "the displaced start does not recover this leg and the square-system \
+         stage does. If the displaced start now recovers it, restore the \
+         recovery assertion this test carried on FERAL 0.20:\n{log}"
     );
 }
 

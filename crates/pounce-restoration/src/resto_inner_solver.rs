@@ -405,6 +405,7 @@ pub fn run_inner_resto(
     intermediate_tnlp: Option<Rc<RefCell<dyn pounce_nlp::tnlp::TNLP>>>,
 ) -> crate::min_c_1nrm::RestoInnerReturn {
     let mut spent: Index = 0;
+    let mut last_point = None;
     let result = run_inner_resto_impl(
         outer_data,
         outer_cq,
@@ -417,9 +418,11 @@ pub fn run_inner_resto(
         debug_hook,
         intermediate_tnlp,
         &mut spent,
+        &mut last_point,
     );
     crate::min_c_1nrm::RestoInnerReturn {
         inner_iter_count: spent,
+        failed_point: if result.is_none() { last_point } else { None },
         result,
     }
 }
@@ -439,6 +442,10 @@ fn run_inner_resto_impl(
     // Out-param: the nested IPM's terminating `iter_count`, written as soon
     // as it is known so every `?` below can bail without losing it.
     spent: &mut Index,
+    // Out-param: the sub-solve's last `(x, s)`, written as soon as it is
+    // extracted, for the same reason — a failed exit returns `None` and the
+    // caller still hands this point back (gh#1084).
+    last_point: &mut Option<(Rc<dyn Vector>, Rc<dyn Vector>)>,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -875,6 +882,7 @@ fn run_inner_resto_impl(
     let xc = final_iv.x.as_any().downcast_ref::<CompoundVector>()?;
     let trial_x = clone_dense_block(xc.comp(BLOCK_X))?;
     let trial_s = clone_to_dense(&*final_iv.s);
+    *last_point = Some((trial_x.clone(), trial_s.clone()));
 
     // gh#645: the user's callback returned `false` from a restoration
     // fire. Return before the locally-infeasible adjudication below
@@ -1371,7 +1379,7 @@ fn run_inner_resto_impl(
     // If the inner failed AND we did NOT detect locally-infeasible,
     // fall back to the original Failed path (caller turns this into
     // `RestorationOutcome::Failed`).
-    if !is_resto_success(status) && !locally_infeasible {
+    if !is_resto_success(status) && !locally_infeasible && !feasible_point_found {
         return None;
     }
 
@@ -1475,6 +1483,20 @@ const SQUARE_FEASIBLE_REL_VIOL_THRESHOLD: f64 = 1e-2;
 /// past square problems would silently turn those three surfaces into
 /// wrong answers rather than merely optimistic ones (gh #815 is what the
 /// opposite error cost: the band said failure and the answer was right).
+///
+/// The status conjunct admits the sub-solve stopping because it *could not
+/// go on* — at its acceptable level, on a tiny step, or on a failed step
+/// computation — not only upstream's `STOP_AT_ACCEPTABLE_POINT` (gh#1084).
+/// On a square problem the verdict is a claim about the point, and how the
+/// sub-solve came to stop there says nothing about it. The measured case:
+/// `square_flowsheet_resto.nl` at `tol=1e-10` parks at an original violation
+/// of `3.2e-10` — round-off on rows carrying `3e6` Pa — and the sub-solve's
+/// next factorization fails (`ErrorInStepComputation`) before its
+/// acceptable-level test can fire. Upstream's sub-solve happens to stop
+/// acceptably there and reports `Feasible point for square problem found`;
+/// pounce reported `Restoration_Failed` at the pre-restoration point,
+/// `1.1e5` off. Limits (`MaxiterExceeded`, the time caps) stay out: they say
+/// the caller's budget ran out, which is the verdict they asked to hear.
 fn square_feasible_point_found(
     is_square_problem: bool,
     status: SolverReturn,
@@ -1483,7 +1505,13 @@ fn square_feasible_point_found(
     orig_rel_inf_pr_at_final: f64,
 ) -> bool {
     is_square_problem
-        && matches!(status, SolverReturn::StopAtAcceptablePoint)
+        && matches!(
+            status,
+            SolverReturn::StopAtAcceptablePoint
+                | SolverReturn::StopAtTinyStep
+                | SolverReturn::ErrorInStepComputation
+                | SolverReturn::RestorationFailure
+        )
         && orig_inf_pr_at_final.is_finite()
         && orig_inf_pr_at_final < outer_constr_viol_tol
         && orig_rel_inf_pr_at_final <= SQUARE_FEASIBLE_REL_VIOL_THRESHOLD
@@ -1973,9 +2001,18 @@ mod tests {
             1.0e-4,
             1.0e-4
         ));
-        // Not an acceptable-point stop.
+        // A stop because the sub-solve could not go on is admitted
+        // (gh#1084); a success or a spent budget is not.
+        for st in [
+            SolverReturn::StopAtTinyStep,
+            SolverReturn::ErrorInStepComputation,
+            SolverReturn::RestorationFailure,
+        ] {
+            assert!(g(st, 1.0e-6, 1.0e-4, 1.0e-4), "{st:?}");
+        }
         assert!(!g(SolverReturn::Success, 1.0e-6, 1.0e-4, 1.0e-4));
         assert!(!g(SolverReturn::MaxiterExceeded, 1.0e-6, 1.0e-4, 1.0e-4));
+        assert!(!g(SolverReturn::WallTimeExceeded, 1.0e-6, 1.0e-4, 1.0e-4));
         // Violation not finite, or not under the outer tolerance.
         assert!(!g(
             SolverReturn::StopAtAcceptablePoint,

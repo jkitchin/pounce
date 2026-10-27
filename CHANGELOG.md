@@ -301,6 +301,30 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Tightening `tol` no longer turns a feasible square model into
+  `Restoration_Failed` (gh #1084).** Below a square model's round-off floor
+  the restoration sub-solve can reach a point feasible to `constr_viol_tol`,
+  but then fail its next step computation before its acceptable-level test
+  fires. pounce reported `Restoration_Failed` (AMPL 500) there, and wrote the
+  point restoration was entered at: on `square_flowsheet_resto.nl` at
+  `tol=1e-10`, 1.1e5 off while the sub-solve had reached 3.2e-10. Ipopt
+  reports `Feasible point for square problem found`. On a square model a
+  sub-solve that stops on a tiny step, a failed step computation or a nested
+  restoration failure, at a point feasible to `constr_viol_tol`, now gives
+  that verdict too. The point and the relative-violation guards are
+  unchanged, and running out of iterations or time still reports the limit.
+  Every failed restoration now also returns the point the sub-solve reached
+  when that point is no more infeasible than the entry point, as upstream
+  does (the gh #981 rule, previously applied only to the
+  locally-infeasible exit). Fixture sweep: no status, objective or iteration
+  count moves.
+- **The second-opinion ladder's `total_iteration_count` counts each solve's
+  `mu_strategy_fallback` re-solve.** The base solve and each rung were counted
+  by `iteration_count`, which holds one attempt; the μ flip's other attempt
+  was dropped. On `square_flowsheet_resto`'s lbfgs leg the report said 3320
+  for a solve that spent 3402 (rung 4's flip, 82 iterations). New
+  `SolveStatistics::spent_iteration_count()`. Fixture sweep: that `tot=` is
+  the one line that moves.
 - **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
   Schur path's base factorization scanned the whole constraint matrix once per
   active row; on the reporter's model it is now ~3× faster, and a warm step

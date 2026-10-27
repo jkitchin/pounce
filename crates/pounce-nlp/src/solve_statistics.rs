@@ -585,4 +585,71 @@ impl SolveStatistics {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Every iteration this solve spent: [`Self::iteration_count`] plus the
+    /// `mu_strategy_fallback` re-solve's, when one ran. `iteration_count`
+    /// alone is one attempt's: the re-solve's when it was promoted, the
+    /// first attempt's when it lost. Either way the other attempt's cost
+    /// lives only in [`Self::mu_strategy_fallback`], so a total built from
+    /// `iteration_count` silently drops it. That is what the second-opinion
+    /// ladder's `total_iteration_count` did: on `square_flowsheet_resto`'s
+    /// lbfgs leg, rung 4's re-solve hit the cap at 500 and its flip spent 82
+    /// more, and the report said 812 for a solve that cost 894.
+    pub fn spent_iteration_count(&self) -> Index {
+        self.mu_strategy_fallback
+            .as_ref()
+            .map_or(self.iteration_count, |r| r.total_iteration_count())
+    }
+}
+
+#[cfg(test)]
+mod spent_iteration_count_tests {
+    use super::*;
+
+    fn with_fallback(
+        iteration_count: Index,
+        base: Index,
+        retry: Index,
+        promoted: bool,
+    ) -> SolveStatistics {
+        SolveStatistics {
+            iteration_count,
+            mu_strategy_fallback: Some(MuStrategyFallbackRecord {
+                base_iteration_count: base,
+                retry_iteration_count: retry,
+                promoted,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn without_a_fallback_it_is_the_iteration_count() {
+        let s = SolveStatistics {
+            iteration_count: 42,
+            ..Default::default()
+        };
+        assert_eq!(s.spent_iteration_count(), 42);
+    }
+
+    /// A lost re-solve: `iteration_count` is the first attempt's, and the
+    /// re-solve's iterations are the ones a total built from it dropped.
+    #[test]
+    fn a_lost_re_solve_is_counted() {
+        assert_eq!(
+            with_fallback(500, 500, 82, false).spent_iteration_count(),
+            582
+        );
+    }
+
+    /// A promoted re-solve: `iteration_count` is the re-solve's, and the
+    /// first attempt's iterations are the ones dropped.
+    #[test]
+    fn a_promoted_re_solve_counts_the_first_attempt_too() {
+        assert_eq!(
+            with_fallback(109, 492, 109, true).spent_iteration_count(),
+            601
+        );
+    }
 }

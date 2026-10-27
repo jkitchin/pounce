@@ -88,8 +88,9 @@ pub struct SecondOpinionOutcome {
     /// true cost is `131 + 54`, 3.4× what the report says.
     pub base_iteration_count: usize,
     /// Iterations spent by every rung the ladder ran, in the order of
-    /// [`Self::tried`]. With [`Self::base_iteration_count`] this is the whole
-    /// cost of the solve.
+    /// [`Self::tried`], each including its own `mu_strategy_fallback`
+    /// re-solve ([`SolveStatistics::spent_iteration_count`]). With
+    /// [`Self::base_iteration_count`] this is the whole cost of the solve.
     pub rung_iteration_counts: Vec<usize>,
 }
 
@@ -105,7 +106,7 @@ impl SecondOpinionOutcome {
     /// The no-op outcome: no rung applied, nothing changed. For a caller that
     /// skips the ladder on its own grounds and still wants one type back.
     pub fn unchanged(status: ApplicationReturnStatus, statistics: SolveStatistics) -> Self {
-        let base_iteration_count = statistics.iteration_count.max(0) as usize;
+        let base_iteration_count = statistics.spent_iteration_count().max(0) as usize;
         Self {
             status,
             statistics,
@@ -233,7 +234,7 @@ pub fn run_second_opinion_ladder(
     let mut rung_iteration_counts: Vec<usize> = Vec::new();
     let mut promoted_by = None;
     let base_status = status;
-    let base_iteration_count = statistics.iteration_count.max(0) as usize;
+    let base_iteration_count = statistics.spent_iteration_count().max(0) as usize;
     // Every rung below is a fresh `optimize_tnlp` on the SAME problem, so the
     // application must not treat each one as a new run and reprint the
     // Ipopt-style problem-statistics header: a four-rung ladder emitted five
@@ -301,7 +302,7 @@ pub fn run_second_opinion_ladder(
         retry_status = app.optimize_tnlp(Rc::clone(&gated));
         retry_stats = app.statistics();
         tried.push(rung.label);
-        rung_iteration_counts.push(retry_stats.iteration_count.max(0) as usize);
+        rung_iteration_counts.push(retry_stats.spent_iteration_count().max(0) as usize);
         if scaling_retry_promoted(retry_status) {
             report(&format!(
                 "pounce: {} re-solve recovered the problem — promoting ({retry_status:?}).",
