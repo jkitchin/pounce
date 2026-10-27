@@ -129,6 +129,21 @@ pub trait SparseSymLinearSolverInterface {
         false
     }
 
+    /// gh#1076: whether a zero pivot read under a *reused* scaling is
+    /// confirmed by refactoring under a fresh one before it is reported.
+    ///
+    /// A backend that caches its scaling across factorizations on one
+    /// pattern (feral's MC64 cache) can report a zero pivot that is an
+    /// artefact of the cached vector rather than of the matrix. An IPM
+    /// answers a `Singular` report by perturbing, which cannot remove such
+    /// a pivot, so for it the re-check is right and is the default. The
+    /// active-set QP factors deliberately rank-deficient working sets and
+    /// repairs them itself; there the re-check is an extra factorization
+    /// on every expected zero pivot and a moved trajectory, and it turns
+    /// the check off. Defaults to a no-op: a backend without a scaling
+    /// cache has nothing to re-check.
+    fn set_reused_scaling_zero_pivot_recheck(&mut self, _on: bool) {}
+
     /// Whether a blocked `multi_solve` of `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
     /// against the same factor.

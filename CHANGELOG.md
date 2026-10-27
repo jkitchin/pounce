@@ -308,6 +308,19 @@ changes.
   lines move, every one on a fixture where the re-check fires, with no status
   change. Over the 733 Vanderbei models, no status changes and 4 models move.
   x86_64 not measured.
+- **The MC64 zero-pivot re-check is off for the active-set QP (gh #1076).**
+  The re-check above applied to every feral backend, including the one under
+  `pounce-qp`, whose working-set loop factors rank-deficient matrices on
+  purpose and repairs them itself. There it was an extra factorization on
+  every expected zero pivot: under `solver_selection=qp-active-set` it moved
+  63 of the 138 Maros-Meszaros problems and lost QFORPLAN, QFFFFF80, QSCSD8
+  and QSCTAP2 (gaining QSCTAP3). A new backend hook,
+  `SparseSymLinearSolverInterface::set_reused_scaling_zero_pivot_recheck`
+  (default no-op), lets `pounce-qp`'s `LinearSolver` turn it off; the IPM
+  keeps it. Every Maros-Meszaros solve that finishes inside 600 s is now
+  identical to before the re-check, and the fixture sweep diffs empty on
+  both legs. The default sweep could not see the regression: it never routes
+  to `qp-active-set`. arm64.
 - **Pooled batch backends forward `singularity_certified`.** The batch pool's
   feral wrapper left the trait default in place, so every pooled solve told the
   perturbation handler `false` (gh #981's classification) where a fresh backend
