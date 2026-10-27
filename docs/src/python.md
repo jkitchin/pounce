@@ -20,11 +20,13 @@ out to `pounce` runs a build directory rather than the package's own binary.
 The CLI binary the wheel carries lives at `python/pounce/bin/pounce` (in an
 installed wheel, `<site-packages>/pounce/bin/pounce`; `python -c "import
 pounce, pathlib; print(pathlib.Path(pounce.__file__).parent / 'bin' /
-'pounce')"`). The `pounce` console script is a Python shim that imports
-`pounce._cli` before it execs that binary, which costs about 0.24 s per
-call against 3 ms for the binary itself. A notebook that shells out to the CLI
-hundreds of times should call the bundled binary directly rather than the
-console script.
+'pounce')"`). The `pounce` console script is a Python shim that execs that
+binary. It starts from `_pounce_cli`, a standard-library-only package beside
+`pounce`, so it never imports the `pounce` package or scipy (gh #1086). Its
+cost is one Python interpreter start, about 15–20 ms, against a few ms for
+the binary itself. Through 0.13 it imported `pounce._cli`, which cost about
+0.2 s per call. A notebook that shells out to the CLI thousands of times can
+still save the interpreter start by calling the bundled binary directly.
 
 Just the extension module, if that is all you need:
 

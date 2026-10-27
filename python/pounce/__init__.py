@@ -29,51 +29,94 @@ from ._warm_start import (
     WarmStartLegacyWarning,
     WarmStartOrderingUnverifiedWarning,
 )
-from ._continuation import (
-    Continuation,
-    ContinuationStep,
-    ContinuationTrace,
-    StepController,
-    kkt_residual_monitor,
+# Everything below loads on first use (PEP 562), not at `import pounce`
+# (gh #1086). The solver facades pull in scipy, and `import pounce` took
+# ~175 ms, nearly all of it in `_minimize`'s scipy.optimize import. That is
+# paid by every process that only needs part of the package: the GAMS link
+# runs once per GAMS solve, and the `pounce` console script used to run
+# through this file twice per Pyomo solve. `_pounce` and `_warm_start` above
+# stay eager: the second installs the Problem.solve wrapper as a side
+# effect. Names resolve exactly as before (`from pounce import minimize`,
+# `pounce.minimize`, `from pounce import *`, `pounce.qp`), on first access.
+_LAZY = {
+    # name -> submodule it lives in
+    "Continuation": "_continuation",
+    "ContinuationStep": "_continuation",
+    "ContinuationTrace": "_continuation",
+    "StepController": "_continuation",
+    "kkt_residual_monitor": "_continuation",
+    "minimize": "_minimize",
+    "OptimizeResult": "_minimize",
+    "solve_nlp_batch": "_nlp_batch",
+    "curve_fit": "_curve_fit",
+    "curve_fit_minima": "_curve_fit",
+    "curve_fit_streaming": "_curve_fit",
+    "CurveFitResult": "_curve_fit",
+    "find_minima": "_minima",
+    "MinimaResult": "_minima",
+    "trf_minimize": "trf",
+    "TRFResult": "trf",
+    "TRFConfig": "trf",
+    "preflight": "_preflight",
+    "PreflightReport": "_preflight",
+    "ProjectionReport": "_starts",
+    "RaceCandidate": "_starts",
+    "RaceReport": "_starts",
+    "RaceRound": "_starts",
+    "generate_starts": "_starts",
+    "project_to_feasible": "_starts",
+    "race_starts": "_starts",
+    "find_critical_points": "_critical",
+    "find_saddles": "_critical",
+    "reaction_network": "_critical",
+    "CriticalPoint": "_critical",
+    "CriticalPointResult": "_critical",
+    "Connection": "_critical",
+    "ReactionNetwork": "_critical",
+    "ActiveSet": "qp",
+    "QpResult": "qp",
+    "QpFactorization": "qp",
+    "QpSensitivity": "qp",
+    "ReducedHessian": "qp",
+    "solve_qp": "qp",
+    "solve_socp": "qp",
+    "solve_qp_batch": "qp",
+    "solve_qp_multi_rhs": "qp",
+    "sos_minimize": "sos",
+    "SosResult": "sos",
+    "solve_bvp": "bvp",
+    "BVPResult": "bvp",
+    "solve_bvp_constrained": "bvp",
+    "solve_ivp": "ode",
+    "solve_dae": "ode",
+    "OdeResult": "ode",
+}
+
+# Submodules the eager imports used to bind as attributes as a side effect,
+# so `import pounce; pounce.qp.solve_qp(...)` kept working without an
+# explicit `import pounce.qp`.
+_LAZY_SUBMODULES = frozenset(
+    {"_continuation", "_minimize", "_nlp_batch", "_curve_fit", "_minima", "trf",
+     "_preflight", "_starts", "_critical", "qp", "sos", "bvp", "ode"}
 )
-from ._minimize import minimize, OptimizeResult
-from ._nlp_batch import solve_nlp_batch
-from ._curve_fit import (
-    curve_fit,
-    curve_fit_minima,
-    curve_fit_streaming,
-    CurveFitResult,
-)
-from ._minima import find_minima, MinimaResult
-from .trf import trf_minimize, TRFResult, TRFConfig
-from ._preflight import preflight, PreflightReport
-from ._starts import (
-    ProjectionReport,
-    RaceCandidate,
-    RaceReport,
-    RaceRound,
-    generate_starts,
-    project_to_feasible,
-    race_starts,
-)
-from ._critical import (
-    find_critical_points, find_saddles, reaction_network,
-    CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
-)
-from .qp import (
-    ActiveSet,
-    QpResult,
-    QpFactorization,
-    QpSensitivity,
-    ReducedHessian,
-    solve_qp,
-    solve_socp,
-    solve_qp_batch,
-    solve_qp_multi_rhs,
-)
-from .sos import sos_minimize, SosResult
-from .bvp import solve_bvp, BVPResult, solve_bvp_constrained
-from .ode import solve_ivp, solve_dae, OdeResult
+
+
+def __getattr__(name):
+    import importlib
+
+    if name in _LAZY:
+        value = getattr(importlib.import_module(f".{_LAZY[name]}", __name__), name)
+    elif name in _LAZY_SUBMODULES:
+        value = importlib.import_module(f".{name}", __name__)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY) | _LAZY_SUBMODULES)
+
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)

@@ -301,6 +301,21 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The `pounce` console script no longer imports the Python package before
+  running the binary (gh #1086).** The entry point was `pounce._cli:main`,
+  and importing it imported `pounce` and, through it, scipy: ~175 ms per
+  invocation. Pyomo's ASL layer runs the executable twice per solve, so HS100
+  took 0.36 s through `SolverFactory('pounce')` against Ipopt's 0.011 s while
+  the binary itself finishes in 0.007 s. The entry point is now
+  `_pounce_cli:main`, a stdlib-only package shipped beside `pounce` that loads
+  `pounce/_cli.py` by path. The same solve now takes 0.042 s, of which the
+  remainder is two Python interpreter starts. `pounce._cli` is unchanged for
+  importers.
+- **`import pounce` no longer imports scipy (gh #1086).** The solver facades
+  (`minimize`, `solve_qp`, `sos_minimize`, `curve_fit`, …) now load on first
+  use. `import pounce` falls from ~175 ms to ~30 ms. That matters most where
+  a new process starts per solve: the GAMS link is one. Every public name
+  resolves as before, including `pounce.qp` and `from pounce import *`.
 - **Tightening `tol` no longer turns a feasible square model into
   `Restoration_Failed` (gh #1084).** Below a square model's round-off floor
   the restoration sub-solve can reach a point feasible to `constr_viol_tol`,

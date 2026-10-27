@@ -33,7 +33,10 @@ dependencies = ["numpy>=1.23", "scipy>=1.11"]
 # Local `maturin develop` installs do not bundle the binary; the
 # shim prints a helpful message in that case.
 [project.scripts]
-pounce = "pounce._cli:main"
+# `_pounce_cli` sits beside `pounce`, not inside it, so starting the CLI
+# never imports the `pounce` package (and with it scipy): ~175 ms per
+# invocation, paid twice per Pyomo solve (gh #1086). It runs pounce/_cli.py.
+pounce = "_pounce_cli:main"
 # Interactive viewer for the debugger's `viz`/`save` artifacts. Point the
 # debugger at it with: export POUNCE_DBG_VIEWER='pounce-dbg-viz {}'
 pounce-dbg-viz = "pounce._debug_viz:main"
@@ -101,6 +104,8 @@ pyomo-pounce = { path = "../pyomo-pounce", editable = true }
 manifest-path = "../crates/pounce-py/Cargo.toml"
 python-source = "."
 module-name = "pounce._pounce"
+# The console script's entry package (gh #1086): see `_pounce_cli/__init__.py`.
+python-packages = ["_pounce_cli"]
 features = ["pyo3/extension-module"]
 strip = true
 # Pull the bundled CLI binary into the wheel. The release workflow
