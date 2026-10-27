@@ -329,6 +329,45 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The `pounce` console script no longer imports the Python package before
+  running the binary (gh #1086).** The entry point was `pounce._cli:main`,
+  and importing it imported `pounce` and, through it, scipy: ~175 ms per
+  invocation. Pyomo's ASL layer runs the executable twice per solve, so HS100
+  took 0.36 s through `SolverFactory('pounce')` against Ipopt's 0.011 s while
+  the binary itself finishes in 0.007 s. The entry point is now
+  `_pounce_cli:main`, a stdlib-only package shipped beside `pounce` that loads
+  `pounce/_cli.py` by path. The same solve now takes 0.042 s, of which the
+  remainder is two Python interpreter starts. `pounce._cli` is unchanged for
+  importers.
+- **`import pounce` no longer imports scipy (gh #1086).** The solver facades
+  (`minimize`, `solve_qp`, `sos_minimize`, `curve_fit`, …) now load on first
+  use. `import pounce` falls from ~175 ms to ~30 ms. That matters most where
+  a new process starts per solve: the GAMS link is one. Every public name
+  resolves as before, including `pounce.qp` and `from pounce import *`.
+- **Tightening `tol` no longer turns a feasible square model into
+  `Restoration_Failed` (gh #1084).** Below a square model's round-off floor
+  the restoration sub-solve can reach a point feasible to `constr_viol_tol`,
+  but then fail its next step computation before its acceptable-level test
+  fires. pounce reported `Restoration_Failed` (AMPL 500) there, and wrote the
+  point restoration was entered at: on `square_flowsheet_resto.nl` at
+  `tol=1e-10`, 1.1e5 off while the sub-solve had reached 3.2e-10. Ipopt
+  reports `Feasible point for square problem found`. On a square model a
+  sub-solve that stops on a tiny step, a failed step computation or a nested
+  restoration failure, at a point feasible to `constr_viol_tol`, now gives
+  that verdict too. The point and the relative-violation guards are
+  unchanged, and running out of iterations or time still reports the limit.
+  Every failed restoration now also returns the point the sub-solve reached
+  when that point is no more infeasible than the entry point, as upstream
+  does (the gh #981 rule, previously applied only to the
+  locally-infeasible exit). Fixture sweep: no status, objective or iteration
+  count moves.
+- **The second-opinion ladder's `total_iteration_count` counts each solve's
+  `mu_strategy_fallback` re-solve.** The base solve and each rung were counted
+  by `iteration_count`, which holds one attempt; the μ flip's other attempt
+  was dropped. On `square_flowsheet_resto`'s lbfgs leg the report said 3320
+  for a solve that spent 3402 (rung 4's flip, 82 iterations). New
+  `SolveStatistics::spent_iteration_count()`. Fixture sweep: that `tot=` is
+  the one line that moves.
 - **Exp- and power-cone solves return an accurate minimizer, not only an
   accurate objective (gh #1085).** On a cond-18 Poisson regression the non-symmetric
   HSDE driver reported `optimal` with the coefficients `1.8e-4` from the

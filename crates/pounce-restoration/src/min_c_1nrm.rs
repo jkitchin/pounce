@@ -149,6 +149,18 @@ pub struct RestoInnerReturn {
     /// `None` on any other failure (matching upstream's `bool` return, with
     /// the granular reasons mapped to log messages).
     pub result: Option<RestoSolveResult>,
+    /// The sub-solve's last iterate `(x, s)` in the original NLP's space,
+    /// when it ran far enough to have one and `result` is `None`.
+    ///
+    /// Upstream copies the restoration iterate into the original NLP's
+    /// `curr` on *every* non-success exit (`IpRestoMinC_1Nrm.cpp:196-245`,
+    /// "so that they will be returned to the user"); pounce dropped it and
+    /// reported the point restoration was entered at. gh#1084 measured the
+    /// cost on a square model: the returned point missed by `1.1e5` while
+    /// the sub-solve had reached `3.2e-10`. The driver promotes this point
+    /// under the gh#981 rule — only when it is no more infeasible than
+    /// `curr` — so a failed restoration never reports a worse point.
+    pub failed_point: Option<(Rc<dyn Vector>, Rc<dyn Vector>)>,
 }
 
 /// Inner-loop driver hook. Constructs and runs the nested IPM around
@@ -278,6 +290,7 @@ impl Default for MinC1NormRestoration {
             inner_solver: Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
                 inner_iter_count: 0,
                 result: None,
+                failed_point: None,
             }),
             orig_progress: None,
             last_inner_iter_count: 0,
@@ -420,6 +433,9 @@ impl RestorationPhase for MinC1NormRestoration {
         // Ahead of the `None` check, not after it (gh #819).
         self.last_inner_iter_count = inner.inner_iter_count;
         let Some(result) = inner.result else {
+            if let Some((x, s)) = inner.failed_point {
+                promote_if_no_more_infeasible(data, cq, x, s);
+            }
             return RestorationOutcome::Failed;
         };
         self.last_recovery_unreleased = result.unreleased_feasible_point;
@@ -497,32 +513,7 @@ impl RestorationPhase for MinC1NormRestoration {
                 .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
                 .is_some_and(|x| self.note_square_certificate(&x.expanded_values()));
         if result.locally_infeasible || square_certificate_honoured {
-            let curr_snapshot = data.borrow().curr.clone();
-            if let Some(curr) = curr_snapshot {
-                let recovered = IteratesVector::new(
-                    result.trial_x.clone(),
-                    result.trial_s.clone(),
-                    curr.y_c.clone(),
-                    curr.y_d.clone(),
-                    curr.z_l.clone(),
-                    curr.z_u.clone(),
-                    curr.v_l.clone(),
-                    curr.v_u.clone(),
-                );
-                let saved_trial = data.borrow().trial.clone();
-                data.borrow_mut().set_trial(recovered.clone());
-                let (theta_curr, theta_rec) = {
-                    let c = cq.borrow();
-                    (
-                        c.curr_constraint_violation(),
-                        c.trial_constraint_violation(),
-                    )
-                };
-                data.borrow_mut().trial = saved_trial;
-                if theta_rec.is_finite() && theta_rec <= theta_curr {
-                    data.borrow_mut().set_curr(recovered);
-                }
-            }
+            promote_if_no_more_infeasible(data, cq, result.trial_x.clone(), result.trial_s.clone());
             return RestorationOutcome::LocallyInfeasible;
         }
 
@@ -741,6 +732,46 @@ fn make_zeroed_like(template: &dyn Vector) -> Box<dyn Vector> {
     let mut v = DenseVectorSpace::new(n).make_new_dense();
     v.set(0.0);
     Box::new(v)
+}
+
+/// Install the restoration's primal `(x, s)` as the original NLP's `curr`,
+/// keeping `curr`'s multipliers, when it is no more infeasible than `curr`
+/// on the original NLP; otherwise leave `curr` alone. The gh#981 rule, shared
+/// by the locally-infeasible exit and (gh#1084) every failed sub-solve that
+/// left an iterate: the point a non-success verdict is reported at is the
+/// best one the solve held, and never a worse one.
+fn promote_if_no_more_infeasible(
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    x: Rc<dyn Vector>,
+    s: Rc<dyn Vector>,
+) {
+    let Some(curr) = data.borrow().curr.clone() else {
+        return;
+    };
+    let recovered = IteratesVector::new(
+        x,
+        s,
+        curr.y_c.clone(),
+        curr.y_d.clone(),
+        curr.z_l.clone(),
+        curr.z_u.clone(),
+        curr.v_l.clone(),
+        curr.v_u.clone(),
+    );
+    let saved_trial = data.borrow().trial.clone();
+    data.borrow_mut().set_trial(recovered.clone());
+    let (theta_curr, theta_rec) = {
+        let c = cq.borrow();
+        (
+            c.curr_constraint_violation(),
+            c.trial_constraint_violation(),
+        )
+    };
+    data.borrow_mut().trial = saved_trial;
+    if theta_rec.is_finite() && theta_rec <= theta_curr {
+        data.borrow_mut().set_curr(recovered);
+    }
 }
 
 /// Allocate an `Box<dyn Vector>` shaped like `template`, copying its
@@ -1205,6 +1236,7 @@ mod tests {
 
         let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
             inner_iter_count: 1,
+            failed_point: None,
             result: Some(RestoSolveResult {
                 trial_x: rcv(&[10.0, 20.0]),
                 trial_s: rcv(&[4.0]),
@@ -1291,6 +1323,7 @@ mod tests {
         let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _, _| RestoInnerReturn {
             inner_iter_count: 37,
             result: None,
+            failed_point: None,
         });
         let mut driver = MinC1NormRestoration::new().with_inner_solver(hook);
         driver.eq_mult = Box::new(StubEqMult);
@@ -1307,5 +1340,75 @@ mod tests {
             "the count must be recorded ahead of the `None` check, not \
              after it (gh #819)",
         );
+    }
+
+    /// Run a failed sub-solve that leaves `(x, s)` behind and return `curr`'s
+    /// primal afterwards. `MockNlp`'s `c` and `d` are identically zero, so the
+    /// original NLP's violation is `|s|`: `curr` starts at `s = 4`.
+    fn run_failed_with_point(x: &[f64], s: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let mut data = IpoptData::new();
+        data.curr_mu = 0.1;
+        data.curr_tau = 0.99;
+        data.set_curr(IteratesVector::new(
+            rcv(&[2.0, 3.0]),
+            rcv(&[4.0]),
+            rcv(&[1.0]),
+            rcv(&[1.0]),
+            rcv(&[0.5]),
+            rcv(&[0.7]),
+            rcv(&[0.3]),
+            rcv(&[]),
+        ));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(data));
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(MockNlp::new()));
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            Rc::clone(&data),
+            Rc::clone(&nlp),
+        )));
+        let (x, s) = (x.to_vec(), s.to_vec());
+        let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _, _, _| RestoInnerReturn {
+            inner_iter_count: 20,
+            result: None,
+            failed_point: Some((rcv(&x), rcv(&s))),
+        });
+        let mut driver = MinC1NormRestoration::new().with_inner_solver(hook);
+        driver.eq_mult = Box::new(StubEqMult);
+        let mut aug = UnusedAug;
+        let outcome = driver.perform_restoration(&data, &cq, &nlp, &mut aug);
+        assert!(
+            matches!(outcome, RestorationOutcome::Failed),
+            "a `None` result is a failed restoration, got {outcome:?}",
+        );
+        let s_after = {
+            let d = data.borrow();
+            let s = d.curr.as_ref().unwrap().s.clone();
+            s.as_any()
+                .downcast_ref::<DenseVector>()
+                .unwrap()
+                .expanded_values()
+        };
+        (curr_x_vals(&data), s_after)
+    }
+
+    /// gh#1084. A failed sub-solve hands back the point it reached, as
+    /// upstream does (`IpRestoMinC_1Nrm.cpp:196-245`), when that point is no
+    /// more infeasible than the one restoration was entered at. Before the
+    /// fix the reported point was always the entry point: `1.1e5` off on
+    /// `square_flowsheet_resto.nl` when the sub-solve had reached `3.2e-10`.
+    #[test]
+    fn a_failed_sub_solve_hands_back_a_less_infeasible_point() {
+        let (x, s) = run_failed_with_point(&[1.5, 2.5], &[1.0]);
+        assert_eq!(x, vec![1.5, 2.5]);
+        assert_eq!(s, vec![1.0]);
+    }
+
+    /// The other branch of the same rule: a failed sub-solve that ended
+    /// *more* infeasible than its entry point leaves `curr` alone, so a
+    /// failure is never reported at a worse point than the solve held.
+    #[test]
+    fn a_failed_sub_solve_never_hands_back_a_worse_point() {
+        let (x, s) = run_failed_with_point(&[1.5, 2.5], &[9.0]);
+        assert_eq!(x, vec![2.0, 3.0]);
+        assert_eq!(s, vec![4.0]);
     }
 }

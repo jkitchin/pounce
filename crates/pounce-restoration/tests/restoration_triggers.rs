@@ -148,6 +148,7 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
             RestoInnerReturn {
                 inner_iter_count: 0,
                 result: None,
+                failed_point: None,
             }
         });
         let driver = MinC1NormRestoration::new().with_inner_solver(hook);

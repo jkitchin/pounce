@@ -35,15 +35,12 @@
 //!
 //! One fixture, one exit path (`Restoration_Failed`), one linear solver.
 //!
-//! The fixture reaches that exit only under `tol=1e-11` as of FERAL 0.21. On
-//! 0.20 it failed in restoration at the default `tol` (131 iterations, 84 of
-//! them `r` rows); on 0.21 it solves at the default in 95, with 82 `r` rows in
-//! one restoration call that *recovers* — which still exercises the two
-//! counting identities but not the terminating path this file is about. Below
-//! the model's round-off floor (see `issue_815_restoration_ladder.rs`) the
-//! restoration sub-solve has nowhere to go and the run ends `Restoration
-//! Failed!` at 108: 3 ordinary rows, then 105 `r` rows in one call. The
-//! assertions parse the log rather than pin those numbers.
+//! The witness was `tol=1e-11` on the exact leg until gh#1084 showed that
+//! exit was a square model at a feasible point below its round-off floor, now
+//! reported as `Feasible_Point_Found` (see `issue_815_restoration_ladder.rs`).
+//! It is `max_resto_iter=5` now: restoration is entered far from feasible and
+//! cannot get there in five iterations, so the run ends `Restoration Failed!`
+//! on every platform. The assertions parse the log rather than pin numbers.
 //!
 //! The
 //! `Recovered` path had a working roll-forward before this change and still
@@ -56,12 +53,12 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// `tol=1e-11` is what puts the fixture on the terminating path under FERAL
-/// 0.21 (module comment). The ladder is switched off so that the run's last
+/// `max_resto_iter=5` is what puts the fixture on the terminating path
+/// (module comment). The ladder is switched off so that the run's last
 /// printed rows are the base solve's own: every rung a `Restoration_Failed`
 /// can reach is named — the gh#815 displacement rung, gh#857's
-/// `feral_increase_quality_retry`, and the square-system stage. None of them
-/// recovers the model at this `tol`, but each would print its own iteration
+/// `feral_increase_quality_retry`, and the square-system stage. The square-system
+/// stage recovers this model, and each would print its own iteration
 /// table after the base solve's, and the identity is about one solve. A rung
 /// added later that catches this trigger belongs here too.
 fn run_to_restoration_failure() -> String {
@@ -74,7 +71,7 @@ fn run_to_restoration_failure() -> String {
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
         .arg(&model)
         .arg(&sol)
-        .arg("tol=1e-11")
+        .arg("max_resto_iter=5")
         .arg("infeasibility_perturbed_start_retry=no")
         .arg("feral_increase_quality_retry=no")
         .arg("square_system_recovery=no")
@@ -175,9 +172,23 @@ fn the_restoration_line_counts_the_r_rows_that_were_printed() {
          is seeded from the outer's and is therefore a position, not a \
          length:\n{log}"
     );
+    // The call count is printed with the noun agreeing with it, whatever
+    // the count is (one call under this witness).
+    let line = log
+        .lines()
+        .find(|l| l.starts_with("Number of restoration iterations"))
+        .expect("restoration summary line");
+    let calls: i64 = line
+        .split("(in ")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no call count in `{line}`"));
+    assert!(calls >= 1, "at least one restoration call:\n{log}");
+    let noun = if calls == 1 { "call)" } else { "calls)" };
     assert!(
-        log.contains("Number of restoration iterations") && log.contains("(in 1 call)"),
-        "one restoration call, singular:\n{log}"
+        line.contains(&format!("(in {calls} {noun}")),
+        "the call count and its noun must agree: `{line}`"
     );
 }
 
