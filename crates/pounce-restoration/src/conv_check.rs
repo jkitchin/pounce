@@ -437,7 +437,7 @@ pub struct RestoConvCheckAdapter {
     /// `None`, the kappa guard alone gates `Converged` (matches the
     /// `RestoConvCheck`-base behavior — the filter-aware variant only
     /// fires when the outer phase's acceptor is `FilterLsAcceptor`).
-    orig_progress_callback: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    orig_progress_callback: Option<pounce_algorithm::restoration::OrigProgressCheck>,
     /// The *original* NLP's `tol`. Layer 2's tightening arm is bounded
     /// against it (`IpRestoConvCheck.cpp:213`'s
     /// `IpData().tol() > 1e-1 * orig_ip_data->tol()`); the sub-problem's
@@ -536,7 +536,7 @@ impl RestoConvCheckAdapter {
     /// `RestoConvCheck`-without-filter case.
     pub fn with_orig_progress_callback(
         mut self,
-        cb: pounce_algorithm::restoration::OrigProgressCallback,
+        cb: pounce_algorithm::restoration::OrigProgressCheck,
     ) -> Self {
         self.orig_progress_callback = Some(cb);
         self
@@ -787,7 +787,6 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
                     inf_pr_scaled: orig_trial_inf_pr,
                     inf_pr_unscaled: orig_trial_inf_pr_unscaled,
                     inf_pr_relative: orig_trial_rel_inf_pr,
-                    f: orig_trial_f,
                 }) = eval_orig_trial_measures(data, &orig_rc)
                 {
                     // 2a. Layer 1's square-problem arm
@@ -846,8 +845,15 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
                             // wired (mirrors `TestOrigProgress`). When the
                             // callback is absent, kappa alone gates the
                             // exit (matches `RestoConvCheck`-base).
+                            //
+                            // The callback evaluates the outer problem's
+                            // barrier objective and 1-norm violation at
+                            // this iterate's `(x, s)` itself — the pair the
+                            // outer filter holds (gh#1042).
                             let outer_accept = match &self.orig_progress_callback {
-                                Some(cb) => cb(orig_trial_f, orig_trial_inf_pr),
+                                Some(cb) => {
+                                    orig_x_s(data).map(|(x, s)| cb(&*x, &*s)).unwrap_or(false)
+                                }
                                 None => true,
                             };
                             if outer_accept {
@@ -885,6 +891,22 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
     }
 }
 
+/// The outer problem's `(x, s)` at the restoration sub-solve's current
+/// iterate: the `x` block of the restoration variables, and the slacks.
+fn orig_x_s(
+    data: &pounce_algorithm::ipopt_data::IpoptDataHandle,
+) -> Option<(
+    std::rc::Rc<dyn pounce_linalg::Vector>,
+    std::rc::Rc<dyn pounce_linalg::Vector>,
+)> {
+    use pounce_linalg::CompoundVector;
+    let curr = data.borrow().curr.clone()?;
+    let xc = curr.x.as_any().downcast_ref::<CompoundVector>()?;
+    let x: std::rc::Rc<dyn pounce_linalg::Vector> =
+        std::rc::Rc::from(xc.comp(crate::resto_nlp::BLOCK_X).make_new_copy());
+    Some((x, std::rc::Rc::clone(&curr.s)))
+}
+
 /// Original-NLP measurements at the restoration sub-solve's current
 /// iterate, in both unit systems.
 struct OrigTrialMeasures {
@@ -914,8 +936,6 @@ struct OrigTrialMeasures {
     /// finite bound, or a declared magnitude of zero, contribute nothing — the
     /// absolute measures are already invariant there.
     inf_pr_relative: f64,
-    /// Unscaled `f(x_orig)`.
-    f: f64,
 }
 
 /// Evaluate the orig-NLP measurements at the inner iterate's
@@ -1060,13 +1080,10 @@ fn eval_orig_trial_measures(
         0.0
     };
 
-    let f = orig.eval_f(x_orig);
-
     Some(OrigTrialMeasures {
         inf_pr_scaled: c_amax.1.max(d_minus_s_amax.1),
         inf_pr_unscaled: c_amax.0.max(d_minus_s_amax.0),
         inf_pr_relative,
-        f,
     })
 }
 
@@ -1445,8 +1462,8 @@ mod tests {
         // gate (kappa-reduction AND callback-accept ⇒ Converged) is
         // exercised by the `restoration_triggers` integration test
         // through the nested IPM.
-        let cb: pounce_algorithm::restoration::OrigProgressCallback =
-            Box::new(|_barr: f64, _theta: f64| true);
+        let cb: pounce_algorithm::restoration::OrigProgressCheck =
+            Box::new(|_x: &dyn pounce_linalg::Vector, _s: &dyn pounce_linalg::Vector| true);
         let a =
             RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000).with_orig_progress_callback(cb);
         assert!(a.orig_progress_callback.is_some());

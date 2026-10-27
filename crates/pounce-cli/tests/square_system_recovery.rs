@@ -193,9 +193,15 @@ fn flowsheet_residual(x: &[f64]) -> Vec<f64> {
     at.iter().zip(&rhs).map(|(a, b)| a - b).collect()
 }
 
+// `mu_strategy_fallback=no`: since gh#1076 the base solve's failure is
+// platform-dependent — `Restoration_Failed`/250 on arm64,
+// `Maximum_Iterations_Exceeded`/500 on x86_64 — and on x86_64 the monotone
+// μ re-solve then recovers the model in 155, ahead of the stage. These tests
+// are about the stage, so the fallback is kept out of their way.
 const FAILING_LBFGS: &[&str] = &[
     "hessian_approximation=limited-memory",
     "feral_increase_quality_retry=no",
+    "mu_strategy_fallback=no",
     "max_iter=500",
 ];
 
@@ -208,10 +214,23 @@ fn lbfgs_square_flowsheet_is_recovered_by_the_square_system_stage() {
     assert_eq!(r.status(), "SolveSucceeded", "{}", r.out);
     assert_eq!(r.promoted_by(), Some(LABEL), "{}", r.out);
     assert_eq!(r.engine(), "square-lm", "the point is LM's, not the IPM's");
+    // gh#1076: the base solve used to run to `max_iter`, which opens no
+    // option rung. With a zero pivot read under a reused MC64 scaling now
+    // refactored under a fresh one, it fails in restoration at 250 instead
+    // (arm64), and `Restoration_Failed` opens the start-point rung first; that
+    // rung fails too (62 iterations) and the stage is what recovers it, as
+    // before. Whatever opens ahead of it, the stage must be the last rung and
+    // the one promoted.
+    let tried = r.tried();
     assert_eq!(
-        r.tried(),
-        [LABEL],
-        "no option rung should open here:\n{}",
+        tried.last().map(String::as_str),
+        Some(LABEL),
+        "the square-system stage must be the rung that recovers this:\n{}",
+        r.out
+    );
+    assert!(
+        tried.len() <= 2,
+        "at most one option rung ahead of the stage, got {tried:?}:\n{}",
         r.out
     );
     let base = r.report["second_opinion"]["base_status"]
@@ -220,7 +239,7 @@ fn lbfgs_square_flowsheet_is_recovered_by_the_square_system_stage() {
     assert!(
         matches!(
             base,
-            "Maximum_Iterations_Exceeded" | "Infeasible_Problem_Detected"
+            "Maximum_Iterations_Exceeded" | "Infeasible_Problem_Detected" | "Restoration_Failed"
         ),
         "the stage recovers a failed IPM solve, not a converged one: base {base}"
     );

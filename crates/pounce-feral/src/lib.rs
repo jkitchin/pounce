@@ -139,6 +139,12 @@ pub struct FeralSolverInterface {
     /// [`SparseSymLinearSolverInterface::singularity_certified`].
     last_singular_certified: bool,
 
+    /// gh#1076: refactor under a fresh MC64 scaling when a zero pivot was
+    /// read under a reused one. On by default; the active-set QP turns it
+    /// off. See
+    /// [`SparseSymLinearSolverInterface::set_reused_scaling_zero_pivot_recheck`].
+    reused_scaling_zero_pivot_recheck: bool,
+
     /// Fill-reducing ordering configured at construction; surfaced on
     /// the `linear_solve` tracing span after each factorization
     /// (pounce#71).
@@ -1146,6 +1152,7 @@ impl FeralSolverInterface {
             slot: None,
             negevals: 0,
             last_singular_certified: false,
+            reused_scaling_zero_pivot_recheck: true,
             ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
             inertia_pivot_floor: cfg.inertia_pivot_floor,
@@ -1317,7 +1324,54 @@ impl FeralSolverInterface {
         let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
 
         let t0 = std::time::Instant::now();
-        let status = self.solver.factor(matrix, None);
+        let hits_before = self.solver.mc64_cache_hit_count();
+        let mut status = self.solver.factor(matrix, None);
+        // gh#1076: a zero pivot read under a *reused* MC64 scaling is
+        // confirmed under the matrix's own scaling before it is reported.
+        //
+        // feral's value-bounded cache lets a `factor()` whose `Auto` scaling
+        // resolved to MC64 reuse the scaling vector of an earlier matrix on
+        // the same pattern, whenever an O(nnz) diagonal-dominance check
+        // passes. The result then depends on the solve's history and not
+        // only on the matrix in hand, and the two are not interchangeable:
+        // on `pooling_rt2stp` (feral 0.22, arm64), 44 of the 47
+        // factorizations that read one zero pivot under a reused scaling
+        // read the exact inertia `(78, 72, 0)` when the same matrix was
+        // factored with the same configuration and pivot threshold by a
+        // solver computing its scaling afresh. Reported as `Singular`, each
+        // sent the perturbation handler up the `δ_x` ladder, which cannot
+        // remove a pivot that is an artefact of the scaling: it ran to
+        // `max_hessian_perturbation = 1e20` six times and the base solve
+        // ended `Error_In_Step_Computation` at iteration 157.
+        //
+        // Upstream Ipopt has no such cache — MA27/MA57 scale from the
+        // values on every factorization — so this restores its verdict
+        // exactly where the verdict moves the IPM. Turning the cache off
+        // outright does the same, but costs a Hungarian matching on every
+        // factorization: over the Vanderbei corpus it took `brainpc0` and
+        // `brainpc2` past a 600 s budget they otherwise meet in about a
+        // minute (that run was on a loaded machine, so the factor is loose,
+        // but the direction is not). Here the extra factorization is paid
+        // only on a zero pivot that came from a cache hit; timed
+        // sequentially, `brainpc0..2`, `cresc132` and the `fletch*` models
+        // run within 1% of before.
+        if self.reused_scaling_zero_pivot_recheck
+            && self.solver.mc64_cache_hit_count() > hits_before
+            && matches!(status, FactorStatus::Success)
+            && self.solver.inertia().is_some_and(|i| i.zero > 0)
+        {
+            tracing::debug!(
+                target: "pounce::linsol",
+                zero = self.solver.inertia().map_or(0, |i| i.zero), dim = self.dim,
+                "zero pivot under a reused MC64 scaling; refactoring with a fresh one"
+            );
+            // Toggling the cache off drops the cached vector (and nothing
+            // else); back on, the refactor below recomputes and re-caches.
+            self.solver = std::mem::take(&mut self.solver)
+                .with_mc64_cache(false)
+                .with_mc64_cache(true);
+            status = self.solver.factor(matrix, None);
+        }
         let factor_secs = t0.elapsed().as_secs_f64();
         match status {
             FactorStatus::Success => {
@@ -1852,6 +1906,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 
     fn provides_inertia(&self) -> bool {
         true
+    }
+
+    fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
+        self.reused_scaling_zero_pivot_recheck = on;
     }
 
     fn singularity_certified(&self) -> bool {

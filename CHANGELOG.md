@@ -311,6 +311,116 @@ changes.
   step that makes no further progress.
 - **The active-set SQP reports a non-finite objective as
   `Invalid_Number_Detected`** instead of a step-size stall.
+- **Restoration's release test now reads the outer filter's own quantities,
+  and the two hand-back paths that the old quantities were masking are closed
+  (gh#1076 §2; supersedes #1075).** The callback that decides whether
+  restoration may hand a point back was given the max-norm violation and the
+  unscaled plain objective, while the filter and reference point hold the
+  1-norm violation and the scaled barrier objective. The outer algorithm now
+  evaluates its own `trial_barrier_obj()` / `trial_constraint_violation()` at
+  restoration's `(x, s)`, as upstream's `TestOrigProgress` does. Judged
+  correctly, restoration stops releasing points by accident, which exposed
+  two consequences of pounce's (deliberate) hand-back of an *unreleased*
+  feasible point, which upstream reports as a restoration failure:
+  - A restoration forced by a non-finite Hessian at a point already
+    feasible to `tol` can never be released (it can only raise the barrier
+    objective against the entry, whose filter envelope dominates every such
+    point), and the outer then cannot step from the hand-back either. Such a
+    hand-back now restarts the filter. `dallass_kink_unmerged`: Optimal at 61
+    with no ladder (65 on main; `Error_In_Step_Computation` at 116 with the
+    corrected test alone).
+  - The gh#1042 exit fired only on a re-entry from the very point handed back.
+    An outer that leaves the hand-back on soft-restoration `s` steps alone and
+    re-enters from elsewhere now counts as not having taken its shot; three
+    such re-entries in a row end the solve with `Restoration_Failed` (judged on
+    the feasible hand-back, so the ladder opens `mu_strategy=adaptive` first).
+    Vanderbei `brainpc0` was cycling 45 restorations to a false
+    `Infeasible_Problem_Detected` at 1678 iterations; it now ends at 365 and is
+    recovered at 24 (11 s against 55 s on main, which reached the same answer
+    through the gh#884 cold retry after a failed 956-iteration base solve).
+  Over the 733 Vanderbei models at default options: 0 lost, 1 gained
+  (`cresc132`, Infeasible → Optimal via the `mu_strategy=adaptive` rung),
+  139679 → 135768 total iterations. `brainpc1`'s base solve now converges
+  directly (123 iterations, a different local minimum; main failed at 378 and
+  was rescued). Fixture sweep, both legs: 2 of 248 lines move, both L-BFGS and
+  failing either way (`dallass` 214 → 218, `deb7` `Restoration_Failed` →
+  `Maximum_Iterations_Exceeded`). Measured on arm64 only; x86_64 is
+  unmeasured.
+- **A zero pivot read under a reused MC64 scaling is re-checked before the
+  IPM acts on it (gh #1076).** feral's value-bounded MC64 cache can reuse the
+  scaling vector of an earlier matrix on the same pattern, so a factorization's
+  verdict depended on the solve's history. On `pooling_rt2stp`, 44 of the 47
+  factorizations that read one zero pivot that way read the exact inertia under
+  a freshly computed scaling. Each was reported `Singular`, and the `δ_x`
+  ladder, which cannot remove such a pivot, ran to `1e20` six times; the base
+  solve ended `Error_In_Step_Computation` at 157 and needed the
+  `mu_strategy=adaptive` rescue (242 iterations in all). A zero pivot that
+  came from a cache hit is now refactored with a fresh scaling first, which is
+  what MA27/MA57 do on every factorization. The cache stays on otherwise:
+  turning it off outright took `brainpc0` and `brainpc2` past a 600 s budget,
+  while the re-check leaves their run times within 1%. The
+  fixture now solves without a rescue (224, arm64), and under a round-off
+  screen of 17 `mu_init` values it is solved in all 17 with no rescue, against
+  4 rescued and 1 `Maximum_Iterations_Exceeded` before. Fixture sweep: 10
+  lines move, every one on a fixture where the re-check fires, with no status
+  change. Over the 733 Vanderbei models, no status changes and 4 models move.
+  x86_64 not measured.
+- **The MC64 zero-pivot re-check is off for the active-set QP (gh #1076).**
+  The re-check above applied to every feral backend, including the one under
+  `pounce-qp`, whose working-set loop factors rank-deficient matrices on
+  purpose and repairs them itself. There it was an extra factorization on
+  every expected zero pivot: under `solver_selection=qp-active-set` it moved
+  63 of the 138 Maros-Meszaros problems and lost QFORPLAN, QFFFFF80, QSCSD8
+  and QSCTAP2 (gaining QSCTAP3). A new backend hook,
+  `SparseSymLinearSolverInterface::set_reused_scaling_zero_pivot_recheck`
+  (default no-op), lets `pounce-qp`'s `LinearSolver` turn it off; the IPM
+  keeps it. Every Maros-Meszaros solve that finishes inside 600 s is now
+  identical to before the re-check, and the fixture sweep diffs empty on
+  both legs. The default sweep could not see the regression: it never routes
+  to `qp-active-set`. arm64.
+- **Pooled batch backends forward `singularity_certified`.** The batch pool's
+  feral wrapper left the trait default in place, so every pooled solve told the
+  perturbation handler `false` (gh #981's classification) where a fresh backend
+  said otherwise. It also forwards `multi_solve_matches_single_solve` now.
+- **Maros-Meszaros `QGFRDXPN` solves again under
+  `solver_selection=qp-active-set` (gh #1076).** The active-set QP's counting
+  prune (an over-full working set is pruned before it is factored) used to
+  stand down for the rest of a Schur pass the first time it removed a slot
+  twice. On `QGFRDXPN` that happened at iteration 73 of the first elastic
+  phase-1 pass, and the solve reported `ErrorInStepComputation` after 11445
+  iterations. The counting prune now stands down after 32 prunes in a pass
+  instead, repeats included. `QGFRDXPN` is optimal in 3553 iterations (5.9 s).
+  The cap is a measured value, and the outcome is not monotone in it:
+  `QFORPLAN` solves at caps 16, 20, 32 and 40 and cycles to `MaxIter` at 24,
+  28, 48 and 64, and `QGFRDXPN` needs at least 24. Both are now fixtures
+  pinned under `qp-active-set`. Three defects on the failing path are fixed
+  alongside:
+  - **The stationarity prune has a cycle guard.** On `QGFRDXPN` it pruned
+    992 times in one pass, 990 of them back to the same working set. Its
+    branch skipped the loop's cycle guard, and the objective drifted by about
+    50 ulps between visits, which cleared that guard's record anyway. It now
+    keeps its own record and compares objectives to round-off.
+  - **An exhausted rank-repair budget ends the pass as `MaxIter`**, like the
+    cycle guard, instead of propagating a hard singular-KKT error that ended
+    the whole attempt.
+  - **The elastic phase-1 checks the original rows before calling a point
+    feasible.** Zero slacks were taken as proof. `QGFRDXPN`'s phase-1 returned
+    a point with every slack at zero and the rows violated by 5.2e4, and
+    `QBANDM` (43.7) and `QSHELL` (766) did the same. Such a point now goes to
+    the recovery path.
+
+  These three do not make the old stand-down rule work: with all three it
+  still ends `QGFRDXPN` `MaxIter`. Over the 138 Maros-Meszaros problems under
+  `qp-active-set` (arm64), no problem is lost and `QGFRDXPN` is gained. Timed
+  serially, alternating base and new, over the 39 common solves that moved or
+  changed status in either run, wall time falls from 4087 s to 3415 s:
+  `QFFFFF80` 476 → 165 s, `CVXQP3_M` 461 → 271 s, `QSCTAP2` 378 → 210 s,
+  `QSCSD8` 400 → 171 s. Two are more than 2× slower, `QSCFXM3` 229 → 494 s and
+  `QSCSD6` 19 → 47 s. `QSCFXM3`'s first phase-1 pass reaches the cap and then
+  runs unpruned to its iteration limit (21310 changes). `QSCSD6`'s first
+  pass ends at the cycle guard, where the stand-down rule's pass finishes,
+  and pays for the recovery path. `QBANDM` is 1.19× (it was 2.2×
+  with the cap alone; the row check recovers it), and `QSHELL` is 1.45×.
 - **A false `Infeasible_Problem_Detected` at a saddle of the constraint
   violation is now re-solved from beside it.** The infeasibility verdict claims
   the solve stopped at a local minimizer of the violation, and every gate that

@@ -164,13 +164,19 @@ struct PinnedFactor {
     rank_guard_calls: u32,
 }
 
-/// Which slots the counting prune in [`ParametricActiveSetSolver::schur_reset_rank_repaired`]
-/// has removed during one Schur pass, and whether it has stood down.
+/// How many times the counting prune in
+/// [`ParametricActiveSetSolver::schur_reset_rank_repaired`] has run during one
+/// Schur pass; it stands down at [`COUNT_PRUNE_CAP`].
 #[derive(Default)]
 struct CountPrune {
-    removed: Vec<bool>,
-    off: bool,
+    prunes: u32,
 }
+
+/// Counting prunes one Schur pass may perform before the counting trigger
+/// stands down for the rest of the pass (gh#1076). See
+/// [`ParametricActiveSetSolver::schur_reset_rank_repaired`] for why it is a
+/// cap and for the measurements behind the value.
+const COUNT_PRUNE_CAP: u32 = 32;
 
 impl ParametricActiveSetSolver {
     pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
@@ -2648,7 +2654,14 @@ impl ParametricActiveSetSolver {
             ));
         }
 
-        let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol);
+        // Zero slacks prove feasibility only if the augmented rows hold at the
+        // point, and a Schur pass can return a point that has left its own
+        // active rows. QGFRDXPN's phase-1 (gh#1076) came back with every
+        // slack at zero and the original rows violated by 5.2e4, and was
+        // returned as a feasible optimum: the convex driver demoted it to
+        // `NumericalFailure` and the attempt was lost. Checking the original
+        // rows directly sends such a point to the recovery below instead.
+        let feasible = elastic_point_is_feasible(&reform, qp, &sol_aug.x, opts.feas_tol);
         if feasible {
             // Elastic drove every slack to zero ⇒ the recovered `x` is
             // feasible for the original QP, and optimal for it iff the
@@ -3535,34 +3548,55 @@ impl ParametricActiveSetSolver {
             //
             // The prune is only sound while what it drops stays out. Which row
             // of a dependent set the probe flags is its pivoting's choice, and
-            // a row it calls dependent need not be dependent at the ratio
-            // test's tolerance. On Maros-Meszaros QFORPLAN the probe dropped
-            // slot 721, the next step re-added it at `α = 0`, the following add
-            // made the set over-full again, and the prune dropped 721 again: a
-            // three-iteration cycle until the iteration limit, on a QP the
-            // unpruned loop solves (QFFFFF80 the same). So the first time a
-            // prune removes a slot it already removed in this pass, the
-            // counting trigger stands down for the rest of the pass; the
-            // factorization-failure repair below is unaffected. Skipping only
-            // the repeated prune and letting later ones run was measured and
-            // rejected: it keeps QGFRDXPN but loses CVXQP3_M (main: optimal,
-            // 326 s; then the 600 s wall limit) and makes QCAPRI 20x and QSEBA
-            // 6x slower. This rule's cost is QGFRDXPN (gh#1042).
-            if ac > qp.n && *budget > 0 && !self.count_prune.off {
-                let was_active = active_slots(qp, working);
+            // at a degenerate vertex the row it drops is routinely a genuine
+            // blocker for the next direction: the following drop releases one
+            // of the rows that implied it, it re-enters at `α = 0` (measured:
+            // 507 of 509 re-entries on Maros-Meszaros QGFRDXPN and 1052 of
+            // 1058 on QFORPLAN carry a rate far above the `TABU_DRIFT_REL`
+            // drift band, most of them the largest component of `p`), the next
+            // add makes the set over-full again, and the prune drops it again.
+            //
+            // Left unguarded, that cycle runs to the iteration limit when it
+            // spans objective progress, which the gh#974 cycle guard (it keys
+            // on an unchanged objective) cannot see: QFORPLAN and QFFFFF80
+            // ended `MaxIter` on a QP the unpruned loop solves. #1047 stood
+            // the trigger down the first time a prune removed a slot it had
+            // already removed in the pass. That lost QGFRDXPN: its elastic
+            // phase-1 repeats a slot at iteration 73 of its first pass, and
+            // with the counting prune off the over-full set factors, its
+            // multipliers fail stationarity, and the stationarity prune below
+            // takes over the same cycle — 992 times, out of sight of the cycle
+            // guard because that branch `continue`s, until the rank-repair
+            // budget is gone and the pass ends in a hard singular-KKT error
+            // (`ErrorInStepComputation`, 11445 iterations). Unguarded, each of
+            // that phase-1's passes instead ends `MaxIter` at the cycle guard
+            // within 24 prunes and the phase-2 solve from there is optimal.
+            //
+            // The three defects on that path are fixed separately: the
+            // stationarity prune has its own cycle guard, an exhausted repair
+            // budget ends the pass as `MaxIter`, and the elastic phase-1 checks
+            // the rows before it calls a point feasible. They do not make the
+            // stand-down safe. With all three, the stand-down rule still ends
+            // QGFRDXPN `MaxIter`: an over-full set left unpruned yields steps
+            // that leave the active rows, and passes run that way return
+            // "optimal" points violating the original rows by up to 5.2e4,
+            // which every recovery then rejects.
+            //
+            // So the trigger stands down after `COUNT_PRUNE_CAP` prunes in a
+            // pass rather than on the first repeat. This is a measured bound,
+            // not a derived one, and the outcome is not monotone in it
+            // (gh#1076): QGFRDXPN needs at least 24; QFORPLAN solves at 16,
+            // 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and 64, with
+            // or without the three fixes. Ending the pass at the cap or at the
+            // first repeat, instead of standing down, loses QFORPLAN. 32 is
+            // the value measured over all 138 Maros-Meszaros problems. The
+            // factorization-failure repair below is unaffected.
+            if ac > qp.n && *budget > 0 && self.count_prune.prunes < COUNT_PRUNE_CAP {
                 if self.prune_dependent_active(qp, working, n_changes) {
                     *budget -= 1;
                     *pruned = true;
                     ac = active_slot_count(working);
-                    let now_active = active_slots(qp, working);
-                    let seen = &mut self.count_prune.removed;
-                    seen.resize(qp.m + qp.n, false);
-                    for k in (0..qp.m + qp.n).filter(|&k| was_active[k] && !now_active[k]) {
-                        if seen[k] {
-                            self.count_prune.off = true;
-                        }
-                        seen[k] = true;
-                    }
+                    self.count_prune.prunes += 1;
                 }
             }
             match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
@@ -3696,6 +3730,10 @@ impl ParametricActiveSetSolver {
         // see `schur_reset_rank_repaired` on why a cap is needed here and not
         // on the refactor path.
         let mut rank_repair_budget: u32 = (qp.n + qp.m).min(1000) as u32;
+        #[cfg(test)]
+        if let Some(b) = issue1076_tests::budget_override() {
+            rank_repair_budget = b;
+        }
         // Set by a rank repair; tells the pin repair to re-freeze its reference
         // residuals (see there).
         let mut pruned = false;
@@ -3784,7 +3822,42 @@ impl ParametricActiveSetSolver {
         let mut streak_obj = Number::NAN;
         let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
-        for _iter in 0..opts.max_iter {
+        // The same guard for the stationarity prune below, which `continue`s
+        // before the one above can see it. It keeps its own record, and
+        // compares objectives to round-off rather than bit for bit: between
+        // two of its prunes the loop takes ordinary iterations whose
+        // objective drifts in the last bits, and each such drift clears the
+        // main guard's record (gh#1076).
+        let mut prune_cycle = PruneCycleGuard::default();
+        // A mid-pass reset that fails after the rank-repair budget is spent
+        // ends the pass the way the cycle guard does: `MaxIter` at the
+        // current iterate, which every caller treats as "unfinished" and
+        // recovers from. It used to propagate as a hard
+        // `LinearSolverFailure`, which ends the whole attempt: on QGFRDXPN's
+        // elastic phase-1 that discarded a feasible point and reported
+        // `ErrorInStepComputation` (gh#1076). The budget is a limit, like
+        // `max_iter`, and is reported like one. The reset before the loop
+        // keeps `?`: there is no iterate yet to hand back.
+        macro_rules! reset_or_stop {
+            ($lbl:lifetime) => {
+                match self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                    &mut pruned,
+                ) {
+                    Ok(()) => {}
+                    Err(e) if reset_failure_ends_pass(&e, rank_repair_budget) => {
+                        break $lbl;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+        }
+        'iters: for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
@@ -3903,15 +3976,7 @@ impl ParametricActiveSetSolver {
                 if !e.is_recoverable_factorization_failure() {
                     return Err(e);
                 }
-                self.schur_reset_rank_repaired(
-                    &mut schur,
-                    qp,
-                    &mut working,
-                    opts,
-                    &mut n_changes,
-                    &mut rank_repair_budget,
-                    &mut pruned,
-                )?;
+                reset_or_stop!('iters);
                 n_refactor += 1;
                 // `solve` writes through `rhs`, so restore it before retrying.
                 rhs.copy_from_slice(&rhs_backup);
@@ -3980,15 +4045,7 @@ impl ParametricActiveSetSolver {
                     stationary = true;
                 } else {
                     floor_refactored = true;
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                     prev_was_null_step = false;
                     prev_p_inf = Number::INFINITY;
@@ -4024,18 +4081,14 @@ impl ParametricActiveSetSolver {
                 }
                 rank_repair_budget -= 1;
                 pruned = true;
-                self.schur_reset_rank_repaired(
-                    &mut schur,
-                    qp,
-                    &mut working,
-                    opts,
-                    &mut n_changes,
-                    &mut rank_repair_budget,
-                    &mut pruned,
-                )?;
+                reset_or_stop!('iters);
                 n_refactor += 1;
                 prev_was_null_step = false;
                 floor_refactored = false;
+                // Cycle guard for this branch (see `PruneCycleGuard`).
+                if prune_cycle.closes(quad_objective(qp, &x), working_set_key(&working)) {
+                    break;
+                }
                 continue;
             }
 
@@ -4100,15 +4153,7 @@ impl ParametricActiveSetSolver {
                     // `Indefinite`). Adds only shrink the null space and keep
                     // the cheap update; on a PSD Hessian, drops do too.
                     if qp.hessian_inertia != HessianInertia::Psd {
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                         n_changes += 1;
                         prev_was_null_step = false;
@@ -4123,29 +4168,13 @@ impl ParametricActiveSetSolver {
                         if !e.is_recoverable_factorization_failure() {
                             return Err(e);
                         }
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                     }
                     n_changes += 1;
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                     }
                     // The working set changed, so the next step is a fresh
@@ -4197,15 +4226,7 @@ impl ParametricActiveSetSolver {
                         *pre_polish = Some(sol);
                         // The projection factored on this solver's backend,
                         // so the Schur state's base factor is gone.
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                         prev_was_null_step = false;
                         floor_refactored = false;
@@ -4371,29 +4392,13 @@ impl ParametricActiveSetSolver {
                     if !e.is_recoverable_factorization_failure() {
                         return Err(e);
                     }
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                 }
                 n_changes += 1;
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                 }
             }
@@ -4575,15 +4580,6 @@ fn active_slot_count(working: &WorkingSet) -> usize {
         + working.bounds.iter().filter(|s| s.is_active()).count()
 }
 
-/// Which slots are active, indexed rows first (`0..m`) then bounds (`m..m+n`),
-/// the numbering `SchurState::apply_change` uses.
-fn active_slots(qp: &QpProblem, working: &WorkingSet) -> Vec<bool> {
-    (0..qp.m)
-        .map(|i| working.constraints[i].is_active())
-        .chain((0..qp.n).map(|j| working.bounds[j].is_active()))
-        .collect()
-}
-
 /// Relative tolerance for the modified-Gram-Schmidt rank test in
 /// [`independent_active_subset`]. A candidate normal whose component
 /// orthogonal to the already-accepted normals falls below this
@@ -4597,6 +4593,66 @@ const RANK_REL_TOL: Number = 1e-9;
 /// layer is part of the state too, and a refactor between visits can break a
 /// cycle that the working set alone would call closed.
 const CYCLE_REPEAT_LIMIT: u32 = 5;
+
+/// Two objective values equal to round-off: within 64 ulps of the larger
+/// magnitude (floored at 1). Used by the stationarity prune's cycle guard,
+/// where the objective between visits to the same working set was measured
+/// drifting by about 50 ulps (QGFRDXPN, gh#1076).
+fn same_to_roundoff(a: Number, b: Number) -> bool {
+    (a - b).abs() <= 64.0 * Number::EPSILON * a.abs().max(b.abs()).max(1.0)
+}
+
+/// The Schur loop's cycle guard for its stationarity prune (gh#1076).
+///
+/// That branch `continue`s before the loop's main guard, so its iterations
+/// were never recorded. Recording them there would not be enough: on
+/// QGFRDXPN's elastic phase-1 under #1047's stand-down rule it pruned 992
+/// times in one pass, 990 of them back to the same working set, but the
+/// ordinary iterations between two prunes moved the objective by about 50
+/// ulps, and the main guard (bit-for-bit) cleared its record each time. So
+/// this guard keeps its own record and compares objectives with
+/// [`same_to_roundoff`].
+#[derive(Default)]
+struct PruneCycleGuard {
+    obj: Option<Number>,
+    seen: std::collections::HashMap<u64, u32>,
+}
+
+impl PruneCycleGuard {
+    /// Record a prune that left working set `key` at objective `obj`; true
+    /// once the same set has been met `CYCLE_REPEAT_LIMIT` times with the
+    /// objective unchanged to round-off, which ends the pass as `MaxIter`.
+    fn closes(&mut self, obj: Number, key: u64) -> bool {
+        if !self.obj.is_some_and(|o| same_to_roundoff(o, obj)) {
+            self.obj = Some(obj);
+            self.seen.clear();
+        }
+        let count = self.seen.entry(key).or_insert(0);
+        *count += 1;
+        *count >= CYCLE_REPEAT_LIMIT
+    }
+}
+
+/// Whether a reset failure inside the Schur loop ends the pass as `MaxIter`
+/// rather than propagating (gh#1076): a recoverable factorization failure
+/// once the rank-repair budget is spent. The budget is a limit like
+/// `max_iter`, and is reported like one; any other failure still propagates.
+fn reset_failure_ends_pass(e: &QpError, budget: u32) -> bool {
+    budget == 0 && e.is_recoverable_factorization_failure()
+}
+
+/// Whether the elastic phase-1's point is feasible for the original QP
+/// (gh#1076). Zero slacks prove it only if the augmented rows hold at the
+/// point, and a Schur pass can return a point that has left its own active
+/// rows, so the original rows are checked directly as well.
+fn elastic_point_is_feasible(
+    reform: &crate::elastic::ElasticReformulation,
+    qp: &QpProblem,
+    x_aug: &[Number],
+    feas_tol: Number,
+) -> bool {
+    reform.is_feasible(x_aug, feas_tol) && point_is_feasible_scaled(qp, &x_aug[..qp.n], feas_tol)
+}
 
 /// A hash of which rows and bounds `working` holds active, and on which side.
 fn working_set_key(working: &WorkingSet) -> u64 {
@@ -7704,7 +7760,7 @@ mod over_n_rank_repair_tests {
             ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
         let mut schur = crate::schur::SchurState::new(n, m);
         let mut n_changes = 0u32;
-        let budget0 = 10u32;
+        let budget0 = 2 * COUNT_PRUNE_CAP;
         let mut budget = budget0;
         (0..rounds)
             .map(|_| {
@@ -7741,22 +7797,34 @@ mod over_n_rank_repair_tests {
         assert_eq!(spent, 1, "the counting guard costs one budget unit");
     }
 
-    /// A slot the counting prune removes and the loop re-admits must not be
-    /// removed again: on QFORPLAN that was a drop/re-add cycle to the
-    /// iteration limit (gh#1042). The second prune of the same slot is the
-    /// signal, and from then on the counting trigger stands down for the pass,
-    /// leaving the unflagged over-full set as the unpruned loop had it.
-    /// Mutation-checked: without the stand-down the third round prunes too
-    /// and spends a third budget unit.
+    /// The counting prune runs at most `COUNT_PRUNE_CAP` times in one Schur
+    /// pass, repeats included, and then stands down for the rest of the pass,
+    /// leaving the unflagged over-full set as the unpruned loop had it
+    /// (gh#1076). Repeats are allowed because on QGFRDXPN's elastic phase-1
+    /// they are the productive path: the cycle guard ends them as `MaxIter`
+    /// within 24 prunes, whereas standing down on the first repeat handed the
+    /// cycle to the stationarity prune and ended the solve in a hard error.
+    /// Mutation-checked: the #1047 rule (stand down on the first repeat) fails
+    /// at round 2, and an uncapped trigger fails at the last round.
     #[test]
-    fn the_counting_prune_stands_down_once_it_repeats_a_slot() {
+    fn the_counting_prune_stands_down_after_its_per_pass_cap() {
         let r0 = vec![0.1, 0.3];
         let r1 = vec![0.7, 0.2];
         let r2: Vec<Number> = (0..2).map(|j| 0.3 * r0[j] + 0.9 * r1[j]).collect();
-        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], 3);
-        assert_eq!(rounds[0], (2, true, 1));
-        assert_eq!(rounds[1], (2, true, 2), "the repeat itself still prunes");
-        assert_eq!(rounds[2], (3, false, 2), "then the trigger stands down");
+        let cap = COUNT_PRUNE_CAP as usize;
+        let rounds = reset_over_n_rounds(2, &[r0, r1, r2], &[], cap + 1);
+        for (k, round) in rounds[..cap].iter().enumerate() {
+            assert_eq!(
+                *round,
+                (2, true, k as u32 + 1),
+                "round {k}: every prune up to the cap runs, repeats included"
+            );
+        }
+        assert_eq!(
+            rounds[cap],
+            (3, false, COUNT_PRUNE_CAP),
+            "past the cap the trigger stands down"
+        );
     }
 
     /// Generic dense rows, one more than `n` — the shape of DEGEN2's
@@ -7904,5 +7972,260 @@ mod issue1042_elastic_accounting_tests {
                 sol.stats.n_working_set_changes
             );
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod issue1076_tests {
+    //! gh#1076: the three defects on QGFRDXPN's failing path under
+    //! `qp-active-set`, each pinned on a constructed problem. None of them is
+    //! reached by the Maros-Meszaros corpus under the shipped prune cap, so
+    //! these are the only tests that execute them.
+    use super::*;
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    thread_local! {
+        static BUDGET: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// The rank-repair budget a Schur pass starts with, when a test set one.
+    pub(crate) fn budget_override() -> Option<u32> {
+        BUDGET.with(Cell::get)
+    }
+
+    /// `n = 2`, `H = I`, `g = (−1, −1)`, one row `x₀ + x₁ ≤ 0.5`, `x ≥ 0`.
+    /// The unconstrained minimizer `(1, 1)` violates the row, so a pass
+    /// started at the origin with nothing active adds the row.
+    fn one_row_qp<R>(f: impl FnOnce(&QpProblem) -> R) -> R {
+        let mut a = GenTMatrix::new(Rc::clone(&GenTMatrixSpace::new(
+            1,
+            2,
+            vec![1, 1],
+            vec![1, 2],
+        )));
+        a.set_values(&[1.0, 1.0]);
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]));
+        h.set_values(&[1.0, 1.0]);
+        let g = vec![-1.0, -1.0];
+        let (bl, bu) = (vec![-1e20], vec![0.5]);
+        let (xl, xu) = (vec![0.0, 0.0], vec![1e20, 1e20]);
+        let qp = QpProblem {
+            n: 2,
+            m: 1,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        f(&qp)
+    }
+
+    fn origin_start() -> QpWarmStart {
+        QpWarmStart {
+            x: vec![0.0, 0.0],
+            lambda_g: vec![0.0],
+            lambda_x: vec![0.0, 0.0],
+            working: WorkingSet::cold(2, 1),
+        }
+    }
+
+    fn reset_every_change() -> QpOptions {
+        QpOptions {
+            use_schur_updates: true,
+            max_schur_updates_before_refactor: 1,
+            ..QpOptions::default()
+        }
+    }
+
+    // ---- fix 3: phase-1 feasibility checks the rows, not only the slacks ----
+
+    /// A phase-1 point whose elastic slacks are all zero but which violates an
+    /// original row must not be called feasible. `ElasticReformulation::
+    /// is_feasible` alone (the pre-gh#1076 test) says it is: that is the
+    /// QGFRDXPN phase-1 point, with every slack at zero and the rows off by
+    /// 5.2e4. Mutation-checked: with the row check removed from
+    /// `elastic_point_is_feasible` the second assertion fails.
+    #[test]
+    fn zero_slacks_with_violated_rows_are_not_feasible() {
+        one_row_qp(|qp| {
+            let reform = crate::elastic::ElasticReformulation::build(qp, 1e6);
+            let mut x_aug = vec![0.0; reform.n_aug];
+            // x₀ + x₁ = 2 against the row's upper bound 0.5; slacks stay 0.
+            x_aug[0] = 1.0;
+            x_aug[1] = 1.0;
+            assert!(
+                reform.is_feasible(&x_aug, 1e-9),
+                "fixture: the slack-only test calls this point feasible"
+            );
+            assert!(
+                !elastic_point_is_feasible(&reform, qp, &x_aug, 1e-9),
+                "zero slacks at a point that violates its row are not feasibility"
+            );
+            // Control: a point that does satisfy the row is still feasible.
+            x_aug[0] = 0.25;
+            x_aug[1] = 0.25;
+            assert!(elastic_point_is_feasible(&reform, qp, &x_aug, 1e-9));
+        });
+    }
+
+    // ---- fix 1: the stationarity prune's cycle guard ----
+
+    /// The same working set met `CYCLE_REPEAT_LIMIT` times, with the
+    /// objective drifting only at round-off between visits, closes the cycle.
+    /// That drift is what the main guard's bit-for-bit comparison reset on
+    /// QGFRDXPN (about 50 ulps of 1.17e11). Mutation-checked: with
+    /// `same_to_roundoff` replaced by `==` this fails.
+    #[test]
+    fn a_prune_cycle_at_a_roundoff_drifting_objective_closes() {
+        let base = 1.169_328_133_459_321_9e11;
+        let ulp = base * Number::EPSILON;
+        let mut guard = PruneCycleGuard::default();
+        let drift = [0.0, 30.0, -12.0, 45.0, 3.0];
+        for (k, d) in drift.iter().enumerate() {
+            let closed = guard.closes(base + d * ulp, 0xC0FFEE);
+            assert_eq!(
+                closed,
+                k + 1 == CYCLE_REPEAT_LIMIT as usize,
+                "visit {k}: closes on the CYCLE_REPEAT_LIMIT-th visit only"
+            );
+        }
+    }
+
+    /// Real progress between visits, or a different working set, is not a
+    /// cycle: the guard must not end a pass that is getting somewhere.
+    #[test]
+    fn a_moving_objective_or_new_sets_do_not_close() {
+        let mut guard = PruneCycleGuard::default();
+        for k in 0..3 * CYCLE_REPEAT_LIMIT {
+            let obj = 100.0 - 1e-6 * Number::from(k);
+            assert!(!guard.closes(obj, 7), "objective moved at visit {k}");
+        }
+        let mut guard = PruneCycleGuard::default();
+        for k in 0..3 * CYCLE_REPEAT_LIMIT {
+            assert!(!guard.closes(5.0, u64::from(k)), "new set at visit {k}");
+        }
+    }
+
+    // ---- fix 2: an exhausted rank-repair budget ends the pass ----
+
+    /// Delegates to FERAL, but every *fresh* factorization after the first
+    /// `ok` reports the KKT singular: a backend that turns every mid-pass
+    /// reset into a recoverable failure.
+    struct SingularAfter {
+        inner: FeralSolverInterface,
+        ok: usize,
+        factored: usize,
+    }
+
+    impl SparseSymLinearSolverInterface for SingularAfter {
+        fn initialize_structure(
+            &mut self,
+            dim: Index,
+            nonzeros: Index,
+            ia: &[Index],
+            ja: &[Index],
+        ) -> ESymSolverStatus {
+            self.inner.initialize_structure(dim, nonzeros, ia, ja)
+        }
+        fn values_array_mut(&mut self) -> &mut [Number] {
+            self.inner.values_array_mut()
+        }
+        fn multi_solve(
+            &mut self,
+            new_matrix: bool,
+            ia: &[Index],
+            ja: &[Index],
+            nrhs: Index,
+            rhs_vals: &mut [Number],
+            check_neg_evals: bool,
+            number_of_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            if new_matrix {
+                self.factored += 1;
+                if self.factored > self.ok {
+                    return ESymSolverStatus::Singular;
+                }
+            }
+            self.inner.multi_solve(
+                new_matrix,
+                ia,
+                ja,
+                nrhs,
+                rhs_vals,
+                check_neg_evals,
+                number_of_neg_evals,
+            )
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            self.inner.number_of_neg_evals()
+        }
+        fn increase_quality(&mut self) -> bool {
+            self.inner.increase_quality()
+        }
+        fn provides_inertia(&self) -> bool {
+            self.inner.provides_inertia()
+        }
+        fn matrix_format(&self) -> EMatrixFormat {
+            self.inner.matrix_format()
+        }
+    }
+
+    fn singular_after_first() -> ParametricActiveSetSolver {
+        ParametricActiveSetSolver::new(Box::new(SingularAfter {
+            inner: FeralSolverInterface::new(),
+            ok: 1,
+            factored: 0,
+        }))
+    }
+
+    /// A Schur pass whose mid-pass reset fails with the rank-repair budget
+    /// already spent ends `MaxIter` at its current, feasible iterate. It used
+    /// to propagate the backend's singular-KKT error, which ended the whole
+    /// attempt (QGFRDXPN's elastic phase-1, `ErrorInStepComputation`).
+    /// Mutation-checked: with `reset_failure_ends_pass` returning `false` the
+    /// pass returns `Err(LinearSolverFailure)` and this fails.
+    #[test]
+    fn an_exhausted_repair_budget_ends_the_pass_as_max_iter() {
+        one_row_qp(|qp| {
+            let mut solver = singular_after_first();
+            BUDGET.with(|b| b.set(Some(0)));
+            let out = solver.solve_general_schur(qp, Some(&origin_start()), &reset_every_change());
+            BUDGET.with(|b| b.set(None));
+            let sol = out.expect("an exhausted budget is a limit, not a hard error");
+            assert_eq!(sol.status, QpStatus::MaxIter);
+            assert!(point_is_feasible(qp, &sol.x, 1e-9), "x = {:?}", sol.x);
+        });
+    }
+
+    /// Control for the fixture above: with budget left, the same backend's
+    /// failure is not swallowed. The repair finds nothing dependent to drop
+    /// (one row on two variables), so the error still propagates.
+    #[test]
+    fn a_reset_failure_with_budget_left_still_propagates() {
+        one_row_qp(|qp| {
+            let mut solver = singular_after_first();
+            let out = solver.solve_general_schur(qp, Some(&origin_start()), &reset_every_change());
+            assert!(
+                matches!(&out, Err(e) if e.is_recoverable_factorization_failure()),
+                "{out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn only_a_recoverable_failure_with_no_budget_ends_the_pass() {
+        let singular = QpError::LinearSolverFailure("KKT matrix is singular".into());
+        let other = QpError::LinearSolverFailure("backend fatal".into());
+        assert!(reset_failure_ends_pass(&singular, 0));
+        assert!(!reset_failure_ends_pass(&singular, 1));
+        assert!(!reset_failure_ends_pass(&other, 0));
     }
 }
