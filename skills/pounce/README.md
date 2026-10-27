@@ -24,11 +24,14 @@ After install, in a fresh Claude Code session, ask "diagnose
 `/path/to/report.json`" — Claude will load this skill, invoke the CLI,
 and answer.
 
-Manual install — for users who don't want to use `make`:
+Manual install — for users who don't want to use `make`. The binaries
+come from crates.io, so this needs a Rust toolchain but not a checkout
+(in a checkout, `--path crates/pounce-studio-core` and `--path
+crates/pounce-cli` build the local source instead):
 
 ```sh
-cargo install --path crates/pounce-studio-core --bin pounce-studio --locked
-cargo install --path crates/pounce-cli --bin pounce --locked
+cargo install pounce-studio-core --bin pounce-studio --locked
+cargo install pounce-cli --bin pounce --locked   # or: pip install pounce-solver
 mkdir -p ~/.claude/skills
 cp -r skills/pounce ~/.claude/skills/pounce
 ```
@@ -36,22 +39,24 @@ cp -r skills/pounce ~/.claude/skills/pounce
 Or, without a checkout, with [knowhow](https://github.com/jkitchin/knowhow)
 (also works with `npx skills add`), which installs the skill for Claude
 Code, Codex, VS Code, Cursor and other agents. It installs only the skill;
-`pounce-studio` still has to be on `PATH`:
+`pounce-studio` still has to be on `PATH` (the `cargo install` lines above;
+the skill's own *Installing pounce* section walks an agent through it):
 
 ```sh
 uvx knowhow add jkitchin/pounce --skill pounce        # this project
 uvx knowhow add jkitchin/pounce --skill pounce -g     # all projects
 ```
 
-Both installs build straight from crates.io — the committed `Cargo.toml`
-pins [`feral`][feral] to a published release (`feral = "0.10.0"`), so no
-sibling checkout or `[patch.crates-io]` override is required. (Solver-core
+Building from a checkout needs no sibling repository either: the committed
+`Cargo.toml` pins [`feral`][feral] to a published release, so no
+`[patch.crates-io]` override is required. (Solver-core
 development against feral's unreleased HEAD uses a *local, uncommitted*
 `[patch.crates-io]` git-rev override; that is a maintainer workflow and
 does not affect installing the skill.)
 
-If you'd rather not build `pounce` at all, skip its install and reuse a
-`pounce` binary you have elsewhere on `PATH` — the skill only invokes
+If you'd rather not build `pounce` at all, `pip install pounce-solver`
+ships it prebuilt, or reuse a `pounce` binary you have elsewhere on
+`PATH` — the skill only invokes
 `pounce-studio` directly; `pounce` is needed only when you want to drive a
 fresh solve from within the skill.
 
