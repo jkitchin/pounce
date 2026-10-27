@@ -289,6 +289,29 @@ changes.
   failing either way (`dallass` 214 → 218, `deb7` `Restoration_Failed` →
   `Maximum_Iterations_Exceeded`). Measured on arm64 only; x86_64 is
   unmeasured.
+- **A zero pivot read under a reused MC64 scaling is re-checked before the
+  IPM acts on it (gh #1076).** feral's value-bounded MC64 cache can reuse the
+  scaling vector of an earlier matrix on the same pattern, so a factorization's
+  verdict depended on the solve's history. On `pooling_rt2stp`, 44 of the 47
+  factorizations that read one zero pivot that way read the exact inertia under
+  a freshly computed scaling. Each was reported `Singular`, and the `δ_x`
+  ladder, which cannot remove such a pivot, ran to `1e20` six times; the base
+  solve ended `Error_In_Step_Computation` at 157 and needed the
+  `mu_strategy=adaptive` rescue (242 iterations in all). A zero pivot that
+  came from a cache hit is now refactored with a fresh scaling first, which is
+  what MA27/MA57 do on every factorization. The cache stays on otherwise:
+  turning it off outright took `brainpc0` and `brainpc2` past a 600 s budget,
+  while the re-check leaves their run times within 1%. The
+  fixture now solves without a rescue (224, arm64), and under a round-off
+  screen of 17 `mu_init` values it is solved in all 17 with no rescue, against
+  4 rescued and 1 `Maximum_Iterations_Exceeded` before. Fixture sweep: 10
+  lines move, every one on a fixture where the re-check fires, with no status
+  change. Over the 733 Vanderbei models, no status changes and 4 models move.
+  x86_64 not measured.
+- **Pooled batch backends forward `singularity_certified`.** The batch pool's
+  feral wrapper left the trait default in place, so every pooled solve told the
+  perturbation handler `false` (gh #981's classification) where a fresh backend
+  said otherwise. It also forwards `multi_solve_matches_single_solve` now.
 - **A false `Infeasible_Problem_Detected` at a saddle of the constraint
   violation is now re-solved from beside it.** The infeasibility verdict claims
   the solve stopped at a local minimizer of the violation, and every gate that

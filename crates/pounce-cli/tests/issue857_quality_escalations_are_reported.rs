@@ -242,7 +242,7 @@ fn the_lbfgs_leg_reports_heavy_escalation_and_the_option_stops_it() {
 
 /// The reason the counter is shared rather than per-solver.
 ///
-/// The solve escalates four times, but only **two** `q`s reach the printed
+/// The solve escalates three times (four before gh#1076), but only **two** `q`s reach the printed
 /// iteration table, on rows 2 and 3: the other two happen inside the
 /// restoration sub-solve (82 `r` rows, one call), which owns a separate
 /// `PdFullSpaceSolver` and a separate `IpoptData`, and its info strings are
@@ -282,12 +282,16 @@ fn the_restoration_escalation_is_counted_though_it_never_prints() {
          rows 2 and 3:\n{base}"
     );
     let counts = per_solve_counts(&out);
-    assert_eq!(
-        counts.first().copied(),
-        Some(4),
-        "the solve escalated four times; if this reads 2 the counter has been \
-         narrowed to the main loop and the restoration escalations are being \
-         dropped again"
+    // gh#1076 moved the total from 4 to 3 (one restoration escalation fewer
+    // since a zero pivot under a reused MC64 scaling is re-checked under a
+    // fresh one); what this test pins is that the count exceeds the two the
+    // table prints.
+    let counted = counts.first().copied().unwrap_or(0);
+    assert!(
+        counted > printed as i64,
+        "the solve escalated {counted} times against {printed} printed; if \
+         these are equal the counter has been narrowed to the main loop and \
+         the restoration escalations are being dropped again"
     );
 }
 
