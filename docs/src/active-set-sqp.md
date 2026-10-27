@@ -194,7 +194,7 @@ only on the SQP path.
 | `sqp_qp_anti_cycling`                       | `expand` | `expand` (Harris two-pass), `bland`, or `none`               |
 | `sqp_qp_certify_second_order`               | `no`     | check second-order optimality before certifying the QP       |
 | `sqp_qp_use_homotopy`                       | `no`     | trace the parametric homotopy on a cold QP solve             |
-| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` |
+| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` (exact Hessian: and `< 5000`) |
 | `sqp_qp_max_schur_updates_before_refactor`  | `50`     | updates to absorb before refactoring (Schur path only)       |
 
 Three of these are worth more than a table row.
@@ -253,8 +253,29 @@ about the same, and that is where the Schur path loses on the CLI fixture
 corpus (`eigena2`, `qcqp_ball_cost_1e22` under `algorithm=active-set-sqp`), so
 small QPs keep the refactor path. An earlier measurement — updates breaking 9
 of the 46 instances the refactor path solved — predates the rank repair of
-the Schur reset and no longer reproduces. Set explicitly, `yes` or `no`
-applies at every size.
+the Schur reset and no longer reproduces.
+
+With an exact Hessian (`sqp_hessian=exact`, the default) updates are off
+again from `n + m ≥ 5000` (gh#1083). An exact Hessian makes the step QP
+indefinite, and on such a QP every *drop* refactors anyway, because a rank-2
+update cannot re-run inertia control on the larger null space; only adds take
+the update. The cold, add-dominated QPs the table above measures are seeded
+from the interior point at that size, so what is left is warm step QPs, which
+are mostly drops: the reporter's took 187 Schur updates against 4181
+working-set changes over an hour, and on its handover QP the Schur path took
+126 s against 72 s without it. On the 38 Maros-Mészáros problems at that
+size the two choices give the same status and objective. Quasi-Newton
+Hessians keep their updates, since their drops do too.
+
+On the refactor path a QP of that size also keeps each dropped row in the
+KKT pattern, as a sentinel, until the next add of a row the pattern does not
+hold, so each later drop refactors on the same pattern and the linear
+solver's symbolic analysis (about half of every factorization there) is
+reused. Below `n + m = 5000` the refactor path assembles the compact KKT as
+before: there the saving is nothing and the different pattern only moves
+round-off, which on the CLI fixture corpus cost two fixtures their verdicts.
+
+Set explicitly, `yes` or `no` applies at every size.
 
 **`sqp_qp_use_homotopy`** changes the cold-start path: the solve starts
 from the box-only relaxation (all general rows dropped, which the box
