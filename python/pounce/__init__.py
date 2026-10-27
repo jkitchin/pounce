@@ -38,6 +38,57 @@ from ._warm_start import (
 # stay eager: the second installs the Problem.solve wrapper as a side
 # effect. Names resolve exactly as before (`from pounce import minimize`,
 # `pounce.minimize`, `from pounce import *`, `pounce.qp`), on first access.
+# For type checkers and IDEs only: the same names, imported eagerly, so
+# static analysis and completion see what `__getattr__` serves at runtime.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ._continuation import (
+        Continuation,
+        ContinuationStep,
+        ContinuationTrace,
+        StepController,
+        kkt_residual_monitor,
+    )
+    from ._minimize import minimize, OptimizeResult
+    from ._nlp_batch import solve_nlp_batch
+    from ._curve_fit import (
+        curve_fit,
+        curve_fit_minima,
+        curve_fit_streaming,
+        CurveFitResult,
+    )
+    from ._minima import find_minima, MinimaResult
+    from .trf import trf_minimize, TRFResult, TRFConfig
+    from ._preflight import preflight, PreflightReport
+    from ._starts import (
+        ProjectionReport,
+        RaceCandidate,
+        RaceReport,
+        RaceRound,
+        generate_starts,
+        project_to_feasible,
+        race_starts,
+    )
+    from ._critical import (
+        find_critical_points, find_saddles, reaction_network,
+        CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
+    )
+    from .qp import (
+        ActiveSet,
+        QpResult,
+        QpFactorization,
+        QpSensitivity,
+        ReducedHessian,
+        solve_qp,
+        solve_socp,
+        solve_qp_batch,
+        solve_qp_multi_rhs,
+    )
+    from .sos import sos_minimize, SosResult
+    from .bvp import solve_bvp, BVPResult, solve_bvp_constrained
+    from .ode import solve_ivp, solve_dae, OdeResult
+
 _LAZY = {
     # name -> submodule it lives in
     "Continuation": "_continuation",
