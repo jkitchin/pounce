@@ -139,6 +139,12 @@ pub struct FeralSolverInterface {
     /// [`SparseSymLinearSolverInterface::singularity_certified`].
     last_singular_certified: bool,
 
+    /// gh#1076: refactor under a fresh MC64 scaling when a zero pivot was
+    /// read under a reused one. On by default; the active-set QP turns it
+    /// off. See
+    /// [`SparseSymLinearSolverInterface::set_reused_scaling_zero_pivot_recheck`].
+    reused_scaling_zero_pivot_recheck: bool,
+
     /// Fill-reducing ordering configured at construction; surfaced on
     /// the `linear_solve` tracing span after each factorization
     /// (pounce#71).
@@ -1146,6 +1152,7 @@ impl FeralSolverInterface {
             slot: None,
             negevals: 0,
             last_singular_certified: false,
+            reused_scaling_zero_pivot_recheck: true,
             ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
             inertia_pivot_floor: cfg.inertia_pivot_floor,
@@ -1348,7 +1355,8 @@ impl FeralSolverInterface {
         // only on a zero pivot that came from a cache hit; timed
         // sequentially, `brainpc0..2`, `cresc132` and the `fletch*` models
         // run within 1% of before.
-        if self.solver.mc64_cache_hit_count() > hits_before
+        if self.reused_scaling_zero_pivot_recheck
+            && self.solver.mc64_cache_hit_count() > hits_before
             && matches!(status, FactorStatus::Success)
             && self.solver.inertia().is_some_and(|i| i.zero > 0)
         {
@@ -1898,6 +1906,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 
     fn provides_inertia(&self) -> bool {
         true
+    }
+
+    fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
+        self.reused_scaling_zero_pivot_recheck = on;
     }
 
     fn singularity_certified(&self) -> bool {

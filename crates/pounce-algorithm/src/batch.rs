@@ -265,8 +265,11 @@ impl FeralBackendPool {
             .lock()
             .ok()
             .and_then(|mut s| s.remove(&thread::current().id()));
-        let inner = recycled
+        let mut inner = recycled
             .unwrap_or_else(|| pounce_feral::FeralSolverInterface::with_config(self.cfg.clone()));
+        // A parked solver keeps whatever its last owner set; a new owner
+        // starts from the default.
+        inner.set_reused_scaling_zero_pivot_recheck(true);
         PooledFeralBackend {
             inner: Some(inner),
             pool: Arc::clone(self),
@@ -363,6 +366,9 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     // ladder from the same model solved on a fresh backend. A wrapper that
     // claims to delegate verbatim has to forward every method the backend
     // overrides, not only the required ones.
+    fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
+        self.get().set_reused_scaling_zero_pivot_recheck(on);
+    }
     fn singularity_certified(&self) -> bool {
         self.inner
             .as_ref()

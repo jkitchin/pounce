@@ -54,7 +54,14 @@ pub struct LinearSolver {
 }
 
 impl LinearSolver {
-    pub fn new(backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
+    pub fn new(mut backend: Box<dyn SparseSymLinearSolverInterface>) -> Self {
+        // gh#1076: the active-set loop factors rank-deficient working sets
+        // on purpose and repairs them itself, so a zero pivot is expected
+        // here, not a verdict to confirm. The IPM-side re-check of one read
+        // under a reused MC64 scaling moved 63 of 138 Maros-Meszaros
+        // problems under `solver_selection=qp-active-set` and lost
+        // QFORPLAN, QFFFFF80, QSCSD8 and QSCTAP2.
+        backend.set_reused_scaling_zero_pivot_recheck(false);
         Self {
             backend,
             cached_irn: None,
@@ -258,5 +265,72 @@ impl LinearSolver {
         } else {
             pounce_feral::determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
         }
+    }
+}
+
+#[cfg(test)]
+mod recheck_scope_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use pounce_common::{Index, Number};
+    use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+
+    use super::LinearSolver;
+
+    /// Records the last value the wrapper set: 0 never set, 1 off, 2 on.
+    struct Recorder(Arc<AtomicU8>);
+
+    impl SparseSymLinearSolverInterface for Recorder {
+        fn initialize_structure(
+            &mut self,
+            _dim: Index,
+            _nonzeros: Index,
+            _ia: &[Index],
+            _ja: &[Index],
+        ) -> ESymSolverStatus {
+            ESymSolverStatus::Success
+        }
+        fn values_array_mut(&mut self) -> &mut [Number] {
+            &mut []
+        }
+        fn multi_solve(
+            &mut self,
+            _new_matrix: bool,
+            _ia: &[Index],
+            _ja: &[Index],
+            _nrhs: Index,
+            _rhs_vals: &mut [Number],
+            _check_neg_evals: bool,
+            _number_of_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            ESymSolverStatus::Success
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            0
+        }
+        fn increase_quality(&mut self) -> bool {
+            false
+        }
+        fn provides_inertia(&self) -> bool {
+            true
+        }
+        fn matrix_format(&self) -> EMatrixFormat {
+            EMatrixFormat::TripletFormat
+        }
+        fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
+            self.0.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+        }
+    }
+
+    /// gh#1076: the IPM's re-check of a zero pivot read under a reused MC64
+    /// scaling is off for the active-set QP, which expects zero pivots and
+    /// repairs them itself. Left on, it moved 63 of 138 Maros-Meszaros
+    /// problems and lost four.
+    #[test]
+    fn the_active_set_wrapper_turns_the_reused_scaling_recheck_off() {
+        let seen = Arc::new(AtomicU8::new(0));
+        let _ls = LinearSolver::new(Box::new(Recorder(Arc::clone(&seen))));
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
     }
 }
