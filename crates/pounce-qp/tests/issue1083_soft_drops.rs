@@ -148,7 +148,10 @@ fn assert_same_answer(soft: &QpSolution, schur: &QpSolution) {
         ("lambda_g", &soft.lambda_g, &schur.lambda_g),
     ] {
         for (i, (u, v)) in a.iter().zip(b.iter()).enumerate() {
-            assert!((u - v).abs() <= 1e-9, "{name}[{i}]: refactor {u} vs Schur {v}");
+            assert!(
+                (u - v).abs() <= 1e-9,
+                "{name}[{i}]: refactor {u} vs Schur {v}"
+            );
         }
     }
     assert_eq!(soft.working, schur.working);
@@ -187,5 +190,10 @@ fn an_add_starts_the_next_pattern() {
     assert_same_answer(&sol, &schur);
     assert!(sol.working.constraints[0].is_active(), "the cap binds");
     assert!(sol.lambda_g[0].abs() > 1e-3, "and carries a multiplier");
-    assert_eq!(pattern_changes(&patterns), 1, "{} factorizations", patterns.len());
+    assert_eq!(
+        pattern_changes(&patterns),
+        1,
+        "{} factorizations",
+        patterns.len()
+    );
 }

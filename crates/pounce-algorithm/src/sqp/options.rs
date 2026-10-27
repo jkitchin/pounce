@@ -256,7 +256,10 @@ mod tests {
             assert_eq!(o.step_qp_schur_updates(lo, h), Some(true), "{h:?}");
             assert_eq!(o.step_qp_schur_updates(hi - 1, h), Some(true), "{h:?}");
         }
-        assert_eq!(o.step_qp_schur_updates(hi, SqpHessianSource::Exact), Some(false));
+        assert_eq!(
+            o.step_qp_schur_updates(hi, SqpHessianSource::Exact),
+            Some(false)
+        );
         for h in [SqpHessianSource::DampedBfgs, SqpHessianSource::Lbfgs] {
             assert_eq!(o.step_qp_schur_updates(hi, h), Some(true), "{h:?}");
         }
@@ -265,11 +268,17 @@ mod tests {
             qp_schur_exact_max_dim: None,
             ..SqpOptions::default()
         };
-        assert_eq!(unset.step_qp_schur_updates(hi, SqpHessianSource::Exact), Some(true));
+        assert_eq!(
+            unset.step_qp_schur_updates(hi, SqpHessianSource::Exact),
+            Some(true)
+        );
         let chosen = SqpOptions {
             qp_schur_min_dim: None,
             ..SqpOptions::default()
         };
-        assert_eq!(chosen.step_qp_schur_updates(hi, SqpHessianSource::Exact), None);
+        assert_eq!(
+            chosen.step_qp_schur_updates(hi, SqpHessianSource::Exact),
+            None
+        );
     }
 }
