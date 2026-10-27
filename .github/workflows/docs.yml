@@ -54,10 +54,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fetched straight from the mdBook release rather than through
+      # peaceiris/actions-mdbook, whose latest major still runs on the
+      # deprecated Node 20 runtime.
       - name: Install mdbook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: ${{ env.MDBOOK_VERSION }}
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" mdbook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mdbook" --version
 
       # The docs assistant (docs/src/ask.md) searches the wiki as well as the
       # book, so the wiki — a separate repository, jkitchin/pounce.wiki — has
@@ -136,7 +142,7 @@ jobs:
           test -s "$GITHUB_WORKSPACE/site/demo/python/wheels/pounce-wheel.json"
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
@@ -149,4 +155,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
