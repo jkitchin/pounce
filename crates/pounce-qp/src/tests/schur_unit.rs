@@ -290,3 +290,81 @@ fn schur_dot_helper_is_used_correctly() {
     let ax = a_times_x(qp.a, x, 1);
     assert!((ax[0] - 1.0).abs() < 1e-10, "Ax = {}, want 1.0", ax[0]);
 }
+
+/// gh#1061: `build_k_max_triplet` finds each active row's `A` entries through
+/// a row index instead of rescanning all of `A` per row — `O(nnz)` per reset
+/// instead of `O(m·nnz)`, which on the reporter's step QP was most of every
+/// Schur-path refactorization. The index must not change what is assembled:
+/// the backend factors the triplet in the order it is given, so the entries,
+/// their order and any duplicates have to match the per-row scan exactly.
+/// `A` here is stored with its rows interleaved and one duplicated entry, the
+/// cases a scan-by-row and a bucket-by-row could disagree on.
+#[test]
+fn k_max_assembly_matches_the_per_row_scan() {
+    let n = 4usize;
+    let m = 3usize;
+    let h_space = SymTMatrixSpace::new(4, vec![1, 2, 3, 4, 2], vec![1, 2, 3, 4, 1]);
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&[2.0, 3.0, 4.0, 5.0, 0.5]);
+    // Rows 3, 1, 2, 1, 3, 2, 1 (1-based), with (1, 2) appearing twice.
+    let a_rows = vec![3, 1, 2, 1, 3, 2, 1];
+    let a_cols = vec![4, 2, 1, 3, 1, 3, 2];
+    let a_vals = [7.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let a_space = GenTMatrixSpace::new(3, 4, a_rows.clone(), a_cols.clone());
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&a_vals);
+    let g = [0.0; 4];
+    let bl = [0.0; 3];
+    let bu = [1.0; 3];
+    let xl = [0.0; 4];
+    let xu = [1.0; 4];
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let s = SchurState::new(n, m);
+    // Rows 1 and 3 active, row 2 not; bounds on x2 and x4 active.
+    let active = [true, false, true, false, true, false, true];
+    let got = s.build_k_max_triplet(&qp, &active);
+
+    // The per-row scan this replaced, written out.
+    let (mut irn, mut jcn, mut vals) = (vec![], vec![], vec![]);
+    for k in 0..h.irows().len() {
+        let (i, j) = (h.irows()[k], h.jcols()[k]);
+        irn.push(i.max(j));
+        jcn.push(i.min(j));
+        vals.push(h.values()[k]);
+    }
+    for (slot, &on) in active.iter().enumerate() {
+        let row = (n + slot + 1) as i32;
+        if !on {
+            irn.push(row);
+            jcn.push(row);
+            vals.push(1.0);
+        } else if slot < m {
+            for k in 0..a_rows.len() {
+                if a_rows[k] == (slot + 1) as i32 {
+                    irn.push(row);
+                    jcn.push(a_cols[k]);
+                    vals.push(a_vals[k]);
+                }
+            }
+        } else {
+            irn.push(row);
+            jcn.push((slot - m + 1) as i32);
+            vals.push(1.0);
+        }
+    }
+    assert_eq!(got.dim, n + m + n);
+    assert_eq!(got.irn, irn);
+    assert_eq!(got.jcn, jcn);
+    assert_eq!(got.vals, vals);
+}

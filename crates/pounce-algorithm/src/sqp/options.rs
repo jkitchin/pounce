@@ -62,6 +62,12 @@ impl SqpHessianSource {
 /// Default for [`SqpOptions::qp_schur_min_dim`].
 pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 500;
 
+/// Default for [`SqpOptions::qp_ipm_cold_start_min_dim`]: the size at which
+/// `algorithm=active-set-sqp` already starts from the interior point and
+/// hands over (`IpoptApplication::sqp_auto_handover`), for the same reason
+/// one level down.
+pub const DEFAULT_QP_IPM_COLD_START_MIN_DIM: usize = 5000;
+
 #[derive(Debug, Clone)]
 pub struct SqpOptions {
     pub globalization: SqpGlobalization,
@@ -134,6 +140,33 @@ pub struct SqpOptions {
     /// behind the default.
     pub qp_schur_min_dim: Option<usize>,
 
+    /// NLP size `n + m` from which a step QP solved without a working set,
+    /// or with one that pins to an infeasible point, is first solved by the
+    /// convex interior point, when its Hessian is PSD, and the active-set
+    /// solver warm-started from the working set that solution identifies
+    /// (gh#1061). `None` never does. The warm case: the reporter's second
+    /// step QP went to the ℓ1-elastic phase 1 from its infeasible warm start
+    /// and reached a 300 s cap after 564 working-set changes; seeded, 12.5 s.
+    ///
+    /// A cold active-set start builds its working set one pivot at a time,
+    /// and on a large model that is the whole cost: gh#1061's first step QP
+    /// (`n = 14 952`, 10 818 equalities, `H = I`) went through the elastic
+    /// phase 1 for more than 30 minutes on either factorization path without
+    /// finishing. The interior point solved it in 16 iterations, 4.3 s, and
+    /// the active-set solve from its working set took zero working-set
+    /// changes and one factorization, 0.4 s, to the same objective. The
+    /// active-set solve still has the last word, so the step and its
+    /// multipliers are what the active-set method certifies, and anything
+    /// short of an interior-point `Optimal` falls back to the cold start.
+    ///
+    /// At the same size a warm start that pins feasibly is given a budget of
+    /// four active-set iterations per iteration the last seed took, and is
+    /// seeded once it runs over. gh#1061's warm step QPs took 68–350
+    /// working-set changes and 51–263 s each at about one factorization per
+    /// change; on the handover QP the budget and the seed together take 34 s
+    /// against 72 s warm (126 s with Schur updates).
+    pub qp_ipm_cold_start_min_dim: Option<usize>,
+
     /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the
     /// same [`Deadline`] the interior-point arm checks. `None` means
     /// unlimited and is the default for a directly constructed driver.
@@ -163,6 +196,7 @@ impl Default for SqpOptions {
             lbfgs_max_history: 6,
             dense_hessian_max_n: 1000,
             qp_schur_min_dim: Some(DEFAULT_QP_SCHUR_MIN_DIM),
+            qp_ipm_cold_start_min_dim: Some(DEFAULT_QP_IPM_COLD_START_MIN_DIM),
             deadline: None,
         }
     }

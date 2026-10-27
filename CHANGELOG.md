@@ -52,9 +52,56 @@ changes.
   Every active-set SQP step QP, including those in crossover's step 4 and the
   IPM→SQP handover, now logs the same figures at debug level
   (`RUST_LOG=pounce::sqp::qp=debug`), so a slow SQP can be traced to the QP
-  that cost it.
+  that cost it. That line now also splits the QP's wall time into
+  factorizations, back-solves, rank tests and everything else, and
+  `CrossoverReport::eqp` carries the same split (`linsol_times`).
 
 ### Changed
+- **A large cold step QP of the active-set SQP starts from an interior point
+  (gh #1061).** At `n + m ≥ 5000`, a step QP with no working set to start from
+  and a positive semidefinite Hessian is solved by the convex QP interior
+  point first, and the active-set solver finishes from the working set that
+  solution identifies. On the reporter's first step QP (15 000 variables,
+  10 818 equalities) the cold active-set start had not finished after 30
+  minutes; it now takes about 5 s. A warm step QP whose working set pins to
+  an infeasible point is seeded the same way instead of going through the
+  elastic phase 1: the reporter's second step QP hit a 300 s cap there and
+  now solves in about 13 s. The line search's second-order-correction QP goes
+  through the same seeding, logs its own `SOC QP` line, and takes its time
+  limit from the remaining wall budget when it is called rather than at the
+  start of the iteration (it had overshot the cap by that iteration's step
+  QP). Checking whether a warm working set pins feasibly no longer runs the
+  pin's rank prune — a hint that does not factor is reported unusable and
+  seeded instead: on the reporter's correction QP that check went from 44 s
+  (40 s of it three sparse rank tests) to 1.3 s, and the QP solves seeded in
+  15 s to IPOPT's objective (666.85076 vs 666.85066).
+- **A large warm step QP that is far from its answer is seeded instead
+  (gh #1061).** At `n + m ≥ 5000`, where step QPs are already seeded from
+  the interior point, a warm start now gets a budget of four active-set
+  iterations per iteration the last seed took, and is seeded when it runs
+  over. On the reporter's model warm step QPs took up to 350 working-set
+  changes and 263 s each; on their handover QP the budget and the seed take
+  34 s against 72 s warm (126 s with Schur updates, the default at that
+  size). Deciding that a warm working set is unusable also no longer tries
+  inertia shifts it would reject (13 factorizations to 1), and
+  the warm solve reuses the factor that decision already computed.
+- **The active-set QP's refactor path factors once per working-set change,
+  not twice (gh #1061).** After a full step that nothing blocked, the next
+  iteration factored the same KKT matrix again only to read the multipliers
+  and choose the next drop; it now back-solves against the factor it has.
+  Same iterates, same answers. On the reporter's warm step QP
+  (`sqp_qp_use_schur_updates no`) 308 factorizations became 159 for the same
+  156 working-set changes, and the QP went from 93 s to 72 s. The ones removed
+  were the cheaper half (the same structure, factored again), so the time
+  falls by about a fifth rather than a half.
+- **An infeasible step QP no longer ends the active-set SQP (gh #1061).** The
+  SQP takes the QP's minimum-violation step instead (Sℓ1QP) and reports local
+  infeasibility only when no step can reduce the linearized violation. `deb7`
+  (feasible) was reported `Infeasible_Problem_Detected` at iteration 0; it
+  now solves in nine iterations. `circle_parabola_t1p5`, which is infeasible,
+  now ends `Search_Direction_Becomes_Too_Small` under the active-set SQP
+  rather than with an infeasibility claim the first linearization did not
+  support; the default interior-point arm still reports it infeasible.
 - **FERAL 0.22.0: the same results, about 10% faster.** FERAL's
   factorization kernels are faster (feral#225), and the new
   `ReanalysisPolicy` (feral#228) stays at its default `Never`, which keeps
@@ -254,6 +301,16 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
+  Schur path's base factorization scanned the whole constraint matrix once per
+  active row; on the reporter's model it is now ~3× faster, and a warm step
+  QP that took 202 s takes 115 s. The refactor path's anti-cycling switch to
+  Bland's rule fired on the 50th blocking step of every solve (a `NaN`
+  comparison), which could leave a degenerate QP pivoting at zero step length
+  until its iteration limit. The refactor path also stops repeating a full
+  step that makes no further progress.
+- **The active-set SQP reports a non-finite objective as
+  `Invalid_Number_Detected`** instead of a step-size stall.
 - **Restoration's release test now reads the outer filter's own quantities,
   and the two hand-back paths that the old quantities were masking are closed
   (gh#1076 §2; supersedes #1075).** The callback that decides whether

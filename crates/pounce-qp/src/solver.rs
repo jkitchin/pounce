@@ -140,6 +140,28 @@ pub struct ParametricActiveSetSolver {
     /// The counting prune's memory for the Schur pass in progress (see
     /// [`Self::schur_reset_rank_repaired`]); each pass starts with its own.
     count_prune: CountPrune,
+    /// Cleared only while [`Self::solve_with_working_set_if_feasible`] pins
+    /// its hint: a hint whose pinned KKT does not factor, or factors only with
+    /// an inertia shift, is then reported unusable at once instead of
+    /// rank-tested and pruned (see `pin_working_set`, `factor_pinned_primal`).
+    pin_prunes: bool,
+    /// The KKT the pinned hint was just factored on, unshifted, so the
+    /// general pass's first iteration can back-solve against it instead of
+    /// factoring the same matrix again (see `factor_pinned_primal`).
+    pinned_factor: Option<PinnedFactor>,
+}
+
+/// What identifies the factor `factor_pinned_primal` left cached: the active
+/// rows and bounds in assembly order, the matrices they were assembled from,
+/// and the factor and rank-test counts when it was made. Any other
+/// factorization or rank test since, or another problem, and it is stale.
+struct PinnedFactor {
+    cons: Vec<usize>,
+    bounds: Vec<usize>,
+    h: *const SymTMatrix,
+    a: *const GenTMatrix,
+    n_factor: u64,
+    rank_guard_calls: u32,
 }
 
 /// How many times the counting prune in
@@ -162,6 +184,8 @@ impl ParametricActiveSetSolver {
             linsol: LinearSolver::new(backend),
             pin_repair: false,
             count_prune: CountPrune::default(),
+            pin_prunes: true,
+            pinned_factor: None,
         }
     }
 
@@ -169,6 +193,12 @@ impl ParametricActiveSetSolver {
     /// solve since it was built. See [`LinearSolver::rank_guard_calls`].
     pub fn rank_guard_calls(&self) -> u32 {
         self.linsol.rank_guard_calls()
+    }
+
+    /// Where this solver's linear algebra spent its time, across every solve
+    /// since it was built. See [`LinearSolver::time_split`].
+    pub fn linsol_time_split(&self) -> crate::factor::LinsolTimes {
+        self.linsol.time_split()
     }
 
     /// §4.5 inertia-controlled factorization. Tries the factor
@@ -275,8 +305,28 @@ impl ParametricActiveSetSolver {
         }
         rhs[n..n + k_c].copy_from_slice(cons_targets);
         rhs[n + k_c..n + k_c + k_b].copy_from_slice(bound_targets);
-        let delta =
-            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?;
+        self.pinned_factor = None;
+        // A caller that will not prune (`pin_prunes` off) rejects a pin that
+        // needs an inertia shift, so it gets one unshifted attempt rather
+        // than the ladder: gh#1061's correction QP spent 13 factorizations
+        // (1 + 12 shifts, 5.3 s) before declining a hint it could not use.
+        let delta = if self.pin_prunes {
+            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?
+        } else {
+            self.linsol
+                .factorize_and_solve(&kkt, &mut rhs, Some((k_c + k_b) as i32))?;
+            0.0
+        };
+        if delta == 0.0 {
+            self.pinned_factor = Some(PinnedFactor {
+                cons: active_cons.to_vec(),
+                bounds: active_bounds.to_vec(),
+                h: qp.h,
+                a: qp.a,
+                n_factor: self.linsol.time_split().n_factor,
+                rank_guard_calls: self.linsol.rank_guard_calls(),
+            });
+        }
 
         // Masked-rank-deficiency guard. No H-block δ·I shift can repair a
         // rank-deficient *constraint* block — but a large enough δ can grow
@@ -301,6 +351,8 @@ impl ParametricActiveSetSolver {
         // the one outcome this guard exists to prevent. Report it as the same
         // recoverable failure; the callers' prune then finds nothing to drop
         // either and moves to its next recovery.
+        // A caller that will not prune (`pin_prunes` off) never gets here
+        // with a shift: its single attempt above reports the failure instead.
         if delta > 0.0 {
             match checked_independent_active_subset(
                 &mut self.linsol,
@@ -391,6 +443,11 @@ impl ParametricActiveSetSolver {
             opts,
         ) {
             Ok(x) => Ok((x, working.clone())),
+            // A caller with another way to a feasible point does not want the
+            // rank prune: each sparse rank test over gh#1061's ~11 000 active
+            // rows cost ~13 s, and the correction QP's hint spent 40 s in three
+            // of them before turning out infeasible anyway.
+            Err(e) if e.is_recoverable_factorization_failure() && !self.pin_prunes => Err(e),
             Err(e) if e.is_recoverable_factorization_failure() => {
                 // Shrink until the pinned set factors. Terminates: every pass
                 // either factors, returns, or strictly shrinks `kc ∪ kb`.
@@ -1416,6 +1473,28 @@ impl ParametricActiveSetSolver {
         // degenerate cycle does. Constant (not size-scaled) so it fires
         // well inside the default `max_iter` on large problems too.
         const STALL_LIMIT: u32 = 50;
+        // Same `[qp]` lines as the Schur path's trace, so a stall reads the
+        // same whichever path took it (gh#1061: the Schur-off run printed
+        // nothing).
+        let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
+        // Null-iteration guard, the refactor path's half of the one
+        // `solve_general_schur` documents: after a full unblocked step the
+        // next `‖p‖∞` is round-off in exact arithmetic, so one that does not
+        // at least halve says the iterate is stationary for this working set
+        // to attainable precision. Without it this loop repeated the same
+        // no-op until `max_iter` — gh#1061 sweep: `infeasible_equalities`'s
+        // `γ = 1e6` elastic step QP, 2 variables, `‖p‖∞ = 1.907e-6` on each of
+        // 197 iterations against `opt_tol = 1e-9`. Every iteration here
+        // factors afresh, so the Schur path's first remedy (refactor) is
+        // already spent and the guard accepts at once.
+        let mut prev_was_null_step = false;
+        let mut prev_p_inf = Number::INFINITY;
+        const NULL_STEP_GAIN: Number = 0.5;
+        let mut factor_reusable = false;
+        // The pinned hint's factor, if it is of the matrix the first
+        // iteration is about to assemble (gh#1061: one factorization, about
+        // 0.5 s on the reporter's model, per warm-started QP).
+        let mut pinned = self.pinned_factor.take();
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
@@ -1436,21 +1515,46 @@ impl ParametricActiveSetSolver {
             let k_c = active_cons.len();
             let k_b = active_bounds.len();
 
-            let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
-
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + k_c + k_b];
             for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            let delta = match self.factorize_with_inertia_control(
-                kkt,
-                &mut rhs,
-                (k_c + k_b) as i32,
-                qp.n,
-                opts,
-            ) {
+            // After an unshifted step nothing blocked, the working set — and
+            // so the KKT matrix — is the one just factored; only `x`, and with
+            // it the right-hand side, moved. Back-solve against that factor
+            // instead of factoring the same matrix again. This iteration is
+            // almost always the stationary check that reads the multipliers
+            // and picks the next drop, so it was half of every drop's cost:
+            // gh#1061's warm step QP took 306 factorizations for 156
+            // working-set changes.
+            let pin_matches = pinned.take().is_some_and(|f| {
+                f.cons == active_cons
+                    && f.bounds == active_bounds
+                    && std::ptr::eq(f.h, qp.h)
+                    && std::ptr::eq(f.a, qp.a)
+                    && f.n_factor == self.linsol.time_split().n_factor
+                    && f.rank_guard_calls == self.linsol.rank_guard_calls()
+            });
+            // A back-solve that fails falls through to the fresh factor.
+            let reused = (std::mem::take(&mut factor_reusable) || pin_matches)
+                && self.linsol.has_cached_factor()
+                && {
+                    let mut solved = rhs.clone();
+                    let ok = self.linsol.resolve(&mut solved).is_ok();
+                    if ok {
+                        rhs = solved;
+                    }
+                    ok
+                };
+            let factored = if reused {
+                Ok(0.0)
+            } else {
+                let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
+                self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)
+            };
+            let delta = match factored {
                 Ok(d) => d,
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     // The active set went rank-deficient: at a degenerate
@@ -1510,7 +1614,9 @@ impl ParametricActiveSetSolver {
                 }
                 Err(e) => return Err(e),
             };
-            n_refactor += 1;
+            if !reused {
+                n_refactor += 1;
+            }
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
@@ -1523,8 +1629,11 @@ impl ParametricActiveSetSolver {
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
+            let floor = prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf;
+            prev_was_null_step = false;
+            prev_p_inf = p_inf;
 
-            if p_inf <= opts.opt_tol {
+            if p_inf <= opts.opt_tol || floor {
                 // KKT-stationary for current W. Pick a wrong-sign
                 // active row to drop.
                 //
@@ -1605,10 +1714,23 @@ impl ParametricActiveSetSolver {
                     consider(&mut worst, DropTarget::Bound(i), viol);
                 }
 
-                if let Some((target, _viol)) = worst {
-                    match target {
-                        DropTarget::Cons(i) => working.constraints[i] = ConsStatus::Inactive,
-                        DropTarget::Bound(i) => working.bounds[i] = BoundStatus::Inactive,
+                if let Some((target, viol)) = worst {
+                    let slot = match target {
+                        DropTarget::Cons(i) => {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            i
+                        }
+                        DropTarget::Bound(i) => {
+                            working.bounds[i] = BoundStatus::Inactive;
+                            m + i
+                        }
+                    };
+                    if trace {
+                        eprintln!(
+                            "[qp] it={_iter} DROP slot={slot} viol={viol:.3e} obj={:.12e} nact={} pinf={p_inf:.2e} bland={use_bland}",
+                            quad_objective(qp, &x),
+                            active_slot_count(&working),
+                        );
                     }
                     n_changes += 1;
                     continue;
@@ -1826,10 +1948,26 @@ impl ParametricActiveSetSolver {
                 tabu_bounds.iter_mut().for_each(|t| *t = false);
             }
 
+            if trace && blocker.is_none() {
+                eprintln!(
+                    "[qp] it={_iter} NOBLOCK alpha={alpha:.3e} pinf={p_inf:.3e} obj={:.12e} nact={} ncand={} delta={delta:.1e}",
+                    quad_objective(qp, &x),
+                    active_slot_count(&working),
+                    candidates.len()
+                );
+            }
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
 
+            // Only an unshifted Newton step lands on the working set's
+            // minimizer; a δ-shifted one is a proximal step, and the next one
+            // from where it lands is no round-off. Arming the guard on it
+            // stopped a gh#1042 elastic pass short at `‖p‖∞ = 4.4e-4`.
+            prev_was_null_step = blocker.is_none() && delta == 0.0;
+            // The same condition leaves the working set, and so the factor,
+            // unchanged for the next iteration.
+            factor_reusable = prev_was_null_step;
             if let Some(blk) = blocker {
                 match blk {
                     BlockerTarget::Bound(i, status) => {
@@ -1846,6 +1984,17 @@ impl ParametricActiveSetSolver {
                         // by construction.
                         working.constraints[i] = status;
                     }
+                }
+                if trace {
+                    let slot = match blk {
+                        BlockerTarget::Bound(i, _) => m + i,
+                        BlockerTarget::Cons(i, _) => i,
+                    };
+                    eprintln!(
+                        "[qp] it={_iter} ADD  slot={slot} alpha={alpha:.3e} obj={:.12e} nact={} pinf={p_inf:.2e}",
+                        quad_objective(qp, &x),
+                        active_slot_count(&working),
+                    );
                 }
                 n_changes += 1;
             }
@@ -1882,7 +2031,17 @@ impl ParametricActiveSetSolver {
             // latched; Bland then guarantees finite termination.
             if !force_bland {
                 let obj_now = quad_objective(qp, &x);
-                let improved = obj_now < best_obj - 1e-9 * best_obj.abs() - 1e-12;
+                // The first iteration sets the reference. Written as a
+                // comparison against `best_obj = +∞` this was
+                // `obj < ∞ − ∞ = NaN`, false on every iteration: `best_obj`
+                // never left `+∞`, and the latch fired on the 50th
+                // blocking step of every solve, progress or not (gh#1061).
+                // Bland has no EXPAND floor, so from there each pivot at a
+                // degenerate vertex was a literal `α = 0`: a 50-variable,
+                // 100-row cone that EXPAND leaves in ~140 changes ran
+                // 100 000 at `x = 0`.
+                let improved =
+                    !best_obj.is_finite() || obj_now < best_obj - 1e-9 * best_obj.abs() - 1e-12;
                 if improved {
                     best_obj = obj_now;
                     stall_iters = 0;
@@ -4723,6 +4882,18 @@ pub(crate) fn checked_independent_active_subset(
     active_cons: &[usize],
     active_bounds: &[usize],
 ) -> Option<(Vec<usize>, Vec<usize>)> {
+    let started = Instant::now();
+    let res = checked_independent_active_subset_inner(linsol, qp, active_cons, active_bounds);
+    linsol.note_rank_test_time(started.elapsed());
+    res
+}
+
+fn checked_independent_active_subset_inner(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
     let (kc, kb) = independent_active_subset_any(linsol, qp, active_cons, active_bounds)?;
 
     // Permanent rows are pruned only for dependence on *each other* (gh#974).
@@ -5877,10 +6048,65 @@ impl ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
+        let ws = match self.warm_start_from_working_set(qp, working, opts)? {
+            Ok(ws) => ws,
+            Err(timed_out) => return Ok(timed_out),
+        };
+        self.solve(qp, Some(&ws), opts)
+    }
+
+    /// [`QpSolver::solve_with_working_set`], except that a working set whose
+    /// pinned point is infeasible for `qp`, even after the pin repair, comes
+    /// back `Ok(None)` instead of going to the ℓ1-elastic phase 1 (gh#1061).
+    /// So does one whose pinned KKT does not factor, without the rank prune
+    /// `solve_with_working_set` would run to rescue it.
+    ///
+    /// For a caller with a better way to a feasible point than that phase,
+    /// which on a large model costs a pivot per row it has to bring in.
+    /// gh#1061's second SQP step QP (n = 14 952, 10 818 equalities, feasible:
+    /// IPOPT 128.990447) was warm-started from the first QP's working set,
+    /// pinned infeasible, and reached the 300 s cap in the elastic phase after
+    /// 564 working-set changes.
+    pub fn solve_with_working_set_if_feasible(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<Option<QpSolution>, QpError> {
+        let _deadline = crate::deadline::enter(opts.time_limit);
+        self.pin_prunes = false;
+        let pinned = self.warm_start_from_working_set(qp, working, opts);
+        self.pin_prunes = true;
+        let ws = match pinned {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(timed_out)) => return Ok(Some(timed_out)),
+            // A hint whose pinned KKT does not factor is as unusable here as
+            // one that pins infeasible.
+            Err(e) if e.is_recoverable_factorization_failure() => return Ok(None),
+            Err(e) => return soften_deadline(qp, None, Err(e)).map(Some),
+        };
+        // The same test `solve` applies before it routes a warm start to
+        // the elastic phase.
+        if !point_is_feasible_scaled(qp, &ws.x, opts.feas_tol) {
+            return Ok(None);
+        }
+        soften_deadline(qp, None, self.solve(qp, Some(&ws), opts)).map(Some)
+    }
+
+    /// The warm start [`QpSolver::solve_with_working_set`] hands to `solve`:
+    /// the hint made well-formed for `qp`, pinned, and repaired if its pinned
+    /// point violates another row. `Ok(Err(sol))` is a deadline that expired
+    /// before any of that ran.
+    fn warm_start_from_working_set(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<Result<QpWarmStart, QpSolution>, QpError> {
         qp.validate()?;
         working.validate_dims(qp.n, qp.m)?;
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, None, 0, 0, 0, false));
+            return Ok(Err(time_limit_solution(qp, None, 0, 0, 0, false)));
         }
 
         // Make the hint well-formed for `qp` before anything trusts it.
@@ -5931,13 +6157,12 @@ impl ParametricActiveSetSolver {
         // The inner loop recomputes multipliers each iteration from a
         // fresh KKT solve, so the warm-start multipliers are unused;
         // pass zeros and let `solve_general` drive from `(x, working)`.
-        let ws = QpWarmStart {
+        Ok(Ok(QpWarmStart {
             x: x_init,
             lambda_g: vec![0.0; qp.m],
             lambda_x: vec![0.0; qp.n],
             working: fwd_working,
-        };
-        self.solve(qp, Some(&ws), opts)
+        }))
     }
 
     /// Refuse to certify a saddle point as a solution, and get off it when

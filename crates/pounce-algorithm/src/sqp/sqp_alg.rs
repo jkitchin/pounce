@@ -28,7 +28,8 @@ use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::GenTMatrix;
 use pounce_qp::{
-    HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus, WorkingSet,
+    BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver,
+    QpStatus, WorkingSet,
 };
 
 /// Header for the `sqp_print_level >= 1` iteration table.
@@ -135,6 +136,19 @@ pub struct SqpAlgorithm {
     /// top of each `optimize` call. Unused when
     /// `opts.globalization = L1Elastic`.
     filter: SqpFilter,
+    /// Whether this solve's cold step QPs are seeded by the convex interior
+    /// point; set per solve from `opts.qp_ipm_cold_start_min_dim`.
+    ipm_cold_start: bool,
+    /// The last interior-point seed's iteration count, which sets a warm
+    /// step QP's budget (see [`solve_subproblem_qp`]).
+    ipm_seed: IpmSeed,
+}
+
+/// State the IPM-seeded subproblem solves share across one SQP solve.
+#[derive(Default)]
+pub(crate) struct IpmSeed {
+    /// Interior-point iterations of the most recent successful seed.
+    pub(crate) last_iters: std::cell::Cell<Option<usize>>,
 }
 
 impl SqpAlgorithm {
@@ -147,6 +161,8 @@ impl SqpAlgorithm {
             iterates: None,
             filter: SqpFilter::new(),
             iteration_hook: None,
+            ipm_cold_start: false,
+            ipm_seed: IpmSeed::default(),
         }
     }
 
@@ -212,6 +228,11 @@ impl SqpAlgorithm {
         if let Some(d) = self.opts.qp_schur_min_dim {
             self.qp_opts.use_schur_updates = nlp.n() + nlp.m() >= d;
         }
+        self.ipm_cold_start = self
+            .opts
+            .qp_ipm_cold_start_min_dim
+            .is_some_and(|d| nlp.n() + nlp.m() >= d);
+        self.ipm_seed.last_iters.set(None);
         let res = self.optimize_inner(nlp, warm);
         (self.qp_opts.max_iter, self.qp_opts.use_schur_updates) = saved;
         res
@@ -539,7 +560,16 @@ impl SqpAlgorithm {
             // interior-point arm's `if !nlp_err.is_finite()` screen
             // (`ipopt_alg.rs`) so the two arms give the same verdict on the
             // same condition (gh #876).
-            if !kkt.stationarity.is_finite() || !kkt.constr_viol.is_finite() {
+            //
+            // The objective is screened too. Without it an iterate whose
+            // objective has overflowed to `-inf`, with residuals still finite,
+            // went on to a line search whose trial point evaluated to `NaN`
+            // and was reported as a step-size stall
+            // (`Search_Direction_Becomes_Too_Small`) — on `unbounded_cubic`'s
+            // limited-memory leg, once the step QPs stopped stalling at their
+            // iteration cap (gh#1061) and the SQP followed the cubic down.
+            if !kkt.stationarity.is_finite() || !kkt.constr_viol.is_finite() || !f_curr.is_finite()
+            {
                 let obj = nlp.eval_f(&iter.x);
                 self.iterates = Some(iter.clone());
                 return Ok(SqpResult {
@@ -739,11 +769,8 @@ impl SqpAlgorithm {
             // stops on it is reported as that budget and not as the
             // subproblem's own iteration limit.
             let qp_budget = self.opts.deadline.as_ref().map(deadline_remaining);
-            let qp_time_limit = match (qp_budget, self.qp_opts.time_limit) {
-                (Some((left, _)), Some(own)) => Some(left.min(own)),
-                (Some((left, _)), None) => Some(left),
-                (None, own) => own,
-            };
+            let qp_time_limit =
+                qp_time_limit_now(self.opts.deadline.as_ref(), self.qp_opts.time_limit);
 
             let qp_data = match low_rank.as_ref() {
                 Some(b) => SqpQpData::build_low_rank(
@@ -838,7 +865,13 @@ impl SqpAlgorithm {
                 // The cold error is still propagated: if a clean start fails
                 // too, the failure is not about the working set and there is
                 // nothing further to try here.
-                match solve_step_qp(&mut self.qp_solver, &qp_data, Some(prev_w), &self.qp_opts) {
+                match solve_step_qp(
+                    &mut self.qp_solver,
+                    &qp_data,
+                    Some(prev_w),
+                    &self.qp_opts,
+                    self.ipm_cold_start.then_some(&self.ipm_seed),
+                ) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::debug!(target: "pounce::sqp",
@@ -846,11 +879,23 @@ impl SqpAlgorithm {
                              from cold, since the carried working set is what a \
                              cold start rebuilds (gh #855)");
                         n_qp_solves += 1;
-                        solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?
+                        solve_step_qp(
+                            &mut self.qp_solver,
+                            &qp_data,
+                            None,
+                            &self.qp_opts,
+                            self.ipm_cold_start.then_some(&self.ipm_seed),
+                        )?
                     }
                 }
             } else {
-                solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?
+                solve_step_qp(
+                    &mut self.qp_solver,
+                    &qp_data,
+                    None,
+                    &self.qp_opts,
+                    self.ipm_cold_start.then_some(&self.ipm_seed),
+                )?
             };
             n_qp_solves += 1;
             n_qp_working_set_changes += sol.stats.n_working_set_changes;
@@ -867,7 +912,13 @@ impl SqpAlgorithm {
             // issue #349 that previously reported
             // `Search_Direction_Becomes_Too_Small`.
             if warm_started && matches!(sol.status, QpStatus::MaxIter | QpStatus::NumericalError) {
-                let cold = solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?;
+                let cold = solve_step_qp(
+                    &mut self.qp_solver,
+                    &qp_data,
+                    None,
+                    &self.qp_opts,
+                    self.ipm_cold_start.then_some(&self.ipm_seed),
+                )?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += cold.stats.n_working_set_changes;
                 // `Unbounded` is accepted as well as `Optimal`, and it is
@@ -940,7 +991,13 @@ impl SqpAlgorithm {
                     b.as_triplet(),
                     self.hessian_inertia(),
                 );
-                let retry = solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?;
+                let retry = solve_step_qp(
+                    &mut self.qp_solver,
+                    &qp_data,
+                    None,
+                    &self.qp_opts,
+                    self.ipm_cold_start.then_some(&self.ipm_seed),
+                )?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += retry.stats.n_working_set_changes;
                 // Same as the cold retry above (gh #855): an `Unbounded`
@@ -1005,7 +1062,13 @@ impl SqpAlgorithm {
                         certify_recession_ray: false,
                         ..self.qp_opts.clone()
                     };
-                    let prox = solve_step_qp(&mut self.qp_solver, &qp_data, None, &prox_opts)?;
+                    let prox = solve_step_qp(
+                        &mut self.qp_solver,
+                        &qp_data,
+                        None,
+                        &prox_opts,
+                        self.ipm_cold_start.then_some(&self.ipm_seed),
+                    )?;
                     n_qp_solves += 1;
                     if prox.status == QpStatus::Optimal {
                         sol = prox;
@@ -1014,8 +1077,38 @@ impl SqpAlgorithm {
             }
             self.qp_opts = base;
 
+            // An infeasible step QP is a statement about the linearization at
+            // `x_k`, not about the NLP (Fletcher's Sℓ1QP; Nocedal-Wright
+            // §18.5). The QP's elastic phase hands back the point minimizing
+            // its ℓ1 violation, which is a step toward feasibility; when it
+            // reduces the linearized violation, take it and let the ℓ1 merit
+            // line search judge it. The multipliers it returns are a Farkas
+            // certificate, not a step's multipliers, so the current ones are
+            // kept. Only a step that cannot reduce the linearized violation —
+            // `x_k` stationary for it — is the local-infeasibility signal.
+            //
+            // Stopping on the first infeasible QP declared `deb7` (813
+            // variables, feasible: the interior point solves it at 97.56)
+            // `Infeasible_Problem_Detected` at iteration 0, and the
+            // second-opinion ladder agreed three times, since every re-solve
+            // starts from the same linearization (gh#1061 sweep).
+            let elastic_step = sol.status == QpStatus::Infeasible && {
+                let zero = vec![0.0; n];
+                let before = linearized_l1_violation(&qp_data, &zero);
+                let after = linearized_l1_violation(&qp_data, &sol.x);
+                tracing::debug!(target: "pounce::sqp",
+                    "infeasible step QP: linearized ℓ1 violation {before:.3e} → {after:.3e} \
+                     along its elastic step");
+                after < (1.0 - ELASTIC_STEP_MIN_GAIN) * before
+            };
+            if elastic_step {
+                sol.lambda_g.clone_from(&iter.lambda_g);
+                sol.lambda_x.clone_from(&iter.lambda_x);
+            }
+
             match sol.status {
                 QpStatus::Optimal => {}
+                QpStatus::Infeasible if elastic_step => {}
                 QpStatus::Infeasible => {
                     let obj = nlp.eval_f(&iter.x);
                     self.iterates = Some(iter.clone());
@@ -1169,11 +1262,9 @@ impl SqpAlgorithm {
             let mut soc_working: Option<WorkingSet> = None;
             let ls = {
                 let qp_solver = &mut self.qp_solver;
-                let soc_opts = QpOptions {
-                    time_limit: qp_time_limit,
-                    ..self.qp_opts.clone()
-                };
-                let qp_opts = &soc_opts;
+                let qp_opts = &self.qp_opts;
+                let deadline = self.opts.deadline.as_ref();
+                let seed = self.ipm_cold_start.then_some(&self.ipm_seed);
                 let qp_data_ref = &qp_data;
                 let c_curr_ref = &c_vals;
                 let a_p_ref = &a_p;
@@ -1198,14 +1289,24 @@ impl SqpAlgorithm {
                     // `bl` / `bu` carry the lifted rows (if any) past `mm`;
                     // only the NLP's own rows are re-centred.
                     let qp_soc = qp_data_ref.as_qp_with_row_bounds(&bl_soc, &bu_soc);
-                    let sol_soc = qp_solver
-                        .solve_with_working_set(
-                            &qp_soc,
-                            &qp_data_ref.lift_working_set(sol_working),
-                            qp_opts,
-                        )
-                        .ok()?;
-                    let sol_soc = qp_data_ref.unlift_solution(sol_soc);
+                    // What is left of the solve's budget now, not at the top of
+                    // the iteration: the step QP and the trial points have
+                    // spent part of it since (gh#1061: the correction QP ran
+                    // 40–142 s past a wall cap on that stale figure).
+                    let soc_opts = QpOptions {
+                        time_limit: qp_time_limit_now(deadline, qp_opts.time_limit),
+                        ..qp_opts.clone()
+                    };
+                    let sol_soc = solve_subproblem_qp(
+                        qp_solver,
+                        qp_data_ref,
+                        qp_soc,
+                        Some(sol_working),
+                        &soc_opts,
+                        seed,
+                        "SOC QP",
+                    )
+                    .ok()?;
                     *n_soc += 1;
                     if sol_soc.status == QpStatus::Optimal {
                         *soc_working_slot = Some(sol_soc.working);
@@ -1491,6 +1592,30 @@ fn ray_certifies_unbounded<N: SqpProblemSpec>(
 pub(crate) struct KktError {
     pub stationarity: Number,
     pub constr_viol: Number,
+}
+
+/// Fraction of the linearized ℓ1 violation an elastic step must remove to be
+/// taken (see `elastic_step` in the outer loop). Any real reduction is a
+/// direction toward feasibility; the margin only keeps round-off on a
+/// stationary point of the violation from passing for one.
+const ELASTIC_STEP_MIN_GAIN: Number = 1e-6;
+
+/// ℓ1 violation of the step QP's own rows and bounds at step `d`: the
+/// linearization `c(x_k) + J d` against the row bounds, and `x_k + d` against
+/// the variable bounds, both as the QP poses them (shifted to step space).
+/// Only the NLP's rows and variables count; a lifted subproblem's extra
+/// rows and columns are bookkeeping, not constraints.
+fn linearized_l1_violation(data: &SqpQpData, d: &[Number]) -> Number {
+    let (m, n) = (data.m, data.n);
+    let ad = mat_vec_gen(&data.a, d, m);
+    crate::sqp::line_search::l1_violation(
+        &d[..n],
+        &ad,
+        &data.bl[..m],
+        &data.bu[..m],
+        &data.xl[..n],
+        &data.xu[..n],
+    )
 }
 
 /// Sparse `A · p` for an `m × n` general-constraint Jacobian stored
@@ -1993,32 +2118,325 @@ fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
 /// number, and the remedies differ: many working-set changes say the working
 /// set moved a lot, a refactor count says the Schur path kept resetting, and
 /// a rank-test count says it spent its time pruning dependent rows.
+///
+/// The wall time is split as well: factorization, back-solves (with their
+/// count), rank tests, and `other` — everything outside the linear solver,
+/// which is KKT assembly, the ratio and drop tests and the SMW correction's
+/// dense arithmetic. Counts say what the QP did; the split says which of it
+/// cost the time. It was a large `other` with a modest `factor` that would
+/// have named the Schur path's `O(m·nnz(A))` reset assembly at once (gh#1061:
+/// 2.2 s per Schur-path refactorization against 0.57 s off it).
 fn solve_step_qp(
     solver: &mut ParametricActiveSetSolver,
     data: &SqpQpData,
     warm: Option<&WorkingSet>,
     opts: &QpOptions,
+    seed: Option<&IpmSeed>,
 ) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
-    let qp = data.as_qp();
+    solve_subproblem_qp(solver, data, data.as_qp(), warm, opts, seed, "step QP")
+}
+
+/// [`solve_step_qp`] for a QP built on `data` with other row bounds — the
+/// second-order-correction QP, which re-centres them on the trial point —
+/// logged as `kind`.
+///
+/// The correction QP used to call the solver directly, so it had none of
+/// the step QP's handling: no seeding for a warm start that pins infeasible,
+/// and no log line. gh#1061: on the reporter's model the SQP reached
+/// iteration 2, rejected the full step, and the correction QP sat in the
+/// elastic phase for the rest of the wall budget (585 pivots in 345 s,
+/// objective frozen) without a line in the log. Solved alone, the same QP
+/// is optimal from the interior point in 32 s.
+///
+/// `seed` is `Some` where step QPs are seeded from the interior point (see
+/// [`SqpOptions::qp_ipm_cold_start_min_dim`]). There a warm start that pins
+/// feasibly is also given a budget: [`WARM_ITERS_PER_SEED_ITER`] active-set
+/// iterations per iteration the last seed took. A warm solve that would need
+/// more is costing more than seeding it, and is seeded instead.
+pub(crate) fn solve_subproblem_qp(
+    solver: &mut ParametricActiveSetSolver,
+    data: &SqpQpData,
+    qp: pounce_qp::QpProblem<'_>,
+    warm: Option<&WorkingSet>,
+    opts: &QpOptions,
+    seed: Option<&IpmSeed>,
+    kind: &str,
+) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
-    let sol = match warm {
-        Some(w) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
-        None => solver.solve(&qp, None, opts),
+    let split_before = solver.linsol_time_split();
+    let seeded = match (warm, seed) {
+        (None, Some(seed)) => ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed),
+        _ => None,
     };
+    // gh#1061: warm step QPs on the reporter's model needed 68–350
+    // working-set changes and 51–263 s each, at about one factorization per
+    // change, where the seed takes 19–22 interior-point iterations and
+    // 15–20 s and finishes in 0–2 changes. Counted in iterations rather than
+    // seconds, so the same model takes the same path on every machine.
+    let budget = seed
+        .and_then(|s| s.last_iters.get())
+        .map(|k| (k * WARM_ITERS_PER_SEED_ITER) as u32)
+        .filter(|&b| b < opts.max_iter);
+    let budget_opts = budget.map(|b| QpOptions {
+        max_iter: b,
+        ..opts.clone()
+    });
+    let sol = match (seeded, warm) {
+        (Some(sol), _) => Ok(sol),
+        // A warm start that pins to an infeasible point would go to the
+        // ℓ1-elastic phase 1, which at this size is the cold start's cost
+        // again. gh#1061's second step QP (warm from the seeded first one,
+        // feasible: IPOPT 128.990447) reached the 300 s cap there after 564
+        // working-set changes; seeded like a cold QP it is optimal in 12.5 s
+        // with 2. The elastic path stays for when the seed declines.
+        (None, Some(w)) if seed.is_some() => {
+            let seed = seed.expect("guarded");
+            let lifted = data.lift_working_set(w);
+            let warm_opts = budget_opts.as_ref().unwrap_or(opts);
+            match solver.solve_with_working_set_if_feasible(&qp, &lifted, warm_opts) {
+                // Over budget: seed, or if the seed declines, carry on from
+                // where the warm solve stopped with the full budget.
+                Ok(Some(sol)) if budget.is_some() && sol.status == QpStatus::MaxIter => {
+                    tracing::debug!(target: "pounce::sqp::qp",
+                        "warm start over its budget of {} iterations (n={}, m={}, {} working-set \
+                         changes in {:.3?}); seeding from the interior point",
+                        warm_opts.max_iter, qp.n, qp.m, sol.stats.n_working_set_changes,
+                        started.elapsed());
+                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed) {
+                        Some(seeded) => Ok(seeded),
+                        None => solver.solve_with_working_set(&qp, &sol.working, opts),
+                    }
+                }
+                Ok(Some(sol)) => Ok(sol),
+                Ok(None) => {
+                    tracing::debug!(target: "pounce::sqp::qp",
+                        "warm start pins infeasible (n={}, m={}); seeding from the interior point",
+                        qp.n, qp.m);
+                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed) {
+                        Some(sol) => Ok(sol),
+                        None => solver.solve_with_working_set(&qp, &lifted, opts),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        (None, Some(w)) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
+        (None, None) => solver.solve(&qp, None, opts),
+    };
+    let elapsed = started.elapsed();
     let rank_guard_calls = solver.rank_guard_calls() - guards_before;
+    let t = solver.linsol_time_split().since(&split_before);
+    let other = elapsed.saturating_sub(t.factor + t.resolve + t.rank_test);
     match &sol {
         Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
-             {} refactors, {} Schur updates, {} rank tests, phase1={}",
-            qp.n, qp.m, warm.is_some(), s.status, started.elapsed(),
+            "{kind} (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
+             {} refactors, {} Schur updates, {} rank tests, phase1={}; \
+             time: {} factorizations {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
+            qp.n, qp.m, warm.is_some(), s.status, elapsed,
             s.stats.n_working_set_changes, s.stats.n_refactor, s.stats.n_schur_updates,
-            rank_guard_calls, s.stats.used_phase1),
+            rank_guard_calls, s.stats.used_phase1,
+            t.n_factor, t.factor, t.n_resolve, t.resolve, t.rank_test, other),
         Err(e) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests",
-            qp.n, qp.m, warm.is_some(), started.elapsed(), rank_guard_calls),
+            "{kind} (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests; \
+             time: {} factorizations {:.3?}, {} back-solves {:.3?}, rank tests {:.3?}, other {:.3?}",
+            qp.n, qp.m, warm.is_some(), elapsed, rank_guard_calls,
+            t.n_factor, t.factor, t.n_resolve, t.resolve, t.rank_test, other),
     }
     Ok(data.unlift_solution(sol?))
+}
+
+/// A step QP solved by the convex interior point and finished by the
+/// active-set solver from the working set that solution identifies, or `None`
+/// to fall back to the active-set path as before (see
+/// [`SqpOptions::qp_ipm_cold_start_min_dim`]). Used for a cold QP, and for a
+/// warm one whose working set pins to an infeasible point.
+///
+/// `None` unless every stage succeeds: the Hessian is certified PSD (an
+/// interior point is not a method for an indefinite QP), the interior point
+/// reaches `Optimal` (an infeasible QP goes to the active set's elastic
+/// phase, whose step the SQP takes — see `elastic_step`), and the warm
+/// active-set solve reaches `Optimal` too. The active-set solution is what
+/// comes back, so the step, its multipliers and its working set are the
+/// active-set method's own; the interior point only chose where it starts.
+fn ipm_seeded_step_qp(
+    solver: &mut ParametricActiveSetSolver,
+    qp: &pounce_qp::QpProblem,
+    hess_inf: Number,
+    opts: &QpOptions,
+    seed: &IpmSeed,
+) -> Option<pounce_qp::QpSolution> {
+    use pounce_convex::Triplet as T;
+    let started = std::time::Instant::now();
+    let (n, m) = (qp.n, qp.m);
+    let feral = || {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+            as Box<dyn pounce_linsol::SparseSymLinearSolverInterface>
+    };
+    let p_lower: Vec<T> = (0..qp.h.irows().len())
+        .map(|k| {
+            let (i, j) = (qp.h.irows()[k] as usize - 1, qp.h.jcols()[k] as usize - 1);
+            T::new(i.max(j), i.min(j), qp.h.values()[k])
+        })
+        .collect();
+    if qp.hessian_inertia != HessianInertia::Psd {
+        // Absolute, as the certificate's contract is, at the scale of `H`.
+        let tol = 1e-9 * (1.0 + hess_inf);
+        if pounce_convex::certify_psd_lower_triangle(n, &p_lower, tol, feral) != Ok(true) {
+            return None;
+        }
+    }
+    let mut rows: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
+    for k in 0..qp.a.irows().len() {
+        let (i, j) = (qp.a.irows()[k] as usize - 1, qp.a.jcols()[k] as usize - 1);
+        rows[i].push((j, qp.a.values()[k]));
+    }
+    let finite_lo = |v: Number| v > NLP_LOWER_BOUND_INF;
+    let finite_hi = |v: Number| v < NLP_UPPER_BOUND_INF;
+    let (mut a, mut b, mut g, mut h) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (i, row) in rows.iter().enumerate() {
+        if qp.bl[i] == qp.bu[i] {
+            a.extend(row.iter().map(|&(j, v)| T::new(b.len(), j, v)));
+            b.push(qp.bl[i]);
+            continue;
+        }
+        if finite_hi(qp.bu[i]) {
+            g.extend(row.iter().map(|&(j, v)| T::new(h.len(), j, v)));
+            h.push(qp.bu[i]);
+        }
+        if finite_lo(qp.bl[i]) {
+            g.extend(row.iter().map(|&(j, v)| T::new(h.len(), j, -v)));
+            h.push(-qp.bl[i]);
+        }
+    }
+    let prob = pounce_convex::QpProblem {
+        n,
+        p_lower,
+        c: qp.g.to_vec(),
+        a,
+        b,
+        g,
+        h,
+        lb: qp
+            .xl
+            .iter()
+            .map(|&v| {
+                if finite_lo(v) {
+                    v
+                } else {
+                    pounce_convex::NEG_INF
+                }
+            })
+            .collect(),
+        ub: qp
+            .xu
+            .iter()
+            .map(|&v| {
+                if finite_hi(v) {
+                    v
+                } else {
+                    pounce_convex::POS_INF
+                }
+            })
+            .collect(),
+    };
+    let ipm_opts = pounce_convex::QpOptions {
+        time_limit: opts.time_limit,
+        max_iter: IPM_SEED_MAX_ITER,
+        ..pounce_convex::QpOptions::default()
+    };
+    let ipm = pounce_convex::solve_qp_ipm(&prob, &ipm_opts, feral);
+    let ipm_time = started.elapsed();
+    if ipm.status == pounce_convex::QpStatus::Optimal {
+        seed.last_iters.set(Some(ipm.iters));
+    }
+    if ipm.status != pounce_convex::QpStatus::Optimal {
+        tracing::debug!(target: "pounce::sqp::qp",
+            "IPM cold start (n={n}, m={m}): {:?} after {} iterations in {ipm_time:.3?}; \
+             solving from cold instead", ipm.status, ipm.iters);
+        return None;
+    }
+    // The working set the interior point's answer sits on: every row and
+    // bound within a scaled `IPM_ACTIVE_TOL` of a side it can be active at.
+    // A wrong guess either way costs the warm solve pivots, not correctness.
+    let near = |v: Number, bound: Number| (v - bound).abs() <= IPM_ACTIVE_TOL * (1.0 + bound.abs());
+    let ax = mat_vec_gen(qp.a, &ipm.x, m);
+    let mut working = WorkingSet::cold(n, m);
+    for i in 0..m {
+        working.constraints[i] = if qp.bl[i] == qp.bu[i] {
+            ConsStatus::Equality
+        } else if finite_lo(qp.bl[i]) && near(ax[i], qp.bl[i]) {
+            ConsStatus::AtLower
+        } else if finite_hi(qp.bu[i]) && near(ax[i], qp.bu[i]) {
+            ConsStatus::AtUpper
+        } else {
+            ConsStatus::Inactive
+        };
+    }
+    for j in 0..n {
+        working.bounds[j] = if qp.xl[j] == qp.xu[j] {
+            BoundStatus::Fixed
+        } else if finite_lo(qp.xl[j]) && near(ipm.x[j], qp.xl[j]) {
+            BoundStatus::AtLower
+        } else if finite_hi(qp.xu[j]) && near(ipm.x[j], qp.xu[j]) {
+            BoundStatus::AtUpper
+        } else {
+            BoundStatus::Inactive
+        };
+    }
+    let warm_opts = QpOptions {
+        time_limit: opts.time_limit.map(|t| t.saturating_sub(started.elapsed())),
+        ..opts.clone()
+    };
+    let sol = solver
+        .solve_with_working_set(qp, &working, &warm_opts)
+        .ok()?;
+    tracing::debug!(target: "pounce::sqp::qp",
+        "IPM cold start (n={n}, m={m}): optimal after {} iterations in {ipm_time:.3?}, \
+         {} rows and bounds active; warm active-set solve {} in {:.3?} with {} \
+         working-set changes", ipm.iters, working.active_count(), sol.status,
+        sol.stats.time, sol.stats.n_working_set_changes);
+    (sol.status == QpStatus::Optimal).then_some(sol)
+}
+
+/// Iteration cap on the seeding interior point, against its own default of
+/// 200. gh#1061's step QPs took 16 and 19; a QP the interior point cannot
+/// solve in a few times that goes back to the active-set path rather than
+/// spending the budget here. Measured on a borderline-feasible emulation of
+/// the second step QP, the uncapped interior point ran 57 iterations to a
+/// 300 s limit.
+const IPM_SEED_MAX_ITER: usize = 50;
+
+/// Active-set iterations a warm-started subproblem QP may take, per
+/// interior-point iteration the last seed took, before it is seeded instead
+/// (see [`solve_subproblem_qp`]). An active-set iteration on gh#1061's model
+/// is one factorization or one back-solve, and a working-set change about
+/// two of them; an interior-point iteration, with the certificate and the
+/// warm finish spread over it, about 0.8 s against 0.44 s per active-set
+/// factorization. Four per seed iteration therefore lets a warm solve spend
+/// about what a seed costs (80 iterations, ~40 changes, at the seed's 20)
+/// before it gives up, so a warm start that is near its answer, as most are,
+/// keeps it, and one that is not costs at most about twice the seed.
+const WARM_ITERS_PER_SEED_ITER: usize = 4;
+
+/// Relative activity tolerance for reading a working set off an
+/// interior-point solution in [`ipm_seeded_step_qp`]. The interior point stops
+/// at a complementarity of order its `tol`, so an active row sits within a few
+/// orders of that and an inactive one, at a nondegenerate solution, well
+/// outside it.
+const IPM_ACTIVE_TOL: Number = 1e-6;
+
+/// A subproblem QP's time limit: what is left of the solve's `deadline` at
+/// this moment, or the QP's `own` limit if that is tighter.
+fn qp_time_limit_now(
+    deadline: Option<&pounce_common::timing::Deadline>,
+    own: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (deadline.map(deadline_remaining), own) {
+        (Some((left, _)), Some(own)) => Some(left.min(own)),
+        (Some((left, _)), None) => Some(left),
+        (None, own) => own,
+    }
 }
 
 /// What is left of `deadline`, as the wall-clock duration a step QP can take

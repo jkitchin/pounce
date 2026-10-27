@@ -58,15 +58,18 @@ layered view (each layer depends only on earlier layers):
 Layer 0: `pounce-common`, `pounce-studio-core` (leaves)
 Layer 1: `pounce-linalg`
 Layer 2: `pounce-linsol`, `pounce-nlp`, `pounce-sens-core`
-Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
+Layer 3: `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
          `pounce-nl`, `pounce-observability`, `pounce-presolve`, `pounce-qp`,
          `pounce-solve-report`
-Layer 4: `pounce-algorithm`
-Layer 5: `pounce-minima`, `pounce-restoration`, `pounce-sensitivity`
-Layer 6: `pounce-cinterface`, `pounce-cli`, `pounce-rs`
+Layer 4: `pounce-convex`
+Layer 5: `pounce-algorithm`
+Layer 6: `pounce-minima`, `pounce-restoration`, `pounce-sensitivity`
+Layer 7: `pounce-cinterface`, `pounce-cli`, `pounce-rs`
 
-`pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on `pounce-common` +
-`pounce-linsol` + `pounce-linalg`, so it sits in layer 3. `pounce-nl` depends
+`pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends on `pounce-qp`,
+`pounce-presolve` and `pounce-sens-core` besides the layer-0–2 crates, so it
+sits in layer 4, and `pounce-algorithm` above it: the SQP seeds a large cold
+step QP with the convex interior point (gh#1061). `pounce-nl` depends
 on `pounce-common` + `pounce-nlp`, also layer 3. `pounce-cli` and the
 `pounce-rs` facade are the sinks: they depend (transitively) on nearly
 everything, so they publish last.

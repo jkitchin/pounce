@@ -244,6 +244,9 @@ pub struct EqpReport {
     pub rank_guard_calls: u32,
     /// Wall time of the QP call.
     pub time: std::time::Duration,
+    /// How that wall time split between factorization, back-solves and rank
+    /// tests; the rest of `time` went outside the linear solver (gh#1061).
+    pub linsol_times: pounce_qp::LinsolTimes,
 }
 
 /// What crossover did. Retrieved from
@@ -609,6 +612,7 @@ where
         schur_updates: eqp.as_ref().map_or(0, |s| s.stats.n_schur_updates),
         rank_guard_calls: qp_solver.rank_guard_calls(),
         time: eqp_started.elapsed(),
+        linsol_times: qp_solver.linsol_time_split(),
     };
     tracing::debug!(target: "pounce::crossover", "crossover step 3 QP: {eqp_report:?}");
 

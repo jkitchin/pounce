@@ -33,6 +33,7 @@ use pounce_common::timing::{LinearSystemPhase, time_linear_system};
 use pounce_common::{Index, Number};
 use pounce_linsol::status::ESymSolverStatus;
 use pounce_linsol::{EMatrixFormat, SparseSymLinearSolverInterface};
+use std::time::{Duration, Instant};
 
 /// A boxed linear-solver backend (FERAL by default; MA57 when the
 /// caller wires the `ma57` feature in pounce-hsl).
@@ -51,6 +52,45 @@ pub struct LinearSolver {
     /// Linear-independence rank tests run against this solver; see
     /// [`Self::rank_guard_calls`].
     rank_guard_calls: u32,
+    /// Where this solver's time went; see [`Self::time_split`].
+    times: LinsolTimes,
+}
+
+/// Cumulative wall time a [`LinearSolver`] spent in each kind of linear
+/// algebra, and how many back-solves it ran (gh#1061).
+///
+/// A step QP's debug line reports its wall time; this splits it. A caller
+/// takes [`LinearSolver::time_split`] before and after a solve and
+/// [`Self::since`] the difference. What none of the buckets hold — assembling
+/// the KKT, the ratio test, the drop test, the SMW correction's dense
+/// arithmetic — is the solve's wall time minus their sum.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinsolTimes {
+    /// Symbolic analysis plus numeric factorization, including every
+    /// inertia-control retry.
+    pub factor: Duration,
+    /// Number of factorizations, inertia-control retries included.
+    pub n_factor: u64,
+    /// Back-solves against a cached factor: the Schur path's per-iteration
+    /// solve, its refinement passes, and the two per rank-2 update.
+    pub resolve: Duration,
+    /// Number of those back-solves.
+    pub n_resolve: u64,
+    /// The linear-independence guard, sparse probe or dense fallback.
+    pub rank_test: Duration,
+}
+
+impl LinsolTimes {
+    /// `self − earlier`, bucket by bucket.
+    pub fn since(&self, earlier: &LinsolTimes) -> LinsolTimes {
+        LinsolTimes {
+            factor: self.factor.saturating_sub(earlier.factor),
+            n_factor: self.n_factor.saturating_sub(earlier.n_factor),
+            resolve: self.resolve.saturating_sub(earlier.resolve),
+            n_resolve: self.n_resolve.saturating_sub(earlier.n_resolve),
+            rank_test: self.rank_test.saturating_sub(earlier.rank_test),
+        }
+    }
 }
 
 impl LinearSolver {
@@ -69,6 +109,7 @@ impl LinearSolver {
             cached_dim: 0,
             factored: false,
             rank_guard_calls: 0,
+            times: LinsolTimes::default(),
         }
     }
 
@@ -104,6 +145,19 @@ impl LinearSolver {
         // backend operation, so a partial failure leaves us in a
         // consistent "no cache" state.
         self.factored = false;
+        let started = Instant::now();
+        let res = self.factorize_and_solve_inner(kkt, rhs, expected_neg_evals);
+        self.times.factor += started.elapsed();
+        self.times.n_factor += 1;
+        res
+    }
+
+    fn factorize_and_solve_inner(
+        &mut self,
+        kkt: &KktTriplet,
+        rhs: &mut [Number],
+        expected_neg_evals: Option<i32>,
+    ) -> Result<(), QpError> {
         let dim = kkt.dim as Index;
         let nnz = kkt.irn.len() as Index;
 
@@ -183,12 +237,15 @@ impl LinearSolver {
         }
         let irn = self.cached_irn.as_ref().expect("factored ⇒ cache present");
         let jcn = self.cached_jcn.as_ref().expect("factored ⇒ cache present");
+        let started = Instant::now();
         let st = time_linear_system(LinearSystemPhase::BackSolve, || {
             self.backend.multi_solve(
                 false, // new_matrix=false ⇒ reuse cached factor
                 irn, jcn, 1, rhs, false, 0,
             )
         });
+        self.times.resolve += started.elapsed();
+        self.times.n_resolve += 1;
         match st {
             ESymSolverStatus::Success => Ok(()),
             other => Err(QpError::LinearSolverFailure(format!(
@@ -226,6 +283,16 @@ impl LinearSolver {
 
     pub(crate) fn note_rank_guard_call(&mut self) {
         self.rank_guard_calls = self.rank_guard_calls.saturating_add(1);
+    }
+
+    /// Cumulative time spent factoring, back-solving and rank-testing since
+    /// this solver was built; never reset (gh#1061). See [`LinsolTimes`].
+    pub fn time_split(&self) -> LinsolTimes {
+        self.times
+    }
+
+    pub(crate) fn note_rank_test_time(&mut self, d: Duration) {
+        self.times.rank_test += d;
     }
 
     /// Whether [`Self::determine_dependent_rows`] is available. Always

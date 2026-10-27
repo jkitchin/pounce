@@ -162,7 +162,7 @@ impl SchurState {
     /// Build the K_max triplet for the given active-slot pattern.
     /// Active slots carry the actual constraint row; inactive
     /// slots carry the `(p, p) = 1` sentinel.
-    fn build_k_max_triplet(&self, qp: &QpProblem, slot_active: &[bool]) -> KktTriplet {
+    pub(crate) fn build_k_max_triplet(&self, qp: &QpProblem, slot_active: &[bool]) -> KktTriplet {
         let n_i = self.n as Index;
         let mut irn = Vec::new();
         let mut jcn = Vec::new();
@@ -182,22 +182,19 @@ impl SchurState {
         }
 
         // One row per slot.
-        let a_irows = qp.a.irows();
         let a_jcols = qp.a.jcols();
         let a_vals = qp.a.values();
+        let (row_ptr, row_entries) = a_row_index(qp);
         for slot in 0..self.m_total {
             let saddle_row = n_i + (slot as Index) + 1; // 1-based row in K_max
             if slot_active[slot] {
                 if self.slot_is_general(slot) {
-                    // Iterate A entries and pick the row.
-                    let slot_1based = (slot + 1) as Index;
-                    for k in 0..a_irows.len() {
-                        if a_irows[k] == slot_1based {
-                            // (saddle_row, jcol, value) — saddle_row > n ≥ jcol ⇒ lower-tri.
-                            irn.push(saddle_row);
-                            jcn.push(a_jcols[k]);
-                            vals.push(a_vals[k]);
-                        }
+                    // This row's `A` entries, in triplet order.
+                    for &k in &row_entries[row_ptr[slot]..row_ptr[slot + 1]] {
+                        // (saddle_row, jcol, value) — saddle_row > n ≥ jcol ⇒ lower-tri.
+                        irn.push(saddle_row);
+                        jcn.push(a_jcols[k]);
+                        vals.push(a_vals[k]);
                     }
                 } else {
                     // Variable bound slot: single (saddle_row, var+1, 1).
@@ -620,6 +617,38 @@ impl SchurState {
     pub fn n_schur_updates(&self) -> u32 {
         (self.s_dim / 2) as u32
     }
+}
+
+/// Row index of `A`'s triplets: row `i`'s entries are
+/// `entries[ptr[i]..ptr[i + 1]]`, each a position in `A`'s triplet arrays,
+/// in the order they appear there.
+///
+/// [`SchurState::build_k_max_triplet`] used to find an active row's entries by
+/// scanning every triplet of `A`, once per active row — `O(m · nnz(A))` per
+/// reset, against the `O(nnz(A))` of the refactor path's assembly
+/// (`kkt::assemble_active_set_kkt`). On gh#1061's SQP step QP (`m = 13 998`,
+/// `nnz(A) = 138 654`) that is ~2e9 comparisons each time the base factor is
+/// rebuilt, and with an exact Hessian every drop rebuilds it: the reporter
+/// measured 2.2–2.4 s per Schur-path refactorization against 0.57 s on the
+/// refactor path, flat across every QP. A counting sort is stable, so the
+/// assembled triplet — and therefore the factorization — is unchanged.
+fn a_row_index(qp: &QpProblem) -> (Vec<usize>, Vec<usize>) {
+    let irows = qp.a.irows();
+    let mut ptr = vec![0usize; qp.m + 1];
+    for &r in irows {
+        ptr[r as usize] += 1;
+    }
+    for i in 0..qp.m {
+        ptr[i + 1] += ptr[i];
+    }
+    let mut next = ptr.clone();
+    let mut entries = vec![0usize; irows.len()];
+    for (k, &r) in irows.iter().enumerate() {
+        let i = (r - 1) as usize;
+        entries[next[i]] = k;
+        next[i] += 1;
+    }
+    (ptr, entries)
 }
 
 fn dot(a: &[Number], b: &[Number]) -> Number {

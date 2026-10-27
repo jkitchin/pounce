@@ -111,30 +111,44 @@ fn a_nan_iterate_is_not_reported_as_an_optimal_solution() {
     );
     assert_eq!(status(&out), "Invalid_Number_Detected", "output:\n{out}");
 
-    // The reported KKT error must stop being a finite `0.0`. It is asserted
-    // as "not finite" and not as the string `nan`, because *which* non-finite
-    // value the arm arrives at is not portable: the same fixture reaches
-    // `nan` in the release build and `inf` in the debug one, since the two
-    // take different rounding through the same divergent trajectory. Both are
-    // correct answers to the question this test asks, and pinning one of them
-    // would be an assertion about the optimizer settings rather than about
-    // the fix — the shape of mistake `issue848_sqp_second_order_option.rs`
-    // records under "which fixture can carry which claim".
-    let err = out
-        .lines()
-        .find(|l| l.trim_start().starts_with("Overall NLP error"))
-        .unwrap_or_default()
-        .to_string();
-    let val: f64 = err
-        .rsplit(':')
-        .next()
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| panic!("could not parse the KKT error line: {err:?}"));
+    // What went non-finite must show in the report: the KKT error, or the
+    // objective. It is asserted as "not finite" and not as the string `nan`,
+    // because *which* non-finite value the arm arrives at is not portable:
+    // the same fixture reached `nan` in the release build and `inf` in the
+    // debug one, since the two take different rounding through the same
+    // divergent trajectory. Both are correct answers to the question this
+    // test asks, and pinning one of them would be an assertion about the
+    // optimizer settings rather than about the fix — the shape of mistake
+    // `issue848_sqp_second_order_option.rs` records under "which fixture can
+    // carry which claim".
+    //
+    // Either quantity, not the KKT error alone, since gh#1061. Until then
+    // this leg's step QPs stalled at their iteration cap every few
+    // iterations (the refactor path lacked the null-iteration guard), and
+    // the cold re-solves that followed sent the iterate into a `NaN`
+    // residual. With the guard they solve, the SQP follows the cubic down
+    // until the objective overflows to `-inf` while the residuals are still
+    // finite (`7.4e305`), and the screen fires on the objective. The
+    // residual-level half of gh #876 — a `NaN` residual not reducing to `0.0`
+    // — no longer has an end-to-end witness in this fixture; it is held by
+    // `pounce-algorithm`'s `sqp::sqp_alg::kkt_nan_tests`.
+    let reported = |prefix: &str| -> f64 {
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with(prefix))
+            .unwrap_or_default()
+            .to_string();
+        line.rsplit(':')
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("could not parse the {prefix:?} line: {line:?}"))
+    };
+    let (err, obj) = (reported("Overall NLP error"), reported("Objective"));
     assert!(
-        !val.is_finite(),
-        "the reported KKT error must be the non-finite quantity it actually \
-         is, not a reduction that swallowed it; got: {err:?}"
+        !err.is_finite() || !obj.is_finite(),
+        "the report must carry the non-finite quantity the solve stopped on, \
+         not a reduction that swallowed it; got KKT error {err}, objective {obj}"
     );
 }
 
