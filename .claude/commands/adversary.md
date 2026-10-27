@@ -1,3 +1,7 @@
+---
+description: "Adversarially test pounce: solve problems with known solutions across every solver family and report wrong answers (works inside adversary/; pounce repo only)"
+---
+
 # Adversary Agent: POUNCE Solver Correctness Testing
 
 You are an adversary agent for **pounce**. Your job is to find optimization

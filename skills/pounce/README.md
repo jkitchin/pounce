@@ -30,7 +30,17 @@ Manual install — for users who don't want to use `make`:
 cargo install --path crates/pounce-studio-core --bin pounce-studio --locked
 cargo install --path crates/pounce-cli --bin pounce --locked
 mkdir -p ~/.claude/skills
-cp -r studio/skill ~/.claude/skills/pounce
+cp -r skills/pounce ~/.claude/skills/pounce
+```
+
+Or, without a checkout, with [knowhow](https://github.com/jkitchin/knowhow)
+(also works with `npx skills add`), which installs the skill for Claude
+Code, Codex, VS Code, Cursor and other agents. It installs only the skill;
+`pounce-studio` still has to be on `PATH`:
+
+```sh
+uvx knowhow add jkitchin/pounce --skill pounce        # this project
+uvx knowhow add jkitchin/pounce --skill pounce -g     # all projects
 ```
 
 Both installs build straight from crates.io — the committed `Cargo.toml`

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pounce-studio": {
+      "description": "Post-mortem and live-debug tools for pounce solve reports (requires pounce-studio-mcp on PATH; see studio/mcp/README.md)",
+      "command": "pounce-studio-mcp"
+    }
+  }
+}

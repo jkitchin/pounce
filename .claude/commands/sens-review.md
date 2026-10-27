@@ -1,3 +1,7 @@
+---
+description: "Review a diff to pounce's sensitivity layer (pounce-sensitivity, pounce-sens-core, pounce-convex sensitivity.rs) against the eight-entry checklist; pounce repo only"
+---
+
 # The sensitivity-layer review checklist
 
 A companion to `/adversary`. That one hunts for wrong answers from the outside,
