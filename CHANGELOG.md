@@ -66,6 +66,14 @@ changes.
   `CrossoverReport::eqp` carries the same split (`linsol_times`).
 
 ### Changed
+- **The agent skill now tells an agent how to install pounce.** A new
+  *Installing pounce* section gives `pip install pounce-solver` for the
+  solver, `cargo install pounce-studio-core --bin pounce-studio` for the
+  analysis CLI (it is not in the wheel), and the crates.io and container
+  alternatives; the skill also loads for "how do I install pounce?". Its
+  troubleshooting no longer sends a `knowhow add` user, who has no checkout,
+  to `cargo install --path crates/...`. The skill README no longer claims
+  the `--path` installs build from crates.io, and drops a stale feral pin.
 - **Warm-started exact-Hessian step QPs of the active-set SQP leave Schur
   updates off at `n + m ≥ 5000` (gh #1083).** An exact Hessian makes the
   step QP indefinite, and there every drop refactors anyway, so only adds take
