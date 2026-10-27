@@ -317,20 +317,40 @@ changes.
   prune (an over-full working set is pruned before it is factored) used to
   stand down for the rest of a Schur pass the first time it removed a slot
   twice. On `QGFRDXPN` that happened at iteration 73 of the first elastic
-  phase-1 pass. The stationarity prune then ran the same drop / re-add cycle
-  992 times, out of the cycle guard's sight, until the rank-repair budget
-  ran out and the pass ended in a hard singular-KKT error. The solve reported
-  `ErrorInStepComputation` after 11445 iterations. The counting prune now
-  stands down after 32 prunes in a pass instead, repeats included. `QGFRDXPN`
-  is optimal in 3553 iterations (5.6 s). Over the 138 Maros-Meszaros problems
-  under `qp-active-set` (arm64), no problem is lost and `QGFRDXPN` is gained.
-  Timed serially over the 36 common solves whose trajectory moved, plus two
-  whose iterations did not, wall time falls from 3432 s to 2778 s: `QFFFFF80` 455 → 161 s, `CVXQP3_M` 445 → 261 s,
-  `QSCTAP2` 346 → 193 s, `QSCSD8` 360 → 162 s. Three are more than 2× slower:
-  `QSCFXM3` 227 → 484 s, `QSCSD6` 18 → 45 s and `QBANDM` 15 → 34 s. The cap
-  is a measured value, and the outcome is not monotone in it: `QFORPLAN`
-  solves at caps 16, 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and
-  64, and `QGFRDXPN` needs at least 24.
+  phase-1 pass, and the solve reported `ErrorInStepComputation` after 11445
+  iterations. The counting prune now stands down after 32 prunes in a pass
+  instead, repeats included. `QGFRDXPN` is optimal in 3553 iterations (5.9 s).
+  The cap is a measured value, and the outcome is not monotone in it:
+  `QFORPLAN` solves at caps 16, 20, 32 and 40 and cycles to `MaxIter` at 24,
+  28, 48 and 64, and `QGFRDXPN` needs at least 24. Both are now fixtures
+  pinned under `qp-active-set`. Three defects on the failing path are fixed
+  alongside:
+  - **The stationarity prune has a cycle guard.** On `QGFRDXPN` it pruned
+    992 times in one pass, 990 of them back to the same working set. Its
+    branch skipped the loop's cycle guard, and the objective drifted by about
+    50 ulps between visits, which cleared that guard's record anyway. It now
+    keeps its own record and compares objectives to round-off.
+  - **An exhausted rank-repair budget ends the pass as `MaxIter`**, like the
+    cycle guard, instead of propagating a hard singular-KKT error that ended
+    the whole attempt.
+  - **The elastic phase-1 checks the original rows before calling a point
+    feasible.** Zero slacks were taken as proof. `QGFRDXPN`'s phase-1 returned
+    a point with every slack at zero and the rows violated by 5.2e4, and
+    `QBANDM` (43.7) and `QSHELL` (766) did the same. Such a point now goes to
+    the recovery path.
+
+  These three do not make the old stand-down rule work: with all three it
+  still ends `QGFRDXPN` `MaxIter`. Over the 138 Maros-Meszaros problems under
+  `qp-active-set` (arm64), no problem is lost and `QGFRDXPN` is gained. Timed
+  serially, alternating base and new, over the 39 common solves that moved or
+  changed status in either run, wall time falls from 4087 s to 3415 s:
+  `QFFFFF80` 476 → 165 s, `CVXQP3_M` 461 → 271 s, `QSCTAP2` 378 → 210 s,
+  `QSCSD8` 400 → 171 s. Two are more than 2× slower, `QSCFXM3` 229 → 494 s and
+  `QSCSD6` 19 → 47 s. `QSCFXM3`'s first phase-1 pass reaches the cap and then
+  runs unpruned to its iteration limit (21310 changes). `QSCSD6`'s first
+  pass ends at the cycle guard, where the stand-down rule's pass finishes,
+  and pays for the recovery path. `QBANDM` is 1.19× (it was 2.2×
+  with the cap alone; the row check recovers it), and `QSHELL` is 1.45×.
 - **A false `Infeasible_Problem_Detected` at a saddle of the constraint
   violation is now re-solved from beside it.** The infeasibility verdict claims
   the solve stopped at a local minimizer of the violation, and every gate that

@@ -203,3 +203,7 @@ no `NumericalFailure` on the corpus as it stood.
   not move. Under `solver_selection=qp-active-set` it is the witness for the
   counting prune's per-pass cap in `pounce-qp`
   (`crates/pounce-cli/tests/issue_1076_qgfrdxpn_active_set_prune_cap.rs`).
+  `convex_qp_qforplan` (Maros–Mészáros `QFORPLAN`, 421 columns, 161 rows,
+  copied the same way) bounds the cap from the other side in the same file.
+  It takes 40–50 s per solve under `qp-active-set`, so it adds that much to
+  the `qp-active-set` sweep leg.

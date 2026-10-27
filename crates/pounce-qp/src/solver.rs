@@ -2495,7 +2495,15 @@ impl ParametricActiveSetSolver {
             ));
         }
 
-        let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol);
+        // Zero slacks prove feasibility only if the augmented rows hold at the
+        // point, and a Schur pass can return a point that has left its own
+        // active rows. QGFRDXPN's phase-1 (gh#1076) came back with every
+        // slack at zero and the original rows violated by 5.2e4, and was
+        // returned as a feasible optimum: the convex driver demoted it to
+        // `NumericalFailure` and the attempt was lost. Checking the original
+        // rows directly sends such a point to the recovery below instead.
+        let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol)
+            && point_is_feasible_scaled(qp, &x, opts.feas_tol);
         if feasible {
             // Elastic drove every slack to zero ⇒ the recovered `x` is
             // feasible for the original QP, and optimal for it iff the
@@ -3406,13 +3414,25 @@ impl ParametricActiveSetSolver {
             // that phase-1's passes instead ends `MaxIter` at the cycle guard
             // within 24 prunes and the phase-2 solve from there is optimal.
             //
+            // The three defects on that path are fixed separately: the
+            // stationarity prune has its own cycle guard, an exhausted repair
+            // budget ends the pass as `MaxIter`, and the elastic phase-1 checks
+            // the rows before it calls a point feasible. They do not make the
+            // stand-down safe. With all three, the stand-down rule still ends
+            // QGFRDXPN `MaxIter`: an over-full set left unpruned yields steps
+            // that leave the active rows, and passes run that way return
+            // "optimal" points violating the original rows by up to 5.2e4,
+            // which every recovery then rejects.
+            //
             // So the trigger stands down after `COUNT_PRUNE_CAP` prunes in a
             // pass rather than on the first repeat. This is a measured bound,
             // not a derived one, and the outcome is not monotone in it
             // (gh#1076): QGFRDXPN needs at least 24; QFORPLAN solves at 16,
-            // 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and 64. 32
-            // is the value measured over all 138 Maros-Meszaros problems.
-            // The factorization-failure repair below is unaffected.
+            // 20, 32 and 40 and cycles to `MaxIter` at 24, 28, 48 and 64, with
+            // or without the three fixes. Ending the pass at the cap or at the
+            // first repeat, instead of standing down, loses QFORPLAN. 32 is
+            // the value measured over all 138 Maros-Meszaros problems. The
+            // factorization-failure repair below is unaffected.
             if ac > qp.n && *budget > 0 && self.count_prune.prunes < COUNT_PRUNE_CAP {
                 if self.prune_dependent_active(qp, working, n_changes) {
                     *budget -= 1;
@@ -3640,7 +3660,46 @@ impl ParametricActiveSetSolver {
         let mut streak_obj = Number::NAN;
         let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
-        for _iter in 0..opts.max_iter {
+        // The same guard for the stationarity prune below, which `continue`s
+        // before the one above can see it. It keeps its own record, and
+        // compares objectives to round-off rather than bit for bit: between
+        // two of its prunes the loop takes ordinary iterations whose
+        // objective drifts in the last bits, and each such drift clears the
+        // main guard's record (gh#1076).
+        let mut prune_streak_obj = Number::NAN;
+        let mut prune_seen_sets: std::collections::HashMap<u64, u32> =
+            std::collections::HashMap::new();
+        // A mid-pass reset that fails after the rank-repair budget is spent
+        // ends the pass the way the cycle guard does: `MaxIter` at the
+        // current iterate, which every caller treats as "unfinished" and
+        // recovers from. It used to propagate as a hard
+        // `LinearSolverFailure`, which ends the whole attempt: on QGFRDXPN's
+        // elastic phase-1 that discarded a feasible point and reported
+        // `ErrorInStepComputation` (gh#1076). The budget is a limit, like
+        // `max_iter`, and is reported like one. The reset before the loop
+        // keeps `?`: there is no iterate yet to hand back.
+        macro_rules! reset_or_stop {
+            ($lbl:lifetime) => {
+                match self.schur_reset_rank_repaired(
+                    &mut schur,
+                    qp,
+                    &mut working,
+                    opts,
+                    &mut n_changes,
+                    &mut rank_repair_budget,
+                    &mut pruned,
+                ) {
+                    Ok(()) => {}
+                    Err(e)
+                        if rank_repair_budget == 0 && e.is_recoverable_factorization_failure() =>
+                    {
+                        break $lbl;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+        }
+        'iters: for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
                 return Ok(time_limit_solution(
                     qp,
@@ -3759,15 +3818,7 @@ impl ParametricActiveSetSolver {
                 if !e.is_recoverable_factorization_failure() {
                     return Err(e);
                 }
-                self.schur_reset_rank_repaired(
-                    &mut schur,
-                    qp,
-                    &mut working,
-                    opts,
-                    &mut n_changes,
-                    &mut rank_repair_budget,
-                    &mut pruned,
-                )?;
+                reset_or_stop!('iters);
                 n_refactor += 1;
                 // `solve` writes through `rhs`, so restore it before retrying.
                 rhs.copy_from_slice(&rhs_backup);
@@ -3836,15 +3887,7 @@ impl ParametricActiveSetSolver {
                     stationary = true;
                 } else {
                     floor_refactored = true;
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                     prev_was_null_step = false;
                     prev_p_inf = Number::INFINITY;
@@ -3880,18 +3923,27 @@ impl ParametricActiveSetSolver {
                 }
                 rank_repair_budget -= 1;
                 pruned = true;
-                self.schur_reset_rank_repaired(
-                    &mut schur,
-                    qp,
-                    &mut working,
-                    opts,
-                    &mut n_changes,
-                    &mut rank_repair_budget,
-                    &mut pruned,
-                )?;
+                reset_or_stop!('iters);
                 n_refactor += 1;
                 prev_was_null_step = false;
                 floor_refactored = false;
+                // Cycle guard for this branch (see `prune_seen_sets`). On
+                // QGFRDXPN's elastic phase-1 under #1047's stand-down rule it
+                // pruned 992 times in one pass, 990 of them back to the same
+                // working set, at an objective that moved only in its last
+                // bits, until the repair budget ran out.
+                let obj_now = quad_objective(qp, &x);
+                if !same_to_roundoff(obj_now, prune_streak_obj) {
+                    prune_streak_obj = obj_now;
+                    prune_seen_sets.clear();
+                }
+                let count = prune_seen_sets
+                    .entry(working_set_key(&working))
+                    .or_insert(0);
+                *count += 1;
+                if *count >= CYCLE_REPEAT_LIMIT {
+                    break;
+                }
                 continue;
             }
 
@@ -3956,15 +4008,7 @@ impl ParametricActiveSetSolver {
                     // `Indefinite`). Adds only shrink the null space and keep
                     // the cheap update; on a PSD Hessian, drops do too.
                     if qp.hessian_inertia != HessianInertia::Psd {
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                         n_changes += 1;
                         prev_was_null_step = false;
@@ -3979,29 +4023,13 @@ impl ParametricActiveSetSolver {
                         if !e.is_recoverable_factorization_failure() {
                             return Err(e);
                         }
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                     }
                     n_changes += 1;
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                     }
                     // The working set changed, so the next step is a fresh
@@ -4053,15 +4081,7 @@ impl ParametricActiveSetSolver {
                         *pre_polish = Some(sol);
                         // The projection factored on this solver's backend,
                         // so the Schur state's base factor is gone.
-                        self.schur_reset_rank_repaired(
-                            &mut schur,
-                            qp,
-                            &mut working,
-                            opts,
-                            &mut n_changes,
-                            &mut rank_repair_budget,
-                            &mut pruned,
-                        )?;
+                        reset_or_stop!('iters);
                         n_refactor += 1;
                         prev_was_null_step = false;
                         floor_refactored = false;
@@ -4227,29 +4247,13 @@ impl ParametricActiveSetSolver {
                     if !e.is_recoverable_factorization_failure() {
                         return Err(e);
                     }
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                 }
                 n_changes += 1;
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {
-                    self.schur_reset_rank_repaired(
-                        &mut schur,
-                        qp,
-                        &mut working,
-                        opts,
-                        &mut n_changes,
-                        &mut rank_repair_budget,
-                        &mut pruned,
-                    )?;
+                    reset_or_stop!('iters);
                     n_refactor += 1;
                 }
             }
@@ -4444,6 +4448,14 @@ const RANK_REL_TOL: Number = 1e-9;
 /// layer is part of the state too, and a refactor between visits can break a
 /// cycle that the working set alone would call closed.
 const CYCLE_REPEAT_LIMIT: u32 = 5;
+
+/// Two objective values equal to round-off: within 64 ulps of the larger
+/// magnitude (floored at 1). Used by the stationarity prune's cycle guard,
+/// where the objective between visits to the same working set was measured
+/// drifting by about 50 ulps (QGFRDXPN, gh#1076).
+fn same_to_roundoff(a: Number, b: Number) -> bool {
+    (a - b).abs() <= 64.0 * Number::EPSILON * a.abs().max(b.abs()).max(1.0)
+}
 
 /// A hash of which rows and bounds `working` holds active, and on which side.
 fn working_set_key(working: &WorkingSet) -> u64 {
