@@ -598,7 +598,7 @@ where
         // step-3 QP of a large model does not refactor per pivot. It is
         // warm-started from the estimated working set.
         use_schur_updates: sqp_opts
-            .step_qp_schur_updates(n + m, sqp_opts.hessian, true)
+            .step_qp_schur_updates(n + m, hessian_inertia, true)
             .unwrap_or(qp_opts.use_schur_updates),
         ..qp_opts.clone()
     };
