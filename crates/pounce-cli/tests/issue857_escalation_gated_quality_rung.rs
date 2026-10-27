@@ -633,11 +633,13 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
 /// the lbfgs leg now, where the base solve fails in restoration for real at
 /// 250 (see `issue_815_restoration_ladder.rs`). `square_system_recovery=no`
 /// keeps the last stage, which recovers this leg, out of a test about the two
-/// rungs. Under the cap, rung 4's own re-solve ends `Maximum_Iterations_Exceeded`
+/// rungs. No `max_iter` cap: on linux/x86_64 this leg's restoration failure
+/// comes after iteration 500 (it hit a 500 cap first in CI), while on
+/// macOS/aarch64 it comes at 250. Rung 4's own re-solve ends `Maximum_Iterations_Exceeded`
 /// and takes *its* μ flip, a fourth summary block. That flip belongs to the
 /// rung's solve and is not the one this test is about, so the assertion is on
-/// where the blocks fall: exactly one, the base solve's, before the ladder
-/// opens.
+/// the report's `mu_strategy_fallback`, which describes the base solve because
+/// its verdict is the one kept.
 ///
 /// What this is not evidence about: the acceptable-level half. No fixture-leg
 /// in the corpus reaches the μ flip with `Solved_To_Acceptable_Level` *and* an
@@ -653,7 +655,6 @@ fn the_stand_down_does_not_reach_a_restoration_failure() {
         "square_flowsheet_resto.nl",
         &[
             "hessian_approximation=limited-memory",
-            "max_iter=500",
             "square_system_recovery=no",
         ],
     );
