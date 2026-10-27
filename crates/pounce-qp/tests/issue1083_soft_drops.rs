@@ -14,6 +14,9 @@
 //! explicit zero on a live row's diagonal is not inert to FERAL (it cost a
 //! fixture its elastic phase 1, see `assemble_soft_active_set_kkt`).
 //!
+//! Soft drops apply from `n + m ≥ SOFT_DROP_MIN_DIM` only, so the first two
+//! tests pad the QP to that size with bounds that stay active.
+//!
 //! What is asserted is the pattern itself, recorded at every factorization by
 //! a pass-through backend, because that is the property the saving rests on
 //! and it is backend-independent; the time it saves is FERAL's to deliver.
@@ -25,7 +28,7 @@ use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrix
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
 use pounce_qp::{
     BoundStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolution,
-    QpSolver, QpStatus, QpWarmStart, WorkingSet,
+    QpSolver, QpStatus, QpWarmStart, SOFT_DROP_MIN_DIM, WorkingSet,
 };
 use std::sync::{Arc, Mutex};
 
@@ -165,9 +168,18 @@ fn assert_same_answer(soft: &QpSolution, schur: &QpSolution) {
 
 const C: [Number; 7] = [5.0, 1.0, 4.0, -2.0, 3.0, -0.5, 2.0];
 
+/// `C`, padded with `c_i = −1` (bounds that stay) to `n` variables, so the QP
+/// (`n + 1` rows and columns) reaches [`SOFT_DROP_MIN_DIM`] when asked to.
+fn padded(n: usize) -> Vec<Number> {
+    let mut c = C.to_vec();
+    c.resize(n.max(C.len()), -1.0);
+    c
+}
+
 #[test]
 fn drops_refactor_on_one_pattern() {
-    let (sol, patterns) = solve(&C, 1e3, false);
+    let c = padded(SOFT_DROP_MIN_DIM);
+    let (sol, patterns) = solve(&c, 1e3, false);
     let drops = C.iter().filter(|&&c| c > 0.0).count();
     assert_eq!(sol.stats.n_working_set_changes as usize, drops);
     // One factorization of the warm start, one per drop: the step after
@@ -179,9 +191,9 @@ fn drops_refactor_on_one_pattern() {
     // is assembled exactly as it was.
     assert_eq!(pattern_changes(&patterns), 1);
 
-    let (schur, _) = solve(&C, 1e3, true);
+    let (schur, _) = solve(&c, 1e3, true);
     assert_same_answer(&sol, &schur);
-    for (i, &c) in C.iter().enumerate() {
+    for (i, &c) in c.iter().enumerate() {
         let (x, z) = if c > 0.0 { (c, 0.0) } else { (0.0, -c) };
         assert!((sol.x[i] - x).abs() <= 1e-12, "x[{i}] = {}", sol.x[i]);
         assert!((sol.lambda_x[i] - z).abs() <= 1e-12, "lambda_x[{i}]");
@@ -196,11 +208,24 @@ fn drops_refactor_on_one_pattern() {
 /// holds sentinels again by the end.
 #[test]
 fn an_add_starts_the_next_pattern() {
-    let (sol, patterns) = solve(&C, 8.0, false);
-    let (schur, _) = solve(&C, 8.0, true);
+    let c = padded(SOFT_DROP_MIN_DIM);
+    let (sol, patterns) = solve(&c, 8.0, false);
+    let (schur, _) = solve(&c, 8.0, true);
     assert_same_answer(&sol, &schur);
     assert!(sol.working.constraints[0].is_active(), "the cap binds");
     assert!(sol.lambda_g[0].abs() > 1e-3, "and carries a multiplier");
     assert_eq!(patterns.len(), 6, "factorizations");
     assert_eq!(pattern_changes(&patterns), 3);
+}
+
+/// Below [`SOFT_DROP_MIN_DIM`] nothing changed: every drop is a pattern of its
+/// own, as before gh#1083. The fixture corpus is all below it, and swept with
+/// soft drops at every size it moved 12 fixture-legs, two to a worse verdict.
+#[test]
+fn small_qps_keep_the_compact_pattern() {
+    let (sol, patterns) = solve(&C, 1e3, false);
+    let drops = C.iter().filter(|&&c| c > 0.0).count();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert_eq!(patterns.len(), drops + 1, "factorizations");
+    assert_eq!(pattern_changes(&patterns), drops);
 }

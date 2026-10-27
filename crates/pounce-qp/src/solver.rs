@@ -164,6 +164,23 @@ struct PinnedFactor {
     rank_guard_calls: u32,
 }
 
+/// QP size `n + m` from which the refactor path keeps dropped rows in the KKT
+/// pattern (gh#1083); below it every iteration assembles the compact
+/// active-set KKT, as before.
+///
+/// Reusing the symbolic analysis is the whole gain, and on a small KKT it is
+/// worth nothing, while the trajectory still moves: the new pattern orders
+/// the factorization differently, and round-off then goes its own way. Swept
+/// ungated over the CLI fixture corpus under `algorithm=active-set-sqp`, it
+/// moved 12 fixture-legs, every one a QP below 500. Two of them were
+/// regressions: `pooling_rt2stp` went from `MaximumIterationsExceeded` to a
+/// local-infeasibility verdict on both legs, and the SQP stopped solving
+/// `square_flowsheet_resto` (exact), which fell through to `square-lm`.
+/// 5000 is the size from which an exact-Hessian step QP is on this path by
+/// default (`pounce-algorithm`'s `qp_schur_exact_max_dim`), which is where
+/// the drop-dominated QPs the change is for are solved.
+pub const SOFT_DROP_MIN_DIM: usize = 5000;
+
 /// Whether every entry of the ascending list `sub` occurs in the ascending
 /// list `sup`.
 fn is_sorted_subset(sub: &[usize], sup: &[usize]) -> bool {
@@ -1527,9 +1544,11 @@ impl ParametricActiveSetSolver {
                 (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k_c = active_cons.len();
             let k_b = active_bounds.len();
-            if !pattern.as_ref().is_some_and(|(pc, pb)| {
-                is_sorted_subset(&active_cons, pc) && is_sorted_subset(&active_bounds, pb)
-            }) {
+            if n + m < SOFT_DROP_MIN_DIM
+                || !pattern.as_ref().is_some_and(|(pc, pb)| {
+                    is_sorted_subset(&active_cons, pc) && is_sorted_subset(&active_bounds, pb)
+                })
+            {
                 pattern = Some((active_cons.clone(), active_bounds.clone()));
             }
             let (pattern_cons, pattern_bounds) = pattern.as_ref().expect("set just above");
