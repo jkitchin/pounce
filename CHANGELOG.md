@@ -329,6 +329,31 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Exp- and power-cone solves return an accurate minimizer, not only an
+  accurate objective (gh #1085).** On a cond-18 Poisson regression the non-symmetric
+  HSDE driver reported `optimal` with the coefficients `1.8e-4` from the
+  minimizer, and tightening `tol` stalled at `1.5e-5`. Below `μ ~ 1e-8` its
+  dense 3×3 exp-cone scaling block loses its smallest eigenvalue to rounding,
+  so the IPM cannot go further. It now finishes with an active-set **polish**:
+  Newton on the KKT equations of the active set the IPM identified, with each
+  active exp block as the smooth equality `ψ(s) = 0`. The polished point
+  replaces the IPM's only when it certifies tighter on the same scale-relative
+  conic KKT certificate. An active power block is held on
+  `ψ(s) = s₁^α s₂^{1−α} − sign(s₀)·s₀ = 0`, which is smooth wherever
+  `s₁, s₂ > 0`. Products with a second-order block, and blocks at a cone's
+  non-smooth faces, are left as the IPM returned them. On a 20-model exp
+  corpus (Poisson, logistic, entropy, log-sum-exp; references from Clarabel at
+  `1e-13`) the median `x` error goes from `1.7e-5` to `5e-13`, and the
+  statuses go from 18 `optimal` / 2 `optimal_inaccurate` to 20 `optimal`. On
+  a 15-model power corpus (CES utility, quad-over-lin, `p`-norm regression)
+  it goes from `2.9e-5` to `1.1e-11`. That includes the adversary's CES model,
+  which returned `optimal` with `x` `6.6e-3` from its closed form. At
+  `tol = 1e-10` the power statuses go from 1 `optimal` / 14
+  `optimal_inaccurate` to 15 `optimal`. The IPM trajectory and iteration
+  counts are unchanged. That certificate's
+  dual-cone closure test also had two defects, both fixed. It required an
+  orthant multiplier `≥ +1e-9` instead of `≥ −1e-9`. It read an exp/power
+  block's exact zero multiplier as outside `K*` (`log(0/0)`).
 - **Active-set QP slowdowns on large models (gh #1061).** Rebuilding the
   Schur path's base factorization scanned the whole constraint matrix once per
   active row; on the reporter's model it is now ~3× faster, and a warm step
