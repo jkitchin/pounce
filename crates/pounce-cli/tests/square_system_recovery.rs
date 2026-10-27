@@ -193,9 +193,15 @@ fn flowsheet_residual(x: &[f64]) -> Vec<f64> {
     at.iter().zip(&rhs).map(|(a, b)| a - b).collect()
 }
 
+// `mu_strategy_fallback=no`: since gh#1076 the base solve's failure is
+// platform-dependent — `Restoration_Failed`/250 on arm64,
+// `Maximum_Iterations_Exceeded`/500 on x86_64 — and on x86_64 the monotone
+// μ re-solve then recovers the model in 155, ahead of the stage. These tests
+// are about the stage, so the fallback is kept out of their way.
 const FAILING_LBFGS: &[&str] = &[
     "hessian_approximation=limited-memory",
     "feral_increase_quality_retry=no",
+    "mu_strategy_fallback=no",
     "max_iter=500",
 ];
 
