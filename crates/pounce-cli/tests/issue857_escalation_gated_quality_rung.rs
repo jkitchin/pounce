@@ -630,16 +630,13 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
 /// On 0.21 that leg solves. The control then moved below the model's
 /// round-off floor (`tol=1e-11`), until gh#1084 showed that exit was a square
 /// model at a feasible point, now reported as `Feasible_Point_Found`. It is
-/// the lbfgs leg now, where the base solve fails in restoration for real at
-/// 250 (see `issue_815_restoration_ladder.rs`). `square_system_recovery=no`
-/// keeps the last stage, which recovers this leg, out of a test about the two
-/// rungs. No `max_iter` cap: on linux/x86_64 this leg's restoration failure
-/// comes after iteration 500 (it hit a 500 cap first in CI), while on
-/// macOS/aarch64 it comes at 250. Rung 4's own re-solve ends `Maximum_Iterations_Exceeded`
-/// and takes *its* μ flip, a fourth summary block. That flip belongs to the
-/// rung's solve and is not the one this test is about, so the assertion is on
-/// the report's `mu_strategy_fallback`, which describes the base solve because
-/// its verdict is the one kept.
+/// `max_resto_iter=5` now: restoration entered far from feasible, with a
+/// budget it cannot finish in, so the base solve fails in restoration on
+/// every platform (the lbfgs leg was tried and is not: on linux/x86_64 it
+/// never fails in restoration). `square_system_recovery=no` keeps the last
+/// stage, which recovers the model, out of a test about the two rungs. The
+/// assertion on the μ flip is on the report's `mu_strategy_fallback`, which
+/// describes the base solve because its verdict is the one kept.
 ///
 /// What this is not evidence about: the acceptable-level half. No fixture-leg
 /// in the corpus reaches the μ flip with `Solved_To_Acceptable_Level` *and* an
@@ -653,10 +650,7 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
 fn the_stand_down_does_not_reach_a_restoration_failure() {
     let run = solve(
         "square_flowsheet_resto.nl",
-        &[
-            "hessian_approximation=limited-memory",
-            "square_system_recovery=no",
-        ],
+        &["max_resto_iter=5", "square_system_recovery=no"],
     );
     let lines = ladder_lines(&run.out);
     let trigger = "restoration failure — re-solving along 2 different trajectories \
@@ -665,6 +659,13 @@ fn the_stand_down_does_not_reach_a_restoration_failure() {
     assert!(
         lines.iter().any(|l| l.contains(trigger)),
         "both rungs should be open, in this order:\n{lines:#?}"
+    );
+    assert_eq!(
+        solve_count(&run.out),
+        3,
+        "the base solve and one solve per rung — no μ flip, which a \
+         restoration failure never buys, and no rung dropped:\n{}",
+        run.out
     );
     assert!(
         run.report["statistics"]["mu_strategy_fallback"].is_null(),

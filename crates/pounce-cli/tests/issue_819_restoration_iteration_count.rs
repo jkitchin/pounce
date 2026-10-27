@@ -35,16 +35,12 @@
 //!
 //! One fixture, one exit path (`Restoration_Failed`), one linear solver.
 //!
-//! The fixture reaches that exit on its lbfgs leg as of FERAL 0.21. On 0.20
-//! it failed in restoration at the default `tol` (131 iterations, 84 of them
-//! `r` rows); on 0.21 the exact leg solves at the default in 95, with 82 `r`
-//! rows in one restoration call that *recovers*, which still exercises the two
-//! counting identities but not the terminating path this file is about. The
-//! witness was `tol=1e-11` on the exact leg until gh#1084 showed that exit was
-//! a square model at a feasible point below its round-off floor, now reported
-//! as `Feasible_Point_Found` (see `issue_815_restoration_ladder.rs`). The lbfgs
-//! leg fails in restoration for real at 250 iterations. The assertions parse
-//! the log rather than pin that number.
+//! The witness was `tol=1e-11` on the exact leg until gh#1084 showed that
+//! exit was a square model at a feasible point below its round-off floor, now
+//! reported as `Feasible_Point_Found` (see `issue_815_restoration_ladder.rs`).
+//! It is `max_resto_iter=5` now: restoration is entered far from feasible and
+//! cannot get there in five iterations, so the run ends `Restoration Failed!`
+//! on every platform. The assertions parse the log rather than pin numbers.
 //!
 //! The
 //! `Recovered` path had a working roll-forward before this change and still
@@ -57,12 +53,12 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// The lbfgs leg is what puts the fixture on the terminating path under FERAL
-/// 0.21 (module comment). The ladder is switched off so that the run's last
+/// `max_resto_iter=5` is what puts the fixture on the terminating path
+/// (module comment). The ladder is switched off so that the run's last
 /// printed rows are the base solve's own: every rung a `Restoration_Failed`
 /// can reach is named — the gh#815 displacement rung, gh#857's
 /// `feral_increase_quality_retry`, and the square-system stage. The square-system
-/// stage recovers this leg, and each would print its own iteration
+/// stage recovers this model, and each would print its own iteration
 /// table after the base solve's, and the identity is about one solve. A rung
 /// added later that catches this trigger belongs here too.
 fn run_to_restoration_failure() -> String {
@@ -75,7 +71,7 @@ fn run_to_restoration_failure() -> String {
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
         .arg(&model)
         .arg(&sol)
-        .arg("hessian_approximation=limited-memory")
+        .arg("max_resto_iter=5")
         .arg("infeasibility_perturbed_start_retry=no")
         .arg("feral_increase_quality_retry=no")
         .arg("square_system_recovery=no")
@@ -176,9 +172,8 @@ fn the_restoration_line_counts_the_r_rows_that_were_printed() {
          is seeded from the outer's and is therefore a position, not a \
          length:\n{log}"
     );
-    // The lbfgs leg enters restoration seven times; the exact-leg witness
-    // this file used before gh#1084 entered once. Either way the call count
-    // is printed with the noun agreeing with it.
+    // The call count is printed with the noun agreeing with it, whatever
+    // the count is (one call under this witness).
     let line = log
         .lines()
         .find(|l| l.starts_with("Number of restoration iterations"))

@@ -42,21 +42,22 @@
 //! orders, which upstream reports as `Feasible point for square problem
 //! found`, and pounce now does too (`issue_1084_square_round_off_floor.rs`).
 //!
-//! [`LEG`] is the witness now: the L-BFGS leg at the default `tol`. There the
-//! base solve fails in restoration for real, 250 iterations in at a violation
-//! of order `1e5`, nowhere near feasible. The ladder opens on that verdict
-//! with the displaced start first. The displaced start and rung 4 fail, and
-//! the square-system stage recovers the model in 8 iterations. That gives
-//! this trigger a recovery to pin again, which the round-off witness never
-//! had: rung 3 recovering a model is still pinned on the local-infeasibility
-//! trigger in `degenerate_start_ladder.rs`, and what is specific to this
-//! trigger, and what this file pins, is that `Restoration_Failed` opens the
-//! ladder, that the displaced start is its first rung, and that rungs 1 and
-//! 2 stay shut.
+//! [`WITNESS`] is the witness now: `max_resto_iter=5` on the exact leg at
+//! the default `tol`. Restoration is entered with a violation of order `1e5`
+//! and given five iterations, which cannot reach feasibility from there, so
+//! the sub-solve fails for real, and on every platform: the trajectory up to
+//! restoration entry is the one the old witness shared. (The lbfgs leg was
+//! tried and is platform-sensitive; on linux/x86_64 it does not fail in
+//! restoration at all.) The ladder opens on that verdict with the displaced
+//! start first; it and rung 4 fail, and the square-system stage recovers the
+//! model. Rung 3 recovering a model is still pinned on the local-infeasibility
+//! trigger in `degenerate_start_ladder.rs`. What is specific to this trigger,
+//! and what this file pins, is that `Restoration_Failed` opens the ladder, that
+//! the displaced start is its first rung, and that rungs 1 and 2 stay shut.
 //!
 //! # What this file is *not* evidence about
 //!
-//! One fixture, one linear solver (the FERAL default), one leg (L-BFGS). It pins that
+//! One fixture, one linear solver (the FERAL default), one leg (exact Hessian, restoration budget capped). It pins that
 //! the trigger is wired and that rung 3 is the first rung it opens; it says
 //! nothing about how often a displaced start rescues a restoration failure in
 //! general — `start_point_retry`'s option text carries that measurement (13
@@ -67,10 +68,9 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// The leg on which this model genuinely fails in restoration; see the module
-/// comment. On the exact-Hessian leg FERAL 0.21 solves the fixture and no
-/// ladder opens.
-const LEG: &str = "hessian_approximation=limited-memory";
+/// A restoration budget this model cannot finish in; see the module comment.
+/// Without it FERAL 0.21 solves the fixture and no ladder opens.
+const WITNESS: &str = "max_resto_iter=5";
 
 fn run(extra: &[&str]) -> String {
     let mut model = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -82,7 +82,7 @@ fn run(extra: &[&str]) -> String {
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
         .arg(&model)
         .arg(&sol)
-        .arg(LEG)
+        .arg(WITNESS)
         .args(extra)
         .output()
         .expect("spawn pounce");
@@ -97,7 +97,7 @@ fn run(extra: &[&str]) -> String {
 /// The fix, end to end. The baseline solve fails in restoration; the ladder
 /// opens on that verdict, and the displaced start is the first rung it
 /// spends. (On FERAL 0.20 it was also the rung that recovered the model, in
-/// 54; on this leg the square-system stage recovers it instead.)
+/// 54; under this witness the square-system stage recovers it instead.)
 #[test]
 fn a_restoration_failure_opens_the_ladder_with_the_displaced_start_first() {
     let log = run(&[]);
@@ -145,7 +145,7 @@ fn a_restoration_failure_opens_the_ladder_with_the_displaced_start_first() {
         log.contains("start_point_perturbation=1e-2 re-solve did not recover")
             && log.contains("square_system_lm recovered the problem")
             && log.contains("Status: Solve_Succeeded"),
-        "the displaced start does not recover this leg and the square-system \
+        "the displaced start does not recover the model and the square-system \
          stage does. If the displaced start now recovers it, restore the \
          recovery assertion this test carried on FERAL 0.20:\n{log}"
     );
