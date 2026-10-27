@@ -393,7 +393,7 @@ uninstall-mcp:
 	rm -rf "$(MCP_VENV)"
 	@echo "Removed $(MCP_VENV) and unregistered pounce-studio (scope=$(MCP_SCOPE))"
 
-# ---- Claude skill (studio/skill) ---------------------------------------
+# ---- Claude skill (skills/pounce) --------------------------------------
 # Build the pounce + pounce-studio binaries, install them under $(PREFIX),
 # and drop the skill directory at ~/.claude/skills/pounce/ so any Claude
 # Code session picks it up. Override SKILL_DIR for a non-default location.
@@ -411,8 +411,8 @@ install-skill: build
 	install -m 0755 "$(CLI_BIN)" "$(DESTDIR)$(BINDIR)/pounce"
 	install -m 0755 "$(STUDIO_BIN)" "$(DESTDIR)$(BINDIR)/pounce-studio"
 	install -d "$(SKILL_DIR)"
-	install -m 0644 studio/skill/SKILL.md "$(SKILL_DIR)/SKILL.md"
-	install -m 0644 studio/skill/README.md "$(SKILL_DIR)/README.md"
+	install -m 0644 skills/pounce/SKILL.md "$(SKILL_DIR)/SKILL.md"
+	install -m 0644 skills/pounce/README.md "$(SKILL_DIR)/README.md"
 	@echo
 	@echo "Done. Verify with:"
 	@echo "  $(BINDIR)/pounce-studio --version"

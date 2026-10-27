@@ -10,6 +10,15 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The agent skill, slash commands and pounce-studio MCP server install
+  with [knowhow](https://github.com/jkitchin/knowhow).** The Claude skill
+  moved from `studio/skill/` to `skills/pounce/` (the directory now matches
+  the skill's `name`, as the Agent Skills spec requires), so `uvx knowhow add
+  jkitchin/pounce --skill pounce` (or `npx skills add`) finds it.
+  `mcp/pounce-studio.json` declares the MCP server for `--mcp pounce-studio`;
+  it is not a root `.mcp.json`, which Claude Code would load as this repo's
+  own project config. `/adversary` and `/sens-review` gain `description`
+  frontmatter. CI runs `knowhow validate .` (pinned to a commit).
 - **`pounce_minima::MinimaOptions` implements `PartialEq`, `Eq` and `Hash`
   (#1065)**, so the options can key a cache. Every field takes part; floats
   compare by bit pattern, so options holding a `NaN` equal themselves.

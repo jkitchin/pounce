@@ -685,6 +685,6 @@ OTHER:
   help    | --help    | -h                  Show this message
 
 All analysis subcommands print pretty-printed JSON on stdout. Pipe into
-`jq` for slicing. See `studio/skill/SKILL.md` for the Claude-skill that
+`jq` for slicing. See `skills/pounce/SKILL.md` for the Claude-skill that
 wraps this binary for AI-assisted post-mortem.
 ";
