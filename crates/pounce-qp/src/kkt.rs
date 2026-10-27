@@ -337,6 +337,65 @@ pub fn assemble_active_set_kkt(
     }
 }
 
+/// [`assemble_active_set_kkt`] over a fixed *pattern* of rows, some of which
+/// may have left the working set since the pattern was built ("soft drops",
+/// gh#1083). `cons_live[j]` / `bounds_live[j]` say whether `pattern_cons[j]` /
+/// `pattern_bounds[j]` is still active. Both lists are ascending, as for
+/// [`assemble_active_set_kkt`].
+///
+/// A live row is assembled as there. A dropped row keeps its entries
+/// structurally, at value 0, and carries the `(p, p) = 1` sentinel of
+/// [`crate::schur`]'s K_max, which decouples it from `x` and makes its
+/// multiplier `rhs_p`; every pattern row carries the diagonal entry, at 0 when
+/// live. So the triplet pattern is a function of the pattern rows alone, and
+/// a drop changes values only: the backend's symbolic analysis, about half
+/// of every factorization on the gh#1083 model, is reused across it.
+///
+/// Each sentinel adds one positive eigenvalue and no negative one, so the
+/// expected inertia counts the live rows only.
+pub(crate) fn assemble_soft_active_set_kkt(
+    qp: &QpProblem,
+    pattern_cons: &[usize],
+    cons_live: &[bool],
+    pattern_bounds: &[usize],
+    bounds_live: &[bool],
+) -> KktTriplet {
+    debug_assert_eq!(pattern_cons.len(), cons_live.len());
+    debug_assert_eq!(pattern_bounds.len(), bounds_live.len());
+    let n = qp.n;
+    let k_c = pattern_cons.len();
+    let k_b = pattern_bounds.len();
+    let mut kkt = assemble_active_set_kkt(qp, pattern_cons, pattern_bounds);
+
+    // `assemble_active_set_kkt` emits the A_W entries in triplet order and
+    // the E_W entries after them, one per bound, so the entries to zero are
+    // found the same way it placed them.
+    let nh = qp.h.nonzeros() as usize;
+    let first_row = (n + 1) as Index;
+    for k in nh..kkt.irn.len() - k_b {
+        let j = (kkt.irn[k] - first_row) as usize;
+        if !cons_live[j] {
+            kkt.vals[k] = 0.0;
+        }
+    }
+    let e_start = kkt.irn.len() - k_b;
+    for (j, &live) in bounds_live.iter().enumerate() {
+        if !live {
+            kkt.vals[e_start + j] = 0.0;
+        }
+    }
+
+    let live = cons_live.iter().chain(bounds_live.iter());
+    for (j, &live) in live.enumerate() {
+        let p = (n + j + 1) as Index;
+        kkt.irn.push(p);
+        kkt.jcn.push(p);
+        kkt.vals.push(if live { 0.0 } else { 1.0 });
+    }
+    debug_assert_eq!(kkt.dim, n + k_c + k_b);
+    kkt
+}
+
 /// Assemble `[H Aᵀ_eq Eᵀ_W; A_eq 0 0; E_W 0 0]` for a QP whose
 /// general constraints are all equalities and whose currently
 /// active variable-bound working set is `active_bounds`
