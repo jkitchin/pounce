@@ -194,7 +194,7 @@ only on the SQP path.
 | `sqp_qp_anti_cycling`                       | `expand` | `expand` (Harris two-pass), `bland`, or `none`               |
 | `sqp_qp_certify_second_order`               | `no`     | check second-order optimality before certifying the QP       |
 | `sqp_qp_use_homotopy`                       | `no`     | trace the parametric homotopy on a cold QP solve             |
-| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` (warm, exact Hessian: and `< 5000`) |
+| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` (warm, Hessian not PSD: and `< 5000`) |
 | `sqp_qp_max_schur_updates_before_refactor`  | `50`     | updates to absorb before refactoring (Schur path only)       |
 
 Three of these are worth more than a table row.
@@ -255,21 +255,36 @@ small QPs keep the refactor path. An earlier measurement — updates breaking 9
 of the 46 instances the refactor path solved — predates the rank repair of
 the Schur reset and no longer reproduces.
 
-With an exact Hessian (`sqp_hessian=exact`, the default) updates are off
-again for a *warm-started* step QP from `n + m ≥ 5000` (gh#1083). An exact
-Hessian makes the step QP indefinite, and on such a QP every *drop*
-refactors anyway, because a rank-2 update cannot re-run inertia control on
-the larger null space; only adds take the update. A warm step QP is mostly
-drops: the reporter's took 187 Schur updates against 4181 working-set
-changes over an hour, and on its handover QP the Schur path took 126 s
-against 72 s without it. Cold step QPs keep the size rule, because they are
-the add-dominated ones the table above measures, and on a nonconvex model
-they are not seeded from the interior point (the seed needs a Hessian
-certified PSD). On the 38 Maros-Mészáros problems at that size the rule
-changes no status. Dense quasi-Newton Hessians are PSD, so their drops keep
-the update; the lifted L-BFGS step QP (`n > sqp_dense_hessian_max_n`) is
-indefinite and refactors on drops as well, but it keeps the size rule here,
-unmeasured.
+A *warm-started* step QP whose Hessian is not known PSD leaves updates off
+again from `n + m ≥ 5000` (gh#1083, gh#1091). Two step QPs are in that
+class: an exact Hessian's (`sqp_hessian=exact`, the default), and the lifted
+L-BFGS one above `sqp_dense_hessian_max_n`, whose QP Hessian `diag(σI, ±1)`
+is indefinite although the `B` it represents is not. On such a QP every
+*drop* refactors anyway, because a rank-2 update cannot re-run inertia
+control on the larger null space; only adds take the update. A warm step QP
+is mostly drops: the reporter's took 187 Schur updates against 4181
+working-set changes over an hour, and on its handover QP the Schur path took
+126 s against 72 s without it. Cold step QPs keep the size rule, because they
+are the add-dominated ones the table above measures, and neither class is
+seeded from the interior point (the seed needs a Hessian certified PSD).
+
+Measured on a 6000-variable smooth model started with every bound active, so
+that its warm step QPs are drop-dominated, under `algorithm=active-set-sqp
+ipm_sqp_handover=no`. With L-BFGS its first warm QP takes 1024 working-set
+changes, 64.3 s with updates and 19.8 s without, and the solve 84.1 s against
+27.0 s; with the exact Hessian the solve takes 2.2 s against 4.0 s. The
+objective agrees to 13 digits. On the 38 Maros-Mészáros problems at that size
+(`solver_selection=nlp`, so that the convex router does not take them;
+`max_wall_time=60`) no status changes, and where both solve (29 problems) the
+rule is faster on 25, 128 s against 151 s in total. Three solved objectives
+differ, `LISWET2`, `LISWET3` and `LISWET9`, the last by 3.4%, and in each the
+rule's is the higher one, from the active-set SQP at a point feasible to
+`8e-11`. The lower one is the interior point's answer to the problem relaxed
+by `bound_relax_factor = 1e-8` (its violation is exactly `1e-8`, against
+multipliers summing to `6.3e9`), which Ipopt shares, and which the convex QP
+interior point does not.
+
+Dense quasi-Newton Hessians are PSD, so their drops keep the update.
 
 On the refactor path a QP of that size also keeps each dropped row in the
 KKT pattern, as a sentinel, until the next add of a row the pattern does not
