@@ -237,7 +237,7 @@ jobs:
       # than ran shows up here as FAILED/ERROR lines, and nowhere else).
       - name: Upload the raw report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-combined
           path: |

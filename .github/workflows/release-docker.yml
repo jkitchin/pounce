@@ -276,11 +276,11 @@ jobs:
 
       - name: Set up Buildx
         if: steps.gate.outputs.run == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to ghcr.io
         if: steps.gate.outputs.run == 'true' && needs.plan.outputs.push == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -316,7 +316,7 @@ jobs:
       - name: Build${{ needs.plan.outputs.push == 'true' && ' and push' || '' }}
         id: build
         if: steps.gate.outputs.run == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -345,7 +345,7 @@ jobs:
 
       - name: Upload digest
         if: steps.gate.outputs.run == 'true' && needs.plan.outputs.push == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.image }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -381,7 +381,7 @@ jobs:
 
       - name: Download digests
         if: steps.gate.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: digests-${{ matrix.image }}-*
           merge-multiple: true
@@ -389,7 +389,7 @@ jobs:
 
       - name: Log in to ghcr.io
         if: steps.gate.outputs.run == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -397,7 +397,7 @@ jobs:
 
       - name: Set up Buildx
         if: steps.gate.outputs.run == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Create manifest list and tag
         if: steps.gate.outputs.run == 'true'
