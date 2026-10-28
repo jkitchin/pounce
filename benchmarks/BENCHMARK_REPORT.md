@@ -1,13 +1,13 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-10-22 03:04:12
+Generated: 2026-10-28 05:36:58
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.12.0 (HEAD @ 54285f95) |
-| POUNCE binary | pounce 0.12.0 (commit 54285f95, built 2026-10-22T03:25:33Z) |
+| POUNCE | v0.13.0 (HEAD @ c082fe76) |
+| POUNCE binary | pounce 0.13.0 (commit c082fe76, built 2026-10-28T06:07:11Z) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -76,14 +76,14 @@ _1345 problems; solvers: pounce, ipopt._
 
 | Suite | Problems | POUNCE Optimal | Ipopt Optimal | POUNCE only | Ipopt only | Both Optimal | Match |
 |-------|----------|---------------|--------------|-------------|------------|--------------|-------|
-| Vanderbei | 733 | 703 (95.9%) | 683 (93.2%) | 22 | 2 | 681 | 657/681 |
+| Vanderbei | 733 | 704 (96.0%) | 683 (93.2%) | 23 | 2 | 681 | 657/681 |
 | Electrolyte | 13 | 13 (100.0%) | 13 (100.0%) | 0 | 0 | 13 | 13/13 |
 | Grid | 22 | 22 (100.0%) | 22 (100.0%) | 0 | 0 | 22 | 22/22 |
 | CHO | 1 | 1 (100.0%) | 1 (100.0%) | 0 | 0 | 1 | 1/1 |
 | Water | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 3/6 |
 | Gas | 4 | 3 (75.0%) | 3 (75.0%) | 0 | 0 | 3 | 3/3 |
 | LargeScale | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 6/6 |
-| Mittelmann | 47 | 45 (95.7%) | 41 (87.2%) | 5 | 1 | 40 | 38/40 |
+| Mittelmann | 47 | 44 (93.6%) | 41 (87.2%) | 4 | 1 | 40 | 38/40 |
 | QP | 138 | 138 (100.0%) | 133 (96.4%) | 5 | 0 | 133 | 125/133 |
 | LP | 371 | 369 (99.5%) | 352 (94.9%) | 17 | 0 | 352 | 327/352 |
 | LPopt | 4 | 2 (50.0%) | 0 (0.0%) | 2 | 0 | 0 | 0/1 |
@@ -94,19 +94,19 @@ Per-problem status from R. Vanderbei's `cute_table.pdf` (`vanderbei/cute_table_s
 
 | cute_table status | problems | POUNCE solved | meaning |
 |---|---|---|---|
-| optimum | 684 | 668 | finite reference optimum exists (expected-solvable) |
+| optimum | 684 | 669 | finite reference optimum exists (expected-solvable) |
 | hard | 14 | 8 | in table, but SNOPT+NITRO+LOQO all hit time/iter limits |
 | infeasible | 3 | 0 | a reference solver declared infeasibility |
 | unbounded | 1 | 0 | unbounded below |
 | untabulated | 31 | 27 | not in cute_table — no reference datum |
 
-**POUNCE solved 668 / 684 expected-solvable (97.7%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
+**POUNCE solved 669 / 684 expected-solvable (97.8%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
 
-**Genuine misses — expected-solvable but POUNCE did not reach Optimal (16):**
+**Genuine misses — expected-solvable but POUNCE did not reach Optimal (15):**
 
-> coshfun cresc100 cresc132 cresc50 deconvb flosp2hh grouping himmelbj nonmsqrt orthrds2 palmer5e polak3 sineali ssebnln steenbrc steenbrf
+> coshfun cresc100 cresc50 deconvb flosp2hh grouping himmelbj nonmsqrt orthrds2 palmer5e polak3 sineali ssebnln steenbrc steenbrf
 
-**Objective disagreements vs. cute_table reference (21)** — POUNCE converged but to a different value than the agreed reference optimum (possible wrong basin or misread problem):
+**Objective disagreements vs. cute_table reference (22)** — POUNCE converged but to a different value than the agreed reference optimum (possible wrong basin or misread problem):
 
 | Problem | POUNCE obj | reference obj | rel. diff |
 |---|---|---|---|
@@ -124,6 +124,7 @@ Per-problem status from R. Vanderbei's `cute_table.pdf` (`vanderbei/cute_table_s
 | fletcher | 1.165685e+01 | 1.952537e+01 | 4.0e-01 |
 | liswet12 | -3.314381e+03 | -5.026353e+03 | 3.4e-01 |
 | britgas | -1.887194e-01 | 2.313955e-08 | 1.9e-01 |
+| cresc132 | 8.577054e-01 | 6.848460e-01 | 1.7e-01 |
 | hs044 | -1.300000e+01 | -1.500000e+01 | 1.3e-01 |
 | avgasb | -4.483219e+00 | -4.132819e+00 | 8.5e-02 |
 | steenbre | 2.851495e+04 | 2.745916e+04 | 3.8e-02 |
@@ -138,16 +139,16 @@ On 681 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 32.3ms | 44.3ms |
-| Total time | 281.34s | 234.88s |
-| Mean iterations | 45.6 | 47.2 |
+| Median time | 31.6ms | 44.3ms |
+| Total time | 275.46s | 234.88s |
+| Mean iterations | 45.4 | 47.2 |
 | Median iterations | 15 | 16 |
 
-- **Geometric mean speedup**: 1.0x
+- **Geometric mean speedup**: 1.1x
 - **Median speedup**: 1.2x
-- POUNCE faster: 502/681 (74%)
+- POUNCE faster: 504/681 (74%)
 - POUNCE 10x+ faster: 1/681
-- Ipopt faster: 179/681
+- Ipopt faster: 177/681
 
 ## Electrolyte Suite — Performance
 
@@ -155,12 +156,12 @@ On 13 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 28.5ms | 37.6ms |
-| Total time | 376.4ms | 503.3ms |
+| Median time | 27.5ms | 37.6ms |
+| Total time | 364.6ms | 503.3ms |
 | Mean iterations | 9.5 | 12.2 |
 | Median iterations | 7 | 10 |
 
-- **Geometric mean speedup**: 1.3x
+- **Geometric mean speedup**: 1.4x
 - **Median speedup**: 1.3x
 - POUNCE faster: 13/13 (100%)
 - POUNCE 10x+ faster: 0/13
@@ -172,9 +173,9 @@ On 22 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 208.7ms | 88.5ms |
-| Total time | 100.47s | 27.54s |
-| Mean iterations | 64.4 | 59.7 |
+| Median time | 203.3ms | 88.5ms |
+| Total time | 88.48s | 27.54s |
+| Mean iterations | 57.3 | 59.7 |
 | Median iterations | 36 | 36 |
 
 - **Geometric mean speedup**: 0.5x
@@ -189,8 +190,8 @@ On 1 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 3.15s | 1.76s |
-| Total time | 3.15s | 1.76s |
+| Median time | 3.13s | 1.76s |
+| Total time | 3.13s | 1.76s |
 | Mean iterations | 31.0 | 33.0 |
 | Median iterations | 31 | 33 |
 
@@ -206,8 +207,8 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 98.1ms | 122.5ms |
-| Total time | 730.7ms | 696.0ms |
+| Median time | 95.4ms | 122.5ms |
+| Total time | 738.5ms | 696.0ms |
 | Mean iterations | 233.5 | 205.2 |
 | Median iterations | 197 | 209 |
 
@@ -223,8 +224,8 @@ On 3 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 81.3ms | 113.3ms |
-| Total time | 281.5ms | 374.0ms |
+| Median time | 80.8ms | 113.3ms |
+| Total time | 277.4ms | 374.0ms |
 | Mean iterations | 39.7 | 39.7 |
 | Median iterations | 20 | 20 |
 
@@ -240,13 +241,13 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 3.11s | 1.27s |
-| Total time | 112.21s | 119.55s |
+| Median time | 3.19s | 1.27s |
+| Total time | 107.56s | 119.55s |
 | Mean iterations | 314.2 | 295.2 |
 | Median iterations | 13 | 6 |
 
 - **Geometric mean speedup**: 0.6x
-- **Median speedup**: 1.1x
+- **Median speedup**: 1.2x
 - POUNCE faster: 3/6 (50%)
 - POUNCE 10x+ faster: 0/6
 - Ipopt faster: 3/6
@@ -257,16 +258,16 @@ On 40 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 8.58s | 6.88s |
-| Total time | 897.06s | 1488.30s |
-| Mean iterations | 91.4 | 110.7 |
+| Median time | 10.31s | 6.88s |
+| Total time | 850.25s | 1488.30s |
+| Mean iterations | 92.3 | 110.7 |
 | Median iterations | 42 | 55 |
 
 - **Geometric mean speedup**: 0.8x
 - **Median speedup**: 0.7x
-- POUNCE faster: 12/40 (30%)
+- POUNCE faster: 15/40 (38%)
 - POUNCE 10x+ faster: 4/40
-- Ipopt faster: 28/40
+- Ipopt faster: 25/40
 
 ## QP Suite — Performance
 
@@ -274,16 +275,16 @@ On 133 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 77.0ms | 92.9ms |
-| Total time | 99.15s | 172.97s |
+| Median time | 77.9ms | 92.9ms |
+| Total time | 96.78s | 172.97s |
 | Mean iterations | 19.8 | 75.6 |
 | Median iterations | 18 | 24 |
 
 - **Geometric mean speedup**: 1.2x
 - **Median speedup**: 1.2x
-- POUNCE faster: 86/133 (65%)
+- POUNCE faster: 87/133 (65%)
 - POUNCE 10x+ faster: 2/133
-- Ipopt faster: 47/133
+- Ipopt faster: 46/133
 
 ## LP Suite — Performance
 
@@ -291,16 +292,16 @@ On 352 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 148.0ms | 157.8ms |
-| Total time | 333.96s | 422.20s |
+| Median time | 148.4ms | 157.8ms |
+| Total time | 324.03s | 422.20s |
 | Mean iterations | 35.5 | 107.3 |
 | Median iterations | 24 | 56 |
 
 - **Geometric mean speedup**: 1.1x
 - **Median speedup**: 1.0x
-- POUNCE faster: 187/352 (53%)
+- POUNCE faster: 186/352 (53%)
 - POUNCE 10x+ faster: 8/352
-- Ipopt faster: 165/352
+- Ipopt faster: 166/352
 
 ## Failure Analysis
 
@@ -310,7 +311,7 @@ On 352 commonly-solved problems:
 |-------------|--------|-------|
 | Acceptable | 4 | 6 |
 | Diverging_Iterates | 3 | 0 |
-| Infeasible_Problem_Detected | 2 | 4 |
+| Infeasible_Problem_Detected | 1 | 4 |
 | Invalid_Number_Detected | 1 | 3 |
 | Maximum_CpuTime_Exceeded | 2 | 8 |
 | Maximum_Iterations_Exceeded | 13 | 16 |
@@ -330,7 +331,7 @@ On 352 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Maximum_CpuTime_Exceeded | 2 | 2 |
+| Maximum_CpuTime_Exceeded | 3 | 2 |
 | Maximum_Iterations_Exceeded | 0 | 3 |
 | Solver_Error | 0 | 1 |
 
@@ -379,8 +380,8 @@ On 352 commonly-solved problems:
 | air05 | LP | 7195 | 426 | Acceptable | 2.587761e+04 |
 | bore3d | LP | 315 | 233 | Acceptable | 1.373080e+03 |
 | brainpc0 | Vanderbei | 6905 | 6900 | Restoration_Failed | 1.499639e-03 |
-| brainpc1 | Vanderbei | 6905 | 6900 | Restoration_Failed | 6.624762e-07 |
-| brainpc2 | Vanderbei | 13805 | 13800 | Maximum_CpuTime_Exceeded | 4.272442e-04 |
+| brainpc1 | Vanderbei | 6905 | 6900 | Restoration_Failed | 4.077592e-04 |
+| brainpc2 | Vanderbei | 13805 | 13800 | Maximum_CpuTime_Exceeded | 4.116990e-04 |
 | brainpc5 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.750403e-04 |
 | brainpc7 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.927065e-04 |
 | britgas | Vanderbei | 450 | 360 | Maximum_Iterations_Exceeded | -1.887194e-01 |
@@ -389,6 +390,7 @@ On 352 commonly-solved problems:
 | complex | LP | 1408 | 1023 | Acceptable | -9.966667e+01 |
 | coolhans | Vanderbei | 9 | 0 | Unknown_Error | 0.000000e+00 |
 | cq5 | LP | 7530 | 5025 | Acceptable | 4.001338e+05 |
+| cresc132 | Vanderbei | 6 | 2654 | Infeasible_Problem_Detected | 8.577054e-01 |
 | csfi2 | Vanderbei | 5 | 4 | Acceptable | 5.501760e+01 |
 | cvxqp3 | Vanderbei | 10000 | 7500 | Maximum_CpuTime_Exceeded | 1.157111e+08 |
 | dallasl | Vanderbei | 906 | 667 | Invalid_Number_Detected | -2.026041e+05 |
@@ -410,7 +412,6 @@ On 352 commonly-solved problems:
 | pilotnov | LP | 2172 | 975 | Acceptable | -4.497276e+03 |
 | polak6 | Vanderbei | 5 | 4 | Unknown_Error | -4.400000e+01 |
 | qap15 | LPopt | 22275 | 6330 | Maximum_CpuTime_Exceeded | 1.040994e+03 |
-| qcqp1500-1nc | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 4.778480e+06 |
 | recipe | LP | 180 | 91 | Acceptable | -2.666160e+02 |
 | robot_a | Mittelmann | 1001 | 52013 | Maximum_Iterations_Exceeded | 1.043192e+00 |
 | robot_b | Mittelmann | 1001 | 52013 | Maximum_Iterations_Exceeded | 2.333099e+00 |
@@ -430,7 +431,7 @@ These problems converged within relaxed tolerances but not strict tolerances.
 |---------|-------|---|---|-------------|------------|-----------|
 | orthrds2 | Vanderbei | 203 | 100 | Optimal | 1.461041e+03 | 1.544297e+03 |
 | ssebnln | Vanderbei | 194 | 96 | Optimal | 1.617060e+07 | 1.617060e+07 |
-| steenbrc | Vanderbei | 540 | 126 | Unknown_Error | 2.811179e+04 | 2.597624e+04 |
+| steenbrc | Vanderbei | 540 | 126 | Unknown_Error | 2.536280e+04 | 2.597624e+04 |
 | steenbrf | Vanderbei | 468 | 108 | Acceptable | 4.697689e+02 | 1.321652e+03 |
 
 ## POUNCE-Only Suite Details
@@ -441,12 +442,12 @@ These suites currently run POUNCE only — no Ipopt-side comparison is captured 
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.07s |
-| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 847 | 300.05s |
-| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 37.08s |
-| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 121.59s |
+| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.10s |
+| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 815 | 300.04s |
+| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 34.90s |
+| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 112.77s |
 
-POUNCE: **2/4 Optimal** in 758.79s total
+POUNCE: **2/4 Optimal** in 747.82s total
 
 ## Dedicated Convex Solver vs. General NLP (head-to-head)
 
@@ -481,15 +482,15 @@ On 349 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 145.5ms | 175.3ms |
-| Total time | 144.10s | 391.19s |
-| Mean iterations | 25.6 | 105.9 |
+| Median time | 144.8ms | 175.8ms |
+| Total time | 136.91s | 373.19s |
+| Mean iterations | 25.6 | 105.1 |
 | Median iterations | 24 | 56 |
 
 - **Geometric-mean speedup (pounce-convex over pounce-nlp)**: 1.3x
 - **Median speedup**: 1.1x
 - pounce-convex faster: 225/349 (64%)
-- pounce-convex 10x+ faster: 7/349
+- pounce-convex 10x+ faster: 6/349
 - pounce-nlp faster: 124/349
 
 ### QP — convex vs NLP
@@ -505,40 +506,40 @@ On 136 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 78.6ms | 92.8ms |
-| Total time | 362.55s | 381.47s |
+| Median time | 76.5ms | 91.0ms |
+| Total time | 369.80s | 344.05s |
 | Mean iterations | 20.4 | 81.6 |
 | Median iterations | 18 | 24 |
 
 - **Geometric-mean speedup (pounce-convex over pounce-nlp)**: 1.0x
 - **Median speedup**: 1.0x
-- pounce-convex faster: 56/136 (41%)
+- pounce-convex faster: 66/136 (49%)
 - pounce-convex 10x+ faster: 1/136
-- pounce-nlp faster: 80/136
+- pounce-nlp faster: 70/136
 
 ### Mittelmann — exact vs L-BFGS
 
 | Metric | exact Hessian | L-BFGS |
 |--------|---------------|------------|
-| Optimal | 45/47 (95.7%) | 32/47 (68.1%) |
-| Solved exclusively | 14 | 1 |
-| Both Optimal | 31 | |
-| Matching objectives (< 0.01%) | 29/31 | |
+| Optimal | 44/47 (93.6%) | 32/47 (68.1%) |
+| Solved exclusively | 14 | 2 |
+| Both Optimal | 30 | |
+| Matching objectives (< 0.01%) | 28/30 | |
 
-On 31 problems solved by both arms:
+On 30 problems solved by both arms:
 
 | Metric | exact Hessian | L-BFGS |
 |--------|---------------|------------|
-| Median time | 10.36s | 10.18s |
-| Total time | 630.16s | 760.80s |
-| Mean iterations | 73.0 | 285.3 |
+| Median time | 10.92s | 10.46s |
+| Total time | 551.02s | 724.43s |
+| Mean iterations | 72.9 | 286.6 |
 | Median iterations | 35 | 71 |
 
 - **Geometric-mean speedup (exact Hessian over L-BFGS)**: 1.6x
-- **Median speedup**: 1.6x
-- exact Hessian faster: 22/31 (71%)
-- exact Hessian 10x+ faster: 2/31
-- L-BFGS faster: 9/31
+- **Median speedup**: 1.7x
+- exact Hessian faster: 22/30 (73%)
+- exact Hessian 10x+ faster: 2/30
+- L-BFGS faster: 8/30
 
 ---
 *Generated by benchmark_report.py*
