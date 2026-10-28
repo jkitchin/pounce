@@ -67,7 +67,7 @@ No toolchain and nothing installed on the host:
 
 ```sh
 docker run --rm -v "$PWD:/work" ghcr.io/jkitchin/pounce:latest problem.nl
-apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.11.0
+apptainer pull pounce.sif docker://ghcr.io/jkitchin/pounce:0.14.0
 ```
 
 Both images carry the CLI, the Python API, and the Pyomo plugin. See

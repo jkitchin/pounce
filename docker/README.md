@@ -38,8 +38,8 @@ The equivalents by hand:
 docker build -f docker/Dockerfile -t pounce:dev \
   --build-arg POUNCE_BUILD_GIT="$(git rev-parse --short=8 HEAD)" .
 
-docker build -f docker/Dockerfile.release -t pounce:0.13.0 \
-  --build-arg POUNCE_VERSION=0.13.0 .
+docker build -f docker/Dockerfile.release -t pounce:0.14.0 \
+  --build-arg POUNCE_VERSION=0.14.0 .
 ```
 
 Each image runs its own smoke test as the final build step — CLI solve,

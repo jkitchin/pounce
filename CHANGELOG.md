@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-28
+
 ### Added
 - **The agent skill, slash commands and pounce-studio MCP server install
   with [knowhow](https://github.com/jkitchin/knowhow).** The Claude skill
@@ -314,8 +316,6 @@ changes.
 
 - `SensBacksolver::solve_many` has a default that solves one right-hand side
   at a time. `PdSensBacksolver` routes it to its batched back-solve.
-
-### Changed
 - `pounce_sensitivity::corrector` is `pounce_sens_core::corrector`, re-exported,
   and its errors are `CorrectorError`, which `Solver::correct_step` maps to the
   same `SolverError` variants and messages as before. The classification types
@@ -24697,7 +24697,9 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/jkitchin/pounce/releases/tag/v0.14.0
+[0.13.0]: https://github.com/jkitchin/pounce/releases/tag/v0.13.0
 [0.12.0]: https://github.com/jkitchin/pounce/releases/tag/v0.12.0
 [0.11.0]: https://github.com/jkitchin/pounce/releases/tag/v0.11.0
 [0.10.0]: https://github.com/jkitchin/pounce/releases/tag/v0.10.0
