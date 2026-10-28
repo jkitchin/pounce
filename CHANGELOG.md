@@ -82,6 +82,24 @@ changes.
   reported was run under `solver_selection=auto`, which routes a convex QP to
   the convex interior point whatever `algorithm` says, so it never reached the
   SQP; this one replaces it.
+- **The agent skill now tells an agent how to install pounce.** A new
+  *Installing pounce* section gives `pip install pounce-solver` for the
+  solver, `cargo install pounce-studio-core --bin pounce-studio` for the
+  analysis CLI (it is not in the wheel), and the crates.io and container
+  alternatives; the skill also loads for "how do I install pounce?". Its
+  troubleshooting no longer sends a `knowhow add` user, who has no checkout,
+  to `cargo install --path crates/...`. The skill README no longer claims
+  the `--path` installs build from crates.io, and drops a stale feral pin.
+- **Warm-started exact-Hessian step QPs of the active-set SQP leave Schur
+  updates off at `n + m ≥ 5000` (gh #1083).** An exact Hessian makes the
+  step QP indefinite, and there every drop refactors anyway, so only adds take
+  the rank-2 update; a warm step QP is mostly drops, and paid for the larger
+  `K_max` for nothing (on the reporter's handover QP: 126 s with updates,
+  72 s without). Cold step QPs, which are add-dominated and on a nonconvex
+  model not seeded from the interior point, keep the size rule, as do
+  quasi-Newton Hessians and an explicit `sqp_qp_use_schur_updates`. On the 38
+  Maros-Mészáros problems at that size under `algorithm=active-set-sqp`, no
+  status changes.
 - **Drops on the active-set QP's refactor path reuse the symbolic analysis
   (gh #1083).** From `n + m ≥ 5000`, a dropped row stays in the KKT pattern
   as an inert sentinel until a row the pattern does not hold is added, so

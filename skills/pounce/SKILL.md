@@ -1,6 +1,6 @@
 ---
 name: pounce
-description: Inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), or set up a warm start.
+description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), or set up a warm start.
 ---
 
 # pounce — solver post-mortem and pre-flight
@@ -18,6 +18,44 @@ Use this skill when the user asks any of:
 - "what does `inf_pr` mean?"
 - "is this .nl file going to be a problem?"
 - "what happened in iteration 47?"
+- "how do I install pounce?"
+
+## Installing pounce
+
+Two binaries, installed separately:
+
+- **`pounce`** — the solver. Needed to run solves.
+- **`pounce-studio`** — the analysis CLI every recipe below calls.
+  Needed for everything except a bare solve.
+
+Check first: `pounce -v` and `pounce-studio --help`. Install only what is
+missing.
+
+**`pounce`** — pick by what the user already has:
+
+```sh
+pip install pounce-solver        # Python 3.9+, prebuilt wheels for Linux,
+                                 # macOS, Windows; no Rust needed. Puts the
+                                 # `pounce` CLI on PATH and installs the
+                                 # `pounce` Python package.
+pip install pyomo-pounce         # add this for Pyomo models
+cargo install pounce-cli --bin pounce --locked   # Rust toolchain, no Python
+docker pull ghcr.io/jkitchin/pounce              # nothing installed on the host
+```
+
+**`pounce-studio`** is not in the pip wheel and has no prebuilt binary; it
+needs a Rust toolchain (<https://rustup.rs>):
+
+```sh
+cargo install pounce-studio-core --bin pounce-studio --locked
+```
+
+`cargo install` puts binaries in `~/.cargo/bin/`, which must be on `PATH`.
+In a clone of the repo, `make install-skill` builds and installs both
+binaries into `~/.local/bin/` instead. Full options, including extras
+(`pounce-solver[jax]`, `[torch]`, `[gams]`) and the GAMS link:
+`docs/src/installation.md`, or
+<https://jkitchin.github.io/pounce/installation.html>.
 
 ## Tools at your disposal
 
@@ -266,15 +304,18 @@ always pass `--json-detail full`.
 ## Troubleshooting
 
 **`pounce-studio: command not found`**
-The binary is not on PATH. Either re-run `cargo install --path
-crates/pounce-studio-core` (it installs into `~/.cargo/bin/`) or pass
-the absolute path to the binary: `~/.cargo/bin/pounce-studio summary
+Not installed, or installed but not on PATH. Install it with `cargo
+install pounce-studio-core --bin pounce-studio --locked` (see *Installing
+pounce*). If it is installed, `~/.cargo/bin/` (or `~/.local/bin/` after
+`make install-skill`) is missing from `PATH`: add it, or call the binary
+by its absolute path, e.g. `~/.cargo/bin/pounce-studio summary
 report.json`.
 
 **`pounce: command not found`** (when running fresh solves)
-The pounce solver binary is missing. Build with `cargo build --release
---bin pounce` and copy `target/release/pounce` onto PATH, or run
-`cargo install --path crates/pounce-cli --bin pounce`.
+The solver is missing. `pip install pounce-solver` is the quickest fix;
+`cargo install pounce-cli --bin pounce --locked` works without Python. If
+it was pip-installed, the `pounce` script lives in the active Python
+environment's `bin/` (`Scripts\` on Windows): activate that environment.
 
 **`unexpected schema "..."`**
 The JSON file is not a `pounce.solve-report/v1` document — perhaps an
