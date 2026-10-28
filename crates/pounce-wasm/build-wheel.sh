@@ -186,8 +186,16 @@ rm -rf "$root/python/dist"
 #
 # so the page is served the emscripten-tagged one. Revisit when the Pyodide
 # pin moves — a newer micropip prefers the repacked tag.
-built="$root/target/wheels/pounce_solver-"*"-emscripten_${EMSCRIPTEN_VERSION//./_}_wasm32.whl"
-built=$(ls $built)
+#
+# Name the wheel by the version being built, not by a glob: target/wheels
+# outlives a version bump, so the previous release's wheel is still there and
+# a glob matches both — exactly the release build this script exists for.
+version=$(python3 -c 'import re,sys; print(re.search(r"^version = \"(.*)\"", open(sys.argv[1]).read(), re.M).group(1))' "$root/python/pyproject.toml")
+built="$root/target/wheels/pounce_solver-${version}-cp39-abi3-emscripten_${EMSCRIPTEN_VERSION//./_}_wasm32.whl"
+if [[ ! -f "$built" ]]; then
+  echo "build did not produce $built" >&2
+  exit 1
+fi
 name=$(basename "$built")
 
 mkdir -p "$wheels"
