@@ -29,6 +29,17 @@ Usage
 are the SQP's own. The `pounce::sqp::qp` debug line reports, per QP, the
 working-set changes, refactors, Schur updates and the time split. Requires
 Pyomo, for its `.nl` writer.
+
+`--kappa K` subtracts `(K/2) sum_i x_i^2`, making the model nonconvex for
+`K > e` (the largest `exp''` on the box): the exact Hessian is then
+indefinite, which is what crossover's step-3 QP needs to exercise its
+inertia hint (gh #1095). Without `ipm_sqp_handover=no`, a model this size
+under `algorithm=active-set-sqp` runs the interior point, then crossover
+(`RUST_LOG=pounce::crossover=debug` reports the step-3 QP):
+
+    python3 scripts/gen-drop-dominated-nl.py 6000 /tmp/ncvx6000.nl --kappa 3
+    RUST_LOG=pounce::crossover=debug pounce /tmp/ncvx6000.nl \\
+        algorithm=active-set-sqp hessian_approximation=limited-memory
 """
 import argparse
 import random
@@ -42,6 +53,9 @@ def main() -> None:
     p.add_argument("out", help="output .nl path")
     p.add_argument("--seed", type=int, default=1091)
     p.add_argument("--rho", type=float, default=2.0, help="coupling weight")
+    p.add_argument(
+        "--kappa", type=float, default=0.0, help="concave weight (nonconvex above e)"
+    )
     args = p.parse_args()
     if args.n < 2:
         p.error("n must be at least 2 (the coupling term needs a neighbour)")
@@ -56,6 +70,7 @@ def main() -> None:
     m.obj = pe.Objective(
         expr=sum(pe.exp(m.x[i]) - a[i] * m.x[i] for i in m.I)
         + 0.5 * args.rho * sum((m.x[i] - m.x[i + 1]) ** 2 for i in range(n - 1))
+        - 0.5 * args.kappa * sum(m.x[i] ** 2 for i in m.I)
     )
     m.cap = pe.Constraint(expr=sum(m.x[i] for i in m.I) <= 0.3 * n)
     m.write(args.out, format="nl")
