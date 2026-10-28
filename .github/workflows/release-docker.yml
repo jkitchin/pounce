@@ -290,6 +290,14 @@ jobs:
       # release-pounce.yml has actually uploaded the wheels for this version.
       # Poll rather than fail: on a normal release both tags are pushed within
       # seconds of each other and the wheel build takes a while.
+      #
+      # Ask pip, not the JSON API. `/pypi/<pkg>/<version>/json` answers 200
+      # as soon as the *first* file of the version lands, while the simple
+      # index pip reads lags behind it. In 0.14.0 the JSON check passed at
+      # 11:53:31 (the macOS wheel), and the linux/arm64 build's pip install
+      # found no 0.14.0 at 11:53:56. The runner is native to
+      # matrix.platform, so a binary-only `pip download` here resolves the
+      # same wheel through the same index the image build will use.
       - name: Wait for PyPI
         if: steps.gate.outputs.run == 'true' && matrix.image == 'release'
         env:
@@ -299,9 +307,9 @@ jobs:
           for pkg in pounce-solver pyomo-pounce; do
             echo "Waiting for ${pkg}==${VERSION} on PyPI..."
             for attempt in $(seq 1 40); do
-              code="$(curl -sS -o /dev/null -w '%{http_code}' \
-                "https://pypi.org/pypi/${pkg}/${VERSION}/json" || echo 000)"
-              if [ "$code" = "200" ]; then
+              if python3 -m pip download --quiet --no-deps --no-cache-dir \
+                  --only-binary=:all: -d "$RUNNER_TEMP/pypi-wait" \
+                  "${pkg}==${VERSION}" >/dev/null 2>&1; then
                 echo "  found after ${attempt} attempt(s)"
                 break
               fi
