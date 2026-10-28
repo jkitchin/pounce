@@ -12,6 +12,95 @@ merges.
 
 ---
 
+## NLP: qcqp1500-1nc stalls at μ = 2e-6; waterx lands in a worse minimum
+
+*Tracked in gh#1098. Introduced by 49ab28aa (#1077, gh#1076 §2). Recorded
+2026-10-28 while preparing 0.14.0.*
+
+**Scope.** Two benchmark models on the default exact-Hessian NLP path. The
+L-BFGS leg solves `qcqp1500-1nc` (106 iterations, 32 s). Neither model is in
+the fixture corpus.
+
+### What is wrong
+
+#1077 made restoration's release test compare the outer filter's own
+quantities (1-norm `θ`, scaled barrier objective) where it had compared the
+max-norm `θ` and the plain `f`. That brought pounce onto Ipopt's trajectory,
+and on these two models Ipopt's trajectory is worse than the one the
+mismatched test produced by accident:
+
+- **qcqp1500-1nc** (Mittelmann, 1500 variables, 10 508 constraints). 0.13.0
+  released restoration at iteration 2 and converged in 77 iterations. 0.14.0
+  stays in restoration to iteration 8, as Ipopt does, and matches Ipopt's
+  iterates to about five digits from there through at least iteration 40.
+  From about iteration 140 it sits at μ = 2e-6 for 1200 iterations: `inf_pr`
+  oscillates between 1e-3 and 1e-2 and never meets the barrier tolerance,
+  steps are long with tiny `alpha_pr` and `alpha_du`, and `δ_w` is non-zero
+  almost every iteration. Ipopt crawls the same way.
+- **waterx** (Water suite). Same 249 iterations, objective 927.1 → 1019.7
+  (Ipopt 944.6). At iteration 146 restoration no longer hands back at once.
+
+### How big
+
+| model | 0.13.0 (`9958a24e`) | 0.14.0 (`c082fe76`) | Ipopt 3.14.20 MA57 |
+|---|---|---|---|
+| qcqp1500-1nc | Optimal, 77 it, 39 s | CPU limit at 300 s; uncapped Optimal, 1346 it, 951 s, f 0.019% higher | CPU limit at 1800 s, 2827 it |
+| waterx | Optimal, f = 927.1 | Optimal, f = 1019.7 | Optimal, f = 944.6 |
+
+Arm64 timings. Uncapped, `qcqp1500-1nc` ran alongside other work, so its 951 s
+is high. The Mittelmann suite drops from 45/47 to 44/47; nothing else in the
+1345-model benchmark lost a solve.
+
+### Already tried, did not work
+
+On `qcqp1500-1nc`, 0.14.0 binary, 400 s limit:
+
+- **Turning SOC off is luck, not a fix.** `max_soc=0` solves in 148
+  iterations (Ipopt with `max_soc=0`: 116). But it matches the default run
+  exactly up to iteration 77, where the default accepts one second-order
+  correction (`H`) that leads into the slow basin. During the crawl, SOC is
+  accepted on only 4 of about 1200 iterations, so a rule that disables SOC
+  when the solve stalls would not fire where it matters.
+- **Lowering μ sooner.** `barrier_tol_factor=100` and `=1000` reach
+  μ = 2e-6 earlier, then stall there for 430 and 375 iterations.
+- **Other options.** `mu_strategy=adaptive` (with or without
+  `mu_oracle=quality-function`), `mu_init=1e-4` and
+  `watchdog_shortened_iter_trigger=0` were all still unsolved at 400 s.
+
+Reverting #1077's test is not on the table: it restores a comparison of
+mismatched quantities, and #1077 measured what that costs elsewhere.
+
+### What a fix would look like
+
+The suspected cause is untested. With 10 508 constraints on 1500 variables,
+more constraints may be active near the solution than there are variables, so
+the active Jacobian would be rank-deficient (LICQ fails). That would explain
+steps that cannot reduce `inf_pr`, tiny step fractions and persistent
+regularization.
+
+**Suggested first step:** at a crawl iterate, around iteration 300, count the
+active constraints, measure the numerical rank of their Jacobian, and check
+whether the KKT solve ever applies `δ_c` or only `δ_w`. If the Jacobian is
+degenerate, the fix is in how a rank-deficient constraint block is regularized
+at fixed μ. That would make pounce better than Ipopt here, not just equal to
+it.
+
+**Acceptance:**
+
+1. `qcqp1500-1nc` solves within 300 s on the exact-Hessian path, without
+   bringing back #1077's mismatched release test.
+2. The Mittelmann suite is otherwise unchanged
+   (`make -C benchmarks mittelmann-rerun`), and `waterx` is re-measured.
+3. `scripts/sweep-fixtures.sh`, both legs, with every moved line explained.
+
+### When to revisit
+
+- A user reports a large QCQP stalling at a fixed μ with `inf_pr` near 1e-3.
+- The restoration release test or the inertia and regularization handling
+  changes. Re-run both models.
+
+---
+
 ## Active-set QP: the per-pass prune cap is a tuned number (QSCFXM3, QSCSD6 slowdowns)
 
 *Was gh#1081. Introduced by #1078 (gh#1076 item 3). Recorded 2026-10-27.*
