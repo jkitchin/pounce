@@ -176,8 +176,8 @@ struct PinnedFactor {
 /// regressions: `pooling_rt2stp` went from `MaximumIterationsExceeded` to a
 /// local-infeasibility verdict on both legs, and the SQP stopped solving
 /// `square_flowsheet_resto` (exact), which fell through to `square-lm`.
-/// 5000 is the size from which a warm-started exact-Hessian step QP is on
-/// this path by default (`pounce-algorithm`'s `qp_schur_exact_max_dim`),
+/// 5000 is the size from which a warm-started step QP not known PSD is on
+/// this path by default (`pounce-algorithm`'s `qp_schur_indefinite_max_dim`),
 /// which is where the drop-dominated QPs the change is for are solved. The
 /// two are separate constants measured on different `n + m`: this one the
 /// QP's (an elastic or lifted QP is larger than its NLP), that one the NLP's.

@@ -226,10 +226,7 @@ impl SqpAlgorithm {
         // cold rule; a warm-started step QP may override it (`warm_qp_opts`).
         let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
-        if let Some(on) =
-            self.opts
-                .step_qp_schur_updates(nlp.n() + nlp.m(), self.opts.hessian, false)
-        {
+        if let Some(on) = self.opts.step_qp_schur_updates(nlp.n() + nlp.m(), None) {
             self.qp_opts.use_schur_updates = on;
         }
         self.ipm_cold_start = self
@@ -869,7 +866,7 @@ impl SqpAlgorithm {
                 // The cold error is still propagated: if a clean start fails
                 // too, the failure is not about the working set and there is
                 // nothing further to try here.
-                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m);
+                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m, qp_data.hessian_inertia);
                 match solve_step_qp(
                     &mut self.qp_solver,
                     &qp_data,
@@ -1267,7 +1264,7 @@ impl SqpAlgorithm {
             let mut soc_working: Option<WorkingSet> = None;
             let ls = {
                 // Warm-started from the step QP's own working set.
-                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m);
+                let warm_opts = self.warm_qp_opts(&self.qp_opts, n + m, qp_data.hessian_inertia);
                 let qp_solver = &mut self.qp_solver;
                 let qp_opts = warm_opts.as_ref().unwrap_or(&self.qp_opts);
                 let deadline = self.opts.deadline.as_ref();
@@ -1448,11 +1445,18 @@ impl SqpAlgorithm {
     }
 
     /// `base` with Schur updates set for a warm-started step QP of size
-    /// `dim` (`SqpOptions::step_qp_schur_updates`), or `None` when that is
-    /// what `base` already says. `base` carries the cold rule.
-    fn warm_qp_opts(&self, base: &QpOptions, dim: usize) -> Option<QpOptions> {
+    /// `dim` carrying the Hessian hint `inertia`
+    /// (`SqpOptions::step_qp_schur_updates`), or `None` when that is what
+    /// `base` already says. `base` carries the cold rule. The hint is the
+    /// built QP's, so a lifted L-BFGS subproblem reads `Indefinite` (gh#1091).
+    pub(crate) fn warm_qp_opts(
+        &self,
+        base: &QpOptions,
+        dim: usize,
+        inertia: HessianInertia,
+    ) -> Option<QpOptions> {
         self.opts
-            .step_qp_schur_updates(dim, self.opts.hessian, true)
+            .step_qp_schur_updates(dim, Some(inertia))
             .filter(|&on| on != base.use_schur_updates)
             .map(|on| QpOptions {
                 use_schur_updates: on,
