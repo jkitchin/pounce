@@ -472,7 +472,12 @@ changes.
   was rescued). Fixture sweep, both legs: 2 of 248 lines move, both L-BFGS and
   failing either way (`dallass` 214 → 218, `deb7` `Restoration_Failed` →
   `Maximum_Iterations_Exceeded`). Measured on arm64 only; x86_64 is
-  unmeasured.
+  unmeasured. The 0.14.0 release benchmark found two losses outside the
+  Vanderbei set, both because pounce now follows Ipopt's trajectory:
+  Mittelmann `qcqp1500-1nc` goes from Optimal in 77 iterations (39 s) to
+  the 300 s limit, where Ipopt also times out, stalling at μ = 2e-6. Water
+  `waterx` reaches a worse local minimum (927.1 → 1019.7; Ipopt 944.6). See
+  `dev-notes/known-limitations.md` and gh #1098.
 - **A zero pivot read under a reused MC64 scaling is re-checked before the
   IPM acts on it (gh #1076).** feral's value-bounded MC64 cache can reuse the
   scaling vector of an earlier matrix on the same pattern, so a factorization's
