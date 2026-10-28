@@ -114,9 +114,9 @@ use pounce_qp::{
 
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::line_search::l1_merit_line_search;
-use crate::sqp::options::{SqpHessianSource, SqpOptions};
+use crate::sqp::options::SqpOptions;
 use crate::sqp::problem::SqpProblemSpec;
-use crate::sqp::qp_assembly::SqpQpData;
+use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpResult, SqpStatus};
 use crate::sqp::sqp_alg::{SqpAlgorithm, check_kkt};
 use crate::sqp::warm_start::classify_working_set;
@@ -447,6 +447,20 @@ fn complementarity_at(
 }
 
 /// Count the active entries of a working set, split bounds / rows.
+/// The inertia hint for a QP built on the exact Lagrangian Hessian `h`.
+///
+/// `Indefinite`, as the SQP loop has it for its exact source, so inertia
+/// control runs on every drop. A model that supplies no Hessian (the Python
+/// frontend and the CasADi plugin under `limited-memory`) gives an empty or
+/// all-zero triplet, which is PSD, and is hinted so.
+fn exact_hessian_inertia(h: &Triplet) -> pounce_qp::HessianInertia {
+    if h.vals.iter().all(|&v| v == 0.0) {
+        pounce_qp::HessianInertia::Psd
+    } else {
+        pounce_qp::HessianInertia::Indefinite
+    }
+}
+
 fn count_active(w: &WorkingSet) -> (usize, usize) {
     let bounds = w
         .bounds
@@ -559,11 +573,11 @@ where
 
     // ---- §7 step 3: one EQP-equivalent step over the estimated set ----
     let mut n_qp_solves = 0_u32;
-    let hessian_inertia = match sqp_opts.hessian {
-        SqpHessianSource::Exact => pounce_qp::HessianInertia::Indefinite,
-        _ => pounce_qp::HessianInertia::Psd,
-    };
+    // The step-3 QP holds the exact Lagrangian Hessian whatever the SQP's own
+    // source is, so it is hinted by that matrix, not by the source (gh#1095).
+    // The hint also decides the Schur rule below.
     let hess_lag = nlp.eval_hess_lag(&seed.x, &seed.lambda_g);
+    let hessian_inertia = exact_hessian_inertia(&hess_lag);
     let qp_data = SqpQpData::build(
         &seed.x,
         &grad_f,

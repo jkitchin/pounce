@@ -2396,3 +2396,172 @@ fn issue_1091_a_lifted_lbfgs_warm_step_qp_leaves_schur_updates_off() {
         "below the ceiling the size rule stands"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1095: the step-3 QP is hinted by the matrix it holds.
+// ─────────────────────────────────────────────────────────────────
+
+/// `min −(x + 1.5)²  s.t.  −1 ≤ x ≤ 2`: concave, with its maximum just
+/// outside the box, so `f` falls across the whole box and the minimizer is
+/// the upper bound. The exact Hessian is `−2`. With `zero_hessian` the model
+/// supplies none, as the Python frontend does under `limited-memory`.
+///
+/// Started on the lower bound with that bound in the working set, the step
+/// QP finds its multiplier negative and drops it. The drop opens a
+/// one-dimensional null space carrying the negative curvature: inertia
+/// control (a refactor) follows it to the upper bound, while a rank-2 Schur
+/// update skips inertia control and takes the Newton step to the stationary
+/// maximum, which points back out through the bound it just dropped.
+struct ConcaveBoxNlp {
+    zero_hessian: bool,
+}
+
+impl SqpProblemSpec for ConcaveBoxNlp {
+    fn n(&self) -> usize {
+        1
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![-1.0]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![-1.0], vec![2.0])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (Vec::new(), Vec::new())
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        -(x[0] + 1.5).powi(2)
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![-2.0 * (x[0] + 1.5)]
+    }
+    fn eval_c(&mut self, _x: &[f64]) -> Vec<f64> {
+        Vec::new()
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 1,
+            irow: Vec::new(),
+            jcol: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        let (irow, jcol, vals) = if self.zero_hessian {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            (vec![1], vec![1], vec![-2.0])
+        };
+        Triplet {
+            n_rows: 1,
+            n_cols: 1,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+/// Crossover's step-3 QP on [`ConcaveBoxNlp`], seeded on the lower bound with
+/// a lower-bound multiplier that puts the bound in the estimated working set.
+/// Schur updates are on from size 0, so a drop reaches the branch that reads
+/// the hint, unless `exact_max` brings the warm Schur-off rule down to this
+/// size (`SqpOptions::qp_schur_indefinite_max_dim`).
+fn crossover_step3_on_concave_box(
+    hessian: SqpHessianSource,
+    zero_hessian: bool,
+    exact_max: Option<usize>,
+) -> crate::crossover::EqpReport {
+    use crate::crossover::{CrossoverOptions, CrossoverSeed};
+    let seed = CrossoverSeed {
+        x: vec![-1.0],
+        lambda_g: Vec::new(),
+        lambda_x: vec![1.0],
+    };
+    let (report, _) = crate::crossover::run(
+        &mut ConcaveBoxNlp { zero_hessian },
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            max_iter: 0,
+            ..CrossoverOptions::default()
+        },
+        &SqpOptions {
+            hessian,
+            qp_schur_min_dim: Some(0),
+            qp_schur_indefinite_max_dim: exact_max,
+            ..SqpOptions::default()
+        },
+        &QpOptions::sqp_subproblem(),
+        || Box::new(pounce_feral::FeralSolverInterface::new()),
+        |_| None,
+    );
+    report.eqp.expect("the step-3 QP ran, so it is reported")
+}
+
+/// gh#1095: under a quasi-Newton source the step-3 QP still holds the exact
+/// Hessian, and was hinted `Psd`, so its drop took the rank-2 update without
+/// inertia control. The Newton step then pointed back out through the dropped
+/// bound and the QP cycled, dropping and re-adding it, until `MaxIter`
+/// (measured: 12 working-set changes, all Schur updates), and crossover
+/// declined. The exact source, hinted `Indefinite` all along, is the control:
+/// it refactors on the drop, adds the upper bound by update, and is optimal.
+/// Every source must now take that same path.
+#[test]
+fn issue_1095_crossover_step3_runs_inertia_control_under_every_source() {
+    let control = crossover_step3_on_concave_box(SqpHessianSource::Exact, false, None);
+    assert_eq!(control.outcome, Ok(QpStatus::Optimal), "{control:?}");
+    let path =
+        |e: &crate::crossover::EqpReport| (e.working_set_changes, e.refactors, e.schur_updates);
+    assert_eq!(
+        path(&control),
+        (2, 2, 1),
+        "the control's path moved: {control:?}"
+    );
+    for hessian in [
+        SqpHessianSource::DampedBfgs,
+        SqpHessianSource::Lbfgs,
+        SqpHessianSource::QuasiNewtonAuto,
+    ] {
+        let eqp = crossover_step3_on_concave_box(hessian, false, None);
+        assert_eq!(eqp.outcome, Ok(QpStatus::Optimal), "{hessian:?}: {eqp:?}");
+        assert_eq!(path(&eqp), path(&control), "{hessian:?}: {eqp:?}");
+    }
+}
+
+/// A model that supplies no Hessian gives the step-3 QP an all-zero one, which
+/// is PSD and stays hinted so: its drop keeps the rank-2 update, and it still
+/// reaches the upper bound.
+#[test]
+fn issue_1095_a_missing_hessian_is_hinted_psd() {
+    for hessian in [SqpHessianSource::Exact, SqpHessianSource::QuasiNewtonAuto] {
+        let eqp = crossover_step3_on_concave_box(hessian, true, None);
+        assert_eq!(eqp.outcome, Ok(QpStatus::Optimal), "{hessian:?}: {eqp:?}");
+        assert_eq!(
+            (eqp.working_set_changes, eqp.schur_updates),
+            (2, 2),
+            "{hessian:?}: both changes, the drop included, take the update: {eqp:?}"
+        );
+    }
+}
+
+/// The warm Schur-off rule (gh#1083) reads the step-3 QP's hint, so under a
+/// quasi-Newton source an exact, indefinite step-3 QP at that size goes to the
+/// refactor path as it does under the exact source. While the hint followed
+/// the source it read `Psd` there, and updates stayed on. An all-zero Hessian
+/// is `Psd` and keeps them.
+#[test]
+fn issue_1095_the_warm_schur_rule_reads_the_step3_hint() {
+    for hessian in [SqpHessianSource::Exact, SqpHessianSource::QuasiNewtonAuto] {
+        let eqp = crossover_step3_on_concave_box(hessian, false, Some(1));
+        assert_eq!(eqp.outcome, Ok(QpStatus::Optimal), "{hessian:?}: {eqp:?}");
+        assert_eq!(eqp.schur_updates, 0, "{hessian:?}: {eqp:?}");
+        let zero = crossover_step3_on_concave_box(hessian, true, Some(1));
+        assert_eq!(zero.outcome, Ok(QpStatus::Optimal), "{hessian:?}: {zero:?}");
+        assert!(zero.schur_updates > 0, "{hessian:?}: {zero:?}");
+    }
+}

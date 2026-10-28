@@ -348,6 +348,22 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Crossover's step-3 QP is hinted by the Hessian it holds (gh #1095).** It
+  is always built from the exact Lagrangian Hessian, but was hinted `Psd`
+  whenever the SQP's own Hessian source was quasi-Newton, which is every
+  `hessian_approximation=limited-memory` solve that crosses over (the
+  IPM→SQP handover, on by default for `algorithm=active-set-sqp` at
+  `n + m ≥ 5000`, or `crossover=yes`). A drop on that QP then took the rank-2
+  Schur update without inertia control, and on a nonconvex model the step
+  could point back through the bound it had just dropped: on a constructed
+  concave case the QP cycled to `MaxIter` and crossover declined, where the
+  exact source solves it in two working-set changes. It also kept the gh #1083
+  warm rule from moving the QP to the refactor path. A model with no Hessian
+  (the Python frontend and the CasADi plugin under `limited-memory`) gives an
+  all-zero matrix, which is PSD and is still hinted so. On a 6000-variable
+  nonconvex model under L-BFGS (`scripts/gen-drop-dominated-nl.py --kappa 3`,
+  new) the solve keeps its status, 158 iterations and objective; its three
+  step-3 QPs refactor instead of updating.
 - **The `pounce` console script no longer imports the Python package before
   running the binary (gh #1086).** The entry point was `pounce._cli:main`,
   and importing it imported `pounce` and, through it, scipy: ~175 ms per
