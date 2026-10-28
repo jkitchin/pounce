@@ -2315,3 +2315,84 @@ fn a_warm_step_qp_over_its_budget_is_seeded() {
     // whose working set is already right.
     assert_eq!(solve(Some(1)).stats.n_working_set_changes, 0);
 }
+
+/// gh#1091: the lifted L-BFGS subproblem reaches the warm Schur rule as
+/// `Indefinite` and so leaves updates off at size, as an exact Hessian's
+/// does, while a dense PSD one keeps them. Built through `build_low_rank`,
+/// the constructor the SQP loop uses, and judged by the driver's own
+/// `warm_qp_opts`, so the test fails if either stops carrying the hint the QP
+/// solver branches on (#1089 read the Hessian source instead, and kept
+/// updates on for the lift).
+#[test]
+fn issue_1091_a_lifted_lbfgs_warm_step_qp_leaves_schur_updates_off() {
+    use crate::sqp::lbfgs::LowRankHessian;
+    let (n, m) = (3, 1);
+    let x = vec![0.0; n];
+    let grad_f = vec![1.0, -1.0, 0.5];
+    let c_vals = vec![0.0];
+    let (bl_c, bu_c) = (vec![0.0], vec![0.0]);
+    let (xl, xu) = (vec![-1.0; n], vec![1.0; n]);
+    let jac = || Triplet {
+        n_rows: m,
+        n_cols: n,
+        irow: vec![1, 1, 1],
+        jcol: vec![1, 2, 3],
+        vals: vec![1.0, 1.0, 1.0],
+    };
+    // σI + aaᵀ − bbᵀ with σ large enough that B stays PD: the lift is
+    // indefinite while the matrix it represents is not.
+    let b = LowRankHessian {
+        sigma: 2.0,
+        vecs: vec![vec![1.0, 0.0, 0.5], vec![0.0, 0.5, 0.0]],
+        signs: vec![1.0, -1.0],
+    };
+    let lifted = SqpQpData::build_low_rank(&x, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, jac(), &b);
+    assert_eq!(lifted.hessian_inertia, HessianInertia::Indefinite);
+    let dense = SqpQpData::build(
+        &x,
+        &grad_f,
+        &c_vals,
+        &bl_c,
+        &bu_c,
+        &xl,
+        &xu,
+        jac(),
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow: vec![1, 2, 3],
+            jcol: vec![1, 2, 3],
+            vals: vec![2.0; 3],
+        },
+        HessianInertia::Psd,
+    );
+
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let alg = SqpAlgorithm::new(
+        qp_solver,
+        SqpOptions {
+            hessian: SqpHessianSource::Lbfgs,
+            ..SqpOptions::default()
+        },
+    );
+    let on = QpOptions {
+        use_schur_updates: true,
+        ..QpOptions::sqp_subproblem()
+    };
+    let dim = crate::sqp::options::DEFAULT_QP_SCHUR_INDEFINITE_MAX_DIM;
+    let warm = alg.warm_qp_opts(&on, dim, lifted.hessian_inertia);
+    assert!(
+        warm.is_some_and(|o| !o.use_schur_updates),
+        "a warm lifted step QP at size refactors"
+    );
+    assert!(
+        alg.warm_qp_opts(&on, dim, dense.hessian_inertia).is_none(),
+        "a warm PSD step QP keeps its updates"
+    );
+    assert!(
+        alg.warm_qp_opts(&on, dim - 1, lifted.hessian_inertia)
+            .is_none(),
+        "below the ceiling the size rule stands"
+    );
+}

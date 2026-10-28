@@ -43,6 +43,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1091)
     p.add_argument("--rho", type=float, default=2.0, help="coupling weight")
     args = p.parse_args()
+    if args.n < 2:
+        p.error("n must be at least 2 (the coupling term needs a neighbour)")
 
     rng = random.Random(args.seed)
     n = args.n

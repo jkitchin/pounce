@@ -173,9 +173,12 @@ pub struct SqpOptions {
     ///
     /// Cold solves keep the size rule because they are the add-dominated
     /// ones the Schur path wins on, and at this size they are not all seeded
-    /// from the interior point: the seed needs a Hessian certified PSD
-    /// (`ipm_seeded_step_qp`), which neither of these is, so a cold one still
-    /// builds its working set one add at a time.
+    /// from the interior point: when the hint is not `Psd` the seed certifies
+    /// the Hessian PSD numerically (`ipm_seeded_step_qp`) and declines if it
+    /// is not. The lifted QP's `-1` entries never pass, and a nonconvex
+    /// model's exact Hessian need not, so such a cold QP still builds its
+    /// working set one add at a time. (A convex model's exact Hessian does
+    /// pass, and its cold step QPs are seeded.)
     pub qp_schur_indefinite_max_dim: Option<usize>,
 
     /// NLP size `n + m` from which a step QP solved without a working set,
@@ -242,22 +245,17 @@ impl Default for SqpOptions {
 }
 
 impl SqpOptions {
-    /// Whether a step QP of size `n + m = dim` whose Hessian carries the
-    /// inertia hint `inertia`, warm-started from a working set when `warm`,
-    /// uses Schur updates, by [`Self::qp_schur_min_dim`] and
-    /// [`Self::qp_schur_indefinite_max_dim`]; `None` when the caller chose
-    /// (`qp_schur_min_dim` unset), which leaves the QP options as given.
-    pub fn step_qp_schur_updates(
-        &self,
-        dim: usize,
-        inertia: HessianInertia,
-        warm: bool,
-    ) -> Option<bool> {
+    /// Whether a step QP of size `n + m = dim` uses Schur updates, by
+    /// [`Self::qp_schur_min_dim`] and [`Self::qp_schur_indefinite_max_dim`].
+    /// `warm` is the inertia hint of a QP warm-started from a working set,
+    /// `None` for a cold one, whose hint the rule does not read. `None` back
+    /// when the caller chose (`qp_schur_min_dim` unset), which leaves the QP
+    /// options as given.
+    pub fn step_qp_schur_updates(&self, dim: usize, warm: Option<HessianInertia>) -> Option<bool> {
         let min = self.qp_schur_min_dim?;
         // `!= Psd`, as in the QP solver's own drop branch: `Unknown` resets on
         // a drop just as `Indefinite` does.
-        let refactor = warm
-            && inertia != HessianInertia::Psd
+        let refactor = warm.is_some_and(|h| h != HessianInertia::Psd)
             && self.qp_schur_indefinite_max_dim.is_some_and(|d| dim >= d);
         Some(dim >= min && !refactor)
     }
@@ -281,32 +279,30 @@ mod tests {
             DEFAULT_QP_SCHUR_INDEFINITE_MAX_DIM,
         );
         assert!(lo < hi);
-        for h in [Indefinite, Psd, Unknown] {
-            for warm in [false, true] {
-                let at = |d| o.step_qp_schur_updates(d, h, warm);
-                assert_eq!(at(lo - 1), Some(false), "{h:?} warm={warm}");
-                assert_eq!(at(lo), Some(true), "{h:?} warm={warm}");
-                assert_eq!(at(hi - 1), Some(true), "{h:?} warm={warm}");
-            }
+        for warm in [None, Some(Indefinite), Some(Psd), Some(Unknown)] {
+            let at = |d| o.step_qp_schur_updates(d, warm);
+            assert_eq!(at(lo - 1), Some(false), "{warm:?}");
+            assert_eq!(at(lo), Some(true), "{warm:?}");
+            assert_eq!(at(hi - 1), Some(true), "{warm:?}");
         }
         for h in [Indefinite, Unknown] {
-            assert_eq!(o.step_qp_schur_updates(hi, h, true), Some(false), "{h:?}");
-            assert_eq!(o.step_qp_schur_updates(hi, h, false), Some(true), "{h:?}");
+            assert_eq!(o.step_qp_schur_updates(hi, Some(h)), Some(false), "{h:?}");
         }
-        assert_eq!(o.step_qp_schur_updates(hi, Psd, true), Some(true));
+        assert_eq!(o.step_qp_schur_updates(hi, None), Some(true), "cold");
+        assert_eq!(o.step_qp_schur_updates(hi, Some(Psd)), Some(true));
 
         let unset = SqpOptions {
             qp_schur_indefinite_max_dim: None,
             ..SqpOptions::default()
         };
         assert_eq!(
-            unset.step_qp_schur_updates(hi, Indefinite, true),
+            unset.step_qp_schur_updates(hi, Some(Indefinite)),
             Some(true)
         );
         let chosen = SqpOptions {
             qp_schur_min_dim: None,
             ..SqpOptions::default()
         };
-        assert_eq!(chosen.step_qp_schur_updates(hi, Indefinite, true), None);
+        assert_eq!(chosen.step_qp_schur_updates(hi, Some(Indefinite)), None);
     }
 }

@@ -226,10 +226,7 @@ impl SqpAlgorithm {
         // cold rule; a warm-started step QP may override it (`warm_qp_opts`).
         let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
-        if let Some(on) =
-            self.opts
-                .step_qp_schur_updates(nlp.n() + nlp.m(), HessianInertia::Psd, false)
-        {
+        if let Some(on) = self.opts.step_qp_schur_updates(nlp.n() + nlp.m(), None) {
             self.qp_opts.use_schur_updates = on;
         }
         self.ipm_cold_start = self
@@ -1452,14 +1449,14 @@ impl SqpAlgorithm {
     /// (`SqpOptions::step_qp_schur_updates`), or `None` when that is what
     /// `base` already says. `base` carries the cold rule. The hint is the
     /// built QP's, so a lifted L-BFGS subproblem reads `Indefinite` (gh#1091).
-    fn warm_qp_opts(
+    pub(crate) fn warm_qp_opts(
         &self,
         base: &QpOptions,
         dim: usize,
         inertia: HessianInertia,
     ) -> Option<QpOptions> {
         self.opts
-            .step_qp_schur_updates(dim, inertia, true)
+            .step_qp_schur_updates(dim, Some(inertia))
             .filter(|&on| on != base.use_schur_updates)
             .map(|on| QpOptions {
                 use_schur_updates: on,

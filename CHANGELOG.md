@@ -74,11 +74,16 @@ changes.
   refactors anyway, so only adds take the rank-2 update, and a warm step QP is
   mostly drops: on the reporter's handover QP, 126 s with updates and 72 s
   without; on a 6000-variable drop-dominated model with L-BFGS, the solve goes
-  from 84 s to 27 s at the same objective. Cold step QPs, which are
-  add-dominated and not seeded from the interior point when their Hessian is
-  not PSD, keep the size rule, as does an explicit `sqp_qp_use_schur_updates`.
-  On the 38 Maros-Mészáros problems at that size through the SQP
-  (`solver_selection=nlp`), no status changes. The comparison gh #1083 first
+  from 84 s to 27 s at the same objective. Cold step QPs keep the size rule:
+  they are add-dominated, and are seeded from the interior point only when the
+  Hessian certifies PSD numerically, which the lifted L-BFGS QP never does and
+  a nonconvex model's exact Hessian need not. An explicit
+  `sqp_qp_use_schur_updates` still wins. On the 38 Maros-Mészáros problems at
+  that size through the SQP (`solver_selection=nlp`), no status changes, but
+  three solved objectives move: `LISWET2`, `LISWET3` and `LISWET9` (by 3.4%,
+  1899.378 → 1963.251) now report the active-set SQP's answer at feasibility
+  instead of the interior point's answer to the problem relaxed by
+  `bound_relax_factor`. The comparison gh #1083 first
   reported was run under `solver_selection=auto`, which routes a convex QP to
   the convex interior point whatever `algorithm` says, so it never reached the
   SQP; this one replaces it.
@@ -90,16 +95,6 @@ changes.
   troubleshooting no longer sends a `knowhow add` user, who has no checkout,
   to `cargo install --path crates/...`. The skill README no longer claims
   the `--path` installs build from crates.io, and drops a stale feral pin.
-- **Warm-started exact-Hessian step QPs of the active-set SQP leave Schur
-  updates off at `n + m ≥ 5000` (gh #1083).** An exact Hessian makes the
-  step QP indefinite, and there every drop refactors anyway, so only adds take
-  the rank-2 update; a warm step QP is mostly drops, and paid for the larger
-  `K_max` for nothing (on the reporter's handover QP: 126 s with updates,
-  72 s without). Cold step QPs, which are add-dominated and on a nonconvex
-  model not seeded from the interior point, keep the size rule, as do
-  quasi-Newton Hessians and an explicit `sqp_qp_use_schur_updates`. On the 38
-  Maros-Mészáros problems at that size under `algorithm=active-set-sqp`, no
-  status changes.
 - **Drops on the active-set QP's refactor path reuse the symbolic analysis
   (gh #1083).** From `n + m ≥ 5000`, a dropped row stays in the KKT pattern
   as an inert sentinel until a row the pattern does not hold is added, so

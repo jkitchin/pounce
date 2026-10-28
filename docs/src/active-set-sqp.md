@@ -265,14 +265,18 @@ control on the larger null space; only adds take the update. A warm step QP
 is mostly drops: the reporter's took 187 Schur updates against 4181
 working-set changes over an hour, and on its handover QP the Schur path took
 126 s against 72 s without it. Cold step QPs keep the size rule, because they
-are the add-dominated ones the table above measures, and neither class is
-seeded from the interior point (the seed needs a Hessian certified PSD).
+are the add-dominated ones the table above measures, and the interior-point
+seed does not always take them: it needs the Hessian certified PSD
+numerically, which the lifted L-BFGS QP's `-1` entries never pass and a
+nonconvex model's exact Hessian need not (a convex model's does, and its cold
+step QPs are seeded).
 
 Measured on a 6000-variable smooth model started with every bound active, so
 that its warm step QPs are drop-dominated, under `algorithm=active-set-sqp
 ipm_sqp_handover=no`. With L-BFGS its first warm QP takes 1024 working-set
 changes, 64.3 s with updates and 19.8 s without, and the solve 84.1 s against
-27.0 s; with the exact Hessian the solve takes 2.2 s against 4.0 s. The
+27.0 s; with the exact Hessian the solve takes 4.0 s with updates and 2.2 s
+without. The
 objective agrees to 13 digits. On the 38 Maros-Mészáros problems at that size
 (`solver_selection=nlp`, so that the convex router does not take them;
 `max_wall_time=60`) no status changes, and where both solve (29 problems) the
