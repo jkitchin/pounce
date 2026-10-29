@@ -21,7 +21,8 @@
 #   3. THE PUBLISH ORDER IS TOPOLOGICAL. cargo refuses to publish a crate
 #      before the crates it depends on are live, so the list must be in
 #      dependency order. This check fails if any crate appears before one of
-#      its own (publishable) workspace dependencies.
+#      its own (publishable) workspace dependencies, dev-dependencies
+#      included: a versioned dev-dep must be live too.
 #
 #   4. EVERY DEPENDENCY IS PUBLISHABLE. cargo publish rewrites path/git deps to
 #      a crates.io version requirement and refuses to upload a crate whose
@@ -97,12 +98,21 @@ for pid in ws:
     pub[p["name"]] = p
 names = set(pub)
 
-# Dependency edges restricted to publishable normal/build deps.
+# Dependency edges restricted to publishable deps of every kind. Dev-deps
+# count: cargo keeps a dev-dependency that carries a version requirement in
+# the published manifest (it strips only path-only ones), so `cargo publish`
+# resolves it against crates.io and fails if it is not live yet. Every
+# `.workspace = true` dep inherits a version. Leaving dev-deps out is what
+# let pounce-sensitivity (dev-dep on pounce-nl) sit ahead of pounce-nl and
+# fail the 0.14.0 publish at crate 17 of 22.
 edges = {n: set() for n in names}
 for n, p in pub.items():
     for d in p["dependencies"]:
-        if d.get("kind") in (None, "build") and d["name"] in names:
-            edges[n].add(d["name"])
+        if d["name"] not in names:
+            continue
+        if d.get("kind") == "dev" and d.get("req") in (None, "", "*"):
+            continue
+        edges[n].add(d["name"])
 
 script = os.environ["SCRIPT_LIST"].split()
 script_set = set(script)
