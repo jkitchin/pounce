@@ -28,6 +28,7 @@ pub mod derivative_test;
 pub mod expression_provider;
 pub mod ipopt_nlp;
 pub mod live_iterate;
+pub mod mpcc;
 pub mod orig_ipopt_nlp;
 pub mod quadratic;
 pub mod return_codes;

@@ -193,6 +193,33 @@ exist and run from one command.
    pair, solve the tightened NLP once (LICQ holds there), and report the
    stationarity class in the JSON. CALIPSO reports residuals only.
 
+**Increments** (each its own commit, each measured before the next):
+
+1. ✅ **Lowering** — `pounce_nlp::mpcc::MpccTnlp`: a TNLP wrapper taking
+   declared pairs `0 <= x_j − x_L ⟂ g_i(x) − g_L >= 0` (AMPL's
+   `complements`, one-sided) and adding one product row per pair, bounded
+   per `Lowering::{Eq, Ineq, Relaxed(τ)}`, switchable between solves.
+   Exact Jacobian and Hessian (checked against finite differences in both
+   index styles), no duplicate entries. Refuses two-sided pairs with the
+   reason.
+2. **Driver** — the policy (which lowerings, in what order, when to fall
+   back) in `pounce_algorithm`, the solves in `pounce_restoration`, the
+   split the second-opinion ladder already uses so the CLI, Python, C and
+   Rust entry points share one implementation. First rung `Eq` (fast);
+   on failure, the Scholtes continuation with full warm starts and an `Eq`
+   finish (`Ineq` where `Eq` would over-determine a square model); then ℓ₁.
+3. **Certificate** — after the driver's answer, read each pair's active
+   side, solve the tightened NLP once from that point, and report
+   S-stationarity (biactive multipliers' signs) in the JSON; a failed rung
+   is decided by physical violation *and* the certificate, not by status.
+4. **Entry points** — `.nl` kind-5 rows (AMPL `complements`, Pyomo
+   `mpec`) mapped to pairs instead of refused; `pounce.Problem(...,
+   complementarity=...)`; safe defaults on declared rows (no bound
+   relaxation).
+5. **Measure** — `benchmarks/calipso/` gains a `declared` route that hands
+   the model over with its pairs and no options, scored against every
+   hand-picked route; Gate 0 and the fixture sweep for regressions.
+
 **Measured by:**
 - Gate 0 corpus: 60/60 solved, 0 below `f*` (no regression).
 - CALIPSO port: 5/5 physical on both problems; drifting-car iterations
