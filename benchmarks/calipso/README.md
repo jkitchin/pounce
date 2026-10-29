@@ -240,6 +240,81 @@ S-stationary) under defaults; CALIPSO returns 17. `maratos`: all solve in
    augmented-Lagrangian fallback rung is a candidate, pending a larger
    degenerate corpus.
 
+## The two follow-up experiments
+
+### 1. An augmented-Lagrangian fallback rung (`al_fallback.py`, `exp_al_corpus.py`, `exp_al_control.py`)
+
+`wachter` is the one failure no formulation fixes, and CALIPSO solves it.
+To see whether that generalizes, a prototype AL rung was built *around*
+POUNCE — equalities in a textbook augmented Lagrangian (Nocedal & Wright
+alg. 17.4, nothing tuned), inequalities and bounds left to POUNCE's IPM,
+then one warm POUNCE polish so the verdict is POUNCE's own — and tried on
+every failure of every NLP fixture in `crates/pounce-cli/tests/fixtures`
+(63 models; own start plus 10 starts perturbed by the variables' own
+scale; 686 runs). A run fails if POUNCE's status is not success /
+acceptable / feasible-point-found or the source violation exceeds 1e-4
+(POUNCE's own `constr_viol_tol`); a rescue must meet the same bar, so the
+rung cannot "rescue" an infeasible model — a rescue *proves* feasibility.
+
+110 runs fail. 88 are on models no method solves from any start (six
+fixtures infeasible by design, plus `circle_parabola_t1p5` and
+`issue981_water_main`); the rung rescues none of them, as it must not. 22
+are on known-feasible models:
+
+| model | failures | AL rung | best existing option | any existing option |
+|---|---:|---:|---:|---:|
+| `issue981_wachter_biegler` | 11 (every start) | **11** | 0 | 0 |
+| `circle_parabola_t0p5` | 2 | **2** | 1 | 1 |
+| `discs` | 2 | 2 | 2 | 2 |
+| `deb7` | 2 | **2** | 1 | 1 |
+| `scale_audit_retry_meyer3` | 5 | 0 | 1 (`mu_strategy=adaptive`) | 1 |
+| **total** | **22** | **17** | 4 (`l1_exact_penalty_barrier`) | 5 |
+
+Existing options tried as the control: `l1_exact_penalty_barrier`,
+`l1_fallback_on_restoration_failure`, `mu_strategy=adaptive`. The rung's
+rescues reach the own-start optimum in all but one case (`discs` start 5:
+21.38 against 12.00). It is expensive as prototyped: ~50 inner iterations
+on `wachter` but 7–12k on `discs` and `deb7`, against a few hundred for a
+plain solve.
+
+**Reading:** a real effect, larger than every existing option combined
+(17 vs 5), but 11 of the 17 are one model; on the rest it is 6 vs 5, with
+two rescues nothing else gets. Medium evidence; the decisive test is a
+larger trap corpus (CUTEst / MacMPEC from random starts), not available in
+this container.
+
+### 2. Derivatives at a contact switch (`exp_contact_sens.py`, `exp_contact_sens.jl`)
+
+One implicit contact step of a falling particle,
+`z⁺ = argmin ½(z − ẑ)² s.t. z ≥ 0`, `ẑ = z₀ + h·v − h²g`, so
+`z⁺ = max(0, ẑ)` and the exact one-sided derivatives in the initial
+velocity `v` are known: `h` in flight, 0 in contact, and at the switch `h`
+for an increase and 0 for a decrease. (Trajectory *optimization* with
+complementarity generically has a solution that **jumps** at a contact
+switch — the control drops when the floor takes the load — and at a jump
+no derivative is right; a contact *step* is the well-posed case, and the
+one a differentiable simulator or CALIPSO's policy tuning differentiates
+through.) Two transcriptions: the contact as the **bound** `z ≥ 0`, and as
+explicit **complementarity** `z − ẑ − γ = 0, z·γ = 0` (CALIPSO's way).
+Base points at the switch and ±1e-6, ±1e-3 away; steps ±1e-2, ±1e-3.
+
+| method | bound form | complementarity form |
+|---|---|---|
+| POUNCE `sens_solution`, `degeneracy="directional"` (default) | **correct on both sides**, at the switch and off it (error = the IPM base offset only) | averaged on the increasing side (≈ h/2) |
+| POUNCE `mode="fix_relax"` | exact to 1e-13 for increases | averaged |
+| POUNCE `sens_jacobian` (plain) | averaged, h/2 — and warns that the point is degenerate | averaged |
+| CALIPSO.jl (default tol 1e-4) | `dz/dv = 0.050` everywhere within ±1e-3 of the switch | same |
+| CALIPSO.jl (tol 1e-8) | 0.0500 at the switch; 0.065 / 0.035 at ±1e-3 (exact 0.1 / 0) | 0.0500 at the switch; 0.091 / 0.009 at ±1e-3 |
+
+**Reading:** POUNCE can already do what CALIPSO cannot — return the
+correct one-sided derivative through a contact switch — but only when the
+contact is a variable bound; its degeneracy machinery inspects bounds, not
+complementarity rows, so written the usual way it averages like CALIPSO.
+CALIPSO's implicit-function derivative is averaged across a band around
+the switch (~√μ wide) at any tolerance. Connecting declared
+complementarity pairs to the existing kink machinery is a concrete,
+demonstrated win for workstream E.
+
 ## What this is not evidence about
 
 - **The paper's quadruped numbers.** CALIPSO.jl's last commit (`0e3bdcf`,
