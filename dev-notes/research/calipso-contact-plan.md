@@ -75,6 +75,29 @@ updates simply does not lead into it. One tiny problem is not a case for
 building anything, but it is the only kind of failure in this corpus that
 no formulation choice fixes.
 
+### Why invest: the evidence, feature by feature
+
+The case for this work rests on **native cones** and **automatic
+complementarity handling**, each supported on several models; not on any
+single problem. "Measured" is from `benchmarks/calipso/` (POUNCE, Ipopt
+3.14.20 + MUMPS, CALIPSO.jl run here); "prior work" is published or
+documented elsewhere and not re-checked here.
+
+| Candidate | Evidence for | Evidence against | Strength |
+|---|---|---|---|
+| **Native second-order cones** in the NLP solver (C) | Measured, 3 models: drifting car with `t − ‖x‖` cones is 0/5 on every route for POUNCE and Ipopt alike, while CALIPSO solves it; the smooth rewrite reports `Solve_Succeeded` 3.5e-4 off physics unless `bound_relax_factor=0`; the quadruped (8 cone pairs per step) fails in POUNCE and solves in CALIPSO (cause not yet isolated). Prior work: friction and thrust cones are standard in contact and powered-descent models. | Expert users can rewrite cones in squared form and set `bound_relax_factor=0`. | **Strong**: several models plus a problem class. |
+| **Automatic complementarity handling** (B: declare, choose the route, fall back, certify) | Measured, 5 of 6 MPCC models: the route decides the outcome. `complementarity` 17 / 25 / 85; ball-in-cup certified on 1/5 to 5/5 starts depending on route; drift `ncp_eq` 3/5 vs ℓ₁ 5/5; bunny-hop ℓ₁ 30× worse; rocket 1532 to 1618. No route wins everywhere. | Expert users can pick a route by hand. | **Strong** for "just works"; mostly orchestration of existing pieces, so cheap relative to its value. |
+| **Fewer iterations** (one solve, not a 10-stage continuation) (B2) | Measured, 3 models: rocket CALIPSO 74 vs POUNCE's best 278; drift ~130 vs 729–1015; quadruped 168 vs POUNCE failing at 3000. | Wall time favours POUNCE on the small models (CALIPSO.jl 20–40 s where POUNCE takes seconds). | **Medium**: matters most at scale, which this corpus does not reach. |
+| **Augmented-Lagrangian fallback rung** | Measured, 1 model: `wachter` defeats POUNCE, Ipopt and both ℓ₁ options; CALIPSO solves it. Prior work: AL global convergence under degenerate constraints incl. MPCCs (Izmailov–Solodov–Uskov 2012, cited by the paper). | One tiny problem; the quadruped may be a second case but is undiagnosed. | **Weak today**: measure on a larger degenerate corpus (MacMPEC, `benchmarks/mpcc`) before building. |
+| **Correct derivatives through contact** (E) | Prior work, POUNCE's own: at a kink the plain sensitivity step is the two-sided average (`sens_resolve_oracle.rs`); CALIPSO's least-squares fallback averages the same way, and POUNCE's directional / fix-relax modes do not. | Not measured on a contact model yet. | **Unknown, potentially the most novel**; one finite-difference comparison at a contact switch decides it. |
+| **Stationarity certificate** on every answer | Measured: separates 17 (optimal) / 25 (genuine local) / 85 (spurious) on `complementarity`; CALIPSO's rocket and ball-in-cup answers do not certify at its own tolerance. | — | **Strong**, and POUNCE's own; it is what the B fallback ladder keys on. |
+| The paper's headline (Ipopt fails on these problems) | — | Measured, refuted for bunny-hop and the drifting car: stock Ipopt solves both through the right route. | Locates the gap in **formulation and usability**, which is exactly what B and C address. |
+
+So: **build B and C** (the core); **measure before building** the AL
+fallback and E, since each has one cheap decisive experiment; treat the
+quadruped matrix, still running, as the item that can move the ratings: if
+POUNCE fails it on every route, C and the AL rung both strengthen.
+
 ## 1. Rules that apply throughout
 
 - Any change that reroutes or rescales the NLP solver's steps (B2, C) runs
