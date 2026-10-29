@@ -128,7 +128,6 @@
 # the per-run results.jsonl / errors.log / solution .npy are not.
 !/benchmarks/calipso/*.py
 !/benchmarks/calipso/*.jl
-!/benchmarks/calipso/run_all.sh
 !/benchmarks/calipso/run_corpus.sh
 # The cblib suite is the conic (exp/power cone) tier: CBLIB .cbf instances
 # solved through the pounce_cblib binary. Track its runner (README via the
