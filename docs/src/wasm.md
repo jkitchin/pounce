@@ -246,7 +246,8 @@ factorization, where the gap narrows. Nothing here is tuned — no SIMD, no
 | `crates/pounce-wasm/web` | the `.nl` page: `index.html`, `app.js`, `worker.js`, `wasi.js` |
 | `crates/pounce-wasm/web-python` | the Pyodide page: the editor, plus `pounce_browser.py` — the Pyomo ↔ POUNCE shim — and `wheels/`, the emscripten `pounce-solver` build |
 | `crates/pounce-wasm/build-wheel.sh` | builds `pounce-solver` for emscripten and stages it into `web-python/wheels/` |
-| `crates/pounce-wasm/build.sh` | builds the module and stages it into both pages |
+| `crates/pounce-wasm/build.sh` | builds the module and stages it into both pages; `--studio` builds the two studio modules into `studio/` |
+| `crates/pounce-wasm/studio` | `debug-host.js`, the host for the studio modules (live debugger, report, evaluation) |
 
 The target is `wasm32-wasip1`, not `wasm32-unknown-unknown`. WASI gives the
 solver a clock (`std::time::Instant::now()` panics on
@@ -265,6 +266,47 @@ that many UTF-8 bytes. Reading a length rather than scanning for a NUL
 terminator keeps the reader's correctness independent of what is *in* the
 payload, and lets a bad pointer or length be reported as exactly that
 instead of surfacing later as an unrelated parse error.
+
+## The studio build: debugger, report, evaluation
+
+`build.sh --studio` builds the module with the `studio` feature, for a front
+end that wants to look inside a solve rather than only run one. Every build
+exports these (the `.nl` page just does not use them yet):
+
+| Export | Returns |
+| --- | --- |
+| `pounce_options_catalog()` | every registered option: type, default, bounds, valid values, category, short and long description |
+| `pounce_solve_report()` | the last solve's `pounce.solve-report/v1` document, per-iteration rows included — the JSON `pounce model.nl --json` writes |
+| `pounce_eval(json)` | objective, gradient, constraints and Jacobian triplets at a point |
+| `pounce_eval_slice(json)` | objective and constraints on a grid in two variables through a point |
+
+and the `studio` feature adds:
+
+| Export | Returns |
+| --- | --- |
+| `pounce_debug_solve(opts)` | a solve under the [JSON debugger](debugger.md#the-json-protocol), the protocol on stdout and commands on stdin |
+| `pounce_analyze()` | `pounce-studio-core`'s analysis of the last report: findings with their glossary entries, stalls, restoration windows, the convergence trace |
+| `pounce_glossary()` | the log-column, finding and citation glossary |
+
+The debugger reads each command with a blocking line read, which a page
+cannot do. `pounce-studio-debug.wasm` is therefore the module after
+Binaryen's Asyncify pass: when no command is waiting, `fd_read` unwinds the
+wasm stack into JavaScript, and the next command rewinds it into the same
+read, so the solve stays suspended at the pause between clicks. No threads,
+no `SharedArrayBuffer`, and so no cross-origin-isolation headers, which
+would stop the page loading Pyodide or anything else from a CDN. The
+debugger defaults to [inline artifacts](debugger.md#inline-artifacts-artifacts-inline)
+there, since `viz` has no file to write and no viewer to launch, and `ask
+--prompt-only` hands the prompt to a model of the page's own.
+
+Asyncify instruments every function that can reach the read, and the
+debugger hook is an indirect call inside the iteration loop, so it slows
+the whole solve, not just a paused one: deb7 (5 interleaved solves each)
+takes 1000 ms (sd 96) without the pass and 1617 ms (sd 253) with it. So the
+build stages two modules: `pounce-studio.wasm` for solving and
+`pounce-studio-debug.wasm` for debugging. `studio/debug-host.js` drives
+either (`canDebug` says which) and is what
+`tests/debug_protocol.mjs` runs end to end in Node.
 
 ## Limitations
 

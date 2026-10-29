@@ -39,10 +39,12 @@ export function createWasi(onStdout) {
       return ERRNO_SUCCESS;
     },
 
-    // Monotonic and realtime clocks both map to `performance.now()`: the
-    // solver only ever takes differences (elapsed wall time per solve).
-    clock_time_get(_id, _precision, out) {
-      dv().setBigUint64(out, BigInt(Math.round(performance.now() * 1e6)), true);
+    // The solver times itself with differences of the monotonic clock
+    // (`performance.now()`). The realtime clock (id 0) is the wall-clock
+    // time, which a solve report stamps as its creation date.
+    clock_time_get(id, _precision, out) {
+      const ms = id === 0 ? performance.timeOrigin + performance.now() : performance.now();
+      dv().setBigUint64(out, BigInt(Math.round(ms * 1e6)), true);
       return ERRNO_SUCCESS;
     },
     clock_res_get(_id, out) {
@@ -80,9 +82,11 @@ export function createWasi(onStdout) {
     fd_close: () => ERRNO_BADF,
     fd_fdstat_get: () => ERRNO_BADF,
     fd_fdstat_set_flags: () => ERRNO_BADF,
+    fd_filestat_get: () => ERRNO_BADF,
     fd_prestat_get: () => ERRNO_BADF,
     fd_prestat_dir_name: () => ERRNO_BADF,
     fd_read: () => ERRNO_BADF,
+    fd_readdir: () => ERRNO_BADF,
     fd_seek: () => ERRNO_BADF,
     path_create_directory: () => ERRNO_NOSYS,
     path_filestat_get: () => ERRNO_NOSYS,

@@ -1,0 +1,3 @@
+# Built by `build.sh --studio`; see README.md.
+*.wasm
+wasi.js
