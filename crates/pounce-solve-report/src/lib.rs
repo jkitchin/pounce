@@ -925,7 +925,14 @@ impl ReportBuilder {
         // spelling, nor set one that disagrees with the other (gh #767).
         let mut solution = self.solution;
         solution.status_upstream = solution.status.upstream_name().to_string();
-        let result_id = format!("{}-{}", self.started_unix_nanos, std::process::id());
+        // WASI has no process id (`std::process::id` aborts there); in the
+        // browser one page runs one solve at a time, so the timestamp alone
+        // identifies it.
+        #[cfg(not(target_family = "wasm"))]
+        let pid = std::process::id();
+        #[cfg(target_family = "wasm")]
+        let pid = 0;
+        let result_id = format!("{}-{pid}", self.started_unix_nanos);
         let created_at_iso = unix_nanos_to_iso(self.started_unix_nanos);
 
         SolveReport {

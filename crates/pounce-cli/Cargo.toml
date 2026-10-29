@@ -59,12 +59,19 @@ anstyle.workspace = true
 # Multistart / find-minima (`--minima`): archive, sampler, penalty wrappers
 # and options (gh#966; the sampler's rand / sobol_burley deps moved with it).
 pounce-minima.workspace = true
+
 # Line editing for the interactive debugger REPL (`--debug`): history,
 # Ctrl-R search, and Tab completion. Only used on an interactive TTY;
-# piped input and `--debug-json` fall back to a plain line reader.
+# piped input and `--debug-json` fall back to a plain line reader. Not
+# built for wasm targets, where the library (the debugger's command engine
+# and its JSON front end) runs in a browser with no terminal.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 rustyline = { version = "14", features = ["derive"] }
+
 # SIGINT handler so Ctrl-C during a debug run breaks into the debugger
-# at the next iteration (second Ctrl-C aborts). Already in the tree.
+# at the next iteration (second Ctrl-C aborts). Unix only; the code that
+# uses it is `cfg(unix)`.
+[target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal"] }
 
 [features]

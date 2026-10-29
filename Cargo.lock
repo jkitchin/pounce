@@ -1193,12 +1193,15 @@ name = "pounce-wasm"
 version = "0.14.0"
 dependencies = [
  "pounce-algorithm",
+ "pounce-cli",
  "pounce-common",
  "pounce-nl",
  "pounce-nlp",
+ "pounce-observability",
  "pounce-presolve",
  "pounce-restoration",
  "pounce-solve-report",
+ "pounce-studio-core",
  "serde_json",
 ]
 

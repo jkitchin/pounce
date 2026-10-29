@@ -22,7 +22,17 @@
 //! * [`pounce_solution_sol`] — format the last solve as an AMPL `.sol` file,
 //!   the same bytes `pounce model.nl` writes, so a browser result can be read
 //!   back by AMPL or Pyomo.
+//! * [`pounce_solve_report`] — the last solve's `pounce.solve-report/v1`
+//!   JSON (the CLI's `--json` document, per-iteration rows included).
+//! * [`pounce_options_catalog`] — every registered option with its type,
+//!   default, bounds, valid values and descriptions.
+//! * [`pounce_eval`] / [`pounce_eval_slice`] — the model's functions at a
+//!   point, and on a 2-D grid through one.
 //! * [`pounce_free_payload`] — release a returned payload.
+//!
+//! The `studio` feature adds the debugger (`pounce_debug_solve`) and the
+//! `pounce-studio-core` analysis (`pounce_analyze`, `pounce_glossary`); see
+//! the `studio` module.
 //!
 //! Every returned payload is a little-endian `u32` byte count followed by
 //! that many UTF-8 bytes, so the caller never has to scan for a terminator.
@@ -51,6 +61,9 @@ use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use pounce_restoration::second_opinion_driver::run_second_opinion_ladder;
+use pounce_solve_report::{
+    InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num,
+};
 
 /// Bound on how many per-variable / per-constraint entries a JSON payload
 /// carries. A million-variable model would otherwise serialize a JSON array
@@ -69,6 +82,9 @@ struct SolveOutcome {
     z_l: Vec<f64>,
     z_u: Vec<f64>,
     status: pounce_nlp::return_codes::ApplicationReturnStatus,
+    /// The solve report (`pounce.solve-report/v1`), for
+    /// [`pounce_solve_report`].
+    report: serde_json::Value,
 }
 
 thread_local! {
@@ -259,6 +275,8 @@ pub unsafe extern "C" fn pounce_load(
             Err(e) => return error_json(format!("could not parse .nl file: {e}")),
         };
         attach_names(&mut prob, col, row);
+        #[cfg(feature = "studio")]
+        studio::remember_model(&prob);
 
         let tnlp = match NlTnlp::try_new(prob) {
             Ok(t) => t,
@@ -439,10 +457,30 @@ pub unsafe extern "C" fn pounce_solve(opts_ptr: *const u8, opts_len: usize) -> *
 }
 
 fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
+    solve_loaded_with(tnlp, opts, |_| {})
+}
+
+/// [`solve_loaded`] with a hook to adjust the application once its options
+/// are read and before anything is built from them: the studio build uses
+/// it to install the JSON debugger.
+fn solve_loaded_with(
+    tnlp: Rc<RefCell<NlTnlp>>,
+    opts: &str,
+    configure: impl FnOnce(&mut IpoptApplication),
+) -> serde_json::Value {
     let mut app = IpoptApplication::new();
     if let Err(e) = app.initialize_with_options_str(opts) {
         return serde_json::json!({ "error": format!("bad options: {}", e.message) });
     }
+    configure(&mut app);
+    // Per-iteration rows for the solve report (the CLI does the same for
+    // `--json` at full detail): the studio's convergence plots and
+    // diagnostics read them. The rows come from the solver's tracing events,
+    // so a collector has to be installed for the solve (and the ladder's
+    // re-solves): collector only, with no log output to interleave with the
+    // console stream or the debugger protocol.
+    app.enable_iter_history();
+    let _collector = pounce_observability::collector_scope();
 
     // Wrap in the auxiliary presolve exactly as the CLI does, so a model
     // solved in the browser takes the same path — and reaches the same
@@ -522,6 +560,18 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
             println!("{line}");
         }
     });
+    // gh #850: what the ladder did, for the solve report — the same block
+    // the CLI writes, taken before `statistics` moves out of the outcome.
+    let second_opinion = ladder
+        .ran()
+        .then(|| pounce_solve_report::SecondOpinionInfo {
+            tried: ladder.tried.iter().map(|s| s.to_string()).collect(),
+            promoted_by: ladder.promoted_by.map(|s| s.to_string()),
+            base_status: ladder.base_status.upstream_name().to_string(),
+            base_iteration_count: ladder.base_iteration_count,
+            rung_iteration_counts: ladder.rung_iteration_counts.clone(),
+            total_iteration_count: ladder.total_iteration_count(),
+        });
     let status = ladder.status;
     let stats = ladder.statistics;
     let presolve_report = presolve.as_ref().map(|p| {
@@ -584,6 +634,35 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
     // primal and dual blocks plus the solver's own status line, and the
     // multipliers are not reconstructible from the JSON payload (which
     // truncates long vectors for display).
+    // The `pounce.solve-report/v1` document the CLI writes with `--json`, at
+    // full detail (per-iteration rows included): what the studio's report
+    // and diagnostics read.
+    let mut builder = ReportBuilder::new(ReportDetail::Full, InputDescriptor::TnlpDirect);
+    builder.problem.n_variables = t.problem().n as _;
+    builder.problem.n_constraints = m as _;
+    builder.problem.n_objectives = 1;
+    builder.problem.minimize = t.problem().minimize;
+    builder.solution.engine = if app.answer_from_active_set_sqp() {
+        "sqp-active-set"
+    } else {
+        "nlp"
+    }
+    .to_string();
+    builder.solution.status = status;
+    builder.solution.solve_result_num = status_to_solve_result_num(status);
+    builder.solution.objective = objective;
+    builder.solution.x = x.clone();
+    builder.solution.lambda = lambda.clone();
+    builder.ingest_stats(&stats);
+    builder.stats.final_objective = objective;
+    if let Some(linsol) = app.linear_solver_summary() {
+        builder.set_linear_solver_summary(linsol);
+    }
+    if let Some(info) = second_opinion {
+        builder.set_second_opinion(info);
+    }
+    let report = serde_json::to_value(builder.finish()).unwrap_or(serde_json::Value::Null);
+
     LAST_SOLVE.with(|slot| {
         *slot.borrow_mut() = Some(SolveOutcome {
             x: x.clone(),
@@ -592,6 +671,7 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
             z_l,
             z_u,
             status,
+            report,
         })
     });
 
@@ -637,6 +717,326 @@ fn solve_loaded(tnlp: Rc<RefCell<NlTnlp>>, opts: &str) -> serde_json::Value {
         "truncated": x_truncated || g_truncated,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Solve report
+// ---------------------------------------------------------------------------
+
+/// The last solve's `pounce.solve-report/v1` document — the JSON `pounce
+/// model.nl --json` writes, at full detail (per-iteration rows included) —
+/// or `null` when no solve has completed since the model was loaded.
+#[unsafe(no_mangle)]
+pub extern "C" fn pounce_solve_report() -> *mut u8 {
+    guarded("solve_report", || {
+        let report = LAST_SOLVE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|o| o.report.clone())
+                .unwrap_or(serde_json::Value::Null)
+        });
+        to_payload(&report.to_string())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Options catalog
+// ---------------------------------------------------------------------------
+
+/// Every registered solver option as a JSON array, in registration order:
+/// `name`, `type` (`number` / `integer` / `string`), `default`, `category`,
+/// `short` and `long` descriptions, `advanced`, the registered bounds
+/// (`lower` / `upper`, `null` when unbounded, with `lower_strict` /
+/// `upper_strict`), and `valid` (`{value, description}` for string options
+/// with an enumerated set). The same registry the solver validates an
+/// options string against, so a front end built from it cannot offer an
+/// option the solver would reject.
+#[unsafe(no_mangle)]
+pub extern "C" fn pounce_options_catalog() -> *mut u8 {
+    guarded("options_catalog", || {
+        to_payload(&options_catalog(&IpoptApplication::new()).to_string())
+    })
+}
+
+fn options_catalog(app: &IpoptApplication) -> serde_json::Value {
+    use pounce_common::reg_options::{DefaultValue, OptionType};
+    let finite = |has: bool, v: f64| has.then_some(v).filter(|v| v.is_finite());
+    let options: Vec<serde_json::Value> = app
+        .registered_options()
+        .registered_options_in_order()
+        .iter()
+        .map(|o| {
+            let ty = match o.option_type {
+                OptionType::OT_Number => "number",
+                OptionType::OT_Integer => "integer",
+                OptionType::OT_String => "string",
+                OptionType::OT_Unknown => "unknown",
+            };
+            let default = match &o.default {
+                DefaultValue::None => serde_json::Value::Null,
+                DefaultValue::Number(v) => serde_json::json!(v),
+                DefaultValue::Integer(v) => serde_json::json!(v),
+                DefaultValue::String(v) => serde_json::json!(v),
+            };
+            serde_json::json!({
+                "name": o.name,
+                "type": ty,
+                "default": default,
+                "category": o.category,
+                "short": o.short_description,
+                "long": o.long_description,
+                "advanced": o.advanced,
+                "lower": finite(o.has_lower, o.lower),
+                "lower_strict": o.lower_strict,
+                "upper": finite(o.has_upper, o.upper),
+                "upper_strict": o.upper_strict,
+                "valid": o.valid_strings.iter().map(|e| serde_json::json!({
+                    "value": e.value,
+                    "description": e.description,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(options)
+}
+
+// ---------------------------------------------------------------------------
+// Point evaluation (the studio's constraint views)
+// ---------------------------------------------------------------------------
+
+/// Cap on the points one [`pounce_eval_slice`] call evaluates, and on the
+/// point × row values it returns: a 500 × 500 grid, and enough rows of it to
+/// draw every constraint of the book-sized models the slice view is for.
+const SLICE_MAX_POINTS: usize = 250_000;
+const SLICE_MAX_VALUES: usize = 5_000_000;
+
+/// Evaluate the loaded model at a point. Input JSON: `{"x": [...]}` (the
+/// model's own variable order; omitted → the `.nl` starting point). Returns
+/// `f` (in the model's sense: a `maximize` objective is reported as written,
+/// not negated), `grad_f`, `g`, and the constraint Jacobian as 0-based
+/// `{irow, jcol, vals}` triplets. A failed evaluation (a domain error such as
+/// `log` of a negative) reports `null` for that quantity.
+///
+/// # Safety
+/// `ptr`/`len` must describe a readable region valid for the call, or be
+/// `(null, 0)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pounce_eval(ptr: *const u8, len: usize) -> *mut u8 {
+    guarded("eval", || {
+        // SAFETY: forwarded from this function's own safety contract.
+        let req = match unsafe { json_arg(ptr, len) } {
+            Ok(v) => v,
+            Err(e) => return error_json(e),
+        };
+        let Some(tnlp) = LOADED.with(|slot| slot.borrow().clone()) else {
+            return error_json("no model loaded — call pounce_load first");
+        };
+        let mut t = tnlp.borrow_mut();
+        let x = match point_arg(&req, "x", &t) {
+            Ok(x) => x,
+            Err(e) => return error_json(e),
+        };
+        to_payload(&eval_at(&mut t, &x).to_string())
+    })
+}
+
+fn eval_at(t: &mut NlTnlp, x: &[f64]) -> serde_json::Value {
+    use pounce_nlp::tnlp::SparsityRequest;
+    let (n, m) = (t.problem().n, t.problem().m);
+    let sense = if t.problem().minimize { 1.0 } else { -1.0 };
+    let f = t.eval_f(x, true).map(|v| sense * v);
+    let mut grad = vec![0.0; n];
+    let grad = t
+        .eval_grad_f(x, false, &mut grad)
+        .then(|| grad.iter().map(|v| sense * v).collect::<Vec<_>>());
+    let mut g = vec![0.0; m];
+    let g = t.eval_g(x, false, &mut g).then_some(g);
+    let nnz = t.get_nlp_info().map(|i| i.nnz_jac_g as usize).unwrap_or(0);
+    let (mut irow, mut jcol, mut vals) = (vec![0; nnz], vec![0; nnz], vec![0.0; nnz]);
+    let structure = t.eval_jac_g(
+        None,
+        false,
+        SparsityRequest::Structure {
+            irow: &mut irow,
+            jcol: &mut jcol,
+        },
+    );
+    let values = structure
+        && t.eval_jac_g(
+            Some(x),
+            false,
+            SparsityRequest::Values { values: &mut vals },
+        );
+    let jac = structure.then(|| {
+        serde_json::json!({
+            "irow": irow,
+            "jcol": jcol,
+            "vals": values.then_some(vals),
+        })
+    });
+    serde_json::json!({ "f": f, "grad_f": grad, "g": g, "jac": jac })
+}
+
+/// Evaluate the objective and constraints on a grid through a point, for
+/// the studio's 2-D slice view. Input JSON:
+///
+/// ```json
+/// {"x": [...], "i": 0, "j": 1, "range_i": [lo, hi], "range_j": [lo, hi],
+///  "nx": 101, "ny": 101, "rows": [0, 3]}
+/// ```
+///
+/// Variables `i` and `j` sweep their ranges on an `nx` × `ny` grid while every
+/// other variable stays at `x` (omitted → the starting point). `rows` limits
+/// the constraints returned (omitted → all). Returns `xi` / `xj` (the grid
+/// coordinates), `f` (row-major, `xj` outer, `xi` inner; model sense), and
+/// `g` keyed by row index; a point where an evaluation fails is `null`.
+///
+/// # Safety
+/// `ptr`/`len` must describe a readable region valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pounce_eval_slice(ptr: *const u8, len: usize) -> *mut u8 {
+    guarded("eval_slice", || {
+        // SAFETY: forwarded from this function's own safety contract.
+        let req = match unsafe { json_arg(ptr, len) } {
+            Ok(v) => v,
+            Err(e) => return error_json(e),
+        };
+        let Some(tnlp) = LOADED.with(|slot| slot.borrow().clone()) else {
+            return error_json("no model loaded — call pounce_load first");
+        };
+        let mut t = tnlp.borrow_mut();
+        match eval_slice(&mut t, &req) {
+            Ok(v) => to_payload(&v.to_string()),
+            Err(e) => error_json(e),
+        }
+    })
+}
+
+fn eval_slice(t: &mut NlTnlp, req: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let (n, m) = (t.problem().n, t.problem().m);
+    let mut x = point_arg(req, "x", t)?;
+    let index = |key: &str| -> Result<usize, String> {
+        let i = req[key]
+            .as_u64()
+            .ok_or_else(|| format!("`{key}` must be a variable index"))? as usize;
+        if i >= n {
+            return Err(format!("`{key}` = {i} is out of range for {n} variables"));
+        }
+        Ok(i)
+    };
+    let range = |key: &str| -> Result<(f64, f64), String> {
+        match req[key].as_array().map(|a| a.as_slice()) {
+            Some([lo, hi]) => match (lo.as_f64(), hi.as_f64()) {
+                (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && lo < hi => Ok((lo, hi)),
+                _ => Err(format!("`{key}` must be [lo, hi] with finite lo < hi")),
+            },
+            _ => Err(format!("`{key}` must be [lo, hi]")),
+        }
+    };
+    let count = |key: &str| -> Result<usize, String> {
+        match req[key].as_u64() {
+            Some(k) if k >= 2 => Ok(k as usize),
+            _ => Err(format!("`{key}` must be an integer >= 2")),
+        }
+    };
+    let (i, j) = (index("i")?, index("j")?);
+    if i == j {
+        return Err("`i` and `j` must be different variables".into());
+    }
+    let ((ilo, ihi), (jlo, jhi)) = (range("range_i")?, range("range_j")?);
+    let (nx, ny) = (count("nx")?, count("ny")?);
+    let rows: Vec<usize> = match req.get("rows") {
+        None | Some(serde_json::Value::Null) => (0..m).collect(),
+        Some(v) => v
+            .as_array()
+            .ok_or("`rows` must be an array of row indices")?
+            .iter()
+            .map(|r| match r.as_u64() {
+                Some(r) if (r as usize) < m => Ok(r as usize),
+                _ => Err(format!("row {r} is out of range for {m} constraints")),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    let points = nx * ny;
+    if points > SLICE_MAX_POINTS {
+        return Err(format!(
+            "{nx} x {ny} grid exceeds {SLICE_MAX_POINTS} points"
+        ));
+    }
+    if points * rows.len() > SLICE_MAX_VALUES {
+        return Err(format!(
+            "{points} points x {} rows exceeds {SLICE_MAX_VALUES} values; pass `rows`",
+            rows.len()
+        ));
+    }
+    let lin =
+        |lo: f64, hi: f64, k: usize, count: usize| lo + (hi - lo) * k as f64 / (count - 1) as f64;
+    let xi: Vec<f64> = (0..nx).map(|k| lin(ilo, ihi, k, nx)).collect();
+    let xj: Vec<f64> = (0..ny).map(|k| lin(jlo, jhi, k, ny)).collect();
+    let sense = if t.problem().minimize { 1.0 } else { -1.0 };
+    let mut f = Vec::with_capacity(points);
+    let mut gs: Vec<Vec<Option<f64>>> = vec![Vec::with_capacity(points); rows.len()];
+    let mut g = vec![0.0; m];
+    for &vj in &xj {
+        for &vi in &xi {
+            x[i] = vi;
+            x[j] = vj;
+            f.push(t.eval_f(&x, true).map(|v| sense * v));
+            let ok = m > 0 && t.eval_g(&x, false, &mut g);
+            for (col, &r) in gs.iter_mut().zip(&rows) {
+                col.push(ok.then_some(g[r]));
+            }
+        }
+    }
+    let g: serde_json::Map<String, serde_json::Value> = rows
+        .iter()
+        .zip(gs)
+        .map(|(r, v)| (r.to_string(), serde_json::json!(v)))
+        .collect();
+    Ok(serde_json::json!({ "xi": xi, "xj": xj, "f": f, "g": g }))
+}
+
+/// Parse a JSON request argument; `(null, 0)` is an empty object.
+///
+/// # Safety
+/// As [`str_from_parts`].
+unsafe fn json_arg(ptr: *const u8, len: usize) -> Result<serde_json::Value, String> {
+    // SAFETY: forwarded from this function's own safety contract.
+    let text = unsafe { str_from_parts(ptr, len) }?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(text).map_err(|e| format!("bad request JSON: {e}"))
+}
+
+/// The point named `key` in a request, checked against the model's size;
+/// absent → the `.nl` starting point.
+fn point_arg(req: &serde_json::Value, key: &str, t: &NlTnlp) -> Result<Vec<f64>, String> {
+    let n = t.problem().n;
+    match req.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(t.problem().x0.clone()),
+        Some(v) => {
+            let x: Vec<f64> = v
+                .as_array()
+                .ok_or(format!("`{key}` must be an array of numbers"))?
+                .iter()
+                .map(|e| {
+                    e.as_f64()
+                        .ok_or(format!("`{key}` must be an array of numbers"))
+                })
+                .collect::<Result<_, _>>()?;
+            if x.len() != n {
+                return Err(format!(
+                    "`{key}` has {} entries; the model has {n} variables",
+                    x.len()
+                ));
+            }
+            Ok(x)
+        }
+    }
+}
+
+#[cfg(feature = "studio")]
+mod studio;
 
 // ---------------------------------------------------------------------------
 // AMPL .sol export
@@ -968,5 +1368,159 @@ mod tests {
     fn bad_options_are_reported() {
         call_load(SIMPLE_NL, "", "");
         assert!(call_solve("max_iter not_an_integer\n")["error"].is_string());
+    }
+
+    fn call_json(
+        f: unsafe extern "C" fn(*const u8, usize) -> *mut u8,
+        req: &serde_json::Value,
+    ) -> serde_json::Value {
+        let req = req.to_string();
+        let ptr = unsafe { f(req.as_ptr(), req.len()) };
+        let s = take_payload(ptr).expect("entry points return a payload");
+        serde_json::from_str(&s).expect("entry points must return JSON")
+    }
+
+    fn close(a: &serde_json::Value, b: f64) -> bool {
+        a.as_f64().is_some_and(|a| (a - b).abs() < 1e-12)
+    }
+
+    // simple.nl: min x0  s.t.  x0^2 + x1^2 = 1,  x0 + x1 >= 0.
+
+    #[test]
+    fn eval_reports_values_gradients_and_the_jacobian() {
+        call_load(SIMPLE_NL, "", "");
+        let v = call_json(pounce_eval, &serde_json::json!({"x": [0.6, 0.8]}));
+        assert!(close(&v["f"], 0.6), "{v}");
+        assert!(
+            close(&v["grad_f"][0], 1.0) && close(&v["grad_f"][1], 0.0),
+            "{v}"
+        );
+        assert!(close(&v["g"][0], 1.0) && close(&v["g"][1], 1.4), "{v}");
+        let jac = &v["jac"];
+        let mut dense = [[0.0; 2]; 2];
+        for k in 0..jac["vals"].as_array().unwrap().len() {
+            let (r, c) = (
+                jac["irow"][k].as_u64().unwrap(),
+                jac["jcol"][k].as_u64().unwrap(),
+            );
+            dense[r as usize][c as usize] += jac["vals"][k].as_f64().unwrap();
+        }
+        assert_eq!(dense, [[1.2, 1.6], [1.0, 1.0]]);
+    }
+
+    #[test]
+    fn eval_defaults_to_the_starting_point_and_checks_the_length() {
+        call_load(SIMPLE_NL, "", "");
+        let v = call_json(pounce_eval, &serde_json::json!({}));
+        assert!(close(&v["f"], 0.5), "{v}");
+        let bad = call_json(pounce_eval, &serde_json::json!({"x": [1.0]}));
+        assert!(
+            bad["error"].as_str().unwrap().contains("2 variables"),
+            "{bad}"
+        );
+    }
+
+    #[test]
+    fn eval_slice_sweeps_two_variables_on_a_grid() {
+        call_load(SIMPLE_NL, "", "");
+        let v = call_json(
+            pounce_eval_slice,
+            &serde_json::json!({"i": 0, "j": 1, "range_i": [-1.0, 1.0], "range_j": [-2.0, 2.0],
+                                "nx": 3, "ny": 5}),
+        );
+        assert_eq!(v["xi"], serde_json::json!([-1.0, 0.0, 1.0]));
+        assert_eq!(v["xj"], serde_json::json!([-2.0, -1.0, 0.0, 1.0, 2.0]));
+        let f = v["f"].as_array().unwrap();
+        let g0 = v["g"]["0"].as_array().unwrap();
+        let g1 = v["g"]["1"].as_array().unwrap();
+        assert_eq!(f.len(), 15);
+        // Row-major with xj outer: point k is (xi[k % 3], xj[k / 3]).
+        for k in 0..15 {
+            let (xi, xj) = ([-1.0, 0.0, 1.0][k % 3], -2.0 + (k / 3) as f64);
+            assert!(close(&f[k], xi), "f[{k}] = {}", f[k]);
+            assert!(close(&g0[k], xi * xi + xj * xj), "g0[{k}] = {}", g0[k]);
+            assert!(close(&g1[k], xi + xj), "g1[{k}] = {}", g1[k]);
+        }
+        let only = call_json(
+            pounce_eval_slice,
+            &serde_json::json!({"i": 1, "j": 0, "range_i": [0.0, 1.0], "range_j": [0.0, 1.0],
+                                "nx": 2, "ny": 2, "rows": [1]}),
+        );
+        assert!(
+            only["g"].get("0").is_none() && only["g"]["1"].is_array(),
+            "{only}"
+        );
+    }
+
+    #[test]
+    fn eval_slice_rejects_bad_requests() {
+        call_load(SIMPLE_NL, "", "");
+        let base = serde_json::json!({"i": 0, "j": 1, "range_i": [0.0, 1.0],
+                                      "range_j": [0.0, 1.0], "nx": 3, "ny": 3});
+        for (key, value, needle) in [
+            ("j", serde_json::json!(0), "different"),
+            ("i", serde_json::json!(7), "out of range"),
+            ("range_i", serde_json::json!([1.0, 0.0]), "lo < hi"),
+            ("nx", serde_json::json!(1), ">= 2"),
+            ("nx", serde_json::json!(1000), "exceeds"),
+            ("rows", serde_json::json!([2]), "out of range"),
+        ] {
+            let mut req = base.clone();
+            req[key] = value;
+            if key == "nx" && needle == "exceeds" {
+                req["ny"] = serde_json::json!(1000);
+            }
+            let v = call_json(pounce_eval_slice, &req);
+            let err = v["error"].as_str().unwrap_or_else(|| panic!("{key}: {v}"));
+            assert!(err.contains(needle), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_solve_report_describes_the_last_solve() {
+        call_load(SIMPLE_NL, "", "");
+        assert!(take_payload(pounce_solve_report()).unwrap() == "null");
+        let result = call_solve("");
+        let r: serde_json::Value =
+            serde_json::from_str(&take_payload(pounce_solve_report()).unwrap()).unwrap();
+        assert_eq!(r["schema"], "pounce.solve-report/v1");
+        assert_eq!(r["solution"]["status"], result["status"]);
+        assert_eq!(r["solution"]["engine"], "nlp");
+        assert_eq!(r["statistics"]["final_objective"], result["objective"]);
+        // Full detail: one row per iteration, and the iteration count the
+        // result reports.
+        let rows = r["iterations"].as_array().unwrap();
+        assert_eq!(
+            rows.len() as u64,
+            result["iterations"].as_u64().unwrap() + 1
+        );
+        assert_eq!(r["problem"]["n_variables"], 2);
+    }
+
+    #[test]
+    fn options_catalog_covers_the_registry() {
+        let v: serde_json::Value =
+            serde_json::from_str(&take_payload(pounce_options_catalog()).unwrap()).unwrap();
+        let opts = v.as_array().unwrap();
+        let app = IpoptApplication::new();
+        assert_eq!(
+            opts.len(),
+            app.registered_options().registered_options_in_order().len()
+        );
+        let get = |name: &str| opts.iter().find(|o| o["name"] == name).unwrap().clone();
+        assert_eq!(get("max_iter")["type"], "integer");
+        assert_eq!(get("max_iter")["default"], 3000);
+        // tol > 0: a strict lower bound and no upper one.
+        let tol = get("tol");
+        assert_eq!(
+            (tol["lower"].as_f64(), tol["lower_strict"].as_bool()),
+            (Some(0.0), Some(true))
+        );
+        assert!(tol["upper"].is_null());
+        assert!(!get("mu_strategy")["valid"].as_array().unwrap().is_empty());
+        assert!(
+            opts.iter()
+                .all(|o| o["short"].is_string() && o["long"].is_string())
+        );
     }
 }

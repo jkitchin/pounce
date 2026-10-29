@@ -51,14 +51,26 @@ use pounce_nlp::ipopt_nlp::SplitNames;
 use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
 use pounce_presolve::incidence::EqualityIncidence;
 use pounce_presolve::matching::hopcroft_karp;
+#[cfg(not(target_family = "wasm"))]
 use rustyline::completion::{Completer, Pair};
+#[cfg(not(target_family = "wasm"))]
 use rustyline::error::ReadlineError;
+#[cfg(not(target_family = "wasm"))]
 use rustyline::history::FileHistory;
+#[cfg(not(target_family = "wasm"))]
 use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
+
+/// The line editor behind the human REPL. On wasm targets there is no
+/// terminal (the debugger is driven over its JSON protocol from a browser),
+/// so the editor type is uninhabited and every editor path compiles away.
+#[cfg(not(target_family = "wasm"))]
+type ReplEditor = Editor<DbgHelper, FileHistory>;
+#[cfg(target_family = "wasm")]
+type ReplEditor = std::convert::Infallible;
 
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
@@ -92,6 +104,7 @@ const COMMANDS: &[&str] = &[
     "diagnose",
     "source",
     "progress",
+    "artifacts",
     "detach",
     "quit",
 ];
@@ -704,6 +717,8 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
                     .collect()
             })
             .unwrap_or_default(),
+        ["artifacts"] => starts(&["inline", "file"]),
+        ["ask"] => starts(&["--prompt-only"]),
         ["stop-at"] | ["stopat"] => starts(CHECKPOINTS),
         ["break", "if"] | ["b", "if"] => starts(METRICS),
         ["break", "on"] | ["b", "on"] => starts(EVENTS),
@@ -745,11 +760,13 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
 /// rustyline helper: supplies Tab completion against the live command /
 /// option vocabulary. Hinting / highlighting / validation are the
 /// no-op derived defaults.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Helper, Hinter, Highlighter, Validator)]
 struct DbgHelper {
     reg: Option<Rc<RegisteredOptions>>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Completer for DbgHelper {
     type Candidate = Pair;
     fn complete(
@@ -1012,6 +1029,11 @@ pub struct SolverDebugger {
     /// Emit a per-iteration `progress` event (JSON mode) when running
     /// between pauses, so a visual debugger can show live progress.
     emit_progress: bool,
+    /// Return `viz` / `save` artifacts inside the command result's `data`
+    /// instead of writing a file and launching a viewer (`artifacts
+    /// inline|file`). The default on wasm targets, which have no
+    /// filesystem to write to and no viewer to launch.
+    inline_artifacts: bool,
     /// One-shot: pause at the very next checkpoint of *any* kind (set by
     /// `stepi`, for walking through sub-iteration phases).
     sub_step: bool,
@@ -1028,8 +1050,10 @@ pub struct SolverDebugger {
     /// rustyline editor for the human REPL on a TTY (history + Tab +
     /// Ctrl-R). `None` for JSON mode or when stdin isn't a terminal, in
     /// which case a plain line reader is used.
-    editor: Option<Editor<DbgHelper, FileHistory>>,
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    editor: Option<ReplEditor>,
     /// Where REPL history is persisted, if a home directory was found.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     hist_path: Option<PathBuf>,
     /// Background stdin reader (JSON mode) enabling async `{"cmd":"pause"}`
     /// during a run. `None` in REPL mode.
@@ -1055,6 +1079,7 @@ pub struct SolverDebugger {
     /// between. The first cancels the line (readline convention); a second
     /// quits the solve — a discoverable Ctrl-C escape hatch that mirrors the
     /// running-mode double-tap. Reset whenever a real line is entered.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     prompt_interrupts: u8,
     /// Rendered constraint equations from the source model (`.nl`), for the
     /// `print equation <name|row>` command. `None` when no model was wired in
@@ -1103,8 +1128,10 @@ impl SolverDebugger {
             pause_iters: true,
             pause_terminal: true,
             terminal_only_on_error: false,
-            interruptible: true,
+            // No signals on wasm targets, so nothing can break in.
+            interruptible: !cfg!(target_family = "wasm"),
             emit_progress: true,
+            inline_artifacts: cfg!(target_family = "wasm"),
             sub_step: false,
             stop_at: HashSet::new(),
             break_events: HashSet::new(),
@@ -1388,6 +1415,26 @@ impl SolverDebugger {
                 }
                 _ => CmdOut::err("usage: progress [on|off]"),
             },
+            "artifacts" => match rest.first().copied() {
+                Some("inline") => {
+                    self.inline_artifacts = true;
+                    CmdOut::ok(vec!["viz / save artifacts returned inline".into()])
+                }
+                Some("file") => {
+                    self.inline_artifacts = false;
+                    CmdOut::ok(vec!["viz / save artifacts written to files".into()])
+                }
+                None => CmdOut::ok(vec![format!(
+                    "artifacts: {}",
+                    if self.inline_artifacts {
+                        "inline"
+                    } else {
+                        "file"
+                    }
+                )])
+                .with_data(serde_json::json!({"inline": self.inline_artifacts})),
+                _ => CmdOut::err("usage: artifacts [inline|file]"),
+            },
             "set" => self.cmd_set(rest, ctx),
             "get" => self.cmd_get(rest),
             "opt" | "options" => self.cmd_opt(rest),
@@ -1506,6 +1553,7 @@ impl SolverDebugger {
             "  complete <prefix>        completion candidates (commands + options)".into(),
             "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
             "  save [path]              write the current iterate + residuals to JSON".into(),
+            "  artifacts [inline|file]  return viz/save payloads in the result instead of files".into(),
             "  load <file> [block]      read a block (default x) from a save artifact / numeric file".into(),
             "  sweep <file>             one solve per start in <file>; tabulate outcomes".into(),
             "  multistart <N> [rel]     N restarts (uniform in each finite box; jitter else)".into(),
@@ -1513,6 +1561,7 @@ impl SolverDebugger {
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
             "  ask [question]           ask an LLM about the state (default Claude Code; set".into(),
             "                           POUNCE_DBG_LLM=claude|codex|gemini|llm or a command template)".into(),
+            "  ask --prompt-only [q]    return the prompt `ask` would send, without running an LLM".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
             "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
@@ -2467,10 +2516,6 @@ impl SolverDebugger {
     /// external analysis. Defaults to a temp path keyed by iteration.
     fn cmd_save(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let iter = ctx.iter();
-        let path = rest
-            .first()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
         let collect = |delta: bool| -> serde_json::Map<String, serde_json::Value> {
             let mut m = serde_json::Map::new();
             for b in block_names(ctx) {
@@ -2502,6 +2547,15 @@ impl SolverDebugger {
             "iterate": collect(false),
             "delta": collect(true),
         });
+        // Inline unless a path was named: an explicit path is a request for
+        // a file, whatever the session setting.
+        if self.inline_artifacts && rest.is_empty() {
+            return CmdOut::ok(vec![format!("iterate at iter {iter} (inline)")]).with_data(payload);
+        }
+        let path = rest
+            .first()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
         match std::fs::write(&path, format!("{payload}\n")) {
             Ok(()) => {
                 let p = path.to_string_lossy().to_string();
@@ -2924,6 +2978,13 @@ impl SolverDebugger {
     /// template. Degrades gracefully when the CLI isn't installed.
     /// "Ask why this step looks wrong without leaving the debugger."
     fn cmd_ask(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
+        // `--prompt-only`: hand the prompt back instead of running a CLI, so
+        // a front end can send it to a model of its own (the browser studio's
+        // in-page LLM) with the same grounding `ask` gives.
+        let (prompt_only, rest) = match rest.split_first() {
+            Some((&"--prompt-only", tail)) => (true, tail),
+            _ => (false, rest),
+        };
         let question = if rest.is_empty() {
             "Explain the current state of this interior-point solve and suggest what to try next."
                 .to_string()
@@ -2931,6 +2992,13 @@ impl SolverDebugger {
             rest.join(" ")
         };
         let prompt = build_ask_prompt(ctx, &question);
+        if prompt_only {
+            let lines = prompt.lines().map(str::to_string).collect();
+            return CmdOut::ok(lines).with_data(serde_json::json!({
+                "question": question,
+                "prompt": prompt,
+            }));
+        }
         match run_llm(&prompt) {
             Ok(reply) => {
                 let lines: Vec<String> = reply.lines().map(|l| l.to_string()).collect();
@@ -3185,6 +3253,12 @@ impl SolverDebugger {
                 "delta_w": k.delta_w, "delta_c": k.delta_c, "status": k.status,
                 "matrix": matrix,
             });
+            if self.inline_artifacts {
+                return CmdOut::ok(vec![format!(
+                    "KKT system, iter {kiter} (dim {dim}, inline)"
+                )])
+                .with_data(payload);
+            }
             return match write_json_and_open("kkt", kiter, &payload) {
                 Ok((path, viewer)) => CmdOut::ok(vec![format!(
                     "wrote {path} (KKT system, iter {kiter}); opened with `{viewer}`"
@@ -3210,6 +3284,10 @@ impl SolverDebugger {
                         "l_irn": l_irn, "l_jcn": l_jcn, "l_vals": l_vals,
                         "format": "strict_lower_1based_permuted",
                     });
+                    if self.inline_artifacts {
+                        return CmdOut::ok(vec![format!("L factor, iter {kiter} (n {n}, inline)")])
+                            .with_data(payload);
+                    }
                     return match write_json_and_open("L", kiter, &payload) {
                         Ok((path, viewer)) => CmdOut::ok(vec![format!(
                             "wrote {path} (L factor, iter {kiter}); opened with `{viewer}`"
@@ -3240,6 +3318,14 @@ impl SolverDebugger {
         } else {
             return CmdOut::err(format!("don't know how to visualize `{target}`"));
         };
+        if self.inline_artifacts {
+            return CmdOut::ok(vec![format!(
+                "{label}, iter {} ({} values, inline)",
+                ctx.iter(),
+                vals.len()
+            )])
+            .with_data(serde_json::json!({"label": label, "iter": ctx.iter(), "values": vals}));
+        }
         match write_and_open(&label, ctx.iter(), &vals) {
             Ok((path, viewer)) => CmdOut::ok(vec![format!(
                 "wrote {} ({} values); opened with `{}`",
@@ -3438,10 +3524,14 @@ impl SolverDebugger {
                 "interruptible": self.interruptible,
                 // #72 §1 / §5.
                 "progress_events": self.emit_progress,
+                "inline_artifacts": self.inline_artifacts,
+                "ask_prompt_only": true,
                 "async_pause": "checkpoint",
                 // Both transports for async pause: SIGINT and the in-band
                 // `{"cmd":"pause"}` (JSON mode).
-                "pause_command": true,
+                // Not on wasm: there is no reader thread to see a command
+                // that arrives while the solve runs.
+                "pause_command": !cfg!(target_family = "wasm"),
             },
             "checkpoints": CHECKPOINTS,
             "events": EVENTS,
@@ -3452,9 +3542,14 @@ impl SolverDebugger {
         emit_json(&ev);
     }
 
+    /// No terminal on wasm targets, so no editor to build.
+    #[cfg(target_family = "wasm")]
+    fn ensure_editor(&mut self) {}
+
     /// Lazily build the rustyline editor for an interactive REPL on a
     /// TTY. No-op for JSON mode, non-terminal stdin, or if construction
     /// fails — those paths fall back to a plain line reader.
+    #[cfg(not(target_family = "wasm"))]
     fn ensure_editor(&mut self) {
         if !matches!(self.mode, DebugMode::Repl)
             || self.editor.is_some()
@@ -3483,6 +3578,7 @@ impl SolverDebugger {
     /// feed the loop: the first interrupt in a row cancels the line (empty
     /// string → reprompt) with a hint; a second quits the solve. The
     /// counter resets when any real line is entered (see `next_command_line`).
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fn on_prompt_interrupt(&mut self) -> String {
         self.prompt_interrupts += 1;
         if self.prompt_interrupts >= 2 {
@@ -3510,6 +3606,7 @@ impl SolverDebugger {
             return cmd;
         }
         if let DebugMode::Repl = self.mode {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(ed) = self.editor.as_mut() {
                 return match ed.readline("pounce-dbg> ") {
                     Ok(l) => {
@@ -3848,6 +3945,7 @@ pub fn print_open_banner(mode: DebugMode) {
 
 /// Whether a command line is an in-band pause request (`pause`, or a JSON
 /// `{"cmd":"pause"}`), used for the async-pause-while-running path.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn is_pause_command(line: &str) -> bool {
     parse_command(line, DebugMode::Json).command.trim() == "pause"
 }
@@ -3856,6 +3954,7 @@ fn is_pause_command(line: &str) -> bool {
 /// commands into a shared queue so the running loop can *peek* for an
 /// async `{"cmd":"pause"}` between iterations (no signals — the
 /// Windows-friendly path) while the prompt still pops commands blocking.
+#[cfg(not(target_family = "wasm"))]
 struct StdinPump {
     inner: std::sync::Arc<(
         std::sync::Mutex<VecDeque<Option<String>>>,
@@ -3863,6 +3962,7 @@ struct StdinPump {
     )>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl StdinPump {
     fn start() -> Self {
         let inner = std::sync::Arc::new((
@@ -3922,6 +4022,42 @@ impl StdinPump {
                 return true;
             }
         }
+        false
+    }
+}
+
+/// JSON-mode stdin on wasm targets, which have no threads to run the
+/// background reader. Reads block on stdin directly (in the browser build
+/// that read is an asyncified import that resolves when the front end sends
+/// a command), so an async `pause` is not seen mid-run: the front end
+/// pauses with a `break` or `stop-at` set before continuing instead.
+#[cfg(target_family = "wasm")]
+struct StdinPump {
+    eof: std::cell::Cell<bool>,
+}
+
+#[cfg(target_family = "wasm")]
+impl StdinPump {
+    fn start() -> Self {
+        Self {
+            eof: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Blocking read of the next command line; `None` on EOF (sticky).
+    fn next(&self) -> Option<String> {
+        if self.eof.get() {
+            return None;
+        }
+        let line = read_stdin_line();
+        if line.is_none() {
+            self.eof.set(true);
+        }
+        line
+    }
+
+    /// Always false: nothing can arrive while the solve is running.
+    fn try_take_pause(&self) -> bool {
         false
     }
 }

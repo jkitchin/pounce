@@ -26,7 +26,19 @@ pounce-restoration.workspace = true
 # `status_to_solve_result_num` for the `.sol` objno line — the same mapping
 # the CLI writes, so a browser `.sol` and a CLI `.sol` agree.
 pounce-solve-report.workspace = true
+# The collector that turns the solver's per-iteration events into the solve
+# report's rows (installed per solve, collector only: no log output).
+pounce-observability.workspace = true
 serde_json = "1"
+# The `studio` build: the JSON debugger (`pounce_debug_solve`) and the
+# solve-report analysis (`pounce_analyze`, `pounce_glossary`). Off by default
+# so the plain `.nl` page's module does not carry the CLI crate.
+pounce-cli = { path = "../pounce-cli", optional = true }
+pounce-studio-core = { workspace = true, optional = true }
+
+[features]
+default = []
+studio = ["dep:pounce-cli", "dep:pounce-studio-core"]
 
 [lints]
 workspace = true

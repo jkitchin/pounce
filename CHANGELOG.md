@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
+  JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
+  are now native-only dependencies, and JSON mode reads stdin directly where
+  there are no threads). `pounce-wasm`'s new `studio` feature exports
+  `pounce_debug_solve`, which runs a solve under the `--debug-json` protocol
+  on the WASI stdin/stdout, plus `pounce_analyze` and `pounce_glossary`
+  (`pounce-studio-core` over the solve report). `build.sh --studio` builds it
+  twice — plain, and after Binaryen's Asyncify pass so the debugger's blocking
+  read can suspend into JavaScript between commands — and
+  `crates/pounce-wasm/studio/debug-host.js` drives both; Asyncify slows a
+  whole solve (deb7: 1000 ms → 1617 ms), so a front end solves with the plain
+  module. `tests/debug_protocol.mjs` drives a session end to end in Node, in CI.
+- **Every wasm build exports the options catalog, the solve report and model
+  evaluation**: `pounce_options_catalog` (type, default, bounds, valid values,
+  category, short and long description of every option),
+  `pounce_solve_report` (the `pounce.solve-report/v1` document of the last
+  solve, per-iteration rows included), `pounce_eval` (objective, gradient,
+  constraints and Jacobian at a point) and `pounce_eval_slice` (objective and
+  constraints on a grid in two variables).
+- **Debugger: `artifacts inline|file` and `ask --prompt-only`.** With inline
+  artifacts, `viz` and a path-less `save` return their payload in the
+  result's `data` instead of writing a file and launching a viewer (the
+  default on wasm). `ask --prompt-only` returns the prompt `ask` would send,
+  for a front end with its own model. Both are advertised in
+  `hello.capabilities` (`inline_artifacts`, `ask_prompt_only`); on wasm
+  `pause_command` and `interruptible` are `false`.
+
+### Fixed
+- **A solve report built on wasm no longer aborts**: `ReportBuilder::finish`
+  read `std::process::id()`, which WASI does not have.
+
 ## [0.14.0] - 2026-10-28
 
 ### Added
