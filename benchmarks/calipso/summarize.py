@@ -33,11 +33,13 @@ files = sys.argv[1:] or ["results.jsonl"]
 g = defaultdict(list)
 solvers = []
 for fn in files:
-    for line in open(fn):
-        if not line.startswith("{"):  # Ipopt prints its banner to stdout
-            continue
-        r = json.loads(line)
-        s = r.get("solver", fn)
+    recs = [json.loads(line) for line in open(fn)
+            if line.startswith("{")]  # Ipopt prints its banner to stdout
+    # a timeout / crash record carries no solver; it belongs to its file's
+    named = [r["solver"] for r in recs if "solver" in r]
+    file_solver = max(set(named), key=named.count) if named else fn
+    for r in recs:
+        s = r.get("solver", file_solver)
         if s not in solvers:
             solvers.append(s)
         g[(r["model"], r["route"], s)].append(r)
