@@ -26,7 +26,7 @@ g = defaultdict(list)
 solvers = []
 for fn in files:
     for line in open(fn):
-        if not line.strip():
+        if not line.startswith("{"):  # Ipopt prints its banner to stdout
             continue
         r = json.loads(line)
         s = r.get("solver", fn)
