@@ -1,0 +1,309 @@
+//! Driver for models with declared complementarity pairs: runs the stages
+//! [`pounce_algorithm::mpcc`] prescribes on a [`MpccTnlp`] and reports the
+//! first answer that is an answer to the model.
+//!
+//! The policy — stage order, the relaxation schedule, the warm-start
+//! options, what counts as an answer — lives in `pounce_algorithm::mpcc`.
+//! This module runs the solves, the split the second-opinion ladder uses.
+//!
+//! Three things a library driver has to get right:
+//!
+//! * **Only the reported answer reaches the caller's model.** The wrapper
+//!   defers `finalize_solution`; every stage's result is captured from it,
+//!   and the accepted one (or, if none is accepted, the exact-product stage's,
+//!   which is what a plain solve of the lowered model would have reported)
+//!   is forwarded once, at the end.
+//! * **Options are restored to set-ness.** Every option a stage writes is
+//!   snapshotted before the first stage with `OptionsList::snapshot_entry`
+//!   and restored after the last, so a knob the caller never set is unset
+//!   again rather than written back as whatever it resolved to.
+//! * **The caller wires restoration.** No stage changes an option the
+//!   restoration sub-solver is built from, so the provider the caller set is
+//!   used as is.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::mpcc::{
+    MpccStage, SCHOLTES_SCHEDULE, STAGES, TOUCHED_OPTIONS, accepts, converged,
+    warm_start_assignments,
+};
+use pounce_common::types::Number;
+use pounce_nlp::SolveStatistics;
+use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::mpcc::{ComplementarityPair, Lowering, MpccTnlp, StartOverride};
+use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::tnlp::{IpoptCq, IpoptData, TNLP};
+
+/// One lowered solve.
+#[derive(Debug, Clone)]
+pub struct MpccSolveRecord {
+    pub stage: MpccStage,
+    /// `None` for an exact-product solve, `Some(τ)` for a relaxed one.
+    pub tau: Option<Number>,
+    pub status: ApplicationReturnStatus,
+    pub iterations: usize,
+    pub max_abs_product: Number,
+}
+
+/// What the driver reports.
+#[derive(Debug, Clone)]
+pub struct MpccOutcome {
+    /// The status of the solve whose answer was forwarded to the model.
+    pub status: ApplicationReturnStatus,
+    /// Its statistics (iteration count of that solve alone; see
+    /// [`Self::total_iterations`] for the whole run).
+    pub statistics: SolveStatistics,
+    /// The stage that produced an accepted answer, if any.
+    pub accepted_by: Option<MpccStage>,
+    /// Every lowered solve, in order.
+    pub solves: Vec<MpccSolveRecord>,
+    pub total_iterations: usize,
+    /// The forwarded point and its largest `|G·H|`.
+    pub x: Vec<Number>,
+    pub max_abs_product: Number,
+}
+
+#[derive(Clone)]
+struct Captured {
+    status: ApplicationReturnStatus,
+    solver_return: SolverReturn,
+    statistics: SolveStatistics,
+    x: Vec<Number>,
+    z_l: Vec<Number>,
+    z_u: Vec<Number>,
+    lambda: Vec<Number>,
+    max_abs_product: Number,
+}
+
+impl Captured {
+    fn warm(&self) -> StartOverride {
+        StartOverride {
+            x: self.x.clone(),
+            z_l: self.z_l.clone(),
+            z_u: self.z_u.clone(),
+            lambda: self.lambda.clone(),
+        }
+    }
+}
+
+/// Solve `inner` with `pairs` declared complementary; see the module docs.
+/// `report` receives one line per stage transition (what the console shows
+/// at `print_level > 0`). Errors only if the pairs cannot be lowered — the
+/// reason is the [`MpccTnlp::new`] refusal.
+pub fn solve_mpcc(
+    app: &mut IpoptApplication,
+    inner: Rc<RefCell<dyn TNLP>>,
+    pairs: Vec<ComplementarityPair>,
+    report: &mut dyn FnMut(&str),
+) -> Result<MpccOutcome, String> {
+    let wrapper = Rc::new(RefCell::new(MpccTnlp::new(
+        Rc::clone(&inner),
+        pairs,
+        Lowering::Eq,
+    )?));
+    wrapper.borrow_mut().set_defer_inner_finalize(true);
+    let lowered: Rc<RefCell<dyn TNLP>> = wrapper.clone();
+
+    let tol = app
+        .options()
+        .get_numeric_value("constr_viol_tol", "")
+        .map(|(v, _)| v)
+        .unwrap_or(1e-4);
+    let snapshot: Vec<_> = TOUCHED_OPTIONS
+        .iter()
+        .map(|&k| (k, app.options().snapshot_entry(k)))
+        .collect();
+    let restore = |app: &mut IpoptApplication| {
+        for (k, s) in &snapshot {
+            app.options_mut().restore_entry(k, s.clone());
+        }
+    };
+
+    let mut solves: Vec<MpccSolveRecord> = Vec::new();
+    let mut first: Option<Captured> = None;
+    let mut accepted: Option<(MpccStage, Captured)> = None;
+
+    // One lowered solve: options already set by the caller of `run`.
+    let run = |app: &mut IpoptApplication,
+               stage: MpccStage,
+               lowering: Lowering,
+               start: Option<StartOverride>,
+               solves: &mut Vec<MpccSolveRecord>|
+     -> Captured {
+        {
+            let mut w = wrapper.borrow_mut();
+            w.set_lowering(lowering);
+            w.set_start_override(start);
+        }
+        let status = app.optimize_tnlp(Rc::clone(&lowered));
+        let statistics = app.statistics();
+        let w = wrapper.borrow();
+        let max_abs_product = w
+            .last_products()
+            .iter()
+            .fold(0.0, |a: Number, p| a.max(p.abs()));
+        let cap = Captured {
+            status,
+            solver_return: w.last_status().unwrap_or(SolverReturn::InternalError),
+            statistics: statistics.clone(),
+            x: w.last_x().to_vec(),
+            z_l: w.last_z_l().to_vec(),
+            z_u: w.last_z_u().to_vec(),
+            lambda: w.last_lambda().to_vec(),
+            max_abs_product: if w.last_x().is_empty() {
+                Number::INFINITY
+            } else {
+                max_abs_product
+            },
+        };
+        solves.push(MpccSolveRecord {
+            stage,
+            tau: match lowering {
+                Lowering::Relaxed(t) => Some(t),
+                _ => None,
+            },
+            status,
+            iterations: statistics.spent_iteration_count().max(0) as usize,
+            max_abs_product: cap.max_abs_product,
+        });
+        cap
+    };
+
+    for (k, &stage) in STAGES.iter().enumerate() {
+        if k > 0 {
+            app.set_in_retry_sequence(true);
+        }
+        restore(app);
+        let candidate = match stage {
+            MpccStage::Exact => {
+                let c = run(app, stage, Lowering::Eq, None, &mut solves);
+                first = Some(c.clone());
+                Some(c)
+            }
+            MpccStage::Continuation => {
+                let mut last: Option<Captured> = None;
+                for &tau in &SCHOLTES_SCHEDULE {
+                    restore(app);
+                    let warm = last.as_ref().map(|c| {
+                        for a in warm_start_assignments(c.statistics.final_mu) {
+                            let _ = app.options_mut().read_from_str(&a, true);
+                        }
+                        c.warm()
+                    });
+                    let mut c = run(app, stage, Lowering::Relaxed(tau), warm, &mut solves);
+                    if !converged(c.status) {
+                        // One weaker rung before giving up on the schedule:
+                        // the previous stage's x only, no dual warm start.
+                        let Some(prev) = &last else { break };
+                        restore(app);
+                        let primal = StartOverride {
+                            x: prev.x.clone(),
+                            ..Default::default()
+                        };
+                        c = run(
+                            app,
+                            stage,
+                            Lowering::Relaxed(tau),
+                            Some(primal),
+                            &mut solves,
+                        );
+                        if !converged(c.status) {
+                            break;
+                        }
+                    }
+                    last = Some(c);
+                }
+                match last {
+                    None => None,
+                    Some(relaxed) => {
+                        // The finish: exact product from the end of the
+                        // schedule; `G·H <= 0` where the equality would
+                        // over-determine the model (same feasible set).
+                        let mut finish = None;
+                        for lowering in [Lowering::Eq, Lowering::Ineq] {
+                            restore(app);
+                            for a in warm_start_assignments(relaxed.statistics.final_mu) {
+                                let _ = app.options_mut().read_from_str(&a, true);
+                            }
+                            let c = run(app, stage, lowering, Some(relaxed.warm()), &mut solves);
+                            let over_determined =
+                                c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
+                            finish = Some(c);
+                            if !over_determined {
+                                break;
+                            }
+                        }
+                        // A finish that does not converge leaves the
+                        // continuation's own answer, which satisfies every
+                        // product to the last τ; accepted on the same test.
+                        match finish {
+                            Some(f) if accepts(f.status, f.max_abs_product, tol) => Some(f),
+                            _ => Some(relaxed),
+                        }
+                    }
+                }
+            }
+            MpccStage::Penalty => {
+                let _ = app
+                    .options_mut()
+                    .read_from_str("l1_exact_penalty_barrier yes\n", true);
+                Some(run(app, stage, Lowering::Eq, None, &mut solves))
+            }
+        };
+        if let Some(c) = candidate {
+            if accepts(c.status, c.max_abs_product, tol) {
+                report(&format!(
+                    "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}).",
+                    stage.label(),
+                    c.status,
+                    c.max_abs_product
+                ));
+                accepted = Some((stage, c));
+                break;
+            }
+            report(&format!(
+                "pounce: complementarity: {} did not ({:?}, max |G·H| = {:.1e}); trying the next \
+                 formulation.",
+                stage.label(),
+                c.status,
+                c.max_abs_product
+            ));
+        }
+    }
+    app.set_in_retry_sequence(false);
+    restore(app);
+
+    // With no accepted stage, report the exact-product stage: what a plain
+    // solve of the lowered model says. It always runs first, so `first` is
+    // only empty if `STAGES` is reordered without this function following.
+    let (accepted_by, chosen) = match (accepted, first) {
+        (Some((s, c)), _) => (Some(s), c),
+        (None, Some(c)) => (None, c),
+        (None, None) => return Err("no exact-product stage ran".into()),
+    };
+    {
+        let mut w = wrapper.borrow_mut();
+        w.set_start_override(None);
+        w.forward_finalize(
+            chosen.solver_return,
+            &chosen.x,
+            &chosen.z_l,
+            &chosen.z_u,
+            &chosen.lambda,
+            &IpoptData::default(),
+            &IpoptCq::default(),
+        );
+    }
+    let total_iterations = solves.iter().map(|s| s.iterations).sum();
+    Ok(MpccOutcome {
+        status: chosen.status,
+        statistics: chosen.statistics,
+        accepted_by,
+        solves,
+        total_iterations,
+        x: chosen.x,
+        max_abs_product: chosen.max_abs_product,
+    })
+}

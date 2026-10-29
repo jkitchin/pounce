@@ -202,12 +202,20 @@ exist and run from one command.
    Exact Jacobian and Hessian (checked against finite differences in both
    index styles), no duplicate entries. Refuses two-sided pairs with the
    reason.
-2. **Driver** — the policy (which lowerings, in what order, when to fall
-   back) in `pounce_algorithm`, the solves in `pounce_restoration`, the
-   split the second-opinion ladder already uses so the CLI, Python, C and
-   Rust entry points share one implementation. First rung `Eq` (fast);
-   on failure, the Scholtes continuation with full warm starts and an `Eq`
-   finish (`Ineq` where `Eq` would over-determine a square model); then ℓ₁.
+2. ✅ **Driver** — policy in `pounce_algorithm::mpcc` (stage order, τ
+   schedule, warm-start options, the acceptance test), solves in
+   `pounce_restoration::mpcc_driver::solve_mpcc`, the split the
+   second-opinion ladder uses. Stages: exact product from the model's own
+   start; Scholtes continuation with full warm starts (primal-only retry on
+   a failed τ) and an exact finish, `G·H <= 0` where the exact one is
+   refused as over-determined; ℓ₁ penalty. A stage is accepted only if it
+   converged **and** every `|G·H| <= constr_viol_tol`. Only the reported
+   answer reaches the model's `finalize_solution`; every option a stage
+   writes is restored to set-ness (mutation-checked: dropping the final
+   restore leaks `l1_exact_penalty_barrier=yes`). Tests solve `qpec_small`
+   from its three Gate 0 starts, force the fallback with an over-determined
+   model, and run every stage on an infeasible one. Not yet reachable from
+   any entry point.
 3. **Certificate** — after the driver's answer, read each pair's active
    side, solve the tightened NLP once from that point, and report
    S-stationarity (biactive multipliers' signs) in the JSON; a failed rung

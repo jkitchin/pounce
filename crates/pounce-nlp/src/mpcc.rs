@@ -82,6 +82,17 @@ pub enum Lowering {
     Relaxed(Number),
 }
 
+/// A primal-dual point for the next solve to start from, in the lowered
+/// model's dimensions (`lambda` covers the product rows too). Set by a
+/// driver between continuation stages; see [`MpccTnlp::set_start_override`].
+#[derive(Debug, Clone, Default)]
+pub struct StartOverride {
+    pub x: Vec<Number>,
+    pub z_l: Vec<Number>,
+    pub z_u: Vec<Number>,
+    pub lambda: Vec<Number>,
+}
+
 /// Bounds at or beyond this magnitude are infinite, matching the
 /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf` defaults (`±1e19`).
 const INF: Number = 1e19;
@@ -127,6 +138,7 @@ pub struct MpccTnlp {
     last_z_u: Vec<Number>,
     last_products: Vec<Number>,
     defer_inner_finalize: bool,
+    start_override: Option<StartOverride>,
 }
 
 fn base(style: IndexStyle) -> Index {
@@ -295,6 +307,7 @@ impl MpccTnlp {
             last_z_u: Vec::new(),
             last_products: Vec::new(),
             defer_inner_finalize: false,
+            start_override: None,
             pairs,
         })
     }
@@ -317,6 +330,14 @@ impl MpccTnlp {
     /// lowered solves forwards only the one it reports.
     pub fn set_defer_inner_finalize(&mut self, defer: bool) {
         self.defer_inner_finalize = defer;
+    }
+
+    /// Start the next solves from `start` instead of the inner model's own
+    /// starting point (`None` restores it). Only the parts the solver asks
+    /// for are used: `x` always, `z_l`/`z_u` and `lambda` when it requests a
+    /// warm start of the duals.
+    pub fn set_start_override(&mut self, start: Option<StartOverride>) {
+        self.start_override = start;
     }
 
     pub fn n(&self) -> usize {
@@ -447,6 +468,23 @@ impl TNLP for MpccTnlp {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        if let Some(st) = &self.start_override {
+            if st.x.len() != sp.x.len()
+                || (sp.init_z && (st.z_l.len() != sp.z_l.len() || st.z_u.len() != sp.z_u.len()))
+                || (sp.init_lambda && st.lambda.len() != sp.lambda.len())
+            {
+                return false;
+            }
+            sp.x.copy_from_slice(&st.x);
+            if sp.init_z {
+                sp.z_l.copy_from_slice(&st.z_l);
+                sp.z_u.copy_from_slice(&st.z_u);
+            }
+            if sp.init_lambda {
+                sp.lambda.copy_from_slice(&st.lambda);
+            }
+            return true;
+        }
         let m = self.m_inner;
         let (head, tail) = sp.lambda.split_at_mut(m.min(sp.lambda.len()));
         if !self.inner.borrow_mut().get_starting_point(StartingPoint {
@@ -1192,6 +1230,52 @@ mod tests {
             .err()
             .unwrap();
         assert!(e.contains("out of range"), "{e}");
+    }
+
+    #[test]
+    fn start_override_replaces_the_inner_start() {
+        let mut w = wrap(IndexStyle::C, Lowering::Relaxed(0.1));
+        w.set_start_override(Some(StartOverride {
+            x: vec![1.0, 2.0, 3.0],
+            z_l: vec![0.1; 3],
+            z_u: vec![0.2; 3],
+            lambda: vec![0.5, 0.6, 0.7, 0.8, 0.9],
+        }));
+        let (mut x, mut zl, mut zu, mut lam) =
+            (vec![0.0; 3], vec![0.0; 3], vec![0.0; 3], vec![0.0; 5]);
+        assert!(w.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: true,
+            z_l: &mut zl,
+            z_u: &mut zu,
+            init_lambda: true,
+            lambda: &mut lam,
+        }));
+        assert_eq!(
+            (x, zl, zu, lam),
+            (
+                vec![1.0, 2.0, 3.0],
+                vec![0.1; 3],
+                vec![0.2; 3],
+                vec![0.5, 0.6, 0.7, 0.8, 0.9]
+            )
+        );
+        // A point of the wrong dimension is refused, not truncated.
+        w.set_start_override(Some(StartOverride {
+            x: vec![1.0],
+            ..Default::default()
+        }));
+        let mut x = vec![0.0; 3];
+        assert!(!w.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut [],
+            z_u: &mut [],
+            init_lambda: false,
+            lambda: &mut [],
+        }));
     }
 
     #[test]
