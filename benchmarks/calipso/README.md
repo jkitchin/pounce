@@ -35,7 +35,7 @@ The complementarity block is lowered the way `benchmarks/mpcc/` lowers it
 
 | route | lowering |
 |---|---|
-| `ipopt_defaults_eq` | `comp = 0`, **POUNCE defaults** (`bound_relax_factor=1e-8`): the closest thing here to handing the model to a stock solver |
+| `defaults_eq` | `comp = 0`, **POUNCE defaults** (`bound_relax_factor=1e-8`): the closest thing here to handing the model to a stock solver |
 | `direct` | `comp <= 0` |
 | `ncp_eq` | `comp = 0` |
 | `ncp_eq_l1` | `comp = 0` + `l1_exact_penalty_barrier=yes` |
@@ -66,7 +66,7 @@ The paper reports, for the same models, CALIPSO / Ipopt:
 
 | route | converged | viol <= 1e-4 | obj (median, best) | max viol (median) | iters (median) |
 |---|---:|---:|---|---|---:|
-| `ipopt_defaults_eq` | 5 | 5 | 463.2, 463.2 | 1.5e-13 | 41 |
+| `defaults_eq` | 5 | 5 | 463.2, 463.2 | 1.5e-13 | 41 |
 | `direct` | 5 | 5 | 462.6, 462.6 | 8.5e-14 | 103 |
 | `ncp_eq` | 5 | 5 | 463.2, 463.2 | 1.0e-13 | 70 |
 | `ncp_eq_l1` | 4 | 4 | 13670, 13670 | 4.4e-11 | 550 |
@@ -81,7 +81,7 @@ The ℓ₁ route converges to a feasible point 30× worse on all five seeds.
 
 | route | converged | viol <= 1e-4 | obj (median, best) | max viol (median) | iters (median) |
 |---|---:|---:|---|---|---:|
-| `ipopt_defaults_eq` | 5 | **0** | – | 3.5e-4 | 872 |
+| `defaults_eq` | 5 | **0** | – | 3.5e-4 | 872 |
 | `direct` | 2 | 3 | 0.219, 0.215 | 4.1e-5 | 2669 |
 | `ncp_eq` | 0 | 3 | 0.452, 0.206 | 1.6e-5 | 3000 |
 | `ncp_eq_l1` | 5 | 5 | 0.2027, 0.2026 | 2.2e-5 | 560 |
@@ -93,7 +93,7 @@ The ℓ₁ route converges to a feasible point 30× worse on all five seeds.
 
 | route | converged | viol <= 1e-4 | obj (median, best) | max viol (median) | iters (median) |
 |---|---:|---:|---|---|---:|
-| `ipopt_defaults_eq` | 0 | 1 | 1.06 | 3.0e-4 | 54 |
+| `defaults_eq` | 0 | 1 | 1.06 | 3.0e-4 | 54 |
 | `direct` | 0 | 2 | 0.94, 0.87 | 5.0e-4 | 3000 |
 | `ncp_eq` | 0 | 3 | 1.05, 1.04 | 6.4e-5 | 1513 |
 | `ncp_eq_l1` | 0 | 0 | – | 2.0e-1 | 3000 |

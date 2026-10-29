@@ -24,6 +24,7 @@ factorization cost of a dense 631x631 KKT dominated).
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
@@ -165,11 +166,108 @@ TAU_SCHEDULE = (1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8)
 OK = (0, 1)
 
 
+#: Which solver runs the lowered NLP. ``pounce`` (default) or ``ipopt``
+#: (cyipopt, e.g. conda-forge's Ipopt 3.14). For Ipopt,
+#: ``IPOPT_LINEAR_SOLVER`` picks the backend (``mumps``, ``spral``, or
+#: ``ma57`` with ``IPOPT_HSLLIB`` pointing at a licensed libhsl/libcoinhsl).
+#: For POUNCE, ``POUNCE_LINEAR_SOLVER=ma57`` needs a ``--features ma57``
+#: build of the extension; ``feral`` is the default.
+SOLVER = os.environ.get("CALIPSO_SOLVER", "pounce")
+
+#: Options only POUNCE has. A route that needs one cannot run on Ipopt.
+POUNCE_ONLY = {"l1_exact_penalty_barrier"}
+
+
+def warm_options(mu):
+    """The options ``pounce.WarmStart.options()`` sets (python/pounce/
+    _warm_start.py), all of which are upstream Ipopt options: applying the
+    same set by hand is what makes the two continuations comparable."""
+    p = 1e-9
+    return {
+        "warm_start_init_point": "yes",
+        "mu_init": float(np.clip(mu, 1e-9, 1e-1)) if mu else 1e-6,
+        "warm_start_bound_push": p,
+        "warm_start_bound_frac": p,
+        "warm_start_slack_bound_push": p,
+        "warm_start_slack_bound_frac": p,
+        "warm_start_mult_bound_push": p,
+    }
+
+
+#: Ipopt's ApplicationReturnStatus, by the names POUNCE reports, so the two
+#: solvers' results group under one vocabulary.
+IPOPT_STATUS = {
+    0: "Solve_Succeeded", 1: "Solved_To_Acceptable_Level",
+    2: "Infeasible_Problem_Detected", 3: "Search_Direction_Becomes_Too_Small",
+    4: "Diverging_Iterates", 5: "User_Requested_Stop", 6: "Feasible_Point_Found",
+    -1: "Maximum_Iterations_Exceeded", -2: "Restoration_Failed",
+    -3: "Error_In_Step_Computation", -4: "Maximum_CpuTime_Exceeded",
+    -5: "Maximum_WallTime_Exceeded", -10: "Not_Enough_Degrees_Of_Freedom",
+    -11: "Invalid_Problem_Definition", -12: "Invalid_Option",
+    -13: "Invalid_Number_Detected", -100: "Unrecoverable_Exception",
+    -101: "NonIpopt_Exception_Thrown", -102: "Insufficient_Memory",
+    -199: "Internal_Error",
+}
+
+
+class _IpoptCallbacks:
+    """``nlp`` plus an ``intermediate`` that records the iteration count and
+    the barrier parameter, which cyipopt's ``info`` does not return."""
+
+    def __init__(self, nlp):
+        self._nlp = nlp
+        self.iter_count = 0
+        self.mu = None
+
+    def __getattr__(self, name):
+        return getattr(self._nlp, name)
+
+    def intermediate(self, alg_mod, iter_count, obj_value, inf_pr, inf_du, mu,
+                     d_norm, regularization_size, alpha_du, alpha_pr, ls_trials):
+        self.iter_count = int(iter_count)
+        self.mu = float(mu)
+        return True
+
+
+def _solve_ipopt(nlp, opts, x0, warm):
+    import cyipopt
+
+    cb = _IpoptCallbacks(nlp)
+    prob = cyipopt.Problem(n=nlp.n, m=nlp.m, problem_obj=cb,
+                           lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu)
+    opts = dict(opts)
+    if warm is not None:
+        opts.update(warm_options(warm["mu"]))
+    ls = os.environ.get("IPOPT_LINEAR_SOLVER")
+    if ls:
+        opts["linear_solver"] = ls
+    if os.environ.get("IPOPT_HSLLIB"):
+        opts["hsllib"] = os.environ["IPOPT_HSLLIB"]
+    for k, v in opts.items():
+        prob.add_option(k, v)
+    kw = {}
+    if warm is not None:
+        kw = {"lagrange": warm["mult_g"], "zl": warm["mult_x_L"], "zu": warm["mult_x_U"]}
+    x0 = warm["x"] if warm is not None else np.asarray(x0, dtype=float)
+    t0 = time.perf_counter()
+    x, info = prob.solve(np.asarray(x0, dtype=float), **kw)
+    wall = time.perf_counter() - t0
+    st = int(info["status"])
+    info = dict(info, iter_count=cb.iter_count, mu=cb.mu or 0.0,
+                status_msg=IPOPT_STATUS.get(st, f"status_{st}"))
+    return np.asarray(x), info, wall
+
+
 def solve_once(nlp: LoweredNlp, opts: dict, x0, warm=None):
+    if SOLVER == "ipopt":
+        return _solve_ipopt(nlp, opts, x0, warm)
     import pounce
 
     prob = pounce.Problem(n=nlp.n, m=nlp.m, problem_obj=nlp,
                           lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu)
+    opts = dict(opts)
+    if os.environ.get("POUNCE_LINEAR_SOLVER"):
+        opts["linear_solver"] = os.environ["POUNCE_LINEAR_SOLVER"]
     for k, v in opts.items():
         prob.add_option(k, v)
     kw = {"x0": np.asarray(x0, dtype=float)}
@@ -191,7 +289,7 @@ def _warm(x, info):
 def run_route(model: Model, route: str, x0, extra_opts=None):
     """Returns dict(x, status, status_msg, iters, wall, stages)."""
     opts = dict(BASE_OPTIONS)
-    if route == "ipopt_defaults_eq":
+    if route == "defaults_eq":
         # closest to what the paper handed Ipopt: product equality,
         # solver defaults (bound_relax_factor=1e-8 etc.)
         opts = {"print_level": 0, "max_iter": 3000}
@@ -201,12 +299,14 @@ def run_route(model: Model, route: str, x0, extra_opts=None):
     single = {
         "direct": ("prod_ineq", {}),
         "ncp_eq": ("prod_eq", {}),
-        "ipopt_defaults_eq": ("prod_eq", {}),
+        "defaults_eq": ("prod_eq", {}),
         "ncp_eq_l1": ("prod_eq", {"l1_exact_penalty_barrier": "yes"}),
         "jordan_eq": ("jordan_eq", {}),
     }
     if route in single:
         low, o = single[route]
+        if SOLVER != "pounce" and POUNCE_ONLY & set(o):
+            raise NotImplementedError(f"{route} needs a POUNCE-only option")
         nlp = LoweredNlp(model, low)
         x, info, wall = solve_once(nlp, {**opts, **o}, x0)
         return {"x": x, "status": int(info["status"]), "status_msg": str(info["status_msg"]),

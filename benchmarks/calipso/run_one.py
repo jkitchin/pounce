@@ -3,6 +3,7 @@
 model: bunnyhop | drifting_norm | drifting_squared
 """
 import json
+import os
 import sys
 import time
 
@@ -27,14 +28,19 @@ def main():
         print(json.dumps({"model": model_name, "route": route, "seed": seed, "error": repr(e)}))
         return
     rep = model.report(r["x"])
-    out = {"model": model_name, "route": route, "seed": seed,
+    solver = os.environ.get("CALIPSO_SOLVER", "pounce")
+    if solver == "ipopt":
+        solver += "-" + os.environ.get("IPOPT_LINEAR_SOLVER", "mumps")
+    else:
+        solver += "-" + os.environ.get("POUNCE_LINEAR_SOLVER", "feral")
+    out = {"solver": solver, "model": model_name, "route": route, "seed": seed,
            "status": r["status"], "status_msg": r["status_msg"], "iters": r["iters"],
            "stages": r["stages"], "solve_wall": round(r["wall"], 2),
            "total_wall": round(time.perf_counter() - t0, 2),
            "finish_failed": r.get("finish_failed", False),
            "log": [list(map(str, s)) for s in r.get("log", [])], **rep}
     print(json.dumps(out))
-    np.save(f"sol_{model_name}_{route}_{seed}.npy", r["x"])
+    np.save(f"sol_{solver}_{model_name}_{route}_{seed}.npy", r["x"])
 
 
 if __name__ == "__main__":
