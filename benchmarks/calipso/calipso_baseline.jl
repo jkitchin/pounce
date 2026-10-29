@@ -31,11 +31,19 @@ cut === nothing && error("no top-level solve!(solver) in $example")
 # `Pkg.*` would switch environments; MeshCatMechanisms is visualization only
 # (quadruped_gait.jl) and not a dependency of anything that runs before the cut.
 head = filter(l -> !occursin(r"^\s*(Pkg\.|using Pkg|using MeshCatMechanisms)", l), lines[1:cut-1])
-setup = join(head, '\n')
+# A relative include("models/x.jl") in the example resolves against the
+# *running script's* directory (this file's), not the working directory, so
+# rewrite it to an absolute path under the example's own directory.
+setup = replace(join(head, '\n'), r"include\(\"(?!/)" => "include(\"" * dirname(path) * "/")
 
 # Methods defined by include_string are newer than this loop's world age, so
 # everything that reaches them goes through invokelatest.
-build!(seed) = (Random.seed!(seed); include_string(Main, setup, path); getfield(Main, :solver))
+# Run the setup from the example's directory too, for any relative file read.
+build!(seed) = cd(dirname(path)) do
+    Random.seed!(seed)
+    include_string(Main, setup, path)
+    getfield(Main, :solver)
+end
 
 for seed in seeds
     # The first solve! in a session includes JIT compilation, which would

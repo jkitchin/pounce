@@ -81,12 +81,20 @@ from scipy.optimize import lsq_linear
 MAX_ENUM = 8
 
 
+#: Above this many free columns BVLS (exact, active-set) takes minutes on a
+#: dense system -- the rocket's 856 x 714 had not finished one solve in five
+#: -- so the interior-reflective `trf` method is used instead: 10-20 s per
+#: solve there, at a residual accuracy well inside `resid_tol`.
+BVLS_MAX_COLS = 300
+
+
 def _bvls(A, b, lo, hi):
     fixed = lo == hi
     free = ~fixed
     if not free.any():
         return float(np.max(np.abs(b))) if b.size else 0.0
-    res = lsq_linear(A[:, free], b, bounds=(lo[free], hi[free]), method="bvls")
+    method = "bvls" if free.sum() <= BVLS_MAX_COLS else "trf"
+    res = lsq_linear(A[:, free], b, bounds=(lo[free], hi[free]), method=method)
     return float(np.max(np.abs(A[:, free] @ res.x - b)))
 
 
