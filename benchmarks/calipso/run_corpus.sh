@@ -11,7 +11,9 @@
 #                           with CALIPSO, RoboDojo 0.1.6 and JSON; Julia 1.8)
 #
 # MODELS restricts the run (comma-separated names from models.py), JOBS sets
-# the parallelism (default 4), and every job is capped at 900 s. Results land
+# the parallelism (default 4), and TIMEOUT caps every job (default 900 s;
+# the quadruped runs ~0.4 s per iteration, so a 3000-iteration solve needs
+# TIMEOUT=3600 or more). Results land
 # in results_<solver>.jsonl; the CALIPSO answers are scored by the port in
 # results_calipso_eval.jsonl; the summary is printed and written to
 # summary.md.
@@ -22,12 +24,13 @@ IPOPT_PYTHON="${IPOPT_PYTHON:-}"
 JULIA="${JULIA:-}"
 MODELS="${MODELS:-}"
 JOBS="${JOBS:-4}"
+export TIMEOUT="${TIMEOUT:-900}"
 LS="${IPOPT_LINEAR_SOLVER:-mumps}"
 files=()
 
 run_matrix() {  # $1 = interpreter, $2 = solver name for models.jobs, $3 = output
     "$1" -I models.py "$2" "$MODELS" |
-    xargs -P "$JOBS" -L 1 sh -c 'timeout 900 "$PY" -I -c "import sys; sys.path.insert(0, \".\"); sys.argv=[\"run_one\", \"$0\", \"$1\", \"$2\"]; import run_one; run_one.main()" || echo "{\"model\": \"$0\", \"route\": \"$1\", \"seed\": $2, \"error\": \"timeout_or_crash\"}"' > "$3" 2> "${3%.jsonl}.errors.log"
+    xargs -P "$JOBS" -L 1 sh -c 'timeout "$TIMEOUT" "$PY" -I -c "import sys; sys.path.insert(0, \".\"); sys.argv=[\"run_one\", \"$0\", \"$1\", \"$2\"]; import run_one; run_one.main()" || echo "{\"model\": \"$0\", \"route\": \"$1\", \"seed\": $2, \"error\": \"timeout_or_crash\"}"' > "$3" 2> "${3%.jsonl}.errors.log"
     rm -f sol_*.npy
 }
 
