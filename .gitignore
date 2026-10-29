@@ -123,6 +123,11 @@
 !/benchmarks/flash/schema.json
 /benchmarks/flash/results-*.json
 /benchmarks/flash/results-*.md
+# The CALIPSO port (bunny-hop, drifting car from arXiv 2205.09255) is the
+# same shape: the model transcriptions and the route driver are source,
+# the per-run results.jsonl / errors.log / solution .npy are not.
+!/benchmarks/calipso/*.py
+!/benchmarks/calipso/run_all.sh
 # The cblib suite is the conic (exp/power cone) tier: CBLIB .cbf instances
 # solved through the pounce_cblib binary. Track its runner (README via the
 # per-suite rule above); the per-run pounce.json stays ignored like every

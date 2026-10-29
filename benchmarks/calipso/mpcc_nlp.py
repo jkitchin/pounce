@@ -1,0 +1,255 @@
+"""Generic JAX-differentiated MPCC -> NLP lowering and the route drivers.
+
+A model supplies, as JAX functions of the full variable vector z:
+  f(z)          objective
+  eq(z)         rows that must be 0
+  ineq(z)       rows that must be >= 0
+  comp(z)       one scalar per complementarity pair, >= 0 by construction
+                (G*H for an NCP pair, beta.eta for an SOC pair); the MPCC
+                asks for comp(z) = 0
+  lb, ub        variable bounds
+  extra[name]   optional alternative complementarity row blocks
+                (e.g. the paper's full Jordan-product equality rows)
+
+Lowerings of the complementarity block:
+  prod_eq    comp = 0
+  prod_ineq  comp <= 0
+  scholtes   comp <= tau
+  jordan_eq  model.extra["jordan"](z) = 0   (drifting only; CALIPSO's rows)
+
+Sparse Jacobian / Hessian patterns, detected structurally from JAX at random
+points (the first dense attempt made each drifting solve ~450 s: the
+factorization cost of a dense 631x631 KKT dominated).
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Optional
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+
+BIG = 1e20
+
+
+@dataclass
+class Model:
+    name: str
+    n: int
+    f: Callable
+    eq: Callable
+    ineq: Callable
+    comp: Callable
+    lb: np.ndarray
+    ub: np.ndarray
+    extra: Dict[str, Callable] = field(default_factory=dict)
+    # source-level diagnostics: z -> dict of floats
+    report: Optional[Callable] = None
+
+
+# Compiled callbacks and sparsity, shared by every lowering that uses the
+# same constraint function (prod_eq / prod_ineq / scholtes differ only in
+# row bounds), so a 10-stage continuation compiles once, not ten times.
+_CACHE: Dict[tuple, tuple] = {}
+
+
+def _compiled(model: Model, kind: str, cons: Callable, m: int):
+    key = (id(model), kind)
+    if key in _CACHE:
+        return _CACHE[key]
+    f = jax.jit(model.f)
+    g = jax.jit(jax.grad(model.f))
+    c = jax.jit(cons)
+    J = jax.jit(jax.jacfwd(cons))
+
+    def lag(z, lam, sigma):
+        return sigma * model.f(z) + jnp.dot(lam, cons(z))
+
+    H = jax.jit(jax.hessian(lag))
+
+    # Structural sparsity: union of nonzeros at a few random points
+    # (random lam for the Hessian). A structural zero is zero
+    # everywhere; a numerical coincidence at three independent
+    # Gaussian points has probability zero.
+    n = model.n
+    rng = np.random.default_rng(12345)
+    jmask = np.zeros((m, n), bool)
+    hmask = np.zeros((n, n), bool)
+    for _ in range(3):
+        zr = jnp.asarray(rng.standard_normal(n))
+        lr = jnp.asarray(rng.standard_normal(m))
+        jmask |= np.asarray(J(zr)) != 0
+        hmask |= np.asarray(H(zr, lr, 1.0)) != 0
+    hmask = np.tril(hmask | hmask.T)
+    _CACHE[key] = (f, g, c, J, H, np.nonzero(jmask), np.nonzero(hmask))
+    return _CACHE[key]
+
+
+class LoweredNlp:
+    def __init__(self, model: Model, lowering: str, tau: float = 0.0):
+        self.model = model
+        self.lowering = lowering
+        self.tau = tau
+        z0 = jnp.zeros(model.n)
+        neq = int(model.eq(z0).shape[0])
+        nin = int(model.ineq(z0).shape[0])
+        if lowering == "jordan_eq":
+            compf = model.extra["jordan"]
+        else:
+            compf = model.comp
+        ncp = int(compf(z0).shape[0])
+
+        def cons(z):
+            return jnp.concatenate([model.eq(z), model.ineq(z), compf(z)])
+
+        self.m = neq + nin + ncp
+        cl = np.concatenate([np.zeros(neq), np.zeros(nin), np.zeros(ncp)])
+        cu = np.concatenate([np.zeros(neq), np.full(nin, BIG), np.zeros(ncp)])
+        if lowering == "prod_ineq":
+            cl[neq + nin:] = -BIG
+            cu[neq + nin:] = 0.0
+        elif lowering == "scholtes":
+            cl[neq + nin:] = -BIG
+            cu[neq + nin:] = tau
+        elif lowering in ("prod_eq", "jordan_eq"):
+            pass
+        else:
+            raise ValueError(lowering)
+        self.cl, self.cu = cl, cu
+        self.n = model.n
+        self.lb = np.where(np.isfinite(model.lb), model.lb, -BIG)
+        self.ub = np.where(np.isfinite(model.ub), model.ub, BIG)
+
+        kind = "jordan" if lowering == "jordan_eq" else "comp"
+        (self._f, self._g, self._c, self._J, self._H,
+         self._jidx, self._hidx) = _compiled(model, kind, cons, self.m)
+
+    # cyipopt-style callbacks
+    def objective(self, x):
+        return float(self._f(jnp.asarray(x)))
+
+    def gradient(self, x):
+        return np.asarray(self._g(jnp.asarray(x)))
+
+    def constraints(self, x):
+        return np.asarray(self._c(jnp.asarray(x)))
+
+    def jacobian(self, x):
+        return np.asarray(self._J(jnp.asarray(x)))[self._jidx]
+
+    def jacobianstructure(self):
+        return self._jidx
+
+    def hessianstructure(self):
+        return self._hidx
+
+    def hessian(self, x, lagrange, obj_factor):
+        h = np.asarray(self._H(jnp.asarray(x), jnp.asarray(lagrange), obj_factor))
+        return h[self._hidx]
+
+
+BASE_OPTIONS = {
+    "print_level": 0,
+    "tol": 1e-8,
+    "max_iter": 3000,
+    "bound_relax_factor": 0.0,
+    "honor_original_bounds": "yes",
+}
+
+TAU_SCHEDULE = (1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8)
+OK = (0, 1)
+
+
+def solve_once(nlp: LoweredNlp, opts: dict, x0, warm=None):
+    import pounce
+
+    prob = pounce.Problem(n=nlp.n, m=nlp.m, problem_obj=nlp,
+                          lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu)
+    for k, v in opts.items():
+        prob.add_option(k, v)
+    kw = {"x0": np.asarray(x0, dtype=float)}
+    if warm is not None:
+        kw["warm_start"] = pounce.WarmStart(
+            x=warm["x"], lagrange=warm["mult_g"], zl=warm["mult_x_L"],
+            zu=warm["mult_x_U"], mu=warm["mu"])
+    t0 = time.perf_counter()
+    x, info = prob.solve(**kw)
+    return np.asarray(x), info, time.perf_counter() - t0
+
+
+def _warm(x, info):
+    return {"x": np.array(x), "mult_g": np.array(info["mult_g"]),
+            "mult_x_L": np.array(info["mult_x_L"]), "mult_x_U": np.array(info["mult_x_U"]),
+            "mu": float(info.get("mu", 0.0)) or None}
+
+
+def run_route(model: Model, route: str, x0, extra_opts=None):
+    """Returns dict(x, status, status_msg, iters, wall, stages)."""
+    opts = dict(BASE_OPTIONS)
+    if route == "ipopt_defaults_eq":
+        # closest to what the paper handed Ipopt: product equality,
+        # solver defaults (bound_relax_factor=1e-8 etc.)
+        opts = {"print_level": 0, "max_iter": 3000}
+    if extra_opts:
+        opts.update(extra_opts)
+
+    single = {
+        "direct": ("prod_ineq", {}),
+        "ncp_eq": ("prod_eq", {}),
+        "ipopt_defaults_eq": ("prod_eq", {}),
+        "ncp_eq_l1": ("prod_eq", {"l1_exact_penalty_barrier": "yes"}),
+        "jordan_eq": ("jordan_eq", {}),
+    }
+    if route in single:
+        low, o = single[route]
+        nlp = LoweredNlp(model, low)
+        x, info, wall = solve_once(nlp, {**opts, **o}, x0)
+        return {"x": x, "status": int(info["status"]), "status_msg": str(info["status_msg"]),
+                "iters": int(info["iter_count"]), "wall": wall, "stages": 1}
+
+    if route in ("scholtes_then_ncp", "scholtes_then_ineq", "scholtes_only"):
+        finish = {"scholtes_then_ncp": "prod_eq", "scholtes_then_ineq": "prod_ineq",
+                  "scholtes_only": None}[route]
+        warm = None
+        xcur = np.asarray(x0, float)
+        iters, wall, stages = 0, 0.0, 0
+        last_ok = None
+        log = []
+        for tau in TAU_SCHEDULE:
+            nlp = LoweredNlp(model, "scholtes", tau)
+            x, info, w = solve_once(nlp, opts, xcur, warm)
+            iters += int(info["iter_count"]); wall += w; stages += 1
+            st = int(info["status"])
+            if st not in OK and warm is not None:
+                # restart rung: primal-only
+                x, info, w = solve_once(nlp, opts, xcur, None)
+                iters += int(info["iter_count"]); wall += w; stages += 1
+                st = int(info["status"])
+            log.append((tau, st, int(info["iter_count"])))
+            if st not in OK:
+                break
+            xcur, warm, last_ok = x, _warm(x, info), (x, info)
+        if last_ok is None:
+            return {"x": xcur, "status": st, "status_msg": str(info["status_msg"]),
+                    "iters": iters, "wall": wall, "stages": stages, "log": log}
+        if finish is None:
+            x, info = last_ok
+            return {"x": x, "status": int(info["status"]), "status_msg": str(info["status_msg"]),
+                    "iters": iters, "wall": wall, "stages": stages, "log": log}
+        nlp = LoweredNlp(model, finish)
+        x, info, w = solve_once(nlp, opts, xcur, warm)
+        iters += int(info["iter_count"]); wall += w; stages += 1
+        st = int(info["status"])
+        log.append(("finish", st, int(info["iter_count"])))
+        if st not in OK:
+            # keep the continuation's answer, flag it
+            x = xcur
+        return {"x": x, "status": st, "status_msg": str(info["status_msg"]),
+                "iters": iters, "wall": wall, "stages": stages, "log": log,
+                "finish_failed": st not in OK}
+    raise ValueError(route)
