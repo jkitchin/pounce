@@ -19,7 +19,8 @@ Lowerings of the complementarity block:
 
 Sparse Jacobian / Hessian patterns, detected structurally from JAX at random
 points (the first dense attempt made each drifting solve ~450 s: the
-factorization cost of a dense 631x631 KKT dominated).
+factorization cost of a dense 631x631 KKT dominated), and evaluated
+compressed by column coloring (see `_compiled`).
 """
 
 from __future__ import annotations
@@ -81,6 +82,35 @@ def generic_report(model: Model) -> Callable:
 _CACHE: Dict[tuple, tuple] = {}
 
 
+def _color_columns(rows_of_col, cols_of_row, n):
+    """Greedy column coloring: two columns share a color only if no row has
+    a nonzero in both. Then one directional derivative per color recovers
+    every nonzero exactly -- row i of (J @ seed_c) holds J[i, j] for the one
+    column j of color c that row i touches."""
+    color = np.full(n, -1)
+    for j in range(n):
+        taken = {color[k] for i in rows_of_col[j] for k in cols_of_row[i]}
+        c = 0
+        while c in taken:
+            c += 1
+        color[j] = c
+    return color
+
+
+def _coloring(mask):
+    rows, cols = np.nonzero(mask)
+    n = mask.shape[1]
+    rows_of_col = [[] for _ in range(n)]
+    cols_of_row = [[] for _ in range(mask.shape[0])]
+    for i, j in zip(rows, cols):
+        rows_of_col[j].append(i)
+        cols_of_row[i].append(j)
+    color = _color_columns(rows_of_col, cols_of_row, n)
+    seeds = np.zeros((n, int(color.max()) + 1 if n else 0))
+    seeds[np.arange(n), color] = 1.0
+    return color, seeds
+
+
 def _compiled(model: Model, kind: str, cons: Callable, m: int):
     key = (id(model), kind)
     if key in _CACHE:
@@ -88,28 +118,53 @@ def _compiled(model: Model, kind: str, cons: Callable, m: int):
     f = jax.jit(model.f)
     g = jax.jit(jax.grad(model.f))
     c = jax.jit(cons)
-    J = jax.jit(jax.jacfwd(cons))
 
     def lag(z, lam, sigma):
         return sigma * model.f(z) + jnp.dot(lam, cons(z))
 
-    H = jax.jit(jax.hessian(lag))
-
-    # Structural sparsity: union of nonzeros at a few random points
-    # (random lam for the Hessian). A structural zero is zero
-    # everywhere; a numerical coincidence at three independent
-    # Gaussian points has probability zero.
+    # Structural sparsity: union of nonzeros of the dense derivatives at a
+    # few random points (random lam for the Hessian). A structural zero is
+    # zero everywhere; a numerical coincidence at three independent Gaussian
+    # points has probability zero. This is the only dense evaluation.
     n = model.n
+    Jd = jax.jit(jax.jacfwd(cons))
+    Hd = jax.jit(jax.hessian(lag))
     rng = np.random.default_rng(12345)
     jmask = np.zeros((m, n), bool)
     hmask = np.zeros((n, n), bool)
     for _ in range(3):
         zr = jnp.asarray(rng.standard_normal(n))
         lr = jnp.asarray(rng.standard_normal(m))
-        jmask |= np.asarray(J(zr)) != 0
-        hmask |= np.asarray(H(zr, lr, 1.0)) != 0
-    hmask = np.tril(hmask | hmask.T)
-    _CACHE[key] = (f, g, c, J, H, np.nonzero(jmask), np.nonzero(hmask))
+        jmask |= np.asarray(Jd(zr)) != 0
+        hmask |= np.asarray(Hd(zr, lr, 1.0)) != 0
+    hmask = hmask | hmask.T
+    jidx = np.nonzero(jmask)
+    hidx = np.nonzero(np.tril(hmask))
+
+    # Compressed evaluation: one JVP (Jacobian) or Hessian-vector product
+    # per color instead of one per variable. Dense jacfwd/hessian pushed
+    # all n directions: on the quadruped (n = 2302, 14 258 Jacobian and
+    # 8 987 Hessian nonzeros) that was 2.9 s and 5.7 s per evaluation.
+    jcolor, jseeds = _coloring(jmask)
+    hcolor, hseeds = _coloring(hmask)
+    jseeds, hseeds = jnp.asarray(jseeds), jnp.asarray(hseeds)
+    jr, jc = jidx[0], jcolor[jidx[1]]
+    hr, hc = hidx[0], hcolor[hidx[1]]
+
+    @jax.jit
+    def J(z):
+        jvp = lambda v: jax.jvp(cons, (z,), (v,))[1]
+        comp = jax.vmap(jvp, in_axes=1, out_axes=1)(jseeds)  # m x colors
+        return comp[jr, jc]
+
+    @jax.jit
+    def H(z, lam, sigma):
+        grad = jax.grad(lambda x: lag(x, lam, sigma))
+        hvp = lambda v: jax.jvp(grad, (z,), (v,))[1]
+        comp = jax.vmap(hvp, in_axes=1, out_axes=1)(hseeds)  # n x colors
+        return comp[hr, hc]
+
+    _CACHE[key] = (f, g, c, J, H, jidx, hidx)
     return _CACHE[key]
 
 
@@ -163,7 +218,7 @@ class LoweredNlp:
         return np.asarray(self._c(jnp.asarray(x)))
 
     def jacobian(self, x):
-        return np.asarray(self._J(jnp.asarray(x)))[self._jidx]
+        return np.asarray(self._J(jnp.asarray(x)))
 
     def jacobianstructure(self):
         return self._jidx
@@ -172,8 +227,7 @@ class LoweredNlp:
         return self._hidx
 
     def hessian(self, x, lagrange, obj_factor):
-        h = np.asarray(self._H(jnp.asarray(x), jnp.asarray(lagrange), obj_factor))
-        return h[self._hidx]
+        return np.asarray(self._H(jnp.asarray(x), jnp.asarray(lagrange), obj_factor))
 
 
 BASE_OPTIONS = {
