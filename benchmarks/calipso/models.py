@@ -71,6 +71,12 @@ MPCC_ROUTES = ("defaults_eq", "direct", "ncp_eq", "ncp_eq_l1", "scholtes_then_nc
 NLP_ROUTES = ("defaults_eq", "ncp_eq")
 
 
+#: Models run on fewer seeds because of cost: a quadruped solve takes up to
+#: ~20 min (2302 variables, ~0.4 s per IPM iteration, 3000-iteration cap),
+#: so five seeds x seven routes per solver would be most of a day.
+REDUCED_SEEDS = {"quadruped": (0, 1)}
+
+
 def jobs(solver="pounce", seeds=(0, 1, 2, 3, 4), names=ALL):
     """(model, route, seed) triples for one solver. ncp_eq_l1 needs a
     POUNCE-only option and is skipped for Ipopt."""
@@ -81,7 +87,8 @@ def jobs(solver="pounce", seeds=(0, 1, 2, 3, 4), names=ALL):
             routes.append("jordan_eq")
         if solver != "pounce" and "ncp_eq_l1" in routes:
             routes.remove("ncp_eq_l1")
-        for seed in (seeds[:1] if name in DETERMINISTIC else seeds):
+        use = seeds[:1] if name in DETERMINISTIC else REDUCED_SEEDS.get(name, seeds)
+        for seed in use:
             out += [(name, r, seed) for r in routes]
     return out
 

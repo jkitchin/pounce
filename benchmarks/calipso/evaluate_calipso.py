@@ -36,10 +36,14 @@ for name in models.ALL:
 
 
 def main(path):
+    # A run killed mid-batch (out of memory) and rerun leaves an earlier
+    # record for the same (example, seed); keep the last one.
+    latest = {}
     for line in open(path):
-        if not line.startswith("{"):
-            continue
-        rec = json.loads(line)
+        if line.startswith("{"):
+            rec = json.loads(line)
+            latest[(rec["example"], rec["seed"])] = rec
+    for rec in latest.values():
         for name in EXAMPLE_TO_MODELS.get(rec["example"], []):
             model, _, _, from_calipso = models.get(name)
             z = from_calipso(rec)
