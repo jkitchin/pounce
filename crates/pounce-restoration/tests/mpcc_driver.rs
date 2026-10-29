@@ -9,7 +9,7 @@
 use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
 };
-use pounce_algorithm::mpcc::{MpccStage, TOUCHED_OPTIONS};
+use pounce_algorithm::mpcc::{MpccStage, StationarityClass, TOUCHED_OPTIONS};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -245,6 +245,13 @@ fn qpec_small_reaches_the_answer_from_every_gate0_start() {
         for (got, want) in out.x.iter().zip([1.0, 1.0, 0.0]) {
             assert!((got - want).abs() < 1e-4, "start {x0:?}: x = {:?}", out.x);
         }
+        // Strongly stationary, with the second pair biactive.
+        let cert = out.certificate.as_ref().unwrap();
+        assert_eq!(
+            (cert.class, cert.n_biactive),
+            (StationarityClass::S, 1),
+            "start {x0:?}: {cert:?}"
+        );
         // The model saw exactly one solution, and it is the reported one.
         let seen = finalized.borrow();
         assert_eq!(seen.len(), 1, "start {x0:?}: {} finalizes", seen.len());
@@ -311,6 +318,58 @@ fn an_over_determined_exact_product_falls_back_to_the_continuation() {
         out.x
     );
     assert_eq!(finalized.borrow().len(), 1);
+    // Three active gradients in R^2: MPCC-LICQ fails, the multipliers are a
+    // set, and with no biactive pair the set search finds S.
+    let cert = out.certificate.unwrap();
+    assert_eq!(
+        (cert.class, cert.n_biactive, cert.multipliers_unique),
+        (StationarityClass::S, 0, false),
+        "{cert:?}"
+    );
+}
+
+/// `ralph1`: `min 2x - y,  x >= 0,  0 <= y ⟂ y - x >= 0`. The solution is the
+/// origin, where no S-stationary multiplier exists (it is M-stationary only).
+/// The driver converges there and must say so: accepted, but certified W,
+/// not S — the case where "the solver succeeded" and "this is a strongly
+/// stationary point" part ways. Three active gradients in R^2 make the
+/// multipliers a set, so this exercises the certificate's set search; its
+/// unique-multiplier path is covered by `pounce_algorithm::mpcc`'s tests.
+#[test]
+fn a_converged_point_that_is_not_strongly_stationary_is_reported_as_such() {
+    let zero = || vec![vec![0.0; 2]; 2];
+    let model = Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, 0.0],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: vec![1.0, 2.0],
+        f: Box::new(|x| 2.0 * x[0] - x[1]),
+        grad: Box::new(|_| vec![2.0, -1.0]),
+        g: Box::new(|x| vec![x[1] - x[0]]),
+        jac: Box::new(|_| vec![vec![-1.0, 1.0]]),
+        hess: Box::new(move |_| vec![zero(), zero()]),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let out = solve_mpcc(
+        &mut app,
+        tnlp,
+        vec![ComplementarityPair { row: 0, var: 1 }],
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(out.accepted_by.is_some(), "{:?}", out.solves);
+    assert!(out.x.iter().all(|v| v.abs() < 1e-4), "{:?}", out.x);
+    let cert = out.certificate.unwrap();
+    assert_eq!(
+        (cert.class, cert.n_biactive),
+        (StationarityClass::W, 1),
+        "{cert:?}"
+    );
 }
 
 /// An infeasible complementarity model: `x >= 1`, `y >= 1` and

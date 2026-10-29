@@ -26,15 +26,15 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    MpccStage, SCHOLTES_SCHEDULE, STAGES, TOUCHED_OPTIONS, accepts, converged,
-    warm_start_assignments,
+    Certificate, CertificateInput, MpccStage, SCHOLTES_SCHEDULE, STAGES, TOUCHED_OPTIONS, accepts,
+    certify, converged, warm_start_assignments,
 };
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::mpcc::{ComplementarityPair, Lowering, MpccTnlp, StartOverride};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
-use pounce_nlp::tnlp::{IpoptCq, IpoptData, TNLP};
+use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, IpoptCq, IpoptData, SparsityRequest, TNLP};
 
 /// One lowered solve.
 #[derive(Debug, Clone)]
@@ -63,6 +63,10 @@ pub struct MpccOutcome {
     /// The forwarded point and its largest `|G·H|`.
     pub x: Vec<Number>,
     pub max_abs_product: Number,
+    /// Which stationarity class the forwarded point satisfies
+    /// ([`pounce_algorithm::mpcc::certify`]); `None` only if the model could
+    /// not be evaluated there.
+    pub certificate: Option<Certificate>,
 }
 
 #[derive(Clone)]
@@ -297,6 +301,13 @@ pub fn solve_mpcc(
         );
     }
     let total_iterations = solves.iter().map(|s| s.iterations).sum();
+    let solver_tol = app
+        .options()
+        .get_numeric_value("tol", "")
+        .map(|(v, _)| v)
+        .unwrap_or(1e-8);
+    let pairs = wrapper.borrow().pairs().to_vec();
+    let certificate = certify_at(&inner, &pairs, &chosen.x, solver_tol);
     Ok(MpccOutcome {
         status: chosen.status,
         statistics: chosen.statistics,
@@ -305,5 +316,68 @@ pub fn solve_mpcc(
         total_iterations,
         x: chosen.x,
         max_abs_product: chosen.max_abs_product,
+        certificate,
     })
+}
+
+/// Evaluate the *inner* model at `x` and certify it. `None` if any callback
+/// declines.
+fn certify_at(
+    inner: &Rc<RefCell<dyn TNLP>>,
+    pairs: &[ComplementarityPair],
+    x: &[Number],
+    solver_tol: Number,
+) -> Option<Certificate> {
+    let mut m = inner.borrow_mut();
+    let info = m.get_nlp_info()?;
+    let (n, mm, nnz) = (info.n as usize, info.m as usize, info.nnz_jac_g as usize);
+    if x.len() != n {
+        return None;
+    }
+    let off = match info.index_style {
+        IndexStyle::C => 0,
+        IndexStyle::Fortran => 1,
+    };
+    let (mut x_l, mut x_u, mut g_l, mut g_u) =
+        (vec![0.0; n], vec![0.0; n], vec![0.0; mm], vec![0.0; mm]);
+    if !m.get_bounds_info(BoundsInfo {
+        x_l: &mut x_l,
+        x_u: &mut x_u,
+        g_l: &mut g_l,
+        g_u: &mut g_u,
+    }) {
+        return None;
+    }
+    let mut grad_f = vec![0.0; n];
+    let mut g = vec![0.0; mm];
+    if !m.eval_grad_f(x, true, &mut grad_f) || !m.eval_g(x, false, &mut g) {
+        return None;
+    }
+    let (mut ir, mut jc, mut v) = (vec![0 as Index; nnz], vec![0 as Index; nnz], vec![0.0; nnz]);
+    if !m.eval_jac_g(
+        None,
+        false,
+        SparsityRequest::Structure {
+            irow: &mut ir,
+            jcol: &mut jc,
+        },
+    ) || !m.eval_jac_g(Some(x), false, SparsityRequest::Values { values: &mut v })
+    {
+        return None;
+    }
+    let jac: Vec<(usize, usize, Number)> = (0..nnz)
+        .map(|k| ((ir[k] - off) as usize, (jc[k] - off) as usize, v[k]))
+        .collect();
+    Some(certify(&CertificateInput {
+        x,
+        grad_f: &grad_f,
+        g: &g,
+        jac: &jac,
+        x_l: &x_l,
+        x_u: &x_u,
+        g_l: &g_l,
+        g_u: &g_u,
+        pairs,
+        solver_tol,
+    }))
 }

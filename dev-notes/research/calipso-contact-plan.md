@@ -216,10 +216,26 @@ exist and run from one command.
    from its three Gate 0 starts, force the fallback with an over-determined
    model, and run every stage on an infeasible one. Not yet reachable from
    any entry point.
-3. **Certificate** — after the driver's answer, read each pair's active
-   side, solve the tightened NLP once from that point, and report
-   S-stationarity (biactive multipliers' signs) in the JSON; a failed rung
-   is decided by physical violation *and* the certificate, not by status.
+3. ✅ **Certificate** — `pounce_algorithm::mpcc::certify`, attached to
+   every driver outcome. **Not** the tightened-NLP solve first planned: that
+   is refused as over-determined wherever MPCC-LICQ fails (the
+   over-determined test model), and where the multipliers are a set it reads
+   one vector, which can report W for a point that is S. Instead, the
+   stationarity system `benchmarks/calipso/stationarity.py` builds — same
+   columns, same thresholds — solved directly: SVD least squares and a sign
+   check when the multipliers are unique, a search of the multiplier set
+   (free columns projected out, Lawson–Hanson NNLS on the rest) when they
+   are not, "not searched" above 600 sign-constrained columns. Reports S /
+   W / None. One departure from the Python classifier: signs inside a
+   `sqrt(tol)` noise band are not descent, because an answer near a
+   biactive pair is only `sqrt(tol)`-accurate (qpec_small's converged point
+   carries a biactive multiplier of -1.6e-4 where the exact point's is 0).
+   Unit tests on the points the Python classifier decides (complementarity
+   17 / 25 / 85, maratos, ralph1, ctrap, qpec_small) plus a rank-deficient
+   case built so the minimum-norm vector reads W while an S vector exists;
+   mutation-checked both ways (S == W fails three tests, dropping the set
+   search fails the rank-deficient one). End to end: qpec_small certifies
+   S, ralph1 converges but certifies W.
 4. **Entry points** — `.nl` kind-5 rows (AMPL `complements`, Pyomo
    `mpec`) mapped to pairs instead of refused; `pounce.Problem(...,
    complementarity=...)`; safe defaults on declared rows (no bound
