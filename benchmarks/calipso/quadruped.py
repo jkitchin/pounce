@@ -448,6 +448,9 @@ def make_model(cones="source"):
         return out
 
     m.report = report
+    # Its complementarity is mostly between second-order cones; the NCP-pair
+    # stationarity classes in stationarity.py do not apply (reported n/a).
+    m.soc_complementarity = True
     return m
 
 

@@ -48,7 +48,10 @@ def cell(rs):
         return "n/a"
     ok = [r for r in rs if "error" not in r]
     phys = [r for r in ok if r["violation"] <= VIOL_OK]
-    cert = sum(r.get("stationarity", {}).get("klass") in ("S", "KKT") for r in ok)
+    # A stationarity verdict says nothing about feasibility -- the KKT test
+    # passes at wachter's infeasible stopping point -- so a run counts as
+    # certified only when it is also physical.
+    cert = sum(r.get("stationarity", {}).get("klass") in ("S", "KKT") for r in phys)
     cert_txt = f"{cert}/{len(rs)}" if any("stationarity" in r for r in ok) else "–"
     obj = f"{np.median([r['obj'] for r in phys]):.4g}" if phys else "–"
     it = int(np.median([r["iters"] for r in ok])) if ok else "–"

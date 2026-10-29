@@ -63,6 +63,12 @@ Thresholds, and why each is relative
   argument as `dual_inf_scale_kappa`; an absolute threshold would grade a
   point by its units.
 
+The verdict is about stationarity only, never feasibility: the test asks
+whether ``grad f`` is a combination of the constraint gradients, which an
+infeasible point can satisfy (`wachter`'s infeasible stopping point passes
+the KKT test). Read it together with the source-level violation;
+`summarize.py` counts a run as certified only when it is also physical.
+
 ``solver_tol`` is what the solver was asked for: 1e-8 for the POUNCE and
 Ipopt routes, 1e-4 for CALIPSO.jl's defaults. Judging CALIPSO's answers at
 1e-8 would fail them for being what they were asked to be.
