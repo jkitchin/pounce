@@ -144,6 +144,9 @@ def report(z):
 
 
 model = Model("bunnyhop", nz, f, eq, ineq, comp, lb, ub, report=report)
+#: (G, H) with comp = G * H: contact impulse against gap, per step.
+model.pairs = lambda z: (jnp.concatenate([z[ie[i]] for i in range(N - 2)]),
+                         jnp.concatenate([d(z[iq[i + 2]]) for i in range(N - 2)]))
 
 
 def initial_point(seed):

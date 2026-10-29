@@ -1,6 +1,6 @@
 """python run_one.py <model> <route> <seed>  -> one JSON line on stdout.
 
-model: bunnyhop | drifting_norm | drifting_squared
+model: any name in models.ALL
 """
 import json
 import os
@@ -12,15 +12,11 @@ import numpy as np
 
 def main():
     model_name, route, seed = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    if model_name == "bunnyhop":
-        import bunnyhop as mod
-        model = mod.model
-    else:
-        import drifting as mod
-        model = mod.make_model(model_name.split("_", 1)[1])
+    import models
     from mpcc_nlp import run_route
 
-    z0 = mod.initial_point(seed)
+    model, initial_point, _, _ = models.get(model_name)
+    z0 = initial_point(seed)
     t0 = time.perf_counter()
     try:
         r = run_route(model, route, z0)
@@ -28,6 +24,13 @@ def main():
         print(json.dumps({"model": model_name, "route": route, "seed": seed, "error": repr(e)}))
         return
     rep = model.report(r["x"])
+    import stationarity
+    try:
+        st = stationarity.classify(model, r["x"], solver_tol=1e-8)
+    except Exception as e:  # a classification failure must not lose the run
+        st = {"klass": "error", "reason": repr(e)}
+    rep["stationarity"] = {k: st[k] for k in ("klass", "n_biactive", "residuals", "resid_tol", "note", "reason")
+                           if k in st}
     solver = os.environ.get("CALIPSO_SOLVER", "pounce")
     if solver == "ipopt":
         solver += "-" + os.environ.get("IPOPT_LINEAR_SOLVER", "mumps")

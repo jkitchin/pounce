@@ -182,8 +182,10 @@ def report(z):
 
 def make_model(soc_form):
     lb, ub = bounds(soc_form)
-    return Model(f"drifting[{soc_form}]", nz, f, eq, make_ineq(soc_form), comp, lb, ub,
-                 extra={"jordan": jordan}, report=report)
+    m = Model(f"drifting[{soc_form}]", nz, f, eq, make_ineq(soc_form), comp, lb, ub,
+              extra={"jordan": jordan}, report=report)
+    m.soc_complementarity = True
+    return m
 
 
 def initial_point(seed):

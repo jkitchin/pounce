@@ -53,6 +53,28 @@ class Model:
     report: Optional[Callable] = None
 
 
+def generic_report(model: Model) -> Callable:
+    """Source-level violation for a model whose complementarity function is
+    a plain product (so |comp| is the residual) and whose cones are all
+    nonnegative orthants: max of |eq|, |comp|, inequality and bound
+    shortfall."""
+
+    def report(z):
+        zj = jnp.asarray(z)
+        zn = np.asarray(z, dtype=float)
+        e = np.asarray(model.eq(zj))
+        c = np.asarray(model.comp(zj))
+        h = np.asarray(model.ineq(zj))
+        eqv = float(np.max(np.abs(e))) if e.size else 0.0
+        cv = float(np.max(np.abs(c))) if c.size else 0.0
+        iv = float(np.max(np.maximum(-h, 0))) if h.size else 0.0
+        bv = float(np.max(np.maximum(np.maximum(model.lb - zn, zn - model.ub), 0)))
+        return {"obj": float(model.f(zj)), "eq_viol": eqv, "compl": cv,
+                "ineq_viol": iv, "bound_viol": bv, "violation": max(eqv, cv, iv, bv)}
+
+    return report
+
+
 # Compiled callbacks and sparsity, shared by every lowering that uses the
 # same constraint function (prod_eq / prod_ineq / scholtes differ only in
 # row bounds), so a 10-stage continuation compiles once, not ten times.
