@@ -60,9 +60,20 @@ Nesterov–Todd scaling (`crates/pounce-convex/src/cones/soc.rs`), and an
 active-set SQP arm with `pounce-qp` subproblems.
 
 CALIPSO's augmented-Lagrangian treatment of equalities is **not** worth
-porting. Its purpose is a full-rank KKT without LICQ, which dual
-regularization already provides, and the closest POUNCE relative (the ℓ₁
-wrapper) gave mixed results on the port.
+porting as the main algorithm. Its stated purpose is a full-rank KKT
+without LICQ, which dual regularization already provides, and the closest
+POUNCE relative (the ℓ₁ wrapper) gave mixed results on the port. **It may
+be worth having as a fallback rung**, though, for a reason the paper does
+not state: on `wachter` (CALIPSO.jl `nonconvex/wachter.jl`) CALIPSO
+reaches the documented solution in 15 iterations, while POUNCE, stock
+Ipopt, `l1_exact_penalty_barrier=yes` and
+`l1_fallback_on_restoration_failure=yes` all stop at `[-1, 0, 0]` with
+`Infeasible_Problem_Detected`. That point is a genuine local minimizer of
+the constraint violation, so restoration and the ℓ₁ penalty are behaving
+as designed; the quadratic augmented-Lagrangian path with multiplier
+updates simply does not lead into it. One tiny problem is not a case for
+building anything, but it is the only kind of failure in this corpus that
+no formulation choice fixes.
 
 ## 1. Rules that apply throughout
 
@@ -75,6 +86,46 @@ wrapper) gave mixed results on the port.
   (CLAUDE.md, "Sensitivity changes need the invariance legs").
 - Thresholds below are set before measuring. If one is missed, the result
   is recorded as missed, not re-scoped.
+
+### Design principle: it just works by default
+
+The target user should not need to know what a Scholtes relaxation, a
+Jordan product or `bound_relax_factor` is. An option is acceptable as an
+override or escape hatch, but **the default must get these problems
+right with no options set**. Most of what failed in the port — for the
+paper's Ipopt runs and for POUNCE alike — was a formulation choice the
+user had to make (`t − ‖x‖` vs `t² − ‖x‖²`, `G·H = 0` vs `≤ 0`,
+`bound_relax_factor` left at its default), not a missing algorithm. That
+implies four things, which cut across B, C and E:
+
+1. **Declare structure, never reformulate it.** Users say "these are
+   complementary" or "this lies in a cone" (Python API, Pyomo `mpec`,
+   AMPL `complements`); the solver chooses the lowering.
+2. **Detect the common forms when nothing is declared**, the way convex
+   quadratic constraints are already detected and routed to the conic
+   solver: a product of two nonnegative quantities held at `= 0` or
+   `≤ 0` is a complementarity pair; `‖x‖ ≤ t` or its square is a
+   second-order cone.
+3. **A fallback ladder with a certificate, not one fixed route.** No
+   single route won on the port: ℓ₁ was best on the drifting car and worst
+   on bunny-hop, `ncp_eq` the reverse, and only the Scholtes continuation
+   was 5/5 on both, at ~4× the iterations. So: try the fast route, classify
+   the answer (`benchmarks/calipso/stationarity.py`), fall back to the
+   robust route only on failure, and report the class. This is the
+   pattern POUNCE already uses in `mu_strategy_fallback` and the
+   `square_system` ladder. Never report a bare success on a point that is
+   not physical (the squared-cone drift under defaults reports
+   `Solve_Succeeded` at 3.5e-4).
+4. **Safe defaults for declared structure**: no bound relaxation on cone
+   and complementarity rows, which is what turns a 1e-8 relaxation into a
+   1e-4 violation at a cone tip.
+
+**Acceptance for "just works"**: with no options set, a physical answer
+certified S-stationary (or KKT) on every corpus problem where *any* of
+POUNCE, Ipopt or CALIPSO finds one; zero wrong certificates; the fixture
+sweep clean on everything POUNCE already solves. It cannot mean "finds the
+best local solution": `complementarity` has S-stationary points at 17 and
+25, and both are correct answers for a local method.
 
 ## 2. Workstreams
 
@@ -189,8 +240,20 @@ anything.
 
 ## 4. Open questions
 
-- Does Ipopt's continuation also solve the drifting car? (Pending Ipopt
-  matrix.) If yes, B is a usability feature, not a capability gap.
-- Is 0.2026 (POUNCE) the same drifting-car local solution as CALIPSO's
-  0.24 at `tol=1e-3`, or a different one? Answered by A's CALIPSO run.
+- ~~Does Ipopt's continuation also solve the drifting car?~~ **Yes**:
+  Ipopt 3.14.20 + MUMPS, `scholtes_then_ncp`, 5/5 physical at 0.2041 in
+  729 iterations (POUNCE: 0.2026, 1015), and Ipopt's plain `ncp_eq` is 5/5
+  where POUNCE's is 3/5. So B is a usability feature, not a capability
+  Ipopt lacks.
+- ~~Is 0.2026 the same drifting-car solution as CALIPSO's 0.24?~~ **No**:
+  CALIPSO.jl run here returns 0.239–0.253 across five seeds (violation
+  ~1.4e-5, matching its own residual), so POUNCE and Ipopt find genuinely
+  lower-cost trajectories.
 - Does `pounce-nl` already parse AMPL complementarity constraints?
+- The paper's quadruped numbers (objective 574.84) are not reproducible
+  from CALIPSO.jl at `0e3bdcf`: that commit changed `quadruped_gait.jl`,
+  and it now solves to 0.26 in 168 iterations. The example also puts its
+  friction cones on `u[9:24]`, which leaves η₃, η₄ in no cone and gives
+  the normal forces a spurious cone — an index offset of 4, apparently.
+  `benchmarks/calipso/quadruped.py` reproduces the source as written and
+  keeps the corrected model as `cones="intended"`.
