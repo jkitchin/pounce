@@ -196,6 +196,8 @@ check(() => assert.equal(events.at(-1).event, 'terminated'));
 
 const plain = studio.solve('');
 check(() => assert.equal(plain.status, 'SolveSucceeded'));
+check(() => assert.ok(studio.solutionSol().includes('objno')));
+check(() => assert.ok(studio.solutionCsv().split('\n').length >= 5));
 check(() => assert.ok(Math.abs(plain.objective - -Math.SQRT1_2) < 1e-6));
 
 // --- the plain studio module: everything but the debugger ------------------

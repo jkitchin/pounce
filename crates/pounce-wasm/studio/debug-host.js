@@ -201,6 +201,16 @@ export async function createStudio(wasmSource, { onEvent, onText = () => {} }) {
       return callJson(ex().pounce_eval_slice, request);
     },
 
+    /** The last solve as an AMPL `.sol` file (null before a solve). */
+    solutionSol() {
+      return fromWasm(ex().pounce_solution_sol());
+    },
+
+    /** The last solve as CSV, one row per variable and constraint (null before a solve). */
+    solutionCsv() {
+      return fromWasm(ex().pounce_solution_csv());
+    },
+
     /** The last solve's `pounce.solve-report/v1` document, or null. */
     report() {
       return JSON.parse(fromWasm(ex().pounce_solve_report()));

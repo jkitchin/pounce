@@ -38,6 +38,10 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Fixed
+- **Debugger: `detach` now ends `stop-at` pauses.** A `stop-at` checkpoint (or
+  a pending `stepi`) kept pausing after `detach`, which every other pause
+  source honours, so a session that had used `stop-at kkt` could not let the
+  solve run to completion.
 - **A solve report built on wasm no longer aborts**: `ReportBuilder::finish`
   read `std::process::id()`, which WASI does not have.
 

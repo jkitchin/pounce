@@ -4142,9 +4142,10 @@ impl DebugHook for SolverDebugger {
 
         // Decide whether to pause. `stop-at` and a one-shot `stepi` apply
         // at every checkpoint; step / run / breakpoints / conditions /
-        // Ctrl-C only at the iteration top.
+        // Ctrl-C only at the iteration top. Once detached, `stop-at` and
+        // `stepi` no longer pause, like breakpoints, events and watchpoints.
         let mut reason: Option<String> = None;
-        let mut pause = self.sub_step || self.stop_at.contains(cp.as_str());
+        let mut pause = !self.detached && (self.sub_step || self.stop_at.contains(cp.as_str()));
 
         // Event breakpoints fire at whatever checkpoint makes them
         // observable (e.g. `regularized` at after_search_dir), so check
