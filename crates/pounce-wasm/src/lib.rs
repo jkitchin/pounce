@@ -403,6 +403,12 @@ fn summarize(tnlp: &mut NlTnlp) -> serde_json::Value {
     let (var_names, var_names_truncated) = preview(&prob.var_names);
     let (con_names, con_names_truncated) = preview(&prob.con_names);
     let (x0, x0_truncated) = preview(&prob.x0);
+    // Bounds for display, with an infinite bound as AMPL's ±1e19 sentinel: JSON has no
+    // infinity, and serde_json would write it as `null`.
+    let sentinel =
+        |v: &[f64]| -> Vec<f64> { preview(v).0.iter().map(|b| b.clamp(-INF, INF)).collect() };
+    let (x_l, x_u) = (sentinel(&prob.x_l), sentinel(&prob.x_u));
+    let (g_l, g_u) = (sentinel(&prob.g_l), sentinel(&prob.g_u));
 
     serde_json::json!({
         "n_vars": n,
@@ -423,6 +429,10 @@ fn summarize(tnlp: &mut NlTnlp) -> serde_json::Value {
         "var_names": var_names,
         "con_names": con_names,
         "x0": x0,
+        "x_l": x_l,
+        "x_u": x_u,
+        "g_l": g_l,
+        "g_u": g_u,
         "truncated": var_names_truncated || con_names_truncated || x0_truncated,
         "preview_limit": PREVIEW_LIMIT,
     })
@@ -1198,6 +1208,17 @@ mod tests {
         // One nonlinear row (the circle), one linear row.
         assert_eq!(s["n_nonlinear_cons"], 1);
         assert!(s["nnz_jac"].as_u64().unwrap_or(0) > 0);
+        // Bounds: x in [-10, 10]; the circle is an equality (= 1), the line a lower bound (>= 0)
+        // whose missing upper bound is the 1e19 sentinel, not `null`.
+        assert_eq!(s["x_l"], serde_json::json!([-10.0, -10.0]));
+        assert_eq!(s["x_u"], serde_json::json!([10.0, 10.0]));
+        assert_eq!(s["g_l"], serde_json::json!([1.0, 0.0]));
+        assert_eq!(s["g_u"][0], 1.0);
+        assert!(
+            s["g_u"][1].as_f64().is_some_and(|u| u >= INF),
+            "{}",
+            s["g_u"]
+        );
     }
 
     #[test]
