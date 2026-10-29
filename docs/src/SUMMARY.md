@@ -36,6 +36,8 @@
   - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
+- [Phase Envelopes & Inverse Mixture Design](phase-envelope.md)
+- [Advanced-Step NMPC for a CSTR](asnmpc-cstr.md)
 - [Catalyst-Pellet Inverse Design](catalyst-pellet.md)
 - [Phase-Changing Flash as an MPCC](flash-mpcc.md)
 - [ODE / DAE Initial Value Problems](ode.md)
