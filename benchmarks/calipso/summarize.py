@@ -52,7 +52,13 @@ def cell(rs):
     # passes at wachter's infeasible stopping point -- so a run counts as
     # certified only when it is also physical.
     cert = sum(r.get("stationarity", {}).get("klass") in ("S", "KKT") for r in phys)
-    cert_txt = f"{cert}/{len(rs)}" if any("stationarity" in r for r in ok) else "–"
+    klasses = [r.get("stationarity", {}).get("klass") for r in ok]
+    if not any("stationarity" in r for r in ok):
+        cert_txt = "–"  # run predates the stationarity column
+    elif all(k == "n/a" for k in klasses):
+        cert_txt = "n/a"  # cone complementarity: the NCP classes do not apply
+    else:
+        cert_txt = f"{cert}/{len(rs)}"
     obj = f"{np.median([r['obj'] for r in phys]):.4g}" if phys else "–"
     it = int(np.median([r["iters"] for r in ok])) if ok else "–"
     return f"{len(phys)}/{len(rs)} · {cert_txt} · {obj} · {it}"
