@@ -443,20 +443,29 @@ def solve_once(nlp: LoweredNlp, opts: dict, x0, warm=None):
     prob = pounce.Problem(n=nlp.n, m=nlp.m, problem_obj=nlp,
                           lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu, cones=cones)
     opts = dict(opts)
-    if cones:
-        # Native cones refuse dual warm starts (workstream C): carry the
-        # previous primal point only.
-        if warm is not None:
-            x0, warm = warm["x"], None
+    if cones and warm is not None and os.environ.get("POUNCE_SOC_WARM") != "1":
+        # Native cones (workstream C): carry the previous primal point only.
+        # The solver takes a dual warm start with cones, but on this
+        # continuation a start at the previous stage's mu (1e-9) with the
+        # new stage's 0.09 infeasibility fails the line search at most
+        # stages (restoration is not installed with cones), and a larger
+        # mu_init needs the restart rung as often; measured in
+        # dev-notes/research/nlp-soc-design.md. POUNCE_SOC_WARM=1 enables it.
+        x0, warm = warm["x"], None
     if os.environ.get("POUNCE_LINEAR_SOLVER"):
         opts["linear_solver"] = os.environ["POUNCE_LINEAR_SOLVER"]
     for k, v in opts.items():
         prob.add_option(k, v)
     kw = {"x0": np.asarray(x0, dtype=float)}
     if warm is not None:
+        wkw = {}
+        if cones and os.environ.get("POUNCE_SOC_WARM_MU"):
+            wkw["mu_init"] = float(os.environ["POUNCE_SOC_WARM_MU"])
+        if cones and os.environ.get("POUNCE_SOC_WARM_PUSH"):
+            wkw["bound_push"] = float(os.environ["POUNCE_SOC_WARM_PUSH"])
         kw["warm_start"] = pounce.WarmStart(
             x=warm["x"], lagrange=warm["mult_g"], zl=warm["mult_x_L"],
-            zu=warm["mult_x_U"], mu=warm["mu"])
+            zu=warm["mult_x_U"], mu=warm["mu"], **wkw)
     t0 = time.perf_counter()
     x, info = prob.solve(**kw)
     return np.asarray(x), info, time.perf_counter() - t0

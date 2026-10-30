@@ -281,3 +281,128 @@ every path is the old one: fixture sweep empty, crate tests unchanged), so
 it can be resumed or reverted as a unit. Resuming would mean the endgame
 (the τ ≤ 1e-5 stall) and cone-aware restoration, against a target that
 main already meets with squared cones.
+
+## Resuming C: where the iterations go, and what moves them
+
+Measured on `feature/contact-mpcc-cones` after the parking verdict above,
+seed 0, `scholtes_then_ineq`, one build per table. Every number below is a
+single stage re-run from the saved primal point the previous stage ended
+at (`solve_once` with `print_level=5`, a per-iteration cone diagnostic
+behind an env switch that was not kept), or the whole continuation
+stage by stage.
+
+**The reference is not what it looked like.** Main's 1759 is 383
+iterations for the nine Scholtes stages and 1376 for the `prod_ineq`
+finish — and the stages are that cheap only because each one warm-starts
+the duals at the previous stage's μ (`WarmStart`, `mu_init ≈ 1e-9`). The
+same squared-cone model with every stage started primal-only at
+`mu_init = 0.1`, which is what the native-cone runs did, costs 1469 for
+the stages and 4065 in all, and ends at a different point (0.2071). So the
+native-cone stage counts were being compared against a continuation
+protocol they were not allowed to use; the honest per-stage gap, cold
+against cold, was 735 vs 175 at τ = 1e-5 and 2426 vs 206 at τ = 1e-6.
+
+**Where a cold stage spends its iterations.** The τ = 1e-6 stage, 2426
+iterations: 19 at μ = 0.1, 69 at 1.5e-4, ~1200 at 1.8e-6 and ~1100 at
+2.5e-9. Each μ drop (superlinear, ×80–700) is followed by one full step
+that re-centres `⟨s, z⟩` and then **hundreds of iterations with
+`alpha_pr`, `alpha_du` in 1e-5 … 1e-1, clipped by the cones' own
+fraction-to-boundary, while `inf_du` sits at 1–60**. The pairs that clip
+are the *active* friction cones (β on its boundary: sliding) and the η
+cones they pair with — on this model most contacts slide, so the pair has
+`s` and `z` both against their boundaries, `det s ≈ 1e-7 … 1e-12` with
+`z₀ ≈ 50 … 1000` at μ = 1.5e-4 (the Scholtes multipliers grow as τ
+shrinks). The mechanism, read off the logs and then checked by hand:
+
+- A pair on the central path with `det s` that small has `det z =
+  μ²/det s`: the dual is itself within rounding of its boundary even when
+  perfectly centred.
+- The dual step `dz = μ s⁻¹ − z − H ds` carries `H ds`, and the NT block's
+  large eigenvalue is `≈ μ/λ_min(s)²` with `λ_min(s) = det s/(2 s₀)`.
+  A *tangential* primal move `t` (the friction direction turning) gives a
+  tangential `dz ≈ μ t/λ_min²`, which leaves the cone as soon as
+  `|t| > λ_min(s) ≈ 1e-7`, while the primal itself tolerates
+  `|t| ≈ √(det s) ≈ 3e-4`. **A boundary dual cannot be rotated by a linear
+  step.** The squared form never has this problem: its dual is the scalar
+  `v` and its direction `v·∇(det s) = 2 v J s` rotates with `s` for free.
+- After the μ drop the first step has `alpha_du = 0.95` with `|dz| ≈ |z|
+  ≈ 1e3`, and the `(1 − α_du) dz` left in `−y_d − z` is the `inf_du = 68`
+  the log shows; the mismatched primal and dual step lengths then leave
+  `s ∘ z` nowhere near `μ e`, and the clipped crawl begins.
+
+**What moved the τ = 1e-6 stage (2426 at the parked default).**
+
+| change | iterations | note |
+|---|---|---|
+| dual lift floor κ = 1e2 / 10 / 3 | 1990 / 1499 / 1282 | monotone in κ |
+| **dual lift floor κ = 1** (`√(det s det z) ≥ μ`) | **570** | kept, new default |
+| κ = 0.5 / 0.3 | 3000, wrong point (0.2106) | over-inflated dual changes the answer |
+| κ = 1, `mu_superlinear_decrease_power = 1.01` | 1012 | gentler drops are worse |
+| κ = 1, + `mu_linear_decrease_factor = 0.5` | 1439 | |
+| `mu_allow_fast_monotone_decrease = no` | 2309 | |
+| corrector off | 3000 (cap) | |
+| per-cone dual step lengths | 2032 | κ = 10 + per-cone: 1624 |
+| cone dual steps with the primal α (common step, as conic codes) | 1229 | both caps on the primal step: 1142; with κ = 1: 718 |
+| full dual step, head lifted back into the cone (no dual cap) | 926 (κ = 1), fails at κ = 1e4 | |
+| re-align `z` onto the central ray when it collapses, keeping `⟨s, z⟩` | 2327 … 3000 | worse than the head-only lift |
+| cone dual ≡ `μ s⁻¹` (primal barrier, no dual step) | 3000, wrong point (0.2136) | |
+| upper half of `kappa_sigma` (scale `z` down when `⟨s, z⟩ > κ_up μ`), κ = 1, κ_up = 10 / 100 | 1479 / 733 | |
+
+Only the lift floor at κ = 1 is a large effect, and it is not specific to
+this model: on 60 CBLIB SOCPs (`pounce_cblib_nlp`, the first 60 of the C3
+list) κ = 1 against the parked 1e4 keeps every one of the 49 matches,
+turns the five `clay*m` "succeeded at a wrong objective" into honest
+`Restoration_Failed`, and takes the matched instances from 8378 to 2557
+iterations (`classical_40_40` 404 → 54, `estein4_A` 2207 → 153). It is
+now the default of `POUNCE_SOC_KAPPA`.
+
+**Warm starts for cones** are implemented (`init_soc_from_warm_start`:
+slacks pushed into the interior, `z = −y_d` lifted to the central path at
+`mu_init`; `warm_start_init_point` is no longer refused). On this
+continuation they do not pay: at the harness's `mu_init = 1e-9` the next
+stage's 0.09 infeasibility meets a barrier that is already gone, the cone
+caps hold every step at 1e-3 … 1e-5, and the line search fails into the
+restoration that is not installed — τ = 0.1 drops 1894 → 86 but τ = 0.01,
+1e-3, 1e-6 and 1e-7 all need the restart rung, 4610 in all at κ = 1. A
+larger `mu_init` (1e-2) needs the rung as often (3836 and a τ = 1e-6
+cap). The squared form survives the same start because the orthant's
+`τ = 1 − μ` lets a bound slack cross 99.9999999% of its distance in one
+step; a cone crosses 99%. The harness keeps the primal-only stage start
+for cones (`POUNCE_SOC_WARM=1` enables the dual start).
+
+**The result against the stopping rule** (κ = 1, the harness unchanged
+otherwise, seed 0): the stages through τ = 1e-6 take 1397 iterations
+(were 5634) and reach the same point as the squared form (0.2026 at
+1.8e-3), and **the τ = 1e-7 stage runs to the 3000-iteration cap on a cold
+start and on the restart rung alike**. `run_route`, seed 0: 7457
+iterations (both τ = 1e-7 attempts at the cap, the finish
+`Restoration_Failed`), the continuation's τ = 1e-6 answer kept, 0.2026 at
+violation 1.8e-3. Seed 1: τ = 1e-7 ends `Restoration_Failed` at 107 on
+both attempts, 1549 iterations, 1.8e-3. With the dual warm start enabled
+(`POUNCE_SOC_WARM=1`), seed 0 gets through every stage with the restart
+rung and fails the finish: 4610 iterations, 0.2027 at 1.8e-4 — the closest
+run to physical, and still neither physical nor under 1759. The τ = 1e-7
+stage is a different failure from the one above:
+2440 of its 3000 iterations sit at μ = 1.8e-6 with `inf_pr ≤ 1e-7`, full
+or half primal steps that the filter backtracks (`ls` 3–5, watchdog
+entries), `inf_du` between 1e-3 and 1e2 never settling, and the objective
+creeping down at ~1e-7 per iteration — a crawl along the degenerate
+valley the Scholtes relaxation leaves at τ = 1e-7, where the η cones of
+the sticking contacts are within 2e-7 of their tips. The squared form's
+cold τ = 1e-7 stage is 156 iterations, with `inf_du` at 1e9 and
+regularisation at 1e10 on the way — Ipopt's inertia machinery handling the
+indefinite `2 v J` the squared row adds, which the cone barrier does not
+have.
+
+**Conclusion.** The decoupled cone dual with the central-path lift is a
+4× better algorithm than what was parked, on the target and on CBLIB,
+and it still does not pass: it cannot close the last two decades of the
+Scholtes continuation in a useful number of iterations. Every remaining
+idea that keeps Ipopt's step structure — separate primal and dual step
+lengths, a pre-set monotone μ, a filter on the primal — was tried above
+and is worse or marginal. What the measurements point at is the thing
+CALIPSO does instead: no Scholtes stages at all, the cone complementarity
+`β ∘ η = κ e` relaxed by the solver's own barrier parameter inside one
+solve, so the degenerate endgame is never posed as a separate NLP. That is
+workstream B's driver with cone pairs, not a fix to this arm. C stays
+parked, with κ = 1 and the warm-start initializer merged into the branch.

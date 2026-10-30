@@ -176,8 +176,23 @@ fn solve(
     model: Dense,
     cones: Vec<Vec<usize>>,
 ) -> (ApplicationReturnStatus, Vec<Number>, Vec<Number>) {
+    solve_with(model, cones, &[])
+}
+
+fn solve_with(
+    model: Dense,
+    cones: Vec<Vec<usize>>,
+    options: &[(&str, &str)],
+) -> (ApplicationReturnStatus, Vec<Number>, Vec<Number>) {
     let out = Rc::clone(&model.out);
     let mut app = IpoptApplication::new();
+    for (k, v) in options {
+        let o = app.options_mut();
+        match v.parse::<Number>() {
+            Ok(x) => o.set_numeric_value(k, x, true, false).unwrap(),
+            Err(_) => o.set_string_value(k, v, true, false).unwrap(),
+        };
+    }
     app.options_mut()
         .set_integer_value(
             "print_level",
@@ -216,6 +231,35 @@ fn the_disk_reaches_its_negative_tail_optimum() {
     assert!((x[1] - r).abs() < 1e-7 && (x[2] - r).abs() < 1e-7, "{x:?}");
     // The cone dual (−λ on the cone rows) lies in the cone and is
     // complementary: z = (√2, 1, 1) / ... up to the head's scale.
+    let z: Vec<Number> = lam.iter().map(|l| -l).collect();
+    assert!(z[0] >= (z[1] * z[1] + z[2] * z[2]).sqrt() - 1e-8, "{z:?}");
+}
+
+/// The warm-start initializer carries the cones (`init_soc_from_warm_start`):
+/// the slacks are pushed into the interior and the duals start at `−y_d`
+/// lifted onto the barrier's central path. With nothing staged the TNLP's
+/// own start is the warm point, so this is the disk from its cold start
+/// through the warm path, and it must reach the same answer.
+#[test]
+fn a_warm_start_carries_the_cones() {
+    let mut m = identity_rows(
+        3,
+        3,
+        vec![1.0, 0.0, 0.0],
+        Box::new(|x| x[1] + x[2]),
+        Box::new(|_| vec![0.0, 1.0, 1.0]),
+        Box::new(|_| zeros(3)),
+    );
+    m.x_l[0] = 1.0;
+    m.x_u[0] = 1.0;
+    let (status, x, lam) = solve_with(
+        m,
+        vec![vec![0, 1, 2]],
+        &[("warm_start_init_point", "yes"), ("mu_init", "1e-3")],
+    );
+    assert_eq!(status, ApplicationReturnStatus::SolveSucceeded, "{x:?}");
+    let r = -(0.5 as Number).sqrt();
+    assert!((x[1] - r).abs() < 1e-7 && (x[2] - r).abs() < 1e-7, "{x:?}");
     let z: Vec<Number> = lam.iter().map(|l| -l).collect();
     assert!(z[0] >= (z[1] * z[1] + z[2] * z[2]).sqrt() - 1e-8, "{z:?}");
 }

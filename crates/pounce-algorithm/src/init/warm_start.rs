@@ -474,8 +474,79 @@ impl IterateInitializer for WarmStartIterateInitializer {
             borrow.warm_start_diagnostics = Some(diag);
         }
 
+        // Second-order cones (workstream C): the cone slacks and duals of
+        // the supplied point.
+        init_soc_from_warm_start(data, nlp, &self.opts);
+
         true
     }
+}
+
+/// The cone blocks of a warm start. Each cone's slack `s_K = d_K(x)` is
+/// pushed into the interior by `warm_start_slack_bound_push` (relative to
+/// its magnitude), as the cold path does with `slack_bound_push`. The cone
+/// dual starts at `−y_d` on the cone rows — the `s`-stationarity identity
+/// a converged solve satisfies — and is lifted off its boundary to
+/// `√(det s · det z) ≥ μ` (the cone's `kappa_sigma` floor at `κ = 1`), so
+/// a pair that was active in the earlier answer starts on the new
+/// barrier's central path rather than at its collapsed limit. A `y_d` that
+/// is not in `−K` at all (nothing was seeded, or the row was inactive) gets
+/// the cold start `bound_mult_init_val · e` lifted the same way.
+fn init_soc_from_warm_start(
+    data: &IpoptDataHandle,
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    opts: &WarmStartOptions,
+) {
+    let Some(layout) = nlp.borrow().soc_layout() else {
+        return;
+    };
+    let curr = data.borrow().curr.clone();
+    let Some(c) = curr else {
+        return;
+    };
+    let (Some(mut sv), Some(yv)) = (flatten(&*c.s), flatten(&*c.y_d)) else {
+        return;
+    };
+    let mu = data.borrow().curr_mu;
+    let mut z = Vec::new();
+    for rows in &layout.blocks {
+        let mut sk: Vec<Number> = rows.iter().map(|&r| sv[r]).collect();
+        let scale = sk.iter().fold(1.0 as Number, |a, v| a.max(v.abs()));
+        crate::soc_slack::push_into_interior(&mut sk, opts.slack_bound_push * scale);
+        for (j, &r) in rows.iter().enumerate() {
+            sv[r] = sk[j];
+        }
+        let mut zk: Vec<Number> = rows.iter().map(|&r| -yv[r]).collect();
+        if !zk.iter().all(|v| v.is_finite()) || zk[0] <= 0.0 {
+            zk = vec![0.0; rows.len()];
+            zk[0] = opts.bound_mult_init_val;
+        }
+        // Lift `z₀` to the least value with `det s · det z ≥ μ²` and
+        // `z₀ ≥ ‖z_{1..}‖ + push`.
+        let tail2: Number = zk[1..].iter().map(|v| v * v).sum();
+        let ds = crate::soc_slack::det(&sk).max(Number::MIN_POSITIVE);
+        let z0_central = (mu * mu / ds + tail2).sqrt();
+        let z0_interior = tail2.sqrt() + opts.mult_bound_push.max(0.0);
+        zk[0] = zk[0].max(z0_central).max(z0_interior);
+        z.extend(zk);
+    }
+    let mut s_new = DenseVectorSpace::new(c.s.dim()).make_new_dense();
+    s_new.set_values(&sv);
+    let new_iv = IteratesVector::new(
+        Rc::clone(&c.x),
+        Rc::new(s_new),
+        Rc::clone(&c.y_c),
+        Rc::clone(&c.y_d),
+        Rc::clone(&c.z_l),
+        Rc::clone(&c.z_u),
+        Rc::clone(&c.v_l),
+        Rc::clone(&c.v_u),
+    );
+    let mut d = data.borrow_mut();
+    d.set_curr(new_iv);
+    d.soc_z = Some(z);
+    d.soc_z_trial = None;
+    d.soc_dz = None;
 }
 
 impl WarmStartDiagnostics {

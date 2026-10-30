@@ -1494,9 +1494,6 @@ impl IpoptApplication {
                 "recalc_y=yes would overwrite the cone duals with least-squares estimates".into(),
             );
         }
-        if set_bool("warm_start_init_point") {
-            return Some("warm_start_init_point=yes is not supported with cones yet".into());
-        }
         for k in [
             "l1_exact_penalty_barrier",
             "l1_fallback_on_restoration_failure",

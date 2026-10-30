@@ -5203,11 +5203,23 @@ impl IpoptAlgorithm {
     /// Lift the cone duals that have collapsed toward their boundary
     /// ([`crate::ipopt_cq::IpoptCalculatedQuantities::soc_lifted_z`]). A
     /// no-op without cones.
+    ///
+    /// `κ = 1` — the floor is the central path itself, `√(det s · det z) ≥
+    /// μ` — not Ipopt's emergency `kappa_sigma = 1e10`. Measured
+    /// (`dev-notes/research/nlp-soc-design.md`, "Resuming C"): the cone
+    /// pairs of a contact model sit against both boundaries, and a dual
+    /// that has slid off the central ray cannot rotate back by a linear
+    /// step, so every drop of μ costs tens of clipped iterations until it is
+    /// lifted. On the drifting car's τ = 1e-6 stage κ ∈ {1e4, 1e2, 10, 3, 1}
+    /// gives 2426, 1990, 1499, 1282, 570 iterations; on 60 CBLIB SOCPs κ = 1
+    /// cuts the matched instances' iterations 8378 → 2557 and loses none.
+    /// Below 1 the lift over-inflates the dual and the solve converges to a
+    /// wrong point (κ = 0.5: objective 0.2106 against 0.2026).
     fn correct_cone_multiplier(&mut self) {
         let kappa: Number = std::env::var("POUNCE_SOC_KAPPA")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1e4);
+            .unwrap_or(1.0);
         if kappa <= 0.0 {
             return;
         }
