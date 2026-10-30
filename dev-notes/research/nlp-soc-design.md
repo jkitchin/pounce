@@ -32,6 +32,24 @@ iterate vector: the cone dual lives in `y_d`'s cone rows, the
 complementarity `s ∘ z = μ e` (Jordan product, `e = (1, 0, …, 0)`) takes
 its place in the Newton system.
 
+**Why not a bound slot.** The alternative — give each cone row an internal
+lower bound `0` so the cone dual lives in `v_L` beside every other slack
+dual — reuses more machinery, and was started and backed out. About 370
+sites read `d_L`, `v_L` and the slack-bound quantities, and each one a cone
+change misses would read a cone entry as `s_i ≥ 0`: a tail entry is negative
+as often as not, so a missed site is a wrong answer. The constraint-violation
+measures (`unscaled_nlp_constraint_violation_max`,
+`relative_d_infeasibility_max`) were the first two found. With the rows free,
+a missed site sees a free row, which is safe: the slack stays strictly inside
+the cone and `d − s` is measured everywhere. So the cone is added where it
+must act, and is invisible everywhere else.
+
+**The Newton row.** Eliminating `v` from Ipopt's system leaves the `s` row
+`Σ ds − dy_d = y_d + μ/s` (`Σ = V/S`). The cone's row is the same with
+`z = −y_d`: `H ds − dy_d = y_d + μ s⁻¹`, `H` the NT block — an ordinary
+symmetric row with a dense `(s, s)` block, so iterative refinement and any
+other right-hand side have their slot.
+
 **Conventions** (pinned by tests in `pounce_algorithm::soc_slack`):
 
 | quantity | value |
@@ -60,10 +78,12 @@ runs the code it runs today. The fixture sweep must diff empty.
 
 | place | change |
 |---|---|
-| application / `OrigIpoptNlp` | accept cone row blocks (user `g` indices); map them to `d` indices; refuse a cone row that is not free, a row in two cones, a cone of dimension < 2 |
-| NLP scaling | every row of one cone gets one factor (a per-row factor changes the cone) |
+| application / `OrigIpoptNlp` | accept cone row blocks (user `g` indices); map them to `d` indices; refuse a cone row that is not free, a row in two cones, a cone of dimension < 2 (✅ C1/C2a) |
+| NLP scaling | every row of one cone gets one factor (a per-row factor changes the cone) (✅ C2a) |
 | presolve, any row-renumbering wrapper | declined when cones are declared, out loud |
-| `IpoptCq` | barrier objective and its `s`-gradient; `grad_lag_s` zero on cone rows; complementarity, average complementarity, centrality, barrier error; Σ blocks |
+| `IpoptCq` | barrier objective and its `s`-gradient; complementarity, average complementarity, centrality, barrier error; the NT blocks |
+| search direction | the `s` right-hand side on cone rows gains `μ s⁻¹` (so it reads `y_d + μ s⁻¹`) |
+| multipliers | `y_d` on cone rows must stay in `−int K`: initialised there, capped by the cone fraction-to-boundary, re-projected after any least-squares recompute (or that recompute refused) |
 | augmented system | dense `(s, s)` blocks at cone positions (structure fixed at first assembly) |
 | line search | cone fraction-to-boundary for `s` and for `y_d`'s cone rows |
 | initialization | `s` and `z` pushed into `int K` (`s₀ ≥ ‖s_{1..}‖ + margin`) |

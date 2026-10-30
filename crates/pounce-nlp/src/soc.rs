@@ -6,7 +6,7 @@
 //! the cone is their only restriction. The IPM classifies a free row as an
 //! inequality row `d(x) − s = 0` with no bounds on `s`, and carries the cone
 //! on that block of slacks; [`resolve`] validates a declaration and maps it
-//! into that `d` index space.
+//! into that `d` index space ([`SocLayout`]).
 //!
 //! A declaration is never dropped: anything that cannot honour it refuses
 //! with the reason. A cone row read as a plain free row is an unconstrained
@@ -82,6 +82,16 @@ pub fn resolve(
         out.push(d_rows);
     }
     Ok(out)
+}
+
+/// Every declared cone in the IPM's `d` index space: `blocks[k]` lists the
+/// `d` rows of cone `k`, head first. The rows stay free in the IPM's
+/// classification — no bound slot, so no bound logic ever reads a cone entry
+/// as `>= 0`; the cone is carried by the slack block `s` and by `y_d`, whose
+/// cone rows are the cone dual (`z = −y_d`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SocLayout {
+    pub blocks: Vec<Vec<usize>>,
 }
 
 #[cfg(test)]

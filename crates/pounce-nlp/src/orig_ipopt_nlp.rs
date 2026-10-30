@@ -238,6 +238,9 @@ pub struct OrigIpoptNlp {
     c_scale: RefCell<Option<Vec<Number>>>,
     /// Same as [`Self::c_scale`] but for inequality rows.
     d_scale: RefCell<Option<Vec<Number>>>,
+    /// Declared second-order cones in `d` index space (workstream C). The
+    /// rows are free here; each cone's rows share one scale factor.
+    soc_layout: Option<Rc<crate::soc::SocLayout>>,
     /// The *declared* compressed `d_L / d_U` — snapshotted (unscaled) at
     /// [`Self::relax_bounds`] time, before `bound_relax_factor` widens the
     /// live bounds and before any safe-slack adjustment moves them. The
@@ -747,6 +750,7 @@ impl OrigIpoptNlp {
             start_obj_grad_max: Cell::new(Number::NAN),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
+            soc_layout: None,
             declared_d_l: RefCell::new(None),
             declared_d_u: RefCell::new(None),
             declared_x_l: RefCell::new(None),
@@ -1150,6 +1154,26 @@ impl OrigIpoptNlp {
         );
     }
 
+    /// Install the declared cones' layout ([`crate::soc::SocLayout`]).
+    pub fn set_soc_layout(&mut self, layout: crate::soc::SocLayout) {
+        self.soc_layout = Some(Rc::new(layout));
+    }
+
+    /// One scale factor per cone (the smallest of its rows'): a per-row
+    /// factor maps the cone to a different set. Rows outside cones keep
+    /// theirs.
+    fn cone_shared_scale(&self, mut dd: Vec<Number>) -> Vec<Number> {
+        if let Some(layout) = &self.soc_layout {
+            for b in &layout.blocks {
+                let f = b.iter().map(|&r| dd[r]).fold(Number::INFINITY, Number::min);
+                for &r in b {
+                    dd[r] = f;
+                }
+            }
+        }
+        dd
+    }
+
     /// Determine objective + per-constraint scaling from the starting
     /// point, per `Algorithm/IpGradientScaling.cpp::DetermineScalingParametersImpl`
     /// (and now also `nlp_scaling_method=user-scaling`). Should be called
@@ -1413,7 +1437,7 @@ impl OrigIpoptNlp {
 
         if n_d > 0 && any_row_above(&d_row_max) {
             let dd: Vec<Number> = d_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
-            *self.d_scale.borrow_mut() = Some(dd);
+            *self.d_scale.borrow_mut() = Some(self.cone_shared_scale(dd));
         } else {
             *self.d_scale.borrow_mut() = None;
         }
@@ -1496,6 +1520,7 @@ impl OrigIpoptNlp {
             } else {
                 None
             };
+            let dd = self.cone_shared_scale(dd);
             let nontrivial_d = dd.iter().any(|&s| s != 1.0);
             *self.d_scale.borrow_mut() = if nontrivial_d && n_d > 0 {
                 Some(dd)
@@ -2647,6 +2672,10 @@ impl IpoptNlp for OrigIpoptNlp {
         install(&mut self.x_u, new_x_u);
         install(&mut self.d_l, new_d_l);
         install(&mut self.d_u, new_d_u);
+    }
+
+    fn soc_layout(&self) -> Option<Rc<crate::soc::SocLayout>> {
+        self.soc_layout.clone()
     }
 
     fn obj_scaling_factor(&self) -> Number {

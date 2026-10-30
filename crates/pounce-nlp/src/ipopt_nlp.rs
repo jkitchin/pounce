@@ -95,6 +95,13 @@ pub fn zeroed_sym_t(space: Rc<SymTMatrixSpace>) -> SymTMatrix {
 }
 
 pub trait IpoptNlp: Nlp {
+    /// Declared second-order cones in this NLP's index spaces (workstream
+    /// C, `dev-notes/research/nlp-soc-design.md`). `None` — the default,
+    /// and every NLP without cones — leaves every computation as it was.
+    fn soc_layout(&self) -> Option<Rc<crate::soc::SocLayout>> {
+        None
+    }
+
     /// Per-evaluation call counts accumulated over the solve, ordered
     /// `[f, grad_f, c, d, jac_c, jac_d, h]`. Populates the end-of-run
     /// summary's evaluation tallies (#206). Default is all zeros for
