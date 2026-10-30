@@ -346,6 +346,20 @@ impl MpccTnlp {
         self.defer_inner_finalize = defer;
     }
 
+    /// Forget the last solve's captured result. A driver calls this before
+    /// each solve, because `finalize_solution` — the only thing that writes
+    /// the capture — is never reached by a solve refused before iteration 0
+    /// (a degrees-of-freedom gate, a presolve proof, an invalid option): read
+    /// without clearing, that solve would report the previous one's point.
+    pub fn clear_capture(&mut self) {
+        self.last_status = None;
+        self.last_x.clear();
+        self.last_lambda.clear();
+        self.last_z_l.clear();
+        self.last_z_u.clear();
+        self.last_products.clear();
+    }
+
     /// Start the next solves from `start` instead of the inner model's own
     /// starting point (`None` restores it). Only the parts the solver asks
     /// for are used: `x` always, `z_l`/`z_u` and `lambda` when it requests a

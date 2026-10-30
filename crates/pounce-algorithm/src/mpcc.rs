@@ -140,24 +140,55 @@ pub const SAFE_DEFAULTS: [(&str, &str); 2] = [
     ("honor_original_bounds", "yes"),
 ];
 
+/// Which point the driver reported, and on what grounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reported {
+    /// A stage answered: converged, products in tolerance, certified S (or
+    /// not determined).
+    Answer(MpccStage),
+    /// No stage certified S; this stage's W-stationary point is reported.
+    WeakFallback(MpccStage),
+    /// No stage certified any stationarity; this stage's converged point with
+    /// every product in tolerance is reported.
+    FeasibleUncertified(MpccStage),
+    /// No stage produced a feasible point; the exact-product stage's own
+    /// verdict (or, if it was refused with no point, the first stage that
+    /// has one) is reported.
+    Verdict,
+}
+
 /// One line for the console: what answered, and what the answer is.
 pub fn describe_outcome(
-    accepted_by: Option<MpccStage>,
+    reported: Reported,
     n_solves: usize,
     total_iterations: usize,
     max_abs_product: Number,
     certificate: Option<&Certificate>,
 ) -> String {
-    let head = match accepted_by {
-        Some(stage) => format!(
-            "pounce: complementarity: answered by the {} formulation ({n_solves} lowered \
-             solve{}, {total_iterations} iterations in all, max |G·H| = {max_abs_product:.1e})",
+    let solves = format!(
+        "{n_solves} lowered solve{}, {total_iterations} iterations in all",
+        if n_solves == 1 { "" } else { "s" }
+    );
+    let head = match reported {
+        Reported::Answer(stage) => format!(
+            "pounce: complementarity: answered by the {} formulation ({solves}, max |G·H| = \
+             {max_abs_product:.1e})",
             stage.label(),
-            if n_solves == 1 { "" } else { "s" },
         ),
-        None => format!(
-            "pounce: complementarity: no formulation produced an answer ({n_solves} lowered \
-             solves, {total_iterations} iterations); reporting the exact-product solve"
+        Reported::WeakFallback(stage) => format!(
+            "pounce: complementarity: no formulation produced a strongly stationary answer \
+             ({solves}); reporting the {} formulation's weakly stationary point (max |G·H| = \
+             {max_abs_product:.1e})",
+            stage.label(),
+        ),
+        Reported::FeasibleUncertified(stage) => format!(
+            "pounce: complementarity: no formulation produced a stationary answer ({solves}); \
+             reporting the {} formulation's feasible point (max |G·H| = {max_abs_product:.1e})",
+            stage.label(),
+        ),
+        Reported::Verdict => format!(
+            "pounce: complementarity: no formulation produced an answer ({solves}); reporting \
+             the exact-product solve's verdict"
         ),
     };
     let tail = match certificate {
@@ -170,7 +201,7 @@ pub fn describe_outcome(
                 }
                 StationarityClass::None => "none (not a stationary point of the model)",
                 StationarityClass::NotSearched => {
-                    "not determined (multiplier set too large to search)"
+                    "not determined (the model or its multiplier set is too large to certify)"
                 }
             };
             format!(
@@ -253,8 +284,10 @@ pub enum StationarityClass {
     /// No multipliers reproduce `∇f` to the tolerance: not a stationary
     /// point of the model (or a pair is not complementary at all).
     None,
-    /// The multipliers are not unique and the model is too large to search
-    /// the set; nothing is claimed.
+    /// Not determined; nothing is claimed. Either the stationarity system
+    /// is too large to factor densely ([`MAX_DENSE_ENTRIES`]), or the
+    /// multipliers are not unique and the set has too many sign-constrained
+    /// columns to search ([`MAX_SEARCHED_COLUMNS`]).
     NotSearched,
 }
 
@@ -297,6 +330,15 @@ pub struct CertificateInput<'a> {
 /// searched (each NNLS step is an SVD of the passive columns).
 pub const MAX_SEARCHED_COLUMNS: usize = 600;
 
+/// Above this many entries in the dense `n × k` stationarity matrix the
+/// certificate is not attempted and reports [`StationarityClass::NotSearched`]
+/// (which [`answers`] accepts, so the ladder is unchanged). The matrix is
+/// factored by a dense thin SVD after every accepted stage; at `n ≈ 10⁴`
+/// with `k ≈ n + m` that is about 1 GB and 10¹² flops per call, a size
+/// contact-implicit trajectory models reach. 4·10⁶ entries (32 MB) keeps the
+/// call well under a second.
+pub const MAX_DENSE_ENTRIES: usize = 4_000_000;
+
 const INF: Number = 1e19;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -334,7 +376,8 @@ enum Sign {
 /// class is a sign check. When they do not (MPCC-LICQ fails) the class is a
 /// property of the multiplier *set* — reading one vector can report W for a
 /// point that is S — so the set is searched with NNLS, up to
-/// [`MAX_SEARCHED_COLUMNS`].
+/// [`MAX_SEARCHED_COLUMNS`]. A system with more than [`MAX_DENSE_ENTRIES`]
+/// entries is not attempted at all: large models report `NotSearched`.
 pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
     let n = inp.x.len();
     let m = inp.g.len();
@@ -441,6 +484,19 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
 
     let b = inp.grad_f.to_vec();
     let k = cols.len();
+    if n.saturating_mul(k) > MAX_DENSE_ENTRIES {
+        // Too large to factor densely: the class is not determined.
+        return Certificate {
+            class: StationarityClass::NotSearched,
+            n_pairs: inp.pairs.len(),
+            n_biactive,
+            n_neither,
+            multipliers_unique: false,
+            residual: Number::NAN,
+            resid_tol: Number::NAN,
+            worst_biactive_sign: 0.0,
+        };
+    }
     let a = Mat::<Number>::from_fn(n, k, |_, _| 0.0);
     let mut a = a;
     let mut col_max: Number = 0.0;
@@ -834,6 +890,52 @@ mod tests {
             (grad, g)
         };
         (m, eval)
+    }
+
+    /// The certificate's size limit (PR review): a system past
+    /// [`MAX_DENSE_ENTRIES`] is not factored and reports `NotSearched`,
+    /// which the ladder accepts. 2001 active bounds give a 2001 × 2001
+    /// system, 4 004 001 entries.
+    #[test]
+    fn a_system_past_the_dense_limit_is_not_searched() {
+        let n = 2001;
+        let m = Model {
+            x_l: vec![0.0; n],
+            x_u: vec![PI; n],
+            g_l: vec![],
+            g_u: vec![],
+            pairs: vec![],
+            jac: vec![],
+        };
+        let c = run(&m, &vec![0.0; n], &vec![1.0; n], &[]);
+        assert_eq!(c.class, StationarityClass::NotSearched, "{c:?}");
+        assert!(n * n > MAX_DENSE_ENTRIES);
+    }
+
+    /// The set search's acceptance band (PR review): with non-unique
+    /// multipliers a point passes when the signed least-squares residual is
+    /// within `resid_tol + sign_tol` — `1e-6 + 1e-4` here (`tol = 1e-8`,
+    /// dual scale 1) — ~100× looser than `resid_tol` alone, by design (a
+    /// sign inside the noise band is not evidence of descent). Two copies of
+    /// the active row `x ≥ 0` make the multipliers a set; `∇f = −ε` leaves
+    /// residual `ε` at the best non-negative multipliers. Pinned just inside
+    /// and just outside the band so it cannot drift silently.
+    #[test]
+    fn the_set_search_band_is_resid_tol_plus_the_sign_band() {
+        let m = Model {
+            x_l: vec![NI],
+            x_u: vec![PI],
+            g_l: vec![0.0, 0.0],
+            g_u: vec![PI, PI],
+            pairs: vec![],
+            jac: vec![(0, 0, 1.0), (1, 0, 1.0)],
+        };
+        let inside = run(&m, &[0.0], &[-5e-5], &[0.0, 0.0]);
+        assert!(!inside.multipliers_unique, "{inside:?}");
+        assert_eq!(inside.class, StationarityClass::S, "{inside:?}");
+        let outside = run(&m, &[0.0], &[-2e-4], &[0.0, 0.0]);
+        assert!(!outside.multipliers_unique, "{outside:?}");
+        assert_eq!(outside.class, StationarityClass::None, "{outside:?}");
     }
 
     #[test]

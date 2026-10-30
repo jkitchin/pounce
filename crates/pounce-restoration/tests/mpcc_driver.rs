@@ -9,7 +9,7 @@
 use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
 };
-use pounce_algorithm::mpcc::{MpccStage, StationarityClass, TOUCHED_OPTIONS};
+use pounce_algorithm::mpcc::{MpccStage, Reported, StationarityClass, TOUCHED_OPTIONS};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -363,7 +363,15 @@ fn a_converged_point_that_is_not_strongly_stationary_is_reported_as_such() {
         &mut |_| {},
     )
     .unwrap();
-    assert!(out.accepted_by.is_some(), "{:?}", out.solves);
+    // A W point is a fallback, not an answer (PR review): `accepted_by` is
+    // reserved for a strongly stationary answer.
+    assert_eq!(out.accepted_by, None, "{:?}", out.solves);
+    assert!(out.fallback.is_some(), "{:?}", out.solves);
+    assert!(
+        matches!(out.reported, Reported::WeakFallback(_)),
+        "{:?}",
+        out.reported
+    );
     assert!(out.x.iter().all(|v| v.abs() < 1e-4), "{:?}", out.x);
     let cert = out.certificate.unwrap();
     assert_eq!(
@@ -639,6 +647,15 @@ fn a_square_infeasible_model_reports_the_exact_verdict_with_a_point() {
         out.solves
     );
     assert_eq!(exact.len(), 2, "the G·H <= 0 retry: {:?}", out.solves);
+    // The refused solve ran after the continuation and has no point of its
+    // own: it must not report the continuation's last point (PR review:
+    // `finalize_solution` never runs for a solve refused before iteration 0,
+    // so an uncleared capture carried the previous stage's x and products).
+    assert!(
+        exact[0].max_abs_product.is_infinite(),
+        "the refused solve reports a point: {:?}",
+        out.solves
+    );
     assert_eq!(out.status, exact[1].status);
     assert!(
         !matches!(

@@ -643,6 +643,12 @@ impl PyNlProblem {
         on_deep_stack(self.expr_depth, move || tnlp.clone())
     }
 
+    /// The number of `.nl` complementarity rows, for the batch path to
+    /// refuse (it solves each model as a plain NLP).
+    pub(crate) fn n_complementarity(&self) -> usize {
+        self.complementarity.len()
+    }
+
     pub(crate) fn dims(&self) -> (usize, usize) {
         (self.n, self.m)
     }

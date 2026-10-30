@@ -108,7 +108,11 @@ def test_a_converged_point_that_is_not_strongly_stationary_says_so():
     prob.add_option("print_level", 0)
     x, info = prob.solve(np.array([1.0, 2.0]))
     np.testing.assert_allclose(x, [0.0, 0.0], atol=1e-4)
-    assert info["complementarity"]["certificate"]["class"] == "W", info["complementarity"]
+    cc = info["complementarity"]
+    assert cc["certificate"]["class"] == "W", cc
+    # A W point is reported as a fallback, not as an answer.
+    assert cc["accepted_by"] is None, cc
+    assert cc["fallback"] is not None, cc
 
 
 def test_without_pairs_nothing_changes():
@@ -132,6 +136,11 @@ def test_read_nl_exposes_pairs_and_the_batch_path_refuses_them():
     assert nl.complementarity == [(0, 1, 1), (1, 2, 1)]
     with pytest.raises(ValueError, match="complementarity"):
         pounce.solve_nlp_batch([nl], [nl.x0])
+    # The extension refuses too: the wrapper's check is not the only guard.
+    from pounce import _pounce
+
+    with pytest.raises(ValueError, match="complementarity"):
+        _pounce.solve_nlp_batch([nl])
     prob = qpec_problem(complementarity=[(0, 1)])
     with pytest.raises(ValueError, match="complementarity"):
         pounce.solve_nlp_batch([prob], [np.array([0.0, 0.5, 0.5])])

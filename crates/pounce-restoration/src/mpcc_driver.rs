@@ -1,6 +1,8 @@
 //! Driver for models with declared complementarity pairs: runs the stages
-//! [`pounce_algorithm::mpcc`] prescribes on a [`MpccTnlp`] and reports the
-//! first answer that is an answer to the model.
+//! [`pounce_algorithm::mpcc`] prescribes on a [`MpccTnlp`] — the Scholtes
+//! continuation and the exact product both, keeping the strongly stationary
+//! answer with the lower objective; the ℓ₁ penalty only if neither answers —
+//! and reports what it found ([`Reported`]).
 //!
 //! The policy — stage order, the relaxation schedule, the warm-start
 //! options, what counts as an answer — lives in `pounce_algorithm::mpcc`.
@@ -29,7 +31,7 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    Certificate, CertificateInput, MpccStage, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
+    Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
     TOUCHED_OPTIONS, accepts, answers, certify, compared, converged, kept_if_nothing_better,
     warm_start_assignments,
 };
@@ -59,8 +61,15 @@ pub struct MpccOutcome {
     /// Its statistics (iteration count of that solve alone; see
     /// [`Self::total_iterations`] for the whole run).
     pub statistics: SolveStatistics,
-    /// The stage that produced an accepted answer, if any.
+    /// The stage that produced an accepted (strongly stationary) answer, if
+    /// any. `None` when the reported point is a fallback: see
+    /// [`Self::reported`] and [`Self::fallback`].
     pub accepted_by: Option<MpccStage>,
+    /// The stage whose weakly stationary point is reported when no stage
+    /// answered, if that is what was reported.
+    pub fallback: Option<MpccStage>,
+    /// Which point was reported, and on what grounds.
+    pub reported: Reported,
     /// Every lowered solve, in order.
     pub solves: Vec<MpccSolveRecord>,
     pub total_iterations: usize,
@@ -160,7 +169,7 @@ pub fn solve_mpcc(
     let mut weak: Option<(MpccStage, Captured, Option<Certificate>)> = None;
     // The first stage that converged with every product in tolerance but
     // did not certify as stationary: reported only if nothing certifies.
-    let mut physical: Option<(Captured, Option<Certificate>)> = None;
+    let mut physical: Option<(MpccStage, Captured, Option<Certificate>)> = None;
     let solver_tol = app
         .options()
         .get_numeric_value("tol", "")
@@ -177,6 +186,10 @@ pub fn solve_mpcc(
      -> Captured {
         {
             let mut w = wrapper.borrow_mut();
+            // A solve refused before iteration 0 never reaches
+            // `finalize_solution`, so without this it would report the
+            // previous stage's point and products under its own status.
+            w.clear_capture();
             w.set_lowering(lowering);
             w.set_start_override(start);
         }
@@ -270,7 +283,16 @@ pub fn solve_mpcc(
                     last = Some(c);
                 }
                 match last {
-                    None => None,
+                    None => {
+                        report(&format!(
+                            "pounce: complementarity: {} did not solve its first relaxation \
+                             (τ = {:.0e}, {:?}); trying the next formulation.",
+                            stage.label(),
+                            SCHOLTES_SCHEDULE[0],
+                            solves.last().map(|s| s.status),
+                        ));
+                        None
+                    }
                     Some(relaxed) => {
                         // The finish: exact product from the end of the
                         // schedule; `G·H <= 0` where the equality would
@@ -367,7 +389,7 @@ pub fn solve_mpcc(
                     cert.as_ref().map_or(Number::NAN, |ct| ct.residual),
                 ));
                 if physical.is_none() {
-                    physical = Some((c, cert));
+                    physical = Some((stage, c, cert));
                 }
                 continue;
             }
@@ -391,12 +413,20 @@ pub fn solve_mpcc(
         Some(e) if !e.x.is_empty() => Some(e),
         e => first.or(e),
     };
-    let accepted = accepted.map(|(s, c, cert, _)| (s, c, cert));
-    let (accepted_by, chosen, known_cert) = match (accepted.or(weak), physical, verdict) {
-        (Some((s, c, cert)), _, _) => (Some(s), c, Some(cert)),
-        (None, Some((c, cert)), _) => (None, c, Some(cert)),
-        (None, None, Some(c)) => (None, c, None),
-        (None, None, None) => return Err("no exact-product stage ran".into()),
+    let (reported, chosen, known_cert) = match (accepted, weak, physical, verdict) {
+        (Some((s, c, cert, _)), _, _, _) => (Reported::Answer(s), c, Some(cert)),
+        (None, Some((s, c, cert)), _, _) => (Reported::WeakFallback(s), c, Some(cert)),
+        (None, None, Some((s, c, cert)), _) => (Reported::FeasibleUncertified(s), c, Some(cert)),
+        (None, None, None, Some(c)) => (Reported::Verdict, c, None),
+        (None, None, None, None) => return Err("no exact-product stage ran".into()),
+    };
+    let accepted_by = match reported {
+        Reported::Answer(s) => Some(s),
+        _ => None,
+    };
+    let fallback = match reported {
+        Reported::WeakFallback(s) => Some(s),
+        _ => None,
     };
     {
         let mut w = wrapper.borrow_mut();
@@ -420,6 +450,8 @@ pub fn solve_mpcc(
         status: chosen.status,
         statistics: chosen.statistics,
         accepted_by,
+        fallback,
+        reported,
         solves,
         total_iterations,
         x: chosen.x,

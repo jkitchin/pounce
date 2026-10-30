@@ -2033,7 +2033,7 @@ fn real_main() -> ExitCode {
                     eprintln!(
                         "{}",
                         pounce_algorithm::mpcc::describe_outcome(
-                            out.accepted_by,
+                            out.reported,
                             out.solves.len(),
                             out.total_iterations,
                             out.max_abs_product,

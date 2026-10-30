@@ -523,6 +523,8 @@ impl PyProblem {
             Some(out) => {
                 let d = PyDict::new_bound(py);
                 d.set_item("accepted_by", out.accepted_by.map(|s| s.label()))?;
+                // A weakly stationary point reported when no stage answered.
+                d.set_item("fallback", out.fallback.map(|s| s.label()))?;
                 d.set_item("n_solves", out.solves.len())?;
                 d.set_item("total_iterations", out.total_iterations)?;
                 d.set_item("max_abs_product", out.max_abs_product)?;
@@ -566,7 +568,7 @@ impl PyProblem {
                 d.set_item(
                     "summary",
                     pounce_algorithm::mpcc::describe_outcome(
-                        out.accepted_by,
+                        out.reported,
                         out.solves.len(),
                         out.total_iterations,
                         out.max_abs_product,

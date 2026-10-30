@@ -369,6 +369,20 @@ pub fn solve_nlp_batch<'py>(
     warms: Option<&Bound<'py, PyAny>>,
     share_structure: bool,
 ) -> PyResult<BatchResults<'py>> {
+    // A model with `.nl` complementarity rows needs the complementarity
+    // driver; solved here as a plain NLP its pairing would be dropped. The
+    // Python wrapper refuses too, but this entry point is reachable directly
+    // as `pounce._pounce.solve_nlp_batch`.
+    for (k, p) in problems.iter().enumerate() {
+        let n = p.borrow().n_complementarity();
+        if n > 0 {
+            return Err(PyValueError::new_err(format!(
+                "solve_nlp_batch: problem {k} declares {n} complementarity pair(s), which the \
+                 batch path does not support; solve it with \
+                 pounce.Problem(..., complementarity=...).solve()"
+            )));
+        }
+    }
     let mut opts = decode_options(options)?;
     // Quiet by default: N workers interleaving per-iteration tables on
     // one stdout is noise, not output. An explicit user `print_level`

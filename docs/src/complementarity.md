@@ -95,9 +95,11 @@ A stage *answers* only if it converged, every product is within
 below). A solve that exits "acceptable" at a point that is not stationary
 does not end the ladder, and neither does a weakly stationary (W) point:
 it is kept, and returned only if no later stage finds an S point. If no
-stage answers, the exact product's own verdict is reported (for an
-infeasible model, `Infeasible_Problem_Detected`) — never a relaxed solve's
-success. Your options apply to every stage and are restored after
+stage answers, the point reported is, in order: the first W point; else the
+first converged point with every product in tolerance; else the exact
+product's own verdict (for an infeasible model,
+`Infeasible_Problem_Detected`) — never a relaxed solve's success. The
+console line says which. Your options apply to every stage and are restored after
 the solve. Unless you set them yourself, declared pairs also run with
 `bound_relax_factor = 0` and `honor_original_bounds = yes`: a relaxed bound
 moves the point a complementarity is measured from.
@@ -110,16 +112,18 @@ The CLI prints one summary line on stderr, e.g. for `qpec_small`:
 pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, max |G·H| = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).
 ```
 
-From Python, `info["complementarity"]` holds `accepted_by` (the stage, or
-`None` if no stage answered), `n_solves`, `total_iterations`,
-`max_abs_product`, the per-solve records, and `certificate`:
+From Python, `info["complementarity"]` holds `accepted_by` (the stage that
+answered with an S point, or `None` if none did), `fallback` (the stage
+whose W point is reported when none answered, else `None`), `n_solves`,
+`total_iterations`, `max_abs_product`, the per-solve records, and
+`certificate`:
 
 | `class` | meaning |
 | --- | --- |
 | `S` | strongly stationary: a multiplier exists with the right sign on every biactive pair. A local minimum candidate in the usual sense. |
 | `W` | weakly stationary only: converged and feasible, but every multiplier has the wrong sign on some biactive pair. There may be a descent direction that changes which side of a pair is zero. ralph1's origin is the textbook case. |
 | `none` | the stationarity system is not satisfied at all. |
-| `not_searched` | too many biactive pairs to search the multiplier set. |
+| `not_searched` | not determined: the model is too large for the dense certificate (more than 4·10⁶ entries in the stationarity system), or its multiplier set has too many sign-constrained columns to search. Accepted like S. |
 
 along with `n_pairs`, `n_biactive`, `n_neither`, whether the multipliers
 are unique, and the stationarity residual against its tolerance.
