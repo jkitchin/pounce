@@ -90,6 +90,9 @@ impl PdSearchDirCalc {
             let cq_ref = cq.borrow();
             rhs.x.copy(&*cq_ref.curr_grad_lag_with_damping_x());
             rhs.s.copy(&*cq_ref.curr_grad_lag_with_damping_s());
+            // Second-order cones: their s rows carry the barrier Lagrangian's
+            // gradient −y_d − μ s⁻¹ (zero without cones).
+            cq_ref.set_soc_rhs_s(data.borrow().curr_mu, &mut *rhs.s);
             rhs.y_c.copy(&*cq_ref.curr_c());
             rhs.y_d.copy(&*cq_ref.curr_d_minus_s());
         }
@@ -338,6 +341,7 @@ impl PdSearchDirCalc {
             let cq_ref = cq.borrow();
             rhs.x.copy(&*cq_ref.curr_grad_lag_with_damping_x());
             rhs.s.copy(&*cq_ref.curr_grad_lag_with_damping_s());
+            cq_ref.set_soc_rhs_s(data.borrow().curr_mu, &mut *rhs.s);
             if soc_method == 1 {
                 rhs.x.scal(alpha_primal_soc);
                 rhs.s.scal(alpha_primal_soc);

@@ -49,6 +49,40 @@ pub struct AugSysCoeffs<'a> {
     /// with a *negative* sign, matching upstream.
     pub d_d: Option<&'a dyn Vector>,
     pub delta_d: Number,
+    /// Second-order-cone `(s, s)` blocks; `None` without cones.
+    pub s_blocks: Option<&'a SocKktBlocks>,
+}
+
+/// The second-order cones' `(s, s)` blocks (workstream C): `rows[k]` are
+/// cone `k`'s `s` indices (head first) and `h[k]` its Nesterov–Todd block,
+/// row-major — the dense counterpart of the diagonal `D_s` a bounded slack
+/// contributes. Added on top of `D_s + δ_s I`.
+#[derive(Debug, Clone, Default)]
+pub struct SocKktBlocks {
+    pub rows: Vec<Vec<usize>>,
+    pub h: Vec<Vec<Number>>,
+}
+
+impl SocKktBlocks {
+    /// Strictly-lower entries a block set contributes to the triplet
+    /// structure.
+    pub fn n_offdiag(&self) -> usize {
+        self.rows.iter().map(|r| r.len() * (r.len() - 1) / 2).sum()
+    }
+
+    /// `out += H · v` on the cone rows (`v`, `out` in `s` space).
+    pub fn mult_add(&self, v: &[Number], out: &mut [Number]) {
+        for (rows, h) in self.rows.iter().zip(&self.h) {
+            let m = rows.len();
+            for i in 0..m {
+                let mut acc = 0.0;
+                for j in 0..m {
+                    acc += h[i * m + j] * v[rows[j]];
+                }
+                out[rows[i]] += acc;
+            }
+        }
+    }
 }
 
 /// Right-hand sides for one solve. All four slices are required;

@@ -179,6 +179,7 @@ impl EqMultCalculator for LeastSquareMults {
                 j_d: &*j_d,
                 d_d: None,
                 delta_d: delta,
+                s_blocks: None,
             };
             let aug_rhs = AugSysRhs {
                 rhs_x: &*rhs_x,

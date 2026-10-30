@@ -224,6 +224,7 @@ impl DefaultIterateInitializer {
             j_d: &*j_d,
             d_d: None,
             delta_d: 1e-8,
+            s_blocks: None,
         };
         let aug_rhs = AugSysRhs {
             rhs_x: &rhs_x,

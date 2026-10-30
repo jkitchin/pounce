@@ -11,7 +11,9 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::{IteratesVector, IteratesVectorMut};
-use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
+use crate::kkt::aug_system_solver::{
+    AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver, SocKktBlocks,
+};
 use crate::kkt::pd_system_solver::PdSystemSolver;
 use crate::kkt::perturbation_handler::{IpoptDataSink, PdPerturbationHandler};
 use pounce_common::tagged::Tag;
@@ -287,6 +289,7 @@ impl PdFullSpaceSolver {
         let j_d = cq_ref.curr_jac_d();
         let sigma_x = cq_ref.curr_sigma_x();
         let sigma_s = cq_ref.curr_sigma_s();
+        let soc_blocks = cq_ref.curr_soc_kkt_blocks();
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
         let slack_s_l = cq_ref.curr_slack_s_l();
@@ -320,6 +323,7 @@ impl PdFullSpaceSolver {
             slack_s_u: &*slack_s_u,
             sigma_x: &*sigma_x,
             sigma_s: &*sigma_s,
+            soc: soc_blocks.as_ref(),
         };
 
         let num_neg_evals = curr.y_c.dim() + curr.y_d.dim();
@@ -694,6 +698,7 @@ impl PdFullSpaceSolver {
         let j_d = cq_ref.curr_jac_d();
         let sigma_x = sigma_override.x.unwrap_or_else(|| cq_ref.curr_sigma_x());
         let sigma_s = sigma_override.s.unwrap_or_else(|| cq_ref.curr_sigma_s());
+        let soc_blocks = cq_ref.curr_soc_kkt_blocks();
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
         let slack_s_l = cq_ref.curr_slack_s_l();
@@ -732,6 +737,7 @@ impl PdFullSpaceSolver {
             slack_s_u: &*slack_s_u,
             sigma_x: &*sigma_x,
             sigma_s: &*sigma_s,
+            soc: soc_blocks.as_ref(),
         };
 
         // Mirror upstream's `dummy_cache_` lookup
@@ -1020,6 +1026,7 @@ impl PdFullSpaceSolver {
         let j_d = cq_ref.curr_jac_d();
         let sigma_x = cq_ref.curr_sigma_x();
         let sigma_s = cq_ref.curr_sigma_s();
+        let soc_blocks = cq_ref.curr_soc_kkt_blocks();
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
         let slack_s_l = cq_ref.curr_slack_s_l();
@@ -1053,6 +1060,7 @@ impl PdFullSpaceSolver {
             slack_s_u: &*slack_s_u,
             sigma_x: &*sigma_x,
             sigma_s: &*sigma_s,
+            soc: soc_blocks.as_ref(),
         };
 
         // Cache-tag check (same 13 tags as `solve()`). If the matrix
@@ -1095,6 +1103,7 @@ impl PdFullSpaceSolver {
             j_d: blocks.j_d,
             d_d: None,
             delta_d: d.delta_d,
+            s_blocks: blocks.soc,
         };
 
         let n_x = curr.x.dim() as usize;
@@ -1278,6 +1287,11 @@ impl PdFullSpaceSolver {
         let j_d = cq_ref.curr_jac_d();
         let sigma_x = cq_ref.curr_sigma_x();
         let sigma_s = cq_ref.curr_sigma_s();
+        if cq_ref.soc_layout().is_some() {
+            // The flat multi-RHS path assembles its own blocks without the
+            // cones'; the general path below carries them.
+            return None;
+        }
         let slack_x_l = cq_ref.curr_slack_x_l();
         let slack_x_u = cq_ref.curr_slack_x_u();
         let slack_s_l = cq_ref.curr_slack_s_l();
@@ -1346,6 +1360,7 @@ impl PdFullSpaceSolver {
             j_d: &*j_d,
             d_d: None,
             delta_d: d.delta_d,
+            s_blocks: None,
         };
 
         let aug_dim = n_x + n_s + n_y_c + n_y_d;
@@ -1528,6 +1543,7 @@ impl PdFullSpaceSolver {
                 j_d: b.j_d,
                 d_d: None,
                 delta_d: d.delta_d,
+                s_blocks: b.soc,
             };
             let aug_rhs = AugSysRhs {
                 rhs_x: &*aug_rhs_x,
@@ -1628,6 +1644,7 @@ impl PdFullSpaceSolver {
                     j_d: b.j_d,
                     d_d: None,
                     delta_d: d.delta_d,
+                    s_blocks: b.soc,
                 };
                 let aug_rhs = AugSysRhs {
                     rhs_x: &*aug_rhs_x,
@@ -1811,6 +1828,12 @@ impl PdFullSpaceSolver {
         let mut s_tmp = sol.s.make_new_copy();
         s_tmp.element_wise_multiply(b.sigma_s);
         x_w_x += s_tmp.dot(&*sol.s);
+        if let Some(sb) = b.soc {
+            let mut hs = sol.s.make_new();
+            hs.set(0.0);
+            soc_mult_add(sb, &*sol.s, &mut *hs);
+            x_w_x += hs.dot(&*sol.s);
+        }
 
         if with_regularization {
             x_tmp.copy(&*sol.x);
@@ -1855,6 +1878,11 @@ impl PdFullSpaceSolver {
         resid.s.add_two_vectors(-1.0, &*res.y_d, -1.0, &*rhs.s, 1.0);
         if d.delta_s != 0.0 {
             resid.s.axpy(d.delta_s, &*res.s);
+        }
+        // Cones: the full system's s-row carries H·res.s (no cone dual to
+        // eliminate; see `SocKktBlocks`).
+        if let Some(sb) = b.soc {
+            soc_mult_add(sb, &*res.s, &mut *resid.s);
         }
 
         // c: J_c·res.x − δ_c·res.y_c − rhs.y_c
@@ -2111,6 +2139,7 @@ fn neg_curv_coeffs<'a>(b: &SolveBlocks<'a>, delta: Number) -> AugSysCoeffs<'a> {
         j_d: b.j_d,
         d_d: None,
         delta_d: 0.0,
+        s_blocks: b.soc,
     }
 }
 
@@ -2134,6 +2163,22 @@ struct SolveBlocks<'a> {
     slack_s_u: &'a dyn Vector,
     sigma_x: &'a dyn Vector,
     sigma_s: &'a dyn Vector,
+    /// Second-order cones' `(s, s)` blocks; `None` without cones.
+    soc: Option<&'a SocKktBlocks>,
+}
+
+/// `out += H · v` over the cones' blocks, on dense `s`-space vectors.
+fn soc_mult_add(sb: &SocKktBlocks, v: &dyn Vector, out: &mut dyn Vector) {
+    let vv = v
+        .as_any()
+        .downcast_ref::<DenseVector>()
+        .expect("second-order cones: s is dense")
+        .expanded_values();
+    let o = out
+        .as_any_mut()
+        .downcast_mut::<DenseVector>()
+        .expect("second-order cones: s is dense");
+    sb.mult_add(&vv, o.values_mut());
 }
 
 /// Helper trait extension on `IteratesVectorMut` for fresh zeroed

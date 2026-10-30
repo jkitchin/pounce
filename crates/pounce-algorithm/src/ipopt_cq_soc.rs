@@ -92,6 +92,24 @@ impl IpoptCalculatedQuantities {
         )
     }
 
+    /// The cones' `(s, s)` blocks for the augmented system at the current
+    /// iterate. A cone that has left the interior gets a NaN block, so the
+    /// factorization fails loudly instead of solving a system without it.
+    pub fn curr_soc_kkt_blocks(&self) -> Option<crate::kkt::aug_system_solver::SocKktBlocks> {
+        let layout = self.soc_layout()?;
+        let blocks = self.curr_soc_nt_blocks()?;
+        let h = layout
+            .blocks
+            .iter()
+            .zip(blocks)
+            .map(|(rows, h)| h.unwrap_or_else(|| vec![Number::NAN; rows.len() * rows.len()]))
+            .collect();
+        Some(crate::kkt::aug_system_solver::SocKktBlocks {
+            rows: layout.blocks.clone(),
+            h,
+        })
+    }
+
     /// `Σ_K −(μ/2) log det s_K` at the given pairs; `+∞` if any `s_K` is not
     /// interior.
     pub(crate) fn soc_barrier(pairs: &SocPairs, mu: Number) -> Number {

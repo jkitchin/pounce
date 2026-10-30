@@ -465,6 +465,7 @@ impl AugSystemSolver for AugRestoSystemSolver {
                 j_d: self.j_d_orig.as_ref().unwrap(),
                 d_d: Some(&d_d_r_dense),
                 delta_d: coeffs.delta_d,
+                s_blocks: None,
             };
             let inner_rhs = AugSysRhs {
                 rhs_x: rhs_x_r_dyn,

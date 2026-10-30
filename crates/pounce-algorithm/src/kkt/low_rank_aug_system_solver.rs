@@ -891,6 +891,7 @@ fn inner_coeffs<'b>(factor: &'b Factorization, coeffs: &AugSysCoeffs<'b>) -> Aug
         j_d: coeffs.j_d,
         d_d: coeffs.d_d,
         delta_d: coeffs.delta_d,
+        s_blocks: coeffs.s_blocks,
     }
 }
 
@@ -1568,6 +1569,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
 
         let rhs_x = dvec(&space_x, &[5.0]);
@@ -1635,6 +1637,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
 
         let rhs_x = dvec(&space_x, &[7.0]);
@@ -1709,6 +1712,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
 
         let rhs_x = dvec(&space_x, &[1.0]);
@@ -1776,6 +1780,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
 
         let rhs_x = dvec(&space_x, &[1.0]);
@@ -1834,6 +1839,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
         let rhs_x = dvec(&space_x, &[1.0]);
         let rhs_zero = dvec(&space_zero, &[]);
@@ -1913,6 +1919,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
         let rhs_x = dvec(&space_x, &[1.0, 1.0, 1.0]);
         let rhs_zero = dvec(&space_zero, &[]);
@@ -1995,6 +2002,7 @@ mod tests {
                 j_d: &j_d as &dyn Matrix,
                 d_d: None,
                 delta_d: 0.0,
+                s_blocks: None,
             };
             let rhs_x = dvec(&space_x, &[1.0, -2.0, 3.5]);
             let rhs_zero = dvec(&space_zero, &[]);
@@ -2112,6 +2120,7 @@ mod tests {
             j_d: &j_d as &dyn Matrix,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
         let rhs_x = dvec(&space_x, &[1.0]);
         let rhs_zero = dvec(&space_zero, &[]);
@@ -2223,6 +2232,7 @@ mod tests {
                 j_d: &j_d as &dyn Matrix,
                 d_d: None,
                 delta_d: 0.0,
+                s_blocks: None,
             };
             let (mut sx, mut z1, mut z2, mut z3) = (
                 dvec(&space_x, &[0.0]),

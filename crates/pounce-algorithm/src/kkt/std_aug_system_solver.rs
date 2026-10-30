@@ -53,7 +53,7 @@ pub struct StdAugSystemSolver {
     /// `n`-diagonal quasi-Newton `B0`, which have different W nnz — the
     /// triplet structure (and the backend's symbolic factor) is rebuilt
     /// rather than silently reusing a stale pattern.
-    struct_sig: Option<(usize, usize, usize, Index, Index, Index)>,
+    struct_sig: Option<(usize, usize, usize, Index, Index, Index, usize)>,
     n_x: Index,
     n_s: Index,
     n_c: Index,
@@ -72,6 +72,8 @@ pub struct StdAugSystemSolver {
     w_range: Range<usize>,
     dx_range: Range<usize>,
     ds_range: Range<usize>,
+    /// Strictly-lower entries of the second-order cones' `(s, s)` blocks.
+    ss_range: Range<usize>,
     jc_range: Range<usize>,
     dc_range: Range<usize>,
     jd_range: Range<usize>,
@@ -146,6 +148,7 @@ impl StdAugSystemSolver {
             w_range: 0..0,
             dx_range: 0..0,
             ds_range: 0..0,
+            ss_range: 0..0,
             jc_range: 0..0,
             dc_range: 0..0,
             jd_range: 0..0,
@@ -187,6 +190,7 @@ impl StdAugSystemSolver {
         let total = w_nnz
             + (n_x as usize) // dx diagonal
             + (n_s as usize) // ds diagonal
+            + coeffs.s_blocks.map_or(0, |b| b.n_offdiag()) // cone (s, s) blocks
             + jc_nnz
             + (n_c as usize) // dc diagonal (negative)
             + jd_nnz
@@ -233,6 +237,21 @@ impl StdAugSystemSolver {
             self.jcn.push(r);
         }
         self.ds_range = ds_start..self.irn.len();
+
+        // ---- (2,2) cone blocks: strictly-lower entries ----
+        let ss_start = self.irn.len();
+        if let Some(b) = coeffs.s_blocks {
+            for rows in &b.rows {
+                for i in 0..rows.len() {
+                    for j in 0..i {
+                        let (r, c) = (rows[i].max(rows[j]), rows[i].min(rows[j]));
+                        self.irn.push(n_x + r as Index + 1);
+                        self.jcn.push(n_x + c as Index + 1);
+                    }
+                }
+            }
+        }
+        self.ss_range = ss_start..self.irn.len();
 
         // ---- (3,1) block: J_c ----
         let jc_start = self.irn.len();
@@ -334,6 +353,22 @@ impl StdAugSystemSolver {
             coeffs.delta_s,
             1.0,
         );
+        // (2,2) cone blocks: diagonal onto D_s, strictly-lower entries in
+        // the order `build_structure` laid them out.
+        if let Some(b) = coeffs.s_blocks {
+            let mut k = self.ss_range.start;
+            for (rows, h) in b.rows.iter().zip(&b.h) {
+                let m = rows.len();
+                for i in 0..m {
+                    self.vals[self.ds_range.start + rows[i]] += h[i * m + i];
+                    for j in 0..i {
+                        self.vals[k] = h[i * m + j];
+                        k += 1;
+                    }
+                }
+            }
+            debug_assert_eq!(k, self.ss_range.end);
+        }
         // (3,1) J_c
         {
             let j_c = gen_t_downcast(coeffs.j_c);
@@ -384,6 +419,7 @@ impl StdAugSystemSolver {
                 coeffs.j_c.n_cols(),
                 coeffs.j_c.n_rows(),
                 coeffs.j_d.n_rows(),
+                coeffs.s_blocks.map_or(0, |b| b.n_offdiag()),
             )
         };
         if !self.initialized || self.struct_sig != Some(sig) {
@@ -1281,6 +1317,7 @@ mod tests {
             j_d: &j_d,
             d_d: None,
             delta_d: 0.0,
+            s_blocks: None,
         };
         let rhs = AugSysRhs {
             rhs_x: &rx,
@@ -1421,6 +1458,7 @@ mod tests {
                 j_d: &j_d,
                 d_d: None,
                 delta_d: 0.0,
+                s_blocks: None,
             };
             let rhs = AugSysRhs {
                 rhs_x: &rx,
