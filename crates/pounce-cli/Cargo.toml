@@ -33,6 +33,13 @@ path = "src/bin/pounce_sens.rs"
 name = "pounce_cblib"
 path = "src/bin/pounce_cblib.rs"
 
+# `pounce_cblib_nlp`: a CBLIB second-order-cone instance through both the
+# convex conic driver and the NLP interior-point method with native cones
+# (workstream C's correctness check).
+[[bin]]
+name = "pounce_cblib_nlp"
+path = "src/bin/pounce_cblib_nlp.rs"
+
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
