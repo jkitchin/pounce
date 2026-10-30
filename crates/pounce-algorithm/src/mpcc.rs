@@ -706,10 +706,15 @@ fn nnls(cols: &[Vec<Number>], b: &[Number], n: usize) -> Vec<Number> {
         .max(1.0)
         * b.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1.0);
     let wtol = 1e-12 * scale * (n.max(k) as Number);
+    // A column freed and dropped again in the same step (its least-squares
+    // coefficient is not positive, so `alpha = 0`) would be picked again
+    // next step with nothing changed; it sits out until some other column
+    // enters and moves `x`.
+    let mut blocked = vec![false; k];
     for _outer in 0..3 * k + 10 {
         let w = grad(&resid(&x));
         let Some((t, wt)) = (0..k)
-            .filter(|&j| !passive[j])
+            .filter(|&j| !passive[j] && !blocked[j])
             .map(|j| (j, w[j]))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         else {
@@ -746,6 +751,11 @@ fn nnls(cols: &[Vec<Number>], b: &[Number], n: usize) -> Vec<Number> {
                 }
             }
         }
+        if passive[t] {
+            blocked.fill(false);
+        } else {
+            blocked[t] = true;
+        }
     }
     x
 }
@@ -753,6 +763,23 @@ fn nnls(cols: &[Vec<Number>], b: &[Number], n: usize) -> Vec<Number> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Near-dependent columns, one of them pointing away from `b`: the
+    /// least-squares solve on the passive set gives a non-positive
+    /// coefficient, which must not be picked again forever.
+    #[test]
+    fn nnls_on_near_dependent_columns_terminates_at_the_fit() {
+        let a = vec![1.0, 2.0, -1.0];
+        let a2: Vec<Number> = a.iter().map(|v| v * (1.0 + 1e-13)).collect();
+        let neg: Vec<Number> = a.iter().map(|v| -v).collect();
+        let b = vec![2.0, 4.0, -2.0];
+        let x = nnls(&[a.clone(), a2.clone(), neg], &b, 3);
+        assert!(x.iter().all(|&v| v >= 0.0));
+        let r: Number = (0..3)
+            .map(|i| (b[i] - x[0] * a[i] - x[1] * a2[i] + x[2] * a[i]).powi(2))
+            .sum();
+        assert!(r.sqrt() < 1e-9, "residual {}", r.sqrt());
+    }
 
     #[test]
     fn a_converged_lowering_with_a_large_product_is_not_an_answer() {

@@ -1533,6 +1533,12 @@ impl PyProblem {
         self.has_hessian
     }
 
+    /// Declared complementarity pairs, for the paths that solve the bare
+    /// model (`Solver`, `find_minima`) to refuse.
+    pub(crate) fn has_declared_structure(&self) -> bool {
+        !self.complementarity.is_empty()
+    }
+
     /// Declared complementarity pairs, for the batch path to refuse.
     pub(crate) fn has_complementarity(&self) -> bool {
         !self.complementarity.is_empty()

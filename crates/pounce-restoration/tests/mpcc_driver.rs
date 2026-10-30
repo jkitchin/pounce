@@ -14,8 +14,8 @@ use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
-    TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, Solution, SparsityRequest,
+    StartingPoint, TNLP,
 };
 use pounce_restoration::mpcc_driver::solve_mpcc;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
@@ -525,6 +525,133 @@ fn the_continuation_and_the_exact_product_both_run_and_the_lower_objective_wins(
     );
     assert_eq!(out.certificate.unwrap().class, StationarityClass::S);
     assert!(out.solves.iter().all(|s| s.stage != MpccStage::Penalty));
+}
+
+/// The previous model maximized through `obj_scaling_factor = -1`
+/// (upstream's spelling of "maximize"): same answer, certified S. The stage
+/// comparison and the certificate work on the minimized `σ·f`; on the raw
+/// `f` the certificate's multipliers carry the wrong sign.
+#[test]
+fn a_negative_obj_scaling_factor_is_maximized_and_certified_on_its_sign() {
+    let zero = || vec![vec![0.0; 2]; 2];
+    let model = Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: vec![0.9, 0.01],
+        f: Box::new(|x| -((x[0] - 0.9).powi(2) + (x[1] - 1.0).powi(2))),
+        grad: Box::new(|x| vec![-2.0 * (x[0] - 0.9), -2.0 * (x[1] - 1.0)]),
+        g: Box::new(|x| vec![x[1]]),
+        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = -2.0;
+            f[1][1] = -2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut app = app();
+    app.options_mut()
+        .read_from_str("obj_scaling_factor -1\n", true)
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let out = solve_mpcc(
+        &mut app,
+        tnlp,
+        vec![ComplementarityPair { row: 0, var: 0 }],
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(
+        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        "{:?} {:?}",
+        out.x,
+        out.solves
+    );
+    assert_eq!(out.certificate.unwrap().class, StationarityClass::S);
+    assert!(
+        matches!(out.reported, Reported::Answer(_)),
+        "{:?}",
+        out.reported
+    );
+}
+
+/// `Dense` with an intermediate callback that stops the solve on its
+/// `stop_at`-th call.
+struct Stopping {
+    inner: Dense,
+    calls: Rc<RefCell<usize>>,
+    stop_at: usize,
+}
+
+impl TNLP for Stopping {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        self.inner.get_nlp_info()
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        self.inner.get_bounds_info(b)
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.inner.get_starting_point(sp)
+    }
+    fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+        self.inner.eval_f(x, n)
+    }
+    fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+        self.inner.eval_grad_f(x, n, g)
+    }
+    fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+        self.inner.eval_g(x, n, g)
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+        self.inner.eval_jac_g(x, n, mode)
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        n: bool,
+        s: Number,
+        lam: Option<&[Number]>,
+        nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        self.inner.eval_h(x, n, s, lam, nl, mode)
+    }
+    fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+        self.inner.finalize_solution(sol, d, q)
+    }
+    fn wants_intermediate_callback(&self) -> bool {
+        true
+    }
+    fn intermediate_callback(&mut self, _: IterStats, _: &IpoptData, _: &IpoptCq) -> bool {
+        *self.calls.borrow_mut() += 1;
+        *self.calls.borrow() < self.stop_at
+    }
+}
+
+/// The caller's intermediate callback reaches the lowered solves and can
+/// stop them (PR review of #1103: `MpccTnlp` dropped it, so a callback that
+/// returned `false` on its 3rd call was never called and the run reported
+/// `Solve_Succeeded`). A stop ends the whole ladder: no later stage runs.
+#[test]
+fn the_callers_intermediate_callback_is_called_and_can_stop_the_solve() {
+    let calls = Rc::new(RefCell::new(0));
+    let model = Stopping {
+        inner: qpec_small([0.0, 0.5, 0.5], Rc::new(RefCell::new(Vec::new()))),
+        calls: Rc::clone(&calls),
+        stop_at: 3,
+    };
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |_| {}).unwrap();
+    assert_eq!(*calls.borrow(), 3, "{:?}", out.solves);
+    assert_eq!(out.status, ApplicationReturnStatus::UserRequestedStop);
+    assert_eq!(out.solves.len(), 1, "the ladder went on: {:?}", out.solves);
+    assert_eq!(out.accepted_by, None);
 }
 
 /// An infeasible complementarity model: `x >= 1`, `y >= 1` and

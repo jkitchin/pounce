@@ -162,6 +162,9 @@ pub fn solve_mpcc(
     // The first stage that returned a point, standing in for `exact` if
     // that stage was refused before iteration 0.
     let mut first: Option<Captured> = None;
+    // A lowered solve the caller's intermediate callback stopped: the
+    // ladder ends there and that solve is reported.
+    let mut stopped: Option<Captured> = None;
     // The best S answer so far, with the model's objective there.
     let mut accepted: Option<(MpccStage, Captured, Option<Certificate>, Number)> = None;
     // The first stage that certified only W: the answer if no later stage
@@ -175,6 +178,12 @@ pub fn solve_mpcc(
         .get_numeric_value("tol", "")
         .map(|(v, _)| v)
         .unwrap_or(1e-8);
+    // `obj_scaling_factor < 0` is upstream's spelling of "maximize": the
+    // stage comparison and the certificate work on the minimized `σ·f`.
+    let sense = app
+        .options()
+        .get_numeric_value("obj_scaling_factor", "")
+        .map_or(1.0, |(v, _)| if v < 0.0 { -1.0 } else { 1.0 });
     let pairs = wrapper.borrow().pairs().to_vec();
 
     // One lowered solve: options already set by the caller of `run`.
@@ -230,7 +239,7 @@ pub fn solve_mpcc(
     for (k, &stage) in STAGES.iter().enumerate() {
         // An answer from a compared stage ends the ladder before the first
         // stage that is not compared (the penalty).
-        if accepted.is_some() && !compared(stage) {
+        if (accepted.is_some() && !compared(stage)) || stopped.is_some() {
             break;
         }
         if k > 0 {
@@ -249,6 +258,10 @@ pub fn solve_mpcc(
                 // inequality form then gives a verdict with a point of its
                 // own.
                 let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
+                if c.status == ApplicationReturnStatus::UserRequestedStop {
+                    stopped = Some(c);
+                    break;
+                }
                 if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty()
                 {
                     baseline(app);
@@ -268,11 +281,21 @@ pub fn solve_mpcc(
                         c.warm()
                     });
                     let mut c = run(app, stage, Lowering::Relaxed(tau), warm, &mut solves);
+                    if c.status == ApplicationReturnStatus::UserRequestedStop {
+                        stopped = Some(c);
+                        break;
+                    }
                     if !converged(c.status) {
                         // One weaker rung before giving up on the schedule:
                         // the previous stage's x only, no dual warm start.
                         let Some(prev) = &last else { break };
                         baseline(app);
+                        // The override carries no duals; a caller's
+                        // `warm_start_init_point yes` would ask for them and
+                        // refuse the start.
+                        let _ = app
+                            .options_mut()
+                            .read_from_str("warm_start_init_point no\n", true);
                         let primal = StartOverride {
                             x: prev.x.clone(),
                             ..Default::default()
@@ -312,8 +335,11 @@ pub fn solve_mpcc(
                                 let _ = app.options_mut().read_from_str(&a, true);
                             }
                             let c = run(app, stage, lowering, Some(relaxed.warm()), &mut solves);
-                            let over_determined =
-                                c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
+                            // Refused before iteration 0, whatever the status:
+                            // the inequality form, as in the exact stage.
+                            let over_determined = c.status
+                                == ApplicationReturnStatus::NotEnoughDegreesOfFreedom
+                                || c.x.is_empty();
                             finish = Some(c);
                             if !over_determined {
                                 break;
@@ -349,12 +375,15 @@ pub fn solve_mpcc(
                 // Converged and physical; the certificate decides whether it
                 // is an answer. A lowered solve can stall short of a biactive
                 // pair and still exit "acceptable" with every product at 0.
-                let cert = certify_at(&inner, &pairs, &c.x, solver_tol);
+                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, sense);
                 if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
-                    let f = objective_at(&inner, &c.x);
+                    let f = match sense * objective_at(&inner, &c.x) {
+                        f if f.is_finite() => f,
+                        _ => Number::INFINITY,
+                    };
                     report(&format!(
                         "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}, \
-                         objective {:.6e}).",
+                         minimized objective {:.6e}).",
                         stage.label(),
                         c.status,
                         c.max_abs_product,
@@ -418,10 +447,50 @@ pub fn solve_mpcc(
     // certificate; failing that, the exact-product stage's verdict (or, if
     // it was refused with no point, the first stage that has one).
     let verdict = verdict_of(exact, first);
+    if let Some(c) = stopped {
+        // The caller asked to stop: report the stopped solve, nothing else.
+        let total_iterations = solves.iter().map(|s| s.iterations).sum();
+        {
+            let mut w = wrapper.borrow_mut();
+            w.set_start_override(None);
+            w.forward_finalize(
+                c.solver_return,
+                &c.x,
+                &c.z_l,
+                &c.z_u,
+                &c.lambda,
+                &IpoptData::default(),
+                &IpoptCq::default(),
+            );
+        }
+        return Ok(MpccOutcome {
+            status: c.status,
+            statistics: c.statistics,
+            accepted_by: None,
+            fallback: None,
+            reported: Reported::Verdict,
+            solves,
+            total_iterations,
+            x: c.x,
+            max_abs_product: c.max_abs_product,
+            certificate: None,
+        });
+    }
     let (reported, chosen, known_cert) = match (accepted, weak, physical, verdict) {
         (Some((s, c, cert, _)), _, _, _) => (Reported::Answer(s), c, Some(cert)),
         (None, Some((s, c, cert)), _, _) => (Reported::WeakFallback(s), c, Some(cert)),
-        (None, None, Some((s, c, cert)), _) => (Reported::FeasibleUncertified(s), c, Some(cert)),
+        // Feasible, but the certificate says not stationary: the lowered
+        // solve's success is not the declared model's, so it is reported
+        // at the acceptable level rather than as `Solve_Succeeded`.
+        (None, None, Some((s, c, cert)), _) => (
+            Reported::FeasibleUncertified(s),
+            Captured {
+                status: ApplicationReturnStatus::SolvedToAcceptableLevel,
+                solver_return: SolverReturn::StopAtAcceptablePoint,
+                ..c
+            },
+            Some(cert),
+        ),
         (None, None, None, Some(c)) => (Reported::Verdict, c, None),
         (None, None, None, None) => return Err("no exact-product stage ran".into()),
     };
@@ -449,7 +518,7 @@ pub fn solve_mpcc(
     let total_iterations = solves.iter().map(|s| s.iterations).sum();
     let certificate = match known_cert {
         Some(c) => c,
-        None => certify_at(&inner, &pairs, &chosen.x, solver_tol),
+        None => certify_at(&inner, &pairs, &chosen.x, solver_tol, sense),
     };
     Ok(MpccOutcome {
         status: chosen.status,
@@ -501,6 +570,7 @@ fn certify_at(
     pairs: &[ComplementarityPair],
     x: &[Number],
     solver_tol: Number,
+    sense: Number,
 ) -> Option<Certificate> {
     let mut m = inner.borrow_mut();
     let info = m.get_nlp_info()?;
@@ -527,6 +597,7 @@ fn certify_at(
     if !m.eval_grad_f(x, true, &mut grad_f) || !m.eval_g(x, false, &mut g) {
         return None;
     }
+    grad_f.iter_mut().for_each(|d| *d *= sense);
     let (mut ir, mut jc, mut v) = (vec![0 as Index; nnz], vec![0 as Index; nnz], vec![0.0; nnz]);
     if !m.eval_jac_g(
         None,

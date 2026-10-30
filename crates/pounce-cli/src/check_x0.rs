@@ -576,6 +576,16 @@ fn load_model(args: &CheckX0Args) -> Result<LoadedModel, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let sha = sha256::hex(&bytes);
     let prob = nl_reader::read_nl_file(path)?;
+    if !prob.complementarity.is_empty() {
+        // The diagnosis reads the rows and bounds; a complementarity pair is
+        // neither, so its report would describe the relaxation.
+        return Err(format!(
+            "{} declares {} complementarity pair(s), which check-x0 does not model",
+            path.display(),
+            prob.complementarity.len()
+        )
+        .into());
+    }
     let var_names = prob.var_names.clone();
     let con_names = prob.con_names.clone();
     // Read the quadratic coefficients before `prob` is consumed: they are

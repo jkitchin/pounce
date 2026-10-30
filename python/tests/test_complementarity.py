@@ -144,3 +144,34 @@ def test_read_nl_exposes_pairs_and_the_batch_path_refuses_them():
     prob = qpec_problem(complementarity=[(0, 1)])
     with pytest.raises(ValueError, match="complementarity"):
         pounce.solve_nlp_batch([prob], [np.array([0.0, 0.5, 0.5])])
+
+
+def test_the_intermediate_callback_is_called_and_can_stop_a_solve_with_pairs():
+    """Review of #1103: the lowering wrapper used to drop the caller's
+    `intermediate`, so it was never called and could not stop the solve."""
+    calls = []
+
+    class Stopping(QpecSmall):
+        def intermediate(self, *args):
+            calls.append(args[1])
+            return len(calls) < 3
+
+    prob = pounce.Problem(
+        n=3, m=2, problem_obj=Stopping(), lb=[0.0, 0.0, 0.0], ub=[2.0, INF, INF],
+        cl=[0.0, 0.0], cu=[INF, INF], complementarity=[(0, 1), (1, 2)],
+    )
+    prob.add_option("print_level", 0)
+    _, info = prob.solve(np.array([0.0, 0.5, 0.5]))
+    assert len(calls) == 3
+    assert info["status"] == 5, info["status_msg"]  # User_Requested_Stop
+    assert info["complementarity"]["n_solves"] == 1
+
+
+def test_entry_points_that_would_drop_the_pairs_refuse_them():
+    from pounce import _pounce
+
+    prob = qpec_problem(complementarity=[(0, 1)])
+    with pytest.raises(ValueError, match="complementarity"):
+        pounce.Solver(prob).solve(np.array([0.0, 0.5, 0.5]))
+    with pytest.raises(ValueError, match="complementarity"):
+        _pounce.find_minima(prob, np.array([0.0, 0.5, 0.5]), {"method": "deflation"})

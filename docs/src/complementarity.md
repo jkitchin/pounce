@@ -96,7 +96,8 @@ below). A solve that exits "acceptable" at a point that is not stationary
 does not end the ladder, and neither does a weakly stationary (W) point:
 it is kept, and returned only if no later stage finds an S point. If no
 stage answers, the point reported is, in order: the first W point; else the
-first converged point with every product in tolerance; else the exact
+first converged point with every product in tolerance, reported as
+`Solved_To_Acceptable_Level` since it is not certified stationary; else the exact
 product's own verdict (for an infeasible model,
 `Infeasible_Problem_Detected`) — never a relaxed solve's success. The
 console line says which. Your options apply to every stage and are restored after
@@ -136,8 +137,15 @@ are unique, and the stationarity residual against its tolerance.
 - Complementarity between **cones** (friction cones, `β ∘ η = 0`) is not
   supported; lower such a model to scalar pairs.
 - Presolve is declined for a model with pairs (it renumbers what they
-  index), and the CLI says so. `--minima`, the interactive debugger,
-  `solve_nlp_batch` and `solve_with_sens` refuse pairs.
+  index), and the CLI says so. `--minima`, the sensitivity and
+  reduced-Hessian requests, the interactive debugger, `pounce verify`,
+  `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
+  `solve_nlp_batch` and `solve_with_sens` refuse pairs rather than solve
+  the model without them.
+- The certificate is dense: a model whose stationarity system has more
+  than 4·10⁶ entries (about a thousand pairs on a chain) is reported
+  `not_searched`, and a stall at a non-stationary point goes undetected
+  there.
 - The JSON solve report does not carry the certificate yet; read the
   console line or the Python `info`.
 

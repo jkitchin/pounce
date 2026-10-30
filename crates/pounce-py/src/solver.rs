@@ -130,6 +130,12 @@ impl PySolver {
         zu: Option<Py<PyAny>>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
         let problem = self.problem.bind(py).borrow();
+        if problem.has_declared_structure() {
+            // `Solver` runs the bare model; a pairing or cone would be dropped.
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Solver does not support declared complementarity pairs; use Problem.solve()",
+            ));
+        }
         let (app, bridge) = problem.prepare(py, x0, lagrange, zl, zu)?;
         let m = problem.m_index() as usize;
         drop(problem);

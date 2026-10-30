@@ -859,6 +859,16 @@ fn real_main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // The sensitivity step would read the lowered model's KKT system (its
+    // product rows and the last stage's relaxation), not the declared one.
+    if wants_nlp_postopt && !nl_pairs.is_empty() {
+        eprintln!(
+            "pounce: {postopt_what} is not supported for a model with \
+             complementarity constraints (this model declares {}).",
+            nl_pairs.len()
+        );
+        return ExitCode::from(2);
+    }
     if let Some(mcfg) = &args.minima {
         // Related to #196: --minima is a multistart search, not a single
         // post-optimal solve, so it does not run the sIPOPT sensitivity /
@@ -920,6 +930,14 @@ fn real_main() -> ExitCode {
 
         let choice = match resolve_solver(class, selection) {
             Ok(c) => c,
+            Err(msg) if !nl_pairs.is_empty() => {
+                eprintln!(
+                    "pounce: {msg}; this model declares {} complementarity \
+                     constraints, which only the NLP solver handles.",
+                    nl_pairs.len()
+                );
+                return ExitCode::from(2);
+            }
             Err(msg) => {
                 eprintln!("pounce: {msg}");
                 return ExitCode::from(2);

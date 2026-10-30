@@ -63,9 +63,10 @@ use std::rc::Rc;
 use pounce_common::types::{Index, Number};
 
 use crate::alg_types::SolverReturn;
+use crate::constant_derivatives::{DerivativeProof, DerivativeProofs};
 use crate::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, MetaData, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
 /// A declared complementarity pair; see the module docs for the semantics.
@@ -775,6 +776,180 @@ impl TNLP for MpccTnlp {
         }
         true
     }
+
+    // ---- Hooks forwarded to the inner model (PR review of #1103: falling
+    // back to the trait defaults dropped the caller's intermediate callback,
+    // user scaling, linearity and derivative proofs). Anything indexed by
+    // constraint row is translated: the product rows are appended after the
+    // inner model's `m_inner` rows.
+
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
+    fn intermediate_callback(
+        &mut self,
+        stats: IterStats,
+        ip_data: &IpoptData,
+        ip_cq: &IpoptCq,
+    ) -> bool {
+        self.inner
+            .borrow_mut()
+            .intermediate_callback(stats, ip_data, ip_cq)
+    }
+
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
+    fn scaling_factors(&self) -> Option<Vec<Number>> {
+        self.inner.borrow().scaling_factors()
+    }
+
+    /// The inner model's factors for its own rows; the product rows are
+    /// unscaled.
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let ScalingRequest {
+            obj_scaling,
+            use_x_scaling,
+            x_scaling,
+            use_g_scaling,
+            g_scaling,
+        } = req;
+        let (inner_g, products) = g_scaling.split_at_mut(self.m_inner.min(g_scaling.len()));
+        let ok = self
+            .inner
+            .borrow_mut()
+            .get_scaling_parameters(ScalingRequest {
+                obj_scaling,
+                use_x_scaling,
+                x_scaling,
+                use_g_scaling,
+                g_scaling: inner_g,
+            });
+        products.fill(1.0);
+        ok
+    }
+
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_objective_variables_linearity(types)
+    }
+
+    /// The inner model's rows as it reports them; the product rows are
+    /// nonlinear.
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        let m = self.m_inner.min(types.len());
+        let (inner, products) = types.split_at_mut(m);
+        if !self.inner.borrow_mut().get_constraints_linearity(inner) {
+            return false;
+        }
+        products.fill(Linearity::NonLinear);
+        true
+    }
+
+    /// The inner model's variables as it reports them, with every variable a
+    /// product touches (each pair's variable and its row's columns) made
+    /// nonlinear.
+    fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        if !self.inner.borrow_mut().get_variables_linearity(types) {
+            return false;
+        }
+        for j in self.product_vars() {
+            if let Some(t) = types.get_mut(j) {
+                *t = Linearity::NonLinear;
+            }
+        }
+        true
+    }
+
+    fn get_number_of_nonlinear_variables(&mut self) -> Index {
+        match self.nonlinear_vars() {
+            Some(v) => v.len() as Index,
+            None => -1,
+        }
+    }
+
+    fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
+        let Some(v) = self.nonlinear_vars() else {
+            return false;
+        };
+        for (p, j) in pos.iter_mut().zip(v) {
+            *p = j;
+        }
+        true
+    }
+
+    /// The inner proofs; the product rows' gradients vary with `x`, and the
+    /// Lagrangian Hessian, which now carries the products' terms, is not
+    /// claimed either way.
+    fn derivative_proofs(&mut self) -> DerivativeProofs {
+        let mut p = self.inner.borrow_mut().derivative_proofs();
+        if !p.jac.is_empty() {
+            p.jac.resize(self.m_inner, DerivativeProof::Unknown);
+            p.jac.extend(std::iter::repeat_n(
+                DerivativeProof::Varying,
+                self.pairs.len(),
+            ));
+        }
+        p.hessian = DerivativeProof::Unknown;
+        p
+    }
+
+    /// The constraint metadata truncated to the inner model's rows.
+    fn finalize_metadata(&mut self, var: &MetaData, con: &MetaData) {
+        let m = self.m_inner;
+        let mut inner_con = con.clone();
+        for v in inner_con.strings.values_mut() {
+            v.truncate(m);
+        }
+        for v in inner_con.integers.values_mut() {
+            v.truncate(m);
+        }
+        for v in inner_con.numerics.values_mut() {
+            v.truncate(m);
+        }
+        self.inner.borrow_mut().finalize_metadata(var, &inner_con);
+    }
+}
+
+impl MpccTnlp {
+    /// Every variable a product row touches (0-based): each pair's variable
+    /// and the columns of its row.
+    fn product_vars(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.pairs.iter().map(|p| p.var).collect();
+        for entries in &self.row_entries {
+            v.extend(entries.iter().map(|&(_, col)| col));
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The inner model's nonlinear variables plus the product-touched ones,
+    /// in the index style's numbering; `None` if the inner model reports
+    /// every variable nonlinear (or does not say).
+    fn nonlinear_vars(&mut self) -> Option<Vec<Index>> {
+        let n_inner = self.inner.borrow_mut().get_number_of_nonlinear_variables();
+        if n_inner < 0 {
+            return None;
+        }
+        let mut list = vec![0 as Index; n_inner as usize];
+        if n_inner > 0
+            && !self
+                .inner
+                .borrow_mut()
+                .get_list_of_nonlinear_variables(&mut list)
+        {
+            return None;
+        }
+        let off = base(self.index_style);
+        list.extend(self.product_vars().into_iter().map(|j| j as Index + off));
+        list.sort_unstable();
+        list.dedup();
+        Some(list)
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1402,96 @@ mod tests {
     /// orientations: pair (row 0, var 1) has `x_1 <= 2 ⟂ g_0 <= 0.5` (both
     /// sides upper-bounded, `s_G = s_H = -1`); pair (row 1, var 2) has
     /// `x_2 >= -1 ⟂ g_1 <= 3` (mixed, `s_G = +1, s_H = -1`).
+    /// `Toy` reporting every row linear and row scaling `[2, 3, 4]`.
+    struct Hooked(Toy);
+
+    impl TNLP for Hooked {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.0.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.0.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.0.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            self.0.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+            self.0.eval_jac_g(x, n, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            n: bool,
+            s: Number,
+            l: Option<&[Number]>,
+            nl: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.0.eval_h(x, n, s, l, nl, mode)
+        }
+        fn finalize_solution(&mut self, s: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.0.finalize_solution(s, d, q)
+        }
+        fn get_constraints_linearity(&mut self, t: &mut [Linearity]) -> bool {
+            t.fill(Linearity::Linear);
+            true
+        }
+        fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+            *req.use_g_scaling = true;
+            req.g_scaling.copy_from_slice(&[2.0, 3.0, 4.0]);
+            true
+        }
+    }
+
+    /// Row-indexed hooks are forwarded with the product rows translated
+    /// (PR review of #1103: they fell back to the trait defaults): the inner
+    /// rows keep what the model reports, the products are nonlinear and
+    /// unscaled.
+    #[test]
+    fn row_indexed_hooks_are_forwarded_and_extended_to_the_products() {
+        let mut w = MpccTnlp::new(
+            Rc::new(RefCell::new(Hooked(Toy {
+                style: IndexStyle::C,
+            }))),
+            pairs(),
+            Lowering::Eq,
+        )
+        .unwrap();
+        let mut lin = vec![Linearity::NonLinear; 5];
+        assert!(w.get_constraints_linearity(&mut lin));
+        assert_eq!(
+            lin,
+            vec![
+                Linearity::Linear,
+                Linearity::Linear,
+                Linearity::Linear,
+                Linearity::NonLinear,
+                Linearity::NonLinear
+            ]
+        );
+        let (mut obj, mut ux, mut ug) = (1.0, false, false);
+        let mut xs = vec![1.0; 3];
+        let mut gs = vec![0.0; 5];
+        assert!(w.get_scaling_parameters(ScalingRequest {
+            obj_scaling: &mut obj,
+            use_x_scaling: &mut ux,
+            x_scaling: &mut xs,
+            use_g_scaling: &mut ug,
+            g_scaling: &mut gs,
+        }));
+        assert!(ug);
+        assert_eq!(gs, vec![2.0, 3.0, 4.0, 1.0, 1.0]);
+    }
+
     struct Flipped(Toy);
 
     impl TNLP for Flipped {
