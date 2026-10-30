@@ -207,3 +207,45 @@ On main the same model with squared cones is 5/5 at 0.2026
 corpora and fail the model they were built for. Making them work needs a
 cone predictor–corrector in the IPM — a new piece of the algorithm, not a
 fix to this one. Until then workstream C should not merge.
+
+## Continuing C: corrector, dual lift, and the coupling they run into
+
+Measured after the verdict above, on the same corpora.
+
+- **Mehrotra corrector on the cone rows** (`soc_slack::mehrotra_term`,
+  predictor with the cone rows' μ at 0, one factorization). Verified: the
+  corrected row closes the scaled second-order residual to 1e-10. Effect on
+  CBLIB: mixed (`estein4_C` 118 → 42 and solved; `robust_20_2` 32 → 92).
+  Allowing one μ decrease per iteration
+  (`mu_allow_fast_monotone_decrease=no`) helps about as much and the two do
+  not stack. Neither touches the hard failures. On the drifting car it
+  changes nothing: those runs fail before μ first decreases.
+- **Cone dual lift** (the lower half of `kappa_sigma`: raise `z₀` minimally
+  when `√(det s det z) < μ/κ`). This is what the drifting car needed first.
+  A dual reached `det z = 4e-14` against `det s = 0.07` at `μ = 0.1`, and the
+  0.99 fraction rule let it close 99% of the gap per iteration. With the
+  lift, `scholtes_then_ineq` gets through `τ = 0.01` and `τ = 0.001`
+  (objective 0.2019, against 0.2026 for squared cones) and stalls at
+  `τ = 1e-4`: primal feasible to 1e-8 with full primal steps, dual step
+  ~1e-4 for 1500 iterations. κ ∈ {1e2, 1e4, 1e6} all stall there or earlier;
+  `ncp_eq` does not converge at any κ. Not yet physical.
+
+**The coupling.** In this design the cone dual *is* the row multiplier
+(`z = −y_d`). Every `x`-stationarity correction to `y_d` moves the cone dual
+directly, and the dual has to stay in the cone at every iterate. Ipopt's
+bound slacks are not built that way: their multiplier `v` is a separate
+variable, tied to `y_d` by `−y_d − v = 0` only at convergence. `y_d` is free
+to move while `v` stays positive under its own step rule. The drifting car
+fails in the shape that coupling predicts: the dual direction keeps pushing
+a cone dual out while its slack is interior. Each safeguard (the
+fraction-to-boundary cap, the lift) moves the failure to a later stage
+without removing it.
+
+**What would remove it:** a separate cone dual `z` in the iterate, with the
+`s`-row residual `−y_d − z` relaxed like Ipopt's `grad_lag_s` and `z` stepped
+by its own cone rule — the bound-slack structure, for cones. That is the
+storage design that was backed out in C2a for safety (a missed bound-reading
+site would impose `s_i ≥ 0` on a cone entry). It can be done safely with a
+dedicated cone-dual component rather than borrowing `v_L`. Doing so means a
+ninth iterate component that every iterate-vector operation, the warm start,
+restoration and the sensitivity layer would have to carry.
