@@ -24,7 +24,7 @@ PAPER = {
     "quadruped": {"CALIPSO": (574.84, 5.32e-4, 178), "Ipopt": (1855.18, 1.13e-1, 2000)},
 }
 VIOL_OK = 1e-4
-ROUTES = ("calipso", "declared", "defaults_eq", "direct", "ncp_eq", "ncp_eq_l1", "jordan_eq",
+ROUTES = ("calipso", "declared", "declared_exact_first", "defaults_eq", "direct", "ncp_eq", "ncp_eq_l1", "jordan_eq",
           "scholtes_then_ncp", "scholtes_then_ineq")
 MODELS = ("bunnyhop", "drifting_squared", "drifting_norm", "ballincup", "quadruped", "rocket",
           "complementarity", "maratos", "wachter")
