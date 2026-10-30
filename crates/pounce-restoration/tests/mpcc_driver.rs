@@ -461,6 +461,64 @@ fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
     assert_eq!(out.certificate.unwrap().class, StationarityClass::S);
 }
 
+/// Two branches, two objectives:
+///
+/// ```text
+/// min (x - 0.9)^2 + (y - 1)^2   s.t.  0 <= x ⟂ y >= 0
+/// ```
+///
+/// `(0, 1)` at 0.81 is the optimum; `(0.9, 0)` at 1.0 is an S-stationary
+/// local minimum. From `(0.9, 0.01)` the exact product commits to the near
+/// branch and stops at the local minimum, while the relaxation sees both.
+/// Both stages run, and the lower objective is the answer whichever stage
+/// produced it.
+#[test]
+fn the_continuation_and_the_exact_product_both_run_and_the_lower_objective_wins() {
+    let zero = || vec![vec![0.0; 2]; 2];
+    let model = Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: vec![0.9, 0.01],
+        f: Box::new(|x| (x[0] - 0.9).powi(2) + (x[1] - 1.0).powi(2)),
+        grad: Box::new(|x| vec![2.0 * (x[0] - 0.9), 2.0 * (x[1] - 1.0)]),
+        g: Box::new(|x| vec![x[1]]),
+        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let mut lines = Vec::new();
+    let out = solve_mpcc(
+        &mut app,
+        tnlp,
+        vec![ComplementarityPair { row: 0, var: 0 }],
+        &mut |l| lines.push(l.to_string()),
+    )
+    .unwrap();
+    let solved: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("solved the model"))
+        .collect();
+    assert_eq!(solved.len(), 2, "both stages answer: {lines:#?}");
+    assert!(
+        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        "{:?} {lines:#?}",
+        out.x
+    );
+    assert_eq!(out.certificate.unwrap().class, StationarityClass::S);
+    assert!(out.solves.iter().all(|s| s.stage != MpccStage::Penalty));
+}
+
 /// An infeasible complementarity model: `x >= 1`, `y >= 1` and
 /// `x + y <= 1.5` cannot hold together whatever the pair does. Every stage
 /// runs and fails, so every option any stage writes is written.

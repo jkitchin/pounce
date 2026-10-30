@@ -17,8 +17,9 @@
 //! exact finish was the only route physical on 5/5 starts on bunny-hop and
 //! the drifting car, at several times the iterations; the ℓ₁ penalty was the
 //! only route that solved the quadruped on every seed. So the driver tries
-//! them in [`STAGES`] order and stops at the first answer that passes
-//! [`accepts`].
+//! them in [`STAGES`] order: the continuation and the exact product both
+//! run and the better certified answer wins ([`compared`]); the penalty
+//! runs only if neither answers.
 //!
 //! ## Why the continuation goes first
 //!
@@ -191,6 +192,20 @@ pub fn converged(status: ApplicationReturnStatus) -> bool {
             | ApplicationReturnStatus::SolvedToAcceptableLevel
             | ApplicationReturnStatus::FeasiblePointFound
     )
+}
+
+/// Are a stage's S answers compared with the other compared stage's, the
+/// lower objective winning, rather than ending the ladder? The continuation
+/// and the exact product: on a nonconvex model each reaches local minima the
+/// other avoids, and neither order wins on both corpora we have. Gate 0
+/// (60 feasible cells) at `f*`: continuation first 60, exact first 48.
+/// CALIPSO bunny-hop (5 seeds) at the best known objective: exact first 5,
+/// continuation first 2 — the continuation settles on S-stationary
+/// trajectories at 1111–1169 against 462.6. Running both and keeping the
+/// lower objective gets every one of those, for the iterations of both.
+/// The penalty runs only when neither answers.
+pub fn compared(stage: MpccStage) -> bool {
+    matches!(stage, MpccStage::Continuation | MpccStage::Exact)
 }
 
 /// Does a certified class make a converged, physical point the answer, ending

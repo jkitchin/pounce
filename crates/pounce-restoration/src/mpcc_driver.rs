@@ -30,7 +30,7 @@ use std::rc::Rc;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
     Certificate, CertificateInput, MpccStage, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
-    TOUCHED_OPTIONS, accepts, answers, certify, converged, kept_if_nothing_better,
+    TOUCHED_OPTIONS, accepts, answers, certify, compared, converged, kept_if_nothing_better,
     warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
@@ -153,7 +153,8 @@ pub fn solve_mpcc(
     // The first stage that returned a point, standing in for `exact` if
     // that stage was refused before iteration 0.
     let mut first: Option<Captured> = None;
-    let mut accepted: Option<(MpccStage, Captured, Option<Certificate>)> = None;
+    // The best S answer so far, with the model's objective there.
+    let mut accepted: Option<(MpccStage, Captured, Option<Certificate>, Number)> = None;
     // The first stage that certified only W: the answer if no later stage
     // certifies S.
     let mut weak: Option<(MpccStage, Captured, Option<Certificate>)> = None;
@@ -214,6 +215,11 @@ pub fn solve_mpcc(
     };
 
     for (k, &stage) in STAGES.iter().enumerate() {
+        // An answer from a compared stage ends the ladder before the first
+        // stage that is not compared (the penalty).
+        if accepted.is_some() && !compared(stage) {
+            break;
+        }
         if k > 0 {
             app.set_in_retry_sequence(true);
         }
@@ -315,14 +321,27 @@ pub fn solve_mpcc(
                 // pair and still exit "acceptable" with every product at 0.
                 let cert = certify_at(&inner, &pairs, &c.x, solver_tol);
                 if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
+                    let f = objective_at(&inner, &c.x);
                     report(&format!(
-                        "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}).",
+                        "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}, \
+                         objective {:.6e}).",
                         stage.label(),
                         c.status,
-                        c.max_abs_product
+                        c.max_abs_product,
+                        f
                     ));
-                    accepted = Some((stage, c, cert));
-                    break;
+                    // Lower objective wins; a tie (relative 1e-9) keeps the
+                    // earlier stage's answer.
+                    let better = accepted.as_ref().is_none_or(|(_, _, _, g)| {
+                        f.is_finite() && f < g - 1e-9 * g.abs().max(1.0)
+                    });
+                    if better {
+                        accepted = Some((stage, c, cert, f));
+                    }
+                    if !compared(stage) {
+                        break;
+                    }
+                    continue;
                 }
                 if cert
                     .as_ref()
@@ -372,6 +391,7 @@ pub fn solve_mpcc(
         Some(e) if !e.x.is_empty() => Some(e),
         e => first.or(e),
     };
+    let accepted = accepted.map(|(s, c, cert, _)| (s, c, cert));
     let (accepted_by, chosen, known_cert) = match (accepted.or(weak), physical, verdict) {
         (Some((s, c, cert)), _, _) => (Some(s), c, Some(cert)),
         (None, Some((c, cert)), _) => (None, c, Some(cert)),
@@ -406,6 +426,16 @@ pub fn solve_mpcc(
         max_abs_product: chosen.max_abs_product,
         certificate,
     })
+}
+
+/// The *inner* model's objective at `x`; `+inf` if it cannot be evaluated,
+/// so an unevaluable answer never wins the comparison.
+fn objective_at(inner: &Rc<RefCell<dyn TNLP>>, x: &[Number]) -> Number {
+    inner
+        .borrow_mut()
+        .eval_f(x, true)
+        .filter(|f| f.is_finite())
+        .unwrap_or(Number::INFINITY)
 }
 
 /// Evaluate the *inner* model at `x` and certify it. `None` if any callback
