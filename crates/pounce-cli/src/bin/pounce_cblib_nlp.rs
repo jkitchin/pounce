@@ -259,7 +259,11 @@ fn main() {
     let out = Rc::clone(&nlp.out);
     let mut app = IpoptApplication::new();
     let o = app.options_mut();
-    let _ = o.set_integer_value("print_level", 0, true, false);
+    let pl = std::env::var("POUNCE_PRINT_LEVEL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let _ = o.set_integer_value("print_level", pl, true, false);
     let _ = o.set_integer_value("max_iter", max_iter as Index, true, false);
     app.set_soc_constraints(socs);
     let t0 = std::time::Instant::now();

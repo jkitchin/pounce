@@ -21,6 +21,9 @@ pub struct SocPairs {
     pub z: Vec<Vec<Number>>,
 }
 
+/// The cones' fraction-to-boundary ceiling (see [`IpoptCalculatedQuantities::soc_alpha_primal_max`]).
+const SOC_TAU_MAX: Number = 0.99;
+
 fn dense(v: &dyn Vector) -> Vec<Number> {
     v.as_any()
         .downcast_ref::<DenseVector>()
@@ -236,6 +239,16 @@ impl IpoptCalculatedQuantities {
         let (Some(layout), Some(p)) = (self.soc_layout(), self.curr_soc_pairs()) else {
             return 1.0;
         };
+        // Ipopt's `τ = max(τ_min, 1 − μ)` lets a bound slack close all but
+        // `μ` of its distance per step; a cone cannot afford that. Its
+        // boundary is `u₀ = ‖u_{1..}‖`, a difference of two numbers of the
+        // cone's own magnitude, and at `τ = 1 − 1e-9` the step lands within
+        // rounding of it: on CBLIB `flay02m` the dual of an active cone of
+        // magnitude 51 came out with `det z = −2.4e-13` (exact arithmetic),
+        // the NT block was undefined, and the solve ended
+        // `Error_In_Step_Computation` one iteration from convergence. Conic
+        // interior-point codes keep the fraction constant; so do the cones.
+        let tau = tau.min(SOC_TAU_MAX);
         let step = if dual {
             dense(&*delta.y_d)
         } else {
