@@ -288,6 +288,13 @@ exist and run from one command.
 
 Design and increments: [`nlp-soc-design.md`](nlp-soc-design.md).
 
+**Status (measured): not worth merging in its first form.** Native cones
+reach fewer CBLIB optima than main's hand-written `t² − ‖x‖² ≥ 0` (121 vs
+125 of 152) at ~9× the iterations, and solve the drifting car on 0/25 runs
+(main: 5/5 with squared cones). Cause: no cone predictor–corrector, so the
+iterates lose centrality after every μ decrease. Details and what was
+tried: `nlp-soc-design.md`, "Verdict on the first implementation".
+
 - `h(x) ∈ K`, K a product of second-order cones, via a cone slack with
   barrier `−log(t² − ‖x‖²)`; reuse `soc.rs` for the cone arithmetic,
   scaling and step-to-boundary rule. Then extend B to cone pairs

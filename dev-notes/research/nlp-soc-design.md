@@ -178,3 +178,32 @@ runs the code it runs today. The fixture sweep must diff empty.
    violation ≤ 1e-8 under default options, iterations against 1759 and
    CALIPSO's 130; quadruped; rocket thrust cones. Then cone complementarity
    (`β ∘ η = 0`) through workstream B's driver.
+
+## Verdict on the first implementation (C4/C5 measured)
+
+**1. The iteration gap is structural, not a setting.** Measured on CBLIB:
+the barrier strategy is the same (monotone) in both arms; gentler μ
+schedules move individual instances both ways and close nothing; a cone
+analogue of Ipopt's `kappa_sigma` reset (re-centre `z = μ s⁻¹` when
+`⟨s, z⟩ > κμ` or `√(det s det z) < μ/κ`) was worse than none at every κ in
+{3, 10, 100, 1000} and was removed. The logs show the mechanism: after
+each μ decrease the native cone pairs leave the central path, the cone
+fraction-to-boundary then clips every step to α ≈ 0.03–0.3 for 10–30
+iterations, while bound slacks absorb the same decrease in 2–5 full steps.
+Conic interior-point codes avoid this with a predictor–corrector
+(Mehrotra) step with a cone-aware second-order term; the Ipopt-style loop
+has none for cones.
+
+**2. The target model fails.** The drifting car with its friction cones
+declared natively (`benchmarks/calipso`, `drifting_native`; the β·η
+complementarity on each route's scalar lowering): **0/25 physical** (5
+routes × 5 seeds), every run `Error_In_Step_Computation` — at 8–11
+iterations on the single-solve routes (the dual step collapses to 1e-16
+with a cone dual pinned on its boundary), at ~245 on the continuations.
+On main the same model with squared cones is 5/5 at 0.2026
+(`scholtes_then_ineq`, 1759 iterations).
+
+**Conclusion.** Native cones in this form are worse than main on both
+corpora and fail the model they were built for. Making them work needs a
+cone predictor–corrector in the IPM — a new piece of the algorithm, not a
+fix to this one. Until then workstream C should not merge.

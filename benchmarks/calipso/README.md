@@ -379,6 +379,18 @@ writes it but breaks LICQ; with the duplicate bounds removed the
 continuation alone reached 462.6/463.2 on 2 of 3 seeds that otherwise landed
 above 1100. Detecting a declared row that only restates a bound is not done.
 
+## Native cones on the drifting car (workstream C)
+
+`drifting_native` declares the friction cones to POUNCE natively
+(`Problem(..., cones=...)`); the β·η complementarity keeps each route's
+scalar lowering, and continuations warm-start primal-only. Result
+(`results_pounce_drift_native.jsonl`): **0/25 physical** over
+`defaults_eq`, `direct`, `ncp_eq`, `scholtes_then_ncp`,
+`scholtes_then_ineq` × 5 seeds, all `Error_In_Step_Computation`, against
+5/5 at 0.2026 for squared cones on `scholtes_then_ineq`. The analysis is in
+`dev-notes/research/nlp-soc-design.md`, "Verdict on the first
+implementation".
+
 ## What this is not evidence about
 
 - **The paper's quadruped numbers.** CALIPSO.jl's last commit (`0e3bdcf`,
