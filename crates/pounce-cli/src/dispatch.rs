@@ -1341,6 +1341,7 @@ mod tests {
         let prob = NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,
@@ -1565,6 +1566,7 @@ mod tests {
         NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n,
             m,
             num_obj: 1,
@@ -1768,6 +1770,7 @@ mod tests {
         NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: k,
             m: 1,
             num_obj: 1,
@@ -1811,6 +1814,7 @@ mod tests {
         NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: k,
             m: 1,
             num_obj: 1,
@@ -2043,6 +2047,7 @@ mod tests {
         NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: 2,
             m,
             num_obj: 1,

@@ -756,6 +756,25 @@ pub struct NlProblem {
     /// identity, so a rebuilt body that allocated fresh bodies would look
     /// unshared.
     pub cse_bodies: Vec<Arc<Expr>>,
+    /// Complementarity rows (`r`-segment kind 5, AMPL `complements`), in
+    /// row order. Each row's bounds are set to the side its body must lie
+    /// on (`[0, inf)` for a variable bounded below, `(-inf, 0]` for one
+    /// bounded above); the pairing itself is lowered by
+    /// `pounce_nlp::mpcc::MpccTnlp`, which a solve of a model with entries
+    /// here must go through. Empty for every model without complementarity.
+    pub complementarity: Vec<NlComplementarity>,
+}
+
+/// One `.nl` complementarity row: `body(row) complements x[var]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NlComplementarity {
+    /// 0-based constraint row.
+    pub row: usize,
+    /// 0-based variable.
+    pub var: usize,
+    /// The `.nl` flag: which of the variable's bounds are finite (1 lower,
+    /// 2 upper, 3 both).
+    pub flags: u8,
 }
 
 /// The pieces of a model built in memory, as handed to
@@ -932,6 +951,7 @@ impl NlProblem {
             // to rebuild from.
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
         })
     }
 
@@ -1294,6 +1314,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
     let mut imported_funcs: Vec<ImportedFunc> = Vec::new();
     // Segment presence, for the truncation check after the loop (gh#785).
     let mut saw_r = false;
+    let mut complementarity: Vec<NlComplementarity> = Vec::new();
     let mut saw_b = false;
 
     while let Some(line) = p.peek_segment_line() {
@@ -1333,6 +1354,23 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
                 saw_r = true;
                 for i in 0..m {
                     let line = p.next_data_line()?;
+                    if let Some(cc) = parse_complementarity_line(line)? {
+                        // `5 k j`: body complements x_j. The body lies on the
+                        // side the variable's finite bound implies; a free
+                        // variable (k = 0) leaves the body an equation.
+                        let (lo, hi) = match cc.flags {
+                            0 => (0.0, 0.0),
+                            1 => (0.0, 1e19),
+                            2 => (-1e19, 0.0),
+                            _ => (-1e19, 1e19),
+                        };
+                        g_l[i] = lo;
+                        g_u[i] = hi;
+                        if cc.flags != 0 {
+                            complementarity.push(NlComplementarity { row: i, ..cc });
+                        }
+                        continue;
+                    }
                     let (lo, hi) = parse_bound_line(line)?;
                     g_l[i] = lo;
                     g_u[i] = hi;
@@ -1630,6 +1668,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
         con_names: Vec::new(),
         src: kept_src,
         cse_bodies: p.cses.clone(),
+        complementarity,
     })
 }
 
@@ -1832,6 +1871,40 @@ fn finite_bound_or_err(what: &str, v: Number, lower: bool) -> Result<Number, Str
          states an absent bound with a bound kind of 1, 2 or 3, not with a \
          non-finite value)"
     ))
+}
+
+/// `Some` for an `r`-segment complementarity line `5 k j` (`k` the variable's
+/// finite-bound flags, `j` the 1-based variable), `None` for any other kind.
+/// The row index is filled in by the caller.
+fn parse_complementarity_line(line: &str) -> Result<Option<NlComplementarity>, String> {
+    let mut parts = line.split_whitespace();
+    if parts.next() != Some("5") {
+        return Ok(None);
+    }
+    let (Some(k), Some(j)) = (parts.next(), parts.next()) else {
+        return Err(format!("complementarity line needs `5 k var`: '{line}'"));
+    };
+    let flags: u8 = k
+        .parse()
+        .map_err(|e| format!("complementarity flags: {e}"))?;
+    if flags > 3 {
+        return Err(format!(
+            "complementarity flags {flags} not in 0..=3: '{line}'"
+        ));
+    }
+    let var: usize = j
+        .parse()
+        .map_err(|e| format!("complementarity variable: {e}"))?;
+    if var == 0 {
+        return Err(format!(
+            "complementarity variable index is 1-based, got 0: '{line}'"
+        ));
+    }
+    Ok(Some(NlComplementarity {
+        row: 0,
+        var: var - 1,
+        flags,
+    }))
 }
 
 fn parse_bound_line(line: &str) -> Result<(Number, Number), String> {
@@ -7084,6 +7157,87 @@ mod tests {
         l.join("\n") + "\n"
     }
 
+    /// `ralph1` written as AMPL would: `min 2x - y, x >= 0, y >= 0,
+    /// (y - x) complements y`. The complementarity row is `5 1 2` — flag 1
+    /// (y has a finite lower bound), variable 2 (1-based).
+    fn ralph1_nl(row_line: &str, y_bound: &str) -> String {
+        [
+            "g3 1 1 0",
+            " 2 1 1 0 0", // vars, constraints, objectives, ranges, eqns
+            " 0 0 1 0",   // nonlinear cons, objs; ccons: linear, nonlinear
+            " 0 0",       // network constraints
+            " 0 0 0",     // nonlinear vars in constraints, objectives, both
+            " 0 0 0 1",   // linear network vars; functions; arith, flags
+            " 0 0 0 0 0", // discrete variables
+            " 2 2",       // Jacobian, gradient nonzeros
+            " 0 0",       // max name lengths
+            " 0 0 0 0 0", // common expressions
+            "C0",
+            "n0",
+            "O0 0",
+            "n0",
+            "r",
+            row_line,
+            "b",
+            "2 0",
+            y_bound,
+            "k1",
+            "1",
+            "J0 2",
+            "0 -1",
+            "1 1",
+            "G0 2",
+            "0 2",
+            "1 -1",
+        ]
+        .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn complementarity_rows_are_read_not_refused() {
+        let p = parse_nl_string(ralph1_nl("5 1 2", "2 0"), false).unwrap();
+        assert_eq!(
+            p.complementarity,
+            vec![NlComplementarity {
+                row: 0,
+                var: 1,
+                flags: 1
+            }]
+        );
+        // Flag 1 (bounded below): the body must be >= 0.
+        assert_eq!((p.g_l[0], p.g_u[0]), (0.0, 1e19));
+        assert_eq!((p.x_l[1], p.x_u[1]), (0.0, 1e19));
+
+        // Flag 2 (bounded above, y <= 0): the body must be <= 0.
+        let p = parse_nl_string(ralph1_nl("5 2 2", "1 0"), false).unwrap();
+        assert_eq!(p.complementarity[0].flags, 2);
+        assert_eq!((p.g_l[0], p.g_u[0]), (-1e19, 0.0));
+
+        // Flag 0 (free variable): the body is an equation, and no pair.
+        let p = parse_nl_string(ralph1_nl("5 0 2", "3"), false).unwrap();
+        assert!(p.complementarity.is_empty());
+        assert_eq!((p.g_l[0], p.g_u[0]), (0.0, 0.0));
+
+        // Flag 3 (mixed) is recorded; the lowering is what refuses it.
+        let p = parse_nl_string(ralph1_nl("5 3 2", "0 0 1"), false).unwrap();
+        assert_eq!(p.complementarity[0].flags, 3);
+
+        // Malformed lines are errors, not silently dropped pairs.
+        assert!(parse_nl_string(ralph1_nl("5 1", "2 0"), false).is_err());
+        assert!(parse_nl_string(ralph1_nl("5 1 0", "2 0"), false).is_err());
+        assert!(parse_nl_string(ralph1_nl("5 7 2", "2 0"), false).is_err());
+    }
+
+    #[test]
+    fn a_model_without_complementarity_reads_exactly_as_before() {
+        // The same model with an ordinary `r` line: no pairs, the row's
+        // bounds as written.
+        let p = parse_nl_string(ralph1_nl("2 0", "2 0"), false).unwrap();
+        assert!(p.complementarity.is_empty());
+        assert_eq!((p.g_l[0], p.g_u[0]), (0.0, 1e19));
+    }
+
     /// Run `f` on a thread with the stack the CLI and `pounce-py` provide,
     /// declared to the reader the way they declare it.
     fn on_big_stack(f: impl FnOnce() + Send + 'static) {
@@ -7455,6 +7609,7 @@ b
         let prob = NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: 2,
             m: 0,
             num_obj: 1,
@@ -7514,6 +7669,7 @@ b
         let prob = NlProblem {
             src: None,
             cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
             n: 2,
             m: 1,
             num_obj: 1,

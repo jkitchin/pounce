@@ -16,7 +16,9 @@
 //! * **Options are restored to set-ness.** Every option a stage writes is
 //!   snapshotted before the first stage with `OptionsList::snapshot_entry`
 //!   and restored after the last, so a knob the caller never set is unset
-//!   again rather than written back as whatever it resolved to.
+//!   again rather than written back as whatever it resolved to. That includes
+//!   the [`SAFE_DEFAULTS`] every stage runs under (no bound relaxation),
+//!   which apply only where the caller did not set the option.
 //! * **The caller wires restoration.** No stage changes an option the
 //!   restoration sub-solver is built from, so the provider the caller set is
 //!   used as is.
@@ -26,8 +28,8 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    Certificate, CertificateInput, MpccStage, SCHOLTES_SCHEDULE, STAGES, TOUCHED_OPTIONS, accepts,
-    certify, converged, warm_start_assignments,
+    Certificate, CertificateInput, MpccStage, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
+    TOUCHED_OPTIONS, accepts, certify, converged, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -124,6 +126,21 @@ pub fn solve_mpcc(
             app.options_mut().restore_entry(k, s.clone());
         }
     };
+    // The caller's options plus the safe defaults it did not set itself:
+    // what every stage starts from.
+    let user_set: Vec<&str> = SAFE_DEFAULTS
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| app.options().names().any(|n| n.eq_ignore_ascii_case(k)))
+        .collect();
+    let baseline = |app: &mut IpoptApplication| {
+        restore(app);
+        for (k, v) in SAFE_DEFAULTS {
+            if !user_set.contains(&k) {
+                let _ = app.options_mut().read_from_str(&format!("{k} {v}\n"), true);
+            }
+        }
+    };
 
     let mut solves: Vec<MpccSolveRecord> = Vec::new();
     let mut first: Option<Captured> = None;
@@ -179,7 +196,7 @@ pub fn solve_mpcc(
         if k > 0 {
             app.set_in_retry_sequence(true);
         }
-        restore(app);
+        baseline(app);
         let candidate = match stage {
             MpccStage::Exact => {
                 let c = run(app, stage, Lowering::Eq, None, &mut solves);
@@ -189,7 +206,7 @@ pub fn solve_mpcc(
             MpccStage::Continuation => {
                 let mut last: Option<Captured> = None;
                 for &tau in &SCHOLTES_SCHEDULE {
-                    restore(app);
+                    baseline(app);
                     let warm = last.as_ref().map(|c| {
                         for a in warm_start_assignments(c.statistics.final_mu) {
                             let _ = app.options_mut().read_from_str(&a, true);
@@ -201,7 +218,7 @@ pub fn solve_mpcc(
                         // One weaker rung before giving up on the schedule:
                         // the previous stage's x only, no dual warm start.
                         let Some(prev) = &last else { break };
-                        restore(app);
+                        baseline(app);
                         let primal = StartOverride {
                             x: prev.x.clone(),
                             ..Default::default()
@@ -227,7 +244,7 @@ pub fn solve_mpcc(
                         // over-determine the model (same feasible set).
                         let mut finish = None;
                         for lowering in [Lowering::Eq, Lowering::Ineq] {
-                            restore(app);
+                            baseline(app);
                             for a in warm_start_assignments(relaxed.statistics.final_mu) {
                                 let _ = app.options_mut().read_from_str(&a, true);
                             }

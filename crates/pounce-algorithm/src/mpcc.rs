@@ -93,7 +93,7 @@ pub fn warm_start_assignments(final_mu: Number) -> Vec<String> {
 
 /// Every option any stage writes; the driver snapshots these before the
 /// first stage and restores them after the last.
-pub const TOUCHED_OPTIONS: [&str; 8] = [
+pub const TOUCHED_OPTIONS: [&str; 10] = [
     "warm_start_init_point",
     "mu_init",
     "warm_start_bound_push",
@@ -102,7 +102,65 @@ pub const TOUCHED_OPTIONS: [&str; 8] = [
     "warm_start_slack_bound_frac",
     "warm_start_mult_bound_push",
     "l1_exact_penalty_barrier",
+    "bound_relax_factor",
+    "honor_original_bounds",
 ];
+
+/// Defaults every stage runs under unless the caller set the option
+/// themselves. `bound_relax_factor`'s default of `1e-8` relaxes every bound
+/// and row before the solve, which on a complementarity pair means accepting
+/// `G >= -1e-8`, and at a cone tip or a pair's corner turns into a violation
+/// of its square root: on `benchmarks/calipso/` every reported success that
+/// violated the model was a run under that default. `honor_original_bounds`
+/// moves the answer back inside the bounds the model stated.
+pub const SAFE_DEFAULTS: [(&str, &str); 2] = [
+    ("bound_relax_factor", "0"),
+    ("honor_original_bounds", "yes"),
+];
+
+/// One line for the console: what answered, and what the answer is.
+pub fn describe_outcome(
+    accepted_by: Option<MpccStage>,
+    n_solves: usize,
+    total_iterations: usize,
+    max_abs_product: Number,
+    certificate: Option<&Certificate>,
+) -> String {
+    let head = match accepted_by {
+        Some(stage) => format!(
+            "pounce: complementarity: answered by the {} formulation ({n_solves} lowered \
+             solve{}, {total_iterations} iterations in all, max |G·H| = {max_abs_product:.1e})",
+            stage.label(),
+            if n_solves == 1 { "" } else { "s" },
+        ),
+        None => format!(
+            "pounce: complementarity: no formulation produced an answer ({n_solves} lowered \
+             solves, {total_iterations} iterations); reporting the exact-product solve"
+        ),
+    };
+    let tail = match certificate {
+        None => "; stationarity not evaluated".to_string(),
+        Some(c) => {
+            let class = match c.class {
+                StationarityClass::S => "S (strongly stationary)",
+                StationarityClass::W => {
+                    "W only (a biactive pair has a wrong-sign multiplier: a branch may still descend)"
+                }
+                StationarityClass::None => "none (not a stationary point of the model)",
+                StationarityClass::NotSearched => {
+                    "not determined (multiplier set too large to search)"
+                }
+            };
+            format!(
+                "; {} pair{}, {} biactive; stationarity: {class}.",
+                c.n_pairs,
+                if c.n_pairs == 1 { "" } else { "s" },
+                c.n_biactive
+            )
+        }
+    };
+    head + &tail
+}
 
 /// Statuses a stage can converge with.
 pub fn converged(status: ApplicationReturnStatus) -> bool {
