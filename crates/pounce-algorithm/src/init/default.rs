@@ -748,6 +748,62 @@ impl IterateInitializer for DefaultIterateInitializer {
             }
         }
 
+        // Step 6: second-order cones (workstream C). Each cone's slack is
+        // pushed into the interior, `s₀ ≥ ‖s_{1..}‖ + slack_bound_push ·
+        // max(1, ‖s‖∞)` — the cone's form of pushing a bounded slack off its
+        // bound — and its dual starts at `z = bound_mult_init_val · e`, the
+        // cone's form of a bound multiplier's constant start. `z = −y_d`
+        // overrides the least-square estimate on those rows, which knows
+        // nothing of the cone.
+        let layout = nlp.borrow().soc_layout();
+        if let Some(layout) = layout {
+            let curr = data.borrow().curr.clone();
+            if let Some(c) = curr {
+                let mut s =
+                    c.s.as_any()
+                        .downcast_ref::<DenseVector>()
+                        .map(|v| v.expanded_values());
+                let mut y = c
+                    .y_d
+                    .as_any()
+                    .downcast_ref::<DenseVector>()
+                    .map(|v| v.expanded_values());
+                if let (Some(sv), Some(yv)) = (s.as_mut(), y.as_mut()) {
+                    for rows in &layout.blocks {
+                        let mut sk: Vec<Number> = rows.iter().map(|&r| sv[r]).collect();
+                        let scale = sk.iter().fold(1.0 as Number, |a, v| a.max(v.abs()));
+                        crate::soc_slack::push_into_interior(
+                            &mut sk,
+                            self.slack_bound_push * scale,
+                        );
+                        for (j, &r) in rows.iter().enumerate() {
+                            sv[r] = sk[j];
+                            yv[r] = if j == 0 {
+                                -self.bound_mult_init_val
+                            } else {
+                                0.0
+                            };
+                        }
+                    }
+                    let mut s_new = DenseVectorSpace::new(n_s).make_new_dense();
+                    s_new.set_values(sv);
+                    let mut y_new = DenseVectorSpace::new(n_yd).make_new_dense();
+                    y_new.set_values(yv);
+                    let new_iv = IteratesVector::new(
+                        c.x.clone(),
+                        Rc::new(s_new),
+                        c.y_c.clone(),
+                        Rc::new(y_new),
+                        c.z_l.clone(),
+                        c.z_u.clone(),
+                        c.v_l.clone(),
+                        c.v_u.clone(),
+                    );
+                    data.borrow_mut().set_curr(new_iv);
+                }
+            }
+        }
+
         true
     }
 }

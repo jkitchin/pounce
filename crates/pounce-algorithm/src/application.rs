@@ -1442,12 +1442,62 @@ impl IpoptApplication {
     /// the rows declared free. Replaces any earlier declaration; an empty
     /// list clears it.
     ///
-    /// Native cone support in the interior-point method is being built
-    /// (workstream C); until it lands a solve with cones declared is
-    /// refused with `Invalid_Problem_Definition` rather than run with the
-    /// cone rows read as unconstrained free rows.
+    /// The interior-point method carries the cones natively
+    /// (`dev-notes/research/nlp-soc-design.md`): the rows' slacks stay in
+    /// the cone, the rows' multipliers are the cone duals. Presolve is
+    /// declined for such a solve (it renumbers the rows the cones name), the
+    /// barrier strategy is monotone, and the paths that do not yet carry
+    /// cones refuse with the reason ([`Self::soc_incompatibility`]) — a
+    /// cone is never solved as the free rows it is declared as.
     pub fn set_soc_constraints(&mut self, cones: Vec<pounce_nlp::soc::SocRows>) {
         self.soc_constraints = cones;
+    }
+
+    /// Why a solve with the declared cones cannot run under the current
+    /// options, or `None` if it can (or no cones are declared). Checked at
+    /// the entry point and again per attempt, so a retry rung that changes
+    /// an option gets the same answer.
+    pub fn soc_incompatibility(&self) -> Option<String> {
+        if self.soc_constraints.is_empty() {
+            return None;
+        }
+        let set_string = |k: &str| match self.options.get_string_value(k, "") {
+            Ok((v, true)) => Some(v),
+            _ => None,
+        };
+        let set_bool = |k: &str| matches!(self.options.get_bool_value(k, ""), Ok((true, true)));
+        if self.is_sqp_algorithm_selected() {
+            return Some(
+                "the active-set SQP arm does not carry cones; use the interior-point method".into(),
+            );
+        }
+        if set_string("mu_strategy").as_deref() == Some("adaptive") {
+            return Some(
+                "mu_strategy=adaptive is not supported with cones (its oracles do not yet \
+                 model them); leave it unset or use monotone"
+                    .into(),
+            );
+        }
+        if set_string("mehrotra_algorithm").as_deref() == Some("yes") {
+            return Some("mehrotra_algorithm=yes is not supported with cones".into());
+        }
+        if let Some(v) = set_string("alpha_for_y") {
+            if v != "primal" {
+                return Some(format!(
+                    "alpha_for_y={v} is not supported with cones: the cone duals are the rows' \
+                     multipliers and move with the primal step"
+                ));
+            }
+        }
+        if set_string("recalc_y").as_deref() == Some("yes") {
+            return Some(
+                "recalc_y=yes would overwrite the cone duals with least-squares estimates".into(),
+            );
+        }
+        if set_bool("warm_start_init_point") {
+            return Some("warm_start_init_point=yes is not supported with cones yet".into());
+        }
+        None
     }
 
     /// The declared second-order cones ([`Self::set_soc_constraints`]).
@@ -2256,18 +2306,13 @@ impl IpoptApplication {
         // solve's.
         self.statistics.borrow_mut().warnings.clear();
         self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
-        if !self.soc_constraints.is_empty() {
+        if let Some(reason) = self.soc_incompatibility() {
             use pounce_common::journalist::JournalCategory;
-            let msg = format!(
-                "pounce: {} second-order cone(s) declared, but native cone support in the \
-                 interior-point method is not yet available; refusing rather than solving \
-                 with the cone rows unconstrained.\n",
-                self.soc_constraints.len()
-            );
+            let msg = format!("pounce: second-order cones: {reason}\n");
             eprint!("{msg}");
             self.journalist
                 .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
-            return ApplicationReturnStatus::InvalidProblemDefinition;
+            return ApplicationReturnStatus::InvalidOption;
         }
         // Belongs to the scale audit's re-solve alone, which runs below this
         // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
@@ -2443,7 +2488,9 @@ impl IpoptApplication {
         // path below (including retry paths) continues to postsolve into
         // the original user-facing space. With `presolve=no`, this returns
         // the exact same Rc unchanged.
-        let tnlp = if self.presolve_already_applied {
+        // Declared cones name rows by index, which presolve renumbers: it is
+        // declined for such a solve.
+        let tnlp = if self.presolve_already_applied || !self.soc_constraints.is_empty() {
             tnlp
         } else {
             match pounce_presolve::wrap_from_options(tnlp, &self.options) {
@@ -4811,6 +4858,10 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
     ) -> ApplicationReturnStatus {
         let first_status = self.optimize_constrained(Rc::clone(&tnlp));
+        if !self.soc_constraints.is_empty() {
+            // Its retry runs the adaptive strategy, which does not carry cones.
+            return first_status;
+        }
         // Which statuses are worth a second solve depends on who asked
         // for the retry (pounce#748).
         //
@@ -6552,6 +6603,62 @@ impl IpoptApplication {
         // before anything is evaluated (gh #588).
         self.install_constant_derivative_hints(&mut orig_nlp);
 
+        // Second-order cones: validate against the rows' bounds and map them
+        // into the IPM's `d` space, before scaling is determined (each cone's
+        // rows share one factor). Refused here too, so every retry rung that
+        // reaches this point gets the same answer as the entry point.
+        if !self.soc_constraints.is_empty() {
+            use pounce_common::journalist::JournalCategory;
+            let refuse = |app: &Self, msg: String| {
+                let msg = format!("pounce: second-order cones: {msg}\n");
+                eprint!("{msg}");
+                app.journalist
+                    .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            };
+            if let Some(reason) = self.soc_incompatibility() {
+                refuse(self, reason);
+                timing.overall_alg.end();
+                return ApplicationReturnStatus::InvalidOption;
+            }
+            let layout = (|| -> Result<pounce_nlp::soc::SocLayout, String> {
+                let a = adapter.borrow();
+                let cls = a.classification();
+                let (nx, ng) = (cls.n_full_x as usize, cls.n_full_g as usize);
+                let (mut xl, mut xu, mut gl, mut gu) =
+                    (vec![0.0; nx], vec![0.0; nx], vec![0.0; ng], vec![0.0; ng]);
+                if !a
+                    .tnlp()
+                    .borrow_mut()
+                    .get_bounds_info(pounce_nlp::tnlp::BoundsInfo {
+                        x_l: &mut xl,
+                        x_u: &mut xu,
+                        g_l: &mut gl,
+                        g_u: &mut gu,
+                    })
+                {
+                    return Err("could not read the model's bounds".into());
+                }
+                let (lo_inf, up_inf, _) = self.adapter_options();
+                let blocks = pounce_nlp::soc::resolve(
+                    &self.soc_constraints,
+                    &gl,
+                    &gu,
+                    lo_inf,
+                    up_inf,
+                    &cls.full_to_d,
+                )?;
+                Ok(pounce_nlp::soc::SocLayout { blocks })
+            })();
+            match layout {
+                Ok(l) => orig_nlp.set_soc_layout(l),
+                Err(msg) => {
+                    refuse(self, msg);
+                    timing.overall_alg.end();
+                    return ApplicationReturnStatus::InvalidProblemDefinition;
+                }
+            }
+        }
+
         // Mirror upstream `OrigIpoptNLP::InitializeStructures` (IpOrigIpoptNLP.cpp:299):
         // bail out with NotEnoughDegreesOfFreedom when there are fewer free
         // variables than equality constraints. Without this gate, square /
@@ -6689,6 +6796,12 @@ impl IpoptApplication {
         // hookup lands as a follow-up; default builder is correct for
         // HS71-class problems.
         let mut builder = self.algorithm_builder_from_options();
+        if !self.soc_constraints.is_empty() {
+            // The adaptive strategy's oracles do not model cones; an explicit
+            // request was refused above, an automatic one is overridden.
+            builder.mu_strategy = MuStrategyChoice::Monotone;
+            builder.mehrotra_algorithm = false;
+        }
 
         // The objective element's support for the partitioned Hessian.
         // Every constraint element reads its support off a Jacobian row;
@@ -6966,7 +7079,11 @@ impl IpoptApplication {
             self.restoration_factory = Some(provider());
         }
         if let Some(factory) = self.restoration_factory.as_mut() {
-            alg = alg.with_restoration(factory());
+            // Restoration does not carry cones yet: a solve with cones that
+            // needs it reports the failure rather than restoring without them.
+            if self.soc_constraints.is_empty() {
+                alg = alg.with_restoration(factory());
+            }
         }
         if let Some(diag) = self.diagnostics.as_ref() {
             alg = alg.with_diagnostics(Rc::clone(diag));

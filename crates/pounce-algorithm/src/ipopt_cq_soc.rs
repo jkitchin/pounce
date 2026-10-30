@@ -214,6 +214,51 @@ impl IpoptCalculatedQuantities {
         }
     }
 
+    /// The cones' primal fraction-to-boundary cap on a step: the largest
+    /// `α ≤ 1` (times `τ`) keeping every `s_K + α Δs_K` inside its cone.
+    /// `1` without cones.
+    pub fn soc_alpha_primal_max(&self, delta: &IteratesVector, tau: Number) -> Number {
+        self.soc_alpha_max(delta, tau, false)
+    }
+
+    /// The cones' dual cap: every `z_K + α Δz_K = −(y_d + α Δy_d)_K` inside
+    /// its cone. The cone rows of `y_d` are the cone duals and step with the
+    /// dual step size, as a bound multiplier does — not with `alpha_y`:
+    /// tying them to the primal step lets a dual direction that leaves the
+    /// cone (driven by a large objective gradient through `x`-stationarity)
+    /// throttle the primal step to nothing. Measured on Rosenbrock in an
+    /// inactive cone: `alpha_pr` fell to `1e-16` with the dual cap binding.
+    pub fn soc_alpha_dual_max(&self, delta: &IteratesVector, tau: Number) -> Number {
+        self.soc_alpha_max(delta, tau, true)
+    }
+
+    fn soc_alpha_max(&self, delta: &IteratesVector, tau: Number, dual: bool) -> Number {
+        let (Some(layout), Some(p)) = (self.soc_layout(), self.curr_soc_pairs()) else {
+            return 1.0;
+        };
+        let step = if dual {
+            dense(&*delta.y_d)
+        } else {
+            dense(&*delta.s)
+        };
+        let sign = if dual { -1.0 } else { 1.0 };
+        let mut alpha: Number = 1.0;
+        for (k, rows) in layout.blocks.iter().enumerate() {
+            let d: Vec<Number> = rows.iter().map(|&r| sign * step[r]).collect();
+            let v = if dual { &p.z[k] } else { &p.s[k] };
+            alpha = alpha.min(soc_slack::max_step(v, &d, tau));
+        }
+        alpha
+    }
+
+    /// Every cone row, flattened (the `y_d` entries that step with the dual
+    /// step size). Empty without cones.
+    pub fn soc_rows_flat(&self) -> Vec<usize> {
+        self.soc_layout()
+            .map(|l| l.blocks.iter().flatten().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// `δ_sᵀ H δ_s` summed over cones: the cones' share of the quadratic
     /// model's `δ_sᵀ Σ_s δ_s` term.
     pub(crate) fn soc_dhd(&self, delta_s: &dyn Vector) -> Number {

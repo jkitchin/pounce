@@ -2983,6 +2983,7 @@ impl IpoptCalculatedQuantities {
             .min(s_x_u.frac_to_bound(&*step_x_u, tau))
             .min(s_s_l.frac_to_bound(&*step_s_l, tau))
             .min(s_s_u.frac_to_bound(&*step_s_u, tau))
+            .min(self.soc_alpha_primal_max(delta_aff, tau))
     }
 
     /// Max dual step that keeps `z + α · Δz > 0` (and same for v).
@@ -2993,6 +2994,7 @@ impl IpoptCalculatedQuantities {
             .min(iv.z_u.frac_to_bound(&*delta_aff.z_u, tau))
             .min(iv.v_l.frac_to_bound(&*delta_aff.v_l, tau))
             .min(iv.v_u.frac_to_bound(&*delta_aff.v_u, tau))
+            .min(self.soc_alpha_dual_max(delta_aff, tau))
     }
 
     /// Predicted average complementarity after the affine step:

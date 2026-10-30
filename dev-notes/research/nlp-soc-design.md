@@ -67,8 +67,14 @@ other right-hand side have their slot.
 After the solve, `dz = −dy_d` on cone rows; no recovery step is needed.
 
 **Step to the boundary.** The primal step is capped so `s + α ds` stays in
-`int K` (fraction `τ`); the step for `y_d` on cone rows is capped so
-`z + α dz` does. Both are the cone-boundary root (`pounce-convex`'s
+`int K` (fraction `τ`). The cone rows of `y_d` — the cone duals — step with
+the **dual** step size, capped so `z + α dz` stays in `int K`, as a bound
+multiplier does; the other rows of `y_d` keep `alpha_y`. Tying the cone
+duals to the primal step was the first version and failed: on Rosenbrock in
+an inactive cone the dual direction, driven by the objective gradient
+through `x`-stationarity, left the cone within two iterations and the dual
+cap then held `alpha_pr` at `1e-3 … 1e-16` until `Error_In_Step_Computation`.
+Both caps are the cone-boundary root (`pounce-convex`'s
 `SecondOrderCone::max_step` computes the same quantity).
 
 ## What must change, and what must not
@@ -93,13 +99,22 @@ runs the code it runs today. The fixture sweep must diff empty.
 
 ## Increments
 
-1. **C1 — math and declaration.** `soc_slack` module: `det`, Jordan product,
+1. ✅ **C1 — math and declaration.** `soc_slack` module: `det`, Jordan product,
    inverse, NT block, barrier value/gradient, max step, interior push,
    with tests that pin every convention above. The declaration surface on
    the application and its validation. No change to any solve.
-2. **C2 — the solve.** CQ, augmented system, line search, initialization,
+2. ✅ **C2 — the solve.** CQ, augmented system, line search, initialization,
    convergence, behind "cones declared". Unit tests on small SOCPs with
    known optima; restoration refuses.
+   *Done* (`crates/pounce-algorithm/tests/soc_native.rs`): a disk whose
+   optimum has both tail entries negative (5 iterations), a cone active at
+   its tip (5), Rosenbrock in an inactive cone (23) and an active one (13),
+   all `Solve_Succeeded` at the closed-form answer. Presolve declined; the
+   barrier strategy forced monotone; `mu_strategy=adaptive`, Mehrotra,
+   `alpha_for_y≠primal`, `recalc_y`, warm start and the SQP arm refused
+   with the reason; restoration not installed (a solve that needs it fails
+   honestly). With no cones every path is the old one: 645 crate unit
+   tests unchanged.
 3. **C3 — measure correctness.** CBLIB SOCPs through the NLP arm against
    `pounce-convex` (global optima): objectives match to 1e-6 on ≥ 95%.
    Fixture sweep empty.

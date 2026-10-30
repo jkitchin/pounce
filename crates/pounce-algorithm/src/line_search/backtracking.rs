@@ -548,7 +548,8 @@ impl BacktrackingLineSearch {
                 None => return Outcome::Failed,
             };
             let alpha_y = self.alpha_for_y.alpha_y(alpha_init, alpha_dual);
-            let trial_iv = scaled_step(&curr, delta, alpha_init, alpha_y, alpha_dual);
+            let soc_rows = cq.borrow().soc_rows_flat();
+            let trial_iv = scaled_step(&curr, delta, alpha_init, alpha_y, alpha_dual, &soc_rows);
             let mut d = data.borrow_mut();
             d.set_trial(trial_iv);
             d.info_alpha_primal = alpha_init;
@@ -694,7 +695,7 @@ impl BacktrackingLineSearch {
 
         // Soft-resto uses the same scalar α for primal, equality
         // multipliers, and bound multipliers (per upstream).
-        let trial_iv = scaled_step(&curr, delta, alpha, alpha, alpha);
+        let trial_iv = scaled_step(&curr, delta, alpha, alpha, alpha, &[]);
         data.borrow_mut().set_trial(trial_iv);
 
         let theta_trial = cq.borrow().trial_constraint_violation();
@@ -1376,7 +1377,8 @@ impl BacktrackingLineSearch {
             n_steps = trial;
 
             let alpha_y = self.alpha_for_y.alpha_y(alpha, alpha_dual);
-            let trial_iv = scaled_step(&curr, delta, alpha, alpha_y, alpha_dual);
+            let soc_rows = cq.borrow().soc_rows_flat();
+            let trial_iv = scaled_step(&curr, delta, alpha, alpha_y, alpha_dual, &soc_rows);
             data.borrow_mut().set_trial(trial_iv);
 
             let theta_trial = cq.borrow().trial_constraint_violation();
@@ -1570,6 +1572,12 @@ impl BacktrackingLineSearch {
                     trial_iv.s.axpy(alpha_primal_soc, &*delta_soc.s);
                     trial_iv.y_c.axpy(alpha_primal_soc, &*delta_soc.y_c);
                     trial_iv.y_d.axpy(alpha_primal_soc, &*delta_soc.y_d);
+                    step_soc_duals(
+                        &mut *trial_iv.y_d,
+                        &*delta_soc.y_d,
+                        alpha_dual_soc - alpha_primal_soc,
+                        &cq.borrow().soc_rows_flat(),
+                    );
                     trial_iv.z_l.axpy(alpha_dual_soc, &*delta_soc.z_l);
                     trial_iv.z_u.axpy(alpha_dual_soc, &*delta_soc.z_u);
                     trial_iv.v_l.axpy(alpha_dual_soc, &*delta_soc.v_l);
@@ -1707,12 +1715,17 @@ impl BacktrackingLineSearch {
 /// path in upstream — both share the same scalar α here because
 /// fraction-to-the-boundary truncation has already been folded into
 /// `alpha_init` upstream.
+///
+/// `soc_rows` are the second-order cones' rows of `y_d`: the cone duals,
+/// which step with `alpha_dual` as a bound multiplier does (see
+/// `IpoptCalculatedQuantities::soc_alpha_dual_max`). Empty without cones.
 fn scaled_step(
     curr: &IteratesVector,
     delta: &IteratesVector,
     alpha_primal: Number,
     alpha_y: Number,
     alpha_dual: Number,
+    soc_rows: &[usize],
 ) -> IteratesVector {
     let mut out = curr.make_new_zeroed();
     out.add_one_vector(1.0, curr, 0.0); // out = curr
@@ -1720,11 +1733,38 @@ fn scaled_step(
     out.s.axpy(alpha_primal, &*delta.s);
     out.y_c.axpy(alpha_y, &*delta.y_c);
     out.y_d.axpy(alpha_y, &*delta.y_d);
+    step_soc_duals(&mut *out.y_d, &*delta.y_d, alpha_dual - alpha_y, soc_rows);
     out.z_l.axpy(alpha_dual, &*delta.z_l);
     out.z_u.axpy(alpha_dual, &*delta.z_u);
     out.v_l.axpy(alpha_dual, &*delta.v_l);
     out.v_u.axpy(alpha_dual, &*delta.v_u);
     out.freeze()
+}
+
+/// `y_d[r] += extra · Δy_d[r]` on the cone rows: brings a cone dual that was
+/// stepped with `alpha_y` to `alpha_dual` (`extra = alpha_dual − alpha_y`).
+fn step_soc_duals(
+    y_d: &mut dyn pounce_linalg::Vector,
+    delta_y_d: &dyn pounce_linalg::Vector,
+    extra: Number,
+    soc_rows: &[usize],
+) {
+    if soc_rows.is_empty() || extra == 0.0 {
+        return;
+    }
+    let dy = delta_y_d
+        .as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+        .expect("second-order cones: y_d is dense")
+        .expanded_values();
+    let y = y_d
+        .as_any_mut()
+        .downcast_mut::<pounce_linalg::dense_vector::DenseVector>()
+        .expect("second-order cones: y_d is dense")
+        .values_mut();
+    for &r in soc_rows {
+        y[r] += extra * dy[r];
+    }
 }
 
 #[cfg(test)]
@@ -2062,7 +2102,7 @@ mod tests {
         // curr.x = (0,0), delta.x = (1,1) → at alpha=0.5, trial.x = (0.5, 0.5).
         let curr = iv_from(&[0.0, 0.0], &[0.0]);
         let delta = iv_from(&[1.0, 1.0], &[2.0]);
-        let trial = scaled_step(&curr, &delta, 0.5, 0.5, 0.5);
+        let trial = scaled_step(&curr, &delta, 0.5, 0.5, 0.5, &[]);
         let xv = trial
             .x
             .as_any()
