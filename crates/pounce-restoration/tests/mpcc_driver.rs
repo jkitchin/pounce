@@ -262,15 +262,20 @@ fn qpec_small_reaches_the_answer_from_every_gate0_start() {
 /// Two variables, one equality and two pairs: the exact product would make
 /// three equalities in two unknowns, which the solver refuses before
 /// iterating (`Not_Enough_Degrees_Of_Freedom`, as upstream Ipopt does). The
-/// continuation's products are inequalities, and its finish falls back to
-/// `G·H <= 0` for the same reason. The only feasible point is (0.5, 0.5).
+/// exact stage falls back to `G·H <= 0` — the same feasible set, without the
+/// equality rows — and answers. The only feasible point is (0.5, 0.5).
+///
+/// Before the fallback the exact stage reported the refusal with no point,
+/// and the continuation answered; on a model where every stage then failed
+/// (Gate 0's `infeasible_pair` declared) the empty point was what reached
+/// the caller.
 ///
 /// ```text
 /// min (x-0.3)^2 + (y-0.9)^2   s.t.  x + y = 1
 ///     0 <= x ⟂ y - 0.5 >= 0,   0 <= y ⟂ x - 0.5 >= 0
 /// ```
 #[test]
-fn an_over_determined_exact_product_falls_back_to_the_continuation() {
+fn an_over_determined_exact_product_falls_back_to_the_inequality_product() {
     let finalized = Rc::new(RefCell::new(Vec::new()));
     let zero = || vec![vec![0.0; 2]; 2];
     let model = Dense {
@@ -306,12 +311,8 @@ fn an_over_determined_exact_product_falls_back_to_the_continuation() {
         "{:?}",
         out.solves
     );
-    assert_eq!(
-        out.accepted_by,
-        Some(MpccStage::Continuation),
-        "{:?}",
-        out.solves
-    );
+    assert_eq!(out.accepted_by, Some(MpccStage::Exact), "{:?}", out.solves);
+    assert_eq!(out.solves.len(), 2, "{:?}", out.solves);
     assert!(
         (out.x[0] - 0.5).abs() < 1e-5 && (out.x[1] - 0.5).abs() < 1e-5,
         "{:?}",

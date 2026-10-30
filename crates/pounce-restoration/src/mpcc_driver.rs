@@ -212,7 +212,13 @@ pub fn solve_mpcc(
         baseline(app);
         let candidate = match stage {
             MpccStage::Exact => {
-                let c = run(app, stage, Lowering::Eq, None, &mut solves);
+                // `G·H <= 0` where the equality would over-determine the
+                // model (same feasible set), as the continuation's finish.
+                let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
+                if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom {
+                    baseline(app);
+                    c = run(app, stage, Lowering::Ineq, None, &mut solves);
+                }
                 first = Some(c.clone());
                 Some(c)
             }
@@ -286,6 +292,13 @@ pub fn solve_mpcc(
                 Some(run(app, stage, Lowering::Eq, None, &mut solves))
             }
         };
+        if let Some(c) = &candidate {
+            // A stage refused before iteration 0 has no point to report;
+            // the verdict of the first stage that has one stands in for it.
+            if first.as_ref().is_some_and(|f| f.x.is_empty()) && !c.x.is_empty() {
+                first = Some(c.clone());
+            }
+        }
         if let Some(c) = candidate {
             if accepts(c.status, c.max_abs_product, tol) {
                 // Converged and physical; the certificate decides whether it
