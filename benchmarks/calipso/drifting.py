@@ -112,6 +112,9 @@ def make_ineq(soc_form):
             x, u = z[ix[t]], z[iu[t]]
             rows.append(jnp.array([circle(x, p_car1, 0.1), circle(x, p_car2, 0.1)]))
             for c in cones(u):
+                if soc_form == "native":
+                    # declared to POUNCE as cones (`cone_vars`), no row here
+                    continue
                 if soc_form == "squared":
                     rows.append(jnp.atleast_1d(c[0] ** 2 - jnp.dot(c[1:], c[1:])))
                 else:
@@ -185,6 +188,11 @@ def make_model(soc_form):
     m = Model(f"drifting[{soc_form}]", nz, f, eq, make_ineq(soc_form), comp, lb, ub,
               extra={"jordan": jordan}, report=report)
     m.soc_complementarity = True
+    if soc_form == "native":
+        # Variable blocks POUNCE carries as second-order cones natively
+        # (workstream C); `mpcc_nlp` adds one free row per entry and declares
+        # them with `Problem(..., cones=...)`.
+        m.cone_vars = [iu[t][k:k + 3] for t in range(T - 1) for k in (2, 5, 8, 11)]
     return m
 
 

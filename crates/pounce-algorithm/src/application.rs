@@ -1497,6 +1497,17 @@ impl IpoptApplication {
         if set_bool("warm_start_init_point") {
             return Some("warm_start_init_point=yes is not supported with cones yet".into());
         }
+        for k in [
+            "l1_exact_penalty_barrier",
+            "l1_fallback_on_restoration_failure",
+        ] {
+            if set_bool(k) {
+                return Some(format!(
+                    "{k}=yes is not supported with cones: the l1 wrapper reformulates the rows \
+                     the cones name"
+                ));
+            }
+        }
         None
     }
 
@@ -4765,7 +4776,8 @@ impl IpoptApplication {
         // First attempt: the standard IPM solve, no ℓ₁ wrapper. Only
         // reached for `m > 0`, so `optimize_constrained` is exact.
         let first_status = self.optimize_constrained(Rc::clone(&tnlp));
-        if !is_l1_fallback_trigger(first_status) {
+        // The l1 wrapper reformulates the rows declared cones name.
+        if !is_l1_fallback_trigger(first_status) || !self.soc_constraints.is_empty() {
             return first_status;
         }
         // gh#987 item 6: the plain attempt's iterations are part of what this

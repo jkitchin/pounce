@@ -182,18 +182,32 @@ class LoweredNlp:
             compf = model.comp
         ncp = int(compf(z0).shape[0])
 
-        def cons(z):
-            return jnp.concatenate([model.eq(z), model.ineq(z), compf(z)])
+        # Natively declared cones (workstream C): one free row per cone
+        # variable, appended last, declared with `Problem(..., cones=...)`.
+        cone_vars = getattr(model, "cone_vars", None) or []
+        cone_idx = jnp.asarray(np.concatenate(cone_vars)) if cone_vars else None
+        ncone = int(cone_idx.shape[0]) if cone_vars else 0
 
-        self.m = neq + nin + ncp
-        cl = np.concatenate([np.zeros(neq), np.zeros(nin), np.zeros(ncp)])
-        cu = np.concatenate([np.zeros(neq), np.full(nin, BIG), np.zeros(ncp)])
+        def cons(z):
+            parts = [model.eq(z), model.ineq(z), compf(z)]
+            if ncone:
+                parts.append(z[cone_idx])
+            return jnp.concatenate(parts)
+
+        self.m = neq + nin + ncp + ncone
+        cl = np.concatenate([np.zeros(neq), np.zeros(nin), np.zeros(ncp), np.full(ncone, -BIG)])
+        cu = np.concatenate([np.zeros(neq), np.full(nin, BIG), np.zeros(ncp), np.full(ncone, BIG)])
+        self.cones = []
+        r = neq + nin + ncp
+        for v in cone_vars:
+            self.cones.append(list(range(r, r + len(v))))
+            r += len(v)
         if lowering == "prod_ineq":
-            cl[neq + nin:] = -BIG
-            cu[neq + nin:] = 0.0
+            cl[neq + nin:neq + nin + ncp] = -BIG
+            cu[neq + nin:neq + nin + ncp] = 0.0
         elif lowering == "scholtes":
-            cl[neq + nin:] = -BIG
-            cu[neq + nin:] = tau
+            cl[neq + nin:neq + nin + ncp] = -BIG
+            cu[neq + nin:neq + nin + ncp] = tau
         elif lowering in ("prod_eq", "jordan_eq"):
             pass
         else:
@@ -425,9 +439,15 @@ def solve_once(nlp: LoweredNlp, opts: dict, x0, warm=None):
         return _solve_ipopt(nlp, opts, x0, warm)
     import pounce
 
+    cones = getattr(nlp, "cones", None) or None
     prob = pounce.Problem(n=nlp.n, m=nlp.m, problem_obj=nlp,
-                          lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu)
+                          lb=nlp.lb, ub=nlp.ub, cl=nlp.cl, cu=nlp.cu, cones=cones)
     opts = dict(opts)
+    if cones:
+        # Native cones refuse dual warm starts (workstream C): carry the
+        # previous primal point only.
+        if warm is not None:
+            x0, warm = warm["x"], None
     if os.environ.get("POUNCE_LINEAR_SOLVER"):
         opts["linear_solver"] = os.environ["POUNCE_LINEAR_SOLVER"]
     for k, v in opts.items():

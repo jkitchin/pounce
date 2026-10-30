@@ -88,6 +88,10 @@ pub struct PyProblem {
     /// Declared complementarity pairs `(row, var)`; non-empty routes
     /// `solve()` through `pounce_restoration::mpcc_driver::solve_mpcc`.
     complementarity: Vec<pounce_nlp::mpcc::ComplementarityPair>,
+    /// Declared second-order cones over constraint rows (workstream C):
+    /// each entry lists free rows `(g_{r0}, g_{r1}, …)` with
+    /// `g_{r0} ≥ ‖(g_{r1}, …)‖`, carried natively by the interior-point method.
+    cones: Vec<pounce_nlp::soc::SocRows>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -103,7 +107,7 @@ pub(crate) struct UserScaling {
 #[pymethods]
 impl PyProblem {
     #[new]
-    #[pyo3(signature = (n, m, problem_obj, lb=None, ub=None, cl=None, cu=None, *, complementarity=None))]
+    #[pyo3(signature = (n, m, problem_obj, lb=None, ub=None, cl=None, cu=None, *, complementarity=None, cones=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         n: i64,
@@ -114,6 +118,7 @@ impl PyProblem {
         cl: Option<Py<PyAny>>,
         cu: Option<Py<PyAny>>,
         complementarity: Option<Vec<(usize, usize)>>,
+        cones: Option<Vec<Vec<usize>>>,
     ) -> PyResult<Self> {
         if n < 0 {
             return Err(PyValueError::new_err("n must be non-negative"));
@@ -171,6 +176,11 @@ impl PyProblem {
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(row, var)| pounce_nlp::mpcc::ComplementarityPair { row, var })
+                .collect(),
+            cones: cones
+                .unwrap_or_default()
+                .into_iter()
+                .map(|rows| pounce_nlp::soc::SocRows { rows })
                 .collect(),
         })
     }
@@ -382,6 +392,12 @@ impl PyProblem {
         let app_guard = SendGuard::new(app);
         let bridge_guard = SendGuard::new(bridge);
         let pairs = self.complementarity.clone();
+        if !pairs.is_empty() && !self.cones.is_empty() {
+            return Err(PyValueError::new_err(
+                "declared complementarity together with second-order cones is not supported yet",
+            ));
+        }
+        let cones = self.cones.clone();
         #[allow(clippy::type_complexity)]
         let (status, stats, second_opinion, second_opinion_log, mpcc_result, app_back, bridge_back): (
             ApplicationReturnStatus,
@@ -393,6 +409,7 @@ impl PyProblem {
             SendGuard<Rc<RefCell<PyTnlp>>>,
         ) = py.allow_threads(move || {
             let mut app = app_guard.into_inner();
+            app.set_soc_constraints(cones);
             let bridge = bridge_guard.into_inner();
             let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
             // The run-ending `EXIT:` / `POUNCE <version>:` verdict belongs to the
@@ -1085,6 +1102,11 @@ impl PyProblem {
                  use solve()",
             ));
         }
+        if !self.cones.is_empty() {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "solve_with_sens does not yet support declared second-order cones; use solve()",
+            ));
+        }
         let compute_reduced_hessian = compute_reduced_hessian || rh_eigendecomp;
         let m = self.m as usize;
         let pins: Vec<Index> = pin_constraint_indices
@@ -1533,7 +1555,7 @@ impl PyProblem {
 
     /// Declared complementarity pairs, for the batch path to refuse.
     pub(crate) fn has_complementarity(&self) -> bool {
-        !self.complementarity.is_empty()
+        !self.complementarity.is_empty() || !self.cones.is_empty()
     }
 
     pub(crate) fn dims(&self) -> (usize, usize) {

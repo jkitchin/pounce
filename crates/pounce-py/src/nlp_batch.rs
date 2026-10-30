@@ -469,7 +469,7 @@ pub fn solve_problem_batch<'py>(
         .position(|p| p.borrow().has_complementarity())
     {
         return Err(PyValueError::new_err(format!(
-            "solve_problem_batch: problem {k} declares complementarity pairs, which the \
+            "solve_problem_batch: problem {k} declares complementarity pairs or second-order cones, which the \
              batch path does not support; solve it with Problem.solve()"
         )));
     }

@@ -54,7 +54,7 @@ def get(name):
 
 #: Models with a complementarity block; the others are plain NLPs, on which
 #: every complementarity route reduces to the same solve.
-MPCC = ("bunnyhop", "drifting_norm", "drifting_squared", "ballincup", "rocket", "quadruped",
+MPCC = ("bunnyhop", "drifting_norm", "drifting_squared", "drifting_native", "ballincup", "rocket", "quadruped",
         "complementarity")
 NLP = ("maratos", "wachter")
 ALL = MPCC + NLP
@@ -65,7 +65,7 @@ DETERMINISTIC = ("rocket", "complementarity", "maratos", "wachter")
 
 #: Models whose complementarity is between second-order cones, and so also
 #: run the paper's Jordan-product rows as a route.
-SOC = ("drifting_norm", "drifting_squared", "quadruped")
+SOC = ("drifting_norm", "drifting_squared", "drifting_native", "quadruped")
 
 #: Models whose pairs are scalar with a variable G side, which POUNCE takes
 #: declared (the `declared` route). The SOC models cannot be declared.
@@ -91,6 +91,10 @@ def jobs(solver="pounce", seeds=(0, 1, 2, 3, 4), names=ALL):
             routes.append("jordan_eq")
         if solver == "pounce" and name in DECLARABLE:
             routes.append("declared")
+        if name == "drifting_native":
+            # Native cones: the l1 wrapper and the Jordan-row route (its own
+            # cone lowering) do not apply.
+            routes = [r for r in routes if r not in ("ncp_eq_l1", "jordan_eq")]
         if solver != "pounce" and "ncp_eq_l1" in routes:
             routes.remove("ncp_eq_l1")
         use = seeds[:1] if name in DETERMINISTIC else REDUCED_SEEDS.get(name, seeds)
