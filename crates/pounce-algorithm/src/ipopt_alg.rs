@@ -3717,6 +3717,8 @@ impl IpoptAlgorithm {
 
         // 8. Bound multiplier kappa_sigma reset.
         self.correct_bound_multiplier();
+        // 8a. Its second-order-cone counterpart (workstream C).
+        self.correct_cone_multiplier();
 
         // 8b. `recalc_y` — re-estimate the equality/inequality
         //     multipliers by least squares once the iterate is feasible
@@ -5194,6 +5196,37 @@ impl IpoptAlgorithm {
             z_u_new,
             v_l_new,
             v_u_new,
+        );
+        self.data.borrow_mut().set_curr(new_iv);
+    }
+
+    /// Lift the cone duals that have collapsed toward their boundary
+    /// ([`crate::ipopt_cq::IpoptCalculatedQuantities::soc_lifted_y_d`]). A
+    /// no-op without cones.
+    fn correct_cone_multiplier(&mut self) {
+        let kappa: Number = std::env::var("POUNCE_SOC_KAPPA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1e4);
+        if kappa <= 0.0 {
+            return;
+        }
+        let mu = self.data.borrow().curr_mu;
+        let Some(y_d) = self.cq.borrow().soc_lifted_y_d(mu, kappa) else {
+            return;
+        };
+        let Some(curr) = self.data.borrow().curr.clone() else {
+            return;
+        };
+        let new_iv = crate::iterates_vector::IteratesVector::new(
+            curr.x.clone(),
+            curr.s.clone(),
+            curr.y_c.clone(),
+            y_d,
+            curr.z_l.clone(),
+            curr.z_u.clone(),
+            curr.v_l.clone(),
+            curr.v_u.clone(),
         );
         self.data.borrow_mut().set_curr(new_iv);
     }

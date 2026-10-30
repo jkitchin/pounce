@@ -300,6 +300,44 @@ impl IpoptCalculatedQuantities {
         true
     }
 
+    /// `y_d` with every cone dual that has collapsed toward its boundary
+    /// lifted back off it, or `None` if none has (or no cones). The cone's
+    /// form of the lower half of Ipopt's `kappa_sigma` bound-multiplier rule
+    /// (`z ≥ μ / (κ s)`): when `√(det s · det z) < μ / κ`, only `z₀` moves, by
+    /// the least amount that restores `det s · det z = (μ / κ)²`. Measured on
+    /// the drifting car: a dual reached `det z = 4e-14` against `det s = 0.07`
+    /// at `μ = 0.1`, the Newton direction kept pointing it outward, and the
+    /// fraction-to-boundary rule let it close 99% of the gap per iteration
+    /// until the dual step was `1e-13`.
+    pub fn soc_lifted_y_d(&self, mu: Number, kappa: Number) -> Option<Rc<dyn Vector>> {
+        let layout = self.soc_layout()?;
+        let p = self.curr_soc_pairs()?;
+        let iv = self.curr_iv();
+        let floor = mu / kappa;
+        let mut changed = false;
+        let mut y = iv.y_d.make_new();
+        y.copy(&*iv.y_d);
+        write_rows(&mut *y, &layout, |k, block| {
+            let (s, z) = (&p.s[k], &p.z[k]);
+            let ds = soc_slack::det(s);
+            if ds <= 0.0 {
+                return;
+            }
+            let dz = soc_slack::det(z);
+            if (ds * dz.max(0.0)).sqrt() >= floor && z[0] > 0.0 {
+                return;
+            }
+            let tail2: Number = z[1..].iter().map(|v| v * v).sum();
+            let z0 = (floor * floor / ds + tail2).sqrt();
+            if z0 > z[0] {
+                // y_d = −z on cone rows.
+                block[0] = -z0;
+                changed = true;
+            }
+        });
+        changed.then(|| Rc::from(y))
+    }
+
     /// `δ_sᵀ H δ_s` summed over cones: the cones' share of the quadratic
     /// model's `δ_sᵀ Σ_s δ_s` term.
     pub(crate) fn soc_dhd(&self, delta_s: &dyn Vector) -> Number {
