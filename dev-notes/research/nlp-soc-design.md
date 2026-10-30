@@ -118,6 +118,39 @@ runs the code it runs today. The fixture sweep must diff empty.
 3. **C3 — measure correctness.** CBLIB SOCPs through the NLP arm against
    `pounce-convex` (global optima): objectives match to 1e-6 on ≥ 95%.
    Fixture sweep empty.
+   *Measured* (`pounce_cblib_nlp`, one build, default options). 611 CBLIB
+   instances downloaded (portfolio families sampled 30 each, every instance
+   of the smaller SOC families, < 1 MB compressed); 192 skipped for rotated
+   cones (`QR`, which the `.cbf` reader does not take), 234 with no
+   second-order cone, 24 with other cones, 2 timeouts (`sched_*_scaled`).
+   Of the 153 the convex driver solves: **121 match to 1e-6 (79%)** — below
+   the 95% bar. By family: `classical`, `robust`, `shortfall` 30/30 each,
+   `flay` 10/10, `estein` 8/9, `tls` 5/6, `nb` 1/3, `nql` 2/3, `qssp` 1/2,
+   `turbine` 2/7, `slay` 2/11, `clay` 0/12. The 32 misses:
+   - **14 `Restoration_Failed`** (`slay`, `clay` `h` variants): restoration
+     is not installed with cones. The largest single gap.
+   - **8 succeed *below* the global optimum** (`clay` `m` variants, ~1e-5):
+     `bound_relax_factor` widening big-M orthant rows — not the cones. With
+     it at 0, `clay0203m` matches (4.5e-8 vs 2.5e-10).
+   - **6 `Error_In_Step_Computation`**, **3 above the optimum**, 1 iteration
+     limit.
+   Fixed on the way: the cones' fraction-to-boundary is capped at 0.99
+   (Ipopt's `τ = 1 − μ` stepped `flay02m`'s active dual outside the cone by
+   rounding; 67 of the first 98 compared instances ended
+   `Error_In_Step_Computation` before the cap). Pinned by
+   `crates/pounce-cli/tests/soc_nlp_vs_convex.rs`. Fixture sweep, both legs,
+   252 lines: diff empty.
+   *Tried and not kept:* starting the cone dual on the central path
+   (`z = μ₀ s⁻¹`) instead of `e` — `clay0203m` 703 → 375 iterations, but
+   `slay05m` went from a slow match (1791 iterations) to the iteration limit
+   far from the optimum. And `bound_relax_factor = 0` as a cone default —
+   it fixes the `clay` `m` misses and breaks `robust_20_2` and
+   `classical_20_18` (orthant duals diverge to 3e10, then
+   `Error_In_Step_Computation`).
+   *Iterations:* the NLP arm takes 3–15× the convex driver's (median
+   `classical` 168 vs 17, `robust` 134 vs 16).
+   *Next:* cone-aware restoration (14 of 32 misses); then the remaining
+   step failures.
 4. **C4 — entry points.** Python `Problem(..., cones=[[rows], …])`; the
    CALIPSO ports' cones declared natively.
 5. **C5 — measure the target.** Drifting car: 5/5 physical, cone-tip

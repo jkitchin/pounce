@@ -265,6 +265,14 @@ fn main() {
         .unwrap_or(0);
     let _ = o.set_integer_value("print_level", pl, true, false);
     let _ = o.set_integer_value("max_iter", max_iter as Index, true, false);
+    // `POUNCE_OPTS="k=v,k=v"`: extra options for the NLP arm (diagnosis).
+    if let Ok(extra) = std::env::var("POUNCE_OPTS") {
+        for kv in extra.split(',').filter(|s| !s.is_empty()) {
+            if let Some((k, v)) = kv.split_once('=') {
+                let _ = app.options_mut().read_from_str(&format!("{k} {v}\n"), true);
+            }
+        }
+    }
     app.set_soc_constraints(socs);
     let t0 = std::time::Instant::now();
     let status = app.optimize_tnlp(Rc::new(RefCell::new(nlp)));
