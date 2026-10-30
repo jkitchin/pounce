@@ -101,6 +101,16 @@ def solve_nlp_batch(problems, x0s=None, options=None, parallel=True,
             )
 
     native = [isinstance(p, _pounce.NlProblem) for p in problems]
+    # A model with complementarity pairs needs the complementarity driver
+    # (pounce.Problem(..., complementarity=...)); the batch path would solve
+    # its relaxation and report it as the answer.
+    for k, p in enumerate(problems):
+        if getattr(p, "complementarity", None):
+            raise ValueError(
+                f"solve_nlp_batch: problem {k} declares {len(p.complementarity)} "
+                "complementarity pair(s), which the batch path does not support; "
+                "solve it with pounce.Problem(..., complementarity=...).solve()"
+            )
     if all(native):
         if x0s is not None:
             problems = [

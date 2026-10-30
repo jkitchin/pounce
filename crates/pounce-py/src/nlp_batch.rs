@@ -464,6 +464,15 @@ pub fn solve_problem_batch<'py>(
             x0s.len()
         )));
     }
+    if let Some(k) = problems
+        .iter()
+        .position(|p| p.borrow().has_complementarity())
+    {
+        return Err(PyValueError::new_err(format!(
+            "solve_problem_batch: problem {k} declares complementarity pairs, which the \
+             batch path does not support; solve it with Problem.solve()"
+        )));
+    }
     let overlay = decode_options(options)?;
     let dims: Vec<(usize, usize)> = problems.iter().map(|p| p.borrow().dims()).collect();
     let eq_masks: Vec<Vec<bool>> = problems

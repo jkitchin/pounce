@@ -29,7 +29,7 @@ use std::rc::Rc;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
     Certificate, CertificateInput, MpccStage, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
-    TOUCHED_OPTIONS, accepts, certify, converged, warm_start_assignments,
+    TOUCHED_OPTIONS, accepts, answers, certify, converged, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -144,7 +144,16 @@ pub fn solve_mpcc(
 
     let mut solves: Vec<MpccSolveRecord> = Vec::new();
     let mut first: Option<Captured> = None;
-    let mut accepted: Option<(MpccStage, Captured)> = None;
+    let mut accepted: Option<(MpccStage, Captured, Option<Certificate>)> = None;
+    // The first stage that converged with every product in tolerance but
+    // did not certify as stationary: reported only if nothing certifies.
+    let mut physical: Option<(Captured, Option<Certificate>)> = None;
+    let solver_tol = app
+        .options()
+        .get_numeric_value("tol", "")
+        .map(|(v, _)| v)
+        .unwrap_or(1e-8);
+    let pairs = wrapper.borrow().pairs().to_vec();
 
     // One lowered solve: options already set by the caller of `run`.
     let run = |app: &mut IpoptApplication,
@@ -275,14 +284,31 @@ pub fn solve_mpcc(
         };
         if let Some(c) = candidate {
             if accepts(c.status, c.max_abs_product, tol) {
+                // Converged and physical; the certificate decides whether it
+                // is an answer. A lowered solve can stall short of a biactive
+                // pair and still exit "acceptable" with every product at 0.
+                let cert = certify_at(&inner, &pairs, &c.x, solver_tol);
+                if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
+                    report(&format!(
+                        "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}).",
+                        stage.label(),
+                        c.status,
+                        c.max_abs_product
+                    ));
+                    accepted = Some((stage, c, cert));
+                    break;
+                }
                 report(&format!(
-                    "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}).",
+                    "pounce: complementarity: {} converged ({:?}) to a point that is not \
+                     stationary (residual {:.1e}); trying the next formulation.",
                     stage.label(),
                     c.status,
-                    c.max_abs_product
+                    cert.as_ref().map_or(Number::NAN, |ct| ct.residual),
                 ));
-                accepted = Some((stage, c));
-                break;
+                if physical.is_none() {
+                    physical = Some((c, cert));
+                }
+                continue;
             }
             report(&format!(
                 "pounce: complementarity: {} did not ({:?}, max |G·H| = {:.1e}); trying the next \
@@ -296,13 +322,16 @@ pub fn solve_mpcc(
     app.set_in_retry_sequence(false);
     restore(app);
 
-    // With no accepted stage, report the exact-product stage: what a plain
-    // solve of the lowered model says. It always runs first, so `first` is
-    // only empty if `STAGES` is reordered without this function following.
-    let (accepted_by, chosen) = match (accepted, first) {
-        (Some((s, c)), _) => (Some(s), c),
-        (None, Some(c)) => (None, c),
-        (None, None) => return Err("no exact-product stage ran".into()),
+    // With no certified answer, report the first physical one (converged,
+    // products in tolerance, not certified) with its certificate; failing
+    // that, the exact-product stage: what a plain solve of the lowered model
+    // says. That stage always runs first, so `first` is only empty if
+    // `STAGES` is reordered without this function following.
+    let (accepted_by, chosen, known_cert) = match (accepted, physical, first) {
+        (Some((s, c, cert)), _, _) => (Some(s), c, Some(cert)),
+        (None, Some((c, cert)), _) => (None, c, Some(cert)),
+        (None, None, Some(c)) => (None, c, None),
+        (None, None, None) => return Err("no exact-product stage ran".into()),
     };
     {
         let mut w = wrapper.borrow_mut();
@@ -318,13 +347,10 @@ pub fn solve_mpcc(
         );
     }
     let total_iterations = solves.iter().map(|s| s.iterations).sum();
-    let solver_tol = app
-        .options()
-        .get_numeric_value("tol", "")
-        .map(|(v, _)| v)
-        .unwrap_or(1e-8);
-    let pairs = wrapper.borrow().pairs().to_vec();
-    let certificate = certify_at(&inner, &pairs, &chosen.x, solver_tol);
+    let certificate = match known_cert {
+        Some(c) => c,
+        None => certify_at(&inner, &pairs, &chosen.x, solver_tol),
+    };
     Ok(MpccOutcome {
         status: chosen.status,
         statistics: chosen.statistics,

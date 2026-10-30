@@ -86,6 +86,8 @@ pub struct PyNlProblem {
     g_u: Vec<Number>,
     var_names: Vec<String>,
     con_names: Vec<String>,
+    /// `.nl` complementarity rows as `(row, var, flags)`.
+    complementarity: Vec<(usize, usize, u8)>,
 }
 
 /// Decode a 1-D float input (NumPy `float64` array or any float sequence)
@@ -303,6 +305,16 @@ impl PyNlProblem {
     #[getter]
     fn con_names(&self) -> Vec<String> {
         self.con_names.clone()
+    }
+
+    /// Complementarity rows (AMPL `complements`, `.nl` kind 5) as
+    /// `(row, var, flags)`, 0-based; `flags` is which of the variable's bounds
+    /// are finite (1 lower, 2 upper, 3 both). Pass `[(row, var), ...]` to
+    /// `Problem(..., complementarity=...)` to solve with them; the batch path
+    /// refuses a model that has any.
+    #[getter]
+    fn complementarity(&self) -> Vec<(usize, usize, u8)> {
+        self.complementarity.clone()
     }
 
     /// Objective value `f(x)`.
@@ -595,6 +607,11 @@ impl PyNlProblem {
         let g_u = prob.g_u.clone();
         let var_names = prob.var_names.clone();
         let con_names = prob.con_names.clone();
+        let complementarity = prob
+            .complementarity
+            .iter()
+            .map(|c| (c.row, c.var, c.flags))
+            .collect();
         Ok(PyNlProblem {
             tnlp: RefCell::new(tnlp),
             n,
@@ -611,6 +628,7 @@ impl PyNlProblem {
             g_u,
             var_names,
             con_names,
+            complementarity,
         })
     }
 

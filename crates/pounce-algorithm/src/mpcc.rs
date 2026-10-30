@@ -24,8 +24,13 @@
 //!
 //! A converged status is not enough: a lowered solve "succeeds" on its own
 //! reformulation, and the reformulation's tolerance is not the model's. A
-//! stage is accepted only if it converged **and** every product `G·H` is
-//! within `constr_viol_tol` — the bar the model's own rows are held to.
+//! stage is accepted only if it converged, every product `G·H` is within
+//! `constr_viol_tol` — the bar the model's own rows are held to — **and**
+//! [`certify`] finds the point stationary ([`answers`]). The last test is
+//! not redundant: through the Python callbacks, qpec_small's exact-product
+//! stage exits "acceptable" with every product at 0 at a point 9e-4 short of
+//! the answer, which is not stationary (residual 1.7e-3 against 2e-6), and
+//! the continuation reaches the answer.
 
 use faer::Mat;
 use pounce_common::types::Number;
@@ -170,6 +175,14 @@ pub fn converged(status: ApplicationReturnStatus) -> bool {
             | ApplicationReturnStatus::SolvedToAcceptableLevel
             | ApplicationReturnStatus::FeasiblePointFound
     )
+}
+
+/// Does a certified class make a converged, physical point an answer? Every
+/// class but `None`: S is the goal; W is the honest answer where no S point
+/// exists nearby (ralph1); `NotSearched` claims nothing either way. A point
+/// that is not stationary at all is a stall, and the driver moves on.
+pub fn answers(class: StationarityClass) -> bool {
+    class != StationarityClass::None
 }
 
 /// Is a stage's answer an answer to the *model*, not just to the lowering?

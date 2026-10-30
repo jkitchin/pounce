@@ -85,6 +85,9 @@ pub struct PyProblem {
     kkt_blocks: Option<Vec<i32>>,
     /// The same structure in model space: `(variable labels, constraint labels)`.
     model_blocks: Option<(Vec<i32>, Vec<i32>)>,
+    /// Declared complementarity pairs `(row, var)`; non-empty routes
+    /// `solve()` through `pounce_restoration::mpcc_driver::solve_mpcc`.
+    complementarity: Vec<pounce_nlp::mpcc::ComplementarityPair>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -100,7 +103,8 @@ pub(crate) struct UserScaling {
 #[pymethods]
 impl PyProblem {
     #[new]
-    #[pyo3(signature = (n, m, problem_obj, lb=None, ub=None, cl=None, cu=None))]
+    #[pyo3(signature = (n, m, problem_obj, lb=None, ub=None, cl=None, cu=None, *, complementarity=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         n: i64,
         m: i64,
@@ -109,6 +113,7 @@ impl PyProblem {
         ub: Option<Py<PyAny>>,
         cl: Option<Py<PyAny>>,
         cu: Option<Py<PyAny>>,
+        complementarity: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
         if n < 0 {
             return Err(PyValueError::new_err("n must be non-negative"));
@@ -162,6 +167,11 @@ impl PyProblem {
             kkt_schur_block: None,
             kkt_blocks: None,
             model_blocks: None,
+            complementarity: complementarity
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(row, var)| pounce_nlp::mpcc::ComplementarityPair { row, var })
+                .collect(),
         })
     }
 
@@ -241,6 +251,15 @@ impl PyProblem {
     /// previously stashed via `set_working_set`. After every SQP
     /// solve `info_dict["working_set"]` holds the final working
     /// set, and `get_working_set()` returns the same tuple.
+    /// The declared complementarity pairs, `[(row, var), ...]`.
+    #[getter]
+    fn complementarity(&self) -> Vec<(usize, usize)> {
+        self.complementarity
+            .iter()
+            .map(|p| (p.row, p.var))
+            .collect()
+    }
+
     #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None, working_set=None, report_path=None, report_detail=None))]
     fn solve<'py>(
         &mut self,
@@ -362,12 +381,14 @@ impl PyProblem {
         // impl`) rather than peeking at the inner `Rc` directly.
         let app_guard = SendGuard::new(app);
         let bridge_guard = SendGuard::new(bridge);
+        let pairs = self.complementarity.clone();
         #[allow(clippy::type_complexity)]
-        let (status, stats, second_opinion, second_opinion_log, app_back, bridge_back): (
+        let (status, stats, second_opinion, second_opinion_log, mpcc_result, app_back, bridge_back): (
             ApplicationReturnStatus,
             SolveStatistics,
             SecondOpinionOutcome,
             Vec<String>,
+            Option<Result<pounce_restoration::mpcc_driver::MpccOutcome, String>>,
             SendGuard<IpoptApplication>,
             SendGuard<Rc<RefCell<PyTnlp>>>,
         ) = py.allow_threads(move || {
@@ -381,6 +402,39 @@ impl PyProblem {
             // driver's attempt printed its own verdict and a run that recovered
             // reported a mid-run one that read as the final answer.
             app.defer_end_verdict();
+            // Declared complementarity: the driver chooses the formulation,
+            // runs the lowered solves and certifies the answer; it replaces
+            // the single solve and the second-opinion ladder, which both
+            // assume one solve of one model.
+            if !pairs.is_empty() {
+                let mut lines: Vec<String> = Vec::new();
+                let res = pounce_restoration::mpcc_driver::solve_mpcc(
+                    &mut app,
+                    bridge_for_solve,
+                    pairs,
+                    &mut |line| lines.push(line.to_string()),
+                );
+                let (status, stats, mpcc) = match res {
+                    Ok(out) => (out.status, out.statistics.clone(), Ok(out)),
+                    Err(e) => (
+                        ApplicationReturnStatus::InvalidProblemDefinition,
+                        app.statistics(),
+                        Err(e),
+                    ),
+                };
+                if app.release_end_verdict() {
+                    app.print_end_verdict(status);
+                }
+                return (
+                    status,
+                    stats.clone(),
+                    SecondOpinionOutcome::unchanged(status, stats),
+                    lines,
+                    Some(mpcc),
+                    SendGuard::new(app),
+                    SendGuard::new(bridge),
+                );
+            }
             let status = app.optimize_tnlp(bridge_for_solve);
             let stats = app.statistics();
             // Second-opinion ladder: an `Infeasible_Problem_Detected` or
@@ -413,12 +467,22 @@ impl PyProblem {
                 outcome.statistics.clone(),
                 outcome,
                 lines,
+                None,
                 SendGuard::new(app),
                 SendGuard::new(bridge),
             )
         });
         let app = app_back.into_inner();
         let bridge = bridge_back.into_inner();
+        let mpcc_outcome = match mpcc_result {
+            Some(Err(e)) => {
+                return Err(PyValueError::new_err(format!(
+                    "cannot solve this model's complementarity constraints: {e}"
+                )));
+            }
+            Some(Ok(out)) => Some(out),
+            None => None,
+        };
         // Pick up any working set the SQP path produced; surface
         // it in the info dict and stash on the Problem instance.
         self.last_working_set = app.last_sqp_working_set().cloned();
@@ -451,6 +515,68 @@ impl PyProblem {
             py.None()
         };
         info.set_item("second_opinion", so_obj)?;
+        // What the complementarity driver did (`None` without declared
+        // pairs): which formulation answered, every lowered solve, and the
+        // stationarity class of the reported point.
+        let cc_obj: PyObject = match &mpcc_outcome {
+            None => py.None(),
+            Some(out) => {
+                let d = PyDict::new_bound(py);
+                d.set_item("accepted_by", out.accepted_by.map(|s| s.label()))?;
+                d.set_item("n_solves", out.solves.len())?;
+                d.set_item("total_iterations", out.total_iterations)?;
+                d.set_item("max_abs_product", out.max_abs_product)?;
+                let stages: Vec<(&str, Option<Number>, String, usize, Number)> = out
+                    .solves
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.stage.label(),
+                            r.tau,
+                            format!("{:?}", r.status),
+                            r.iterations,
+                            r.max_abs_product,
+                        )
+                    })
+                    .collect();
+                d.set_item("solves", stages)?;
+                let cert: PyObject = match &out.certificate {
+                    None => py.None(),
+                    Some(c) => {
+                        let cd = PyDict::new_bound(py);
+                        let class = match c.class {
+                            pounce_algorithm::mpcc::StationarityClass::S => "S",
+                            pounce_algorithm::mpcc::StationarityClass::W => "W",
+                            pounce_algorithm::mpcc::StationarityClass::None => "none",
+                            pounce_algorithm::mpcc::StationarityClass::NotSearched => {
+                                "not_searched"
+                            }
+                        };
+                        cd.set_item("class", class)?;
+                        cd.set_item("n_pairs", c.n_pairs)?;
+                        cd.set_item("n_biactive", c.n_biactive)?;
+                        cd.set_item("n_neither", c.n_neither)?;
+                        cd.set_item("multipliers_unique", c.multipliers_unique)?;
+                        cd.set_item("residual", c.residual)?;
+                        cd.set_item("resid_tol", c.resid_tol)?;
+                        cd.into_any().unbind()
+                    }
+                };
+                d.set_item("certificate", cert)?;
+                d.set_item(
+                    "summary",
+                    pounce_algorithm::mpcc::describe_outcome(
+                        out.accepted_by,
+                        out.solves.len(),
+                        out.total_iterations,
+                        out.max_abs_product,
+                        out.certificate.as_ref(),
+                    ),
+                )?;
+                d.into_any().unbind()
+            }
+        };
+        info.set_item("complementarity", cc_obj)?;
         // Per-subsystem wall-clock breakdown (seconds) of this solve
         // (pounce#180 item 3). `info["timing"]` is a dict keyed by
         // subsystem (`overall_alg`, the linear-algebra split, and the
@@ -953,6 +1079,12 @@ impl PyProblem {
         zl: Option<Py<PyAny>>,
         zu: Option<Py<PyAny>>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
+        if !self.complementarity.is_empty() {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "solve_with_sens does not yet support declared complementarity pairs; \
+                 use solve()",
+            ));
+        }
         let compute_reduced_hessian = compute_reduced_hessian || rh_eigendecomp;
         let m = self.m as usize;
         let pins: Vec<Index> = pin_constraint_indices
@@ -1397,6 +1529,11 @@ impl PyProblem {
 
     pub(crate) fn uses_exact_hessian(&self) -> bool {
         self.has_hessian
+    }
+
+    /// Declared complementarity pairs, for the batch path to refuse.
+    pub(crate) fn has_complementarity(&self) -> bool {
+        !self.complementarity.is_empty()
     }
 
     pub(crate) fn dims(&self) -> (usize, usize) {
