@@ -10,6 +10,22 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Declared complementarity constraints solve without choosing a
+  formulation.** Models with complementarity pairs `0 ≤ G ⟂ H ≥ 0` — AMPL
+  `complements`, Pyomo `mpec` through `SolverFactory("pounce")`, or
+  `pounce.Problem(..., complementarity=[(row, var), ...])` — are solved by a
+  driver that runs the Scholtes continuation and the exact product, keeps the
+  lower objective among the strongly stationary (S) answers, and falls back to
+  the ℓ₁ penalty only if neither answers. Each answer is certified (S / W /
+  none) and reported on the console and in `info["complementarity"]`.
+  Previously the `.nl` reader refused complementarity rows outright, and from
+  Python the formulation was the caller's to pick: on the MPCC corpus
+  (`benchmarks/mpcc/declared.py`, 60 feasible cells) the declared route
+  reaches the optimum on 60/60 against 57 for the best hand-picked route, at
+  about 2× its median iterations. Pairs must be one-sided; presolve is
+  declined for such models, and `--minima`, the debugger, `solve_nlp_batch`
+  and `solve_with_sens` refuse them. See the book page *Complementarity
+  Constraints (MPCC)*.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
   are now native-only dependencies, and JSON mode reads stdin directly where
