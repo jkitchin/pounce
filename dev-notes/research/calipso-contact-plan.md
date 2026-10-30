@@ -236,10 +236,26 @@ exist and run from one command.
    mutation-checked both ways (S == W fails three tests, dropping the set
    search fails the rank-deficient one). End to end: qpec_small certifies
    S, ralph1 converges but certifies W.
-4. **Entry points** — `.nl` kind-5 rows (AMPL `complements`, Pyomo
+4. ✅ **Entry points** — `.nl` kind-5 rows (AMPL `complements`, Pyomo
    `mpec`) mapped to pairs instead of refused; `pounce.Problem(...,
    complementarity=...)`; safe defaults on declared rows (no bound
    relaxation).
+   *Done:* pair orientation generalized to either finite bound
+   (`G = s_G(x_j − b_j)`, sign from the one finite bound; two-sided refused
+   with the reason). `.nl` reader keeps kind-5 rows (`NlProblem.complementarity`);
+   the CLI forces the NLP arm, declines presolve out loud, refuses
+   `--minima` and the debugger, and prints a one-line summary with the
+   certificate. Python `Problem(..., complementarity=...)` returns
+   `info["complementarity"]`; `solve_nlp_batch` and `solve_with_sens`
+   refuse pairs. Pyomo `mpec` through `SolverFactory("pounce")` works with
+   no transformation (`pyomo-pounce/tests/test_mpec_complementarity.py`).
+   Safe defaults `bound_relax_factor = 0`, `honor_original_bounds = yes`
+   unless user-set. Acceptance became certificate-keyed: a stage answers
+   only if converged, products ≤ `constr_viol_tol` and the class is not
+   None — qpec_small from (0, 0.5, 0.5) otherwise accepted a stalled
+   non-stationary "acceptable" exit. Fixture sweep, both legs, 252 lines:
+   diff empty. Docs: `docs/src/complementarity.md`. Not done: the JSON
+   solve report does not carry the certificate (schema change deferred).
 5. **Measure** — `benchmarks/calipso/` gains a `declared` route that hands
    the model over with its pairs and no options, scored against every
    hand-picked route; Gate 0 and the fixture sweep for regressions.
