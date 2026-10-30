@@ -294,6 +294,10 @@ reach fewer CBLIB optima than main's hand-written `t² − ‖x‖² ≥ 0` (121
 (main: 5/5 with squared cones). Cause: no cone predictor–corrector, so the
 iterates lose centrality after every μ decrease. Details and what was
 tried: `nlp-soc-design.md`, "Verdict on the first implementation".
+**Parked** after the decoupled-dual redesign: the drifting car reaches the
+correct objective (0.2026) but not physical feasibility (1.8e-3) and takes
+11 659 iterations against main's 1759 (`nlp-soc-design.md`, "The decoupled
+cone dual").
 
 - `h(x) ∈ K`, K a product of second-order cones, via a cone slack with
   barrier `−log(t² − ‖x‖²)`; reuse `soc.rs` for the cone arithmetic,

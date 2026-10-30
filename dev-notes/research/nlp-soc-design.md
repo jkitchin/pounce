@@ -249,3 +249,35 @@ site would impose `s_i ≥ 0` on a cone entry). It can be done safely with a
 dedicated cone-dual component rather than borrowing `v_L`. Doing so means a
 ninth iterate component that every iterate-vector operation, the warm start,
 restoration and the sensitivity layer would have to carry.
+
+## The decoupled cone dual (option 1) — measured, parked
+
+Implemented (`80c880e`): each cone's dual `z` is its own variable
+(`IpoptData::soc_z`), tied to `y_d` only through the `s`-stationarity
+residual `−y_d − z`. The reduced Newton row is unchanged (z cancels), `dz`
+is recovered after each solve, `z` steps with `alpha_dual` under its own
+cone cap, `y_d` steps freely. Agreed stopping rule: the drifting car, seed
+0, continuation route, must be physical (violation ≤ 1e-4) and clearly
+better than main's 1759 iterations, or C is parked.
+
+| `scholtes_then_ineq`, seed 0 | furthest τ | objective | violation | iterations |
+|---|---|---|---|---|
+| decoupled, lift κ=1e4, corrector | 1e-6 | **0.2026** | 1.8e-3 | 11 659 |
+| decoupled, lift, no corrector | 1e-5 | 0.2036 | 5.7e-3 | 7 890 |
+| decoupled, no lift, no corrector | 1e-4 | 0.2031 | 1.8e-2 | 2 484 |
+| decoupled, no lift, corrector | fails at 0.1 | — | 1.8 | 1 332 |
+| coupled `z = −y_d` (before), lift | 1e-3 | 0.2019 | 5.8e-2 | 6 550 |
+| **main, squared cones** | finished | 0.2026 | ≤ 1e-4 | **1 759** |
+
+`ncp_eq` and `direct` end `Restoration_Failed` (restoration is not
+installed with cones). The decoupling is a real improvement — the
+continuation reaches the correct trajectory, which the coupled design
+never did — but it fails the stopping rule on both counts. Where the
+iterations go: the tightest stages (τ ≤ 1e-5) run to the 3000-iteration
+cap with the dual step small, and with the corrector on τ = 0.1 alone
+takes 1894. **C is parked here.** Everything is on
+`feature/contact-mpcc-cones` behind declared cones (with none declared,
+every path is the old one: fixture sweep empty, crate tests unchanged), so
+it can be resumed or reverted as a unit. Resuming would mean the endgame
+(the τ ≤ 1e-5 stall) and cone-aware restoration, against a target that
+main already meets with squared cones.
