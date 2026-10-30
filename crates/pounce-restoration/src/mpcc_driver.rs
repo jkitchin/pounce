@@ -219,7 +219,6 @@ pub fn solve_mpcc(
                     baseline(app);
                     c = run(app, stage, Lowering::Ineq, None, &mut solves);
                 }
-                first = Some(c.clone());
                 Some(c)
             }
             MpccStage::Continuation => {
@@ -295,7 +294,7 @@ pub fn solve_mpcc(
         if let Some(c) = &candidate {
             // A stage refused before iteration 0 has no point to report;
             // the verdict of the first stage that has one stands in for it.
-            if first.as_ref().is_some_and(|f| f.x.is_empty()) && !c.x.is_empty() {
+            if first.as_ref().is_none_or(|f| f.x.is_empty() && !c.x.is_empty()) {
                 first = Some(c.clone());
             }
         }

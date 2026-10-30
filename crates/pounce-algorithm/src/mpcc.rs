@@ -62,8 +62,8 @@ impl MpccStage {
 }
 
 pub const STAGES: [MpccStage; 3] = [
-    MpccStage::Exact,
     MpccStage::Continuation,
+    MpccStage::Exact,
     MpccStage::Penalty,
 ];
 
