@@ -2459,7 +2459,15 @@ fn real_main() -> ExitCode {
     // answer by construction never passes through that hook.
     let square_system_promoted = second_opinion.promoted_by
         == Some(pounce_algorithm::square_system::SQUARE_SYSTEM_RUNG_LABEL);
-    if app.answer_restored_from_floor() || square_system_promoted {
+    // A declared-complementarity run is the same case again: every lowered
+    // solve that converged ran `on_converged`, so the cell holds the *last*
+    // one's point — and the driver runs the continuation and the exact
+    // product both and may report the first. The driver forwards only the
+    // answer it reports, through `finalize_solution`, outside every
+    // `optimize_tnlp`. Measured on `qpec_small.nl`: the JSON carried the
+    // exact stage's `(1.000019, 1.0000095, 0)` at objective 4.5e-10 while the
+    // continuation's answer, the one reported, sat at 0.
+    if app.answer_restored_from_floor() || square_system_promoted || mpcc_outcome.is_some() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
             x_capture_from_finalize = true;

@@ -62,9 +62,13 @@ fn x_of(r: &Run) -> Vec<f64> {
 fn a_qpec_written_with_complements_is_solved_and_certified() {
     let r = run("qpec_small.nl", &[]);
     assert_eq!(r.code, Some(0), "{}", r.stderr);
+    // 1e-6, not looser: the exact-product stage's own point,
+    // (1.000019, 1.0000095, 0), is within 1e-4 of the answer, and the report
+    // once carried it in place of the continuation's, which was the one
+    // accepted and summarized.
     let x = x_of(&r);
     for (got, want) in x.iter().zip([1.0, 1.0, 0.0]) {
-        assert!((got - want).abs() < 1e-4, "x = {x:?}");
+        assert!((got - want).abs() < 1e-6, "x = {x:?}");
     }
     assert!(
         r.stderr.contains("2 pairs, 1 biactive; stationarity: S"),
