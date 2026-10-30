@@ -107,7 +107,7 @@ moves the point a complementarity is measured from.
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:
 
 ```text
-pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, max |G·H| = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).; 2 pairs, 1 biactive; stationarity: S (strongly stationary).
+pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, max |G·H| = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).
 ```
 
 From Python, `info["complementarity"]` holds `accepted_by` (the stage, or
