@@ -130,6 +130,10 @@ pub struct IpoptCalculatedQuantities {
 
 /// Helper: convert `Box<dyn Vector>` to `Rc<dyn Vector>`. Cheap; the
 /// box is unwrapped without copying.
+#[path = "ipopt_cq_soc.rs"]
+mod soc;
+pub use soc::SocPairs;
+
 fn rc_from(v: Box<dyn Vector>) -> Rc<dyn Vector> {
     Rc::from(v)
 }
@@ -861,6 +865,7 @@ impl IpoptCalculatedQuantities {
         // tmp = tmp - y_d
         tmp.axpy(-1.0, &*iv.y_d);
         drop(nlp);
+        self.zero_soc_rows(&mut *tmp);
         let v = rc_from(tmp);
         self.curr_grad_lag_s_cache
             .borrow_mut()
@@ -1767,7 +1772,11 @@ impl IpoptCalculatedQuantities {
         let s_x_u = self.curr_slack_x_u();
         let s_s_l = self.curr_slack_s_l();
         let s_s_u = self.curr_slack_s_u();
+        let mu = self.data.borrow().curr_mu;
         self.barrier_obj_at(f, &*s_x_l, &*s_x_u, &*s_s_l, &*s_s_u)
+            + self
+                .curr_soc_pairs()
+                .map_or(0.0, |p| Self::soc_barrier(&p, mu))
     }
 
     pub fn trial_barrier_obj(&self) -> Number {
@@ -1776,7 +1785,11 @@ impl IpoptCalculatedQuantities {
         let s_x_u = self.trial_slack_x_u();
         let s_s_l = self.trial_slack_s_l();
         let s_s_u = self.trial_slack_s_u();
+        let mu = self.data.borrow().curr_mu;
         self.barrier_obj_at(f, &*s_x_l, &*s_x_u, &*s_s_l, &*s_s_u)
+            + self
+                .trial_soc_pairs()
+                .map_or(0.0, |p| Self::soc_barrier(&p, mu))
     }
 
     /// Gradient of the barrier objective wrt `x`:
@@ -1877,6 +1890,8 @@ impl IpoptCalculatedQuantities {
             nlp.pd_u()
                 .mult_vector(-self.kappa_d * mu, &*di.s_u, 1.0, &mut *tmp);
         }
+        drop(nlp);
+        self.add_soc_barrier_grad_s(&iv, mu, &mut *tmp);
         rc_from(tmp)
     }
 
@@ -1908,6 +1923,8 @@ impl IpoptCalculatedQuantities {
             nlp.pd_u()
                 .mult_vector(-self.kappa_d * mu, &*di.s_u, 1.0, &mut *tmp);
         }
+        drop(nlp);
+        self.add_soc_barrier_grad_s(&iv, mu, &mut *tmp);
         rc_from(tmp)
     }
 
@@ -1951,12 +1968,13 @@ impl IpoptCalculatedQuantities {
         tmp_x.element_wise_multiply(&*sigma_x);
         dwd += tmp_x.dot(delta_x);
 
-        // δ_sᵀ Σ_s δ_s.
+        // δ_sᵀ Σ_s δ_s, and the cones' δ_sᵀ H δ_s.
         let sigma_s = self.curr_sigma_s();
         let mut tmp_s = delta_s.make_new();
         tmp_s.copy(delta_s);
         tmp_s.element_wise_multiply(&*sigma_s);
         dwd += tmp_s.dot(delta_s);
+        dwd += self.soc_dhd(delta_s);
 
         // PD perturbations.
         let pert = self.data.borrow().perturbations;
@@ -2379,7 +2397,8 @@ impl IpoptCalculatedQuantities {
     /// (`IpIpoptCalculatedQuantities.cpp:3553-3606`).
     pub fn curr_avrg_compl(&self) -> Number {
         let iv = self.curr_iv();
-        let n = iv.z_l.dim() + iv.z_u.dim() + iv.v_l.dim() + iv.v_u.dim();
+        let (soc_sum, soc_n) = self.curr_soc_compl_sum();
+        let n = iv.z_l.dim() + iv.z_u.dim() + iv.v_l.dim() + iv.v_u.dim() + soc_n as i32;
         if n == 0 {
             return 0.0;
         }
@@ -2391,6 +2410,7 @@ impl IpoptCalculatedQuantities {
         acc += iv.z_u.dot(&*s_x_u);
         acc += iv.v_l.dot(&*s_s_l);
         acc += iv.v_u.dot(&*s_s_u);
+        acc += soc_sum;
         acc / Number::from(n)
     }
 
@@ -2412,7 +2432,10 @@ impl IpoptCalculatedQuantities {
                 v.min()
             }
         };
-        let acc = m(&cxl).min(m(&cxu)).min(m(&csl)).min(m(&csu));
+        let mut acc = m(&cxl).min(m(&cxu)).min(m(&csl)).min(m(&csu));
+        if let Some((lo, _)) = self.curr_soc_compl_range() {
+            acc = acc.min(lo);
+        }
         if acc.is_infinite() { 0.0 } else { acc }
     }
 
@@ -2429,6 +2452,7 @@ impl IpoptCalculatedQuantities {
             .max(self.curr_compl_x_u().amax())
             .max(self.curr_compl_s_l().amax())
             .max(self.curr_compl_s_u().amax())
+            .max(self.curr_soc_compl_error(0.0))
     }
 
     /// Centrality measure `ξ = min_i(s_i z_i) / avrg(s · z)`. Mirrors
@@ -2469,6 +2493,7 @@ impl IpoptCalculatedQuantities {
             .max(self.curr_relaxed_compl_x_u().amax())
             .max(self.curr_relaxed_compl_s_l().amax())
             .max(self.curr_relaxed_compl_s_u().amax())
+            .max(self.curr_soc_compl_error(self.data.borrow().curr_mu))
             / s_c;
 
         dual.max(primal).max(compl)
@@ -2605,7 +2630,8 @@ impl IpoptCalculatedQuantities {
             _ => c.amax().max(dms.amax()),
         };
         let compl_raw = compl_override
-            .unwrap_or_else(|| cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()));
+            .unwrap_or_else(|| cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()))
+            .max(self.curr_soc_compl_error(0.0));
         let compl = compl_raw / s_c;
 
         dual.max(primal).max(compl)
@@ -2691,6 +2717,8 @@ impl IpoptCalculatedQuantities {
         nlp.pd_u().mult_vector(1.0, &*iv.v_u, 0.0, &mut *tmp);
         nlp.pd_l().mult_vector(-1.0, &*iv.v_l, 1.0, &mut *tmp);
         tmp.axpy(-1.0, &*iv.y_d);
+        drop(nlp);
+        self.zero_soc_rows(&mut *tmp);
         rc_from(tmp)
     }
 
