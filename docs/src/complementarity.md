@@ -79,14 +79,16 @@ first one that *answers* winning:
    of freedom).
 2. **Exact** — `G·H = 0` per pair from your start, with the same fallback.
 3. **Penalty** — the complementarity products moved into the objective with
-   an exact ℓ₁ weight.
+   an exact ℓ₁ weight; run only if neither of the first two answers.
 
-The continuation goes first because it finds better answers: the
-relaxation sees the whole feasible set before committing to a branch,
-where the exact product commits from the start and often converges to a
-local minimum that is not the best one. On the 60 feasible cells of the
-MPCC benchmark corpus (`benchmarks/mpcc/declared.py`) it reached the
-optimum on all 60, against 48 for exact-first, at about 3× the iterations.
+The first two both run, and the answer with the lower objective wins. On a
+nonconvex model each reaches local minima the other avoids: on the 60
+feasible cells of the MPCC benchmark corpus (`benchmarks/mpcc/declared.py`)
+the exact product alone reaches the optimum on 48 and the continuation alone
+on 60, while on the CALIPSO bunny-hop the continuation alone settles on a
+trajectory 2.4× worse on 3 of 5 starts that the exact product avoids.
+Running both reaches the best known answer on every one of them, at roughly
+the iterations of both.
 
 A stage *answers* only if it converged, every product is within
 `constr_viol_tol`, and the point is certified strongly stationary (S, see
@@ -105,7 +107,7 @@ moves the point a complementarity is measured from.
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:
 
 ```text
-pounce: complementarity: answered by …; 2 pairs, 1 biactive; stationarity: S (strongly stationary).
+pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, max |G·H| = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).; 2 pairs, 1 biactive; stationarity: S (strongly stationary).
 ```
 
 From Python, `info["complementarity"]` holds `accepted_by` (the stage, or

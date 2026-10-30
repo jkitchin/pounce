@@ -315,6 +315,70 @@ the switch (~√μ wide) at any tolerance. Connecting declared
 complementarity pairs to the existing kink machinery is a concrete,
 demonstrated win for workstream E.
 
+## The `declared` route: POUNCE choosing for itself (workstream B, increment 5)
+
+`declared` hands the model to `pounce.Problem` with its pairs declared
+(`complementarity=[(row, var), ...]`) and sets nothing but `print_level`:
+what a user writes. POUNCE's complementarity driver
+(`pounce_restoration::mpcc_driver`) picks the formulation and certifies the
+answer. Only the models whose pairs are scalar can be declared — bunny-hop,
+ball-in-cup, rocket, complementarity. The drifting car and the quadruped pair
+second-order cones, which the driver does not lower (workstream C).
+
+Rerun on one build, every hand-picked route beside it
+(`results_pounce_declared.jsonl`; cells as in the tables above):
+
+| model | `declared` | best hand-picked route on certified/objective | `declared_exact_first` |
+|---|---|---|---|
+| bunnyhop | 5/5 · 5/5 · **462.6** · 418 | `scholtes_then_ncp` 5/5 · 5/5 · 463.2 · 225 | 5/5 · 5/5 · 462.6 · 58 |
+| ballincup | 5/5 · 5/5 · 12.38 · 732 | `ncp_eq_l1` 5/5 · 5/5 · 12.38 · 172 | 5/5 · 5/5 · 12.38 · 705 |
+| rocket | 1/1 · 1/1 · **1532** · 1174 | `scholtes_then_ncp` 1/1 · 1/1 · 1532 · 278 | 1/1 · 1/1 · 1534 · 113 |
+| complementarity | 1/1 · 1/1 · 17 · 71 | `direct` 1/1 · 1/1 · 17 · 43 | 1/1 · 1/1 · 17 · 71 |
+
+and on the Gate 0 corpus (`benchmarks/mpcc/declared.py`: every case, both
+scaling legs, every start; 60 feasible cells), against the route Gate 0
+chose as supported:
+
+| route | solved | at `f*` | below `f*` | median iterations |
+|---|---:|---:|---:|---:|
+| `declared` | 60 | **60** | 0 | 99 |
+| `scholtes_then_ncp` | 60 | 57 | 0 | 57 |
+
+The four `infeasible_pair` cells report `Infeasible_Problem_Detected` with no
+stage accepted.
+
+**What it buys.** Declared, with no options, POUNCE is physical and certified
+S on every cell of every declarable model, at the best objective any route
+reached on each (bunny-hop's 462.6 is CALIPSO's own answer; Ipopt's in the
+paper was 1503), and at the oracle's optimum on every Gate 0 cell — three
+more than the supported hand-picked route. No single hand-picked route does
+that on both corpora: `scholtes_then_ncp` misses 3 Gate 0 optima and 1
+ball-in-cup certificate; `ncp_eq_l1` lands bunny-hop at 1.4e4; `direct`
+leaves rocket uncertified.
+
+**What it costs.** Iterations: 2–4× the cheapest route that would have
+worked on that model, because the driver runs both the continuation and the
+exact product and keeps the lower certified objective (and ball-in-cup seed
+4 needs the penalty, 3650 iterations). The wall-time column is not a guide
+here: each run includes a ~20 s JAX compile.
+
+**How the policy was chosen, by measurement.** Exact product first: Gate 0
+48/60 at `f*` (it converges to S-stationary local minima that are not the
+optimum). Continuation first: Gate 0 60/60, but bunny-hop at 462.6 on only
+2/5 seeds (the rest at 1111–1169, also S-stationary). Each order reaches
+local minima the other avoids, so both run. Three driver defects surfaced
+on the way and are fixed with tests: a W point ended the ladder
+(`complementarity` stopped at 85, not 17); a square model's exact stage was
+refused with no fallback and its empty point was forwarded
+(`infeasible_pair`); and the CLI's `.sol` / JSON carried the last lowered
+solve's point instead of the reported one.
+
+**Not measured here.** Duplicated bounds: bunny-hop's `H = (q1, q3, q5 −
+0.3)` are rows declared and bounds on the variables too, which is how a user
+writes it but breaks LICQ; with the duplicate bounds removed the
+continuation alone reached 462.6/463.2 on 2 of 3 seeds that otherwise landed
+above 1100. Detecting a declared row that only restates a bound is not done.
+
 ## What this is not evidence about
 
 - **The paper's quadruped numbers.** CALIPSO.jl's last commit (`0e3bdcf`,

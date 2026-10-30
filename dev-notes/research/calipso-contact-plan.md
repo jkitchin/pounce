@@ -256,9 +256,27 @@ exist and run from one command.
    non-stationary "acceptable" exit. Fixture sweep, both legs, 252 lines:
    diff empty. Docs: `docs/src/complementarity.md`. Not done: the JSON
    solve report does not carry the certificate (schema change deferred).
-5. **Measure** — `benchmarks/calipso/` gains a `declared` route that hands
+5. ✅ **Measure** — `benchmarks/calipso/` gains a `declared` route that hands
    the model over with its pairs and no options, scored against every
    hand-picked route; Gate 0 and the fixture sweep for regressions.
+   *Done* (full tables: `benchmarks/calipso/README.md`, "The `declared`
+   route"). Declared, no options: physical and certified S on every cell of
+   the four declarable models, at the best objective any route reached on
+   each (bunny-hop 462.6 = CALIPSO's answer); Gate 0 60/60 solved, **60/60
+   at `f*`**, 0 below — against 57 for `scholtes_then_ncp`. Cost: 2–4× the
+   iterations of the cheapest route that would have worked (Gate 0 median 99
+   vs 57). The measurement changed the policy three times: W no longer ends
+   the ladder; the exact stage falls back to `G·H <= 0` on a square model;
+   the continuation and the exact product both run and the lower certified
+   objective wins (exact-first: Gate 0 48/60 at `f*`; continuation-first:
+   bunny-hop 2/5 at the best objective). It also found a CLI defect (the
+   `.sol` carried the last lowered solve's point). Fixture sweep: unchanged
+   by construction (no fixture declares pairs; the CLI change is gated on a
+   declared run), last run empty at increment 4.
+   *Not reached:* the drifting-car target (1015 → ≤ 300 iterations) — its
+   pairs are cones, not declarable until workstream C. *Open:* a declared row
+   that only restates a variable bound (bunny-hop's `H`) breaks LICQ and
+   moved the continuation to worse minima on 2 of 3 seeds.
 
 **Measured by:**
 - Gate 0 corpus: 60/60 solved, 0 below `f*` (no regression).
