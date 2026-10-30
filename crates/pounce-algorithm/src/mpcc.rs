@@ -229,15 +229,32 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
     let row_tol = corner;
 
     // Pair sides and their family scales.
+    // Each side's orientation from its one finite bound, as MpccTnlp reads
+    // it: (+1, lower) or (-1, upper).
+    let side = |lo: Number, hi: Number| -> (Number, Number) {
+        if lo > -INF { (1.0, lo) } else { (-1.0, hi) }
+    };
+    let g_side: Vec<(Number, Number)> = inp
+        .pairs
+        .iter()
+        .map(|p| side(inp.x_l[p.var], inp.x_u[p.var]))
+        .collect();
+    let h_side: Vec<(Number, Number)> = inp
+        .pairs
+        .iter()
+        .map(|p| side(inp.g_l[p.row], inp.g_u[p.row]))
+        .collect();
     let gv: Vec<Number> = inp
         .pairs
         .iter()
-        .map(|p| inp.x[p.var] - inp.x_l[p.var])
+        .zip(&g_side)
+        .map(|(p, &(s, b))| s * (inp.x[p.var] - b))
         .collect();
     let hv: Vec<Number> = inp
         .pairs
         .iter()
-        .map(|p| inp.g[p.row] - inp.g_l[p.row])
+        .zip(&h_side)
+        .map(|(p, &(s, c))| s * (inp.g[p.row] - c))
         .collect();
     let gs = gv.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
     let hs = hv.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
@@ -265,10 +282,13 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
     let mut cols: Vec<(Vec<(usize, Number)>, Sign)> = Vec::new();
     for i in 0..m {
         if let Some(k) = pair_row[i] {
+            let sh = h_side[k].0;
+            let grad_h: Vec<(usize, Number)> =
+                rows_of[i].iter().map(|&(c, v)| (c, sh * v)).collect();
             match (g_act[k], h_act[k]) {
                 (_, false) => {}
-                (true, true) => cols.push((rows_of[i].clone(), Sign::Biactive)),
-                (false, true) => cols.push((rows_of[i].clone(), Sign::Free)),
+                (true, true) => cols.push((grad_h, Sign::Biactive)),
+                (false, true) => cols.push((grad_h, Sign::Free)),
             }
             continue;
         }
@@ -285,12 +305,13 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
     }
     for (j, pv) in pair_var.iter().enumerate() {
         if let Some(k) = *pv {
+            let sg = g_side[k].0;
             match (g_act[k], h_act[k]) {
                 (false, _) => {}
-                (true, true) => cols.push((vec![(j, 1.0)], Sign::Biactive)),
-                (true, false) => cols.push((vec![(j, 1.0)], Sign::Free)),
+                (true, true) => cols.push((vec![(j, sg)], Sign::Biactive)),
+                (true, false) => cols.push((vec![(j, sg)], Sign::Free)),
             }
-            // A pair variable's upper bound is infinite (MpccTnlp refuses
+            // A pair variable's other bound is infinite (MpccTnlp refuses
             // anything else), so nothing more to add.
             continue;
         }
@@ -770,6 +791,19 @@ mod tests {
         let c = run(&m, &[0.0, 0.0], &[2.0, -1.0], &[0.0]);
         assert_eq!((c.class, c.n_biactive), (StationarityClass::W, 1), "{c:?}");
 
+        // ralph1 mirrored through x -> -x, y -> -y (both sides upper-bounded:
+        // y <= 0 ⟂ y - x <= 0): the same point, the same verdict.
+        let mirrored = Model {
+            x_l: vec![NI, NI],
+            x_u: vec![0.0, 0.0],
+            g_l: vec![NI],
+            g_u: vec![0.0],
+            pairs: vec![ComplementarityPair { row: 0, var: 1 }],
+            jac: vec![(0, 0, -1.0), (0, 1, 1.0)],
+        };
+        let c = run(&mirrored, &[0.0, 0.0], &[-2.0, 1.0], &[0.0]);
+        assert_eq!((c.class, c.n_biactive), (StationarityClass::W, 1), "{c:?}");
+
         // ctrap: min x1^2 + x2^2 - x1 - x2,  0 <= x1 ⟂ x2 >= 0. Origin: C, not S.
         let m = Model {
             x_l: vec![0.0, NI],
@@ -799,6 +833,20 @@ mod tests {
         };
         let c = run(&m, &[1.0, 1.0, 0.0], &[0.0, 0.0, 0.0], &[0.0, 0.0]);
         assert_eq!((c.class, c.n_biactive), (StationarityClass::S, 1), "{c:?}");
+        // ctrap's minimizer mirrored (x1 <= 0 ⟂ x2 <= 0, at (-1/2, 0)): S,
+        // reading the orientation from the finite bounds.
+        let m = Model {
+            x_l: vec![NI, NI],
+            x_u: vec![0.0, PI],
+            g_l: vec![NI],
+            g_u: vec![0.0],
+            pairs: vec![ComplementarityPair { row: 0, var: 0 }],
+            jac: vec![(0, 1, 1.0)],
+        };
+        let c = run(&m, &[-0.5, 0.0], &[0.0, 1.0], &[0.0]);
+        assert_eq!((c.class, c.n_biactive), (StationarityClass::S, 0), "{c:?}");
+        let c = run(&m, &[0.0, 0.0], &[1.0, 1.0], &[0.0]);
+        assert_eq!(c.class, StationarityClass::W, "{c:?}");
     }
 
     /// The class is a property of the multiplier *set*. Here an equality row

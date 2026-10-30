@@ -13,16 +13,19 @@
 //! A [`ComplementarityPair`] `{ row: i, var: j }` declares
 //!
 //! ```text
-//! 0 <= G(x) := x_j - x_L[j]   ⟂   H(x) := g_i(x) - g_L[i] >= 0
+//! 0 <= G(x) := s_G (x_j - b_j)   ⟂   H(x) := s_H (g_i(x) - c_i) >= 0
 //! ```
 //!
-//! which is AMPL's `g_i(x) complements x_j` with `x_j` bounded below only —
-//! the shape `.nl` complementarity rows (kind 5, one finite variable bound)
-//! encode — and covers the corpus in `benchmarks/calipso/`. The inner model
-//! must state those bounds itself (`x_L[j]` and `g_L[i]` finite, `x_U[j]`
-//! and `g_U[i]` infinite); [`MpccTnlp::new`] refuses anything else with the
-//! reason, rather than guess at a two-sided (mixed) complementarity it does
-//! not lower. A pair between two variables is a row `g_i(x) = x_k` away.
+//! where each side takes its orientation from the one finite bound the
+//! model states: `x_j` bounded below gives `s_G = +1, b_j = x_L[j]`, bounded
+//! above gives `s_G = -1, b_j = x_U[j]`; row `i` likewise from `g_L` / `g_U`.
+//! That is AMPL's `g_i(x) complements x_j` in both one-sided forms — the
+//! shapes `.nl` complementarity rows encode (kind 5 with one finite variable
+//! bound: `x >= l ⟂ body >= 0` or `x <= u ⟂ body <= 0`) — and covers the
+//! corpus in `benchmarks/calipso/`. A side with both bounds finite or both
+//! infinite (two-sided / mixed complementarity, or no bound at all) is
+//! refused by [`MpccTnlp::new`] with the reason, rather than lowered
+//! wrongly. A pair between two variables is a row `g_i(x) = x_k` away.
 //!
 //! ## What the wrapper adds
 //!
@@ -40,10 +43,10 @@
 //!
 //! ## Derivatives
 //!
-//! `∇p = H e_j + G ∇g_i`. The Lagrangian Hessian of the lowered model is the
-//! inner one evaluated with the row-`i` multiplier shifted by `μ_k G`, plus
-//! the cross terms `μ_k (e_j ∇g_iᵀ + ∇g_i e_jᵀ)` (`2 μ_k ∂g_i/∂x_j` on the
-//! diagonal when `x_j` appears in `g_i`). Cross entries the inner Hessian
+//! `∇p = s_G H e_j + s_H G ∇g_i`. The Lagrangian Hessian of the lowered
+//! model is the inner one evaluated with the row-`i` multiplier shifted by
+//! `μ_k s_H G`, plus the cross terms `μ_k s_G s_H (e_j ∇g_iᵀ + ∇g_i e_jᵀ)`
+//! (doubled on the diagonal when `x_j` appears in `g_i`). Cross entries the inner Hessian
 //! already has are accumulated in place; the rest are appended. No entry is
 //! ever duplicated, in the Jacobian or the Hessian.
 //!
@@ -107,9 +110,10 @@ pub struct MpccTnlp {
     index_style: IndexStyle,
     inner_jac_nnz: usize,
     inner_h_nnz: usize,
-    /// `x_L[j]` and `g_L[i]` per pair.
-    g_offset: Vec<Number>,
-    h_offset: Vec<Number>,
+    /// Per pair: `(s_G, b_j)` and `(s_H, c_i)` — orientation sign and the
+    /// finite bound each side is measured from.
+    g_side: Vec<(Number, Number)>,
+    h_side: Vec<(Number, Number)>,
     /// Per pair: positions in the inner Jacobian value array of row `i`'s
     /// entries, and their (0-based) columns.
     row_entries: Vec<Vec<(usize, usize)>>,
@@ -139,6 +143,16 @@ pub struct MpccTnlp {
     last_products: Vec<Number>,
     defer_inner_finalize: bool,
     start_override: Option<StartOverride>,
+}
+
+/// `(sign, bound)` for a side with exactly one finite bound: `(+1, lo)` when
+/// only the lower bound is finite, `(-1, hi)` when only the upper is.
+fn one_sided(lo: Number, hi: Number) -> Option<(Number, Number)> {
+    match (lo > -INF, hi < INF) {
+        (true, false) => Some((1.0, lo)),
+        (false, true) => Some((-1.0, hi)),
+        _ => None,
+    }
 }
 
 fn base(style: IndexStyle) -> Index {
@@ -182,8 +196,8 @@ impl MpccTnlp {
 
         let mut seen_row = vec![false; m];
         let mut seen_var = vec![false; n];
-        let mut g_offset = Vec::with_capacity(pairs.len());
-        let mut h_offset = Vec::with_capacity(pairs.len());
+        let mut g_side = Vec::with_capacity(pairs.len());
+        let mut h_side = Vec::with_capacity(pairs.len());
         for (k, p) in pairs.iter().enumerate() {
             if p.var >= n || p.row >= m {
                 return Err(format!(
@@ -198,16 +212,16 @@ impl MpccTnlp {
                 return Err(format!("pair {k}: row {} is already in a pair", p.row));
             }
             let (xl, xu, gl, gu) = (x_l[p.var], x_u[p.var], g_l[p.row], g_u[p.row]);
-            if !(xl > -INF && xu >= INF && gl > -INF && gu >= INF) {
+            let (Some(gs), Some(hs)) = (one_sided(xl, xu), one_sided(gl, gu)) else {
                 return Err(format!(
-                    "pair {k}: only one-sided pairs `0 <= x_j - x_L ⟂ g_i(x) - g_L >= 0` are \
-                     lowered (finite x_L and g_L, infinite x_U and g_U); variable {} has bounds \
-                     [{xl:e}, {xu:e}] and row {} has [{gl:e}, {gu:e}]",
+                    "pair {k}: only one-sided pairs are lowered -- each side needs exactly one \
+                     finite bound (`x >= l ⟂ g >= 0`-type, either orientation); variable {} has \
+                     bounds [{xl:e}, {xu:e}] and row {} has [{gl:e}, {gu:e}]",
                     p.var, p.row
                 ));
-            }
-            g_offset.push(xl);
-            h_offset.push(gl);
+            };
+            g_side.push(gs);
+            h_side.push(hs);
         }
 
         // Inner Jacobian structure, 0-based.
@@ -289,8 +303,8 @@ impl MpccTnlp {
             index_style: style,
             inner_jac_nnz: jnnz,
             inner_h_nnz: hnnz,
-            g_offset,
-            h_offset,
+            g_side,
+            h_side,
             row_entries,
             var_slot,
             jac_block,
@@ -390,10 +404,8 @@ impl MpccTnlp {
             .iter()
             .enumerate()
             .map(|(k, p)| {
-                (
-                    x[p.var] - self.g_offset[k],
-                    self.g_inner[p.row] - self.h_offset[k],
-                )
+                let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
+                (sg * (x[p.var] - b), sh * (self.g_inner[p.row] - c))
             })
             .collect()
     }
@@ -574,18 +586,19 @@ impl TNLP for MpccTnlp {
                 }
                 let pv = self.pair_values_from(x);
                 for (k, &(gk, hk)) in pv.iter().enumerate() {
+                    let (sg, sh) = (self.g_side[k].0, self.h_side[k].0);
                     let b = self.jac_block[k];
                     let ents = &self.row_entries[k];
                     // G ∇g_i on row i's columns ...
                     for (s, &(pos, _)) in ents.iter().enumerate() {
-                        values[b + s] = gk * values[pos];
+                        values[b + s] = gk * sh * values[pos];
                     }
                     // ... plus H on column j, in place or appended.
                     let slot = self.var_slot[k];
                     if slot == ents.len() {
-                        values[b + slot] = hk;
+                        values[b + slot] = hk * sg;
                     } else {
-                        values[b + slot] += hk;
+                        values[b + slot] += hk * sg;
                     }
                 }
                 true
@@ -642,7 +655,7 @@ impl TNLP for MpccTnlp {
                 // Row-i multipliers shifted by μ_k G_k.
                 self.lam_inner.copy_from_slice(&lambda[..m]);
                 for (k, p) in self.pairs.iter().enumerate() {
-                    self.lam_inner[p.row] += lambda[m + k] * pv[k].0;
+                    self.lam_inner[p.row] += lambda[m + k] * pv[k].0 * self.h_side[k].0;
                 }
                 values.fill(0.0);
                 {
@@ -675,7 +688,7 @@ impl TNLP for MpccTnlp {
                 }
                 // Cross terms μ_k (e_j ∇g_iᵀ + ∇g_i e_jᵀ), lower triangle.
                 for (k, p) in self.pairs.iter().enumerate() {
-                    let mu = lambda[m + k];
+                    let mu = lambda[m + k] * self.g_side[k].0 * self.h_side[k].0;
                     if mu == 0.0 {
                         continue;
                     }
@@ -1194,6 +1207,108 @@ mod tests {
         ));
         assert!((h[0] - (2.0 * s + 6.0 * x[0] * (l0 + mu * x[1]))).abs() < 1e-13);
         assert!((h[1] - 3.0 * mu * x[0] * x[0]).abs() < 1e-13);
+    }
+
+    /// The toy model with its bounds flipped so the pairs take the other
+    /// orientations: pair (row 0, var 1) has `x_1 <= 2 ⟂ g_0 <= 0.5` (both
+    /// sides upper-bounded, `s_G = s_H = -1`); pair (row 1, var 2) has
+    /// `x_2 >= -1 ⟂ g_1 <= 3` (mixed, `s_G = +1, s_H = -1`).
+    struct Flipped(Toy);
+
+    impl TNLP for Flipped {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.0.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-5.0, -1e19, -1.0]);
+            b.x_u.copy_from_slice(&[5.0, 2.0, 1e19]);
+            b.g_l.copy_from_slice(&[-1e19, -1e19, -10.0]);
+            b.g_u.copy_from_slice(&[0.5, 3.0, 10.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.0.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            self.0.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+            self.0.eval_jac_g(x, n, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            n: bool,
+            s: Number,
+            l: Option<&[Number]>,
+            nl: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.0.eval_h(x, n, s, l, nl, mode)
+        }
+        fn finalize_solution(&mut self, s: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.0.finalize_solution(s, d, q)
+        }
+    }
+
+    #[test]
+    fn upper_and_mixed_orientations() {
+        let mut w = MpccTnlp::new(
+            Rc::new(RefCell::new(Flipped(Toy {
+                style: IndexStyle::C,
+            }))),
+            pairs(),
+            Lowering::Eq,
+        )
+        .unwrap();
+        // G and H are the oriented slacks, each >= 0 on the feasible side.
+        let gi = Toy::g(&X);
+        let g = lowered_g(&mut w, &X);
+        assert!((g[3] - (2.0 - X[1]) * (0.5 - gi[0])).abs() < 1e-15, "{g:?}");
+        assert!((g[4] - (X[2] + 1.0) * (3.0 - gi[1])).abs() < 1e-15, "{g:?}");
+        // Jacobian and Hessian against central differences.
+        let j = dense_jac(&mut w, &X);
+        let lam = [0.3, -1.2, 0.8, 2.5, -0.7];
+        let s = 1.7;
+        let hd = dense_hess(&mut w, &X, s, &lam);
+        let grad_l = |w: &mut MpccTnlp, x: &[Number]| -> Vec<Number> {
+            let mut gf = vec![0.0; 3];
+            assert!(w.eval_grad_f(x, true, &mut gf));
+            let j = dense_jac(w, x);
+            (0..3)
+                .map(|c| s * gf[c] + (0..5).map(|r| lam[r] * j[r][c]).sum::<Number>())
+                .collect()
+        };
+        let h = 1e-6;
+        for c in 0..3 {
+            let (mut xp, mut xm) = (X, X);
+            xp[c] += h;
+            xm[c] -= h;
+            let (gp, gm) = (lowered_g(&mut w, &xp), lowered_g(&mut w, &xm));
+            for r in 0..5 {
+                let fd = (gp[r] - gm[r]) / (2.0 * h);
+                assert!(
+                    (j[r][c] - fd).abs() < 1e-8,
+                    "J[{r}][{c}] = {} vs fd {fd}",
+                    j[r][c]
+                );
+            }
+            let (lp, lm) = (grad_l(&mut w, &xp), grad_l(&mut w, &xm));
+            for r in 0..3 {
+                let fd = (lp[r] - lm[r]) / (2.0 * h);
+                assert!(
+                    (hd[r][c] - fd).abs() < 1e-7,
+                    "H[{r}][{c}] = {} vs fd {fd}",
+                    hd[r][c]
+                );
+            }
+        }
     }
 
     #[test]
