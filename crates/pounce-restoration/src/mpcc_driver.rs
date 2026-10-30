@@ -241,8 +241,16 @@ pub fn solve_mpcc(
             MpccStage::Exact => {
                 // `G·H <= 0` where the equality would over-determine the
                 // model (same feasible set), as the continuation's finish.
+                // Also retried whenever the equality solve was refused
+                // before iteration 0 (no point), whatever the status: the
+                // degrees-of-freedom gate can refuse an over-determined
+                // model with a proven verdict (`Infeasible_Problem_Detected`)
+                // rather than `Not_Enough_Degrees_Of_Freedom`, and the
+                // inequality form then gives a verdict with a point of its
+                // own.
                 let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
-                if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom {
+                if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty()
+                {
                     baseline(app);
                     c = run(app, stage, Lowering::Ineq, None, &mut solves);
                 }
@@ -409,10 +417,7 @@ pub fn solve_mpcc(
     // one (converged, products in tolerance, not stationary) with its
     // certificate; failing that, the exact-product stage's verdict (or, if
     // it was refused with no point, the first stage that has one).
-    let verdict = match exact {
-        Some(e) if !e.x.is_empty() => Some(e),
-        e => first.or(e),
-    };
+    let verdict = verdict_of(exact, first);
     let (reported, chosen, known_cert) = match (accepted, weak, physical, verdict) {
         (Some((s, c, cert, _)), _, _, _) => (Reported::Answer(s), c, Some(cert)),
         (None, Some((s, c, cert)), _, _) => (Reported::WeakFallback(s), c, Some(cert)),
@@ -468,6 +473,25 @@ fn objective_at(inner: &Rc<RefCell<dyn TNLP>>, x: &[Number]) -> Number {
         .eval_f(x, true)
         .filter(|f| f.is_finite())
         .unwrap_or(Number::INFINITY)
+}
+
+/// The point and status reported when no stage answered: the exact-product
+/// stage's. If that stage has no point (refused before iteration 0), the
+/// point is borrowed from the first stage that has one — but the status stays
+/// the exact stage's. A relaxed solve's `Solve_Succeeded` is a success on the
+/// relaxation; carried over whole, it reported success for a model the exact
+/// stage had proved infeasible (PR review of #1103).
+fn verdict_of(exact: Option<Captured>, first: Option<Captured>) -> Option<Captured> {
+    match (exact, first) {
+        (Some(e), _) if !e.x.is_empty() => Some(e),
+        (Some(e), Some(f)) => Some(Captured {
+            status: e.status,
+            solver_return: e.solver_return,
+            statistics: e.statistics,
+            ..f
+        }),
+        (e, f) => e.or(f),
+    }
 }
 
 /// Evaluate the *inner* model at `x` and certify it. `None` if any callback
@@ -530,4 +554,50 @@ fn certify_at(
         pairs,
         solver_tol,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cap(status: ApplicationReturnStatus, x: Vec<Number>) -> Captured {
+        Captured {
+            status,
+            solver_return: SolverReturn::InternalError,
+            statistics: SolveStatistics::default(),
+            max_abs_product: if x.is_empty() { Number::INFINITY } else { 0.25 },
+            x,
+            z_l: Vec::new(),
+            z_u: Vec::new(),
+            lambda: Vec::new(),
+        }
+    }
+
+    /// The exact stage refused before iteration 0 with a proven verdict and
+    /// no point, after a relaxed solve that "succeeded": the reported status
+    /// is the exact stage's, never the relaxed success; only the point is
+    /// borrowed.
+    #[test]
+    fn a_refused_exact_stage_keeps_its_own_verdict() {
+        let exact = cap(
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            Vec::new(),
+        );
+        let first = cap(ApplicationReturnStatus::SolveSucceeded, vec![0.5, 0.5]);
+        let v = verdict_of(Some(exact), Some(first)).unwrap();
+        assert_eq!(v.status, ApplicationReturnStatus::InfeasibleProblemDetected);
+        assert_eq!(v.x, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn an_exact_stage_with_a_point_is_the_verdict() {
+        let exact = cap(
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            vec![1.0, 0.0],
+        );
+        let first = cap(ApplicationReturnStatus::SolveSucceeded, vec![0.5, 0.5]);
+        let v = verdict_of(Some(exact), Some(first)).unwrap();
+        assert_eq!(v.status, ApplicationReturnStatus::InfeasibleProblemDetected);
+        assert_eq!(v.x, vec![1.0, 0.0]);
+    }
 }
