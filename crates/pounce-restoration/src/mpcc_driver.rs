@@ -11,8 +11,9 @@
 //! * **Only the reported answer reaches the caller's model.** The wrapper
 //!   defers `finalize_solution`; every stage's result is captured from it,
 //!   and the accepted one (or, if none is accepted, the exact-product stage's,
-//!   which is what a plain solve of the lowered model would have reported)
-//!   is forwarded once, at the end.
+//!   which is what a plain solve of the lowered model would have reported —
+//!   never a relaxed stage's, whose success is on the relaxation) is
+//!   forwarded once, at the end.
 //! * **Options are restored to set-ness.** Every option a stage writes is
 //!   snapshotted before the first stage with `OptionsList::snapshot_entry`
 //!   and restored after the last, so a knob the caller never set is unset
@@ -144,6 +145,13 @@ pub fn solve_mpcc(
     };
 
     let mut solves: Vec<MpccSolveRecord> = Vec::new();
+    // The exact-product stage's result: what a plain solve of the lowered
+    // model says, and so the verdict reported when no stage answers. A
+    // relaxed solve's "success" is a success on the relaxation, never on the
+    // model.
+    let mut exact: Option<Captured> = None;
+    // The first stage that returned a point, standing in for `exact` if
+    // that stage was refused before iteration 0.
     let mut first: Option<Captured> = None;
     let mut accepted: Option<(MpccStage, Captured, Option<Certificate>)> = None;
     // The first stage that certified only W: the answer if no later stage
@@ -219,6 +227,7 @@ pub fn solve_mpcc(
                     baseline(app);
                     c = run(app, stage, Lowering::Ineq, None, &mut solves);
                 }
+                exact = Some(c.clone());
                 Some(c)
             }
             MpccStage::Continuation => {
@@ -292,9 +301,10 @@ pub fn solve_mpcc(
             }
         };
         if let Some(c) = &candidate {
-            // A stage refused before iteration 0 has no point to report;
-            // the verdict of the first stage that has one stands in for it.
-            if first.as_ref().is_none_or(|f| f.x.is_empty() && !c.x.is_empty()) {
+            if first
+                .as_ref()
+                .is_none_or(|f| f.x.is_empty() && !c.x.is_empty())
+            {
                 first = Some(c.clone());
             }
         }
@@ -356,10 +366,13 @@ pub fn solve_mpcc(
 
     // With no S answer, the first W one; with neither, the first physical
     // one (converged, products in tolerance, not stationary) with its
-    // certificate; failing that, the exact-product stage: what a plain solve
-    // of the lowered model says. That stage always runs first, so `first` is
-    // only empty if `STAGES` is reordered without this function following.
-    let (accepted_by, chosen, known_cert) = match (accepted.or(weak), physical, first) {
+    // certificate; failing that, the exact-product stage's verdict (or, if
+    // it was refused with no point, the first stage that has one).
+    let verdict = match exact {
+        Some(e) if !e.x.is_empty() => Some(e),
+        e => first.or(e),
+    };
+    let (accepted_by, chosen, known_cert) = match (accepted.or(weak), physical, verdict) {
         (Some((s, c, cert)), _, _) => (Some(s), c, Some(cert)),
         (None, Some((c, cert)), _) => (None, c, Some(cert)),
         (None, None, Some(c)) => (None, c, None),

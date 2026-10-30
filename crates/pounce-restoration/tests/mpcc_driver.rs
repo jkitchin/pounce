@@ -262,20 +262,15 @@ fn qpec_small_reaches_the_answer_from_every_gate0_start() {
 /// Two variables, one equality and two pairs: the exact product would make
 /// three equalities in two unknowns, which the solver refuses before
 /// iterating (`Not_Enough_Degrees_Of_Freedom`, as upstream Ipopt does). The
-/// exact stage falls back to `G·H <= 0` — the same feasible set, without the
-/// equality rows — and answers. The only feasible point is (0.5, 0.5).
-///
-/// Before the fallback the exact stage reported the refusal with no point,
-/// and the continuation answered; on a model where every stage then failed
-/// (Gate 0's `infeasible_pair` declared) the empty point was what reached
-/// the caller.
+/// continuation's products are inequalities, and its finish falls back to
+/// `G·H <= 0` for the same reason. The only feasible point is (0.5, 0.5).
 ///
 /// ```text
 /// min (x-0.3)^2 + (y-0.9)^2   s.t.  x + y = 1
 ///     0 <= x ⟂ y - 0.5 >= 0,   0 <= y ⟂ x - 0.5 >= 0
 /// ```
 #[test]
-fn an_over_determined_exact_product_falls_back_to_the_inequality_product() {
+fn an_over_determined_model_is_answered_through_the_inequality_finish() {
     let finalized = Rc::new(RefCell::new(Vec::new()));
     let zero = || vec![vec![0.0; 2]; 2];
     let model = Dense {
@@ -306,13 +301,18 @@ fn an_over_determined_exact_product_falls_back_to_the_inequality_product() {
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
     let out = solve_mpcc(&mut app, tnlp, pairs, &mut |_| {}).unwrap();
     assert_eq!(
-        out.solves[0].status,
-        ApplicationReturnStatus::NotEnoughDegreesOfFreedom,
+        out.accepted_by,
+        Some(MpccStage::Continuation),
         "{:?}",
         out.solves
     );
-    assert_eq!(out.accepted_by, Some(MpccStage::Exact), "{:?}", out.solves);
-    assert_eq!(out.solves.len(), 2, "{:?}", out.solves);
+    assert!(
+        out.solves
+            .iter()
+            .any(|s| s.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom),
+        "the equality finish should have been refused: {:?}",
+        out.solves
+    );
     assert!(
         (out.x[0] - 0.5).abs() < 1e-5 && (out.x[1] - 0.5).abs() < 1e-5,
         "{:?}",
@@ -508,7 +508,13 @@ fn when_no_stage_succeeds_the_exact_verdict_is_reported() {
     )
     .unwrap();
     assert_eq!(out.accepted_by, None, "{:?}", out.solves);
-    assert_eq!(out.status, out.solves[0].status);
+    let exact = out.solves.iter().find(|s| s.stage == MpccStage::Exact);
+    assert_eq!(
+        Some(out.status),
+        exact.map(|s| s.status),
+        "{:?}",
+        out.solves
+    );
     assert!(
         out.solves
             .iter()
@@ -516,6 +522,78 @@ fn when_no_stage_succeeds_the_exact_verdict_is_reported() {
     );
     assert!(out.solves.iter().any(|s| s.stage == MpccStage::Penalty));
     assert_eq!(finalized.borrow().len(), 1);
+}
+
+/// Gate 0's `infeasible_pair`: two equalities force `(1/2, 1/2)`, where the
+/// product is 1/4, so the MPCC has no feasible point; and the model is
+/// square, so the exact product's equality row is refused before iteration
+/// 0. Declared, this once reported a relaxed solve's `Solve_Succeeded`
+/// (continuation first, nothing answering) and, before that, forwarded the
+/// refused stage's empty point. The exact stage must fall back to
+/// `G·H <= 0`, and its verdict — infeasible — is what is reported.
+///
+/// ```text
+/// min x^2 + y^2   s.t.  x + y = 1,  x - y = 0,   0 <= x ⟂ y >= 0
+/// ```
+#[test]
+fn a_square_infeasible_model_reports_the_exact_verdict_with_a_point() {
+    let zero = || vec![vec![0.0; 2]; 2];
+    let finalized = Rc::new(RefCell::new(Vec::new()));
+    let model = Dense {
+        n: 2,
+        m: 3,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![1.0, 0.0, 0.0],
+        g_u: vec![1.0, 0.0, INF],
+        x0: vec![0.0, 0.0],
+        f: Box::new(|x| x[0] * x[0] + x[1] * x[1]),
+        grad: Box::new(|x| vec![2.0 * x[0], 2.0 * x[1]]),
+        g: Box::new(|x| vec![x[0] + x[1], x[0] - x[1], x[1]]),
+        jac: Box::new(|_| vec![vec![1.0, 1.0], vec![1.0, -1.0], vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero(), zero(), zero()]
+        }),
+        finalized: Rc::clone(&finalized),
+    };
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let out = solve_mpcc(
+        &mut app,
+        tnlp,
+        vec![ComplementarityPair { row: 2, var: 0 }],
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(out.accepted_by, None, "{:?}", out.solves);
+    let exact: Vec<_> = out
+        .solves
+        .iter()
+        .filter(|s| s.stage == MpccStage::Exact)
+        .collect();
+    assert_eq!(
+        exact.first().map(|s| s.status),
+        Some(ApplicationReturnStatus::NotEnoughDegreesOfFreedom),
+        "{:?}",
+        out.solves
+    );
+    assert_eq!(exact.len(), 2, "the G·H <= 0 retry: {:?}", out.solves);
+    assert_eq!(out.status, exact[1].status);
+    assert!(
+        !matches!(
+            out.status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(out.x.len(), 2);
+    assert_eq!(finalized.borrow().len(), 1);
+    assert_eq!(finalized.borrow()[0].len(), 2);
 }
 
 /// Every option a stage writes reads afterwards exactly as before, set-ness

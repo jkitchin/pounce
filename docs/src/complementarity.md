@@ -73,17 +73,29 @@ The model is solved as an NLP (never routed to a convex engine — with the
 pairing it is not convex), through a short ladder of formulations, the
 first one that *answers* winning:
 
-1. **Exact** — `G·H = 0` per pair, falling back to `G·H <= 0` when the
-   equality form leaves too few degrees of freedom.
-2. **Continuation** — Scholtes relaxation `G·H <= τ`, `τ` from 1 down to
-   1e-8, each solve warm-started from the last, then an exact finish.
+1. **Continuation** — Scholtes relaxation `G·H <= τ`, `τ` from 1 down to
+   1e-8, each solve warm-started from the last, then an exact finish
+   (`G·H = 0`, or `G·H <= 0` when the equality form leaves too few degrees
+   of freedom).
+2. **Exact** — `G·H = 0` per pair from your start, with the same fallback.
 3. **Penalty** — the complementarity products moved into the objective with
    an exact ℓ₁ weight.
 
+The continuation goes first because it finds better answers: the
+relaxation sees the whole feasible set before committing to a branch,
+where the exact product commits from the start and often converges to a
+local minimum that is not the best one. On the 60 feasible cells of the
+MPCC benchmark corpus (`benchmarks/mpcc/declared.py`) it reached the
+optimum on all 60, against 48 for exact-first, at about 3× the iterations.
+
 A stage *answers* only if it converged, every product is within
-`constr_viol_tol`, and the point passes the stationarity certificate below.
-A solve that exits "acceptable" at a point that is not stationary does not
-end the ladder. Your options apply to every stage and are restored after
+`constr_viol_tol`, and the point is certified strongly stationary (S, see
+below). A solve that exits "acceptable" at a point that is not stationary
+does not end the ladder, and neither does a weakly stationary (W) point:
+it is kept, and returned only if no later stage finds an S point. If no
+stage answers, the exact product's own verdict is reported (for an
+infeasible model, `Infeasible_Problem_Detected`) — never a relaxed solve's
+success. Your options apply to every stage and are restored after
 the solve. Unless you set them yourself, declared pairs also run with
 `bound_relax_factor = 0` and `honor_original_bounds = yes`: a relaxed bound
 moves the point a complementarity is measured from.
@@ -93,7 +105,7 @@ moves the point a complementarity is measured from.
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:
 
 ```text
-pounce: complementarity: answered by the exact product formulation (1 lowered solve, 80 iterations in all, max |G·H| = 2.2e-16); 2 pairs, 1 biactive; stationarity: S (strongly stationary).
+pounce: complementarity: answered by …; 2 pairs, 1 biactive; stationarity: S (strongly stationary).
 ```
 
 From Python, `info["complementarity"]` holds `accepted_by` (the stage, or

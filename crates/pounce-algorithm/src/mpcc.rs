@@ -20,6 +20,21 @@
 //! them in [`STAGES`] order and stops at the first answer that passes
 //! [`accepts`].
 //!
+//! ## Why the continuation goes first
+//!
+//! Measured on the Gate 0 corpus (`benchmarks/mpcc/declared.py`, 60 feasible
+//! cells: every case, both scaling legs, every start). Exact first: 60
+//! solved, 0 below `f*`, but only **48** at `f*` — the exact product
+//! converges fast (median 19 iterations) to S-stationary local minima that
+//! are not the optimum (`regular_strict` 4 for 1, the selectors 0.75 for
+//! 0.25). Continuation first: 60 solved, **60** at `f*`, 0 below, median 60
+//! iterations — against 57 at `f*` for `scholtes_then_ncp`, the route Gate 0
+//! chose as supported. The relaxation at `τ = 1` sees the whole feasible
+//! set before it commits to a branch; the exact product commits from the
+//! start. The cost is about 3× the iterations where the exact product
+//! would have found the optimum anyway. The exact product stays as the
+//! second stage, for models whose relaxation path fails.
+//!
 //! ## What an answer is
 //!
 //! A converged status is not enough: a lowered solve "succeeds" on its own
@@ -40,7 +55,8 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 /// The stages, in the order the driver tries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpccStage {
-    /// `G·H = 0` from the model's own start.
+    /// `G·H = 0` from the model's own start (`G·H <= 0` where the equality
+    /// would leave the model with more equalities than variables).
     Exact,
     /// `G·H <= τ` for τ down [`SCHOLTES_SCHEDULE`], each stage warm-started
     /// from the last, then one `G·H = 0` solve from the end of it
