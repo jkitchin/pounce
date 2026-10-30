@@ -272,6 +272,34 @@ impl IpoptCalculatedQuantities {
             .unwrap_or_default()
     }
 
+    /// Add the cones' Mehrotra second-order term to a Newton `s` right-hand
+    /// side (`rhs_s`, in the solver's `−rhs` convention, so the cone rows read
+    /// `H ds + dz = −rhs`): `rhs += c`, `c` from [`soc_slack::mehrotra_term`]
+    /// at the affine step `delta_aff` (`dz_a = −Δy_d` on the cone rows).
+    /// `false` if a cone has left the interior (nothing is added then).
+    pub fn add_soc_mehrotra(&self, delta_aff: &IteratesVector, rhs_s: &mut dyn Vector) -> bool {
+        let (Some(layout), Some(p)) = (self.soc_layout(), self.curr_soc_pairs()) else {
+            return true;
+        };
+        let ds = dense(&*delta_aff.s);
+        let dy = dense(&*delta_aff.y_d);
+        let mut terms = Vec::with_capacity(layout.blocks.len());
+        for (k, rows) in layout.blocks.iter().enumerate() {
+            let dsk: Vec<Number> = rows.iter().map(|&r| ds[r]).collect();
+            let dzk: Vec<Number> = rows.iter().map(|&r| -dy[r]).collect();
+            match soc_slack::mehrotra_term(&p.s[k], &p.z[k], &dsk, &dzk) {
+                Some(c) => terms.push(c),
+                None => return false,
+            }
+        }
+        write_rows(rhs_s, &layout, |k, block| {
+            for (b, c) in block.iter_mut().zip(&terms[k]) {
+                *b += c;
+            }
+        });
+        true
+    }
+
     /// `δ_sᵀ H δ_s` summed over cones: the cones' share of the quadratic
     /// model's `δ_sᵀ Σ_s δ_s` term.
     pub(crate) fn soc_dhd(&self, delta_s: &dyn Vector) -> Number {

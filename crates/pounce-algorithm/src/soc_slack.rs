@@ -102,6 +102,98 @@ pub fn nt_block(s: &[Number], z: &[Number]) -> Option<Vec<Number>> {
     h.iter().all(|v| v.is_finite()).then_some(h)
 }
 
+/// The Nesterov–Todd scaling of a pair, as `(η, v)` with `W = η(2 v vᵀ − J)`
+/// and `W² z = s` (`pounce-convex`'s convention) — so `H = W⁻²`
+/// ([`nt_block`]) and the scaled point is `λ = W z = W⁻¹ s`. `v` is the Jordan
+/// square root of the NT point `w̄` (`det w̄ = 1`): `η²(2 w̄ w̄ᵀ − J)` is `W²`,
+/// not `W`. `None` outside the interior.
+pub fn nt_scaling(s: &[Number], z: &[Number]) -> Option<(Number, Vec<Number>)> {
+    if !(in_interior(s) && in_interior(z)) {
+        return None;
+    }
+    let m = s.len();
+    let sd = det(s).sqrt();
+    let zd = det(z).sqrt();
+    let sz: Number = s.iter().zip(z).map(|(a, b)| (a / sd) * (b / zd)).sum();
+    let gamma = ((1.0 + sz) / 2.0).sqrt();
+    let mut w = vec![0.0; m];
+    w[0] = (s[0] / sd + z[0] / zd) / (2.0 * gamma);
+    for k in 1..m {
+        w[k] = (s[k] / sd - z[k] / zd) / (2.0 * gamma);
+    }
+    // Jordan square root of w̄ (det w̄ = 1).
+    let v0 = ((w[0] + 1.0) / 2.0).sqrt();
+    let mut v = vec![0.0; m];
+    v[0] = v0;
+    for k in 1..m {
+        v[k] = w[k] / (2.0 * v0);
+    }
+    Some(((sd / zd).sqrt(), v))
+}
+
+/// `out = W v` (`inverse = false`) or `W⁻¹ v` (`inverse = true`) for the
+/// scaling [`nt_scaling`] returns. `W⁻¹ = η⁻¹(2 (J w̄)(J w̄)ᵀ − J)`.
+pub fn apply_nt(eta: Number, w: &[Number], v: &[Number], inverse: bool, out: &mut [Number]) {
+    let m = w.len();
+    if inverse {
+        let jwv: Number = w[0] * v[0] - (1..m).map(|k| w[k] * v[k]).sum::<Number>();
+        out[0] = (2.0 * w[0] * jwv - v[0]) / eta;
+        for k in 1..m {
+            out[k] = (-2.0 * w[k] * jwv + v[k]) / eta;
+        }
+    } else {
+        let wv: Number = w.iter().zip(v).map(|(a, b)| a * b).sum();
+        out[0] = eta * (2.0 * w[0] * wv - v[0]);
+        for k in 1..m {
+            out[k] = eta * (2.0 * w[k] * wv + v[k]);
+        }
+    }
+}
+
+/// Solve `Arw(u) x = b`, `Arw(u) = [[u₀, u_{1..}ᵀ], [u_{1..}, u₀ I]]` — the
+/// cone's division by `u` (`u ∘ x = b`).
+pub fn arw_solve(u: &[Number], b: &[Number], out: &mut [Number]) {
+    let m = u.len();
+    let ub: Number = (1..m).map(|k| u[k] * b[k]).sum();
+    let x0 = (u[0] * b[0] - ub) / det(u);
+    out[0] = x0;
+    for k in 1..m {
+        out[k] = (b[k] - x0 * u[k]) / u[0];
+    }
+}
+
+/// The Mehrotra second-order term for one cone, in the `s`-row space of the
+/// Newton system: `c = W⁻¹ Arw(λ)⁻¹ ((W dz_a) ∘ (W⁻¹ ds_a))` with `W` the NT
+/// scaling (`W² z = s`) and `λ = W z`. The cone's complementarity row
+/// `H ds + dz = −z + μ s⁻¹` becomes `H ds + dz = −z + μ s⁻¹ − c`: the
+/// linearization of `λ ∘ (W dz + W⁻¹ ds) = μ e − λ ∘ λ − (W dz_a) ∘ (W⁻¹ ds_a)`
+/// after multiplying through by `W⁻¹ Arw(λ)⁻¹`, whose first two terms are
+/// exactly the uncorrected row. `None` outside the interior.
+pub fn mehrotra_term(
+    s: &[Number],
+    z: &[Number],
+    ds_a: &[Number],
+    dz_a: &[Number],
+) -> Option<Vec<Number>> {
+    let (eta, w) = nt_scaling(s, z)?;
+    let m = s.len();
+    let (mut lam, mut a, mut b, mut eta_v, mut t, mut c) = (
+        vec![0.0; m],
+        vec![0.0; m],
+        vec![0.0; m],
+        vec![0.0; m],
+        vec![0.0; m],
+        vec![0.0; m],
+    );
+    apply_nt(eta, &w, z, false, &mut lam);
+    apply_nt(eta, &w, dz_a, false, &mut a);
+    apply_nt(eta, &w, ds_a, true, &mut b);
+    jordan(&a, &b, &mut eta_v);
+    arw_solve(&lam, &eta_v, &mut t);
+    apply_nt(eta, &w, &t, true, &mut c);
+    c.iter().all(|v| v.is_finite()).then_some(c)
+}
+
 /// Largest `α ∈ (0, 1]` with `v + α dv` in the cone, times `tau`, capped at
 /// 1 — the cone's fraction-to-boundary rule. Same root as
 /// `pounce_convex`'s `SecondOrderCone::max_step`.
@@ -238,6 +330,64 @@ mod tests {
         let h = nt_block(&[3.0], &[0.5]).unwrap();
         assert!((h[0] - 0.5 / 3.0).abs() < 1e-15);
         assert!((barrier(&[3.0], 0.2) + 0.2 * (3.0f64).ln()).abs() < 1e-15);
+    }
+
+    /// The scaling's defining identities: `W z = W⁻¹ s` (the scaled point
+    /// `λ`), and `W⁻²` is the block [`nt_block`] assembles.
+    #[test]
+    fn nt_scaling_identities() {
+        let (eta, w) = nt_scaling(&S, &Z).unwrap();
+        let (mut wz, mut wis) = ([0.0; 3], [0.0; 3]);
+        apply_nt(eta, &w, &Z, false, &mut wz);
+        apply_nt(eta, &w, &S, true, &mut wis);
+        assert!(close(&wz, &wis, 1e-13), "{wz:?} {wis:?}");
+        let h = nt_block(&S, &Z).unwrap();
+        for j in 0..3 {
+            let mut e = [0.0; 3];
+            e[j] = 1.0;
+            let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
+            apply_nt(eta, &w, &e, true, &mut a);
+            apply_nt(eta, &w, &a, true, &mut b);
+            for i in 0..3 {
+                assert!((b[i] - h[i * 3 + j]).abs() < 1e-12, "{i},{j}");
+            }
+        }
+    }
+
+    /// The corrected row is the linearization it claims: for a step that
+    /// satisfies `H ds + dz = −z + μ s⁻¹ − c(ds, dz)` exactly (here: any `ds`,
+    /// with `dz` then solved from it), the scaled complementarity residual
+    /// `λ ∘ (W dz + W⁻¹ ds) + (W dz) ∘ (W⁻¹ ds) − (μ e − λ ∘ λ)` vanishes.
+    #[test]
+    fn the_mehrotra_term_closes_the_second_order_residual() {
+        let mu = 0.21;
+        let ds = [0.13, -0.4, 0.07];
+        // Fixed point in dz: dz = −z + μ s⁻¹ − c(ds, dz) − H ds.
+        let h = nt_block(&S, &Z).unwrap();
+        let mut sinv = [0.0; 3];
+        inverse(&S, &mut sinv);
+        let mut dz = [0.0; 3];
+        for _ in 0..200 {
+            let c = mehrotra_term(&S, &Z, &ds, &dz).unwrap();
+            for i in 0..3 {
+                let hds: Number = (0..3).map(|j| h[i * 3 + j] * ds[j]).sum();
+                dz[i] = -Z[i] + mu * sinv[i] - c[i] - hds;
+            }
+        }
+        let (eta, w) = nt_scaling(&S, &Z).unwrap();
+        let (mut lam, mut a, mut b) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+        apply_nt(eta, &w, &Z, false, &mut lam);
+        apply_nt(eta, &w, &dz, false, &mut a);
+        apply_nt(eta, &w, &ds, true, &mut b);
+        let sum: Vec<Number> = (0..3).map(|k| a[k] + b[k]).collect();
+        let (mut l1, mut l2, mut l3) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+        jordan(&lam, &sum, &mut l1);
+        jordan(&a, &b, &mut l2);
+        jordan(&lam, &lam, &mut l3);
+        let r: Vec<Number> = (0..3)
+            .map(|k| l1[k] + l2[k] - (if k == 0 { mu } else { 0.0 } - l3[k]))
+            .collect();
+        assert!(r.iter().all(|v| v.abs() < 1e-10), "{r:?}");
     }
 
     #[test]

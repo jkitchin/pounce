@@ -155,6 +155,47 @@ impl PdSearchDirCalc {
         }
 
         let allow_inexact = self.fast_step_computation;
+
+        // Second-order cones: a Mehrotra predictor–corrector on the cone
+        // rows. Without it the cone pairs lose centrality at every μ
+        // decrease and the cone fraction-to-boundary clips the steps for
+        // tens of iterations (`dev-notes/research/nlp-soc-design.md`). The
+        // predictor is the same system with the cone rows' μ at 0; the
+        // corrector adds its second-order term to the cone rows. Both reuse
+        // one factorization. Bounds and μ are left to the usual machinery.
+        let frozen_rhs = if !improve_solution
+            && cq.borrow().soc_layout().is_some()
+            && std::env::var("POUNCE_SOC_CORRECTOR").as_deref() != Ok("0")
+        {
+            let mut aff_rhs = frozen_rhs.deep_copy();
+            cq.borrow().set_soc_rhs_s(0.0, &mut *aff_rhs.s);
+            let aff_rhs = aff_rhs.freeze();
+            let mut aff = aff_rhs.make_new_zeroed();
+            let ok = self.pd_solver.borrow_mut().solve(
+                data,
+                cq,
+                nlp,
+                -1.0,
+                0.0,
+                &aff_rhs,
+                &mut aff,
+                allow_inexact,
+                false,
+            );
+            if !ok {
+                return false;
+            }
+            let aff = aff.freeze();
+            let mut corrected = frozen_rhs.deep_copy();
+            if cq.borrow().add_soc_mehrotra(&aff, &mut *corrected.s) {
+                corrected.freeze()
+            } else {
+                frozen_rhs
+            }
+        } else {
+            frozen_rhs
+        };
+
         let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
