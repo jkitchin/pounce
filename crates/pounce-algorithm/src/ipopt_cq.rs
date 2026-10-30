@@ -865,7 +865,12 @@ impl IpoptCalculatedQuantities {
         // tmp = tmp - y_d
         tmp.axpy(-1.0, &*iv.y_d);
         drop(nlp);
-        self.zero_soc_rows(&mut *tmp);
+        if self.soc_layout().is_some() {
+            // Cone rows: −y_d − z. The cone duals live outside the iterate,
+            // so this is not cached against the iterate's tags.
+            self.set_soc_grad_lag_s(false, &mut *tmp);
+            return rc_from(tmp);
+        }
         let v = rc_from(tmp);
         self.curr_grad_lag_s_cache
             .borrow_mut()
@@ -2718,7 +2723,7 @@ impl IpoptCalculatedQuantities {
         nlp.pd_l().mult_vector(-1.0, &*iv.v_l, 1.0, &mut *tmp);
         tmp.axpy(-1.0, &*iv.y_d);
         drop(nlp);
-        self.zero_soc_rows(&mut *tmp);
+        self.set_soc_grad_lag_s(true, &mut *tmp);
         rc_from(tmp)
     }
 

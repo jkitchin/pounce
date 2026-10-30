@@ -72,6 +72,21 @@ pub struct IpoptData {
     /// without re-factorising for each candidate σ.
     pub delta_cen: Option<IteratesVector>,
 
+    /// Second-order-cone duals (workstream C, `dev-notes/research/
+    /// nlp-soc-design.md`): every cone's `z`, flattened in layout order.
+    /// Kept beside the iterate rather than in it — the paths that would
+    /// have to carry a ninth component (warm start, restoration, the
+    /// sensitivity layer) refuse cones. Tied to `y_d` only through the
+    /// `s`-stationarity residual `−y_d − z`, as a bound slack's `v` is.
+    /// `None` without cones.
+    pub soc_z: Option<Vec<Number>>,
+    /// `soc_z` at the trial point; promoted with it by
+    /// [`Self::accept_trial_point`].
+    pub soc_z_trial: Option<Vec<Number>>,
+    /// The cone duals' search direction, recovered after each Newton solve
+    /// (`dz = μ s⁻¹ − z − H ds − c`).
+    pub soc_dz: Option<Vec<Number>>,
+
     /// Hessian of the Lagrangian for the *current* iterate. Set by
     /// `HessianUpdater` (exact or quasi-Newton). Mirrors `IpIpoptData::W_`.
     pub w: Option<Rc<dyn SymMatrix>>,
@@ -255,6 +270,9 @@ impl IpoptData {
             delta: None,
             delta_aff: None,
             delta_cen: None,
+            soc_z: None,
+            soc_z_trial: None,
+            soc_dz: None,
             w: None,
             iter_count: 0,
             curr_mu: 0.1,
@@ -311,6 +329,9 @@ impl IpoptData {
     pub fn accept_trial_point(&mut self) {
         if let Some(trial) = self.trial.take() {
             self.curr = Some(trial);
+            if let Some(z) = self.soc_z_trial.take() {
+                self.soc_z = Some(z);
+            }
         }
         // Upstream `IpoptData::AcceptTrialPoint` frees the affine-scaling
         // step with the trial point: it was computed at the iterate just
@@ -330,6 +351,9 @@ impl IpoptData {
     /// Phase 7.
     pub fn set_trial(&mut self, trial: IteratesVector) {
         self.trial = Some(trial);
+        // A trial staged without cone duals keeps the current ones; the
+        // line search stages its own after this call.
+        self.soc_z_trial = None;
     }
 
     pub fn set_curr(&mut self, curr: IteratesVector) {

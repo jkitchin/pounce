@@ -163,8 +163,10 @@ impl PdSearchDirCalc {
         // predictor is the same system with the cone rows' μ at 0; the
         // corrector adds its second-order term to the cone rows. Both reuse
         // one factorization. Bounds and μ are left to the usual machinery.
+        let has_soc = cq.borrow().soc_layout().is_some();
+        let mut soc_c: Option<Vec<Vec<Number>>> = None;
         let frozen_rhs = if !improve_solution
-            && cq.borrow().soc_layout().is_some()
+            && has_soc
             && std::env::var("POUNCE_SOC_CORRECTOR").as_deref() != Ok("0")
         {
             let mut aff_rhs = frozen_rhs.deep_copy();
@@ -187,7 +189,8 @@ impl PdSearchDirCalc {
             }
             let aff = aff.freeze();
             let mut corrected = frozen_rhs.deep_copy();
-            if cq.borrow().add_soc_mehrotra(&aff, &mut *corrected.s) {
+            soc_c = cq.borrow().add_soc_mehrotra(&aff, &mut *corrected.s);
+            if soc_c.is_some() {
                 corrected.freeze()
             } else {
                 frozen_rhs
@@ -209,7 +212,13 @@ impl PdSearchDirCalc {
         );
 
         if ok {
-            data.borrow_mut().set_delta(delta.freeze());
+            let delta = delta.freeze();
+            if has_soc {
+                // The cone duals' step, from the solved `ds`.
+                let mu = data.borrow().curr_mu;
+                cq.borrow().store_soc_dz(&delta, mu, soc_c.as_deref());
+            }
+            data.borrow_mut().set_delta(delta);
         }
         ok
     }
@@ -371,6 +380,13 @@ impl PdSearchDirCalc {
         alpha_primal_soc: Number,
         soc_method: i32,
     ) -> Option<IteratesVector> {
+        // Second-order cones: declined. The correction would need its own
+        // cone-dual step, and storing one would overwrite the main step's,
+        // which the line search falls back to when the correction is
+        // rejected.
+        if cq.borrow().soc_layout().is_some() {
+            return None;
+        }
         let curr = {
             let d = data.borrow();
             d.curr

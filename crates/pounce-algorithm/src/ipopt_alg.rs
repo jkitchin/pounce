@@ -5201,7 +5201,7 @@ impl IpoptAlgorithm {
     }
 
     /// Lift the cone duals that have collapsed toward their boundary
-    /// ([`crate::ipopt_cq::IpoptCalculatedQuantities::soc_lifted_y_d`]). A
+    /// ([`crate::ipopt_cq::IpoptCalculatedQuantities::soc_lifted_z`]). A
     /// no-op without cones.
     fn correct_cone_multiplier(&mut self) {
         let kappa: Number = std::env::var("POUNCE_SOC_KAPPA")
@@ -5212,23 +5212,10 @@ impl IpoptAlgorithm {
             return;
         }
         let mu = self.data.borrow().curr_mu;
-        let Some(y_d) = self.cq.borrow().soc_lifted_y_d(mu, kappa) else {
-            return;
-        };
-        let Some(curr) = self.data.borrow().curr.clone() else {
-            return;
-        };
-        let new_iv = crate::iterates_vector::IteratesVector::new(
-            curr.x.clone(),
-            curr.s.clone(),
-            curr.y_c.clone(),
-            y_d,
-            curr.z_l.clone(),
-            curr.z_u.clone(),
-            curr.v_l.clone(),
-            curr.v_u.clone(),
-        );
-        self.data.borrow_mut().set_curr(new_iv);
+        let lifted = self.cq.borrow().soc_lifted_z(mu, kappa);
+        if let Some(z) = lifted {
+            self.data.borrow_mut().soc_z = Some(z);
+        }
     }
 
     /// Outer entry point — port of `IpoptAlgorithm::Optimize()`. Calls

@@ -1,8 +1,10 @@
 //! The computed quantities second-order cones add to [`IpoptCalculatedQuantities`]
 //! (workstream C, `dev-notes/research/nlp-soc-design.md`).
 //!
-//! A cone's rows are free `d` rows; their slacks `s_K` carry the cone and the
-//! cone dual is `z_K = −y_d` on those rows. Everything here is a no-op when
+//! A cone's rows are free `d` rows; their slacks `s_K` carry the cone, and the
+//! cone dual `z_K` is its own variable (`IpoptData::soc_z`), tied to the rows'
+//! multipliers only through the `s`-stationarity residual `−y_d − z` — the
+//! structure Ipopt gives a bound slack and its `v`. Everything here is a no-op when
 //! the NLP declares no cones ([`IpoptNlp::soc_layout`] is `None`), which is
 //! every model today's code path solves.
 
@@ -53,31 +55,64 @@ impl IpoptCalculatedQuantities {
         self.nlp.borrow().soc_layout()
     }
 
-    fn soc_pairs_of(&self, iv: &IteratesVector) -> Option<SocPairs> {
+    /// Split a flat cone vector (layout order) into its cones.
+    fn split(layout: &SocLayout, flat: &[Number]) -> Vec<Vec<Number>> {
+        let mut off = 0;
+        layout
+            .blocks
+            .iter()
+            .map(|rows| {
+                let b = flat[off..off + rows.len()].to_vec();
+                off += rows.len();
+                b
+            })
+            .collect()
+    }
+
+    /// The stored cone duals, flattened; `−y_d` on the cone rows of `iv` if
+    /// none are stored yet (before initialization finishes).
+    fn soc_z_or(&self, z: Option<Vec<Number>>, iv: &IteratesVector) -> Option<Vec<Number>> {
         let layout = self.soc_layout()?;
+        Some(z.unwrap_or_else(|| {
+            let y = dense(&*iv.y_d);
+            layout.blocks.iter().flatten().map(|&r| -y[r]).collect()
+        }))
+    }
+
+    fn soc_pairs_of(&self, iv: &IteratesVector, z: Option<Vec<Number>>) -> Option<SocPairs> {
+        let layout = self.soc_layout()?;
+        let z = self.soc_z_or(z, iv)?;
         let s = dense(&*iv.s);
-        let y = dense(&*iv.y_d);
-        let pick = |v: &[Number], sign: Number| -> Vec<Vec<Number>> {
-            layout
+        Some(SocPairs {
+            s: layout
                 .blocks
                 .iter()
-                .map(|rows| rows.iter().map(|&r| sign * v[r]).collect())
-                .collect()
-        };
-        Some(SocPairs {
-            s: pick(&s, 1.0),
-            z: pick(&y, -1.0),
+                .map(|rows| rows.iter().map(|&r| s[r]).collect())
+                .collect(),
+            z: Self::split(&layout, &z),
         })
     }
 
-    /// `(s_K, z_K = −y_d)` per cone at the current iterate.
+    /// `(s_K, z_K)` per cone at the current iterate.
     pub fn curr_soc_pairs(&self) -> Option<SocPairs> {
-        self.soc_pairs_of(&self.curr_iv())
+        let z = self.data.borrow().soc_z.clone();
+        self.soc_pairs_of(&self.curr_iv(), z)
     }
 
-    /// `(s_K, z_K)` per cone at the trial iterate.
+    /// `(s_K, z_K)` per cone at the trial iterate (the current `z` if the
+    /// trial staged none).
     pub fn trial_soc_pairs(&self) -> Option<SocPairs> {
-        self.soc_pairs_of(&self.trial_iv())
+        let z = {
+            let d = self.data.borrow();
+            d.soc_z_trial.clone().or_else(|| d.soc_z.clone())
+        };
+        self.soc_pairs_of(&self.trial_iv(), z)
+    }
+
+    /// The current cone duals, flattened (initialized from `−y_d` if unset).
+    pub fn curr_soc_z(&self) -> Option<Vec<Number>> {
+        let z = self.data.borrow().soc_z.clone();
+        self.soc_z_or(z, &self.curr_iv())
     }
 
     /// The Nesterov–Todd block `H` (`H s = z`, row-major) of every cone at the
@@ -130,7 +165,7 @@ impl IpoptCalculatedQuantities {
         let Some(layout) = self.soc_layout() else {
             return;
         };
-        let Some(p) = self.soc_pairs_of(iv) else {
+        let Some(p) = self.soc_pairs_of(iv, None) else {
             return;
         };
         write_rows(v, &layout, |k, block| {
@@ -142,13 +177,33 @@ impl IpoptCalculatedQuantities {
         });
     }
 
-    /// Zero `v`'s cone rows. `grad_lag_s` there is `−y_d − z ≡ 0` by the
-    /// identity `z = −y_d`: a cone row's `s`-stationarity is carried by its
-    /// complementarity, not by its dual infeasibility.
-    pub(crate) fn zero_soc_rows(&self, v: &mut dyn Vector) {
-        if let Some(layout) = self.soc_layout() {
-            write_rows(v, &layout, |_, block| block.fill(0.0));
-        }
+    /// Write the cone rows' `s`-stationarity residual `−y_d − z` into `v`
+    /// (`grad_lag_s`, which holds `−y_d` there: the rows have no bound
+    /// multiplier). `trial` reads the trial cone duals.
+    pub(crate) fn set_soc_grad_lag_s(&self, trial: bool, v: &mut dyn Vector) {
+        let Some(layout) = self.soc_layout() else {
+            return;
+        };
+        let z = if trial {
+            let d = self.data.borrow();
+            d.soc_z_trial.clone().or_else(|| d.soc_z.clone())
+        } else {
+            self.data.borrow().soc_z.clone()
+        };
+        let iv = if trial {
+            self.trial_iv()
+        } else {
+            self.curr_iv()
+        };
+        let Some(z) = self.soc_z_or(z, &iv) else {
+            return;
+        };
+        let zs = Self::split(&layout, &z);
+        write_rows(v, &layout, |k, block| {
+            for (b, zi) in block.iter_mut().zip(&zs[k]) {
+                *b -= zi;
+            }
+        });
     }
 
     /// The `s` right-hand side the Newton system needs on cone rows, written
@@ -161,17 +216,72 @@ impl IpoptCalculatedQuantities {
             return;
         };
         let iv = self.curr_iv();
-        let Some(p) = self.soc_pairs_of(&iv) else {
+        let Some(p) = self.soc_pairs_of(&iv, None) else {
             return;
         };
-        write_rows(rhs_s, &layout, |k, block| {
+        let y = dense(&*iv.y_d);
+        let mut k = 0;
+        write_rows(rhs_s, &layout, |kk, block| {
             let mut g = vec![0.0; block.len()];
-            soc_slack::barrier_gradient(&p.s[k], mu, &mut g);
-            for ((b, gi), zi) in block.iter_mut().zip(&g).zip(&p.z[k]) {
-                // −y_d = z
-                *b = zi + gi;
+            soc_slack::barrier_gradient(&p.s[kk], mu, &mut g);
+            for (j, (b, gi)) in block.iter_mut().zip(&g).enumerate() {
+                // The cone's z cancels out of the reduced row: eliminating
+                // dz = μ s⁻¹ − z − H ds from `−dy − dz = y_d + z` leaves
+                // `H ds − dy = y_d + μ s⁻¹`, whatever z is.
+                *b = -y[layout.blocks[kk][j]] + gi;
             }
+            k += 1;
         });
+    }
+
+    /// Recover the cone duals' step from a Newton solve and store it
+    /// (`IpoptData::soc_dz`): `dz = μ s⁻¹ − z − H ds − c`, with `c` the
+    /// Mehrotra term when the corrector ran (`None` otherwise).
+    pub fn store_soc_dz(&self, delta: &IteratesVector, mu: Number, c: Option<&[Vec<Number>]>) {
+        let Some(dz) = self.soc_dz_of(delta, mu, c) else {
+            return;
+        };
+        self.data.borrow_mut().soc_dz = Some(dz.into_iter().flatten().collect());
+    }
+
+    fn soc_dz_of(
+        &self,
+        delta: &IteratesVector,
+        mu: Number,
+        c: Option<&[Vec<Number>]>,
+    ) -> Option<Vec<Vec<Number>>> {
+        let layout = self.soc_layout()?;
+        let p = self.curr_soc_pairs()?;
+        let ds = dense(&*delta.s);
+        let mut out = Vec::with_capacity(layout.blocks.len());
+        for (k, rows) in layout.blocks.iter().enumerate() {
+            let m = rows.len();
+            let (s, z) = (&p.s[k], &p.z[k]);
+            let h = soc_slack::nt_block(s, z)?;
+            let mut sinv = vec![0.0; m];
+            soc_slack::inverse(s, &mut sinv);
+            let mut dz = vec![0.0; m];
+            for i in 0..m {
+                let hds: Number = (0..m).map(|j| h[i * m + j] * ds[rows[j]]).sum();
+                dz[i] = mu * sinv[i] - z[i] - hds - c.map_or(0.0, |c| c[k][i]);
+            }
+            out.push(dz);
+        }
+        Some(out)
+    }
+
+    /// Stage the trial cone duals `z + α Δz` after the line search set the
+    /// trial iterate (`set_trial` clears them).
+    pub fn stage_soc_z_trial(&self, alpha_dual: Number) {
+        let Some(z) = self.curr_soc_z() else {
+            return;
+        };
+        let dz = self.data.borrow().soc_dz.clone();
+        let Some(dz) = dz else {
+            return;
+        };
+        let t: Vec<Number> = z.iter().zip(&dz).map(|(a, b)| a + alpha_dual * b).collect();
+        self.data.borrow_mut().soc_z_trial = Some(t);
     }
 
     /// `(Σ_K ⟨s_K, z_K⟩, number of cones)`: the cones' share of the average
@@ -224,13 +334,9 @@ impl IpoptCalculatedQuantities {
         self.soc_alpha_max(delta, tau, false)
     }
 
-    /// The cones' dual cap: every `z_K + α Δz_K = −(y_d + α Δy_d)_K` inside
-    /// its cone. The cone rows of `y_d` are the cone duals and step with the
-    /// dual step size, as a bound multiplier does — not with `alpha_y`:
-    /// tying them to the primal step lets a dual direction that leaves the
-    /// cone (driven by a large objective gradient through `x`-stationarity)
-    /// throttle the primal step to nothing. Measured on Rosenbrock in an
-    /// inactive cone: `alpha_pr` fell to `1e-16` with the dual cap binding.
+    /// The cones' dual cap: every `z_K + α Δz_K` inside its cone, `Δz` the
+    /// step [`Self::store_soc_dz`] recovered. The cone duals step with the
+    /// dual step size, as bound multipliers do.
     pub fn soc_alpha_dual_max(&self, delta: &IteratesVector, tau: Number) -> Number {
         self.soc_alpha_max(delta, tau, true)
     }
@@ -249,93 +355,80 @@ impl IpoptCalculatedQuantities {
         // `Error_In_Step_Computation` one iteration from convergence. Conic
         // interior-point codes keep the fraction constant; so do the cones.
         let tau = tau.min(SOC_TAU_MAX);
-        let step = if dual {
-            dense(&*delta.y_d)
+        let ds = dense(&*delta.s);
+        let dz = if dual {
+            match self.data.borrow().soc_dz.clone() {
+                Some(dz) => Some(Self::split(&layout, &dz)),
+                None => return 1.0,
+            }
         } else {
-            dense(&*delta.s)
+            None
         };
-        let sign = if dual { -1.0 } else { 1.0 };
         let mut alpha: Number = 1.0;
         for (k, rows) in layout.blocks.iter().enumerate() {
-            let d: Vec<Number> = rows.iter().map(|&r| sign * step[r]).collect();
-            let v = if dual { &p.z[k] } else { &p.s[k] };
-            alpha = alpha.min(soc_slack::max_step(v, &d, tau));
+            let a = match &dz {
+                Some(dz) => soc_slack::max_step(&p.z[k], &dz[k], tau),
+                None => {
+                    let d: Vec<Number> = rows.iter().map(|&r| ds[r]).collect();
+                    soc_slack::max_step(&p.s[k], &d, tau)
+                }
+            };
+            alpha = alpha.min(a);
         }
         alpha
     }
 
-    /// Every cone row, flattened (the `y_d` entries that step with the dual
-    /// step size). Empty without cones.
-    pub fn soc_rows_flat(&self) -> Vec<usize> {
-        self.soc_layout()
-            .map(|l| l.blocks.iter().flatten().copied().collect())
-            .unwrap_or_default()
-    }
-
-    /// Add the cones' Mehrotra second-order term to a Newton `s` right-hand
-    /// side (`rhs_s`, in the solver's `−rhs` convention, so the cone rows read
-    /// `H ds + dz = −rhs`): `rhs += c`, `c` from [`soc_slack::mehrotra_term`]
-    /// at the affine step `delta_aff` (`dz_a = −Δy_d` on the cone rows).
-    /// `false` if a cone has left the interior (nothing is added then).
-    pub fn add_soc_mehrotra(&self, delta_aff: &IteratesVector, rhs_s: &mut dyn Vector) -> bool {
-        let (Some(layout), Some(p)) = (self.soc_layout(), self.curr_soc_pairs()) else {
-            return true;
-        };
+    /// The cones' Mehrotra second-order terms at the affine (μ = 0) step
+    /// `delta_aff` (`dz_a = −z − H ds_a`), and add them to a Newton `s`
+    /// right-hand side (`rhs_s += c`, the solver's `−rhs` convention).
+    /// `None` if a cone has left the interior (nothing is added then).
+    pub fn add_soc_mehrotra(
+        &self,
+        delta_aff: &IteratesVector,
+        rhs_s: &mut dyn Vector,
+    ) -> Option<Vec<Vec<Number>>> {
+        let layout = self.soc_layout()?;
+        let p = self.curr_soc_pairs()?;
+        let dz = self.soc_dz_of(delta_aff, 0.0, None)?;
         let ds = dense(&*delta_aff.s);
-        let dy = dense(&*delta_aff.y_d);
         let mut terms = Vec::with_capacity(layout.blocks.len());
         for (k, rows) in layout.blocks.iter().enumerate() {
             let dsk: Vec<Number> = rows.iter().map(|&r| ds[r]).collect();
-            let dzk: Vec<Number> = rows.iter().map(|&r| -dy[r]).collect();
-            match soc_slack::mehrotra_term(&p.s[k], &p.z[k], &dsk, &dzk) {
-                Some(c) => terms.push(c),
-                None => return false,
-            }
+            terms.push(soc_slack::mehrotra_term(&p.s[k], &p.z[k], &dsk, &dz[k])?);
         }
         write_rows(rhs_s, &layout, |k, block| {
             for (b, c) in block.iter_mut().zip(&terms[k]) {
                 *b += c;
             }
         });
-        true
+        Some(terms)
     }
 
-    /// `y_d` with every cone dual that has collapsed toward its boundary
+    /// The cone duals with every one that has collapsed toward its boundary
     /// lifted back off it, or `None` if none has (or no cones). The cone's
     /// form of the lower half of Ipopt's `kappa_sigma` bound-multiplier rule
     /// (`z ≥ μ / (κ s)`): when `√(det s · det z) < μ / κ`, only `z₀` moves, by
-    /// the least amount that restores `det s · det z = (μ / κ)²`. Measured on
-    /// the drifting car: a dual reached `det z = 4e-14` against `det s = 0.07`
-    /// at `μ = 0.1`, the Newton direction kept pointing it outward, and the
-    /// fraction-to-boundary rule let it close 99% of the gap per iteration
-    /// until the dual step was `1e-13`.
-    pub fn soc_lifted_y_d(&self, mu: Number, kappa: Number) -> Option<Rc<dyn Vector>> {
-        let layout = self.soc_layout()?;
+    /// the least amount that restores `det s · det z = (μ / κ)²`.
+    pub fn soc_lifted_z(&self, mu: Number, kappa: Number) -> Option<Vec<Number>> {
         let p = self.curr_soc_pairs()?;
-        let iv = self.curr_iv();
         let floor = mu / kappa;
         let mut changed = false;
-        let mut y = iv.y_d.make_new();
-        y.copy(&*iv.y_d);
-        write_rows(&mut *y, &layout, |k, block| {
-            let (s, z) = (&p.s[k], &p.z[k]);
+        let mut out = Vec::new();
+        for (s, z) in p.s.iter().zip(&p.z) {
+            let mut z = z.clone();
             let ds = soc_slack::det(s);
-            if ds <= 0.0 {
-                return;
+            let dz = soc_slack::det(&z);
+            if ds > 0.0 && ((ds * dz.max(0.0)).sqrt() < floor || z[0] <= 0.0) {
+                let tail2: Number = z[1..].iter().map(|v| v * v).sum();
+                let z0 = (floor * floor / ds + tail2).sqrt();
+                if z0 > z[0] {
+                    z[0] = z0;
+                    changed = true;
+                }
             }
-            let dz = soc_slack::det(z);
-            if (ds * dz.max(0.0)).sqrt() >= floor && z[0] > 0.0 {
-                return;
-            }
-            let tail2: Number = z[1..].iter().map(|v| v * v).sum();
-            let z0 = (floor * floor / ds + tail2).sqrt();
-            if z0 > z[0] {
-                // y_d = −z on cone rows.
-                block[0] = -z0;
-                changed = true;
-            }
-        });
-        changed.then(|| Rc::from(y))
+            out.extend(z);
+        }
+        changed.then_some(out)
     }
 
     /// `δ_sᵀ H δ_s` summed over cones: the cones' share of the quadratic
