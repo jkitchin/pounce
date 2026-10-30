@@ -151,6 +151,27 @@ runs the code it runs today. The fixture sweep must diff empty.
    `classical` 168 vs 17, `robust` 134 vs 16).
    *Next:* cone-aware restoration (14 of 32 misses); then the remaining
    step failures.
+
+   **Against main (the before).** On main a cone in an NLP has to be
+   written as a smooth row; `pounce_cblib_nlp` runs both ways on the same
+   152 instances (one build, default options, NLP arm throughout):
+
+   | | `t² − ‖x‖² ≥ 0` (main) | `t − ‖x‖ ≥ 0` (main) | native (branch) |
+   |---|---|---|---|
+   | reaches the convex optimum (1e-6) | **125** | 121 | 121 |
+   | reports success at a wrong answer | 11 | 13 | **10** |
+   | median iterations | **18** | **18** | 128 |
+   | median time | **45 ms** | 47 ms | 322 ms |
+
+   On the 112 both solve, native takes a median 151 iterations against 17.
+   Native solves 2 the smooth forms do not (`nb_L1`, `turbine07GF`); the
+   smooth forms solve 14 native does not (`slay*`, `qssp60`, `estein4_C`).
+   **On this corpus native cones are not an improvement over main.** The
+   tip — where the smooth forms degenerate and the case native cones exist
+   for — is rare in convex SOCP optima and common in contact (a sliding-free
+   contact sits at it); the drifting car is the test that decides C. First
+   suspect for the iteration gap: the barrier strategy is forced monotone for
+   cones, while the smooth runs use the default adaptive one.
 4. **C4 — entry points.** Python `Problem(..., cones=[[rows], …])`; the
    CALIPSO ports' cones declared natively.
 5. **C5 — measure the target.** Drifting car: 5/5 physical, cone-tip
