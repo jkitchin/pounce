@@ -975,6 +975,10 @@ pub struct IpoptApplication {
     /// Whether the submitted TNLP has already been explicitly wrapped by the
     /// caller's presolve layer.
     presolve_already_applied: bool,
+    /// Declared second-order cones over constraint rows (workstream C,
+    /// `dev-notes/research/nlp-soc-design.md`). Set with
+    /// [`Self::set_soc_constraints`]; a solve never drops them.
+    soc_constraints: Vec<pounce_nlp::soc::SocRows>,
     reg_options: Rc<RegisteredOptions>,
     journalist: Rc<Journalist>,
     statistics: RefCell<SolveStatistics>,
@@ -1347,6 +1351,7 @@ impl IpoptApplication {
             variable_scaling: RefCell::new(None),
             row_scaling_active: std::cell::Cell::new(None),
             presolve_already_applied: false,
+            soc_constraints: Vec::new(),
             reg_options: reg,
             journalist: Rc::new(Journalist::new()),
             statistics: RefCell::new(SolveStatistics::new()),
@@ -1430,6 +1435,24 @@ impl IpoptApplication {
         let status = self.optimize_tnlp(tnlp);
         self.presolve_already_applied = explicit_wrapper;
         status
+    }
+
+    /// Declare second-order cones over constraint rows: each
+    /// [`pounce_nlp::soc::SocRows`] states `(g_{r0}, g_{r1}, …) ∈ K`, with
+    /// the rows declared free. Replaces any earlier declaration; an empty
+    /// list clears it.
+    ///
+    /// Native cone support in the interior-point method is being built
+    /// (workstream C); until it lands a solve with cones declared is
+    /// refused with `Invalid_Problem_Definition` rather than run with the
+    /// cone rows read as unconstrained free rows.
+    pub fn set_soc_constraints(&mut self, cones: Vec<pounce_nlp::soc::SocRows>) {
+        self.soc_constraints = cones;
+    }
+
+    /// The declared second-order cones ([`Self::set_soc_constraints`]).
+    pub fn soc_constraints(&self) -> &[pounce_nlp::soc::SocRows] {
+        &self.soc_constraints
     }
 
     pub fn registered_options(&self) -> &Rc<RegisteredOptions> {
@@ -2233,6 +2256,19 @@ impl IpoptApplication {
         // solve's.
         self.statistics.borrow_mut().warnings.clear();
         self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
+        if !self.soc_constraints.is_empty() {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!(
+                "pounce: {} second-order cone(s) declared, but native cone support in the \
+                 interior-point method is not yet available; refusing rather than solving \
+                 with the cone rows unconstrained.\n",
+                self.soc_constraints.len()
+            );
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidProblemDefinition;
+        }
         // Belongs to the scale audit's re-solve alone, which runs below this
         // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
         // solve that starts here may inherit it. `RetryOptionScope` clears it

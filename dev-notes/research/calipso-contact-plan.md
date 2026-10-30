@@ -286,6 +286,8 @@ exist and run from one command.
 
 ### C. Native second-order cones in the NLP solver (the real gap)
 
+Design and increments: [`nlp-soc-design.md`](nlp-soc-design.md).
+
 - `h(x) ∈ K`, K a product of second-order cones, via a cone slack with
   barrier `−log(t² − ‖x‖²)`; reuse `soc.rs` for the cone arithmetic,
   scaling and step-to-boundary rule. Then extend B to cone pairs

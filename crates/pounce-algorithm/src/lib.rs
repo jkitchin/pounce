@@ -49,6 +49,7 @@ pub mod mu;
 pub mod output;
 pub mod restoration;
 pub mod second_opinion;
+pub mod soc_slack;
 pub mod sqp;
 pub mod square_system;
 pub mod strategy;
