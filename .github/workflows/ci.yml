@@ -190,6 +190,17 @@ jobs:
           python -m pip install pyomo
           python crates/pounce-wasm/tests/pyomo_roundtrip.py
 
+      # The studio modules (crates/pounce-wasm/studio): the live debugger
+      # behind Binaryen's Asyncify pass, driven end to end in Node — a pause
+      # suspends the solve inside `fd_read` and a command resumes it — plus
+      # the inline `viz` / `save` payloads, the solve report and its analysis.
+      # Last in the job: the studio build replaces the module in target/ that
+      # the steps above read. `--fast` skips the post-Asyncify optimizer.
+      - name: Studio debugger protocol through wasm
+        run: |
+          crates/pounce-wasm/build.sh --studio --fast
+          node crates/pounce-wasm/tests/debug_protocol.mjs
+
   # Exercise the Python surface (the `pounce.jax` differentiable /
   # sensitivity / path-following APIs) on every PR. The Rust `test` job
   # above covers the solver core, and `wheel-smoke` only imports the

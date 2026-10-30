@@ -781,6 +781,26 @@ own plotter, and with nothing set + the `viz` extra installed it just
 works. The same `pounce-dbg-viz <file.json>` also renders a `save`
 artifact (the full iterate).
 
+### Inline artifacts (`artifacts inline`)
+
+A front end that renders the matrices itself — or has no filesystem to
+write to and no viewer to launch, like the browser build — switches the
+session to inline artifacts:
+
+```text
+pounce-dbg> artifacts inline
+pounce-dbg> viz kkt
+KKT system, iter 1 (dim 5, inline)
+```
+
+Every `viz` target and a path-less `save` then return their payload in the
+`result` event's `data` — exactly the JSON the file would have held — and
+nothing is written or launched. `save <path>` still writes `<path>`: naming
+a file is a request for one. `artifacts file` switches back; `artifacts`
+alone reports the setting (`data.inline`). The default is `file` on a
+native build and `inline` on wasm, and `hello.capabilities.inline_artifacts`
+carries the session's starting value.
+
 ---
 
 ## Multi-start and initialization sensitivity
@@ -924,6 +944,15 @@ unaffected. `ask` is the only command that shells out; nothing else
 depends on an LLM being present.
 
 In JSON mode the reply comes back in the `result` event's `data.reply`.
+
+### Bring your own model (`ask --prompt-only`)
+
+`ask --prompt-only [question]` builds the same prompt and returns it
+instead of running a CLI: printed in the REPL, and in `data.prompt` (with
+`data.question`) in JSON mode. A front end with its own model — the
+browser studio's in-page LLM, an agent that is itself the model — gets the
+grounding `ask` would have sent and decides what to do with it. No LLM is
+needed for it, so it works where `ask` cannot (`hello.capabilities.ask_prompt_only`).
 
 ---
 
@@ -1091,6 +1120,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `complete <prefix>` | completion candidates |
 | `viz <target>` | open an artifact in a viewer |
 | `save [path]` | dump the iterate to JSON |
+| `artifacts [inline/file]` | return `viz` / `save` payloads in the result instead of writing files |
 | `load <file> [block]` | read a block (default `x`) from a save artifact / numeric file |
 | `sweep <file>` | one solve per start in `<file>`; tabulate outcomes |
 | `multistart <N> [rel]` | `N` restarts (uniform in each finite box; jitter elsewhere); tabulate |
@@ -1104,6 +1134,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |
 | `ask [question]` | ask an LLM about the state (default Claude Code; `$POUNCE_DBG_LLM`=`claude`/`codex`/`gemini`/`llm` or a template) |
+| `ask --prompt-only [question]` | return the prompt `ask` would send, without running an LLM |
 | `progress [on/off]` | toggle JSON progress events |
 | `detach` | stop pausing; run to completion |
 | `quit` (`q`, `exit`) | stop the solve |

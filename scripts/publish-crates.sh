@@ -33,7 +33,10 @@
 # pounce-minima (gh#966) depends on pounce-algorithm (its IpoptLocalSolve
 # drives the application), so it publishes after it. pounce-convex
 # publishes before pounce-algorithm, whose SQP seeds large cold step QPs with
-# its interior point (gh#1061).
+# its interior point (gh#1061). pounce-nl publishes before pounce-sensitivity:
+# it is only a dev-dependency there, but a versioned dev-dep must be live on
+# crates.io for `cargo publish` to resolve it (the 0.14.0 publish stopped at
+# pounce-sensitivity on exactly this).
 # (The benchmark crates pounce-cutest and pounce-large-scale were retired
 # when those suites moved to .nl.)
 
@@ -62,9 +65,9 @@ CRATES=(
   pounce-algorithm
   pounce-minima
   pounce-restoration
+  pounce-nl
   pounce-sensitivity
   pounce-cinterface
-  pounce-nl
   pounce-studio-core
   pounce-cli
   pounce-rs

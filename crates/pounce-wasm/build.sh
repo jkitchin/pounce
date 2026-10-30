@@ -3,6 +3,7 @@
 #
 #   crates/pounce-wasm/build.sh          # build + copy into web/
 #   crates/pounce-wasm/build.sh --serve  # ...and serve web/ on :8000
+#   crates/pounce-wasm/build.sh --studio [--fast]  # the studio modules (below)
 #
 # Requires the wasm target once:  rustup target add wasm32-wasip1
 #
@@ -16,6 +17,50 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 target=wasm32-wasip1
+
+# `--studio [--fast]`: the two modules the pounce studio front end loads,
+# staged in studio/ with the host it drives them through (studio/README.md):
+#
+#   pounce-studio.wasm        the `studio` feature build (adds the debugger
+#                             engine and `pounce_debug_solve`), wasm-opt -Oz;
+#                             the Solve route.
+#   pounce-studio-debug.wasm  the same module after Binaryen's Asyncify pass,
+#                             which lets the debugger's blocking stdin read
+#                             suspend into JavaScript; the Debug route.
+#
+# Two modules because Asyncify instruments every function that can reach the
+# read, and the debugger hook is an indirect call inside the iteration loop,
+# so that is nearly all of them: measured on deb7 (5 interleaved solves
+# each), 1000 ms (sd 96) without the pass against 1617 ms (sd 253) with it.
+# A plain solve should not pay that. `--fast` skips the optimizer after
+# Asyncify (about 40 s instead of several minutes, at roughly twice the
+# size), which is what CI's protocol test uses.
+if [[ "${1:-}" == "--studio" ]]; then
+  if ! command -v wasm-opt >/dev/null 2>&1; then
+    echo "build.sh --studio needs wasm-opt (binaryen) for the Asyncify pass" >&2
+    exit 1
+  fi
+  cargo build --manifest-path "$root/Cargo.toml" \
+    -p pounce-wasm --features studio --release --target "$target" \
+    --config 'profile.release.debug=false' \
+    --config 'profile.release.strip="symbols"'
+  out="$root/target/$target/release/pounce_wasm.wasm"
+  mkdir -p "$here/studio"
+  cp "$here/web/wasi.js" "$here/studio/wasi.js"
+  asyncify=(--asyncify --pass-arg=asyncify-imports@wasi_snapshot_preview1.fd_read)
+  if [[ "${2:-}" == "--fast" ]]; then
+    cp "$out" "$here/studio/pounce-studio.wasm"
+    wasm-opt -all "${asyncify[@]}" "$out" -o "$here/studio/pounce-studio-debug.wasm"
+  else
+    wasm-opt -Oz -all "$out" -o "$here/studio/pounce-studio.wasm"
+    wasm-opt -O2 -all "${asyncify[@]}" "$out" -o "$here/studio/pounce-studio-debug.wasm"
+  fi
+  for f in pounce-studio.wasm pounce-studio-debug.wasm; do
+    size=$(wc -c < "$here/studio/$f")
+    printf 'studio/%-25s %s bytes (%.1f MB)\n' "$f" "$size" "$(echo "$size" | awk '{print $1/1048576}')"
+  done
+  exit 0
+fi
 
 # The workspace release profile carries debug info (`debug = 1`), which is
 # ~10x the code size in a wasm module and useless to the page. Override it
