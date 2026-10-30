@@ -230,6 +230,92 @@ class LoweredNlp:
         return np.asarray(self._H(jnp.asarray(x), jnp.asarray(lagrange), obj_factor))
 
 
+class DeclaredNlp:
+    """The model as a user would hand it to POUNCE with its pairs declared:
+    rows ``eq = 0``, ``ineq >= 0`` and, per pair, ``H >= 0``; no
+    complementarity row at all. Pair k is ``(row of H_k, variable G_k)``,
+    which POUNCE's driver lowers and certifies itself (``complementarity=``
+    on ``pounce.Problem``). Needs ``model.pairs`` whose G side is a plain
+    variable; a free one gets the ``G >= 0`` bound the declaration states,
+    as AMPL's ``0 <= x complements ...`` does."""
+
+    def __init__(self, model: Model):
+        pairs = getattr(model, "pairs", None)
+        if pairs is None or getattr(model, "soc_complementarity", False):
+            raise NotImplementedError("declared needs scalar (G, H) pairs; cone complementarity is not supported")
+        z0 = jnp.zeros(model.n)
+        neq = int(model.eq(z0).shape[0])
+        nin = int(model.ineq(z0).shape[0])
+        npair = int(pairs(z0)[0].shape[0])
+        # G_k must be exactly z[j_k]: one unit entry per Jacobian row, at two
+        # random points.
+        rng = np.random.default_rng(7)
+        JG = None
+        for _ in range(2):
+            zr = jnp.asarray(rng.standard_normal(model.n))
+            Jr = np.asarray(jax.jacfwd(lambda z: pairs(z)[0])(zr))
+            if JG is not None and not np.array_equal(Jr, JG):
+                raise NotImplementedError("declared needs G to be a variable")
+            JG = Jr
+        var = np.argmax(JG != 0, axis=1)
+        if not (np.count_nonzero(JG, axis=1) == 1).all() or not np.all(JG[np.arange(npair), var] == 1.0):
+            raise NotImplementedError("declared needs G to be a variable")
+
+        def cons(z):
+            return jnp.concatenate([model.eq(z), model.ineq(z), pairs(z)[1]])
+
+        self.model = model
+        self.n = model.n
+        self.m = neq + nin + npair
+        self.cl = np.zeros(self.m)
+        self.cu = np.concatenate([np.zeros(neq), np.full(nin + npair, BIG)])
+        lb = np.array(model.lb, dtype=float)
+        ub = np.array(model.ub, dtype=float)
+        for j in var:
+            if not np.isfinite(lb[j]) and not np.isfinite(ub[j]):
+                lb[j] = 0.0
+            elif not (lb[j] == 0.0 and not np.isfinite(ub[j])):
+                raise NotImplementedError(f"declared: G variable {j} has bounds [{lb[j]}, {ub[j]}]")
+        self.lb = np.where(np.isfinite(lb), lb, -BIG)
+        self.ub = np.where(np.isfinite(ub), ub, BIG)
+        self.complementarity = [(neq + nin + k, int(j)) for k, j in enumerate(var)]
+        (self._f, self._g, self._c, self._J, self._H,
+         self._jidx, self._hidx) = _compiled(model, "declared", cons, self.m)
+
+    objective = LoweredNlp.objective
+    gradient = LoweredNlp.gradient
+    constraints = LoweredNlp.constraints
+    jacobian = LoweredNlp.jacobian
+    jacobianstructure = LoweredNlp.jacobianstructure
+    hessianstructure = LoweredNlp.hessianstructure
+    hessian = LoweredNlp.hessian
+
+
+def solve_declared(model: Model, x0, opts):
+    """One ``pounce.Problem`` with the pairs declared and only ``opts`` set."""
+    if SOLVER != "pounce":
+        raise NotImplementedError("declared is a POUNCE entry point")
+    import pounce
+
+    nlp = DeclaredNlp(model)
+    prob = pounce.Problem(n=nlp.n, m=nlp.m, problem_obj=nlp, lb=nlp.lb, ub=nlp.ub,
+                          cl=nlp.cl, cu=nlp.cu, complementarity=nlp.complementarity)
+    for k, v in opts.items():
+        prob.add_option(k, v)
+    t0 = time.perf_counter()
+    x, info = prob.solve(np.asarray(x0, dtype=float))
+    wall = time.perf_counter() - t0
+    cc = info["complementarity"]
+    cert = cc["certificate"]
+    return {"x": np.asarray(x), "status": int(info["status"]), "status_msg": str(info["status_msg"]),
+            "iters": int(cc["total_iterations"]), "wall": wall, "stages": int(cc["n_solves"]),
+            "declared": {"accepted_by": cc["accepted_by"], "class": (cert or {}).get("class"),
+                         "n_biactive": (cert or {}).get("n_biactive"),
+                         "max_abs_product": cc["max_abs_product"]},
+            # (stage, tau, status, iterations) per lowered solve
+            "log": [(stage, tau, status, it) for stage, tau, status, it, _ in cc["solves"]]}
+
+
 BASE_OPTIONS = {
     "print_level": 0,
     "tol": 1e-8,
@@ -364,6 +450,9 @@ def _warm(x, info):
 
 def run_route(model: Model, route: str, x0, extra_opts=None):
     """Returns dict(x, status, status_msg, iters, wall, stages)."""
+    if route == "declared":
+        # what a user gets by declaring the pairs and setting nothing
+        return solve_declared(model, x0, {"print_level": 0, **(extra_opts or {})})
     opts = dict(BASE_OPTIONS)
     if route == "defaults_eq":
         # closest to what the paper handed Ipopt: product equality,

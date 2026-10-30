@@ -42,6 +42,8 @@ def main():
            "total_wall": round(time.perf_counter() - t0, 2),
            "finish_failed": r.get("finish_failed", False),
            "log": [list(map(str, s)) for s in r.get("log", [])], **rep}
+    if "declared" in r:
+        out["declared"] = r["declared"]
     print(json.dumps(out))
     np.save(f"sol_{solver}_{model_name}_{route}_{seed}.npy", r["x"])
 

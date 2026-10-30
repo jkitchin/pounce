@@ -67,6 +67,10 @@ DETERMINISTIC = ("rocket", "complementarity", "maratos", "wachter")
 #: run the paper's Jordan-product rows as a route.
 SOC = ("drifting_norm", "drifting_squared", "quadruped")
 
+#: Models whose pairs are scalar with a variable G side, which POUNCE takes
+#: declared (the `declared` route). The SOC models cannot be declared.
+DECLARABLE = ("bunnyhop", "ballincup", "rocket", "complementarity")
+
 MPCC_ROUTES = ("defaults_eq", "direct", "ncp_eq", "ncp_eq_l1", "scholtes_then_ncp", "scholtes_then_ineq")
 NLP_ROUTES = ("defaults_eq", "ncp_eq")
 
@@ -85,6 +89,8 @@ def jobs(solver="pounce", seeds=(0, 1, 2, 3, 4), names=ALL):
         routes = list(MPCC_ROUTES if name in MPCC else NLP_ROUTES)
         if name in SOC:
             routes.append("jordan_eq")
+        if solver == "pounce" and name in DECLARABLE:
+            routes.append("declared")
         if solver != "pounce" and "ncp_eq_l1" in routes:
             routes.remove("ncp_eq_l1")
         use = seeds[:1] if name in DETERMINISTIC else REDUCED_SEEDS.get(name, seeds)

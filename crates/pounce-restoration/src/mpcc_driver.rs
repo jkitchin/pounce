@@ -29,7 +29,8 @@ use std::rc::Rc;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
     Certificate, CertificateInput, MpccStage, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
-    TOUCHED_OPTIONS, accepts, answers, certify, converged, warm_start_assignments,
+    TOUCHED_OPTIONS, accepts, answers, certify, converged, kept_if_nothing_better,
+    warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -145,6 +146,9 @@ pub fn solve_mpcc(
     let mut solves: Vec<MpccSolveRecord> = Vec::new();
     let mut first: Option<Captured> = None;
     let mut accepted: Option<(MpccStage, Captured, Option<Certificate>)> = None;
+    // The first stage that certified only W: the answer if no later stage
+    // certifies S.
+    let mut weak: Option<(MpccStage, Captured, Option<Certificate>)> = None;
     // The first stage that converged with every product in tolerance but
     // did not certify as stationary: reported only if nothing certifies.
     let mut physical: Option<(Captured, Option<Certificate>)> = None;
@@ -298,6 +302,22 @@ pub fn solve_mpcc(
                     accepted = Some((stage, c, cert));
                     break;
                 }
+                if cert
+                    .as_ref()
+                    .is_some_and(|ct| kept_if_nothing_better(ct.class))
+                {
+                    report(&format!(
+                        "pounce: complementarity: {} converged ({:?}) to a weakly stationary \
+                         point only; kept, trying the next formulation for a strongly \
+                         stationary one.",
+                        stage.label(),
+                        c.status,
+                    ));
+                    if weak.is_none() {
+                        weak = Some((stage, c, cert));
+                    }
+                    continue;
+                }
                 report(&format!(
                     "pounce: complementarity: {} converged ({:?}) to a point that is not \
                      stationary (residual {:.1e}); trying the next formulation.",
@@ -322,12 +342,12 @@ pub fn solve_mpcc(
     app.set_in_retry_sequence(false);
     restore(app);
 
-    // With no certified answer, report the first physical one (converged,
-    // products in tolerance, not certified) with its certificate; failing
-    // that, the exact-product stage: what a plain solve of the lowered model
-    // says. That stage always runs first, so `first` is only empty if
-    // `STAGES` is reordered without this function following.
-    let (accepted_by, chosen, known_cert) = match (accepted, physical, first) {
+    // With no S answer, the first W one; with neither, the first physical
+    // one (converged, products in tolerance, not stationary) with its
+    // certificate; failing that, the exact-product stage: what a plain solve
+    // of the lowered model says. That stage always runs first, so `first` is
+    // only empty if `STAGES` is reordered without this function following.
+    let (accepted_by, chosen, known_cert) = match (accepted.or(weak), physical, first) {
         (Some((s, c, cert)), _, _) => (Some(s), c, Some(cert)),
         (None, Some((c, cert)), _) => (None, c, Some(cert)),
         (None, None, Some(c)) => (None, c, None),

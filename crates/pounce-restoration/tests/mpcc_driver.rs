@@ -372,6 +372,94 @@ fn a_converged_point_that_is_not_strongly_stationary_is_reported_as_such() {
     );
 }
 
+/// CALIPSO.jl's `nonconvex/complementarity` example, pairs declared:
+///
+/// ```text
+/// min (x0 - 5)^2 + (2 x1 + 1)^2,   x >= 0,
+///   2(x1 - 1) - 1.5 x1 + x2 - 0.5 x3 + x4 = 0
+///   3 x0 - x1 - 3 - x5 = 0,  -x0 + 0.5 x1 + 4 - x6 = 0,  -x0 - x1 + 7 - x7 = 0
+///   0 <= x_{2+k}  ⟂  x_{5+k} >= 0,   k = 0, 1, 2
+/// ```
+///
+/// From the origin the exact-product stage converges to a W-stationary point
+/// at objective 85; the continuation reaches the S-stationary optimum
+/// `(1, 0, 2, 0, 0, 0, 3, 6)` at 17. A W point must not end the ladder.
+#[test]
+fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
+    let zero = || vec![vec![0.0; 8]; 8];
+    let unit = |j: usize| {
+        let mut r = vec![0.0; 8];
+        r[j] = 1.0;
+        r
+    };
+    let model = Dense {
+        n: 8,
+        m: 7,
+        x_l: vec![0.0; 8],
+        x_u: vec![INF; 8],
+        g_l: vec![0.0; 7],
+        g_u: vec![0.0, 0.0, 0.0, 0.0, INF, INF, INF],
+        x0: vec![0.0; 8],
+        f: Box::new(|x| (x[0] - 5.0).powi(2) + (2.0 * x[1] + 1.0).powi(2)),
+        grad: Box::new(|x| {
+            let mut g = vec![0.0; 8];
+            g[0] = 2.0 * (x[0] - 5.0);
+            g[1] = 4.0 * (2.0 * x[1] + 1.0);
+            g
+        }),
+        g: Box::new(|x| {
+            vec![
+                2.0 * (x[1] - 1.0) - 1.5 * x[1] + x[2] - 0.5 * x[3] + x[4],
+                3.0 * x[0] - x[1] - 3.0 - x[5],
+                -x[0] + 0.5 * x[1] + 4.0 - x[6],
+                -x[0] - x[1] + 7.0 - x[7],
+                x[5],
+                x[6],
+                x[7],
+            ]
+        }),
+        jac: Box::new(move |_| {
+            vec![
+                vec![0.0, 0.5, 1.0, -0.5, 1.0, 0.0, 0.0, 0.0],
+                vec![3.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+                vec![-1.0, 0.5, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0],
+                vec![-1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+                unit(5),
+                unit(6),
+                unit(7),
+            ]
+        }),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 8.0;
+            let mut h = vec![f];
+            h.extend((0..7).map(|_| zero()));
+            h
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let pairs = (0..3)
+        .map(|k| ComplementarityPair {
+            row: 4 + k,
+            var: 2 + k,
+        })
+        .collect();
+    let out = solve_mpcc(&mut app, tnlp, pairs, &mut |_| {}).unwrap();
+    assert_eq!(
+        out.accepted_by,
+        Some(MpccStage::Continuation),
+        "{:?}",
+        out.solves
+    );
+    for (got, want) in out.x.iter().zip([1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 6.0]) {
+        assert!((got - want).abs() < 1e-4, "x = {:?}", out.x);
+    }
+    assert_eq!(out.certificate.unwrap().class, StationarityClass::S);
+}
+
 /// An infeasible complementarity model: `x >= 1`, `y >= 1` and
 /// `x + y <= 1.5` cannot hold together whatever the pair does. Every stage
 /// runs and fails, so every option any stage writes is written.

@@ -177,12 +177,23 @@ pub fn converged(status: ApplicationReturnStatus) -> bool {
     )
 }
 
-/// Does a certified class make a converged, physical point an answer? Every
-/// class but `None`: S is the goal; W is the honest answer where no S point
-/// exists nearby (ralph1); `NotSearched` claims nothing either way. A point
+/// Does a certified class make a converged, physical point the answer, ending
+/// the ladder? S, the goal; and `NotSearched`, which claims nothing either way
+/// and only arises on models large enough that more stages are costly. A W
+/// point is not: it admits a descent direction along some branch, and a later
+/// stage can reach an S point below it ([`kept_if_nothing_better`]). A point
 /// that is not stationary at all is a stall, and the driver moves on.
 pub fn answers(class: StationarityClass) -> bool {
-    class != StationarityClass::None
+    matches!(class, StationarityClass::S | StationarityClass::NotSearched)
+}
+
+/// Is a converged, physical point that does not [`answers`] still worth
+/// reporting if no later stage certifies? W is: it is the honest answer
+/// where no S point exists nearby (ralph1's origin). Measured on the CALIPSO
+/// corpus's `complementarity` model, stopping at the first W point returned
+/// objective 85 where the continuation reaches the S optimum at 17.
+pub fn kept_if_nothing_better(class: StationarityClass) -> bool {
+    class == StationarityClass::W
 }
 
 /// Is a stage's answer an answer to the *model*, not just to the lowering?
