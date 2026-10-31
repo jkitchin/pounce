@@ -568,6 +568,29 @@ impl PyProblem {
                     }
                 };
                 d.set_item("certificate", cert)?;
+                // The B-stationarity check of the reported point (run when it
+                // is feasible and not certified S; S implies B), and how many
+                // branch NLPs moved the point off a non-B-stationary one.
+                let b: PyObject = match &out.b_check {
+                    None => py.None(),
+                    Some(bc) => {
+                        use pounce_algorithm::mpcc::BVerdict;
+                        let bd = PyDict::new_bound(py);
+                        let (verdict, reason) = match &bc.verdict {
+                            BVerdict::B => ("B", None),
+                            BVerdict::NotB { .. } => ("not_B", None),
+                            BVerdict::NotChecked(why) => ("not_checked", Some(*why)),
+                        };
+                        bd.set_item("verdict", verdict)?;
+                        bd.set_item("reason", reason)?;
+                        bd.set_item("n_biactive", bc.n_biactive)?;
+                        bd.set_item("branches_solved", bc.branches_solved)?;
+                        bd.set_item("enumerated", bc.enumerated)?;
+                        bd.into_any().unbind()
+                    }
+                };
+                d.set_item("b_stationarity", b)?;
+                d.set_item("escapes", out.escapes)?;
                 d.set_item(
                     "summary",
                     pounce_algorithm::mpcc::describe_outcome(

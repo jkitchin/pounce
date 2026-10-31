@@ -31,9 +31,10 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
-    Strategy, TOUCHED_OPTIONS, accepts, answers, certify, compared, converged,
-    kept_if_nothing_better, warm_start_assignments,
+    BCheck, BVerdict, Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS,
+    SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS, accepts, answers,
+    branch_bounds, certify, check_b_stationarity, compared, converged, kept_if_nothing_better,
+    warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -83,6 +84,13 @@ pub struct MpccOutcome {
     /// ([`pounce_algorithm::mpcc::certify`]); `None` only if the model could
     /// not be evaluated there.
     pub certificate: Option<Certificate>,
+    /// The B-stationarity check of the forwarded point
+    /// ([`pounce_algorithm::mpcc::check_b_stationarity`]), run when the point
+    /// is feasible and not certified S (S implies B). `None` when it did not
+    /// run there.
+    pub b_check: Option<BCheck>,
+    /// Branch NLPs that moved the point off a non-B-stationary one.
+    pub escapes: usize,
 }
 
 impl MpccOutcome {
@@ -459,6 +467,8 @@ pub fn solve_mpcc(
                     }
                 }
             }
+            // Not in STAGES: run only from a reported point, below.
+            MpccStage::Branch => None,
             MpccStage::Penalty => {
                 let _ = app
                     .options_mut()
@@ -572,6 +582,100 @@ pub fn solve_mpcc(
     // certificate; failing that, the exact-product stage's verdict (or, if
     // it was refused with no point, the first stage that has one).
     let verdict = verdict_of(exact, first);
+    // With no tight answer, the best S point inside the band is the answer.
+    let accepted = accepted.or(loose);
+    let mut selection = match (accepted, weak, physical, verdict) {
+        (Some((s, c, cert, _)), _, _, _) => Some((Reported::Answer(s), c, Some(cert))),
+        (None, Some((s, c, cert)), _, _) => Some((Reported::WeakFallback(s), c, Some(cert))),
+        // Feasible, but the certificate says not stationary: the lowered
+        // solve's success is not the declared model's, so it is reported
+        // at the acceptable level rather than as `Solve_Succeeded`.
+        (None, None, Some((s, c, cert)), _) => {
+            Some((Reported::FeasibleUncertified(s), acceptable(c), Some(cert)))
+        }
+        (None, None, None, Some(c)) => Some((Reported::Verdict, c, None)),
+        (None, None, None, None) => None,
+    };
+
+    // A feasible reported point the certificate does not call S may still be
+    // B-stationary (ralph1's origin is), or may sit where a branch descends.
+    // Check, and while a branch descends, re-solve it from the point: an
+    // ordinary NLP with each pair's held side pinned. Bounded by
+    // MAX_BRANCH_ESCAPES; each accepted escape is feasible and strictly lower.
+    let mut b_check: Option<BCheck> = None;
+    let mut escapes = 0;
+    if let Some((reported, chosen, known_cert)) = selection.as_mut() {
+        let eligible = |cert: &Option<Option<Certificate>>, c: &Captured| {
+            matches!(cert, Some(Some(ct)) if ct.feasible && ct.class != StationarityClass::S)
+                && accepts(c.status, c.max_abs_product, tol)
+        };
+        while !halted() && escapes < MAX_BRANCH_ESCAPES && eligible(known_cert, chosen) {
+            let Some(mp) = model_at(&inner, &chosen.x, sense) else {
+                break;
+            };
+            let inp = mp.input(&pairs, solver_tol, tol);
+            let bc = check_b_stationarity(&inp);
+            report(&describe_b_check(&bc));
+            let BVerdict::NotB { held, .. } = &bc.verdict else {
+                b_check = Some(bc);
+                break;
+            };
+            let bounds = branch_bounds(&inp, held);
+            wrapper.borrow_mut().set_branch(Some(bounds));
+            app.set_in_retry_sequence(true);
+            baseline(app);
+            let start = StartOverride {
+                x: chosen.x.clone(),
+                ..Default::default()
+            };
+            let c = run(
+                app,
+                MpccStage::Branch,
+                Lowering::Ineq,
+                Some(start),
+                &mut solves,
+            );
+            wrapper.borrow_mut().set_branch(None);
+            app.set_in_retry_sequence(false);
+            restore(app);
+            b_check = Some(bc);
+            if halted() {
+                break;
+            }
+            let f_old = sense * objective_at(&inner, &chosen.x);
+            let f_new = sense * objective_at(&inner, &c.x);
+            let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
+            let lower = f_new < f_old - 1e-9 * f_old.abs().max(1.0);
+            if !(accepts(c.status, c.max_abs_product, tol)
+                && lower
+                && cert.as_ref().is_some_and(|ct| ct.feasible))
+            {
+                report(&format!(
+                    "pounce: complementarity: the branch NLP did not improve the point ({:?}, \
+                     minimized objective {f_new:.6e} against {f_old:.6e}); keeping it.",
+                    c.status
+                ));
+                break;
+            }
+            report(&format!(
+                "pounce: complementarity: the branch NLP moved the point off the non-B-stationary \
+                 one: minimized objective {f_old:.6e} -> {f_new:.6e}."
+            ));
+            escapes += 1;
+            b_check = None; // a check describes the point it ran at
+            let class = cert.as_ref().map(|ct| ct.class);
+            (*reported, *chosen) = match class {
+                Some(StationarityClass::S) => (Reported::Answer(MpccStage::Branch), c),
+                Some(StationarityClass::W) => (Reported::WeakFallback(MpccStage::Branch), c),
+                _ => (
+                    Reported::FeasibleUncertified(MpccStage::Branch),
+                    acceptable(c),
+                ),
+            };
+            *known_cert = Some(cert);
+        }
+    }
+
     if let Some(c) = stopped.into_inner() {
         // The caller asked to stop: report the stopped solve, nothing else.
         let total_iterations = solves.iter().map(|s| s.iterations).sum();
@@ -600,28 +704,12 @@ pub fn solve_mpcc(
             x: c.x,
             max_abs_product: c.max_abs_product,
             certificate: None,
+            b_check: None,
+            escapes,
         });
     }
-    // With no tight answer, the best S point inside the band is the answer.
-    let accepted = accepted.or(loose);
-    let (reported, chosen, known_cert) = match (accepted, weak, physical, verdict) {
-        (Some((s, c, cert, _)), _, _, _) => (Reported::Answer(s), c, Some(cert)),
-        (None, Some((s, c, cert)), _, _) => (Reported::WeakFallback(s), c, Some(cert)),
-        // Feasible, but the certificate says not stationary: the lowered
-        // solve's success is not the declared model's, so it is reported
-        // at the acceptable level rather than as `Solve_Succeeded`.
-        (None, None, Some((s, c, cert)), _) => (
-            Reported::FeasibleUncertified(s),
-            Captured {
-                status: ApplicationReturnStatus::SolvedToAcceptableLevel,
-                solver_return: SolverReturn::StopAtAcceptablePoint,
-                ..c
-            },
-            Some(cert),
-        ),
-        (None, None, None, Some(c)) => (Reported::Verdict, c, None),
-        (None, None, None, None) => return Err("no exact-product stage ran".into()),
-    };
+    let (reported, chosen, known_cert) =
+        selection.ok_or_else(|| "no exact-product stage ran".to_string())?;
     let accepted_by = match reported {
         Reported::Answer(s) => Some(s),
         _ => None,
@@ -660,7 +748,52 @@ pub fn solve_mpcc(
         x: chosen.x,
         max_abs_product: chosen.max_abs_product,
         certificate,
+        b_check,
+        escapes,
     })
+}
+
+/// A converged point whose certificate does not say stationary, reported at
+/// the acceptable level: the lowered solve's success is not the model's.
+fn acceptable(c: Captured) -> Captured {
+    Captured {
+        status: ApplicationReturnStatus::SolvedToAcceptableLevel,
+        solver_return: SolverReturn::StopAtAcceptablePoint,
+        ..c
+    }
+}
+
+/// At most this many branch NLPs from one reported point.
+const MAX_BRANCH_ESCAPES: usize = 3;
+
+/// The console line for a B-stationarity check.
+fn describe_b_check(bc: &BCheck) -> String {
+    let how = if bc.enumerated {
+        format!(
+            "{} biactive pair{}, {} branch LP{}",
+            bc.n_biactive,
+            if bc.n_biactive == 1 { "" } else { "s" },
+            bc.branches_solved,
+            if bc.branches_solved == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "{} biactive pairs, too many to enumerate; heuristic branch",
+            bc.n_biactive
+        )
+    };
+    match &bc.verdict {
+        BVerdict::B => format!(
+            "pounce: complementarity: B-stationarity ({how}): B-stationary -- no branch descends."
+        ),
+        BVerdict::NotB { decrease, .. } => format!(
+            "pounce: complementarity: B-stationarity ({how}): not B-stationary -- a branch \
+             descends (∇f·d = {decrease:.2e}); re-solving that branch."
+        ),
+        BVerdict::NotChecked(why) => {
+            format!("pounce: complementarity: B-stationarity ({how}): not decided ({why}).")
+        }
+    }
 }
 
 /// The *inner* model's objective at `x`; `+inf` if it cannot be evaluated,
@@ -692,16 +825,45 @@ fn verdict_of(exact: Option<Captured>, first: Option<Captured>) -> Option<Captur
     }
 }
 
-/// Evaluate the *inner* model at `x` and certify it. `None` if any callback
-/// declines.
-fn certify_at(
-    inner: &Rc<RefCell<dyn TNLP>>,
-    pairs: &[ComplementarityPair],
-    x: &[Number],
-    solver_tol: Number,
-    feas_tol: Number,
-    sense: Number,
-) -> Option<Certificate> {
+/// The *inner* model's data at a point, as the certificate and the
+/// B-stationarity check read it.
+struct ModelPoint {
+    x: Vec<Number>,
+    grad_f: Vec<Number>,
+    g: Vec<Number>,
+    jac: Vec<(usize, usize, Number)>,
+    x_l: Vec<Number>,
+    x_u: Vec<Number>,
+    g_l: Vec<Number>,
+    g_u: Vec<Number>,
+}
+
+impl ModelPoint {
+    fn input<'a>(
+        &'a self,
+        pairs: &'a [ComplementarityPair],
+        solver_tol: Number,
+        feas_tol: Number,
+    ) -> CertificateInput<'a> {
+        CertificateInput {
+            x: &self.x,
+            grad_f: &self.grad_f,
+            g: &self.g,
+            jac: &self.jac,
+            x_l: &self.x_l,
+            x_u: &self.x_u,
+            g_l: &self.g_l,
+            g_u: &self.g_u,
+            pairs,
+            solver_tol,
+            feas_tol,
+        }
+    }
+}
+
+/// Evaluate the *inner* model at `x`, the objective gradient in the
+/// minimized sense. `None` if any callback declines.
+fn model_at(inner: &Rc<RefCell<dyn TNLP>>, x: &[Number], sense: Number) -> Option<ModelPoint> {
     let mut m = inner.borrow_mut();
     let info = m.get_nlp_info()?;
     let (n, mm, nnz) = (info.n as usize, info.m as usize, info.nnz_jac_g as usize);
@@ -740,22 +902,33 @@ fn certify_at(
     {
         return None;
     }
-    let jac: Vec<(usize, usize, Number)> = (0..nnz)
+    let jac = (0..nnz)
         .map(|k| ((ir[k] - off) as usize, (jc[k] - off) as usize, v[k]))
         .collect();
-    Some(certify(&CertificateInput {
-        x,
-        grad_f: &grad_f,
-        g: &g,
-        jac: &jac,
-        x_l: &x_l,
-        x_u: &x_u,
-        g_l: &g_l,
-        g_u: &g_u,
-        pairs,
-        solver_tol,
-        feas_tol,
-    }))
+    Some(ModelPoint {
+        x: x.to_vec(),
+        grad_f,
+        g,
+        jac,
+        x_l,
+        x_u,
+        g_l,
+        g_u,
+    })
+}
+
+/// Evaluate the *inner* model at `x` and certify it. `None` if any callback
+/// declines.
+fn certify_at(
+    inner: &Rc<RefCell<dyn TNLP>>,
+    pairs: &[ComplementarityPair],
+    x: &[Number],
+    solver_tol: Number,
+    feas_tol: Number,
+    sense: Number,
+) -> Option<Certificate> {
+    let mp = model_at(inner, x, sense)?;
+    Some(certify(&mp.input(pairs, solver_tol, feas_tol)))
 }
 
 #[cfg(test)]

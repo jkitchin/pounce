@@ -66,6 +66,11 @@ pub enum MpccStage {
     Continuation,
     /// `G·H = 0` through the ℓ₁ exact-penalty barrier.
     Penalty,
+    /// A branch NLP: each pair with one side held at zero, the other kept
+    /// non-negative — run from a reported point that is not B-stationary,
+    /// along the branch its B-stationarity check found a descent on
+    /// ([`check_b_stationarity`]). Not in [`STAGES`].
+    Branch,
 }
 
 impl MpccStage {
@@ -74,6 +79,7 @@ impl MpccStage {
             Self::Exact => "exact product",
             Self::Continuation => "Scholtes continuation",
             Self::Penalty => "l1 penalty",
+            Self::Branch => "branch NLP",
         }
     }
 }
@@ -466,14 +472,19 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
     certify_routed(inp, None)
 }
 
-/// [`certify`], with the dense/sparse choice forced when `force_sparse` is
-/// set — for holding the two paths to each other in tests.
-fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Certificate {
-    let n = inp.x.len();
-    let m = inp.g.len();
-    let corner = inp.solver_tol.max(0.0).sqrt();
-    let row_tol = corner;
+/// Each pair's orientation, values and activity at a point, as both the
+/// certificate and the B-stationarity check read them.
+struct PairActivity {
+    mixed: Vec<bool>,
+    /// `(s_G, b)` and `(s_H, c)`: `G = s_G (x_j - b)`, `H = s_H (g_i - c)`.
+    g_side: Vec<(Number, Number)>,
+    h_side: Vec<(Number, Number)>,
+    hv: Vec<Number>,
+    g_act: Vec<bool>,
+    h_act: Vec<bool>,
+}
 
+fn pair_activity(inp: &CertificateInput<'_>, corner: Number) -> PairActivity {
     // Pair sides and their family scales.
     // Each side's orientation from its one finite bound, as MpccTnlp reads
     // it: (+1, lower) or (-1, upper).
@@ -551,6 +562,32 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     let hs = hv.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
     let g_act: Vec<bool> = gv.iter().map(|v| v.abs() <= corner * gs).collect();
     let h_act: Vec<bool> = hv.iter().map(|v| v.abs() <= corner * hs).collect();
+    PairActivity {
+        mixed,
+        g_side,
+        h_side,
+        hv,
+        g_act,
+        h_act,
+    }
+}
+
+/// [`certify`], with the dense/sparse choice forced when `force_sparse` is
+/// set — for holding the two paths to each other in tests.
+fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Certificate {
+    let n = inp.x.len();
+    let m = inp.g.len();
+    let corner = inp.solver_tol.max(0.0).sqrt();
+    let row_tol = corner;
+
+    let PairActivity {
+        mixed,
+        g_side,
+        h_side,
+        hv,
+        g_act,
+        h_act,
+    } = pair_activity(inp, corner);
     let n_biactive = g_act.iter().zip(&h_act).filter(|(a, b)| **a && **b).count();
     let n_neither = g_act
         .iter()
@@ -1079,6 +1116,323 @@ fn nnls(cols: &[Vec<Number>], b: &[Number], n: usize) -> Vec<Number> {
     x
 }
 
+// ---------------------------------------------------------------------------
+// B-stationarity: whether a feasible direction along some branch descends.
+// ---------------------------------------------------------------------------
+
+/// Which side of a pair is held at zero along a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldSide {
+    G,
+    H,
+}
+
+/// What [`check_b_stationarity`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BVerdict {
+    /// No branch has a first-order descent direction: B-stationary.
+    B,
+    /// The branch `held` (one entry per pair) descends: `∇f·d = decrease`
+    /// (negative) for a step `d` in the unit box.
+    NotB {
+        held: Vec<HeldSide>,
+        decrease: Number,
+    },
+    /// Not decided, with the reason.
+    NotChecked(&'static str),
+}
+
+/// [`check_b_stationarity`]'s verdict and what it took.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BCheck {
+    pub verdict: BVerdict,
+    pub n_biactive: usize,
+    /// Branch LPs solved.
+    pub branches_solved: usize,
+    /// Whether every branch was enumerated (`false`: the heuristic above
+    /// [`MAX_ENUMERATED_BIACTIVE`], which can find a descent but never
+    /// certify B).
+    pub enumerated: bool,
+}
+
+/// Up to this many biactive pairs every one of the `2^b` branches is
+/// checked; above it, one heuristic branch.
+pub const MAX_ENUMERATED_BIACTIVE: usize = 10;
+
+/// Whether `x` is B-stationary: no direction `d` feasible for the linearized
+/// constraints along any branch of the biactive pairs has `∇f·d < 0`.
+///
+/// Each branch is an LP: `min ∇f·d` over the linearized active rows and
+/// bounds, with each pair's active side held (`∇G·d = 0` or `∇H·d = 0`) and,
+/// on a biactive pair, the side the branch releases kept non-negative, in the
+/// box `-1 <= d <= 1`. `d = 0` is always feasible, so every LP has optimum
+/// `<= 0`; the point is B-stationary exactly when all of them are `0`. Up to
+/// [`MAX_ENUMERATED_BIACTIVE`] biactive pairs all `2^b` branches are solved
+/// (the LPEC by enumeration, no MILP); above it, the relaxed LP — both sides
+/// of every biactive pair only non-negative — picks one branch (hold the side
+/// its direction moves less), which is solved.
+///
+/// A decrease counts only below `-sqrt(solver_tol)·max(1, ‖∇f‖∞)`, the
+/// certificate's sign band: near a biactive pair the point itself is only
+/// `sqrt(tol)`-accurate. S implies B, so a caller checks only points the
+/// certificate did not call S. The point must be feasible and every pair
+/// complementary.
+pub fn check_b_stationarity(inp: &CertificateInput<'_>) -> BCheck {
+    let corner = inp.solver_tol.max(0.0).sqrt();
+    let act = pair_activity(inp, corner);
+    let np = inp.pairs.len();
+    let biactive: Vec<usize> = (0..np).filter(|&k| act.g_act[k] && act.h_act[k]).collect();
+    let mut out = BCheck {
+        verdict: BVerdict::NotChecked(""),
+        n_biactive: biactive.len(),
+        branches_solved: 0,
+        enumerated: false,
+    };
+    if (0..np).any(|k| !act.g_act[k] && !act.h_act[k]) {
+        out.verdict = BVerdict::NotChecked("a pair is not complementary at the point");
+        return out;
+    }
+    let scale = inp.grad_f.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+    let band = corner * scale;
+    // Held side per pair, `None` on a biactive pair left to the branch.
+    let held_of = |choice: &dyn Fn(usize) -> Option<HeldSide>| -> Vec<Option<HeldSide>> {
+        (0..np)
+            .map(|k| match (act.g_act[k], act.h_act[k]) {
+                (true, false) => Some(HeldSide::G),
+                (false, true) => Some(HeldSide::H),
+                _ => choice(k),
+            })
+            .collect()
+    };
+    let full = |h: &[Option<HeldSide>]| -> Vec<HeldSide> {
+        h.iter().map(|s| s.unwrap_or(HeldSide::G)).collect()
+    };
+
+    if biactive.len() <= MAX_ENUMERATED_BIACTIVE {
+        out.enumerated = true;
+        let mut best: Option<(Number, Vec<HeldSide>)> = None;
+        for mask in 0..(1usize << biactive.len()) {
+            let held = held_of(&|k| {
+                let bit = biactive.iter().position(|&b| b == k).unwrap();
+                Some(if mask >> bit & 1 == 0 {
+                    HeldSide::G
+                } else {
+                    HeldSide::H
+                })
+            });
+            let Some((v, _)) = branch_lp(inp, &act, &held) else {
+                out.verdict = BVerdict::NotChecked("a branch LP did not solve");
+                return out;
+            };
+            out.branches_solved += 1;
+            if best.as_ref().is_none_or(|(b, _)| v < *b) {
+                best = Some((v, full(&held)));
+            }
+        }
+        out.verdict = match best {
+            Some((v, held)) if v < -band => BVerdict::NotB { held, decrease: v },
+            _ => BVerdict::B,
+        };
+        return out;
+    }
+
+    // Too many to enumerate: the relaxed cone's direction names a branch.
+    let relaxed = held_of(&|_| None);
+    let Some((_, d)) = branch_lp(inp, &act, &relaxed) else {
+        out.verdict = BVerdict::NotChecked("the relaxed LP did not solve");
+        return out;
+    };
+    out.branches_solved += 1;
+    let dg = |k: usize| act.g_side[k].0 * d[inp.pairs[k].var];
+    let dh = |k: usize| {
+        let i = inp.pairs[k].row;
+        act.h_side[k].0
+            * inp
+                .jac
+                .iter()
+                .filter(|&&(r, _, _)| r == i)
+                .map(|&(_, c, v)| v * d[c])
+                .sum::<Number>()
+    };
+    let held = held_of(&|k| {
+        Some(if dg(k) <= dh(k) {
+            HeldSide::G
+        } else {
+            HeldSide::H
+        })
+    });
+    let Some((v, _)) = branch_lp(inp, &act, &held) else {
+        out.verdict = BVerdict::NotChecked("a branch LP did not solve");
+        return out;
+    };
+    out.branches_solved += 1;
+    out.verdict = if v < -band {
+        BVerdict::NotB {
+            held: full(&held),
+            decrease: v,
+        }
+    } else {
+        BVerdict::NotChecked(
+            "too many biactive pairs to enumerate; the heuristic branch does not descend",
+        )
+    };
+    out
+}
+
+/// One branch LP (`held[k] = None` on a biactive pair: both sides only
+/// non-negative, the relaxed cone). Returns the optimum and the direction,
+/// or `None` if the LP did not solve.
+fn branch_lp(
+    inp: &CertificateInput<'_>,
+    act: &PairActivity,
+    held: &[Option<HeldSide>],
+) -> Option<(Number, Vec<Number>)> {
+    use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
+    let n = inp.x.len();
+    let m = inp.g.len();
+    let row_tol = inp.solver_tol.max(0.0).sqrt();
+    let mut rows_of: Vec<Vec<(usize, Number)>> = vec![Vec::new(); m];
+    for &(r, c, v) in inp.jac {
+        rows_of[r].push((c, v));
+    }
+    let (mut lb, mut ub) = (vec![-1.0; n], vec![1.0; n]);
+    let (mut a, mut b, mut g, mut h) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let eq = |coef: &[(usize, Number)], s: Number, a: &mut Vec<Triplet>, b: &mut Vec<Number>| {
+        let r = b.len();
+        a.extend(coef.iter().map(|&(c, v)| Triplet {
+            row: r,
+            col: c,
+            val: s * v,
+        }));
+        b.push(0.0);
+    };
+    // `s·(coef·d) >= 0`, written `-s·coef·d <= 0`.
+    let geq = |coef: &[(usize, Number)], s: Number, g: &mut Vec<Triplet>, h: &mut Vec<Number>| {
+        let r = h.len();
+        g.extend(coef.iter().map(|&(c, v)| Triplet {
+            row: r,
+            col: c,
+            val: -s * v,
+        }));
+        h.push(0.0);
+    };
+    let mut pair_row = vec![None; m];
+    let mut pair_var = vec![None; n];
+    for (k, p) in inp.pairs.iter().enumerate() {
+        pair_row[p.row] = Some(k);
+        pair_var[p.var] = Some(k);
+    }
+    // Ordinary rows: the active ones, linearized.
+    for i in (0..m).filter(|&i| pair_row[i].is_none()) {
+        let (lo, hi) = (inp.g_l[i], inp.g_u[i]);
+        let at_lo = lo > -INF && inp.g[i] - lo <= row_tol;
+        let at_hi = hi < INF && hi - inp.g[i] <= row_tol;
+        match (at_lo, at_hi) {
+            (true, true) => eq(&rows_of[i], 1.0, &mut a, &mut b),
+            (true, false) => geq(&rows_of[i], 1.0, &mut g, &mut h),
+            (false, true) => geq(&rows_of[i], -1.0, &mut g, &mut h),
+            (false, false) => {}
+        }
+    }
+    // Ordinary bounds, and a pair variable's ordinary second bound.
+    for j in 0..n {
+        let (lo, hi) = (inp.x_l[j], inp.x_u[j]);
+        let (mut at_lo, mut at_hi) = (
+            lo > -INF && inp.x[j] - lo <= row_tol,
+            hi < INF && hi - inp.x[j] <= row_tol,
+        );
+        if let Some(k) = pair_var[j] {
+            if act.mixed[k] {
+                continue; // both bounds are the pair's
+            }
+            // The pair's own bound is handled with the pair.
+            if act.g_side[k].0 > 0.0 {
+                at_lo = false;
+            } else {
+                at_hi = false;
+            }
+        }
+        if at_lo {
+            lb[j] = 0.0;
+        }
+        if at_hi {
+            ub[j] = 0.0;
+        }
+    }
+    // Pairs.
+    for (k, p) in inp.pairs.iter().enumerate() {
+        let (sg, sh) = (act.g_side[k].0, act.h_side[k].0);
+        let gcoef = [(p.var, 1.0)];
+        let hcoef = &rows_of[p.row];
+        match held[k] {
+            Some(HeldSide::G) => {
+                lb[p.var] = 0.0;
+                ub[p.var] = 0.0;
+                if act.h_act[k] {
+                    geq(hcoef, sh, &mut g, &mut h);
+                }
+            }
+            Some(HeldSide::H) => {
+                eq(hcoef, 1.0, &mut a, &mut b);
+                if act.g_act[k] {
+                    geq(&gcoef, sg, &mut g, &mut h);
+                }
+            }
+            None => {
+                geq(&gcoef, sg, &mut g, &mut h);
+                geq(hcoef, sh, &mut g, &mut h);
+            }
+        }
+    }
+    let prob = QpProblem {
+        n,
+        p_lower: Vec::new(),
+        c: inp.grad_f.to_vec(),
+        a,
+        b,
+        g,
+        h,
+        lb,
+        ub,
+    };
+    let opts = QpOptions::default();
+    let sol = solve_qp_ipm(&prob, &opts, || {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+            as Box<dyn pounce_linsol::SparseSymLinearSolverInterface>
+    });
+    matches!(sol.status, QpStatus::Optimal).then_some((sol.obj, sol.x))
+}
+
+/// The branch NLP's bounds for `held` (one per pair): the held side pinned
+/// at zero, and, on a mixed pair held at a bound, the free row given the
+/// sign the pair requires there. For [`pounce_nlp::mpcc::MpccTnlp::set_branch`].
+pub fn branch_bounds(
+    inp: &CertificateInput<'_>,
+    held: &[HeldSide],
+) -> pounce_nlp::mpcc::BranchBounds {
+    let corner = inp.solver_tol.max(0.0).sqrt();
+    let act = pair_activity(inp, corner);
+    let mut out = pounce_nlp::mpcc::BranchBounds::default();
+    for (k, p) in inp.pairs.iter().enumerate() {
+        let ((sg, bnd), (_, c)) = (act.g_side[k], act.h_side[k]);
+        match held[k] {
+            HeldSide::G => {
+                out.vars.push((p.var, bnd, bnd));
+                if act.mixed[k] {
+                    // H = s_G·g >= 0 at the held bound.
+                    out.rows.push(if sg > 0.0 {
+                        (p.row, 0.0, 2.0 * INF)
+                    } else {
+                        (p.row, -2.0 * INF, 0.0)
+                    });
+                }
+            }
+            HeldSide::H => out.rows.push((p.row, c, c)),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,6 +1624,121 @@ mod tests {
         let x = [0.0, 1.0];
         let c = run(&m, &x, &[-4.0, 0.0], &[x[1]]);
         assert_eq!(c.class, StationarityClass::S, "{c:?}");
+    }
+
+    fn input<'a>(
+        m: &'a Model,
+        x: &'a [Number],
+        grad_f: &'a [Number],
+        g: &'a [Number],
+    ) -> CertificateInput<'a> {
+        CertificateInput {
+            x,
+            grad_f,
+            g,
+            jac: &m.jac,
+            x_l: &m.x_l,
+            x_u: &m.x_u,
+            g_l: &m.g_l,
+            g_u: &m.g_u,
+            pairs: &m.pairs,
+            solver_tol: 1e-8,
+            feas_tol: 1e-4,
+        }
+    }
+
+    /// ralph1 at the origin, `min 2x - y`, `x >= 0`, `0 <= y ⟂ y - x >= 0`:
+    /// weakly but not strongly stationary, and B-stationary -- both branch
+    /// LPs have optimum 0. The check must not report a descent there.
+    #[test]
+    fn ralph1s_origin_is_b_stationary() {
+        let m = Model {
+            x_l: vec![0.0, 0.0],
+            x_u: vec![PI, PI],
+            g_l: vec![0.0],
+            g_u: vec![PI],
+            pairs: vec![ComplementarityPair { row: 0, var: 1 }],
+            jac: vec![(0, 0, -1.0), (0, 1, 1.0)],
+        };
+        let (x, gf, g) = ([0.0, 0.0], [2.0, -1.0], [0.0]);
+        assert_eq!(run(&m, &x, &gf, &g).class, StationarityClass::W);
+        let b = check_b_stationarity(&input(&m, &x, &gf, &g));
+        assert_eq!(b.verdict, BVerdict::B, "{b:?}");
+        assert_eq!(
+            (b.n_biactive, b.branches_solved, b.enumerated),
+            (1, 2, true)
+        );
+    }
+
+    /// `min (x - 1)² + (y - 1)²`, `0 <= x ⟂ y >= 0` at the origin: biactive,
+    /// and either branch descends (`∇f·d = -2` with `d` in the unit box).
+    /// The branch bounds pin the held side.
+    #[test]
+    fn a_biactive_corner_with_descent_is_not_b_stationary() {
+        let m = Model {
+            x_l: vec![0.0, NI],
+            x_u: vec![PI, PI],
+            g_l: vec![0.0],
+            g_u: vec![PI],
+            pairs: vec![ComplementarityPair { row: 0, var: 0 }],
+            jac: vec![(0, 1, 1.0)],
+        };
+        let (x, gf, g) = ([0.0, 0.0], [-2.0, -2.0], [0.0]);
+        let inp = input(&m, &x, &gf, &g);
+        let b = check_b_stationarity(&inp);
+        let BVerdict::NotB { held, decrease } = &b.verdict else {
+            panic!("{b:?}")
+        };
+        assert!((decrease + 2.0).abs() < 1e-6, "{b:?}");
+        let bb = branch_bounds(&inp, held);
+        match held[0] {
+            HeldSide::G => assert_eq!(bb.vars, vec![(0, 0.0, 0.0)], "{bb:?}"),
+            HeldSide::H => assert_eq!(bb.rows, vec![(0, 0.0, 0.0)], "{bb:?}"),
+        }
+        // Away from the corner, a point on one branch whose gradient is held
+        // by the pinned side is B-stationary: x = 0, y = 1 with ∇f = (-2, 0).
+        let (x, gf, g) = ([0.0, 1.0], [-2.0, 0.0], [1.0]);
+        assert_eq!(
+            check_b_stationarity(&input(&m, &x, &gf, &g)).verdict,
+            BVerdict::B
+        );
+    }
+
+    /// Past [`MAX_ENUMERATED_BIACTIVE`], the relaxed LP's direction picks one
+    /// branch: it finds the descent here, and could never certify B.
+    #[test]
+    fn past_the_enumeration_cap_the_heuristic_finds_a_descent() {
+        let k = MAX_ENUMERATED_BIACTIVE + 1;
+        let n = 2 * k;
+        let m = Model {
+            x_l: (0..n).map(|j| if j < k { 0.0 } else { NI }).collect(),
+            x_u: vec![PI; n],
+            g_l: vec![0.0; k],
+            g_u: vec![PI; k],
+            pairs: (0..k)
+                .map(|i| ComplementarityPair { row: i, var: i })
+                .collect(),
+            jac: (0..k).map(|i| (i, k + i, 1.0)).collect(),
+        };
+        let (x, gf, g) = (vec![0.0; n], vec![-1.0; n], vec![0.0; k]);
+        let b = check_b_stationarity(&input(&m, &x, &gf, &g));
+        assert!(!b.enumerated && b.branches_solved == 2, "{b:?}");
+        assert!(matches!(b.verdict, BVerdict::NotB { .. }), "{b:?}");
+    }
+
+    #[test]
+    fn a_point_where_a_pair_is_not_complementary_is_not_checked() {
+        let m = Model {
+            x_l: vec![0.0, NI],
+            x_u: vec![PI, PI],
+            g_l: vec![0.0],
+            g_u: vec![PI],
+            pairs: vec![ComplementarityPair { row: 0, var: 0 }],
+            jac: vec![(0, 1, 1.0)],
+        };
+        let (x, gf, g) = ([1.0, 1.0], [0.0, 0.0], [1.0]);
+        let b = check_b_stationarity(&input(&m, &x, &gf, &g));
+        assert!(matches!(b.verdict, BVerdict::NotChecked(_)), "{b:?}");
     }
 
     /// CALIPSO.jl `nonconvex/complementarity.jl`, its x-x pairs written as

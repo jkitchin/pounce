@@ -113,6 +113,14 @@ def test_a_converged_point_that_is_not_strongly_stationary_says_so():
     # A W point is reported as a fallback, not as an answer.
     assert cc["accepted_by"] is None, cc
     assert cc["fallback"] is not None, cc
+    # W but B-stationary: both branch LPs have optimum 0, so no branch NLP
+    # runs and the origin stands.
+    b = cc["b_stationarity"]
+    assert (b["verdict"], b["n_biactive"], b["branches_solved"]) == ("B", 1, 2), cc
+    assert cc["escapes"] == 0, cc
+    # A strongly stationary answer is B by implication; no check runs.
+    _, info = qpec_problem(complementarity=[(0, 1), (1, 2)]).solve(np.zeros(3))
+    assert info["complementarity"]["b_stationarity"] is None
 
 
 def test_without_pairs_nothing_changes():
