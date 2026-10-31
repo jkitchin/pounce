@@ -5799,12 +5799,11 @@ impl IpoptApplication {
         }
         let retry_status = scope.optimize_constrained(Rc::clone(&seeded));
         drop(scope);
-        // A re-solve the caller's intermediate callback stopped reports the
-        // stop, at the point it stopped; the comparison below would put the
-        // base attempt's status back over the request.
-        if retry_status == ApplicationReturnStatus::UserRequestedStop {
-            return retry_status;
-        }
+        // A re-solve the caller's intermediate callback stopped is declined
+        // like any unclean one -- the audit only runs after a converged base,
+        // and the stop's mid-run iterate must not replace it -- but the
+        // status reported is the stop, and nothing calls back after it.
+        let stopped = retry_status == ApplicationReturnStatus::UserRequestedStop;
         let retry = self.statistics.borrow().clone();
         let sense = if prev_user_factor < 0.0 { -1.0 } else { 1.0 };
         let clean = match first_status {
@@ -5906,7 +5905,7 @@ impl IpoptApplication {
             // The replayed row is the reported answer's last iterate, so a
             // `false` here is a stop request on it, honored as a solve's
             // final-iterate stop is.
-            if let Some(stats) = trace_floor {
+            if let Some(stats) = trace_floor.filter(|_| !stopped) {
                 if !tnlp.borrow_mut().intermediate_callback(
                     stats,
                     &TnlpIpoptData::default(),
@@ -5915,6 +5914,9 @@ impl IpoptApplication {
                     return ApplicationReturnStatus::UserRequestedStop;
                 }
             }
+        }
+        if stopped {
+            return retry_status;
         }
         let detail = if keeps_box {
             format!(

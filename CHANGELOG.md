@@ -59,8 +59,11 @@ changes.
   (the scale audit, the dual-divergence retry, the μ-strategy fallback, the
   ℓ₁ fallback) and the callback returned `false` during the re-solve, or on
   the final iterate replayed after a declined one, the first attempt's status
-  was put back and the run reported success. It now reports
-  `User_Requested_Stop`, as a solve without a re-solve does.
+  was put back and the run reported success. The same held for a stop during
+  the negative-curvature escape, which restored the point it left and
+  reported `Solve_Succeeded`. These now report `User_Requested_Stop`, as a
+  solve without a re-solve does; a stop during the scale audit's re-solve,
+  which only runs after a converged solve, keeps that converged point.
 - **Debugger: `detach` now ends `stop-at` pauses.** A `stop-at` checkpoint (or
   a pending `stepi`) kept pausing after `detach`, which every other pause
   source honours, so a session that had used `stop-at kkt` could not let the
