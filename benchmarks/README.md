@@ -115,6 +115,8 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 | [`water/`](water/README.md)         | Water-network design | 6 problems | MINLPLib instances, signomial nonlinearities |
 | [`warmstart/`](warmstart/README.md) | Parametric NLP **sequences** | 6 families × 3 step sizes | The one suite that is not a cold-solve set: measures warm starting (cold vs warm × IPM vs active-set SQP) over paths of related NLPs. Python-driven, not `.nl` |
 | [`mpcc/`](mpcc/README.md)           | Complementarity-constrained programs (MPCC) | 11 cases, ≤ 3 vars | gh#794 Gate 0: compares the direct, exact-product/NCP, ℓ₁ exact-penalty and Scholtes-continuation routes on a corpus with known optima and known MPCC stationarity classes. Python-driven, not `.nl` |
+| [`macmpec/`](macmpec/README.md)     | MacMPEC (Leyffer), standard MPCC collection | 178 problems, up to 3.4k vars | Classified against published best-known objectives (at / worse / BETTER), not an Ipopt reference. Needs a binary with complementarity support (PR #1103) |
+| [`mpcc_nl/`](mpcc_nl/README.md)     | MPCC as AMPL `complements` `.nl` | 16 problems, up to 180k vars | The CLI's declared-complementarity path (PR #1103), checked against known global optima in `answers.json`; no Ipopt reference. Needs a binary with complementarity support |
 
 The `warmstart/` and `mpcc/` suites sit outside the `.nl` machinery entirely — they
 has no Ipopt reference and does not feed the composite report, because
