@@ -33,8 +33,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
     BCheck, BVerdict, Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS,
     SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS, accepts, answers,
-    branch_bounds, certify, check_b_stationarity, compared, converged, kept_if_nothing_better,
-    warm_start_assignments,
+    branch_bounds, budgeted_max_iter, certify, check_b_stationarity, compared, converged,
+    exact_stage_budget, finish_budget, kept_if_nothing_better, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -231,6 +231,19 @@ pub fn solve_mpcc(
         }
     };
 
+    // The caller's own iteration limit: a budgeted stage never exceeds it.
+    let caller_max_iter = app
+        .options()
+        .get_integer_value("max_iter", "")
+        .map(|(v, _)| v)
+        .unwrap_or(3000);
+    let set_budget = |app: &mut IpoptApplication, budget: usize| {
+        let it = budgeted_max_iter(budget, caller_max_iter);
+        let _ = app
+            .options_mut()
+            .read_from_str(&format!("max_iter {it}\n"), true);
+    };
+
     let mut solves: Vec<MpccSolveRecord> = Vec::new();
     // The exact-product stage's result: what a plain solve of the lowered
     // model says, and so the verdict reported when no stage answers. A
@@ -353,6 +366,20 @@ pub fn solve_mpcc(
                 // rather than `Not_Enough_Degrees_Of_Freedom`, and the
                 // inequality form then gives a verdict with a point of its
                 // own.
+                //
+                // With a tight S answer from the continuation already in
+                // hand, this stage is a second opinion and runs on a budget
+                // proportional to what the continuation spent
+                // ([`EXACT_BUDGET_FACTOR`]). Without one -- the
+                // continuation failed, or answered only W or inside the
+                // band -- it is the main attempt and runs in full.
+                let budget = exact_stage_budget(
+                    accepted.is_some(),
+                    iterations_of(&solves, MpccStage::Continuation),
+                );
+                if let Some(b) = budget {
+                    set_budget(app, b);
+                }
                 let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
                 if halted() {
                     break;
@@ -360,6 +387,9 @@ pub fn solve_mpcc(
                 if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty()
                 {
                     baseline(app);
+                    if let Some(b) = budget {
+                        set_budget(app, b);
+                    }
                     c = run(app, stage, Lowering::Ineq, None, &mut solves);
                     if halted() {
                         break;
@@ -428,12 +458,19 @@ pub fn solve_mpcc(
                         // The finish: exact product from the end of the
                         // schedule; `G·H <= 0` where the equality would
                         // over-determine the model (same feasible set).
+                        //
+                        // On a budget ([`FINISH_BUDGET_FLOOR`], or what the
+                        // schedule spent if more): a finish that has not
+                        // converged by then leaves the schedule's answer.
+                        let finish_budget =
+                            finish_budget(iterations_of(&solves, MpccStage::Continuation));
                         let mut finish = None;
                         for lowering in [Lowering::Eq, Lowering::Ineq] {
                             baseline(app);
                             for a in warm_start_assignments(relaxed.statistics.final_mu) {
                                 let _ = app.options_mut().read_from_str(&a, true);
                             }
+                            set_budget(app, finish_budget);
                             let c = run(app, stage, lowering, Some(relaxed.warm()), &mut solves);
                             if halted() {
                                 break;
@@ -755,6 +792,15 @@ pub fn solve_mpcc(
 
 /// A converged point whose certificate does not say stationary, reported at
 /// the acceptable level: the lowered solve's success is not the model's.
+/// Iterations the solves of `stage` have spent so far.
+fn iterations_of(solves: &[MpccSolveRecord], stage: MpccStage) -> usize {
+    solves
+        .iter()
+        .filter(|s| s.stage == stage)
+        .map(|s| s.iterations)
+        .sum()
+}
+
 fn acceptable(c: Captured) -> Captured {
     Captured {
         status: ApplicationReturnStatus::SolvedToAcceptableLevel,
