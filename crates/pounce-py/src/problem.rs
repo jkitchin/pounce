@@ -561,6 +561,9 @@ impl PyProblem {
                         cd.set_item("multipliers_unique", c.multipliers_unique)?;
                         cd.set_item("residual", c.residual)?;
                         cd.set_item("resid_tol", c.resid_tol)?;
+                        cd.set_item("primal_violation", c.primal_violation)?;
+                        cd.set_item("feasible", c.feasible)?;
+                        cd.set_item("tight", c.tight)?;
                         cd.into_any().unbind()
                     }
                 };

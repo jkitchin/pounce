@@ -199,6 +199,16 @@ pub fn describe_outcome(
                 StationarityClass::W => {
                     "W only (a biactive pair has a wrong-sign multiplier: a branch may still descend)"
                 }
+                StationarityClass::None if !c.feasible => {
+                    return format!(
+                        "{head}; {} pair{}, {} biactive; stationarity: none (the point violates a \
+                         row or bound by {:.1e}, beyond constr_viol_tol).",
+                        c.n_pairs,
+                        if c.n_pairs == 1 { "" } else { "s" },
+                        c.n_biactive,
+                        c.primal_violation
+                    );
+                }
                 StationarityClass::None => "none (not a stationary point of the model)",
                 StationarityClass::NotSearched => {
                     "not determined (the model or its multiplier set is too large to certify)"
@@ -334,7 +344,22 @@ pub struct Certificate {
     pub multipliers_unique: bool,
     /// `‖A θ − ∇f‖∞` at the multipliers that decided the class.
     pub residual: Number,
+    /// The band `residual` is judged against: `max(1e-6, tol)` plus the
+    /// `sqrt(tol)` sign band, both times the dual scale (see [`certify`]).
     pub resid_tol: Number,
+    /// The residual is within the floor alone,
+    /// `max(1e-6, tol)` times the dual scale. An `S` point that is not
+    /// `tight` reproduces `∇f` only to the `sqrt(tol)` band: the driver keeps
+    /// it and reports it only if no formulation produces a tight one. With a
+    /// multiplier set, the test is on the sign-free fit, as the old gate
+    /// into the set search was; the search itself then takes the band.
+    pub tight: bool,
+    /// Largest violation of a row or variable bound at the point (pair
+    /// sides included), in the model's units.
+    pub primal_violation: Number,
+    /// `primal_violation` is within [`CertificateInput::feas_tol`]. When it
+    /// is not, the class is `None` whatever the multipliers say.
+    pub feasible: bool,
     /// Largest-magnitude negative sign on a biactive pair, when the class
     /// is decided by a sign (`W` with unique multipliers).
     pub worst_biactive_sign: Number,
@@ -354,6 +379,9 @@ pub struct CertificateInput<'a> {
     pub pairs: &'a [ComplementarityPair],
     /// The tolerance the answer was solved to (`tol`).
     pub solver_tol: Number,
+    /// The feasibility tolerance (`constr_viol_tol`): a point violating a
+    /// row or bound by more is not certified, stationary or not.
+    pub feas_tol: Number,
 }
 
 /// Above this many sign-constrained columns, a rank-deficient system is not
@@ -476,6 +504,21 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         .filter(|(a, b)| !**a && !**b)
         .count();
 
+    // Primal feasibility, in the model's units: every row and every bound,
+    // pair sides included. A point outside its own constraints is not a
+    // stationary point of the model, whatever multipliers reproduce `∇f`
+    // (an infeasibility verdict's point did read S before this check).
+    let viol = |v: Number, lo: Number, hi: Number| {
+        let below = if lo > -INF { lo - v } else { 0.0 };
+        let above = if hi < INF { v - hi } else { 0.0 };
+        below.max(above).max(0.0)
+    };
+    let primal_violation = (0..m)
+        .map(|i| viol(inp.g[i], inp.g_l[i], inp.g_u[i]))
+        .chain((0..n).map(|j| viol(inp.x[j], inp.x_l[j], inp.x_u[j])))
+        .fold(0.0, Number::max);
+    let feasible = primal_violation <= inp.feas_tol;
+
     let mut pair_row = vec![None; m];
     let mut pair_var = vec![None; n];
     for (k, p) in inp.pairs.iter().enumerate() {
@@ -552,6 +595,13 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     // at products <= 1e-4, has a biactive multiplier of -1.6e-4 while the
     // exact point's is 0. A sign inside the band is not evidence of descent.
     let sign_tol = corner * dual_scale;
+    // One acceptance band on every path: the residual's own floor plus the
+    // sign band. The point is `sqrt(tol)`-accurate near the boundary, so
+    // `∇f` is reproduced only to that order; the set search always allowed
+    // it, and the unique path holding the same point to `resid_tol` alone
+    // rejected optimal IPM answers (MacMPEC `flp4-3`, `flp4-4`,
+    // `portfl-i-1`: residuals 1.7e-6 to 2.1e-5 at f within 0.2% of f*).
+    let accept_tol = resid_tol + sign_tol;
     let signs: Vec<Sign> = cols.iter().map(|(_, s)| *s).collect();
 
     let mut cert = Certificate {
@@ -561,11 +611,15 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         n_neither,
         multipliers_unique: true,
         residual: Number::INFINITY,
-        resid_tol,
+        resid_tol: accept_tol,
+        tight: false,
+        primal_violation,
+        feasible,
         worst_biactive_sign: 0.0,
     };
-    if n_neither > 0 {
-        // Complementarity itself fails at this point: no class applies.
+    if n_neither > 0 || !feasible {
+        // Complementarity, or feasibility itself, fails at this point: no
+        // class applies.
         return cert;
     }
 
@@ -603,7 +657,8 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                     }
                 }
                 cert.residual = r.iter().fold(0.0, |m: Number, v| m.max(v.abs()));
-                if cert.residual <= resid_tol {
+                cert.tight = cert.residual <= resid_tol;
+                if cert.residual <= accept_tol {
                     classify_unique(&mut cert, &theta);
                 }
                 return cert;
@@ -615,6 +670,7 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 cert.multipliers_unique = false;
                 cert.residual = Number::NAN;
                 cert.class = StationarityClass::NotSearched;
+                cert.tight = true; // nothing measured looser: accepted as before
                 return cert;
             }
         }
@@ -632,7 +688,8 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     let (theta, rank) = lstsq(&a, &b);
     let r_free = resid_inf(&a, &theta, &b);
     cert.residual = r_free;
-    if r_free > resid_tol {
+    cert.tight = r_free <= resid_tol;
+    if r_free > accept_tol {
         return cert; // not stationary for any multipliers, signs aside
     }
     if rank == k {
@@ -645,6 +702,7 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     let constrained = signs.iter().filter(|s| **s != Sign::Free).count();
     if constrained > MAX_SEARCHED_COLUMNS {
         cert.class = StationarityClass::NotSearched;
+        cert.tight = true; // nothing measured looser: accepted as before
         return cert;
     }
     for (class, biactive_signed) in [(StationarityClass::S, true), (StationarityClass::W, false)] {
@@ -655,9 +713,15 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         // Forcing a multiplier inside the noise band to zero moves the
         // residual by up to that band; allow it.
         let r = signed_lstsq_residual(&a, &b, &nonneg);
-        if r <= resid_tol + sign_tol {
+        if r <= accept_tol {
             cert.class = class;
             cert.residual = r;
+            // Tight as the sign-free fit was: before the band was unified, a
+            // point reached this search only with `r_free <= resid_tol`, and
+            // then took the whole band (see
+            // `the_set_search_band_is_resid_tol_plus_the_sign_band`). Those
+            // points stay answers; one the old gate turned away is kept.
+            cert.tight = r_free <= resid_tol;
             return cert;
         }
     }
@@ -1039,6 +1103,7 @@ mod tests {
             g_u: &m.g_u,
             pairs: &m.pairs,
             solver_tol: 1e-8,
+            feas_tol: 1e-4,
         };
         let dense = certify_routed(&inp, Some(false));
         let sparse = certify_routed(&inp, Some(true));
@@ -1151,6 +1216,7 @@ mod tests {
                 g_u: &m.g_u,
                 pairs: &m.pairs,
                 solver_tol: 1e-8,
+                feas_tol: 1e-4,
             })
         };
         let c = cert(&grad);
@@ -1203,6 +1269,79 @@ mod tests {
         }
     }
 
+    /// One acceptance band on every path (PR review, MacMPEC): an IPM
+    /// answer reproduces `∇f` only to about `sqrt(tol)` near the boundary,
+    /// and the unique-multiplier path used to hold it to `max(1e-6, tol)`
+    /// while the set search allowed the `sqrt(tol)` band too -- so `flp4-3`,
+    /// `flp4-4` and `portfl-i-1`, optimal to f within 0.2%, read `none` with
+    /// residuals of 1.7e-6 to 2.1e-5. Here a lone free variable with
+    /// `∂f = r` leaves residual `r` (dual scale 1, band `1e-6 + 1e-4`).
+    #[test]
+    fn the_residual_band_is_the_same_on_the_unique_path() {
+        let m = Model {
+            x_l: vec![-2e19],
+            x_u: vec![2e19],
+            g_l: vec![],
+            g_u: vec![],
+            pairs: vec![],
+            jac: vec![],
+        };
+        // Inside the floor: S and tight. Inside the band only: S, not tight
+        // (the driver keeps it and looks for a tighter answer). Outside: none.
+        for (r, class, tight) in [
+            (5e-7, StationarityClass::S, true),
+            (2e-5, StationarityClass::S, false),
+            (9e-5, StationarityClass::S, false),
+            (2e-4, StationarityClass::None, false),
+        ] {
+            let c = run(&m, &[0.3], &[r], &[]);
+            assert_eq!((c.class, c.tight), (class, tight), "{r:e}: {c:?}");
+            assert!((c.resid_tol - (1e-6 + 1e-4)).abs() < 1e-15, "{c:?}");
+        }
+    }
+
+    /// A point outside its own constraints is not certified (PR review,
+    /// MacMPEC `pack-rig2*`: infeasibility verdicts whose points violate
+    /// rows by 4.6e-4 to 9.9e-4 read "S"). Row `x₀ ≥ 1` at `x₀ = 1 − 5e-4`
+    /// with `∇f = e₀`: the row's multiplier is +1, which would be S.
+    #[test]
+    fn a_point_violating_a_row_beyond_constr_viol_tol_is_not_certified() {
+        let m = Model {
+            x_l: vec![-2e19],
+            x_u: vec![2e19],
+            g_l: vec![1.0],
+            g_u: vec![2e19],
+            pairs: vec![],
+            jac: vec![(0, 0, 1.0)],
+        };
+        let x = 1.0 - 5e-4;
+        let c = run(&m, &[x], &[1.0], &[x]);
+        assert_eq!(
+            (c.class, c.feasible),
+            (StationarityClass::None, false),
+            "{c:?}"
+        );
+        assert!((c.primal_violation - 5e-4).abs() < 1e-12, "{c:?}");
+        // Inside constr_viol_tol (1e-4) the same point certifies.
+        let x = 1.0 - 5e-5;
+        let c = run(&m, &[x], &[1.0], &[x]);
+        assert_eq!((c.class, c.feasible), (StationarityClass::S, true), "{c:?}");
+        // A violated variable bound counts the same way.
+        let m = Model {
+            x_l: vec![0.0],
+            g_l: vec![],
+            g_u: vec![],
+            jac: vec![],
+            ..m
+        };
+        let c = run(&m, &[-2e-3], &[1.0], &[]);
+        assert_eq!(
+            (c.class, c.feasible),
+            (StationarityClass::None, false),
+            "{c:?}"
+        );
+    }
+
     /// A large system whose multipliers are a set is still not searched:
     /// the set search is dense. One active row `x₀ ≥ 0` duplicating the
     /// bound makes the 2001 bound columns plus the row dependent, and
@@ -1221,6 +1360,7 @@ mod tests {
             g_u: &[2e19],
             pairs: &[],
             solver_tol: 1e-8,
+            feas_tol: 1e-4,
         });
         assert_eq!(
             (c.class, c.multipliers_unique),

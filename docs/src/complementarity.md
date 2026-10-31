@@ -143,11 +143,19 @@ whose W point is reported when none answered, else `None`), `n_solves`,
 | --- | --- |
 | `S` | strongly stationary: a multiplier exists with the right sign on every biactive pair. A local minimum candidate in the usual sense. |
 | `W` | weakly stationary only: converged and feasible, but every multiplier has the wrong sign on some biactive pair. There may be a descent direction that changes which side of a pair is zero. ralph1's origin is the textbook case. |
-| `none` | the stationarity system is not satisfied at all. |
+| `none` | the stationarity system is not satisfied at all, or the point violates a row or bound by more than `constr_viol_tol` (`feasible` is then false and `primal_violation` says by how much). |
 | `not_searched` | not determined: the multipliers are not unique (MPCC-LICQ fails) and the set is too large to search — more than 4·10⁶ entries in the stationarity system, or more than 600 sign-constrained columns. Accepted like S. |
 
 along with `n_pairs`, `n_biactive`, `n_neither`, whether the multipliers
-are unique, and the stationarity residual against its tolerance.
+are unique, the stationarity residual against its tolerance, `primal_violation`
+and `feasible`, and `tight`.
+
+The residual is judged against `max(1e-6, tol)` plus a `sqrt(tol)` band, both
+times the dual scale: an interior-point answer near a bound reproduces `∇f`
+only to about `sqrt(tol)`, so a tighter test rejects optimal points. An `S` point
+whose sign-free residual is inside the band but not the `max(1e-6, tol)` floor
+alone is not `tight`: the driver keeps it, runs the remaining formulations, and
+reports it only if none of them produces a tight answer.
 
 ### The exit status and the certificate answer different questions
 
@@ -206,8 +214,9 @@ Notebook
 designs a string resting on a floor (contact force ⟂ gap): the hand-written
 product reports `Solve_Succeeded` at the same wrong design for every target,
 the declared pairs meet every target with an `S` certificate, and it measures
-`complementarity_strategy`, a `W` point, and the scaling trap that lets a
-certificate pass with its residual just inside tolerance.
+`complementarity_strategy`, a `W` point, and the scaling trap: on badly
+scaled rows a wrong point certifies `S`, because every tolerance is relative
+to the model's own scale.
 
 ## Evidence
 

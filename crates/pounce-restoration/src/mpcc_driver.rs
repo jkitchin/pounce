@@ -172,6 +172,12 @@ pub fn solve_mpcc(
     // The first stage that certified only W: the answer if no later stage
     // certifies S.
     let mut weak: Option<(MpccStage, Captured, Option<Certificate>)> = None;
+    // The best S answer whose residual is only inside the `sqrt(tol)` band
+    // (not `tight`): an answer if no formulation produces a tight one, but it
+    // does not end the ladder -- a later stage may land on the same point
+    // more accurately (CALIPSO ball-in-cup: the continuation's acceptable-
+    // level point, residual 5e-5, against the penalty's 7e-8).
+    let mut loose: Option<(MpccStage, Captured, Option<Certificate>, Number)> = None;
     // The first stage that converged with every product in tolerance but
     // did not certify as stationary: reported only if nothing certifies.
     let mut physical: Option<(MpccStage, Captured, Option<Certificate>)> = None;
@@ -412,12 +418,29 @@ pub fn solve_mpcc(
                 // Converged and physical; the certificate decides whether it
                 // is an answer. A lowered solve can stall short of a biactive
                 // pair and still exit "acceptable" with every product at 0.
-                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, sense);
+                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
                 if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
                     let f = match sense * objective_at(&inner, &c.x) {
                         f if f.is_finite() => f,
                         _ => Number::INFINITY,
                     };
+                    if cert.as_ref().is_some_and(|ct| !ct.tight) {
+                        report(&format!(
+                            "pounce: complementarity: {} converged ({:?}) to a strongly \
+                             stationary point within the sqrt(tol) band only (residual {:.1e}); \
+                             kept, trying the next formulation for a tighter one.",
+                            stage.label(),
+                            c.status,
+                            cert.as_ref().map_or(Number::NAN, |ct| ct.residual),
+                        ));
+                        let better = loose.as_ref().is_none_or(|(_, _, _, g)| {
+                            f.is_finite() && f < g - 1e-9 * g.abs().max(1.0)
+                        });
+                        if better {
+                            loose = Some((stage, c, cert, f));
+                        }
+                        continue;
+                    }
                     report(&format!(
                         "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}, \
                          minimized objective {:.6e}).",
@@ -513,6 +536,8 @@ pub fn solve_mpcc(
             certificate: None,
         });
     }
+    // With no tight answer, the best S point inside the band is the answer.
+    let accepted = accepted.or(loose);
     let (reported, chosen, known_cert) = match (accepted, weak, physical, verdict) {
         (Some((s, c, cert, _)), _, _, _) => (Reported::Answer(s), c, Some(cert)),
         (None, Some((s, c, cert)), _, _) => (Reported::WeakFallback(s), c, Some(cert)),
@@ -555,7 +580,7 @@ pub fn solve_mpcc(
     let total_iterations = solves.iter().map(|s| s.iterations).sum();
     let certificate = match known_cert {
         Some(c) => c,
-        None => certify_at(&inner, &pairs, &chosen.x, solver_tol, sense),
+        None => certify_at(&inner, &pairs, &chosen.x, solver_tol, tol, sense),
     };
     Ok(MpccOutcome {
         status: chosen.status,
@@ -607,6 +632,7 @@ fn certify_at(
     pairs: &[ComplementarityPair],
     x: &[Number],
     solver_tol: Number,
+    feas_tol: Number,
     sense: Number,
 ) -> Option<Certificate> {
     let mut m = inner.borrow_mut();
@@ -661,6 +687,7 @@ fn certify_at(
         g_u: &g_u,
         pairs,
         solver_tol,
+        feas_tol,
     }))
 }
 
