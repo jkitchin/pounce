@@ -3588,7 +3588,7 @@ impl IpoptAlgorithm {
             {
                 let mu = self.data.borrow().curr_mu;
                 if let Some((ap, ad)) =
-                    crate::ftb_floor::floored_alphas(&self.cq, &delta, mu, gamma)
+                    crate::ftb_floor::floored_alphas(&self.cq, &delta, mu, gamma, tau)
                 {
                     alpha_p_max = ap;
                     alpha_d_max = ad;

@@ -31,6 +31,7 @@ pub fn floored_alphas(
     delta: &IteratesVector,
     mu: Number,
     gamma: Number,
+    tau: Number,
 ) -> Option<(Number, Number)> {
     let cq = cq.borrow();
     let iv = cq.curr_iv();
@@ -92,11 +93,22 @@ pub fn floored_alphas(
         }
     }
     let floor = 1.0 - gamma;
+    // `POUNCE_FTB_FLOOR_CENTERED`: the rule presumes the blocking pair is
+    // near the central path. When it already sits below γμ there is no
+    // centrality to preserve, and holding τ at 1 − γ only slows the slack's
+    // way to zero (clnlbeam: switching-point migration along a bang-bang
+    // arc, blockers at s·v/μ ≈ 1e-3…1e-6). Fall back to the τ rule there.
+    let only_centered = std::env::var_os("POUNCE_FTB_FLOOR_CENTERED").is_some();
 
     // Primal: the blocking slack may approach its bound only while its
     // product with the (fully dual-stepped) multiplier stays ≥ γμ.
     let alpha_p = match ip {
         None => 1.0,
+        Some((b, i))
+            if only_centered && dense_blocks[b].0[i] * dense_blocks[b].2[i] < gamma * mu =>
+        {
+            (tau * ap_bnd).min(1.0)
+        }
         Some((b, i)) => {
             let (s, ds, v, dv) = &dense_blocks[b];
             let v_new = v[i] + ad_bnd * dv[i];
@@ -110,6 +122,11 @@ pub fn floored_alphas(
     };
     let alpha_d = match id {
         None => 1.0,
+        Some((b, i))
+            if only_centered && dense_blocks[b].0[i] * dense_blocks[b].2[i] < gamma * mu =>
+        {
+            (tau * ad_bnd).min(1.0)
+        }
         Some((b, i)) => {
             let (s, ds, v, dv) = &dense_blocks[b];
             let s_new = s[i] + alpha_p * ds[i];
@@ -121,5 +138,36 @@ pub fn floored_alphas(
             (floor.max(f).min(1.0) * ad_bnd).min(1.0)
         }
     };
+    if std::env::var_os("POUNCE_FTB_FLOOR_DIAG").is_some() {
+        let names = ["x_l", "x_u", "s_l", "s_u"];
+        let show = |t: Option<(usize, usize)>| -> String {
+            match t {
+                None => "-".into(),
+                Some((b, i)) => {
+                    let (s, ds, v, dv) = &dense_blocks[b];
+                    format!(
+                        "{}[{}] s={:.2e} ds={:.2e} v={:.2e} dv={:.2e} sv/mu={:.1e}",
+                        names[b],
+                        i,
+                        s[i],
+                        ds[i],
+                        v[i],
+                        dv[i],
+                        s[i] * v[i] / mu
+                    )
+                }
+            }
+        };
+        eprintln!(
+            "FTB mu={:.2e} ap_bnd={:.3e} aP={:.3e} ad_bnd={:.3e} aD={:.3e} | P {} | D {}",
+            mu,
+            ap_bnd,
+            alpha_p,
+            ad_bnd,
+            alpha_d,
+            show(ip),
+            show(id)
+        );
+    }
     Some((alpha_p, alpha_d))
 }

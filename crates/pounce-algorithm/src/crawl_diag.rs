@@ -136,7 +136,7 @@ pub fn report(
         pb(best.1),
         db(bestd.1),
         imax,
-        dms[imax],
+        dms.get(imax).copied().unwrap_or(f64::NAN),
         sl.get(imax).copied().unwrap_or(f64::NAN),
         vl.get(imax).copied().unwrap_or(f64::NAN),
     );
