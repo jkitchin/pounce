@@ -390,7 +390,7 @@ one whose point was reported; `total_iterations` is what the run cost.
 | `solves` | array of object | Every lowered solve, in order: `stage`, `tau` (relaxation, omitted for an exact solve), `status` (upstream name), `iterations`, `max_abs_product` (`null` when the solve returned no point). |
 | `total_iterations` | integer | Iterations summed over `solves`. |
 | `max_abs_product` | float \| null | Largest `|G·H|` at the reported point. |
-| `certificate` | object \| omitted | Stationarity class of the reported point; omitted only if the model could not be evaluated there. Fields: `class` (`S`, `W`, `none`, `not_searched`), `n_pairs`, `n_biactive`, `n_neither`, `multipliers_unique`, `residual` (`null` when no multipliers were computed), `resid_tol`, `tight` (residual within the tight floor rather than only the acceptance band), `primal_violation` (largest row or bound violation, model units), `feasible` (`primal_violation <= constr_viol_tol`; an infeasible point classifies `none`). |
+| `certificate` | object \| omitted | Stationarity class of the reported point; omitted only if the model could not be evaluated there. Fields: `class` (`S`, `W`, `none`, `not_searched`), `n_pairs`, `n_biactive`, `n_neither`, `multipliers_unique`, `residual` (`null` when no multipliers were computed), `resid_tol` (`null` if non-finite), `tight` (residual within the tight floor rather than only the acceptance band), `primal_violation` (largest row or bound violation, model units), `feasible` (`primal_violation <= constr_viol_tol`; an infeasible point classifies `none`). |
 
 ## Detail levels
 
