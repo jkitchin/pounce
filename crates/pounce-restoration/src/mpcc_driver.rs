@@ -219,10 +219,9 @@ pub fn solve_mpcc(
         let status = app.optimize_tnlp(Rc::clone(&lowered));
         let statistics = app.statistics();
         let w = wrapper.borrow();
-        let max_abs_product = w
-            .last_products()
-            .iter()
-            .fold(0.0, |a: Number, p| a.max(p.abs()));
+        // Complementarity violation: `|G·H|` for one-sided pairs, the positive
+        // part for a mixed pair's rows; `+inf` when the solve returned no point.
+        let max_abs_product = w.last_violation();
         let cap = Captured {
             status,
             solver_return: w.last_status().unwrap_or(SolverReturn::InternalError),
@@ -231,11 +230,7 @@ pub fn solve_mpcc(
             z_l: w.last_z_l().to_vec(),
             z_u: w.last_z_u().to_vec(),
             lambda: w.last_lambda().to_vec(),
-            max_abs_product: if w.last_x().is_empty() {
-                Number::INFINITY
-            } else {
-                max_abs_product
-            },
+            max_abs_product,
         };
         solves.push(MpccSolveRecord {
             stage,

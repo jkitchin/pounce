@@ -95,13 +95,18 @@ fn a_converged_but_not_strongly_stationary_answer_is_labelled() {
     assert!(r.stderr.contains("stationarity: W only"), "{}", r.stderr);
 }
 
-/// A two-sided (mixed) complementarity is refused with the reason and a
-/// load-error exit, never solved as if the pairing were absent.
+/// A two-sided (mixed) complementarity, `0 <= y <= 1 ⟂ y - x` (`.nl` flag
+/// 3), is solved, not refused or dropped. Its optimum is the origin (`f* = 0`;
+/// the branches `y = 1` and `y = x` are worse), where the pair is biactive at
+/// the lower bound and only weakly stationary, as in `ralph1` it extends.
+/// Without the pairing the model is unbounded below in `y`'s direction.
 #[test]
-fn a_mixed_pair_is_refused_not_dropped() {
+fn a_mixed_pair_is_solved() {
     let r = run("mixed_pair.nl", &[]);
-    assert_eq!(r.code, Some(2), "{}", r.stderr);
-    assert!(r.stderr.contains("only one-sided pairs"), "{}", r.stderr);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    let x = x_of(&r);
+    assert!(x.iter().all(|v| v.abs() < 1e-4), "x = {x:?}");
+    assert!(r.stderr.contains("stationarity: W"), "{}", r.stderr);
 }
 
 /// Presolve renumbers rows and variables, which the pairs index; asking for

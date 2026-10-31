@@ -123,12 +123,42 @@ def test_without_pairs_nothing_changes():
     assert prob.complementarity == []
 
 
+class MixedPair:
+    """`0 <= x <= 1 ⟂ g = y - x` with `y` and the row free (a mixed pair):
+    `min (x - 2)² + y²` has its optimum at the upper bound, `(1, 0)` with
+    `g = -1 <= 0` (f = 1)."""
+
+    def objective(self, z):
+        return (z[0] - 2.0) ** 2 + z[1] ** 2
+
+    def gradient(self, z):
+        return np.array([2.0 * (z[0] - 2.0), 2.0 * z[1]])
+
+    def constraints(self, z):
+        return np.array([z[1] - z[0]])
+
+    def jacobianstructure(self):
+        return np.array([0, 0]), np.array([0, 1])
+
+    def jacobian(self, z):
+        return np.array([-1.0, 1.0])
+
+    def hessianstructure(self):
+        return np.array([0, 1]), np.array([0, 1])
+
+    def hessian(self, z, lagrange, obj_factor):
+        return obj_factor * np.array([2.0, 2.0])
+
+
 def test_a_pair_it_cannot_lower_raises_with_the_reason():
-    # x is bounded on both sides: a mixed pair, not lowered.
-    prob = qpec_problem(complementarity=[(0, 0)])
+    # y has no finite bound and the row is free: neither one-sided nor mixed.
+    prob = pounce.Problem(
+        n=2, m=1, problem_obj=MixedPair(), lb=[0.0, -INF], ub=[1.0, INF],
+        cl=[-INF], cu=[INF], complementarity=[(0, 1)],
+    )
     prob.add_option("print_level", 0)
     with pytest.raises(ValueError, match="one-sided"):
-        prob.solve(np.array([0.0, 0.5, 0.5]))
+        prob.solve(np.array([0.5, 0.5]))
 
 
 def test_read_nl_exposes_pairs_and_the_batch_path_refuses_them():
@@ -196,3 +226,17 @@ def test_complementarity_strategy_picks_the_formulations_that_run(strategy):
         "continuation": {"Scholtes continuation"},
     }[strategy]
     assert ran == expected, cc["solves"]
+
+
+def test_a_mixed_pair_is_solved():
+    """A boxed variable paired with a free row is a mixed complementarity,
+    lowered and solved -- not refused."""
+    prob = pounce.Problem(
+        n=2, m=1, problem_obj=MixedPair(), lb=[0.0, -INF], ub=[1.0, INF],
+        cl=[-INF], cu=[INF], complementarity=[(0, 0)],
+    )
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(np.array([0.5, 0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    assert np.allclose(x, [1.0, 0.0], atol=1e-6)
+    assert info["complementarity"]["certificate"]["class"] == "S"

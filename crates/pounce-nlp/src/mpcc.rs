@@ -21,11 +21,21 @@
 //! above gives `s_G = -1, b_j = x_U[j]`; row `i` likewise from `g_L` / `g_U`.
 //! That is AMPL's `g_i(x) complements x_j` in both one-sided forms — the
 //! shapes `.nl` complementarity rows encode (kind 5 with one finite variable
-//! bound: `x >= l ⟂ body >= 0` or `x <= u ⟂ body <= 0`) — and covers the
-//! corpus in `benchmarks/calipso/`. A side with both bounds finite or both
-//! infinite (two-sided / mixed complementarity, or no bound at all) is
-//! refused by [`MpccTnlp::new`] with the reason, rather than lowered
-//! wrongly. A pair between two variables is a row `g_i(x) = x_k` away.
+//! bound: `x >= l ⟂ body >= 0` or `x <= u ⟂ body <= 0`). A variable with a
+//! second finite bound keeps it as an ordinary limit, the row's one finite
+//! side naming the bound in the pair (what Pyomo writes for
+//! `complements(s >= 0, L >= 0)` with `L <= 1` declared).
+//!
+//! A **mixed** pair — the variable boxed, the row free: `l <= x_j <= u ⟂
+//! g_i`, `g_i >= 0` at `l`, `g_i <= 0` at `u`, `g_i = 0` between (`.nl` flag
+//! 3) — lowers to two product rows on the same variable and row,
+//! `(x_j - l)·g_i <= 0` and `(u - x_j)·(-g_i) <= 0`. Their products are
+//! legitimately nonzero at a bound, so both rows are bounded above under
+//! every lowering and their violation is the positive part
+//! ([`MpccTnlp::last_violation`]). A boxed row, or a pair with no finite
+//! bound on either side, is refused by [`MpccTnlp::new`] with the reason
+//! rather than lowered wrongly. A pair between two variables is a row
+//! `g_i(x) = x_k` away.
 //!
 //! ## What the wrapper adds
 //!
@@ -104,7 +114,15 @@ const INF: Number = 1e19;
 /// The lowered model; see the module docs.
 pub struct MpccTnlp {
     inner: Rc<RefCell<dyn TNLP>>,
+    /// The pairs as declared, for [`Self::pairs`].
     pairs: Vec<ComplementarityPair>,
+    /// The lowered pairs, one per product row: a one-sided declared pair
+    /// once, a mixed one twice (see [`MpccTnlp::new`]).
+    lowered: Vec<ComplementarityPair>,
+    /// Per lowered pair: `H` carries no sign constraint (a mixed pair's free
+    /// row), so its product row is bounded above only, never `= 0`, and its
+    /// violation is the product's positive part.
+    signless: Vec<bool>,
     lowering: Lowering,
     n: usize,
     m_inner: usize,
@@ -156,6 +174,12 @@ fn one_sided(lo: Number, hi: Number) -> Option<(Number, Number)> {
     }
 }
 
+/// A mixed pair: the variable boxed (two finite bounds, `l < u`) and the row
+/// free (no finite bound).
+pub fn is_mixed(xl: Number, xu: Number, gl: Number, gu: Number) -> bool {
+    xl > -INF && xu < INF && xl < xu && gl <= -INF && gu >= INF
+}
+
 fn base(style: IndexStyle) -> Index {
     match style {
         IndexStyle::C => 0,
@@ -197,8 +221,12 @@ impl MpccTnlp {
 
         let mut seen_row = vec![false; m];
         let mut seen_var = vec![false; n];
+        // Each declared pair becomes one product row (one-sided) or two
+        // (mixed); the rest of the wrapper works on these lowered pairs.
+        let mut lowered = Vec::with_capacity(pairs.len());
         let mut g_side = Vec::with_capacity(pairs.len());
         let mut h_side = Vec::with_capacity(pairs.len());
+        let mut signless = Vec::with_capacity(pairs.len());
         for (k, p) in pairs.iter().enumerate() {
             if p.var >= n || p.row >= m {
                 return Err(format!(
@@ -213,21 +241,51 @@ impl MpccTnlp {
                 return Err(format!("pair {k}: row {} is already in a pair", p.row));
             }
             let (xl, xu, gl, gu) = (x_l[p.var], x_u[p.var], g_l[p.row], g_u[p.row]);
-            let (Some(gs), Some(hs)) = (one_sided(xl, xu), one_sided(gl, gu)) else {
-                return Err(format!(
-                    "pair {k}: only one-sided pairs are lowered -- each side needs exactly one \
-                     finite bound (`x >= l ⟂ g >= 0`-type, either orientation); variable {} has \
-                     bounds [{xl:e}, {xu:e}] and row {} has [{gl:e}, {gu:e}]. A variable or row \
-                     with two finite bounds makes the pair mixed (`l <= x <= u ⟂ g`: g >= 0 \
-                     at l, g <= 0 at u, g = 0 between); if the second bound is meant as an ordinary limit, \
-                     state it as a separate constraint (e.g. `x <= u` as its own row), or drop \
-                     it if the other rows already imply it",
-                    p.var, p.row
-                ));
-            };
-            g_side.push(gs);
-            h_side.push(hs);
+            if let (Some(gs), Some(hs)) = (one_sided(xl, xu), one_sided(gl, gu)) {
+                lowered.push(*p);
+                g_side.push(gs);
+                h_side.push(hs);
+                signless.push(false);
+                continue;
+            }
+            // One-sided with an ordinary second bound on the variable: the
+            // row's one finite side names the variable bound in the pair
+            // (`g >= c` with `x`'s lower bound, `g <= c` with its upper, as
+            // the `.nl` flag does), and the other bound stays a plain limit.
+            // `complements(s >= 0, L >= 0)` with `L <= 1` declared writes this.
+            if let Some(hs) = one_sided(gl, gu) {
+                if xl > -INF && xu < INF {
+                    lowered.push(*p);
+                    g_side.push(if hs.0 > 0.0 { (1.0, xl) } else { (-1.0, xu) });
+                    h_side.push(hs);
+                    signless.push(false);
+                    continue;
+                }
+            }
+            // Mixed: `l <= x <= u ⟂ g` with the row free -- g >= 0 at l,
+            // g <= 0 at u, g = 0 strictly between -- is exactly the box with
+            // `(x - l)·g <= 0` and `(u - x)·(-g) <= 0`: two product rows on
+            // the same variable and row, g itself unconstrained in sign.
+            if is_mixed(xl, xu, gl, gu) {
+                lowered.extend([*p, *p]);
+                g_side.extend([(1.0, xl), (-1.0, xu)]);
+                h_side.extend([(1.0, 0.0), (-1.0, 0.0)]);
+                signless.extend([true, true]);
+                continue;
+            }
+            return Err(format!(
+                "pair {k}: variable {} has bounds [{xl:e}, {xu:e}] and row {} has \
+                 [{gl:e}, {gu:e}]. Two shapes are lowered: one-sided (the row has exactly \
+                 one finite bound, and the variable a matching one: `x >= l ⟂ g >= 0`, \
+                 either orientation; a second variable bound is kept as an ordinary limit) \
+                 and mixed (the variable boxed, the row free: `l <= x <= u ⟂ g`, g >= 0 at l, \
+                 g <= 0 at u, g = 0 between). For a box on the row side, put it on a \
+                 variable instead (`g(x) = y` as a row, `l <= y <= u ⟂ ...`)",
+                p.var, p.row
+            ));
         }
+        let declared = pairs;
+        let pairs = lowered;
 
         // Inner Jacobian structure, 0-based.
         let jnnz = info.nnz_jac_g as usize;
@@ -327,10 +385,14 @@ impl MpccTnlp {
             last_products: Vec::new(),
             defer_inner_finalize: false,
             start_override: None,
-            pairs,
+            pairs: declared,
+            lowered: pairs,
+            signless,
         })
     }
 
+    /// The pairs as declared (a mixed pair once, though it lowers to two
+    /// product rows).
     pub fn pairs(&self) -> &[ComplementarityPair] {
         &self.pairs
     }
@@ -405,9 +467,26 @@ impl MpccTnlp {
         &self.last_z_u
     }
 
-    /// `G_k · H_k` at the last finalized `x`.
+    /// `G_k · H_k` at the last finalized `x`, one per product row.
     pub fn last_products(&self) -> &[Number] {
         &self.last_products
+    }
+
+    /// How far the last finalized `x` is from complementarity: the largest
+    /// `|G·H|` over one-sided product rows and the largest positive part over
+    /// a mixed pair's rows (whose products are legitimately negative at a
+    /// bound, e.g. `(u - l)·g` with `g < 0` at `x = u`). `+inf` when the last
+    /// solve returned no point.
+    pub fn last_violation(&self) -> Number {
+        if self.last_x.is_empty() {
+            return Number::INFINITY;
+        }
+        self.last_products
+            .iter()
+            .zip(&self.signless)
+            .fold(0.0, |a: Number, (&p, &sl)| {
+                a.max(if sl { p.max(0.0) } else { p.abs() })
+            })
     }
 
     /// `(G_k(x), H_k(x))` for every pair at `x`.
@@ -419,7 +498,7 @@ impl MpccTnlp {
     }
 
     fn pair_values_from(&self, x: &[Number]) -> Vec<(Number, Number)> {
-        self.pairs
+        self.lowered
             .iter()
             .enumerate()
             .map(|(k, p)| {
@@ -469,7 +548,7 @@ impl TNLP for MpccTnlp {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: self.n as Index,
-            m: (self.m_inner + self.pairs.len()) as Index,
+            m: (self.m_inner + self.lowered.len()) as Index,
             nnz_jac_g: self.jac_nnz as Index,
             nnz_h_lag: (self.inner_h_nnz + self.h_extra.len()) as Index,
             index_style: self.index_style,
@@ -491,8 +570,9 @@ impl TNLP for MpccTnlp {
             Lowering::Ineq => (-2.0 * INF, 0.0),
             Lowering::Relaxed(tau) => (-2.0 * INF, tau),
         };
-        for k in 0..self.pairs.len() {
-            b.g_l[m + k] = lo;
+        for k in 0..self.lowered.len() {
+            // A mixed pair's rows are inequalities under every lowering.
+            b.g_l[m + k] = if self.signless[k] { -2.0 * INF } else { lo };
             b.g_u[m + k] = hi;
         }
         true
@@ -571,7 +651,7 @@ impl TNLP for MpccTnlp {
                 ) {
                     return false;
                 }
-                for (k, p) in self.pairs.iter().enumerate() {
+                for (k, p) in self.lowered.iter().enumerate() {
                     let b = self.jac_block[k];
                     let row = (m + k) as Index + off;
                     let ents = &self.row_entries[k];
@@ -673,7 +753,7 @@ impl TNLP for MpccTnlp {
                 let pv = self.pair_values_from(x);
                 // Row-i multipliers shifted by μ_k G_k.
                 self.lam_inner.copy_from_slice(&lambda[..m]);
-                for (k, p) in self.pairs.iter().enumerate() {
+                for (k, p) in self.lowered.iter().enumerate() {
                     self.lam_inner[p.row] += lambda[m + k] * pv[k].0 * self.h_side[k].0;
                 }
                 values.fill(0.0);
@@ -685,7 +765,7 @@ impl TNLP for MpccTnlp {
                             false,
                             obj_factor,
                             Some(&self.lam_inner),
-                            new_lambda || !self.pairs.is_empty(),
+                            new_lambda || !self.lowered.is_empty(),
                             SparsityRequest::Values {
                                 values: &mut values[..hnnz],
                             },
@@ -693,7 +773,7 @@ impl TNLP for MpccTnlp {
                     {
                         return false;
                     }
-                    if !self.pairs.is_empty()
+                    if !self.lowered.is_empty()
                         && !inner.eval_jac_g(
                             Some(x),
                             false,
@@ -706,7 +786,7 @@ impl TNLP for MpccTnlp {
                     }
                 }
                 // Cross terms μ_k (e_j ∇g_iᵀ + ∇g_i e_jᵀ), lower triangle.
-                for (k, p) in self.pairs.iter().enumerate() {
+                for (k, p) in self.lowered.iter().enumerate() {
                     let mu = lambda[m + k] * self.g_side[k].0 * self.h_side[k].0;
                     if mu == 0.0 {
                         continue;
@@ -753,7 +833,7 @@ impl TNLP for MpccTnlp {
         // Variable metadata passes through unchanged; constraint metadata is
         // extended to the product rows (named `complementarity[k]` where the
         // inner model names its rows), so names stay index-aligned.
-        let m_total = self.m_inner + self.pairs.len();
+        let m_total = self.m_inner + self.lowered.len();
         let mut inner_con = MetaData::default();
         let ok = self
             .inner
@@ -765,7 +845,7 @@ impl TNLP for MpccTnlp {
         for (key, v) in inner_con.strings {
             let mut v = v;
             if v.len() == self.m_inner {
-                v.extend((0..self.pairs.len()).map(|k| format!("complementarity[{k}]")));
+                v.extend((0..self.lowered.len()).map(|k| format!("complementarity[{k}]")));
             }
             v.resize(m_total, String::new());
             con.strings.insert(key, v);
@@ -894,7 +974,7 @@ impl TNLP for MpccTnlp {
             p.jac.resize(self.m_inner, DerivativeProof::Unknown);
             p.jac.extend(std::iter::repeat_n(
                 DerivativeProof::Varying,
-                self.pairs.len(),
+                self.lowered.len(),
             ));
         }
         p.hessian = DerivativeProof::Unknown;
@@ -922,7 +1002,7 @@ impl MpccTnlp {
     /// Every variable a product row touches (0-based): each pair's variable
     /// and the columns of its row.
     fn product_vars(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = self.pairs.iter().map(|p| p.var).collect();
+        let mut v: Vec<usize> = self.lowered.iter().map(|p| p.var).collect();
         for entries in &self.row_entries {
             v.extend(entries.iter().map(|&(_, col)| col));
         }
@@ -1296,6 +1376,170 @@ mod tests {
         }
     }
 
+    /// `Toy` with row 1 free, so the pair `(row 1, x0)` — `x0` boxed in
+    /// `[-5, 5]` — is mixed: `-5 <= x0 <= 5 ⟂ g1`.
+    struct MixedToy(Toy);
+
+    impl TNLP for MixedToy {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.0.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-5.0, 0.0, -1.0]);
+            b.x_u.copy_from_slice(&[5.0, 1e19, 1e19]);
+            b.g_l.copy_from_slice(&[0.5, -1e19, -10.0]);
+            b.g_u.copy_from_slice(&[1e19, 1e19, 10.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.0.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            self.0.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            self.0.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+            self.0.eval_jac_g(x, n, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            n: bool,
+            s: Number,
+            l: Option<&[Number]>,
+            nl: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.0.eval_h(x, n, s, l, nl, mode)
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    fn wrap_mixed(style: IndexStyle, lowering: Lowering) -> MpccTnlp {
+        MpccTnlp::new(
+            Rc::new(RefCell::new(MixedToy(Toy { style }))),
+            vec![
+                ComplementarityPair { row: 0, var: 1 },
+                ComplementarityPair { row: 1, var: 0 },
+            ],
+            lowering,
+        )
+        .unwrap()
+    }
+
+    /// A mixed pair lowers to two product rows, `(x - l)·g <= 0` and
+    /// `(u - x)·(-g) <= 0`, bounded above under every lowering (never `= 0`:
+    /// the product is legitimately nonzero at a bound), with derivatives that
+    /// match finite differences; the declared pairs stay as declared.
+    #[test]
+    fn a_mixed_pair_lowers_to_two_inequality_rows() {
+        let mut w = wrap_mixed(IndexStyle::C, Lowering::Eq);
+        assert_eq!(w.pairs().len(), 2, "declared pairs");
+        assert_eq!(
+            w.get_nlp_info().unwrap().m,
+            6,
+            "3 rows + 1 one-sided + 2 mixed"
+        );
+
+        let gi = Toy::g(&X);
+        let g = lowered_g(&mut w, &X);
+        assert!((g[3] - X[1] * (gi[0] - 0.5)).abs() < 1e-15);
+        assert!((g[4] - (X[0] + 5.0) * gi[1]).abs() < 1e-15);
+        assert!((g[5] - (5.0 - X[0]) * (-gi[1])).abs() < 1e-15);
+
+        for (low, lo, hi) in [
+            (Lowering::Eq, 0.0, 0.0),
+            (Lowering::Ineq, -2e19, 0.0),
+            (Lowering::Relaxed(1e-3), -2e19, 1e-3),
+        ] {
+            let mut w = wrap_mixed(IndexStyle::C, low);
+            let (mut xl, mut xu, mut gl, mut gu) =
+                (vec![0.0; 3], vec![0.0; 3], vec![0.0; 6], vec![0.0; 6]);
+            assert!(w.get_bounds_info(BoundsInfo {
+                x_l: &mut xl,
+                x_u: &mut xu,
+                g_l: &mut gl,
+                g_u: &mut gu
+            }));
+            assert_eq!(
+                (gl[3], gu[3]),
+                (lo, hi),
+                "the one-sided row follows the lowering"
+            );
+            for k in [4, 5] {
+                assert_eq!((gl[k], gu[k]), (-2e19, hi), "mixed row {k} under {low:?}");
+            }
+        }
+
+        for style in [IndexStyle::C, IndexStyle::Fortran] {
+            let mut w = wrap_mixed(style, Lowering::Eq);
+            let j = dense_jac(&mut w, &X);
+            let lam = [0.3, -1.2, 0.8, 2.5, -0.7, 1.9];
+            let s = 1.7;
+            let hd = dense_hess(&mut w, &X, s, &lam);
+            let grad_l = |w: &mut MpccTnlp, x: &[Number]| -> Vec<Number> {
+                let mut gf = vec![0.0; 3];
+                assert!(w.eval_grad_f(x, true, &mut gf));
+                let j = dense_jac(w, x);
+                (0..3)
+                    .map(|c| s * gf[c] + (0..6).map(|r| lam[r] * j[r][c]).sum::<Number>())
+                    .collect()
+            };
+            let h = 1e-6;
+            for c in 0..3 {
+                let (mut xp, mut xm) = (X, X);
+                xp[c] += h;
+                xm[c] -= h;
+                let (gp, gm) = (lowered_g(&mut w, &xp), lowered_g(&mut w, &xm));
+                for r in 0..6 {
+                    let fd = (gp[r] - gm[r]) / (2.0 * h);
+                    assert!((j[r][c] - fd).abs() < 1e-8, "{style:?} J[{r}][{c}]");
+                }
+                let (lp, lm) = (grad_l(&mut w, &xp), grad_l(&mut w, &xm));
+                for r in 0..3 {
+                    let fd = (lp[r] - lm[r]) / (2.0 * h);
+                    assert!((hd[r][c] - fd).abs() < 1e-7, "{style:?} H[{r}][{c}]");
+                }
+            }
+        }
+    }
+
+    /// The violation the driver reads: `|G·H|` on a one-sided row, the
+    /// positive part on a mixed one. At `x0 = u` with `g1 < 0` the mixed pair
+    /// is satisfied though its first product, `(u - l)·g1`, is far from 0.
+    #[test]
+    fn a_mixed_pair_at_its_upper_bound_is_not_a_violation() {
+        let mut w = wrap_mixed(IndexStyle::C, Lowering::Eq);
+        assert_eq!(w.last_violation(), Number::INFINITY, "no point yet");
+        // x0 = 5 (its upper bound) and x2 = 0, so g1 = sin 5 + x2² ≈ -0.959.
+        let x = [5.0, 0.9, 0.0];
+        let gi = Toy::g(&x);
+        assert!(gi[1] < 0.0);
+        let g = lowered_g(&mut w, &x);
+        let zeros = [0.0; 3];
+        w.finalize_solution(
+            Solution {
+                status: SolverReturn::Success,
+                x: &x,
+                z_l: &zeros,
+                z_u: &zeros,
+                g: &g,
+                lambda: &[0.0; 6],
+                obj_value: 0.0,
+            },
+            &IpoptData::default(),
+            &IpoptCq::default(),
+        );
+        let (p_one, p_lo, p_hi) = (g[3], g[4], g[5]);
+        assert!(p_lo < -1.0 && p_hi.abs() < 1e-15, "{p_lo} {p_hi}");
+        assert!((w.last_violation() - p_one.abs()).abs() < 1e-15);
+    }
+
     /// A pair whose variable does not appear in its row: the Jacobian entry
     /// for `x_j` is appended rather than accumulated, and the cross Hessian
     /// entries the inner model lacks are appended.
@@ -1605,11 +1849,12 @@ mod tests {
                 Lowering::Eq,
             )
         };
-        // x0 has a finite upper bound (two-sided).
-        let e = mk(vec![ComplementarityPair { row: 0, var: 0 }])
-            .err()
-            .unwrap();
-        assert!(e.contains("one-sided"), "{e}");
+        // x0 is boxed and row 0 has only a lower bound: a one-sided pair at
+        // x0's lower bound, its upper bound an ordinary limit -- lowered.
+        let mut w = mk(vec![ComplementarityPair { row: 0, var: 0 }]).unwrap();
+        let g = lowered_g(&mut w, &X);
+        let gi = Toy::g(&X);
+        assert!((g[3] - (X[0] + 5.0) * (gi[0] - 0.5)).abs() < 1e-15);
         // row 2 has a finite upper bound.
         let e = mk(vec![ComplementarityPair { row: 2, var: 1 }])
             .err()

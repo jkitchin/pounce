@@ -318,7 +318,7 @@ class POUNCE(ASL):
             return super().solve(*args, **kwds)
         except ApplicationError as e:
             # Pyomo's message is only "did not exit normally"; the reason the
-            # CLI refused the model (a two-sided complementarity pair, say) is
+            # CLI refused the model (a sensitivity request with complementarity pairs, say) is
             # in the solver log, which a caller catching the exception never
             # sees. Carry the CLI's own `pounce: ...` lines into it.
             reasons = [ln.strip() for ln in str(getattr(self, "_log", "") or "").splitlines()

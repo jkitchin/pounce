@@ -906,20 +906,17 @@ fn options_are_restored_to_set_ness() {
 #[test]
 fn a_pair_it_cannot_lower_is_refused_with_the_reason() {
     let mut app = app();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
-        [0.0, 0.5, 0.5],
-        Rc::new(RefCell::new(Vec::new())),
-    )));
-    // x0 is bounded above (two-sided): not a pair this lowering handles.
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(mixed(false)));
+    // y has no finite bound and row 0 is free: neither one-sided nor mixed.
     let e = solve_mpcc(
         &mut app,
         tnlp,
-        vec![ComplementarityPair { row: 0, var: 0 }],
+        vec![ComplementarityPair { row: 0, var: 1 }],
         &mut |_| {},
     )
     .err()
     .unwrap();
-    assert!(e.contains("one-sided"), "{e}");
+    assert!(e.contains("one-sided") && e.contains("mixed"), "{e}");
 }
 
 /// The equality-split model, where the two formulations reach different
@@ -1100,4 +1097,75 @@ fn continuation_alone_reports_its_exact_finish_as_the_verdict() {
         .expect("the finish ran");
     assert_ne!(finish.status, ApplicationReturnStatus::SolveSucceeded);
     assert_eq!(out.status, finish.status, "{:?}", out.solves);
+}
+
+/// A mixed pair, `0 <= x <= 1 ⟂ g = y - x` with `y` and the row free, whose
+/// optimum is at the bound named: `min (x - 0.5)² + (y - 2)²` at `(0, 2)`,
+/// `g = 2 >= 0` (f = 0.25); `min (x - 2)² + y²` at `(1, 0)`, `g = -1 <= 0`
+/// (f = 1). The interior branch `y = x` is worse on both.
+fn mixed(at_upper: bool) -> Dense {
+    let zero = || vec![vec![0.0; 2]; 2];
+    let (cx, cy) = if at_upper { (2.0, 0.0) } else { (0.5, 2.0) };
+    Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![1.0, INF],
+        g_l: vec![-INF],
+        g_u: vec![INF],
+        x0: vec![0.5, 0.5],
+        f: Box::new(move |x| (x[0] - cx).powi(2) + (x[1] - cy).powi(2)),
+        grad: Box::new(move |x| vec![2.0 * (x[0] - cx), 2.0 * (x[1] - cy)]),
+        g: Box::new(|x| vec![x[1] - x[0]]),
+        jac: Box::new(|_| vec![vec![-1.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+/// A mixed (two-sided) pair is lowered and solved, not refused. Every
+/// strategy returns a strongly stationary point that satisfies the pair (in
+/// the box; `g >= 0` at 0, `g <= 0` at 1, `g = 0` between); the default runs
+/// both formulations and reaches the optimum at whichever bound it lies. A
+/// single formulation can stop at a local minimum: from `(0.5, 0.5)` on the
+/// lower-bound model the exact product reaches `(1, 1)`, `f = 1.25` — the
+/// interior branch `y = x` pressed against `x <= 1`, a genuine local minimum.
+#[test]
+fn a_mixed_pair_is_solved_at_either_bound() {
+    for (at_upper, want, f_want) in [(false, [0.0, 2.0], 0.25), (true, [1.0, 0.0], 1.0)] {
+        let (cx, cy) = if at_upper { (2.0, 0.0) } else { (0.5, 2.0) };
+        for strategy in [None, Some("exact"), Some("continuation")] {
+            let model = mixed(at_upper);
+            let fin = Rc::clone(&model.finalized);
+            let out = solve_with_strategy(model, strategy, ComplementarityPair { row: 0, var: 0 });
+            let ctx = format!(
+                "upper={at_upper} {strategy:?}: x = {:?}, {:?}",
+                out.x, out.solves
+            );
+            assert!(out.accepted_by.is_some(), "{ctx}");
+            assert_eq!(
+                out.certificate.as_ref().map(|c| c.class),
+                Some(StationarityClass::S),
+                "{ctx}"
+            );
+            assert_eq!(fin.borrow().len(), 1, "one forwarded answer; {ctx}");
+            // The mixed conditions, to the solve's accuracy.
+            let (x, g) = (out.x[0], out.x[1] - out.x[0]);
+            assert!((-1e-8..=1.0 + 1e-8).contains(&x), "{ctx}");
+            let resid = (x.min(g.max(0.0))).max((1.0 - x).min((-g).max(0.0)));
+            assert!(resid < 1e-6, "mixed residual {resid}; {ctx}");
+            if strategy.is_none() {
+                for (a, b) in out.x.iter().zip(want) {
+                    assert!((a - b).abs() < 1e-6, "want {want:?}; {ctx}");
+                }
+                let f = (out.x[0] - cx).powi(2) + (out.x[1] - cy).powi(2);
+                assert!((f - f_want).abs() < 1e-6, "f = {f}; {ctx}");
+            }
+        }
+    }
 }
