@@ -171,19 +171,19 @@ pub fn describe_outcome(
     );
     let head = match reported {
         Reported::Answer(stage) => format!(
-            "pounce: complementarity: answered by the {} formulation ({solves}, max |G·H| = \
+            "pounce: complementarity: answered by the {} formulation ({solves}, violation = \
              {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::WeakFallback(stage) => format!(
             "pounce: complementarity: no formulation produced a strongly stationary answer \
-             ({solves}); reporting the {} formulation's weakly stationary point (max |G·H| = \
+             ({solves}); reporting the {} formulation's weakly stationary point (violation = \
              {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::FeasibleUncertified(stage) => format!(
             "pounce: complementarity: no formulation produced a stationary answer ({solves}); \
-             reporting the {} formulation's feasible point (max |G·H| = {max_abs_product:.1e})",
+             reporting the {} formulation's feasible point (violation = {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::Verdict => format!(

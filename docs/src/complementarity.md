@@ -141,8 +141,13 @@ moves the point a complementarity is measured from.
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:
 
 ```text
-pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, max |G·H| = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).
+pounce: complementarity: answered by the Scholtes continuation formulation (11 lowered solves, 171 iterations in all, violation = 0.0e0); 2 pairs, 1 biactive; stationarity: S (strongly stationary).
 ```
+
+`violation` is the largest complementarity violation at the reported point:
+`|G·H|` for a one-sided pair, and the positive part of each product row for
+a mixed pair, whose products are legitimately nonzero at a bound. The same
+number is `max_abs_product` in Python and in the JSON report.
 
 From Python, `info["complementarity"]` holds `accepted_by` (the stage that
 answered with an S point, or `None` if none did), `fallback` (the stage

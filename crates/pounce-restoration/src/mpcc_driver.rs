@@ -75,7 +75,8 @@ pub struct MpccOutcome {
     /// Every lowered solve, in order.
     pub solves: Vec<MpccSolveRecord>,
     pub total_iterations: usize,
-    /// The forwarded point and its largest `|G·H|`.
+    /// The forwarded point and its complementarity violation (`|G·H|`, or the
+    /// positive part on a mixed pair's rows).
     pub x: Vec<Number>,
     pub max_abs_product: Number,
     /// Which stationarity class the forwarded point satisfies
@@ -506,7 +507,7 @@ pub fn solve_mpcc(
                         continue;
                     }
                     report(&format!(
-                        "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}, \
+                        "pounce: complementarity: {} solved the model ({:?}, violation = {:.1e}, \
                          minimized objective {:.6e}).",
                         stage.label(),
                         c.status,
@@ -555,7 +556,7 @@ pub fn solve_mpcc(
                 continue;
             }
             report(&format!(
-                "pounce: complementarity: {} did not ({:?}, max |G·H| = {:.1e}); trying the next \
+                "pounce: complementarity: {} did not ({:?}, violation = {:.1e}); trying the next \
                  formulation.",
                 stage.label(),
                 c.status,
