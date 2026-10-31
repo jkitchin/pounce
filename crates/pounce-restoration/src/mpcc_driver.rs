@@ -163,8 +163,10 @@ pub fn solve_mpcc(
     // that stage was refused before iteration 0.
     let mut first: Option<Captured> = None;
     // A lowered solve the caller's intermediate callback stopped: the
-    // ladder ends there and that solve is reported.
-    let mut stopped: Option<Captured> = None;
+    // ladder ends there and that solve is reported. Set by `run` itself, so
+    // no solve can stop unnoticed; every caller of `run` leaves on it
+    // (`halted()`) before starting another.
+    let stopped: RefCell<Option<Captured>> = RefCell::new(None);
     // The best S answer so far, with the model's objective there.
     let mut accepted: Option<(MpccStage, Captured, Option<Certificate>, Number)> = None;
     // The first stage that certified only W: the answer if no later stage
@@ -233,13 +235,17 @@ pub fn solve_mpcc(
             iterations: statistics.spent_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
         });
+        if status == ApplicationReturnStatus::UserRequestedStop {
+            stopped.borrow_mut().get_or_insert_with(|| cap.clone());
+        }
         cap
     };
+    let halted = || stopped.borrow().is_some();
 
     for (k, &stage) in STAGES.iter().enumerate() {
         // An answer from a compared stage ends the ladder before the first
         // stage that is not compared (the penalty).
-        if (accepted.is_some() && !compared(stage)) || stopped.is_some() {
+        if (accepted.is_some() && !compared(stage)) || halted() {
             break;
         }
         if k > 0 {
@@ -258,14 +264,16 @@ pub fn solve_mpcc(
                 // inequality form then gives a verdict with a point of its
                 // own.
                 let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
-                if c.status == ApplicationReturnStatus::UserRequestedStop {
-                    stopped = Some(c);
+                if halted() {
                     break;
                 }
                 if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty()
                 {
                     baseline(app);
                     c = run(app, stage, Lowering::Ineq, None, &mut solves);
+                    if halted() {
+                        break;
+                    }
                 }
                 exact = Some(c.clone());
                 Some(c)
@@ -281,8 +289,7 @@ pub fn solve_mpcc(
                         c.warm()
                     });
                     let mut c = run(app, stage, Lowering::Relaxed(tau), warm, &mut solves);
-                    if c.status == ApplicationReturnStatus::UserRequestedStop {
-                        stopped = Some(c);
+                    if halted() {
                         break;
                     }
                     if !converged(c.status) {
@@ -307,11 +314,14 @@ pub fn solve_mpcc(
                             Some(primal),
                             &mut solves,
                         );
-                        if !converged(c.status) {
+                        if halted() || !converged(c.status) {
                             break;
                         }
                     }
                     last = Some(c);
+                }
+                if halted() {
+                    break;
                 }
                 match last {
                     None => {
@@ -335,6 +345,9 @@ pub fn solve_mpcc(
                                 let _ = app.options_mut().read_from_str(&a, true);
                             }
                             let c = run(app, stage, lowering, Some(relaxed.warm()), &mut solves);
+                            if halted() {
+                                break;
+                            }
                             // Refused before iteration 0, whatever the status:
                             // the inequality form, as in the exact stage.
                             let over_determined = c.status
@@ -344,6 +357,9 @@ pub fn solve_mpcc(
                             if !over_determined {
                                 break;
                             }
+                        }
+                        if halted() {
+                            break;
                         }
                         // A finish that does not converge leaves the
                         // continuation's own answer, which satisfies every
@@ -359,7 +375,11 @@ pub fn solve_mpcc(
                 let _ = app
                     .options_mut()
                     .read_from_str("l1_exact_penalty_barrier yes\n", true);
-                Some(run(app, stage, Lowering::Eq, None, &mut solves))
+                let c = run(app, stage, Lowering::Eq, None, &mut solves);
+                if halted() {
+                    break;
+                }
+                Some(c)
             }
         };
         if let Some(c) = &candidate {
@@ -447,7 +467,7 @@ pub fn solve_mpcc(
     // certificate; failing that, the exact-product stage's verdict (or, if
     // it was refused with no point, the first stage that has one).
     let verdict = verdict_of(exact, first);
-    if let Some(c) = stopped {
+    if let Some(c) = stopped.into_inner() {
         // The caller asked to stop: report the stopped solve, nothing else.
         let total_iterations = solves.iter().map(|s| s.iterations).sum();
         {

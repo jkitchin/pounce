@@ -54,6 +54,13 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Fixed
+- **A stop requested from the intermediate callback is no longer overridden
+  by an automatic re-solve.** When a solve re-runs itself inside one call
+  (the scale audit, the dual-divergence retry, the μ-strategy fallback, the
+  ℓ₁ fallback) and the callback returned `false` during the re-solve, or on
+  the final iterate replayed after a declined one, the first attempt's status
+  was put back and the run reported success. It now reports
+  `User_Requested_Stop`, as a solve without a re-solve does.
 - **Debugger: `detach` now ends `stop-at` pauses.** A `stop-at` checkpoint (or
   a pending `stepi`) kept pausing after `detach`, which every other pause
   source honours, so a session that had used `stop-at kkt` could not let the

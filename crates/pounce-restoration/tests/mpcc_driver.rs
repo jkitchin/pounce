@@ -586,6 +586,9 @@ struct Stopping {
     inner: Dense,
     calls: Rc<RefCell<usize>>,
     stop_at: usize,
+    /// `false` on the `stop_at`-th call only (a stop button), rather than
+    /// on every call from there on.
+    once: bool,
 }
 
 impl TNLP for Stopping {
@@ -629,7 +632,12 @@ impl TNLP for Stopping {
     }
     fn intermediate_callback(&mut self, _: IterStats, _: &IpoptData, _: &IpoptCq) -> bool {
         *self.calls.borrow_mut() += 1;
-        *self.calls.borrow() < self.stop_at
+        let k = *self.calls.borrow();
+        if self.once {
+            k != self.stop_at
+        } else {
+            k < self.stop_at
+        }
     }
 }
 
@@ -644,6 +652,7 @@ fn the_callers_intermediate_callback_is_called_and_can_stop_the_solve() {
         inner: qpec_small([0.0, 0.5, 0.5], Rc::new(RefCell::new(Vec::new()))),
         calls: Rc::clone(&calls),
         stop_at: 3,
+        once: false,
     };
     let mut app = app();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
@@ -652,6 +661,58 @@ fn the_callers_intermediate_callback_is_called_and_can_stop_the_solve() {
     assert_eq!(out.status, ApplicationReturnStatus::UserRequestedStop);
     assert_eq!(out.solves.len(), 1, "the ladder went on: {:?}", out.solves);
     assert_eq!(out.accepted_by, None);
+}
+
+/// A stop wherever it lands — a relaxation, the primal-only rung, the
+/// continuation's finish, the exact stage's retry — ends the run there
+/// (PR review of #1103: a stop in an unchecked solve was dropped, and one
+/// returned once during the finish was overridden by a success). Swept over
+/// every callback of the unstopped run, for a callback that returns `false`
+/// once and for one that keeps returning it: the run reports
+/// `User_Requested_Stop`, the stopped solve is the last one started, and no
+/// callback is made after the stop.
+#[test]
+fn a_stop_anywhere_in_the_ladder_ends_it() {
+    let solve = |stop_at: usize, once: bool| {
+        let calls = Rc::new(RefCell::new(0));
+        let model = Stopping {
+            inner: qpec_small([0.0, 0.5, 0.5], Rc::new(RefCell::new(Vec::new()))),
+            calls: Rc::clone(&calls),
+            stop_at,
+            once,
+        };
+        let mut app = app();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+        let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |_| {}).unwrap();
+        let n = *calls.borrow();
+        (out, n)
+    };
+    let (free, total) = solve(usize::MAX, false);
+    assert_ne!(free.status, ApplicationReturnStatus::UserRequestedStop);
+    assert!(
+        free.solves.len() > 3 && total > 20,
+        "{total} {:?}",
+        free.solves
+    );
+    // Every call for a one-time stop; a persistent stop lands in the same
+    // places, so every tenth call covers it.
+    for (once, stride) in [(true, 1), (false, 10)] {
+        for stop_at in (1..=total).step_by(stride) {
+            let (out, n) = solve(stop_at, once);
+            let ctx = format!("stop at call {stop_at} (once = {once}): {:?}", out.solves);
+            assert_eq!(
+                out.status,
+                ApplicationReturnStatus::UserRequestedStop,
+                "{ctx}"
+            );
+            assert_eq!(n, stop_at, "callbacks after the stop; {ctx}");
+            assert_eq!(
+                out.solves.last().map(|s| s.status),
+                Some(ApplicationReturnStatus::UserRequestedStop),
+                "a solve started after the stop; {ctx}"
+            );
+        }
+    }
 }
 
 /// An infeasible complementarity model: `x >= 1`, `y >= 1` and
