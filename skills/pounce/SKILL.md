@@ -290,7 +290,7 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
 1. **Recognize it.** `pounce-studio analyze-nl model.nl` reports the
    class as `…, N complementarity rows (MPCC)` and says what changes (the
    header count includes rows whose variable is free, which are read as
-   equations, and two-sided pairs, which are refused).
+   equations; two-sided "mixed" pairs are solved as mixed complementarity).
    From Python, `pounce.read_nl(path).complementarity` lists the pairs.
 2. **Declare, don't lower.** Pass the pairs as data and set nothing:
    AMPL `complements` and Pyomo `mpec` (`SolverFactory("pounce")`, no
@@ -298,9 +298,10 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    `pounce.Problem(..., complementarity=[(row, var), ...])`. Do not
    hand-write `G·H = 0`, a Scholtes schedule or a penalty — the driver
    runs the continuation and the exact product and keeps the better
-   certified answer. Each pair must be one-sided (a variable with one
-   finite bound, a row with one finite side); a two-sided ("mixed") pair
-   is refused with the reason. Cone complementarity is not supported.
+   certified answer. A pair is one-sided (a row with one finite side; the
+   variable's matching bound is in the pair, a second one an ordinary
+   limit) or mixed (`l <= x <= u ⟂ g` with the row free); a boxed row is
+   refused with the reason. Cone complementarity is not supported.
 3. **Read the verdict.** The JSON report does **not** carry the
    certificate yet, so `diagnose` cannot see it. Read the console line
    (`pounce: complementarity: answered by …; stationarity: S`) or Python

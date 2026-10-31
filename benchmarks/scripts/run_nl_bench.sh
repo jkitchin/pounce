@@ -287,7 +287,7 @@ run_one() {
       status=$(pounce_status_from_log "$log")
     fi
     if [ -z "$status" ] || [ "$status" = "Unknown_Error" ]; then
-      # A model the CLI declines up front (a two-sided complementarity pair)
+      # A model the CLI declines up front (a complementarity pair it cannot lower)
       # exits non-zero with no status line, exactly as a crash does; its own
       # message tells the two apart, and a suite that expects the refusal
       # must not pass on a crash.

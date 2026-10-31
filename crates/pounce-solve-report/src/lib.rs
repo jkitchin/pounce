@@ -142,8 +142,10 @@ pub struct ComplementarityInfo {
     pub solves: Vec<ComplementaritySolveInfo>,
     /// Iterations summed over every lowered solve.
     pub total_iterations: usize,
-    /// The reported point's largest `|G·H|`; `null` when it has no point (a
-    /// solve refused before iteration 0).
+    /// The reported point's complementarity violation -- the largest `|G·H|`
+    /// over one-sided pairs, the largest positive part of a mixed pair's
+    /// products -- or `null` when it has no point (a solve refused before
+    /// iteration 0).
     pub max_abs_product: Option<f64>,
     /// The stationarity certificate of the reported point; `None` only if the
     /// model could not be evaluated there.
@@ -162,7 +164,8 @@ pub struct ComplementaritySolveInfo {
     /// Upstream status name, e.g. `Solve_Succeeded`.
     pub status: String,
     pub iterations: usize,
-    /// Largest `|G·H|` at the solve's point; `null` when it returned none.
+    /// Complementarity violation at the solve's point (as
+    /// [`ComplementarityInfo::max_abs_product`]); `null` when it returned none.
     pub max_abs_product: Option<f64>,
 }
 

@@ -34,8 +34,8 @@ run is classified rather than failed, in the model's own objective sense
 - `worse`: another local solution.
 - `BETTER`: past the published value. Check the point's feasibility before
   believing it.
-- `unsolved`: the run did not converge, including the two-sided-pair models
-  PR #1103 refuses.
+- `unsolved`: the run did not converge (or the CLI refused a pair it cannot
+  lower).
 
 The target fails only on a contradiction of the reference: converging on a
 model published as infeasible, or reporting infeasible where a feasible
@@ -43,7 +43,13 @@ point is known.
 
 ## Reference result
 
-`main` at `e7873df` (PR #1103 merged): of 170 models with a best-known value, 144 `at`,
-6 `BETTER` (each verified feasible by direct evaluation), 10 `worse`, and
-10 `unsolved` (all two-sided refusals). All 4 published-infeasible models
-are reported infeasible. No FAILs.
+With mixed (two-sided) pairs solved (PR #1107): of 170 models with a
+best-known value, 153 `at`, 6 `BETTER` (each verified feasible by direct
+evaluation), 11 `worse`, and none `unsolved`. All 4 published-infeasible
+models are reported infeasible. No FAILs.
+
+Before it, `main` at `e7873df` (PR #1103) had 144 `at`, 6 `BETTER`, 10
+`worse`, and 10 `unsolved`, all of them two-sided refusals: `bilevel1m` and
+`gnash11m`–`gnash19m`. Nine of those now reach the published optimum.
+`bilevel1m` reaches 5 against a published −55, the local solution its
+one-sided twin `ex9.2.3` also reaches, and is the eleventh `worse`.

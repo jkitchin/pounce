@@ -171,19 +171,19 @@ pub fn describe_outcome(
     );
     let head = match reported {
         Reported::Answer(stage) => format!(
-            "pounce: complementarity: answered by the {} formulation ({solves}, max |G·H| = \
+            "pounce: complementarity: answered by the {} formulation ({solves}, violation = \
              {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::WeakFallback(stage) => format!(
             "pounce: complementarity: no formulation produced a strongly stationary answer \
-             ({solves}); reporting the {} formulation's weakly stationary point (max |G·H| = \
+             ({solves}); reporting the {} formulation's weakly stationary point (violation = \
              {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::FeasibleUncertified(stage) => format!(
             "pounce: complementarity: no formulation produced a stationary answer ({solves}); \
-             reporting the {} formulation's feasible point (max |G·H| = {max_abs_product:.1e})",
+             reporting the {} formulation's feasible point (violation = {max_abs_product:.1e})",
             stage.label(),
         ),
         Reported::Verdict => format!(
@@ -480,15 +480,60 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     let side = |lo: Number, hi: Number| -> (Number, Number) {
         if lo > -INF { (1.0, lo) } else { (-1.0, hi) }
     };
+    // A mixed pair (`l <= x <= u ⟂ g`, the row free) is, at a given point,
+    // the one-sided pair of the bound `x` is nearer: `x - l ⟂ g` at `l`,
+    // `u - x ⟂ -g` at `u` (strictly between, `G` is inactive either way and
+    // `g = 0` is the condition).
+    let mixed: Vec<bool> = inp
+        .pairs
+        .iter()
+        .map(|p| {
+            pounce_nlp::mpcc::is_mixed(
+                inp.x_l[p.var],
+                inp.x_u[p.var],
+                inp.g_l[p.row],
+                inp.g_u[p.row],
+            )
+        })
+        .collect();
     let g_side: Vec<(Number, Number)> = inp
         .pairs
         .iter()
-        .map(|p| side(inp.x_l[p.var], inp.x_u[p.var]))
+        .zip(&mixed)
+        .map(|(p, &mx)| {
+            let (lo, hi) = (inp.x_l[p.var], inp.x_u[p.var]);
+            if mx {
+                if inp.x[p.var] - lo <= hi - inp.x[p.var] {
+                    (1.0, lo)
+                } else {
+                    (-1.0, hi)
+                }
+            } else if lo > -INF && hi < INF {
+                // A boxed variable in a one-sided pair: the row's finite side
+                // names the bound in the pair, as MpccTnlp reads it; the
+                // other bound is an ordinary limit (columns below).
+                if inp.g_l[p.row] > -INF {
+                    (1.0, lo)
+                } else {
+                    (-1.0, hi)
+                }
+            } else {
+                side(lo, hi)
+            }
+        })
         .collect();
     let h_side: Vec<(Number, Number)> = inp
         .pairs
         .iter()
-        .map(|p| side(inp.g_l[p.row], inp.g_u[p.row]))
+        .zip(&mixed)
+        .zip(&g_side)
+        .map(|((p, &mx), &(sg, _))| {
+            if mx {
+                (sg, 0.0)
+            } else {
+                side(inp.g_l[p.row], inp.g_u[p.row])
+            }
+        })
         .collect();
     let gv: Vec<Number> = inp
         .pairs
@@ -522,9 +567,15 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         let above = if hi < INF { v - hi } else { 0.0 };
         below.max(above).max(0.0)
     };
+    // A mixed pair's row is free, so no row bound carries the sign of `g` at
+    // an active bound (`g >= 0` at `l`, `g <= 0` at `u`): measure it here.
+    let mixed_sign = (0..inp.pairs.len())
+        .filter(|&k| mixed[k] && g_act[k])
+        .map(|k| (-hv[k]).max(0.0));
     let primal_violation = (0..m)
         .map(|i| viol(inp.g[i], inp.g_l[i], inp.g_u[i]))
         .chain((0..n).map(|j| viol(inp.x[j], inp.x_l[j], inp.x_u[j])))
+        .chain(mixed_sign)
         .fold(0.0, Number::max);
     let feasible = primal_violation <= inp.feas_tol;
 
@@ -572,8 +623,20 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 (true, true) => cols.push((vec![(j, sg)], Sign::Biactive)),
                 (true, false) => cols.push((vec![(j, sg)], Sign::Free)),
             }
-            // A pair variable's other bound is infinite (MpccTnlp refuses
-            // anything else), so nothing more to add.
+            // A one-sided pair variable's other bound, when it has one, is an
+            // ordinary limit: a sign-constrained column when active. (A mixed
+            // pair's other bound is the other branch, handled above.)
+            if !mixed[k] {
+                let (lo, hi) = (inp.x_l[j], inp.x_u[j]);
+                let other_active = if sg > 0.0 {
+                    hi < INF && hi - inp.x[j] <= row_tol
+                } else {
+                    lo > -INF && inp.x[j] - lo <= row_tol
+                };
+                if other_active {
+                    cols.push((vec![(j, -sg)], Sign::NonNeg));
+                }
+            }
             continue;
         }
         let (lo, hi) = (inp.x_l[j], inp.x_u[j]);
@@ -1130,6 +1193,83 @@ mod tests {
             );
         }
         dense
+    }
+
+    /// A mixed pair, `0 <= x <= 1 ⟂ g = y - x` with `y` and the row free,
+    /// certified at each place it can be: at either bound with the sign the
+    /// pair requires, strictly between with `g = 0`, at a bound with the wrong
+    /// sign (infeasible: no row bound states it), and strictly between with
+    /// `g != 0` (not complementary).
+    #[test]
+    fn a_mixed_pair_is_certified_from_the_bound_it_is_at() {
+        let m = Model {
+            x_l: vec![0.0, NI],
+            x_u: vec![1.0, PI],
+            g_l: vec![NI],
+            g_u: vec![PI],
+            pairs: vec![ComplementarityPair { row: 0, var: 0 }],
+            jac: vec![(0, 0, -1.0), (0, 1, 1.0)],
+        };
+        let g = |x: &[Number]| vec![x[1] - x[0]];
+
+        // x at 0, g = 2 >= 0: min (x - 0.5)² + (y - 2)², grad (-1, 0) held by
+        // the bound alone.
+        let x = [0.0, 2.0];
+        let c = run(&m, &x, &[-1.0, 0.0], &g(&x));
+        assert_eq!(c.class, StationarityClass::S, "{c:?}");
+        assert!(c.feasible, "{c:?}");
+
+        // x at 1, g = -1 <= 0: min (x - 2)² + y², grad (-2, 0).
+        let x = [1.0, 0.0];
+        let c = run(&m, &x, &[-2.0, 0.0], &g(&x));
+        assert_eq!(c.class, StationarityClass::S, "{c:?}");
+
+        // Strictly between, g = 0: the row is an equality there, grad = λ ∇g.
+        let x = [0.5, 0.5];
+        let c = run(&m, &x, &[-1.0, 1.0], &g(&x));
+        assert_eq!(c.class, StationarityClass::S, "{c:?}");
+
+        // x at 0 with g = -1 < 0: violates the pair; no row bound says so.
+        let x = [0.0, -1.0];
+        let c = run(&m, &x, &[0.0, 0.0], &g(&x));
+        assert_eq!(c.class, StationarityClass::None, "{c:?}");
+        assert!(
+            !c.feasible && (c.primal_violation - 1.0).abs() < 1e-12,
+            "{c:?}"
+        );
+
+        // Strictly between with g = 0.5: neither side at zero.
+        let x = [0.5, 1.0];
+        let c = run(&m, &x, &[0.0, 0.0], &g(&x));
+        assert_eq!(
+            (c.class, c.n_neither),
+            (StationarityClass::None, 1),
+            "{c:?}"
+        );
+    }
+
+    /// A one-sided pair whose variable also has an ordinary second bound:
+    /// `x >= 0 ⟂ g = y >= 0` with `x <= 1` a plain limit. `min (x - 2)² +
+    /// (y - 1)²` has its optimum at `(1, 0)` -- `x` on the ordinary bound, not
+    /// the pair's -- which is stationary only with that bound's multiplier.
+    #[test]
+    fn a_pair_variables_ordinary_second_bound_carries_a_multiplier() {
+        let m = Model {
+            x_l: vec![0.0, NI],
+            x_u: vec![1.0, PI],
+            g_l: vec![0.0],
+            g_u: vec![PI],
+            pairs: vec![ComplementarityPair { row: 0, var: 0 }],
+            jac: vec![(0, 1, 1.0)],
+        };
+        let x = [1.0, 0.0];
+        let c = run(&m, &x, &[-2.0, -2.0], &[x[1]]);
+        assert_eq!(c.class, StationarityClass::S, "{c:?}");
+        // The pair's own bound is the lower one: at x = 0 with y = 1 the
+        // gradient (−4, 0) is held by it.
+        let x = [0.0, 1.0];
+        let c = run(&m, &x, &[-4.0, 0.0], &[x[1]]);
+        assert_eq!(c.class, StationarityClass::S, "{c:?}");
     }
 
     /// CALIPSO.jl `nonconvex/complementarity.jl`, its x-x pairs written as

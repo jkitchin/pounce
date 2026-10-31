@@ -75,7 +75,8 @@ pub struct MpccOutcome {
     /// Every lowered solve, in order.
     pub solves: Vec<MpccSolveRecord>,
     pub total_iterations: usize,
-    /// The forwarded point and its largest `|G·H|`.
+    /// The forwarded point and its complementarity violation (`|G·H|`, or the
+    /// positive part on a mixed pair's rows).
     pub x: Vec<Number>,
     pub max_abs_product: Number,
     /// Which stationarity class the forwarded point satisfies
@@ -288,10 +289,9 @@ pub fn solve_mpcc(
         let status = app.optimize_tnlp(Rc::clone(&lowered));
         let statistics = app.statistics();
         let w = wrapper.borrow();
-        let max_abs_product = w
-            .last_products()
-            .iter()
-            .fold(0.0, |a: Number, p| a.max(p.abs()));
+        // Complementarity violation: `|G·H|` for one-sided pairs, the positive
+        // part for a mixed pair's rows; `+inf` when the solve returned no point.
+        let max_abs_product = w.last_violation();
         let cap = Captured {
             status,
             solver_return: w.last_status().unwrap_or(SolverReturn::InternalError),
@@ -300,11 +300,7 @@ pub fn solve_mpcc(
             z_l: w.last_z_l().to_vec(),
             z_u: w.last_z_u().to_vec(),
             lambda: w.last_lambda().to_vec(),
-            max_abs_product: if w.last_x().is_empty() {
-                Number::INFINITY
-            } else {
-                max_abs_product
-            },
+            max_abs_product,
         };
         solves.push(MpccSolveRecord {
             stage,
@@ -511,7 +507,7 @@ pub fn solve_mpcc(
                         continue;
                     }
                     report(&format!(
-                        "pounce: complementarity: {} solved the model ({:?}, max |G·H| = {:.1e}, \
+                        "pounce: complementarity: {} solved the model ({:?}, violation = {:.1e}, \
                          minimized objective {:.6e}).",
                         stage.label(),
                         c.status,
@@ -560,7 +556,7 @@ pub fn solve_mpcc(
                 continue;
             }
             report(&format!(
-                "pounce: complementarity: {} did not ({:?}, max |G·H| = {:.1e}); trying the next \
+                "pounce: complementarity: {} did not ({:?}, violation = {:.1e}); trying the next \
                  formulation.",
                 stage.label(),
                 c.status,
