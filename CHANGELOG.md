@@ -10,6 +10,17 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Two-sided ("mixed") complementarity pairs are solved, not refused.** A
+  pair whose variable is boxed and whose row is free — `l <= x <= u ⟂ g`,
+  `g >= 0` at `l`, `g <= 0` at `u`, `g = 0` between; AMPL `complements` with
+  a doubly bounded variable, `.nl` flag 3 — is lowered as two product rows,
+  `(x - l)·g <= 0` and `(u - x)·g >= 0`, and certified from the bound `x`
+  is at. On MacMPEC this solves the 10 models previously refused for it
+  (`bilevel1m`, `gnash11m`–`gnash19m`); 9 reach the published best known
+  objective, all certified S. A one-sided pair whose variable also has a
+  second, ordinary bound (Pyomo `complements(s >= 0, L >= 0)` with `L <= 1`
+  declared) is lowered too, keeping that bound as a plain limit; it used to
+  be refused with advice to restate the bound as a row.
 - **The JSON solve report records the complementarity driver.** For a model
   with declared complementarity pairs, `--json-output` and Python's
   `solve(report_path=...)` now carry a `complementarity` block: the strategy,
@@ -73,6 +84,9 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Fixed
+- **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
+  bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
+  the server failed at import (`No module named 'mcp.server.fastmcp'`).
 - **A Python-written solve report now records the second-opinion ladder.**
   `solve(report_path=...)` omitted the `second_opinion` block the CLI's report
   has carried since gh#850, so a solve rescued by a rung read as the base

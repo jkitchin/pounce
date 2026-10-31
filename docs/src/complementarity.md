@@ -53,9 +53,20 @@ pyo.SolverFactory("pounce").solve(m)
 0 <= x_j - lb_j   ⟂   g_i(x) - cl_i >= 0
 ```
 
-or, for an upper bound, `ub_j - x_j` (respectively `cu_i - g_i`). So a
-pair is a variable with exactly one finite bound and a row with exactly one
-finite side:
+or, for an upper bound, `ub_j - x_j` (respectively `cu_i - g_i`). Three
+shapes are lowered:
+
+| shape | variable `x_j` | row `g_i` | meaning |
+|---|---|---|---|
+| one-sided | one finite bound | one finite side | `0 <= x_j - lb_j ⟂ g_i - cl_i >= 0`, either orientation |
+| one-sided, plus a plain bound | both bounds finite | one finite side | the row's side names the variable bound in the pair (`g >= cl` with `lb`, `g <= cu` with `ub`); the other bound is an ordinary limit |
+| mixed | both bounds finite | free | `lb_j <= x_j <= ub_j ⟂ g_i`: `g_i >= 0` at `lb_j`, `g_i <= 0` at `ub_j`, `g_i = 0` between |
+
+A mixed pair is lowered as two product rows, `(x_j - lb_j)·g_i <= 0` and
+`(ub_j - x_j)·g_i >= 0`, with `g_i` free in sign; in a `.nl` file it is a
+complementarity row with flag 3 (AMPL `l <= x <= u complements g`). A box
+on the row side is not lowered; put it on a variable instead (`g(x) = y`
+as a row, `l <= y <= u ⟂ ...`).
 
 ```python
 prob = pounce.Problem(n=3, m=2, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu,
@@ -181,16 +192,13 @@ the `complementarity` block of the JSON solve report (`--json-output`, or
 
 ## Limits
 
-- Pairs must be **one-sided**: a variable or row bounded on both sides (an
-  AMPL "mixed" complementarity) is refused with the reason, never solved as
-  if the pairing were absent. This is easy to hit from Pyomo:
-  `complements(m.L >= 0, m.sL >= 0)` with `m.L` declared `bounds=(0, 1)`
-  reads as "a pair plus `L <= 1`", but `mpec.nl` folds the variable's own
-  upper bound into the pair, which makes it mixed (`0 <= L <= 1 ⟂ sL`, where
-  `sL` may be negative at `L = 1`), and the written file cannot say which was
-  meant. The fix is to keep the pair's variable one-sided and state the other
-  bound as its own constraint (`m.L_max = Constraint(expr=m.L <= 1)`), or to
-  drop it when the other rows already imply it.
+- A pair whose **row** is boxed, or whose variable and row both have no
+  finite bound, is refused with the reason, never solved as if the pairing
+  were absent. The three shapes in the table under "Declaring pairs" are
+  lowered. Pyomo's `complements(m.sL >= 0, m.L >= 0)` with `m.L` declared
+  `bounds=(0, 1)` writes the pair on `L`'s lower bound (flag 1) and keeps
+  `L <= 1` a plain bound; an AMPL `0 <= L <= 1 complements sL` writes the
+  mixed pair (flag 3).
 - Complementarity between **cones** (friction cones, `β ∘ η = 0`) is not
   supported; lower such a model to scalar pairs.
 - Presolve is declined for a model with pairs (it renumbers what they
