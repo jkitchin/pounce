@@ -186,8 +186,9 @@ can disagree, and when they do, each is right about its own question:
 
 Pyomo reads `Solved_To_Acceptable_Level` as `optimal`, as it does for any
 model, so the certificate is the only place the `none` and `W` cases show.
-Read it from `info["complementarity"]` or the console line (`tee=True`); the
-JSON solve report does not carry it yet.
+Read it from `info["complementarity"]`, the console line (`tee=True`), or
+the `complementarity` block of the JSON solve report (`--json-output`, or
+`solve(report_path=...)` from Python).
 
 ## Limits
 
@@ -212,8 +213,6 @@ JSON solve report does not carry it yet.
   multipliers are a set, the search over it is dense, and past 4·10⁶
   entries it is not attempted: the point is reported `not_searched`, and a
   stall there goes undetected.
-- The JSON solve report does not carry the certificate yet; read the
-  console line or the Python `info`.
 
 ## Worked example
 

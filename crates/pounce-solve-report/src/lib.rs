@@ -104,6 +104,95 @@ pub struct SolveReport {
     /// deserializes unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub second_opinion: Option<SecondOpinionInfo>,
+    /// What the complementarity driver did, for a model with declared
+    /// complementarity pairs. `None` for every other model.
+    ///
+    /// Additive; older `pounce.solve-report/v1` JSON without this field
+    /// deserializes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub complementarity: Option<ComplementarityInfo>,
+}
+
+/// The complementarity driver's record: which formulation answered, every
+/// lowered solve it ran, and the stationarity certificate of the reported
+/// point. Keyed like Python's `info["complementarity"]`.
+///
+/// `statistics.iteration_count` is the iteration count of the one lowered
+/// solve whose point was reported; the driver runs several, and
+/// [`Self::total_iterations`] is what the solve cost — the same honesty rule
+/// as [`SecondOpinionInfo::total_iteration_count`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplementarityInfo {
+    /// `complementarity_strategy`: `both`, `exact` or `continuation`.
+    pub strategy: String,
+    /// The formulation whose strongly stationary answer was reported, or
+    /// `None` when no formulation answered.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub accepted_by: Option<String>,
+    /// The formulation whose weakly stationary point was reported when no
+    /// formulation answered, if that is what was reported.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fallback: Option<String>,
+    /// What was reported and on what grounds: `answer`, `weak_fallback`,
+    /// `feasible_uncertified` or `verdict`.
+    pub reported: String,
+    /// The driver's one-line account, as printed on the console.
+    pub summary: String,
+    /// Every lowered solve, in order.
+    pub solves: Vec<ComplementaritySolveInfo>,
+    /// Iterations summed over every lowered solve.
+    pub total_iterations: usize,
+    /// The reported point's complementarity violation -- the largest `|G·H|`
+    /// over one-sided pairs, the largest positive part of a mixed pair's
+    /// products -- or `null` when it has no point (a solve refused before
+    /// iteration 0).
+    pub max_abs_product: Option<f64>,
+    /// The stationarity certificate of the reported point; `None` only if the
+    /// model could not be evaluated there.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub certificate: Option<ComplementarityCertificateInfo>,
+}
+
+/// One lowered solve of the complementarity driver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplementaritySolveInfo {
+    /// `exact product`, `Scholtes continuation` or `l1 penalty`.
+    pub stage: String,
+    /// The relaxation `τ` for a relaxed solve; absent for an exact one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tau: Option<f64>,
+    /// Upstream status name, e.g. `Solve_Succeeded`.
+    pub status: String,
+    pub iterations: usize,
+    /// Complementarity violation at the solve's point (as
+    /// [`ComplementarityInfo::max_abs_product`]); `null` when it returned none.
+    pub max_abs_product: Option<f64>,
+}
+
+/// Which stationarity class the reported point satisfies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplementarityCertificateInfo {
+    /// `S`, `W`, `none` or `not_searched`.
+    pub class: String,
+    pub n_pairs: usize,
+    pub n_biactive: usize,
+    /// Pairs with neither side at zero.
+    pub n_neither: usize,
+    /// Whether the stationarity multipliers are unique (MPCC-LICQ).
+    pub multipliers_unique: bool,
+    /// Stationarity residual at the multipliers that decided the class. `null`
+    /// when no multipliers were computed (an infeasible point).
+    pub residual: Option<f64>,
+    pub resid_tol: f64,
+    /// Whether the residual is within the tight floor rather than only the
+    /// wider acceptance band.
+    pub tight: bool,
+    /// Largest violation of any row or bound, in the model's units; `null`
+    /// if it could not be evaluated.
+    pub primal_violation: Option<f64>,
+    /// `primal_violation <= constr_viol_tol`; an infeasible point classifies
+    /// `none` before any multiplier is computed.
+    pub feasible: bool,
 }
 
 /// The second-opinion ladder's record: which rungs ran, which (if any) was
@@ -800,6 +889,7 @@ pub struct ReportBuilder {
     pub iterations: Vec<IterRecord>,
     pub linear_solver: Option<LinearSolverSummaryInfo>,
     pub second_opinion: Option<SecondOpinionInfo>,
+    pub complementarity: Option<ComplementarityInfo>,
 }
 
 impl ReportBuilder {
@@ -840,7 +930,14 @@ impl ReportBuilder {
             iterations: Vec::new(),
             linear_solver: None,
             second_opinion: None,
+            complementarity: None,
         }
+    }
+
+    /// Record what the complementarity driver did. Called only for a model
+    /// with declared complementarity pairs.
+    pub fn set_complementarity(&mut self, info: ComplementarityInfo) {
+        self.complementarity = Some(info);
     }
 
     /// Record what the second-opinion ladder did. Called only when it ran; a
@@ -958,6 +1055,7 @@ impl ReportBuilder {
             iterations: self.iterations,
             linear_solver: self.linear_solver,
             second_opinion: self.second_opinion,
+            complementarity: self.complementarity,
         }
     }
 }
@@ -1170,6 +1268,59 @@ fn unix_nanos_to_iso(nanos: i128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A complementarity block round-trips, including the quantities that are
+    /// `null` because they were not measured: JSON has no infinity, and a
+    /// plain `f64` field holding one would serialize as `null` and then fail
+    /// to read back (the CLI re-reads its own reports).
+    #[test]
+    fn complementarity_block_round_trips_with_unmeasured_values() {
+        let mut b = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect);
+        b.solution.status = ApplicationReturnStatus::InfeasibleProblemDetected;
+        b.set_complementarity(ComplementarityInfo {
+            strategy: "both".into(),
+            accepted_by: None,
+            fallback: None,
+            reported: "verdict".into(),
+            summary: "pounce: complementarity: no formulation produced an answer".into(),
+            solves: vec![ComplementaritySolveInfo {
+                stage: "exact product".into(),
+                tau: None,
+                status: "Not_Enough_Degrees_Of_Freedom".into(),
+                iterations: 0,
+                max_abs_product: None,
+            }],
+            total_iterations: 0,
+            max_abs_product: None,
+            certificate: Some(ComplementarityCertificateInfo {
+                class: "none".into(),
+                n_pairs: 1,
+                n_biactive: 0,
+                n_neither: 0,
+                multipliers_unique: true,
+                residual: None,
+                resid_tol: 2e-4,
+                tight: false,
+                primal_violation: Some(4.6e-4),
+                feasible: false,
+            }),
+        });
+        let report = b.finish();
+        let text = serde_json::to_string(&report).unwrap();
+        assert!(text.contains("\"residual\":null"), "{text}");
+        let back: SolveReport = serde_json::from_str(&text).expect("round trip");
+        let c = back.complementarity.expect("block");
+        assert_eq!(c.reported, "verdict");
+        assert_eq!(c.solves[0].max_abs_product, None);
+        assert_eq!(c.certificate.unwrap().primal_violation, Some(4.6e-4));
+
+        // A report without the block omits the key and still reads back.
+        let plain = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect).finish();
+        let text = serde_json::to_string(&plain).unwrap();
+        assert!(!text.contains("complementarity"), "{text}");
+        let back: SolveReport = serde_json::from_str(&text).unwrap();
+        assert!(back.complementarity.is_none());
+    }
 
     #[test]
     fn iso_formatter_matches_known_epochs() {

@@ -246,6 +246,15 @@ impl Strategy {
         }
     }
 
+    /// The option's value for this strategy; the inverse of [`Self::parse`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Strategy::Both => "both",
+            Strategy::Exact => "exact",
+            Strategy::Continuation => "continuation",
+        }
+    }
+
     pub fn runs(self, stage: MpccStage) -> bool {
         !matches!(
             (self, stage),

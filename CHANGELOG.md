@@ -21,6 +21,15 @@ changes.
   second, ordinary bound (Pyomo `complements(s >= 0, L >= 0)` with `L <= 1`
   declared) is lowered too, keeping that bound as a plain limit; it used to
   be refused with advice to restate the bound as a row.
+- **The JSON solve report records the complementarity driver.** For a model
+  with declared complementarity pairs, `--json-output` and Python's
+  `solve(report_path=...)` now carry a `complementarity` block: the strategy,
+  which formulation answered (or which fallback was reported), every lowered
+  solve, the true total iteration count, and the stationarity certificate of
+  the reported point (S / W / none, residual, primal violation). Before, the
+  certificate was only on the console and in `info["complementarity"]`, and
+  the report's `iteration_count` showed one lowered solve of the several the
+  driver ran (171 iterations reported as 4 on `qpec_small`).
 - **Declared complementarity constraints solve without choosing a
   formulation.** Models with complementarity pairs `0 ≤ G ⟂ H ≥ 0` — AMPL
   `complements`, Pyomo `mpec` through `SolverFactory("pounce")`, or
@@ -78,6 +87,11 @@ changes.
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
   the server failed at import (`No module named 'mcp.server.fastmcp'`).
+- **A Python-written solve report now records the second-opinion ladder.**
+  `solve(report_path=...)` omitted the `second_opinion` block the CLI's report
+  has carried since gh#850, so a solve rescued by a rung read as the base
+  solve succeeding on its own. It now writes the same block through the same
+  conversion.
 - **A stop requested from the intermediate callback is no longer overridden
   by an automatic re-solve.** When a solve re-runs itself inside one call
   (the scale audit, the dual-divergence retry, the μ-strategy fallback, the

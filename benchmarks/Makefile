@@ -63,6 +63,8 @@ export IPOPT_LINEAR_SOLVER
 	warmstart-run warmstart-quick warmstart-selftest warmstart-report \
 	warmstart-ipopt warmstart-transfer warmstart-composite warmstart-all \
 	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
+	mpcc-nl-run mpcc-nl-rerun mpcc-nl-check \
+	macmpec-run macmpec-rerun macmpec-check \
 	flash-selftest flash-smoke flash-run \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
 	pounce-bin
@@ -112,6 +114,10 @@ help:
 	@echo "  mpcc-selftest              MPCC suite: derivatives, oracle, classifier, manifest (no solver needed)"
 	@echo "  mpcc-smoke                 MPCC suite: deterministic asserted subset (~10 s, needs the built Python ext)"
 	@echo "  mpcc-run                   MPCC suite: the full gh#794 configuration, writes results-full.{json,md}"
+	@echo "  mpcc-nl-run / -rerun       MPCC .nl suite (AMPL complements, CLI), checked against answers.json"
+	@echo "  mpcc-nl-check              re-check an existing mpcc_nl/pounce.json against answers.json"
+	@echo "  macmpec-run / -rerun       MacMPEC (178 .nl), classified against best-known objectives"
+	@echo "  macmpec-check              re-check an existing macmpec/pounce.json against answers.json"
 	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
 	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
 	@echo "  flash-selftest             Gate 1 flash: derivatives, oracle cross-check, regime coverage (no solver)"
@@ -187,6 +193,8 @@ nldir_mittelmann  := $(POUNCE_BENCH_DATA)/mittelmann/nl
 nldir_qp          := $(POUNCE_BENCH_DATA)/qp/nl
 nldir_lp          := $(POUNCE_BENCH_DATA)/lp/nl
 nldir_lpopt       := $(POUNCE_BENCH_DATA)/lpopt/nl
+nldir_mpcc_nl     := $(POUNCE_BENCH_DATA)/mpcc_nl/nl
+nldir_macmpec     := $(POUNCE_BENCH_DATA)/macmpec/nl
 
 # --- pounce release runs (incremental, pounce-only) ---
 # Each <suite>/pounce.json rebuilds when the pounce binary or the suite's
@@ -463,6 +471,66 @@ mpcc-report:
 
 mpcc-manifest:
 	cd $(CURDIR) && $(PYTHON) -m mpcc.run --write-manifest
+
+# --- MPCC .nl suite ----------------------------------------------------
+#
+# The other half of the MPCC evidence: AMPL `complements` models solved
+# through the CLI, which reads them as declared complementarity pairs.
+# Unlike the Gate 0 suite above it reads `.nl` from the data root
+# ($(POUNCE_BENCH_DATA)/mpcc_nl/nl) and runs the shared driver. Every row
+# is then checked against the suite's own answers.json (global optimum,
+# expected status), so a run that reaches a worse branch, reports a
+# relaxed solve's success on the infeasible model, or solves the mixed
+# pair it must refuse, fails the target. See benchmarks/mpcc_nl/README.md.
+#
+# Needs a pounce with declared-complementarity support (PR #1103, on main
+# since e7873df);
+# an earlier binary refuses every file at load, and every row fails.
+# Not in REF_SUITES: the reference is each model's known optimum in
+# answers.json, not an Ipopt run.
+
+MPCC_NL_DIR     := $(REPO_ROOT)/benchmarks/mpcc_nl
+MPCC_NL_ANSWERS := $(POUNCE_BENCH_DATA)/mpcc_nl/answers.json
+
+$(MPCC_NL_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(nldir_mpcc_nl)/*.nl)
+	$(NL_DRIVER) mpcc_nl $(nldir_mpcc_nl) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+mpcc-nl-run: $(MPCC_NL_DIR)/pounce.json
+	$(PYTHON) $(REPO_ROOT)/benchmarks/scripts/check_nl_answers.py $(MPCC_NL_ANSWERS) $<
+
+mpcc-nl-check:
+	$(PYTHON) $(REPO_ROOT)/benchmarks/scripts/check_nl_answers.py $(MPCC_NL_ANSWERS) $(MPCC_NL_DIR)/pounce.json
+
+mpcc-nl-rerun:
+	rm -f $(MPCC_NL_DIR)/pounce.json
+	$(MAKE) mpcc-nl-run
+
+# --- MacMPEC (Leyffer) ---------------------------------------------------
+#
+# The standard MPCC test collection: 178 AMPL `.nl` (167 stubs from the 2009
+# MacMPEC archive, 11 compiled with AMPL), run like mpcc_nl but checked against *best-known*
+# objectives (published, found by local solvers, ~6 significant figures):
+# a converged run is classified at / worse / BETTER, not failed. Only a
+# contradiction of the reference fails the target -- converging on a
+# published-infeasible model, reporting infeasible where a feasible point
+# is known. See benchmarks/macmpec/README.md. Same binary requirement as
+# mpcc_nl; a full run takes about 20 minutes at the default time limit.
+
+MACMPEC_DIR     := $(REPO_ROOT)/benchmarks/macmpec
+MACMPEC_ANSWERS := $(POUNCE_BENCH_DATA)/macmpec/answers.json
+
+$(MACMPEC_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(nldir_macmpec)/*.nl)
+	$(NL_DRIVER) macmpec $(nldir_macmpec) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+macmpec-run: $(MACMPEC_DIR)/pounce.json
+	$(PYTHON) $(REPO_ROOT)/benchmarks/scripts/check_nl_answers.py $(MACMPEC_ANSWERS) $<
+
+macmpec-check:
+	$(PYTHON) $(REPO_ROOT)/benchmarks/scripts/check_nl_answers.py $(MACMPEC_ANSWERS) $(MACMPEC_DIR)/pounce.json
+
+macmpec-rerun:
+	rm -f $(MACMPEC_DIR)/pounce.json
+	$(MAKE) macmpec-run
 
 # ---- Gate 1 flash fixture (gh#776) ---------------------------------------
 # The phase-changing model Gate 0 gated. `flash-selftest` needs no solver

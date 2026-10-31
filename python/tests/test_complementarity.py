@@ -240,3 +240,34 @@ def test_a_mixed_pair_is_solved():
     assert info["status_msg"] == "Solve_Succeeded"
     assert np.allclose(x, [1.0, 0.0], atol=1e-6)
     assert info["complementarity"]["certificate"]["class"] == "S"
+
+
+def test_the_solve_report_carries_the_complementarity_block(tmp_path):
+    """`solve(report_path=...)` writes the same `complementarity` block as the
+    CLI's `--json-output`, through the same conversion, and it agrees with
+    `info["complementarity"]`. `statistics.iteration_count` is the reported
+    lowered solve's alone; `total_iterations` is what the run cost."""
+    import json
+
+    path = tmp_path / "report.json"
+    x, info = qpec_problem(complementarity=[(0, 1), (1, 2)]).solve(
+        np.zeros(3), report_path=str(path)
+    )
+    report = json.loads(path.read_text())
+    block, cc = report["complementarity"], info["complementarity"]
+    assert block["strategy"] == "both"
+    assert block["reported"] == "answer"
+    assert block["accepted_by"] == cc["accepted_by"]
+    assert block["total_iterations"] == cc["total_iterations"]
+    assert len(block["solves"]) == cc["n_solves"]
+    assert block["certificate"]["class"] == cc["certificate"]["class"] == "S"
+    assert block["summary"] == cc["summary"]
+    assert block["total_iterations"] > report["statistics"]["iteration_count"]
+
+
+def test_a_solve_report_without_pairs_has_no_complementarity_block(tmp_path):
+    import json
+
+    path = tmp_path / "report.json"
+    qpec_problem().solve(np.zeros(3), report_path=str(path))
+    assert "complementarity" not in json.loads(path.read_text())
