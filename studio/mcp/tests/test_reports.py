@@ -398,7 +398,7 @@ def test_analyze_nl_file_reports_complementarity_pairs(tmp_path):
     )
     out = analyze_problem(nl_file=str(nl))
     assert out["dimensions"]["n_complementarity"] == 2
-    assert out["class"].endswith("2 complementarity pairs (MPCC)")
+    assert out["class"].endswith("2 complementarity rows (MPCC)")
     assert any("complementarity_strategy" in w for w in out["warnings"])
 
 

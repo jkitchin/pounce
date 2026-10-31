@@ -288,7 +288,9 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
 `python/notebooks/47_declared_complementarity.ipynb`.
 
 1. **Recognize it.** `pounce-studio analyze-nl model.nl` reports the
-   class as `…, N complementarity pairs (MPCC)` and says what changes.
+   class as `…, N complementarity rows (MPCC)` and says what changes (the
+   header count includes rows whose variable is free, which are read as
+   equations, and two-sided pairs, which are refused).
    From Python, `pounce.read_nl(path).complementarity` lists the pairs.
 2. **Declare, don't lower.** Pass the pairs as data and set nothing:
    AMPL `complements` and Pyomo `mpec` (`SolverFactory("pounce")`, no

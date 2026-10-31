@@ -1058,6 +1058,57 @@ mod tests {
         assert_eq!(c.class, StationarityClass::None, "{c:?}");
     }
 
+    /// A badly scaled column (PR review). The sparse path calls a system
+    /// rank-deficient when an LU pivot of `[s·I A; Aᵀ 0]` falls under
+    /// `1e-9·s`. Measured on columns `e₀` and `(1, ε)`: the sparse
+    /// multipliers are exact down to `ε = 1e-8`, and "rank-deficient" starts
+    /// at `ε = 1e-9` -- the pivot tracks σ, not σ²/s. Below that, within
+    /// [`MAX_DENSE_ENTRIES`], the sparse verdict falls through to the dense
+    /// path, which re-decides the rank, so class and uniqueness agree on both
+    /// paths at every scale (`run` asserts it). Past that limit a sparse
+    /// "rank-deficient" is final and reads `NotSearched` -- never a
+    /// different class.
+    #[test]
+    fn a_badly_scaled_column_gets_the_same_verdict_on_both_paths() {
+        for (eps, deficient) in [
+            (1e-3, false),
+            (1e-5, false),
+            (1e-8, false),
+            (1e-9, true),
+            (1e-12, true),
+        ] {
+            let m = Model {
+                x_l: vec![0.0, -2e19],
+                x_u: vec![2e19, 2e19],
+                g_l: vec![0.0],
+                g_u: vec![2e19],
+                pairs: vec![],
+                jac: vec![(0, 0, 1.0), (0, 1, eps)],
+            };
+            // grad f = A (1, 1): both multipliers +1, so S.
+            let c = run(&m, &[0.0, 0.0], &[2.0, eps], &[0.0]);
+            assert_eq!(
+                (c.class, c.multipliers_unique),
+                (StationarityClass::S, true),
+                "{eps:e}: {c:?}"
+            );
+            let cols = vec![vec![(0, 1.0)], vec![(0, 1.0), (1, eps)]];
+            match pounce_feral::sparse_least_squares(2, &cols, &[2.0, eps]) {
+                pounce_feral::LeastSquares::Solved(theta) => {
+                    assert!(!deficient, "{eps:e}");
+                    assert!(
+                        theta.iter().all(|t| (t - 1.0).abs() < 1e-9),
+                        "{eps:e}: {theta:?}"
+                    );
+                }
+                other => assert!(
+                    deficient && other == pounce_feral::LeastSquares::RankDeficient,
+                    "{eps:e}: {other:?}"
+                ),
+            }
+        }
+    }
+
     /// A large system whose multipliers are a set is still not searched:
     /// the set search is dense. One active row `x₀ ≥ 0` duplicating the
     /// bound makes the 2001 bound columns plus the row dependent, and

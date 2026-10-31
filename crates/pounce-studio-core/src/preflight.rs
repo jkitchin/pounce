@@ -255,7 +255,7 @@ fn classify_nl(h: &NlHeader) -> String {
     };
     let class = format!("{nl_or_lin} {eq_or_gen}");
     match h.n_complementarity {
-        Some(k) if k > 0 => format!("{class}, {k} complementarity pairs (MPCC)"),
+        Some(k) if k > 0 => format!("{class}, {k} complementarity rows (MPCC)"),
         _ => class,
     }
 }
@@ -278,11 +278,12 @@ fn nl_warnings(h: &NlHeader) -> Vec<String> {
     }
     if let Some(k) = h.n_complementarity.filter(|&k| k > 0) {
         out.push(format!(
-            "{k} complementarity pairs: solved by POUNCE's MPCC driver (Scholtes continuation \
-             and exact product, each answer certified S/W/none; complementarity_strategy picks \
-             one), with presolve declined. --minima, sensitivity suffixes, `pounce verify` and \
-             `check-x0` refuse the model. See the book page \"Complementarity Constraints \
-             (MPCC)\".",
+            "{k} complementarity rows (header n_cc). Each one-sided pair is solved by POUNCE's \
+             MPCC driver (Scholtes continuation and exact product, each answer certified \
+             S/W/none; complementarity_strategy picks one), with presolve declined; a row whose \
+             variable is free is read as an equation, and a two-sided (mixed) pair is refused \
+             with the reason. --minima, sensitivity suffixes, `pounce verify` and `check-x0` \
+             refuse the model. See the book page \"Complementarity Constraints (MPCC)\".",
         ));
     }
     out
@@ -794,7 +795,7 @@ mod tests {
         assert_eq!(h.n_complementarity, Some(2));
         let a = analyze_nl("m.nl", h);
         assert!(
-            a.class.ends_with("2 complementarity pairs (MPCC)"),
+            a.class.ends_with("2 complementarity rows (MPCC)"),
             "{}",
             a.class
         );

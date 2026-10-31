@@ -187,7 +187,7 @@ def _classify(dims: dict[str, Any]) -> str:
     parts.append("equality-constrained" if n_eq == n_con else "general-constrained")
     cls = " ".join(parts)
     k = dims.get("n_complementarity", 0)
-    return f"{cls}, {k} complementarity pairs (MPCC)" if k > 0 else cls
+    return f"{cls}, {k} complementarity rows (MPCC)" if k > 0 else cls
 
 
 def _suggest_options(dims: dict[str, Any]) -> list[dict[str, str]]:
@@ -239,10 +239,12 @@ def _heuristic_warnings(dims: dict[str, Any]) -> list[str]:
     k = dims.get("n_complementarity", 0)
     if k > 0:
         warnings.append(
-            f"{k} complementarity pairs: solved by POUNCE's MPCC driver (Scholtes "
-            "continuation and exact product, each answer certified S/W/none; "
-            "complementarity_strategy picks one), with presolve declined. --minima, "
-            "sensitivity suffixes, `pounce verify` and `check-x0` refuse the model. "
+            f"{k} complementarity rows (header n_cc). Each one-sided pair is solved by "
+            "POUNCE's MPCC driver (Scholtes continuation and exact product, each answer "
+            "certified S/W/none; complementarity_strategy picks one), with presolve "
+            "declined; a row whose variable is free is read as an equation, and a "
+            "two-sided (mixed) pair is refused with the reason. --minima, sensitivity "
+            "suffixes, `pounce verify` and `check-x0` refuse the model. "
             'See the book page "Complementarity Constraints (MPCC)".'
         )
     return warnings
