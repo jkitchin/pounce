@@ -183,7 +183,9 @@ pub struct ComplementarityCertificateInfo {
     /// Stationarity residual at the multipliers that decided the class. `null`
     /// when no multipliers were computed (an infeasible point).
     pub residual: Option<f64>,
-    pub resid_tol: f64,
+    /// The band `residual` is judged against; `null` if non-finite (JSON has
+    /// no infinity, and a plain `f64` holding one would not read back).
+    pub resid_tol: Option<f64>,
     /// Whether the residual is within the tight floor rather than only the
     /// wider acceptance band.
     pub tight: bool,
@@ -1299,7 +1301,7 @@ mod tests {
                 n_neither: 0,
                 multipliers_unique: true,
                 residual: None,
-                resid_tol: 2e-4,
+                resid_tol: Some(2e-4),
                 tight: false,
                 primal_violation: Some(4.6e-4),
                 feasible: false,

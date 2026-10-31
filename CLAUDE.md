@@ -154,7 +154,7 @@ anything**. Swept twice, default versus `bound_relax_factor=0`, the convex
 lines move by tens of percent in both directions and `lp_degen2` moves 18 → 15.
 `convex_qp_qscfxm1` is QSCFXM1 itself, moves 131 → 30 on both legs, and is
 pinned by `crates/pounce-cli/tests/issue_760_convex_bound_relax_magnitude.rs`.
-The general rule it instances is the branch rule below: a corpus that is
+The general rule it instances is the branch rule (next section): a corpus that is
 uniform in the dimension a change acts on reports "small and mixed" no matter
 how large its models are. See `dev-notes/qp-bound-relax-iteration-cost.md` and
 `dev-notes/convex-fixture-corpus.md`.
@@ -218,6 +218,21 @@ only. Without either it is indistinguishable from noise to the next reader —
 which is how 206 → 812 sat in a commit message through a release.
 
 Full post-mortem: `dev-notes/trajectory-regressions-and-the-fixture-sweep.md`.
+
+## A test is only evidence about the branch it reaches
+
+If the rule under test *branches* — on an activity class, on a status, on
+which side of a threshold a quantity falls — a fixture that always takes one
+branch says nothing about the other, and it stays green while the other
+branch is broken. Before trusting a green test or an empty sweep on a change,
+check which branch its fixture takes, and add a fixture for each branch the
+rule can take: the second fixture is the test, not a duplicate of the first.
+The same holds for a corpus: one that is uniform in the dimension a change
+acts on reports "small and mixed" no matter how large its models are.
+
+The worked example (gh#756, whose defect stayed live under a green leg
+because that leg's fixture certified the class the PR's rule returned early
+on) and its classifier corollary are in `crates/pounce-sensitivity/CLAUDE.md`.
 
 ## Working GitHub issues
 
