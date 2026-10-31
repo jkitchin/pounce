@@ -40,7 +40,7 @@ whole suite takes about 20 s, 14 s of it on `chain_60000`.
 |---|---|
 | `SolveSucceeded` | the run converged (`Solve_Succeeded` or `Solved_To_Acceptable_Level`) and `\|f − f*\| ≤ 1e-6·max(1, \|f*\|)` |
 | `InfeasibleProblemDetected` | the run reported `Infeasible_Problem_Detected` (a relaxed solve's success fails) |
-| `refused` | the run did not converge (the CLI refuses a two-sided pair and exits 2) |
+| `refused` | the run did not converge (the CLI refuses a pair it cannot lower — a boxed row, or no finite bound on either side — and exits 2) |
 
 `f*` is a **global** optimum on every model that has one, so a run that
 settles on a worse S-stationary branch fails. That is the case

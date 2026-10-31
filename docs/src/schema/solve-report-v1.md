@@ -387,9 +387,9 @@ one whose point was reported; `total_iterations` is what the run cost.
 | `fallback` | string \| omitted | The formulation whose weakly stationary point was reported when none answered. |
 | `reported` | string | `answer`, `weak_fallback`, `feasible_uncertified` or `verdict` (no point qualified; the exact product's status is reported). |
 | `summary` | string | The driver's one-line account, as printed on the console. |
-| `solves` | array of object | Every lowered solve, in order: `stage`, `tau` (relaxation, omitted for an exact solve), `status` (upstream name), `iterations`, `max_abs_product` (`null` when the solve returned no point). |
+| `solves` | array of object | Every lowered solve, in order: `stage`, `tau` (relaxation, omitted for an exact solve), `status` (upstream name), `iterations`, `max_abs_product` (its complementarity violation, as below; `null` when the solve returned no point). |
 | `total_iterations` | integer | Iterations summed over `solves`. |
-| `max_abs_product` | float \| null | Largest `|G·H|` at the reported point. |
+| `max_abs_product` | float \| null | The reported point's complementarity violation: the largest `|G·H|` over one-sided pairs, and the largest positive part of a mixed pair's two products (which are legitimately nonzero at a bound). |
 | `certificate` | object \| omitted | Stationarity class of the reported point; omitted only if the model could not be evaluated there. Fields: `class` (`S`, `W`, `none`, `not_searched`), `n_pairs`, `n_biactive`, `n_neither`, `multipliers_unique`, `residual` (`null` when no multipliers were computed), `resid_tol`, `tight` (residual within the tight floor rather than only the acceptance band), `primal_violation` (largest row or bound violation, model units), `feasible` (`primal_violation <= constr_viol_tol`; an infeasible point classifies `none`). |
 
 ## Detail levels

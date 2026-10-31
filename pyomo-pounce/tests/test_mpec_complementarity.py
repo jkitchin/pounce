@@ -53,23 +53,39 @@ def test_qpec_small_reaches_its_answer(start):
         assert pyo.value(v) == pytest.approx(want, abs=1e-4)
 
 
-def test_a_two_sided_pair_is_refused_with_the_reason_in_the_exception():
+def test_a_two_sided_pair_is_solved_as_mixed_complementarity():
     """A pair variable bounded on both sides is a mixed complementarity in the
-    written ``.nl``; the CLI refuses it with the reason and the fix, and that
-    reason reaches the exception, not only the solver log (PR #1103 review)."""
-    from pyomo.common.errors import ApplicationError
-
+    written ``.nl`` (``0 <= L <= 1 ⟂ sL``: sL >= 0 at 0, sL <= 0 at 1, sL = 0
+    between) and is solved as one. With ``sL >= 0`` its own bound, the answer
+    is ``L = 1, sL = 0`` -- the same point as stating ``L <= 1`` as a row."""
     m = pyo.ConcreteModel()
     m.L = pyo.Var(bounds=(0, 1))
     m.sL = pyo.Var(bounds=(0, None))
     m.o = pyo.Objective(expr=(m.L - 1.5) ** 2 + (m.sL - 0.2) ** 2)
     m.c = Complementarity(expr=complements(m.sL >= 0, m.L >= 0))
-    with pytest.raises(ApplicationError, match="only one-sided pairs.*separate constraint"):
-        pyo.SolverFactory("pounce").solve(m)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert res.solver.termination_condition == pyo.TerminationCondition.optimal
+    assert abs(pyo.value(m.L) - 1.0) < 1e-6 and abs(pyo.value(m.sL)) < 1e-6
 
-    # The fix the message names: keep the pair one-sided, state L <= 1 as a row.
+    # Stated one-sided with L <= 1 as a row: the same answer.
     m.L.setub(None)
     m.L_max = pyo.Constraint(expr=m.L <= 1)
     res = pyo.SolverFactory("pounce").solve(m)
     assert res.solver.termination_condition == pyo.TerminationCondition.optimal
     assert abs(pyo.value(m.L) - 1.0) < 1e-6 and abs(pyo.value(m.sL)) < 1e-6
+
+
+def test_a_refusal_reason_reaches_the_exception():
+    """When the CLI refuses a model with complementarity pairs, the reason
+    reaches the exception, not only the solver log (PR #1103 review)."""
+    from pyomo.common.errors import ApplicationError
+
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, None), initialize=1.0)
+    m.y = pyo.Var(bounds=(0, None), initialize=2.0)
+    m.obj = pyo.Objective(expr=2 * m.x - m.y)
+    m.c = Complementarity(expr=complements(m.y >= 0, m.y - m.x >= 0))
+    solver = pyo.SolverFactory("pounce")
+    solver.options["compute_red_hessian"] = "yes"
+    with pytest.raises(ApplicationError, match="reduced-Hessian"):
+        solver.solve(m)
