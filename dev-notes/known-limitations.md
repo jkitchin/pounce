@@ -12,6 +12,55 @@ merges.
 
 ---
 
+## MPCC: the exact-product stage is slow on dense degenerate QPECs
+
+*Measured in the PR review of declared complementarity (jkitchin/pounce#1103),
+on MacMPEC through the CLI. Recorded 2026-10-31.*
+
+**Scope.** Models with declared complementarity pairs whose complementarity
+rows are dense, under the default `complementarity_strategy=both` or `=exact`.
+The qpecgen family in MacMPEC is the measured case. Models without pairs are
+unaffected.
+
+### What is wrong
+
+The exact-product stage lowers each pair to `G·H = 0`, which has no strict
+interior. On `qpec-100-2` (110 variables), run with
+`complementarity_strategy=exact` to isolate the stage, it takes **561
+iterations and 8.3 s**:
+
+- the multipliers grow to about 1e12;
+- it exits through the scale-relative dual-infeasibility floor (`dual_inf`
+  612 against a dual scale of 1.6e12), not a converged KKT error;
+- 5.0 s of the 8.3 s is Lagrangian Hessian evaluation, because qpecgen's
+  complementarity rows are dense (11 020 Jacobian nonzeros on 110 variables).
+
+Under the default `both`, the stage runs for every solve. `qpec-200-2` takes
+**434 s** there, but that total also includes about 4 200 continuation
+iterations, and the exact stage was not timed alone on it; how much of the
+434 s is the exact stage is not measured. Only the `qpec-100-2` numbers
+above isolate it.
+
+### What has been tried
+
+Nothing beyond `complementarity_strategy=continuation`, which skips the stage
+and is the workaround for a model known to behave this way. The stage is kept
+in the default because on the Gate 0 corpus and the CALIPSO bunny-hop it finds
+answers the continuation misses (see `docs/src/complementarity.md`).
+
+### How to tell whether a fix works
+
+`qpec-100-2` under `complementarity_strategy=exact` should take a small
+fraction of 561 iterations without changing its objective (time `qpec-200-2`
+per stage first if it is to be the second witness), while the Gate 0 corpus
+(`benchmarks/mpcc/declared.py`) stays at 60/60 cells at `f*`. Integrated
+approaches that tie the relaxation to the barrier parameter (relaxing the
+products by an amount proportional to μ inside one solve) avoid the empty
+interior and are the obvious direction. The MacMPEC suite and its harness are
+in the benchmark data root (`macmpec/`).
+
+---
+
 ## NLP: qcqp1500-1nc stalls at μ = 2e-6; waterx lands in a worse minimum
 
 *Tracked in gh#1098. Introduced by 49ab28aa (#1077, gh#1076 §2). Recorded

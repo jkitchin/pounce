@@ -274,6 +274,15 @@ pub unsafe extern "C" fn pounce_load(
             Ok(p) => p,
             Err(e) => return error_json(format!("could not parse .nl file: {e}")),
         };
+        if !prob.complementarity.is_empty() {
+            // This entry point solves the model as a plain NLP, which would
+            // drop the pairing: refuse rather than solve the relaxation.
+            return error_json(format!(
+                "this model declares {} complementarity pair(s), which the WebAssembly build \
+                 does not support; solve it with the pounce CLI or pounce.Problem",
+                prob.complementarity.len()
+            ));
+        }
         attach_names(&mut prob, col, row);
         #[cfg(feature = "studio")]
         studio::remember_model(&prob);

@@ -2165,7 +2165,7 @@ impl IpoptAlgorithm {
     /// spent iteration budget, a restoration failure — restores the floor and
     /// reports it under the status it always had.
     ///
-    /// Restoring reports `Success` even over a budget or user-stop exit, which
+    /// Restoring reports `Success` even over a budget exit, which
     /// is the opposite of what [`Self::honour_decline_floor`] and
     /// [`Self::honour_best_acceptable_after_dual_guard`] do — and deliberately
     /// so. Those two hold an *acceptable-level* point and must not let it erase
@@ -2174,7 +2174,10 @@ impl IpoptAlgorithm {
     /// the budget ever runs: the budget was spent by the bet, not by the
     /// caller's problem. Reproducing the baseline outcome — point and status
     /// both — is the guarantee, and it is the reading gh #200's hook already
-    /// takes of a refused certificate.
+    /// takes of a refused certificate. A user stop is the one exception, and
+    /// it is applied in [`Self::optimize`]: the floor's point is still
+    /// restored, under `UserRequestedStop`, because the caller asked to stop
+    /// and a `Success` would let a driver of several solves carry on.
     fn honour_neg_curv_floor(&mut self, result: SolverReturn) -> SolverReturn {
         let Some(floor) = self.neg_curv_floor.clone() else {
             return result;
@@ -5220,6 +5223,7 @@ impl IpoptAlgorithm {
     /// reading a status that is not the one reported.
     pub fn optimize(&mut self) -> SolverReturn {
         let result = self.optimize_inner();
+        let user_stopped = matches!(result, SolverReturn::UserRequestedStop);
 
         // gh #200: a refused certificate outranks any non-success verdict the
         // continued run reached, and an earlier refusal can outrank the
@@ -5245,6 +5249,18 @@ impl IpoptAlgorithm {
         // beat the point it left with a certificate of its own or that point is
         // handed back.
         let result = self.honour_neg_curv_floor(result);
+
+        // A stop the caller asked for keeps its status whatever point the hooks
+        // above settled on. They may hand back a better point than the one the
+        // stop landed on, but `honour_neg_curv_floor` and the gh #200 hook also
+        // report their restored point's own status, and a `Success` there tells
+        // a caller driving a sequence of solves (the MPCC ladder) to carry on
+        // after the user said stop.
+        let result = if user_stopped {
+            SolverReturn::UserRequestedStop
+        } else {
+            result
+        };
 
         // Terminal post-mortem checkpoint. Skipped when the user already
         // asked to stop (they were just at a prompt); otherwise the

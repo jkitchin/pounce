@@ -4736,7 +4736,12 @@ impl IpoptApplication {
                 st.passes = passes;
             }
         }
-        if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
+        // A retry the caller's intermediate callback stopped reports the
+        // stop: returning the first attempt's status would override it.
+        if matches!(
+            retry_status,
+            ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::UserRequestedStop
+        ) {
             retry_status
         } else {
             first_status
@@ -4966,7 +4971,13 @@ impl IpoptApplication {
         );
         drop(scope);
         self.statistics.borrow_mut().mu_strategy_fallback = Some(record);
-        if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
+        // A retry the caller's intermediate callback stopped reports the
+        // stop, at the point it stopped: the first attempt's status would
+        // override the request.
+        if matches!(
+            retry_status,
+            ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::UserRequestedStop
+        ) {
             return retry_status;
         }
         // The bet lost. Put the first attempt's answer back, so the point and
@@ -5007,12 +5018,17 @@ impl IpoptApplication {
             // The row is a real iterate that was already sent once, not a
             // synthesized one, so a trace still contains only points the solver
             // actually visited.
+            // The replayed row is the reported answer's last iterate, so a
+            // `false` here is a stop request on it, honored as a solve's
+            // final-iterate stop is.
             if let Some(stats) = trace_floor {
-                let _ = tnlp.borrow_mut().intermediate_callback(
+                if !tnlp.borrow_mut().intermediate_callback(
                     stats,
                     &TnlpIpoptData::default(),
                     &TnlpIpoptCq::default(),
-                );
+                ) {
+                    return ApplicationReturnStatus::UserRequestedStop;
+                }
             }
         }
         first_status
@@ -5247,6 +5263,12 @@ impl IpoptApplication {
             false,
         );
         drop(scope);
+        // A retry the caller's intermediate callback stopped reports the
+        // stop, at the point it stopped; the comparison below would put the
+        // first attempt's status back over the request.
+        if retry_status == ApplicationReturnStatus::UserRequestedStop {
+            return retry_status;
+        }
         let retry_unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
         let retry_viol = self.statistics.borrow().final_unscaled_constr_viol;
         // Conjuncts 3, 4 and 5. Conjunct 4 is the one that distinguishes
@@ -5366,12 +5388,17 @@ impl IpoptApplication {
             // The signature belongs to the attempt whose numbers are now
             // reported, and `certificate_floor` does not carry it.
             self.statistics.borrow_mut().dual_divergence_signature = true;
+            // The replayed row is the reported answer's last iterate, so a
+            // `false` here is a stop request on it, honored as a solve's
+            // final-iterate stop is.
             if let Some(stats) = trace_floor {
-                let _ = tnlp.borrow_mut().intermediate_callback(
+                if !tnlp.borrow_mut().intermediate_callback(
                     stats,
                     &TnlpIpoptData::default(),
                     &TnlpIpoptCq::default(),
-                );
+                ) {
+                    return ApplicationReturnStatus::UserRequestedStop;
+                }
             }
         }
         first_status
@@ -5772,6 +5799,11 @@ impl IpoptApplication {
         }
         let retry_status = scope.optimize_constrained(Rc::clone(&seeded));
         drop(scope);
+        // A re-solve the caller's intermediate callback stopped is declined
+        // like any unclean one -- the audit only runs after a converged base,
+        // and the stop's mid-run iterate must not replace it -- but the
+        // status reported is the stop, and nothing calls back after it.
+        let stopped = retry_status == ApplicationReturnStatus::UserRequestedStop;
         let retry = self.statistics.borrow().clone();
         let sense = if prev_user_factor < 0.0 { -1.0 } else { 1.0 };
         let clean = match first_status {
@@ -5870,13 +5902,21 @@ impl IpoptApplication {
             certificate_floor.restore_into(&mut self.statistics.borrow_mut());
             self.statistics.borrow_mut().dual_divergence_signature |=
                 retry.dual_divergence_signature;
-            if let Some(stats) = trace_floor {
-                let _ = tnlp.borrow_mut().intermediate_callback(
+            // The replayed row is the reported answer's last iterate, so a
+            // `false` here is a stop request on it, honored as a solve's
+            // final-iterate stop is.
+            if let Some(stats) = trace_floor.filter(|_| !stopped) {
+                if !tnlp.borrow_mut().intermediate_callback(
                     stats,
                     &TnlpIpoptData::default(),
                     &TnlpIpoptCq::default(),
-                );
+                ) {
+                    return ApplicationReturnStatus::UserRequestedStop;
+                }
             }
+        }
+        if stopped {
+            return retry_status;
         }
         let detail = if keeps_box {
             format!(

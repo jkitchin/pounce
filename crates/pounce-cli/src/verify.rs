@@ -417,6 +417,17 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
 
     // --- canonical problem ---
     let prob = nl_reader::read_nl_file(&args.nl)?;
+    if !prob.complementarity.is_empty() {
+        // Verification checks the rows and bounds; a complementarity pair is
+        // neither, so a point violating it would pass.
+        return Err(format!(
+            "{} declares {} complementarity pair(s), which verify does not check; refusing \
+             rather than verifying the relaxation",
+            args.nl.display(),
+            prob.complementarity.len()
+        )
+        .into());
+    }
     let n = prob.n;
     let m = prob.m;
     let con_names = prob.con_names.clone();

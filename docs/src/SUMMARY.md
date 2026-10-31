@@ -39,6 +39,7 @@
 - [Phase Envelopes & Inverse Mixture Design](phase-envelope.md)
 - [Advanced-Step NMPC for a CSTR](asnmpc-cstr.md)
 - [Catalyst-Pellet Inverse Design](catalyst-pellet.md)
+- [Complementarity Constraints (MPCC)](complementarity.md)
 - [Phase-Changing Flash as an MPCC](flash-mpcc.md)
 - [ODE / DAE Initial Value Problems](ode.md)
 - [Implicit DAEs](dae.md)

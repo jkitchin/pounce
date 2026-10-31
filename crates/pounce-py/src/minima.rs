@@ -160,6 +160,13 @@ pub fn find_minima<'py>(
     let (n, _m) = pb.dims();
     let cfg = options_from_dict(options, n)?;
     let has_hessian = pb.uses_exact_hessian();
+    if pb.has_declared_structure() {
+        // The search runs the bare model; a pairing would be dropped.
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "find_minima does not support declared complementarity pairs; solve the model \
+             with Problem.solve()",
+        ));
+    }
     let (mut app, bridge) = pb.prepare(py, x0, None, None, None)?;
     drop(pb);
     let base: Rc<RefCell<dyn TNLP>> = bridge;

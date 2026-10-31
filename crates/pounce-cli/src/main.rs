@@ -571,6 +571,12 @@ fn real_main() -> ExitCode {
     // (re-parsing doubled parse time / peak memory on large models — code
     // review L24). `None` for builtins (treated as general NLP).
     let mut nl_class: Option<pounce_cli::dispatch::ProblemClass> = None;
+    // Complementarity pairs declared in the `.nl` (`r`-segment kind 5, AMPL
+    // `complements`). Non-empty routes the solve through
+    // `pounce_restoration::mpcc_driver::solve_mpcc`, which chooses the
+    // formulation and certifies the answer; see workstream B in
+    // `dev-notes/research/calipso-contact-plan.md`.
+    let mut nl_pairs: Vec<pounce_nlp::mpcc::ComplementarityPair> = Vec::new();
     // gh #703: set alongside `nl_class` when curvature-based scaling is
     // switched on below, and only then. Records whether the model handed the
     // scheme any second-order coefficient to work with — see
@@ -675,6 +681,21 @@ fn real_main() -> ExitCode {
                     // be moved into `NlTnlp`). Saves a second full parse in the
                     // LP/QP dispatch block below.
                     nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
+                    if !prob.complementarity.is_empty() {
+                        nl_pairs = prob
+                            .complementarity
+                            .iter()
+                            .map(|c| pounce_nlp::mpcc::ComplementarityPair {
+                                row: c.row,
+                                var: c.var,
+                            })
+                            .collect();
+                        // The structure classifier sees the rows without the
+                        // pairing (a QPEC reads as a QP), so a convex engine
+                        // would solve a different problem. Complementarity is
+                        // solved on the NLP arm, through the driver.
+                        nl_class = Some(pounce_cli::dispatch::ProblemClass::Nlp);
+                    }
                     // `try_new`, not `new`: a model naming AMPL external
                     // functions that `$AMPLFUNC` cannot resolve is a load
                     // error like any other, not a panic (gh#1069).
@@ -830,6 +851,24 @@ fn real_main() -> ExitCode {
     // local solver in a loop over the *raw* problem TNLP (presolve / counting
     // wrappers are intentionally bypassed so coordinates match the original
     // problem and the clean objective is evaluated directly) and return.
+    if args.minima.is_some() && !nl_pairs.is_empty() {
+        eprintln!(
+            "pounce: --minima does not yet support complementarity constraints \
+             (this model declares {}); solve it without --minima.",
+            nl_pairs.len()
+        );
+        return ExitCode::from(2);
+    }
+    // The sensitivity step would read the lowered model's KKT system (its
+    // product rows and the last stage's relaxation), not the declared one.
+    if wants_nlp_postopt && !nl_pairs.is_empty() {
+        eprintln!(
+            "pounce: {postopt_what} is not supported for a model with \
+             complementarity constraints (this model declares {}).",
+            nl_pairs.len()
+        );
+        return ExitCode::from(2);
+    }
     if let Some(mcfg) = &args.minima {
         // Related to #196: --minima is a multistart search, not a single
         // post-optimal solve, so it does not run the sIPOPT sensitivity /
@@ -891,6 +930,14 @@ fn real_main() -> ExitCode {
 
         let choice = match resolve_solver(class, selection) {
             Ok(c) => c,
+            Err(msg) if !nl_pairs.is_empty() => {
+                eprintln!(
+                    "pounce: {msg}; this model declares {} complementarity \
+                     constraints, which only the NLP solver handles.",
+                    nl_pairs.len()
+                );
+                return ExitCode::from(2);
+            }
             Err(msg) => {
                 eprintln!("pounce: {msg}");
                 return ExitCode::from(2);
@@ -1787,6 +1834,15 @@ fn real_main() -> ExitCode {
         );
         presolve_opts.enabled = false;
     }
+    // Complementarity pairs index the model's own rows and variables, and
+    // presolve drops rows and (with linear-equality elimination) columns.
+    if !nl_pairs.is_empty() && presolve_opts.enabled {
+        eprintln!(
+            "pounce: disabling presolve — the model's complementarity pairs index its \
+             original rows and variables"
+        );
+        presolve_opts.enabled = false;
+    }
     let presolve_handle = if presolve_opts.enabled {
         let p = Rc::new(RefCell::new(match &nl_expr_provider {
             Some(ep) => pounce_presolve::PresolveTnlp::with_expression_provider(
@@ -1965,48 +2021,98 @@ fn real_main() -> ExitCode {
              solver."
         );
     }
-    let mut status = loop {
-        let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
-        let req = restart_cell.borrow_mut().take();
-        let Some(req) = req else { break st };
-        for (k, v) in &req.options {
-            if let Err(e) = app.options_mut().read_from_str(&format!("{k} {v}\n"), true) {
-                eprintln!("pounce: re-solve could not set {k}={v}: {e}");
+    // A model with complementarity pairs is solved by the driver, which runs
+    // its own sequence of lowered solves and certifies the answer; the
+    // debugger's re-solve loop and the second-opinion ladder below both
+    // assume one solve of one model and stand down.
+    let mut mpcc_outcome: Option<pounce_restoration::mpcc_driver::MpccOutcome> = None;
+    if !nl_pairs.is_empty() {
+        if debug_hook.is_some() {
+            eprintln!(
+                "pounce: the interactive debugger does not yet support complementarity \
+                 constraints (this model declares {}); run without --debug.",
+                nl_pairs.len()
+            );
+            return ExitCode::from(2);
+        }
+        let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
+        match pounce_restoration::mpcc_driver::solve_mpcc(
+            &mut app,
+            Rc::clone(&tnlp),
+            nl_pairs.clone(),
+            &mut |line| {
+                if narrate {
+                    eprintln!("{line}");
+                }
+            },
+        ) {
+            Ok(out) => {
+                if narrate {
+                    eprintln!(
+                        "{}",
+                        pounce_algorithm::mpcc::describe_outcome(
+                            out.reported,
+                            out.solves.len(),
+                            out.total_iterations,
+                            out.max_abs_product,
+                            out.certificate.as_ref(),
+                        )
+                    );
+                }
+                mpcc_outcome = Some(out);
+            }
+            Err(e) => {
+                eprintln!("pounce: cannot solve this model's complementarity constraints: {e}");
+                return ExitCode::from(2);
             }
         }
-        // Full primal-dual warm restart (`resolve`): install the captured
-        // 8-vector iterate and turn on the warm-start initializer so the
-        // duals carry over and the barrier resumes at the captured μ
-        // instead of cold-restarting at `mu_init`. The primal-only path
-        // (sweep / multistart, `warm == None`) leaves these off and just
-        // seeds `x` through `SeededTnlp` below.
-        if let Some(snap) = req.warm {
-            let mu = snap.mu();
-            app.set_warm_start_iterate(snap);
-            let _ = app
-                .options_mut()
-                .read_from_str("warm_start_init_point yes\n", true);
-            if mu.is_finite() && mu > 0.0 {
+    }
+    let mut status = if let Some(out) = &mpcc_outcome {
+        out.status
+    } else {
+        loop {
+            let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
+            let req = restart_cell.borrow_mut().take();
+            let Some(req) = req else { break st };
+            for (k, v) in &req.options {
+                if let Err(e) = app.options_mut().read_from_str(&format!("{k} {v}\n"), true) {
+                    eprintln!("pounce: re-solve could not set {k}={v}: {e}");
+                }
+            }
+            // Full primal-dual warm restart (`resolve`): install the captured
+            // 8-vector iterate and turn on the warm-start initializer so the
+            // duals carry over and the barrier resumes at the captured μ
+            // instead of cold-restarting at `mu_init`. The primal-only path
+            // (sweep / multistart, `warm == None`) leaves these off and just
+            // seeds `x` through `SeededTnlp` below.
+            if let Some(snap) = req.warm {
+                let mu = snap.mu();
+                app.set_warm_start_iterate(snap);
                 let _ = app
                     .options_mut()
-                    .read_from_str(&format!("warm_start_target_mu {mu}\n"), true);
+                    .read_from_str("warm_start_init_point yes\n", true);
+                if mu.is_finite() && mu > 0.0 {
+                    let _ = app
+                        .options_mut()
+                        .read_from_str(&format!("warm_start_target_mu {mu}\n"), true);
+                }
             }
+            solve_tnlp = Rc::new(RefCell::new(pounce_cli::seeded_tnlp::SeededTnlp::new(
+                Rc::clone(&tnlp),
+                req.seed_x,
+            )));
+            if let Some(hook) = debug_hook.as_ref() {
+                // Re-arm the SAME debugger for the next solve (the hook is consumed
+                // per `optimize_tnlp`). Reusing it — rather than building a fresh
+                // one — preserves the stdin pump, the `hello` handshake, and any
+                // breakpoints, and avoids leaking a second stdin-reader thread.
+                app.set_debug_hook(hook.clone());
+            }
+            eprintln!(
+                "pounce: re-solving from saved point with {} option override(s)…",
+                req.options.len()
+            );
         }
-        solve_tnlp = Rc::new(RefCell::new(pounce_cli::seeded_tnlp::SeededTnlp::new(
-            Rc::clone(&tnlp),
-            req.seed_x,
-        )));
-        if let Some(hook) = debug_hook.as_ref() {
-            // Re-arm the SAME debugger for the next solve (the hook is consumed
-            // per `optimize_tnlp`). Reusing it — rather than building a fresh
-            // one — preserves the stdin pump, the `hello` handshake, and any
-            // breakpoints, and avoids leaking a second stdin-reader thread.
-            app.set_debug_hook(hook.clone());
-        }
-        eprintln!(
-            "pounce: re-solving from saved point with {} option override(s)…",
-            req.options.len()
-        );
     };
 
     // Snapshot the statistics from the solve whose verdict `status` currently
@@ -2016,7 +2122,10 @@ fn real_main() -> ExitCode {
     // the original stats too — otherwise the summary/JSON report would pair the
     // original verdict with the failed retry's iteration count / objective. We
     // adopt the retry's stats only when the retry is actually promoted (below).
-    let mut solve_stats = app.statistics();
+    let mut solve_stats = match &mpcc_outcome {
+        Some(out) => out.statistics.clone(),
+        None => app.statistics(),
+    };
 
     // Second-opinion ladder: a failing verdict gets re-solved along up to
     // three deliberately different trajectories before it ships. Policy in
@@ -2038,37 +2147,38 @@ fn real_main() -> ExitCode {
     let presolve_certified = presolve_handle
         .as_ref()
         .and_then(|p| p.borrow().certified_infeasible());
-    let second_opinion = if debug_hook.is_none() && presolve_certified.is_none() {
-        // Gated like every other banner the CLI prints: `print_level 0` is a
-        // request for silence, and the ladder's narration is no more exempt
-        // than the `EXIT:` block or the degeneracy diagnosis. The ladder still
-        // *runs* -- silence is about the console, not about the answer. The
-        // gate itself is shared with the C interface so the two cannot drift.
-        let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
-        let outcome = run_second_opinion_ladder(
-            &mut app,
-            Rc::clone(&tnlp),
-            status,
-            solve_stats.clone(),
-            &mut |line| {
-                if narrate {
-                    eprintln!("{line}");
-                }
-            },
-        );
-        status = outcome.status;
-        solve_stats = outcome.statistics.clone();
-        outcome
-    } else {
-        // The ladder is exempted here, so it cannot be the one to release the
-        // deferred verdict — release it on this path too, or a debugger
-        // session and a presolve-certified infeasibility each lose their
-        // `EXIT:` line entirely.
-        if app.release_end_verdict() {
-            app.print_end_verdict(status);
-        }
-        SecondOpinionOutcome::unchanged(status, solve_stats.clone())
-    };
+    let second_opinion =
+        if debug_hook.is_none() && presolve_certified.is_none() && mpcc_outcome.is_none() {
+            // Gated like every other banner the CLI prints: `print_level 0` is a
+            // request for silence, and the ladder's narration is no more exempt
+            // than the `EXIT:` block or the degeneracy diagnosis. The ladder still
+            // *runs* -- silence is about the console, not about the answer. The
+            // gate itself is shared with the C interface so the two cannot drift.
+            let narrate = pounce_algorithm::second_opinion::narration_is_wanted(app.options());
+            let outcome = run_second_opinion_ladder(
+                &mut app,
+                Rc::clone(&tnlp),
+                status,
+                solve_stats.clone(),
+                &mut |line| {
+                    if narrate {
+                        eprintln!("{line}");
+                    }
+                },
+            );
+            status = outcome.status;
+            solve_stats = outcome.statistics.clone();
+            outcome
+        } else {
+            // The ladder is exempted here, so it cannot be the one to release the
+            // deferred verdict — release it on this path too, or a debugger
+            // session and a presolve-certified infeasibility each lose their
+            // `EXIT:` line entirely.
+            if app.release_end_verdict() {
+                app.print_end_verdict(status);
+            }
+            SecondOpinionOutcome::unchanged(status, solve_stats.clone())
+        };
     // Put back the captures of the firing whose attempt is being reported
     // (see `filed_captures`). The ladder only runs on statuses no converged
     // attempt reports, and a converged rung promotes, so the application's
@@ -2367,7 +2477,15 @@ fn real_main() -> ExitCode {
     // answer by construction never passes through that hook.
     let square_system_promoted = second_opinion.promoted_by
         == Some(pounce_algorithm::square_system::SQUARE_SYSTEM_RUNG_LABEL);
-    if app.answer_restored_from_floor() || square_system_promoted {
+    // A declared-complementarity run is the same case again: every lowered
+    // solve that converged ran `on_converged`, so the cell holds the *last*
+    // one's point — and the driver runs the continuation and the exact
+    // product both and may report the first. The driver forwards only the
+    // answer it reports, through `finalize_solution`, outside every
+    // `optimize_tnlp`. Measured on `qpec_small.nl`: the JSON carried the
+    // exact stage's `(1.000019, 1.0000095, 0)` at objective 4.5e-10 while the
+    // continuation's answer, the one reported, sat at 0.
+    if app.answer_restored_from_floor() || square_system_promoted || mpcc_outcome.is_some() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
             x_capture_from_finalize = true;

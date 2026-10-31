@@ -179,6 +179,22 @@ does not; the v2 route, whose reader maps that band to
 `raise_exception_on_nonoptimal_result=True`. If your code special-cased
 POUNCE for either, it no longer needs to.
 
+## Complementarity constraints (`pyomo.mpec`)
+
+`Complementarity` components need no transformation: `SolverFactory("pounce")`
+writes them as complementarity rows, and POUNCE picks the formulation and
+certifies the answer.
+
+```python
+from pyomo.mpec import Complementarity, complements
+m.c = Complementarity(expr=complements(m.y >= 0, m.x + 2 * m.y - 1 >= 0))
+pyo.SolverFactory("pounce").solve(m, tee=True)  # tee shows the certificate line
+```
+
+Each pair must be one-sided. See
+[Complementarity Constraints](complementarity.md) for the formulations, the
+stationarity certificate and `complementarity_strategy`.
+
 ## User scaling with the `scaling_factor` Suffix
 
 A badly conditioned model converges poorly, and often you know its

@@ -90,6 +90,10 @@ pub struct NlHeader {
     pub n_equalities: Option<i32>,
     pub n_nonlinear_constraints: Option<i32>,
     pub n_nonlinear_objectives: Option<i32>,
+    /// Complementarity conditions (AMPL `complements`, Pyomo `mpec`): the
+    /// header's `n_cc`, the third field of line 3, which counts all of them
+    /// (`nlcc`, the fourth, is the nonlinear subset).
+    pub n_complementarity: Option<i32>,
     pub n_nonlinear_vars_in_cons: Option<i32>,
     pub n_nonlinear_vars_in_obj: Option<i32>,
     pub n_nonlinear_vars_in_both: Option<i32>,
@@ -143,6 +147,9 @@ pub fn parse_nl_header(bytes: &[u8]) -> NlHeader {
         if v.len() >= 2 {
             out.n_nonlinear_constraints = Some(v[0]);
             out.n_nonlinear_objectives = Some(v[1]);
+        }
+        if v.len() >= 3 {
+            out.n_complementarity = Some(v[2]);
         }
     }
     if let Some(line) = lines.get(4) {
@@ -246,7 +253,11 @@ fn classify_nl(h: &NlHeader) -> String {
     } else {
         "general-constrained"
     };
-    format!("{nl_or_lin} {eq_or_gen}")
+    let class = format!("{nl_or_lin} {eq_or_gen}");
+    match h.n_complementarity {
+        Some(k) if k > 0 => format!("{class}, {k} complementarity rows (MPCC)"),
+        _ => class,
+    }
 }
 
 fn nl_warnings(h: &NlHeader) -> Vec<String> {
@@ -264,6 +275,16 @@ fn nl_warnings(h: &NlHeader) -> Vec<String> {
     }
     if h.n_objectives == Some(0) {
         out.push("no objective: this is a feasibility problem, not optimisation.".into());
+    }
+    if let Some(k) = h.n_complementarity.filter(|&k| k > 0) {
+        out.push(format!(
+            "{k} complementarity rows (header n_cc). Each one-sided pair is solved by POUNCE's \
+             MPCC driver (Scholtes continuation and exact product, each answer certified \
+             S/W/none; complementarity_strategy picks one), with presolve declined; a row whose \
+             variable is free is read as an equation, and a two-sided (mixed) pair is refused \
+             with the reason. --minima, sensitivity suffixes, `pounce verify` and `check-x0` \
+             refuse the model. See the book page \"Complementarity Constraints (MPCC)\".",
+        ));
     }
     out
 }
@@ -764,6 +785,29 @@ mod tests {
         assert_eq!(h.n_variables, Some(5));
         assert_eq!(h.n_constraints, Some(3));
         assert_eq!(h.n_nonlinear_constraints, Some(1));
+    }
+
+    /// Line 3 as Pyomo's `mpec.nl` writes it: `nlc nlo n_cc nlcc ndcc nzlb`.
+    #[test]
+    fn nl_header_reads_complementarity_pairs() {
+        let bytes = b"g3 1 1 0\n 3 2 1 0 0\n 1 1 2 0 0 0\t# nonlinear constrs, objs; ccons: lin, nonlin, nd, nzlb\n";
+        let h = parse_nl_header(bytes);
+        assert_eq!(h.n_complementarity, Some(2));
+        let a = analyze_nl("m.nl", h);
+        assert!(
+            a.class.ends_with("2 complementarity rows (MPCC)"),
+            "{}",
+            a.class
+        );
+        assert!(
+            a.warnings
+                .iter()
+                .any(|w| w.contains("complementarity_strategy"))
+        );
+        // A plain two-field line 3 reports none.
+        let h = parse_nl_header(b"g3 1 1 0\n 3 2 1 0 0\n 1 1\n");
+        assert_eq!(h.n_complementarity, None);
+        assert!(!analyze_nl("m.nl", h).class.contains("complementarity"));
     }
 
     #[test]

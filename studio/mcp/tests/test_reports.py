@@ -387,6 +387,21 @@ def test_analyze_nl_file_dimensions():
     assert "class" in out
 
 
+def test_analyze_nl_file_reports_complementarity_pairs(tmp_path):
+    """Line 3 as Pyomo's mpec.nl writes it: nlc nlo n_cc nlcc ndcc nzlb. The
+    Rust preflight (`pounce-studio analyze-nl`) reads the same field."""
+    from pounce_studio_mcp.server import analyze_problem
+
+    nl = tmp_path / "cc.nl"
+    nl.write_text(
+        "g3 1 1 0\n 3 2 1 0 0\n 1 1 2 0 0 0\t# nonlinear constrs, objs; ccons: lin, nonlin, nd, nzlb\n"
+    )
+    out = analyze_problem(nl_file=str(nl))
+    assert out["dimensions"]["n_complementarity"] == 2
+    assert out["class"].endswith("2 complementarity rows (MPCC)")
+    assert any("complementarity_strategy" in w for w in out["warnings"])
+
+
 def test_analyze_missing_nl_file():
     from pounce_studio_mcp.server import analyze_problem
 

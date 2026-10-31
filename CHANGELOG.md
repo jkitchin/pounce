@@ -10,6 +10,32 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Declared complementarity constraints solve without choosing a
+  formulation.** Models with complementarity pairs `0 ≤ G ⟂ H ≥ 0` — AMPL
+  `complements`, Pyomo `mpec` through `SolverFactory("pounce")`, or
+  `pounce.Problem(..., complementarity=[(row, var), ...])` — are solved by a
+  driver that runs the Scholtes continuation and the exact product, keeps the
+  lower objective among the strongly stationary (S) answers, and falls back to
+  the ℓ₁ penalty only if neither answers. Each answer is certified (S / W /
+  none) and reported on the console and in `info["complementarity"]`.
+  Previously the `.nl` reader refused complementarity rows outright, and from
+  Python the formulation was the caller's to pick: on the MPCC corpus
+  (`benchmarks/mpcc/declared.py`, 60 feasible cells) the declared route
+  reaches the optimum on 60/60 against 57 for the best hand-picked route, at
+  about 2× its median iterations; `complementarity_strategy=exact` or
+  `=continuation` runs one formulation when you know which works. The
+  certificate is sparse past small sizes, so a model with unique
+  multipliers is certified at any size (a 650-pair chain solves in 0.51 s
+  where the dense certificate alone took over 4 s). Pairs must be
+  one-sided; presolve is declined for such models, and every entry point
+  that would otherwise solve the model without its pairs refuses them
+  (`--minima`, sensitivity requests, the debugger, `pounce verify`,
+  `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
+  `solve_nlp_batch`, `solve_with_sens`). `pounce-studio analyze-nl` reports
+  a `.nl` file's complementarity pairs. Notebook
+  `47_declared_complementarity.ipynb` works a contact-design example end to
+  end. See the book page *Complementarity
+  Constraints (MPCC)*.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
   are now native-only dependencies, and JSON mode reads stdin directly where
@@ -38,6 +64,16 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Fixed
+- **A stop requested from the intermediate callback is no longer overridden
+  by an automatic re-solve.** When a solve re-runs itself inside one call
+  (the scale audit, the dual-divergence retry, the μ-strategy fallback, the
+  ℓ₁ fallback) and the callback returned `false` during the re-solve, or on
+  the final iterate replayed after a declined one, the first attempt's status
+  was put back and the run reported success. The same held for a stop during
+  the negative-curvature escape, which restored the point it left and
+  reported `Solve_Succeeded`. These now report `User_Requested_Stop`, as a
+  solve without a re-solve does; a stop during the scale audit's re-solve,
+  which only runs after a converged solve, keeps that converged point.
 - **Debugger: `detach` now ends `stop-at` pauses.** A `stop-at` checkpoint (or
   a pending `stepi`) kept pausing after `detach`, which every other pause
   source honours, so a session that had used `stop-at kkt` could not let the
