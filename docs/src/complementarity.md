@@ -98,10 +98,28 @@ feasible cells of the MPCC benchmark corpus (`benchmarks/mpcc/declared.py`)
 the exact product alone reaches the optimum on 48 and the continuation alone
 on 60, while on the CALIPSO bunny-hop the continuation alone settles on a
 trajectory 2.4× worse on 3 of 5 starts that the exact product avoids.
-Running both reaches the best known answer on every one of them, at roughly
-the iterations of both.
+Running both reaches the best known answer on every one of them.
 
-That doubled cost is a choice you can undo when you know your model. Two
+Once the continuation has answered with a tight S point, the exact product
+is a second opinion and runs on a budget: three times the iterations the
+continuation spent, at least 200 (never more than your `max_iter`). With no
+such answer in hand (the continuation failed, or found only a W point or one
+inside the tolerance band) it runs in full. Every exact-product answer that
+changed a MacMPEC outcome fitted inside that budget (`water-net`, 470
+iterations against the continuation's 189), as do the bunny-hop starts
+above. The continuation's exact finish is budgeted too, at 500 iterations or
+what the schedule spent if more. A finish that has not converged by then
+leaves the schedule's own answer, whose products are within `τ = 1e-8`. On
+MacMPEC the budgets cut the iterations spent by 30% (112k to 78k) with no
+outcome worse, and one better (`pack-rig1p-32` reaches its best known value).
+The price is that a point the finish would have tightened to `1e-10` after
+thousands of iterations is now reported at the schedule's `1e-8`: on one
+CALIPSO ball-in-cup start the answer moved from violation 8e-11 to 1e-8
+(objective 2.4e-6 lower, the slack τ allows), still certified S, in half
+the time.
+
+The remaining cost of running both is a choice you can undo when you know
+your model. Two
 local solves from different starts raise the odds of the better local
 minimum; they guarantee nothing, and on a model where one formulation is
 known to work the other is overhead. `complementarity_strategy` picks:

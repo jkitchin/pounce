@@ -95,6 +95,19 @@ changes.
   `hello.capabilities` (`inline_artifacts`, `ask_prompt_only`); on wasm
   `pause_command` and `interruptible` are `false`.
 
+### Changed
+- **Declared complementarity spends less on second opinions.** Under the
+  default `complementarity_strategy=both`, the exact-product stage used to run
+  to completion even after the continuation had answered, and on MacMPEC it
+  was 55% of all iterations, mostly grinding to `max_iter` on models already
+  solved. It now runs on a budget of three times the continuation's
+  iterations (at least 200) once a tight strongly stationary answer is in
+  hand, and in full otherwise. The continuation's exact finish gets at least
+  500 iterations, or what the relaxation schedule spent. Neither budget
+  exceeds your `max_iter`. MacMPEC: iterations 112k → 78k, no outcome worse,
+  `pack-rig1p-32` now at its best known value; `pack-comp2c-32` 261 s → 53 s,
+  `pack-comp1-32` 252 s → 120 s.
+
 ### Fixed
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
