@@ -3579,8 +3579,31 @@ impl IpoptAlgorithm {
             // calls to `IpCq.primal_frac_to_the_bound` /
             // `IpCq.dual_frac_to_the_bound` with τ = `curr_tau`.
             let tau = self.data.borrow().curr_tau;
-            let alpha_p_max = self.cq.borrow().aff_step_alpha_primal_max(&delta, tau);
-            let alpha_d_max = self.cq.borrow().aff_step_alpha_dual_max(&delta, tau);
+            let mut alpha_p_max = self.cq.borrow().aff_step_alpha_primal_max(&delta, tau);
+            let mut alpha_d_max = self.cq.borrow().aff_step_alpha_dual_max(&delta, tau);
+            // gh#1098 prototype: centrality-floored step to the boundary.
+            if let Some(gamma) = std::env::var("POUNCE_FTB_FLOOR")
+                .ok()
+                .and_then(|s| s.parse::<Number>().ok())
+            {
+                let mu = self.data.borrow().curr_mu;
+                if let Some((ap, ad)) =
+                    crate::ftb_floor::floored_alphas(&self.cq, &delta, mu, gamma)
+                {
+                    alpha_p_max = ap;
+                    alpha_d_max = ad;
+                }
+            }
+            if std::env::var_os("POUNCE_CRAWL_DIAG").is_some() {
+                crate::crawl_diag::report(
+                    &self.data,
+                    &self.cq,
+                    &delta,
+                    tau,
+                    alpha_p_max,
+                    alpha_d_max,
+                );
+            }
 
             // Tiny-step gate — port of `IpBacktrackingLineSearch.cpp:363`
             // and the handling block at lines 382-435. When the search

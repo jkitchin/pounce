@@ -37,6 +37,13 @@ use crate::types::{Index, Number};
 /// it and being shared. `pounce-algorithm` implements it over its
 /// `IpoptDataHandle`; `pounce-qp` (which cannot depend on `pounce-algorithm` —
 /// the dependency runs the other way) passes `None` or its own sink.
+fn ds_fact() -> Number {
+    std::env::var("POUNCE_DS_FACT")
+        .ok()
+        .and_then(|s| s.parse::<Number>().ok())
+        .unwrap_or(1.0)
+}
+
 pub trait PerturbationSink {
     /// Append to the iteration line's info string (upstream `info_string`).
     fn append_info(&self, s: &str);
@@ -356,7 +363,7 @@ impl PdPerturbationHandler {
             // the rungs below it are not climbed a second time.
             if self.delta_x_curr < self.delta_x_at_withdrawal {
                 self.delta_x_curr = self.delta_x_at_withdrawal;
-                self.delta_s_curr = self.delta_x_at_withdrawal;
+                self.delta_s_curr = self.delta_x_at_withdrawal * ds_fact();
             }
             self.test_status = TrialStatus::NoTest;
             append_info(ip_data, "W");
@@ -703,7 +710,10 @@ impl PdPerturbationHandler {
             append_info(ip_data, "dx");
             return false;
         }
-        self.delta_s_curr = self.delta_x_curr;
+        // gh#1098 prototype, env-gated: POUNCE_DS_FACT=<f> sets δ_s = f·δ_x
+        // (upstream and default: f = 1). Lets the coordinator's δ_s variant be
+        // combined with the other prototypes from one binary.
+        self.delta_s_curr = self.delta_x_curr * ds_fact();
 
         *delta_x = self.delta_x_curr;
         *delta_s = self.delta_s_curr;
