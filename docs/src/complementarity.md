@@ -149,11 +149,39 @@ whose W point is reported when none answered, else `None`), `n_solves`,
 along with `n_pairs`, `n_biactive`, `n_neither`, whether the multipliers
 are unique, and the stationarity residual against its tolerance.
 
+### The exit status and the certificate answer different questions
+
+The exit status — `info["status"]` / `info["status_msg"]`, the CLI's
+`EXIT:` line, the `.sol` file, and so Pyomo's termination condition — is the
+convergence level of the solve that produced the reported point. The
+certificate is the verdict on the complementarity model at that point. They
+can disagree, and when they do, each is right about its own question:
+
+| status | certificate | what it means |
+| --- | --- | --- |
+| `Solve_Succeeded` | `S` | converged to `tol`, strongly stationary |
+| `Solved_To_Acceptable_Level` | `S` | strongly stationary, but the solve that found it met only the acceptable tolerances. Common at an optimum with a biactive pair, and on badly scaled models (look for `large_dual_scale` in the log). An answer, at reduced accuracy. |
+| `Solved_To_Acceptable_Level` | `none` | feasible but **not** stationary: no formulation found a stationary point. Not an answer; the status is lowered to say so whatever the solve reported. |
+| any converged status | `W` | weakly stationary only, reported as the fallback (`accepted_by` is `None`, `fallback` names the stage) |
+| anything else | — | the exact product's verdict, e.g. `Infeasible_Problem_Detected` |
+
+Pyomo reads `Solved_To_Acceptable_Level` as `optimal`, as it does for any
+model, so the certificate is the only place the `none` and `W` cases show.
+Read it from `info["complementarity"]` or the console line (`tee=True`); the
+JSON solve report does not carry it yet.
+
 ## Limits
 
 - Pairs must be **one-sided**: a variable or row bounded on both sides (an
   AMPL "mixed" complementarity) is refused with the reason, never solved as
-  if the pairing were absent.
+  if the pairing were absent. This is easy to hit from Pyomo:
+  `complements(m.L >= 0, m.sL >= 0)` with `m.L` declared `bounds=(0, 1)`
+  reads as "a pair plus `L <= 1`", but `mpec.nl` folds the variable's own
+  upper bound into the pair, which makes it mixed (`0 <= L <= 1 ⟂ sL`, where
+  `sL` may be negative at `L = 1`), and the written file cannot say which was
+  meant. The fix is to keep the pair's variable one-sided and state the other
+  bound as its own constraint (`m.L_max = Constraint(expr=m.L <= 1)`), or to
+  drop it when the other rows already imply it.
 - Complementarity between **cones** (friction cones, `β ∘ η = 0`) is not
   supported; lower such a model to scalar pairs.
 - Presolve is declined for a model with pairs (it renumbers what they

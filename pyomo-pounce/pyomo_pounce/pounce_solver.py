@@ -312,7 +312,20 @@ class POUNCE(ASL):
         if model is not None and (has_declarations(model) or explicit):
             return sens_solve(model, tee=kwds.get("tee", False),
                               options=opts, **explicit)
-        return super().solve(*args, **kwds)
+        from pyomo.common.errors import ApplicationError
+
+        try:
+            return super().solve(*args, **kwds)
+        except ApplicationError as e:
+            # Pyomo's message is only "did not exit normally"; the reason the
+            # CLI refused the model (a two-sided complementarity pair, say) is
+            # in the solver log, which a caller catching the exception never
+            # sees. Carry the CLI's own `pounce: ...` lines into it.
+            reasons = [ln.strip() for ln in str(getattr(self, "_log", "") or "").splitlines()
+                       if ln.strip().startswith("pounce: ")]
+            if not reasons:
+                raise
+            raise ApplicationError(f"{e}: {' '.join(reasons)}") from e
 
     def _default_executable(self):
         # Prefer the binary bundled in the installed ``pounce-solver`` wheel,

@@ -217,7 +217,11 @@ impl MpccTnlp {
                 return Err(format!(
                     "pair {k}: only one-sided pairs are lowered -- each side needs exactly one \
                      finite bound (`x >= l ⟂ g >= 0`-type, either orientation); variable {} has \
-                     bounds [{xl:e}, {xu:e}] and row {} has [{gl:e}, {gu:e}]",
+                     bounds [{xl:e}, {xu:e}] and row {} has [{gl:e}, {gu:e}]. A variable or row \
+                     with two finite bounds makes the pair mixed (`l <= x <= u ⟂ g`: g >= 0 \
+                     at l, g <= 0 at u, g = 0 between); if the second bound is meant as an ordinary limit, \
+                     state it as a separate constraint (e.g. `x <= u` as its own row), or drop \
+                     it if the other rows already imply it",
                     p.var, p.row
                 ));
             };

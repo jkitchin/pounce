@@ -51,3 +51,25 @@ def test_qpec_small_reaches_its_answer(start):
     solve(m)
     for v, want in ((m.x, 1.0), (m.y1, 1.0), (m.y2, 0.0)):
         assert pyo.value(v) == pytest.approx(want, abs=1e-4)
+
+
+def test_a_two_sided_pair_is_refused_with_the_reason_in_the_exception():
+    """A pair variable bounded on both sides is a mixed complementarity in the
+    written ``.nl``; the CLI refuses it with the reason and the fix, and that
+    reason reaches the exception, not only the solver log (PR #1103 review)."""
+    from pyomo.common.errors import ApplicationError
+
+    m = pyo.ConcreteModel()
+    m.L = pyo.Var(bounds=(0, 1))
+    m.sL = pyo.Var(bounds=(0, None))
+    m.o = pyo.Objective(expr=(m.L - 1.5) ** 2 + (m.sL - 0.2) ** 2)
+    m.c = Complementarity(expr=complements(m.sL >= 0, m.L >= 0))
+    with pytest.raises(ApplicationError, match="only one-sided pairs.*separate constraint"):
+        pyo.SolverFactory("pounce").solve(m)
+
+    # The fix the message names: keep the pair one-sided, state L <= 1 as a row.
+    m.L.setub(None)
+    m.L_max = pyo.Constraint(expr=m.L <= 1)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert res.solver.termination_condition == pyo.TerminationCondition.optimal
+    assert abs(pyo.value(m.L) - 1.0) < 1e-6 and abs(pyo.value(m.sL)) < 1e-6
