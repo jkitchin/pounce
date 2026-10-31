@@ -24,6 +24,7 @@ pounce-algorithm.workspace = true
 # Not called from this crate; see the `ma57` feature and `build.rs`.
 pounce-hsl = { workspace = true, optional = true }
 pounce-linsol.workspace = true
+pounce-solve-report.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

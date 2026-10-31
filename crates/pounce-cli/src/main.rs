@@ -2862,14 +2862,14 @@ fn real_main() -> ExitCode {
         // without this nothing in the report says the base solver failed --
         // which turns a lost solve into a recorded speed-up.
         if second_opinion.ran() {
-            builder.set_second_opinion(pounce_solve_report::SecondOpinionInfo {
-                tried: second_opinion.tried.iter().map(|s| s.to_string()).collect(),
-                promoted_by: second_opinion.promoted_by.map(|s| s.to_string()),
-                base_status: second_opinion.base_status.upstream_name().to_string(),
-                base_iteration_count: second_opinion.base_iteration_count,
-                rung_iteration_counts: second_opinion.rung_iteration_counts.clone(),
-                total_iteration_count: second_opinion.total_iteration_count(),
-            });
+            builder.set_second_opinion(second_opinion.report_info());
+        }
+        // Declared complementarity: `ingest_stats` wrote the reported lowered
+        // solve's statistics, one of several the driver ran. The block records
+        // which formulation answered, every lowered solve, the true total
+        // iteration count, and the stationarity certificate.
+        if let Some(out) = &mpcc_outcome {
+            builder.set_complementarity(out.report_info());
         }
 
         // `Full` detail carries the suffix blocks: the sensitivity

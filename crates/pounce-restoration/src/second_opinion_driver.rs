@@ -95,6 +95,19 @@ pub struct SecondOpinionOutcome {
 }
 
 impl SecondOpinionOutcome {
+    /// The solve report's `second_opinion` block (gh #850). One conversion,
+    /// shared by the CLI's `--json-output` and Python's `report_path`.
+    pub fn report_info(&self) -> pounce_solve_report::SecondOpinionInfo {
+        pounce_solve_report::SecondOpinionInfo {
+            tried: self.tried.iter().map(|s| s.to_string()).collect(),
+            promoted_by: self.promoted_by.map(|s| s.to_string()),
+            base_status: self.base_status.upstream_name().to_string(),
+            base_iteration_count: self.base_iteration_count,
+            rung_iteration_counts: self.rung_iteration_counts.clone(),
+            total_iteration_count: self.total_iteration_count(),
+        }
+    }
+
     /// Every iteration the solve actually spent: the base solve's plus each
     /// rung's. [`Self::statistics`]'s count is one rung's.
     pub fn total_iteration_count(&self) -> usize {

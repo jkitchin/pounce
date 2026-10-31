@@ -218,3 +218,30 @@ def test_the_ladder_stays_out_of_the_sensitivity_path():
     _x2, info2 = _solve(NoRealSolution())
     assert info2["status_msg"] == "Infeasible_Problem_Detected"
     assert info2["second_opinion"] is not None
+
+
+def test_the_solve_report_records_the_ladder(tmp_path):
+    """`solve(report_path=...)` carries the `second_opinion` block the CLI's
+    report does (gh #850). Without it a Python-written report showed a laddered
+    solve as the base solve alone; a converged solve still carries none."""
+    import json
+
+    path = tmp_path / "report.json"
+    prob = pounce.Problem(n=1, m=1, problem_obj=NoRealSolution(), lb=[-10.0], ub=[10.0], cl=[0.0], cu=[0.0])
+    prob.add_option("print_level", 0)
+    prob.add_option("sb", "yes")
+    _, info = prob.solve([0.5], report_path=str(path))
+    block = json.loads(path.read_text())["second_opinion"]
+    assert block["tried"] == info["second_opinion"]["tried"]
+    assert block.get("promoted_by") == info["second_opinion"]["promoted_by"]
+    assert block["base_status"] == "Infeasible_Problem_Detected"
+    assert len(block["rung_iteration_counts"]) == len(block["tried"])
+    assert block["total_iteration_count"] == block["base_iteration_count"] + sum(
+        block["rung_iteration_counts"]
+    )
+
+    path = tmp_path / "converged.json"
+    prob = pounce.Problem(n=1, m=0, problem_obj=Quadratic(), lb=[-10.0], ub=[10.0])
+    prob.add_option("print_level", 0)
+    prob.solve([0.0], report_path=str(path))
+    assert "second_opinion" not in json.loads(path.read_text())
