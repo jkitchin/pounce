@@ -168,6 +168,50 @@ whose sign-free residual is inside the band but not the `max(1e-6, tol)` floor
 alone is not `tight`: the driver keeps it, runs the remaining formulations, and
 reports it only if none of them produces a tight answer.
 
+### B-stationarity: when the certificate is not S
+
+S is the strongest first-order statement, but a point can fail it and still
+be a local minimum: ralph1's origin is W and is the minimizer. The question
+that settles it is **B-stationarity** — no direction that keeps the pairs
+complementary descends, along any branch of the biactive pairs (which side of
+each stays zero). S implies B, so the driver checks B only when the reported
+point is feasible and not certified S:
+
+- **The check** solves one LP per branch: `min ∇f·d` over the linearized
+  active constraints, with each pair's held side kept at zero and the released
+  side non-negative, in the box `-1 <= d <= 1`. The point is B-stationary
+  exactly when every LP's optimum is 0. Up to 10 biactive pairs all `2^b`
+  branches are solved (no MILP: the LPs go to POUNCE's convex LP solver).
+  Above that, one heuristic branch, picked from the relaxed LP's direction,
+  is solved; it can find a descent but never certify B.
+- **The escape.** When a branch descends, the driver re-solves that branch as
+  an ordinary NLP — each pair's held side pinned, warm-started at the point —
+  and keeps the result if it is feasible and strictly lower, then checks
+  again (at most 3 times). The console says what happened:
+
+  ```text
+  pounce: complementarity: B-stationarity (1 biactive pair, 2 branch LPs): B-stationary -- no branch descends.
+  ```
+
+From Python, `info["complementarity"]["b_stationarity"]` holds `verdict`
+(`B`, `not_B`, `not_checked`), `reason` (for `not_checked`), `n_biactive`,
+`branches_solved` and `enumerated`; it is `None` when the check did not run
+(an S answer, which is B, or an infeasible verdict). `escapes` counts branch
+NLPs that moved the point.
+
+On MacMPEC the check confirms the W fallbacks `ralph1`, `scholtes4` and `qpec2`
+(10 biactive pairs, 1024 branch LPs, about a second) as B-stationary. On
+`siouxfls` it finds a descending branch at the continuation's point
+(minimized objective −207.36); the branch NLP reaches −208.258, the published
+best known, where the check then reads B.
+
+The check is on the **linearized** constraints. Where constraint
+qualifications fail it can read B at a point the multiplier certificate calls
+`none` — the escaped `siouxfls` point, with 1748 pairs, is one — and each is
+right about its own question: no linearized branch descends, and no
+multipliers reproduce `∇f`. The status then stays
+`Solved_To_Acceptable_Level`.
+
 ### The exit status and the certificate answer different questions
 
 The exit status — `info["status"]` / `info["status_msg"]`, the CLI's
@@ -181,7 +225,7 @@ can disagree, and when they do, each is right about its own question:
 | `Solve_Succeeded` | `S` | converged to `tol`, strongly stationary |
 | `Solved_To_Acceptable_Level` | `S` | strongly stationary, but the solve that found it met only the acceptable tolerances. Common at an optimum with a biactive pair, and on badly scaled models (look for `large_dual_scale` in the log). An answer, at reduced accuracy. |
 | `Solved_To_Acceptable_Level` | `none` | feasible but **not** stationary: no formulation found a stationary point. Not an answer; the status is lowered to say so whatever the solve reported. |
-| any converged status | `W` | weakly stationary only, reported as the fallback (`accepted_by` is `None`, `fallback` names the stage) |
+| any converged status | `W` | weakly stationary only, reported as the fallback (`accepted_by` is `None`, `fallback` names the stage); `b_stationarity` says whether it is B-stationary |
 | anything else | — | the exact product's verdict, e.g. `Infeasible_Problem_Detected` |
 
 Pyomo reads `Solved_To_Acceptable_Level` as `optimal`, as it does for any
