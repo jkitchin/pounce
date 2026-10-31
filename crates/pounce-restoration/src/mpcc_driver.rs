@@ -32,8 +32,8 @@ use std::rc::Rc;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
     Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES,
-    TOUCHED_OPTIONS, accepts, answers, certify, compared, converged, kept_if_nothing_better,
-    warm_start_assignments,
+    Strategy, TOUCHED_OPTIONS, accepts, answers, certify, compared, converged,
+    kept_if_nothing_better, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -187,6 +187,12 @@ pub fn solve_mpcc(
         .get_numeric_value("obj_scaling_factor", "")
         .map_or(1.0, |(v, _)| if v < 0.0 { -1.0 } else { 1.0 });
     let pairs = wrapper.borrow().pairs().to_vec();
+    let strategy = app
+        .options()
+        .get_string_value("complementarity_strategy", "")
+        .ok()
+        .and_then(|(v, _)| Strategy::parse(&v))
+        .unwrap_or(Strategy::Both);
 
     // One lowered solve: options already set by the caller of `run`.
     let run = |app: &mut IpoptApplication,
@@ -242,15 +248,20 @@ pub fn solve_mpcc(
     };
     let halted = || stopped.borrow().is_some();
 
-    for (k, &stage) in STAGES.iter().enumerate() {
+    let mut stages_run = 0;
+    for &stage in STAGES.iter() {
         // An answer from a compared stage ends the ladder before the first
         // stage that is not compared (the penalty).
         if (accepted.is_some() && !compared(stage)) || halted() {
             break;
         }
-        if k > 0 {
+        if !strategy.runs(stage) {
+            continue;
+        }
+        if stages_run > 0 {
             app.set_in_retry_sequence(true);
         }
+        stages_run += 1;
         baseline(app);
         let candidate = match stage {
             MpccStage::Exact => {
@@ -360,6 +371,12 @@ pub fn solve_mpcc(
                         }
                         if halted() {
                             break;
+                        }
+                        // With the exact stage not run, the finish -- an
+                        // exact-product solve -- is the verdict when nothing
+                        // answers, never the relaxed solve below.
+                        if !strategy.runs(MpccStage::Exact) {
+                            exact = finish.clone();
                         }
                         // A finish that does not converge leaves the
                         // continuation's own answer, which satisfies every

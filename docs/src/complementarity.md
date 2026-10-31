@@ -90,6 +90,26 @@ trajectory 2.4× worse on 3 of 5 starts that the exact product avoids.
 Running both reaches the best known answer on every one of them, at roughly
 the iterations of both.
 
+That doubled cost is a choice you can undo when you know your model. Two
+local solves from different starts raise the odds of the better local
+minimum; they guarantee nothing, and on a model where one formulation is
+known to work the other is overhead. `complementarity_strategy` picks:
+
+| value | runs |
+| --- | --- |
+| `both` (default) | the continuation and the exact product; the better S answer wins |
+| `exact` | the exact product only |
+| `continuation` | the continuation (and its exact finish) only |
+
+```bash
+pounce model.nl complementarity_strategy=exact
+```
+
+The penalty still runs under every setting if nothing answers, and the
+verdict reported then is still an exact-product solve's — with
+`continuation`, the continuation's own exact finish — never a relaxed
+solve's success.
+
 A stage *answers* only if it converged, every product is within
 `constr_viol_tol`, and the point is certified strongly stationary (S, see
 below). A solve that exits "acceptable" at a point that is not stationary
@@ -124,7 +144,7 @@ whose W point is reported when none answered, else `None`), `n_solves`,
 | `S` | strongly stationary: a multiplier exists with the right sign on every biactive pair. A local minimum candidate in the usual sense. |
 | `W` | weakly stationary only: converged and feasible, but every multiplier has the wrong sign on some biactive pair. There may be a descent direction that changes which side of a pair is zero. ralph1's origin is the textbook case. |
 | `none` | the stationarity system is not satisfied at all. |
-| `not_searched` | not determined: the model is too large for the dense certificate (more than 4·10⁶ entries in the stationarity system), or its multiplier set has too many sign-constrained columns to search. Accepted like S. |
+| `not_searched` | not determined: the multipliers are not unique (MPCC-LICQ fails) and the set is too large to search — more than 4·10⁶ entries in the stationarity system, or more than 600 sign-constrained columns. Accepted like S. |
 
 along with `n_pairs`, `n_biactive`, `n_neither`, whether the multipliers
 are unique, and the stationarity residual against its tolerance.
@@ -142,10 +162,12 @@ are unique, and the stationarity residual against its tolerance.
   `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
   `solve_nlp_batch` and `solve_with_sens` refuse pairs rather than solve
   the model without them.
-- The certificate is dense: a model whose stationarity system has more
-  than 4·10⁶ entries (about a thousand pairs on a chain) is reported
-  `not_searched`, and a stall at a non-stationary point goes undetected
-  there.
+- The certificate is sparse above 2.5·10⁵ entries in its stationarity
+  system, so a model with unique multipliers is certified at any size (a
+  3 000-pair chain, `n = 9 000`, in 2.1 s for the whole solve). Where the
+  multipliers are a set, the search over it is dense, and past 4·10⁶
+  entries it is not attempted: the point is reported `not_searched`, and a
+  stall there goes undetected.
 - The JSON solve report does not carry the certificate yet; read the
   console line or the Python `info`.
 

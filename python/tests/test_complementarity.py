@@ -175,3 +175,24 @@ def test_entry_points_that_would_drop_the_pairs_refuse_them():
         pounce.Solver(prob).solve(np.array([0.0, 0.5, 0.5]))
     with pytest.raises(ValueError, match="complementarity"):
         _pounce.find_minima(prob, np.array([0.0, 0.5, 0.5]), {"method": "deflation"})
+
+
+@pytest.mark.parametrize("strategy", ["both", "exact", "continuation"])
+def test_complementarity_strategy_picks_the_formulations_that_run(strategy):
+    prob = qpec_problem(complementarity=[(0, 1), (1, 2)])
+    prob.add_option("print_level", 0)
+    prob.add_option("complementarity_strategy", strategy)
+    x, info = prob.solve(np.array([0.0, 0.5, 0.5]))
+    np.testing.assert_allclose(x, [1.0, 1.0, 0.0], atol=1e-4)
+    cc = info["complementarity"]
+    assert cc["certificate"]["class"] == "S", cc
+    # The l1 penalty may run under any strategy, as the fallback when no
+    # formulation answers (from this start the exact product alone stalls at
+    # an acceptable-level point the certificate rejects).
+    ran = {s[0] for s in cc["solves"]} - {"l1 penalty"}
+    expected = {
+        "both": {"Scholtes continuation", "exact product"},
+        "exact": {"exact product"},
+        "continuation": {"Scholtes continuation"},
+    }[strategy]
+    assert ran == expected, cc["solves"]

@@ -215,6 +215,35 @@ pub fn describe_outcome(
     head + &tail
 }
 
+/// Which formulations a solve runs, from `complementarity_strategy`. The
+/// penalty runs under every strategy, as the fallback when nothing answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    Both,
+    Exact,
+    Continuation,
+}
+
+impl Strategy {
+    /// The option's value; `None` for anything else (the registry rejects
+    /// other values before a solve starts).
+    pub fn parse(s: &str) -> Option<Strategy> {
+        match s {
+            "both" => Some(Strategy::Both),
+            "exact" => Some(Strategy::Exact),
+            "continuation" => Some(Strategy::Continuation),
+            _ => None,
+        }
+    }
+
+    pub fn runs(self, stage: MpccStage) -> bool {
+        !matches!(
+            (self, stage),
+            (Strategy::Exact, MpccStage::Continuation) | (Strategy::Continuation, MpccStage::Exact)
+        )
+    }
+}
+
 /// Statuses a stage can converge with.
 pub fn converged(status: ApplicationReturnStatus) -> bool {
     matches!(
@@ -284,10 +313,11 @@ pub enum StationarityClass {
     /// No multipliers reproduce `∇f` to the tolerance: not a stationary
     /// point of the model (or a pair is not complementary at all).
     None,
-    /// Not determined; nothing is claimed. Either the stationarity system
-    /// is too large to factor densely ([`MAX_DENSE_ENTRIES`]), or the
-    /// multipliers are not unique and the set has too many sign-constrained
-    /// columns to search ([`MAX_SEARCHED_COLUMNS`]).
+    /// Not determined; nothing is claimed. The multipliers are not unique
+    /// and the set is too large to search: more than [`MAX_DENSE_ENTRIES`]
+    /// entries in the system, or more than [`MAX_SEARCHED_COLUMNS`]
+    /// sign-constrained columns. Also reported if the sparse factorization
+    /// fails outright.
     NotSearched,
 }
 
@@ -330,14 +360,30 @@ pub struct CertificateInput<'a> {
 /// searched (each NNLS step is an SVD of the passive columns).
 pub const MAX_SEARCHED_COLUMNS: usize = 600;
 
-/// Above this many entries in the dense `n × k` stationarity matrix the
-/// certificate is not attempted and reports [`StationarityClass::NotSearched`]
-/// (which [`answers`] accepts, so the ladder is unchanged). The matrix is
-/// factored by a dense thin SVD after every accepted stage; at `n ≈ 10⁴`
-/// with `k ≈ n + m` that is about 1 GB and 10¹² flops per call, a size
-/// contact-implicit trajectory models reach. 4·10⁶ entries (32 MB) keeps the
-/// call well under a second.
+/// Above this many entries in the `n × k` stationarity matrix, a system whose
+/// multipliers are **not unique** is not searched and reports
+/// [`StationarityClass::NotSearched`] (which [`answers`] accepts, so the
+/// ladder is unchanged). The set search factors the matrix densely; at
+/// `n ≈ 10⁴` with `k ≈ n + m` that is about 1 GB and 10¹² flops per call, a
+/// size contact-implicit trajectory models reach. 4·10⁶ entries (32 MB)
+/// keeps the call well under a second. A system with unique multipliers —
+/// the common case, MPCC-LICQ — is certified at any size, sparsely (see
+/// [`DENSE_ENTRIES`]).
 pub const MAX_DENSE_ENTRIES: usize = 4_000_000;
+
+/// Up to this many entries the stationarity system is factored densely (a
+/// thin SVD, rank by LAPACK's threshold); above it, by sparse LU of the
+/// least-squares augmented system ([`pounce_feral::sparse_least_squares`]).
+/// The dense SVD's cost grows as `n·k²`: on a 650-pair chain model
+/// (`n = 1950`) the solve took 4.8 s with the dense certificate and 0.44 s
+/// with the sparse one, and at 1100 pairs 31 s against 0.77 s, same class
+/// and answer. Below 2.5·10⁵ entries the SVD costs little and keeps the path
+/// the certificate was validated on against `stationarity.py` (the Gate 0
+/// corpus, bunny-hop, ball-in-cup); the CALIPSO rocket (`n = 856`) is past
+/// it and certifies S on the sparse path exactly as it did densely. The
+/// unit tests hold the two paths to the same class on every point they
+/// check.
+pub const DENSE_ENTRIES: usize = 250_000;
 
 const INF: Number = 1e19;
 
@@ -376,9 +422,16 @@ enum Sign {
 /// class is a sign check. When they do not (MPCC-LICQ fails) the class is a
 /// property of the multiplier *set* — reading one vector can report W for a
 /// point that is S — so the set is searched with NNLS, up to
-/// [`MAX_SEARCHED_COLUMNS`]. A system with more than [`MAX_DENSE_ENTRIES`]
-/// entries is not attempted at all: large models report `NotSearched`.
+/// [`MAX_SEARCHED_COLUMNS`] and [`MAX_DENSE_ENTRIES`]; a larger set reports
+/// `NotSearched`. Above [`DENSE_ENTRIES`] the unique multipliers come from a
+/// sparse factorization rather than the SVD.
 pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
+    certify_routed(inp, None)
+}
+
+/// [`certify`], with the dense/sparse choice forced when `force_sparse` is
+/// set — for holding the two paths to each other in tests.
+fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Certificate {
     let n = inp.x.len();
     let m = inp.g.len();
     let corner = inp.solver_tol.max(0.0).sqrt();
@@ -484,28 +537,10 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
 
     let b = inp.grad_f.to_vec();
     let k = cols.len();
-    if n.saturating_mul(k) > MAX_DENSE_ENTRIES {
-        // Too large to factor densely: the class is not determined.
-        return Certificate {
-            class: StationarityClass::NotSearched,
-            n_pairs: inp.pairs.len(),
-            n_biactive,
-            n_neither,
-            multipliers_unique: false,
-            residual: Number::NAN,
-            resid_tol: Number::NAN,
-            worst_biactive_sign: 0.0,
-        };
-    }
-    let a = Mat::<Number>::from_fn(n, k, |_, _| 0.0);
-    let mut a = a;
-    let mut col_max: Number = 0.0;
-    for (c, (ents, _)) in cols.iter().enumerate() {
-        for &(r, v) in ents {
-            a[(r, c)] += v;
-            col_max = col_max.max(v.abs());
-        }
-    }
+    let col_max = cols
+        .iter()
+        .flat_map(|(ents, _)| ents)
+        .fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
     let dual_scale = 1.0_f64
         .max(b.iter().fold(0.0_f64, |m, v| m.max(v.abs())))
         .max(col_max);
@@ -534,6 +569,66 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
         return cert;
     }
 
+    // Unique multipliers: the class is a sign check on them.
+    let classify_unique = |cert: &mut Certificate, theta: &[Number]| {
+        let ordinary_ok = signs
+            .iter()
+            .zip(theta)
+            .all(|(s, t)| *s != Sign::NonNeg || *t >= -sign_tol);
+        if !ordinary_ok {
+            return;
+        }
+        let worst = signs
+            .iter()
+            .zip(theta)
+            .filter(|(s, _)| **s == Sign::Biactive)
+            .fold(0.0_f64, |w, (_, t)| w.min(*t));
+        cert.worst_biactive_sign = worst;
+        cert.class = if worst >= -sign_tol {
+            StationarityClass::S
+        } else {
+            StationarityClass::W
+        };
+    };
+
+    let sparse = force_sparse.unwrap_or(n.saturating_mul(k) > DENSE_ENTRIES);
+    if sparse {
+        let entries: Vec<Vec<(usize, Number)>> = cols.iter().map(|(e, _)| e.clone()).collect();
+        match pounce_feral::sparse_least_squares(n, &entries, &b) {
+            pounce_feral::LeastSquares::Solved(theta) => {
+                let mut r = b.clone();
+                for (ents, t) in entries.iter().zip(&theta) {
+                    for &(row, v) in ents {
+                        r[row] -= v * t;
+                    }
+                }
+                cert.residual = r.iter().fold(0.0, |m: Number, v| m.max(v.abs()));
+                if cert.residual <= resid_tol {
+                    classify_unique(&mut cert, &theta);
+                }
+                return cert;
+            }
+            pounce_feral::LeastSquares::RankDeficient
+                if n.saturating_mul(k) <= MAX_DENSE_ENTRIES =>
+            {
+                // The set search below is dense; it fits.
+            }
+            pounce_feral::LeastSquares::RankDeficient | pounce_feral::LeastSquares::Failed => {
+                cert.multipliers_unique = false;
+                cert.residual = Number::NAN;
+                cert.class = StationarityClass::NotSearched;
+                return cert;
+            }
+        }
+    }
+
+    let mut a = Mat::<Number>::from_fn(n, k, |_, _| 0.0);
+    for (c, (ents, _)) in cols.iter().enumerate() {
+        for &(r, v) in ents {
+            a[(r, c)] += v;
+        }
+    }
+
     // Sign-free least squares: the W test's lower bound on the residual,
     // and the unique multipliers when the columns have full rank.
     let (theta, rank) = lstsq(&a, &b);
@@ -543,24 +638,7 @@ pub fn certify(inp: &CertificateInput<'_>) -> Certificate {
         return cert; // not stationary for any multipliers, signs aside
     }
     if rank == k {
-        let ordinary_ok = signs
-            .iter()
-            .zip(&theta)
-            .all(|(s, t)| *s != Sign::NonNeg || *t >= -sign_tol);
-        if !ordinary_ok {
-            return cert;
-        }
-        let worst = signs
-            .iter()
-            .zip(&theta)
-            .filter(|(s, _)| **s == Sign::Biactive)
-            .fold(0.0_f64, |w, (_, t)| w.min(*t));
-        cert.worst_biactive_sign = worst;
-        cert.class = if worst >= -sign_tol {
-            StationarityClass::S
-        } else {
-            StationarityClass::W
-        };
+        classify_unique(&mut cert, &theta);
         return cert;
     }
 
@@ -842,8 +920,10 @@ mod tests {
         jac: Vec<(usize, usize, Number)>,
     }
 
+    /// Certifies on both paths and holds them to the same class, so every
+    /// point a test below checks is also a dense-vs-sparse parity check.
     fn run(m: &Model, x: &[Number], grad_f: &[Number], g: &[Number]) -> Certificate {
-        certify(&CertificateInput {
+        let inp = CertificateInput {
             x,
             grad_f,
             g,
@@ -854,7 +934,22 @@ mod tests {
             g_u: &m.g_u,
             pairs: &m.pairs,
             solver_tol: 1e-8,
-        })
+        };
+        let dense = certify_routed(&inp, Some(false));
+        let sparse = certify_routed(&inp, Some(true));
+        assert_eq!(
+            (dense.class, dense.multipliers_unique),
+            (sparse.class, sparse.multipliers_unique),
+            "dense {dense:?}\nsparse {sparse:?}"
+        );
+        if dense.multipliers_unique && dense.residual.is_finite() {
+            let tol = 1e-9 * dense.resid_tol.max(dense.residual);
+            assert!(
+                (dense.residual - sparse.residual).abs() <= tol.max(1e-14),
+                "dense {dense:?}\nsparse {sparse:?}"
+            );
+        }
+        dense
     }
 
     /// CALIPSO.jl `nonconvex/complementarity.jl`, its x-x pairs written as
@@ -919,12 +1014,14 @@ mod tests {
         (m, eval)
     }
 
-    /// The certificate's size limit (PR review): a system past
-    /// [`MAX_DENSE_ENTRIES`] is not factored and reports `NotSearched`,
-    /// which the ladder accepts. 2001 active bounds give a 2001 × 2001
-    /// system, 4 004 001 entries.
+    /// Past [`DENSE_ENTRIES`] a system with unique multipliers is certified
+    /// sparsely, at any size; it used to be skipped past
+    /// [`MAX_DENSE_ENTRIES`] (PR review: the stall guard was off for
+    /// mid-size models). 2001 active bounds give a 2001 × 2001 system,
+    /// 4 004 001 entries, past both limits. A wrong-signed bound multiplier
+    /// is still caught there.
     #[test]
-    fn a_system_past_the_dense_limit_is_not_searched() {
+    fn a_large_system_with_unique_multipliers_is_certified_sparsely() {
         let n = 2001;
         let m = Model {
             x_l: vec![0.0; n],
@@ -934,9 +1031,58 @@ mod tests {
             pairs: vec![],
             jac: vec![],
         };
-        let c = run(&m, &vec![0.0; n], &vec![1.0; n], &[]);
-        assert_eq!(c.class, StationarityClass::NotSearched, "{c:?}");
         assert!(n * n > MAX_DENSE_ENTRIES);
+        let mut grad = vec![1.0; n];
+        let cert = |grad: &[Number]| {
+            certify(&CertificateInput {
+                x: &vec![0.0; n],
+                grad_f: grad,
+                g: &[],
+                jac: &m.jac,
+                x_l: &m.x_l,
+                x_u: &m.x_u,
+                g_l: &m.g_l,
+                g_u: &m.g_u,
+                pairs: &m.pairs,
+                solver_tol: 1e-8,
+            })
+        };
+        let c = cert(&grad);
+        assert_eq!(
+            (c.class, c.multipliers_unique),
+            (StationarityClass::S, true),
+            "{c:?}"
+        );
+        grad[7] = -1.0;
+        let c = cert(&grad);
+        assert_eq!(c.class, StationarityClass::None, "{c:?}");
+    }
+
+    /// A large system whose multipliers are a set is still not searched:
+    /// the set search is dense. One active row `x₀ ≥ 0` duplicating the
+    /// bound makes the 2001 bound columns plus the row dependent, and
+    /// 2001 × 2002 entries is past [`MAX_DENSE_ENTRIES`].
+    #[test]
+    fn a_large_rank_deficient_system_is_not_searched() {
+        let n = 2001;
+        let c = certify(&CertificateInput {
+            x: &vec![0.0; n],
+            grad_f: &vec![1.0; n],
+            g: &[0.0],
+            jac: &[(0, 0, 1.0)],
+            x_l: &vec![0.0; n],
+            x_u: &vec![PI; n],
+            g_l: &[0.0],
+            g_u: &[2e19],
+            pairs: &[],
+            solver_tol: 1e-8,
+        });
+        assert_eq!(
+            (c.class, c.multipliers_unique),
+            (StationarityClass::NotSearched, false),
+            "{c:?}"
+        );
+        assert!(n * (n + 1) > MAX_DENSE_ENTRIES);
     }
 
     /// The set search's acceptance band (PR review): with non-unique

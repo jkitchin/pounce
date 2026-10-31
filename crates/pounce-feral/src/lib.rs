@@ -1753,6 +1753,133 @@ pub fn determine_dependent_rows(
     ESymSolverStatus::Success
 }
 
+/// `min ‖A θ − b‖₂` for a sparse `A` with full column rank, or the reason
+/// it could not be answered.
+///
+/// `A` is `n × k`, given column by column as `(row, value)` lists (repeated
+/// rows are summed). Solved through the same augmented system
+/// [`determine_dependent_rows`] factors — `[s·I A; Aᵀ 0] [r; θ] = [b; 0]`, so
+/// `s·r = b − A θ` and `Aᵀ r = 0` — by threshold-Markowitz sparse LU, with
+/// `s = max(1, max|A|)` and one step of iterative refinement. The cost is a
+/// sparse factorization of an `(n + k)`-square system instead of a dense SVD
+/// of the `n × k` one, which is what makes the MPCC stationarity certificate
+/// affordable on a model with thousands of pairs.
+///
+/// Returns [`LeastSquares::RankDeficient`] when any pivot falls under the
+/// same `1e-9·s` floor [`determine_dependent_rows`] calls dependent —
+/// wherever it lands, including the identity block, so a dependency is never
+/// under-reported here: a caller that needs the multipliers to be unique
+/// gets no answer rather than a perturbed one.
+pub fn sparse_least_squares(n: usize, cols: &[Vec<(usize, Number)>], b: &[Number]) -> LeastSquares {
+    use feral::{LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu};
+
+    let k = cols.len();
+    if b.len() != n || cols.iter().flatten().any(|&(r, _)| r >= n) {
+        return LeastSquares::Failed;
+    }
+    if k == 0 {
+        return LeastSquares::Solved(Vec::new());
+    }
+    if k > n {
+        return LeastSquares::RankDeficient;
+    }
+    // Merge repeated rows within a column.
+    let cols: Vec<Vec<(usize, Number)>> = cols
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.sort_by_key(|&(r, _)| r);
+            let mut out: Vec<(usize, Number)> = Vec::with_capacity(c.len());
+            for (r, v) in c {
+                match out.last_mut() {
+                    Some(last) if last.0 == r => last.1 += v,
+                    _ => out.push((r, v)),
+                }
+            }
+            out
+        })
+        .collect();
+    let a_max = cols
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
+    let s = a_max.max(1.0);
+    let d = n + k;
+    let mut m_cols: Vec<Vec<(usize, Number)>> = vec![Vec::new(); d];
+    for (i, mc) in m_cols.iter_mut().enumerate().take(n) {
+        mc.push((i, s));
+    }
+    for (j, c) in cols.iter().enumerate() {
+        for &(r, v) in c {
+            m_cols[n + j].push((r, v)); // A in the top-right block
+            m_cols[r].push((n + j, v)); // Aᵀ in the bottom-left block
+        }
+    }
+    for c in m_cols.iter_mut() {
+        c.sort_by_key(|&(r, _)| r);
+    }
+    let Ok(m) = SparseColMatrix::from_sparse_columns(d, &m_cols) else {
+        return LeastSquares::Failed;
+    };
+    let zero_pivot_tol = 1e-13;
+    let params = LuParams {
+        on_singular: LuSingularAction::PerturbToEps {
+            abs_floor: zero_pivot_tol * s,
+        },
+        scaling: LuScaling::None,
+        zero_pivot_tol,
+        pivoting: LuPivoting::Markowitz,
+        ..LuParams::default()
+    };
+    let Ok(mut lu) = SparseLu::factor_markowitz(&m, params) else {
+        return LeastSquares::Failed;
+    };
+    let dep_tol = 1e-9 * s;
+    if (0..d).any(|p| lu.u_dense(p, p).abs() <= dep_tol) {
+        return LeastSquares::RankDeficient;
+    }
+    let apply = |z: &[Number]| -> Vec<Number> {
+        let mut out = vec![0.0; d];
+        for (j, c) in m_cols.iter().enumerate() {
+            for &(r, v) in c {
+                out[r] += v * z[j];
+            }
+        }
+        out
+    };
+    let mut rhs = vec![0.0; d];
+    rhs[..n].copy_from_slice(b);
+    let mut z = rhs.clone();
+    if lu.ftran(&mut z).is_err() {
+        return LeastSquares::Failed;
+    }
+    // One refinement step: the augmented system is solved to the LU's
+    // backward error, and the multipliers' signs are what is read off it.
+    let mz = apply(&z);
+    let mut corr: Vec<Number> = rhs.iter().zip(&mz).map(|(a, b)| a - b).collect();
+    if lu.ftran(&mut corr).is_err() {
+        return LeastSquares::Failed;
+    }
+    for (zi, ci) in z.iter_mut().zip(&corr) {
+        *zi += ci;
+    }
+    if z.iter().any(|v| !v.is_finite()) {
+        return LeastSquares::Failed;
+    }
+    LeastSquares::Solved(z[n..].to_vec())
+}
+
+/// What [`sparse_least_squares`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeastSquares {
+    /// The unique minimizer `θ`.
+    Solved(Vec<Number>),
+    /// The columns are (numerically) dependent: the minimizers form a set.
+    RankDeficient,
+    /// Malformed input, or the factorization or solve failed.
+    Failed,
+}
+
 impl Default for FeralSolverInterface {
     fn default() -> Self {
         Self::new()

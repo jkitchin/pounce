@@ -17,7 +17,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
-use pounce_restoration::mpcc_driver::solve_mpcc;
+use pounce_restoration::mpcc_driver::{MpccOutcome, solve_mpcc};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
@@ -920,4 +920,184 @@ fn a_pair_it_cannot_lower_is_refused_with_the_reason() {
     .err()
     .unwrap();
     assert!(e.contains("one-sided"), "{e}");
+}
+
+/// The equality-split model, where the two formulations reach different
+/// S-stationary points (PR review, round 2):
+///
+/// ```text
+/// min x^2 + 2 y^2   s.t.  x + y = 1,   0 <= x ⟂ y >= 0
+/// ```
+///
+/// The branches are `(1, 0)` with `f = 1` and `(0, 1)` with `f = 2`; from
+/// `(0.5, 0.5)` both formulations reach the first.
+fn equality_split() -> Dense {
+    let zero = || vec![vec![0.0; 2]; 2];
+    Dense {
+        n: 2,
+        m: 2,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![1.0, 0.0],
+        g_u: vec![1.0, INF],
+        x0: vec![0.5, 0.5],
+        f: Box::new(|x| x[0] * x[0] + 2.0 * x[1] * x[1]),
+        grad: Box::new(|x| vec![2.0 * x[0], 4.0 * x[1]]),
+        g: Box::new(|x| vec![x[0] + x[1], x[1]]),
+        jac: Box::new(|_| vec![vec![1.0, 1.0], vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 4.0;
+            vec![f, zero(), zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+fn solve_with_strategy(
+    model: Dense,
+    strategy: Option<&str>,
+    pair: ComplementarityPair,
+) -> MpccOutcome {
+    let mut app = app();
+    if let Some(s) = strategy {
+        app.options_mut()
+            .read_from_str(&format!("complementarity_strategy {s}\n"), true)
+            .unwrap();
+    }
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    solve_mpcc(&mut app, tnlp, vec![pair], &mut |_| {}).unwrap()
+}
+
+fn stages(out: &MpccOutcome) -> Vec<MpccStage> {
+    let mut s: Vec<MpccStage> = out.solves.iter().map(|r| r.stage).collect();
+    s.dedup();
+    s
+}
+
+/// `complementarity_strategy` (PR review, round 4): `both` (the default)
+/// runs the two formulations and keeps the better answer; `exact` and
+/// `continuation` run only theirs, so a user who knows which works pays for
+/// one.
+#[test]
+fn complementarity_strategy_picks_the_formulations_that_run() {
+    let pair = ComplementarityPair { row: 1, var: 0 };
+    let f = |out: &MpccOutcome| out.x[0] * out.x[0] + 2.0 * out.x[1] * out.x[1];
+
+    let both = solve_with_strategy(equality_split(), None, pair);
+    assert_eq!(stages(&both), [MpccStage::Continuation, MpccStage::Exact]);
+    assert!((f(&both) - 1.0).abs() < 1e-6, "{:?}", both.x);
+
+    let exact = solve_with_strategy(equality_split(), Some("exact"), pair);
+    assert_eq!(stages(&exact), [MpccStage::Exact], "{:?}", exact.solves);
+    assert!((f(&exact) - 1.0).abs() < 1e-6, "{:?}", exact.x);
+    assert_eq!(exact.accepted_by, Some(MpccStage::Exact));
+
+    let cont = solve_with_strategy(equality_split(), Some("continuation"), pair);
+    assert_eq!(
+        stages(&cont),
+        [MpccStage::Continuation],
+        "{:?}",
+        cont.solves
+    );
+    assert!((f(&cont) - 1.0).abs() < 1e-6, "{:?}", cont.x);
+    assert_eq!(cont.accepted_by, Some(MpccStage::Continuation));
+
+    // The ladder's iterations are the single route's, not both.
+    let iters = |o: &MpccOutcome| o.total_iterations;
+    assert!(iters(&exact) < iters(&both) && iters(&cont) < iters(&both));
+}
+
+/// With `continuation` alone and nothing answering, the verdict is never a
+/// relaxed solve's: on `infeasible_pair` the first relaxation is already
+/// infeasible, so no finish runs, the penalty runs as the last resort, and
+/// the infeasibility verdict is reported. The exact stage never runs.
+#[test]
+fn continuation_alone_still_reports_an_infeasible_verdict() {
+    let finalized = Rc::new(RefCell::new(Vec::new()));
+    let out = solve_with_strategy(
+        infeasible_pair(Rc::clone(&finalized)),
+        Some("continuation"),
+        ComplementarityPair { row: 1, var: 0 },
+    );
+    assert_eq!(out.accepted_by, None, "{:?}", out.solves);
+    assert!(out.solves.iter().all(|s| s.stage != MpccStage::Exact));
+    assert!(out.solves.iter().any(|s| s.stage == MpccStage::Penalty));
+    assert_eq!(
+        out.status,
+        ApplicationReturnStatus::InfeasibleProblemDetected,
+        "{:?}",
+        out.solves
+    );
+    assert_eq!(finalized.borrow().len(), 1);
+}
+
+/// A model whose relaxations are feasible but whose MPCC is not:
+///
+/// ```text
+/// min x^2 + y^2   s.t.  x + y = 1,  x >= 0.3,  y >= 0.3,   0 <= x ⟂ y >= 0
+/// ```
+///
+/// `x·y >= 0.21` on the feasible segment, so `τ = 1` solves and `τ = 0.1` is
+/// already infeasible, the schedule stops there, and the exact finish from
+/// the `τ = 1` point is infeasible too; the relaxed point's products are far
+/// outside tolerance, so nothing answers.
+fn relaxation_only_feasible() -> Dense {
+    let zero = || vec![vec![0.0; 2]; 2];
+    Dense {
+        n: 2,
+        m: 4,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![1.0, 0.0, 0.3, 0.3],
+        g_u: vec![1.0, INF, INF, INF],
+        x0: vec![0.5, 0.5],
+        f: Box::new(|x| x[0] * x[0] + x[1] * x[1]),
+        grad: Box::new(|x| vec![2.0 * x[0], 2.0 * x[1]]),
+        g: Box::new(|x| vec![x[0] + x[1], x[1], x[0], x[1]]),
+        jac: Box::new(|_| {
+            vec![
+                vec![1.0, 1.0],
+                vec![0.0, 1.0],
+                vec![1.0, 0.0],
+                vec![0.0, 1.0],
+            ]
+        }),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero(), zero(), zero(), zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+/// With `continuation` alone, the exact stage is not there to supply the
+/// verdict, so the continuation's own exact finish does: on a model whose
+/// relaxations solve and whose MPCC is infeasible, the reported status is the
+/// finish's, never the `τ = 1` relaxation's `Solve_Succeeded`.
+#[test]
+fn continuation_alone_reports_its_exact_finish_as_the_verdict() {
+    let out = solve_with_strategy(
+        relaxation_only_feasible(),
+        Some("continuation"),
+        ComplementarityPair { row: 1, var: 0 },
+    );
+    assert_eq!(out.accepted_by, None, "{:?}", out.solves);
+    assert!(
+        out.solves
+            .iter()
+            .any(|s| s.tau.is_some() && s.status == ApplicationReturnStatus::SolveSucceeded),
+        "no relaxation solved: {:?}",
+        out.solves
+    );
+    let finish = out
+        .solves
+        .iter()
+        .rfind(|s| s.stage == MpccStage::Continuation && s.tau.is_none())
+        .expect("the finish ran");
+    assert_ne!(finish.status, ApplicationReturnStatus::SolveSucceeded);
+    assert_eq!(out.status, finish.status, "{:?}", out.solves);
 }

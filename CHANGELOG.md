@@ -22,9 +22,16 @@ changes.
   Python the formulation was the caller's to pick: on the MPCC corpus
   (`benchmarks/mpcc/declared.py`, 60 feasible cells) the declared route
   reaches the optimum on 60/60 against 57 for the best hand-picked route, at
-  about 2× its median iterations. Pairs must be one-sided; presolve is
-  declined for such models, and `--minima`, the debugger, `solve_nlp_batch`
-  and `solve_with_sens` refuse them. See the book page *Complementarity
+  about 2× its median iterations; `complementarity_strategy=exact` or
+  `=continuation` runs one formulation when you know which works. The
+  certificate is sparse past small sizes, so a model with unique
+  multipliers is certified at any size (a 650-pair chain solves in 0.44 s
+  where the dense certificate alone took over 4 s). Pairs must be
+  one-sided; presolve is declined for such models, and every entry point
+  that would otherwise solve the model without its pairs refuses them
+  (`--minima`, sensitivity requests, the debugger, `pounce verify`,
+  `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
+  `solve_nlp_batch`, `solve_with_sens`). See the book page *Complementarity
   Constraints (MPCC)*.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
