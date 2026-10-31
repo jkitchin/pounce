@@ -49,6 +49,13 @@ when `--sol-output` is given explicitly.
 
 ## Degenerate / MPCC NLPs — the ℓ₁-exact penalty-barrier wrapper
 
+If the complementarity is written as AMPL `complements` (or Pyomo `mpec`),
+the `.nl` carries the pairs and POUNCE handles them itself — formulation,
+fallbacks and a stationarity certificate — with nothing to set; see
+[Complementarity Constraints](complementarity.md). The wrapper below is for
+a model whose degeneracy is not declared: complementarity written by hand
+as `G·H = 0`, or degenerate equalities.
+
 For problems where the standard IPM thrashes in restoration because
 LICQ fails at the iterate (degenerate equalities, MPCC-like
 complementarity), enable the Thierry–Biegler ℓ₁-exact penalty-barrier

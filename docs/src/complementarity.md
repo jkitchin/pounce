@@ -171,6 +171,16 @@ are unique, and the stationarity residual against its tolerance.
 - The JSON solve report does not carry the certificate yet; read the
   console line or the Python `info`.
 
+## Worked example
+
+Notebook
+[`47_declared_complementarity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/47_declared_complementarity.ipynb)
+designs a string resting on a floor (contact force ⟂ gap): the hand-written
+product reports `Solve_Succeeded` at the same wrong design for every target,
+the declared pairs meet every target with an `S` certificate, and it measures
+`complementarity_strategy`, a `W` point, and the scaling trap that lets a
+certificate pass with its residual just inside tolerance.
+
 ## Evidence
 
 `benchmarks/calipso/` ports the trajectory-optimization problems of the

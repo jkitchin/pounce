@@ -31,7 +31,10 @@ changes.
   that would otherwise solve the model without its pairs refuses them
   (`--minima`, sensitivity requests, the debugger, `pounce verify`,
   `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
-  `solve_nlp_batch`, `solve_with_sens`). See the book page *Complementarity
+  `solve_nlp_batch`, `solve_with_sens`). `pounce-studio analyze-nl` reports
+  a `.nl` file's complementarity pairs. Notebook
+  `47_declared_complementarity.ipynb` works a contact-design example end to
+  end. See the book page *Complementarity
   Constraints (MPCC)*.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler

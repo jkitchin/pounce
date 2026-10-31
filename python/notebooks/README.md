@@ -68,6 +68,13 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 34 | [`34_phase_envelope_peng_robinson.ipynb`](34_phase_envelope_peng_robinson.ipynb) | Peng–Robinson phase envelopes through cricondenbar/cricondentherm folds; augmented fold refinement, published-mixture validation, composition/`k_ij` sensitivities checked by complete retraces, and inverse composition design. |
 | 45 | [`45_which_parameter_stopped_fitting.ipynb`](45_which_parameter_stopped_fitting.ipynb) | A calibrated flowsheet stops matching new plant data — which parameter drifted? The score test reads `-mult_g[pin]` and `-reduced_hessian(pins)` off the monitoring solve that already ran, and ranks the culprit first in 94% of 600 randomized fault injections against 84% for a Wald statistic costing an extra solve. Includes the measured sequential-modular comparison (whose expected accuracy argument does *not* hold), sensor-bias-vs-drift confounding and its design-of-experiments fix, and where the linearization breaks. |
 
+## Complementarity constraints (MPCC)
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 47 | [`47_declared_complementarity.ipynb`](47_declared_complementarity.ipynb) | A string sagging onto a floor, contact force ⟂ gap, with a design question on top (the tension that puts a target share of the load on the floor). Written by hand as `λ·gap = 0`, every target returns `Solve_Succeeded` at the same wrong tension; declared as pairs (`complementarity=[(row, var), ...]`), every target is met and certified strongly stationary. Reads `info["complementarity"]` (stages run, certificate classes S/W/none), prices `complementarity_strategy` (the continuation alone at about half the iterations here; the exact product alone stopping on a genuine but useless `S` plateau), shows the one way the certificate is fooled (unscaled rows, residual just inside its tolerance), a W point, the Pyomo `mpec` route, and what refuses pairs. |
+| 38 | [`38_phase_changing_flash_mpcc.ipynb`](38_phase_changing_flash_mpcc.ipynb) | A Peng–Robinson flash across single-liquid, two-phase and single-vapour with fixed dimensions, the phase logic carried by complementarity — lowered by hand (Scholtes, then an exact finish with a `G·H ≤ 0` fallback), measured against successive substitution. Predates declared pairs; see the book page *Phase-Changing Flash as a Complementarity Problem*. |
+
 ## Convex & conic (`pounce.qp`)
 
 | # | Notebook | What it shows |

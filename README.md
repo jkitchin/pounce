@@ -22,7 +22,10 @@ numerical backbone:
 
 - **Nonlinear programming** — the filter line-search interior-point method
   (the Ipopt port), plus an active-set SQP path, for general smooth problems
-  `min f(x)  s.t.  g_L ≤ g(x) ≤ g_U,  x_L ≤ x ≤ x_U`.
+  `min f(x)  s.t.  g_L ≤ g(x) ≤ g_U,  x_L ≤ x ≤ x_U`. Complementarity
+  constraints (AMPL `complements`, Pyomo `mpec`) are declared rather than
+  hand-lowered: POUNCE picks the formulation and certifies the answer's
+  stationarity ([Complementarity Constraints](https://jkitchin.github.io/pounce/complementarity.html)).
 - **Conic & quadratic** — dedicated interior-point solvers for LP, convex QP,
   second-order (SOCP), positive-semidefinite (SDP), and the non-symmetric
   exponential and power cones — each solved to the global optimum, with

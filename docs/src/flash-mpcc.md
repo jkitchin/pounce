@@ -141,6 +141,13 @@ none — the one axis Gate 0 chose that finish for. Re-measured with the
 conditional in place, Gate 0's corpus is bit-identical, so the fallback
 buys Gate 1 its finishing solve at no cost to Gate 0.
 
+Declaring the pairs instead of lowering them by hand
+([Complementarity Constraints](complementarity.md)) gets this fallback
+without asking: the driver's exact stage and the continuation's exact
+finish both switch to `G*H <= 0` whenever the equality form is refused
+before iteration zero. The measurements on this page are the hand-built
+route's; the flash has not been re-run through the declared driver.
+
 **Reverse-mode autodiff loses the Hessian at the bubble point.** Under
 `jax.jit`, `jax.hessian` — which is `jacfwd(jacrev(·))` — is wrong by O(20)
 at exactly the two path points straddling the bubble temperature, where the

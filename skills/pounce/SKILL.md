@@ -1,6 +1,6 @@
 ---
 name: pounce
-description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), or set up a warm start.
+description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), set up a warm start, or solve or interpret a model with complementarity constraints (AMPL complements, Pyomo mpec, MPCC).
 ---
 
 # pounce — solver post-mortem and pre-flight
@@ -19,6 +19,7 @@ Use this skill when the user asks any of:
 - "is this .nl file going to be a problem?"
 - "what happened in iteration 47?"
 - "how do I install pounce?"
+- "my model has complementarity constraints / is an MPCC"
 
 ## Installing pounce
 
@@ -279,6 +280,46 @@ Reference: the *Initialization and Warm Starts* chapter of the docs
 The MCP twin (`suggest_initialization` in `pounce-studio-mcp`) runs
 step 1 and emits these suggestions mechanically; treat its output as
 advisory, exactly like the `analyze-*` suggestion blocks.
+
+### "This model has complementarity constraints" — the MPCC recipe
+
+Reference: the *Complementarity Constraints (MPCC)* chapter
+(`docs/src/complementarity.md`); worked examples in
+`python/notebooks/47_declared_complementarity.ipynb`.
+
+1. **Recognize it.** `pounce-studio analyze-nl model.nl` reports the
+   class as `…, N complementarity pairs (MPCC)` and says what changes.
+   From Python, `pounce.read_nl(path).complementarity` lists the pairs.
+2. **Declare, don't lower.** Pass the pairs as data and set nothing:
+   AMPL `complements` and Pyomo `mpec` (`SolverFactory("pounce")`, no
+   transformation) carry them in the `.nl`; from Python,
+   `pounce.Problem(..., complementarity=[(row, var), ...])`. Do not
+   hand-write `G·H = 0`, a Scholtes schedule or a penalty — the driver
+   runs the continuation and the exact product and keeps the better
+   certified answer. Each pair must be one-sided (a variable with one
+   finite bound, a row with one finite side); a two-sided ("mixed") pair
+   is refused with the reason. Cone complementarity is not supported.
+3. **Read the verdict.** The JSON report does **not** carry the
+   certificate yet, so `diagnose` cannot see it. Read the console line
+   (`pounce: complementarity: answered by …; stationarity: S`) or Python
+   `info["complementarity"]`:
+   - `S` — strongly stationary, a local-minimum candidate. Done.
+   - `W` (`fallback` set, `accepted_by` None) — weakly stationary only:
+     a descent direction may switch which side of a pair is zero. Try
+     other starts.
+   - `none` with status `Solved_To_Acceptable_Level` — converged and
+     feasible but not stationary; the solve stalled. Treat as a failure.
+   - `not_searched` — not determined (the multipliers form a set too
+     large to search). Accepted like S; say so when reporting.
+4. **Cost.** Running both formulations costs about the iterations of
+   both. When one is known to work for the model,
+   `complementarity_strategy=exact` (or `=continuation`) runs only it.
+5. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian
+   requests, the debugger, `pounce verify`, `check-x0`, the WASM build,
+   `pounce.Solver`, `find_minima`, `solve_nlp_batch` and
+   `solve_with_sens` refuse a model with pairs rather than solve it
+   without them; presolve is declined. Use `Problem.solve()` or the
+   plain CLI.
 
 ### "Cite this for me"
 
