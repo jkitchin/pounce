@@ -175,6 +175,7 @@ python/*.egg-info/
 # past this rule, so the next command added here silently failed to commit.
 .claude/*
 !.claude/commands/
+!.claude/skills/
 
 # Crucible knowledge base — kept entirely local. The distilled sources
 # include extracted text of copyrighted papers, so the whole directory
