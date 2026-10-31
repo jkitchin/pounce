@@ -43,13 +43,25 @@ point is known.
 
 ## Reference result
 
-With mixed (two-sided) pairs solved (PR #1107): of 170 models with a
-best-known value, 153 `at`, 6 `BETTER` (each verified feasible by direct
-evaluation), 11 `worse`, and none `unsolved`. All 4 published-infeasible
-models are reported infeasible. No FAILs.
+`main` at `26991b7` (PRs #1107–#1109 merged), with `BENCH_TIMELIMIT=900` for
+`qpec-200-2`: of 170 models with a best-known value, 154 `at`, 6 `BETTER`
+(each verified feasible by direct evaluation), 10 `worse`, and none
+`unsolved`. All 4 published-infeasible models are reported infeasible. No
+FAILs. `gnash10m` (no reference) solves at −230.823, the value its one-sided
+twin `gnash10` reaches. At the default 300 s limit `qpec-200-2` alone is
+`unsolved` (`Maximum_CpuTime_Exceeded`), which is not a FAIL.
 
-Before it, `main` at `e7873df` (PR #1103) had 144 `at`, 6 `BETTER`, 10
-`worse`, and 10 `unsolved`, all of them two-sided refusals: `bilevel1m` and
-`gnash11m`–`gnash19m`. Nine of those now reach the published optimum.
-`bilevel1m` reaches 5 against a published −55, the local solution its
-one-sided twin `ex9.2.3` also reaches, and is the eleventh `worse`.
+`main` at `e7873df` (PR #1103) had 144 `at`, 6 `BETTER`, 10 `worse`, and 10
+`unsolved`, all of them two-sided refusals: `bilevel1m` and
+`gnash11m`–`gnash19m`. Two changes since:
+
+- **PR #1107** solves two-sided pairs. `gnash11m`–`gnash19m` reach the
+  published optimum. `bilevel1m` reaches 5 against a published −55, the
+  local solution its one-sided twin `ex9.2.3` also reaches, and joins
+  `worse`.
+- **PR #1109** checks B-stationarity of non-S answers and escapes along a
+  descending branch. `siouxfls` moves from `worse` (207.365) to `at`
+  (208.258, maximize).
+
+None of these models' `answers.json` entries expected `refused`; they carry
+the published best-known values (gh#1110).
