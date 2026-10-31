@@ -23,7 +23,9 @@ How a row is judged depends on what the reference is:
 
 Independent of kind, a run that contradicts the reference FAILs: converging
 on a problem whose `expected_status` is `InfeasibleProblemDetected`, not
-reporting infeasible there, or solving a problem that must be `refused`.
+reporting infeasible there, or anything but the CLI's own refusal
+(`Complementarity_Refused`, which run_nl_bench.sh records from the CLI's
+message) on a problem that must be `refused` -- a crash is not a refusal.
 Problems with no reference (`expected_status: "unknown"`) are listed only.
 
 Exits 1 if any row FAILs. A problem missing from pounce.json FAILs.
@@ -36,6 +38,7 @@ import sys
 
 CONVERGED = {"Solve_Succeeded", "Solved_To_Acceptable_Level"}
 INFEASIBLE = "Infeasible_Problem_Detected"
+REFUSED = "Complementarity_Refused"
 
 
 def judge(ans, row, rel_tol):
@@ -47,9 +50,11 @@ def judge(ans, row, rel_tol):
     if want == "unknown":
         return "note", f"{status}, f = {f} (no reference)"
     if want == "refused":
+        if status == REFUSED:
+            return "pass", "refused"
         if status in CONVERGED:
             return "FAIL", f"solved ({status}); must be refused"
-        return "pass", "refused"
+        return "FAIL", f"{status}; must be refused by the CLI, not fail otherwise"
     if want == "InfeasibleProblemDetected":
         if status == INFEASIBLE:
             return "pass", "infeasible"

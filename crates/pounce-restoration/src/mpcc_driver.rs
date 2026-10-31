@@ -142,7 +142,7 @@ impl MpccOutcome {
                     n_neither: c.n_neither,
                     multipliers_unique: c.multipliers_unique,
                     residual: finite(c.residual),
-                    resid_tol: c.resid_tol,
+                    resid_tol: finite(c.resid_tol),
                     tight: c.tight,
                     primal_violation: finite(c.primal_violation),
                     feasible: c.feasible,
