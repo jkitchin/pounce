@@ -66,7 +66,9 @@ even while the rest of the solver is under churn.
   "solution":      { ... },
   "statistics":    { ... },
   "iterations":    [ ... ],  // optional, omitted when empty
-  "linear_solver": { ... }   // optional, omitted when backend did not report
+  "linear_solver": { ... },  // optional, omitted when backend did not report
+  "second_opinion": { ... }, // optional, omitted when no ladder ran
+  "complementarity": { ... } // optional, omitted without declared pairs
 }
 ```
 
@@ -347,6 +349,48 @@ Omitted from JSON when no backend reported.
 | `schur` | object \| omitted | Present only when the block-triangular / Schur path (`set_kkt_schur_block`) actually factored; absent when it was not requested **or** fell back to the standard solver. Fields: `n_eliminated`, `n_schur`, `n_factors`, `eliminated_factor_secs`, `form_schur_secs`, `schur_factor_secs`. The eliminated block's factorizations are also counted in the fields above. |
 
 | `restoration` | object \| omitted | The restoration phase's factorizations, in the same shape as this object (without a nested `restoration`). Present only when restoration factored. The fields above describe the main solve alone, so total factorization work is the sum of the two. Recorded by the CLI, Python and C frontends, which wire the restoration backend; a custom restoration factory records nothing. |
+
+### `second_opinion` (object, optional)
+
+What the second-opinion ladder did (gh#850). Present only when a failing
+verdict opened the ladder; omitted from every ordinary solve. On a promotion,
+`solution.status` and `statistics.iteration_count` are the promoted rung's, so
+this block is the only record that the base solve failed and of what the run
+cost. Written by the CLI's `--json-output` and by Python's
+`solve(report_path=...)`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `tried` | array of string | Rung labels actually run, in order. |
+| `promoted_by` | string \| omitted | The rung whose re-solve was promoted; omitted when the base verdict shipped unchanged. |
+| `base_status` | string | Upstream status name of the base solve, before any rung. |
+| `base_iteration_count` | integer | Iterations the base solve spent. |
+| `rung_iteration_counts` | array of integer | Iterations each rung in `tried` spent, in the same order. |
+| `total_iteration_count` | integer | Base plus every rung: what the solve cost. |
+
+### `complementarity` (object, optional)
+
+What the complementarity driver did, for a model with declared
+complementarity pairs (AMPL `complements`, Pyomo `mpec`, or
+`Problem(..., complementarity=...)`); omitted for every other model. Keyed like
+Python's `info["complementarity"]`, and written through one conversion by
+both the CLI's `--json-output` and Python's `solve(report_path=...)`. See
+[Complementarity Constraints](../complementarity.md).
+
+The driver runs several lowered solves. `statistics.iteration_count` is the
+one whose point was reported; `total_iterations` is what the run cost.
+
+| Field | Type | Notes |
+|---|---|---|
+| `strategy` | string | `complementarity_strategy`: `both`, `exact` or `continuation`. |
+| `accepted_by` | string \| omitted | The formulation whose strongly stationary answer was reported (`Scholtes continuation`, `exact product`, `l1 penalty`); omitted when none answered. |
+| `fallback` | string \| omitted | The formulation whose weakly stationary point was reported when none answered. |
+| `reported` | string | `answer`, `weak_fallback`, `feasible_uncertified` or `verdict` (no point qualified; the exact product's status is reported). |
+| `summary` | string | The driver's one-line account, as printed on the console. |
+| `solves` | array of object | Every lowered solve, in order: `stage`, `tau` (relaxation, omitted for an exact solve), `status` (upstream name), `iterations`, `max_abs_product` (`null` when the solve returned no point). |
+| `total_iterations` | integer | Iterations summed over `solves`. |
+| `max_abs_product` | float \| null | Largest `|G·H|` at the reported point. |
+| `certificate` | object \| omitted | Stationarity class of the reported point; omitted only if the model could not be evaluated there. Fields: `class` (`S`, `W`, `none`, `not_searched`), `n_pairs`, `n_biactive`, `n_neither`, `multipliers_unique`, `residual` (`null` when no multipliers were computed), `resid_tol`, `tight` (residual within the tight floor rather than only the acceptance band), `primal_violation` (largest row or bound violation, model units), `feasible` (`primal_violation <= constr_viol_tol`; an infeasible point classifies `none`). |
 
 ## Detail levels
 

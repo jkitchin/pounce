@@ -1107,6 +1107,7 @@ dependencies = [
  "pounce-linalg",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-solve-report",
  "tracing",
 ]
 

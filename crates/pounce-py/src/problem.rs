@@ -630,6 +630,8 @@ impl PyProblem {
                 status,
                 &bridge.borrow().state,
                 linsol,
+                &second_opinion,
+                mpcc_outcome.as_ref(),
             )?;
         }
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
@@ -1579,6 +1581,8 @@ fn write_solve_report(
     status: ApplicationReturnStatus,
     state: &PyTnlpInit,
     linsol: Option<pounce_linsol::summary::LinearSolverSummary>,
+    second_opinion: &SecondOpinionOutcome,
+    mpcc: Option<&pounce_restoration::mpcc_driver::MpccOutcome>,
 ) -> PyResult<()> {
     let detail = match detail {
         Some(s) => ReportDetail::parse(s).map_err(PyValueError::new_err)?,
@@ -1598,6 +1602,16 @@ fn write_solve_report(
     builder.solution.lambda = state.final_lambda.clone();
     if let Some(summary) = linsol {
         builder.set_linear_solver_summary(summary);
+    }
+    // The same blocks the CLI's `--json-output` attaches, through the same
+    // conversions: what the second-opinion ladder did (gh #850) and what the
+    // complementarity driver did. Without them a Python-written report showed
+    // a rescued or multi-stage solve as the reported solve alone.
+    if second_opinion.ran() {
+        builder.set_second_opinion(second_opinion.report_info());
+    }
+    if let Some(out) = mpcc {
+        builder.set_complementarity(out.report_info());
     }
     let report = builder.finish();
     write_report_file(std::path::Path::new(path), &report)

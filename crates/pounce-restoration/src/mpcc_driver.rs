@@ -70,6 +70,8 @@ pub struct MpccOutcome {
     pub fallback: Option<MpccStage>,
     /// Which point was reported, and on what grounds.
     pub reported: Reported,
+    /// The `complementarity_strategy` the run used.
+    pub strategy: Strategy,
     /// Every lowered solve, in order.
     pub solves: Vec<MpccSolveRecord>,
     pub total_iterations: usize,
@@ -80,6 +82,73 @@ pub struct MpccOutcome {
     /// ([`pounce_algorithm::mpcc::certify`]); `None` only if the model could
     /// not be evaluated there.
     pub certificate: Option<Certificate>,
+}
+
+impl MpccOutcome {
+    /// The solve report's `complementarity` block. One conversion, shared by
+    /// the CLI's `--json-output` and Python's `report_path`, so the two
+    /// frontends cannot describe the same run differently.
+    pub fn report_info(&self) -> pounce_solve_report::ComplementarityInfo {
+        use pounce_algorithm::mpcc::StationarityClass;
+        use pounce_solve_report::{
+            ComplementarityCertificateInfo, ComplementarityInfo, ComplementaritySolveInfo,
+        };
+        // JSON has no infinity; a quantity that was not measured is `null`.
+        let finite = |v: Number| v.is_finite().then_some(v);
+        ComplementarityInfo {
+            strategy: self.strategy.name().to_string(),
+            accepted_by: self.accepted_by.map(|s| s.label().to_string()),
+            fallback: self.fallback.map(|s| s.label().to_string()),
+            reported: match self.reported {
+                Reported::Answer(_) => "answer",
+                Reported::WeakFallback(_) => "weak_fallback",
+                Reported::FeasibleUncertified(_) => "feasible_uncertified",
+                Reported::Verdict => "verdict",
+            }
+            .to_string(),
+            summary: pounce_algorithm::mpcc::describe_outcome(
+                self.reported,
+                self.solves.len(),
+                self.total_iterations,
+                self.max_abs_product,
+                self.certificate.as_ref(),
+            ),
+            solves: self
+                .solves
+                .iter()
+                .map(|r| ComplementaritySolveInfo {
+                    stage: r.stage.label().to_string(),
+                    tau: r.tau,
+                    status: r.status.upstream_name().to_string(),
+                    iterations: r.iterations,
+                    max_abs_product: finite(r.max_abs_product),
+                })
+                .collect(),
+            total_iterations: self.total_iterations,
+            max_abs_product: finite(self.max_abs_product),
+            certificate: self
+                .certificate
+                .as_ref()
+                .map(|c| ComplementarityCertificateInfo {
+                    class: match c.class {
+                        StationarityClass::S => "S",
+                        StationarityClass::W => "W",
+                        StationarityClass::None => "none",
+                        StationarityClass::NotSearched => "not_searched",
+                    }
+                    .to_string(),
+                    n_pairs: c.n_pairs,
+                    n_biactive: c.n_biactive,
+                    n_neither: c.n_neither,
+                    multipliers_unique: c.multipliers_unique,
+                    residual: finite(c.residual),
+                    resid_tol: c.resid_tol,
+                    tight: c.tight,
+                    primal_violation: finite(c.primal_violation),
+                    feasible: c.feasible,
+                }),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -529,6 +598,7 @@ pub fn solve_mpcc(
             accepted_by: None,
             fallback: None,
             reported: Reported::Verdict,
+            strategy,
             solves,
             total_iterations,
             x: c.x,
@@ -588,6 +658,7 @@ pub fn solve_mpcc(
         accepted_by,
         fallback,
         reported,
+        strategy,
         solves,
         total_iterations,
         x: chosen.x,
