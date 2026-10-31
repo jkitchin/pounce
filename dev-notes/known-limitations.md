@@ -35,9 +35,11 @@ iterations and 8.3 s**:
 - 5.0 s of the 8.3 s is Lagrangian Hessian evaluation, because qpecgen's
   complementarity rows are dense (11 020 Jacobian nonzeros on 110 variables).
 
-Under the default `both`, the stage runs for every solve, which is why
-`qpec-200-2` takes **434 s**. The continuation stage, which relaxes the
-products to `G·H ≤ τ`, does not pay this.
+Under the default `both`, the stage runs for every solve. `qpec-200-2` takes
+**434 s** there, but that total also includes about 4 200 continuation
+iterations, and the exact stage was not timed alone on it; how much of the
+434 s is the exact stage is not measured. Only the `qpec-100-2` numbers
+above isolate it.
 
 ### What has been tried
 
@@ -49,8 +51,8 @@ answers the continuation misses (see `docs/src/complementarity.md`).
 ### How to tell whether a fix works
 
 `qpec-100-2` under `complementarity_strategy=exact` should take a small
-fraction of 561 iterations without changing its objective, and `qpec-200-2`
-under `both` a small fraction of 434 s, while the Gate 0 corpus
+fraction of 561 iterations without changing its objective (time `qpec-200-2`
+per stage first if it is to be the second witness), while the Gate 0 corpus
 (`benchmarks/mpcc/declared.py`) stays at 60/60 cells at `f*`. Integrated
 approaches that tie the relaxation to the barrier parameter (relaxing the
 products by an amount proportional to μ inside one solve) avoid the empty
