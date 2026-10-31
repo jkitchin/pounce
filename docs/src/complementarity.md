@@ -164,7 +164,7 @@ are unique, and the stationarity residual against its tolerance.
   the model without them.
 - The certificate is sparse above 2.5·10⁵ entries in its stationarity
   system, so a model with unique multipliers is certified at any size (a
-  3 000-pair chain, `n = 9 000`, in 2.1 s for the whole solve). Where the
+  3 000-pair chain, `n = 9 000`, in 2.3 s for the whole solve). Where the
   multipliers are a set, the search over it is dense, and past 4·10⁶
   entries it is not attempted: the point is reported `not_searched`, and a
   stall there goes undetected.

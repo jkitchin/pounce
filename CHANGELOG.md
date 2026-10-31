@@ -25,7 +25,7 @@ changes.
   about 2× its median iterations; `complementarity_strategy=exact` or
   `=continuation` runs one formulation when you know which works. The
   certificate is sparse past small sizes, so a model with unique
-  multipliers is certified at any size (a 650-pair chain solves in 0.44 s
+  multipliers is certified at any size (a 650-pair chain solves in 0.51 s
   where the dense certificate alone took over 4 s). Pairs must be
   one-sided; presolve is declined for such models, and every entry point
   that would otherwise solve the model without its pairs refuses them

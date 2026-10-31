@@ -49,7 +49,7 @@
 //! the continuation reaches the answer.
 
 use faer::Mat;
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 
@@ -372,12 +372,12 @@ pub const MAX_SEARCHED_COLUMNS: usize = 600;
 pub const MAX_DENSE_ENTRIES: usize = 4_000_000;
 
 /// Up to this many entries the stationarity system is factored densely (a
-/// thin SVD, rank by LAPACK's threshold); above it, by sparse LU of the
-/// least-squares augmented system ([`pounce_feral::sparse_least_squares`]).
-/// The dense SVD's cost grows as `n·k²`: on a 650-pair chain model
-/// (`n = 1950`) the solve took 4.8 s with the dense certificate and 0.44 s
-/// with the sparse one, and at 1100 pairs 31 s against 0.77 s, same class
-/// and answer. Below 2.5·10⁵ entries the SVD costs little and keeps the path
+/// thin SVD, rank by LAPACK's threshold); above it, by the interior-point
+/// method's own sparse LDLᵀ of the least-squares augmented system
+/// ([`sparse_least_squares`]). The dense SVD's cost grows as `n·k²`: on a
+/// 650-pair chain model (`n = 1950`) the solve took 4.8 s with the dense
+/// certificate and 0.51 s with the sparse one, and at 1100 pairs 31 s
+/// against 0.93 s, same class and answer. Below 2.5·10⁵ entries the SVD costs little and keeps the path
 /// the certificate was validated on against `stationarity.py` (the Gate 0
 /// corpus, bunny-hop, ball-in-cup); the CALIPSO rocket (`n = 856`) is past
 /// it and certifies S on the sparse path exactly as it did densely. The
@@ -594,8 +594,8 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     let sparse = force_sparse.unwrap_or(n.saturating_mul(k) > DENSE_ENTRIES);
     if sparse {
         let entries: Vec<Vec<(usize, Number)>> = cols.iter().map(|(e, _)| e.clone()).collect();
-        match pounce_feral::sparse_least_squares(n, &entries, &b) {
-            pounce_feral::LeastSquares::Solved(theta) => {
+        match sparse_least_squares(n, &entries, &b) {
+            LeastSquares::Solved(theta) => {
                 let mut r = b.clone();
                 for (ents, t) in entries.iter().zip(&theta) {
                     for &(row, v) in ents {
@@ -608,12 +608,10 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 }
                 return cert;
             }
-            pounce_feral::LeastSquares::RankDeficient
-                if n.saturating_mul(k) <= MAX_DENSE_ENTRIES =>
-            {
+            LeastSquares::RankDeficient if n.saturating_mul(k) <= MAX_DENSE_ENTRIES => {
                 // The set search below is dense; it fits.
             }
-            pounce_feral::LeastSquares::RankDeficient | pounce_feral::LeastSquares::Failed => {
+            LeastSquares::RankDeficient | LeastSquares::Failed => {
                 cert.multipliers_unique = false;
                 cert.residual = Number::NAN;
                 cert.class = StationarityClass::NotSearched;
@@ -665,6 +663,113 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     }
     cert
 }
+
+/// What [`sparse_least_squares`] found.
+#[derive(Debug, Clone, PartialEq)]
+enum LeastSquares {
+    /// The unique minimizer `θ`.
+    Solved(Vec<Number>),
+    /// The columns are (numerically) dependent: the minimizers form a set.
+    RankDeficient,
+    /// Malformed input, or the factorization or solve failed.
+    Failed,
+}
+
+/// `min ‖A θ − b‖₂` for a sparse `A` (`n × k`, columns as `(row, value)`
+/// lists, repeated rows summed), through the least-squares augmented system
+///
+/// ```text
+/// [ s·I  A ] [ r ]   [ b ]
+/// [ Aᵀ   0 ] [ θ ] = [ 0 ]      (s·r = b − A θ,  Aᵀ r = 0)
+/// ```
+///
+/// factored by the same symmetric indefinite solver the interior-point
+/// method uses on its own KKT systems (FERAL, through
+/// [`SparseSymLinearSolverInterface`]), with `s = max(1, max|A|)`. The
+/// system has exactly `n` positive and `k` negative eigenvalues when `A`
+/// has full column rank, so the factorization's inertia is the rank test:
+/// a zero pivot or any other negative count is [`LeastSquares::RankDeficient`],
+/// and no answer is returned rather than a perturbed one.
+fn sparse_least_squares(n: usize, cols: &[Vec<(usize, Number)>], b: &[Number]) -> LeastSquares {
+    use pounce_linsol::{ESymSolverStatus, SparseSymLinearSolverInterface};
+
+    let k = cols.len();
+    if b.len() != n || cols.iter().flatten().any(|&(r, _)| r >= n) {
+        return LeastSquares::Failed;
+    }
+    if k == 0 {
+        return LeastSquares::Solved(Vec::new());
+    }
+    if k > n {
+        return LeastSquares::RankDeficient;
+    }
+    let a_max = cols
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
+    let s = a_max.max(1.0);
+    // Lower triangle, 1-based (FERAL's triplet convention): the identity
+    // block on the diagonal, Aᵀ below it in rows n+1..n+k.
+    let mut trip: Vec<(Index, Index, Number)> = (1..=n as Index).map(|i| (i, i, s)).collect();
+    for (j, c) in cols.iter().enumerate() {
+        let mut c = c.clone();
+        c.sort_by_key(|&(r, _)| r);
+        for (r, v) in c {
+            let (row, col) = ((n + j + 1) as Index, (r + 1) as Index);
+            match trip.last_mut() {
+                Some(last) if last.0 == row && last.1 == col => last.2 += v,
+                _ => trip.push((row, col, v)),
+            }
+        }
+    }
+    let irn: Vec<Index> = trip.iter().map(|t| t.0).collect();
+    let jcn: Vec<Index> = trip.iter().map(|t| t.1).collect();
+    let mut solver = pounce_feral::FeralSolverInterface::new();
+    let dim = (n + k) as Index;
+    if solver.initialize_structure(dim, irn.len() as Index, &irn, &jcn) != ESymSolverStatus::Success
+    {
+        return LeastSquares::Failed;
+    }
+    for (slot, t) in solver.values_array_mut().iter_mut().zip(&trip) {
+        *slot = t.2;
+    }
+    let mut rhs0 = vec![0.0; n + k];
+    rhs0[..n].copy_from_slice(b);
+    let mut z = rhs0.clone();
+    match solver.multi_solve(true, &irn, &jcn, 1, &mut z, true, k as Index) {
+        ESymSolverStatus::Success => {}
+        ESymSolverStatus::Singular | ESymSolverStatus::WrongInertia => {
+            return LeastSquares::RankDeficient;
+        }
+        _ => return LeastSquares::Failed,
+    }
+    // Iterative refinement on the same factor: the multipliers' signs are
+    // what the class is read from, and the augmented system is as
+    // ill-conditioned as A's columns are close to dependent.
+    for _ in 0..REFINEMENT_STEPS {
+        let mut corr = rhs0.clone();
+        for &(r, c, v) in &trip {
+            let (r, c) = ((r - 1) as usize, (c - 1) as usize);
+            corr[r] -= v * z[c];
+            if r != c {
+                corr[c] -= v * z[r];
+            }
+        }
+        if solver.multi_solve(false, &irn, &jcn, 1, &mut corr, false, 0)
+            != ESymSolverStatus::Success
+        {
+            return LeastSquares::Failed;
+        }
+        z.iter_mut().zip(&corr).for_each(|(zi, ci)| *zi += ci);
+    }
+    if z.iter().all(|v| v.is_finite()) {
+        LeastSquares::Solved(z[n..].to_vec())
+    } else {
+        LeastSquares::Failed
+    }
+}
+
+const REFINEMENT_STEPS: usize = 2;
 
 /// Minimum-norm least squares by thin SVD; returns the solution and the
 /// numerical rank (LAPACK's threshold).
@@ -942,10 +1047,11 @@ mod tests {
             (sparse.class, sparse.multipliers_unique),
             "dense {dense:?}\nsparse {sparse:?}"
         );
+        // The residuals agree far inside the tolerance the class is decided
+        // against (the SVD reaches ~1e-16, the LDLᵀ solve ~1e-13).
         if dense.multipliers_unique && dense.residual.is_finite() {
-            let tol = 1e-9 * dense.resid_tol.max(dense.residual);
             assert!(
-                (dense.residual - sparse.residual).abs() <= tol.max(1e-14),
+                (dense.residual - sparse.residual).abs() <= 1e-6 * dense.resid_tol,
                 "dense {dense:?}\nsparse {sparse:?}"
             );
         }
@@ -1058,25 +1164,16 @@ mod tests {
         assert_eq!(c.class, StationarityClass::None, "{c:?}");
     }
 
-    /// A badly scaled column (PR review). The sparse path calls a system
-    /// rank-deficient when an LU pivot of `[s·I A; Aᵀ 0]` falls under
-    /// `1e-9·s`. Measured on columns `e₀` and `(1, ε)`: the sparse
-    /// multipliers are exact down to `ε = 1e-8`, and "rank-deficient" starts
-    /// at `ε = 1e-9` -- the pivot tracks σ, not σ²/s. Below that, within
-    /// [`MAX_DENSE_ENTRIES`], the sparse verdict falls through to the dense
-    /// path, which re-decides the rank, so class and uniqueness agree on both
-    /// paths at every scale (`run` asserts it). Past that limit a sparse
-    /// "rank-deficient" is final and reads `NotSearched` -- never a
-    /// different class.
+    /// A badly scaled column (PR review): columns `e₀` and `(1, ε)`, swept
+    /// from well conditioned to exactly dependent. The sparse path's
+    /// multipliers are exact (after refinement) at every ε > 0, and it calls
+    /// the system rank-deficient only at ε = 0, where the factorization's
+    /// inertia is wrong. The dense SVD draws the same line (its threshold is
+    /// `ε_mach · max(n, k) · σ_max`), so class and uniqueness agree on both
+    /// paths at every scale (`run` asserts it).
     #[test]
     fn a_badly_scaled_column_gets_the_same_verdict_on_both_paths() {
-        for (eps, deficient) in [
-            (1e-3, false),
-            (1e-5, false),
-            (1e-8, false),
-            (1e-9, true),
-            (1e-12, true),
-        ] {
+        for eps in [1e-3, 1e-5, 1e-7, 1e-9, 1e-12, 1e-14, 0.0] {
             let m = Model {
                 x_l: vec![0.0, -2e19],
                 x_u: vec![2e19, 2e19],
@@ -1085,24 +1182,21 @@ mod tests {
                 pairs: vec![],
                 jac: vec![(0, 0, 1.0), (0, 1, eps)],
             };
-            // grad f = A (1, 1): both multipliers +1, so S.
+            // grad f = A (1, 1): multipliers +1 and +1, so S.
             let c = run(&m, &[0.0, 0.0], &[2.0, eps], &[0.0]);
-            assert_eq!(
-                (c.class, c.multipliers_unique),
-                (StationarityClass::S, true),
-                "{eps:e}: {c:?}"
-            );
+            assert_eq!(c.class, StationarityClass::S, "{eps:e}: {c:?}");
+            assert_eq!(c.multipliers_unique, eps != 0.0, "{eps:e}: {c:?}");
             let cols = vec![vec![(0, 1.0)], vec![(0, 1.0), (1, eps)]];
-            match pounce_feral::sparse_least_squares(2, &cols, &[2.0, eps]) {
-                pounce_feral::LeastSquares::Solved(theta) => {
-                    assert!(!deficient, "{eps:e}");
+            match sparse_least_squares(2, &cols, &[2.0, eps]) {
+                LeastSquares::Solved(theta) => {
+                    assert!(eps != 0.0, "{theta:?}");
                     assert!(
-                        theta.iter().all(|t| (t - 1.0).abs() < 1e-9),
+                        theta.iter().all(|t| (t - 1.0).abs() < 1e-12),
                         "{eps:e}: {theta:?}"
                     );
                 }
                 other => assert!(
-                    deficient && other == pounce_feral::LeastSquares::RankDeficient,
+                    eps == 0.0 && other == LeastSquares::RankDeficient,
                     "{eps:e}: {other:?}"
                 ),
             }
