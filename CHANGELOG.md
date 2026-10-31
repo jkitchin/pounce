@@ -10,6 +10,18 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Complementarity answers that are not strongly stationary are checked for
+  B-stationarity, and moved off when they are not.** When the reported point
+  is feasible but not certified S (a weakly stationary fallback, or a set too
+  large to search), the driver solves the branch LPs of its biactive pairs —
+  all `2^b` up to 10 pairs, one heuristic branch above — and reports whether
+  any branch descends. If one does, it re-solves that branch as an ordinary
+  NLP from the point and keeps the result when it is feasible and lower. On
+  MacMPEC this confirms the W fallbacks `ralph1`, `scholtes4` and `qpec2` as
+  B-stationary (local minima the S certificate could not vouch for), and
+  moves `siouxfls` from a non-B-stationary point (207.36) to the published
+  best known (208.258). Python reads it as
+  `info["complementarity"]["b_stationarity"]`.
 - **Two-sided ("mixed") complementarity pairs are solved, not refused.** A
   pair whose variable is boxed and whose row is free — `l <= x <= u ⟂ g`,
   `g >= 0` at `l`, `g <= 0` at `u`, `g = 0` between; AMPL `complements` with

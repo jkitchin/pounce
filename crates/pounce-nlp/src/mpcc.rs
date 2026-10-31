@@ -107,6 +107,20 @@ pub struct StartOverride {
     pub lambda: Vec<Number>,
 }
 
+/// A branch of the complementarity: which side of each pair is held at
+/// zero, stated as bound overrides on the inner model. Set with
+/// [`MpccTnlp::set_branch`] for a branch NLP: the product rows are then
+/// unbounded, so the lowered model is the inner one with these bounds — an
+/// ordinary NLP, solved through the same wrapper (hooks, deferred finalize,
+/// start override) as every other lowered solve.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BranchBounds {
+    /// `(variable, lower, upper)`: replaces that variable's bounds.
+    pub vars: Vec<(usize, Number, Number)>,
+    /// `(row, lower, upper)`: replaces that row's bounds.
+    pub rows: Vec<(usize, Number, Number)>,
+}
+
 /// Bounds at or beyond this magnitude are infinite, matching the
 /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf` defaults (`±1e19`).
 const INF: Number = 1e19;
@@ -162,6 +176,7 @@ pub struct MpccTnlp {
     last_products: Vec<Number>,
     defer_inner_finalize: bool,
     start_override: Option<StartOverride>,
+    branch: Option<BranchBounds>,
 }
 
 /// `(sign, bound)` for a side with exactly one finite bound: `(+1, lo)` when
@@ -385,6 +400,7 @@ impl MpccTnlp {
             last_products: Vec::new(),
             defer_inner_finalize: false,
             start_override: None,
+            branch: None,
             pairs: declared,
             lowered: pairs,
             signless,
@@ -404,6 +420,12 @@ impl MpccTnlp {
     /// Change how the product rows are bounded for the next solve.
     pub fn set_lowering(&mut self, lowering: Lowering) {
         self.lowering = lowering;
+    }
+
+    /// Solve a branch NLP instead of a lowering (`None` restores the
+    /// lowering); see [`BranchBounds`].
+    pub fn set_branch(&mut self, branch: Option<BranchBounds>) {
+        self.branch = branch;
     }
 
     /// When set, `finalize_solution` records the result for the driver but
@@ -570,6 +592,23 @@ impl TNLP for MpccTnlp {
             Lowering::Ineq => (-2.0 * INF, 0.0),
             Lowering::Relaxed(tau) => (-2.0 * INF, tau),
         };
+        if let Some(br) = &self.branch {
+            // A branch NLP: the pinned sides carry the complementarity, and
+            // the product rows constrain nothing.
+            for &(j, l, u) in &br.vars {
+                b.x_l[j] = l;
+                b.x_u[j] = u;
+            }
+            for &(i, l, u) in &br.rows {
+                b.g_l[i] = l;
+                b.g_u[i] = u;
+            }
+            for k in 0..self.lowered.len() {
+                b.g_l[m + k] = -2.0 * INF;
+                b.g_u[m + k] = 2.0 * INF;
+            }
+            return true;
+        }
         for k in 0..self.lowered.len() {
             // A mixed pair's rows are inequalities under every lowering.
             b.g_l[m + k] = if self.signless[k] { -2.0 * INF } else { lo };

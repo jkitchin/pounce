@@ -1169,3 +1169,103 @@ fn a_mixed_pair_is_solved_at_either_bound() {
         }
     }
 }
+
+/// The branch escape's pieces, as the driver chains them, from a point no
+/// formulation stops at on its own: the corner `(0, 0)` of
+/// `min (x - 1)² + (y - 1)²`, `0 <= x ⟂ y >= 0` (row `y >= 0`). The check
+/// finds a descending branch; the branch NLP -- the lowered model with the
+/// held side pinned and the product rows free, warm-started at the corner --
+/// reaches that branch's optimum, `(0, 1)` or `(1, 0)` with `f = 1`, below
+/// the corner's `f = 2` and certified S.
+#[test]
+fn a_branch_nlp_leaves_a_corner_that_is_not_b_stationary() {
+    use pounce_algorithm::mpcc::{
+        BVerdict, CertificateInput, branch_bounds, certify, check_b_stationarity,
+    };
+    use pounce_nlp::mpcc::{Lowering, MpccTnlp, StartOverride};
+
+    let zero = || vec![vec![0.0; 2]; 2];
+    let finalized = Rc::new(RefCell::new(Vec::new()));
+    let corner = || Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: vec![0.5, 0.5],
+        f: Box::new(|x| (x[0] - 1.0).powi(2) + (x[1] - 1.0).powi(2)),
+        grad: Box::new(|x| vec![2.0 * (x[0] - 1.0), 2.0 * (x[1] - 1.0)]),
+        g: Box::new(|x| vec![x[1]]),
+        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::clone(&finalized),
+    };
+    let pairs = vec![ComplementarityPair { row: 0, var: 0 }];
+    let jac = [(0usize, 1usize, 1.0)];
+    let (xl, xu, gl, gu) = ([0.0, -INF], [INF, INF], [0.0], [INF]);
+    let inp =
+        |x: &'static [f64; 2], gf: &'static [f64; 2], g: &'static [f64; 1]| CertificateInput {
+            x,
+            grad_f: gf,
+            g,
+            jac: &jac,
+            x_l: &xl,
+            x_u: &xu,
+            g_l: &gl,
+            g_u: &gu,
+            pairs: &pairs,
+            solver_tol: 1e-8,
+            feas_tol: 1e-4,
+        };
+    let at_corner = inp(&[0.0, 0.0], &[-2.0, -2.0], &[0.0]);
+    let BVerdict::NotB { held, .. } = check_b_stationarity(&at_corner).verdict else {
+        panic!("the corner should not be B-stationary")
+    };
+    let bounds = branch_bounds(&at_corner, &held);
+
+    let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(corner()));
+    let w = Rc::new(RefCell::new(
+        MpccTnlp::new(Rc::clone(&inner), pairs.clone(), Lowering::Ineq).unwrap(),
+    ));
+    w.borrow_mut().set_defer_inner_finalize(true);
+    w.borrow_mut().set_branch(Some(bounds));
+    w.borrow_mut().set_start_override(Some(StartOverride {
+        x: vec![0.0, 0.0],
+        ..Default::default()
+    }));
+    let mut app = app();
+    let lowered: Rc<RefCell<dyn TNLP>> = w.clone();
+    let status = app.optimize_tnlp(lowered);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "{status:?}"
+    );
+    let x = w.borrow().last_x().to_vec();
+    let f = (x[0] - 1.0).powi(2) + (x[1] - 1.0).powi(2);
+    assert!((f - 1.0).abs() < 1e-6, "x = {x:?}, f = {f}");
+    assert!(
+        x[0].abs() < 1e-6 || x[1].abs() < 1e-6,
+        "complementary: {x:?}"
+    );
+    let (gf, g) = ([2.0 * (x[0] - 1.0), 2.0 * (x[1] - 1.0)], [x[1]]);
+    let cert = certify(&CertificateInput {
+        x: &x,
+        grad_f: &gf,
+        g: &g,
+        ..inp(&[0.0, 0.0], &[0.0, 0.0], &[0.0])
+    });
+    assert_eq!(cert.class, StationarityClass::S, "{cert:?}");
+    // The inner model saw no finalize: the branch solve is deferred like
+    // every lowered solve, so only the driver forwards an answer.
+    assert!(finalized.borrow().is_empty());
+}
