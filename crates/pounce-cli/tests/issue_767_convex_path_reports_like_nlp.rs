@@ -215,10 +215,19 @@ fn print_timing_statistics_attributes_the_solve_on_every_convex_arm() {
             solve <= overall + SLACK,
             "{arm}: ConvexSolve {solve}s exceeds OverallAlgorithm {overall}s"
         );
+        // The linear algebra happens inside the solve or, on the conic QCQP
+        // arm, inside SolutionRecovery too: the gh#1114 polish (PR #1120)
+        // factors the original KKT system after the conic solve, under the
+        // recovery timer. Its factorizations are charged to the LinearSystem*
+        // rows correctly, so on a slow machine (CI: 0.004s against a 0.002s
+        // solve) they exceed `ConvexSolve` alone — the bound is the two
+        // stages they can happen in.
+        let recovery = seconds("SolutionRecovery");
         assert!(
-            linear <= solve + SLACK,
-            "{arm}: the LinearSystem* rows ({linear}s) exceed the solve they \
-             happen inside ({solve}s)"
+            linear <= solve + recovery + SLACK,
+            "{arm}: the LinearSystem* rows ({linear}s) exceed the stages they \
+             happen inside (ConvexSolve {solve}s + SolutionRecovery \
+             {recovery}s)"
         );
 
         if solve >= RESOLVABLE {
