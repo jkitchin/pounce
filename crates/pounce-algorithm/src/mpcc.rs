@@ -119,9 +119,59 @@ pub fn warm_start_assignments(final_mu: Number) -> Vec<String> {
     ]
 }
 
+/// The exact-product stage's iteration budget once the continuation has
+/// already answered with a tight S point: [`EXACT_BUDGET_FACTOR`] times the
+/// iterations the continuation spent, never below [`EXACT_BUDGET_FLOOR`].
+///
+/// With an answer in hand, the exact stage is a second opinion: it can only
+/// change the report by converging to a strictly lower S point (a different
+/// branch, `eq_split`'s global optimum or MacMPEC's `water-net`). Run in
+/// full it was 55% of every iteration POUNCE spent on MacMPEC, most of it
+/// grinding to `max_iter` on models the continuation had already solved
+/// (`pack-comp1-32`: 3000 of 3327). Every exact-stage answer that changed a
+/// MacMPEC outcome took at most 2.5 times the continuation's iterations
+/// (`water-net`, 470 against 189), so the factor leaves it room.
+pub const EXACT_BUDGET_FACTOR: usize = 3;
+/// See [`EXACT_BUDGET_FACTOR`].
+pub const EXACT_BUDGET_FLOOR: usize = 200;
+/// The continuation's finish budget: the exact-product solve warm-started at
+/// the end of the schedule. Never below this, nor below the iterations the
+/// schedule itself spent. Every finish that converged to `Solve_Succeeded`
+/// on MacMPEC took at most 411 iterations; the ones that ran past 500 all
+/// crawled to `Solved_To_Acceptable_Level` (up to 3188) at a point the
+/// schedule's own answer already satisfies to `τ = 1e-8`, which the driver
+/// falls back to when the finish does not converge.
+pub const FINISH_BUDGET_FLOOR: usize = 500;
+
+/// The exact-product stage's iteration budget: `None` (run in full) unless
+/// the continuation has already answered with a tight S point, in which case
+/// [`EXACT_BUDGET_FACTOR`] times the `continuation_iterations` it spent, at
+/// least [`EXACT_BUDGET_FLOOR`].
+pub fn exact_stage_budget(answered: bool, continuation_iterations: usize) -> Option<usize> {
+    answered.then(|| {
+        EXACT_BUDGET_FACTOR
+            .saturating_mul(continuation_iterations)
+            .max(EXACT_BUDGET_FLOOR)
+    })
+}
+
+/// The continuation finish's iteration budget: what the schedule spent, at
+/// least [`FINISH_BUDGET_FLOOR`].
+pub fn finish_budget(schedule_iterations: usize) -> usize {
+    schedule_iterations.max(FINISH_BUDGET_FLOOR)
+}
+
+/// The `max_iter` a budgeted solve runs under: `budget`, but never above the
+/// caller's own `max_iter`.
+pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
+    let b = Index::try_from(budget).unwrap_or(Index::MAX);
+    b.min(caller_max_iter.max(0))
+}
+
 /// Every option any stage writes; the driver snapshots these before the
 /// first stage and restores them after the last.
-pub const TOUCHED_OPTIONS: [&str; 10] = [
+pub const TOUCHED_OPTIONS: [&str; 11] = [
+    "max_iter",
     "warm_start_init_point",
     "mu_init",
     "warm_start_bound_push",
@@ -1484,6 +1534,34 @@ mod tests {
         assert_eq!(mu(3.0), "mu_init 1e-1\n");
         assert_eq!(mu(0.0), "mu_init 1e-6\n");
         assert_eq!(mu(Number::NAN), "mu_init 1e-6\n");
+    }
+
+    /// Both branches of the exact stage's budget: with no tight answer in
+    /// hand it runs in full, whatever the continuation spent; with one, it
+    /// gets the factor times that work, never less than the floor.
+    #[test]
+    fn the_exact_stage_is_budgeted_only_after_an_answer() {
+        assert_eq!(exact_stage_budget(false, 0), None);
+        assert_eq!(exact_stage_budget(false, 5000), None);
+        assert_eq!(exact_stage_budget(true, 0), Some(EXACT_BUDGET_FLOOR));
+        assert_eq!(exact_stage_budget(true, 10), Some(EXACT_BUDGET_FLOOR));
+        assert_eq!(exact_stage_budget(true, 189), Some(3 * 189));
+        assert_eq!(exact_stage_budget(true, usize::MAX), Some(usize::MAX));
+    }
+
+    #[test]
+    fn the_finish_budget_has_a_floor_and_follows_the_schedule() {
+        assert_eq!(finish_budget(0), FINISH_BUDGET_FLOOR);
+        assert_eq!(finish_budget(721), 721);
+    }
+
+    /// A budget never raises the caller's own `max_iter`.
+    #[test]
+    fn a_budget_never_exceeds_the_callers_max_iter() {
+        assert_eq!(budgeted_max_iter(567, 3000), 567);
+        assert_eq!(budgeted_max_iter(567, 100), 100);
+        assert_eq!(budgeted_max_iter(usize::MAX, 3000), 3000);
+        assert_eq!(budgeted_max_iter(10, -1), 0);
     }
 
     #[test]

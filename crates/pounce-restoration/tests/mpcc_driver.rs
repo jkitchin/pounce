@@ -1269,3 +1269,55 @@ fn a_branch_nlp_leaves_a_corner_that_is_not_b_stationary() {
     // every lowered solve, so only the driver forwards an answer.
     assert!(finalized.borrow().is_empty());
 }
+
+/// The exact stage's and the finish's iteration budgets never raise the
+/// caller's own `max_iter`, and the option reads afterwards as the caller
+/// left it -- set, at their value -- even though a budgeted stage wrote it.
+/// qpec_small's continuation answers, so both budgets are written here.
+#[test]
+fn iteration_budgets_respect_and_restore_the_callers_max_iter() {
+    for caller in [None, Some(7)] {
+        let mut app = app();
+        if let Some(it) = caller {
+            app.options_mut()
+                .set_integer_value("max_iter", it, true, false)
+                .unwrap();
+        }
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
+            [0.0, 0.5, 0.5],
+            Rc::new(RefCell::new(Vec::new())),
+        )));
+        let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |_| {}).unwrap();
+        if let Some(it) = caller {
+            // The budgeted solves: the exact stage and the continuation's
+            // finish. (A relaxation's spent count can exceed `max_iter`: it
+            // includes the solver's own re-solves, which no budget governs.)
+            let budgeted = out.solves.iter().filter(|s| {
+                s.stage == MpccStage::Exact
+                    || (s.stage == MpccStage::Continuation && s.tau.is_none())
+            });
+            for s in budgeted {
+                assert!(
+                    s.iterations <= it as usize,
+                    "a solve ran past the caller's max_iter {it}: {:?}",
+                    out.solves
+                );
+            }
+        } else {
+            assert!(out.accepted_by.is_some(), "{:?}", out.solves);
+            assert!(
+                out.solves.iter().any(|s| s.stage == MpccStage::Exact),
+                "the exact stage did not run: {:?}",
+                out.solves
+            );
+        }
+        let set = app.options().names().any(|n| n == "max_iter");
+        let v = app
+            .options()
+            .get_integer_value("max_iter", "")
+            .map(|(v, _)| v)
+            .unwrap();
+        assert_eq!(set, caller.is_some(), "max_iter set-ness leaked");
+        assert_eq!(v, caller.unwrap_or(3000), "max_iter value leaked");
+    }
+}
