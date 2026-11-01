@@ -374,7 +374,7 @@ pub fn solve_mpcc(
     };
 
     let mut stages_run = 0;
-    for &stage in STAGES.iter() {
+    'ladder: for &stage in STAGES.iter() {
         // An answer from a compared stage ends the ladder before the first
         // stage that is not compared (the penalty).
         if (accepted.is_some() && !compared(stage)) || halted() {
@@ -388,23 +388,31 @@ pub fn solve_mpcc(
         }
         stages_run += 1;
         baseline(app);
-        let candidate = match stage {
+        let candidates: Vec<Captured> = match stage {
             MpccStage::Exact => {
-                // One relaxed solve, `G·H <= EXACT_STAGE_TAU`, from the
-                // model's own start, then the continuation's exact finish
-                // from there. A relaxation keeps an interior: the exact
-                // product `G·H = 0` (or `<= 0`) has none, every product row is
-                // parallel to its pair's active bound, and solved cold it is
-                // the degenerate system that made this stage the slowest on
-                // MacMPEC (pivots to 1e55, 3000-iteration stalls). The start,
-                // not the schedule, is what makes this a second opinion:
-                // from it the solve can settle on a branch the continuation's
-                // path from `τ = 1` does not reach.
+                // Two second opinions, both from the model's own start, both
+                // compared like any other candidate (lower objective wins):
                 //
-                // With a tight S answer from the continuation already in
-                // hand, the relaxed solve runs on a budget proportional to
-                // what the continuation spent ([`EXACT_BUDGET_FACTOR`]);
-                // without one it runs in full.
+                // * A relaxed path: `G·H <= EXACT_STAGE_TAU`, one warm step to
+                //   the continuation's last `τ`, then the exact finish. A
+                //   relaxation keeps an interior; the exact product has none
+                //   (every product row is parallel to its pair's active
+                //   bound), so this path converges where the cold solve
+                //   stalls, and it reaches branches the cold solve misses
+                //   (MacMPEC `dempe`, `ex9.2.5`, both past their published
+                //   values).
+                // * The exact product solved cold, `G·H = 0`. The path least
+                //   like the continuation's, and on some models the only one
+                //   that reaches the better branch (MacMPEC `water-net`: 927,
+                //   where both relaxed paths settle on 953 and 964).
+                //
+                // Neither dominates on MacMPEC or CALIPSO, so both run. With
+                // an answer already in hand (the continuation's, or a converged
+                // relaxed path's), the cold solve is a second opinion and runs
+                // on a budget proportional to what the stages before it spent
+                // ([`EXACT_BUDGET_FACTOR`]); the relaxed path is budgeted only
+                // on the continuation's answer.
+                let mut cands: Vec<Captured> = Vec::new();
                 let budget = exact_stage_budget(
                     accepted.is_some(),
                     iterations_of(&solves, MpccStage::Continuation),
@@ -422,13 +430,14 @@ pub fn solve_mpcc(
                 if halted() {
                     break;
                 }
+                // The relaxed path's verdict, if it has one: an exact-product
+                // solve (its finish), or the relaxation's own infeasibility.
+                let mut path_verdict: Option<Captured> = None;
                 if converged(relaxed.status) && !relaxed.x.is_empty() {
                     // One warm step down to the continuation's last `τ`
                     // before the finish: an exact finish from `1e-6` is the
                     // degenerate solve again (`incid-set2-32`: 679 iterations
-                    // to `max_iter`), and it can drift off the branch the
-                    // relaxed solve found (`water-net`: 927 to 964). Kept
-                    // only if it converges.
+                    // to `max_iter`). Kept only if it converges.
                     baseline(app);
                     for a in warm_start_assignments(relaxed.statistics.final_mu) {
                         let _ = app.options_mut().read_from_str(&a, true);
@@ -456,53 +465,70 @@ pub fn solve_mpcc(
                     if halted() {
                         break;
                     }
-                    // The finish is an exact-product solve: the verdict if
-                    // nothing answers, never the relaxed solve's success.
-                    exact = finish.clone();
-                    match finish {
-                        Some(f) if accepts(f.status, f.max_abs_product, tol) => Some(f),
-                        _ => Some(relaxed),
-                    }
+                    path_verdict = finish.clone();
+                    cands.push(match finish {
+                        Some(f) if accepts(f.status, f.max_abs_product, tol) => f,
+                        _ => relaxed,
+                    });
                 } else if relaxed.status == ApplicationReturnStatus::InfeasibleProblemDetected
                     && !relaxed.x.is_empty()
                 {
                     // The relaxation contains the model, so its
                     // infeasibility is the model's.
-                    exact = Some(relaxed.clone());
-                    Some(relaxed)
-                } else {
-                    // The relaxation failed some other way: the exact
-                    // product itself, for an answer or a verdict of its own.
-                    // `G·H <= 0` where the equality would over-determine the
-                    // model (same feasible set), and whenever the equality
-                    // solve was refused before iteration 0 (no point),
-                    // whatever the status: the degrees-of-freedom gate can
-                    // refuse an over-determined model with a proven verdict
-                    // (`Infeasible_Problem_Detected`) rather than
-                    // `Not_Enough_Degrees_Of_Freedom`.
+                    path_verdict = Some(relaxed.clone());
+                    cands.push(relaxed);
+                }
+                // The cold exact product. `G·H <= 0` where the equality would
+                // over-determine the model (same feasible set), and whenever
+                // the equality solve was refused before iteration 0 (no
+                // point), whatever the status: the degrees-of-freedom gate
+                // can refuse an over-determined model with a proven verdict
+                // (`Infeasible_Problem_Detected`) rather than
+                // `Not_Enough_Degrees_Of_Freedom`.
+                let answered = accepted.is_some()
+                    || cands
+                        .first()
+                        .is_some_and(|c| accepts(c.status, c.max_abs_product, tol));
+                let cold_budget = exact_stage_budget(
+                    answered,
+                    iterations_of(&solves, MpccStage::Continuation)
+                        + iterations_of(&solves, MpccStage::Exact),
+                );
+                let mut c = None;
+                for lowering in [Lowering::Eq, Lowering::Ineq] {
                     baseline(app);
-                    if let Some(b) = budget {
+                    if let Some(b) = cold_budget {
                         set_budget(app, b);
                     }
-                    let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
+                    let r = run(app, stage, lowering, None, &mut solves);
                     if halted() {
                         break;
                     }
-                    if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom
-                        || c.x.is_empty()
-                    {
-                        baseline(app);
-                        if let Some(b) = budget {
-                            set_budget(app, b);
-                        }
-                        c = run(app, stage, Lowering::Ineq, None, &mut solves);
-                        if halted() {
-                            break;
-                        }
+                    let refused = r.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom
+                        || r.x.is_empty();
+                    c = Some(r);
+                    if !refused {
+                        break;
                     }
-                    exact = Some(c.clone());
-                    Some(c)
                 }
+                if halted() {
+                    break;
+                }
+                // The verdict when nothing answers: a proven infeasibility
+                // from either solve first, then the cold solve's own (it is
+                // the plain exact product), then the relaxed path's.
+                let infeasible = |v: &Captured| {
+                    v.status == ApplicationReturnStatus::InfeasibleProblemDetected
+                        && !v.x.is_empty()
+                };
+                exact = match (path_verdict, c.clone()) {
+                    (Some(v), _) if infeasible(&v) => Some(v),
+                    (_, Some(cold)) if !cold.x.is_empty() => Some(cold),
+                    (Some(v), cold) => Some(v).or(cold),
+                    (None, cold) => cold,
+                };
+                cands.extend(c);
+                cands
             }
             MpccStage::Continuation => {
                 let mut last: Option<Captured> = None;
@@ -558,7 +584,7 @@ pub fn solve_mpcc(
                             SCHOLTES_SCHEDULE[0],
                             solves.last().map(|s| s.status),
                         ));
-                        None
+                        Vec::new()
                     }
                     Some(relaxed) => {
                         // The finish: exact product from the end of the
@@ -582,15 +608,15 @@ pub fn solve_mpcc(
                         // A finish that does not converge leaves the
                         // continuation's own answer, which satisfies every
                         // product to the last τ; accepted on the same test.
-                        match finish {
-                            Some(f) if accepts(f.status, f.max_abs_product, tol) => Some(f),
-                            _ => Some(relaxed),
-                        }
+                        vec![match finish {
+                            Some(f) if accepts(f.status, f.max_abs_product, tol) => f,
+                            _ => relaxed,
+                        }]
                     }
                 }
             }
             // Not in STAGES: run only from a reported point, below.
-            MpccStage::Branch => None,
+            MpccStage::Branch => Vec::new(),
             MpccStage::Penalty => {
                 let _ = app
                     .options_mut()
@@ -599,10 +625,10 @@ pub fn solve_mpcc(
                 if halted() {
                     break;
                 }
-                Some(c)
+                vec![c]
             }
         };
-        if let Some(c) = &candidate {
+        for c in &candidates {
             if first
                 .as_ref()
                 .is_none_or(|f| f.x.is_empty() && !c.x.is_empty())
@@ -610,7 +636,7 @@ pub fn solve_mpcc(
                 first = Some(c.clone());
             }
         }
-        if let Some(c) = candidate {
+        for c in candidates {
             if accepts(c.status, c.max_abs_product, tol) {
                 // Converged and physical; the certificate decides whether it
                 // is an answer. A lowered solve can stall short of a biactive
@@ -655,7 +681,7 @@ pub fn solve_mpcc(
                         accepted = Some((stage, c, cert, f));
                     }
                     if !compared(stage) {
-                        break;
+                        break 'ladder;
                     }
                     continue;
                 }

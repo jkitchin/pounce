@@ -478,10 +478,11 @@ fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
 /// ```
 ///
 /// `(0, 1)` at 0.81 is the optimum; `(0.9, 0)` at 1.0 is an S-stationary
-/// local minimum. From `(0.9, 0.01)` the exact product commits to the near
-/// branch and stops at the local minimum, while the relaxation sees both.
-/// Both stages run, and the lower objective is the answer whichever stage
-/// produced it.
+/// local minimum. From `(0.9, 0.01)` the cold exact product commits to the
+/// near branch and stops at the local minimum, while a relaxation sees both.
+/// Every candidate runs (the continuation, and the exact stage's relaxed path
+/// and cold solve), and the lower objective is the answer whichever produced
+/// it.
 #[test]
 fn the_continuation_and_the_exact_product_both_run_and_the_lower_objective_wins() {
     let zero = || vec![vec![0.0; 2]; 2];
@@ -519,7 +520,10 @@ fn the_continuation_and_the_exact_product_both_run_and_the_lower_objective_wins(
         .iter()
         .filter(|l| l.contains("solved the model"))
         .collect();
-    assert_eq!(solved.len(), 2, "both stages answer: {lines:#?}");
+    assert!(
+        solved.len() >= 2 && solved.iter().any(|l| l.contains("exact product")),
+        "both stages answer: {lines:#?}"
+    );
     assert!(
         out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
         "{:?} {lines:#?}",
@@ -788,7 +792,8 @@ fn when_no_stage_succeeds_the_exact_verdict_is_reported() {
 /// refused stage's empty point. The exact stage's relaxation `G·H <= 1e-6`
 /// contains the model and is infeasible too (the product is pinned at 1/4),
 /// so its verdict — infeasible, with a point — is the model's, and is what is
-/// reported.
+/// reported. Its cold solve is refused as `G·H = 0` (the square model) and
+/// retried as `G·H <= 0`, which reaches the same verdict.
 ///
 /// ```text
 /// min x^2 + y^2   s.t.  x + y = 1,  x - y = 0,   0 <= x ⟂ y >= 0
@@ -832,8 +837,15 @@ fn a_square_infeasible_model_reports_the_exact_verdict_with_a_point() {
         .iter()
         .filter(|s| s.stage == MpccStage::Exact)
         .collect();
-    assert_eq!(exact.len(), 1, "{:?}", out.solves);
+    assert_eq!(exact.len(), 3, "{:?}", out.solves);
     assert_eq!(exact[0].tau, Some(EXACT_STAGE_TAU), "{:?}", out.solves);
+    assert_eq!(
+        exact[1].status,
+        ApplicationReturnStatus::NotEnoughDegreesOfFreedom,
+        "the cold G·H = 0 is refused: {:?}",
+        out.solves
+    );
+    assert_eq!(exact[2].tau, None, "the G·H <= 0 retry: {:?}", out.solves);
     assert_eq!(
         exact[0].status,
         ApplicationReturnStatus::InfeasibleProblemDetected,
@@ -1333,14 +1345,14 @@ fn iteration_budgets_respect_and_restore_the_callers_max_iter() {
     }
 }
 
-/// The exact stage's three branches, by what its relaxed solve returns:
+/// The exact stage's relaxed path by what its relaxed solve returns --
 /// converged (tighten to the continuation's last `τ`, then the exact finish),
 /// infeasible (that verdict is the model's: the square infeasible model
-/// above), or failed some other way -- here out of iterations -- when it falls
-/// back to the exact product itself, cold, for an answer or a verdict of its
-/// own.
+/// above), or failed some other way (here out of iterations, when it
+/// contributes no candidate) -- and, whichever it is, the cold exact product
+/// after it.
 #[test]
-fn the_exact_stage_finishes_a_converged_relaxation_and_falls_back_on_a_failed_one() {
+fn the_exact_stage_runs_its_relaxed_path_and_the_cold_exact_product() {
     let run = |max_iter: Option<i32>| {
         let mut app = app();
         app.options_mut()
@@ -1364,17 +1376,18 @@ fn the_exact_stage_finishes_a_converged_relaxation_and_falls_back_on_a_failed_on
             .map(|s| s.tau)
             .collect()
     };
-    // Converged: relaxed, tightened, finished, and the answer is S.
+    // Converged: relaxed, tightened, finished; then the cold solve. The
+    // answer is S.
     let ok = run(None);
     assert_eq!(
         taus(&ok),
-        [Some(EXACT_STAGE_TAU), Some(1e-8), None],
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None, None],
         "{:?}",
         ok.solves
     );
     assert_eq!(ok.accepted_by, Some(MpccStage::Exact), "{:?}", ok.solves);
     // Out of iterations: the relaxation fails without a verdict, and the
-    // stage runs the exact product cold for one.
+    // cold solve still runs.
     let failed = run(Some(2));
     let exact: Vec<_> = failed
         .solves
@@ -1388,5 +1401,6 @@ fn the_exact_stage_finishes_a_converged_relaxation_and_falls_back_on_a_failed_on
         "{:?}",
         failed.solves
     );
-    assert_eq!(exact[1].tau, None, "no cold fallback: {:?}", failed.solves);
+    assert_eq!(exact.len(), 2, "{:?}", failed.solves);
+    assert_eq!(exact[1].tau, None, "no cold solve: {:?}", failed.solves);
 }
