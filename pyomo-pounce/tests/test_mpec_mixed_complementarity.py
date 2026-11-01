@@ -19,11 +19,14 @@ returned point is also checked against the complementarity directly, so a
 case cannot pass by landing on the unconstrained optimum.
 """
 import pyomo.environ as pyo
+import pyomo.version
 import pytest
 from pyomo.mpec import Complementarity, ComplementarityList, complements
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
 from pyomo_pounce import mpec as pp_mpec
+
+_PYOMO_VERSION = tuple(pyomo.version.version_info[:3])
 
 TOL = 1e-5
 
@@ -319,6 +322,14 @@ def test_a_pair_lost_in_the_written_file_is_refused(monkeypatch, pair, why):
     m = _model((0, 1))
     m.o = pyo.Objective(expr=(m.x - 0.3) ** 2 + (m.y - 0.5) ** 2)
     m.c = Complementarity(expr=pair(m))
+    if why == "carries 0" and _PYOMO_VERSION >= (6, 10, 1):
+        # Pyomo 6.10.1's mpec.nl no longer writes this form silently: it
+        # fails while building the row ("does not have a proper value").
+        # That is also fail-closed -- no `optimal` comes back -- so the
+        # property under test still holds, just raised by Pyomo first.
+        with pytest.raises(ValueError, match="proper value"):
+            pyo.SolverFactory("pounce").solve(m)
+        return
     with pytest.raises(pp_mpec.ComplementarityLoweringError, match=why) as ei:
         pyo.SolverFactory("pounce").solve(m)
     assert "pounce.Problem" in str(ei.value)
