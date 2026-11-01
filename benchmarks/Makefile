@@ -54,6 +54,7 @@ export IPOPT_LINEAR_SOLVER
 	gas-run gas-rerun water-run water-rerun \
 	qp-run qp-rerun qp-generate \
 	lp-run lp-rerun lp-generate \
+	lp-infeas-run lp-infeas-rerun lp-infeas-generate lp-infeas-score \
 	lp-convex-run lp-convex-rerun qp-convex-run qp-convex-rerun \
 	lbfgs-run lbfgs-rerun \
 	lpopt-run lpopt-rerun lpopt-generate \
@@ -100,6 +101,9 @@ help:
 	@echo "  qp-generate                (Re)generate the qp .nl files only (needs pyomo/scipy; downloads .mat)"
 	@echo "  lp-run          / -rerun   Netlib + small Meszaros LP validation set (.nl from generate_nl.py)"
 	@echo "  lp-generate                (Re)generate the lp .nl files only (needs highspy/pyomo; downloads MPS)"
+	@echo "  lp-infeas-run   / -rerun   Infeasible/unbounded LPs (NETLIB infeas + MIPLIB 2017 Infeas), scored vs labels"
+	@echo "  lp-infeas-generate         (Re)generate the lp_infeas .nl + labels.json (needs highspy/pyomo; downloads MPS)"
+	@echo "  lp-infeas-score            Re-score lp_infeas/pounce.json against the labels (no solves)"
 	@echo "  lp-convex-run   / -rerun   LP head-to-head: pounce-convex (lp-ipm) vs pounce-nlp (reuses lp .nl)"
 	@echo "  qp-convex-run   / -rerun   QP head-to-head: pounce-convex (qp-ipm) vs pounce-nlp (reuses qp .nl)"
 	@echo "  lbfgs-run       / -rerun   Hessian head-to-head: exact vs limited-memory (reuses mittelmann .nl)"
@@ -165,6 +169,7 @@ QP_DIR          := $(REPO_ROOT)/benchmarks/qp
 LP_DIR          := $(REPO_ROOT)/benchmarks/lp
 LPOPT_DIR       := $(REPO_ROOT)/benchmarks/lpopt
 LP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/lp_convex
+LP_INFEAS_DIR   := $(REPO_ROOT)/benchmarks/lp_infeas
 QP_CONVEX_DIR   := $(REPO_ROOT)/benchmarks/qp_convex
 LBFGS_DIR       := $(REPO_ROOT)/benchmarks/lbfgs
 
@@ -193,6 +198,7 @@ nldir_mittelmann  := $(POUNCE_BENCH_DATA)/mittelmann/nl
 nldir_qp          := $(POUNCE_BENCH_DATA)/qp/nl
 nldir_lp          := $(POUNCE_BENCH_DATA)/lp/nl
 nldir_lpopt       := $(POUNCE_BENCH_DATA)/lpopt/nl
+nldir_lp_infeas   := $(POUNCE_BENCH_DATA)/lp_infeas/nl
 nldir_mpcc_nl     := $(POUNCE_BENCH_DATA)/mpcc_nl/nl
 nldir_macmpec     := $(POUNCE_BENCH_DATA)/macmpec/nl
 
@@ -351,6 +357,31 @@ lp-run: $(LP_DIR)/pounce.json
 lp-rerun:
 	rm -f $(LP_DIR)/pounce.json
 	$(MAKE) lp-run
+
+# Infeasible / unbounded LPs (benchmarks/lp_infeas/README.md). Every instance
+# has no optimum and a known label; score.py classifies each run correct /
+# wrong / unresolved and exits non-zero on a wrong verdict. labels.json is
+# both the generation stamp and the scorer's input. Generation downloads
+# ~130 MB of MIPLIB 2017 Infeas MPS (size-capped, see generate_nl.py) and
+# records HiGHS's verdict on each as the reference column.
+$(nldir_lp_infeas)/labels.json: $(LP_INFEAS_DIR)/generate_nl.py $(LP_DIR)/mps_to_nl.py
+	python3 $(LP_INFEAS_DIR)/generate_nl.py --out-dir $(nldir_lp_infeas) --check-labels
+
+lp-infeas-generate: $(nldir_lp_infeas)/labels.json
+
+$(LP_INFEAS_DIR)/pounce.json: $(POUNCE_BIN) $(nldir_lp_infeas)/labels.json
+	$(NL_DRIVER) lp_infeas $(nldir_lp_infeas) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+lp-infeas-score:
+	python3 $(LP_INFEAS_DIR)/score.py $(nldir_lp_infeas)/labels.json \
+		$(LP_INFEAS_DIR)/pounce.json --md $(LP_INFEAS_DIR)/score.md
+
+lp-infeas-run: $(LP_INFEAS_DIR)/pounce.json
+	$(MAKE) lp-infeas-score
+
+lp-infeas-rerun:
+	rm -f $(LP_INFEAS_DIR)/pounce.json
+	$(MAKE) lp-infeas-run
 
 # Head-to-head suites: the dedicated convex interior-point solver
 # (pounce-convex, via solver_selection=lp-ipm / qp-ipm) vs the general NLP

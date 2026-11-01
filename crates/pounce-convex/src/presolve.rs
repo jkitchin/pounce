@@ -652,7 +652,7 @@ const FORCING_PIN_TOL: f64 = BOUND_FEAS_TOL;
 /// at one ULP (gh#496). Matches [`ACTIVITY_TOL`], the same feasibility
 /// question asked of a row that kept its coefficients, and sits far above
 /// accumulated `f64` cancellation yet far below any real conflict.
-const EMPTY_ROW_TOL: f64 = 1e-9;
+pub(crate) const EMPTY_ROW_TOL: f64 = 1e-9;
 /// How close `x_i` must be to a box bound to count it *active* when
 /// recovering bound multipliers. Looser than [`BOUND_FEAS_TOL`] because an
 /// interior-point solve only drives a variable to within ~1e-8 of a bound,

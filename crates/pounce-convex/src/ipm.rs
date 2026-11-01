@@ -6191,6 +6191,7 @@ pub(crate) fn detect_infeasibility(
         y,
         z,
         opts,
+        true,
         |z, tol| z.iter().all(|&zi| zi >= -tol),
         |gd, tol| gd.iter().all(|&v| v <= tol),
     )
@@ -6225,6 +6226,7 @@ pub(crate) fn detect_infeasibility_cone(
         y,
         z,
         opts,
+        cone.is_orthant(),
         |z, tol| cone.in_dual_cone(z, tol),
         |gd, tol| {
             // `−Gd ∈ K`; K self-dual here ⇒ test via `in_dual_cone`.
@@ -6234,12 +6236,14 @@ pub(crate) fn detect_infeasibility_cone(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn detect_infeasibility_with(
     prob: &QpProblem,
     x: &[f64],
     y: &[f64],
     z: &[f64],
     opts: &QpOptions,
+    orthant: bool,
     dual_cone_ok: impl Fn(&[f64], f64) -> bool,
     primal_recession_ok: impl Fn(&[f64], f64) -> bool,
 ) -> Option<QpStatus> {
@@ -6272,6 +6276,14 @@ pub(crate) fn detect_infeasibility_with(
         let cert = dot(&prob.b, y) + dot(&prob.h, z); // bᵀy + hᵀz
         let z_ok = dual_cone_ok(z, ctol * dual_norm);
         if cert < -ctol * dual_norm && inf_norm(&resid) <= rtol * dual_norm && z_ok {
+            return Some(QpStatus::PrimalInfeasible);
+        }
+        // A Farkas ray whose value is too small *relative to `‖(y,z)‖`* for
+        // the margin above can still be an exact proof once the variables'
+        // own bounds are brought in. On an orthant, a feasible `x` satisfies
+        // `(Aᵀy+Gᵀz)ᵀx ≤ bᵀy+hᵀz`; if no `x` in the bound box can, there is
+        // no feasible point. See [`farkas_box_proof`].
+        if orthant && cert < 0.0 && farkas_box_proof(prob, y, z) {
             return Some(QpStatus::PrimalInfeasible);
         }
     }
@@ -6331,6 +6343,267 @@ pub(crate) fn detect_infeasibility_with(
     }
 
     None
+}
+
+/// Prove primal infeasibility from a Farkas pair `(y, z)` and the variable
+/// box, with rounding accounted for — an exact test, not a tolerance.
+///
+/// For any `x` with `Ax = b`, `Gx ≤ h` and `z ≥ 0`,
+/// `rᵀx = yᵀAx + zᵀGx ≤ bᵀy + hᵀz =: β`, where `r = Aᵀy + Gᵀz`. So if
+/// `min { rᵀx : x ∈ box } > β`, no feasible `x` exists. The box is the
+/// declared `lb/ub` intersected with every singleton row of `G` (on an
+/// orthant a singleton row *is* a bound; `solve_qp_ipm` expands the box into
+/// exactly such rows). `z` is clipped to `z⁺ = max(z, 0)` first, so the
+/// inequality holds without a cone tolerance.
+///
+/// Why it exists: the ratio test in [`detect_infeasibility_with`] wants
+/// `β < −infeas_tol·‖(y,z)‖∞`. That margin is what keeps a feasible
+/// large-`‖x*‖` model (POWELL20) from being certified off an approximate ray,
+/// but it also rejects a converged, machine-precision ray when the model is
+/// infeasible by a margin that is small relative to its multipliers. On
+/// MIPLIB 2017 Infeas `cmflsp50-24-8-8` the IPM reached `‖r‖ ≈ 2e-16·‖(y,z)‖`
+/// with `β ≈ −6.4e-9·‖(y,z)‖`, and then iterated on that same ray to the
+/// iteration limit (KKT error 1e115) and a 3-minute NLP fallback. Over the
+/// box `min rᵀx ≈ −6e-10` against `β ≈ −1.1e-4`: a proof by five orders.
+/// POWELL20 cannot pass this way, because a feasible point lies in its box.
+///
+/// Rounding: `β` and each `rⱼ` are dot products, each perturbed by at most
+/// `γ_L·Σ|terms|` (`γ_L = L·ε/(1−L·ε)`, `L` the length); the bound check
+/// widens the box by a few ulps; and the final sum adds its own `γ_n` term.
+/// Every slack is charged *against* the proof, so a borderline ray is
+/// rejected rather than accepted. An infinite bound on a column with a
+/// non-zero (or uncertain) `rⱼ` makes the minimum `−∞`: no proof.
+pub(crate) fn farkas_box_proof(prob: &QpProblem, y: &[f64], z: &[f64]) -> bool {
+    let n = prob.n;
+    let eps = f64::EPSILON;
+    let gamma = |len: usize| {
+        let le = (len as f64 + 2.0) * eps;
+        le / (1.0 - le)
+    };
+    let zp: Vec<f64> = z.iter().map(|&v| v.max(0.0)).collect();
+
+    // β = bᵀy + hᵀz⁺ and an upper bound on its rounding error.
+    let beta = dot(&prob.b, y) + dot(&prob.h, &zp);
+    let beta_mag: f64 = prob
+        .b
+        .iter()
+        .zip(y)
+        .map(|(b, y)| (b * y).abs())
+        .sum::<f64>()
+        + prob
+            .h
+            .iter()
+            .zip(&zp)
+            .map(|(h, z)| (h * z).abs())
+            .sum::<f64>();
+    let beta_hi = beta + gamma(prob.b.len() + prob.h.len()) * beta_mag;
+    // NaN anywhere in the data makes this no proof.
+    if beta_hi.is_nan() || beta_hi >= 0.0 {
+        return false;
+    }
+
+    // r = Aᵀy + Gᵀz⁺, with per-column magnitude and term count for its error.
+    let mut r = vec![0.0; n];
+    prob.at_mul(y, &mut r);
+    prob.gt_mul(&zp, &mut r);
+    let mut mag = vec![0.0; n];
+    let mut len = vec![0usize; n];
+    for t in &prob.a {
+        mag[t.col] += (t.val * y[t.row]).abs();
+        len[t.col] += 1;
+    }
+    for t in &prob.g {
+        mag[t.col] += (t.val * zp[t.row]).abs();
+        len[t.col] += 1;
+    }
+
+    // The box: declared bounds, tightened by singleton rows of G.
+    let mut lo: Vec<f64> = (0..n).map(|j| prob.lb_of(j)).collect();
+    let mut hi: Vec<f64> = (0..n).map(|j| prob.ub_of(j)).collect();
+    // Per row: `Some((col, coeff))` while it touches one column, `None` after.
+    let mut single: Vec<Option<Option<(usize, f64)>>> = vec![Some(None); prob.m_ineq()];
+    for t in &prob.g {
+        if t.val == 0.0 {
+            continue;
+        }
+        single[t.row] = match single[t.row] {
+            Some(None) => Some(Some((t.col, t.val))),
+            Some(Some((c, v))) if c == t.col => Some(Some((c, v + t.val))),
+            _ => None,
+        };
+    }
+    for (row, entry) in single.iter().enumerate() {
+        if let Some(Some((col, a))) = *entry {
+            if a == 0.0 {
+                continue;
+            }
+            // a·x ≤ h. Widen the quotient by a few ulps so rounding in the
+            // division can only loosen the box.
+            let q = prob.h[row] / a;
+            let q = if a > 0.0 {
+                q + 4.0 * eps * q.abs()
+            } else {
+                q - 4.0 * eps * q.abs()
+            };
+            if a > 0.0 {
+                hi[col] = hi[col].min(q);
+            } else {
+                lo[col] = lo[col].max(q);
+            }
+        }
+    }
+
+    // Lower bound on min over the box of rᵀx, with every rⱼ ranging over
+    // [rⱼ − eⱼ, rⱼ + eⱼ].
+    let mut lower = 0.0;
+    let mut lower_mag = 0.0;
+    for j in 0..n {
+        let e = gamma(len[j]) * mag[j];
+        let (rl, rh) = (r[j] - e, r[j] + e);
+        if rl == 0.0 && rh == 0.0 {
+            continue;
+        }
+        // min over x ∈ [lo, hi], ρ ∈ [rl, rh] of ρ·x is attained at a corner.
+        let mut m = f64::INFINITY;
+        for &rho in &[rl, rh] {
+            for &xv in &[lo[j], hi[j]] {
+                let p = if rho == 0.0 { 0.0 } else { rho * xv };
+                m = m.min(p);
+            }
+        }
+        if !m.is_finite() || lo[j] > hi[j] {
+            // `lo > hi` would itself be an infeasibility, but it is the
+            // presolve's and the box screen's to report, not this test's.
+            return false;
+        }
+        lower += m;
+        lower_mag += m.abs();
+    }
+    let lower_lo = lower - gamma(n) * lower_mag;
+    lower_lo > beta_hi
+}
+
+#[cfg(test)]
+mod farkas_box_proof_tests {
+    //! [`farkas_box_proof`]: each branch of the rule gets its own fixture —
+    //! the weak-but-exact ray it exists to accept, a feasible model, a free
+    //! column that leaves `min rᵀx = −∞`, and a conflict at rounding level
+    //! that must be charged against the proof rather than accepted.
+    use super::{QpOptions, QpProblem, QpStatus, detect_infeasibility, farkas_box_proof};
+    use crate::qp::Triplet;
+
+    /// `−x0 − x1 ≤ h0` with `x0, x1 ∈ [0, 1]` as singleton rows (the shape
+    /// `solve_qp_ipm` hands the drivers: rows 1–4 are `x0 ≤ 1`, `x1 ≤ 1`,
+    /// `−x0 ≤ 0`, `−x1 ≤ 0`). Infeasible iff `−h0 > 2`.
+    fn two_var(h0: f64) -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -1.0),
+                Triplet::new(0, 1, -1.0),
+                Triplet::new(1, 0, 1.0),
+                Triplet::new(2, 1, 1.0),
+                Triplet::new(3, 0, -1.0),
+                Triplet::new(4, 1, -1.0),
+            ],
+            h: vec![h0, 1.0, 1.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    /// The Farkas ray of `two_var`: the coupling row plus both upper bounds.
+    const RAY: [f64; 5] = [1.0, 1.0, 1.0, 0.0, 0.0];
+
+    #[test]
+    fn weak_exact_ray_is_proved_by_the_box() {
+        // Infeasible by 1e-8: `x0 + x1 ≥ 2 + 1e-8` against `x0, x1 ≤ 1`.
+        // The ray has `r = 0` exactly and `β = −1e-8` — inside the ratio
+        // test's `infeas_tol·‖z‖ = 1e-7` margin, so only the box proof can
+        // certify it.
+        let prob = two_var(-(2.0 + 1e-8));
+        let (x, y, z) = (vec![0.0, 0.0], vec![], RAY.to_vec());
+        let beta: f64 = prob.h.iter().zip(&z).map(|(h, z)| h * z).sum();
+        assert!(
+            beta > -QpOptions::default().infeas_tol,
+            "the ratio test must not be the one that fires"
+        );
+        assert!(farkas_box_proof(&prob, &y, &z));
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &QpOptions::default()),
+            Some(QpStatus::PrimalInfeasible)
+        );
+    }
+
+    #[test]
+    fn a_feasible_model_is_never_proved_infeasible() {
+        // `x0 + x1 ≥ 2 − 1e-8` with both `≤ 1`: feasible. Same ray, β > 0.
+        let prob = two_var(-(2.0 - 1e-8));
+        assert!(!farkas_box_proof(&prob, &[], &RAY));
+        // A ray with a non-zero residual whose box minimum sits below β:
+        // `z = e₀` gives `r = (−1, −1)`, `β = −2 + 1e-8`, box minimum `−2`.
+        assert!(!farkas_box_proof(&prob, &[], &[1.0, 0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(
+            detect_infeasibility(&prob, &[0.0, 0.0], &[], &RAY, &QpOptions::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unbounded_column_with_residual_blocks_the_proof() {
+        // `−x0 − x1 ≤ −2`, `x0 ≤ 1`, x1 free: feasible (x1 = 1). The
+        // candidate `z = (1, 1)` has `β = −1` but `r = (0, −1)` on a free
+        // column, so `min rᵀx = −∞`.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -1.0),
+                Triplet::new(0, 1, -1.0),
+                Triplet::new(1, 0, 1.0),
+            ],
+            h: vec![-2.0, 1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(!farkas_box_proof(&prob, &[], &[1.0, 1.0]));
+    }
+
+    #[test]
+    fn a_rounding_level_conflict_is_not_a_proof() {
+        // `x0 + x1 ≥ 2 + 2ε` against both `≤ 1`: infeasible in exact
+        // arithmetic, but `β = −2ε` is inside the rounding error of the dot
+        // product that computed it. The error bound is charged against the
+        // proof.
+        let prob = two_var(-(2.0 + 2.0 * f64::EPSILON));
+        assert!(!farkas_box_proof(&prob, &[], &RAY));
+    }
+
+    #[test]
+    fn declared_bounds_count_as_box() {
+        // The box on `lb/ub` instead of in `G`: `−x0 − x1 ≤ −(2 + 1e-6)`,
+        // `x ∈ [−10, 1]²`. The ray is `z = 1` on the one row: `r = (−1, −1)`,
+        // `β = −(2 + 1e-6)`, and over the box `min rᵀx = −2 > β`.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0), Triplet::new(0, 1, -1.0)],
+            h: vec![-(2.0 + 1e-6)],
+            lb: vec![-10.0, -10.0],
+            ub: vec![1.0, 1.0],
+        };
+        assert!(farkas_box_proof(&prob, &[], &[1.0]));
+    }
 }
 
 #[cfg(test)]
