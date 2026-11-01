@@ -476,8 +476,9 @@ engine. `max_cpu_time` remains an NLP-side option and is not forwarded.
 
 ### Infeasible and unbounded problems
 
-The convex solver detects infeasibility and unboundedness directly,
-reporting a clean status instead of exhausting the iteration budget:
+The convex solver detects infeasibility and unboundedness directly, from
+the iterates themselves, rather than inferring them from a solve that ran
+out of budget:
 
 - **Primal infeasible** — no point satisfies the constraints. Reported
   with AMPL `solve_result_num` 200.
@@ -485,11 +486,42 @@ reporting a clean status instead of exhausting the iteration budget:
   bound along a feasible direction. Reported with `solve_result_num`
   300.
 
-Each verdict is backed by a *verified* certificate (a Farkas
+Each verdict is backed by a *verified* certificate — a Farkas
 infeasibility proof or an unbounded recession direction that is checked,
-not merely inferred), so these statuses are never reported in error; a
-problem the solver cannot certify simply runs to the iteration limit —
-and, if it is an LP under `auto`, is then handed to the NLP path (above).
+not merely inferred — so these statuses are not reported in error. A
+problem the solver cannot certify is not given one of them: it runs to the
+iteration limit and, if it is an LP under `auto`, is handed to the NLP
+path (above).
+
+**Detection is not guaranteed, only correctness.** Every iteration tests
+the dual iterate `(y, z)` as a Farkas ray, in two ways:
+
+1. **The ratio test.** `bᵀy + hᵀz < −qp_infeas_tol·‖(y, z)‖∞` with
+   `‖Aᵀy + Gᵀz‖∞ ≤ 1e-10·‖(y, z)‖∞`. The margin is what keeps a feasible
+   model with a very large solution (POWELL20, `‖x*‖ ≈ 1e7`) from being
+   certified off an approximate ray.
+2. **The box proof** (LP and QP only). Any feasible `x` satisfies
+   `(Aᵀy + Gᵀz)ᵀx ≤ bᵀy + hᵀz`. If no `x` within the variable bounds can,
+   the model is infeasible. Every rounding error in the computation is
+   charged against the proof, so this is exact rather than a tolerance and
+   cannot accept a feasible model.
+
+The ratio test alone used to miss models that are infeasible by a margin
+small relative to their multipliers. The solve converged to a
+machine-precision ray, the test rejected it every iteration, and the
+iterate diverged to the 200-iteration limit (KKT error ~1e115) before the
+NLP fallback took over. On MIPLIB 2017 Infeas `cmflsp50-24-8-8` the ray had
+`bᵀy + hᵀz ≈ −6.4e-9·‖(y, z)‖`, against a margin of `1e-7`. The box proof
+catches that case whenever the variables are bounded.
+
+It can still happen when they are not. With a free variable carrying a
+non-zero residual, the box proof has nothing to work with, so a weak but
+genuine ray goes uncertified. That ends either in the NLP fallback,
+which can reach `Infeasible_Problem_Detected` through its own
+restoration phase (`cmflsp50-24-8-8` did, before the box proof, in 197
+more iterations), or at a time limit. Unbounded models have no
+equivalent second test. Detection rates and times on a public corpus are
+in [`benchmarks/lp_infeas`](https://github.com/jkitchin/pounce/tree/main/benchmarks/lp_infeas/README.md).
 
 `solver_selection=qp-active-set` follows the same contract. Its inner QP
 certifies the recession ray of the *linearization*, which on a nonlinear
