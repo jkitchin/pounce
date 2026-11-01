@@ -1242,6 +1242,7 @@ fn detect_infeasibility_nscone(
         y,
         z,
         opts,
+        false,
         |z, tol| cone.in_dual_cone(z, tol),
         |gd, tol| {
             // `−Gd ∈ K`; the non-symmetric cone is NOT self-dual, so this

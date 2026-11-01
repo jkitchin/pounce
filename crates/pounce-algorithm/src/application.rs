@@ -8450,6 +8450,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("perturb_slack_fact") {
             builder.perturbation.perturb_slack_fact = v;
         }
+        if let Some(v) = read_int("perturb_slack_max_rows") {
+            builder.perturbation.perturb_slack_max_rows = v;
+        }
 
         // Iterative-refinement constants (#191), consumed by
         // `PdFullSpaceSolver`. Registered but never read.

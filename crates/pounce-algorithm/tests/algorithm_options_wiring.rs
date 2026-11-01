@@ -516,3 +516,16 @@ fn perturb_slack_fact_default_and_upstream() {
     });
     assert!((b.perturbation.perturb_slack_fact - 0.03).abs() < 1e-15);
 }
+
+#[test]
+fn perturb_slack_max_rows_default_and_upstream() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.perturbation.perturb_slack_max_rows, 1000);
+    // `0` disables the cap; with `perturb_slack_fact=1` that is upstream.
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("perturb_slack_max_rows", 0, true, false)
+            .unwrap();
+    });
+    assert_eq!(b.perturbation.perturb_slack_max_rows, 0);
+}

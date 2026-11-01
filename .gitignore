@@ -94,6 +94,8 @@
 # ignored like every other suite.
 !/benchmarks/lp/generate_nl.py
 !/benchmarks/lp/mps_to_nl.py
+!/benchmarks/lp_infeas/generate_nl.py
+!/benchmarks/lp_infeas/score.py
 !/benchmarks/lpopt/build_subset.py
 !/benchmarks/lpopt/mps_to_nl.py
 # The kkt_scaling suite (structured-KKT Phase 0b) is a Python harness over

@@ -105,6 +105,46 @@ changes.
   instead of 10 (`dempe` 28.25 against 31.25, `ex9.2.5` 5 against 9, both
   checked feasible), 3 worse instead of 4, none lost; one CALIPSO bunny-hop
   start improves. It costs about a fifth more time.
+- **The slack-block inertia perturbation is budgeted by row count, and
+  Mittelmann `qcqp1500-1nc` no longer crawls (gh #1098).** When the
+  factorization reports the wrong inertia, upstream Ipopt adds the same
+  `δ_s = δ_x` it puts on the Hessian block to every slack row. On an
+  inactive inequality the slack row's own curvature `Σ_s = v/s` is tiny, so
+  there `δ_s` is the row's whole contribution to the curvature along a
+  direction, and summed over thousands of inactive rows it dominates the
+  genuine curvature: successive regularized directions disagree and the
+  solver sits at a fixed `μ` — `qcqp1500-1nc` (1500 variables, 10005
+  inequalities) for 1200 iterations at `μ = 1.8e-6`, past the 300 s limit,
+  in pounce since 49ab28aa and in Ipopt 3.14. The rule is now
+  `δ_s = perturb_slack_fact · min(1, perturb_slack_max_rows / m_d) · δ_x`
+  with a new integer option `perturb_slack_max_rows` (default 1000, `0`
+  disables; with the default `perturb_slack_fact=1` that is upstream
+  exactly). It holds `δ_s · m_d`, the total the perturbation adds to the
+  slack block's trace, at a 1000-row model's level: a model with at most
+  1000 inequality rows is solved exactly as before — every CLI fixture
+  (largest: `deb7`, 351 rows) and the Water suite (at most 84) included —
+  and above it the factor decays as `1/m_d`. Measured against main at
+  defaults, exact-Hessian leg (L-BFGS never raises `δ_x`): Mittelmann
+  `qcqp1500-1nc` from the 300 s limit (362 iterations, `μ` stalled) to
+  Optimal in 128 iterations and 47 s, and over the 43 Mittelmann lines that
+  end in a verdict on both sides 4347 → 3899 iterations, with `arki0009`
+  (328 → 332) the only line the budget alone makes longer, `NARX_CFy`
+  converging to a lower local minimum (8.590e-3 → 8.526e-3, 378 → 305
+  iterations) and the three `robot_*` models (52 013 rows) doing less
+  total work with the gh#983 scale audit now promoting its re-solve on
+  `robot_b` and `robot_c`; `qcqp1500-1c` still times out, unchanged
+  through every row it reaches (`dev-notes/known-limitations.md`).
+  `benchmarks/grid` 1261 → 909 iterations (`pglib_case1888_rte`
+  501 → 183, nothing worse), `benchmarks/grid_ecf` 1031 → 981 (two models
+  one iteration longer); fixture sweep 252/252 lines and Water identical.
+  A fixed `perturb_slack_fact=0.03` (PR #1113, opt-in) also solves
+  `qcqp1500-1nc` but moves 14 fixture-legs and about twenty regression
+  tests on small models, and its response is not smooth in the factor; it
+  stays at 1 and composes with the budget as the factor *below* the cap.
+  `manyineq_concave_qp` (1100 rows, `scripts/gen-manyineq-nl.py`) is the
+  fixture that reaches the budgeted branch, since no existing one could.
+  Documented in `docs/src/options.md`; full account in
+  `dev-notes/qcqp1500-crawl-slack-perturbation.md`.
 - **Declared complementarity spends less on second opinions.** Under the
   default `complementarity_strategy=both`, the exact-product stage used to run
   to completion even after the continuation had answered, and on MacMPEC it
@@ -118,6 +158,28 @@ changes.
   `pack-comp1-32` 252 s → 120 s.
 
 ### Fixed
+- **The convex LP/QP solver certifies infeasibility from a converged Farkas
+  ray it used to reject.** The certificate test wanted `bᵀy + hᵀz` below
+  `−infeas_tol·‖(y,z)‖`; a model infeasible by a margin small relative to its
+  multipliers reached a machine-precision ray that missed that margin and
+  iterated on it to the 200-iteration limit (KKT error ~1e115), then fell
+  back to the NLP path. A second, exact test now brings in the variable box:
+  when no `x` in the bounds can satisfy `(Aᵀy+Gᵀz)ᵀx ≤ bᵀy+hᵀz`, with every
+  rounding error charged against the proof, the model is infeasible. On
+  MIPLIB 2017 Infeas, `cmflsp50-24-8-8` goes from 184 s (NLP fallback) to
+  28 s, and `momentum1` (5 s), `neos-662469` (107 s) and `atlanta-ip`
+  (30 s) are certified where they previously timed out at 600 s. Across the
+  93 primal-infeasible instances with at most 300k nonzeros, those certified
+  within 120 s go from 82 to 85, and 37 of the rest stop 1–8 iterations
+  sooner; no verdict changes on the 54 unbounded ones.
+- **Presolve no longer "proves" infeasibility from rounding on a row emptied
+  by aggregation.** Doubleton aggregation can pin a column and empty a row to
+  `0 ≤ h − Σ aⱼ·shiftⱼ`; that computed residual (e.g. `−1.3e-15`) was passed
+  to the next round's empty-row screen, which compares against exact zero,
+  and a feasible model was rejected at iteration 0. The residual is now
+  judged against `EMPTY_ROW_TOL × (1 + scale)`, as a row emptied by fixing
+  already was (gh#496). Seen on MIPLIB 2017 Infeas `dws008-03`/`dws012-02`,
+  which are infeasible but were rejected for this reason.
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
   the server failed at import (`No module named 'mcp.server.fastmcp'`).

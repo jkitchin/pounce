@@ -21,9 +21,10 @@ described below, and do not publish it. Some of those files carry license
 restrictions that do not allow redistribution. For example, the Mittelmann
 `.nl` files are AMPL translations of Mittelmann's models, and `gams/nlpbench`
 is a private GAMS-licensed clone. So the published results cannot be
-reproduced from this repository alone. Three suites can be regenerated from
-public sources: `make qp-generate`, `make lp-generate` and
-`make large-scale-generate` download or build their inputs. The
+reproduced from this repository alone. Four suites can be regenerated from
+public sources: `make qp-generate`, `make lp-generate`,
+`make lp-infeas-generate` and `make large-scale-generate` download or build
+their inputs. The
 `robot_a/b/c` Mittelmann instances can also be written without AMPL
 (`mittelmann/gen_robot_nl.py`). For every other suite, the tracked README
 says where the problems come from.
@@ -55,6 +56,7 @@ $POUNCE_BENCH_DATA/
   mittelmann/nl/*.nl
   qp/nl/*.nl
   lp/nl/*.nl
+  lp_infeas/nl/*.nl  (+ labels.json)
   lpopt/nl/*.nl
 ```
 
@@ -74,7 +76,7 @@ cd benchmarks
 # reproduces the path under the new root:
 rsync -a --relative \
   vanderbei/nl electrolyte/nl grid/nl cho/nl_export_results \
-  large_scale/nl mittelmann/nl qp/nl lp/nl lpopt/nl \
+  large_scale/nl mittelmann/nl qp/nl lp/nl lp_infeas/nl lpopt/nl \
   "$POUNCE_BENCH_DATA/"
 # gas/ and water/ keep their .nl flat alongside a tracked README — copy just
 # the .nl:
@@ -111,6 +113,7 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 | [`mittelmann/`](mittelmann/README.md) | Mittelmann ampl-nlp | 47 problems, up to 261k vars | Standard public NLP benchmark |
 | [`qp/`](qp/README.md)               | Convex QP (Maros-Mészáros) | 138 problems, up to ~93k vars | Standard convex-QP benchmark; `.nl` from a generator that converts the qpsolvers `.mat` mirror |
 | [`lp/`](lp/README.md)               | Linear programs (Netlib + small Mészáros) | small, known optima | LP *validation* set — small classic LPs pounce solves to optimality; `.nl` converted from MPS via `generate_nl.py` |
+| [`lp_infeas/`](lp_infeas/README.md) | LPs with **no** optimum: primal-infeasible and unbounded | 29 NETLIB + 147 MIPLIB 2017 Infeas, up to 300k nonzeros | Infeasibility/unboundedness *detection*: every instance carries a known label and is scored correct / wrong / unresolved by `score.py`, with HiGHS as the reference; no Ipopt reference and not in the composite report |
 | [`lpopt/`](lpopt/README.md)         | Hard linear programs (Mittelmann lpopt) | large/degenerate subset | LP *stress* tier from the plato lpopt benchmark (even HiGHS/ipopt time out at short limits); run with a long limit |
 | [`water/`](water/README.md)         | Water-network design | 6 problems | MINLPLib instances, signomial nonlinearities |
 | [`warmstart/`](warmstart/README.md) | Parametric NLP **sequences** | 6 families × 3 step sizes | The one suite that is not a cold-solve set: measures warm starting (cold vs warm × IPM vs active-set SQP) over paths of related NLPs. Python-driven, not `.nl` |

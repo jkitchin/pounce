@@ -61,83 +61,75 @@ in the benchmark data root (`macmpec/`).
 
 ---
 
-## NLP: qcqp1500-1nc crawls at the default; the fix is opt-in (`perturb_slack_fact=0.03`)
+## NLP: qcqp1500-1c hits the CPU limit at the default
 
-*Tracked in gh#1098. The crawl came in with 49ab28aa (#1077), which put
-pounce on Ipopt's trajectory; Ipopt crawls the same way. Recorded
-2026-10-28, revised 2026-10-31.*
+*Not tracked. This entry is what remains of gh#1098, which was closed on
+2026-11-01 when #1117 fixed `qcqp1500-1nc`. `qcqp1500-1c` has no known
+path to a fix, so per the tracker's planned-work-only rule it has no
+issue; its signature also differs from the crawl #1098 described. (#1098
+also listed `waterx` reaching a different local minimum than Ipopt; that
+is not a limitation for a local solver, so it is not recorded.) The 1nc crawl came
+in with 49ab28aa (#1077), which put pounce on Ipopt's trajectory; Ipopt
+crawls the same way. Recorded 2026-10-28, revised 2026-10-31 and
+2026-11-01.*
 
-**Scope.** The default exact-Hessian NLP path. The L-BFGS leg solves
-`qcqp1500-1nc`.
+**Scope.** The default exact-Hessian NLP path. The L-BFGS leg solves both
+`qcqp1500` models.
 
-### What is wrong
+### What was fixed
 
-At the default, Mittelmann `qcqp1500-1nc` sits at μ ≈ 1.8e-6 for about
-1200 iterations and hits the 300 s CPU limit. `qcqp1500-1c` behaves the
-same. `waterx` reaches f = 1019.7, where Ipopt reaches 944.6. The diagnosis
-is in `dev-notes/qcqp1500-crawl-slack-perturbation.md`: inertia correction
-puts `δ_s = δ_x` on the slack block, and the fraction-to-the-boundary rule
-pushes centered blocking pairs to `s·v ≈ μ²`.
+Mittelmann `qcqp1500-1nc` sat at μ ≈ 1.8e-6 for about 1200 iterations and
+hit the 300 s CPU limit. The diagnosis is in
+`dev-notes/qcqp1500-crawl-slack-perturbation.md`: inertia correction puts
+`δ_s = δ_x` on every slack row, and on the thousands of inactive rows that
+term is the whole curvature contribution, so successive regularized
+directions disagree. Since 2026-11-01 the default is a row budget,
+`δ_s = perturb_slack_fact · min(1, perturb_slack_max_rows / m_d) · δ_x`
+with `perturb_slack_max_rows = 1000`, and `qcqp1500-1nc` solves in
+128 iterations. Models with at most 1000 inequality rows are
+untouched; `perturb_slack_max_rows=0` is upstream's rule exactly. The
+Mittelmann before/after table is in the dev-note.
 
-### How big, and the opt-in
+### What is still wrong
 
-`perturb_slack_fact=0.03` scales the slack-block perturbation to
-`0.03·δ_x`. Measured against main `26991b7b`, three lanes at once, so the
-timings are approximate:
+- **`qcqp1500-1c`** still runs out the 300 s CPU limit, at the default and
+  under every rule measured for 1nc. Its signature is different: the
+  inertia correction never fires in the stretch it reaches (main and the
+  budgeted default are identical through every row), so the slack
+  perturbation has nothing to act on; the dual infeasibility stays near
+  1e6–1e7 while `inf_pr` falls, with line searches of up to 17 trials, and
+  it is around iteration 100–125 when the clock runs out.
+  `ftb_centrality_floor=0.01` with
+  `perturb_slack_fact=0.01` solves it (148 iterations) but turns the
+  `discs` fixture into a false `InfeasibleProblemDetected`, so neither is
+  on by default.
 
-| | main | `perturb_slack_fact=0.03` |
-|---|---|---|
-| Mittelmann solved | 44/47 | 45/47 |
-| Mittelmann total iterations | 5182 | 4355 |
-| qcqp1500-1nc | CPU limit | Optimal, 228 it |
-| qcqp1500-1c | CPU limit | CPU limit |
-| henon120 / lane_emden120 | 267 / 84 | 80 / 25 |
-| qcqp750-2c / dirichlet120 | 75 / 56 | 198 / 79 |
-| water4 / watersbp | 137 / 164 | 213 / 233 |
-| waterx | f = 1019.7 | f = 1151.5 |
-| fixture sweep | — | 14/252 lines move, no status loss, no new retry |
+### What has been tried
 
-`ftb_centrality_floor=0.01` together with `perturb_slack_fact=0.01` also
-solves `qcqp1500-1c` (148 it), but it turns the `discs` fixture into a false
-`InfeasibleProblemDetected`.
+- A fixed `perturb_slack_fact` (0.01–0.3): solves 1nc at 0.03–0.1, never
+  1c; breaks `cresc4` / `discs` at 0.01 and 0.1; moves 22 CLI tests at 0.03.
+- `(n/m_d)^p`, norm-based and per-row `Σ_s`-scaled rules for `δ_s`: each
+  measured and rejected in the dev-note (wrong basins on `discs`, retries
+  on `cresc4`, 2556 iterations on `pooling_rt2stp`).
+- `ftb_centrality_floor` (γ > 0): solves 1c with a small factor, false
+  infeasibility on `discs`; opt-in, default 0.
 
-### Why it is not the default
+### How to tell whether a fix works
 
-At 0.03, 22 `pounce-cli` regression tests that pass on main fail:
-
-- **About 10 are premise tests.** Their fixture, mostly `csfi2`, now
-  converges on the first attempt, so the retry or fallback they pin
-  (gh#748, #757, #1042, #616, one-verdict-per-run, #534, #592) never fires.
-- **About 6 assert an answer:**
-  - `false_local_infeasibility::hs13_from_remote_start_reaches_the_optimum`
-    gets 0.98168 where Ipopt gets 0.98493.
-  - `issue_250_dual_guard_never_worse` reads `autocorr_bern55-06` at −2368
-    as a worse basin than −2304, and its control fixture becomes
-    infeasible.
-  - `mpcc_qpec_small_biactive` fails in the #884 and #981 tests.
-  - `issue_1000` and `issue857` also move.
-
-### What a fix would look like
-
-Making 0.03 the default means triaging those 22 tests:
-
-- Re-point each premise test to a fixture that still reaches its branch.
-- For each answer test, decide whether the new answer is a regression.
-
-A per-row `δ_s` scaled by `Σ_s`, which regularizes only the slacks that
-need it, might move fewer of them, and might also solve `qcqp1500-1c`.
-
-Acceptance:
-
-1. `qcqp1500-1nc` solves within 300 s at the default.
-2. The workspace tests pass, with any re-pointed fixture explained.
-3. `scripts/sweep-fixtures.sh` on both legs, diffing the `2nd=` column as
-   well.
+1. `qcqp1500-1c` solves within 300 s at the default, and `qcqp1500-1nc`
+   stays at or near 128 iterations.
+2. `discs` and `cresc4` keep their verdicts on the first attempt (no
+   second-opinion rescue, `2nd=-` in the sweep).
+3. `scripts/sweep-fixtures.sh` on both legs, diffing `2nd=` and `mu=`, and
+   `benchmarks/grid` (15 of 22 models above the row cap) not worse than
+   909 iterations.
 
 ### When to revisit
 
 - The inertia-correction or `δ_s` handling changes.
-- A user reports a large QCQP stalling at a fixed μ with `inf_pr` near 1e-3.
+- A user reports a large QCQP stalling at a fixed μ with `inf_pr` near 1e-3
+  on a model with fewer than 1000 inequality rows — the budget does not
+  reach it, and `perturb_slack_fact` is the knob.
 
 ---
 

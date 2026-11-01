@@ -491,6 +491,78 @@ Where `delta_c` is the right remedy this never fires: on `eigena2` and
 (`maybe_withdraw_delta_c`) and
 `dev-notes/issue-592-restart-non-idempotence.md`.
 
+### Budgeting the slack perturbation (`perturb_slack_max_rows`, `perturb_slack_fact`)
+
+POUNCE extensions; not upstream Ipopt options. Defaults `1000` and `1`.
+`perturb_slack_max_rows=0` (or `perturb_slack_fact=1` on any model with
+at most `perturb_slack_max_rows` inequality rows) is upstream's rule
+exactly.
+
+When the factorization reports the wrong inertia, the solver adds
+`delta_w` to the Hessian block — that is where the curvature defect is —
+and upstream Ipopt adds the same `delta_s = delta_w` to every slack row
+as well. The slack row already carries `Sigma_s = v/s`, which is large
+on an active inequality and tiny on an inactive one, so on an inactive
+row the added `delta_s` is not a perturbation of something: it *is* the
+row's whole contribution, `delta_s * (J_i d)^2`, to the curvature along
+a direction `d`. Sum that over thousands of inactive rows and it
+dominates the genuine curvature, successive regularized directions
+disagree, and the solver crawls. That is
+[#1098](https://github.com/jkitchin/pounce/issues/1098): Mittelmann
+`qcqp1500-1nc` (1500 variables, 10005 inequalities) sits at
+`mu = 1.8e-6` for 1200 iterations and runs out the 300 s CPU limit;
+Ipopt 3.14 shows the same crawl.
+
+The rule is
+
+```text
+delta_s = perturb_slack_fact * min(1, perturb_slack_max_rows / m_d) * delta_w
+```
+
+with `m_d` the number of inequality rows. Below the cap nothing
+changes. Above it the factor decays as `1/m_d`, which holds
+`delta_s * m_d` — the total the perturbation adds to the slack block's
+trace — at the level a model with `perturb_slack_max_rows` rows would
+see. On `qcqp1500-1nc` that is a factor of `0.1`, and the model solves
+in 128 iterations.
+
+Why a row budget and not a smaller constant. A fixed
+`perturb_slack_fact=0.03` solves `qcqp1500-1nc` too, but it acts on
+every model, and its response is not smooth in the factor: measured on
+the CLI corpus, `0.01` sends `cresc4` and `discs` to a false
+infeasibility verdict on the first attempt, `0.1` leaves `discs`
+locally infeasible, and `0.03` moves 14 of 252 fixture-legs together
+with about twenty regression tests that pin retry and fallback
+behaviour on small models. The budget leaves every one of those alone
+by construction — the largest fixture has 351 inequality rows and the
+Water suite 84 — and engages where the mechanism it addresses can
+operate. Per-row rules keyed on `Sigma_s` were measured and rejected:
+on the small fixtures that regress, most rows also have
+`Sigma_s << delta_w` during the regularized phase, so a rule that
+scales each row by its own `Sigma_s` is the bad constant in disguise.
+
+What it costs. Measured against `main`, both at defaults, iteration
+counts: Mittelmann suite (47 models, 19 of them above the cap)
+`qcqp1500-1nc` from the 300 s limit to 128 iterations, and over the 43
+lines with a verdict on both sides 4347 → 3899, with `arki0009`
+(328 → 332) the only line the budget alone makes longer and `NARX_CFy`
+moving to a different (lower) local minimum — the full table, including
+the three `robot_*` lines the gh#983 scale audit re-solves, and the
+cap at 500 and 2000, is in the `dev-notes` entry; `benchmarks/grid` (AC-OPF,
+15 of 22 above the cap) 1261 → 909 iterations, `pglib_case1888_rte`
+501 → 183 and no model worse; `benchmarks/grid_ecf` 1031 → 981, with
+`pglib_case10000_goc` and `pglib_case162_ieee_dtc` each one iteration
+longer; the CLI fixture sweep and the Water suite unchanged on both
+legs. The option composes with `perturb_slack_fact`, which is the
+factor *below* the cap and the knob to reach for when a model with few
+inequalities shows the same signature (`delta_w > 0` on nearly every
+iteration, `alpha_pr ~ 1e-3`, `mu` stalled).
+
+The fixture that reaches the budgeted branch is `manyineq_concave_qp`
+(1100 inequality rows, `scripts/gen-manyineq-nl.py`); every other
+fixture is below the cap. Full account:
+`dev-notes/qcqp1500-crawl-slack-perturbation.md`.
+
 ### Inertia-free curvature test (`neg_curv_test_tol`)
 
 By default every KKT factorization is checked for the right inertia — as

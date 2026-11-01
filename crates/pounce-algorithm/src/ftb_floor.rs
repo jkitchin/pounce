@@ -44,7 +44,7 @@
 
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::iterates_vector::IteratesVector;
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use pounce_linalg::Vector;
 
 fn dense(v: &dyn Vector) -> Option<Vec<Number>> {
@@ -60,6 +60,15 @@ pub const DEFAULT_FTB_CENTRALITY_FLOOR: Number = 0.0;
 /// upstream Ipopt's tie; `0.03` solves gh#1098 but is opt-in, see the
 /// option's registration and `dev-notes/qcqp1500-crawl-slack-perturbation.md`.
 pub const DEFAULT_PERTURB_SLACK_FACT: Number = 1.0;
+
+/// Registered default of `perturb_slack_max_rows` (`δ_s = fact · min(1,
+/// max_rows / m_d) · δ_x`). On a model with at most this many inequality
+/// rows the rule is upstream's exactly; above it the slack-block
+/// perturbation is scaled down so that `δ_s · m_d` stays at the level a
+/// model with `max_rows` rows would see. `0` disables the cap. See
+/// `PdPerturbationHandler::delta_s_fact_effective` and
+/// `dev-notes/qcqp1500-crawl-slack-perturbation.md`.
+pub const DEFAULT_PERTURB_SLACK_MAX_ROWS: Index = 1000;
 
 /// Largest fraction of the step to the boundary the floor may take.
 /// Mathematically `f < 1` always (it is `1 − γμ/(s·v_new)`), but it rounds
