@@ -423,6 +423,34 @@ pub fn solve_mpcc(
                     break;
                 }
                 if converged(relaxed.status) && !relaxed.x.is_empty() {
+                    // One warm step down to the continuation's last `τ`
+                    // before the finish: an exact finish from `1e-6` is the
+                    // degenerate solve again (`incid-set2-32`: 679 iterations
+                    // to `max_iter`), and it can drift off the branch the
+                    // relaxed solve found (`water-net`: 927 to 964). Kept
+                    // only if it converges.
+                    baseline(app);
+                    for a in warm_start_assignments(relaxed.statistics.final_mu) {
+                        let _ = app.options_mut().read_from_str(&a, true);
+                    }
+                    if let Some(b) = budget {
+                        set_budget(app, b);
+                    }
+                    let tight = run(
+                        app,
+                        stage,
+                        Lowering::Relaxed(SCHOLTES_SCHEDULE[SCHOLTES_SCHEDULE.len() - 1]),
+                        Some(relaxed.warm()),
+                        &mut solves,
+                    );
+                    if halted() {
+                        break;
+                    }
+                    let relaxed = if converged(tight.status) {
+                        tight
+                    } else {
+                        relaxed
+                    };
                     let fb = finish_budget(iterations_of(&solves, MpccStage::Exact));
                     let finish = finish_from(app, stage, &relaxed, fb, &mut solves);
                     if halted() {
