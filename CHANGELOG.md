@@ -105,8 +105,11 @@ changes.
   when no `x` in the bounds can satisfy `(Aᵀy+Gᵀz)ᵀx ≤ bᵀy+hᵀz`, with every
   rounding error charged against the proof, the model is infeasible. On
   MIPLIB 2017 Infeas, `cmflsp50-24-8-8` goes from 184 s (NLP fallback) to
-  28 s, and `momentum1` (5 s) and `neos-662469` (107 s) are certified where
-  they previously timed out at 600 s.
+  28 s, and `momentum1` (5 s), `neos-662469` (107 s) and `atlanta-ip`
+  (30 s) are certified where they previously timed out at 600 s. Across the
+  93 primal-infeasible instances with at most 300k nonzeros, those certified
+  within 120 s go from 82 to 85, and 39 of the rest stop 1–8 iterations
+  sooner; no verdict changes on the 54 unbounded ones.
 - **Presolve no longer "proves" infeasibility from rounding on a row emptied
   by aggregation.** Doubleton aggregation can pin a column and empty a row to
   `0 ≤ h − Σ aⱼ·shiftⱼ`; that computed residual (e.g. `−1.3e-15`) was passed
