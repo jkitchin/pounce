@@ -4313,6 +4313,26 @@ fn run_convex_socp(
         println!("{line}");
     }
 
+    // Polish the answer in the original QCQP's terms (gh#1114): re-fit the
+    // multipliers a cone dual maps to only approximately, then take Newton
+    // steps on the original KKT system over the active set the solve
+    // identified. The conic gap certifies the objective, not `x` or the
+    // mapped multipliers to the same digits — measured, the returned
+    // `(x, λ)` missed the original stationarity by up to `9e-5` on fixtures
+    // reported `SolveSucceeded` with a conic `final_dual_inf` of `1e-12`.
+    // `None` for a non-optimal verdict, whose `(y, z)` is a certificate.
+    let recovery = timing.solution_recovery.guard();
+    let polished = pounce_cli::qcqp_polish::polish_qcqp(&qp, &cones, &con_map, &sol, &backend);
+    recovery.stop();
+    let sol = match &polished {
+        Some(p) => pounce_convex::QpSolution {
+            x: p.x.clone(),
+            obj: p.obj,
+            ..sol
+        },
+        None => sol,
+    };
+
     let reported_obj = sign * sol.obj + obj_const;
 
     let (msg, ok, srn) = convex_status_report(sol.status);
@@ -4328,18 +4348,19 @@ fn run_convex_socp(
     // legitimately violate `Gx ≤ h` at a perfectly feasible point, so the
     // orthant-only `kkt_residuals` reported a large bogus constraint violation
     // and NLP error for a solved problem (pounce#209).
-    let mut res = sol.kkt_residuals_conic(&qp, &cones);
-    // The multipliers the caller receives are the original QCQP's, mapped
-    // from the cone duals and re-fitted to its stationarity where the cone
-    // dual's misalignment left them short (gh#1114). `res` measured the
-    // *conic* stationarity, which a misaligned cone dual satisfies while the
-    // mapped multipliers miss the original one by orders more, so the
-    // reported dual infeasibility is the larger of the two: a number about
-    // the `(x, λ)` actually handed back.
-    let recovery = timing.solution_recovery.guard();
-    let duals = pounce_cli::qp_extract::polish_socp_multipliers(&qp, &cones, &con_map, &sol);
-    recovery.stop();
-    res.dual_infeasibility = res.dual_infeasibility.max(duals.dual_infeasibility);
+    //
+    // A polished solve reports the original problem's residuals instead: the
+    // conic ones are measured on the cone duals, whose misalignment they
+    // cannot see (gh#1114), and at a point the polish has since moved.
+    let res = match &polished {
+        Some(p) => pounce_convex::QpResiduals {
+            primal_infeasibility: p.residuals.primal_infeasibility,
+            bound_violation: p.residuals.bound_violation,
+            dual_infeasibility: p.residuals.dual_infeasibility,
+            complementarity: p.residuals.complementarity,
+        },
+        None => sol.kkt_residuals_conic(&qp, &cones),
+    };
     // Declared-model numbers for reporting, as on the QP path above: `qp`
     // carries the `bound_relax_factor` widening, so measuring against it
     // understates how far the returned point sits outside the model the
@@ -4368,10 +4389,14 @@ fn run_convex_socp(
     );
 
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
-    // constraint order and re-fitted to the original stationarity (see
-    // `polish_socp_multipliers`).
+    // constraint order — from the polish when there is one (gh#1114), whose
+    // quadratic-row multipliers are the original problem's; otherwise
+    // best-effort for the quadratic rows (see `recover_socp_duals`).
     let recovery = timing.solution_recovery.guard();
-    let lambda = duals.constraint_duals(prob, &con_map);
+    let lambda = match &polished {
+        Some(p) => p.constraint_duals(prob, &con_map),
+        None => pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z),
+    };
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). As on the QP path the
     // variable bounds live in the solver's explicit box — outside the cone
@@ -4379,14 +4404,10 @@ fn run_convex_socp(
     // blocks — so they come back in `sol.z_lb`/`z_ub`. `sign` restores the
     // user objective sense and the Ipopt output convention is
     // `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` (gh #296).
-    // Read from the re-fitted multipliers (gh#1114), which move a bound
-    // multiplier together with the row multipliers it trades off against.
-    let read = |v: &[f64]| -> Vec<f64> {
-        (0..prob.n)
-            .map(|i| v.get(i).copied().unwrap_or(0.0))
-            .collect()
+    let (z_lb_raw, z_ub_raw) = match &polished {
+        Some(p) => (p.z_lb.clone(), p.z_ub.clone()),
+        None => pounce_cli::qp_extract::recover_bound_mults(prob, &sol),
     };
-    let (z_lb_raw, z_ub_raw) = (read(&duals.z_lb), read(&duals.z_ub));
     let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
     let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
     let socp_bound_suffixes = [
