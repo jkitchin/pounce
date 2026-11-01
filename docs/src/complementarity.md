@@ -139,6 +139,28 @@ CALIPSO ball-in-cup start the answer moved from violation 8e-11 to 1e-8
 (objective 2.4e-6 lower, the slack τ allows), still certified S, in half
 the time.
 
+Three more rules keep the exact-product solves from costing more than they
+return; together they cut MacMPEC's time by about a quarter with no answer
+changed:
+
+- **A finish never replaces a better relaxed point.** A finish solves the
+  degenerate exact product and can wander: `pack-comp1p-32`'s continuation
+  reaches 0.65304 at `τ = 1e-8`, and its finish used to crawl to 0.783 and
+  replace it. A finish is kept unless its objective is worse than the relaxed
+  point's by more than the relaxation's own slack can explain, which at a
+  biactive corner is about `sqrt(τ)`, not `τ` (`scholtes4`'s `τ = 1e-8` point
+  sits at `-2e-4` against the exact `0`), so the allowance is
+  `max(1e-4, 10·sqrt(product))·max(1, |f|)`.
+- **The cold solve runs only when the cheap paths disagree.** When the
+  continuation's answer and the exact stage's relaxed path agree to `1e-4`
+  relative, the cold `G·H = 0` solve is skipped: two routes landing on one
+  point. It still runs where they differ, which is where it earns its cost
+  (`water-net`: 953 and 964, and the cold solve finds 927).
+- **A failed relaxation step is retried warm.** It restarts from the previous
+  step's point and barrier parameter, with twice that step's iterations,
+  rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried
+  and dropped: on the CALIPSO rocket the later steps reach a better branch.
+
 The remaining cost of running both is a choice you can undo when you know
 your model. Two
 local solves from different starts raise the odds of the better local
