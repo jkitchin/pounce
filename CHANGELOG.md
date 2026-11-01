@@ -96,6 +96,25 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Fixed
+- **The convex LP/QP solver certifies infeasibility from a converged Farkas
+  ray it used to reject.** The certificate test wanted `bᵀy + hᵀz` below
+  `−infeas_tol·‖(y,z)‖`; a model infeasible by a margin small relative to its
+  multipliers reached a machine-precision ray that missed that margin and
+  iterated on it to the 200-iteration limit (KKT error ~1e115), then fell
+  back to the NLP path. A second, exact test now brings in the variable box:
+  when no `x` in the bounds can satisfy `(Aᵀy+Gᵀz)ᵀx ≤ bᵀy+hᵀz`, with every
+  rounding error charged against the proof, the model is infeasible. On
+  MIPLIB 2017 Infeas, `cmflsp50-24-8-8` goes from 184 s (NLP fallback) to
+  28 s, and `momentum1` (5 s) and `neos-662469` (107 s) are certified where
+  they previously timed out at 600 s.
+- **Presolve no longer "proves" infeasibility from rounding on a row emptied
+  by aggregation.** Doubleton aggregation can pin a column and empty a row to
+  `0 ≤ h − Σ aⱼ·shiftⱼ`; that computed residual (e.g. `−1.3e-15`) was passed
+  to the next round's empty-row screen, which compares against exact zero,
+  and a feasible model was rejected at iteration 0. The residual is now
+  judged against `EMPTY_ROW_TOL × (1 + scale)`, as a row emptied by fixing
+  already was (gh#496). Seen on MIPLIB 2017 Infeas `dws008-03`/`dws012-02`,
+  which are infeasible but were rejected for this reason.
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
   the server failed at import (`No module named 'mcp.server.fastmcp'`).

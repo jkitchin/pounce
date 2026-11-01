@@ -80,7 +80,7 @@ use pounce_presolve::linear_eq_plan::{
     EliminationPlan, PlanConfig, PlanInput, VarRecovery, build_plan,
 };
 
-use crate::presolve::{at_bound, group_by_row, merge_sort_coeffs};
+use crate::presolve::{EMPTY_ROW_TOL, at_bound, group_by_row, merge_sort_coeffs};
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, Triplet};
 
 /// A survivor's leftover reduced cost below this is noise, not a bound
@@ -280,9 +280,19 @@ pub(crate) fn reduce(prob: &QpProblem, plan: &EliminationPlan) -> Option<(QpProb
     new_p.sort_by_key(|t| (t.row, t.col));
 
     // --- rows ---
+    // A row the substitution empties is left as `0 (cmp) rhs` for the next
+    // round's empty-row screen, which compares against exact zero. Its `rhs`
+    // is a computed difference of terms up to `scale`, so on a row that is
+    // redundant in exact arithmetic it carries rounding of that size — a
+    // `0 ≤ -1.3e-15` the next round would report as a proof of
+    // infeasibility. Snap a residual within `EMPTY_ROW_TOL × (1 + scale)` to
+    // zero (the same test `build_rows` applies to a row emptied by fixing,
+    // gh#496); a real conflict is far larger and keeps its value, so the
+    // screen still reports it.
     let substitute = |entries: &[(usize, f64)], rhs0: f64| -> (Vec<(usize, f64)>, f64) {
         let mut coeffs: Vec<(usize, f64)> = Vec::with_capacity(entries.len());
         let mut rhs = rhs0;
+        let mut scale = rhs0.abs();
         for &(col, a) in entries {
             let m = &maps[col];
             if let Some(p) = m.rep {
@@ -290,9 +300,14 @@ pub(crate) fn reduce(prob: &QpProblem, plan: &EliminationPlan) -> Option<(QpProb
                     coeffs.push((p, a * m.mult));
                 }
             }
-            rhs -= a * m.shift;
+            let term = a * m.shift;
+            rhs -= term;
+            scale = scale.max(term.abs());
         }
         merge_sort_coeffs(&mut coeffs);
+        if coeffs.is_empty() && rhs.abs() <= EMPTY_ROW_TOL * (1.0 + scale) {
+            rhs = 0.0;
+        }
         (coeffs, rhs)
     };
 
