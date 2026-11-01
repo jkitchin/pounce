@@ -6991,6 +6991,7 @@ impl IpoptApplication {
         // default matches the registered default, so default runs are
         // unchanged.
         alg.kappa_sigma = builder.kappa_sigma;
+        alg.ftb_centrality_floor = builder.ftb_centrality_floor;
         // `recalc_y` (#677) — see the read site above for why the
         // limited-memory path defaults it on.
         // `linear_system_scaling=slack-based` (#677) — the only scaling
@@ -8065,6 +8066,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("kappa_sigma") {
             builder.kappa_sigma = v;
         }
+        if let Some(v) = read_num("ftb_centrality_floor") {
+            builder.ftb_centrality_floor = v;
+        }
         if let Some(v) = read_num("kappa_d") {
             builder.kappa_d = v;
         }
@@ -8442,6 +8446,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("perturb_delta_c_max_rungs") {
             builder.perturbation.perturb_delta_c_max_rungs = v;
+        }
+        if let Some(v) = read_num("perturb_slack_fact") {
+            builder.perturbation.perturb_slack_fact = v;
         }
 
         // Iterative-refinement constants (#191), consumed by

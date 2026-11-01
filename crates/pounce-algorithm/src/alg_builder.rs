@@ -350,6 +350,11 @@ pub struct AlgorithmBuilder {
     /// default `1e10`. Baked onto [`crate::ipopt_alg::IpoptAlgorithm`] by
     /// the solve path.
     pub kappa_sigma: Number,
+    /// `ftb_centrality_floor` (pounce gh#1098) — γ of the
+    /// centrality-floored fraction-to-the-boundary rule; `0` restores
+    /// upstream's τ rule. Baked onto
+    /// [`crate::ipopt_alg::IpoptAlgorithm`] by the solve path.
+    pub ftb_centrality_floor: Number,
     /// `recalc_y` / `recalc_y_feas_tol` — least-square re-estimation of
     /// the equality multipliers once feasible (#677). Registered
     /// upstream, refused by pounce as unimplemented until now. Default
@@ -1051,6 +1056,8 @@ pub struct PerturbationOptions {
     pub perturb_always_cd: bool,
     /// `perturb_delta_c_max_rungs` → `delta_c_max_rungs` (pounce gh#592).
     pub perturb_delta_c_max_rungs: Index,
+    /// `perturb_slack_fact` → `delta_s_fact` (pounce gh#1098).
+    pub perturb_slack_fact: Number,
 }
 
 impl Default for PerturbationOptions {
@@ -1066,6 +1073,7 @@ impl Default for PerturbationOptions {
             jacobian_regularization_exponent: 0.25,
             perturb_always_cd: false,
             perturb_delta_c_max_rungs: 3,
+            perturb_slack_fact: crate::ftb_floor::DEFAULT_PERTURB_SLACK_FACT,
         }
     }
 }
@@ -1260,6 +1268,7 @@ impl Default for AlgorithmBuilder {
             mehrotra_algorithm: false,
             fast_step_computation: false,
             kappa_sigma: 1e10,
+            ftb_centrality_floor: crate::ftb_floor::DEFAULT_FTB_CENTRALITY_FLOOR,
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
             kappa_d: 1e-5,
@@ -1451,6 +1460,7 @@ impl AlgorithmBuilder {
         ph.delta_cd_exp = self.perturbation.jacobian_regularization_exponent;
         ph.set_perturb_always_cd(self.perturbation.perturb_always_cd);
         ph.delta_c_max_rungs = self.perturbation.perturb_delta_c_max_rungs;
+        ph.delta_s_fact = self.perturbation.perturb_slack_fact;
         let perturb = Rc::new(RefCell::new(ph));
         let mut pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
         // Iterative-refinement constants (#191): registered but previously
@@ -1904,6 +1914,7 @@ mod tests {
                             mehrotra_algorithm: false,
                             fast_step_computation: false,
                             kappa_sigma: 1e10,
+                            ftb_centrality_floor: crate::ftb_floor::DEFAULT_FTB_CENTRALITY_FLOOR,
                             recalc_y: false,
                             recalc_y_feas_tol: 1e-6,
                             kappa_d: 1e-5,

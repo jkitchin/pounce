@@ -24,7 +24,6 @@ pub mod alg_builder;
 pub mod application;
 pub mod batch;
 pub mod conv_check;
-pub mod crawl_diag;
 pub mod crossover;
 pub mod debug;
 pub mod debug_rank;

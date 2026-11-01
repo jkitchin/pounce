@@ -261,6 +261,10 @@ pub struct IpoptAlgorithm {
     /// `kappa_sigma` for the post-AcceptTrialPoint multiplier reset
     /// (`IpIpoptAlg.cpp:correct_bound_multiplier`, line 1055-1134).
     pub kappa_sigma: Number,
+    /// `ftb_centrality_floor` (pounce gh#1098): γ of the
+    /// centrality-floored fraction-to-the-boundary rule in
+    /// [`crate::ftb_floor`]; `0` keeps upstream's τ rule.
+    pub ftb_centrality_floor: Number,
     /// `recalc_y` — recompute `y_c`/`y_d` as least-square estimates
     /// once the iterate is feasible enough, instead of carrying the
     /// multipliers the Newton step produced. Upstream registers this
@@ -736,6 +740,7 @@ impl IpoptAlgorithm {
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
+            ftb_centrality_floor: crate::ftb_floor::DEFAULT_FTB_CENTRALITY_FLOOR,
             slack_based_scaling: false,
             recalc_y: false,
             recalc_y_feas_tol: 1e-6,
@@ -3581,28 +3586,19 @@ impl IpoptAlgorithm {
             let tau = self.data.borrow().curr_tau;
             let mut alpha_p_max = self.cq.borrow().aff_step_alpha_primal_max(&delta, tau);
             let mut alpha_d_max = self.cq.borrow().aff_step_alpha_dual_max(&delta, tau);
-            // gh#1098 prototype: centrality-floored step to the boundary.
-            if let Some(gamma) = std::env::var("POUNCE_FTB_FLOOR")
-                .ok()
-                .and_then(|s| s.parse::<Number>().ok())
-            {
+            // gh#1098: centrality-floored step to the boundary (γ > 0).
+            if self.ftb_centrality_floor > 0.0 {
                 let mu = self.data.borrow().curr_mu;
-                if let Some((ap, ad)) =
-                    crate::ftb_floor::floored_alphas(&self.cq, &delta, mu, gamma, tau)
-                {
+                if let Some((ap, ad)) = crate::ftb_floor::floored_alphas(
+                    &self.cq,
+                    &delta,
+                    mu,
+                    self.ftb_centrality_floor,
+                    tau,
+                ) {
                     alpha_p_max = ap;
                     alpha_d_max = ad;
                 }
-            }
-            if std::env::var_os("POUNCE_CRAWL_DIAG").is_some() {
-                crate::crawl_diag::report(
-                    &self.data,
-                    &self.cq,
-                    &delta,
-                    tau,
-                    alpha_p_max,
-                    alpha_d_max,
-                );
             }
 
             // Tiny-step gate — port of `IpBacktrackingLineSearch.cpp:363`
