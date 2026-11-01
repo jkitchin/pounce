@@ -96,6 +96,15 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Changed
+- **Declared complementarity's exact stage also tries a relaxation.** Besides
+  solving `G·H = 0` cold from your start, it now solves `G·H <= 1e-6` from
+  there, tightens to `1e-8`, and finishes exactly, and the better certified
+  answer wins. The cold solve is degenerate and stalls on larger models but
+  finds branches nothing else reaches; the relaxed path converges where it
+  stalls and finds others. On MacMPEC: 12 answers better than published
+  instead of 10 (`dempe` 28.25 against 31.25, `ex9.2.5` 5 against 9, both
+  checked feasible), 3 worse instead of 4, none lost; one CALIPSO bunny-hop
+  start improves. It costs about a fifth more time.
 - **The slack-block inertia perturbation is budgeted by row count, and
   Mittelmann `qcqp1500-1nc` no longer crawls (gh #1098).** When the
   factorization reports the wrong inertia, upstream Ipopt adds the same

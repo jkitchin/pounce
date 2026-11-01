@@ -56,8 +56,11 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 /// The stages, in the order the driver tries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpccStage {
-    /// `G·H = 0` from the model's own start (`G·H <= 0` where the equality
-    /// would leave the model with more equalities than variables).
+    /// Two solves from the model's own start, each a candidate: a relaxed
+    /// path (`G·H <= `[`EXACT_STAGE_TAU`], one warm step to the
+    /// continuation's last `τ`, then its exact finish), and the exact product
+    /// `G·H = 0` solved cold (`G·H <= 0` where the equality would leave the
+    /// model with more equalities than variables).
     Exact,
     /// `G·H <= τ` for τ down [`SCHOLTES_SCHEDULE`], each stage warm-started
     /// from the last, then one `G·H = 0` solve from the end of it
@@ -118,6 +121,15 @@ pub fn warm_start_assignments(final_mu: Number) -> Vec<String> {
         format!("warm_start_mult_bound_push {p:e}\n"),
     ]
 }
+
+/// The exact stage's relaxation: one solve of `G·H <= EXACT_STAGE_TAU` from
+/// the model's own start, then an exact finish. Measured against the cold
+/// exact product `G·H = 0` on the 28 MacMPEC models where the exact stage
+/// costs most or matters most: 1879 iterations against 25712, 26 converged
+/// against 20, 23 at or better than the published value against 19. `1e-8`
+/// does worse (3311 iterations, 20 at): a thinner interior, back towards the
+/// degenerate system.
+pub const EXACT_STAGE_TAU: Number = 1e-6;
 
 /// The exact-product stage's iteration budget once the continuation has
 /// already answered with a tight S point: [`EXACT_BUDGET_FACTOR`] times the

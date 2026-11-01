@@ -64,3 +64,16 @@ twin `gnash10` reaches. At the default 300 s limit `qpec-200-2` alone is
 
 None of these models' `answers.json` entries expected `refused`; they carry
 the published best-known values (gh#1110).
+
+**Not yet re-measured with this harness since PRs #1112 and #1121.** Both
+change outcomes, measured on the 167 public MacMPEC `.nl` stubs (outside
+`make macmpec-check`, so the counts are not directly comparable with the
+table above):
+
+- **PR #1112** budgets the exact stage and the finish: `pack-rig1p-32` moves
+  from `worse` to `at`.
+- **PR #1121** adds a relaxed path to the exact stage: `dempe` (28.25 against
+  31.25) and `ex9.2.5` (5 against 9) move from `at` to `BETTER`, both checked
+  feasible by direct evaluation, and `pack-comp2p-8` from `worse` to `at`.
+
+Re-run `make macmpec-run` to refresh the reference result above.
