@@ -88,7 +88,9 @@ first one that *answers* winning:
    1e-8, each solve warm-started from the last, then an exact finish
    (`G·H = 0`, or `G·H <= 0` when the equality form leaves too few degrees
    of freedom).
-2. **Exact** — `G·H = 0` per pair from your start, with the same fallback.
+2. **Exact** — two solves from your start. A relaxed path: `G·H <= 1e-6`,
+   one warm step to `1e-8`, then the same exact finish as the continuation.
+   And the exact product solved cold, `G·H = 0` (with the same fallback).
 3. **Penalty** — the complementarity products moved into the objective with
    an exact ℓ₁ weight; run only if neither of the first two answers.
 
@@ -100,11 +102,28 @@ on 60, while on the CALIPSO bunny-hop the continuation alone settles on a
 trajectory 2.4× worse on 3 of 5 starts that the exact product avoids.
 Running both reaches the best known answer on every one of them.
 
-Once the continuation has answered with a tight S point, the exact product
-is a second opinion and runs on a budget: three times the iterations the
-continuation spent, at least 200 (never more than your `max_iter`). With no
-such answer in hand (the continuation failed, or found only a W point or one
-inside the tolerance band) it runs in full. Every exact-product answer that
+The exact stage runs two solves because they, too, find different minima.
+The cold exact product has no interior to work in (each product row is
+parallel to its pair's active bound), so on larger models it stalls, but it
+takes the path least like the continuation's and is the only one that
+reaches MacMPEC `water-net`'s better branch (927 against 953). The relaxed
+path converges where the cold solve stalls (on the 28 MacMPEC models where
+the exact stage costs or matters most it takes about 1,900 iterations
+against 25,700) and reaches branches the cold solve misses: `dempe` (28.25)
+and `ex9.2.5` (5), both below their published values, and `pack-comp2p-8`.
+Running both costs about a fifth more time on MacMPEC and CALIPSO and loses
+no answer on either: MacMPEC goes from 137 at the best known value, 10 better
+and 4 worse to 136, 12 and 3, and one CALIPSO bunny-hop start improves.
+
+Once an answer is in hand, the exact stage is a second opinion and runs on
+a budget: three times the iterations spent so far, at least 200 (never more
+than your `max_iter`). The relaxed path is budgeted once the continuation
+has answered with a tight S point, the cold solve once the continuation or
+the relaxed path has. With no answer in hand (the continuation failed, or
+found only a W point or one inside the tolerance band) the stage runs in
+full. If the relaxed path finds its relaxation infeasible, that is reported
+as the model's verdict when nothing answers: the relaxation contains the
+model. Every exact-product answer that
 changed a MacMPEC outcome fitted inside that budget (`water-net`, 470
 iterations against the continuation's 189), as do the bunny-hop starts
 above. The continuation's exact finish is budgeted too, at 500 iterations or

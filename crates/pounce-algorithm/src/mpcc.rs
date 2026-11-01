@@ -56,8 +56,11 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 /// The stages, in the order the driver tries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpccStage {
-    /// `G·H = 0` from the model's own start (`G·H <= 0` where the equality
-    /// would leave the model with more equalities than variables).
+    /// Two solves from the model's own start, each a candidate: a relaxed
+    /// path (`G·H <= `[`EXACT_STAGE_TAU`], one warm step to the
+    /// continuation's last `τ`, then its exact finish), and the exact product
+    /// `G·H = 0` solved cold (`G·H <= 0` where the equality would leave the
+    /// model with more equalities than variables).
     Exact,
     /// `G·H <= τ` for τ down [`SCHOLTES_SCHEDULE`], each stage warm-started
     /// from the last, then one `G·H = 0` solve from the end of it
