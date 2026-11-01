@@ -28,6 +28,7 @@ pub mod crossover;
 pub mod debug;
 pub mod debug_rank;
 pub mod eq_mult;
+pub mod ftb_floor;
 pub mod handover;
 pub mod hess;
 pub mod inf_pr_floor;

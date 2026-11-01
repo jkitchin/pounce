@@ -490,3 +490,29 @@ fn dual_divergence_retry_thresholds_override_flows_through() {
     assert_eq!(b.dual_divergence_retry_step_tol, 0.0);
     assert_eq!(b.dual_divergence_retry_du_floor, 1e4);
 }
+
+// gh#1098: both pounce extensions default to their registered values and
+// accept an override. Both are opt-in; the defaults are upstream's.
+#[test]
+fn ftb_centrality_floor_default_and_off() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.ftb_centrality_floor, 0.0);
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_numeric_value("ftb_centrality_floor", 0.01, true, false)
+            .unwrap();
+    });
+    assert!((b.ftb_centrality_floor - 0.01).abs() < 1e-15);
+}
+
+#[test]
+fn perturb_slack_fact_default_and_upstream() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.perturbation.perturb_slack_fact, 1.0);
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_numeric_value("perturb_slack_fact", 0.03, true, false)
+            .unwrap();
+    });
+    assert!((b.perturbation.perturb_slack_fact - 0.03).abs() < 1e-15);
+}

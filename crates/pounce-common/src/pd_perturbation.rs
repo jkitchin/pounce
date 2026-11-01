@@ -86,6 +86,11 @@ pub struct PdPerturbationHandler {
     pub perturb_always_cd: bool,
     pub reset_last: bool,
     pub degen_iters_max: Index,
+    /// `perturb_slack_fact` (pounce gh#1098): the slack-block perturbation
+    /// is `δ_s = delta_s_fact · δ_x`. Upstream Ipopt ties them (`1.0`, the
+    /// default here so the bare handler stays upstream); the builder
+    /// sets the registered default.
+    pub delta_s_fact: Number,
 
     // ---- live state ----
     pub delta_x_curr: Number,
@@ -149,6 +154,7 @@ impl Default for PdPerturbationHandler {
             perturb_always_cd: false,
             reset_last: false,
             degen_iters_max: 3,
+            delta_s_fact: 1.0,
             delta_x_curr: 0.0,
             delta_s_curr: 0.0,
             delta_c_curr: 0.0,
@@ -356,7 +362,7 @@ impl PdPerturbationHandler {
             // the rungs below it are not climbed a second time.
             if self.delta_x_curr < self.delta_x_at_withdrawal {
                 self.delta_x_curr = self.delta_x_at_withdrawal;
-                self.delta_s_curr = self.delta_x_at_withdrawal;
+                self.delta_s_curr = self.delta_x_at_withdrawal * self.delta_s_fact;
             }
             self.test_status = TrialStatus::NoTest;
             append_info(ip_data, "W");
@@ -703,7 +709,8 @@ impl PdPerturbationHandler {
             append_info(ip_data, "dx");
             return false;
         }
-        self.delta_s_curr = self.delta_x_curr;
+        // gh#1098: δ_s = perturb_slack_fact · δ_x (upstream: δ_s = δ_x).
+        self.delta_s_curr = self.delta_x_curr * self.delta_s_fact;
 
         *delta_x = self.delta_x_curr;
         *delta_s = self.delta_s_curr;
