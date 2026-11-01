@@ -588,21 +588,16 @@ pub fn solve_mpcc(
                     }
                     if !converged(c.status) {
                         let Some(prev) = &last else { break };
-                        // The previous rung's point already satisfies every
-                        // product within `constr_viol_tol`: tightening further
-                        // buys accuracy, not feasibility, so go to the finish
-                        // from it rather than fight a failing rung (MacMPEC
-                        // `siouxfls`: the `1e-7` rung fails in restoration and
-                        // its cold retry cost 727 iterations, 215 s, at a
-                        // point already on the published value).
-                        if prev.max_abs_product <= tol {
-                            break;
-                        }
                         // One weaker rung before giving up on the schedule:
                         // the previous stage's x only, no dual warm start,
                         // but the barrier where that stage left it rather
                         // than back at `mu_init`'s 0.1, and a budget of twice
-                        // what that stage took.
+                        // what that stage took (MacMPEC `siouxfls`: the cold
+                        // retry of its failed `1e-7` rung cost 727
+                        // iterations). Skipping straight to the finish instead
+                        // was measured and dropped: on CALIPSO's rocket the
+                        // later rungs reach a better branch (1531.73 against
+                        // 1533.81) that the skip loses.
                         baseline(app);
                         // The override carries no duals; a caller's
                         // `warm_start_init_point yes` would ask for them and
