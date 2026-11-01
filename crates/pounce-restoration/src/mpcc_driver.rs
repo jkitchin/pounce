@@ -790,8 +790,6 @@ pub fn solve_mpcc(
     })
 }
 
-/// A converged point whose certificate does not say stationary, reported at
-/// the acceptable level: the lowered solve's success is not the model's.
 /// Iterations the solves of `stage` have spent so far.
 fn iterations_of(solves: &[MpccSolveRecord], stage: MpccStage) -> usize {
     solves
@@ -801,6 +799,8 @@ fn iterations_of(solves: &[MpccSolveRecord], stage: MpccStage) -> usize {
         .sum()
 }
 
+/// A converged point whose certificate does not say stationary, reported at
+/// the acceptable level: the lowered solve's success is not the model's.
 fn acceptable(c: Captured) -> Captured {
     Captured {
         status: ApplicationReturnStatus::SolvedToAcceptableLevel,
