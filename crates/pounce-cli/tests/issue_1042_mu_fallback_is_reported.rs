@@ -18,9 +18,17 @@
 //!
 //! | fixture (exact leg)        | first attempt        | re-solve                    | reported   |
 //! |----------------------------|----------------------|-----------------------------|------------|
-//! | `csfi2`                    | Acceptable / 35      | adaptive, Solve_Succeeded / 21 | promoted, `it=21` |
+//! | `csfi2_stall_start`        | Acceptable / 12      | adaptive, Solve_Succeeded / 9 | promoted, `it=9` |
 //! | `mu_fallback_point_floor`  | Acceptable / 55      | adaptive, Infeasible / 31   | kept, `it=55` |
 //! | any, `mu_strategy_fallback=no` | —                | none                        | no record  |
+//!
+//! The promoted row was `csfi2` (Acceptable/35 → Solve_Succeeded/21) until
+//! gh#1098: that first-attempt stall depends on the inertia correction's
+//! `δ_s = δ_x`, and at `perturb_slack_fact=0.03` `csfi2.nl` certifies
+//! directly (`Optimal`/37) with no record to read. `csfi2_stall_start.nl` is
+//! the same model from a start on which the stall and the promotion above are
+//! measured identically at `perturb_slack_fact` 1, 0.3, 0.1, 0.03 and 0.01,
+//! and 17/17 under the round-off screen at each.
 //!
 //! Mutation-checked: with the record never written (`mu_strategy_fallback`
 //! left `None`) the first two tests fail; with `promoted` hard-wired `false`
@@ -69,12 +77,10 @@ fn solve(name: &str, tag: &str, opts: &[&str]) -> SolveReport {
 /// count is the re-solve's alone.
 #[test]
 fn a_promoted_fallback_records_the_first_attempt() {
-    let r = solve("csfi2.nl", "promoted", &[]);
-    let mf = r
-        .statistics
-        .mu_strategy_fallback
-        .as_ref()
-        .expect("csfi2's first attempt stops at the acceptable level and the fallback runs");
+    let r = solve("csfi2_stall_start.nl", "promoted", &[]);
+    let mf = r.statistics.mu_strategy_fallback.as_ref().expect(
+        "csfi2_stall_start's first attempt stops at the acceptable level and the fallback runs",
+    );
     assert!(
         mf.promoted,
         "the re-solve should have been promoted: {mf:?}"
@@ -122,7 +128,14 @@ fn a_losing_fallback_records_the_retry_and_keeps_the_first_attempt() {
 /// No retry, no record — including on a run that would otherwise have one.
 #[test]
 fn no_record_without_a_retry() {
-    let r = solve("csfi2.nl", "off", &["mu_strategy_fallback=no"]);
+    let r = solve("csfi2_stall_start.nl", "off", &["mu_strategy_fallback=no"]);
+    // The run must be one that *would* retry: an acceptable-level exit on
+    // stock termination options, the trigger the promoted test above reaches.
+    assert_eq!(
+        r.solution.status,
+        pounce_nlp::return_codes::ApplicationReturnStatus::SolvedToAcceptableLevel,
+        "this fixture no longer stalls, so the absence of a record proves nothing",
+    );
     assert!(
         r.statistics.mu_strategy_fallback.is_none(),
         "{:?}",

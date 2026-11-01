@@ -251,10 +251,31 @@ fn pooling_reaches_its_optimum_without_the_gh544_detour() {
 /// makes the walk-back load-bearing here again, this fails and says so —
 /// and that would be the replacement witness the header describes
 /// searching for and not finding.
+///
+/// **Pinned to `perturb_slack_fact=1` (gh#1098).** Every number in this
+/// file's header is a measurement at upstream's `δ_s = δ_x`, and this test
+/// pins one of them. At `perturb_slack_fact=0.03` the inertness does not
+/// hold: one draw gives 458 iterations with the walk-back off against 130
+/// with it on, and under the round-off screen (`mu_init = 0.1·(1 ± k·1e-12)`,
+/// 17 draws per arm) the medians are 453 off and 289 on. At factor 1 the
+/// same screen gives medians of 202 off and 201 on — inert, as recorded. So
+/// at 0.03 the walk-back looks load-bearing on `pooling_rt2stp` again, which
+/// is the outcome this test was written to report, but that is a finding
+/// about a different inertia correction, not a regression in this one:
+/// it is recorded here and in gh#1098 rather than allowed to fail a test
+/// whose claim is about factor 1. Caveat for whoever re-measures: at 0.03
+/// the walk-back-on arm ends `Solved_To_Acceptable_Level` on 2 of the 17
+/// draws, and the off arm on none, so "load-bearing" there is about
+/// iterations, not about the certificate.
+///
+/// The `< 300` bound is itself not robust under the screen at factor 1:
+/// 7 of 17 draws with the walk-back off take more than 300 (116..424). It
+/// passes on the unperturbed draw, as it did before this pin.
 #[test]
 fn the_walkback_is_inert_on_this_fixture_since_gh693() {
-    let with = solve(&[]);
-    let without = solve(&NO_WALKBACK);
+    const UPSTREAM_DELTA_S: &str = "perturb_slack_fact=1";
+    let with = solve(&[UPSTREAM_DELTA_S]);
+    let without = solve(&[NO_WALKBACK[0], UPSTREAM_DELTA_S]);
     assert_eq!(
         without.solution.status,
         ApplicationReturnStatus::SolveSucceeded,

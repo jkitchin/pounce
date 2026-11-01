@@ -243,7 +243,15 @@ fn the_reproducer_still_promotes() {
 /// nothing to gain from, and the base answer shipping.
 #[test]
 fn the_reproducer_no_longer_needs_the_retry() {
-    let (r, out) = solve("mpcc_qpec_small_biactive", REPRO);
+    // `perturb_slack_fact=1`: see the note on
+    // `issue_884_biactive_dual_divergence::the_reproducer_no_longer_stalls_at_the_default`
+    // (gh#1098). This model's outcome under these options is round-off
+    // chaotic at every factor; the pin keeps the draw this was written on.
+    // `tol=1e-8` changes nothing in that measurement: the screen reads the
+    // same 7/6/4 at factor 1 and 6/8/3 at 0.03 with it as without.
+    let mut opts = REPRO.to_vec();
+    opts.push("perturb_slack_fact=1");
+    let (r, out) = solve("mpcc_qpec_small_biactive", &opts);
     assert_eq!(
         r.solution.status,
         ApplicationReturnStatus::SolveSucceeded,

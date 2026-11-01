@@ -49,6 +49,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pounce_cli::solve_report::SolveReport;
+use pounce_nlp::ApplicationReturnStatus;
 
 fn pounce_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_pounce"))
@@ -116,16 +117,53 @@ fn hs13_from_remote_start_is_not_reported_infeasible() {
     );
 }
 
-/// And it must actually converge, to Ipopt's answer.
+/// And it must actually converge — to Ipopt's answer under Ipopt's inertia
+/// correction, and to the neighbourhood of `x* = (1, 0)` under any.
+///
+/// Where a solve on HS13 stops is set by the trajectory, not by the
+/// optimality conditions: `x*` admits no KKT multiplier (LICQ and MFCQ both
+/// fail there), so every solver stops on a tolerance short of it, with the
+/// multiplier growing without bound and the objective a little under
+/// `f* = 1` because the stopping point sits just outside the cusp, within
+/// `constr_viol_tol`. Ipopt's `0.98492871533797743` is one such point. It is
+/// pinned at `perturb_slack_fact=1`, which is Ipopt's `δ_s = δ_x`, because
+/// matching it to 1e-6 is a trajectory-parity claim and holds only on
+/// Ipopt's trajectory (gh#1098). At `perturb_slack_fact=0.03` the same start
+/// stops at `0.98168`, `x = (1.00920, -1e-8)`, in 31 iterations — the same
+/// kind of point (`Solve_Succeeded`, unscaled constraint violation 7.6e-7
+/// against 4.1e-7 at factor 1, unscaled dual infeasibility 0.70 against 0.69
+/// behind the same `large_dual_scale` warning), a little further along the
+/// cusp. That is not a regression and is not pinned as a value; what is
+/// pinned at the default is that the solve converges near `x*`, which is
+/// what the pre-fix answer — objective 0.2858 at a point violating the
+/// constraint by 0.51, reported infeasible — did not do.
 #[test]
 fn hs13_from_remote_start_reaches_the_optimum() {
-    let report = solve("hs13_bigstart.nl", &[]);
+    let report = solve("hs13_bigstart.nl", &["perturb_slack_fact=1"]);
     let obj = report.solution.objective;
     let rel = (obj - HS13_IPOPT).abs() / HS13_IPOPT.abs();
     assert!(
         rel < 1e-6,
-        "HS13 from the remote start: got {obj}, expected Ipopt's {HS13_IPOPT} \
-         (rel err {rel:.3e})",
+        "HS13 from the remote start at Ipopt's δ_s = δ_x: got {obj}, expected \
+         Ipopt's {HS13_IPOPT} (rel err {rel:.3e})",
+    );
+
+    let default = solve("hs13_bigstart.nl", &[]);
+    assert_eq!(
+        default.solution.status,
+        ApplicationReturnStatus::SolveSucceeded,
+        "HS13 from the remote start at the default inertia correction",
+    );
+    let obj = default.solution.objective;
+    assert!(
+        (0.97..=1.0 + 1e-6).contains(&obj),
+        "HS13 at the default: objective {obj} is not near f* = 1 (Ipopt \
+         stops at {HS13_IPOPT}; the pre-fix answer was 0.2858)",
+    );
+    let x = &default.solution.x;
+    assert!(
+        (x[0] - 1.0).abs() < 1e-2 && x[1].abs() < 1e-2,
+        "HS13 at the default: x = {x:?} is not near x* = (1, 0)",
     );
 }
 

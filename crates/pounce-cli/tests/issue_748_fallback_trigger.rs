@@ -76,6 +76,18 @@
 //! from "any acceptable-level exit" to "an acceptable-level exit the
 //! caller's own options may have caused". `issue_757_acceptable_retry`
 //! owns the positive half.
+//!
+//! The tests below run `csfi2_stall_start`, not `csfi2` (gh#1098). The
+//! sweep numbers above are `csfi2.nl`'s, and its acceptable-level stall
+//! depends on the inertia correction's `δ_s = δ_x`: at
+//! `perturb_slack_fact=0.03` it certifies directly (`Optimal`/37), so the
+//! stand-down tests would pass with no retry to stand down.
+//! `csfi2_stall_start.nl` is the same model from a start on which the stall
+//! (`Solved_To_Acceptable_Level`/12) and the adaptive promotion
+//! (`Solve_Succeeded`/9) are measured identically at `perturb_slack_fact`
+//! 1, 0.3, 0.1, 0.03 and 0.01, 17/17 under the round-off screen at each.
+//! Every test also reads `statistics.mu_strategy_fallback`, so that it
+//! states whether the retry ran rather than inferring it from a status.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -126,9 +138,9 @@ fn solve(model: &str, opts: &[&str]) -> SolveReport {
 
 /// The stand-down, in the form #757 left it: an acceptable-level exit is
 /// retried by default, *unless* the caller armed one of the options that
-/// decides what termination means. `csfi2` finishes
-/// `Solved_To_Acceptable_Level` in 35 iterations and the opposite μ
-/// strategy reaches `Solve_Succeeded` in 21 — a genuine improvement the
+/// decides what termination means. `csfi2_stall_start` finishes
+/// `Solved_To_Acceptable_Level` in 12 iterations and the opposite μ
+/// strategy reaches `Solve_Succeeded` in 9 — a genuine improvement the
 /// stock configuration is now allowed to take, and a deliberate downgrade
 /// the tuned configuration must still be shown.
 ///
@@ -139,7 +151,14 @@ fn solve(model: &str, opts: &[&str]) -> SolveReport {
 /// count is the platform-sensitive half.
 #[test]
 fn a_caller_set_termination_option_stands_the_retry_down() {
-    let stock = solve("csfi2", &[]);
+    let stock = solve("csfi2_stall_start", &[]);
+    let mf = stock
+        .statistics
+        .mu_strategy_fallback
+        .as_ref()
+        .expect("the stock run's first attempt must stall and be retried");
+    assert_eq!(mf.base_status, "Solved_To_Acceptable_Level", "{mf:?}");
+    assert!(mf.promoted, "{mf:?}");
     assert_eq!(
         format!("{:?}", stock.solution.status),
         "SolveSucceeded",
@@ -149,7 +168,12 @@ fn a_caller_set_termination_option_stands_the_retry_down() {
          alone and cho_parmest has stopped certifying",
     );
 
-    let tuned = solve("csfi2", &["kkt_fidelity_tol=1e-14"]);
+    let tuned = solve("csfi2_stall_start", &["kkt_fidelity_tol=1e-14"]);
+    assert!(
+        tuned.statistics.mu_strategy_fallback.is_none(),
+        "a caller-set termination option must stand the retry down: {:?}",
+        tuned.statistics.mu_strategy_fallback,
+    );
     assert_eq!(
         format!("{:?}", tuned.solution.status),
         "SolvedToAcceptableLevel",
@@ -164,7 +188,13 @@ fn a_caller_set_termination_option_stands_the_retry_down() {
 /// for it cannot make the status worse — only the wall clock.
 #[test]
 fn an_explicit_opt_in_still_retries_and_promotes() {
-    let r = solve("csfi2", &["mu_strategy_fallback=yes"]);
+    let r = solve("csfi2_stall_start", &["mu_strategy_fallback=yes"]);
+    let mf = r
+        .statistics
+        .mu_strategy_fallback
+        .as_ref()
+        .expect("mu_strategy_fallback=yes must retry the acceptable-level exit");
+    assert!(mf.promoted, "{mf:?}");
     assert_eq!(
         format!("{:?}", r.solution.status),
         "SolveSucceeded",
@@ -182,7 +212,12 @@ fn an_explicit_opt_in_still_retries_and_promotes() {
 /// both arms.
 #[test]
 fn naming_a_strategy_stands_the_automatic_retry_down() {
-    let r = solve("csfi2", &["mu_strategy=monotone"]);
+    let r = solve("csfi2_stall_start", &["mu_strategy=monotone"]);
+    assert!(
+        r.statistics.mu_strategy_fallback.is_none(),
+        "an explicit mu_strategy must suppress the automatic retry: {:?}",
+        r.statistics.mu_strategy_fallback,
+    );
     assert_eq!(
         format!("{:?}", r.solution.status),
         "SolvedToAcceptableLevel",

@@ -53,6 +53,20 @@
 //! archive carries: this build solves it to `55.017604529660318`, against
 //! `55.01760452966031` in `benchmarks/BENCHMARK_REPORT.json`, and reaches the
 //! guard at the `theta 1.501e-7` the issue quotes.
+//!
+//! THE TESTS RUN `csfi2_stall_start.nl` (gh#1098), which is `csfi2.nl` with a
+//! different starting point (seed 11 of a random-start scan) and nothing else
+//! changed. From `csfi2.nl`'s own start the stall at the guard depends on the
+//! inertia correction's `δ_s = δ_x`: at `perturb_slack_fact=0.03` the solve
+//! certifies (`Optimal`/37) without ever reaching the guard, so the two
+//! "same point" tests below passed vacuously and the bounded-cost test failed
+//! its "deferral was taken" check. From `csfi2_stall_start` the guard is
+//! reached and declined at iteration 12 (`Solved_To_Acceptable_Level`), and a
+//! forced deferral is taken and lost (23 iterations, the same `x`), measured
+//! identically at `perturb_slack_fact` 1, 0.3, 0.1, 0.03 and 0.01 and 17/17
+//! under the round-off screen (`mu_init = 0.1·(1 ± k·1e-12)`) at each. The
+//! window and `theta` numbers quoted above are `csfi2.nl`'s and were not
+//! re-measured on this start.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -88,7 +102,7 @@ fn solve(extra: &[&str]) -> SolveReport {
     let json_path = tmp_path("csfi2.json");
     let sol_path = tmp_path("csfi2.sol");
     let mut cmd = Command::new(pounce_exe());
-    cmd.arg(fixture("csfi2.nl"))
+    cmd.arg(fixture("csfi2_stall_start.nl"))
         .arg(&sol_path)
         .arg("--json-output")
         .arg(&json_path)
@@ -97,11 +111,10 @@ fn solve(extra: &[&str]) -> SolveReport {
         // `TERMINATION_POLICY_OPTIONS` member, which suppresses the
         // default-on μ-strategy retry (gh #757), so leaving the retry
         // to its default would let it fire on the bare arm alone and
-        // the comparison would no longer isolate the guard. On `csfi2`
-        // the retry is a real promotion -- Solved_To_Acceptable_Level
-        // in 35 iterations becomes Solve_Succeeded in 21, at the same
-        // objective to nine digits -- which is measured in
-        // `issue_757_acceptable_retry.rs`, not here.
+        // the comparison would no longer isolate the guard. On this
+        // fixture the retry is a real promotion -- Solved_To_Acceptable_Level
+        // in 12 iterations becomes Solve_Succeeded in 9 -- which is
+        // measured in `issue_757_acceptable_retry.rs`, not here.
         .arg("mu_strategy_fallback=no");
     for o in extra {
         cmd.arg(o);
@@ -122,10 +135,21 @@ const NO_DEFERRAL: [&str; 1] = ["resto_decline_deferrals=0"];
 
 /// `csfi2` stalls at the guard, so the default settings must behave exactly as
 /// the pre-#534 build did — same status, same objective, same iteration count.
+///
+/// That comparison is only evidence if the guard is reached at all: a solve
+/// that never gets there is identical on both arms for that reason alone. The
+/// forced-deferral arm is the witness — it moves only if the guard fires.
 #[test]
 fn a_stalled_solve_is_declined_exactly_as_before() {
     let baseline = solve(&NO_DEFERRAL);
     let default = solve(&[]);
+    let forced = solve(&FORCE_DEFERRAL);
+    assert!(
+        forced.statistics.iteration_count > baseline.statistics.iteration_count,
+        "the guard was not reached (forcing the deferral changed nothing, \
+         {} iterations either way), so this comparison is vacuous",
+        baseline.statistics.iteration_count,
+    );
     assert_eq!(
         default.solution.status, baseline.solution.status,
         "the progress test changed the status on a stalled solve",
@@ -149,6 +173,12 @@ fn a_stalled_solve_is_declined_exactly_as_before() {
 fn a_lost_deferral_returns_the_same_point() {
     let baseline = solve(&NO_DEFERRAL);
     let deferred = solve(&FORCE_DEFERRAL);
+    assert!(
+        deferred.statistics.iteration_count > baseline.statistics.iteration_count,
+        "the deferral was not taken ({} iterations either way); the \
+         same-point checks below would pass vacuously",
+        baseline.statistics.iteration_count,
+    );
     assert_eq!(
         deferred.solution.status, baseline.solution.status,
         "a lost deferral changed the reported status",

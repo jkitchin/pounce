@@ -358,9 +358,23 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
 /// capped run in the corpus, and
 /// `an_escalating_budget_exit_recovers_by_undoing_the_escalation` would pass
 /// just the same.
+///
+/// `mu_strategy_fallback=no` (gh#1098) keeps the run a budget exit. The
+/// μ-strategy retry is a different rescue from the ladder and runs before
+/// it; whether it recovers `deb7` from `max_iter=100` depends on the
+/// trajectory. At the upstream inertia correction (`perturb_slack_fact=1`) it
+/// does not (both attempts hit the cap), but at `perturb_slack_fact=0.03` it
+/// promotes to `Optimal`/77, so there was no budget exit left for this test
+/// to be about. A cap does not fix that: `max_iter=60` holds at 1 and 0.03
+/// but the retry promotes at 0.1. The ladder does not depend on the
+/// μ-strategy retry being on: `square_flowsheet_resto` at `max_iter=75` with
+/// `mu_strategy_fallback=no` still opens rung 4 and promotes, so turning the
+/// retry off here removes a different rescue and leaves the branch under
+/// test as it was. The off-retry run is `MaximumIterationsExceeded`/100 with
+/// no ladder lines and no escalation at both factors.
 #[test]
 fn a_budget_exit_that_never_escalated_is_left_alone() {
-    let run = solve("deb7.nl", &["max_iter=100"]);
+    let run = solve("deb7.nl", &["max_iter=100", "mu_strategy_fallback=no"]);
     assert!(
         run.out.contains("Maximum Number of Iterations Exceeded"),
         "{}",
@@ -386,13 +400,20 @@ fn a_budget_exit_that_never_escalated_is_left_alone() {
          to test and must not pay for a solve:\n{}",
         run.out
     );
-    // gh#983 item 5: the returned point is the first attempt's (the gh#884
-    // retry is declined on the answer), so the report's iteration count is the
-    // first attempt's own -- the *first* "Number of Iterations" line, which
-    // counts the restoration iterations it spent (84 outer + 32 restoration
-    // = 116 here). This used to read 100, the declined retry's count, which
-    // was the mixed-run report the issue describes: objective and point from
-    // one run, iteration count from the other.
+    assert_eq!(
+        solve_count(&run.out),
+        1,
+        "with the μ-strategy retry off, a budget exit the ladder leaves alone \
+         is exactly one solve:\n{}",
+        run.out
+    );
+    // gh#983 item 5: the report's iteration count is that of the run that
+    // produced the returned point -- the *first* "Number of Iterations"
+    // line. With `mu_strategy_fallback=no` that is the only attempt, so here
+    // this is a consistency check; the declined-retry case gh#983 is about
+    // (point from one run, count from the other) is pinned on a fixture whose
+    // retry is declined by construction, in `issue_870_mu_fallback_solution_floor`
+    // and `issue_1042_mu_fallback_is_reported`.
     let first_pass: i64 = run
         .out
         .lines()

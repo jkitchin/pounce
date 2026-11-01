@@ -151,7 +151,40 @@ const AUTOCORR_OPTIMUM: f64 = -2_304.000_027_802_734_2;
 /// The guard is opt-in as of the pounce#250 follow-up (`dual_diverging_streak`
 /// defaults to 0). Every test below must therefore enable it explicitly — at the
 /// former default of 15 — or it would exercise nothing and pass vacuously.
-const GUARD_ON: [&str; 2] = [HANG_GUARD, "dual_diverging_streak=15"];
+const GUARD_ON: [&str; 3] = [HANG_GUARD, "dual_diverging_streak=15", UPSTREAM_DELTA_S];
+
+/// The autocorr tests pin upstream's inertia correction, `δ_s = δ_x`
+/// (gh#1098). The scenario this file is about — the guard fires, the diverted
+/// run visits -2304 and then wanders off — is a trajectory, and it is
+/// `perturb_slack_fact=1`'s trajectory. At `perturb_slack_fact=0.03` the
+/// default solve itself takes a restoration call early and reaches a
+/// different, better KKT point, -2368.0000315 (`Solve_Succeeded`/78, KKT
+/// error 2.5e-9, constraint violation 5e-12), and the guard never fires: the
+/// guard-on run is the guard-off run, iteration for iteration. Those tests
+/// would then measure nothing about the guard. -2368 is a legitimate local
+/// minimum, not a regression; it is simply not the scenario.
+///
+/// Each autocorr test also asserts that the guard fired, read off
+/// `restoration_calls`: the guard's diversion *is* a restoration call, and
+/// at factor 1 the guard-off run makes none (measured: 0 off, 1 on, both
+/// with and without the widened band below).
+const UPSTREAM_DELTA_S: &str = "perturb_slack_fact=1";
+
+/// Asserts that the dual-divergence guard diverted `on` into restoration,
+/// by comparison with the same solve with the guard off.
+fn assert_guard_fired(on: &SolveReport, off: &SolveReport) {
+    assert!(
+        on.statistics.restoration_calls > off.statistics.restoration_calls,
+        "the dual-divergence guard did not divert this solve (restoration \
+         calls: {} with the guard, {} without), so the test reaches no \
+         diversion and says nothing about one",
+        on.statistics.restoration_calls,
+        off.statistics.restoration_calls,
+    );
+}
+
+/// The same solve as [`GUARD_ON`] with the guard off.
+const GUARD_OFF: [&str; 3] = [HANG_GUARD, "dual_diverging_streak=0", UPSTREAM_DELTA_S];
 
 /// With the guard enabled (streak 15 — its former default; it is now off by
 /// default) the diversion must not cost the objective. Pre-fix this returned
@@ -159,6 +192,7 @@ const GUARD_ON: [&str; 2] = [HANG_GUARD, "dual_diverging_streak=15"];
 #[test]
 fn dual_guard_diversion_does_not_return_a_worse_point() {
     let report = solve("autocorr_bern55-06.nl", &GUARD_ON);
+    assert_guard_fired(&report, &solve("autocorr_bern55-06.nl", &GUARD_OFF));
     let obj = report.solution.objective;
     let rel = (obj - AUTOCORR_OPTIMUM).abs() / AUTOCORR_OPTIMUM.abs();
     assert!(
@@ -176,6 +210,7 @@ fn dual_guard_diversion_does_not_return_a_worse_point() {
 #[test]
 fn dual_guard_diversion_returns_a_stationary_point() {
     let report = solve("autocorr_bern55-06.nl", &GUARD_ON);
+    assert_guard_fired(&report, &solve("autocorr_bern55-06.nl", &GUARD_OFF));
     let err = report.statistics.final_kkt_error;
     assert!(
         err < 1e-4,
@@ -349,12 +384,18 @@ fn best_acceptable_fallback_does_not_trade_feasibility_for_objective() {
     // is loosened, which is unusual but entirely legal on hard or badly-scaled
     // models. `constr_viol_tol` (the strict feasibility band the fix keys on) is
     // left at its 1e-4 default.
-    const BAND: [&str; 5] = [
+    //
+    // `UPSTREAM_DELTA_S` for the reason at its definition: at
+    // `perturb_slack_fact=0.03` the guard never fires here (the two arms are
+    // the same run) and the guard-off control itself ends at a constraint
+    // violation of 4.1e-2, so neither half of the test is reached.
+    const BAND: [&str; 6] = [
         "acceptable_constr_viol_tol=1e1",
         "acceptable_tol=1e10",
         "acceptable_dual_inf_tol=1e30",
         "acceptable_compl_inf_tol=1e10",
         HANG_GUARD,
+        UPSTREAM_DELTA_S,
     ];
 
     let off = solve(
@@ -365,6 +406,8 @@ fn best_acceptable_fallback_does_not_trade_feasibility_for_objective() {
         "autocorr_bern55-06.nl",
         &[BAND.as_slice(), &["dual_diverging_streak=15"]].concat(),
     );
+
+    assert_guard_fired(&on, &off);
 
     // The control: the loose band on its own must not produce an infeasible
     // return, or this fixture no longer isolates the fallback's behaviour.

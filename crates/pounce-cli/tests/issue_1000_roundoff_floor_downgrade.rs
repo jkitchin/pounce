@@ -18,6 +18,21 @@
 //!   optimal. The cause is the `bound_relax_factor = 0` the caller chose, so
 //!   the warning names it, and at the default relaxation the same model ends
 //!   `Solve_Succeeded` (items II.23 and I.15).
+//!
+//! The control now runs `haverly_runaway_start_brf0` (gh#1098): the same
+//! `.nl` as `haverly_multistart_t3_brf0` with a different starting point (a
+//! uniform draw within the bounds) and nothing else changed. The runaway
+//! multiplier on trial 3 is a property of the inertia correction's
+//! `δ_s = δ_x`: at `perturb_slack_fact=0.03` trial 3 converges `Optimal` in 57
+//! iterations at an unscaled dual of `1.25e-11`, with no runaway and nothing to
+//! downgrade, so the control no longer reached the branch it controls for.
+//! From the new start the runaway is there at every factor measured: residual
+//! `1.67e-2` against terms of `3.72e10` (about 2000 ulps), `Solved_To_Acceptable_Level`
+//! in 47 iterations at objective `-99.99999262`, the downgrade and the
+//! `bound_relax_factor = 0` warning both present — at `perturb_slack_fact` 1,
+//! 0.3, 0.1, 0.03 and 0.01, 17/17 under the round-off screen
+//! (`mu_init = 0.1·(1 ± k·1e-12)`) at each. At the default relaxation it ends
+//! `Optimal` with no `bound_relax_factor` warning, as trial 3 did.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -57,7 +72,7 @@ fn a_residual_at_the_roundoff_floor_keeps_its_success_verdict() {
 
 #[test]
 fn a_residual_above_the_floor_is_still_downgraded() {
-    let out = run("haverly_multistart_t3_brf0.nl");
+    let out = run("haverly_runaway_start_brf0.nl");
     assert_eq!(
         exit_line(&out),
         "EXIT: Solved To Acceptable Level.",
@@ -74,7 +89,7 @@ fn a_residual_above_the_floor_is_still_downgraded() {
 
 #[test]
 fn the_default_relaxation_certifies_the_same_model() {
-    let out = run_with("haverly_multistart_t3_brf0.nl", "1e-8");
+    let out = run_with("haverly_runaway_start_brf0.nl", "1e-8");
     assert_eq!(exit_line(&out), "EXIT: Optimal Solution Found.", "{out}");
     assert!(!out.contains("bound_relax_factor = 0 is set"), "{out}");
 }

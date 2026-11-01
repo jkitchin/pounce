@@ -407,7 +407,23 @@ fn safeguard_decision(model: &str) -> BTreeMap<String, String> {
 /// measured cost is now `csfi2` alone.
 #[test]
 fn the_safeguards_measured_cost_is_now_csfi2_alone() {
-    let csfi2 = solve("csfi2", true);
+    // `perturb_slack_fact=1` is pinned on the csfi2 leg (gh#1098). The
+    // acceptable-level stall this leg records is csfi2's own, on both
+    // `least_square_init_primal` arms, and it depends on the inertia
+    // correction's `δ_s = δ_x`: at `perturb_slack_fact=0.03` both arms
+    // certify instead (`SolveSucceeded`/37, the same point on each), so
+    // the downgrade gh#616 recorded is not there to measure. Pinning the
+    // factor keeps the measurement gh#616 made; it does not claim the
+    // stall is a property of the safeguard at every factor.
+    const UPSTREAM_DELTA_S: &[&str] = &["perturb_slack_fact=1"];
+    let csfi2 = solve_with("csfi2", true, &[], UPSTREAM_DELTA_S);
+    let csfi2_no = solve_with("csfi2", false, &[], UPSTREAM_DELTA_S);
+    assert_eq!(
+        (status_of(&csfi2), &csfi2.solution.x),
+        (status_of(&csfi2_no), &csfi2_no.solution.x),
+        "the safeguard declines every trial on csfi2, so `=yes` must reach \
+         bit for bit what `=no` reaches",
+    );
     assert_eq!(
         status_of(&csfi2),
         "SolvedToAcceptableLevel",

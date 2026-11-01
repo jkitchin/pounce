@@ -94,9 +94,16 @@ impl Run {
 ///
 /// This is the run from the bug report. The first attempt's verdict is the
 /// one that used to read as the final answer.
+///
+/// The fixture is `csfi2_stall_start.nl`, `csfi2` from a different start
+/// (gh#1098). From `csfi2.nl`'s own start the first attempt's stall depends on
+/// the inertia correction's `δ_s = δ_x`, and at `perturb_slack_fact=0.03` it
+/// certifies in one attempt; from this start the stall (acceptable/12) and the
+/// promotion (optimal/9) are measured identically at `perturb_slack_fact` 1,
+/// 0.3, 0.1, 0.03 and 0.01.
 #[test]
 fn a_retried_run_reports_one_verdict_and_it_is_the_last_attempts() {
-    let run = Run::go("csfi2.nl", &[]);
+    let run = Run::go("csfi2_stall_start.nl", &[]);
     assert!(
         run.attempts() >= 2,
         "csfi2 should retry under stock options; it made {} attempt(s). \
@@ -282,10 +289,17 @@ fn print_level_zero_reports_no_verdict_at_all() {
 /// attempts genuinely differ in size and the reader needs both headers.
 /// `mu_strategy_fallback=no` keeps the run to the ℓ₁ driver alone, so the
 /// attempt count is the one this test reasons about.
+///
+/// The fixture is likewise `csfi2_stall_start.nl`, `csfi2` from a different start
+/// (gh#1098). From `csfi2.nl`'s own start the first attempt's failure
+/// depends on the inertia correction's `δ_s = δ_x`, and at
+/// `perturb_slack_fact=0.03` it certifies in one attempt and the ℓ₁ retry
+/// never runs; from this start the ℓ₁ retry runs and its header (5 vs 9
+/// variables) is measured the same at `perturb_slack_fact` 1 and 0.03.
 #[test]
 fn the_header_reprints_when_the_retry_changes_the_problem() {
     let run = Run::go(
-        "csfi2.nl",
+        "csfi2_stall_start.nl",
         &[
             "l1_fallback_on_restoration_failure=yes",
             "mu_strategy_fallback=no",

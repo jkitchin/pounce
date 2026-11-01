@@ -14,6 +14,19 @@
 //! The motivating model is `cho_parmest`, which lives in the external
 //! benchmark corpus and so cannot be a fixture here; `csfi2` reproduces
 //! the same promotion on an in-repo model.
+//!
+//! **From `csfi2_stall_start.nl`, not `csfi2.nl` (gh#1098).** These tests
+//! need a stock run that *stalls* at an acceptable-level exit, so that the
+//! retry has something to promote. From `csfi2.nl`'s own start that stall
+//! is a property of the inertia correction's `δ_s = δ_x`: at
+//! `perturb_slack_fact=0.03` the base solve certifies directly
+//! (`Optimal`/37) and every test here would pass or fail without the retry
+//! ever being asked. `csfi2_stall_start.nl` is the same model from a
+//! different start (seed 11 of a random-start scan), on which the stall is
+//! not a property of that knob. Measured identically at
+//! `perturb_slack_fact` 1, 0.3, 0.1, 0.03 and 0.01: base
+//! `Solved_To_Acceptable_Level`/12, adaptive retry `Optimal`/9, and 17/17
+//! the same at each under the round-off screen (`mu_init = 0.1·(1 ± k·1e-12)`).
 
 use std::process::Command;
 
@@ -27,10 +40,12 @@ fn fixture(name: &str) -> String {
     format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// `(exit line, iteration count)` of the *last* solve the run reported.
-fn solve(extra: &[&str]) -> (String, u32) {
+/// `(exit line, iteration count, attempts)` — the exit and iteration count
+/// of the *last* solve the run reported, and how many solves it reported
+/// (one `Number of Iterations` line each; the retry is the second).
+fn solve(extra: &[&str]) -> (String, u32, usize) {
     let mut cmd = Command::new(pounce_exe());
-    cmd.arg(fixture("csfi2.nl")).arg("--no-sol");
+    cmd.arg(fixture("csfi2_stall_start.nl")).arg("--no-sol");
     for o in extra {
         cmd.arg(o);
     }
@@ -49,14 +64,24 @@ fn solve(extra: &[&str]) -> (String, u32) {
         .next_back()
         .and_then(|l| l.rsplit(' ').next().and_then(|v| v.parse().ok()))
         .unwrap_or(0);
-    (exit, iters)
+    let attempts = text
+        .lines()
+        .filter(|l| l.contains("Number of Iterations"))
+        .count();
+    (exit, iters, attempts)
 }
 
 /// Stock options: the acceptable-level exit is POUNCE's own stall, so it
 /// earns one retry under the flipped schedule — and that retry certifies.
 #[test]
 fn stock_options_retry_an_acceptable_level_exit() {
-    let (exit, iters) = solve(&[]);
+    let (exit, iters, attempts) = solve(&[]);
+    assert_eq!(
+        attempts, 2,
+        "expected the base solve to stall and the retry to run (base \
+         acceptable/12, retry optimal/9); a single attempt means the base \
+         certified on its own and this test no longer reaches the retry",
+    );
     assert!(
         exit.contains("Optimal Solution Found"),
         "expected the retry to promote csfi2 to a certificate, got {exit:?}",
@@ -70,11 +95,12 @@ fn stock_options_retry_an_acceptable_level_exit() {
 /// `mu_strategy_fallback=no` restores upstream's single solve.
 #[test]
 fn an_explicit_no_still_declines() {
-    let (exit, _) = solve(&["mu_strategy_fallback=no"]);
+    let (exit, _, attempts) = solve(&["mu_strategy_fallback=no"]);
     assert!(
         exit.contains("Solved To Acceptable Level"),
         "an explicit no must not retry, got {exit:?}",
     );
+    assert_eq!(attempts, 1, "an explicit no must not retry");
 }
 
 /// A caller-armed termination guard means the downgrade may be the
@@ -89,10 +115,15 @@ fn a_caller_set_termination_option_declines_the_retry() {
         "resto_decline_deferrals=0",
         "tol=1e-9",
     ] {
-        let (exit, _) = solve(&[opt]);
+        let (exit, _, attempts) = solve(&[opt]);
         assert!(
-            !exit.contains("Optimal Solution Found"),
-            "{opt} must suppress the default-on retry, got {exit:?}",
+            exit.contains("Solved To Acceptable Level"),
+            "{opt}: expected the acceptable-level stall the retry would \
+             otherwise take, got {exit:?}",
+        );
+        assert_eq!(
+            attempts, 1,
+            "{opt} must suppress the default-on retry, got {attempts} attempts",
         );
     }
 }
@@ -100,7 +131,8 @@ fn a_caller_set_termination_option_declines_the_retry() {
 /// The caller can always override the guard back on.
 #[test]
 fn an_explicit_yes_overrides_a_caller_set_termination_option() {
-    let (exit, _) = solve(&["kkt_fidelity_tol=1e-14", "mu_strategy_fallback=yes"]);
+    let (exit, _, attempts) = solve(&["kkt_fidelity_tol=1e-14", "mu_strategy_fallback=yes"]);
+    assert_eq!(attempts, 2, "an explicit yes must run the retry");
     assert!(
         exit.contains("Optimal Solution Found") || exit.contains("Solved To Acceptable Level"),
         "an explicit yes must still run the retry path, got {exit:?}",

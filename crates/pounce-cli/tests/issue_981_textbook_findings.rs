@@ -231,12 +231,17 @@ fn a_duplicated_row_keeps_its_delta_c_under_adaptive_mu() {
 /// file's criterion next to the mechanism that could break it.
 #[test]
 fn the_reinstatement_does_not_reach_the_biactive_mpcc() {
+    // `perturb_slack_fact=1`: see the note on
+    // `issue_884_biactive_dual_divergence::the_reproducer_no_longer_stalls_at_the_default`
+    // (gh#1098). This model's outcome under these options is round-off
+    // chaotic at every factor; the pin keeps the draw this was written on.
     let sol_path = tmp_path("out.sol");
     let out = Command::new(pounce_exe())
         .arg(fixture("mpcc_qpec_small_biactive.nl"))
         .arg(&sol_path)
         .arg("bound_relax_factor=0")
         .arg("mu_strategy_fallback=no")
+        .arg("perturb_slack_fact=1")
         .output()
         .expect("spawn pounce");
     let _ = std::fs::remove_file(&sol_path);
