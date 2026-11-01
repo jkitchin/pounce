@@ -108,7 +108,7 @@ changes.
   28 s, and `momentum1` (5 s), `neos-662469` (107 s) and `atlanta-ip`
   (30 s) are certified where they previously timed out at 600 s. Across the
   93 primal-infeasible instances with at most 300k nonzeros, those certified
-  within 120 s go from 82 to 85, and 39 of the rest stop 1–8 iterations
+  within 120 s go from 82 to 85, and 37 of the rest stop 1–8 iterations
   sooner; no verdict changes on the 54 unbounded ones.
 - **Presolve no longer "proves" infeasibility from rounding on a row emptied
   by aggregation.** Doubleton aggregation can pin a column and empty a row to
