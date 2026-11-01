@@ -394,7 +394,7 @@ pub fn solve_mpcc(
         match finish {
             Some(f) if accepts(f.status, f.max_abs_product, tol) => {
                 let (ff, fr) = (min_obj(&f), min_obj(&relaxed));
-                if finish_drifted(ff, fr) {
+                if finish_drifted(ff, fr, relaxed.max_abs_product) {
                     report(&format!(
                         "pounce: complementarity: {label}'s exact finish drifted to a worse \
                          point (minimized objective {ff:.6e} against {fr:.6e} at the last \

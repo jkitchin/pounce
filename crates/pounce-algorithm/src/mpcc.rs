@@ -180,18 +180,36 @@ pub fn finish_budget(schedule_iterations: usize) -> usize {
 /// genuinely different branches (MacMPEC `water-net`: 953 against 964, 1.1%).
 pub const SAME_ANSWER_REL_TOL: Number = 1e-4;
 
+/// How much objective a relaxed point's slack can buy at a biactive corner,
+/// per unit of `sqrt(product)`: [`finish_drifted`]'s allowance. At a corner
+/// the relaxation `G·H <= p` moves the objective by `O(sqrt(p))`, not `O(p)`
+/// (MacMPEC `scholtes4`: the `τ = 1e-8` point sits at `-2e-4 = -2·sqrt(τ)`,
+/// against the exact `f* = 0`), so a finish that *removes* that slack looks
+/// worse by about this much without having drifted anywhere.
+pub const CORNER_SLACK_FACTOR: Number = 10.0;
+
 /// Did an exact finish drift off the relaxed answer it started from? True
 /// when the finish's minimized objective is worse than the relaxed point's by
-/// more than [`SAME_ANSWER_REL_TOL`]. A finish solves the degenerate exact
-/// product and can wander: MacMPEC `pack-comp1p-32`'s continuation reaches
-/// 0.65304 at `τ = 1e-8` and its finish then crawls through restoration to
-/// 0.783, which used to replace it. The relaxed point already satisfies every
-/// product to the last `τ`, so it is kept instead.
-pub fn finish_drifted(f_finish: Number, f_relaxed: Number) -> bool {
+/// more than what the relaxed point's own slack can account for:
+/// `max(SAME_ANSWER_REL_TOL, CORNER_SLACK_FACTOR·sqrt(product))·max(1, |f|)`,
+/// `product` the relaxed point's largest complementarity product. A finish
+/// solves the degenerate exact product and can wander: MacMPEC
+/// `pack-comp1p-32`'s continuation reaches 0.65304 at `τ = 1e-8` (products
+/// 5e-9) and its finish then crawls through restoration to 0.783, which used
+/// to replace it; the relaxed point is kept instead. On `scholtes4` the
+/// finish's `3e-11` is the exact answer and the relaxed `-2e-4` is slack, and
+/// the allowance (`1e-3` at `1e-8`) keeps the finish.
+pub fn finish_drifted(f_finish: Number, f_relaxed: Number, relaxed_product: Number) -> bool {
     if !f_relaxed.is_finite() {
         return false;
     }
-    !f_finish.is_finite() || f_finish > f_relaxed + SAME_ANSWER_REL_TOL * f_relaxed.abs().max(1.0)
+    let p = if relaxed_product.is_finite() {
+        relaxed_product.max(0.0)
+    } else {
+        return false;
+    };
+    let allowance = SAME_ANSWER_REL_TOL.max(CORNER_SLACK_FACTOR * p.sqrt());
+    !f_finish.is_finite() || f_finish > f_relaxed + allowance * f_relaxed.abs().max(1.0)
 }
 
 /// Do two answers agree, within [`SAME_ANSWER_REL_TOL`]? The exact stage's
@@ -1600,14 +1618,21 @@ mod tests {
 
     #[test]
     fn a_finish_that_drifts_above_its_relaxed_start_is_flagged() {
-        // pack-comp1p-32: 0.653 relaxed, 0.783 after the finish wandered.
-        assert!(finish_drifted(0.783, 0.65304));
+        // pack-comp1p-32: 0.653 relaxed (products 5e-9), 0.783 after the
+        // finish wandered.
+        assert!(finish_drifted(0.783, 0.65304, 5e-9));
         // A finish that tightens the products at (almost) the same objective,
         // or improves it, is kept.
-        assert!(!finish_drifted(0.65304 + 1e-6, 0.65304));
-        assert!(!finish_drifted(0.6529, 0.65304));
-        assert!(finish_drifted(Number::NAN, 1.0));
-        assert!(!finish_drifted(1.0, Number::INFINITY));
+        assert!(!finish_drifted(0.65304 + 1e-6, 0.65304, 5e-9));
+        assert!(!finish_drifted(0.6529, 0.65304, 5e-9));
+        // scholtes4 and ralph1: the relaxed point's slack at a biactive
+        // corner buys -2e-4 / -1e-4 = O(sqrt(1e-8)); the finish removing it
+        // has not drifted.
+        assert!(!finish_drifted(3e-11, -1.999973e-4, 1e-8));
+        assert!(!finish_drifted(2e-9, -9.999818e-5, 1e-8));
+        assert!(finish_drifted(Number::NAN, 1.0, 1e-8));
+        assert!(!finish_drifted(1.0, Number::INFINITY, 1e-8));
+        assert!(!finish_drifted(5.0, 1.0, Number::INFINITY));
     }
 
     #[test]
