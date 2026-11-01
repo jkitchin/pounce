@@ -171,6 +171,19 @@ changes.
   judged against `EMPTY_ROW_TOL × (1 + scale)`, as a row emptied by fixing
   already was (gh#496). Seen on MIPLIB 2017 Infeas `dws008-03`/`dws012-02`,
   which are infeasible but were rejected for this reason.
+- **Convex QCQPs solved on the conic arm (`cvx-qcqp`) return correct
+  multipliers, and their reported dual infeasibility describes what is
+  returned (gh#1114).** A quadratic constraint's multiplier was read off its
+  cone dual, which is exact only at exact complementarity; the conic solver
+  stops before that, and the error landed in the other multipliers. On `min
+  (x0-2)^2 + x1^2` subject to `x0^2 + x1^2 <= 1`, `x0 + x1 == 1` the `.sol`
+  duals came back `(1.000006, -1.2e-5)` against the exact `(1, 0)`, while
+  `final_dual_inf` read `1.3e-11`. The answer is now polished in the original
+  problem — multipliers re-fitted, then Newton steps on the active set,
+  each kept only if the KKT error falls — and the console summary and JSON
+  report give the original problem's residuals. The multipliers are now
+  exact to roundoff on that model, `airport`'s stationarity residual goes
+  from `9e-5` to `2e-12` and its objective now matches the NLP arm's.
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
   the server failed at import (`No module named 'mcp.server.fastmcp'`).
