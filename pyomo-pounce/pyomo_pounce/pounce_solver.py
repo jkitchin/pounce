@@ -263,6 +263,9 @@ class POUNCE(ASL):
         self._capabilities.integer = False
         self._capabilities.sos1 = False
         self._capabilities.sos2 = False
+        # Complementarity pairs lowered by pyomo_pounce.mpec for the solve
+        # in flight (None outside a solve, or with no Complementarity).
+        self._cc_lowering = None
 
     def solve(self, *args, **kwds):
         # When the model declares sensitivity parameters
@@ -313,7 +316,15 @@ class POUNCE(ASL):
             return sens_solve(model, tee=kwds.get("tee", False),
                               options=opts, **explicit)
         from pyomo.common.errors import ApplicationError
+        from pyomo_pounce.mpec import lower_complementarity
 
+        # Pyomo's mpec.nl route loses two-sided complementarity pairs (and
+        # one-sided pairs on a variable with a different bound of its own)
+        # on the way to `.nl`, and the solve then reports "optimal" at a
+        # non-complementary point. Lower those pairs ourselves first; the
+        # written file is checked in `_presolve` (see pyomo_pounce.mpec).
+        self._cc_lowering = (lower_complementarity(model)
+                             if model is not None else None)
         try:
             return super().solve(*args, **kwds)
         except ApplicationError as e:
@@ -326,6 +337,24 @@ class POUNCE(ASL):
             if not reasons:
                 raise
             raise ApplicationError(f"{e}: {' '.join(reasons)}") from e
+        finally:
+            # After the solution load: the auxiliary pair components go, the
+            # user's Complementarity data come back, and so do the bounds
+            # mpec.nl wrote onto the user's variables.
+            if self._cc_lowering is not None:
+                self._cc_lowering.restore()
+            self._cc_lowering = None
+
+    def _presolve(self, *args, **kwds):
+        # The ASL layer applies mpec.nl and writes the `.nl` here. Fail
+        # closed if the written file does not carry every pair.
+        super()._presolve(*args, **kwds)
+        lowering = getattr(self, "_cc_lowering", None)
+        files = getattr(self, "_problem_files", None) or ()
+        if lowering is not None and files and str(files[0]).endswith(".nl"):
+            from pyomo_pounce.mpec import check_written_nl
+
+            check_written_nl(files[0], lowering)
 
     def _default_executable(self):
         # Prefer the binary bundled in the installed ``pounce-solver`` wheel,

@@ -45,6 +45,13 @@ m.c1 = Complementarity(expr=complements(m.y1 >= 0, 2 * m.y1 - 1 - m.x >= 0))
 pyo.SolverFactory("pounce").solve(m)
 ```
 
+A mixed pair is `complements(pyo.inequality(lo, r, hi), f)`, in either
+order. Pyomo's `mpec.nl` writer loses it (and merges a one-sided pair's
+bound into a different declared bound on the same variable), so
+pyomo-pounce writes those pairs itself as flag-3 (or flag-1) rows on an
+auxiliary variable, and refuses the solve if the written file still lacks a
+pair — see [Pyomo](pyomo.md#complementarity-constraints-pyomompec).
+
 **Python API** — pass `complementarity=[(row, var), ...]` to
 `pounce.Problem`. Pair `(i, j)` pairs constraint row `g_i` with variable
 `x_j`, each measured from its one finite bound:
