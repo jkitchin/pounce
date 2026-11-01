@@ -173,6 +173,43 @@ pub fn finish_budget(schedule_iterations: usize) -> usize {
     schedule_iterations.max(FINISH_BUDGET_FLOOR)
 }
 
+/// How far, relative to `max(1, |f|)`, two minimized objectives may differ
+/// and still be "the same answer" in the driver's two tests below. Far above
+/// the slack a relaxation's `τ <= 1e-6` products can buy (so a relaxed point
+/// does not beat a finish on that slack alone), far below the gaps between
+/// genuinely different branches (MacMPEC `water-net`: 953 against 964, 1.1%).
+pub const SAME_ANSWER_REL_TOL: Number = 1e-4;
+
+/// Did an exact finish drift off the relaxed answer it started from? True
+/// when the finish's minimized objective is worse than the relaxed point's by
+/// more than [`SAME_ANSWER_REL_TOL`]. A finish solves the degenerate exact
+/// product and can wander: MacMPEC `pack-comp1p-32`'s continuation reaches
+/// 0.65304 at `τ = 1e-8` and its finish then crawls through restoration to
+/// 0.783, which used to replace it. The relaxed point already satisfies every
+/// product to the last `τ`, so it is kept instead.
+pub fn finish_drifted(f_finish: Number, f_relaxed: Number) -> bool {
+    if !f_relaxed.is_finite() {
+        return false;
+    }
+    !f_finish.is_finite() || f_finish > f_relaxed + SAME_ANSWER_REL_TOL * f_relaxed.abs().max(1.0)
+}
+
+/// Do two answers agree, within [`SAME_ANSWER_REL_TOL`]? The exact stage's
+/// cold `G·H = 0` solve is skipped when the continuation's answer and the
+/// exact stage's relaxed path agree: two different routes landing on one
+/// point is evidence the cheap paths found the branch, and the cold solve --
+/// degenerate, often `max_iter`-bound, the largest single cost on MacMPEC --
+/// exists for the models where they do not (`water-net`, `dempe`).
+pub fn answers_agree(f_a: Number, f_b: Number) -> bool {
+    f_a.is_finite()
+        && f_b.is_finite()
+        && (f_a - f_b).abs() <= SAME_ANSWER_REL_TOL * f_a.abs().max(f_b.abs()).max(1.0)
+}
+
+/// The budget of a continuation rung retried after its warm-started solve
+/// failed: twice what the previous rung took, at least this.
+pub const RUNG_RETRY_FLOOR: usize = 200;
+
 /// The `max_iter` a budgeted solve runs under: `budget`, but never above the
 /// caller's own `max_iter`.
 pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
@@ -1559,6 +1596,29 @@ mod tests {
         assert_eq!(exact_stage_budget(true, 10), Some(EXACT_BUDGET_FLOOR));
         assert_eq!(exact_stage_budget(true, 189), Some(3 * 189));
         assert_eq!(exact_stage_budget(true, usize::MAX), Some(usize::MAX));
+    }
+
+    #[test]
+    fn a_finish_that_drifts_above_its_relaxed_start_is_flagged() {
+        // pack-comp1p-32: 0.653 relaxed, 0.783 after the finish wandered.
+        assert!(finish_drifted(0.783, 0.65304));
+        // A finish that tightens the products at (almost) the same objective,
+        // or improves it, is kept.
+        assert!(!finish_drifted(0.65304 + 1e-6, 0.65304));
+        assert!(!finish_drifted(0.6529, 0.65304));
+        assert!(finish_drifted(Number::NAN, 1.0));
+        assert!(!finish_drifted(1.0, Number::INFINITY));
+    }
+
+    #[test]
+    fn answers_agree_within_the_relative_tolerance() {
+        // pack-comp1p-32: continuation 0.65304, relaxed exact path 0.65310.
+        assert!(answers_agree(0.65304, 0.65310));
+        // water-net: 953 against 964 is two branches.
+        assert!(!answers_agree(953.23, 964.12));
+        // Near zero the tolerance is absolute.
+        assert!(answers_agree(1e-9, -5e-5));
+        assert!(!answers_agree(f64::NAN, 0.0));
     }
 
     #[test]
