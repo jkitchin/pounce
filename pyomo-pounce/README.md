@@ -98,6 +98,27 @@ resolution. Prefer one of the two registrations above.
 > before; `pyomo_pounce.HAVE_V2_INTERFACE` reports whether the v2 names are
 > available.
 
+## Complementarity (`pyomo.mpec`)
+
+`Complementarity` components are solved directly by
+`SolverFactory('pounce')`, one-sided and two-sided ("mixed") pairs alike:
+
+```python
+from pyomo.mpec import Complementarity, complements
+m.c1 = Complementarity(expr=complements(m.y >= 0, m.x - m.y >= 0))
+m.c2 = Complementarity(expr=complements(pyo.inequality(0, m.x, 1), m.x - m.y))
+```
+
+Pyomo's `mpec.nl` writer drops a mixed pair (or writes it as an equation),
+and merges a one-sided pair's bound into a different declared bound on the
+same variable; either way the solve used to return `optimal` at a point that
+violates the complementarity. `pyomo_pounce.mpec` writes those pairs itself
+and restores the model afterwards, and the plugin counts the complementarity
+rows in the written `.nl`: if a pair is still missing it raises
+`ComplementarityLoweringError` rather than solve. Use the legacy
+`SolverFactory('pounce')` for these models; the v2 interface's writer raises
+on an active `Complementarity`.
+
 ## Solver Options
 
 Pass options the same way as IPOPT:
