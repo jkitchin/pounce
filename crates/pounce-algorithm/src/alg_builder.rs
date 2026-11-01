@@ -1058,6 +1058,8 @@ pub struct PerturbationOptions {
     pub perturb_delta_c_max_rungs: Index,
     /// `perturb_slack_fact` → `delta_s_fact` (pounce gh#1098).
     pub perturb_slack_fact: Number,
+    /// `perturb_slack_max_rows` → `delta_s_max_rows` (pounce gh#1098).
+    pub perturb_slack_max_rows: Index,
 }
 
 impl Default for PerturbationOptions {
@@ -1074,6 +1076,7 @@ impl Default for PerturbationOptions {
             perturb_always_cd: false,
             perturb_delta_c_max_rungs: 3,
             perturb_slack_fact: crate::ftb_floor::DEFAULT_PERTURB_SLACK_FACT,
+            perturb_slack_max_rows: crate::ftb_floor::DEFAULT_PERTURB_SLACK_MAX_ROWS,
         }
     }
 }
@@ -1461,6 +1464,7 @@ impl AlgorithmBuilder {
         ph.set_perturb_always_cd(self.perturbation.perturb_always_cd);
         ph.delta_c_max_rungs = self.perturbation.perturb_delta_c_max_rungs;
         ph.delta_s_fact = self.perturbation.perturb_slack_fact;
+        ph.delta_s_max_rows = self.perturbation.perturb_slack_max_rows;
         let perturb = Rc::new(RefCell::new(ph));
         let mut pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
         // Iterative-refinement constants (#191): registered but previously

@@ -1566,6 +1566,11 @@ impl PdFullSpaceSolver {
             return true;
         }
 
+        // gh#1098: the slack-block perturbation is budgeted by the number
+        // of slack rows of this aug-system (`PdPerturbationHandler::
+        // delta_s_fact_effective`). Taken from `Σ_s`, whose dimension is
+        // `m_d` on the main and the restoration NLP alike.
+        self.perturb.borrow_mut().delta_s_rows = b.sigma_s.dim();
         let mut deltas = self
             .perturb
             .borrow_mut()
