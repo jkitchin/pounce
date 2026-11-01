@@ -91,6 +91,19 @@ pub struct PdPerturbationHandler {
     /// default here so the bare handler stays upstream); the builder
     /// sets the registered default.
     pub delta_s_fact: Number,
+    /// `perturb_slack_max_rows` (pounce gh#1098): a budget on the slack-block
+    /// perturbation. With `m_d` slack rows the effective factor is
+    /// `delta_s_fact · min(1, delta_s_max_rows / m_d)`, so that
+    /// `δ_s · m_d` — the total the perturbation adds to the slack block's
+    /// trace — never exceeds what it would be on a model with
+    /// `delta_s_max_rows` inequalities. `0` disables the cap (upstream; the
+    /// default here so the bare handler stays upstream). See
+    /// [`Self::delta_s_fact_effective`].
+    pub delta_s_max_rows: Index,
+    /// Number of slack rows of the aug-system being solved; set by the
+    /// owner before [`Self::consider_new_system`]. Read only by
+    /// [`Self::delta_s_fact_effective`].
+    pub delta_s_rows: Index,
 
     // ---- live state ----
     pub delta_x_curr: Number,
@@ -155,6 +168,8 @@ impl Default for PdPerturbationHandler {
             reset_last: false,
             degen_iters_max: 3,
             delta_s_fact: 1.0,
+            delta_s_max_rows: 0,
+            delta_s_rows: 0,
             delta_x_curr: 0.0,
             delta_s_curr: 0.0,
             delta_c_curr: 0.0,
@@ -195,6 +210,30 @@ pub struct Deltas {
 impl PdPerturbationHandler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The factor applied to `δ_x` to get `δ_s` on the current aug-system:
+    /// `delta_s_fact · min(1, delta_s_max_rows / delta_s_rows)` (gh#1098).
+    ///
+    /// Why a row budget. The inertia correction adds `δ_x` to the Hessian
+    /// block because that is where the curvature defect is; upstream adds
+    /// the same `δ_s` to every slack row as well. Along a direction `z` the
+    /// slack rows contribute `Σ_i (Σ_s,i + δ_s) (J_d,i z)²` to the reduced
+    /// curvature, and on an inactive row `Σ_s,i = v_i/s_i` is tiny, so there
+    /// the added `δ_s` is not a perturbation of something but the whole
+    /// term. With thousands of inactive inequalities that sum dominates the
+    /// genuine curvature and successive regularized directions disagree
+    /// (the qcqp1500-1nc crawl). Capping `δ_s · m_d` holds the slack block's
+    /// share of the correction at the level a model with
+    /// `delta_s_max_rows` rows would see, independent of how many
+    /// inequalities the model happens to carry; below the cap the rule is
+    /// upstream's and the corpus of small models is untouched.
+    pub fn delta_s_fact_effective(&self) -> Number {
+        if self.delta_s_max_rows > 0 && self.delta_s_rows > self.delta_s_max_rows {
+            self.delta_s_fact * (self.delta_s_max_rows as Number) / (self.delta_s_rows as Number)
+        } else {
+            self.delta_s_fact
+        }
     }
 
     /// Configure `perturb_always_cd_` and rebuild the initial `jac`
@@ -362,7 +401,7 @@ impl PdPerturbationHandler {
             // the rungs below it are not climbed a second time.
             if self.delta_x_curr < self.delta_x_at_withdrawal {
                 self.delta_x_curr = self.delta_x_at_withdrawal;
-                self.delta_s_curr = self.delta_x_at_withdrawal * self.delta_s_fact;
+                self.delta_s_curr = self.delta_x_at_withdrawal * self.delta_s_fact_effective();
             }
             self.test_status = TrialStatus::NoTest;
             append_info(ip_data, "W");
@@ -709,8 +748,9 @@ impl PdPerturbationHandler {
             append_info(ip_data, "dx");
             return false;
         }
-        // gh#1098: δ_s = perturb_slack_fact · δ_x (upstream: δ_s = δ_x).
-        self.delta_s_curr = self.delta_x_curr * self.delta_s_fact;
+        // gh#1098: δ_s = perturb_slack_fact · min(1, perturb_slack_max_rows/m_d) · δ_x
+        // (upstream: δ_s = δ_x).
+        self.delta_s_curr = self.delta_x_curr * self.delta_s_fact_effective();
 
         *delta_x = self.delta_x_curr;
         *delta_s = self.delta_s_curr;
@@ -801,6 +841,70 @@ fn set_info_regu_x(sink: Option<&dyn PerturbationSink>, v: Number) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#1098: the row budget leaves a model at or below the cap on
+    /// upstream's rule exactly, scales the factor as `cap / rows` above it,
+    /// composes with `delta_s_fact`, and `0` switches it off. Each arm of
+    /// the rule is asserted on its own, so a change that breaks one branch
+    /// cannot hide behind the other.
+    #[test]
+    fn the_slack_row_budget_scales_only_above_the_cap() {
+        let mut h = PdPerturbationHandler::new();
+        // Bare handler: no cap, upstream factor.
+        h.delta_s_rows = 10_005;
+        assert_eq!(h.delta_s_fact_effective(), 1.0);
+
+        h.delta_s_max_rows = 1000;
+        for rows in [0, 1, 999, 1000] {
+            h.delta_s_rows = rows;
+            assert_eq!(
+                h.delta_s_fact_effective(),
+                1.0,
+                "rows={rows} is below the cap"
+            );
+        }
+        h.delta_s_rows = 2000;
+        assert!((h.delta_s_fact_effective() - 0.5).abs() < 1e-15);
+        h.delta_s_rows = 10_005;
+        assert!((h.delta_s_fact_effective() - 1000.0 / 10_005.0).abs() < 1e-15);
+
+        // Composes with the user factor below and above the cap.
+        h.delta_s_fact = 0.03;
+        h.delta_s_rows = 500;
+        assert!((h.delta_s_fact_effective() - 0.03).abs() < 1e-15);
+        h.delta_s_rows = 2000;
+        assert!((h.delta_s_fact_effective() - 0.015).abs() < 1e-15);
+
+        // `0` disables the cap.
+        h.delta_s_max_rows = 0;
+        assert!((h.delta_s_fact_effective() - 0.03).abs() < 1e-15);
+    }
+
+    /// gh#1098: the effective factor is what the ladder actually applies —
+    /// `δ_s = fact_eff · δ_x` on every rung, not only the first.
+    #[test]
+    fn the_ladder_applies_the_effective_slack_factor() {
+        let mut h = PdPerturbationHandler::new();
+        h.delta_s_max_rows = 1000;
+        h.delta_s_rows = 4000;
+        h.consider_new_system(0.1, None).unwrap();
+        for _ in 0..3 {
+            let d = h.perturb_for_wrong_inertia(0.1, None).unwrap();
+            assert!(d.delta_x > 0.0);
+            assert!(
+                (d.delta_s - 0.25 * d.delta_x).abs() <= 1e-15 * d.delta_x,
+                "delta_s={:e} delta_x={:e}",
+                d.delta_s,
+                d.delta_x
+            );
+        }
+        // Same ladder, upstream tie, for the branch the cap does not take.
+        let mut u = PdPerturbationHandler::new();
+        u.delta_s_rows = 4000;
+        u.consider_new_system(0.1, None).unwrap();
+        let d = u.perturb_for_wrong_inertia(0.1, None).unwrap();
+        assert_eq!(d.delta_s, d.delta_x);
+    }
 
     /// A ladder that overflows `δ_xs_max` gives up on the system *and*
     /// forgets it: the next system's ladder starts from the first rung, not
