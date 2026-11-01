@@ -140,8 +140,8 @@ CALIPSO ball-in-cup start the answer moved from violation 8e-11 to 1e-8
 the time.
 
 Three more rules keep the exact-product solves from costing more than they
-return; together they cut MacMPEC's time by about a quarter with no answer
-changed:
+return; together they cut MacMPEC's time by 31% (3,663 s to 2,528 s) and its
+iterations by a third, with no answer changed:
 
 - **A finish never replaces a better relaxed point.** A finish solves the
   degenerate exact product and can wander: `pack-comp1p-32`'s continuation

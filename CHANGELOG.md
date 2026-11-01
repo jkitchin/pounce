@@ -102,10 +102,10 @@ changes.
   slack explains); the exact stage's cold `G·H = 0` solve is skipped when the
   continuation and the relaxed path already agree; and a failed relaxation
   step is retried warm from the previous step's barrier parameter. MacMPEC:
-  same 135 at / 12 better / 4 worse as before, iterations 106k → 71k, time
-  3,663 s → 2,720 s (`pack-comp1-32` 131 → 29 s, `pack-comp1c-32` 74 → 29 s,
-  `pack-comp2c-32` 293 → 143 s); CALIPSO's declared route 209 → 162 s, every
-  answer unchanged.
+  same 135 at / 12 better / 4 worse as before, iterations 106k → 70k, time
+  3,663 s → 2,528 s (`pack-comp1-32` 131 → 26 s, `pack-rig3c-32` 182 → 36 s,
+  `pack-comp1c-32` 74 → 29 s, `pack-comp2c-32` 293 → 136 s); CALIPSO's
+  declared route 209 → 162 s, every answer unchanged.
 - **The dual-divergence retry is no longer refused for a violation far
   below tolerance.** Its rule against "buying" an objective improvement with
   primal slack treated any violation above `1e-12` (and above the base
