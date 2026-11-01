@@ -284,3 +284,76 @@ because no small QP could be built that drives a real pass into that cycle.
 - The gh#1076 pins start failing after a FERAL, probe-pivoting or phase-1
   change.
 - A user reports QSCFXM3-like timeouts under `qp-active-set`.
+
+---
+
+## Convex LP/QP: Farkas certificates are a tolerance at the far-feasible boundary
+
+*Recorded 2026-11-01 with the fix that introduced `FARKAS_MARGIN_MIN`
+(`crates/pounce-convex/src/ipm.rs`, `FarkasMargin`). Not tracked: no rule
+can close it (see "What is wrong").*
+
+**Scope.** The ratio Farkas test in `detect_infeasibility_with` (every
+HSDE and direct-driver iteration of the convex QP/QCQP/conic arm) and the
+free-column residual waiver in `active_set::certifies_primal_infeasible`.
+The exact box proof (`farkas_box_proof`) and presolve verdicts are not
+affected.
+
+### What is wrong
+
+An approximate ray `(y, z)` with `q = Aᵀy + Gᵀz ≠ 0` and
+`β = bᵀy + hᵀz < 0` proves only that no feasible `x` has
+`‖x‖₁ < |β|/‖q‖∞`. With `s = (|b|ᵀ|y| + |h|ᵀ|z|)/‖|A|ᵀ|y| + |G|ᵀ|z|‖∞`,
+the data's natural scale, that radius equals `(ρ_h/ρ_g)·s`. The test
+accepts at `ρ_h/ρ_g ≥ 1e4`. Two consequences follow, and no finite
+threshold removes either:
+
+1. **False certificates beyond `1e4·s`.** Take `g·(x0 + x1) ≤ −1` and
+   `−g·(x0 + (1−ε)·x1) ≤ 0`, with no bounds. It is feasible at
+   `x1 ≤ −1/(gε)`, its ray `z = (1, 1)` has radius `2/ε`, and it is
+   certified infeasible by both engines when `ε ≤ 2e-4` and the absolute
+   tests also pass (`gε ≤ 1e-10`). The unit test
+   `margin_threshold_borderline` pins this boundary at `ε = 1e-4`
+   (accepted) and `ε = 4e-4` (rejected).
+2. **Lost certificates below `1e4·s`.** Integer `A` with an exact null
+   vector, `Σh = −δ`, data near `1e6` and `δ = 1e-6` (a relative margin
+   near `1e-13`): the IPM certifies 20 of 39 and active-set 18 of 39.
+   The rest end `dual_infeasible`, `numerical_failure`,
+   `iteration_limit`, `optimal_inaccurate` or, on active-set only,
+   `optimal` (3 of 39). The feasible twins (`Σh = +δ`) show the same
+   distribution, and the old test certified 14 of those 39 as infeasible,
+   so at that margin the model's verdict lies below its data's rounding.
+
+### Measurements (default options, before → after)
+
+| corpus | before | after |
+|---|---|---|
+| netlib-infeas (29) | 29 infeasible | 29, same iteration counts |
+| MIPLIB 2017 Infeas, nnz ≤ 150k (49) | 32 infeasible, 17 unbounded | same; `lr1dr04vc05v17a-t360_if` 36 → 37 iterations (first ray radius 2.0e3) |
+| `benchmarks/qp` (138) | 137 optimal, BOYD2 timeout | identical, iteration counts included |
+| fixture sweep (134 × 2 legs) | — | only `farkas_far_feasible_no_box` moves (Infeasible → Diverging) |
+| synthetic, feasible (180 + 360) | 15 certified infeasible | 0 |
+| synthetic, infeasible (360) | 360 / 360 (both engines) | IPM 341, active-set 339; every loss at `δ = 1e-6`, data `1e6` |
+
+Ratio-path certificates on netlib-infeas have radius `2.4e8` (`pang`)
+to `1.5e12`. Every false certificate measured had radius `0.16`–`2.4`.
+`1e4` is the log-midpoint of that gap and the order of Clarabel's reduced
+`AlmostPrimalInfeasible` tolerance (`5e-5`).
+
+### What has been tried
+
+- **K = 10…1e8.** Every `K ≥ 10` removes all 15 measured false
+  certificates. On the infeasible family the IPM keeps 360/355/341/341/305/292
+  at `K = 10, 1e2, 1e3, 1e4, 1e6, 1e8`, and netlib is unchanged up to
+  `1e8`.
+- **A componentwise `ρ_g = maxⱼ |qⱼ|/magⱼ`.** Rejected genuine netlib
+  certificates (`ex72a`, `ex73a`, `ω ≈ 0.59`) because some columns have
+  tiny magnitudes. The max-norm version is used instead.
+
+### How to tell whether a fix works
+
+A fix would need a status between certified and not, like Clarabel's
+`AlmostPrimalInfeasible`, or an exact (rational or interval) check of the
+ray. It works if `farkas_far_feasible_no_box.nl` stays uncertified, the
+`two_row` borderline in `ipm.rs` with `ε = 1e-4` stops being certified,
+and the netlib/MIPLIB counts above hold.

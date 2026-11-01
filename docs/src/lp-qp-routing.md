@@ -499,7 +499,15 @@ the dual iterate `(y, z)` as a Farkas ray, in two ways:
 1. **The ratio test.** `bᵀy + hᵀz < −qp_infeas_tol·‖(y, z)‖∞` with
    `‖Aᵀy + Gᵀz‖∞ ≤ 1e-10·‖(y, z)‖∞`. The margin is what keeps a feasible
    model with a very large solution (POWELL20, `‖x*‖ ≈ 1e7`) from being
-   certified off an approximate ray.
+   certified off an approximate ray. An approximate ray only proves that
+   no feasible point lies within `|bᵀy + hᵀz| / ‖Aᵀy + Gᵀz‖∞` of the
+   origin, so the test also requires that radius to exceed `1e4` times the
+   model's own data scale, `(|b|ᵀ|y| + |h|ᵀ|z|) / ‖|A|ᵀ|y| + |G|ᵀ|z|‖∞`.
+   Without that, a feasible 18-variable LP with data of order `1e6` and no
+   variable bounds was reported infeasible: its ray passed both absolute
+   tests but excluded only points out to `~3e6`, and the feasible points
+   start near `1e9`. (Clarabel, ECOS and SCS accept a ray on the same
+   residual-to-value ratio.)
 2. **The box proof** (LP and QP only). Any feasible `x` satisfies
    `(Aᵀy + Gᵀz)ᵀx ≤ bᵀy + hᵀz`. If no `x` within the variable bounds can,
    the model is infeasible. Every rounding error in the computation is
@@ -522,6 +530,16 @@ restoration phase (`cmflsp50-24-8-8` did, before the box proof, in 197
 more iterations), or at a time limit. Unbounded models have no
 equivalent second test. Detection rates and times on a public corpus are
 in [`benchmarks/lp_infeas`](https://github.com/jkitchin/pounce/tree/main/benchmarks/lp_infeas/README.md).
+
+The ratio test is a tolerance, not a proof. A feasible model whose
+feasible points all lie more than `1e4` times its data scale from the
+origin, which takes rows that are dependent to about `1e-10`, can still
+be certified infeasible. Conversely, a model infeasible by a relative
+margin near `1e-12` may not be certified at all. It then ends unbounded,
+at a numerical failure or at the iteration limit, or (with
+`qp-active-set`) as optimal at a point that violates no row beyond
+rounding. At that margin a feasible model differing in the 13th digit of
+its data behaves identically.
 
 `solver_selection=qp-active-set` follows the same contract. Its inner QP
 certifies the recession ray of the *linearization*, which on a nonlinear

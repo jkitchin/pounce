@@ -6275,7 +6275,16 @@ pub(crate) fn detect_infeasibility_with(
         prob.gt_mul(z, &mut resid);
         let cert = dot(&prob.b, y) + dot(&prob.h, z); // bᵀy + hᵀz
         let z_ok = dual_cone_ok(z, ctol * dual_norm);
-        if cert < -ctol * dual_norm && inf_norm(&resid) <= rtol * dual_norm && z_ok {
+        // The two tests above bound `|β|` and `‖q‖` against `‖(y,z)‖`, which
+        // only excludes feasible points within `‖x‖₁ < |β|/‖q‖∞ ≥ 1e3` — an
+        // absolute radius that a model whose data live at `1e6` falls well
+        // inside. `farkas_margin(..).decisive()` asks for the radius to clear
+        // the data's own scale by `FARKAS_MARGIN_MIN`; see [`FarkasMargin`].
+        if cert < -ctol * dual_norm
+            && inf_norm(&resid) <= rtol * dual_norm
+            && z_ok
+            && farkas_margin(prob, y, z).decisive()
+        {
             return Some(QpStatus::PrimalInfeasible);
         }
         // A Farkas ray whose value is too small *relative to `‖(y,z)‖`* for
@@ -6343,6 +6352,159 @@ pub(crate) fn detect_infeasibility_with(
     }
 
     None
+}
+
+/// Minimum [`FarkasMargin::radius`] — the factor by which an approximate
+/// Farkas ray must push feasible points beyond the data's own scale before
+/// [`detect_infeasibility_with`] accepts it as a certificate.
+///
+/// Measured, not reasoned (see [`FarkasMargin`] for the quantity):
+///
+/// * every false certificate the ratio test issued on feasible no-box LPs
+///   (the adversarial `false_infeas_lp` reproducer and 14 instances of an
+///   exact-null-vector family at `‖x*‖ ~ 1e6`) had `radius` in `[0.16, 2.4]`;
+/// * the smallest `radius` among the netlib-infeas models this path
+///   certifies is `2.4e8` (`pang`), the rest `1e9`–`1e12`.
+///
+/// `1e4` is the log-midpoint of that gap. It is also the order of Clarabel's
+/// *reduced* infeasibility tolerance (default `reduced_tol_infeas_rel = 5e-5`, the
+/// threshold below which it will say only `AlmostPrimalInfeasible`), whose
+/// test `‖Aᵀy+Gᵀz‖ < tol·|bᵀy+hᵀz|` is the same trade of residual against
+/// value — ECOS (`feastol`) and SCS (`eps_infeas`) test the same ratio. The
+/// certificates it gives up are on models infeasible by a relative margin of
+/// `≲ 1e-12` (`|bᵀy+hᵀz|` against `|b|ᵀ|y|+|h|ᵀ|z|`), where a feasible twin
+/// differing in the 13th digit of the data is indistinguishable; on the IPM
+/// those now end `DualInfeasible`/`NumericalFailure`/`IterationLimit` (the
+/// active-set engine, which shares this threshold, can also end `Optimal`
+/// there, at a point violating no row beyond rounding).
+pub(crate) const FARKAS_MARGIN_MIN: f64 = 1e4;
+
+/// How decisively an approximate Farkas pair `(y, z)` excludes feasible
+/// points, measured against the scale of the rows it combines.
+///
+/// For any feasible `x`, `qᵀx ≤ β` with `q = Aᵀy + Gᵀz`, `β = bᵀy + hᵀz < 0`,
+/// so `‖x‖₁ ≥ |β| / ‖q‖∞`: a ray with `q ≠ 0` proves only that no feasible
+/// point lies *within that radius*. The absolute tests in
+/// [`detect_infeasibility_with`] (`β < −1e-7·‖(y,z)‖`,
+/// `‖q‖ ≤ 1e-10·‖(y,z)‖`) put the radius at `≥ 1e3` in absolute units —
+/// meaningless for a model whose data, and whose feasible points, live at
+/// `1e6`. The `false_infeas_lp` reproducer (m = n = 18, no bounds) is exactly
+/// that: `β/‖z‖ = −1.9e-5`, `‖q‖ = 5.5e-12`, radius `3.4e6`, and an exact
+/// rational solve finds a feasible point at `‖x‖∞ ≈ 1.1e9`.
+///
+/// Both quantities are made relative to the magnitudes they cancel from:
+///
+/// * `rho_h = |bᵀy + hᵀz| / (|b|ᵀ|y| + |h|ᵀ|z|)` — the fraction of the
+///   right-hand side that survives in the Farkas value;
+/// * `rho_g = ‖Aᵀy + Gᵀz‖∞ / ‖|A|ᵀ|y| + |G|ᵀ|z|‖∞` — the fraction of the
+///   column magnitudes that survives in the residual.
+///
+/// With `s = (|b|ᵀ|y| + |h|ᵀ|z|) / ‖|A|ᵀ|y| + |G|ᵀ|z|‖∞` — the size of `x`
+/// at which the combined rows' left-hand sides reach their right-hand sides,
+/// the data's natural scale — the exclusion radius is exactly
+/// `|β|/‖q‖∞ = (rho_h / rho_g) · s`. So [`radius`](Self::radius)
+/// `= rho_h/rho_g` is the radius in units of the data's own scale, and
+/// requiring it `≥ FARKAS_MARGIN_MIN` says "no feasible point within
+/// `FARKAS_MARGIN_MIN` times the scale this model is written at". It is
+/// invariant to scaling any row (with its multiplier) and to scaling `x`.
+///
+/// It is not a proof, and no finite threshold is: a feasible model whose
+/// feasible points sit beyond `FARKAS_MARGIN_MIN · s` (rows nearly
+/// dependent to `1e-10` and beyond) still yields a ray that passes. The
+/// threshold moves the boundary from an absolute `1e3` to a data-relative
+/// `1e4·s`; `dev-notes/known-limitations.md` records the remainder.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FarkasMargin {
+    /// `|bᵀy + hᵀz| / (|b|ᵀ|y| + |h|ᵀ|z|)`, in `[0, 1]` up to rounding.
+    pub rho_h: f64,
+    /// `‖Aᵀy + Gᵀz‖∞ / ‖|A|ᵀ|y| + |G|ᵀ|z|‖∞`, in `[0, 1]` up to rounding;
+    /// `0` for an exact ray.
+    pub rho_g: f64,
+}
+
+impl FarkasMargin {
+    /// `rho_h / rho_g`: the exclusion radius in units of the data scale
+    /// (`+∞` for an exact ray with a non-zero value).
+    pub(crate) fn radius(&self) -> f64 {
+        if self.rho_g == 0.0 {
+            if self.rho_h > 0.0 { f64::INFINITY } else { 0.0 }
+        } else {
+            self.rho_h / self.rho_g
+        }
+    }
+
+    /// The radius clears [`FARKAS_MARGIN_MIN`]. NaN (no column magnitude at
+    /// all, so nothing to measure against) is not decisive.
+    pub(crate) fn decisive(&self) -> bool {
+        self.radius() >= FARKAS_MARGIN_MIN
+    }
+}
+
+/// Compute [`FarkasMargin`] for the pair `(y, z)` on `prob`. `z` is used as
+/// given (the caller has already checked it lies in the dual cone); the
+/// absolute values make the measure cone-agnostic.
+pub(crate) fn farkas_margin(prob: &QpProblem, y: &[f64], z: &[f64]) -> FarkasMargin {
+    let n = prob.n;
+    let mut q = vec![0.0; n];
+    prob.at_mul(y, &mut q);
+    prob.gt_mul(z, &mut q);
+    let beta = dot(&prob.b, y) + dot(&prob.h, z);
+    FarkasMargin::new(
+        beta.abs(),
+        farkas_rhs_magnitude(prob, y, z),
+        inf_norm(&q),
+        inf_norm(&farkas_column_magnitudes(prob, y, z)),
+    )
+}
+
+impl FarkasMargin {
+    /// Build from the raw pieces: the value margin `gap > 0` and the sum of
+    /// absolute terms it was formed from, the residual `‖q‖∞` the margin has
+    /// to overcome and the column magnitudes `‖|A|ᵀ|y| + |G|ᵀ|z|‖∞`. Shared
+    /// with the active-set certifier, whose margin is `L − v` rather than
+    /// `|β|` (see `active_set::certifies_primal_infeasible`).
+    pub(crate) fn new(gap: f64, gap_scale: f64, resid: f64, mag: f64) -> Self {
+        let rho_g = if resid == 0.0 {
+            0.0
+        } else if mag > 0.0 {
+            resid / mag
+        } else {
+            f64::NAN
+        };
+        let rho_h = if gap_scale > 0.0 {
+            gap / gap_scale
+        } else {
+            0.0
+        };
+        FarkasMargin { rho_h, rho_g }
+    }
+}
+
+/// `|b|ᵀ|y| + |h|ᵀ|z|`: the magnitudes `bᵀy + hᵀz` cancels from.
+pub(crate) fn farkas_rhs_magnitude(prob: &QpProblem, y: &[f64], z: &[f64]) -> f64 {
+    prob.b
+        .iter()
+        .zip(y)
+        .map(|(b, y)| (b * y).abs())
+        .sum::<f64>()
+        + prob
+            .h
+            .iter()
+            .zip(z)
+            .map(|(h, z)| (h * z).abs())
+            .sum::<f64>()
+}
+
+/// `|A|ᵀ|y| + |G|ᵀ|z|`, per column: the magnitudes `Aᵀy + Gᵀz` cancels from.
+pub(crate) fn farkas_column_magnitudes(prob: &QpProblem, y: &[f64], z: &[f64]) -> Vec<f64> {
+    let mut mag = vec![0.0; prob.n];
+    for t in &prob.a {
+        mag[t.col] += (t.val * y[t.row]).abs();
+    }
+    for t in &prob.g {
+        mag[t.col] += (t.val * z[t.row]).abs();
+    }
+    mag
 }
 
 /// Prove primal infeasibility from a Farkas pair `(y, z)` and the variable
@@ -6670,7 +6832,7 @@ mod detect_infeasibility_tests {
     //! H7 regression: the dual-infeasibility recession test must validate
     //! `−Gd ∈ K`, not componentwise `Gd ≤ 0`. These call the `pub(crate)`
     //! detectors directly with crafted recession directions.
-    use super::{detect_infeasibility, detect_infeasibility_cone};
+    use super::{detect_infeasibility, detect_infeasibility_cone, farkas_margin};
     use crate::QpOptions;
     use crate::cones::{CompositeCone, ConeSpec};
     use crate::qp::{QpProblem, QpStatus, Triplet};
@@ -6957,18 +7119,140 @@ mod detect_infeasibility_tests {
              feasibility floor, not a certificate — must not report infeasible"
         );
 
-        // A genuine, machine-tight certificate (residual 1e-12 ≪ 1e-10) on the
-        // same structure must still be detected — the tightening only rejects
-        // the floor, not real certificates.
+        // The same structure with residual 1e-12 (≪ FARKAS_RESID_TOL) passes
+        // both absolute tests — and is *still feasible*: `1e-12·x ≤ −1` holds
+        // at `x = −1e12`. This used to be asserted as a "genuine certificate";
+        // it is the false-infeasibility pattern of `false_infeas_lp`. The ray
+        // combines one row, so nothing cancels: `rho_h = rho_g = 1` and the
+        // exclusion radius is `1×` the data scale `|h|/|G| = 1e12` — exactly
+        // where the feasible points start.
         let tight = QpProblem {
             g: vec![Triplet::new(0, 0, 1e-12)],
             ..prob
         };
         assert_eq!(
             detect_infeasibility(&tight, &x, &y, &z, &opts),
-            Some(QpStatus::PrimalInfeasible),
-            "residual 1e-12 ≪ FARKAS_RESID_TOL is a genuine Farkas certificate"
+            None,
+            "1e-12·x ≤ −1 is feasible (x = −1e12); a ray that only excludes \
+             |x| < 1e12 must not certify it"
         );
+    }
+
+    /// `rows`: `g·(x0 + x1) ≤ −1`, `−g·(x0 + (1−eps)·x1) ≤ 0` (no bounds).
+    /// For `eps > 0` it is feasible (`x1 ≤ −1/(g·eps)`); for `eps = 0` it is
+    /// infeasible (the rows sum to `0 ≤ −1`).
+    fn two_row(g: f64, eps: f64) -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, g),
+                Triplet::new(0, 1, g),
+                Triplet::new(1, 0, -g),
+                Triplet::new(1, 1, -g * (1.0 - eps)),
+            ],
+            h: vec![-1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    /// The branch that must stay certified: no box, so `farkas_box_proof`
+    /// cannot help, and an exact ray (`q = 0`, radius `∞`).
+    #[test]
+    fn exact_ray_without_box_stays_primal_infeasible() {
+        let opts = QpOptions::default();
+        let (x, y, z) = ([0.0, 0.0], [0.0; 0], [1.0, 1.0]);
+        for g in [1.0, 1e-8, 1e6] {
+            let prob = two_row(g, 0.0);
+            let m = farkas_margin(&prob, &y, &z);
+            assert_eq!(m.rho_g, 0.0);
+            assert!(m.decisive());
+            assert_eq!(
+                detect_infeasibility(&prob, &x, &y, &z, &opts),
+                Some(QpStatus::PrimalInfeasible),
+                "g = {g}"
+            );
+        }
+    }
+
+    /// Both sides of `FARKAS_MARGIN_MIN` with the absolute tests held
+    /// passing: `g = 1e-8` keeps `‖q‖ = g·eps ≤ 1e-10`, `β = −1`. The
+    /// radius is `rho_h/rho_g = 1/(g·eps / 2g) = 2/eps` (`‖mag‖∞` is column 0's `2g`).
+    ///
+    /// * `eps = 4e-4` → radius `5e3 < 1e4`: rejected. This is the
+    ///   reproducer's regime (feasible points at `2.5e11`, data scale
+    ///   `5e7`) and the old rule certified it.
+    /// * `eps = 1e-4` → radius `2e4 ≥ 1e4`: accepted, although the model is
+    ///   feasible (at `1e12`). That is the documented residual limitation —
+    ///   no finite threshold separates "infeasible" from "feasible only beyond
+    ///   `K` times the data scale" — and this leg pins where the line is.
+    #[test]
+    fn margin_threshold_borderline() {
+        let opts = QpOptions::default();
+        let (x, y, z) = ([0.0, 0.0], [0.0; 0], [1.0, 1.0]);
+
+        let below = two_row(1e-8, 4e-4);
+        let m = farkas_margin(&below, &y, &z);
+        assert!((m.radius() / 5000.0 - 1.0).abs() < 1e-6, "{m:?}");
+        assert!(!m.decisive());
+        assert_eq!(detect_infeasibility(&below, &x, &y, &z, &opts), None);
+        let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(2)]);
+        assert_eq!(
+            detect_infeasibility_cone(&below, &x, &y, &z, &opts, &cone),
+            None
+        );
+
+        let above = two_row(1e-8, 1e-4);
+        let m = farkas_margin(&above, &y, &z);
+        assert!((m.radius() / 20000.0 - 1.0).abs() < 1e-6, "{m:?}");
+        assert!(m.decisive());
+        assert_eq!(
+            detect_infeasibility(&above, &x, &y, &z, &opts),
+            Some(QpStatus::PrimalInfeasible)
+        );
+    }
+
+    /// The other branch of the same rule on a *genuinely* infeasible model:
+    /// an inaccurate ray (`z = [1, 1−eps]` on the `eps = 0` rows) has the
+    /// same radius `≈ 2/eps` and is held back until the iteration sharpens
+    /// it — the margin judges the ray, not the model.
+    #[test]
+    fn inaccurate_ray_on_infeasible_model_waits_for_a_sharper_one() {
+        let opts = QpOptions::default();
+        let prob = two_row(1e-8, 0.0);
+        let (x, y) = ([0.0, 0.0], [0.0; 0]);
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &[1.0, 1.0 - 1e-3], &opts),
+            None
+        );
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &[1.0, 1.0 - 1e-9], &opts),
+            Some(QpStatus::PrimalInfeasible)
+        );
+    }
+
+    /// Row scaling (with the multiplier scaled inversely) leaves the margin
+    /// unchanged; scaling the whole model does too.
+    #[test]
+    fn farkas_margin_is_scale_invariant() {
+        let y = [0.0; 0];
+        let base = farkas_margin(&two_row(1e-8, 1e-3), &y, &[1.0, 1.0]);
+        let mut scaled = two_row(1e-8, 1e-3);
+        for t in scaled.g.iter_mut().filter(|t| t.row == 1) {
+            t.val *= 1e5;
+        }
+        let row = farkas_margin(&scaled, &y, &[1.0, 1e-5]);
+        let whole = farkas_margin(&two_row(1.0, 1e-3), &y, &[1.0, 1.0]);
+        for m in [row, whole] {
+            assert!(
+                (m.radius() / base.radius() - 1.0).abs() < 1e-9,
+                "{m:?} vs {base:?}"
+            );
+        }
     }
 }
 
