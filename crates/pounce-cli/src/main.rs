@@ -4322,8 +4322,30 @@ fn run_convex_socp(
     // reported `SolveSucceeded` with a conic `final_dual_inf` of `1e-12`.
     // `None` for a non-optimal verdict, whose `(y, z)` is a certificate.
     let recovery = timing.solution_recovery.guard();
-    let polished = pounce_cli::qcqp_polish::polish_qcqp(&qp, &cones, &con_map, &sol, &backend);
+    let polished =
+        pounce_cli::qcqp_polish::polish_qcqp(&qp, &cones, &con_map, &sol, qp_opts.tol, &backend);
     recovery.stop();
+    // A polished point that still misses the KKT conditions is not
+    // reported as cleanly converged without a word (PR #1120 review): the
+    // status is the conic solver's verdict on the conic problem, and stands,
+    // but the caller is told the original problem's multipliers are not
+    // that accurate.
+    if let Some(p) = polished.as_ref().filter(|p| p.misses_tol(qp_opts.tol)) {
+        eprintln!(
+            "pounce: warning: the {} conic solve's point misses the original \
+             problem's KKT conditions after polishing (primal {:.2e}, dual \
+             {:.2e} against an objective-gradient scale of {:.2e}, \
+             complementarity {:.2e}; tol {:.0e}); its multipliers may be \
+             inaccurate. solver_selection=nlp solves the model on the general \
+             NLP path instead.",
+            class.name(),
+            p.residuals.primal_infeasibility,
+            p.residuals.dual_infeasibility,
+            p.dual_scale,
+            p.residuals.complementarity,
+            qp_opts.tol,
+        );
+    }
     let sol = match &polished {
         Some(p) => pounce_convex::QpSolution {
             x: p.x.clone(),

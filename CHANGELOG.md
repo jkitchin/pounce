@@ -180,10 +180,12 @@ changes.
   duals came back `(1.000006, -1.2e-5)` against the exact `(1, 0)`, while
   `final_dual_inf` read `1.3e-11`. The answer is now polished in the original
   problem — multipliers re-fitted, then Newton steps on the active set,
-  each kept only if the KKT error falls — and the console summary and JSON
-  report give the original problem's residuals. The multipliers are now
-  exact to roundoff on that model, `airport`'s stationarity residual goes
-  from `9e-5` to `2e-12` and its objective now matches the NLP arm's.
+  each kept only if the KKT error falls without losing feasibility — and the
+  console summary and JSON report give the original problem's residuals; a
+  point that still misses `tol` is warned about. The multipliers are now
+  exact to roundoff on that model, including when they differ by eight
+  orders of magnitude, and `airport`'s stationarity residual goes from
+  `9e-5` to `5e-13` at an exactly feasible point.
 - **`pounce-studio-mcp` pins `mcp<2`.** It declared `mcp>=1.0` with no upper
   bound, and `mcp` 2.x renamed `FastMCP`, so a fresh install pulled 2.x and
   the server failed at import (`No module named 'mcp.server.fastmcp'`).

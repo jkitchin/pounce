@@ -27,10 +27,14 @@
 //! [`polish_qcqp`] repairs both, in the original problem: it re-fits the
 //! multipliers to the original stationarity at the returned `x`
 //! ([`refit`]), then takes Newton steps on the original KKT system restricted
-//! to the active set the solve identified ([`newton_step`]), keeping each
-//! only if the original KKT error falls. The result is reported against the
-//! original problem ([`QcqpResiduals`]), so `final_dual_inf` describes the
-//! `(x, λ)` actually handed back.
+//! to the active set ([`is_active`]: a significant multiplier *or* a
+//! constraint at its bound; [`newton_step`] drops any that come back with a
+//! negative multiplier). A step is kept only if it lowers the KKT error, each
+//! term in its own units, without giving up feasibility beyond `tol`
+//! ([`accept_step`]). The result is reported against the original problem
+//! ([`QcqpResiduals`]), so `final_dual_inf` describes the `(x, λ)` actually
+//! handed back, and a point that still misses `tol` is warned about
+//! ([`QcqpPolish::misses_tol`]).
 
 use crate::nl_reader::NlProblem;
 use crate::qp_extract::{ConSocpMap, recover_socp_duals};
@@ -39,9 +43,10 @@ use pounce_convex::{ConeSpec, QpProblem, QpSolution, QpStatus};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
 
-/// An inequality multiplier at or below this fraction of the largest
-/// multiplier is read as inactive: frozen by the re-fit, and left out of the
-/// Newton step's active set.
+/// An inequality is read as **active** when its multiplier is above this
+/// fraction of the largest multiplier, *or* it is primal-active
+/// ([`PRIMAL_ACTIVE_REL`]). An inactive one is frozen by the re-fit and left
+/// out of the Newton step's active set.
 ///
 /// Freezing, rather than the small weight a multiplier-proportional rule
 /// would give it, matters when `x` carries a residual no honest multiplier
@@ -49,7 +54,29 @@ use std::collections::BTreeMap;
 /// inactive row instead. Measured on a 3-variable ball-plus-plane model, an
 /// inactive range row went from `−3e-9` to `−1.6e-5`, "zeroing" a residual
 /// the returned `x` genuinely carried.
+///
+/// The multiplier ratio alone is not enough (PR #1120 review): on
+/// `min W(x0−2)² + (x1+1)²  s.t.  ‖x‖² ≤ 1, x1 ≥ 0` the active `x1 ≥ 0`
+/// carries `2` against the ball's `W`, so for `W ≥ 1e7` it fell under the
+/// ratio, was frozen, and every Newton step was refused — `final_dual_inf`
+/// `9.56` at `W = 1e8`. Hence the primal test beside it.
 const ACTIVE_REL: f64 = 1e-6;
+
+/// An inequality whose value is within this fraction of its own magnitude
+/// (`1 + |rhs| + Σ|terms|`) of its bound is primal-active, whatever its
+/// multiplier. The conic point is only `~√gap`-accurate, so a genuinely
+/// active constraint can sit `1e-7` inside its bound (`x1 = 1.8e-7` on the
+/// `W = 1e8` model above). Admitting a constraint that is near its bound but
+/// not active is safe: held at equality, it comes back with a negative
+/// multiplier, and [`newton_step`] drops it and re-solves.
+const PRIMAL_ACTIVE_REL: f64 = 1e-6;
+
+/// Iterative-refinement passes on each active-set KKT solve.
+const REFINE_STEPS: usize = 2;
+
+/// Constraints [`newton_step`] may drop from its active set, one per
+/// re-solve, for coming back with a negative multiplier.
+const MAX_DROPS: usize = 8;
 
 /// Newton steps attempted on the active-set KKT system. Each is kept only
 /// if it lowers the original KKT error, and the conic point is already close,
@@ -116,6 +143,11 @@ pub struct QcqpResiduals {
     pub dual_infeasibility: f64,
     /// `max |multiplier · constraint value|`.
     pub complementarity: f64,
+    /// `max |μ·g| / (1 + |μ|)`: complementarity in the constraint's own
+    /// units, which the step-acceptance test compares. Unscaled, a large
+    /// multiplier turns roundoff in `g` into an error that refused every
+    /// Newton step on an already-stationary model (PR #1120 review, `W = 1e5`).
+    compl_scaled: f64,
 }
 
 impl QcqpResiduals {
@@ -123,6 +155,20 @@ impl QcqpResiduals {
         self.primal_infeasibility
             .max(self.dual_infeasibility)
             .max(self.complementarity)
+    }
+
+    /// What a Newton step must lower to be kept: [`Self::kkt_error`] with
+    /// each term in its own units — complementarity as
+    /// [`Self::compl_scaled`], and the dual residual relative to
+    /// `dual_scale`, the objective gradient's magnitude. An absolute dual
+    /// residual cannot go below the roundoff in summing gradient terms of
+    /// that size: on a `1e8`-weighted objective the exact point reads `3e-8`,
+    /// and an unscaled comparison refused the step that reached it in favour
+    /// of an inexact one whose terms happened to cancel to `7e-11`.
+    fn merit(&self, dual_scale: f64) -> f64 {
+        self.primal_infeasibility
+            .max(self.dual_infeasibility / dual_scale)
+            .max(self.compl_scaled)
     }
 }
 
@@ -145,6 +191,9 @@ pub struct QcqpPolish {
     pub residuals: QcqpResiduals,
     /// Newton steps accepted.
     pub newton_steps: usize,
+    /// `max(1, ‖Px + c‖∞)` at the returned point: the scale a dual residual
+    /// is judged against ([`Self::misses_tol`]).
+    pub dual_scale: f64,
 }
 
 impl QcqpPolish {
@@ -161,6 +210,17 @@ impl QcqpPolish {
         }
         lambda
     }
+
+    /// Whether the polished point still misses the original KKT conditions
+    /// by more than `tol`, with the dual residual read relative to the
+    /// objective gradient ([`Self::dual_scale`]) — the caller warns rather
+    /// than reporting such a solve as cleanly converged.
+    pub fn misses_tol(&self, tol: f64) -> bool {
+        let r = &self.residuals;
+        r.primal_infeasibility > tol
+            || r.dual_infeasibility / self.dual_scale > tol
+            || r.compl_scaled > tol
+    }
 }
 
 fn row_dot(row: &[(usize, f64)], x: &[f64]) -> f64 {
@@ -168,7 +228,12 @@ fn row_dot(row: &[(usize, f64)], x: &[f64]) -> f64 {
 }
 
 impl<'a> View<'a> {
-    fn new(qp: &'a QpProblem, cones: &[ConeSpec], con_map: &[ConSocpMap]) -> Self {
+    /// `None` when the cone layout and `con_map` disagree — a cone running
+    /// past `G`, a quadratic row whose block is not a second-order cone of
+    /// dimension ≥ 2 starting at its `z_row0`, or rows `z_row0`/`z_row1` that
+    /// are not adjacent. The polish would otherwise read the wrong rows
+    /// without a sign, so it is skipped instead.
+    fn new(qp: &'a QpProblem, cones: &[ConeSpec], con_map: &[ConSocpMap]) -> Option<Self> {
         let m_ineq = qp.m_ineq();
         let mut a_rows: Vec<SpVec> = vec![Vec::new(); qp.m_eq()];
         for t in &qp.a {
@@ -182,7 +247,10 @@ impl<'a> View<'a> {
         let mut soc_dim_at: BTreeMap<usize, usize> = BTreeMap::new();
         let mut off = 0usize;
         for spec in cones {
-            let dim = spec.dim().min(m_ineq.saturating_sub(off));
+            let dim = spec.dim();
+            if off + dim > m_ineq {
+                return None;
+            }
             match spec {
                 ConeSpec::Nonneg(_) => nonneg[off..off + dim].iter_mut().for_each(|b| *b = true),
                 _ => {
@@ -193,26 +261,33 @@ impl<'a> View<'a> {
         }
         // Rows past the cone list are the orthant.
         nonneg[off..].iter_mut().for_each(|b| *b = true);
-        let quads = con_map
-            .iter()
-            .enumerate()
-            .filter_map(|(con_idx, m)| match *m {
-                ConSocpMap::Quad { z_row0, kappa, .. } => Some(Quad {
+        let mut quads = Vec::new();
+        for (con_idx, m) in con_map.iter().enumerate() {
+            if let ConSocpMap::Quad {
+                z_row0,
+                z_row1,
+                kappa,
+            } = *m
+            {
+                let dim = *soc_dim_at.get(&z_row0)?;
+                if dim < 2 || z_row1 != z_row0 + 1 || !(kappa > 0.0) {
+                    return None;
+                }
+                quads.push(Quad {
                     con_idx,
                     row0: z_row0,
-                    dim: soc_dim_at.get(&z_row0).copied().unwrap_or(2).max(2),
+                    dim,
                     kappa,
-                }),
-                _ => None,
-            })
-            .collect();
-        View {
+                });
+            }
+        }
+        Some(View {
             qp,
             a_rows,
             g_rows,
             nonneg,
             quads,
-        }
+        })
     }
 
     fn has_lb(&self, j: usize) -> bool {
@@ -295,6 +370,11 @@ impl<'a> View<'a> {
         let mut r = self.objective_gradient(x);
         let mut primal = 0.0_f64;
         let mut compl = 0.0_f64;
+        let mut compl_scaled = 0.0_f64;
+        let mut note = |mu: f64, g: f64| {
+            compl = compl.max((mu * g).abs());
+            compl_scaled = compl_scaled.max((mu * g).abs() / (1.0 + mu.abs()));
+        };
         for (i, row) in self.a_rows.iter().enumerate() {
             primal = primal.max((row_dot(row, x) - qp.b[i]).abs());
             for &(j, v) in row {
@@ -307,7 +387,7 @@ impl<'a> View<'a> {
             }
             let s = self.slack(i, x);
             primal = primal.max((-s).max(0.0));
-            compl = compl.max((m.z[i] * s).abs());
+            note(m.z[i], s);
             for &(j, v) in row {
                 r[j] += m.z[i] * v;
             }
@@ -315,7 +395,7 @@ impl<'a> View<'a> {
         for (k, q) in self.quads.iter().enumerate() {
             let g = self.quad_value(q, x);
             primal = primal.max(g.max(0.0));
-            compl = compl.max((m.quad[k] * g).abs());
+            note(m.quad[k], g);
             for (j, v) in self.quad_grad(q, x) {
                 r[j] += m.quad[k] * v;
             }
@@ -326,12 +406,12 @@ impl<'a> View<'a> {
             if self.has_lb(j) {
                 let s = x[j] - qp.lb_of(j);
                 bound = bound.max((-s).max(0.0));
-                compl = compl.max((m.z_lb[j] * s).abs());
+                note(m.z_lb[j], s);
             }
             if self.has_ub(j) {
                 let s = qp.ub_of(j) - x[j];
                 bound = bound.max((-s).max(0.0));
-                compl = compl.max((m.z_ub[j] * s).abs());
+                note(m.z_ub[j], s);
             }
         }
         QcqpResiduals {
@@ -339,6 +419,7 @@ impl<'a> View<'a> {
             bound_violation: bound,
             dual_infeasibility: r.iter().fold(0.0_f64, |a, v| a.max(v.abs())),
             complementarity: compl,
+            compl_scaled,
         }
     }
 }
@@ -386,17 +467,22 @@ struct Col {
     slot: Slot,
     grad: SpVec,
     value: f64,
+    /// The magnitude of the terms `value` is a difference of, for the
+    /// primal-activity test ([`PRIMAL_ACTIVE_REL`]).
+    mag: f64,
 }
 
 /// Every multiplier of the original problem at `x`.
 fn columns(view: &View, x: &[f64]) -> Vec<Col> {
     let qp = view.qp;
+    let abs_dot = |row: &[(usize, f64)]| row.iter().map(|&(j, v)| (v * x[j]).abs()).sum::<f64>();
     let mut cols = Vec::new();
     for (i, row) in view.a_rows.iter().enumerate() {
         cols.push(Col {
             slot: Slot::Y(i),
             grad: row.clone(),
             value: row_dot(row, x) - qp.b[i],
+            mag: qp.b[i].abs() + abs_dot(row),
         });
     }
     for (i, row) in view.g_rows.iter().enumerate() {
@@ -405,14 +491,21 @@ fn columns(view: &View, x: &[f64]) -> Vec<Col> {
                 slot: Slot::Z(i),
                 grad: row.clone(),
                 value: -view.slack(i, x),
+                mag: qp.h[i].abs() + abs_dot(row),
             });
         }
     }
     for (k, q) in view.quads.iter().enumerate() {
+        let s0 = view.slack(q.row0, x);
+        let s1 = view.slack(q.row0 + 1, x);
+        let sq: f64 = (q.row0 + 2..q.row0 + q.dim)
+            .map(|r| view.slack(r, x).powi(2))
+            .sum();
         cols.push(Col {
             slot: Slot::Quad(k),
             grad: view.quad_grad(q, x),
             value: view.quad_value(q, x),
+            mag: 0.25 * sq + 0.5 * q.kappa * (s0.abs() + s1.abs()),
         });
     }
     #[allow(clippy::needless_range_loop)] // `j` names the bound slot, not just `x[j]`
@@ -422,6 +515,7 @@ fn columns(view: &View, x: &[f64]) -> Vec<Col> {
                 slot: Slot::Lb(j),
                 grad: vec![(j, -1.0)],
                 value: qp.lb_of(j) - x[j],
+                mag: qp.lb_of(j).abs() + x[j].abs(),
             });
         }
         if view.has_ub(j) {
@@ -429,22 +523,28 @@ fn columns(view: &View, x: &[f64]) -> Vec<Col> {
                 slot: Slot::Ub(j),
                 grad: vec![(j, 1.0)],
                 value: x[j] - qp.ub_of(j),
+                mag: qp.ub_of(j).abs() + x[j].abs(),
             });
         }
     }
     cols
 }
 
-fn is_active(slot: Slot, m: &Mults, scale: f64) -> bool {
-    slot.free() || slot.get(m) > ACTIVE_REL * scale
+/// Every equality, and each inequality whose multiplier is significant
+/// ([`ACTIVE_REL`]) or which is primal-active ([`PRIMAL_ACTIVE_REL`]).
+fn is_active(c: &Col, m: &Mults, scale: f64) -> bool {
+    c.slot.free()
+        || c.slot.get(m) > ACTIVE_REL * scale
+        || c.value >= -PRIMAL_ACTIVE_REL * (1.0 + c.mag)
 }
 
 /// Re-fit the multipliers to the original stationarity at a fixed `x`: the
 /// smallest weighted correction `min Σ Δᵢ²/wᵢ` with `MΔ = −∇ₓL` (in the
-/// least-squares sense), solved by CGLS. An inequality's weight is its own
-/// multiplier, so an active one moves in proportion to its size and an
-/// inactive one ([`ACTIVE_REL`]) is frozen; equalities are weighted by the
-/// largest multiplier and move freely. Whatever part of `∇ₓL` the active
+/// least-squares sense), solved by CGLS. An active inequality ([`is_active`])
+/// is weighted by its own multiplier, floored at [`ACTIVE_REL`] of the
+/// largest so a primal-active one with a near-zero multiplier can still move;
+/// an inactive one is frozen. Equalities are weighted by the largest
+/// multiplier and move freely. Whatever part of `∇ₓL` the active
 /// gradients cannot reach is left in it — that is the point's residual, for
 /// [`newton_step`] to remove. Returns `None` unless it lowers `‖∇ₓL‖∞`.
 fn refit(view: &View, x: &[f64], m: &Mults) -> Option<Mults> {
@@ -464,8 +564,8 @@ fn refit(view: &View, x: &[f64], m: &Mults) -> Option<Mults> {
         .map(|c| {
             if c.slot.free() {
                 scale.sqrt()
-            } else if is_active(c.slot, m, scale) {
-                c.slot.get(m).sqrt()
+            } else if is_active(c, m, scale) {
+                c.slot.get(m).max(ACTIVE_REL * scale).sqrt()
             } else {
                 0.0
             }
@@ -539,32 +639,79 @@ fn cgls_min_norm(cols: &[Col], d: &[f64], r: &[f64], n: usize) -> Vec<f64> {
 }
 
 /// One Newton step on the original KKT system restricted to the active set
-/// `m` identifies: every equality, and each inequality whose multiplier is
-/// above [`ACTIVE_REL`] of the largest, held at equality.
+/// ([`is_active`]), held at equality.
 ///
 /// ```text
-/// [ H + δ_w·I   J_Aᵀ    ] [ dx ]   [ −(Px + c) ]
-/// [ J_A         −δ_c·I  ] [ μ  ] = [ −c_A(x)   ]
+/// [ H + δ_w·I   J_Aᵀ    ] [ dx ]   [ −∇ₓL_A(x, μ_A) ]
+/// [ J_A         −δ_c·I  ] [ dμ ] = [ −c_A(x)        ]
 /// ```
 ///
-/// with `H = P + Σ λⱼQⱼ` over the active quadratic rows. Solving for the new
-/// multipliers `μ` directly, rather than a correction, leaves the inactive
-/// ones at zero. Returns `None` if the factorization fails or an active
-/// inequality's new multiplier comes out negative beyond the activity
-/// threshold — the active set was wrong, and the step is not one to take.
+/// with `H = P + Σ λⱼQⱼ` over the active quadratic rows, `∇ₓL_A` the
+/// Lagrangian gradient with only the active multipliers, and the new active
+/// multipliers `μ_A + dμ`; the inactive ones are set to zero.
+///
+/// For the *correction* `dμ`, not the new `μ`: the regularization then
+/// perturbs the constraint rows by `δ_c·dμ`, which is negligible, where for
+/// `μ` itself it is `δ_c·μ` — with a ball multiplier of `1e8` that put the
+/// step `5e-5` off the constraint and every step was refused.
+///
+/// An inequality whose new multiplier comes out negative beyond
+/// [`ACTIVE_REL`] of the largest does not belong in the active set — a
+/// primal-active constraint that is not binding, typically — so the most
+/// negative is dropped and the system re-solved, up to [`MAX_DROPS`] times.
+/// Returns `None` if the factorization fails or the drops run out.
 fn newton_step(
     view: &View,
     x: &[f64],
     m: &Mults,
     backend: &BackendFactory,
 ) -> Option<(Vec<f64>, Mults)> {
+    let scale = m.scale();
+    let mut active: Vec<Col> = columns(view, x)
+        .into_iter()
+        .filter(|c| is_active(c, m, scale))
+        .collect();
+    for _ in 0..=MAX_DROPS {
+        let (x_new, mu) = solve_active_kkt(view, x, m, &active, backend)?;
+        let worst = active
+            .iter()
+            .zip(&mu)
+            .enumerate()
+            .filter(|(_, (c, v))| !c.slot.free() && **v < -ACTIVE_REL * scale)
+            .min_by(|a, b| a.1.1.total_cmp(b.1.1))
+            .map(|(i, _)| i);
+        if let Some(i) = worst {
+            active.remove(i);
+            continue;
+        }
+        let n = view.qp.n;
+        let mut out = Mults {
+            y: vec![0.0; m.y.len()],
+            z: vec![0.0; m.z.len()],
+            quad: vec![0.0; m.quad.len()],
+            z_lb: vec![0.0; n],
+            z_ub: vec![0.0; n],
+        };
+        for (c, &v) in active.iter().zip(&mu) {
+            c.slot
+                .set(&mut out, if c.slot.free() { v } else { v.max(0.0) });
+        }
+        return Some((x_new, out));
+    }
+    None
+}
+
+/// Factor and solve the active-set KKT system of [`newton_step`], returning
+/// the new point and the active constraints' new multipliers `μ_A + dμ`.
+fn solve_active_kkt(
+    view: &View,
+    x: &[f64],
+    m: &Mults,
+    active: &[Col],
+    backend: &BackendFactory,
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let qp = view.qp;
     let n = qp.n;
-    let scale = m.scale();
-    let active: Vec<Col> = columns(view, x)
-        .into_iter()
-        .filter(|c| is_active(c.slot, m, scale))
-        .collect();
     let dim = n + active.len();
 
     // Lower triangle, 0-based, duplicates merged.
@@ -577,7 +724,7 @@ fn newton_step(
         };
         *h.entry((i, j)).or_insert(0.0) += t.val;
     }
-    for c in &active {
+    for c in active {
         if let Slot::Quad(k) = c.slot {
             view.add_quad_hessian(&view.quads[k], m.quad[k], &mut h);
         }
@@ -596,37 +743,80 @@ fn newton_step(
         }
         h.insert((n + i, n + i), -delta_c);
     }
-    let airn: Vec<Index> = h.keys().map(|&(i, _)| (i + 1) as Index).collect();
-    let ajcn: Vec<Index> = h.keys().map(|&(_, j)| (j + 1) as Index).collect();
-    let vals: Vec<f64> = h.into_values().collect();
+    let entries: Vec<((usize, usize), f64)> = h.into_iter().collect();
+    let airn: Vec<Index> = entries
+        .iter()
+        .map(|&((i, _), _)| (i + 1) as Index)
+        .collect();
+    let ajcn: Vec<Index> = entries
+        .iter()
+        .map(|&((_, j), _)| (j + 1) as Index)
+        .collect();
+    let vals: Vec<f64> = entries.iter().map(|&(_, v)| v).collect();
 
-    let mut rhs = Vec::with_capacity(dim);
-    rhs.extend(view.objective_gradient(x).iter().map(|v| -v));
-    rhs.extend(active.iter().map(|c| -c.value));
+    // `∇ₓL` with the active multipliers only.
+    let mut grad_l = view.objective_gradient(x);
+    for c in active {
+        let mu = c.slot.get(m);
+        for &(j, g) in &c.grad {
+            grad_l[j] += mu * g;
+        }
+    }
+    let mut b = Vec::with_capacity(dim);
+    b.extend(grad_l.iter().map(|v| -v));
+    b.extend(active.iter().map(|c| -c.value));
     let mut fact = Factorization::new(dim as Index, airn, ajcn, vals, backend()).ok()?;
+    let mut rhs = b.clone();
     fact.solve(&mut rhs, 1).ok()?;
+    // Iterative refinement against the matrix as assembled, each correction
+    // kept only if it shrinks the linear residual: on a near-singular system
+    // (a degenerate active set) refinement can diverge, and did on
+    // `pump_network_h148_brf0`.
+    let residual = |sol: &[f64]| -> Vec<f64> {
+        let mut r = b.clone();
+        for &((i, j), v) in &entries {
+            r[i] -= v * sol[j];
+            if i != j {
+                r[j] -= v * sol[i];
+            }
+        }
+        r
+    };
+    let inf = |v: &[f64]| v.iter().fold(0.0_f64, |a, x| a.max(x.abs()));
+    let mut r = residual(&rhs);
+    for _ in 0..REFINE_STEPS {
+        let mut d = r.clone();
+        if fact.solve(&mut d, 1).is_err() {
+            break;
+        }
+        let trial: Vec<f64> = rhs.iter().zip(&d).map(|(s, d)| s + d).collect();
+        let r_trial = residual(&trial);
+        if !(inf(&r_trial) < inf(&r)) {
+            break;
+        }
+        rhs = trial;
+        r = r_trial;
+    }
     if !rhs.iter().all(|v| v.is_finite()) {
         return None;
     }
 
     let x_new: Vec<f64> = x.iter().zip(&rhs[..n]).map(|(a, b)| a + b).collect();
-    let mut out = Mults {
-        y: vec![0.0; m.y.len()],
-        z: vec![0.0; m.z.len()],
-        quad: vec![0.0; m.quad.len()],
-        z_lb: vec![0.0; n],
-        z_ub: vec![0.0; n],
-    };
-    for (c, &mu) in active.iter().zip(&rhs[n..]) {
-        if c.slot.free() {
-            c.slot.set(&mut out, mu);
-        } else if mu < -ACTIVE_REL * scale {
-            return None;
-        } else {
-            c.slot.set(&mut out, mu.max(0.0));
-        }
-    }
-    Some((x_new, out))
+    let mu: Vec<f64> = active
+        .iter()
+        .zip(&rhs[n..])
+        .map(|(c, d)| c.slot.get(m) + d)
+        .collect();
+    Some((x_new, mu))
+}
+
+/// Whether a Newton step from residuals `old` to `new` is kept: it must
+/// lower the merit ([`QcqpResiduals::merit`]) and must not raise the primal
+/// violation above `max(old, tol)` — stationarity is never bought with
+/// feasibility the point already had.
+fn accept_step(old: &QcqpResiduals, new: &QcqpResiduals, tol: f64, dual_scale: f64) -> bool {
+    new.primal_infeasibility <= old.primal_infeasibility.max(tol)
+        && new.merit(dual_scale) < old.merit(dual_scale)
 }
 
 /// Polish an optimal conic QCQP solve in the original problem's terms; see
@@ -635,12 +825,18 @@ fn newton_step(
 /// Returns `None` — the caller keeps the conic answer and its own residuals
 /// — when `sol` is not an optimal point of `qp`'s shape: an infeasibility
 /// verdict's `(y, z)` is a certificate, not a Lagrange multiplier, and a
-/// presolve verdict or zero-iteration stop has no point to polish.
+/// presolve verdict or zero-iteration stop has no point to polish. Also
+/// `None` when the cone layout disagrees with `con_map` ([`View::new`]).
+///
+/// `tol` is the solve's tolerance: a Newton step may not raise the primal
+/// violation above `max(current, tol)`, so stationarity is never bought with
+/// feasibility the solve had.
 pub fn polish_qcqp(
     qp: &QpProblem,
     cones: &[ConeSpec],
     con_map: &[ConSocpMap],
     sol: &QpSolution,
+    tol: f64,
     backend: &BackendFactory,
 ) -> Option<QcqpPolish> {
     let n = qp.n;
@@ -653,7 +849,7 @@ pub fn polish_qcqp(
     {
         return None;
     }
-    let view = View::new(qp, cones, con_map);
+    let view = View::new(qp, cones, con_map)?;
     let read =
         |v: &[f64]| -> Vec<f64> { (0..n).map(|i| v.get(i).copied().unwrap_or(0.0)).collect() };
     let mut m = Mults {
@@ -674,15 +870,20 @@ pub fn polish_qcqp(
     }
     let mut res = view.residuals(&x, &m);
     let mut newton_steps = 0;
+    // Fixed for the whole loop, so every comparison is in one unit.
+    let merit_scale = view
+        .objective_gradient(&x)
+        .iter()
+        .fold(1.0_f64, |a, v| a.max(v.abs()));
     for _ in 0..MAX_NEWTON {
-        if !(res.kkt_error() > 0.0) {
+        if !(res.merit(merit_scale) > 0.0) {
             break;
         }
         let Some((x_new, m_new)) = newton_step(&view, &x, &m, backend) else {
             break;
         };
         let res_new = view.residuals(&x_new, &m_new);
-        if res_new.kkt_error() < res.kkt_error() {
+        if accept_step(&res, &res_new, tol, merit_scale) {
             x = x_new;
             m = m_new;
             res = res_new;
@@ -692,7 +893,25 @@ pub fn polish_qcqp(
         }
     }
 
+    // The Newton multipliers carry the linear solve's error, which on an
+    // ill-conditioned active set exceeds what a re-fit at the final point
+    // reaches: `pump_network_h148_brf0`'s dual residual is `7.7e-7` after its
+    // accepted step and lower after this.
+    if newton_steps > 0 {
+        if let Some(fit) = refit(&view, &x, &m) {
+            let res_fit = view.residuals(&x, &fit);
+            if res_fit.merit(merit_scale) <= res.merit(merit_scale) {
+                m = fit;
+                res = res_fit;
+            }
+        }
+    }
+
     let obj = sol.obj + (view.objective(&x) - view.objective(&sol.x));
+    let dual_scale = view
+        .objective_gradient(&x)
+        .iter()
+        .fold(1.0_f64, |a, v| a.max(v.abs()));
     let mut quad_by_con = vec![0.0; con_map.len()];
     for (k, q) in view.quads.iter().enumerate() {
         quad_by_con[q.con_idx] = m.quad[k];
@@ -707,6 +926,7 @@ pub fn polish_qcqp(
         z_ub: m.z_ub,
         residuals: res,
         newton_steps,
+        dual_scale,
     })
 }
 
@@ -822,7 +1042,7 @@ mod tests {
         let raw = recover_socp_duals(&prob, &con_map, &sol.y, &sol.z);
         let raw_r = grad_l(1.0, p, &sol.x, &raw, &rows);
 
-        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, &backend).expect("optimal");
+        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).expect("optimal");
         let lambda = pol.constraint_duals(&prob, &con_map);
         assert!(
             (pol.x[0] - 1.0).abs() < 1e-12 && pol.x[1].abs() < 1e-12,
@@ -854,7 +1074,7 @@ mod tests {
             extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
-        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, &backend).expect("optimal");
+        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).expect("optimal");
         let lambda = pol.constraint_duals(&prob, &con_map);
         assert!((lambda[0] + 1.0).abs() < 1e-10, "ball = {}", lambda[0]);
         assert!(lambda[1].abs() < 1e-10, "line = {}", lambda[1]);
@@ -895,7 +1115,7 @@ mod tests {
             "fixture must start off-stationary"
         );
 
-        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, &backend).expect("optimal");
+        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).expect("optimal");
         assert!(pol.newton_steps >= 1, "no Newton step was taken");
         assert!(
             (pol.x[0] - 1.0).abs() < 1e-12 && pol.x[1].abs() < 1e-12,
@@ -918,7 +1138,7 @@ mod tests {
         let prob = model(true, p, &rows);
         let (qp, con_map, _, cones) =
             extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
-        let view = View::new(&qp, &cones, &con_map);
+        let view = View::new(&qp, &cones, &con_map).expect("layout");
         let delta: f64 = 1e-5;
         let x = vec![(1.0 - delta * delta).sqrt(), delta];
         let row = qp.m_ineq() - 4 - 1; // the orthant row precedes the 4-row cone
@@ -936,6 +1156,116 @@ mod tests {
         assert!(view.residuals(&x, &fit).dual_infeasibility > 1e-5);
     }
 
+    /// `OptimalInaccurate` is an optimal point too, and is polished.
+    #[test]
+    fn issue_1114_optimal_inaccurate_is_polished() {
+        let (p, rows) = ([2.0, 0.0], line());
+        let prob = model(true, p, &rows);
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let mut sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        sol.status = QpStatus::OptimalInaccurate;
+        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).expect("polished");
+        let lambda = pol.constraint_duals(&prob, &con_map);
+        assert!((lambda[0] - 1.0).abs() < 1e-10 && lambda[1].abs() < 1e-10);
+    }
+
+    /// The active-set drop. `min (x0−2)² + (x1−t)²  s.t.  ‖x‖² ≤ 1, x1 ≥ 0`
+    /// with `t = 9e-7`: the optimum is the circle point nearest `(2, t)`,
+    /// `x1* = t/‖(2, t)‖ ≈ 4.5e-7`, so `x1 ≥ 0` is *not* binding — but it
+    /// is within [`PRIMAL_ACTIVE_REL`] of its bound, so it enters the active
+    /// set, comes back with a negative multiplier when held at equality, and
+    /// must be dropped and the system re-solved.
+    #[test]
+    fn issue_1114_primal_active_nonbinding_row_is_dropped() {
+        let t = 9e-7;
+        let p = [2.0, t];
+        let rows = vec![(vec![(1, 1.0)], 0.0, 2e19)];
+        let prob = model(true, p, &rows);
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let mut sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let norm = (4.0 + t * t).sqrt();
+        let x_star = [2.0 / norm, t / norm];
+        // Start from a point that is off by more than the polish's own
+        // accuracy, so the drop is what has to happen for the test to pass.
+        sol.x = vec![x_star[0], x_star[1] + 2e-7];
+        let pol = polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).expect("optimal");
+        assert!(pol.newton_steps >= 1, "no Newton step was taken");
+        assert!(
+            (pol.x[1] - x_star[1]).abs() < 1e-13,
+            "x1 = {:e}, expected {:e}",
+            pol.x[1],
+            x_star[1]
+        );
+        let lambda = pol.constraint_duals(&prob, &con_map);
+        assert_eq!(lambda[1], 0.0, "non-binding row multiplier");
+        assert!(
+            (lambda[0] - (norm - 1.0)).abs() < 1e-9,
+            "ball μ = {}",
+            lambda[0]
+        );
+    }
+
+    /// A cone layout that disagrees with `con_map` skips the polish rather
+    /// than reading the wrong rows.
+    #[test]
+    fn issue_1114_layout_mismatch_skips_the_polish() {
+        let prob = model(true, [2.0, 0.0], &line());
+        let (qp, mut con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        assert!(polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).is_some());
+        let ConSocpMap::Quad { z_row0, kappa, .. } = con_map[0] else {
+            panic!("expected the ball as a cone: {:?}", con_map[0]);
+        };
+        con_map[0] = ConSocpMap::Quad {
+            z_row0: z_row0 + 1,
+            z_row1: z_row0 + 2,
+            kappa,
+        };
+        assert!(polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).is_none());
+        assert!(
+            polish_qcqp(
+                &qp,
+                &cones[..cones.len() - 1],
+                &con_map,
+                &sol,
+                1e-8,
+                &backend
+            )
+            .is_none()
+        );
+    }
+
+    /// Both arms of the acceptance rule.
+    #[test]
+    fn issue_1114_accept_step_rule() {
+        let r = |primal: f64, dual: f64, compl_scaled: f64| QcqpResiduals {
+            primal_infeasibility: primal,
+            bound_violation: 0.0,
+            dual_infeasibility: dual,
+            complementarity: compl_scaled,
+            compl_scaled,
+        };
+        let old = r(1e-14, 1e-6, 0.0);
+        // Lower merit, feasibility kept: accepted.
+        assert!(accept_step(&old, &r(1e-14, 1e-12, 0.0), 1e-8, 1.0));
+        // Lower merit bought with feasibility past `tol`: refused.
+        assert!(!accept_step(&old, &r(1e-7, 1e-12, 0.0), 1e-8, 1.0));
+        // Feasibility worse but within `tol`: accepted.
+        assert!(accept_step(&old, &r(1e-9, 1e-12, 0.0), 1e-8, 1.0));
+        // Not lower: refused.
+        assert!(!accept_step(&old, &r(1e-14, 1e-6, 0.0), 1e-8, 1.0));
+        // The dual term is read relative to the gradient scale: `3e-8` on a
+        // `2e8` gradient beats a complementarity of `2e-11`.
+        let inexact = r(3e-14, 7e-11, 2e-11);
+        let exact = r(0.0, 3e-8, 1e-15);
+        assert!(accept_step(&inexact, &exact, 1e-8, 2e8));
+        assert!(!accept_step(&inexact, &exact, 1e-8, 1.0));
+    }
+
     /// An infeasibility verdict's `(y, z)` is a certificate, not a Lagrange
     /// multiplier: nothing is polished.
     #[test]
@@ -945,6 +1275,6 @@ mod tests {
             extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
         let mut sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
         sol.status = QpStatus::PrimalInfeasible;
-        assert!(polish_qcqp(&qp, &cones, &con_map, &sol, &backend).is_none());
+        assert!(polish_qcqp(&qp, &cones, &con_map, &sol, 1e-8, &backend).is_none());
     }
 }
