@@ -431,7 +431,8 @@ pub fn solve_mpcc(
                     break;
                 }
                 // The relaxed path's verdict, if it has one: an exact-product
-                // solve (its finish), or the relaxation's own infeasibility.
+                // solve (its finish), or the relaxation's own infeasibility
+                // (see [`exact_stage_verdict`] for how it ranks).
                 let mut path_verdict: Option<Captured> = None;
                 if converged(relaxed.status) && !relaxed.x.is_empty() {
                     // One warm step down to the continuation's last `τ`
@@ -473,8 +474,10 @@ pub fn solve_mpcc(
                 } else if relaxed.status == ApplicationReturnStatus::InfeasibleProblemDetected
                     && !relaxed.x.is_empty()
                 {
-                    // The relaxation contains the model, so its
-                    // infeasibility is the model's.
+                    // The relaxation contains the model, so a relaxation with
+                    // no feasible point means the model has none either; the
+                    // solver's verdict is local, so the cold solve's own still
+                    // ranks first ([`exact_stage_verdict`]).
                     path_verdict = Some(relaxed.clone());
                     cands.push(relaxed);
                 }
@@ -514,19 +517,7 @@ pub fn solve_mpcc(
                 if halted() {
                     break;
                 }
-                // The verdict when nothing answers: a proven infeasibility
-                // from either solve first, then the cold solve's own (it is
-                // the plain exact product), then the relaxed path's.
-                let infeasible = |v: &Captured| {
-                    v.status == ApplicationReturnStatus::InfeasibleProblemDetected
-                        && !v.x.is_empty()
-                };
-                exact = match (path_verdict, c.clone()) {
-                    (Some(v), _) if infeasible(&v) => Some(v),
-                    (_, Some(cold)) if !cold.x.is_empty() => Some(cold),
-                    (Some(v), cold) => Some(v).or(cold),
-                    (None, cold) => cold,
-                };
+                exact = exact_stage_verdict(path_verdict, c.clone());
                 cands.extend(c);
                 cands
             }
@@ -963,6 +954,27 @@ fn objective_at(inner: &Rc<RefCell<dyn TNLP>>, x: &[Number]) -> Number {
         .unwrap_or(Number::INFINITY)
 }
 
+/// The exact stage's verdict -- what is reported when nothing answers -- from
+/// its two solves: the cold exact product's own whenever it returned a point
+/// (it is the plain lowered model), else the relaxed path's (its finish, or
+/// its relaxation's infeasibility), else the cold solve's refusal.
+///
+/// The relaxed path does not override a cold solve that has a point, even
+/// when the relaxation reports infeasible. The relaxation contains the
+/// model, so a relaxation that truly has no feasible point means the model
+/// has none either; but an interior-point `Infeasible_Problem_Detected` is
+/// local (a stationary point of the infeasibility measure from one start),
+/// not a proof, and preferring it would turn a cold solve's "out of
+/// iterations" into a stronger claim than either solve established (review of
+/// #1121).
+fn exact_stage_verdict(path: Option<Captured>, cold: Option<Captured>) -> Option<Captured> {
+    match (path, cold) {
+        (_, Some(c)) if !c.x.is_empty() => Some(c),
+        (Some(p), c) => Some(p).or(c),
+        (None, c) => c,
+    }
+}
+
 /// The point and status reported when no stage answered: the exact-product
 /// stage's. If that stage has no point (refused before iteration 0), the
 /// point is borrowed from the first stage that has one — but the status stays
@@ -1119,6 +1131,30 @@ mod tests {
         let v = verdict_of(Some(exact), Some(first)).unwrap();
         assert_eq!(v.status, ApplicationReturnStatus::InfeasibleProblemDetected);
         assert_eq!(v.x, vec![0.5, 0.5]);
+    }
+
+    /// Every branch of [`exact_stage_verdict`]: a cold solve with a point is
+    /// the verdict even over a relaxed infeasibility (it has a point but did
+    /// not converge here); a refused cold solve defers to the relaxed path;
+    /// with neither, the refusal stands.
+    #[test]
+    fn the_cold_solve_with_a_point_is_the_exact_stages_verdict() {
+        use ApplicationReturnStatus as S;
+        let relaxed_infeasible = || cap(S::InfeasibleProblemDetected, vec![0.5, 0.5]);
+        let cold_out_of_iterations = cap(S::MaximumIterationsExceeded, vec![1.0, 0.0]);
+        let refused = || cap(S::NotEnoughDegreesOfFreedom, vec![]);
+
+        let v = exact_stage_verdict(Some(relaxed_infeasible()), Some(cold_out_of_iterations));
+        assert_eq!(v.map(|v| v.status), Some(S::MaximumIterationsExceeded));
+
+        let v = exact_stage_verdict(Some(relaxed_infeasible()), Some(refused())).unwrap();
+        assert_eq!(v.status, S::InfeasibleProblemDetected);
+        assert_eq!(v.x, vec![0.5, 0.5]);
+
+        let v = exact_stage_verdict(None, Some(refused()));
+        assert_eq!(v.map(|v| v.status), Some(S::NotEnoughDegreesOfFreedom));
+
+        assert!(exact_stage_verdict(None, None).is_none());
     }
 
     #[test]

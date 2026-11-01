@@ -43,17 +43,49 @@ above isolate it.
 
 ### What has been tried
 
-Nothing beyond `complementarity_strategy=continuation`, which skips the stage
-and is the workaround for a model known to behave this way. The stage is kept
-in the default because on the Gate 0 corpus and the CALIPSO bunny-hop it finds
+`complementarity_strategy=continuation` skips the stage and is the
+workaround for a model known to behave this way. The stage is kept in the
+default because on the Gate 0 corpus and the CALIPSO bunny-hop it finds
 answers the continuation misses (see `docs/src/complementarity.md`).
+
+**A relaxed exact stage (jkitchin/pounce#1121, 2026-11-01).** Solving
+`G·H <= 1e-6` from the start, then a warm step to `1e-8` and the exact
+finish, instead of `G·H = 0` cold. On the 28 MacMPEC models where the stage
+costs or matters most (`complementarity_strategy=exact`) it takes 1,879
+iterations against 25,712, converges on 26 against 20, and lands at or below
+the published value on 23 against 19. `G·H <= 0` gains almost nothing (23,439
+iterations): no interior either. A thinner `1e-8` from cold does worse than
+`1e-6` (3,311 iterations, 20 at). Two things did not work:
+
+- *Replacing* the cold solve: MacMPEC time −21%, but `water-net` moves from
+  927 to 953 (the relaxed path settles on another branch) and two CALIPSO
+  bunny-hop starts swap between 462.605 and 463.195. The two solves find
+  different minima and neither dominates.
+- Pinning each pair's smaller side at the relaxed point and solving the
+  branch NLP (#1109's machinery): it does not recover `water-net`'s 927, and
+  costs 266 extra iterations on `pack-comp1-32`.
+
+So #1121 runs both and keeps the better certified answer. That is the
+accepted cost recorded here: on the 167 public MacMPEC stubs, wall time
+**+19%** (3,177 s to 3,767 s) and iterations **+37%** (78,431 to 107,563),
+measured in clean sequential runs against `main` at `29ebd48`; CALIPSO's
+declared route 170 s to 209 s. In exchange no answer is lost and three
+improve (`dempe` 28.25 and `ex9.2.5` 5, both below their published values;
+`pack-comp2p-8` reaches its published value). `pack-comp1p-32` still times
+out at 300 s: the relaxed path alone solves it (0.704 against a published
+0.653), and the cold solve's budget is what pushes the run over.
 
 ### How to tell whether a fix works
 
 `qpec-100-2` under `complementarity_strategy=exact` should take a small
 fraction of 561 iterations without changing its objective (time `qpec-200-2`
 per stage first if it is to be the second witness), while the Gate 0 corpus
-(`benchmarks/mpcc/declared.py`) stays at 60/60 cells at `f*`. Integrated
+(`benchmarks/mpcc/declared.py`) stays at 60/60 cells at `f*`. (Neither model
+is among the 167 public MacMPEC stubs #1121 measured; they are in the data
+root's compiled set.) A cheaper schedule than #1121's two solves works if,
+on the public MacMPEC stubs, it keeps 136 at / 12 better / 3 worse with
+`water-net` at 927 and `dempe`, `ex9.2.5` below their published values, in
+less than 3,767 s, and changes no CALIPSO declared-route answer. Integrated
 approaches that tie the relaxation to the barrier parameter (relaxing the
 products by an amount proportional to μ inside one solve) avoid the empty
 interior and are the obvious direction. The MacMPEC suite and its harness are

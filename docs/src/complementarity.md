@@ -121,9 +121,11 @@ than your `max_iter`). The relaxed path is budgeted once the continuation
 has answered with a tight S point, the cold solve once the continuation or
 the relaxed path has. With no answer in hand (the continuation failed, or
 found only a W point or one inside the tolerance band) the stage runs in
-full. If the relaxed path finds its relaxation infeasible, that is reported
-as the model's verdict when nothing answers: the relaxation contains the
-model. Every exact-product answer that
+full. When nothing answers, the verdict reported is the cold solve's own
+whenever it returned a point; the relaxed path's (its finish, or its
+relaxation reported infeasible) only when the cold solve was refused. An
+infeasibility verdict is local to where the solver ended, so it does not
+override a cold solve that merely ran out of iterations. Every exact-product answer that
 changed a MacMPEC outcome fitted inside that budget (`water-net`, 470
 iterations against the continuation's 189), as do the bunny-hop starts
 above. The continuation's exact finish is budgeted too, at 500 iterations or

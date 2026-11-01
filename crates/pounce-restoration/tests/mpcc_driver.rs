@@ -790,10 +790,10 @@ fn when_no_stage_succeeds_the_exact_verdict_is_reported() {
 /// 0. Declared, this once reported a relaxed solve's `Solve_Succeeded`
 /// (continuation first, nothing answering) and, before that, forwarded the
 /// refused stage's empty point. The exact stage's relaxation `G·H <= 1e-6`
-/// contains the model and is infeasible too (the product is pinned at 1/4),
-/// so its verdict — infeasible, with a point — is the model's, and is what is
-/// reported. Its cold solve is refused as `G·H = 0` (the square model) and
-/// retried as `G·H <= 0`, which reaches the same verdict.
+/// is infeasible too (the product is pinned at 1/4). Its cold solve is
+/// refused as `G·H = 0` (the square model) and retried as `G·H <= 0`, which
+/// reaches the same verdict with a point of its own; that verdict —
+/// infeasible — is what is reported.
 ///
 /// ```text
 /// min x^2 + y^2   s.t.  x + y = 1,  x - y = 0,   0 <= x ⟂ y >= 0
