@@ -9,7 +9,9 @@
 use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
 };
-use pounce_algorithm::mpcc::{MpccStage, Reported, StationarityClass, TOUCHED_OPTIONS};
+use pounce_algorithm::mpcc::{
+    EXACT_STAGE_TAU, MpccStage, Reported, StationarityClass, TOUCHED_OPTIONS,
+};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -783,8 +785,10 @@ fn when_no_stage_succeeds_the_exact_verdict_is_reported() {
 /// square, so the exact product's equality row is refused before iteration
 /// 0. Declared, this once reported a relaxed solve's `Solve_Succeeded`
 /// (continuation first, nothing answering) and, before that, forwarded the
-/// refused stage's empty point. The exact stage must fall back to
-/// `G·H <= 0`, and its verdict — infeasible — is what is reported.
+/// refused stage's empty point. The exact stage's relaxation `G·H <= 1e-6`
+/// contains the model and is infeasible too (the product is pinned at 1/4),
+/// so its verdict — infeasible, with a point — is the model's, and is what is
+/// reported.
 ///
 /// ```text
 /// min x^2 + y^2   s.t.  x + y = 1,  x - y = 0,   0 <= x ⟂ y >= 0
@@ -828,23 +832,30 @@ fn a_square_infeasible_model_reports_the_exact_verdict_with_a_point() {
         .iter()
         .filter(|s| s.stage == MpccStage::Exact)
         .collect();
+    assert_eq!(exact.len(), 1, "{:?}", out.solves);
+    assert_eq!(exact[0].tau, Some(EXACT_STAGE_TAU), "{:?}", out.solves);
     assert_eq!(
-        exact.first().map(|s| s.status),
-        Some(ApplicationReturnStatus::NotEnoughDegreesOfFreedom),
+        exact[0].status,
+        ApplicationReturnStatus::InfeasibleProblemDetected,
         "{:?}",
         out.solves
     );
-    assert_eq!(exact.len(), 2, "the G·H <= 0 retry: {:?}", out.solves);
-    // The refused solve ran after the continuation and has no point of its
-    // own: it must not report the continuation's last point (PR review:
-    // `finalize_solution` never runs for a solve refused before iteration 0,
-    // so an uncleared capture carried the previous stage's x and products).
+    assert_eq!(out.status, exact[0].status);
+    // The continuation's finish is refused before iteration 0 (the square
+    // model's equality row) and has no point of its own: it must not report
+    // the schedule's last point (PR review: `finalize_solution` never runs for
+    // a solve refused before iteration 0, so an uncleared capture carried the
+    // previous solve's x and products).
+    let refused = out
+        .solves
+        .iter()
+        .find(|s| s.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom)
+        .expect("the finish's equality row is refused");
     assert!(
-        exact[0].max_abs_product.is_infinite(),
+        refused.max_abs_product.is_infinite(),
         "the refused solve reports a point: {:?}",
         out.solves
     );
-    assert_eq!(out.status, exact[1].status);
     assert!(
         !matches!(
             out.status,
@@ -1320,4 +1331,62 @@ fn iteration_budgets_respect_and_restore_the_callers_max_iter() {
         assert_eq!(set, caller.is_some(), "max_iter set-ness leaked");
         assert_eq!(v, caller.unwrap_or(3000), "max_iter value leaked");
     }
+}
+
+/// The exact stage's three branches, by what its relaxed solve returns:
+/// converged (tighten to the continuation's last `τ`, then the exact finish),
+/// infeasible (that verdict is the model's: the square infeasible model
+/// above), or failed some other way -- here out of iterations -- when it falls
+/// back to the exact product itself, cold, for an answer or a verdict of its
+/// own.
+#[test]
+fn the_exact_stage_finishes_a_converged_relaxation_and_falls_back_on_a_failed_one() {
+    let run = |max_iter: Option<i32>| {
+        let mut app = app();
+        app.options_mut()
+            .set_string_value("complementarity_strategy", "exact", true, false)
+            .unwrap();
+        if let Some(it) = max_iter {
+            app.options_mut()
+                .set_integer_value("max_iter", it, true, false)
+                .unwrap();
+        }
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
+            [0.0, 0.5, 0.5],
+            Rc::new(RefCell::new(Vec::new())),
+        )));
+        solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |_| {}).unwrap()
+    };
+    let taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
+        out.solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Exact)
+            .map(|s| s.tau)
+            .collect()
+    };
+    // Converged: relaxed, tightened, finished, and the answer is S.
+    let ok = run(None);
+    assert_eq!(
+        taus(&ok),
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None],
+        "{:?}",
+        ok.solves
+    );
+    assert_eq!(ok.accepted_by, Some(MpccStage::Exact), "{:?}", ok.solves);
+    // Out of iterations: the relaxation fails without a verdict, and the
+    // stage runs the exact product cold for one.
+    let failed = run(Some(2));
+    let exact: Vec<_> = failed
+        .solves
+        .iter()
+        .filter(|s| s.stage == MpccStage::Exact)
+        .collect();
+    assert_eq!(exact[0].tau, Some(EXACT_STAGE_TAU), "{:?}", failed.solves);
+    assert_eq!(
+        exact[0].status,
+        ApplicationReturnStatus::MaximumIterationsExceeded,
+        "{:?}",
+        failed.solves
+    );
+    assert_eq!(exact[1].tau, None, "no cold fallback: {:?}", failed.solves);
 }
