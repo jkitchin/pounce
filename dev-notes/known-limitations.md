@@ -61,13 +61,14 @@ in the benchmark data root (`macmpec/`).
 
 ---
 
-## NLP: qcqp1500-1c hits the CPU limit at the default; waterx reaches a worse local minimum than Ipopt
+## NLP: qcqp1500-1c hits the CPU limit at the default
 
 *Not tracked. This entry is what remains of gh#1098, which was closed on
-2026-11-01 when #1117 fixed `qcqp1500-1nc`. Neither model below has a known
-path to a fix, so per the tracker's planned-work-only rule neither has an
-issue. `qcqp1500-1c` has a different signature from the crawl #1098
-described. `waterx` reaches a certified local minimum. The 1nc crawl came
+2026-11-01 when #1117 fixed `qcqp1500-1nc`. `qcqp1500-1c` has no known
+path to a fix, so per the tracker's planned-work-only rule it has no
+issue; its signature also differs from the crawl #1098 described. (#1098
+also listed `waterx` reaching a different local minimum than Ipopt; that
+is not a limitation for a local solver, so it is not recorded.) The 1nc crawl came
 in with 49ab28aa (#1077), which put pounce on Ipopt's trajectory; Ipopt
 crawls the same way. Recorded 2026-10-28, revised 2026-10-31 and
 2026-11-01.*
@@ -102,10 +103,6 @@ Mittelmann before/after table is in the dev-note.
   `perturb_slack_fact=0.01` solves it (148 iterations) but turns the
   `discs` fixture into a false `InfeasibleProblemDetected`, so neither is
   on by default.
-- **`waterx`** reaches f = 1019.7, where Ipopt reaches 944.6 and pounce
-  before 49ab28aa reached 927.1. Unchanged by the budget (at most 84
-  inequality rows, below the cap). `perturb_slack_fact=0.03` makes it worse
-  (1151.5).
 
 ### What has been tried
 
@@ -126,8 +123,6 @@ Mittelmann before/after table is in the dev-note.
 3. `scripts/sweep-fixtures.sh` on both legs, diffing `2nd=` and `mu=`, and
    `benchmarks/grid` (15 of 22 models above the row cap) not worse than
    909 iterations.
-4. For `waterx`: f ≤ 944.6 from the bundled start without a basin change
-   on the other five Water models.
 
 ### When to revisit
 
