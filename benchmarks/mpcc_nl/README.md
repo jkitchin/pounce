@@ -64,9 +64,11 @@ settles on a worse S-stationary branch fails. That is the case
 
 ## Reference result
 
-`main` at `e7873df` (PR #1103 merged), CLI defaults: **16/16 pass**, and every model
-with an answer certifies S. The per-model table (status, answering stage,
-certificate, wall time) is in the data root's `mpcc_nl/README.md`.
+`main` at `26991b7` (PRs #1103–#1109 merged), CLI defaults: **16/16
+pass**. `mixed_pair` holds a two-sided pair, which the CLI refused until PR
+#1107. Every model with an answer certifies S except `ralph1` and
+`mixed_pair`, whose minimizers are only weakly stationary (W). The
+per-model table (status, answering stage, certificate, wall time) is in the data root's `mpcc_nl/README.md`.
 
 `answers.json` assumes the default `complementarity_strategy=both`. Under
 `exact` alone `eq_split` lands on its local optimum, and under
