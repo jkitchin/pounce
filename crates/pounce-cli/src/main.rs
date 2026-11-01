@@ -4328,7 +4328,18 @@ fn run_convex_socp(
     // legitimately violate `Gx ≤ h` at a perfectly feasible point, so the
     // orthant-only `kkt_residuals` reported a large bogus constraint violation
     // and NLP error for a solved problem (pounce#209).
-    let res = sol.kkt_residuals_conic(&qp, &cones);
+    let mut res = sol.kkt_residuals_conic(&qp, &cones);
+    // The multipliers the caller receives are the original QCQP's, mapped
+    // from the cone duals and re-fitted to its stationarity where the cone
+    // dual's misalignment left them short (gh#1114). `res` measured the
+    // *conic* stationarity, which a misaligned cone dual satisfies while the
+    // mapped multipliers miss the original one by orders more, so the
+    // reported dual infeasibility is the larger of the two: a number about
+    // the `(x, λ)` actually handed back.
+    let recovery = timing.solution_recovery.guard();
+    let duals = pounce_cli::qp_extract::polish_socp_multipliers(&qp, &cones, &con_map, &sol);
+    recovery.stop();
+    res.dual_infeasibility = res.dual_infeasibility.max(duals.dual_infeasibility);
     // Declared-model numbers for reporting, as on the QP path above: `qp`
     // carries the `bound_relax_factor` widening, so measuring against it
     // understates how far the returned point sits outside the model the
@@ -4357,10 +4368,10 @@ fn run_convex_socp(
     );
 
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
-    // constraint order (best-effort for the quadratic rows; see
-    // `recover_socp_duals`).
+    // constraint order and re-fitted to the original stationarity (see
+    // `polish_socp_multipliers`).
     let recovery = timing.solution_recovery.guard();
-    let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
+    let lambda = duals.constraint_duals(prob, &con_map);
 
     // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). As on the QP path the
     // variable bounds live in the solver's explicit box — outside the cone
@@ -4368,7 +4379,14 @@ fn run_convex_socp(
     // blocks — so they come back in `sol.z_lb`/`z_ub`. `sign` restores the
     // user objective sense and the Ipopt output convention is
     // `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` (gh #296).
-    let (z_lb_raw, z_ub_raw) = pounce_cli::qp_extract::recover_bound_mults(prob, &sol);
+    // Read from the re-fitted multipliers (gh#1114), which move a bound
+    // multiplier together with the row multipliers it trades off against.
+    let read = |v: &[f64]| -> Vec<f64> {
+        (0..prob.n)
+            .map(|i| v.get(i).copied().unwrap_or(0.0))
+            .collect()
+    };
+    let (z_lb_raw, z_ub_raw) = (read(&duals.z_lb), read(&duals.z_ub));
     let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
     let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
     let socp_bound_suffixes = [

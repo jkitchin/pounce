@@ -794,6 +794,392 @@ pub fn recover_socp_duals(
         .collect()
 }
 
+/// Multipliers re-fitted to the **original** QCQP's stationarity
+/// (gh #1114), as returned by [`polish_socp_multipliers`].
+///
+/// All values are the internal-minimize multipliers, in the solver's own
+/// convention (`Px + c + Aᵀy + Σ λ∇g − z_lb + z_ub = 0`); `quad` is indexed
+/// like `con_map`, and is meaningful only at its [`ConSocpMap::Quad`] slots.
+#[derive(Debug, Clone)]
+pub struct SocpDuals {
+    pub y: Vec<f64>,
+    pub z: Vec<f64>,
+    pub quad: Vec<f64>,
+    pub z_lb: Vec<f64>,
+    pub z_ub: Vec<f64>,
+    /// `‖∇ₓL(x, y, z, λ, z_lb, z_ub)‖∞` of the *original* problem at the
+    /// returned point — the dual infeasibility of what the caller receives.
+    pub dual_infeasibility: f64,
+}
+
+impl SocpDuals {
+    /// Per-`.nl`-constraint duals in POUNCE's `.sol` convention, exactly as
+    /// [`recover_socp_duals`] maps them, but reading a quadratic row's
+    /// multiplier from [`Self::quad`].
+    pub fn constraint_duals(&self, prob: &NlProblem, con_map: &[ConSocpMap]) -> Vec<f64> {
+        let sign = if prob.minimize { 1.0 } else { -1.0 };
+        let mut lambda = recover_socp_duals(prob, con_map, &self.y, &self.z);
+        for (i, m) in con_map.iter().enumerate() {
+            if matches!(m, ConSocpMap::Quad { .. }) {
+                lambda[i] = sign * self.quad[i];
+            }
+        }
+        lambda
+    }
+}
+
+/// One multiplier of the original problem as a column of its stationarity
+/// system: `∇ₓL = Px + c + Σ val·col`.
+struct MultCol {
+    col: Vec<(usize, f64)>,
+    val: f64,
+    /// An equality multiplier (sign-free); otherwise `val ≥ 0`.
+    free: bool,
+}
+
+/// Where a [`MultCol`]'s value is written back.
+#[derive(Clone, Copy)]
+enum MultSlot {
+    Y(usize),
+    Z(usize),
+    Quad(usize),
+    Lb(usize),
+    Ub(usize),
+}
+
+/// The SOCP solve's multipliers, mapped to the original QCQP and — when they
+/// miss its stationarity — re-fitted to it at the returned `x` (gh #1114).
+///
+/// A quadratic row's multiplier is read off its cone dual as
+/// `λ = (z₀ + z₁)/κ` ([`recover_socp_duals`]). That is the original
+/// multiplier only when the cone dual is *aligned* with the cone slack — exact
+/// complementarity, `s ∘ z = 0`. The conic IPM stops on the scalar gap
+/// `sᵀz`, which is small long before the alignment is: on
+/// `min (x₀−2)² + x₁²  s.t.  ‖x‖² ≤ 1,  x₀ + x₁ = 1` the cone dual's `x₁`
+/// component came back `−6e-6` where it should be `0`, the equality
+/// multiplier absorbed it (`−1.2e-5` against `0`), and the conic
+/// stationarity residual read `1.3e-11` while the original problem's, for the
+/// `(x, λ)` actually returned, read `1.2e-5`. Only `(z₀ + z₁)` reaches the
+/// caller; the misaligned remainder of `z` is dropped, and with it the part
+/// of stationarity it carried.
+///
+/// So the original Lagrangian gradient is formed directly — a quadratic row
+/// contributes `λ·∇g(x)`, `∇g = Fᵀ(Fx + w) + a_⊥`, recovered from the cone's
+/// own `G` rows and slacks — and, if it is larger than the conic one, the
+/// multipliers are moved by the smallest weighted correction that zeroes it:
+/// `min Σ Δᵢ²/wᵢ  s.t.  MΔ = −r` (in the least-squares sense), solved by
+/// CGLS. An inequality's weight is its own multiplier, so an active one moves
+/// in proportion to its size, and one the solve found inactive (`λ` below
+/// [`POLISH_ACTIVE_REL`] of the largest) is frozen; equalities are weighted by
+/// the largest multiplier and move freely. Whatever part of `r` the active
+/// gradients cannot reach — the returned `x` is only as accurate as the conic
+/// gap makes it — is left in the residual and reported. The correction
+/// is kept only if it lowers the residual without flipping an inequality
+/// multiplier's sign beyond a clip to zero; otherwise the mapped multipliers
+/// are returned unchanged, with their honest residual.
+pub fn polish_socp_multipliers(
+    qp: &QpProblem,
+    cones: &[ConeSpec],
+    con_map: &[ConSocpMap],
+    sol: &QpSolution,
+) -> SocpDuals {
+    let n = qp.n;
+    let x = &sol.x;
+    let m_ineq = qp.m_ineq();
+
+    // Only an optimal point has multipliers to re-fit. An infeasibility
+    // verdict's `(y, z)` is a certificate, not a Lagrange multiplier, and a
+    // solve that returned no point of the model's shape (a presolve verdict,
+    // a zero-iteration stop) has nothing to fit: map those as they are and
+    // leave the reported residual to the solver's own measurement.
+    let optimal = matches!(
+        sol.status,
+        pounce_convex::QpStatus::Optimal | pounce_convex::QpStatus::OptimalInaccurate
+    );
+    if !optimal || x.len() != n || sol.y.len() != qp.m_eq() || sol.z.len() != m_ineq {
+        let quad = con_map
+            .iter()
+            .map(|m| match *m {
+                ConSocpMap::Quad {
+                    z_row0,
+                    z_row1,
+                    kappa,
+                } => {
+                    (sol.z.get(z_row0).copied().unwrap_or(0.0)
+                        + sol.z.get(z_row1).copied().unwrap_or(0.0))
+                        / kappa
+                }
+                _ => 0.0,
+            })
+            .collect();
+        return SocpDuals {
+            y: sol.y.clone(),
+            z: sol.z.clone(),
+            quad,
+            z_lb: sol.z_lb.clone(),
+            z_ub: sol.z_ub.clone(),
+            dual_infeasibility: 0.0,
+        };
+    }
+
+    // Row-wise `A` and `G`.
+    let mut a_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); qp.m_eq()];
+    for t in &qp.a {
+        a_rows[t.row].push((t.col, t.val));
+    }
+    let mut g_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_ineq];
+    for t in &qp.g {
+        g_rows[t.row].push((t.col, t.val));
+    }
+    let row_dot = |row: &[(usize, f64)]| row.iter().map(|&(j, v)| v * x[j]).sum::<f64>();
+
+    // Which `G` rows are orthant rows, and the dimension of the SOC block
+    // starting at each quadratic row's `z_row0`.
+    let mut nonneg = vec![false; m_ineq];
+    let mut soc_dim_at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut off = 0usize;
+    for spec in cones {
+        let dim = spec.dim().min(m_ineq.saturating_sub(off));
+        match spec {
+            ConeSpec::Nonneg(_) => nonneg[off..off + dim].iter_mut().for_each(|b| *b = true),
+            _ => {
+                soc_dim_at.insert(off, dim);
+            }
+        }
+        off += dim;
+    }
+    nonneg[off..].iter_mut().for_each(|b| *b = true);
+
+    let mut cols: Vec<MultCol> = Vec::new();
+    let mut slots: Vec<MultSlot> = Vec::new();
+    for (i, row) in a_rows.iter().enumerate() {
+        cols.push(MultCol {
+            col: row.clone(),
+            val: sol.y[i],
+            free: true,
+        });
+        slots.push(MultSlot::Y(i));
+    }
+    for (i, row) in g_rows.iter().enumerate() {
+        if nonneg[i] {
+            cols.push(MultCol {
+                col: row.clone(),
+                val: sol.z[i],
+                free: false,
+            });
+            slots.push(MultSlot::Z(i));
+        }
+    }
+    let mut quad = vec![0.0; con_map.len()];
+    for (ci, m) in con_map.iter().enumerate() {
+        let ConSocpMap::Quad {
+            z_row0,
+            z_row1,
+            kappa,
+        } = *m
+        else {
+            continue;
+        };
+        let lam = (sol.z[z_row0] + sol.z[z_row1]) / kappa;
+        quad[ci] = lam;
+        // `∇g = κ·G₀ − ½ Σₖ sₖ·Gₖ` over the block's `F` rows `k ≥ 2`, where
+        // `sₖ = hₖ − Gₖx = √2(Fx + w)ₖ` and `Gₖ = −√2·Fₖ` (see
+        // `extract_socp_with_map`).
+        let dim = soc_dim_at.get(&z_row0).copied().unwrap_or(2).max(2);
+        let mut grad: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+        for &(j, v) in &g_rows[z_row0] {
+            *grad.entry(j).or_insert(0.0) += kappa * v;
+        }
+        let f_range = z_row0 + 2..z_row0 + dim;
+        for (row, &h_r) in g_rows[f_range.clone()].iter().zip(&qp.h[f_range]) {
+            let s = h_r - row_dot(row);
+            for &(j, v) in row {
+                *grad.entry(j).or_insert(0.0) -= 0.5 * s * v;
+            }
+        }
+        cols.push(MultCol {
+            col: grad.into_iter().collect(),
+            val: lam,
+            free: false,
+        });
+        slots.push(MultSlot::Quad(ci));
+    }
+    for j in 0..n {
+        if qp.lb_of(j) > -1e19 {
+            cols.push(MultCol {
+                col: vec![(j, -1.0)],
+                val: sol.z_lb.get(j).copied().unwrap_or(0.0),
+                free: false,
+            });
+            slots.push(MultSlot::Lb(j));
+        }
+        if qp.ub_of(j) < 1e19 {
+            cols.push(MultCol {
+                col: vec![(j, 1.0)],
+                val: sol.z_ub.get(j).copied().unwrap_or(0.0),
+                free: false,
+            });
+            slots.push(MultSlot::Ub(j));
+        }
+    }
+
+    // `Px + c`, the part of `∇ₓL` the multipliers do not move.
+    let mut base = vec![0.0; n];
+    qp.p_mul(x, &mut base);
+    for (b, c) in base.iter_mut().zip(&qp.c) {
+        *b += c;
+    }
+    let residual = |vals: &[f64]| -> Vec<f64> {
+        let mut r = base.clone();
+        for (c, &v) in cols.iter().zip(vals) {
+            if v != 0.0 {
+                for &(j, g) in &c.col {
+                    r[j] += v * g;
+                }
+            }
+        }
+        r
+    };
+    let inf_norm = |r: &[f64]| r.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+
+    let mut vals: Vec<f64> = cols.iter().map(|c| c.val).collect();
+    let mut r = residual(&vals);
+    let mut r_inf = inf_norm(&r);
+    let conic = sol.kkt_residuals_conic(qp, cones).dual_infeasibility;
+
+    // Two reweighted rounds: the weights are the multipliers themselves.
+    for _ in 0..2 {
+        if !(r_inf > conic) || !r_inf.is_finite() {
+            break;
+        }
+        let scale = vals.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+        let d: Vec<f64> = cols
+            .iter()
+            .zip(&vals)
+            .map(|(c, &v)| {
+                if c.free {
+                    scale.sqrt()
+                } else if v > POLISH_ACTIVE_REL * scale {
+                    v.sqrt()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let delta = cgls_min_norm(&cols, &d, &r, n);
+        let trial: Vec<f64> = cols
+            .iter()
+            .zip(&vals)
+            .zip(&delta)
+            .map(|((c, &v), &dv)| if c.free { v + dv } else { (v + dv).max(0.0) })
+            .collect();
+        let rt = residual(&trial);
+        let rt_inf = inf_norm(&rt);
+        if rt_inf < r_inf {
+            vals = trial;
+            r = rt;
+            r_inf = rt_inf;
+        } else {
+            break;
+        }
+    }
+    let _ = r;
+
+    let mut out = SocpDuals {
+        y: sol.y.clone(),
+        z: sol.z.clone(),
+        quad,
+        z_lb: sol.z_lb.clone(),
+        z_ub: sol.z_ub.clone(),
+        dual_infeasibility: r_inf,
+    };
+    for (slot, &v) in slots.iter().zip(&vals) {
+        match *slot {
+            MultSlot::Y(i) => out.y[i] = v,
+            MultSlot::Z(i) => out.z[i] = v,
+            MultSlot::Quad(i) => out.quad[i] = v,
+            MultSlot::Lb(j) => out.z_lb[j] = v,
+            MultSlot::Ub(j) => out.z_ub[j] = v,
+        }
+    }
+    out
+}
+
+/// An inequality multiplier at or below this fraction of the largest one is
+/// read as inactive and frozen by [`polish_socp_multipliers`].
+///
+/// Freezing, rather than the small weight a multiplier-proportional rule
+/// would give it, matters when the conic `x` is itself only `√gap`-accurate:
+/// part of the residual then lies outside the span of the active gradients,
+/// no honest multiplier removes it, and a minimum-norm fit that may touch
+/// every column parks it on an inactive row instead — measured, an inactive
+/// range row went from `−3e-9` to `−1.6e-5` and a bound multiplier from `~0`
+/// to `4e-6` on a 3-variable ball-plus-plane model, "zeroing" a residual the
+/// returned `x` genuinely carries. Frozen, that part stays in the residual and
+/// is reported.
+const POLISH_ACTIVE_REL: f64 = 1e-6;
+
+/// The minimum-`‖u‖` least-squares solution of `M·D·u = −r` by CGLS, returned
+/// as `Δ = D·u` — i.e. the correction minimizing `Σ Δᵢ²/dᵢ²` among those
+/// that best zero `r + MΔ` ([`polish_socp_multipliers`]). Sparse mat-vecs
+/// only: no factorization, so it costs `O(nnz)` per iteration on a model of
+/// any size.
+fn cgls_min_norm(cols: &[MultCol], d: &[f64], r: &[f64], n: usize) -> Vec<f64> {
+    let k = cols.len();
+    let apply = |u: &[f64]| -> Vec<f64> {
+        let mut out = vec![0.0; n];
+        for (i, c) in cols.iter().enumerate() {
+            let s = d[i] * u[i];
+            if s != 0.0 {
+                for &(j, g) in &c.col {
+                    out[j] += s * g;
+                }
+            }
+        }
+        out
+    };
+    let apply_t = |v: &[f64]| -> Vec<f64> {
+        cols.iter()
+            .zip(d)
+            .map(|(c, &di)| di * c.col.iter().map(|&(j, g)| g * v[j]).sum::<f64>())
+            .collect()
+    };
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+
+    let mut u = vec![0.0; k];
+    let mut res: Vec<f64> = r.iter().map(|v| -v).collect(); // −r − M D u
+    let mut s = apply_t(&res);
+    let mut p = s.clone();
+    let mut gamma = dot(&s, &s);
+    let gamma0 = gamma;
+    let max_iter = (2 * k).clamp(10, 500);
+    for _ in 0..max_iter {
+        if !(gamma > 1e-30 * gamma0) || !gamma.is_finite() {
+            break;
+        }
+        let q = apply(&p);
+        let qq = dot(&q, &q);
+        if !(qq > 0.0) {
+            break;
+        }
+        let alpha = gamma / qq;
+        for (ui, pi) in u.iter_mut().zip(&p) {
+            *ui += alpha * pi;
+        }
+        for (ri, qi) in res.iter_mut().zip(&q) {
+            *ri -= alpha * qi;
+        }
+        s = apply_t(&res);
+        let gamma_new = dot(&s, &s);
+        let beta = gamma_new / gamma;
+        gamma = gamma_new;
+        for (pi, si) in p.iter_mut().zip(&s) {
+            *pi = si + beta * *pi;
+        }
+    }
+    u.iter().zip(d).map(|(ui, di)| ui * di).collect()
+}
+
 /// The balancing factor `κ` for a rotated cone whose constant is `b`
 /// (gh #1056).
 ///
@@ -1260,6 +1646,213 @@ mod tests {
             "ball constraint dual={}",
             lambda[0]
         );
+    }
+
+    // ---- gh #1114: multipliers re-fitted to the original stationarity ----
+
+    /// `min (x0−2)² + x1²  s.t.  x0² + x1² ≤ 1,  x0 + x1 = 1` (maximized as
+    /// its negation when `!minimize`) — the issue's model, built as an
+    /// `NlProblem` so the test runs the real extraction. `extra` appends
+    /// linear rows `(coefs, g_l, g_u)`.
+    fn issue_1114_model(minimize: bool, extra: &[(Vec<(usize, f64)>, f64, f64)]) -> NlProblem {
+        let sq = |e: Expr| Expr::Binary(BinOp::Pow, Box::new(e), Box::new(Expr::Const(2.0)));
+        let shifted = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let mut obj = Expr::Binary(BinOp::Add, Box::new(sq(shifted)), Box::new(pow2(1)));
+        if !minimize {
+            obj = Expr::Binary(BinOp::Mul, Box::new(Expr::Const(-1.0)), Box::new(obj));
+        }
+        let mut con_nonlinear = vec![
+            NlBody::Tree(Expr::Binary(
+                BinOp::Add,
+                Box::new(pow2(0)),
+                Box::new(pow2(1)),
+            )),
+            NlBody::Tree(Expr::Const(0.0)),
+        ];
+        let mut con_linear = vec![vec![], vec![(0, 1.0), (1, 1.0)]];
+        let mut g_l = vec![-2e19, 1.0];
+        let mut g_u = vec![1.0, 1.0];
+        for (coefs, lo, hi) in extra {
+            con_nonlinear.push(NlBody::Tree(Expr::Const(0.0)));
+            con_linear.push(coefs.clone());
+            g_l.push(*lo);
+            g_u.push(*hi);
+        }
+        let m = g_l.len();
+        NlProblem {
+            src: None,
+            cse_bodies: Vec::new(),
+            complementarity: Vec::new(),
+            n: 2,
+            m,
+            num_obj: 1,
+            minimize,
+            obj_nonlinear: NlBody::Tree(obj),
+            obj_linear: vec![],
+            obj_constant: 0.0,
+            con_nonlinear,
+            con_linear,
+            x_l: vec![-2e19, -2e19],
+            x_u: vec![2e19, 2e19],
+            g_l,
+            g_u,
+            x0: vec![0.0, 0.0],
+            lambda0: vec![0.0; m],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            ampl_options: Vec::new(),
+            nl_counts: None,
+            n_discrete: None,
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    /// `‖∇ₓL‖∞` of the issue model's minimize form, `(x0−2)² + x1²` with
+    /// internal multipliers `lambda` on the ball, the line and `extra` —
+    /// computed independently of the code under test.
+    fn issue_1114_grad_l(
+        x: &[f64],
+        lambda: &[f64],
+        extra: &[(Vec<(usize, f64)>, f64, f64)],
+    ) -> f64 {
+        let mut r = [2.0 * (x[0] - 2.0), 2.0 * x[1]];
+        for (j, rj) in r.iter_mut().enumerate() {
+            *rj += lambda[0] * 2.0 * x[j] + lambda[1];
+            for (k, (coefs, _, _)) in extra.iter().enumerate() {
+                for &(v, c) in coefs {
+                    if v == j {
+                        *rj += lambda[2 + k] * c;
+                    }
+                }
+            }
+        }
+        r.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+    }
+
+    /// The issue's reproduction: the cone dual's misalignment left the
+    /// mapped multipliers `(1.000006, −1.2e-5)` with a `1.2e-5` stationarity
+    /// residual against a reported `1.3e-11`. Re-fitted, they are the unique
+    /// `μ = 1, ν = 0` and the residual the report carries is the residual of
+    /// what is returned.
+    #[test]
+    fn issue_1114_qcqp_equality_row_multipliers_are_stationary() {
+        let prob = issue_1114_model(true, &[]);
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!(
+            (sol.x[0] - 1.0).abs() < 1e-8 && sol.x[1].abs() < 1e-8,
+            "x={:?}",
+            sol.x
+        );
+
+        let duals = polish_socp_multipliers(&qp, &cones, &con_map, &sol);
+        let lambda = duals.constraint_duals(&prob, &con_map);
+        assert!((lambda[0] - 1.0).abs() < 1e-8, "ball μ = {}", lambda[0]);
+        assert!(lambda[1].abs() < 1e-8, "line ν = {}", lambda[1]);
+
+        let r = issue_1114_grad_l(&sol.x, &lambda, &[]);
+        assert!(r < 1e-10, "|∇L|∞ of the returned pair = {r:.2e}");
+        // The reported number describes the returned pair (to roundoff).
+        assert!(
+            (duals.dual_infeasibility - r).abs() < 1e-12,
+            "reported {:.2e} vs independent {r:.2e}",
+            duals.dual_infeasibility
+        );
+    }
+
+    /// The maximize sense: the internal problem is negated, and the
+    /// re-fitted multipliers must come back in the caller's sense.
+    #[test]
+    fn issue_1114_maximize_sense_round_trips() {
+        let prob = issue_1114_model(false, &[]);
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let duals = polish_socp_multipliers(&qp, &cones, &con_map, &sol);
+        let lambda = duals.constraint_duals(&prob, &con_map);
+        // `.sol` convention flips the sign under maximize.
+        assert!((lambda[0] + 1.0).abs() < 1e-8, "ball = {}", lambda[0]);
+        assert!(lambda[1].abs() < 1e-8, "line = {}", lambda[1]);
+        let internal: Vec<f64> = lambda.iter().map(|l| -l).collect();
+        let r = issue_1114_grad_l(&sol.x, &internal, &[]);
+        assert!(r < 1e-10, "|∇L|∞ = {r:.2e}");
+    }
+
+    /// The other branch of the active-set rule: a residual the active
+    /// gradients cannot reach. At `x = (1, δ)` — off the optimum along the
+    /// circle's tangent, as a `√gap`-accurate conic point can be — the ball
+    /// and the line span all of ℝ², so to make the branch reachable the line
+    /// is dropped and an *inactive* row `x1 ≥ −5` stands in its place. The
+    /// stationarity residual in `x1` is then outside the active span; it must
+    /// be reported, not parked on the inactive row's multiplier. (The row is
+    /// a lower bound so that parking it there needs a *positive* multiplier:
+    /// an upper one would need a negative one, which the sign clip rejects
+    /// on its own and the test would not see the freeze.)
+    #[test]
+    fn issue_1114_inactive_row_is_frozen_and_residual_reported() {
+        // Ball plus the inactive `x1 ≥ −5`, with the line removed.
+        let mut prob = issue_1114_model(true, &[(vec![(1, 1.0)], -5.0, 2e19)]);
+        prob.con_nonlinear.remove(1);
+        prob.con_linear.remove(1);
+        prob.g_l.remove(1);
+        prob.g_u.remove(1);
+        prob.lambda0.remove(1);
+        prob.m -= 1;
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let mut sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        // Perturb x off the optimum (1, 0) tangentially and give the inactive
+        // row a roundoff-sized multiplier, as an IPM leaves it.
+        let delta: f64 = 1e-5;
+        sol.x = vec![(1.0 - delta * delta).sqrt(), delta];
+        let ConSocpMap::Ineq {
+            lower: Some(row), ..
+        } = con_map[1]
+        else {
+            panic!("expected a lower-bounded linear row: {:?}", con_map[1]);
+        };
+        sol.z[row] = 1e-12;
+
+        let duals = polish_socp_multipliers(&qp, &cones, &con_map, &sol);
+        let lambda = duals.constraint_duals(&prob, &con_map);
+        assert!(
+            lambda[1].abs() <= 1e-12,
+            "inactive row multiplier moved to {:.2e}",
+            lambda[1]
+        );
+        // The residual is the x1 component 2δ(1 + μ) ≈ 4e-5: genuinely there,
+        // and reported rather than hidden.
+        assert!(
+            duals.dual_infeasibility > 1e-5,
+            "residual hidden: {:.2e}",
+            duals.dual_infeasibility
+        );
+    }
+
+    /// An infeasibility verdict's `(y, z)` is a certificate, not a Lagrange
+    /// multiplier: it is mapped untouched, and contributes no residual.
+    #[test]
+    fn issue_1114_non_optimal_status_is_not_refitted() {
+        let prob = issue_1114_model(true, &[]);
+        let (qp, con_map, _, cones) =
+            extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
+        let mut sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), backend);
+        sol.status = QpStatus::PrimalInfeasible;
+        let duals = polish_socp_multipliers(&qp, &cones, &con_map, &sol);
+        assert_eq!(
+            duals.constraint_duals(&prob, &con_map),
+            recover_socp_duals(&prob, &con_map, &sol.y, &sol.z)
+        );
+        assert_eq!(duals.dual_infeasibility, 0.0);
     }
 
     /// min x0  s.t.  (x0−3)² ≤ 1  → feasible x0 ∈ [2, 4], optimum x0 = 2.
