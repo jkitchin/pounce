@@ -59,6 +59,9 @@ const MAX_NEWTON: usize = 3;
 
 type SpVec = Vec<(usize, f64)>;
 
+/// Builds a fresh linear-solver backend, as the conic solve's callers do.
+pub type BackendFactory = dyn Fn() -> Box<dyn SparseSymLinearSolverInterface>;
+
 /// One quadratic row's cone block: `G` rows `row0 .. row0 + dim`, of which
 /// the first two carry `a_⊥/κ` and the rest `−√2·F` (see
 /// `extract_socp_with_map`).
@@ -412,6 +415,7 @@ fn columns(view: &View, x: &[f64]) -> Vec<Col> {
             value: view.quad_value(q, x),
         });
     }
+    #[allow(clippy::needless_range_loop)] // `j` names the bound slot, not just `x[j]`
     for j in 0..qp.n {
         if view.has_lb(j) {
             cols.push(Col {
@@ -552,7 +556,7 @@ fn newton_step(
     view: &View,
     x: &[f64],
     m: &Mults,
-    backend: &dyn Fn() -> Box<dyn SparseSymLinearSolverInterface>,
+    backend: &BackendFactory,
 ) -> Option<(Vec<f64>, Mults)> {
     let qp = view.qp;
     let n = qp.n;
@@ -637,7 +641,7 @@ pub fn polish_qcqp(
     cones: &[ConeSpec],
     con_map: &[ConSocpMap],
     sol: &QpSolution,
-    backend: &dyn Fn() -> Box<dyn SparseSymLinearSolverInterface>,
+    backend: &BackendFactory,
 ) -> Option<QcqpPolish> {
     let n = qp.n;
     let optimal = matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate);
@@ -714,6 +718,9 @@ mod tests {
     use pounce_convex::{QpOptions, solve_socp_ipm};
     use pounce_feral::FeralSolverInterface;
 
+    /// A linear row `(coefficients, g_l, g_u)`.
+    type Row = (Vec<(usize, f64)>, f64, f64);
+
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
     }
@@ -730,7 +737,7 @@ mod tests {
     /// `(coefs, g_l, g_u)` — the issue's model family, built as an
     /// `NlProblem` so the tests run the real extraction. Maximized as the
     /// negation when `!minimize`.
-    fn model(minimize: bool, p: [f64; 2], rows: &[(Vec<(usize, f64)>, f64, f64)]) -> NlProblem {
+    fn model(minimize: bool, p: [f64; 2], rows: &[Row]) -> NlProblem {
         let shift = |v: usize, c: f64| {
             Expr::Binary(BinOp::Sub, Box::new(Expr::Var(v)), Box::new(Expr::Const(c)))
         };
@@ -780,13 +787,7 @@ mod tests {
 
     /// `‖∇ₓL‖∞` in the minimize form, computed independently of the code
     /// under test from `.sol`-convention duals (`sign` undoes a maximize).
-    fn grad_l(
-        sign: f64,
-        p: [f64; 2],
-        x: &[f64],
-        lambda: &[f64],
-        rows: &[(Vec<(usize, f64)>, f64, f64)],
-    ) -> f64 {
+    fn grad_l(sign: f64, p: [f64; 2], x: &[f64], lambda: &[f64], rows: &[Row]) -> f64 {
         let mut r = [2.0 * (x[0] - p[0]), 2.0 * (x[1] - p[1])];
         for (j, rj) in r.iter_mut().enumerate() {
             *rj += sign * lambda[0] * 2.0 * x[j];
@@ -801,7 +802,7 @@ mod tests {
         r.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
     }
 
-    fn line() -> Vec<(Vec<(usize, f64)>, f64, f64)> {
+    fn line() -> Vec<Row> {
         vec![(vec![(0, 1.0), (1, 1.0)], 1.0, 1.0)]
     }
 
