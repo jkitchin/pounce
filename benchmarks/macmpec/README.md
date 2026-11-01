@@ -34,8 +34,7 @@ run is classified rather than failed, in the model's own objective sense
 - `worse`: another local solution.
 - `BETTER`: past the published value. Check the point's feasibility before
   believing it.
-- `unsolved`: the run did not converge (or the CLI refused a pair it cannot
-  lower).
+- `unsolved`: the run did not converge.
 
 The target fails only on a contradiction of the reference: converging on a
 model published as infeasible, or reporting infeasible where a feasible

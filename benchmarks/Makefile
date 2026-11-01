@@ -479,9 +479,9 @@ mpcc-manifest:
 # Unlike the Gate 0 suite above it reads `.nl` from the data root
 # ($(POUNCE_BENCH_DATA)/mpcc_nl/nl) and runs the shared driver. Every row
 # is then checked against the suite's own answers.json (global optimum,
-# expected status), so a run that reaches a worse branch, reports a
-# relaxed solve's success on the infeasible model, or solves the mixed
-# pair it must refuse, fails the target. See benchmarks/mpcc_nl/README.md.
+# expected status), so a run that reaches a worse branch, or reports a
+# relaxed solve's success on the infeasible model, fails the target. See
+# benchmarks/mpcc_nl/README.md.
 #
 # Needs a pounce with declared-complementarity support (PR #1103, on main
 # since e7873df);
