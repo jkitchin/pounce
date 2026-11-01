@@ -31,10 +31,10 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    BCheck, BVerdict, Certificate, CertificateInput, MpccStage, Reported, SAFE_DEFAULTS,
-    SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS, accepts, answers,
-    branch_bounds, budgeted_max_iter, certify, check_b_stationarity, compared, converged,
-    exact_stage_budget, finish_budget, kept_if_nothing_better, warm_start_assignments,
+    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, Reported,
+    SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS,
+    accepts, answers, branch_bounds, budgeted_max_iter, certify, check_b_stationarity, compared,
+    converged, exact_stage_budget, finish_budget, kept_if_nothing_better, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -340,6 +340,39 @@ pub fn solve_mpcc(
     };
     let halted = || stopped.borrow().is_some();
 
+    // The finish: one exact-product solve warm-started at a relaxed answer
+    // (`G·H <= 0` where the equality would over-determine the model -- same
+    // feasible set), on `budget` iterations. `None` only if a stop arrived
+    // before it ran.
+    let finish_from = |app: &mut IpoptApplication,
+                       stage: MpccStage,
+                       relaxed: &Captured,
+                       budget: usize,
+                       solves: &mut Vec<MpccSolveRecord>|
+     -> Option<Captured> {
+        let mut finish = None;
+        for lowering in [Lowering::Eq, Lowering::Ineq] {
+            baseline(app);
+            for a in warm_start_assignments(relaxed.statistics.final_mu) {
+                let _ = app.options_mut().read_from_str(&a, true);
+            }
+            set_budget(app, budget);
+            let c = run(app, stage, lowering, Some(relaxed.warm()), solves);
+            if halted() {
+                return Some(c);
+            }
+            // Refused before iteration 0, whatever the status: the
+            // inequality form.
+            let over_determined =
+                c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty();
+            finish = Some(c);
+            if !over_determined {
+                break;
+            }
+        }
+        finish
+    };
+
     let mut stages_run = 0;
     for &stage in STAGES.iter() {
         // An answer from a compared stage ends the ladder before the first
@@ -357,22 +390,21 @@ pub fn solve_mpcc(
         baseline(app);
         let candidate = match stage {
             MpccStage::Exact => {
-                // `G·H <= 0` where the equality would over-determine the
-                // model (same feasible set), as the continuation's finish.
-                // Also retried whenever the equality solve was refused
-                // before iteration 0 (no point), whatever the status: the
-                // degrees-of-freedom gate can refuse an over-determined
-                // model with a proven verdict (`Infeasible_Problem_Detected`)
-                // rather than `Not_Enough_Degrees_Of_Freedom`, and the
-                // inequality form then gives a verdict with a point of its
-                // own.
+                // One relaxed solve, `G·H <= EXACT_STAGE_TAU`, from the
+                // model's own start, then the continuation's exact finish
+                // from there. A relaxation keeps an interior: the exact
+                // product `G·H = 0` (or `<= 0`) has none, every product row is
+                // parallel to its pair's active bound, and solved cold it is
+                // the degenerate system that made this stage the slowest on
+                // MacMPEC (pivots to 1e55, 3000-iteration stalls). The start,
+                // not the schedule, is what makes this a second opinion:
+                // from it the solve can settle on a branch the continuation's
+                // path from `τ = 1` does not reach.
                 //
                 // With a tight S answer from the continuation already in
-                // hand, this stage is a second opinion and runs on a budget
-                // proportional to what the continuation spent
-                // ([`EXACT_BUDGET_FACTOR`]). Without one -- the
-                // continuation failed, or answered only W or inside the
-                // band -- it is the main attempt and runs in full.
+                // hand, the relaxed solve runs on a budget proportional to
+                // what the continuation spent ([`EXACT_BUDGET_FACTOR`]);
+                // without one it runs in full.
                 let budget = exact_stage_budget(
                     accepted.is_some(),
                     iterations_of(&solves, MpccStage::Continuation),
@@ -380,23 +412,69 @@ pub fn solve_mpcc(
                 if let Some(b) = budget {
                     set_budget(app, b);
                 }
-                let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
+                let relaxed = run(
+                    app,
+                    stage,
+                    Lowering::Relaxed(EXACT_STAGE_TAU),
+                    None,
+                    &mut solves,
+                );
                 if halted() {
                     break;
                 }
-                if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom || c.x.is_empty()
+                if converged(relaxed.status) && !relaxed.x.is_empty() {
+                    let fb = finish_budget(iterations_of(&solves, MpccStage::Exact));
+                    let finish = finish_from(app, stage, &relaxed, fb, &mut solves);
+                    if halted() {
+                        break;
+                    }
+                    // The finish is an exact-product solve: the verdict if
+                    // nothing answers, never the relaxed solve's success.
+                    exact = finish.clone();
+                    match finish {
+                        Some(f) if accepts(f.status, f.max_abs_product, tol) => Some(f),
+                        _ => Some(relaxed),
+                    }
+                } else if relaxed.status == ApplicationReturnStatus::InfeasibleProblemDetected
+                    && !relaxed.x.is_empty()
                 {
+                    // The relaxation contains the model, so its
+                    // infeasibility is the model's.
+                    exact = Some(relaxed.clone());
+                    Some(relaxed)
+                } else {
+                    // The relaxation failed some other way: the exact
+                    // product itself, for an answer or a verdict of its own.
+                    // `G·H <= 0` where the equality would over-determine the
+                    // model (same feasible set), and whenever the equality
+                    // solve was refused before iteration 0 (no point),
+                    // whatever the status: the degrees-of-freedom gate can
+                    // refuse an over-determined model with a proven verdict
+                    // (`Infeasible_Problem_Detected`) rather than
+                    // `Not_Enough_Degrees_Of_Freedom`.
                     baseline(app);
                     if let Some(b) = budget {
                         set_budget(app, b);
                     }
-                    c = run(app, stage, Lowering::Ineq, None, &mut solves);
+                    let mut c = run(app, stage, Lowering::Eq, None, &mut solves);
                     if halted() {
                         break;
                     }
+                    if c.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom
+                        || c.x.is_empty()
+                    {
+                        baseline(app);
+                        if let Some(b) = budget {
+                            set_budget(app, b);
+                        }
+                        c = run(app, stage, Lowering::Ineq, None, &mut solves);
+                        if halted() {
+                            break;
+                        }
+                    }
+                    exact = Some(c.clone());
+                    Some(c)
                 }
-                exact = Some(c.clone());
-                Some(c)
             }
             MpccStage::Continuation => {
                 let mut last: Option<Captured> = None;
@@ -462,29 +540,8 @@ pub fn solve_mpcc(
                         // On a budget ([`FINISH_BUDGET_FLOOR`], or what the
                         // schedule spent if more): a finish that has not
                         // converged by then leaves the schedule's answer.
-                        let finish_budget =
-                            finish_budget(iterations_of(&solves, MpccStage::Continuation));
-                        let mut finish = None;
-                        for lowering in [Lowering::Eq, Lowering::Ineq] {
-                            baseline(app);
-                            for a in warm_start_assignments(relaxed.statistics.final_mu) {
-                                let _ = app.options_mut().read_from_str(&a, true);
-                            }
-                            set_budget(app, finish_budget);
-                            let c = run(app, stage, lowering, Some(relaxed.warm()), &mut solves);
-                            if halted() {
-                                break;
-                            }
-                            // Refused before iteration 0, whatever the status:
-                            // the inequality form, as in the exact stage.
-                            let over_determined = c.status
-                                == ApplicationReturnStatus::NotEnoughDegreesOfFreedom
-                                || c.x.is_empty();
-                            finish = Some(c);
-                            if !over_determined {
-                                break;
-                            }
-                        }
+                        let budget = finish_budget(iterations_of(&solves, MpccStage::Continuation));
+                        let finish = finish_from(app, stage, &relaxed, budget, &mut solves);
                         if halted() {
                             break;
                         }

@@ -119,6 +119,15 @@ pub fn warm_start_assignments(final_mu: Number) -> Vec<String> {
     ]
 }
 
+/// The exact stage's relaxation: one solve of `G·H <= EXACT_STAGE_TAU` from
+/// the model's own start, then an exact finish. Measured against the cold
+/// exact product `G·H = 0` on the 28 MacMPEC models where the exact stage
+/// costs most or matters most: 1879 iterations against 25712, 26 converged
+/// against 20, 23 at or better than the published value against 19. `1e-8`
+/// does worse (3311 iterations, 20 at): a thinner interior, back towards the
+/// degenerate system.
+pub const EXACT_STAGE_TAU: Number = 1e-6;
+
 /// The exact-product stage's iteration budget once the continuation has
 /// already answered with a tight S point: [`EXACT_BUDGET_FACTOR`] times the
 /// iterations the continuation spent, never below [`EXACT_BUDGET_FLOOR`].
