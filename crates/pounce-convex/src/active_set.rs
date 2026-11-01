@@ -3017,7 +3017,9 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
 /// A variable whose *binding* side is infinite makes `L = −∞` and there is
 /// nothing to deduce — unless its `qᵢ` is negligible, which is the one place
 /// this falls back on [`FARKAS_RESID_TOL`]'s tolerance argument rather than an
-/// exact bound.
+/// exact bound — and then also on the data-relative exclusion-radius floor of
+/// [`crate::ipm::FarkasMargin`], because an absolute residual tolerance alone
+/// certified `1e-12·x ≤ −1` (feasible at `x = −1e12`).
 ///
 /// Soundness is the property that matters here: a false positive is a wrong
 /// verdict about the user's model, which is worse than any failure status (the
@@ -3049,6 +3051,10 @@ fn certifies_primal_infeasible(prob: &QpProblem, y: &[f64], z: &[f64], opts: &Qp
     // L = min over the box of qᵀx, separably.
     let resid_slack = FARKAS_RESID_TOL * dual_norm;
     let mut l = 0.0_f64;
+    // Largest `|qᵢ|` waved through on an unbounded side, and `Σ|qᵢ·boundᵢ|`
+    // over the bounded terms of `L` (for the margin test below).
+    let mut skipped = 0.0_f64;
+    let mut l_abs = 0.0_f64;
     for (i, &qi) in q.iter().enumerate() {
         if !qi.is_finite() {
             return false;
@@ -3065,8 +3071,11 @@ fn certifies_primal_infeasible(prob: &QpProblem, y: &[f64], z: &[f64], opts: &Qp
         };
         if bound > crate::qp::NEG_INF && bound < crate::qp::POS_INF {
             l += qi * bound;
+            l_abs += (qi * bound).abs();
         } else if qi.abs() > resid_slack {
             return false; // qᵀx is unbounded below on the box — no deduction
+        } else {
+            skipped = skipped.max(qi.abs());
         }
     }
     if !l.is_finite() {
@@ -3077,7 +3086,30 @@ fn certifies_primal_infeasible(prob: &QpProblem, y: &[f64], z: &[f64], opts: &Qp
     // compared. Scaling by `dual_norm` as well keeps a certificate whose two
     // sides are both ~0 next to huge multipliers from passing on rounding.
     let mag = dual_norm.max(v.abs()).max(l.abs());
-    l - v > ctol * mag
+    if l - v <= ctol * mag {
+        return false;
+    }
+
+    // The waved-through `qᵢ` are where this stops being exact: a feasible `x`
+    // needs `Σ_free qᵢxᵢ ≤ v − L < 0`, i.e. `‖x_free‖₁ ≥ (L − v)/skipped` —
+    // which excludes feasible points only out to that radius, and an absolute
+    // `FARKAS_RESID_TOL` puts no data-relative floor under it. `1e-12·x ≤ −1`
+    // (feasible at `x = −1e12`) passed here off the simplex phase-1's `z = 1`.
+    // Hold the radius to the same data-relative floor as the IPM's Farkas
+    // test ([`crate::ipm::FarkasMargin`]); with no box, `L = 0` and this *is*
+    // that test.
+    if skipped > 0.0 {
+        let margin = crate::ipm::FarkasMargin::new(
+            l - v,
+            crate::ipm::farkas_rhs_magnitude(prob, y, z) + l_abs,
+            skipped,
+            inf_norm(&crate::ipm::farkas_column_magnitudes(prob, y, z)),
+        );
+        if !margin.decisive() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Iteration budget for the active-set engine.
@@ -3636,6 +3668,75 @@ mod tests {
             !certifies_primal_infeasible(&free, &[], &z, &QpOptions::default()),
             "without a box the residual is unaccounted for — must not be trusted"
         );
+    }
+
+    /// A free column's residual below `FARKAS_RESID_TOL` used to be waved
+    /// through unconditionally, so `1e-12·x ≤ −1` — feasible at `x = −1e12` —
+    /// was certified off the simplex phase-1's `z = 1` (`q = 1e-12`,
+    /// `v = −1`). Its exclusion radius is `1×` the data scale; it must not
+    /// pass. On the infeasible `x0 + x1 ≤ −1`, `−x0 − x1 ≤ 0` the exact ray
+    /// (`q = 0`, nothing skipped) and a slightly inexact one
+    /// (`z = (1, 1−1e-11)`: skipped `|q| = 1e-11`, radius `2e11`) must.
+    #[test]
+    fn skipped_free_residual_needs_a_data_relative_margin() {
+        let opts = QpOptions::default();
+        let one_row = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1e-12)],
+            h: vec![-1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(!certifies_primal_infeasible(&one_row, &[], &[1.0], &opts));
+
+        let two_row = |eps: f64| QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(1, 1, -(1.0 - eps)),
+            ],
+            h: vec![-1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(certifies_primal_infeasible(
+            &two_row(0.0),
+            &[],
+            &[1.0, 1.0],
+            &opts
+        ));
+        assert!(certifies_primal_infeasible(
+            &two_row(0.0),
+            &[],
+            &[1.0, 1.0 - 1e-11],
+            &opts
+        ));
+        // The reproducer's regime: skipped residual 1e-11 against column
+        // magnitude 2e-8 is radius 2e3 < 1e4.
+        let scaled = QpProblem {
+            g: two_row(5e-4)
+                .g
+                .into_iter()
+                .map(|t| Triplet::new(t.row, t.col, t.val * 2e-8))
+                .collect(),
+            ..two_row(5e-4)
+        };
+        assert!(!certifies_primal_infeasible(
+            &scaled,
+            &[],
+            &[1.0, 1.0],
+            &opts
+        ));
     }
 
     /// The budget scales with `n + m` instead of sitting at the IPM's flat

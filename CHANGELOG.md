@@ -158,6 +158,25 @@ changes.
   `pack-comp1-32` 252 s → 120 s.
 
 ### Fixed
+- **A feasible LP is no longer reported infeasible off an approximate Farkas
+  ray.** The convex solver's certificate test bounded `bᵀy + hᵀz` and
+  `‖Aᵀy + Gᵀz‖` only against `‖(y,z)‖`. That proves no feasible point
+  exists within `|bᵀy + hᵀz| / ‖Aᵀy + Gᵀz‖`, which is an absolute radius
+  of about `1e3`. A feasible 18 × 18 LP with no bounds and data of order
+  `1e6` (exactly feasible, with points near `1e9`) was reported
+  `Infeasible_Problem_Detected` from a ray that excluded points only out
+  to `3.4e6`. The test now also requires that radius to be `1e4` times the
+  data's own scale, `(|b|ᵀ|y| + |h|ᵀ|z|) / ‖|A|ᵀ|y| + |G|ᵀ|z|‖∞`. This
+  is the same residual-to-value trade Clarabel, ECOS and SCS make. The
+  model now ends `Diverging_Iterates`, and it is unbounded. The active-set
+  engine's certificate had the same gap where it waives a small residual
+  on a free column (it certified `1e-12·x ≤ −1`), and it now applies the
+  same floor. No verdict changes on netlib-infeas (29/29 certified),
+  MIPLIB 2017 Infeas under 150k nonzeros (32/32 certified; one model is
+  certified one iteration later), `benchmarks/qp` or the fixture sweep. On
+  synthetic models infeasible by a relative margin near `1e-13`, where
+  the old test also certified 14 feasible twins, about half lose the
+  certificate. See `dev-notes/known-limitations.md`.
 - **The convex LP/QP solver certifies infeasibility from a converged Farkas
   ray it used to reject.** The certificate test wanted `bᵀy + hᵀz` below
   `−infeas_tol·‖(y,z)‖`; a model infeasible by a margin small relative to its
