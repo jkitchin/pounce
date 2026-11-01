@@ -158,6 +158,23 @@ changes.
   `pack-comp1-32` 252 s → 120 s.
 
 ### Fixed
+- **Pyomo complementarity pairs that Pyomo's `.nl` route loses are no longer
+  solved as if they were absent.** Through `SolverFactory("pounce")`, a
+  two-sided ("mixed") pair, `complements(pyo.inequality(lo, r, hi), f)` in
+  either order, was dropped from the `.nl` file (header `n_cc = 0`: the
+  writer skips the free row `mpec.nl` builds for it) or written with flag 0,
+  which reads as the equation `r == lo`; and a one-sided pair on a variable
+  whose declared bound on the same side differed from the pair's had the two
+  bounds merged (a tighter declared `ub` discarded, a looser one replacing
+  the pair's, a tighter `lb` becoming the reference point). Measured on
+  Pyomo 6.10.0, each returned `optimal` at a point violating the
+  complementarity — `(0.3, 0.5)` instead of `(0.4, 0.4)` on the reported
+  model. pyomo-pounce now writes those pairs itself (flag 3, or flag 1, on
+  an auxiliary variable) and restores the model after the solve; pairs
+  `mpec.nl` writes correctly are left to it, byte-for-byte. It also counts
+  the complementarity rows in the written file and raises
+  `ComplementarityLoweringError` if a pair is missing or carries flag 0,
+  rather than solve.
 - **The convex LP/QP solver certifies infeasibility from a converged Farkas
   ray it used to reject.** The certificate test wanted `bᵀy + hᵀz` below
   `−infeas_tol·‖(y,z)‖`; a model infeasible by a margin small relative to its

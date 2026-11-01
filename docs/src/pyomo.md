@@ -191,9 +191,35 @@ m.c = Complementarity(expr=complements(m.y >= 0, m.x + 2 * m.y - 1 >= 0))
 pyo.SolverFactory("pounce").solve(m, tee=True)  # tee shows the certificate line
 ```
 
-Each pair must be one-sided. See
-[Complementarity Constraints](complementarity.md) for the formulations, the
-stationarity certificate and `complementarity_strategy`.
+A two-sided ("mixed") pair works too:
+
+```python
+# 0 <= x <= 1 ⟂ x - y:  x - y >= 0 at x = 0, <= 0 at x = 1, == 0 between
+m.c = Complementarity(expr=complements(pyo.inequality(0, m.x, 1), m.x - m.y))
+```
+
+Pyomo's own `mpec.nl` route loses a mixed pair on the way to `.nl` — it is
+dropped from the file, or written as the equation `x == 0` — and so does a
+one-sided pair on a variable whose declared bound on the same side differs
+from the pair's (`complements(m.x <= 1, ...)` with `m.x` declared `ub=0.2`):
+the bounds are merged. Measured on Pyomo 6.10.0, each was solved to
+`optimal` at a point that violates the complementarity. pyomo-pounce
+rewrites those pairs itself before the file is written — an auxiliary
+variable carries the pair's bound(s), the row is written with the flag
+POUNCE reads (3 for a mixed pair) — and gives the model back unchanged after
+the solve. It then counts the complementarity rows in the written file, and
+if any pair is missing or carries flag 0 it raises
+`pyomo_pounce.mpec.ComplementarityLoweringError` instead of solving. Pairs
+`mpec.nl` writes correctly are left to it; the bounds it writes onto your
+variables are put back afterwards.
+
+The legacy `SolverFactory("pounce")` is the route for `Complementarity`
+models. The v2 interface and the in-process sensitivity solve write the
+model with Pyomo's NL writer directly, which raises on an active
+`Complementarity` rather than ignoring it.
+
+See [Complementarity Constraints](complementarity.md) for the formulations,
+the stationarity certificate and `complementarity_strategy`.
 
 ## User scaling with the `scaling_factor` Suffix
 
