@@ -42,17 +42,36 @@ point is known.
 
 ## Reference result
 
-`main` at `26991b7` (PRs #1107–#1109 merged), with `BENCH_TIMELIMIT=900` for
-`qpec-200-2`: of 170 models with a best-known value, 154 `at`, 6 `BETTER`
-(each verified feasible by direct evaluation), 10 `worse`, and none
-`unsolved`. All 4 published-infeasible models are reported infeasible. No
-FAILs. `gnash10m` (no reference) solves at −230.823, the value its one-sided
-twin `gnash10` reaches. At the default 300 s limit `qpec-200-2` alone is
-`unsolved` (`Maximum_CpuTime_Exceeded`), which is not a FAIL.
+`main` at `5882e01` (PR #1121 merged; measured at `72ad1d7`, the same
+tree), with `BENCH_TIMELIMIT=900` for every model: of 170 models with a best-known
+value, 154 `at`, 7 `BETTER`, 9 `worse`, and none `unsolved`. All 4
+published-infeasible models are reported infeasible. No FAILs. `gnash10m`
+(no reference) solves at −230.823, the value its one-sided twin `gnash10`
+reaches.
 
+Against the previous reference (`main` at `26991b7`, PRs #1107–#1109; 154
+`at`, 6 `BETTER`, 10 `worse`), seven models move:
+
+| model | before | now | f* | from |
+|---|---|---|---|---|
+| `pack-rig1p-32` | worse 0.8813 | at 0.85091 | 0.8509 | #1112 (per its PR) |
+| `pack-comp1p-32` | at | worse 0.67714 | 0.652979 | before #1121: `main` at `45c18dd` gives the same answer (between `26991b7` and `45c18dd`; not bisected) |
+| `dempe` | worse 31.25 | at 28.25 | 28.25 | #1121 |
+| `ex9.2.5` | worse 9 | BETTER 5 | 6 | #1121 (checked feasible by direct evaluation) |
+| `pack-comp2p-8` | worse 0.67360 | at 0.67312 | 0.67312 | #1121 |
+| `incid-set2c-8` | at 0.0054719 | worse 0.0056302 | 0.005471 | #1121 |
+| `pack-comp2p-16` | at | worse 0.72864 | 0.727134 | already worse on `main` at `45c18dd` (0.72769; not bisected); #1121 moves it further |
+
+The three new `worse` lines converge to feasible points, so they are other
+local solutions, not wrong answers. #1121's own measurement used the 167
+public `.nl` stubs outside this harness, where `incid-set2c-8` and
+`pack-comp2p-16` did not move, so that run is not directly comparable with
+this table.
+
+`main` at `26991b7` had 154 `at`, 6 `BETTER`, 10 `worse`. Before that,
 `main` at `e7873df` (PR #1103) had 144 `at`, 6 `BETTER`, 10 `worse`, and 10
 `unsolved`, all of them two-sided refusals: `bilevel1m` and
-`gnash11m`–`gnash19m`. Two changes since:
+`gnash11m`–`gnash19m`. Two changes between those:
 
 - **PR #1107** solves two-sided pairs. `gnash11m`–`gnash19m` reach the
   published optimum. `bilevel1m` reaches 5 against a published −55, the
@@ -64,16 +83,3 @@ twin `gnash10` reaches. At the default 300 s limit `qpec-200-2` alone is
 
 None of these models' `answers.json` entries expected `refused`; they carry
 the published best-known values (gh#1110).
-
-**Not yet re-measured with this harness since PRs #1112 and #1121.** Both
-change outcomes, measured on the 167 public MacMPEC `.nl` stubs (outside
-`make macmpec-check`, so the counts are not directly comparable with the
-table above):
-
-- **PR #1112** budgets the exact stage and the finish: `pack-rig1p-32` moves
-  from `worse` to `at`.
-- **PR #1121** adds a relaxed path to the exact stage: `dempe` (28.25 against
-  31.25) and `ex9.2.5` (5 against 9) move from `at` to `BETTER`, both checked
-  feasible by direct evaluation, and `pack-comp2p-8` from `worse` to `at`.
-
-Re-run `make macmpec-run` to refresh the reference result above.
