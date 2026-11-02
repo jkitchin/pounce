@@ -96,6 +96,26 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Changed
+- **Declared complementarity spends a quarter less time, with the same
+  answers.** A finish no longer replaces a better relaxed point it started
+  from (it is kept unless its objective drifted past what the relaxation's
+  slack explains); the exact stage's cold `G·H = 0` solve is skipped when the
+  continuation and the relaxed path already agree; and a failed relaxation
+  step is retried warm from the previous step's barrier parameter. MacMPEC:
+  same 135 at / 12 better / 4 worse as before, iterations 106k → 70k, time
+  3,663 s → 2,528 s (`pack-comp1-32` 131 → 26 s, `pack-rig3c-32` 182 → 36 s,
+  `pack-comp1c-32` 74 → 29 s, `pack-comp2c-32` 293 → 136 s); CALIPSO's
+  declared route 209 → 162 s, every answer unchanged.
+  Declared-complementarity solves also run with `perturb_slack_max_rows = 0`
+  unless you set it: a lowered model crosses gh#1098's 1,000-row budget
+  through its own product rows. On MacMPEC that puts `pack-comp2p-32` back at
+  its best known value (it had moved to `worse` when the budget became the
+  default) and changes no other outcome, at +0.9% total time.
+- **The dual-divergence retry is no longer refused for a violation far
+  below tolerance.** Its rule against "buying" an objective improvement with
+  primal slack treated any violation above `1e-12` (and above the base
+  attempt's) as slack; the floor is now `1e-10`. `scholtes4`'s `1.09e-9`
+  purchase is still refused.
 - **Declared complementarity's exact stage also tries a relaxation.** Besides
   solving `G·H = 0` cold from your start, it now solves `G·H <= 1e-6` from
   there, tightens to `1e-8`, and finishes exactly, and the better certified

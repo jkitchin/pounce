@@ -75,6 +75,27 @@ improve (`dempe` 28.25 and `ex9.2.5` 5, both below their published values;
 out at 300 s: the relaxed path alone solves it (0.704 against a published
 0.653), and the cold solve's budget is what pushes the run over.
 
+**Later (2026-11-02), and what remains.** Three rules cut MacMPEC's time
+from 3,663 s to 2,528 s with no answer changed (see
+`docs/src/complementarity.md`): a finish no longer replaces a better relaxed
+point, the cold solve is skipped when the continuation and the relaxed path
+agree, and a failed relaxation step is retried warm. Measured while finding
+them: POUNCE's per-iteration cost is at parity with stock Ipopt + MUMPS on
+the same lowered NLP (pack-comp1-32's `τ = 1` rung: 64 against 73 ms per
+iteration), and stock Ipopt stalls on the cold `G·H = 0` solve the same way,
+so the remaining time is in how many exact-product iterations the schedule
+spends, not in the linear algebra. Three models still time out at 300 s:
+
+- `siouxfls`, `siouxfls1`: the first relaxation (`τ = 1`) alone takes about
+  1,000 iterations and is solved twice (~110 s), and the `1e-7`/`1e-8` rungs
+  struggle in restoration; the published value is already reached at
+  `τ = 1e-6` (`siouxfls`) and `1e-7` (`siouxfls1`). With
+  `complementarity_strategy=continuation max_cpu_time=900`, `siouxfls`
+  reaches 208.258. An early stop when successive rungs stop moving the
+  objective would trade product tightness for time.
+- `pack-comp1p-32`: the continuation reaches 0.65304 (published 0.652979)
+  in ~50 s; the exact stage's relaxed path and the cold solve take the rest.
+
 ### How to tell whether a fix works
 
 `qpec-100-2` under `complementarity_strategy=exact` should take a small

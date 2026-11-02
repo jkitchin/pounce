@@ -31,10 +31,11 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, Reported,
-    SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS,
-    accepts, answers, branch_bounds, budgeted_max_iter, certify, check_b_stationarity, compared,
-    converged, exact_stage_budget, finish_budget, kept_if_nothing_better, warm_start_assignments,
+    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, RUNG_RETRY_FLOOR,
+    Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy,
+    TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter, certify,
+    check_b_stationarity, compared, converged, exact_stage_budget, finish_budget, finish_drifted,
+    kept_if_nothing_better, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -373,6 +374,41 @@ pub fn solve_mpcc(
         finish
     };
 
+    // The minimized objective at a captured point (`+inf` if it does not
+    // evaluate), as the stage comparison reads it.
+    let min_obj = |c: &Captured| -> Number {
+        match sense * objective_at(&inner, &c.x) {
+            f if f.is_finite() && !c.x.is_empty() => f,
+            _ => Number::INFINITY,
+        }
+    };
+    // Item: a finish replaces the relaxed point it started from only if it
+    // converged with every product in tolerance *and* did not drift to a
+    // worse objective ([`finish_drifted`]); otherwise the relaxed point,
+    // which satisfies every product to its `τ`, is the candidate.
+    let keep_finish = |finish: Option<Captured>,
+                       relaxed: Captured,
+                       label: &str,
+                       report: &mut dyn FnMut(&str)|
+     -> Captured {
+        match finish {
+            Some(f) if accepts(f.status, f.max_abs_product, tol) => {
+                let (ff, fr) = (min_obj(&f), min_obj(&relaxed));
+                if finish_drifted(ff, fr, relaxed.max_abs_product) {
+                    report(&format!(
+                        "pounce: complementarity: {label}'s exact finish drifted to a worse \
+                         point (minimized objective {ff:.6e} against {fr:.6e} at the last \
+                         relaxation); keeping the relaxed point."
+                    ));
+                    relaxed
+                } else {
+                    f
+                }
+            }
+            _ => relaxed,
+        }
+    };
+
     let mut stages_run = 0;
     'ladder: for &stage in STAGES.iter() {
         // An answer from a compared stage ends the ladder before the first
@@ -389,7 +425,7 @@ pub fn solve_mpcc(
         stages_run += 1;
         baseline(app);
         let candidates: Vec<Captured> = match stage {
-            MpccStage::Exact => {
+            MpccStage::Exact => 'exact_stage: {
                 // Two second opinions, both from the model's own start, both
                 // compared like any other candidate (lower objective wins):
                 //
@@ -428,7 +464,7 @@ pub fn solve_mpcc(
                     &mut solves,
                 );
                 if halted() {
-                    break;
+                    break 'ladder;
                 }
                 // The relaxed path's verdict, if it has one: an exact-product
                 // solve (its finish), or the relaxation's own infeasibility
@@ -454,7 +490,7 @@ pub fn solve_mpcc(
                         &mut solves,
                     );
                     if halted() {
-                        break;
+                        break 'ladder;
                     }
                     let relaxed = if converged(tight.status) {
                         tight
@@ -464,13 +500,10 @@ pub fn solve_mpcc(
                     let fb = finish_budget(iterations_of(&solves, MpccStage::Exact));
                     let finish = finish_from(app, stage, &relaxed, fb, &mut solves);
                     if halted() {
-                        break;
+                        break 'ladder;
                     }
                     path_verdict = finish.clone();
-                    cands.push(match finish {
-                        Some(f) if accepts(f.status, f.max_abs_product, tol) => f,
-                        _ => relaxed,
-                    });
+                    cands.push(keep_finish(finish, relaxed, stage.label(), report));
                 } else if relaxed.status == ApplicationReturnStatus::InfeasibleProblemDetected
                     && !relaxed.x.is_empty()
                 {
@@ -488,10 +521,26 @@ pub fn solve_mpcc(
                 // can refuse an over-determined model with a proven verdict
                 // (`Infeasible_Problem_Detected`) rather than
                 // `Not_Enough_Degrees_Of_Freedom`.
-                let answered = accepted.is_some()
-                    || cands
-                        .first()
-                        .is_some_and(|c| accepts(c.status, c.max_abs_product, tol));
+                // Skipped when the continuation's answer and the relaxed
+                // path's agree ([`answers_agree`]): two routes landing on one
+                // point, and the cold solve exists for the models where they
+                // do not.
+                let path_answer = cands
+                    .first()
+                    .filter(|c| accepts(c.status, c.max_abs_product, tol));
+                if let (Some((_, _, _, f_cont)), Some(p)) = (&accepted, path_answer) {
+                    let f_path = min_obj(p);
+                    if answers_agree(*f_cont, f_path) {
+                        report(&format!(
+                            "pounce: complementarity: the continuation and the exact stage's \
+                             relaxed path agree (minimized objective {f_cont:.6e} and \
+                             {f_path:.6e}); skipping the cold exact product."
+                        ));
+                        exact = exact_stage_verdict(path_verdict, None);
+                        break 'exact_stage cands;
+                    }
+                }
+                let answered = accepted.is_some() || path_answer.is_some();
                 let cold_budget = exact_stage_budget(
                     answered,
                     iterations_of(&solves, MpccStage::Continuation)
@@ -515,7 +564,7 @@ pub fn solve_mpcc(
                     }
                 }
                 if halted() {
-                    break;
+                    break 'ladder;
                 }
                 exact = exact_stage_verdict(path_verdict, c.clone());
                 cands.extend(c);
@@ -523,6 +572,8 @@ pub fn solve_mpcc(
             }
             MpccStage::Continuation => {
                 let mut last: Option<Captured> = None;
+                // Iterations the last converged rung took (its retry budget).
+                let mut last_its = 0;
                 for &tau in &SCHOLTES_SCHEDULE {
                     baseline(app);
                     let warm = last.as_ref().map(|c| {
@@ -536,9 +587,17 @@ pub fn solve_mpcc(
                         break;
                     }
                     if !converged(c.status) {
-                        // One weaker rung before giving up on the schedule:
-                        // the previous stage's x only, no dual warm start.
                         let Some(prev) = &last else { break };
+                        // One weaker rung before giving up on the schedule:
+                        // the previous stage's x only, no dual warm start,
+                        // but the barrier where that stage left it rather
+                        // than back at `mu_init`'s 0.1, and a budget of twice
+                        // what that stage took (MacMPEC `siouxfls`: the cold
+                        // retry of its failed `1e-7` rung cost 727
+                        // iterations). Skipping straight to the finish instead
+                        // was measured and dropped: on CALIPSO's rocket the
+                        // later rungs reach a better branch (1531.73 against
+                        // 1533.81) that the skip loses.
                         baseline(app);
                         // The override carries no duals; a caller's
                         // `warm_start_init_point yes` would ask for them and
@@ -546,6 +605,13 @@ pub fn solve_mpcc(
                         let _ = app
                             .options_mut()
                             .read_from_str("warm_start_init_point no\n", true);
+                        if let Some(mu) = warm_start_assignments(prev.statistics.final_mu)
+                            .into_iter()
+                            .find(|a| a.starts_with("mu_init"))
+                        {
+                            let _ = app.options_mut().read_from_str(&mu, true);
+                        }
+                        set_budget(app, (2 * last_its).max(RUNG_RETRY_FLOOR));
                         let primal = StartOverride {
                             x: prev.x.clone(),
                             ..Default::default()
@@ -561,6 +627,7 @@ pub fn solve_mpcc(
                             break;
                         }
                     }
+                    last_its = solves.last().map_or(0, |s| s.iterations);
                     last = Some(c);
                 }
                 if halted() {
@@ -599,10 +666,7 @@ pub fn solve_mpcc(
                         // A finish that does not converge leaves the
                         // continuation's own answer, which satisfies every
                         // product to the last τ; accepted on the same test.
-                        vec![match finish {
-                            Some(f) if accepts(f.status, f.max_abs_product, tol) => f,
-                            _ => relaxed,
-                        }]
+                        vec![keep_finish(finish, relaxed, stage.label(), report)]
                     }
                 }
             }

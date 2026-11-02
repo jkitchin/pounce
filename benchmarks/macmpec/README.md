@@ -62,6 +62,13 @@ Against the previous reference (`main` at `26991b7`, PRs #1107–#1109; 154
 | `incid-set2c-8` | at 0.0054719 | worse 0.0056302 | 0.005471 | #1121 |
 | `pack-comp2p-16` | at | worse 0.72864 | 0.727134 | already worse on `main` at `45c18dd` (0.72769; not bisected); #1121 moves it further |
 
+**Not yet re-measured with this harness since PR #1126**, which changes the
+driver's exact-product schedule. On the 167 public `.nl` stubs (outside this
+harness, 300 s limit) it moves `pack-comp2p-32` from `worse` back to `at`
+and cuts total time by about 30%; there, `incid-set2c-8` and
+`pack-comp2p-16` are `at` both before and after it. Re-run `make
+macmpec-run` to refresh the table above.
+
 The three new `worse` lines converge to feasible points, so they are other
 local solutions, not wrong answers. #1121's own measurement used the 167
 public `.nl` stubs outside this harness, where `incid-set2c-8` and

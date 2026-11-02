@@ -503,10 +503,16 @@ fn push_warning_once(warnings: &mut Vec<String>, w: String) {
 /// "primal slack". Rule 2 compared the retry's violation to the base's with no
 /// floor, so a base at `3e-38` refused a retry at `2e-13` that halved the
 /// objective (`x*y == 0` from `(0.3, 0.3)`: base `f = 2` with unscaled dual
-/// infeasibility `1.4e9`, retry `f = 1`). The floor is a few hundred ulps of 1;
-/// the case rule 2 exists for, `scholtes4`, buys `6.6e-05` of objective with a
-/// violation of `1.09e-09` -- four orders above it, so it is still refused.
-const RETRY_VIOL_NOISE_FLOOR: Number = 1e-12;
+/// infeasibility `1.4e9`, retry `f = 1`). The case rule 2 exists for,
+/// `scholtes4`, buys `6.6e-05` of objective with a violation of `1.09e-09`, an
+/// order above this floor, so it is still refused. The floor was `1e-12` until
+/// MacMPEC `pack-comp1p-32` (complementarity driver review): the retry reached
+/// the published optimum, `0.652997` against the base's `0.704` (whose own
+/// unscaled dual residual was `7.2e7`), at a violation of `2.6e-11` -- three
+/// orders inside `tol` and four inside `constr_viol_tol` -- and was refused
+/// because the base sat at `2.5e-12`. Two orders below the default `tol` is
+/// still far below any violation that changes which point a model accepts.
+const RETRY_VIOL_NOISE_FLOOR: Number = 1e-10;
 
 /// gh#983 review item 5: how many orders a retry's unscaled KKT error must sit
 /// below the base attempt's before it may be promoted without reaching
@@ -12243,6 +12249,17 @@ mod tests {
         // ... and rule 1 is untouched by the floor.
         assert!(!retry_answer_is_admissible(
             1.0, 3.037e-38, 2.0, 1.0e-13, ACCEPT, MIN
+        ));
+        // MacMPEC pack-comp1p-32's exact finish: the retry reaches the
+        // published optimum at a violation three orders inside `tol`, next to
+        // a base at 2.5e-12. Admitted.
+        assert!(retry_answer_is_admissible(
+            0.704, 2.5e-12, 0.652997, 2.6e-11, ACCEPT, MIN
+        ));
+        // scholtes4: f* = 0 exactly, and the retry buys -6.6e-5 with a
+        // violation of 1.09e-9. Still refused.
+        assert!(!retry_answer_is_admissible(
+            1.82e-9, 2.07e-25, -6.61e-5, 1.09e-9, ACCEPT, MIN
         ));
     }
 

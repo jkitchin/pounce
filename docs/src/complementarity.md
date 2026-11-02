@@ -146,6 +146,28 @@ CALIPSO ball-in-cup start the answer moved from violation 8e-11 to 1e-8
 (objective 2.4e-6 lower, the slack τ allows), still certified S, in half
 the time.
 
+Three more rules keep the exact-product solves from costing more than they
+return; together they cut MacMPEC's time by 31% (3,663 s to 2,528 s) and its
+iterations by a third, with no answer changed:
+
+- **A finish never replaces a better relaxed point.** A finish solves the
+  degenerate exact product and can wander: `pack-comp1p-32`'s continuation
+  reaches 0.65304 at `τ = 1e-8`, and its finish used to crawl to 0.783 and
+  replace it. A finish is kept unless its objective is worse than the relaxed
+  point's by more than the relaxation's own slack can explain, which at a
+  biactive corner is about `sqrt(τ)`, not `τ` (`scholtes4`'s `τ = 1e-8` point
+  sits at `-2e-4` against the exact `0`), so the allowance is
+  `max(1e-4, 10·sqrt(product))·max(1, |f|)`.
+- **The cold solve runs only when the cheap paths disagree.** When the
+  continuation's answer and the exact stage's relaxed path agree to `1e-4`
+  relative, the cold `G·H = 0` solve is skipped: two routes landing on one
+  point. It still runs where they differ, which is where it earns its cost
+  (`water-net`: 953 and 964, and the cold solve finds 927).
+- **A failed relaxation step is retried warm.** It restarts from the previous
+  step's point and barrier parameter, with twice that step's iterations,
+  rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried
+  and dropped: on the CALIPSO rocket the later steps reach a better branch.
+
 The remaining cost of running both is a choice you can undo when you know
 your model. Two
 local solves from different starts raise the odds of the better local
@@ -179,8 +201,13 @@ product's own verdict (for an infeasible model,
 `Infeasible_Problem_Detected`) — never a relaxed solve's success. The
 console line says which. Your options apply to every stage and are restored after
 the solve. Unless you set them yourself, declared pairs also run with
-`bound_relax_factor = 0` and `honor_original_bounds = yes`: a relaxed bound
-moves the point a complementarity is measured from.
+`bound_relax_factor = 0` and `honor_original_bounds = yes` (a relaxed bound
+moves the point a complementarity is measured from) and
+`perturb_slack_max_rows = 0`: that option's row budget targets models with
+thousands of inactive inequality rows, and a lowered model crosses it through
+its own near-active product rows. Measured on MacMPEC, turning the budget off
+for these solves moves one model back to its best known value and changes no
+other outcome, at under 1% in total time.
 
 ## What you get back
 

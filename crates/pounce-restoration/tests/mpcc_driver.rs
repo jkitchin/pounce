@@ -1404,3 +1404,46 @@ fn the_exact_stage_runs_its_relaxed_path_and_the_cold_exact_product() {
     assert_eq!(exact.len(), 2, "{:?}", failed.solves);
     assert_eq!(exact[1].tau, None, "no cold solve: {:?}", failed.solves);
 }
+
+/// The exact stage's cold `G·H = 0` solve runs only when the cheap paths
+/// disagree. On qpec_small the continuation and the exact stage's relaxed
+/// path land on the same answer, so the cold solve is skipped; on the
+/// two-branch model below them, from `(0.9, 0.01)`, the relaxed path settles
+/// on the near branch (1.0) and the continuation on the optimum (0.81), so
+/// it runs. Either way the reported answer is the optimum.
+#[test]
+fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
+    let exact_taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
+        out.solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Exact)
+            .map(|s| s.tau)
+            .collect()
+    };
+    // Agree: relaxed, 1e-8 step, finish -- and no cold solve.
+    let mut app = app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
+        [0.0, 0.5, 0.5],
+        Rc::new(RefCell::new(Vec::new())),
+    )));
+    let mut lines = Vec::new();
+    let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |l| {
+        lines.push(l.to_string())
+    })
+    .unwrap();
+    assert_eq!(
+        exact_taus(&out),
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None],
+        "{:?} {lines:#?}",
+        out.solves
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("skipping the cold exact product")),
+        "{lines:#?}"
+    );
+    for (got, want) in out.x.iter().zip([1.0, 1.0, 0.0]) {
+        assert!((got - want).abs() < 1e-4, "x = {:?}", out.x);
+    }
+}
