@@ -84,7 +84,8 @@ them: POUNCE's per-iteration cost is at parity with stock Ipopt + MUMPS on
 the same lowered NLP (pack-comp1-32's `τ = 1` rung: 64 against 73 ms per
 iteration), and stock Ipopt stalls on the cold `G·H = 0` solve the same way,
 so the remaining time is in how many exact-product iterations the schedule
-spends, not in the linear algebra. Three models still time out at 300 s:
+spends, not in the linear algebra. Three models timed out at 300 s when
+this was written (the run at `5882e01`):
 
 - `siouxfls`, `siouxfls1`: the first relaxation (`τ = 1`) alone takes about
   1,000 iterations and is solved twice (~110 s), and the `1e-7`/`1e-8` rungs
@@ -95,6 +96,10 @@ spends, not in the linear algebra. Three models still time out at 300 s:
   objective would trade product tightness for time.
 - `pack-comp1p-32`: the continuation reaches 0.65304 (published 0.652979)
   in ~50 s; the exact stage's relaxed path and the cold solve take the rest.
+
+The rerun after #1126 and gh#1128 (`benchmarks/macmpec/README.md`, Reference
+result) moves this list: `pack-comp1p-32` and `siouxfls1` now finish inside
+300 s, `siouxfls` still does not (676 s), and `qpec-200-2` joins it (335 s).
 
 ### How to tell whether a fix works
 
@@ -227,8 +232,10 @@ this model only on its second attempt.
 
 `large_scale/laptime` (n = 58 014, m_d = 6000, factor 0.17) shows the same
 pattern without a status change. Its iteration counts are 327 at cap 0, 331
-at 500, **756** at 1000 (310 s, past the 300 s limit) and 284 at 2000, and
-every run reaches f = 65.2947.
+at 500, **756** at 1000 and 284 at 2000, and every run reaches f = 65.2947.
+At cap 1000 it took 310 s of wall-clock time. That is past 300 s, but the
+sweep's limit is on CPU time (`max_cpu_time`), so the run still ended
+`SolveSucceeded`; a harness with a 300 s wall-clock limit would lose it.
 
 ### What the cap does on every model it reaches
 

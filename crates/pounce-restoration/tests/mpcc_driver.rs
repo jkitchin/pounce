@@ -1637,6 +1637,15 @@ fn the_finish_drift_verdict_does_not_change_with_the_objectives_scale() {
 /// `0.02`, so both the continuation's finish and the relaxed path's read as
 /// drifted and the continuation's relaxed point (`z3 = τ^(1/20)`) is
 /// reported.
+///
+/// This locks in a known false positive. The exact model forces `z3 = 0`,
+/// so the finish at `0` *is* the answer and the relaxed point at `-0.398`
+/// is below `f*`; the rule cannot tell a finish that wandered from one that
+/// removed a slack worth twenty times its first-order value. The fixture is
+/// here because it reaches the drifted branch, not because the verdict is
+/// right: a rule that catches the second-order underestimate should change
+/// this test, and a fixture whose finish genuinely wanders (the shape of
+/// MacMPEC `pack-comp1p-32`) should replace it.
 #[test]
 fn a_finish_that_drifts_past_the_allowance_leaves_the_relaxed_point() {
     let (out, lines) = run(
@@ -1820,4 +1829,73 @@ fn a_failed_rung_retry_ends_the_schedule() {
         "the finish follows the failed retry: {taus:?}"
     );
     assert_eq!(taus.len(), k + 3, "{taus:?}");
+}
+
+/// A strictly complementary answer at `f* = 0`:
+///
+/// ```text
+/// min a·x + (y - yt)^2   s.t.  0 <= x ⟂ y >= 0
+/// ```
+///
+/// unique optimum `(0, yt)`.
+fn zero_optimum(a: Number, yt: Number, x0: [Number; 2]) -> Dense {
+    let zero = || vec![vec![0.0; 2]; 2];
+    Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: x0.to_vec(),
+        f: Box::new(move |x| a * x[0] + (x[1] - yt).powi(2)),
+        grad: Box::new(move |x| vec![a, 2.0 * (x[1] - yt)]),
+        g: Box::new(|x| vec![x[1]]),
+        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[1][1] = 2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+/// gh#1128 follow-up (PR #1130 review): with only the relative and slack
+/// terms, two exact answers at `f* = 0` agreed only if both read exactly
+/// `0`, so solver noise -- the continuation at `1e-11` (`z_l·x`, `z_l = a`),
+/// the relaxed path at `5e-20` -- sent 11 of these 24 cases into the cold
+/// exact solve, and `a = 1, yt = 0.01` from `(1, 0)` then reported the cold
+/// solve's point. The two points' complementarity gaps are the floor: every
+/// case skips it and reports the continuation.
+#[test]
+fn two_answers_at_zero_that_differ_by_solver_noise_skip_the_cold_solve() {
+    for a in [0.01, 1.0, 100.0] {
+        for yt in [1.0, 0.01] {
+            for x0 in [[0.5, 0.5], [1.0, 0.0], [0.0, 1.0], [2.0, 2.0]] {
+                let (out, lines) = run(
+                    zero_optimum(a, yt, x0),
+                    vec![ComplementarityPair { row: 0, var: 0 }],
+                    None,
+                );
+                let case = format!("a={a} yt={yt} x0={x0:?}");
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.contains("skipping the cold exact product")),
+                    "{case}: {lines:#?}"
+                );
+                assert_eq!(
+                    out.reported,
+                    Reported::Answer(MpccStage::Continuation),
+                    "{case}: {lines:#?}"
+                );
+                assert!(
+                    out.x[0].abs() < 1e-6 && (out.x[1] - yt).abs() < 1e-6,
+                    "{case}: {:?}",
+                    out.x
+                );
+            }
+        }
+    }
 }

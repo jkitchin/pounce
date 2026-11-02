@@ -213,48 +213,130 @@ pub fn relaxation_slack(products: &[Number], product_lambda: &[Number]) -> Numbe
         .sum()
 }
 
+/// The objective error a converged point carries from stopping at a
+/// tolerance rather than at the optimum: its complementarity gap in the
+/// model's own units,
+///
+/// ```text
+/// Σ_i |z_l,i|·|x_i - x_l,i| + |z_u,i|·|x_u,i - x_i|  +  Σ_j |λ_j|·d_j
+/// ```
+///
+/// over the finite bounds, `d_j` the distance from `g_j` to its nearest
+/// finite bound (`0` for a free row). To first order a point is above the
+/// optimum of the branch it sits on by at most this much (weak duality on
+/// the local model), so two points on one branch differ by at most the sum
+/// of their gaps however close to zero their objectives are. Multipliers
+/// scale with the objective and distances do not, so the gap does too.
+///
+/// gh#1128 follow-up: with only the relative and slack terms, two exact
+/// points at `f* = 0` agreed only if both read exactly `0`. On
+/// `min a·x + (y - 1)^2, 0 <= x ⟂ y >= 0` the continuation stopped at
+/// `1e-11` (`z_l·x` with `z_l = a = 0.01`) and the relaxed path at `5e-20`,
+/// so the cold exact solve ran on a model whose two cheap answers were one
+/// point. `+inf` if any input is not finite or the lengths disagree, which
+/// the tests that use it read as "cannot tell".
+#[allow(clippy::too_many_arguments)]
+pub fn complementarity_gap(
+    x: &[Number],
+    z_l: &[Number],
+    z_u: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    g: &[Number],
+    lambda: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+) -> Number {
+    let n = x.len();
+    let m = g.len();
+    if [z_l.len(), z_u.len(), x_l.len(), x_u.len()] != [n; 4]
+        || [lambda.len(), g_l.len(), g_u.len()] != [m; 3]
+    {
+        return Number::INFINITY;
+    }
+    // `mult·dist` over the finite bounds of one entry; `+inf` on a
+    // non-finite value or multiplier.
+    let term = |mult: Number, v: Number, lo: Number, hi: Number| -> Number {
+        if !mult.is_finite() || !v.is_finite() {
+            return Number::INFINITY;
+        }
+        let d = [lo, hi]
+            .into_iter()
+            .filter(|b| b.is_finite())
+            .map(|b| (v - b).abs())
+            .fold(Number::INFINITY, Number::min);
+        if d.is_finite() { mult.abs() * d } else { 0.0 }
+    };
+    let bounds: Number = (0..n)
+        .map(|i| {
+            let lo = term(z_l[i], x[i], x_l[i], Number::INFINITY);
+            let hi = term(z_u[i], x[i], Number::NEG_INFINITY, x_u[i]);
+            lo + hi
+        })
+        .sum();
+    let rows: Number = (0..m).map(|j| term(lambda[j], g[j], g_l[j], g_u[j])).sum();
+    bounds + rows
+}
+
 /// How far two minimized objectives may differ and still be one answer:
-/// `SAME_ANSWER_REL_TOL·max(|f_a|, |f_b|) + CORNER_SLACK_FACTOR·slack`,
+/// `SAME_ANSWER_REL_TOL·max(|f_a|, |f_b|) + CORNER_SLACK_FACTOR·slack + gap`,
 /// `slack` the [`relaxation_slack`] of the points compared (their sum when
-/// both are relaxed). Both terms scale with the objective, so neither test
-/// that uses it changes its verdict when `f` is multiplied by a constant
-/// (gh#1128: an absolute `1e-4` floor near zero, and an allowance
-/// proportional to `max(1, |f|)` rather than to the multipliers, both did).
-/// Two exact points (`slack = 0`) at `f = 0` agree only if both are `0`.
-pub fn same_answer_allowance(f_a: Number, f_b: Number, slack: Number) -> Number {
-    SAME_ANSWER_REL_TOL * f_a.abs().max(f_b.abs()) + CORNER_SLACK_FACTOR * slack.max(0.0)
+/// both are relaxed) and `gap` the sum of their [`complementarity_gap`]s.
+/// Every term scales with the objective, so neither test that uses it
+/// changes its verdict when `f` is multiplied by a constant (gh#1128: an
+/// absolute `1e-4` floor near zero, and an allowance proportional to
+/// `max(1, |f|)` rather than to the multipliers, both did). The gap is the
+/// floor near `f = 0`: what the two solves' own tolerance leaves.
+pub fn same_answer_allowance(f_a: Number, f_b: Number, slack: Number, gap: Number) -> Number {
+    SAME_ANSWER_REL_TOL * f_a.abs().max(f_b.abs())
+        + CORNER_SLACK_FACTOR * slack.max(0.0)
+        + gap.max(0.0)
 }
 
 /// Did an exact finish drift off the relaxed answer it started from? True
 /// when the finish's minimized objective is worse than the relaxed point's by
-/// more than [`same_answer_allowance`], `relaxed_slack` the relaxed point's
-/// [`relaxation_slack`]. A finish solves the degenerate exact product and can
-/// wander: MacMPEC `pack-comp1p-32`'s continuation reaches 0.65304 at
-/// `τ = 1e-8` (products 5e-9) and its finish then crawls through restoration
-/// to 0.783, which used to replace it; the relaxed point is kept instead. On
-/// `scholtes4` the finish's `3e-11` is the exact answer and the relaxed
-/// `-2e-4` is slack (`λ·τ = 1e-4`, allowance `1e-3`), and the finish is kept
-/// -- at any scaling of the objective.
+/// more than [`same_answer_allowance`], with `relaxed_slack` the relaxed
+/// point's [`relaxation_slack`] and no [`complementarity_gap`] term. A finish
+/// solves the degenerate exact product and can wander: MacMPEC
+/// `pack-comp1p-32`'s continuation reaches 0.65304 at `τ = 1e-8` (products
+/// 5e-9) and its finish then crawls through restoration to 0.783, which used
+/// to replace it; the relaxed point is kept instead. On `scholtes4` the
+/// finish's `3e-11` is the exact answer and the relaxed `-2e-4` is slack
+/// (`λ·τ = 1e-4`, allowance `1e-3`), and the finish is kept -- at any
+/// scaling of the objective. A slack that is not finite keeps the finish:
+/// there is nothing to measure the drift against.
+///
+/// The gap is left out on measurement. A finish that wandered is typically
+/// poorly converged, and its gap is then large enough to excuse the wander:
+/// with the two points' summed gaps in the allowance, MacMPEC
+/// `incid-set2c-8` (finish 7.77e-3 against 5.47e-3 relaxed),
+/// `pack-comp2p-16`, `qpec-100-3` and `incid-set2c-32` all kept their
+/// drifted finishes and fell from `at` to `worse`. Both objectives are values
+/// at real points, so a finish that reads higher is worse however loosely it
+/// converged.
 pub fn finish_drifted(f_finish: Number, f_relaxed: Number, relaxed_slack: Number) -> bool {
     if !f_relaxed.is_finite() || !relaxed_slack.is_finite() {
         return false;
     }
     !f_finish.is_finite()
-        || f_finish > f_relaxed + same_answer_allowance(f_relaxed, f_relaxed, relaxed_slack)
+        || f_finish > f_relaxed + same_answer_allowance(f_relaxed, f_relaxed, relaxed_slack, 0.0)
 }
 
 /// Do two answers agree, within [`same_answer_allowance`]? `slack` is the
-/// sum of the two points' [`relaxation_slack`]s. The exact stage's cold
+/// sum of the two points' [`relaxation_slack`]s and `gap` of their
+/// [`complementarity_gap`]s. The exact stage's cold
 /// `G·H = 0` solve is skipped when the continuation's answer and the exact
 /// stage's relaxed path agree: two different routes landing on one point is
 /// evidence the cheap paths found the branch, and the cold solve --
 /// degenerate, often `max_iter`-bound, the largest single cost on MacMPEC --
-/// exists for the models where they do not (`water-net`, `dempe`).
-pub fn answers_agree(f_a: Number, f_b: Number, slack: Number) -> bool {
+/// exists for the models where they do not (`water-net`, `dempe`). A slack
+/// or gap that is not finite never agrees, so the cold solve runs.
+pub fn answers_agree(f_a: Number, f_b: Number, slack: Number, gap: Number) -> bool {
     f_a.is_finite()
         && f_b.is_finite()
         && slack.is_finite()
-        && (f_a - f_b).abs() <= same_answer_allowance(f_a, f_b, slack)
+        && gap.is_finite()
+        && (f_a - f_b).abs() <= same_answer_allowance(f_a, f_b, slack, gap)
 }
 
 /// The budget of a continuation rung retried after its warm-started solve
@@ -1735,16 +1817,92 @@ mod tests {
     #[test]
     fn answers_agree_within_the_relative_tolerance() {
         // pack-comp1p-32: continuation 0.65304, relaxed exact path 0.65310.
-        assert!(answers_agree(0.65304, 0.65310, 0.0));
+        assert!(answers_agree(0.65304, 0.65310, 0.0, 0.0));
         // water-net: 953 against 964 is two branches.
-        assert!(!answers_agree(953.23, 964.12, 0.0));
+        assert!(!answers_agree(953.23, 964.12, 0.0, 0.0));
         // Near zero, what a relaxed answer's slack buys still agrees: an
         // exact finish at 1e-9 and a relaxed point at -5e-5 whose products
         // are worth 2.5e-5.
-        assert!(answers_agree(1e-9, -5e-5, 2.5e-5));
-        assert!(!answers_agree(f64::NAN, 0.0, 0.0));
-        assert!(!answers_agree(0.0, 0.0, f64::INFINITY));
-        assert!(answers_agree(0.0, 0.0, 0.0));
+        assert!(answers_agree(1e-9, -5e-5, 2.5e-5, 0.0));
+        assert!(!answers_agree(f64::NAN, 0.0, 0.0, 0.0));
+        assert!(!answers_agree(0.0, 0.0, f64::INFINITY, 0.0));
+        assert!(answers_agree(0.0, 0.0, 0.0, 0.0));
+        assert!(!answers_agree(0.0, 0.0, 0.0, f64::INFINITY));
+    }
+
+    /// The floor near zero: two exact points (no slack) on one branch at
+    /// `f* = 0` agree when they differ by no more than their summed gaps,
+    /// and no further. Numbers from `min 0.01·x + (y - 1)^2`,
+    /// `0 <= x ⟂ y >= 0`: the continuation's `1e-11` and the relaxed path's
+    /// `5e-20`, gaps `1e-11` and `2.5e-11`.
+    #[test]
+    fn two_answers_at_zero_agree_within_their_gaps() {
+        for c in [1e-6, 1.0, 1e6] {
+            assert!(
+                answers_agree(c * 1e-11, c * 5e-20, 0.0, c * 3.5e-11),
+                "x{c}"
+            );
+            assert!(!answers_agree(c * 1e-11, c * 5e-20, 0.0, 0.0), "x{c}");
+            assert!(
+                !answers_agree(c * 1e-9, c * 5e-20, 0.0, c * 3.5e-11),
+                "x{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_complementarity_gap_sums_multiplier_times_distance() {
+        let inf = Number::INFINITY;
+        // x = [1e-9 above 0, 2 below 3, free]; rows: g = 0.5 in [0, inf),
+        // g = 1 equality at 1, g = 7 free.
+        let gap = complementarity_gap(
+            &[1e-9, 2.0, 5.0],
+            &[0.01, 0.0, 0.0],
+            &[0.0, -4.0, 0.0],
+            &[0.0, -inf, -inf],
+            &[inf, 3.0, inf],
+            &[0.5, 1.0, 7.0],
+            &[-1e-8, 30.0, 0.0],
+            &[0.0, 1.0, -inf],
+            &[inf, 1.0, inf],
+        );
+        assert!((gap - (1e-11 + 4.0 + 0.5e-8)).abs() < 1e-15, "{gap:e}");
+        // Multipliers scale with the objective; the gap follows.
+        let scaled = complementarity_gap(
+            &[1e-9],
+            &[1e3 * 0.01],
+            &[0.0],
+            &[0.0],
+            &[inf],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!((scaled - 1e3 * 1e-11).abs() < 1e-20, "{scaled:e}");
+        // Mismatched lengths, or a non-finite multiplier: cannot tell.
+        assert!(
+            complementarity_gap(&[1.0], &[], &[0.0], &[0.0], &[inf], &[], &[], &[], &[])
+                .is_infinite()
+        );
+        assert!(
+            complementarity_gap(
+                &[1.0],
+                &[f64::NAN],
+                &[0.0],
+                &[0.0],
+                &[inf],
+                &[],
+                &[],
+                &[],
+                &[]
+            )
+            .is_infinite()
+        );
+        assert_eq!(
+            complementarity_gap(&[], &[], &[], &[], &[], &[], &[], &[], &[]),
+            0.0
+        );
     }
 
     /// gh#1128: near zero the old test was an absolute `1e-4`, so two exact
@@ -1754,12 +1912,12 @@ mod tests {
     #[test]
     fn answers_agree_does_not_change_with_the_objectives_scale() {
         for c in [1e-6, 1e-3, 0.1, 1.0, 10.0, 1e3, 1e6] {
-            assert!(answers_agree(c * 1e-9, -c * 5e-5, c * 2.5e-5), "x{c}");
-            assert!(!answers_agree(c * 1e-9, -c * 5e-5, 0.0), "x{c}");
-            assert!(answers_agree(c * 0.65304, c * 0.65310, 0.0), "x{c}");
-            assert!(!answers_agree(c * 953.23, c * 964.12, 0.0), "x{c}");
+            assert!(answers_agree(c * 1e-9, -c * 5e-5, c * 2.5e-5, 0.0), "x{c}");
+            assert!(!answers_agree(c * 1e-9, -c * 5e-5, 0.0, 0.0), "x{c}");
+            assert!(answers_agree(c * 0.65304, c * 0.65310, 0.0, 0.0), "x{c}");
+            assert!(!answers_agree(c * 953.23, c * 964.12, 0.0, 0.0), "x{c}");
             let (fr, slack) = scholtes4_relaxed(c, 1e-8);
-            assert!(answers_agree(c * 3e-11, fr, slack), "scholtes4 x{c}");
+            assert!(answers_agree(c * 3e-11, fr, slack, 0.0), "scholtes4 x{c}");
         }
     }
 

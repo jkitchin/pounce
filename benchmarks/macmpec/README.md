@@ -83,8 +83,23 @@ set up.
 **gh#1128 on this suite.** gh#1128 makes the drift and agreement tests
 independent of the objective's scale. The same harness run on #1126's head
 classifies all 178 models identically. Only one line moves:
-`incid-set2c-32`, 2 → 1 iterations at the same objective (6,241 → 6,240
-iterations in total; time 2,635 s → 2,634 s).
+`incid-set2c-32`, 2 → 1 iterations at the same objective (time 2,635 s →
+2,634 s). The harness's iteration column is the reported solve's count, not
+the run's total across lowered solves, so it cannot show whether a cold
+exact solve ran; only the time can.
+
+The noise floor added in PR #1130's review (each point's complementarity
+gap, in the agreement test only) moves nothing here either: a third run
+gives the same status, iteration count and objective on all 178 models.
+Its total time read 1,919 s, but that is the machine, not the change: timed
+back to back, the binaries with and without the floor take the same time and
+run the same lowered solves on `incid-set2c-8`, `pack-comp1-32` and
+`incid-set2-32`, three of the models whose times moved most. On that run
+`qpec-200-2` finished inside 300 s and `siouxfls` took 598 s, so treat
+times near the limit as load-dependent. A first version of the floor that
+also widened the finish-drift test sent `incid-set2c-8`, `pack-comp2p-16`,
+`qpec-100-3` and `incid-set2c-32` to `worse`; see `finish_drifted` in
+`crates/pounce-algorithm/src/mpcc.rs`.
 
 Earlier references: `main` at `26991b7` (PRs #1107–#1109) had 154 `at`, 6
 `BETTER`, 10 `worse`. `main` at `e7873df` (PR #1103) had 144 `at`, 6
