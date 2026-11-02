@@ -7,7 +7,7 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
-## [Unreleased]
+## [0.15.0] - 2026-11-02
 
 ### Added
 - **Complementarity answers that are not strongly stationary are checked for
@@ -24969,7 +24969,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/jkitchin/pounce/releases/tag/v0.15.0
 [0.14.0]: https://github.com/jkitchin/pounce/releases/tag/v0.14.0
 [0.13.0]: https://github.com/jkitchin/pounce/releases/tag/v0.13.0
 [0.12.0]: https://github.com/jkitchin/pounce/releases/tag/v0.12.0
