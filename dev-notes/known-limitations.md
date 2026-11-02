@@ -232,10 +232,17 @@ this model only on its second attempt.
 
 `large_scale/laptime` (n = 58 014, m_d = 6000, factor 0.17) shows the same
 pattern without a status change. Its iteration counts are 327 at cap 0, 331
-at 500, **756** at 1000 and 284 at 2000, and every run reaches f = 65.2947.
+at 500, **756** at 1000 and 284 at 2000. Cap 1000 lands in a different,
+slightly lower local minimum, f = 65.29277 (the others reach 65.2947, as does
+Ipopt): re-solved 2026-11-02 at `f1787277` it is a genuine KKT point (scaled
+constraint violation 1.1e-10, dual infeasibility 7.1e-11), not a loose stop.
 At cap 1000 it took 310 s of wall-clock time. That is past 300 s, but the
 sweep's limit is on CPU time (`max_cpu_time`), so the run still ended
 `SolveSucceeded`; a harness with a 300 s wall-clock limit would lose it.
+The CPU limit is no wider a margin: the 0.15.0 sweep finished it at 756
+iterations, while a standalone re-solve of the same binary under
+`max_cpu_time=300` ran out at iteration 729 (244 s wall). Expect it to flip
+to `Maximum_CpuTime_Exceeded` between otherwise identical runs.
 
 ### What the cap does on every model it reaches
 

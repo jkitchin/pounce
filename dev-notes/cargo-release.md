@@ -128,6 +128,13 @@ was first swept 27 commits behind its tag, and 0.12.0 ran from a
    `benchmark-rerun`, not `benchmark`: the incremental target skips any
    suite whose `pounce.json` is newer than the binary and its inputs, which
    in a reused tree is a stale result silently carried forward.
+
+   **Send the log somewhere outside the worktree** (`> "$TMPDIR/bench.log"`,
+   not `> bench.log`). Both dirty checks — `crates/pounce-cli/build.rs` and
+   `benchmark_report.py` — run `git status --porcelain`, which counts
+   untracked files, so a log written into the tree before the binary builds
+   stamps it `+dirty` for the whole sweep. The 0.15.0 sweep lost a 3.5 h run
+   to exactly this.
 2. **Check what ran.** The report's "POUNCE binary" row (from
    `target/release/pounce --about`) must name the `origin/main` commit,
    and its POUNCE row must read a tree with no `-dirty`. The two rows can
