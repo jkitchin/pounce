@@ -237,7 +237,7 @@ pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
 
 /// Every option any stage writes; the driver snapshots these before the
 /// first stage and restores them after the last.
-pub const TOUCHED_OPTIONS: [&str; 11] = [
+pub const TOUCHED_OPTIONS: [&str; 12] = [
     "max_iter",
     "warm_start_init_point",
     "mu_init",
@@ -249,6 +249,7 @@ pub const TOUCHED_OPTIONS: [&str; 11] = [
     "l1_exact_penalty_barrier",
     "bound_relax_factor",
     "honor_original_bounds",
+    "perturb_slack_max_rows",
 ];
 
 /// Defaults every stage runs under unless the caller set the option
@@ -258,9 +259,20 @@ pub const TOUCHED_OPTIONS: [&str; 11] = [
 /// of its square root: on `benchmarks/calipso/` every reported success that
 /// violated the model was a run under that default. `honor_original_bounds`
 /// moves the answer back inside the bounds the model stated.
-pub const SAFE_DEFAULTS: [(&str, &str); 2] = [
+///
+/// `perturb_slack_max_rows` (gh#1098's row budget on the slack-block
+/// perturbation, default 1000) is off: a lowered model crosses the budget
+/// through its own product rows (MacMPEC's 961-pair models have 1954
+/// inequality rows), which are near-active as `τ` shrinks, not the inactive
+/// rows the budget is for. Measured on the 167 MacMPEC stubs with the rest of
+/// this driver unchanged: off moves `pack-comp2p-32` from `worse` back to
+/// its best known value and changes no other classification, at +0.9% wall
+/// time (2,528 s to 2,551 s); individual models trade time both ways
+/// (`incid-set2-32` 118 to 31 s, `pack-comp1c-32` 29 to 96 s).
+pub const SAFE_DEFAULTS: [(&str, &str); 3] = [
     ("bound_relax_factor", "0"),
     ("honor_original_bounds", "yes"),
+    ("perturb_slack_max_rows", "0"),
 ];
 
 /// Which point the driver reported, and on what grounds.

@@ -194,8 +194,13 @@ product's own verdict (for an infeasible model,
 `Infeasible_Problem_Detected`) — never a relaxed solve's success. The
 console line says which. Your options apply to every stage and are restored after
 the solve. Unless you set them yourself, declared pairs also run with
-`bound_relax_factor = 0` and `honor_original_bounds = yes`: a relaxed bound
-moves the point a complementarity is measured from.
+`bound_relax_factor = 0` and `honor_original_bounds = yes` (a relaxed bound
+moves the point a complementarity is measured from) and
+`perturb_slack_max_rows = 0`: that option's row budget targets models with
+thousands of inactive inequality rows, and a lowered model crosses it through
+its own near-active product rows. Measured on MacMPEC, turning the budget off
+for these solves moves one model back to its best known value and changes no
+other outcome, at under 1% in total time.
 
 ## What you get back
 

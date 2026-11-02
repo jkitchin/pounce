@@ -106,6 +106,11 @@ changes.
   3,663 s → 2,528 s (`pack-comp1-32` 131 → 26 s, `pack-rig3c-32` 182 → 36 s,
   `pack-comp1c-32` 74 → 29 s, `pack-comp2c-32` 293 → 136 s); CALIPSO's
   declared route 209 → 162 s, every answer unchanged.
+  Declared-complementarity solves also run with `perturb_slack_max_rows = 0`
+  unless you set it: a lowered model crosses gh#1098's 1,000-row budget
+  through its own product rows. On MacMPEC that puts `pack-comp2p-32` back at
+  its best known value (it had moved to `worse` when the budget became the
+  default) and changes no other outcome, at +0.9% total time.
 - **The dual-divergence retry is no longer refused for a violation far
   below tolerance.** Its rule against "buying" an objective improvement with
   primal slack treated any violation above `1e-12` (and above the base
