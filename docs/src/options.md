@@ -558,6 +558,18 @@ factor *below* the cap and the knob to reach for when a model with few
 inequalities shows the same signature (`delta_w > 0` on nearly every
 iteration, `alpha_pr ~ 1e-3`, `mu` stalled).
 
+What it loses. Vanderbei `cresc132` (6 variables, 2654 inequalities)
+solves with the cap off and not at the default, and `laptime`
+(6000 inequalities) takes 756 iterations against 327. Neither is a
+model that needs the full `delta_s`: `cresc132` gives a false
+infeasibility verdict at caps 500 and 2000 and solves at 2500, and
+`laptime` solves in about 300 iterations at both 500 and 2000. Both
+are chaotic in the factor, and the default happens to land on a bad
+value for them
+([#1127](https://github.com/jkitchin/pounce/issues/1127); measurements and the
+87-model comparison in `dev-notes/known-limitations.md`). On such a model,
+`perturb_slack_max_rows=0` restores upstream's rule.
+
 The fixture that reaches the budgeted branch is `manyineq_concave_qp`
 (1100 inequality rows, `scripts/gen-manyineq-nl.py`); every other
 fixture is below the cap. Full account:

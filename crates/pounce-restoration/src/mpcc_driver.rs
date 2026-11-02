@@ -34,8 +34,9 @@ use pounce_algorithm::mpcc::{
     BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, RUNG_RETRY_FLOOR,
     Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy,
     TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter, certify,
-    check_b_stationarity, compared, converged, exact_stage_budget, finish_budget, finish_drifted,
-    kept_if_nothing_better, warm_start_assignments,
+    check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
+    finish_budget, finish_drifted, kept_if_nothing_better, relaxation_slack,
+    warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -171,6 +172,18 @@ struct Captured {
     z_u: Vec<Number>,
     lambda: Vec<Number>,
     max_abs_product: Number,
+    /// What a relaxed point's product slack buys, to first order
+    /// ([`relaxation_slack`]): the margin a relaxed point is allowed over a
+    /// finish. `0` for an exact-product point (`Eq`/`Ineq`): its products
+    /// are residuals within `constr_viol_tol`, not slack it was granted, and
+    /// at a point where MFCQ fails their multipliers can be large enough
+    /// that `|λ|·p` would let two different branches agree. `+inf` with no
+    /// point.
+    slack: Number,
+    /// The point's [`complementarity_gap`] in the inner model: how far above
+    /// its branch's optimum stopping at tolerance can leave it. `+inf` with
+    /// no point, or when the model declines an evaluation.
+    gap: Number,
 }
 
 impl Captured {
@@ -314,6 +327,26 @@ pub fn solve_mpcc(
         // Complementarity violation: `|G·H|` for one-sided pairs, the positive
         // part for a mixed pair's rows; `+inf` when the solve returned no point.
         let max_abs_product = w.last_violation();
+        let lam = w.last_lambda();
+        let m_inner = w.m_inner();
+        let slack = match lowering {
+            _ if w.last_x().is_empty() => Number::INFINITY,
+            Lowering::Relaxed(_) => {
+                relaxation_slack(w.last_products(), lam.get(m_inner..).unwrap_or(&[]))
+            }
+            _ => 0.0,
+        };
+        let gap = if w.last_x().is_empty() {
+            Number::INFINITY
+        } else {
+            gap_at(
+                &inner,
+                w.last_x(),
+                w.last_z_l(),
+                w.last_z_u(),
+                lam.get(..m_inner).unwrap_or(&[]),
+            )
+        };
         let cap = Captured {
             status,
             solver_return: w.last_status().unwrap_or(SolverReturn::InternalError),
@@ -323,6 +356,8 @@ pub fn solve_mpcc(
             z_u: w.last_z_u().to_vec(),
             lambda: w.last_lambda().to_vec(),
             max_abs_product,
+            slack,
+            gap,
         };
         solves.push(MpccSolveRecord {
             stage,
@@ -394,11 +429,13 @@ pub fn solve_mpcc(
         match finish {
             Some(f) if accepts(f.status, f.max_abs_product, tol) => {
                 let (ff, fr) = (min_obj(&f), min_obj(&relaxed));
-                if finish_drifted(ff, fr, relaxed.max_abs_product) {
+                if finish_drifted(ff, fr, relaxed.slack) {
                     report(&format!(
                         "pounce: complementarity: {label}'s exact finish drifted to a worse \
                          point (minimized objective {ff:.6e} against {fr:.6e} at the last \
-                         relaxation); keeping the relaxed point."
+                         relaxation, whose products are worth {:.1e}); keeping the relaxed \
+                         point.",
+                        relaxed.slack
                     ));
                     relaxed
                 } else {
@@ -528,9 +565,9 @@ pub fn solve_mpcc(
                 let path_answer = cands
                     .first()
                     .filter(|c| accepts(c.status, c.max_abs_product, tol));
-                if let (Some((_, _, _, f_cont)), Some(p)) = (&accepted, path_answer) {
+                if let (Some((_, cont, _, f_cont)), Some(p)) = (&accepted, path_answer) {
                     let f_path = min_obj(p);
-                    if answers_agree(*f_cont, f_path) {
+                    if answers_agree(*f_cont, f_path, cont.slack + p.slack, cont.gap + p.gap) {
                         report(&format!(
                             "pounce: complementarity: the continuation and the exact stage's \
                              relaxed path agree (minimized objective {f_cont:.6e} and \
@@ -1150,6 +1187,39 @@ fn model_at(inner: &Rc<RefCell<dyn TNLP>>, x: &[Number], sense: Number) -> Optio
     })
 }
 
+/// The [`complementarity_gap`] of a captured point in the inner model, its
+/// bounds and constraint values read back from the model. `+inf` if a
+/// callback declines.
+fn gap_at(
+    inner: &Rc<RefCell<dyn TNLP>>,
+    x: &[Number],
+    z_l: &[Number],
+    z_u: &[Number],
+    lambda: &[Number],
+) -> Number {
+    let mut m = inner.borrow_mut();
+    let Some(info) = m.get_nlp_info() else {
+        return Number::INFINITY;
+    };
+    let (n, mm) = (info.n as usize, info.m as usize);
+    if x.len() != n {
+        return Number::INFINITY;
+    }
+    let (mut x_l, mut x_u, mut g_l, mut g_u) =
+        (vec![0.0; n], vec![0.0; n], vec![0.0; mm], vec![0.0; mm]);
+    let mut g = vec![0.0; mm];
+    if !m.get_bounds_info(BoundsInfo {
+        x_l: &mut x_l,
+        x_u: &mut x_u,
+        g_l: &mut g_l,
+        g_u: &mut g_u,
+    }) || !m.eval_g(x, true, &mut g)
+    {
+        return Number::INFINITY;
+    }
+    complementarity_gap(x, z_l, z_u, &x_l, &x_u, &g, lambda, &g_l, &g_u)
+}
+
 /// Evaluate the *inner* model at `x` and certify it. `None` if any callback
 /// declines.
 fn certify_at(
@@ -1174,6 +1244,8 @@ mod tests {
             solver_return: SolverReturn::InternalError,
             statistics: SolveStatistics::default(),
             max_abs_product: if x.is_empty() { Number::INFINITY } else { 0.25 },
+            slack: if x.is_empty() { Number::INFINITY } else { 0.0 },
+            gap: if x.is_empty() { Number::INFINITY } else { 0.0 },
             x,
             z_l: Vec::new(),
             z_u: Vec::new(),
