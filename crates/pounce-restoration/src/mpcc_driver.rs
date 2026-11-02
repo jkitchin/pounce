@@ -35,7 +35,7 @@ use pounce_algorithm::mpcc::{
     Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy,
     TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter, certify,
     check_b_stationarity, compared, converged, exact_stage_budget, finish_budget, finish_drifted,
-    kept_if_nothing_better, warm_start_assignments,
+    kept_if_nothing_better, relaxation_slack, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -171,6 +171,10 @@ struct Captured {
     z_u: Vec<Number>,
     lambda: Vec<Number>,
     max_abs_product: Number,
+    /// What the point's product slack buys, to first order
+    /// ([`relaxation_slack`]): `0` for an exact-product point at
+    /// complementarity, the margin a relaxed point is allowed over a finish.
+    slack: Number,
 }
 
 impl Captured {
@@ -314,6 +318,12 @@ pub fn solve_mpcc(
         // Complementarity violation: `|G·H|` for one-sided pairs, the positive
         // part for a mixed pair's rows; `+inf` when the solve returned no point.
         let max_abs_product = w.last_violation();
+        let lam = w.last_lambda();
+        let slack = if w.last_x().is_empty() {
+            Number::INFINITY
+        } else {
+            relaxation_slack(w.last_products(), lam.get(w.m_inner()..).unwrap_or(&[]))
+        };
         let cap = Captured {
             status,
             solver_return: w.last_status().unwrap_or(SolverReturn::InternalError),
@@ -323,6 +333,7 @@ pub fn solve_mpcc(
             z_u: w.last_z_u().to_vec(),
             lambda: w.last_lambda().to_vec(),
             max_abs_product,
+            slack,
         };
         solves.push(MpccSolveRecord {
             stage,
@@ -394,11 +405,13 @@ pub fn solve_mpcc(
         match finish {
             Some(f) if accepts(f.status, f.max_abs_product, tol) => {
                 let (ff, fr) = (min_obj(&f), min_obj(&relaxed));
-                if finish_drifted(ff, fr, relaxed.max_abs_product) {
+                if finish_drifted(ff, fr, relaxed.slack) {
                     report(&format!(
                         "pounce: complementarity: {label}'s exact finish drifted to a worse \
                          point (minimized objective {ff:.6e} against {fr:.6e} at the last \
-                         relaxation); keeping the relaxed point."
+                         relaxation, whose products are worth {:.1e}); keeping the relaxed \
+                         point.",
+                        relaxed.slack
                     ));
                     relaxed
                 } else {
@@ -528,9 +541,9 @@ pub fn solve_mpcc(
                 let path_answer = cands
                     .first()
                     .filter(|c| accepts(c.status, c.max_abs_product, tol));
-                if let (Some((_, _, _, f_cont)), Some(p)) = (&accepted, path_answer) {
+                if let (Some((_, cont, _, f_cont)), Some(p)) = (&accepted, path_answer) {
                     let f_path = min_obj(p);
-                    if answers_agree(*f_cont, f_path) {
+                    if answers_agree(*f_cont, f_path, cont.slack + p.slack) {
                         report(&format!(
                             "pounce: complementarity: the continuation and the exact stage's \
                              relaxed path agree (minimized objective {f_cont:.6e} and \
@@ -1174,6 +1187,7 @@ mod tests {
             solver_return: SolverReturn::InternalError,
             statistics: SolveStatistics::default(),
             max_abs_product: if x.is_empty() { Number::INFINITY } else { 0.25 },
+            slack: if x.is_empty() { Number::INFINITY } else { 0.0 },
             x,
             z_l: Vec::new(),
             z_u: Vec::new(),

@@ -485,27 +485,7 @@ fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
 /// it.
 #[test]
 fn the_continuation_and_the_exact_product_both_run_and_the_lower_objective_wins() {
-    let zero = || vec![vec![0.0; 2]; 2];
-    let model = Dense {
-        n: 2,
-        m: 1,
-        x_l: vec![0.0, -INF],
-        x_u: vec![INF, INF],
-        g_l: vec![0.0],
-        g_u: vec![INF],
-        x0: vec![0.9, 0.01],
-        f: Box::new(|x| (x[0] - 0.9).powi(2) + (x[1] - 1.0).powi(2)),
-        grad: Box::new(|x| vec![2.0 * (x[0] - 0.9), 2.0 * (x[1] - 1.0)]),
-        g: Box::new(|x| vec![x[1]]),
-        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
-        hess: Box::new(move |_| {
-            let mut f = zero();
-            f[0][0] = 2.0;
-            f[1][1] = 2.0;
-            vec![f, zero()]
-        }),
-        finalized: Rc::new(RefCell::new(Vec::new())),
-    };
+    let model = two_branch([0.9, 0.01]);
     let mut app = app();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
     let mut lines = Vec::new();
@@ -1446,4 +1426,398 @@ fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
     for (got, want) in out.x.iter().zip([1.0, 1.0, 0.0]) {
         assert!((got - want).abs() < 1e-4, "x = {:?}", out.x);
     }
+
+    // Disagree: the continuation reaches the optimum (0.81) and the relaxed
+    // path the near branch (1.0), so after the relaxed path's three solves
+    // the cold exact product runs as well.
+    let mut app = crate::app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
+    let mut lines = Vec::new();
+    let out = solve_mpcc(
+        &mut app,
+        tnlp,
+        vec![ComplementarityPair { row: 0, var: 0 }],
+        &mut |l| lines.push(l.to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        exact_taus(&out),
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None, None],
+        "{:?} {lines:#?}",
+        out.solves
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("skipping the cold exact product")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("exact product solved the model") && l.contains("1.000000e0")),
+        "the relaxed path's answer is the near branch: {lines:#?}"
+    );
+    assert!(
+        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        "{:?} {lines:#?}",
+        out.x
+    );
+}
+
+/// MacMPEC `scholtes4` with its objective multiplied by `c`:
+///
+/// ```text
+/// min c·(z1 + z2 - z3)   s.t.  z3 - 4 z1 <= 0,  z3 - 4 z2 <= 0,
+///                              0 <= z1 ⟂ z2 >= 0
+/// ```
+///
+/// `f* = 0` at the origin, a biactive corner. Relaxed to `z1·z2 <= τ` the
+/// optimum is `z1 = z2 = sqrt(τ)`, `z3 = 4·sqrt(τ)`, `f = -2c·sqrt(τ)`: below
+/// `f*` by an amount that scales with `c`.
+fn scholtes4(c: Number) -> Dense {
+    let zero = || vec![vec![0.0; 3]; 3];
+    Dense {
+        n: 3,
+        m: 3,
+        x_l: vec![0.0, 0.0, -INF],
+        x_u: vec![INF, INF, INF],
+        g_l: vec![-INF, -INF, 0.0],
+        g_u: vec![0.0, 0.0, INF],
+        x0: vec![1.0, 1.0, 0.0],
+        f: Box::new(move |x| c * (x[0] + x[1] - x[2])),
+        grad: Box::new(move |_| vec![c, c, -c]),
+        g: Box::new(|x| vec![x[2] - 4.0 * x[0], x[2] - 4.0 * x[1], x[1]]),
+        jac: Box::new(|_| {
+            vec![
+                vec![-4.0, 0.0, 1.0],
+                vec![0.0, -4.0, 1.0],
+                vec![0.0, 1.0, 0.0],
+            ]
+        }),
+        hess: Box::new(move |_| vec![zero(), zero(), zero(), zero()]),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+/// Two branches, two objectives:
+///
+/// ```text
+/// min (x - 0.9)^2 + (y - 1)^2   s.t.  0 <= x ⟂ y >= 0
+/// ```
+///
+/// `(0, 1)` at 0.81 is the optimum; `(0.9, 0)` at 1.0 is an S-stationary
+/// local minimum.
+fn two_branch(x0: [Number; 2]) -> Dense {
+    let zero = || vec![vec![0.0; 2]; 2];
+    Dense {
+        n: 2,
+        m: 1,
+        x_l: vec![0.0, -INF],
+        x_u: vec![INF, INF],
+        g_l: vec![0.0],
+        g_u: vec![INF],
+        x0: x0.to_vec(),
+        f: Box::new(|x| (x[0] - 0.9).powi(2) + (x[1] - 1.0).powi(2)),
+        grad: Box::new(|x| vec![2.0 * (x[0] - 0.9), 2.0 * (x[1] - 1.0)]),
+        g: Box::new(|x| vec![x[1]]),
+        jac: Box::new(|_| vec![vec![0.0, 1.0]]),
+        hess: Box::new(move |_| {
+            let mut f = zero();
+            f[0][0] = 2.0;
+            f[1][1] = 2.0;
+            vec![f, zero()]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+/// A corner where the relaxation buys far more than its first-order value:
+///
+/// ```text
+/// min -z3   s.t.  z3^k <= z1·z2,   0 <= z1 ⟂ z2 >= 0,   z in [0, 1]^3
+/// ```
+///
+/// The exact model forces `z3 = 0`. Relaxed to `z1·z2 <= τ`, `z3 = τ^(1/k)`
+/// and `f = -τ^(1/k)`, so the product row's multiplier is `τ^(1/k - 1)/k` and
+/// the first-order value of the slack is `τ^(1/k)/k`: `1/k` of what it
+/// actually buys. At `k = 20`, `τ = 1e-8` that is `0.02` against `0.398`.
+fn concave_corner(k: i32) -> Dense {
+    let kf = k as Number;
+    Dense {
+        n: 3,
+        m: 2,
+        x_l: vec![0.0, 0.0, 0.0],
+        x_u: vec![1.0, 1.0, 1.0],
+        g_l: vec![-INF, 0.0],
+        g_u: vec![0.0, INF],
+        x0: vec![0.5, 0.5, 0.5],
+        f: Box::new(|x| -x[2]),
+        grad: Box::new(|_| vec![0.0, 0.0, -1.0]),
+        g: Box::new(move |x| vec![x[2].powi(k) - x[0] * x[1], x[1]]),
+        jac: Box::new(move |x| {
+            vec![
+                vec![-x[1], -x[0], kf * x[2].powi(k - 1)],
+                vec![0.0, 1.0, 0.0],
+            ]
+        }),
+        hess: Box::new(move |x| {
+            let z = vec![vec![0.0; 3]; 3];
+            let mut h0 = z.clone();
+            h0[0][1] = -1.0;
+            h0[1][0] = -1.0;
+            h0[2][2] = kf * (kf - 1.0) * x[2].powi(k - 2);
+            vec![z.clone(), h0, z]
+        }),
+        finalized: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+fn run(
+    model: Dense,
+    pairs: Vec<ComplementarityPair>,
+    max_iter: Option<Index>,
+) -> (MpccOutcome, Vec<String>) {
+    run_tnlp(model, pairs, max_iter)
+}
+
+fn run_tnlp<T: TNLP + 'static>(
+    model: T,
+    pairs: Vec<ComplementarityPair>,
+    max_iter: Option<Index>,
+) -> (MpccOutcome, Vec<String>) {
+    let mut app = app();
+    if let Some(mi) = max_iter {
+        app.options_mut()
+            .set_integer_value("max_iter", mi, true, false)
+            .unwrap();
+    }
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(model));
+    let mut lines = Vec::new();
+    let out = solve_mpcc(&mut app, tnlp, pairs, &mut |l| lines.push(l.to_string())).unwrap();
+    (out, lines)
+}
+
+/// gh#1128: the finish-drift test must not depend on the objective's units.
+/// On `scholtes4` the continuation's relaxed point sits at `-2c·sqrt(τ)` and
+/// its exact finish reaches the corner at `0`, which is the answer. The old
+/// allowance, `10·sqrt(p)·max(1, |f|)`, stayed at `1e-3` while the slack
+/// grew with `c`: at `c = 10` the finish read as drifted and the relaxed
+/// point, below `f*`, was kept. The allowance now comes from the relaxed
+/// point's multipliers, which scale with `c`.
+#[test]
+fn the_finish_drift_verdict_does_not_change_with_the_objectives_scale() {
+    for c in [0.1, 1.0, 10.0, 1e3] {
+        let (out, lines) = run(
+            scholtes4(c),
+            vec![ComplementarityPair { row: 2, var: 0 }],
+            None,
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("drifted")),
+            "scholtes4 x{c}: {lines:#?}"
+        );
+        assert_eq!(
+            out.reported,
+            Reported::WeakFallback(MpccStage::Continuation),
+            "scholtes4 x{c}: {lines:#?}"
+        );
+        assert!(
+            out.x.iter().all(|v| v.abs() < 1e-6),
+            "scholtes4 x{c}: the finish (the origin) is reported, not the relaxed point: {:?} {lines:#?}",
+            out.x
+        );
+    }
+}
+
+/// The other branch of the same test: a finish worse than its relaxed start
+/// by more than the allowance is not taken, and the relaxed point -- every
+/// product within its `τ` -- stands in for it. On `concave_corner(20)` the
+/// relaxation at `τ = 1e-8` buys `0.398` against a first-order value of
+/// `0.02`, so both the continuation's finish and the relaxed path's read as
+/// drifted and the continuation's relaxed point (`z3 = τ^(1/20)`) is
+/// reported.
+#[test]
+fn a_finish_that_drifts_past_the_allowance_leaves_the_relaxed_point() {
+    let (out, lines) = run(
+        concave_corner(20),
+        vec![ComplementarityPair { row: 1, var: 0 }],
+        None,
+    );
+    for label in ["Scholtes continuation", "exact product"] {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&format!("{label}'s exact finish drifted"))),
+            "{label}: {lines:#?}"
+        );
+    }
+    assert_eq!(
+        out.reported,
+        Reported::FeasibleUncertified(MpccStage::Continuation)
+    );
+    assert!(
+        (out.x[2] - (1e-8f64).powf(0.05)).abs() < 1e-6,
+        "the relaxed point at tau = 1e-8: {:?} {lines:#?}",
+        out.x
+    );
+    assert!(
+        out.max_abs_product <= 1e-8 * (1.0 + 1e-6),
+        "{}",
+        out.max_abs_product
+    );
+}
+
+/// `Dense` recording `mu` at every solve's iteration 0 (the barrier the solve
+/// started from).
+struct MuAtStart {
+    inner: Dense,
+    mu0: Rc<RefCell<Vec<Number>>>,
+}
+
+impl TNLP for MuAtStart {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        self.inner.get_nlp_info()
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        self.inner.get_bounds_info(b)
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.inner.get_starting_point(sp)
+    }
+    fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+        self.inner.eval_f(x, n)
+    }
+    fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+        self.inner.eval_grad_f(x, n, g)
+    }
+    fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+        self.inner.eval_g(x, n, g)
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, mode: SparsityRequest<'_>) -> bool {
+        self.inner.eval_jac_g(x, n, mode)
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        n: bool,
+        s: Number,
+        lam: Option<&[Number]>,
+        nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        self.inner.eval_h(x, n, s, lam, nl, mode)
+    }
+    fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+        self.inner.finalize_solution(sol, d, q)
+    }
+    fn wants_intermediate_callback(&self) -> bool {
+        true
+    }
+    fn intermediate_callback(&mut self, st: IterStats, _: &IpoptData, _: &IpoptCq) -> bool {
+        if st.iter == 0 {
+            self.mu0.borrow_mut().push(st.mu);
+        }
+        true
+    }
+}
+
+/// A continuation rung whose warm-started solve fails is retried once from
+/// the previous rung's `x` alone, at the barrier that rung ended on rather
+/// than `mu_init`'s default `0.1`, on a budget of twice its iterations (at
+/// least `pounce_algorithm::mpcc::RUNG_RETRY_FLOOR`, never above the caller's `max_iter`). On
+/// `concave_corner(2)` under `max_iter = 12` the warm `τ = 1e-2` rung runs
+/// out of iterations and the retry converges in 7 (the same holds for every
+/// `max_iter` from 10 to 15), after which the schedule moves on to `1e-3`.
+/// The retry's failing arm -- the schedule ending at the last converged
+/// rung -- is reached by `scholtes4` under `max_iter = 6`, below.
+#[test]
+fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
+    let mu0 = Rc::new(RefCell::new(Vec::new()));
+    let model = MuAtStart {
+        inner: concave_corner(2),
+        mu0: Rc::clone(&mu0),
+    };
+    let (out, lines) = run_tnlp(
+        model,
+        vec![ComplementarityPair { row: 1, var: 0 }],
+        Some(12),
+    );
+    let mu0 = mu0.borrow();
+    assert_eq!(
+        mu0.len(),
+        out.solves.len(),
+        "one iteration 0 per solve: {:?}",
+        out.solves
+    );
+    let cont: Vec<(usize, &_)> = out
+        .solves
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.stage == MpccStage::Continuation)
+        .collect();
+    let k = cont
+        .windows(2)
+        .position(|w| w[0].1.tau == w[1].1.tau && w[0].1.tau.is_some())
+        .unwrap_or_else(|| panic!("no rung was retried: {:?} {lines:#?}", out.solves));
+    let ((_, failed), (retry_idx, retry)) = (cont[k], cont[k + 1]);
+    assert_eq!(failed.tau, Some(1e-2), "{:?}", out.solves);
+    assert_eq!(
+        failed.status,
+        ApplicationReturnStatus::MaximumIterationsExceeded
+    );
+    assert!(
+        matches!(
+            retry.status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "{:?}",
+        out.solves
+    );
+    // The barrier the previous converged rung ended on, not `mu_init`'s 0.1.
+    assert!(
+        mu0[retry_idx] < 1e-2,
+        "retry started at mu = {}",
+        mu0[retry_idx]
+    );
+    // The schedule goes on past the retried rung: the next `τ` runs, warm
+    // from the retry.
+    let taus: Vec<_> = cont.iter().map(|(_, s)| s.tau).collect();
+    assert_eq!(taus.get(k + 2), Some(&Some(1e-3)), "{taus:?}");
+}
+
+/// The retry's other arm: on `scholtes4` under `max_iter = 6` the warm
+/// `τ = 1e-5` rung and its retry both run out of iterations, and the
+/// schedule ends there -- the finish starts from the last converged rung,
+/// `τ = 1e-4`, and no later rung runs.
+#[test]
+fn a_failed_rung_retry_ends_the_schedule() {
+    let (out, lines) = run(
+        scholtes4(1.0),
+        vec![ComplementarityPair { row: 2, var: 0 }],
+        Some(6),
+    );
+    let taus: Vec<_> = out
+        .solves
+        .iter()
+        .filter(|s| s.stage == MpccStage::Continuation)
+        .map(|s| (s.tau, s.status))
+        .collect();
+    let mi = ApplicationReturnStatus::MaximumIterationsExceeded;
+    let k = taus
+        .iter()
+        .position(|t| t.0 == Some(1e-5))
+        .unwrap_or_else(|| panic!("{taus:?} {lines:#?}"));
+    assert_eq!(
+        &taus[k..k + 2],
+        &[(Some(1e-5), mi), (Some(1e-5), mi)],
+        "{taus:?}"
+    );
+    assert_eq!(
+        taus[k + 2].0,
+        None,
+        "the finish follows the failed retry: {taus:?}"
+    );
+    assert_eq!(taus.len(), k + 3, "{taus:?}");
 }

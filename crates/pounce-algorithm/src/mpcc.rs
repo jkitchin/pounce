@@ -173,55 +173,88 @@ pub fn finish_budget(schedule_iterations: usize) -> usize {
     schedule_iterations.max(FINISH_BUDGET_FLOOR)
 }
 
-/// How far, relative to `max(1, |f|)`, two minimized objectives may differ
-/// and still be "the same answer" in the driver's two tests below. Far above
-/// the slack a relaxation's `τ <= 1e-6` products can buy (so a relaxed point
-/// does not beat a finish on that slack alone), far below the gaps between
-/// genuinely different branches (MacMPEC `water-net`: 953 against 964, 1.1%).
+/// How far, relative to `max(|f_a|, |f_b|)`, two minimized objectives may
+/// differ and still be "the same answer" in the driver's two tests below, on
+/// top of what the relaxations' slack accounts for ([`same_answer_allowance`]).
+/// Far below the gaps between genuinely different branches (MacMPEC
+/// `water-net`: 953 against 964, 1.1%).
 pub const SAME_ANSWER_REL_TOL: Number = 1e-4;
 
-/// How much objective a relaxed point's slack can buy at a biactive corner,
-/// per unit of `sqrt(product)`: [`finish_drifted`]'s allowance. At a corner
-/// the relaxation `G·H <= p` moves the objective by `O(sqrt(p))`, not `O(p)`
-/// (MacMPEC `scholtes4`: the `τ = 1e-8` point sits at `-2e-4 = -2·sqrt(τ)`,
-/// against the exact `f* = 0`), so a finish that *removes* that slack looks
-/// worse by about this much without having drifted anywhere.
+/// The multiple of a relaxed point's first-order slack value
+/// ([`relaxation_slack`]) that [`same_answer_allowance`] grants. `Σ λ_k·p_k`
+/// is the objective the products' slack buys to first order; where a pair is
+/// biactive the objective moves as `sqrt(τ)`, not `τ`, and the first-order
+/// estimate is then half the true gap (MacMPEC `scholtes4`: the `τ = 1e-8`
+/// point sits at `-2e-4 = -2·sqrt(τ)` against the exact `f* = 0`, with
+/// `λ = 1/sqrt(τ)`, so `λ·τ = 1e-4`). Ten leaves a margin of five over that.
 pub const CORNER_SLACK_FACTOR: Number = 10.0;
+
+/// The objective a relaxed point's products buy, to first order: `Σ |λ_k|·
+/// max(p_k, 0)` over the product rows, `λ_k` the row's multiplier and `p_k`
+/// its product `G_k·H_k`. Relaxing row `k` from `0` to `p_k` lowers the
+/// minimized objective by `λ_k·p_k` to first order, so this is how much worse
+/// an exact finish that removes the slack may look without having moved.
+///
+/// Unlike `sqrt(max p)·max(1, |f|)`, which this replaced (gh#1128), it scales
+/// with the objective: multiplying `f` by `c` multiplies every `λ_k` by `c`,
+/// so a verdict built on it does not change with the objective's units.
+/// `+inf` if a multiplier or product is not finite; `0` with no product rows.
+pub fn relaxation_slack(products: &[Number], product_lambda: &[Number]) -> Number {
+    products
+        .iter()
+        .zip(product_lambda)
+        .map(|(&p, &l)| {
+            if p.is_finite() && l.is_finite() {
+                l.abs() * p.max(0.0)
+            } else {
+                Number::INFINITY
+            }
+        })
+        .sum()
+}
+
+/// How far two minimized objectives may differ and still be one answer:
+/// `SAME_ANSWER_REL_TOL·max(|f_a|, |f_b|) + CORNER_SLACK_FACTOR·slack`,
+/// `slack` the [`relaxation_slack`] of the points compared (their sum when
+/// both are relaxed). Both terms scale with the objective, so neither test
+/// that uses it changes its verdict when `f` is multiplied by a constant
+/// (gh#1128: an absolute `1e-4` floor near zero, and an allowance
+/// proportional to `max(1, |f|)` rather than to the multipliers, both did).
+/// Two exact points (`slack = 0`) at `f = 0` agree only if both are `0`.
+pub fn same_answer_allowance(f_a: Number, f_b: Number, slack: Number) -> Number {
+    SAME_ANSWER_REL_TOL * f_a.abs().max(f_b.abs()) + CORNER_SLACK_FACTOR * slack.max(0.0)
+}
 
 /// Did an exact finish drift off the relaxed answer it started from? True
 /// when the finish's minimized objective is worse than the relaxed point's by
-/// more than what the relaxed point's own slack can account for:
-/// `max(SAME_ANSWER_REL_TOL, CORNER_SLACK_FACTOR·sqrt(product))·max(1, |f|)`,
-/// `product` the relaxed point's largest complementarity product. A finish
-/// solves the degenerate exact product and can wander: MacMPEC
-/// `pack-comp1p-32`'s continuation reaches 0.65304 at `τ = 1e-8` (products
-/// 5e-9) and its finish then crawls through restoration to 0.783, which used
-/// to replace it; the relaxed point is kept instead. On `scholtes4` the
-/// finish's `3e-11` is the exact answer and the relaxed `-2e-4` is slack, and
-/// the allowance (`1e-3` at `1e-8`) keeps the finish.
-pub fn finish_drifted(f_finish: Number, f_relaxed: Number, relaxed_product: Number) -> bool {
-    if !f_relaxed.is_finite() {
+/// more than [`same_answer_allowance`], `relaxed_slack` the relaxed point's
+/// [`relaxation_slack`]. A finish solves the degenerate exact product and can
+/// wander: MacMPEC `pack-comp1p-32`'s continuation reaches 0.65304 at
+/// `τ = 1e-8` (products 5e-9) and its finish then crawls through restoration
+/// to 0.783, which used to replace it; the relaxed point is kept instead. On
+/// `scholtes4` the finish's `3e-11` is the exact answer and the relaxed
+/// `-2e-4` is slack (`λ·τ = 1e-4`, allowance `1e-3`), and the finish is kept
+/// -- at any scaling of the objective.
+pub fn finish_drifted(f_finish: Number, f_relaxed: Number, relaxed_slack: Number) -> bool {
+    if !f_relaxed.is_finite() || !relaxed_slack.is_finite() {
         return false;
     }
-    let p = if relaxed_product.is_finite() {
-        relaxed_product.max(0.0)
-    } else {
-        return false;
-    };
-    let allowance = SAME_ANSWER_REL_TOL.max(CORNER_SLACK_FACTOR * p.sqrt());
-    !f_finish.is_finite() || f_finish > f_relaxed + allowance * f_relaxed.abs().max(1.0)
+    !f_finish.is_finite()
+        || f_finish > f_relaxed + same_answer_allowance(f_relaxed, f_relaxed, relaxed_slack)
 }
 
-/// Do two answers agree, within [`SAME_ANSWER_REL_TOL`]? The exact stage's
-/// cold `G·H = 0` solve is skipped when the continuation's answer and the
-/// exact stage's relaxed path agree: two different routes landing on one
-/// point is evidence the cheap paths found the branch, and the cold solve --
+/// Do two answers agree, within [`same_answer_allowance`]? `slack` is the
+/// sum of the two points' [`relaxation_slack`]s. The exact stage's cold
+/// `G·H = 0` solve is skipped when the continuation's answer and the exact
+/// stage's relaxed path agree: two different routes landing on one point is
+/// evidence the cheap paths found the branch, and the cold solve --
 /// degenerate, often `max_iter`-bound, the largest single cost on MacMPEC --
 /// exists for the models where they do not (`water-net`, `dempe`).
-pub fn answers_agree(f_a: Number, f_b: Number) -> bool {
+pub fn answers_agree(f_a: Number, f_b: Number, slack: Number) -> bool {
     f_a.is_finite()
         && f_b.is_finite()
-        && (f_a - f_b).abs() <= SAME_ANSWER_REL_TOL * f_a.abs().max(f_b.abs()).max(1.0)
+        && slack.is_finite()
+        && (f_a - f_b).abs() <= same_answer_allowance(f_a, f_b, slack)
 }
 
 /// The budget of a continuation rung retried after its warm-started solve
@@ -1628,34 +1661,106 @@ mod tests {
         assert_eq!(exact_stage_budget(true, usize::MAX), Some(usize::MAX));
     }
 
+    /// `scholtes4` with its objective multiplied by `c`:
+    /// `min c·(z1 + z2 - z3)`, `z3 <= 4 z1`, `z3 <= 4 z2`, `0 <= z1 ⟂ z2 >= 0`.
+    /// Relaxed to `z1·z2 <= τ` the optimum is `z1 = z2 = sqrt(τ)`,
+    /// `f = -2c·sqrt(τ)`, with product-row multiplier `c/sqrt(τ)`; the exact
+    /// `f* = 0`. Returns `(f_relaxed, relaxed_slack)`.
+    fn scholtes4_relaxed(c: Number, tau: Number) -> (Number, Number) {
+        let lambda = c / tau.sqrt();
+        (-2.0 * c * tau.sqrt(), relaxation_slack(&[tau], &[lambda]))
+    }
+
+    #[test]
+    fn relaxation_slack_is_the_first_order_value_of_the_products() {
+        assert_eq!(relaxation_slack(&[], &[]), 0.0);
+        assert!((relaxation_slack(&[1e-8, 2e-8], &[1e4, -3.0]) - (1e-4 + 6e-8)).abs() < 1e-18);
+        // A mixed pair's legitimately negative product buys nothing.
+        assert_eq!(relaxation_slack(&[-0.5], &[7.0]), 0.0);
+        assert!(relaxation_slack(&[1e-8], &[Number::NAN]).is_infinite());
+        assert!(relaxation_slack(&[Number::INFINITY], &[1.0]).is_infinite());
+    }
+
     #[test]
     fn a_finish_that_drifts_above_its_relaxed_start_is_flagged() {
         // pack-comp1p-32: 0.653 relaxed (products 5e-9), 0.783 after the
         // finish wandered.
-        assert!(finish_drifted(0.783, 0.65304, 5e-9));
+        let slack = relaxation_slack(&[5e-9; 4], &[30.0; 4]);
+        assert!(finish_drifted(0.783, 0.65304, slack));
         // A finish that tightens the products at (almost) the same objective,
         // or improves it, is kept.
-        assert!(!finish_drifted(0.65304 + 1e-6, 0.65304, 5e-9));
-        assert!(!finish_drifted(0.6529, 0.65304, 5e-9));
+        assert!(!finish_drifted(0.65304 + 1e-6, 0.65304, slack));
+        assert!(!finish_drifted(0.6529, 0.65304, slack));
         // scholtes4 and ralph1: the relaxed point's slack at a biactive
         // corner buys -2e-4 / -1e-4 = O(sqrt(1e-8)); the finish removing it
         // has not drifted.
-        assert!(!finish_drifted(3e-11, -1.999973e-4, 1e-8));
-        assert!(!finish_drifted(2e-9, -9.999818e-5, 1e-8));
+        let (f_s4, s_s4) = scholtes4_relaxed(1.0, 1e-8);
+        assert!(!finish_drifted(3e-11, f_s4, s_s4));
+        assert!(!finish_drifted(
+            2e-9,
+            -9.999818e-5,
+            relaxation_slack(&[1e-8], &[1e4])
+        ));
         assert!(finish_drifted(Number::NAN, 1.0, 1e-8));
         assert!(!finish_drifted(1.0, Number::INFINITY, 1e-8));
         assert!(!finish_drifted(5.0, 1.0, Number::INFINITY));
     }
 
+    /// gh#1128: the verdict must not depend on the objective's units. With
+    /// the old allowance `10·sqrt(p)·max(1, |f|)`, scholtes4 ×10 (relaxed
+    /// `-2e-3`, finish `3e-10`) read as drifted -- the allowance stayed at
+    /// `1e-3` while the corner's slack grew to `2e-3` -- and the driver kept
+    /// a relaxed point below `f*`.
+    #[test]
+    fn the_drift_verdict_does_not_change_with_the_objectives_scale() {
+        for c in [1e-6, 1e-3, 0.1, 1.0, 10.0, 1e3, 1e6] {
+            let (fr, slack) = scholtes4_relaxed(c, 1e-8);
+            assert!(!finish_drifted(c * 3e-11, fr, slack), "scholtes4 x{c}");
+            assert!(!finish_drifted(0.0, fr, slack), "scholtes4 x{c}");
+            // The same relaxed point with a finish that genuinely wandered
+            // (to +f_relaxed's magnitude a thousand times over) is flagged.
+            assert!(finish_drifted(-1e3 * fr, fr, slack), "scholtes4 x{c}");
+            let pack = relaxation_slack(&[5e-9; 4], &[30.0 * c; 4]);
+            assert!(finish_drifted(0.783 * c, 0.65304 * c, pack), "pack x{c}");
+            assert!(!finish_drifted(0.6529 * c, 0.65304 * c, pack), "pack x{c}");
+        }
+        // The case the issue derived: scholtes4 x10 at the old constants.
+        assert!(!finish_drifted(
+            3e-10,
+            -2e-3,
+            relaxation_slack(&[1e-8], &[1e5])
+        ));
+    }
+
     #[test]
     fn answers_agree_within_the_relative_tolerance() {
         // pack-comp1p-32: continuation 0.65304, relaxed exact path 0.65310.
-        assert!(answers_agree(0.65304, 0.65310));
+        assert!(answers_agree(0.65304, 0.65310, 0.0));
         // water-net: 953 against 964 is two branches.
-        assert!(!answers_agree(953.23, 964.12));
-        // Near zero the tolerance is absolute.
-        assert!(answers_agree(1e-9, -5e-5));
-        assert!(!answers_agree(f64::NAN, 0.0));
+        assert!(!answers_agree(953.23, 964.12, 0.0));
+        // Near zero, what a relaxed answer's slack buys still agrees: an
+        // exact finish at 1e-9 and a relaxed point at -5e-5 whose products
+        // are worth 2.5e-5.
+        assert!(answers_agree(1e-9, -5e-5, 2.5e-5));
+        assert!(!answers_agree(f64::NAN, 0.0, 0.0));
+        assert!(!answers_agree(0.0, 0.0, f64::INFINITY));
+        assert!(answers_agree(0.0, 0.0, 0.0));
+    }
+
+    /// gh#1128: near zero the old test was an absolute `1e-4`, so two exact
+    /// answers 5e-5 apart "agreed" -- the cold solve was skipped -- however
+    /// small the objective's own scale, while the same model in larger units
+    /// ran it. The verdict is now the same at every scale, both ways.
+    #[test]
+    fn answers_agree_does_not_change_with_the_objectives_scale() {
+        for c in [1e-6, 1e-3, 0.1, 1.0, 10.0, 1e3, 1e6] {
+            assert!(answers_agree(c * 1e-9, -c * 5e-5, c * 2.5e-5), "x{c}");
+            assert!(!answers_agree(c * 1e-9, -c * 5e-5, 0.0), "x{c}");
+            assert!(answers_agree(c * 0.65304, c * 0.65310, 0.0), "x{c}");
+            assert!(!answers_agree(c * 953.23, c * 964.12, 0.0), "x{c}");
+            let (fr, slack) = scholtes4_relaxed(c, 1e-8);
+            assert!(answers_agree(c * 3e-11, fr, slack), "scholtes4 x{c}");
+        }
     }
 
     #[test]
