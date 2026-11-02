@@ -84,7 +84,8 @@ them: POUNCE's per-iteration cost is at parity with stock Ipopt + MUMPS on
 the same lowered NLP (pack-comp1-32's `τ = 1` rung: 64 against 73 ms per
 iteration), and stock Ipopt stalls on the cold `G·H = 0` solve the same way,
 so the remaining time is in how many exact-product iterations the schedule
-spends, not in the linear algebra. Three models still time out at 300 s:
+spends, not in the linear algebra. Three models timed out at 300 s when
+this was written (the run at `5882e01`):
 
 - `siouxfls`, `siouxfls1`: the first relaxation (`τ = 1`) alone takes about
   1,000 iterations and is solved twice (~110 s), and the `1e-7`/`1e-8` rungs
@@ -95,6 +96,10 @@ spends, not in the linear algebra. Three models still time out at 300 s:
   objective would trade product tightness for time.
 - `pack-comp1p-32`: the continuation reaches 0.65304 (published 0.652979)
   in ~50 s; the exact stage's relaxed path and the cold solve take the rest.
+
+The rerun after #1126 and gh#1128 (`benchmarks/macmpec/README.md`, Reference
+result) moves this list: `pack-comp1p-32` and `siouxfls1` now finish inside
+300 s, `siouxfls` still does not (676 s), and `qpec-200-2` joins it (335 s).
 
 ### How to tell whether a fix works
 
@@ -142,6 +147,7 @@ with `perturb_slack_max_rows = 1000`, and `qcqp1500-1nc` solves in
 128 iterations. Models with at most 1000 inequality rows are
 untouched; `perturb_slack_max_rows=0` is upstream's rule exactly. The
 Mittelmann before/after table is in the dev-note.
+The budget's cost, Vanderbei `cresc132`, is the next entry.
 
 ### What is still wrong
 
@@ -183,6 +189,101 @@ Mittelmann before/after table is in the dev-note.
 - A user reports a large QCQP stalling at a fixed μ with `inf_pr` near 1e-3
   on a model with fewer than 1000 inequality rows — the budget does not
   reach it, and `perturb_slack_fact` is the knob.
+
+---
+
+## NLP: the slack row budget loses `cresc132` (and slows `laptime`)
+
+*gh#1127. Measured on Apple silicon (14 cores) at #1126's head `6b669294`,
+default options except the cap. Recorded 2026-11-01.*
+
+**Scope.** The default exact-Hessian NLP path on models with more than
+`perturb_slack_max_rows = 1000` inequality rows, which the gh#1098 budget
+reaches. Complementarity models are not affected: the MPCC driver sets the
+cap to 0 (#1126).
+
+### What is wrong
+
+Vanderbei `cresc132` (n = 6, m_d = 2654, factor 0.38) no longer solves
+within 300 s at the default. With the cap off it solves as v0.14.0 does
+(610 iterations including the adaptive re-solve, f = 0.85771). So in the
+suites the budget gains `qcqp1500-1nc` (Mittelmann) and loses `cresc132`
+(Vanderbei), one each.
+
+The cap-off and cap-1000 iteration tables agree through iteration 21,
+which includes the first restoration call. They diverge at 22, the first
+iterate where regularization fires. From there the cap-1000 run falls back
+into restoration and stays there.
+
+### It is not a rule that is wrong, it is a model that is chaotic in `δ_s`
+
+`cresc132` alone, by cap (factor = cap/2654):
+
+| `perturb_slack_max_rows` | factor | result |
+|---|---|---|
+| 0 (upstream) | 1 | Solve_Succeeded, 610 it, only after the first attempt fails and the adaptive re-solve rescues it |
+| 2500 | 0.94 | Solve_Succeeded, 247 it, 25 s |
+| 2000 | 0.75 | **Infeasible_Problem_Detected**, 591 it (false) |
+| 1000 (default) | 0.38 | CPU limit, stuck in restoration |
+| 500 | 0.19 | **Infeasible_Problem_Detected**, 153 it (false) |
+
+The response is not monotone in the factor. Even upstream's own rule solves
+this model only on its second attempt.
+
+`large_scale/laptime` (n = 58 014, m_d = 6000, factor 0.17) shows the same
+pattern without a status change. Its iteration counts are 327 at cap 0, 331
+at 500, **756** at 1000 and 284 at 2000, and every run reaches f = 65.2947.
+At cap 1000 it took 310 s of wall-clock time. That is past 300 s, but the
+sweep's limit is on CPU time (`max_cpu_time`), so the run still ended
+`SolveSucceeded`; a harness with a 300 s wall-clock limit would lose it.
+
+### What the cap does on every model it reaches
+
+All 87 non-LP/QP/MPCC models in the benchmark data with m_d > 1000 were run at
+cap 1000 against cap 0 (300 s CPU limit, 5 at a time):
+
+- **Better under the cap (iterations):** `qcqp1500-1nc` (timeout → 128),
+  `pglib_case1888_rte` (grid 501 → 183, ECF 212 → 166),
+  `pglib_case10000_goc` (polar 131 → 85, grid 99 → 87), the other 2000/500/179
+  grid cases, `arki0003` 448 → 335, `qcqp1000-2nc` 289 → 184, `robot_b`
+  271 → 180, `robot_c` 222 → 116, `svanberg` (both suites), `nql180`,
+  `optmass`, `oet2` 63 → 34, `oet7` 297 → 189, and `NARX_CFy`, which lands in
+  a different local minimum.
+- **Worse:** `cresc132` (lost), `laptime` (327 → 756), `gausselm`
+  (871 → 1311, a different local value −17.848 against −17.835), `robot_a`
+  145 → 193, `arki0009` 328 → 332, and `ngone` 40 → 46 (it also reaches a
+  lower local value, −0.63597 against −0.63328).
+- Everything else is identical, including the 25 that route to a convex
+  engine.
+
+### What has been tried
+
+- **Gating the budget on `n` or `m_d/n`** (the issue's suggestion). The
+  losers sit at n = 6, 1495 and 58 014 and m_d/n = 442, 1.8 and 0.10.
+  The winners sit in between (`qcqp1500-1nc` 1500 and 6.7, the grid cases
+  0.4–2.4, `robot_b` 52, `oet2`/`oet7` n ≤ 7 and m_d/n ≈ 140–330). No threshold on
+  either separates them. And `cresc132`'s table above shows that no factor
+  rule can "keep" it, because neighbouring factors fail in both directions.
+- **Other cap values.** `dev-notes/qcqp1500-crawl-slack-perturbation.md`
+  measured 500/1000/2000 on the 19 Mittelmann models above the cap: every
+  value solves `qcqp1500-1nc`, and 1000 has the lowest iteration sum. Both
+  losers here fail or slow down at 1000 and recover at a nearby value, so
+  moving the constant would trade them for other models' luck.
+
+### How to tell whether a fix works
+
+1. `cresc132` solves within 300 s at the default, *and* it keeps solving at
+   caps either side of the default (to show it isn't another lucky value).
+2. `qcqp1500-1nc` still solves, and the 87-model comparison above shows no
+   new status losses. The model list and runner are reproducible from the
+   description: `n`, `m`, `m_d` read from each `.nl` header, m_d > 1000.
+3. The fixture sweep cannot see this (no fixture has more than 1100 rows,
+   and only `manyineq_concave_qp` is above the cap), so use the Vanderbei
+   and Mittelmann suites.
+
+### Workaround
+
+`perturb_slack_max_rows=0` restores upstream's rule for one model.
 
 ---
 
