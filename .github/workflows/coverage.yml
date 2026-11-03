@@ -53,7 +53,7 @@ jobs:
     # nothing. Now that `push` is the only automatic trigger, this gate is the
     # only thing standing between a fork sync and that email.
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # 120 was a guess made before any run existed. Measured since: 33.2, 40.4
     # and 33.3 minutes, the spread coming from how warm the cargo cache is. 90
     # keeps better than 2x headroom over the slowest of those (and well over
@@ -71,8 +71,16 @@ jobs:
           # directly. Without this it exits with a FATAL naming the component.
           components: llvm-tools-preview
 
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
           # Distinct from ci.yml's cache: everything here is built with
           # `-C instrument-coverage`, so the artifacts are not interchangeable
           # and sharing a key would just thrash both.

@@ -50,7 +50,7 @@ jobs:
     # receive `v*` tags when they sync — without this a fork's sync is a
     # failed publish run and an email (gh#599).
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     environment:
       name: crates-io
       url: https://crates.io/crates/pounce-cli
@@ -59,8 +59,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
           shared-key: release-crates
 
       # Tag-vs-manifest guard (M38). A `v0.5.0` tag with the workspace still

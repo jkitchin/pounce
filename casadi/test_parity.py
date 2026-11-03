@@ -1489,11 +1489,28 @@ def test_codegen_reproduces_the_finite_difference_hessian():
                       first_error(exc.stderr), log=exc.stderr)
                 continue
             check(f"codegen fd/{pattern} compiles", True)
+            # What makes it a finite-difference solve, read off the emitted
+            # C: no `nlp_hess_l`, the option itself, and the Hessian callback
+            # the pattern calls for -- the declared structure, or for
+            # `jacobian` none at all (POUNCE derives the pattern itself). This used to be inferred from the answer
+            # matching the interpreted solve bit for bit, which tells an
+            # exact-Hessian solve apart (it differs in the last bits) only
+            # while both engines round identically; GitHub's ubuntu-26.04
+            # runners broke that (2026-11-03) though an ubuntu:26.04 container
+            # with the same compiler and glibc did not.
+            src = open(os.path.join(d, f"cg_fd_{pattern}.c")).read()
+            callback = {"declared": "hess_l_struct",
+                        "jacobian": "casadi_pounce_hess_l_empty"}[pattern]
+            check(f"codegen fd/{pattern} emits a finite-difference Hessian",
+                  "nlp_hess_l" not in src and callback in src
+                  and '"hessian_approximation", "finite-difference"' in src,
+                  f"expects {callback}")
             got = G(x0=[0.5, 0.5, 0.5], lbx=-ca.inf, ubx=ca.inf,
                     lbg=0, ubg=0, lam_x0=0, lam_g0=0)
-            check(f"codegen fd/{pattern} == interpreted",
-                  float(ca.norm_inf(ca.DM(got["x"]) - ca.DM(want["x"]))) == 0.0,
-                  f"f={float(got['f']):.12g}")
+            dx = float(ca.norm_inf(ca.DM(got["x"]) - ca.DM(want["x"])))
+            # The two engines may round differently; the solve is to 1e-10.
+            check(f"codegen fd/{pattern} == interpreted", dx <= 1e-8,
+                  f"|dx|={dx:.3e} f={float(got['f']):.12g}")
 
 
 def test_fd_hessian_stats_are_reported():

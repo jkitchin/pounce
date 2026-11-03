@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -38,8 +38,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
 
       # Release guard: the three registry versions (Rust workspace,
       # pounce-solver wheel, pyomo-pounce) must agree, and the crates.io
@@ -128,13 +137,22 @@ jobs:
   # load a `.nl`, solve it, check the objective — under Node's WASI.
   wasm:
     name: WebAssembly build + smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -210,7 +228,7 @@ jobs:
   # and runs the test suite.
   python-test:
     name: Python tests (jax)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
@@ -221,7 +239,16 @@ jobs:
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -299,14 +326,23 @@ jobs:
   # jax so both the torch suite and the JAX↔Torch parity fixtures run.
   python-test-torch:
     name: Python tests (torch)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -344,14 +380,23 @@ jobs:
   # and fires on tag push. Mirrors that workflow's bundle-the-CLI flow.
   wheel-smoke:
     name: wheel smoke (pounce-solver)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
       # Mirrors release-pounce.yml: the bundled CLI is built INSIDE the
       # manylinux container, not on this runner (#452). Building it here with
       # a plain `cargo build` is precisely what let a glibc-2.39 binary ship
@@ -462,14 +507,23 @@ jobs:
   # solve, where before they were covered by Rust unit tests only.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
       - run: python -m pip install --upgrade pip build
       - name: Build pyomo-pounce wheel + sdist
         working-directory: pyomo-pounce
@@ -626,14 +680,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
 
       # Unpinned, which is the point of this job: everything below derives
       # the version it builds against from the installed wheel, so a CasADi
@@ -771,7 +834,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -794,7 +857,7 @@ jobs:
   # another repository.
   agent-skills:
     name: Validate agent skills (knowhow)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
