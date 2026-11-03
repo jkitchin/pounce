@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v5
 
@@ -128,7 +128,7 @@ jobs:
   # load a `.nl`, solve it, check the objective — under Node's WASI.
   wasm:
     name: WebAssembly build + smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -210,7 +210,7 @@ jobs:
   # and runs the test suite.
   python-test:
     name: Python tests (jax)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -299,7 +299,7 @@ jobs:
   # jax so both the torch suite and the JAX↔Torch parity fixtures run.
   python-test-torch:
     name: Python tests (torch)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -344,7 +344,7 @@ jobs:
   # and fires on tag push. Mirrors that workflow's bundle-the-CLI flow.
   wheel-smoke:
     name: wheel smoke (pounce-solver)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -462,7 +462,7 @@ jobs:
   # solve, where before they were covered by Rust unit tests only.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -626,7 +626,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -771,7 +771,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -794,7 +794,7 @@ jobs:
   # another repository.
   agent-skills:
     name: Validate agent skills (knowhow)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
