@@ -1118,6 +1118,11 @@ pub struct IpoptApplication {
     /// previous attempt's verdict. Also copied into
     /// [`SolveStatistics::dual_divergence_signature`].
     dual_divergence_signature: std::cell::Cell<bool>,
+    /// The returned run's algorithm released the tiny-step stop through the
+    /// `tiny_step_dual_stall_iters` rule. Read by the mu-strategy fallback,
+    /// which retries a `Search_Direction_Becomes_Too_Small` reached this way
+    /// as it does an iteration limit. Reset at the top of every solve.
+    tiny_step_dual_stall: std::cell::Cell<bool>,
     /// gh#990 item 3: the derivative checker's structured result for the
     /// current solve; copied onto the statistics when the solve finishes.
     derivative_check: RefCell<Option<pounce_nlp::derivative_test::DerivativeCheckSummary>>,
@@ -1375,6 +1380,7 @@ impl IpoptApplication {
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             mu_strategy_pounce_chosen: false,
             dual_divergence_signature: std::cell::Cell::new(false),
+            tiny_step_dual_stall: std::cell::Cell::new(false),
             derivative_check: RefCell::new(None),
             obj_scale_refused: std::cell::Cell::new((false, false)),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
@@ -2233,12 +2239,18 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
-        // gh#983 review item 1: warnings belong to this solve. Cleared here as
-        // well as per attempt, so a solve that returns before any attempt runs
-        // (an option refusal, a presolve proof) does not report the previous
-        // solve's.
-        self.statistics.borrow_mut().warnings.clear();
-        self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
+        // The statistics belong to this solve, all of them. A solve that
+        // returns before any attempt runs (the degrees-of-freedom refusal, an
+        // option refusal, a presolve proof) used to leave the previous solve's
+        // record standing, so `statistics()` on an application reused for a
+        // second solve reported the first one's iterations for a solve that
+        // never iterated. The complementarity driver is the case that showed
+        // it: each `G·H = 0` finish refused for too few degrees of freedom
+        // was recorded with the iteration count of the solve before it, and
+        // `total_iterations` counted it again. This replaces the field-by-field
+        // clears (gh#983 review item 1: `warnings`; `sqp_warm_working_set_applied`)
+        // that patched the same leak one field at a time.
+        *self.statistics.borrow_mut() = SolveStatistics::new();
         // Belongs to the scale audit's re-solve alone, which runs below this
         // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
         // solve that starts here may inherit it. `RetryOptionScope` clears it
@@ -2274,6 +2286,7 @@ impl IpoptApplication {
         // `run_with_dual_divergence_retry` reads "some attempt of the base
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
+        self.tiny_step_dual_stall.set(false);
         self.obj_scale_refused.set((false, false));
         self.dual_divergence_retry_promoted.set(false);
         *self.mu_strategy_fallback_record.borrow_mut() = None;
@@ -4823,6 +4836,16 @@ impl IpoptApplication {
         // either way.
         let retry_worthy = match first_status {
             ApplicationReturnStatus::MaximumIterationsExceeded => true,
+            // A tiny-step stop the `tiny_step_dual_stall_iters` rule released
+            // is an iteration limit reached early: the solve had stopped
+            // moving with its multipliers running away, and before the rule
+            // it took the remaining budget to say so and then came here as
+            // `Maximum_Iterations_Exceeded`. Retrying it keeps that rescue.
+            // A tiny-step stop upstream's own rule reached (multiplier step
+            // settled) is not retried, as before.
+            ApplicationReturnStatus::SearchDirectionBecomesTooSmall => {
+                self.tiny_step_dual_stall.get()
+            }
             ApplicationReturnStatus::SolvedToAcceptableLevel => {
                 self.mu_strategy_fallback_was_set() || !self.caller_set_termination_policy()
             }
@@ -4900,13 +4923,12 @@ impl IpoptApplication {
         // Adaptive and every other value (incl. unset) → Monotone, so the
         // opposite of an explicit "adaptive" is "monotone" and the
         // opposite of anything else is "adaptive".
-        let prev = self.options.get_string_value("mu_strategy", "").ok();
+        let saved_mu_strategy = self.options.snapshot_entry("mu_strategy");
         let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
-        // Unwind cover only: the normal-path restore below writes the
-        // resolved value back as caller-set, deliberately, and the scope must
-        // not change that. A panic in the retry used to leave the flipped
-        // strategy in the option table of an application `ffi_guard` keeps.
+        // Unwind cover only; the normal path restores the same snapshot
+        // below. A panic in the retry used to leave the flipped strategy in
+        // the option table of an application `ffi_guard` keeps.
         let mut scope = RetryOptionScope::enter(self, &["mu_strategy"], true);
         let _ = scope
             .options
@@ -4965,16 +4987,17 @@ impl IpoptApplication {
         record.retry_iteration_count = scope.statistics.borrow().iteration_count;
         record.promoted = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded);
         *scope.mu_strategy_fallback_record.borrow_mut() = Some(record.clone());
-        // Restore the user's original option-table view.
-        let _ = scope.options.set_string_value(
-            "mu_strategy",
-            prev.as_ref()
-                .filter(|(_, found)| *found)
-                .map(|(v, _)| v.as_str())
-                .unwrap_or(if was_adaptive { "adaptive" } else { "monotone" }),
-            true,
-            false,
-        );
+        // Put the entry back exactly as it was, absence as absence. Writing
+        // the resolved strategy back instead marked it caller-set, and a
+        // caller-set `mu_strategy` switches this fallback off
+        // (`is_mu_strategy_fallback_enabled`): every later solve on the same
+        // application lost it, which the declared-complementarity driver --
+        // one application, every stage -- hit whenever an early stage fell
+        // back. An unset entry still resolves the same way, so the view the
+        // write-back was preserving is unchanged.
+        scope
+            .options
+            .restore_entry("mu_strategy", saved_mu_strategy);
         drop(scope);
         self.statistics.borrow_mut().mu_strategy_fallback = Some(record);
         // A retry the caller's intermediate callback stopped reports the
@@ -5249,25 +5272,17 @@ impl IpoptApplication {
              (base {:?}, unscaled KKT {:.3e}); re-solving from scratch with \
              perturb_always_cd=yes.",
             first_status, base_unscaled_kkt);
-        let prev = self.options.get_string_value("perturb_always_cd", "").ok();
-        // Unwind cover only, as for the μ-strategy fallback: the restore
-        // below is the normal path and is left exactly as it was.
+        let saved_cd = self.options.snapshot_entry("perturb_always_cd");
+        // Unwind cover only, as for the μ-strategy fallback; the normal path
+        // restores the same snapshot below.
         let mut scope = RetryOptionScope::enter(self, &["perturb_always_cd"], true);
         let _ = scope
             .options
             .set_string_value("perturb_always_cd", "yes", true, false);
         let retry_status = scope.dispatch_standard_solve(Rc::clone(&tnlp));
-        // Restore the caller's option-table view. Absence is restored as
-        // absence would be seen: the registered default is `no`.
-        let _ = scope.options.set_string_value(
-            "perturb_always_cd",
-            prev.as_ref()
-                .filter(|(_, found)| *found)
-                .map(|(v, _)| v.as_str())
-                .unwrap_or("no"),
-            true,
-            false,
-        );
+        // Exactly as it was, absence as absence, so a later solve on the
+        // same application does not read a caller-set `no`.
+        scope.options.restore_entry("perturb_always_cd", saved_cd);
         drop(scope);
         // A retry the caller's intermediate callback stopped reports the
         // stop, at the point it stopped; the comparison below would put the
@@ -7023,6 +7038,9 @@ impl IpoptApplication {
         alg.dual_diverging_streak = builder.dual_diverging_streak.max(0) as usize;
         alg.dual_divergence_retry_step_tol = builder.dual_divergence_retry_step_tol;
         alg.dual_divergence_retry_du_floor = builder.dual_divergence_retry_du_floor;
+        alg.tiny_stall = crate::tiny_step_stall::TinyStepDualStall::new(
+            builder.tiny_step_dual_stall_iters.max(0) as usize,
+        );
         alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
         alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.neg_curv_escapes = builder.neg_curv_escapes.max(0) as usize;
@@ -7153,6 +7171,7 @@ impl IpoptApplication {
                 .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
             stats.returned_run_dual_divergence_signature = alg.dual_divergence_signature();
+            self.tiny_step_dual_stall.set(alg.tiny_step_dual_stall());
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
             stats.mu_strategy_fallback = self.mu_strategy_fallback_record.borrow().clone();
             stats.derivative_check = self.derivative_check.borrow().clone();
@@ -8102,6 +8121,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("dual_divergence_retry_du_floor") {
             builder.dual_divergence_retry_du_floor = v;
+        }
+        if let Some(v) = read_int("tiny_step_dual_stall_iters") {
+            builder.tiny_step_dual_stall_iters = v;
         }
         if let Some(v) = read_int("resto_decline_deferrals") {
             builder.resto_decline_deferrals = v;

@@ -275,7 +275,10 @@ From Python, `info["complementarity"]["b_stationarity"]` holds `verdict`
 (`B`, `not_B`, `not_checked`), `reason` (for `not_checked`), `n_biactive`,
 `branches_solved` and `enumerated`; it is `None` when the check did not run
 (an S answer, which is B, or an infeasible verdict). `escapes` counts branch
-NLPs that moved the point.
+NLPs that moved the point. The JSON solve report (`--json-output`, or
+`report_path=` from Python) carries both under `complementarity`, with the
+same keys; there an unrun check is omitted rather than `null`
+([schema](schema/solve-report-v1.md)).
 
 On MacMPEC the check confirms the W fallbacks `ralph1`, `scholtes4` and `qpec2`
 (10 biactive pairs, 1024 branch LPs, about a second) as B-stationary. On

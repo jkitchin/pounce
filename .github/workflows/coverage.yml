@@ -53,7 +53,7 @@ jobs:
     # nothing. Now that `push` is the only automatic trigger, this gate is the
     # only thing standing between a fork sync and that email.
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 120 was a guess made before any run existed. Measured since: 33.2, 40.4
     # and 33.3 minutes, the spread coming from how warm the cargo cache is. 90
     # keeps better than 2x headroom over the slowest of those (and well over

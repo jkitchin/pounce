@@ -145,8 +145,7 @@ Declaring the pairs instead of lowering them by hand
 ([Complementarity Constraints](complementarity.md)) gets this fallback
 without asking: the driver's exact stage and the continuation's exact
 finish both switch to `G*H <= 0` whenever the equality form is refused
-before iteration zero. The measurements on this page are the hand-built
-route's; the flash has not been re-run through the declared driver.
+before iteration zero.
 
 **Reverse-mode autodiff loses the Hessian at the bubble point.** Under
 `jax.jit`, `jax.hessian` — which is `jacfwd(jacrev(·))` — is wrong by O(20)
@@ -157,6 +156,29 @@ and costs the same, so `pounce.examples.flash_mpcc` uses it. The Jacobian is
 unaffected in every mode, which is what makes this dangerous rather than
 merely wrong: gradients, KKT residuals and converged answers were all
 correct while the Hessian was not.
+
+## The same flash, declared
+
+`pounce.examples.flash_mpcc.declare` builds the model with its pairs declared
+instead of lowered (notebook section 7). One change of variables is forced: a
+variable may sit in only one pair, and the hand-written model pairs `beta` on
+both of its bounds, so the declared model carries `gamma = 1 - beta` as its own
+variable, tied by `beta + gamma = 1`, with pairs `beta ⟂ 1 - Sy` and
+`gamma ⟂ 1 - Sx`. Its rows come from the same JAX residual function, so the two
+models cannot drift apart. Over the 34-temperature path, from the same starts:
+
+| route | regimes agree | worst error in `beta` | certified | iterations |
+| --- | --- | --- | --- | --- |
+| hand-written Scholtes continuation | 34/34 | 8.4e-10 | — | 3 441 |
+| declared, `complementarity_strategy=continuation` | 34/34 | 4.2e-10 | 34 `S` | 3 703 |
+| declared, default (`both`) | 34/34 | 4.2e-10 | 34 `S` | 5 737 |
+
+Same answers, each certified strongly stationary, and no route code. The cost
+is iterations, nearly all of it the exact stage's second opinion (2 034 on this
+path, finding no other branch, since a square flash has one solution per
+temperature); the driver's continuation takes 8% more than the hand-written
+schedule for the same `tau` values. `python/tests/test_flash_mpcc.py` holds
+the declared route to the same oracle at the smoke temperatures.
 
 ## Limitations
 

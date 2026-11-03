@@ -496,7 +496,10 @@ Where `delta_c` is the right remedy this never fires: on `eigena2` and
 POUNCE extensions; not upstream Ipopt options. Defaults `1000` and `1`.
 `perturb_slack_max_rows=0` (or `perturb_slack_fact=1` on any model with
 at most `perturb_slack_max_rows` inequality rows) is upstream's rule
-exactly.
+exactly. A model with declared complementarity pairs runs its lowered
+solves with `perturb_slack_max_rows=0` unless you set the option: the
+lowering's own product rows push a model past the 1000-row budget
+([Complementarity Constraints](complementarity.md)).
 
 When the factorization reports the wrong inertia, the solver adds
 `delta_w` to the Hessian block — that is where the curvature defect is —
@@ -1129,6 +1132,45 @@ a warning over a correct answer is noise), and the retry prints its own
 verdict line when it runs. In the JSON report the two are
 `statistics.dual_divergence_signature` and
 `statistics.dual_divergence_retry_promoted`.
+
+## A tiny step that never stops (`tiny_step_dual_stall_iters`)
+
+POUNCE extension; not an upstream Ipopt option. Default `10`; `0` is
+upstream's rule.
+
+Upstream stops at a tiny step (`Search_Direction_Becomes_Too_Small`, once μ
+has reached its floor) only when the multiplier step is also below
+`tiny_step_y_tol`, so that a primal iterate that has stopped moving is not
+abandoned while its multipliers are still converging. At a point whose
+multipliers are not unique they need not converge. They run away, the
+multiplier step stays large, and the solve repeats the same iterate until
+`max_iter`: the iteration log shows `t` in the `alpha_pr` column on every
+line, `||d||` at round-off, and `inf_du` flat or growing.
+
+`tiny_step_dual_stall_iters` bounds the wait. After that many consecutive
+tiny primal steps during which the scaled dual infeasibility has not fallen
+below 0.99 times its best value in the run, the multiplier step is treated
+as settled and upstream's tiny-step logic takes over: μ is reduced, or the
+solve stops if it cannot be. Two things it never does:
+
+* It never cuts short multipliers that are converging: they reduce the dual
+  infeasibility and reset the count.
+* It never pre-empts an acceptable iterate: one that passes the
+  acceptable-level test is left to `acceptable_iter`, so a point on a
+  round-off floor still ends `Solved_To_Acceptable_Level`.
+
+A stop reached this way is retried by `mu_strategy_fallback` exactly as an
+iteration-limit exit is, so the rescue a stalled solve used to reach after
+`max_iter` iterations is reached after this many.
+
+The case is the phase-change flash example
+(`pounce.examples.flash_mpcc.declare`). At a single-phase point the square
+flash has more active constraints than variables, and from 331 K's
+all-vapor answer the first continuation solve at 332 K sat for 3 000
+iterations before the adaptive-μ re-solve finished it in 14. With the
+default it ends after 43. Over the example's 34-temperature path the
+declared route's continuation went from 6 660 iterations to 3 703, against
+3 441 for the hand-written route.
 
 ## Big models that start feasible and the `theta_max` ceiling
 

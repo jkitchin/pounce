@@ -100,7 +100,11 @@ Layout
     phase label, Rachford--Rice with a Newton polish, and the
     switch-point bisection.
 `lower`, `LoweredFlash`, `fd_check`
-    MPCC -> smooth NLP with exact JAX derivatives.
+    MPCC -> smooth NLP by hand (product rows, Scholtes relaxation) with
+    exact JAX derivatives.
+`declare`, `DeclaredFlash`
+    the same MPCC with its pairs *declared* to POUNCE, which picks the
+    formulation, runs the finish and certifies the point.
 
 All temperatures are in K, pressures in Pa, and phase amounts are moles
 per mole of feed unless a docstring says otherwise.
@@ -1340,6 +1344,145 @@ def lower(
         _j=j,
         _h=h,
         _t=jnp.asarray(float(temperature_k), dtype=jnp.float64),
+    )
+
+
+# ====================================================================
+# The same MPCC, declared
+# ====================================================================
+#
+# Everything above writes the complementarity by hand: the product rows
+# are ordinary constraints, and which lowering to use, the tau schedule
+# and the finish are the caller's. `declare` hands POUNCE the *pairs*
+# instead (`pounce.Problem(..., complementarity=...)`) and lets its
+# driver choose the formulation, run the finish, and certify the point.
+#
+# One change of variables is needed, and it is forced by the declaration
+# rule rather than chosen: a variable may sit in only one pair, and the
+# hand-written model pairs `beta` on *both* of its bounds (`beta ⟂ H_V`
+# and `1 - beta ⟂ H_L`). So the declared model carries `gamma = 1 - beta`
+# as its own variable, tied by one linear row, and each pair names its
+# own variable's lower bound:
+#
+#     0 <= beta   ⟂  H_V = 1 - Sy >= 0
+#     0 <= gamma  ⟂  H_L = 1 - Sx >= 0,      beta + gamma = 1
+#
+# Variables are `[beta, x, y, gamma]`, so `v[:case.n]` is the
+# hand-written model's point and every `FlashCase` method reads it
+# unchanged. Rows are the hand-written ones minus the two products, plus
+# the link:
+#
+#     [ balance_1..nc ] [ isofug_1..nc ] [ H_V ] [ H_L ] [ link ]
+
+DECLARED = "declared"
+
+
+def _declared_residuals(v, temperature_k, case: FlashCase):
+    """The declared model's rows: the hand-written rows without the products."""
+    n = case.n
+    rows = _residuals(v[:n], temperature_k, case)[: 2 * case.nc + 2]
+    return jnp.concatenate([rows, jnp.array([v[0] + v[n] - 1.0])])
+
+
+_COMPILED_DECLARED: Dict[int, tuple] = {}
+
+
+def _compiled_declared(case: FlashCase) -> tuple:
+    key = id(case)
+    hit = _COMPILED_DECLARED.get(key)
+    if hit is not None:
+        return hit
+
+    def fn(v, t):
+        return _declared_residuals(v, t, case)
+
+    # Forward-over-forward for the Hessian, for the reason `_compiled`
+    # documents.
+    built = (
+        jax.jit(fn),
+        jax.jit(jax.jacfwd(fn, argnums=0)),
+        jax.jit(
+            jax.jacfwd(
+                jax.jacfwd(lambda v, lam, t: jnp.dot(lam, fn(v, t)), argnums=0),
+                argnums=0,
+            )
+        ),
+    )
+    _COMPILED_DECLARED[key] = built
+    return built
+
+
+@dataclasses.dataclass
+class DeclaredFlash(LoweredFlash):
+    """`LoweredFlash`'s callbacks for the declared model, plus its pairs.
+
+    Pass ``complementarity`` to `pounce.Problem` with the rest; nothing
+    else differs. ``prod_row0`` is ``-1``: there are no product rows,
+    because writing them is the driver's job.
+    """
+
+    link_row: int = -1
+    complementarity: List[Tuple[int, int]] = dataclasses.field(default_factory=list)
+
+    def flash_point(self, v) -> np.ndarray:
+        """The hand-written model's ``[beta, x, y]`` from a declared point."""
+        return np.asarray(v, dtype=float)[: self.case.n]
+
+    def start(self, v_flash) -> np.ndarray:
+        """A declared start from a hand-written one: ``gamma = 1 - beta``."""
+        v_flash = np.asarray(v_flash, dtype=float)[: self.case.n]
+        return np.concatenate([v_flash, [1.0 - v_flash[0]]])
+
+    def pair_multipliers(self, mult_g):
+        raise TypeError(
+            "the declared model has no product rows; read the driver's "
+            "certificate from info['complementarity'] instead"
+        )
+
+    @property
+    def row_names(self) -> List[str]:
+        names = [f"balance_{c}" for c in self.case.mixture.names]
+        names += [f"isofugacity_{c}" for c in self.case.mixture.names]
+        return names + ["H_vapor", "H_liquid", "link_beta_gamma"]
+
+
+def declare(case: FlashCase, temperature_k: float) -> DeclaredFlash:
+    """Build the flash with its complementarity *declared*, not lowered.
+
+    Solve it with ``pounce.Problem(..., complementarity=nlp.complementarity)``.
+    """
+    nc = case.nc
+    n = case.n + 1
+    m = 2 * nc + 3
+    balance_row0, isofug_row0, h_row0, link_row = 0, nc, 2 * nc, 2 * nc + 2
+
+    cl = np.zeros(m)
+    cu = np.zeros(m)
+    cu[h_row0 : h_row0 + 2] = np.inf
+
+    c, j, h = _compiled_declared(case)
+    return DeclaredFlash(
+        case=case,
+        temperature_k=float(temperature_k),
+        lowering=DECLARED,
+        tau=None,
+        n=n,
+        m=m,
+        lb=np.concatenate([case.lb, [0.0]]),
+        ub=np.concatenate([case.ub, [1.0]]),
+        cl=cl,
+        cu=cu,
+        balance_row0=balance_row0,
+        isofug_row0=isofug_row0,
+        h_row0=h_row0,
+        prod_row0=-1,
+        _c=c,
+        _j=j,
+        _h=h,
+        _t=jnp.asarray(float(temperature_k), dtype=jnp.float64),
+        link_row=link_row,
+        # (row, var): H_V with beta's lower bound, H_L with gamma's.
+        complementarity=[(h_row0, 0), (h_row0 + 1, n - 1)],
     )
 
 

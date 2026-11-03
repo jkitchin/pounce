@@ -7,7 +7,17 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
-## [Unreleased]
+## [0.15.0] - 2026-11-03
+
+**Where MacMPEC stands at release.** The MacMPEC counts in the entries
+below were each measured when that change landed, against the references
+of the time. At release, measured 2026-11-01 (900 s per model) against
+references corrected where the published value was wrong (gh#1129:
+`bilevel1m` −55 → 0, `ex9.2.3` −55 → 5, both global optima by LP branch
+enumeration): of 170 models with a best-known value, **158 at it, 7 better
+than published, 5 at another local solution, none unsolved**, and all 4
+published-infeasible models reported infeasible. Table:
+`benchmarks/macmpec/README.md`.
 
 ### Added
 - **Complementarity answers that are not strongly stationary are checked for
@@ -21,7 +31,9 @@ changes.
   B-stationary (local minima the S certificate could not vouch for), and
   moves `siouxfls` from a non-B-stationary point (207.36) to the published
   best known (208.258). Python reads it as
-  `info["complementarity"]["b_stationarity"]`.
+  `info["complementarity"]["b_stationarity"]`, and the JSON solve report
+  carries it as `complementarity.b_stationarity` with `escapes`, the count
+  of branch NLPs that moved the point.
 - **Two-sided ("mixed") complementarity pairs are solved, not refused.** A
   pair whose variable is boxed and whose row is free — `l <= x <= u ⟂ g`,
   `g >= 0` at `l`, `g <= 0` at `u`, `g = 0` between; AMPL `complements` with
@@ -68,6 +80,14 @@ changes.
   `47_declared_complementarity.ipynb` works a contact-design example end to
   end. See the book page *Complementarity
   Constraints (MPCC)*.
+- **The phase-change flash example shows both routes.**
+  `pounce.examples.flash_mpcc.declare` builds the same flash with its pairs
+  declared (carrying `gamma = 1 - beta`, since a variable sits in one pair),
+  and notebook 38's new section 7 sets it beside the hand-written
+  continuation: the same 34/34 regimes and `beta` to 4e-10, every point
+  certified S, at about 1.7× the iterations (the exact stage's second
+  opinion is most of it). Notebook 47 is re-run against
+  the current driver.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
   are now native-only dependencies, and JSON mode reads stdin directly where
@@ -96,6 +116,19 @@ changes.
   `pause_command` and `interruptible` are `false`.
 
 ### Changed
+- **A solve whose primal has stopped and whose multipliers run away no
+  longer runs to `max_iter`.** Upstream's tiny-step stop waits for the
+  multiplier step to settle; at a point with non-unique multipliers it never
+  does, and the solve repeated one iterate until the iteration limit before
+  any fallback could start. The wait is now bounded by dual progress
+  (`tiny_step_dual_stall_iters`, default 10, `0` restores upstream): after
+  that many tiny primal steps without the dual infeasibility improving, the
+  tiny-step stop proceeds, and `mu_strategy_fallback` retries it as it does
+  an iteration limit. Converging multipliers and acceptable iterates are
+  never cut short. On the phase-change flash example the declared route's
+  continuation goes from 6 660 to 3 703 iterations over its path (3 000 of
+  the difference was one stalled solve at 332 K); the CLI fixture corpus is
+  unchanged on both legs, since none of it reaches the rule.
 - **Declared complementarity spends a quarter less time, with the same
   answers.** A finish no longer replaces a better relaxed point it started
   from (it is kept unless its objective drifted past what the relaxation's
@@ -178,6 +211,31 @@ changes.
   `pack-comp1-32` 252 s → 120 s.
 
 ### Fixed
+- **A solve refused before it iterates no longer reports the previous
+  solve's statistics.** An application reused for a second solve kept the
+  first one's record when the second returned before any attempt ran (too
+  few degrees of freedom, an option refusal, a presolve proof), so
+  `statistics()` — and Python's `info`, the C API's iteration count — showed
+  iterations for a solve that never took one. The complementarity driver
+  counted them: each exact finish refused for too few degrees of freedom was
+  recorded with the iteration count of the solve before it, and added to
+  `total_iterations` again (11 iterations per flash on the phase-change
+  example). The record is now reset at the start of every solve.
+- **One `mu_strategy_fallback` no longer switches it off for the rest of an
+  application's solves.** The retry put `mu_strategy` back as a caller-set
+  value, and a caller-set `mu_strategy` is what turns the default-on
+  fallback off, so every later solve on the same application ran without it.
+  The complementarity driver solves every stage on one application: on
+  `benchmarks/mpcc`'s `biactive_positive` (skew scaling), a fallback in the
+  continuation's finish left the exact stage's acceptable-level exit to the
+  gh#884 cold retry instead of the fallback. Both retries now restore the
+  option entry exactly as they found it (the gh#884 retry's
+  `perturb_always_cd` had the same write-back). Since the driver now gets the
+  fallback on every stage rather than at most one per run, a solve on one of
+  the driver's own iteration budgets (the exact stage's second opinion, the
+  finish, a retried rung) runs without it, unless the caller set
+  `mu_strategy_fallback`: reaching the budget is the driver's decision to
+  stop, and the re-solve would spend a second budget on it.
 - **A feasible LP is no longer reported infeasible off an approximate Farkas
   ray.** The convex solver's certificate test bounded `bᵀy + hᵀz` and
   `‖Aᵀy + Gᵀz‖` only against `‖(y,z)‖`. That proves no feasible point
@@ -24969,7 +25027,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/jkitchin/pounce/releases/tag/v0.15.0
 [0.14.0]: https://github.com/jkitchin/pounce/releases/tag/v0.14.0
 [0.13.0]: https://github.com/jkitchin/pounce/releases/tag/v0.13.0
 [0.12.0]: https://github.com/jkitchin/pounce/releases/tag/v0.12.0

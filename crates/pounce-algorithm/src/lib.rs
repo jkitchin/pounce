@@ -54,6 +54,7 @@ pub mod sqp;
 pub mod square_system;
 pub mod strategy;
 pub mod timing_stats;
+pub mod tiny_step_stall;
 pub mod unimplemented_options;
 pub mod upstream_options;
 

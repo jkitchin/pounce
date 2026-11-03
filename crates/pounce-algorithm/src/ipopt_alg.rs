@@ -429,6 +429,16 @@ pub struct IpoptAlgorithm {
     /// so the mu update can attempt to terminate. Mirrors
     /// `IpBacktrackingLineSearch::tiny_step_last_iteration_`.
     pub tiny_step_last_iteration: bool,
+    /// How long the tiny-step stop waits for a multiplier step that is not
+    /// settling (`tiny_step_dual_stall_iters`); see
+    /// [`crate::tiny_step_stall`]. Its `released()` is read by the
+    /// application layer, which retries a `StopAtTinyStep` reached this way
+    /// as it would an iteration limit.
+    pub tiny_stall: crate::tiny_step_stall::TinyStepDualStall,
+    /// Whether the current iterate passed the acceptable-level test at the
+    /// top of this iteration. An acceptable iterate has its own exit
+    /// (`acceptable_iter`), so the tiny-step stall rule leaves it to that.
+    curr_iterate_acceptable: bool,
     /// Cycle-detection state for [`Self::invoke_restoration`]: the
     /// outer `(x, s)` snapshot from the previous restoration entry,
     /// cleared on any iteration that exits via a normal line-search
@@ -765,6 +775,8 @@ impl IpoptAlgorithm {
             last_step_rel: Number::INFINITY,
             dual_divergence_signature: false,
             tiny_step_last_iteration: false,
+            tiny_stall: crate::tiny_step_stall::TinyStepDualStall::new(10),
+            curr_iterate_acceptable: false,
             last_resto_entry_x: None,
             last_resto_entry_s: None,
             last_resto_recovery_x: None,
@@ -3069,11 +3081,11 @@ impl IpoptAlgorithm {
         // restoration later fails. The recorder feeds
         // `acceptable_obj_change_tol`'s stability cross-check on
         // subsequent iterates.
-        if self
+        self.curr_iterate_acceptable = self
             .bundle
             .conv_check
-            .current_is_acceptable_with_state(nlp_err, &self.data, &self.cq)
-        {
+            .current_is_acceptable_with_state(nlp_err, &self.data, &self.cq);
+        if self.curr_iterate_acceptable {
             self.store_acceptable_point();
             let curr_f = self.cq.borrow().curr_f();
             self.bundle.conv_check.set_curr_acceptable_obj(curr_f);
@@ -3636,9 +3648,30 @@ impl IpoptAlgorithm {
                     }
                 }
                 let dy_amax = delta.y_c.amax().max(delta.y_d.amax());
-                self.tiny_step_last_iteration = dy_amax < self.tiny_step_y_tol;
+                let y_settled = dy_amax < self.tiny_step_y_tol;
+                // Upstream waits for the multiplier step before it lets a
+                // tiny primal step stop the solve, so that multipliers still
+                // converging are not cut off. Multipliers that are not
+                // converging never satisfy it, and the solve repeats the same
+                // iterate until max_iter. Bound the wait by dual progress:
+                // see `tiny_step_dual_stall_iters` in `upstream_options.rs`.
+                let du = self.cq.borrow().curr_dual_infeasibility_max();
+                let first = !self.tiny_stall.released();
+                let stalled = self
+                    .tiny_stall
+                    .observe(y_settled, self.curr_iterate_acceptable, du);
+                if stalled && first {
+                    tracing::debug!(target: "pounce::algorithm",
+                        "[POUNCE] tiny-step stall at iter {}: tiny primal steps \
+                         without dual progress (multiplier step {:.2e}); the \
+                         tiny-step stop no longer waits for it.",
+                        self.data.borrow().iter_count, dy_amax,
+                    );
+                }
+                self.tiny_step_last_iteration = y_settled || stalled;
             } else {
                 self.tiny_step_last_iteration = false;
+                self.tiny_stall.not_tiny();
                 let alpha_init = self.alpha_init.min(alpha_p_max);
                 let alpha_dual = self.alpha_init.min(alpha_d_max);
                 let outcome = self.bundle.line_search.find_acceptable_trial_point(
@@ -3814,6 +3847,12 @@ impl IpoptAlgorithm {
 
     /// Whether this solve ever saw gh#884's dual-divergence-at-a-settled-primal
     /// signature. Sticky; see [`Self::dual_divergence_signature`].
+    /// Whether the tiny-step stall rule released the tiny-step stop in this
+    /// solve; see `tiny_step_dual_stall_iters`.
+    pub fn tiny_step_dual_stall(&self) -> bool {
+        self.tiny_stall.released()
+    }
+
     pub fn dual_divergence_signature(&self) -> bool {
         self.dual_divergence_signature
     }

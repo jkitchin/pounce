@@ -232,10 +232,17 @@ this model only on its second attempt.
 
 `large_scale/laptime` (n = 58 014, m_d = 6000, factor 0.17) shows the same
 pattern without a status change. Its iteration counts are 327 at cap 0, 331
-at 500, **756** at 1000 and 284 at 2000, and every run reaches f = 65.2947.
+at 500, **756** at 1000 and 284 at 2000. Cap 1000 lands in a different,
+slightly lower local minimum, f = 65.29277 (the others reach 65.2947, as does
+Ipopt): re-solved 2026-11-02 at `f1787277` it is a genuine KKT point (scaled
+constraint violation 1.1e-10, dual infeasibility 7.1e-11), not a loose stop.
 At cap 1000 it took 310 s of wall-clock time. That is past 300 s, but the
 sweep's limit is on CPU time (`max_cpu_time`), so the run still ended
 `SolveSucceeded`; a harness with a 300 s wall-clock limit would lose it.
+The CPU limit is no wider a margin: the 0.15.0 sweep finished it at 756
+iterations, while a standalone re-solve of the same binary under
+`max_cpu_time=300` ran out at iteration 729 (244 s wall). Expect it to flip
+to `Maximum_CpuTime_Exceeded` between otherwise identical runs.
 
 ### What the cap does on every model it reaches
 
@@ -479,3 +486,45 @@ A fix would need a status between certified and not, like Clarabel's
 ray. It works if `farkas_far_feasible_no_box.nl` stays uncertified, the
 `two_row` borderline in `ipm.rs` with `ε = 1e-4` stops being certified,
 and the netlib/MIPLIB counts above hold.
+
+## CI: every workflow is pinned to `ubuntu-24.04`, not `ubuntu-latest`
+
+Pinned on 2026-11-03 to ship 0.15.0, when GitHub moved `ubuntu-latest` from
+24.04 to 26.04 between two `main` runs (green at `f1787277` on 24.04, red at
+`4315417d`, a README-only commit, on 26.04). Two jobs broke, neither because
+of a code change.
+
+### What is wrong on 26.04
+
+- **`Test`: a stale build cache, not a build defect.** `Swatinem/rust-cache`
+  keys on `Linux-x64-<hash>`, with no OS release in it, so the 26.04 runner
+  restored the 24.04 target directory. PyO3's cached build configuration
+  still names Python 3.12, and the link of `pounce-studio-pyo3` fails with
+  `rust-lld: error: unable to find library -lpython3.12`: the new image has
+  a different Python and no 3.12 library. Every workflow that uses
+  `rust-cache` (`ci`, `coverage`, `docs`, `release-crates`,
+  `release-pounce`) is exposed, which is why all of them are pinned, not
+  only `ci.yml`.
+- **`CasADi plugin parity`: two bitwise checks.** `casadi/test_parity.py`'s
+  `codegen fd/declared == interpreted` and `codegen fd/jacobian ==
+  interpreted` require the compiled generated code and the interpreted
+  solve to reach the same `x` exactly (`norm_inf == 0.0`) under
+  `hessian_approximation=finite-difference`. On 26.04 they do not. Cause not
+  yet investigated: the new compiler's floating-point code generation (FMA
+  contraction, a different libm) is the first suspect, a CasADi version
+  change the second.
+
+### How to unpin
+
+1. Put the image and the interpreter in the cache key, for example a step
+   writing `ImageOS`, `ImageVersion` and `python3 -c 'import sys;
+   print(sys.version_info[:2])'` to `$GITHUB_ENV` and passing it as
+   `rust-cache`'s `key`, so an image change starts a fresh cache instead of
+   restoring one built against another system.
+2. Find why the finite-difference codegen run differs: compile the generated
+   C with `-ffp-contract=off` and compare. If the difference is rounding, the
+   check should state a tolerance it can defend instead of `== 0.0`; if it
+   is not, it is a real codegen divergence.
+3. Run every workflow once on `ubuntu-26.04` (a `workflow_dispatch` of
+   `ci.yml` on a branch, plus a dry-run `release-crates`) before replacing
+   the pins.

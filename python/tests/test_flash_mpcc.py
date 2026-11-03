@@ -345,3 +345,136 @@ def test_the_smoke_cli_rejects_a_bad_record(
         "only the doctored temperature should be reported as failing; got "
         f"{failed_lines}"
     )
+
+
+# --------------------------------------------------------------------
+# The same flash with its pairs declared (`flash_mpcc.declare`)
+# --------------------------------------------------------------------
+#
+# Everything above runs the hand-written route: the product rows, the tau
+# schedule and the finish are the harness's. Here POUNCE's complementarity
+# driver gets the pairs and chooses for itself, from the same cold start,
+# and is held to the same oracle. A failure here and not above is a
+# regression in the driver, not in the model.
+
+
+@pytest.fixture(scope="module")
+def declared(case):
+    import numpy as np
+    import pounce
+    from pounce.examples.flash_mpcc import declare
+
+    out = {}
+    for t in flash_run.SMOKE_TEMPERATURES:
+        nlp = declare(case, t)
+        prob = pounce.Problem(
+            n=nlp.n, m=nlp.m, problem_obj=nlp, lb=nlp.lb, ub=nlp.ub,
+            cl=nlp.cl, cu=np.where(np.isfinite(nlp.cu), nlp.cu, 1e20),
+            complementarity=nlp.complementarity,
+        )
+        prob.add_option("print_level", 0)
+        prob.add_option("tol", 1e-8)
+        v, info = prob.solve(x0=nlp.start(cold_start(case, t)))
+        out[t] = (nlp.flash_point(v), info, flash(t, case.pressure_pa, case.mixture))
+    return out
+
+
+@pytest.mark.parametrize("temperature_k", flash_run.SMOKE_TEMPERATURES)
+def test_the_declared_flash_matches_the_oracle(case, declared, temperature_k):
+    v, info, ref = declared[temperature_k]
+    cc = info["complementarity"]
+    assert cc["accepted_by"] is not None, cc["summary"]
+    assert cc["certificate"]["class"] == "S", cc["summary"]
+    assert case.regime(v) == ref.regime
+    beta, x, y = case.unpack(v)
+    assert beta == pytest.approx(ref.beta, abs=1e-6)
+    assert x.sum() == pytest.approx(ref.sum_x, abs=1e-6)
+    assert y.sum() == pytest.approx(ref.sum_y, abs=1e-6)
+    src = case.source_feasibility(v, temperature_k)
+    assert src["compl_max"] <= CORNER_TOL, src
+
+
+def test_the_declared_model_is_the_hand_written_one(case):
+    """Same rows, same derivatives: `declare` drops the two products and adds
+    `beta + gamma = 1`, and nothing else moves."""
+    import numpy as np
+    from pounce.examples.flash_mpcc import declare, fd_check
+
+    t = 300.0
+    v = cold_start(case, t)
+    hand, dec = lower(case, t, "prod_ineq"), declare(case, t)
+    w = dec.start(v)
+    np.testing.assert_array_equal(
+        dec.constraints(w)[: 2 * case.nc + 2], hand.constraints(v)[: 2 * case.nc + 2]
+    )
+    assert dec.constraints(w)[dec.link_row] == pytest.approx(0.0, abs=1e-15)
+    # The selftest's thresholds (benchmarks/flash/selftest.py), set to the
+    # central difference's own truncation error on this model.
+    from flash.selftest import HESS_TOL, JAC_TOL
+
+    err = fd_check(dec, w)
+    assert err["jac"] <= JAC_TOL and err["hess"] <= HESS_TOL, err
+
+
+# The start the 1 K path hands 332 K: 331 K's all-vapor answer, to the bit.
+# At a single-phase point the square flash has more active constraints than
+# variables, its multipliers are not unique, and from this start they run
+# away while the primal step sits at round-off. Upstream's tiny-step stop
+# waits for the multiplier step to settle, which it never does: the first
+# continuation rung took the full 3000 iterations before the adaptive-mu
+# re-solve finished it. `tiny_step_dual_stall_iters` bounds that wait.
+_START_332 = (
+    "0x1.ffffffffec2ebp-1", "0x1.c54e81ce225cdp-4", "0x1.80d814c05b333p-1",
+    "0x1.0000000007b73p-1", "0x1.fffffffff606ap-2",
+)
+
+
+def _declared_332(stall_iters):
+    import numpy as np
+    import pounce
+    from pounce.examples.flash_mpcc import GATE1_FLASH, declare
+
+    nlp = declare(GATE1_FLASH, 332.0)
+    prob = pounce.Problem(
+        n=nlp.n, m=nlp.m, problem_obj=nlp, lb=nlp.lb, ub=nlp.ub,
+        cl=nlp.cl, cu=np.where(np.isfinite(nlp.cu), nlp.cu, 1e20),
+        complementarity=nlp.complementarity,
+    )
+    for k, v in {
+        "print_level": 0, "tol": 1e-8, "complementarity_strategy": "continuation",
+        "tiny_step_dual_stall_iters": stall_iters,
+    }.items():
+        prob.add_option(k, v)
+    v0 = np.array([float.fromhex(h) for h in _START_332])
+    v, info = prob.solve(x0=nlp.start(v0))
+    return nlp.flash_point(v), info
+
+
+def test_a_stalled_rung_is_cut_short_not_run_to_max_iter(case):
+    """The default bound ends the stalled attempt early, and the run reaches
+    the same certified answer as upstream's rule for a fraction of the
+    iterations. What happens after the cut is a trajectory and differs by
+    platform, so it is not asserted: on arm64 macOS the mu-strategy fallback
+    rescues the rung (57 iterations, against 3 000 + the re-solve; 132 in all
+    against 3 089) and the continuation answers; on x86_64 Linux the
+    fallback's re-solve stalls too, under either rule, and the l1 penalty
+    answers (86 in all against 6 012). Where upstream's rule does not stall
+    from this start, the comparison is skipped rather than passed without
+    reaching the branch."""
+    import numpy as np
+
+    v_up, info_up = _declared_332(0)
+    cc_up = info_up["complementarity"]
+    first_up = cc_up["solves"][0][3]
+    if first_up < 1000:
+        pytest.skip(f"upstream's rule does not stall from this start here ({first_up} iterations)")
+    v, info = _declared_332(10)
+    cc = info["complementarity"]
+    # Cut short: the stalled attempt no longer runs to max_iter.
+    assert cc["solves"][0][3] < 200, cc["solves"][0]
+    assert cc["total_iterations"] < cc_up["total_iterations"] / 4, (
+        cc["total_iterations"], cc_up["total_iterations"])
+    # The same certified answer as upstream's rule, and the right regime.
+    assert cc["certificate"]["class"] == cc_up["certificate"]["class"] == "S"
+    assert np.max(np.abs(np.asarray(v) - np.asarray(v_up))) < 1e-6, (v, v_up)
+    assert case.regime(v) == case.regime(v_up) == flash(332.0, case.pressure_pa, case.mixture).regime

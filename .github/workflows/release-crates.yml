@@ -50,7 +50,7 @@ jobs:
     # receive `v*` tags when they sync — without this a fork's sync is a
     # failed publish run and an email (gh#599).
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: crates-io
       url: https://crates.io/crates/pounce-cli

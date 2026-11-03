@@ -102,7 +102,8 @@ impl MpccOutcome {
     pub fn report_info(&self) -> pounce_solve_report::ComplementarityInfo {
         use pounce_algorithm::mpcc::StationarityClass;
         use pounce_solve_report::{
-            ComplementarityCertificateInfo, ComplementarityInfo, ComplementaritySolveInfo,
+            ComplementarityBStationarityInfo, ComplementarityCertificateInfo, ComplementarityInfo,
+            ComplementaritySolveInfo,
         };
         // JSON has no infinity; a quantity that was not measured is `null`.
         let finite = |v: Number| v.is_finite().then_some(v);
@@ -158,6 +159,22 @@ impl MpccOutcome {
                     primal_violation: finite(c.primal_violation),
                     feasible: c.feasible,
                 }),
+            b_stationarity: self.b_check.as_ref().map(|bc| {
+                use pounce_algorithm::mpcc::BVerdict;
+                let (verdict, reason) = match &bc.verdict {
+                    BVerdict::B => ("B", None),
+                    BVerdict::NotB { .. } => ("not_B", None),
+                    BVerdict::NotChecked(why) => ("not_checked", Some(why.to_string())),
+                };
+                ComplementarityBStationarityInfo {
+                    verdict: verdict.to_string(),
+                    reason,
+                    n_biactive: bc.n_biactive,
+                    branches_solved: bc.branches_solved,
+                    enumerated: bc.enumerated,
+                }
+            }),
+            escapes: self.escapes,
         }
     }
 }
@@ -251,11 +268,25 @@ pub fn solve_mpcc(
         .get_integer_value("max_iter", "")
         .map(|(v, _)| v)
         .unwrap_or(3000);
+    // A budget is the driver's own decision to stop, so a budgeted solve
+    // that reaches it runs without `mu_strategy_fallback`, which would
+    // otherwise treat the cap as a stall and spend a second budget on a
+    // flipped-schedule re-solve. Unless the caller set the option: then it
+    // is theirs. Unbudgeted solves (the continuation's rungs) keep it.
+    let caller_set_fallback = matches!(
+        app.options().get_bool_value("mu_strategy_fallback", ""),
+        Ok((_, true))
+    );
     let set_budget = |app: &mut IpoptApplication, budget: usize| {
         let it = budgeted_max_iter(budget, caller_max_iter);
         let _ = app
             .options_mut()
             .read_from_str(&format!("max_iter {it}\n"), true);
+        if !caller_set_fallback {
+            let _ = app
+                .options_mut()
+                .read_from_str("mu_strategy_fallback no\n", true);
+        }
     };
 
     let mut solves: Vec<MpccSolveRecord> = Vec::new();

@@ -151,6 +151,32 @@ pub struct ComplementarityInfo {
     /// model could not be evaluated there.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub certificate: Option<ComplementarityCertificateInfo>,
+    /// The B-stationarity check of the reported point: run when it is
+    /// feasible and not certified S (S implies B). `None` when it did not
+    /// run. Additive; older reports without the field deserialize unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub b_stationarity: Option<ComplementarityBStationarityInfo>,
+    /// Branch NLPs that moved the reported point off a non-B-stationary
+    /// one. Additive; reads `0` on reports written before the field existed.
+    #[serde(default)]
+    pub escapes: usize,
+}
+
+/// The B-stationarity check of the complementarity driver's reported point,
+/// keyed like Python's `info["complementarity"]["b_stationarity"]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplementarityBStationarityInfo {
+    /// `B` (no branch descends), `not_B` (one does) or `not_checked`.
+    pub verdict: String,
+    /// Why the check was not decided; `null` unless `verdict` is
+    /// `not_checked`.
+    pub reason: Option<String>,
+    pub n_biactive: usize,
+    /// Branch LPs solved.
+    pub branches_solved: usize,
+    /// Whether every branch was enumerated (`false`: the heuristic used above
+    /// the enumeration limit, which can find a descent but never certify B).
+    pub enumerated: bool,
 }
 
 /// One lowered solve of the complementarity driver.
@@ -1306,6 +1332,14 @@ mod tests {
                 primal_violation: Some(4.6e-4),
                 feasible: false,
             }),
+            b_stationarity: Some(ComplementarityBStationarityInfo {
+                verdict: "not_checked".into(),
+                reason: Some("the point is infeasible".into()),
+                n_biactive: 0,
+                branches_solved: 0,
+                enumerated: true,
+            }),
+            escapes: 0,
         });
         let report = b.finish();
         let text = serde_json::to_string(&report).unwrap();
@@ -1315,6 +1349,18 @@ mod tests {
         assert_eq!(c.reported, "verdict");
         assert_eq!(c.solves[0].max_abs_product, None);
         assert_eq!(c.certificate.unwrap().primal_violation, Some(4.6e-4));
+        assert_eq!(c.b_stationarity.unwrap().verdict, "not_checked");
+
+        // A block written before `b_stationarity` and `escapes` existed
+        // still reads back: the check absent, no escapes.
+        let mut old: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let blk = old["complementarity"].as_object_mut().unwrap();
+        blk.remove("b_stationarity");
+        blk.remove("escapes");
+        let back: SolveReport = serde_json::from_value(old).expect("pre-field report");
+        let c = back.complementarity.expect("block");
+        assert!(c.b_stationarity.is_none());
+        assert_eq!(c.escapes, 0);
 
         // A report without the block omits the key and still reads back.
         let plain = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect).finish();

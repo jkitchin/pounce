@@ -391,6 +391,8 @@ one whose point was reported; `total_iterations` is what the run cost.
 | `total_iterations` | integer | Iterations summed over `solves`. |
 | `max_abs_product` | float \| null | The reported point's complementarity violation: the largest `|G·H|` over one-sided pairs, and the largest positive part of a mixed pair's two products (which are legitimately nonzero at a bound). |
 | `certificate` | object \| omitted | Stationarity class of the reported point; omitted only if the model could not be evaluated there. Fields: `class` (`S`, `W`, `none`, `not_searched`), `n_pairs`, `n_biactive`, `n_neither`, `multipliers_unique`, `residual` (`null` when no multipliers were computed), `resid_tol` (`null` if non-finite), `tight` (residual within the tight floor rather than only the acceptance band), `primal_violation` (largest row or bound violation, model units), `feasible` (`primal_violation <= constr_viol_tol`; an infeasible point classifies `none`). |
+| `b_stationarity` | object \| omitted | The B-stationarity check of the reported point, run when it is feasible and not certified `S` (an `S` point is B-stationary); omitted when it did not run. Fields: `verdict` (`B`: no branch of the biactive pairs descends; `not_B`: one does; `not_checked`), `reason` (why it was `not_checked`, else `null`), `n_biactive`, `branches_solved` (branch LPs), `enumerated` (`false` above the enumeration limit, where one heuristic branch can find a descent but never certify `B`). Omitted on reports written before the field existed. |
+| `escapes` | integer | Branch NLPs that moved the point off a non-B-stationary one. Every branch NLP tried, kept or not, is a row of `solves`. Reads `0` on reports written before the field existed. |
 
 ## Detail levels
 

@@ -315,6 +315,21 @@ fn an_over_determined_model_is_answered_through_the_inequality_finish() {
         "the equality finish should have been refused: {:?}",
         out.solves
     );
+    // A refused solve never iterated. It used to be recorded with the
+    // iteration count of the solve before it -- the application's statistics
+    // were left standing by a solve that returned before running -- and
+    // `total_iterations` counted those iterations twice.
+    for s in &out.solves {
+        if s.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom {
+            assert_eq!(s.iterations, 0, "{:?}", out.solves);
+        }
+    }
+    assert_eq!(
+        out.total_iterations,
+        out.solves.iter().map(|s| s.iterations).sum::<usize>(),
+        "{:?}",
+        out.solves
+    );
     assert!(
         (out.x[0] - 0.5).abs() < 1e-5 && (out.x[1] - 0.5).abs() < 1e-5,
         "{:?}",
@@ -1285,6 +1300,16 @@ fn iteration_budgets_respect_and_restore_the_callers_max_iter() {
             app.options_mut()
                 .set_integer_value("max_iter", it, true, false)
                 .unwrap();
+            // `max_iter` bounds one attempt. Under 7 the continuation does
+            // not answer, so the exact stage runs on the caller's own cap,
+            // where a `mu_strategy_fallback` re-solve is a second attempt
+            // exactly as in a standalone solve. Off, the per-solve count is
+            // the attempt's. (It used to hold with the fallback on only
+            // because the first fallback in a run switched it off for the
+            // rest.)
+            app.options_mut()
+                .set_string_value("mu_strategy_fallback", "no", true, false)
+                .unwrap();
         }
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
             [0.0, 0.5, 0.5],
@@ -1586,7 +1611,21 @@ fn run_tnlp<T: TNLP + 'static>(
     pairs: Vec<ComplementarityPair>,
     max_iter: Option<Index>,
 ) -> (MpccOutcome, Vec<String>) {
+    run_tnlp_with(model, pairs, max_iter, &[])
+}
+
+fn run_tnlp_with<T: TNLP + 'static>(
+    model: T,
+    pairs: Vec<ComplementarityPair>,
+    max_iter: Option<Index>,
+    strings: &[(&str, &str)],
+) -> (MpccOutcome, Vec<String>) {
     let mut app = app();
+    for (k, v) in strings {
+        app.options_mut()
+            .set_string_value(k, v, true, false)
+            .unwrap();
+    }
     if let Some(mi) = max_iter {
         app.options_mut()
             .set_integer_value("max_iter", mi, true, false)
@@ -1735,9 +1774,11 @@ impl TNLP for MuAtStart {
 /// the previous rung's `x` alone, at the barrier that rung ended on rather
 /// than `mu_init`'s default `0.1`, on a budget of twice its iterations (at
 /// least `pounce_algorithm::mpcc::RUNG_RETRY_FLOOR`, never above the caller's `max_iter`). On
-/// `concave_corner(2)` under `max_iter = 12` the warm `τ = 1e-2` rung runs
-/// out of iterations and the retry converges in 7 (the same holds for every
-/// `max_iter` from 10 to 15), after which the schedule moves on to `1e-3`.
+/// `concave_corner(2)` under `max_iter = 21`, with `mu_strategy_fallback`
+/// off, the warm `τ = 1e-1` rung runs out of iterations and the retry
+/// converges in 20 (also under 20; from 7 to 19 the retry fails too, and
+/// from 22 the rung converges), after which the schedule moves on to `1e-2`.
+/// (Tuned at 12 on `1e-2` while a first fallback switched the rest off.)
 /// The retry's failing arm -- the schedule ending at the last converged
 /// rung -- is reached by `scholtes4` under `max_iter = 6`, below.
 #[test]
@@ -1747,15 +1788,24 @@ fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
         inner: concave_corner(2),
         mu0: Rc::clone(&mu0),
     };
-    let (out, lines) = run_tnlp(
+    // `mu_strategy_fallback` off: with it on, the fallback rescues the rung
+    // before the driver's retry is reached
+    // (`the_fallback_stays_live_on_every_rung_of_a_run`).
+    let (out, lines) = run_tnlp_with(
         model,
         vec![ComplementarityPair { row: 1, var: 0 }],
-        Some(12),
+        Some(21),
+        &[("mu_strategy_fallback", "no")],
     );
     let mu0 = mu0.borrow();
+    // The branch stage's solves send this model no iteration 0 of their
+    // own, and come last, so the count is every other solve's.
     assert_eq!(
         mu0.len(),
-        out.solves.len(),
+        out.solves
+            .iter()
+            .filter(|s| s.stage != MpccStage::Branch)
+            .count(),
         "one iteration 0 per solve: {:?}",
         out.solves
     );
@@ -1770,7 +1820,7 @@ fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
         .position(|w| w[0].1.tau == w[1].1.tau && w[0].1.tau.is_some())
         .unwrap_or_else(|| panic!("no rung was retried: {:?} {lines:#?}", out.solves));
     let ((_, failed), (retry_idx, retry)) = (cont[k], cont[k + 1]);
-    assert_eq!(failed.tau, Some(1e-2), "{:?}", out.solves);
+    assert_eq!(failed.tau, Some(1e-1), "{:?}", out.solves);
     assert_eq!(
         failed.status,
         ApplicationReturnStatus::MaximumIterationsExceeded
@@ -1793,7 +1843,7 @@ fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
     // The schedule goes on past the retried rung: the next `τ` runs, warm
     // from the retry.
     let taus: Vec<_> = cont.iter().map(|(_, s)| s.tau).collect();
-    assert_eq!(taus.get(k + 2), Some(&Some(1e-3)), "{taus:?}");
+    assert_eq!(taus.get(k + 2), Some(&Some(1e-2)), "{taus:?}");
 }
 
 /// The retry's other arm: on `scholtes4` under `max_iter = 6` the warm
@@ -1898,4 +1948,45 @@ fn two_answers_at_zero_that_differ_by_solver_noise_skip_the_cold_solve() {
             }
         }
     }
+}
+
+/// The driver solves every stage on one application, and a
+/// `mu_strategy_fallback` in one used to switch it off for the rest: the
+/// retry put `mu_strategy` back as a caller-set value, which disables the
+/// default-on fallback. On `concave_corner(2)` under `max_iter = 12` the
+/// `τ = 1e-1` and `τ = 1e-2` rungs both reach the cap and both must be
+/// rescued, each at more than the cap (attempt plus re-solve); with the leak
+/// only the first was, and `1e-2` fell to the driver's own rung retry.
+#[test]
+fn the_fallback_stays_live_on_every_rung_of_a_run() {
+    let mu0 = Rc::new(RefCell::new(Vec::new()));
+    let model = MuAtStart {
+        inner: concave_corner(2),
+        mu0: Rc::clone(&mu0),
+    };
+    let (out, _) = run_tnlp(
+        model,
+        vec![ComplementarityPair { row: 1, var: 0 }],
+        Some(12),
+    );
+    let rescued: Vec<_> = out
+        .solves
+        .iter()
+        .filter(|s| {
+            s.stage == MpccStage::Continuation
+                && s.tau.is_some()
+                && s.iterations > 12
+                && s.status == ApplicationReturnStatus::SolveSucceeded
+        })
+        .map(|s| s.tau)
+        .collect();
+    assert_eq!(rescued, vec![Some(1e-1), Some(1e-2)], "{:?}", out.solves);
+    // No rung was retried by the driver: every `τ` appears once.
+    let taus: Vec<_> = out
+        .solves
+        .iter()
+        .filter(|s| s.stage == MpccStage::Continuation)
+        .map(|s| s.tau)
+        .collect();
+    assert!(taus.windows(2).all(|w| w[0] != w[1]), "{:?}", out.solves);
 }
