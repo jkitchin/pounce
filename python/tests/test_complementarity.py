@@ -273,6 +273,34 @@ def test_the_solve_report_carries_the_complementarity_block(tmp_path):
     assert block["total_iterations"] > report["statistics"]["iteration_count"]
 
 
+def test_the_solve_report_carries_the_b_stationarity_check(tmp_path):
+    """The report's `b_stationarity` and `escapes` agree with `info`'s.
+
+    ralph1's origin is the branch that reaches them: a W point, so the check
+    runs (an S answer skips it, which is the other test's branch). Before
+    these fields existed the report omitted the check entirely, so a CLI or
+    `--json-output` reader could not see the verdict Python could."""
+    import json
+
+    path = tmp_path / "report.json"
+    prob = pounce.Problem(
+        n=2, m=1, problem_obj=Ralph1(), lb=[0.0, 0.0], ub=[INF, INF], cl=[0.0], cu=[INF],
+        complementarity=[(0, 1)],
+    )
+    prob.add_option("print_level", 0)
+    _, info = prob.solve(np.array([1.0, 2.0]), report_path=str(path))
+    block, cc = json.loads(path.read_text())["complementarity"], info["complementarity"]
+    assert cc["b_stationarity"] is not None, cc
+    for key in ("verdict", "reason", "n_biactive", "branches_solved", "enumerated"):
+        assert block["b_stationarity"][key] == cc["b_stationarity"][key], key
+    assert block["escapes"] == cc["escapes"] == 0
+
+    # An S answer: the check does not run, and the report omits it.
+    path_s = tmp_path / "report_s.json"
+    qpec_problem(complementarity=[(0, 1), (1, 2)]).solve(np.zeros(3), report_path=str(path_s))
+    assert "b_stationarity" not in json.loads(path_s.read_text())["complementarity"]
+
+
 def test_a_solve_report_without_pairs_has_no_complementarity_block(tmp_path):
     import json
 

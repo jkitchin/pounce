@@ -102,7 +102,8 @@ impl MpccOutcome {
     pub fn report_info(&self) -> pounce_solve_report::ComplementarityInfo {
         use pounce_algorithm::mpcc::StationarityClass;
         use pounce_solve_report::{
-            ComplementarityCertificateInfo, ComplementarityInfo, ComplementaritySolveInfo,
+            ComplementarityBStationarityInfo, ComplementarityCertificateInfo, ComplementarityInfo,
+            ComplementaritySolveInfo,
         };
         // JSON has no infinity; a quantity that was not measured is `null`.
         let finite = |v: Number| v.is_finite().then_some(v);
@@ -158,6 +159,22 @@ impl MpccOutcome {
                     primal_violation: finite(c.primal_violation),
                     feasible: c.feasible,
                 }),
+            b_stationarity: self.b_check.as_ref().map(|bc| {
+                use pounce_algorithm::mpcc::BVerdict;
+                let (verdict, reason) = match &bc.verdict {
+                    BVerdict::B => ("B", None),
+                    BVerdict::NotB { .. } => ("not_B", None),
+                    BVerdict::NotChecked(why) => ("not_checked", Some(why.to_string())),
+                };
+                ComplementarityBStationarityInfo {
+                    verdict: verdict.to_string(),
+                    reason,
+                    n_biactive: bc.n_biactive,
+                    branches_solved: bc.branches_solved,
+                    enumerated: bc.enumerated,
+                }
+            }),
+            escapes: self.escapes,
         }
     }
 }
