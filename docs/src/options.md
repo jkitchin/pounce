@@ -496,7 +496,10 @@ Where `delta_c` is the right remedy this never fires: on `eigena2` and
 POUNCE extensions; not upstream Ipopt options. Defaults `1000` and `1`.
 `perturb_slack_max_rows=0` (or `perturb_slack_fact=1` on any model with
 at most `perturb_slack_max_rows` inequality rows) is upstream's rule
-exactly.
+exactly. A model with declared complementarity pairs runs its lowered
+solves with `perturb_slack_max_rows=0` unless you set the option: the
+lowering's own product rows push a model past the 1000-row budget
+([Complementarity Constraints](complementarity.md)).
 
 When the factorization reports the wrong inertia, the solver adds
 `delta_w` to the Hessian block — that is where the curvature defect is —
