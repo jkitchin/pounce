@@ -34,7 +34,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 47952.70167983085,
+    "pounce_obj": 47952.70167983145,
     "ipopt_obj": 47952.70140972709,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1232,11 +1232,11 @@
   {
     "name": "cresc132",
     "suite": "Vanderbei",
-    "pounce_status": "Optimal",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 0.8577054077694786,
+    "pounce_obj": 10.54952840054466,
     "ipopt_obj": -4.447533416283649e-15,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -1444,7 +1444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2.999999999243056,
+    "pounce_obj": -3.0000000000000004,
     "ipopt_obj": -3.0000000024822864,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2454,7 +2454,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -17.834687618556867,
+    "pounce_obj": -17.84815540257076,
     "ipopt_obj": -17.862886560246064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3254,7 +3254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -8.498464221060043,
+    "pounce_obj": -8.498464223154679,
     "ipopt_obj": -8.49846425114183,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3264,7 +3264,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -29.999999998203712,
+    "pounce_obj": -30.0,
     "ipopt_obj": -30.000000122494,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3284,7 +3284,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3934649810012303,
+    "pounce_obj": 1.3934649806893016,
     "ipopt_obj": 1.3934649647312893,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3444,7 +3444,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.9999999998598021,
+    "pounce_obj": 1.0,
     "ipopt_obj": 0.9999999800415539,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3574,7 +3574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -43.99999999955411,
+    "pounce_obj": -44.0,
     "ipopt_obj": -44.0000001749944,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3784,7 +3784,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.9535288570223841,
+    "pounce_obj": 0.9535288568047804,
     "ipopt_obj": 0.9535288198704925,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4804,7 +4804,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.414213560757855,
+    "pounce_obj": -1.4142135623730951,
     "ipopt_obj": -1.4142135673467737,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4814,7 +4814,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7.199999999964165,
+    "pounce_obj": 7.200000000000004,
     "ipopt_obj": 7.199999853410457,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4824,7 +4824,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.747769637164916e-09,
+    "pounce_obj": -1.3010398772865839e-17,
     "ipopt_obj": 4.011808472577404e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4974,7 +4974,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.9999999991294611,
+    "pounce_obj": -1.0,
     "ipopt_obj": -1.0000000049881925,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4984,7 +4984,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.9999999994015343,
+    "pounce_obj": -0.9999999999999998,
     "ipopt_obj": -1.0000000069462984,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5004,7 +5004,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 115.70643952100815,
+    "pounce_obj": 115.70643952100693,
     "ipopt_obj": 115.70643951851932,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5274,7 +5274,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.6332838536449588,
+    "pounce_obj": -0.635969134687478,
     "ipopt_obj": -0.6332838522530307,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5394,7 +5394,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.08715962993690961,
+    "pounce_obj": 0.08715963009946567,
     "ipopt_obj": 0.08715962891120173,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5414,7 +5414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.446239008763607e-05,
+    "pounce_obj": 4.4506154613264815e-05,
     "ipopt_obj": 4.45050019224728e-05,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6504,7 +6504,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -43.99999999907837,
+    "pounce_obj": -43.999999999999986,
     "ipopt_obj": -44.00000017949011,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7004,7 +7004,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8361.422731272762,
+    "pounce_obj": 8361.422731272785,
     "ipopt_obj": 8361.422737666273,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7504,7 +7504,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1354031.3156131539,
+    "pounce_obj": 1354031.3156131532,
     "ipopt_obj": 1354031.3162789855,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7564,7 +7564,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1402530.8662058883,
+    "pounce_obj": 1402530.8662058767,
     "ipopt_obj": 1402530.8662058688,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7574,7 +7574,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 973432.4717634431,
+    "pounce_obj": 973432.4717634511,
     "ipopt_obj": 973432.4717722975,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7624,7 +7624,7 @@
     "suite": "Grid",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 454945.9784716674,
+    "pounce_obj": 454945.9784716686,
     "ipopt_obj": 454945.9784715221,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7804,7 +7804,7 @@
     "suite": "LargeScale",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 65.29466063723913,
+    "pounce_obj": 65.29277391614413,
     "ipopt_obj": 65.29467800296965,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7854,7 +7854,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.008589722144077324,
+    "pounce_obj": 0.008525683619624047,
     "ipopt_obj": 0.008675495668633269,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7862,11 +7862,11 @@
   {
     "name": "WM_CFy",
     "suite": "Mittelmann",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": null,
+    "pounce_obj": 1.2319037641282715,
     "ipopt_obj": 1.2218235931043862,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -7874,7 +7874,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3795.2009505566143,
+    "pounce_obj": -3795.2009505566148,
     "ipopt_obj": -3795.200950556614,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7884,7 +7884,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 207096.6075605355,
+    "pounce_obj": 207096.6075604849,
     "ipopt_obj": 207096.6075400124,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8124,7 +8124,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Solver_Error",
-    "pounce_obj": -0.9277211161281825,
+    "pounce_obj": -0.9277211161289006,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8174,7 +8174,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 93279.08929311552,
+    "pounce_obj": 93279.08929311548,
     "ipopt_obj": 93279.08901274561,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8192,11 +8192,11 @@
   {
     "name": "qcqp1500-1nc",
     "suite": "Mittelmann",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": null,
+    "pounce_obj": 4778479.68616761,
     "ipopt_obj": null,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -8274,7 +8274,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 2.333099018756607,
+    "pounce_obj": 2.333095905024014,
     "ipopt_obj": 15.48468449656994,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8284,7 +8284,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": 1.4059755770799616,
+    "pounce_obj": 1.4059686156934952,
     "ipopt_obj": 29.039905764280274,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -8314,7 +8314,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 83623.8201241766,
+    "pounce_obj": 83623.82012417672,
     "ipopt_obj": 83623.82012417658,
     "pounce_solved": true,
     "ipopt_solved": true
