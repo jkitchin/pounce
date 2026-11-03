@@ -9,6 +9,16 @@ changes.
 
 ## [0.15.0] - 2026-11-02
 
+**Where MacMPEC stands at release.** The MacMPEC counts in the entries
+below were each measured when that change landed, against the references
+of the time. At release, measured 2026-11-01 (900 s per model) against
+references corrected where the published value was wrong (gh#1129:
+`bilevel1m` −55 → 0, `ex9.2.3` −55 → 5, both global optima by LP branch
+enumeration): of 170 models with a best-known value, **158 at it, 7 better
+than published, 5 at another local solution, none unsolved**, and all 4
+published-infeasible models reported infeasible. Table:
+`benchmarks/macmpec/README.md`.
+
 ### Added
 - **Complementarity answers that are not strongly stationary are checked for
   B-stationarity, and moved off when they are not.** When the reported point
