@@ -451,18 +451,30 @@ def _declared_332(stall_iters):
 
 
 def test_a_stalled_rung_is_cut_short_not_run_to_max_iter(case):
-    """The default bound ends the stalled attempt early and the mu-strategy
-    fallback still rescues it, to the same certified answer as upstream's
-    rule. The stall is a trajectory, so it reproduces only where the
-    platform takes it; where upstream's rule does not stall here, the
-    comparison is skipped rather than passed without reaching the branch."""
+    """The default bound ends the stalled attempt early, and the run reaches
+    the same certified answer as upstream's rule for a fraction of the
+    iterations. What happens after the cut is a trajectory and differs by
+    platform, so it is not asserted: on arm64 macOS the mu-strategy fallback
+    rescues the rung (57 iterations, against 3 000 + the re-solve; 132 in all
+    against 3 089) and the continuation answers; on x86_64 Linux the
+    fallback's re-solve stalls too, under either rule, and the l1 penalty
+    answers (86 in all against 6 012). Where upstream's rule does not stall
+    from this start, the comparison is skipped rather than passed without
+    reaching the branch."""
+    import numpy as np
+
     v_up, info_up = _declared_332(0)
-    first_up = info_up["complementarity"]["solves"][0][3]
+    cc_up = info_up["complementarity"]
+    first_up = cc_up["solves"][0][3]
     if first_up < 1000:
         pytest.skip(f"upstream's rule does not stall from this start here ({first_up} iterations)")
     v, info = _declared_332(10)
     cc = info["complementarity"]
-    assert cc["solves"][0][2] == "SolveSucceeded", cc["solves"][0]
+    # Cut short: the stalled attempt no longer runs to max_iter.
     assert cc["solves"][0][3] < 200, cc["solves"][0]
-    assert cc["certificate"]["class"] == "S"
+    assert cc["total_iterations"] < cc_up["total_iterations"] / 4, (
+        cc["total_iterations"], cc_up["total_iterations"])
+    # The same certified answer as upstream's rule, and the right regime.
+    assert cc["certificate"]["class"] == cc_up["certificate"]["class"] == "S"
+    assert np.max(np.abs(np.asarray(v) - np.asarray(v_up))) < 1e-6, (v, v_up)
     assert case.regime(v) == case.regime(v_up) == flash(332.0, case.pressure_pa, case.mixture).regime

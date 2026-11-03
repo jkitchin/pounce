@@ -19,9 +19,12 @@
 //! (`pounce.examples.flash_mpcc.declare`) at 332 K, started from 331 K's
 //! all-vapor answer, sat for 3 000 iterations at a primal step of `5.6e-16`
 //! with the dual infeasibility constant at `1.3e29`, and the adaptive-mu
-//! re-solve then finished it in 14. With the default bound the base attempt
-//! ends after 43 and the same re-solve takes it from there
-//! (`python/tests/test_flash_mpcc.py`).
+//! re-solve then finished it in 14 (arm64 macOS). With the default bound the
+//! base attempt ends after 43 and the same re-solve takes it from there. On
+//! x86_64 Linux the re-solve stalls as well, under either rule, and the
+//! driver's l1 penalty answers: the same point, in 86 iterations against
+//! 6 012 (`python/tests/test_flash_mpcc.py`, which asserts only what both
+//! platforms share).
 
 use pounce_common::types::Number;
 
