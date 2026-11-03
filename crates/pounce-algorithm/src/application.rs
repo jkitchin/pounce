@@ -1118,6 +1118,11 @@ pub struct IpoptApplication {
     /// previous attempt's verdict. Also copied into
     /// [`SolveStatistics::dual_divergence_signature`].
     dual_divergence_signature: std::cell::Cell<bool>,
+    /// The returned run's algorithm released the tiny-step stop through the
+    /// `tiny_step_dual_stall_iters` rule. Read by the mu-strategy fallback,
+    /// which retries a `Search_Direction_Becomes_Too_Small` reached this way
+    /// as it does an iteration limit. Reset at the top of every solve.
+    tiny_step_dual_stall: std::cell::Cell<bool>,
     /// gh#990 item 3: the derivative checker's structured result for the
     /// current solve; copied onto the statistics when the solve finishes.
     derivative_check: RefCell<Option<pounce_nlp::derivative_test::DerivativeCheckSummary>>,
@@ -1375,6 +1380,7 @@ impl IpoptApplication {
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             mu_strategy_pounce_chosen: false,
             dual_divergence_signature: std::cell::Cell::new(false),
+            tiny_step_dual_stall: std::cell::Cell::new(false),
             derivative_check: RefCell::new(None),
             obj_scale_refused: std::cell::Cell::new((false, false)),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
@@ -2280,6 +2286,7 @@ impl IpoptApplication {
         // `run_with_dual_divergence_retry` reads "some attempt of the base
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
+        self.tiny_step_dual_stall.set(false);
         self.obj_scale_refused.set((false, false));
         self.dual_divergence_retry_promoted.set(false);
         *self.mu_strategy_fallback_record.borrow_mut() = None;
@@ -4829,6 +4836,16 @@ impl IpoptApplication {
         // either way.
         let retry_worthy = match first_status {
             ApplicationReturnStatus::MaximumIterationsExceeded => true,
+            // A tiny-step stop the `tiny_step_dual_stall_iters` rule released
+            // is an iteration limit reached early: the solve had stopped
+            // moving with its multipliers running away, and before the rule
+            // it took the remaining budget to say so and then came here as
+            // `Maximum_Iterations_Exceeded`. Retrying it keeps that rescue.
+            // A tiny-step stop upstream's own rule reached (multiplier step
+            // settled) is not retried, as before.
+            ApplicationReturnStatus::SearchDirectionBecomesTooSmall => {
+                self.tiny_step_dual_stall.get()
+            }
             ApplicationReturnStatus::SolvedToAcceptableLevel => {
                 self.mu_strategy_fallback_was_set() || !self.caller_set_termination_policy()
             }
@@ -7029,6 +7046,9 @@ impl IpoptApplication {
         alg.dual_diverging_streak = builder.dual_diverging_streak.max(0) as usize;
         alg.dual_divergence_retry_step_tol = builder.dual_divergence_retry_step_tol;
         alg.dual_divergence_retry_du_floor = builder.dual_divergence_retry_du_floor;
+        alg.tiny_stall = crate::tiny_step_stall::TinyStepDualStall::new(
+            builder.tiny_step_dual_stall_iters.max(0) as usize,
+        );
         alg.resto_decline_deferrals = builder.resto_decline_deferrals.max(0) as usize;
         alg.resto_decline_progress_ratio = builder.resto_decline_progress_ratio;
         alg.neg_curv_escapes = builder.neg_curv_escapes.max(0) as usize;
@@ -7159,6 +7179,7 @@ impl IpoptApplication {
                 .set(self.dual_divergence_signature.get() || alg.dual_divergence_signature());
             stats.dual_divergence_signature = self.dual_divergence_signature.get();
             stats.returned_run_dual_divergence_signature = alg.dual_divergence_signature();
+            self.tiny_step_dual_stall.set(alg.tiny_step_dual_stall());
             stats.dual_divergence_retry_promoted = self.dual_divergence_retry_promoted.get();
             stats.mu_strategy_fallback = self.mu_strategy_fallback_record.borrow().clone();
             stats.derivative_check = self.derivative_check.borrow().clone();
@@ -8108,6 +8129,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("dual_divergence_retry_du_floor") {
             builder.dual_divergence_retry_du_floor = v;
+        }
+        if let Some(v) = read_int("tiny_step_dual_stall_iters") {
+            builder.tiny_step_dual_stall_iters = v;
         }
         if let Some(v) = read_int("resto_decline_deferrals") {
             builder.resto_decline_deferrals = v;

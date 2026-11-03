@@ -418,6 +418,11 @@ pub struct AlgorithmBuilder {
     /// units on purpose: the `s_d`-normalised aggregate is what hid the
     /// defect. See `upstream_options.rs`.
     pub dual_divergence_retry_du_floor: Number,
+    /// `tiny_step_dual_stall_iters` — consecutive tiny primal steps with no
+    /// dual progress after which the tiny-step stop stops waiting for the
+    /// multiplier step. Default `10`; `0` is upstream's rule. See
+    /// `upstream_options.rs`.
+    pub tiny_step_dual_stall_iters: Index,
     /// `resto_decline_deferrals` (gh #534) — how many times the
     /// acceptable-point restoration decline may be deferred on a solve whose
     /// NLP error is still contracting. Default `1`; `0` restores the pre-#534
@@ -1281,6 +1286,7 @@ impl Default for AlgorithmBuilder {
             diverging_iterates_tol: 1e20,
             dual_divergence_retry_step_tol: 1e-5,
             dual_divergence_retry_du_floor: 1e2,
+            tiny_step_dual_stall_iters: 10,
             dual_diverging_streak: 0,
             resto_decline_deferrals: 1,
             resto_decline_progress_ratio: 0.5,
@@ -1929,6 +1935,7 @@ mod tests {
                             dual_diverging_streak: 0,
                             dual_divergence_retry_step_tol: 1e-5,
                             dual_divergence_retry_du_floor: 1e2,
+                            tiny_step_dual_stall_iters: 10,
                             resto_decline_deferrals: 1,
                             resto_decline_progress_ratio: 0.5,
                             neg_curv_escapes: 1,

@@ -115,6 +115,19 @@ published-infeasible models reported infeasible. Table:
   `pause_command` and `interruptible` are `false`.
 
 ### Changed
+- **A solve whose primal has stopped and whose multipliers run away no
+  longer runs to `max_iter`.** Upstream's tiny-step stop waits for the
+  multiplier step to settle; at a point with non-unique multipliers it never
+  does, and the solve repeated one iterate until the iteration limit before
+  any fallback could start. The wait is now bounded by dual progress
+  (`tiny_step_dual_stall_iters`, default 10, `0` restores upstream): after
+  that many tiny primal steps without the dual infeasibility improving, the
+  tiny-step stop proceeds, and `mu_strategy_fallback` retries it as it does
+  an iteration limit. Converging multipliers and acceptable iterates are
+  never cut short. On the phase-change flash example the declared route's
+  continuation goes from 6 660 to 3 703 iterations over its path (3 000 of
+  the difference was one stalled solve at 332 K); the CLI fixture corpus is
+  unchanged on both legs, since none of it reaches the rule.
 - **Declared complementarity spends a quarter less time, with the same
   answers.** A finish no longer replaces a better relaxed point it started
   from (it is kept unless its objective drifted past what the relaxation's
