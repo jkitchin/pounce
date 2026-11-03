@@ -85,7 +85,8 @@ published-infeasible models reported infeasible. Table:
   declared (carrying `gamma = 1 - beta`, since a variable sits in one pair),
   and notebook 38's new section 7 sets it beside the hand-written
   continuation: the same 34/34 regimes and `beta` to 4e-10, every point
-  certified S, at about 2.5× the iterations. Notebook 47 is re-run against
+  certified S, at about 1.7× the iterations (the exact stage's second
+  opinion is most of it). Notebook 47 is re-run against
   the current driver.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler

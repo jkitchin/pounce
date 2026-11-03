@@ -170,14 +170,14 @@ models cannot drift apart. Over the 34-temperature path, from the same starts:
 | route | regimes agree | worst error in `beta` | certified | iterations |
 | --- | --- | --- | --- | --- |
 | hand-written Scholtes continuation | 34/34 | 8.4e-10 | — | 3 441 |
-| declared, `complementarity_strategy=continuation` | 34/34 | 4.2e-10 | 34 `S` | 6 660 |
-| declared, default (`both`) | 34/34 | 4.2e-10 | 34 `S` | 8 694 |
+| declared, `complementarity_strategy=continuation` | 34/34 | 4.2e-10 | 34 `S` | 3 703 |
+| declared, default (`both`) | 34/34 | 4.2e-10 | 34 `S` | 5 737 |
 
 Same answers, each certified strongly stationary, and no route code. The cost
-is iterations: the exact stage's second opinion (2 034 on this path, finding no
-other branch, since a square flash has one solution per temperature) and a
-driver continuation that takes about twice the hand-written schedule's
-iterations for the same `tau` values. `python/tests/test_flash_mpcc.py` holds
+is iterations, nearly all of it the exact stage's second opinion (2 034 on this
+path, finding no other branch, since a square flash has one solution per
+temperature); the driver's continuation takes 8% more than the hand-written
+schedule for the same `tau` values. `python/tests/test_flash_mpcc.py` holds
 the declared route to the same oracle at the smoke temperatures.
 
 ## Limitations
