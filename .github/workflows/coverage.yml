@@ -71,6 +71,18 @@ jobs:
           # directly. Without this it exits with a FATAL naming the component.
           components: llvm-tools-preview
 
+      - name: Free runner disk space
+        # The 26.04 image leaves less room than 24.04 did: on PR #1132 a cold
+        # build passed, and the next run, restoring that build's cache and
+        # compiling on top of it, died with "No space left on device". These
+        # preinstalled toolchains are never used here.
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       - name: Key the build cache on the runner image
         # rust-cache's own key has no OS release in it, so a new runner image
         # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir

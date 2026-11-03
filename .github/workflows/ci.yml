@@ -38,6 +38,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Free runner disk space
+        # The 26.04 image leaves less room than 24.04 did: on PR #1132 a cold
+        # build passed, and the next run, restoring that build's cache and
+        # compiling on top of it, died with "No space left on device". These
+        # preinstalled toolchains are never used here.
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       - name: Key the build cache on the runner image
         # rust-cache's own key has no OS release in it, so a new runner image
         # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
@@ -126,6 +138,10 @@ jobs:
       # directives when COINHSL_DIR is unset, so this needs no HSL install.
       - name: Compile-check pounce-hsl (publishable, link-excluded above)
         run: cargo check -p pounce-hsl --all-targets --verbose
+
+      - name: Disk use after the build
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true
 
   # Guard the browser build (crates/pounce-wasm, docs/src/wasm.md). The
   # `test` job type-checks pounce-wasm on the host, which catches neither of
