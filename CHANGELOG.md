@@ -31,7 +31,9 @@ published-infeasible models reported infeasible. Table:
   B-stationary (local minima the S certificate could not vouch for), and
   moves `siouxfls` from a non-B-stationary point (207.36) to the published
   best known (208.258). Python reads it as
-  `info["complementarity"]["b_stationarity"]`.
+  `info["complementarity"]["b_stationarity"]`, and the JSON solve report
+  carries it as `complementarity.b_stationarity` with `escapes`, the count
+  of branch NLPs that moved the point.
 - **Two-sided ("mixed") complementarity pairs are solved, not refused.** A
   pair whose variable is boxed and whose row is free — `l <= x <= u ⟂ g`,
   `g >= 0` at `l`, `g <= 0` at `u`, `g = 0` between; AMPL `complements` with
@@ -78,6 +80,13 @@ published-infeasible models reported infeasible. Table:
   `47_declared_complementarity.ipynb` works a contact-design example end to
   end. See the book page *Complementarity
   Constraints (MPCC)*.
+- **The phase-change flash example shows both routes.**
+  `pounce.examples.flash_mpcc.declare` builds the same flash with its pairs
+  declared (carrying `gamma = 1 - beta`, since a variable sits in one pair),
+  and notebook 38's new section 7 sets it beside the hand-written
+  continuation: the same 34/34 regimes and `beta` to 4e-10, every point
+  certified S, at about 2.5× the iterations. Notebook 47 is re-run against
+  the current driver.
 - **The debugger runs in the browser.** `pounce-cli`'s debugger engine and
   JSON front end build for `wasm32-wasip1` (`rustyline` and the SIGINT handler
   are now native-only dependencies, and JSON mode reads stdin directly where
@@ -188,6 +197,16 @@ published-infeasible models reported infeasible. Table:
   `pack-comp1-32` 252 s → 120 s.
 
 ### Fixed
+- **A solve refused before it iterates no longer reports the previous
+  solve's statistics.** An application reused for a second solve kept the
+  first one's record when the second returned before any attempt ran (too
+  few degrees of freedom, an option refusal, a presolve proof), so
+  `statistics()` — and Python's `info`, the C API's iteration count — showed
+  iterations for a solve that never took one. The complementarity driver
+  counted them: each exact finish refused for too few degrees of freedom was
+  recorded with the iteration count of the solve before it, and added to
+  `total_iterations` again (11 iterations per flash on the phase-change
+  example). The record is now reset at the start of every solve.
 - **A feasible LP is no longer reported infeasible off an approximate Farkas
   ray.** The convex solver's certificate test bounded `bᵀy + hᵀz` and
   `‖Aᵀy + Gᵀz‖` only against `‖(y,z)‖`. That proves no feasible point

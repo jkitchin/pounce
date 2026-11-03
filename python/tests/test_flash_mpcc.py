@@ -345,3 +345,72 @@ def test_the_smoke_cli_rejects_a_bad_record(
         "only the doctored temperature should be reported as failing; got "
         f"{failed_lines}"
     )
+
+
+# --------------------------------------------------------------------
+# The same flash with its pairs declared (`flash_mpcc.declare`)
+# --------------------------------------------------------------------
+#
+# Everything above runs the hand-written route: the product rows, the tau
+# schedule and the finish are the harness's. Here POUNCE's complementarity
+# driver gets the pairs and chooses for itself, from the same cold start,
+# and is held to the same oracle. A failure here and not above is a
+# regression in the driver, not in the model.
+
+
+@pytest.fixture(scope="module")
+def declared(case):
+    import numpy as np
+    import pounce
+    from pounce.examples.flash_mpcc import declare
+
+    out = {}
+    for t in flash_run.SMOKE_TEMPERATURES:
+        nlp = declare(case, t)
+        prob = pounce.Problem(
+            n=nlp.n, m=nlp.m, problem_obj=nlp, lb=nlp.lb, ub=nlp.ub,
+            cl=nlp.cl, cu=np.where(np.isfinite(nlp.cu), nlp.cu, 1e20),
+            complementarity=nlp.complementarity,
+        )
+        prob.add_option("print_level", 0)
+        prob.add_option("tol", 1e-8)
+        v, info = prob.solve(x0=nlp.start(cold_start(case, t)))
+        out[t] = (nlp.flash_point(v), info, flash(t, case.pressure_pa, case.mixture))
+    return out
+
+
+@pytest.mark.parametrize("temperature_k", flash_run.SMOKE_TEMPERATURES)
+def test_the_declared_flash_matches_the_oracle(case, declared, temperature_k):
+    v, info, ref = declared[temperature_k]
+    cc = info["complementarity"]
+    assert cc["accepted_by"] is not None, cc["summary"]
+    assert cc["certificate"]["class"] == "S", cc["summary"]
+    assert case.regime(v) == ref.regime
+    beta, x, y = case.unpack(v)
+    assert beta == pytest.approx(ref.beta, abs=1e-6)
+    assert x.sum() == pytest.approx(ref.sum_x, abs=1e-6)
+    assert y.sum() == pytest.approx(ref.sum_y, abs=1e-6)
+    src = case.source_feasibility(v, temperature_k)
+    assert src["compl_max"] <= CORNER_TOL, src
+
+
+def test_the_declared_model_is_the_hand_written_one(case):
+    """Same rows, same derivatives: `declare` drops the two products and adds
+    `beta + gamma = 1`, and nothing else moves."""
+    import numpy as np
+    from pounce.examples.flash_mpcc import declare, fd_check
+
+    t = 300.0
+    v = cold_start(case, t)
+    hand, dec = lower(case, t, "prod_ineq"), declare(case, t)
+    w = dec.start(v)
+    np.testing.assert_array_equal(
+        dec.constraints(w)[: 2 * case.nc + 2], hand.constraints(v)[: 2 * case.nc + 2]
+    )
+    assert dec.constraints(w)[dec.link_row] == pytest.approx(0.0, abs=1e-15)
+    # The selftest's thresholds (benchmarks/flash/selftest.py), set to the
+    # central difference's own truncation error on this model.
+    from flash.selftest import HESS_TOL, JAC_TOL
+
+    err = fd_check(dec, w)
+    assert err["jac"] <= JAC_TOL and err["hess"] <= HESS_TOL, err
