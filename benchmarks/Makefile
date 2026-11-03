@@ -66,6 +66,7 @@ export IPOPT_LINEAR_SOLVER
 	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
 	mpcc-nl-run mpcc-nl-rerun mpcc-nl-check \
 	macmpec-run macmpec-rerun macmpec-check \
+	mpcc-opf-selftest mpcc-opf-run \
 	flash-selftest flash-smoke flash-run \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
 	pounce-bin
@@ -122,6 +123,8 @@ help:
 	@echo "  mpcc-nl-check              re-check an existing mpcc_nl/pounce.json against answers.json"
 	@echo "  macmpec-run / -rerun       MacMPEC (178 .nl), classified against best-known objectives"
 	@echo "  macmpec-check              re-check an existing macmpec/pounce.json against answers.json"
+	@echo "  mpcc-opf-selftest          OPF volt-var/volt-watt MPCCs: port checks against the analytic references (no solver)"
+	@echo "  mpcc-opf-run               OPF volt-var/volt-watt MPCCs (37, data root), CLI, held to the upstream regime gate"
 	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
 	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
 	@echo "  flash-selftest             Gate 1 flash: derivatives, oracle cross-check, regime coverage (no solver)"
@@ -535,6 +538,23 @@ mpcc-nl-check:
 mpcc-nl-rerun:
 	rm -f $(MPCC_NL_DIR)/pounce.json
 	$(MAKE) mpcc-nl-run
+
+# --- OPF volt-var / volt-watt MPCCs ---------------------------------------
+#
+# The 37 small balanced AC OPF cases of MPCCModels.jl PR #13. The suite
+# lives in the data root ($(POUNCE_BENCH_DATA)/mpcc_opf/): case data, the
+# Pyomo generator and the checks, run in place; the .nl are regenerated
+# into its nl/ on every run. Each answer is held to upstream's integration
+# gate: converged, physical residuals <= 1e-5 with the curves evaluated
+# directly, every controller in its target regime. `mpcc-opf-selftest`
+# needs no solver and checks the port against each case's analytic
+# reference. See $(POUNCE_BENCH_DATA)/mpcc_opf/README.md.
+
+mpcc-opf-selftest:
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf.selftest
+
+mpcc-opf-run: mpcc-opf-selftest $(POUNCE_BIN)
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf.run --pounce $(POUNCE_BIN)
 
 # --- MacMPEC (Leyffer) ---------------------------------------------------
 #
