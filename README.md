@@ -487,6 +487,9 @@ Devin Griffith has been creating a series of interactive optimization examples t
 
 @GermanHeim is integrating pounce into oximo a Rust algebraic modeling library for mathematical optimization (https://github.com/oximo-rs/oximo/tree/main/crates/oximo-pounce)
 
+[tellegen](https://tellegen.dev/) is using [pounce](
+https://eigenergy.github.io/tellegen/architecture.html?highlight=pounce#the-engine) to run their live interactive power flow analysis!
+
 Are you using pounce for something and want it listed here? Let me know!
 
 ## Acknowledgments
