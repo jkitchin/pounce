@@ -42,7 +42,7 @@ jobs:
     # job here reaches this one through `needs`, so skipping it skips them all
     # (gh#599).
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Verify tag matches manifest version
@@ -59,7 +59,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             target: x86_64
             manylinux: manylinux2014
             rust_target: x86_64-unknown-linux-gnu
@@ -105,8 +105,16 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Key the build cache on the runner image
+        # rust-cache's own key has no OS release in it, so a new runner image
+        # (ubuntu-latest 24.04 -> 26.04, 2026-11-03) restored a target dir
+        # built on another system, and PyO3's cached build config linked a
+        # libpython the new image does not have.
+        shell: bash
+        run: echo "IMAGE_CACHE_KEY=${ImageOS:-unknown}-py$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ env.IMAGE_CACHE_KEY }}
           shared-key: pounce-cli-${{ matrix.rust_target }}
 
       # Build the standalone pounce CLI binary and stage it inside the
@@ -213,7 +221,7 @@ jobs:
   build-sdist:
     name: sdist
     needs: verify-version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -235,7 +243,7 @@ jobs:
     name: publish to PyPI
     needs: [build-wheels, build-sdist]
     if: startsWith(github.ref, 'refs/tags/python-v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/project/pounce-solver/
@@ -253,7 +261,7 @@ jobs:
     name: publish to TestPyPI
     needs: [build-wheels, build-sdist]
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     environment:
       name: testpypi
       url: https://test.pypi.org/project/pounce-solver/

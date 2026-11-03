@@ -102,7 +102,7 @@ jobs:
     # so contributor PRs still get the rot guard; a PR opened inside a fork
     # against the fork's own main does not, which is the point.
     if: github.repository == 'jkitchin/pounce'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.plan.outputs.version }}
       push: ${{ steps.plan.outputs.push }}
@@ -241,7 +241,7 @@ jobs:
             dockerfile: docker/Dockerfile.release
             platform: linux/amd64
             arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-latest
           - image: release
             dockerfile: docker/Dockerfile.release
             platform: linux/arm64
@@ -251,7 +251,7 @@ jobs:
             dockerfile: docker/Dockerfile
             platform: linux/amd64
             arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-latest
           - image: source
             dockerfile: docker/Dockerfile
             platform: linux/arm64
@@ -367,7 +367,7 @@ jobs:
     name: tag ${{ matrix.image }}
     needs: [plan, build]
     if: needs.plan.outputs.push == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
