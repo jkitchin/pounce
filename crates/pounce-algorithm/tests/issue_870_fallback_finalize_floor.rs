@@ -300,3 +300,39 @@ fn the_trace_ends_on_the_iterate_the_statistics_describe() {
         r.stats.final_dual_inf
     );
 }
+
+/// One application, two solves: the second must get the fallback the first
+/// did. The retry used to restore `mu_strategy` as a caller-set value, so
+/// after one fallback the table read as "the caller chose a strategy" and
+/// `is_mu_strategy_fallback_enabled` switched the default-on retry off for
+/// every later solve on the same application. The declared-complementarity
+/// driver solves every stage on one application; measured on
+/// `benchmarks/mpcc` `biactive_positive` (skew, far), a fallback in the
+/// Scholtes finish left the exact stage's `Solved_To_Acceptable_Level` to the
+/// gh#884 cold retry instead. The gh#884 retry's `perturb_always_cd` restore
+/// had the same shape and is held to the same rule.
+#[test]
+fn a_reused_application_keeps_the_fallback_and_leaves_the_table_as_it_was() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("max_iter", 4, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    for solve in 1..=2 {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Recording::default()));
+        let _ = app.optimize_tnlp(tnlp);
+        assert!(
+            app.statistics().mu_strategy_fallback.is_some(),
+            "solve {solve}: the mu_strategy_fallback retry did not run"
+        );
+        for tag in ["mu_strategy", "perturb_always_cd"] {
+            assert!(
+                !matches!(app.options().get_string_value(tag, ""), Ok((_, true))),
+                "solve {solve}: `{tag}` reads as caller-set after the solve"
+            );
+        }
+    }
+}

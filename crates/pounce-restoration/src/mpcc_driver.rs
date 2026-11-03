@@ -268,11 +268,25 @@ pub fn solve_mpcc(
         .get_integer_value("max_iter", "")
         .map(|(v, _)| v)
         .unwrap_or(3000);
+    // A budget is the driver's own decision to stop, so a budgeted solve
+    // that reaches it runs without `mu_strategy_fallback`, which would
+    // otherwise treat the cap as a stall and spend a second budget on a
+    // flipped-schedule re-solve. Unless the caller set the option: then it
+    // is theirs. Unbudgeted solves (the continuation's rungs) keep it.
+    let caller_set_fallback = matches!(
+        app.options().get_bool_value("mu_strategy_fallback", ""),
+        Ok((_, true))
+    );
     let set_budget = |app: &mut IpoptApplication, budget: usize| {
         let it = budgeted_max_iter(budget, caller_max_iter);
         let _ = app
             .options_mut()
             .read_from_str(&format!("max_iter {it}\n"), true);
+        if !caller_set_fallback {
+            let _ = app
+                .options_mut()
+                .read_from_str("mu_strategy_fallback no\n", true);
+        }
     };
 
     let mut solves: Vec<MpccSolveRecord> = Vec::new();

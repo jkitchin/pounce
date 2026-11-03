@@ -352,8 +352,9 @@ pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
 
 /// Every option any stage writes; the driver snapshots these before the
 /// first stage and restores them after the last.
-pub const TOUCHED_OPTIONS: [&str; 12] = [
+pub const TOUCHED_OPTIONS: [&str; 13] = [
     "max_iter",
+    "mu_strategy_fallback",
     "warm_start_init_point",
     "mu_init",
     "warm_start_bound_push",

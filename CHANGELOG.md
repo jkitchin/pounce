@@ -220,6 +220,21 @@ published-infeasible models reported infeasible. Table:
   recorded with the iteration count of the solve before it, and added to
   `total_iterations` again (11 iterations per flash on the phase-change
   example). The record is now reset at the start of every solve.
+- **One `mu_strategy_fallback` no longer switches it off for the rest of an
+  application's solves.** The retry put `mu_strategy` back as a caller-set
+  value, and a caller-set `mu_strategy` is what turns the default-on
+  fallback off, so every later solve on the same application ran without it.
+  The complementarity driver solves every stage on one application: on
+  `benchmarks/mpcc`'s `biactive_positive` (skew scaling), a fallback in the
+  continuation's finish left the exact stage's acceptable-level exit to the
+  gh#884 cold retry instead of the fallback. Both retries now restore the
+  option entry exactly as they found it (the gh#884 retry's
+  `perturb_always_cd` had the same write-back). Since the driver now gets the
+  fallback on every stage rather than at most one per run, a solve on one of
+  the driver's own iteration budgets (the exact stage's second opinion, the
+  finish, a retried rung) runs without it, unless the caller set
+  `mu_strategy_fallback`: reaching the budget is the driver's decision to
+  stop, and the re-solve would spend a second budget on it.
 - **A feasible LP is no longer reported infeasible off an approximate Farkas
   ray.** The convex solver's certificate test bounded `bᵀy + hᵀz` and
   `‖Aᵀy + Gᵀz‖` only against `‖(y,z)‖`. That proves no feasible point

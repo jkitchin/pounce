@@ -4923,13 +4923,12 @@ impl IpoptApplication {
         // Adaptive and every other value (incl. unset) → Monotone, so the
         // opposite of an explicit "adaptive" is "monotone" and the
         // opposite of anything else is "adaptive".
-        let prev = self.options.get_string_value("mu_strategy", "").ok();
+        let saved_mu_strategy = self.options.snapshot_entry("mu_strategy");
         let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
-        // Unwind cover only: the normal-path restore below writes the
-        // resolved value back as caller-set, deliberately, and the scope must
-        // not change that. A panic in the retry used to leave the flipped
-        // strategy in the option table of an application `ffi_guard` keeps.
+        // Unwind cover only; the normal path restores the same snapshot
+        // below. A panic in the retry used to leave the flipped strategy in
+        // the option table of an application `ffi_guard` keeps.
         let mut scope = RetryOptionScope::enter(self, &["mu_strategy"], true);
         let _ = scope
             .options
@@ -4988,16 +4987,17 @@ impl IpoptApplication {
         record.retry_iteration_count = scope.statistics.borrow().iteration_count;
         record.promoted = matches!(retry_status, ApplicationReturnStatus::SolveSucceeded);
         *scope.mu_strategy_fallback_record.borrow_mut() = Some(record.clone());
-        // Restore the user's original option-table view.
-        let _ = scope.options.set_string_value(
-            "mu_strategy",
-            prev.as_ref()
-                .filter(|(_, found)| *found)
-                .map(|(v, _)| v.as_str())
-                .unwrap_or(if was_adaptive { "adaptive" } else { "monotone" }),
-            true,
-            false,
-        );
+        // Put the entry back exactly as it was, absence as absence. Writing
+        // the resolved strategy back instead marked it caller-set, and a
+        // caller-set `mu_strategy` switches this fallback off
+        // (`is_mu_strategy_fallback_enabled`): every later solve on the same
+        // application lost it, which the declared-complementarity driver --
+        // one application, every stage -- hit whenever an early stage fell
+        // back. An unset entry still resolves the same way, so the view the
+        // write-back was preserving is unchanged.
+        scope
+            .options
+            .restore_entry("mu_strategy", saved_mu_strategy);
         drop(scope);
         self.statistics.borrow_mut().mu_strategy_fallback = Some(record);
         // A retry the caller's intermediate callback stopped reports the
@@ -5272,25 +5272,17 @@ impl IpoptApplication {
              (base {:?}, unscaled KKT {:.3e}); re-solving from scratch with \
              perturb_always_cd=yes.",
             first_status, base_unscaled_kkt);
-        let prev = self.options.get_string_value("perturb_always_cd", "").ok();
-        // Unwind cover only, as for the μ-strategy fallback: the restore
-        // below is the normal path and is left exactly as it was.
+        let saved_cd = self.options.snapshot_entry("perturb_always_cd");
+        // Unwind cover only, as for the μ-strategy fallback; the normal path
+        // restores the same snapshot below.
         let mut scope = RetryOptionScope::enter(self, &["perturb_always_cd"], true);
         let _ = scope
             .options
             .set_string_value("perturb_always_cd", "yes", true, false);
         let retry_status = scope.dispatch_standard_solve(Rc::clone(&tnlp));
-        // Restore the caller's option-table view. Absence is restored as
-        // absence would be seen: the registered default is `no`.
-        let _ = scope.options.set_string_value(
-            "perturb_always_cd",
-            prev.as_ref()
-                .filter(|(_, found)| *found)
-                .map(|(v, _)| v.as_str())
-                .unwrap_or("no"),
-            true,
-            false,
-        );
+        // Exactly as it was, absence as absence, so a later solve on the
+        // same application does not read a caller-set `no`.
+        scope.options.restore_entry("perturb_always_cd", saved_cd);
         drop(scope);
         // A retry the caller's intermediate callback stopped reports the
         // stop, at the point it stopped; the comparison below would put the
