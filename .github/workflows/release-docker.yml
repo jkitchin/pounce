@@ -246,7 +246,7 @@ jobs:
             dockerfile: docker/Dockerfile.release
             platform: linux/arm64
             arch: arm64
-            runner: ubuntu-latest-arm
+            runner: ubuntu-24.04-arm
           - image: source
             dockerfile: docker/Dockerfile
             platform: linux/amd64
@@ -256,7 +256,7 @@ jobs:
             dockerfile: docker/Dockerfile
             platform: linux/arm64
             arch: arm64
-            runner: ubuntu-latest-arm
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
 

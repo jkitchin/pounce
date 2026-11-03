@@ -69,7 +69,7 @@ jobs:
           # the standalone `cargo build --bin pounce` step we now do for
           # the bundled CLI does not play well with maturin-action's
           # QEMU container.
-          - os: ubuntu-latest-arm
+          - os: ubuntu-24.04-arm
             target: aarch64
             manylinux: manylinux2014
             rust_target: aarch64-unknown-linux-gnu
