@@ -7,7 +7,7 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
-## [0.15.0] - 2026-11-02
+## [0.15.0] - 2026-11-03
 
 **Where MacMPEC stands at release.** The MacMPEC counts in the entries
 below were each measured when that change landed, against the references
