@@ -315,6 +315,21 @@ fn an_over_determined_model_is_answered_through_the_inequality_finish() {
         "the equality finish should have been refused: {:?}",
         out.solves
     );
+    // A refused solve never iterated. It used to be recorded with the
+    // iteration count of the solve before it -- the application's statistics
+    // were left standing by a solve that returned before running -- and
+    // `total_iterations` counted those iterations twice.
+    for s in &out.solves {
+        if s.status == ApplicationReturnStatus::NotEnoughDegreesOfFreedom {
+            assert_eq!(s.iterations, 0, "{:?}", out.solves);
+        }
+    }
+    assert_eq!(
+        out.total_iterations,
+        out.solves.iter().map(|s| s.iterations).sum::<usize>(),
+        "{:?}",
+        out.solves
+    );
     assert!(
         (out.x[0] - 0.5).abs() < 1e-5 && (out.x[1] - 0.5).abs() < 1e-5,
         "{:?}",

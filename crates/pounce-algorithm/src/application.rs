@@ -2233,12 +2233,18 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
-        // gh#983 review item 1: warnings belong to this solve. Cleared here as
-        // well as per attempt, so a solve that returns before any attempt runs
-        // (an option refusal, a presolve proof) does not report the previous
-        // solve's.
-        self.statistics.borrow_mut().warnings.clear();
-        self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
+        // The statistics belong to this solve, all of them. A solve that
+        // returns before any attempt runs (the degrees-of-freedom refusal, an
+        // option refusal, a presolve proof) used to leave the previous solve's
+        // record standing, so `statistics()` on an application reused for a
+        // second solve reported the first one's iterations for a solve that
+        // never iterated. The complementarity driver is the case that showed
+        // it: each `G·H = 0` finish refused for too few degrees of freedom
+        // was recorded with the iteration count of the solve before it, and
+        // `total_iterations` counted it again. This replaces the field-by-field
+        // clears (gh#983 review item 1: `warnings`; `sqp_warm_working_set_applied`)
+        // that patched the same leak one field at a time.
+        *self.statistics.borrow_mut() = SolveStatistics::new();
         // Belongs to the scale audit's re-solve alone, which runs below this
         // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
         // solve that starts here may inherit it. `RetryOptionScope` clears it
