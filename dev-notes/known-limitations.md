@@ -12,6 +12,72 @@ merges.
 
 ---
 
+## MPCC: four MacMPEC answers stay complementary only to ~7e-5
+
+*Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through
+the CLI. Recorded 2026-11-04.*
+
+**Scope.** Answers whose branch re-solve (the "branch polish", see
+`docs/src/complementarity.md`, "Complementary to `tol`, not to `sqrt(tol)`")
+is refused, so the reported point keeps a nearly biactive pair at
+`sqrt(τ)`. The report says so: `complementarity.natural_residual` and
+`complementarity.polish.reason`, and `pounce-studio diagnose` warns
+(`mpcc_loose_pairs`).
+
+### What is wrong
+
+| model | `natural_residual` | class | why the re-solve was refused |
+|---|---|---|---|
+| `pack-comp1-8` | 6.9e-5 | S | the branch is `Infeasible_Problem_Detected` |
+| `pack-comp1p-8` | 6.9e-5 | S | the same |
+| `pack-comp1p-32` | 7.0e-5 | W | the same |
+| `incid-set2-32` | 6.4e-7 | S | the re-solved point certifies only W and a branch descends from it |
+
+The objectives are at the best known to about 1e-8 relative
+(`pack-comp1-8`: 0.6000000082 against 0.6), so the cost is the residual, not
+the value.
+
+### Already tried, did not work
+
+On `pack-comp1-8`, 33 of its 49 pairs have `min(|G|, |H|)` above `10·tol`.
+About 30 of them are strictly complementary, with sides of about 1e-6 and
+1e-3 to 1e-2, so their product is just `τ`. Four are nearly biactive, with
+sides within a factor of 30: pairs 9, 13, 17 and 46. Holding each pair's
+other side, retried once from the same warm start when the first branch
+fails:
+
+- **Every loose pair.** This is wrong by construction: it pins the 1e-3
+  sides of strictly complementary pairs. It is infeasible on all three
+  `pack-comp1` models. On `opf_vv_lower_knee_held` it flips only that
+  model's one loose pair, and the other branch is infeasible there too:
+  solved directly, `s[1] = 0` with `r[1] >= 5e-5` reports local
+  infeasibility.
+- **Only the pairs whose sides are within 100× of each other.** Infeasible
+  on all three.
+- **Each of the four nearly biactive pairs alone.** Infeasible every time.
+
+So the orientation of the nearly biactive pairs is not what makes the branch
+infeasible. The retry was removed: it cost a solve on every refused polish
+and gained nothing that was measured. Holding both sides of a pair is no
+alternative, because that set lies inside both one-sided branches.
+
+Untested: whether the branch NLP is truly infeasible or only locally so from
+the warm start. A cold solve of the same branch, or a feasibility problem
+with slacks on the held sides, would tell.
+
+### How to tell whether a fix works
+
+`make -C benchmarks macmpec-run` with `grep -l "keeping it"` over the logs.
+The four models above should move to "re-solved on its branch", and nothing
+else should move from at to worse. The `cc:` lines of
+`scripts/sweep-fixtures.sh` must stay as they are except where the fix
+intends them to change. `opf_vv_lower_knee_held.nl` (one branch infeasible)
+and a both-branches-infeasible variant are the fixtures to test it against.
+In the variant, `s[1] >= 5e-5` is added as well; the generator is in the
+data root, `mpcc_opf.model.build` plus one `Constraint`.
+
+---
+
 ## MPCC: the exact-product stage is slow on dense degenerate QPECs
 
 *Measured in the PR review of declared complementarity (jkitchin/pounce#1103),

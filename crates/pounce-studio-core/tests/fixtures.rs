@@ -227,3 +227,20 @@ fn markdown_renders_full_report() {
     // Final iter row should appear in the table.
     assert!(md.contains("converged"));
 }
+
+/// Every code `diagnose` emits on these reports has a glossary entry, which
+/// the MCP server's `explain` serves. A code added on the Rust side without
+/// one leaves an agent with a finding it cannot look up.
+#[test]
+fn every_emitted_finding_has_a_glossary_entry() {
+    for src in [ROSENBROCK, STALLED, QUADRATIC, CIRCLE, MPCC_POLISHED, MPCC_LOOSE] {
+        let r = SolveReport::from_json_str(src).unwrap();
+        for f in diagnose(&r) {
+            assert!(
+                pounce_studio_core::glossary::finding(f.code).is_some(),
+                "no glossary entry for {}",
+                f.code
+            );
+        }
+    }
+}

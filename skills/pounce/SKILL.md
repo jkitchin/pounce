@@ -101,7 +101,9 @@ summary fields (`n_factors`, `n_pattern_reuse`, `max_fill_ratio`, …).
 
 Known finding codes: `converged`, `max_iter_exceeded`,
 `restoration_used`, `restoration_loop`, `mu_stuck`,
-`heavy_line_search`, `hessian_regularized`, `convergence_stall`.
+`heavy_line_search`, `hessian_regularized`, `convergence_stall`; and,
+for a model with declared complementarity pairs, `mpcc_outcome`,
+`mpcc_cost`, `mpcc_loose_pairs`, `mpcc_polished`.
 
 ### Pre-flight on an input file
 

@@ -967,6 +967,92 @@ def head_to_head_lines(head_to_head):
     return lines
 
 
+def _bench_root():
+    try:
+        from bench_data import bench_data_root
+        r = bench_data_root(required=False)
+        return str(r) if r else None
+    except Exception:
+        return None
+
+
+def complementarity_lines(bench_root):
+    """The complementarity (MPCC) section: MacMPEC against best-known
+    objectives, and the `mpcc-compare` arms judged by their pairs.
+
+    Kept out of the Ipopt-reference machinery on purpose. An MPCC answer is
+    not judged by status: Ipopt refuses declared pairs, and handed the
+    `G·H <= 0` rewrite it reports `Optimal` at points whose pairs are not
+    complementary. So this section counts what each suite's own check says
+    about the returned point, never a status match.
+    """
+    lines = []
+    sections = []
+    mm_rows = os.path.join(SCRIPT_DIR, 'macmpec', 'pounce.json')
+    mm_ans = os.path.join(bench_root, 'macmpec', 'answers.json') if bench_root else None
+    if os.path.exists(mm_rows) and mm_ans and os.path.exists(mm_ans):
+        sys.path.insert(0, os.path.join(SCRIPT_DIR, 'scripts'))
+        from check_nl_answers import judge
+        doc = json.load(open(mm_ans))
+        rows = {r['name']: r for r in json.load(open(mm_rows)) if r.get('solver') == 'pounce'}
+        counts = {}
+        for ans in doc['problems']:
+            o, _ = judge(ans, rows.get(ans['name']), float(doc.get('rel_tol', 1e-6)))
+            counts[o] = counts.get(o, 0) + 1
+        its = sum(r.get('iterations') or 0 for r in rows.values())
+        wall = sum(r.get('solve_time') or 0 for r in rows.values())
+        sections.append(('macmpec', counts, its, wall, len(doc['problems'])))
+    cmp_path = os.path.join(bench_root, 'mpcc_compare', 'out', 'results.json') if bench_root else None
+    cmp = json.load(open(cmp_path)) if cmp_path and os.path.exists(cmp_path) else None
+    if not sections and not cmp:
+        return lines
+    lines.append("## Complementarity (MPCC)")
+    lines.append("")
+    lines.append("Judged by the returned point, not by status: `min(G, H)` and what the")
+    lines.append("pairs encode are recomputed by each suite's own check. Ipopt refuses")
+    lines.append("declared pairs; on the `G·H <= 0` rewrite it reports `Optimal` at")
+    lines.append("points whose pairs are not complementary, counted below as")
+    lines.append("*converged, check failed*.")
+    lines.append("")
+    for name, counts, its, wall, n in sections:
+        order = ["pass", "at", "BETTER", "worse", "unsolved", "note", "FAIL"]
+        lines.append(f"**MacMPEC** (`make -C benchmarks macmpec-run`, {n} problems, against "
+                     "best-known objectives): " + ", ".join(
+                         f"{counts[k]} {k}" for k in order if counts.get(k)) +
+                     f"; {its} iterations, {wall:.1f} s.")
+        lines.append("")
+    if cmp:
+        arms = cmp.get('arms', [])
+        good = {"pass", "global", "feasible", "infeasible"}
+        lines.append(f"**mpcc-compare** (`make -C benchmarks mpcc-compare`; pounce "
+                     f"`{cmp.get('pounce', '?')}`, Ipopt `{cmp.get('ipopt', '?')}` "
+                     f"({cmp.get('linear_solver', '?')}), {cmp.get('ccopt', 'CCOpt')}):")
+        lines.append("")
+        lines.append("| suite | arm | answer | local | FAIL | converged, check failed | at best | iterations | wall (s) |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
+        for suite, rows in cmp.get('suites', {}).items():
+            for arm in arms:
+                rs = [r[arm] for r in rows if arm in r]
+                if not rs:
+                    continue
+                ok = {"Solve_Succeeded", "Solved_To_Acceptable_Level"}
+                fail = [r for r in rs if str(r.get('verdict', '')).startswith('FAIL')]
+                lines.append(
+                    f"| {suite} | {arm} | {sum(r.get('verdict') in good for r in rs)} "
+                    f"| {sum(r.get('verdict') == 'local' for r in rs)} | {len(fail)} "
+                    f"| {sum(r.get('status') in ok for r in fail)} "
+                    f"| {sum(bool(r.get('at_best')) for r in rs)} "
+                    f"| {sum(r.get('iterations') or 0 for r in rs)} "
+                    f"| {sum(r.get('wall') or 0 for r in rs):.1f} |")
+        lines.append("")
+        lines.append("*answer*: feasible to the suite's gate (or the proven verdict on a")
+        lines.append("certified-infeasible case); *at best*: within 1e-6 relative of the best")
+        lines.append("objective any arm or reference reached at residual <= 1e-7. Sources and")
+        lines.append("licences: `$POUNCE_BENCH_DATA/SOURCES.md`.")
+        lines.append("")
+    return lines
+
+
 def unreferenced_lines(unreferenced):
     """Problems a suite now runs that its saved Ipopt reference predates.
 
@@ -1324,6 +1410,7 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
     # standalone section; intentionally not folded into all_comps / the
     # baseline / the Ipopt profiles (a different comparison axis).
     lines.extend(head_to_head_lines(head_to_head or []))
+    lines.extend(complementarity_lines(_bench_root()))
 
     lines.append("---")
     lines.append("*Generated by benchmark_report.py*")

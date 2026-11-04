@@ -312,6 +312,57 @@ FINDINGS: dict[str, dict[str, Any]] = {
         ),
         "see_also": ["wachter2006"],
     },
+    # Complementarity (MPCC) findings: read from the report's
+    # `complementarity` block, present only for a model with declared pairs.
+    "mpcc_outcome": {
+        "severity": "info",
+        "meaning": (
+            "What the complementarity driver reported: a strongly stationary answer "
+            "(info), or a weakly stationary point, an uncertified feasible point or the "
+            "verdict of a failed solve (warning), with the certificate class. The solver "
+            "status describes one lowered solve, not the pairs."
+        ),
+        "what_to_try": (
+            "Judge the answer by `complementarity.certificate.class` and "
+            "`natural_residual`, never by status. W: try other starts, a descent "
+            "direction may switch which side of a pair is zero."
+        ),
+        "see_also": ["leyffer2003"],
+    },
+    "mpcc_cost": {
+        "severity": "info",
+        "meaning": (
+            "How many lowered solves the driver ran and their iterations and seconds by "
+            "stage. `statistics.iteration_count` counts only the reported solve."
+        ),
+        "what_to_try": (
+            "If one stage dominates, `complementarity_strategy=continuation` or `=exact` "
+            "runs one formulation only; check the per-solve rows in `solves`."
+        ),
+        "see_also": ["leyffer2003"],
+    },
+    "mpcc_loose_pairs": {
+        "severity": "warning",
+        "meaning": (
+            "The reported point's largest min(|G|, |H|) exceeds 1e-6: a nearly biactive "
+            "pair was left at about sqrt(tau), and the branch re-solve that would tighten "
+            "it was refused (its reason is quoted) or did not run."
+        ),
+        "what_to_try": (
+            "Recompute min(G, H) and whatever the pairs encode (a curve value, a "
+            "contact gap) from the returned point before trusting the objective."
+        ),
+        "see_also": ["leyffer2003"],
+    },
+    "mpcc_polished": {
+        "severity": "info",
+        "meaning": (
+            "A nearly biactive answer was re-solved on its branch (each pair's smaller "
+            "side held at zero), and the tighter point replaced it."
+        ),
+        "what_to_try": "Nothing: this is the success path for a hinge at a knot.",
+        "see_also": ["leyffer2003"],
+    },
 }
 
 

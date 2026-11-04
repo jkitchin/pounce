@@ -3,14 +3,17 @@
 AC Optimal Power Flow (AC OPF) is the canonical nonconvex NLP of the power
 systems community: minimise generation cost subject to nonlinear AC power
 flow equations, voltage limits, line thermal limits, and generator output
-bounds. Problems come from the MATPOWER test case library (Zimmerman,
-Murillo-Sanchez, Thomas, "MATPOWER: Steady-State Operations, Planning, and
-Analysis Tools for Power Systems Research and Education", IEEE Trans. Power
-Syst. 2011). POUNCE uses the polar form with explicit bus voltage magnitude
-and angle variables.
+bounds. Problems are PGLib-OPF cases (Babaeinejadsarookolaee et al., "The
+Power Grid Library for Benchmarking AC Optimal Power Flow Algorithms",
+arXiv:1908.02788; data CC BY 4.0, v23.07), in the MATPOWER case format
+(Zimmerman, Murillo-Sánchez, Thomas, IEEE Trans. Power Syst. 2011).
+`case3_lmbd` and `case5_pjm` exist only in PGLib, not in MATPOWER's own
+case library. Cite PGLib's version and each file header's source, as PGLib
+asks; `$POUNCE_BENCH_DATA/SOURCES.md` has the record. POUNCE uses the polar
+form with explicit bus voltage magnitude and angle variables.
 
-Problems currently range from case3_lmbd (3 buses, 12 variables) to
-case30_ieee (30 buses, 72 variables, 142 constraints). These are good
+The 22 problems range from `case3_lmbd` (3 buses, 12 variables) to
+`pglib_case10000_goc` (10 000 buses). These are good
 stress tests for dense KKT paths because the constraint Jacobian is
 moderately dense and the Hessian has many non-convex blocks from the
 voltage–angle coupling.
@@ -23,8 +26,9 @@ through the AMPL `.nl` interface by the shared NL driver
 
 ## Contents
 
-- `nl/` — the AMPL `.nl` files solved by the harness (one per MATPOWER case)
-- `grid_nl_export.py` — regenerates the `.nl` files from the MATPOWER cases
+- `nl/` (data root) — the AMPL `.nl` files solved by the harness, one per case
+- `grid_nl_export.py` — the generator that wrote them; it is not in this
+  repository (nor in its predecessors') and is recorded as lost
 - `pounce.json` — latest POUNCE per-problem results
 - `ipopt_ma57.json` — Ipopt/MA57 reference results
 - `grid_benchmark_report.md` — per-problem analysis
