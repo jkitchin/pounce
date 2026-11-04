@@ -904,6 +904,8 @@ pub fn solve_mpcc(
     // ([`polish_objective_ok`]), and certifies as the ladder accepts; an S
     // answer is demoted to W only where no branch descends from the new
     // point. Otherwise the point is kept as it was.
+    // A B-check the polish already ran at the point it reported (see below).
+    let mut seeded_check: Option<BCheck> = None;
     if let Some((reported, chosen, known_cert)) = selection.as_mut() {
         let feasible = matches!(known_cert, Some(Some(ct)) if ct.feasible);
         let found = (feasible && !halted() && accepts(chosen.status, chosen.max_abs_product, tol))
@@ -956,11 +958,19 @@ pub fn solve_mpcc(
                     Reported::Verdict => None,
                 };
                 let was_answer = matches!(*reported, Reported::Answer(_));
+                // The demotion's B-check, kept: if the polished point is
+                // taken it is the check the B-escape step would run first at
+                // the same `x`, so it seeds that step instead of being run
+                // again (up to 1024 branch LPs on MacMPEC `qpec2`).
+                let mut demotion_check: Option<BCheck> = None;
                 let next = match stage {
                     Some(s) => polish_class(was_answer, class, || {
-                        inp.as_ref().is_some_and(|inp| {
-                            matches!(check_b_stationarity(inp).verdict, BVerdict::B)
-                        })
+                        let bc = inp.as_ref().map(check_b_stationarity);
+                        let b = bc
+                            .as_ref()
+                            .is_some_and(|bc| matches!(bc.verdict, BVerdict::B));
+                        demotion_check = bc;
+                        b
                     })
                     .map(|answer| {
                         if answer {
@@ -998,6 +1008,7 @@ pub fn solve_mpcc(
                         *reported = next;
                         *chosen = c;
                         *known_cert = Some(cert);
+                        seeded_check = demotion_check;
                     }
                     Err(why) => report(&format!(
                         "pounce: complementarity: the answer's pairs are complementary only to \
@@ -1021,7 +1032,17 @@ pub fn solve_mpcc(
             matches!(cert, Some(Some(ct)) if ct.feasible && ct.class != StationarityClass::S)
                 && accepts(c.status, c.max_abs_product, tol)
         };
-        while !halted() && escapes < MAX_BRANCH_ESCAPES && eligible(known_cert, chosen) {
+        // The polish's demotion check is at this very point and read B, the
+        // loop's first verdict: report it, and the loop has nothing to do.
+        if let Some(bc) = seeded_check.filter(|_| eligible(known_cert, chosen)) {
+            report(&describe_b_check(&bc));
+            b_check = Some(bc);
+        }
+        while b_check.is_none()
+            && !halted()
+            && escapes < MAX_BRANCH_ESCAPES
+            && eligible(known_cert, chosen)
+        {
             let Some(mp) = model_at(&inner, &chosen.x, sense) else {
                 break;
             };
