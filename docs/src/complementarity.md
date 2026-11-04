@@ -305,7 +305,9 @@ present only when the re-solve ran, holds `taken`, `residual_before`,
 `natural_residual` alongside `certificate.class`: the kept answer above
 certifies S with its pairs complementary only to 7.8e-5. `pounce-studio
 diagnose` warns about it (`mpcc_loose_pairs`) when `natural_residual`
-exceeds 1e-6.
+exceeds 1e-6, or `polish_threshold` (the `10·tol` above which the driver
+re-solves) when that is larger: under a looser `tol`, a residual below the
+threshold was left alone on purpose.
 
 ### B-stationarity: when the certificate is not S
 

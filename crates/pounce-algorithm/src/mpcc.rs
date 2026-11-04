@@ -384,6 +384,28 @@ pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
     b.min(caller_max_iter.max(0))
 }
 
+/// The `max_iter` a warm-started continuation rung runs under, or `None` to
+/// leave the caller's.
+///
+/// [`warm_rung_budget`] is safe only because a rung that reaches it is
+/// re-solved cold by `mu_strategy_fallback`. Where that retry will not run
+/// (`fallback_live` false: the caller switched it off, or named a
+/// `mu_strategy`), the budget would be a hard stop that cuts a slow but
+/// converging rung and abandons the schedule, so there is none.
+///
+/// `previous_point_iterations` is what the attempt that produced the previous
+/// rung's point took, not everything its call spent: after a capped rung is
+/// rescued (500 + 124 on `ieee300_reserve_q98`), ten times the total clamps
+/// to the caller's `max_iter` and leaves the next rung unbudgeted.
+pub fn warm_rung_max_iter(
+    fallback_live: bool,
+    previous_point_iterations: usize,
+    caller_max_iter: Index,
+) -> Option<Index> {
+    fallback_live
+        .then(|| budgeted_max_iter(warm_rung_budget(previous_point_iterations), caller_max_iter))
+}
+
 /// Every option any stage writes; the driver snapshots these before the
 /// first stage and restores them after the last.
 pub const TOUCHED_OPTIONS: [&str; 13] = [
@@ -1846,6 +1868,17 @@ mod tests {
         // A caller's smaller max_iter still wins.
         assert_eq!(budgeted_max_iter(warm_rung_budget(25), 12), 12);
         assert_eq!(budgeted_max_iter(warm_rung_budget(25), 3000), 500);
+    }
+
+    /// Both branches of the warm rung's budget: with the fallback live the
+    /// rung is budgeted, without it the caller's `max_iter` stands.
+    #[test]
+    fn a_warm_rung_is_budgeted_only_while_the_fallback_can_rescue_it() {
+        assert_eq!(warm_rung_max_iter(true, 25, 3000), Some(500));
+        assert_eq!(warm_rung_max_iter(true, 25, 12), Some(12));
+        assert_eq!(warm_rung_max_iter(false, 25, 3000), None);
+        // From the rescuing re-solve's 124, not the call's 624: still capped.
+        assert_eq!(warm_rung_max_iter(true, 124, 3000), Some(1240));
     }
 
     /// Every branch of the polish's acceptance, one assertion per branch.

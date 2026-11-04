@@ -281,6 +281,7 @@ def test_the_solve_report_carries_the_complementarity_block(tmp_path):
     assert block["natural_residual"] == cc["natural_residual"] <= 1e-7, cc
     assert block["polish"] == cc["polish"], cc
     assert cc["polish"]["taken"] is True, cc
+    assert block["polish_threshold"] == cc["polish_threshold"] > 0.0, cc
     assert all(s["seconds"] >= 0.0 for s in block["solves"])
 
 

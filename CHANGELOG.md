@@ -15,6 +15,8 @@ changes.
   - `natural_residual`, the reported point's largest `min(|G|, |H|)`;
   - `polish`, present when the branch re-solve ran: `taken`,
     `residual_before`, `residual_after` and the `reason` it was not taken;
+  - `polish_threshold`, the `natural_residual` above which the re-solve
+    runs (`10·tol`);
   - in the JSON only, each lowered solve's wall-clock `seconds`.
 
   Before this, only the console said that an answer certified S could have
@@ -24,8 +26,8 @@ changes.
   findings, each with a glossary entry in the Rust core and the MCP server:
   - `mpcc_outcome`: which point was reported, and its certificate class;
   - `mpcc_cost`: solves, iterations and seconds by stage;
-  - `mpcc_loose_pairs`: `natural_residual` above 1e-6, with the polish's
-    reason;
+  - `mpcc_loose_pairs`: `natural_residual` above 1e-6, or above
+    `polish_threshold` when that is larger, with the polish's outcome;
   - `mpcc_polished`.
 - **The fixture sweep reaches the complementarity driver.**
   `scripts/sweep-fixtures.sh` also runs the declared-pair fixtures in
@@ -41,8 +43,11 @@ changes.
 
 ### Changed
 - **A warm-started continuation rung is budgeted.** Its `max_iter` is 10×
-  the previous rung's iterations, at least 500, and never above the
-  caller's. `mu_strategy_fallback` stays live, so a rung that crawls is
+  the iterations of the attempt that produced the previous rung's point
+  (not its call's total, which includes a capped attempt the fallback
+  rescued), at least 500, and never above the caller's. The budget is set
+  only while `mu_strategy_fallback` will run; with it off, or with a
+  caller-named `mu_strategy`, a rung keeps the caller's `max_iter`. `mu_strategy_fallback` stays live, so a rung that crawls is
   re-solved cold early instead of after the full `max_iter`. On
   `ieee300_reserve_q98` the `τ = 1e-4` rung took all 3000 iterations
   (16 s of 20) after rungs of 25–41; the run now takes 6.7 s, in the same 13

@@ -609,6 +609,8 @@ impl PyProblem {
                     }
                 };
                 d.set_item("polish", polish)?;
+                // The residual above which that re-solve runs (10·tol).
+                d.set_item("polish_threshold", out.polish_threshold)?;
                 d.set_item(
                     "summary",
                     pounce_algorithm::mpcc::describe_outcome(

@@ -128,6 +128,10 @@ pub struct ComplementarityReport {
     pub natural_residual: Option<f64>,
     #[serde(default)]
     pub polish: Option<ComplementarityPolish>,
+    /// The `natural_residual` above which the driver runs the branch
+    /// re-solve (`10·tol`); `None` on reports written before the field.
+    #[serde(default)]
+    pub polish_threshold: Option<f64>,
     #[serde(default)]
     pub escapes: usize,
 }

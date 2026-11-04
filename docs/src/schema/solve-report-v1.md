@@ -395,6 +395,7 @@ one whose point was reported; `total_iterations` is what the run cost.
 | `escapes` | integer | Branch NLPs that moved the point off a non-B-stationary one. Every branch NLP tried, kept or not, is a row of `solves`. Reads `0` on reports written before the field existed. |
 | `natural_residual` | float \| omitted | How complementary the reported point is: the largest `min(|G|, |H|)` over its pairs, in the units of the pair sides. Near `tol` for a point complementary to `tol`; near `sqrt(τ)` for one a relaxed stage left at a nearly biactive pair, even while `max_abs_product` reads `τ` and `certificate.class` reads `S`. Omitted if it could not be evaluated, and on reports written before the field existed. |
 | `polish` | object \| omitted | The branch re-solve of a nearly biactive answer, present when it ran (the answer was feasible and accepted, and its `natural_residual` exceeded `10·tol`). Fields: `taken` (the re-solved point replaced the answer), `residual_before`, `residual_after` (`null` if not measured), `reason` (why it was not taken, else `null`). See [Complementarity Constraints](../complementarity.md). |
+| `polish_threshold` | float \| omitted | The `natural_residual` above which the driver runs the branch re-solve (`10·tol`). A residual at or below it was left alone on purpose. Omitted on reports written before the field existed. |
 
 ## Detail levels
 

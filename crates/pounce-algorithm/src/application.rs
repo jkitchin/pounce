@@ -2761,7 +2761,11 @@ impl IpoptApplication {
     /// case is unaffected: `dirichlet120` stalls under the
     /// limited-memory substitution (pounce#746), which by definition
     /// only happens when `mu_strategy` is unset.
-    fn is_mu_strategy_fallback_enabled(&self) -> bool {
+    ///
+    /// Public so a driver that budgets a solve on the assumption that a
+    /// stalled one is re-solved (the complementarity driver's warm rungs)
+    /// can check that the retry will actually run.
+    pub fn is_mu_strategy_fallback_enabled(&self) -> bool {
         match self.options.get_bool_value("mu_strategy_fallback", "") {
             Ok((v, true)) => v,
             _ => !self.mu_strategy_was_set() || self.mu_strategy_pounce_chosen,

@@ -36,7 +36,7 @@ use pounce_algorithm::mpcc::{
     Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter,
     certify, check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
     finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, polish_class,
-    polish_objective_ok, polish_tightened, relaxation_slack, warm_rung_budget,
+    polish_objective_ok, polish_tightened, relaxation_slack, warm_rung_max_iter,
     warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
@@ -117,6 +117,10 @@ pub struct MpccOutcome {
     pub natural_residual: Option<Number>,
     /// The branch re-solve, when it ran.
     pub polish: Option<PolishRecord>,
+    /// The `natural_residual` above which the branch re-solve runs
+    /// (`POLISH_TRIGGER · tol`), so a reader can tell a residual the driver
+    /// left alone on purpose from one it failed to tighten.
+    pub polish_threshold: Number,
 }
 
 impl MpccOutcome {
@@ -207,6 +211,7 @@ impl MpccOutcome {
                 residual_after: finite(p.residual_after),
                 reason: p.reason.clone(),
             }),
+            polish_threshold: finite(self.polish_threshold),
         }
     }
 }
@@ -681,8 +686,14 @@ pub fn solve_mpcc(
                 let mut last: Option<Captured> = None;
                 // Iterations the last converged rung took (its retry budget).
                 let mut last_its = 0;
+                // Iterations of the attempt that produced the last rung's
+                // point, not every attempt in its call ([`warm_rung_max_iter`]).
+                let mut last_point_its = 0;
                 for &tau in &SCHOLTES_SCHEDULE {
                     baseline(app);
+                    // Read after `baseline`: a budget is set only while the
+                    // fallback that rescues a capped rung will run.
+                    let fallback_live = app.is_mu_strategy_fallback_enabled();
                     let warm = last.as_ref().map(|c| {
                         for a in warm_start_assignments(c.statistics.final_mu) {
                             let _ = app.options_mut().read_from_str(&a, true);
@@ -690,10 +701,13 @@ pub fn solve_mpcc(
                         // `max_iter` only: unlike a finish's budget, this keeps
                         // `mu_strategy_fallback` live, which re-solves a
                         // crawling rung cold and is what rescued the q98 rung.
-                        let it = budgeted_max_iter(warm_rung_budget(last_its), caller_max_iter);
-                        let _ = app
-                            .options_mut()
-                            .read_from_str(&format!("max_iter {it}\n"), true);
+                        if let Some(it) =
+                            warm_rung_max_iter(fallback_live, last_point_its, caller_max_iter)
+                        {
+                            let _ = app
+                                .options_mut()
+                                .read_from_str(&format!("max_iter {it}\n"), true);
+                        }
                         c.warm()
                     });
                     let mut c = run(app, stage, Lowering::Relaxed(tau), warm, &mut solves);
@@ -742,6 +756,7 @@ pub fn solve_mpcc(
                         }
                     }
                     last_its = solves.last().map_or(0, |s| s.iterations);
+                    last_point_its = c.statistics.iteration_count.max(0) as usize;
                     last = Some(c);
                 }
                 if halted() {
@@ -1185,6 +1200,7 @@ pub fn solve_mpcc(
             escapes,
             natural_residual: None,
             polish,
+            polish_threshold: POLISH_TRIGGER * solver_tol,
         });
     }
     let (reported, chosen, known_cert) =
@@ -1233,6 +1249,7 @@ pub fn solve_mpcc(
         escapes,
         natural_residual: nat_res,
         polish,
+        polish_threshold: POLISH_TRIGGER * solver_tol,
     })
 }
 

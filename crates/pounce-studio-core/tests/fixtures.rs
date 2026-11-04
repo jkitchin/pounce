@@ -87,6 +87,62 @@ fn diagnose_warns_on_a_loose_complementarity_answer() {
     assert!(finding(&f, "mpcc_polished").is_none(), "{f:?}");
 }
 
+/// Edit one field of a fixture's `complementarity` block.
+fn with_block(json: &str, edit: impl FnOnce(&mut serde_json::Value)) -> SolveReport {
+    let mut v: serde_json::Value = serde_json::from_str(json).unwrap();
+    edit(&mut v["complementarity"]);
+    SolveReport::from_json_str(&v.to_string()).unwrap()
+}
+
+/// A re-solve may be taken at `1e-3` of the residual it started from and
+/// still leave the pairs above the threshold. Both findings are then true:
+/// the polish was taken, and the pairs are still loose. The warning must not
+/// say the re-solve was refused.
+#[test]
+fn diagnose_reports_a_taken_polish_that_left_the_pairs_loose() {
+    let r = with_block(MPCC_POLISHED, |c| {
+        c["polish"]["residual_before"] = serde_json::json!(1e-2);
+        c["polish"]["residual_after"] = serde_json::json!(5e-6);
+        c["natural_residual"] = serde_json::json!(5e-6);
+    });
+    let f = diagnose(&r);
+    assert!(finding(&f, "mpcc_polished").is_some(), "{f:?}");
+    let loose = finding(&f, "mpcc_loose_pairs").expect("mpcc_loose_pairs");
+    assert!(loose.message.contains("was taken"), "{}", loose.message);
+    assert!(!loose.message.contains("not taken"), "{}", loose.message);
+}
+
+/// Under a caller's looser `tol` the driver re-solves only above `10·tol`,
+/// so a residual below that was left alone on purpose and is not loose. The
+/// same residual on a report whose threshold is the default's still warns,
+/// and one above the larger threshold warns too: the second and third
+/// fixtures are the test, each on the other side of the threshold.
+#[test]
+fn diagnose_judges_loose_pairs_against_the_drivers_threshold() {
+    let at = |nr: f64, thr: Option<f64>| {
+        let r = with_block(MPCC_LOOSE, |c| {
+            c.as_object_mut().unwrap().remove("polish");
+            c["natural_residual"] = serde_json::json!(nr);
+            match thr {
+                Some(t) => c["polish_threshold"] = serde_json::json!(t),
+                None => {
+                    c.as_object_mut().unwrap().remove("polish_threshold");
+                }
+            }
+        });
+        finding(&diagnose(&r), "mpcc_loose_pairs").map(|l| l.message.clone())
+    };
+    // tol = 1e-4: threshold 1e-3, residual 5e-4 below it.
+    assert!(at(5e-4, Some(1e-3)).is_none());
+    // The default tol (threshold 1e-7), and a report predating the field.
+    assert!(at(5e-4, Some(1e-7)).is_some());
+    assert!(at(5e-4, None).is_some());
+    // Above the larger threshold: loose, and the reason is not the residual.
+    let m = at(5e-3, Some(1e-3)).expect("loose above threshold");
+    assert!(m.contains("did not run"), "{m}");
+    assert!(!m.contains("not a feasible accepted"), "{m}");
+}
+
 /// A plain NLP report carries no block and gets no MPCC findings.
 #[test]
 fn diagnose_has_no_complementarity_findings_without_the_block() {

@@ -175,6 +175,11 @@ pub struct ComplementarityInfo {
     /// feasible accepted one). Additive.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub polish: Option<ComplementarityPolishInfo>,
+    /// The `natural_residual` above which the driver runs the branch
+    /// re-solve (`10·tol`). A residual at or below it was left alone on
+    /// purpose. Additive; absent on reports written before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub polish_threshold: Option<f64>,
 }
 
 /// The branch re-solve of the complementarity driver's answer, keyed like
@@ -1381,6 +1386,7 @@ mod tests {
                 residual_after: None,
                 reason: Some("Infeasible_Problem_Detected".into()),
             }),
+            polish_threshold: Some(1e-7),
         });
         let report = b.finish();
         let text = serde_json::to_string(&report).unwrap();
@@ -1402,7 +1408,13 @@ mod tests {
         // reads back, with each absent.
         let mut old: serde_json::Value = serde_json::from_str(&text).unwrap();
         let blk = old["complementarity"].as_object_mut().unwrap();
-        for k in ["b_stationarity", "escapes", "natural_residual", "polish"] {
+        for k in [
+            "b_stationarity",
+            "escapes",
+            "natural_residual",
+            "polish",
+            "polish_threshold",
+        ] {
             blk.remove(k);
         }
         blk["solves"][0].as_object_mut().unwrap().remove("seconds");
@@ -1411,6 +1423,7 @@ mod tests {
         assert!(c.b_stationarity.is_none());
         assert_eq!(c.escapes, 0);
         assert!(c.natural_residual.is_none() && c.polish.is_none());
+        assert!(c.polish_threshold.is_none());
         assert_eq!(c.solves[0].seconds, None);
 
         // A report without the block omits the key and still reads back.

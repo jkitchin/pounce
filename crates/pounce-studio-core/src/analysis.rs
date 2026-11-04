@@ -464,11 +464,23 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
 }
 
 /// Above this largest `min(|G|, |H|)` a complementarity answer's pairs are
-/// reported as loose. The driver's own re-solve triggers at `10·tol`, which
-/// the report does not carry; `1e-6` is a hundred times that at the default
-/// `tol = 1e-8`, and well below the `sqrt(τ) ≈ 1e-4` a nearly biactive pair
-/// is left at by a relaxed stage.
+/// reported as loose, unless the driver's own re-solve threshold is larger
+/// ([`loose_residual_threshold`]). The driver re-solves above `10·tol`; `1e-6`
+/// is a hundred times that at the default `tol = 1e-8`, and well below the
+/// `sqrt(τ) ≈ 1e-4` a nearly biactive pair is left at by a relaxed stage.
 pub const LOOSE_NATURAL_RESIDUAL: f64 = 1e-6;
+
+/// The residual above which [`diagnose`] calls a complementarity answer's
+/// pairs loose: [`LOOSE_NATURAL_RESIDUAL`], or the driver's re-solve
+/// threshold (`polish_threshold`, `10·tol`) when that is larger. Under a
+/// caller's looser `tol` the driver deliberately leaves a residual below its
+/// threshold alone, and a warning there would contradict the tolerance the
+/// caller asked for.
+pub fn loose_residual_threshold(c: &crate::report::ComplementarityReport) -> f64 {
+    c.polish_threshold
+        .filter(|t| t.is_finite())
+        .map_or(LOOSE_NATURAL_RESIDUAL, |t| t.max(LOOSE_NATURAL_RESIDUAL))
+}
 
 /// Findings from the `complementarity` block. The solver status and
 /// `iteration_count` of an MPCC report describe the one lowered solve whose
@@ -549,40 +561,51 @@ fn complementarity_findings(
         });
     }
 
-    let polished = c.polish.as_ref().filter(|p| p.taken);
-    match (c.natural_residual, polished) {
-        (Some(r), _) if r > LOOSE_NATURAL_RESIDUAL => {
-            let why = match &c.polish {
-                Some(p) => format!(
-                    "the branch re-solve ran and was not taken ({})",
-                    p.reason.as_deref().unwrap_or("no reason recorded"),
-                ),
-                None => "the branch re-solve did not run (the point is not a feasible \
-                         accepted one)"
-                    .to_string(),
-            };
-            findings.push(Finding {
-                severity: Severity::Warning,
-                code: "mpcc_loose_pairs",
-                message: format!(
-                    "The reported point's pairs are complementary only to {r:.1e} \
-                     (largest min(|G|, |H|)); {why}. A nearly biactive pair left at \
-                     sqrt(tau) can buy objective the model does not allow: check the \
-                     sides of that pair before trusting the objective.",
-                ),
-            });
-        }
-        (r, Some(p)) => findings.push(Finding {
+    // The re-solve's outcome and the residual are reported separately: a
+    // taken re-solve may tighten the pairs by `1e-3` and still leave them
+    // above the threshold, and then both are true.
+    if let Some(p) = c.polish.as_ref().filter(|p| p.taken) {
+        findings.push(Finding {
             severity: Severity::Info,
             code: "mpcc_polished",
             message: format!(
                 "A nearly biactive answer (min(|G|, |H|) = {}) was re-solved on its branch: \
                  now {}.",
                 p.residual_before.map_or("?".into(), |v| format!("{v:.1e}")),
-                r.map_or("?".into(), |v| format!("{v:.1e}")),
+                c.natural_residual
+                    .map_or("?".into(), |v| format!("{v:.1e}")),
             ),
-        }),
-        _ => {}
+        });
+    }
+
+    let loose_above = loose_residual_threshold(c);
+    if let Some(r) = c.natural_residual.filter(|r| *r > loose_above) {
+        let why = match &c.polish {
+            Some(p) if p.taken => format!(
+                "the branch re-solve ran and was taken (from {}) but did not tighten them \
+                 below {loose_above:.0e}",
+                p.residual_before.map_or("?".into(), |v| format!("{v:.1e}")),
+            ),
+            Some(p) => format!(
+                "the branch re-solve ran and was not taken ({})",
+                p.reason.as_deref().unwrap_or("no reason recorded"),
+            ),
+            // `natural_residual` above the threshold, so the residual was
+            // not why it was skipped.
+            None => "the branch re-solve did not run (it runs only from a feasible, \
+                     accepted point, and not after a stop request)"
+                .to_string(),
+        };
+        findings.push(Finding {
+            severity: Severity::Warning,
+            code: "mpcc_loose_pairs",
+            message: format!(
+                "The reported point's pairs are complementary only to {r:.1e} \
+                 (largest min(|G|, |H|)); {why}. A nearly biactive pair left at \
+                 sqrt(tau) can buy objective the model does not allow: check the \
+                 sides of that pair before trusting the objective.",
+            ),
+        });
     }
 }
 

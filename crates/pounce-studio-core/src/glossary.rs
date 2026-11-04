@@ -387,7 +387,7 @@ const FINDINGS: &[(&str, FindingEntry)] = &[
         "mpcc_loose_pairs",
         FindingEntry {
             severity: "warning",
-            meaning: "The reported point's largest min(|G|, |H|) exceeds 1e-6: a nearly biactive pair was left at about sqrt(tau), and the branch re-solve that would tighten it was refused (its reason is quoted) or did not run.",
+            meaning: "The reported point's largest min(|G|, |H|) exceeds 1e-6 (or the driver's re-solve threshold, 10*tol, when that is larger): a nearly biactive pair was left at about sqrt(tau), and the branch re-solve that would tighten it was refused (its reason is quoted), did not run, or was taken without tightening it below the threshold.",
             what_to_try: "Recompute min(G, H) and whatever the pairs encode (a curve value, a contact gap) from the returned point before trusting the objective.",
             see_also: &["leyffer2003"],
         },
