@@ -88,4 +88,13 @@ have (gh #505 is the worked example; see
 - Docs: `make book` renders `docs/src/` (mdbook) to `docs/book/`.
 - The user guide lives in `docs/src/`; `docs/src/SUMMARY.md` is its TOC.
 - `gams/nlpbench/` and `benchmarks/` hold benchmark suites; the former is
-  gitignored.
+  gitignored. Most suites' problems live outside the repo in
+  `$POUNCE_BENCH_DATA` (see `benchmarks/README.md`). Its `SOURCES.md`
+  records where every suite comes from; a new suite needs a row there, and
+  a `SOURCE.md` with its authors, pinned version, licence and citation,
+  before its results are reported.
+- Complementarity (MPCC) answers are judged by recomputing `min(G, H)` and
+  whatever the pairs encode from the returned point, never by solver status:
+  an NLP solver given `G·H ≤ 0` reports success at complementarity-
+  infeasible points. `make -C benchmarks mpcc-compare` runs pounce against
+  Ipopt (MA57) and CCOpt this way.

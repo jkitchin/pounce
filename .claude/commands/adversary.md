@@ -62,6 +62,7 @@ pounce.
 | `batch`         | `solve_qp_batch` / `solve_qp_multi_rhs`             | many QPs at once                               | per-item single `solve_qp`                      |
 | `diff`          | `pounce.jax` / `pounce.torch` QP/SOCP layers        | differentiable layer `x*(θ)`                   | **finite-difference** `dx/dθ` + JAX↔Torch parity + `gradcheck`/`gradgradcheck` (float64) |
 | `sensitivity`   | `QpSensitivity` / sIPOPT suffixes on `.nl`          | parametric `dx/dp`                             | **finite-difference re-solve**                  |
+| `mpcc`          | `.nl` with AMPL `complements` / Pyomo `mpec`, or `Problem(..., complementarity=…)` | complementarity-constrained NLP (MPCC)        | **known optimum** (branch enumeration on small models) + `min(G,H)` and the physics recomputed from the returned point. **Not** Ipopt: it refuses declared pairs, and on the `G·H ≤ 0` rewrite it reports `Optimal` at complementarity-infeasible points (data root `mpcc_compare/`) |
 
 ### Target selection (step 1 uses this)
 
@@ -100,6 +101,7 @@ does not clearly discriminate. Keep all families moving.
 | `pounce-algorithm/kkt/*`, `ipopt_alg.rs`, `mu/*` | `nlp` (KKT/barrier internals) |
 | `pounce-restoration/*` | `nlp` — infeasible / badly-scaled / hard starts |
 | `pounce-presolve/*` | `lp`, `qp` (redundant rows, fixed vars, dup columns) |
+| `pounce-restoration/mpcc_driver.rs`, `pounce-algorithm/mpcc.rs`, `pounce-nlp/mpcc.rs` | `mpcc` |
 | `pounce-sensitivity/*` | `sensitivity`, `diff` |
 | `pounce-sens-core/*` | `sensitivity`, `diff` — reached through both arms |
 | `pounce-algorithm/batch.rs` | `batch` |
