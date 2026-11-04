@@ -21,29 +21,54 @@ changes.
   - **Case:** on the 37 small AC OPF volt-var/volt-watt cases of
     MPCCModels.jl PR #13, 13 answers at curve knots had min(r, s) up to
     7.8e-5, and the reactive power was up to 6e-4 off its volt-var curve.
-  - **Fix:** when the reported point's largest `min(|G|, |H|)` exceeds `tol`,
-    the driver re-solves once on the branch holding each pair's smaller side
-    at zero. The re-solve is warm-started from the whole point at its final
-    barrier, because a start from `x` alone can settle in another well of a
-    nonconvex branch. The result replaces the answer if it converged, removed
-    the residual, certifies S, W or not-searched, and moved the objective by
-    at most 1% relative. Otherwise the answer is kept as it was.
+  - **Fix:** when the reported point's largest `min(|G|, |H|)` exceeds
+    `10·tol` (a strictly complementary pair ends near `τ = tol`, on `tol`
+    itself), the driver re-solves once on the branch holding each pair's
+    smaller side at zero. It is recorded as the `branch polish` stage. The
+    re-solve is warm-started from the whole point at its final barrier,
+    because a start from `x` alone can settle in another well of a nonconvex
+    branch. The pairs' own multipliers are zeroed, since they are inactive on
+    the branch. The result replaces the answer when:
+    - it converged;
+    - it tightened the residual to `max(tol, 1e-3 × before)`;
+    - the objective rose by no more than `100 × residual × max(1, |f|)`. The
+      largest rise measured was 15.7 of those units, on a curve of slope 16.
+      A fall is taken at any size;
+    - it certifies S or not searched (an answer) or W (the weak fallback). An
+      S answer is demoted to W only where the B-stationarity check at the new
+      point finds no descending branch.
+
+    Otherwise the answer is kept, and the console says which condition
+    failed.
   - **Measured against 0.15.0:**
     - OPF cases: 24/37 → 37/37 under upstream's own gate.
-    - MacMPEC: standing unchanged at 158 at / 7 better / 5 worse. 29 answers
+    - MacMPEC: standing unchanged at 158 at / 7 better / 5 worse. 23 answers
       tightened, among them `qpec2` 44.996 → 45 (its true value). Three move
-      from `Solved_To_Acceptable_Level` to `Solve_Succeeded`. Five keep their
-      answer: four because the held branch is infeasible, one because its
-      re-solve fails (`pack-rig3-16`). Iterations +2%, time +0.6%.
-    - CALIPSO: `ballincup`'s product goes from 1e-8 to 2e-17, at +2.4e-6
-      relative objective.
+      from `Solved_To_Acceptable_Level` to `Solve_Succeeded`:
+      `pack-comp2p-32`, `pack-rig2c-8` and `siouxfls`. Five keep their
+      answer:
+      - three because the held branch is infeasible;
+      - one because its re-solve fails;
+      - one, `incid-set2-32`, because its re-solve is W where the answer was
+        S and a branch descends from it.
+
+      Iterations in all +0.75%, time −0.3%.
+    - CALIPSO: `ballincup`'s product goes from 1e-8 to 4e-15 and 5e-16 on its
+      two moved seeds, at +2.4e-6 relative objective.
     - `mpcc.declared` (64), `mpcc_nl` (16) and the flash smoke run are
       unchanged.
     - The fixture sweep cannot see this change: its `mpcc_*` fixtures write
       their pairs as product rows, so they never reach the driver.
-  - **Tests:** `crates/pounce-cli/tests/mpcc_complementarity.rs` covers both
-    branches on the OPF knot case and a variant whose held branch is
-    infeasible.
+    - Answers whose residual sits between `tol` and `10·tol` are not
+      re-solved. They are inside every gate, but `pack-rig3c-16` stays at
+      `Solved_To_Acceptable_Level`, and OPF `vv_deadband_upper` keeps a
+      2.3e-7 curve error.
+  - **Tests:** `crates/pounce-cli/tests/mpcc_complementarity.rs` covers the
+    re-solve accepted (the OPF knot case) and refused (a variant whose held
+    branch is infeasible). A unit test,
+    `the_polish_takes_only_a_tightened_nearby_point_of_an_accepted_class`,
+    asserts every branch of the acceptance rules, including the S-to-W
+    demotion that no fixture reaches.
 
 
 ## [0.15.0] - 2026-11-03
