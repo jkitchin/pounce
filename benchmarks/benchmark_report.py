@@ -1016,7 +1016,8 @@ def complementarity_lines(bench_root):
     lines.append("")
     for name, counts, its, wall, n in sections:
         order = ["pass", "at", "BETTER", "worse", "unsolved", "note", "FAIL"]
-        lines.append(f"**MacMPEC** (`make -C benchmarks macmpec-run`, {n} problems, against "
+        stamp = datetime.fromtimestamp(os.path.getmtime(mm_rows)).strftime('%Y-%m-%d')
+        lines.append(f"**MacMPEC** (`make -C benchmarks macmpec-run`, results of {stamp}, {n} problems, against "
                      "best-known objectives): " + ", ".join(
                          f"{counts[k]} {k}" for k in order if counts.get(k)) +
                      f"; {its} iterations, {wall:.1f} s.")
@@ -1041,7 +1042,7 @@ def complementarity_lines(bench_root):
                     f"| {suite} | {arm} | {sum(r.get('verdict') in good for r in rs)} "
                     f"| {sum(r.get('verdict') == 'local' for r in rs)} | {len(fail)} "
                     f"| {sum(r.get('status') in ok for r in fail)} "
-                    f"| {sum(bool(r.get('at_best')) for r in rs)} "
+                    f"| {sum(r.get('at_best') in (True, 'True') for r in rs)} "
                     f"| {sum(r.get('iterations') or 0 for r in rs)} "
                     f"| {sum(r.get('wall') or 0 for r in rs):.1f} |")
         lines.append("")
