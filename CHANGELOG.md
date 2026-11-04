@@ -7,6 +7,45 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
+## [Unreleased]
+
+### Fixed
+- **A complementarity answer at a nearly biactive pair is complementary to
+  the solver's tolerance, not to `sqrt(tol)`.** Every stage of the driver
+  stops at a pair product near the last `τ` (1e-8). That is harmless where a
+  pair is strictly complementary, because the smaller side is then about `τ`.
+  Where a pair is nearly biactive at the answer, both sides sit near
+  `sqrt(τ)` = 1e-4. The driver reported `Solve_Succeeded`, the certificate
+  counted the pair as one-sided, and the answer's objective read *better*
+  than the true optimum by what the slack bought.
+  - **Case:** on the 37 small AC OPF volt-var/volt-watt cases of
+    MPCCModels.jl PR #13, 13 answers at curve knots had min(r, s) up to
+    7.8e-5, and the reactive power was up to 6e-4 off its volt-var curve.
+  - **Fix:** when the reported point's largest `min(|G|, |H|)` exceeds `tol`,
+    the driver re-solves once on the branch holding each pair's smaller side
+    at zero. The re-solve is warm-started from the whole point at its final
+    barrier, because a start from `x` alone can settle in another well of a
+    nonconvex branch. The result replaces the answer if it converged, removed
+    the residual, certifies S, W or not-searched, and moved the objective by
+    at most 1% relative. Otherwise the answer is kept as it was.
+  - **Measured against 0.15.0:**
+    - OPF cases: 24/37 → 37/37 under upstream's own gate.
+    - MacMPEC: standing unchanged at 158 at / 7 better / 5 worse. 29 answers
+      tightened, among them `qpec2` 44.996 → 45 (its true value). Three move
+      from `Solved_To_Acceptable_Level` to `Solve_Succeeded`. Five keep their
+      answer: four because the held branch is infeasible, one because its
+      re-solve fails (`pack-rig3-16`). Iterations +2%, time +0.6%.
+    - CALIPSO: `ballincup`'s product goes from 1e-8 to 2e-17, at +2.4e-6
+      relative objective.
+    - `mpcc.declared` (64), `mpcc_nl` (16) and the flash smoke run are
+      unchanged.
+    - The fixture sweep cannot see this change: its `mpcc_*` fixtures write
+      their pairs as product rows, so they never reach the driver.
+  - **Tests:** `crates/pounce-cli/tests/mpcc_complementarity.rs` covers both
+    branches on the OPF knot case and a variant whose held branch is
+    infeasible.
+
+
 ## [0.15.0] - 2026-11-03
 
 **Where MacMPEC stands at release.** The MacMPEC counts in the entries

@@ -1648,6 +1648,37 @@ fn branch_lp(
     matches!(sol.status, QpStatus::Optimal).then_some((sol.obj, sol.x))
 }
 
+/// The largest natural residual `min(|G_k|, |H_k|)` over the pairs at a
+/// point, with the branch that removes it: each pair's smaller side held at
+/// zero. A mixed pair is read as the one-sided pair of its nearer bound, as
+/// the certificate reads it.
+///
+/// Every stage stops at a pair product near the last `τ`, which is harmless
+/// where a pair is strictly complementary (the other side is `O(1)`, so the
+/// smaller is `≈ τ`) and is not where a pair is nearly biactive: there both
+/// sides sit near `sqrt(τ)`. On MPCCModels.jl's OPF volt-var cases (PR #13)
+/// the answer at a curve knot had `r = 7.8e-5`, `s = 1.3e-4` at a product of
+/// `1e-8`, the curve's slope of 7.5 put `Q` 5.9e-4 off it, and the objective
+/// read *better* than the model's true optimum by what that slack bought.
+/// `None` with no pairs or a non-finite side.
+pub fn natural_residual(inp: &CertificateInput<'_>) -> Option<(Number, Vec<HeldSide>)> {
+    let corner = inp.solver_tol.max(0.0).sqrt();
+    let act = pair_activity(inp, corner);
+    let mut worst: Number = 0.0;
+    let mut held = Vec::with_capacity(inp.pairs.len());
+    for (k, p) in inp.pairs.iter().enumerate() {
+        let (sg, b) = act.g_side[k];
+        let g = (sg * (inp.x[p.var] - b)).abs();
+        let h = act.hv[k].abs();
+        if !g.is_finite() || !h.is_finite() {
+            return None;
+        }
+        worst = worst.max(g.min(h));
+        held.push(if g <= h { HeldSide::G } else { HeldSide::H });
+    }
+    (!held.is_empty()).then_some((worst, held))
+}
+
 /// The branch NLP's bounds for `held` (one per pair): the held side pinned
 /// at zero, and, on a mixed pair held at a bound, the free row given the
 /// sign the pair requires there. For [`pounce_nlp::mpcc::MpccTnlp::set_branch`].

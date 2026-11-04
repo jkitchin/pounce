@@ -35,7 +35,7 @@ use pounce_algorithm::mpcc::{
     Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy,
     TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter, certify,
     check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
-    finish_budget, finish_drifted, kept_if_nothing_better, relaxation_slack,
+    finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, relaxation_slack,
     warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
@@ -868,6 +868,108 @@ pub fn solve_mpcc(
         (None, None, None, None) => None,
     };
 
+    // The polish ([`natural_residual`]): a reported point whose pairs are
+    // complementary only to more than `tol` in `min(|G|, |H|)` -- every stage
+    // stops at a product near the last `τ`, so a nearly biactive pair keeps
+    // both sides near `sqrt(τ)` -- is re-solved once on the branch that
+    // holds each pair's smaller side at zero, warm from the point. The
+    // polished point replaces it if it converged, is feasible, certifies S
+    // or W, removes the residual, and did not move the objective by more
+    // than [`POLISH_DRIFT`]; otherwise the point is kept as it was.
+    if let Some((reported, chosen, known_cert)) = selection.as_mut() {
+        let feasible = matches!(known_cert, Some(Some(ct)) if ct.feasible);
+        let residual =
+            (feasible && !halted() && accepts(chosen.status, chosen.max_abs_product, tol))
+                .then(|| model_at(&inner, &chosen.x, sense))
+                .flatten()
+                .and_then(|mp| {
+                    let inp = mp.input(&pairs, solver_tol, tol);
+                    natural_residual(&inp).map(|(r, held)| (r, branch_bounds(&inp, &held)))
+                });
+        if let Some((r_old, bounds)) = residual.filter(|(r, _)| *r > solver_tol) {
+            wrapper.borrow_mut().set_branch(Some(bounds));
+            app.set_in_retry_sequence(true);
+            baseline(app);
+            // Warm from the whole point, at the barrier it ended on, as a
+            // finish is: the branch can be nonconvex, and a re-solve from
+            // `x` alone is pushed `bound_push` off its bounds and may settle
+            // in another well of the same branch. Measured on the capacity
+            // best responses (CapacityEquilibriaBenchmarks.jl): from `x`
+            // alone, B's corner-start base-load problem moved 5.5e-5 above
+            // its global optimum to remove a residual of 1.6e-8.
+            for a in warm_start_assignments(chosen.statistics.final_mu) {
+                let _ = app.options_mut().read_from_str(&a, true);
+            }
+            set_budget(
+                app,
+                finish_budget(solves.iter().map(|s| s.iterations).sum()),
+            );
+            let c = run(
+                app,
+                MpccStage::Branch,
+                Lowering::Ineq,
+                Some(chosen.warm()),
+                &mut solves,
+            );
+            wrapper.borrow_mut().set_branch(None);
+            app.set_in_retry_sequence(false);
+            restore(app);
+            if !halted() {
+                let f_old = sense * objective_at(&inner, &chosen.x);
+                let f_new = sense * objective_at(&inner, &c.x);
+                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
+                let r_new = model_at(&inner, &c.x, sense)
+                    .and_then(|mp| natural_residual(&mp.input(&pairs, solver_tol, tol)))
+                    .map_or(Number::INFINITY, |(r, _)| r);
+                let class = cert.as_ref().filter(|ct| ct.feasible).map(|ct| ct.class);
+                let stage = match *reported {
+                    Reported::Answer(s)
+                    | Reported::WeakFallback(s)
+                    | Reported::FeasibleUncertified(s) => Some(s),
+                    Reported::Verdict => None,
+                };
+                // The same classes the ladder accepts: S, or not searched
+                // (`answers`; MacMPEC `siouxfls`, 2403 variables, is not
+                // searched and tightened from 1.7e-7 to 2.4e-11), as an
+                // answer; W as the weak fallback; a point the certificate
+                // calls not stationary is not taken.
+                let next = match (stage, class) {
+                    (Some(s), Some(k)) if answers(k) => Some(Reported::Answer(s)),
+                    (Some(s), Some(k)) if kept_if_nothing_better(k) => {
+                        Some(Reported::WeakFallback(s))
+                    }
+                    _ => None,
+                };
+                let drift = f_new - f_old;
+                match next {
+                    Some(next)
+                        if accepts(c.status, c.max_abs_product, tol)
+                            && r_new <= solver_tol
+                            && f_new.is_finite()
+                            && drift.abs() <= POLISH_DRIFT * f_old.abs().max(1.0) =>
+                    {
+                        report(&format!(
+                            "pounce: complementarity: the answer's pairs were complementary only \
+                             to {r_old:.1e} (min(|G|,|H|)); re-solved on its branch with each \
+                             pair's smaller side held at zero: {r_new:.1e}, minimized objective \
+                             {f_old:.6e} -> {f_new:.6e}."
+                        ));
+                        *reported = next;
+                        *chosen = c;
+                        *known_cert = Some(cert);
+                    }
+                    _ => report(&format!(
+                        "pounce: complementarity: the answer's pairs are complementary only to \
+                         {r_old:.1e} (min(|G|,|H|)), and the branch re-solve did not tighten it \
+                         ({:?}, {r_new:.1e}, minimized objective {f_old:.6e} -> {f_new:.6e}); \
+                         keeping it.",
+                        c.status
+                    )),
+                }
+            }
+        }
+    }
+
     // A feasible reported point the certificate does not call S may still be
     // B-stationary (ralph1's origin is), or may sit where a branch descends.
     // Check, and while a branch descends, re-solve it from the point: an
@@ -1045,6 +1147,14 @@ fn acceptable(c: Captured) -> Captured {
 
 /// At most this many branch NLPs from one reported point.
 const MAX_BRANCH_ESCAPES: usize = 3;
+
+/// How far, relative to `max(1, |f|)`, the polish may move the minimized
+/// objective and still be the same answer made complementary. It removes
+/// slack the point was using, so it moves the objective by what that slack
+/// bought: on the OPF volt-var cases up to 3.9e-4 at `|f| = 0.4` (a VW cap
+/// exceeded by 3.9e-4 at unit cost). A re-solve that moves it more has left
+/// the answer's branch, and the point is kept.
+const POLISH_DRIFT: Number = 1e-2;
 
 /// The console line for a B-stationarity check.
 fn describe_b_check(bc: &BCheck) -> String {
