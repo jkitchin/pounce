@@ -233,7 +233,14 @@ fn markdown_renders_full_report() {
 /// one leaves an agent with a finding it cannot look up.
 #[test]
 fn every_emitted_finding_has_a_glossary_entry() {
-    for src in [ROSENBROCK, STALLED, QUADRATIC, CIRCLE, MPCC_POLISHED, MPCC_LOOSE] {
+    for src in [
+        ROSENBROCK,
+        STALLED,
+        QUADRATIC,
+        CIRCLE,
+        MPCC_POLISHED,
+        MPCC_LOOSE,
+    ] {
         let r = SolveReport::from_json_str(src).unwrap();
         for f in diagnose(&r) {
             assert!(

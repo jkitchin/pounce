@@ -350,6 +350,33 @@ pub fn answers_agree(f_a: Number, f_b: Number, slack: Number, gap: Number) -> bo
 /// failed: twice what the previous rung took, at least this.
 pub const RUNG_RETRY_FLOOR: usize = 200;
 
+/// The budget of a warm-started continuation rung, as a multiple of what the
+/// previous rung took ([`warm_rung_budget`]).
+pub const WARM_RUNG_FACTOR: usize = 10;
+
+/// The least budget of a warm-started continuation rung.
+pub const WARM_RUNG_FLOOR: usize = 500;
+
+/// The budget of a warm-started continuation rung: [`WARM_RUNG_FACTOR`]
+/// times what the previous rung took, at least [`WARM_RUNG_FLOOR`].
+///
+/// A warm rung starts at the previous rung's point with the barrier where it
+/// ended, and tightening `τ` leaves that point infeasible by up to the step
+/// in `τ`. Where the barrier is already small the iterate is pinned against
+/// its bounds and can crawl: on MPCCModels.jl's `ieee300_reserve_q98` the
+/// `τ = 1e-4` rung, started at `μ = 3e-8` and `9e-4` infeasible, took
+/// steps of `1e-4` with 14 backtracks each for all 3000 of `max_iter`
+/// (16 s of the run's 20), after rungs of 25 to 41 iterations; the cold
+/// re-solve that followed took 124. Unbudgeted, a crawl costs `max_iter`
+/// before anything else is tried. Budgeted, it stops early and the same
+/// rescue runs: the budget is a `max_iter` only, leaving
+/// `mu_strategy_fallback` live (a finish's budget switches it off), and that
+/// fallback is the cold re-solve. On q98 the run goes from 20 s to 6.7 s, in
+/// the same 13 lowered solves and to the same objective.
+pub fn warm_rung_budget(previous_rung_iterations: usize) -> usize {
+    (WARM_RUNG_FACTOR * previous_rung_iterations).max(WARM_RUNG_FLOOR)
+}
+
 /// The `max_iter` a budgeted solve runs under: `budget`, but never above the
 /// caller's own `max_iter`.
 pub fn budgeted_max_iter(budget: usize, caller_max_iter: Index) -> Index {
@@ -1807,6 +1834,18 @@ mod tests {
             .map(|i| (b[i] - x[0] * a[i] - x[1] * a2[i] + x[2] * a[i]).powi(2))
             .sum();
         assert!(r.sqrt() < 1e-9, "residual {}", r.sqrt());
+    }
+
+    #[test]
+    fn a_warm_rung_is_budgeted_from_the_rung_before_it() {
+        // ieee300_reserve_q98: rungs of 25-41 iterations, then a crawl to
+        // max_iter = 3000. Ten times the previous rung, floored at 500.
+        assert_eq!(warm_rung_budget(25), WARM_RUNG_FLOOR);
+        assert_eq!(warm_rung_budget(0), WARM_RUNG_FLOOR);
+        assert_eq!(warm_rung_budget(120), 1200);
+        // A caller's smaller max_iter still wins.
+        assert_eq!(budgeted_max_iter(warm_rung_budget(25), 12), 12);
+        assert_eq!(budgeted_max_iter(warm_rung_budget(25), 3000), 500);
     }
 
     /// Every branch of the polish's acceptance, one assertion per branch.

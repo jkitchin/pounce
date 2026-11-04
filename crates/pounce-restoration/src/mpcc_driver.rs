@@ -36,7 +36,8 @@ use pounce_algorithm::mpcc::{
     Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter,
     certify, check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
     finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, polish_class,
-    polish_objective_ok, polish_tightened, relaxation_slack, warm_start_assignments,
+    polish_objective_ok, polish_tightened, relaxation_slack, warm_rung_budget,
+    warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -54,7 +55,8 @@ pub struct MpccSolveRecord {
     pub status: ApplicationReturnStatus,
     pub iterations: usize,
     pub max_abs_product: Number,
-    /// Wall-clock seconds the solve took (its `total_wallclock_time_secs`).
+    /// Wall-clock seconds of the whole `optimize_tnlp` call, retries and
+    /// second opinions inside it included.
     pub seconds: Number,
 }
 
@@ -382,7 +384,13 @@ pub fn solve_mpcc(
             w.set_lowering(lowering);
             w.set_start_override(start);
         }
+        // Timed here, around the whole call: the statistics' wall clock
+        // describes the last attempt inside it, and a retry or second
+        // opinion within the call resets it (ieee300_reserve_q98: 2.9 s of
+        // 20 s by the statistics).
+        let t0 = std::time::Instant::now();
         let status = app.optimize_tnlp(Rc::clone(&lowered));
+        let seconds = t0.elapsed().as_secs_f64();
         let statistics = app.statistics();
         let w = wrapper.borrow();
         // Complementarity violation: `|G·H|` for one-sided pairs, the positive
@@ -429,7 +437,7 @@ pub fn solve_mpcc(
             status,
             iterations: statistics.spent_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
-            seconds: statistics.total_wallclock_time_secs,
+            seconds,
         });
         if status == ApplicationReturnStatus::UserRequestedStop {
             stopped.borrow_mut().get_or_insert_with(|| cap.clone());
@@ -679,6 +687,13 @@ pub fn solve_mpcc(
                         for a in warm_start_assignments(c.statistics.final_mu) {
                             let _ = app.options_mut().read_from_str(&a, true);
                         }
+                        // `max_iter` only: unlike a finish's budget, this keeps
+                        // `mu_strategy_fallback` live, which re-solves a
+                        // crawling rung cold and is what rescued the q98 rung.
+                        let it = budgeted_max_iter(warm_rung_budget(last_its), caller_max_iter);
+                        let _ = app
+                            .options_mut()
+                            .read_from_str(&format!("max_iter {it}\n"), true);
                         c.warm()
                     });
                     let mut c = run(app, stage, Lowering::Relaxed(tau), warm, &mut solves);

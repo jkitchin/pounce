@@ -167,6 +167,13 @@ iterations by a third, with no answer changed:
   step's point and barrier parameter, with twice that step's iterations,
   rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried
   and dropped: on the CALIPSO rocket the later steps reach a better branch.
+- **A warm step that crawls is cut short.** Each warm-started step may take
+  10× the previous step's iterations, at least 500 (never more than your
+  `max_iter`). Tightening `τ` leaves the previous point slightly infeasible,
+  and at a small barrier parameter the iterate can creep along its bounds:
+  on an IEEE 300-bus volt-var case one step took all 3000 iterations after
+  steps of 25–41. Cut at 500, it is re-solved cold by `mu_strategy_fallback`
+  and the run takes a third of the time, to the same answer.
 
 The remaining cost of running both is a choice you can undo when you know
 your model. Two
