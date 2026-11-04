@@ -160,6 +160,35 @@ pub struct ComplementarityInfo {
     /// one. Additive; reads `0` on reports written before the field existed.
     #[serde(default)]
     pub escapes: usize,
+    /// How complementary the reported point is: the largest `min(|G|, |H|)`
+    /// over its pairs, in the units of the pair sides. A point whose pairs
+    /// are complementary to `tol` reads near `tol`; one a relaxed stage left
+    /// at a nearly biactive pair reads near `sqrt(τ)` even when
+    /// `max_abs_product` reads `τ`. `null` when it could not be evaluated.
+    /// Additive; absent on reports written before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub natural_residual: Option<f64>,
+    /// The branch re-solve of a nearly biactive answer, when it ran: whether
+    /// its point was taken, the residual before and after, and why it was
+    /// not taken. Absent when it did not run (the answer's
+    /// `natural_residual` was within `10·tol`, or the point was not a
+    /// feasible accepted one). Additive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub polish: Option<ComplementarityPolishInfo>,
+}
+
+/// The branch re-solve of the complementarity driver's answer, keyed like
+/// Python's `info["complementarity"]["polish"]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplementarityPolishInfo {
+    /// The re-solved point replaced the answer.
+    pub taken: bool,
+    /// The answer's `natural_residual` before the re-solve.
+    pub residual_before: Option<f64>,
+    /// The re-solved point's; `null` if it was not measured.
+    pub residual_after: Option<f64>,
+    /// Why the re-solved point was not taken; `null` when it was.
+    pub reason: Option<String>,
 }
 
 /// The B-stationarity check of the complementarity driver's reported point,
@@ -193,6 +222,10 @@ pub struct ComplementaritySolveInfo {
     /// Complementarity violation at the solve's point (as
     /// [`ComplementarityInfo::max_abs_product`]); `null` when it returned none.
     pub max_abs_product: Option<f64>,
+    /// Wall-clock seconds of the solve. Additive; absent on reports written
+    /// before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub seconds: Option<f64>,
 }
 
 /// Which stationarity class the reported point satisfies.
@@ -1317,6 +1350,7 @@ mod tests {
                 status: "Not_Enough_Degrees_Of_Freedom".into(),
                 iterations: 0,
                 max_abs_product: None,
+                seconds: Some(0.01),
             }],
             total_iterations: 0,
             max_abs_product: None,
@@ -1340,6 +1374,13 @@ mod tests {
                 enumerated: true,
             }),
             escapes: 0,
+            natural_residual: Some(7.8e-5),
+            polish: Some(ComplementarityPolishInfo {
+                taken: false,
+                residual_before: Some(7.8e-5),
+                residual_after: None,
+                reason: Some("Infeasible_Problem_Detected".into()),
+            }),
         });
         let report = b.finish();
         let text = serde_json::to_string(&report).unwrap();
@@ -1350,17 +1391,27 @@ mod tests {
         assert_eq!(c.solves[0].max_abs_product, None);
         assert_eq!(c.certificate.unwrap().primal_violation, Some(4.6e-4));
         assert_eq!(c.b_stationarity.unwrap().verdict, "not_checked");
+        assert_eq!(c.natural_residual, Some(7.8e-5));
+        assert_eq!(c.solves[0].seconds, Some(0.01));
+        let p = c.polish.expect("polish");
+        assert!(!p.taken);
+        assert_eq!(p.residual_after, None);
 
-        // A block written before `b_stationarity` and `escapes` existed
-        // still reads back: the check absent, no escapes.
+        // A block written before `b_stationarity`, `escapes`,
+        // `natural_residual`, `polish` and a solve's `seconds` existed still
+        // reads back, with each absent.
         let mut old: serde_json::Value = serde_json::from_str(&text).unwrap();
         let blk = old["complementarity"].as_object_mut().unwrap();
-        blk.remove("b_stationarity");
-        blk.remove("escapes");
+        for k in ["b_stationarity", "escapes", "natural_residual", "polish"] {
+            blk.remove(k);
+        }
+        blk["solves"][0].as_object_mut().unwrap().remove("seconds");
         let back: SolveReport = serde_json::from_value(old).expect("pre-field report");
         let c = back.complementarity.expect("block");
         assert!(c.b_stationarity.is_none());
         assert_eq!(c.escapes, 0);
+        assert!(c.natural_residual.is_none() && c.polish.is_none());
+        assert_eq!(c.solves[0].seconds, None);
 
         // A report without the block omits the key and still reads back.
         let plain = ReportBuilder::new(ReportDetail::Summary, InputDescriptor::TnlpDirect).finish();

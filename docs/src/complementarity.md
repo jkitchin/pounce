@@ -225,8 +225,9 @@ number is `max_abs_product` in Python and in the JSON report.
 From Python, `info["complementarity"]` holds `accepted_by` (the stage that
 answered with an S point, or `None` if none did), `fallback` (the stage
 whose W point is reported when none answered, else `None`), `n_solves`,
-`total_iterations`, `max_abs_product`, the per-solve records, and
-`certificate`:
+`total_iterations`, `max_abs_product`, `natural_residual` (how
+complementary the reported point is; see below), `polish`, the per-solve
+records, and `certificate`:
 
 | `class` | meaning |
 | --- | --- |
@@ -283,12 +284,21 @@ and why:
 
 ```text
 pounce: complementarity: the answer's pairs were complementary only to 7.8e-5 (min(|G|,|H|)); re-solved on its branch with each pair's smaller side held at zero: 6.0e-14, minimized objective -3.954779e-1 -> -3.954731e-1.
-pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (InfeasibleProblemDetected); keeping it.
+pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (the re-solve returned Infeasible_Problem_Detected); keeping it.
 ```
 
 The re-solve appears in `solves` as a `branch polish` stage, distinct from a
 B-escape's `branch NLP`. A kept answer is no worse than before, but its pairs
 are complementary only to the residual printed.
+
+The report says the same without the console. `natural_residual` is the
+reported point's largest `min(|G_k|, |H_k|)`, on every run. `polish`,
+present only when the re-solve ran, holds `taken`, `residual_before`,
+`residual_after` and the `reason` it was not taken. Read
+`natural_residual` alongside `certificate.class`: the kept answer above
+certifies S with its pairs complementary only to 7.8e-5. `pounce-studio
+diagnose` warns about it (`mpcc_loose_pairs`) when `natural_residual`
+exceeds 1e-6.
 
 ### B-stationarity: when the certificate is not S
 

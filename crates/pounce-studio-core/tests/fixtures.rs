@@ -17,6 +17,13 @@ const ROSENBROCK: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock.j
 const STALLED: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock-stalled.json");
 const QUADRATIC: &str = include_str!("../../../studio/mcp/fixtures/quadratic.json");
 const CIRCLE: &str = include_str!("../../../studio/mcp/fixtures/circle.json");
+// The complementarity polish's two branches: `crates/pounce-cli/tests/
+// fixtures_mpcc/opf_vv_lower_knee{,_held}.nl`, solved with `--json-output`
+// (input path and git commit stripped).
+const MPCC_POLISHED: &str =
+    include_str!("../../../studio/mcp/fixtures/mpcc-opf-vv-lower-knee.json");
+const MPCC_LOOSE: &str =
+    include_str!("../../../studio/mcp/fixtures/mpcc-opf-vv-lower-knee-held.json");
 const EQ_TRACE: &[u8] = include_bytes!("../../../studio/mcp/fixtures/eq-quadratic.iterdump");
 
 #[test]
@@ -26,10 +33,66 @@ fn fixtures_round_trip_schema() {
         ("rosenbrock-stalled", STALLED),
         ("quadratic", QUADRATIC),
         ("circle", CIRCLE),
+        ("mpcc-polished", MPCC_POLISHED),
+        ("mpcc-loose", MPCC_LOOSE),
     ] {
         let r = SolveReport::from_json_str(src).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(r.schema, SOLVE_REPORT_SCHEMA, "{name}");
     }
+}
+
+fn finding<'a>(
+    f: &'a [pounce_studio_core::analysis::Finding],
+    code: &str,
+) -> Option<&'a pounce_studio_core::analysis::Finding> {
+    f.iter().find(|x| x.code == code)
+}
+
+/// An MPCC report: `diagnose` reads the complementarity block, says what
+/// the status does not (which point, which class, what it all cost), and
+/// that a polished answer was polished.
+#[test]
+fn diagnose_reads_a_polished_complementarity_answer() {
+    let r = SolveReport::from_json_str(MPCC_POLISHED).unwrap();
+    let f = diagnose(&r);
+    let out = finding(&f, "mpcc_outcome").expect("mpcc_outcome");
+    assert!(out.message.contains("weakly stationary"), "{}", out.message);
+    let cost = finding(&f, "mpcc_cost").expect("mpcc_cost");
+    assert!(
+        cost.message.contains("Scholtes continuation"),
+        "{}",
+        cost.message
+    );
+    assert!(cost.message.contains("branch polish"), "{}", cost.message);
+    assert!(finding(&f, "mpcc_polished").is_some(), "{f:?}");
+    assert!(finding(&f, "mpcc_loose_pairs").is_none(), "{f:?}");
+}
+
+/// The other branch: an S answer whose pairs are loose to 7.8e-5 because
+/// its branch is infeasible. `certificate.class` alone reads as a clean S
+/// answer; `diagnose` must warn, with the re-solve's reason.
+#[test]
+fn diagnose_warns_on_a_loose_complementarity_answer() {
+    let r = SolveReport::from_json_str(MPCC_LOOSE).unwrap();
+    let f = diagnose(&r);
+    let out = finding(&f, "mpcc_outcome").expect("mpcc_outcome");
+    assert_eq!(out.severity, Severity::Info, "{}", out.message);
+    let loose = finding(&f, "mpcc_loose_pairs").expect("mpcc_loose_pairs");
+    assert_eq!(loose.severity, Severity::Warning);
+    assert!(
+        loose.message.contains("Infeasible_Problem_Detected"),
+        "{}",
+        loose.message
+    );
+    assert!(finding(&f, "mpcc_polished").is_none(), "{f:?}");
+}
+
+/// A plain NLP report carries no block and gets no MPCC findings.
+#[test]
+fn diagnose_has_no_complementarity_findings_without_the_block() {
+    let r = SolveReport::from_json_str(ROSENBROCK).unwrap();
+    assert!(r.complementarity.is_none());
+    assert!(!diagnose(&r).iter().any(|x| x.code.starts_with("mpcc_")));
 }
 
 #[test]

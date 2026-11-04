@@ -268,6 +268,17 @@ fn a_nearly_biactive_answer_is_re_solved_onto_its_branch() {
         0.3 * (0.98 - v) / 0.04
     };
     assert!((q - vv).abs() <= 1e-7, "v = {v}, q = {q}, VV(v) = {vv}");
+    // The report says so, without the reader recomputing it: the reported
+    // point's residual, and the re-solve that produced it.
+    let c = &r.json.as_ref().unwrap()["complementarity"];
+    let nr = c["natural_residual"].as_f64().expect("natural_residual");
+    assert!(nr <= 1e-9, "natural_residual = {nr:e}");
+    let p = &c["polish"];
+    assert_eq!(p["taken"], true, "{p}");
+    assert!(p["residual_before"].as_f64().unwrap() > 1e-5, "{p}");
+    assert_eq!(p["residual_after"].as_f64(), Some(nr), "{p}");
+    assert!(p["reason"].is_null(), "{p}");
+    assert!(c["solves"][0]["seconds"].as_f64().is_some(), "{c}");
 }
 
 /// The polish's other branch: `opf_vv_lower_knee_held.nl` adds `r[1] >=
@@ -292,4 +303,58 @@ fn a_branch_the_answer_cannot_hold_leaves_the_answer_as_it_was() {
         natural_residual(&x) > 1e-6,
         "the kept point is the stages' own"
     );
+    // The report says the answer is loose, and why it stayed so: a reader
+    // of `certificate.class` alone would take it for a tight S answer.
+    let c = &r.json.as_ref().unwrap()["complementarity"];
+    let nr = c["natural_residual"].as_f64().expect("natural_residual");
+    assert!(nr > 1e-6, "natural_residual = {nr:e}");
+    let p = &c["polish"];
+    assert_eq!(p["taken"], false, "{p}");
+    assert_eq!(p["residual_before"].as_f64(), Some(nr), "{p}");
+    assert_eq!(
+        p["reason"], "the re-solve returned Infeasible_Problem_Detected",
+        "{p}"
+    );
+}
+
+/// A point already complementary to `tol` is not re-solved, and the report
+/// says how complementary it is with no `polish` record.
+#[test]
+fn a_tight_answer_reports_its_residual_and_no_polish() {
+    let r = run("qpec_small.nl", &[]);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    let c = &r.json.as_ref().unwrap()["complementarity"];
+    let nr = c["natural_residual"].as_f64().expect("natural_residual");
+    assert!(nr <= 1e-7, "natural_residual = {nr:e}");
+    assert!(c.get("polish").is_none(), "{c}");
+}
+
+/// The ladder's last branch: no formulation answers (`infeasible_pair.nl`
+/// has `x >= 1`, `y >= 1` and `x ⟂ y`), so every stage runs, the l1 penalty
+/// included, and the exact-product solve's verdict is reported. Not an
+/// answer, so it is neither certified feasible nor polished.
+#[test]
+fn a_pair_no_point_satisfies_reports_the_verdict() {
+    let r = run("infeasible_pair.nl", &[]);
+    let j = r.json.as_ref().expect("report");
+    assert_eq!(
+        j["solution"]["status_upstream"], "Infeasible_Problem_Detected",
+        "{}",
+        r.stderr
+    );
+    let c = &j["complementarity"];
+    assert_eq!(c["reported"], "verdict", "{c}");
+    assert!(
+        c.get("accepted_by").is_none() && c.get("fallback").is_none(),
+        "{c}"
+    );
+    assert_eq!(c["certificate"]["feasible"], false, "{c}");
+    assert!(c.get("polish").is_none(), "{c}");
+    let stages: Vec<&str> = c["solves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stage"].as_str().unwrap())
+        .collect();
+    assert!(stages.contains(&"l1 penalty"), "{stages:?}");
 }

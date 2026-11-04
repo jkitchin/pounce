@@ -187,12 +187,19 @@ purpose-built fixture that reaches an acceptable-level exit above
 `dual_inf_tol`; an empty sweep is not evidence about it. Full account:
 `dev-notes/mpcc-biactive-dual-divergence.md`.
 
-**The complementarity driver is not in the sweep either.** The corpus's
-`mpcc_*` fixtures write their pairs as product rows, so they solve as plain
-NLPs and never reach `pounce_restoration::mpcc_driver`. A change to the driver
-or to `pounce_algorithm::mpcc` diffs the sweep empty by construction, as the
-nearly-biactive re-solve did. Measure it on the declared-pair corpora against
-a baseline binary instead:
+**The complementarity driver reaches the sweep only through `cc:` lines.**
+The corpus's `mpcc_*` fixtures write their pairs as product rows, so they
+solve as plain NLPs and never reach `pounce_restoration::mpcc_driver`; a
+driver change diffed the sweep empty by construction, as the nearly-biactive
+re-solve did. The sweep now also runs the six declared-pair fixtures in
+`tests/fixtures_mpcc/`, as `cc:<name>` lines with a `cc=` field (reported
+point and class, lowered solves, their total iterations, `natural_residual`,
+polish taken/kept, escapes). Between them they reach the polish taken, kept
+and not run, the weak fallback, and the verdict; **no fixture reaches a
+B-escape** (nor did any of the 120 smallest MacMPEC models, measured), so an
+escape change still diffs empty. Six small models are a trajectory check, not
+a magnitude one. Measure a driver change on the declared-pair corpora against
+a baseline binary as well:
 - MacMPEC (`macmpec-run`; answers checked against best known);
 - `mpcc-nl-run`;
 - CALIPSO;

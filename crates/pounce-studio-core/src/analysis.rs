@@ -346,6 +346,10 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
         });
     }
 
+    if let Some(c) = &report.complementarity {
+        complementarity_findings(c, stats.iteration_count, &mut findings);
+    }
+
     if stats.restoration_calls > 0 {
         findings.push(Finding {
             severity: Severity::Warning,
@@ -457,6 +461,129 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
     }
 
     findings
+}
+
+/// Above this largest `min(|G|, |H|)` a complementarity answer's pairs are
+/// reported as loose. The driver's own re-solve triggers at `10·tol`, which
+/// the report does not carry; `1e-6` is a hundred times that at the default
+/// `tol = 1e-8`, and well below the `sqrt(τ) ≈ 1e-4` a nearly biactive pair
+/// is left at by a relaxed stage.
+pub const LOOSE_NATURAL_RESIDUAL: f64 = 1e-6;
+
+/// Findings from the `complementarity` block. The solver status and
+/// `iteration_count` of an MPCC report describe the one lowered solve whose
+/// point was reported, so neither says whether the pairs hold or what the
+/// solve cost; these say both.
+fn complementarity_findings(
+    c: &crate::report::ComplementarityReport,
+    reported_iters: i32,
+    findings: &mut Vec<Finding>,
+) {
+    let class = c.certificate.as_ref().map(|ct| ct.class.as_str());
+    let pairs = c.certificate.as_ref().map_or(String::new(), |ct| {
+        format!(" over {} pair(s), {} biactive", ct.n_pairs, ct.n_biactive)
+    });
+    let by = match (&c.accepted_by, &c.fallback) {
+        (Some(s), _) => format!(" by the {s} stage"),
+        (None, Some(s)) => format!(" from the {s} stage"),
+        _ => String::new(),
+    };
+    let (severity, what) = match c.reported.as_str() {
+        "answer" => (Severity::Info, "a strongly stationary answer"),
+        "weak_fallback" => (
+            Severity::Warning,
+            "a weakly stationary point (no formulation certified S)",
+        ),
+        "feasible_uncertified" => (
+            Severity::Warning,
+            "a feasible point that certifies no stationarity class",
+        ),
+        _ => (Severity::Warning, "no answer (the status is the verdict)"),
+    };
+    findings.push(Finding {
+        severity,
+        code: "mpcc_outcome",
+        message: format!(
+            "Complementarity driver reported {what}{by}; certificate class {}{pairs}. \
+             The solver status describes the reported lowered solve, not the pairs: \
+             judge the answer by the certificate and natural_residual.",
+            class.unwrap_or("unknown"),
+        ),
+    });
+
+    if c.solves.len() > 1 {
+        // Per stage, in first-seen order: solves, iterations, seconds.
+        let mut by_stage: Vec<(&str, usize, usize, f64)> = Vec::new();
+        for s in &c.solves {
+            match by_stage.iter_mut().find(|e| e.0 == s.stage) {
+                Some(e) => {
+                    e.1 += 1;
+                    e.2 += s.iterations;
+                    e.3 += s.seconds.unwrap_or(0.0);
+                }
+                None => by_stage.push((&s.stage, 1, s.iterations, s.seconds.unwrap_or(0.0))),
+            }
+        }
+        let timed = c.solves.iter().any(|s| s.seconds.is_some());
+        let parts: Vec<String> = by_stage
+            .iter()
+            .map(|(st, n, it, sec)| {
+                if timed {
+                    format!("{st}: {n} solve(s), {it} it, {sec:.3}s")
+                } else {
+                    format!("{st}: {n} solve(s), {it} it")
+                }
+            })
+            .collect();
+        findings.push(Finding {
+            severity: Severity::Info,
+            code: "mpcc_cost",
+            message: format!(
+                "{} lowered solves, {} iterations in total; iteration_count ({}) counts \
+                 the reported solve alone. By stage: {}.",
+                c.solves.len(),
+                c.total_iterations,
+                reported_iters,
+                parts.join("; "),
+            ),
+        });
+    }
+
+    let polished = c.polish.as_ref().filter(|p| p.taken);
+    match (c.natural_residual, polished) {
+        (Some(r), _) if r > LOOSE_NATURAL_RESIDUAL => {
+            let why = match &c.polish {
+                Some(p) => format!(
+                    "the branch re-solve ran and was not taken ({})",
+                    p.reason.as_deref().unwrap_or("no reason recorded"),
+                ),
+                None => "the branch re-solve did not run (the point is not a feasible \
+                         accepted one)"
+                    .to_string(),
+            };
+            findings.push(Finding {
+                severity: Severity::Warning,
+                code: "mpcc_loose_pairs",
+                message: format!(
+                    "The reported point's pairs are complementary only to {r:.1e} \
+                     (largest min(|G|, |H|)); {why}. A nearly biactive pair left at \
+                     sqrt(tau) can buy objective the model does not allow: check the \
+                     sides of that pair before trusting the objective.",
+                ),
+            });
+        }
+        (r, Some(p)) => findings.push(Finding {
+            severity: Severity::Info,
+            code: "mpcc_polished",
+            message: format!(
+                "A nearly biactive answer (min(|G|, |H|) = {}) was re-solved on its branch: \
+                 now {}.",
+                p.residual_before.map_or("?".into(), |v| format!("{v:.1e}")),
+                r.map_or("?".into(), |v| format!("{v:.1e}")),
+            ),
+        }),
+        _ => {}
+    }
 }
 
 /// Augmented [`IterRecord`] returned by [`get_iterate`]: the raw row
@@ -595,6 +722,7 @@ mod tests {
             },
             iterations: iters,
             linear_solver: None,
+            complementarity: None,
         }
     }
 

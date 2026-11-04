@@ -1720,7 +1720,10 @@ pub fn polish_class(
                 )
             }
         }
-        k => Err(format!("its certificate is {k:?}")),
+        Some(StationarityClass::None) => Err("the re-solved point is not stationary".into()),
+        None => Err("the re-solved point is infeasible or could not be evaluated".into()),
+        // `answers` and `kept_if_nothing_better` cover every other class.
+        Some(k) => Err(format!("the re-solved point certifies {k:?}")),
     }
 }
 

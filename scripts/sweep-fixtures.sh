@@ -125,6 +125,27 @@
 # the column reads 0 everywhere; those lines move by exactly one field, which
 # is the intended signal and not a regression.
 #
+# THE cc= COLUMN, AND THE cc: LINES. The corpus's own `mpcc_*` fixtures
+# write their pairs as product rows, so they solve as plain NLPs and never
+# reach `pounce_restoration::mpcc_driver`; a change to the driver or to
+# `pounce_algorithm::mpcc` diffed this sweep empty by construction (the
+# nearly-biactive branch re-solve did). The declared-pair fixtures in
+# `tests/fixtures_mpcc/` are swept too, on lines named `cc:<fixture>`, and
+# each carries one more field:
+#   cc=<reported>/<class>,n=<lowered solves>,tot=<their iterations>,
+#      nr=<largest min(|G|,|H|) at the reported point>,pol=<-|taken|kept>,
+#      esc=<branch NLPs that moved the point off a non-B-stationary one>
+# On those lines `it=` is the reported lowered solve's count alone and `tot`
+# is what the run cost; `status` is the reported solve's, and says nothing
+# about the pairs -- `nr` does. The column appears only on reports that carry
+# a `complementarity` block, so every other line is unchanged and a baseline
+# from before it still diffs cleanly; the cc: lines themselves are new.
+# `nr` and `pol` read `-` on a binary predating those report fields, so
+# against one every cc: line moves in them and nowhere else.
+# This is not the driver's benchmark: six small models cannot measure
+# magnitude, which the declared-pair corpora (MacMPEC, the data-root OPF
+# suites; CLAUDE.md) still must.
+#
 # Usage:
 #   scripts/sweep-fixtures.sh <pounce-binary> <outfile> [extra solver opts...]
 #
@@ -150,6 +171,10 @@ shift 2
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FX="$ROOT/crates/pounce-cli/tests/fixtures"
 [ -d "$FX" ] || { echo "no fixture dir at $FX" >&2; exit 2; }
+# Declared-pair fixtures: the only ones that reach the complementarity driver
+# (see THE cc= COLUMN above). Optional so the script still runs on a checkout
+# that predates the directory.
+FX_MPCC="$ROOT/crates/pounce-cli/tests/fixtures_mpcc"
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
@@ -159,8 +184,11 @@ trap 'rm -rf "$W"' EXIT
 # solver options that define it.
 sweep_leg() {
   leg="$1"; shift
-  for f in "$FX"/*.nl; do
+  for f in "$FX"/*.nl "$FX_MPCC"/*.nl; do
+    [ -f "$f" ] || continue
     n=$(basename "$f" .nl)
+    # Keep the two directories' names apart in the diff.
+    case "$f" in "$FX_MPCC"/*) n="cc:$n" ;; esac
     # A fixture that hangs must not hang the sweep; it shows up as NO_JSON.
     timeout 300 "$BIN" "$f" "$W/$n.sol" --json-output "$W/$n.json" "$@" \
       > "$W/$n.out" 2>&1
@@ -246,7 +274,24 @@ else:
 # answer, which is a trajectory change and is reportable as one. Defaults
 # to 0 rather than "?" so a baseline binary predating the field reads as
 # "did not report any" instead of moving every line in the diff.
-print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s mu=%-56s obj=%s" % (
+# What the complementarity driver did (see THE cc= COLUMN in the header).
+# Only on a report that carries the block, so every other line is unchanged.
+cc = d.get("complementarity")
+ccol = ""
+if cc:
+    cert = cc.get("certificate") or {}
+    nr = cc.get("natural_residual")
+    pol = cc.get("polish")
+    ccol = " cc=%s/%s,n=%d,tot=%d,nr=%s,pol=%s,esc=%d" % (
+        cc.get("reported", "?"),
+        cert.get("class", "?"),
+        len(cc.get("solves", [])),
+        cc.get("total_iterations", 0),
+        "%.1e" % nr if nr is not None else "-",
+        "-" if not pol else ("taken" if pol.get("taken") else "kept"),
+        cc.get("escapes", 0),
+    )
+print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s mu=%-56s obj=%s%s" % (
     sys.argv[3],
     sys.argv[2],
     sys.argv[4],
@@ -256,6 +301,7 @@ print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s mu=%-56s obj=%s" % (
     second,
     mu,
     "%.10g" % obj if obj is not None else "none",
+    ccol,
 ))
 PY
       # Each leg re-uses the same scratch names; a stale json from the

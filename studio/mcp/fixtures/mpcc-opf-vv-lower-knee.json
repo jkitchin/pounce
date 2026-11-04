@@ -1,0 +1,305 @@
+{
+ "schema": "pounce.solve-report/v1",
+ "fair_metadata": {
+  "result_id": "1793794255070682000-11296",
+  "created_at_iso": "2026-11-04T12:10:55.070Z",
+  "created_at_unix_nanos": 1793794255070682000,
+  "elapsed_seconds": 5e-06,
+  "solver": {
+   "name": "pounce",
+   "version": "0.15.0",
+   "target_triple": "aarch64-apple-darwin"
+  },
+  "license": "EPL-2.0",
+  "input": {
+   "kind": "nl-file",
+   "path": "opf_vv_lower_knee.nl",
+   "size_bytes": 4818
+  }
+ },
+ "problem": {
+  "n_variables": 24,
+  "n_constraints": 27,
+  "n_objectives": 1,
+  "minimize": true,
+  "nnz_jac_g": 62,
+  "nnz_h_lag": 5
+ },
+ "solution": {
+  "engine": "nlp",
+  "status": "SolveSucceeded",
+  "status_upstream": "Solve_Succeeded",
+  "solve_result_num": 0,
+  "objective": -0.3954730633597743,
+  "x": [
+   0.7999999986002522,
+   0.9399999999741856,
+   0.2999999999971592,
+   0.032561776805887954,
+   -0.3954730633597743,
+   1.876608463282568e-14,
+   1.1957421502725641e-13,
+   3.689077849722624e-14,
+   6.75634002114731e-14,
+   5.234361089183536e-14,
+   3.800178403340057e-14,
+   7.160133132437393e-11,
+   0.04000000002593393,
+   0.08000000002585132,
+   0.12000000002588201,
+   0.13000000002586667,
+   0.1800000000258525,
+   -0.18189225903472095,
+   9.383042310509386e-15,
+   5.978710753489572e-14,
+   1.844538923568749e-14,
+   3.378170011766307e-14,
+   2.617180542009669e-14,
+   1.9000891999263925e-14
+  ],
+  "lambda": [
+   -0.9999999997942174,
+   -0.7241338680026825,
+   9.170463676908085e-11,
+   1.2042032589409284,
+   3.703693672958832e-09,
+   4.853052670113594e-10,
+   4.877948777815287e-10,
+   -14.30317556480012,
+   -2.49999899837913e-08,
+   -1.2499989995960731e-08,
+   -8.333323331535973e-09,
+   -7.692297690777119e-09,
+   -5.555545554757639e-09,
+   -1.204203269734573,
+   4.99998996501204e-09,
+   53309.63124623772,
+   -53309.63124623772,
+   8354.486946175759,
+   -8354.486946175759,
+   27115.566629311812,
+   -27115.566629311812,
+   14792.392329019707,
+   -14792.392329019707,
+   19104.5288313168,
+   -19104.5288313168,
+   26314.554364761385,
+   -26314.554364761385
+  ]
+ },
+ "statistics": {
+  "iteration_count": 8,
+  "final_objective": -0.3954730633597743,
+  "final_scaled_objective": -0.3954730633597743,
+  "final_dual_inf": 6.210757734642763e-11,
+  "final_constr_viol": 4.576816703405484e-11,
+  "final_declared_constr_viol": 4.576816703405484e-11,
+  "final_declared_box_viol": 0.0,
+  "final_compl": 1.0241264126059111e-09,
+  "final_kkt_error": 4.576816703405484e-11,
+  "final_kkt_error_above_noise": 4.576816703405484e-11,
+  "num_obj_evals": 32,
+  "num_constr_evals": 32,
+  "num_obj_grad_evals": 1,
+  "num_constr_jac_evals": 9,
+  "num_hess_evals": 9,
+  "total_wallclock_time_secs": 0.002143333,
+  "restoration_calls": 0,
+  "restoration_inner_iters": 0,
+  "restoration_outer_iters": 0,
+  "restoration_wall_secs": 0.0,
+  "quality_escalations": 0,
+  "dual_divergence_signature": true,
+  "dual_divergence_retry_promoted": false,
+  "warnings": [],
+  "objective_scaling": {
+   "factor": 1.0,
+   "total_factor": 1.0,
+   "start_gradient_max": 1.0,
+   "certificate_refused": false,
+   "acceptable_certificate_refused": false
+  }
+ },
+ "linear_solver": {
+  "solver_name": "feral",
+  "requested": "feral",
+  "n_factors": 13,
+  "n_pattern_reuse": 12,
+  "n_pattern_changes": 1,
+  "max_fill_ratio": 3.4556962025316458,
+  "min_abs_pivot": 5.489017570622976e-28,
+  "max_abs_pivot": 10000017.818552343,
+  "last_inertia": [
+   34,
+   33,
+   0
+  ],
+  "last_inertia_unregularized": [
+   34,
+   33,
+   0
+  ],
+  "last_nnz_a": 158,
+  "last_nnz_l": 546,
+  "total_factor_secs": 0.0005381239999999999,
+  "total_factor_flops": 167115.0,
+  "total_delayed_cols": 13,
+  "total_two_by_two": 292,
+  "total_n_tiny": 38,
+  "last_factor_flops": 12855.0,
+  "last_peak_bytes": 1984,
+  "last_n_supernodes": 9,
+  "last_max_front_rows": 18,
+  "last_delayed_cols": 1,
+  "last_two_by_two": 22,
+  "last_n_tiny": 6,
+  "last_ordering": "amf",
+  "last_ordering_preprocess": "none"
+ },
+ "complementarity": {
+  "strategy": "both",
+  "fallback": "Scholtes continuation",
+  "reported": "weak_fallback",
+  "summary": "pounce: complementarity: no formulation produced a strongly stationary answer (14 lowered solves, 178 iterations in all); reporting the Scholtes continuation formulation's weakly stationary point (violation = 4.1e-15); 6 pairs, 1 biactive; stationarity: W only (a biactive pair has a wrong-sign multiplier: a branch may still descend).",
+  "solves": [
+   {
+    "stage": "Scholtes continuation",
+    "tau": 1.0,
+    "status": "Solve_Succeeded",
+    "iterations": 9,
+    "max_abs_product": 0.759175559170944,
+    "seconds": 0.005717166
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 0.1,
+    "status": "Solve_Succeeded",
+    "iterations": 27,
+    "max_abs_product": 0.07688767117158957,
+    "seconds": 0.008966041
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 0.01,
+    "status": "Solve_Succeeded",
+    "iterations": 23,
+    "max_abs_product": 0.007676591786983555,
+    "seconds": 0.006497375
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 0.001,
+    "status": "Solve_Succeeded",
+    "iterations": 24,
+    "max_abs_product": 0.0008948920465358676,
+    "seconds": 0.005816458
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 0.0001,
+    "status": "Solve_Succeeded",
+    "iterations": 17,
+    "max_abs_product": 9.999936813076215e-05,
+    "seconds": 0.005753334
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 1e-05,
+    "status": "Solve_Succeeded",
+    "iterations": 8,
+    "max_abs_product": 9.999854913205736e-06,
+    "seconds": 0.002764458
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 1e-06,
+    "status": "Solve_Succeeded",
+    "iterations": 7,
+    "max_abs_product": 9.999574487421378e-07,
+    "seconds": 0.002132708
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 1e-07,
+    "status": "Solve_Succeeded",
+    "iterations": 9,
+    "max_abs_product": 9.998683541515155e-08,
+    "seconds": 0.003006042
+   },
+   {
+    "stage": "Scholtes continuation",
+    "tau": 1e-08,
+    "status": "Solve_Succeeded",
+    "iterations": 9,
+    "max_abs_product": 9.995866991542038e-09,
+    "seconds": 0.002655875
+   },
+   {
+    "stage": "Scholtes continuation",
+    "status": "Solve_Succeeded",
+    "iterations": 0,
+    "max_abs_product": 9.995866991542038e-09,
+    "seconds": 0.000425417
+   },
+   {
+    "stage": "exact product",
+    "tau": 1e-06,
+    "status": "Solve_Succeeded",
+    "iterations": 24,
+    "max_abs_product": 9.998933817063376e-07,
+    "seconds": 0.003223917
+   },
+   {
+    "stage": "exact product",
+    "tau": 1e-08,
+    "status": "Solve_Succeeded",
+    "iterations": 13,
+    "max_abs_product": 9.989656033072171e-09,
+    "seconds": 0.00326875
+   },
+   {
+    "stage": "exact product",
+    "status": "Solve_Succeeded",
+    "iterations": 0,
+    "max_abs_product": 9.989656033072171e-09,
+    "seconds": 0.000480916
+   },
+   {
+    "stage": "branch polish",
+    "status": "Solve_Succeeded",
+    "iterations": 8,
+    "max_abs_product": 4.053804014993907e-15,
+    "seconds": 0.002143333
+   }
+  ],
+  "total_iterations": 178,
+  "max_abs_product": 4.053804014993907e-15,
+  "certificate": {
+   "class": "W",
+   "n_pairs": 6,
+   "n_biactive": 1,
+   "n_neither": 0,
+   "multipliers_unique": false,
+   "residual": 1.887379141862766e-15,
+   "resid_tol": 0.0011384305381419157,
+   "tight": true,
+   "primal_violation": 4.576816703405484e-11,
+   "feasible": true
+  },
+  "b_stationarity": {
+   "verdict": "B",
+   "reason": null,
+   "n_biactive": 1,
+   "branches_solved": 2,
+   "enumerated": true
+  },
+  "escapes": 0,
+  "natural_residual": 5.978710753489572e-14,
+  "polish": {
+   "taken": true,
+   "residual_before": 7.837004978165345e-05,
+   "residual_after": 5.978710753489572e-14,
+   "reason": null
+  }
+ }
+}

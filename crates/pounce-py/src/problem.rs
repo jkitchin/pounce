@@ -591,6 +591,24 @@ impl PyProblem {
                 };
                 d.set_item("b_stationarity", b)?;
                 d.set_item("escapes", out.escapes)?;
+                // How complementary the reported point is (largest
+                // min(|G|, |H|)), and what the branch re-solve did, if it ran.
+                d.set_item("natural_residual", out.natural_residual)?;
+                let polish: PyObject = match &out.polish {
+                    None => py.None(),
+                    Some(p) => {
+                        let pd = PyDict::new_bound(py);
+                        pd.set_item("taken", p.taken)?;
+                        pd.set_item("residual_before", p.residual_before)?;
+                        pd.set_item(
+                            "residual_after",
+                            p.residual_after.is_finite().then_some(p.residual_after),
+                        )?;
+                        pd.set_item("reason", p.reason.as_deref())?;
+                        pd.into_any().unbind()
+                    }
+                };
+                d.set_item("polish", polish)?;
                 d.set_item(
                     "summary",
                     pounce_algorithm::mpcc::describe_outcome(

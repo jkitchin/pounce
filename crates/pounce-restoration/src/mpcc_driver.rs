@@ -54,6 +54,22 @@ pub struct MpccSolveRecord {
     pub status: ApplicationReturnStatus,
     pub iterations: usize,
     pub max_abs_product: Number,
+    /// Wall-clock seconds the solve took (its `total_wallclock_time_secs`).
+    pub seconds: Number,
+}
+
+/// What the branch re-solve of a nearly biactive answer did
+/// ([`natural_residual`]). Recorded whenever it ran.
+#[derive(Debug, Clone)]
+pub struct PolishRecord {
+    /// The re-solved point replaced the answer.
+    pub taken: bool,
+    /// The answer's largest `min(|G|, |H|)` before the re-solve.
+    pub residual_before: Number,
+    /// The same at the re-solved point; `+inf` if it was not measured.
+    pub residual_after: Number,
+    /// Why the re-solved point was not taken; `None` when it was.
+    pub reason: Option<String>,
 }
 
 /// What the driver reports.
@@ -93,6 +109,12 @@ pub struct MpccOutcome {
     pub b_check: Option<BCheck>,
     /// Branch NLPs that moved the point off a non-B-stationary one.
     pub escapes: usize,
+    /// The forwarded point's largest `min(|G|, |H|)` over its pairs
+    /// ([`natural_residual`]): how complementary it is, in the units of the
+    /// pair sides. `None` when the model could not be evaluated there.
+    pub natural_residual: Option<Number>,
+    /// The branch re-solve, when it ran.
+    pub polish: Option<PolishRecord>,
 }
 
 impl MpccOutcome {
@@ -103,7 +125,7 @@ impl MpccOutcome {
         use pounce_algorithm::mpcc::StationarityClass;
         use pounce_solve_report::{
             ComplementarityBStationarityInfo, ComplementarityCertificateInfo, ComplementarityInfo,
-            ComplementaritySolveInfo,
+            ComplementarityPolishInfo, ComplementaritySolveInfo,
         };
         // JSON has no infinity; a quantity that was not measured is `null`.
         let finite = |v: Number| v.is_finite().then_some(v);
@@ -134,6 +156,7 @@ impl MpccOutcome {
                     status: r.status.upstream_name().to_string(),
                     iterations: r.iterations,
                     max_abs_product: finite(r.max_abs_product),
+                    seconds: finite(r.seconds),
                 })
                 .collect(),
             total_iterations: self.total_iterations,
@@ -175,6 +198,13 @@ impl MpccOutcome {
                 }
             }),
             escapes: self.escapes,
+            natural_residual: self.natural_residual.and_then(finite),
+            polish: self.polish.as_ref().map(|p| ComplementarityPolishInfo {
+                taken: p.taken,
+                residual_before: finite(p.residual_before),
+                residual_after: finite(p.residual_after),
+                reason: p.reason.clone(),
+            }),
         }
     }
 }
@@ -399,6 +429,7 @@ pub fn solve_mpcc(
             status,
             iterations: statistics.spent_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
+            seconds: statistics.total_wallclock_time_secs,
         });
         if status == ApplicationReturnStatus::UserRequestedStop {
             stopped.borrow_mut().get_or_insert_with(|| cap.clone());
@@ -906,6 +937,7 @@ pub fn solve_mpcc(
     // point. Otherwise the point is kept as it was.
     // A B-check the polish already ran at the point it reported (see below).
     let mut seeded_check: Option<BCheck> = None;
+    let mut polish: Option<PolishRecord> = None;
     if let Some((reported, chosen, known_cert)) = selection.as_mut() {
         let feasible = matches!(known_cert, Some(Some(ct)) if ct.feasible);
         let found = (feasible && !halted() && accepts(chosen.status, chosen.max_abs_product, tol))
@@ -963,39 +995,48 @@ pub fn solve_mpcc(
                 // the same `x`, so it seeds that step instead of being run
                 // again (up to 1024 branch LPs on MacMPEC `qpec2`).
                 let mut demotion_check: Option<BCheck> = None;
-                let next = match stage {
-                    Some(s) => polish_class(was_answer, class, || {
-                        let bc = inp.as_ref().map(check_b_stationarity);
-                        let b = bc
-                            .as_ref()
-                            .is_some_and(|bc| matches!(bc.verdict, BVerdict::B));
-                        demotion_check = bc;
-                        b
-                    })
-                    .map(|answer| {
-                        if answer {
-                            Reported::Answer(s)
-                        } else {
-                            Reported::WeakFallback(s)
-                        }
-                    }),
-                    None => Err("the reported point is a verdict, not an answer".into()),
-                };
-                let next = next.and_then(|n| {
-                    if !accepts(c.status, c.max_abs_product, tol) {
-                        Err(format!("{:?}", c.status))
-                    } else if !polish_tightened(r_new, r_old, solver_tol) {
-                        Err(format!(
-                            "its pairs are still complementary only to {r_new:.1e}"
-                        ))
-                    } else if !polish_objective_ok(f_old, f_new, r_old) {
-                        Err(format!(
-                            "the minimized objective rose from {f_old:.6e} to {f_new:.6e}, more \
-                             than removing {r_old:.1e} can cost"
-                        ))
-                    } else {
-                        Ok(n)
+                // Cheapest and most basic first: the class check can run a
+                // B-check (branch LPs), and a re-solve that did not converge
+                // should say so rather than describe its point's class.
+                let next = if !accepts(c.status, c.max_abs_product, tol) {
+                    Err(format!(
+                        "the re-solve returned {}",
+                        c.status.upstream_name()
+                    ))
+                } else if !polish_tightened(r_new, r_old, solver_tol) {
+                    Err(format!(
+                        "its pairs are still complementary only to {r_new:.1e}"
+                    ))
+                } else if !polish_objective_ok(f_old, f_new, r_old) {
+                    Err(format!(
+                        "the minimized objective rose from {f_old:.6e} to {f_new:.6e}, more \
+                         than removing {r_old:.1e} can cost"
+                    ))
+                } else {
+                    match stage {
+                        Some(s) => polish_class(was_answer, class, || {
+                            let bc = inp.as_ref().map(check_b_stationarity);
+                            let b = bc
+                                .as_ref()
+                                .is_some_and(|bc| matches!(bc.verdict, BVerdict::B));
+                            demotion_check = bc;
+                            b
+                        })
+                        .map(|answer| {
+                            if answer {
+                                Reported::Answer(s)
+                            } else {
+                                Reported::WeakFallback(s)
+                            }
+                        }),
+                        None => Err("the reported point is a verdict, not an answer".into()),
                     }
+                };
+                polish = Some(PolishRecord {
+                    taken: next.is_ok(),
+                    residual_before: r_old,
+                    residual_after: r_new,
+                    reason: next.as_ref().err().cloned(),
                 });
                 match next {
                     Ok(next) => {
@@ -1127,6 +1168,8 @@ pub fn solve_mpcc(
             certificate: None,
             b_check: None,
             escapes,
+            natural_residual: None,
+            polish,
         });
     }
     let (reported, chosen, known_cert) =
@@ -1157,6 +1200,8 @@ pub fn solve_mpcc(
         Some(c) => c,
         None => certify_at(&inner, &pairs, &chosen.x, solver_tol, tol, sense),
     };
+    let nat_res = model_at(&inner, &chosen.x, sense)
+        .and_then(|mp| natural_residual(&mp.input(&pairs, solver_tol, tol)).map(|(r, _)| r));
     Ok(MpccOutcome {
         status: chosen.status,
         statistics: chosen.statistics,
@@ -1171,6 +1216,8 @@ pub fn solve_mpcc(
         certificate,
         b_check,
         escapes,
+        natural_residual: nat_res,
+        polish,
     })
 }
 
