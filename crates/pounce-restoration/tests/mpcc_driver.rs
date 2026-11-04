@@ -1798,27 +1798,16 @@ fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
         &[("mu_strategy_fallback", "no")],
     );
     let mu0 = mu0.borrow();
-    // Every solve before the branch stage sends one iteration 0. The branch
-    // solves come last and may or may not: the B-escape's branch pins every
-    // variable of this model and never reaches iteration 0, the polish's
-    // (natural_residual) leaves one free and does. `mu0` is indexed by
-    // solve position, which only the leading solves need.
-    let leading = out
-        .solves
-        .iter()
-        .filter(|s| s.stage != MpccStage::Branch)
-        .count();
-    assert!(
-        (leading..=out.solves.len()).contains(&mu0.len()),
-        "one iteration 0 per solve before the branch stage: {} for {:?}",
+    // One iteration 0 per solve, the polish's included. A B-escape's branch
+    // pins every variable of this model and never reaches iteration 0; the
+    // escapes run last, so `mu0` stays indexed by solve position.
+    assert_eq!(
         mu0.len(),
         out.solves
-    );
-    assert!(
-        out.solves[..leading]
             .iter()
-            .all(|s| s.stage != MpccStage::Branch),
-        "branch solves come last: {:?}",
+            .filter(|s| s.stage != MpccStage::Branch)
+            .count(),
+        "one iteration 0 per solve: {:?}",
         out.solves
     );
     let cont: Vec<(usize, &_)> = out

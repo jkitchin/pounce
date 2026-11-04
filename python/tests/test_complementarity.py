@@ -226,11 +226,12 @@ def test_complementarity_strategy_picks_the_formulations_that_run(strategy):
     assert cc["certificate"]["class"] == "S", cc
     # The l1 penalty may run under any strategy, as the fallback when no
     # formulation answers (from this start the exact product alone stalls at
-    # an acceptable-level point the certificate rejects). A `branch NLP` is
-    # not a formulation either: it is the re-solve of the reported point onto
-    # its branch, run under every strategy when a pair is left complementary
-    # only to more than `tol` -- here the biactive second pair at (1, 1, 0).
-    ran = {s[0] for s in cc["solves"]} - {"l1 penalty", "branch NLP"}
+    # an acceptable-level point the certificate rejects). A `branch polish`
+    # is not a formulation either: it is the re-solve of the reported point
+    # onto its branch, run under every strategy when a pair is left
+    # complementary only to more than 10 tol -- here the biactive second pair
+    # at (1, 1, 0). A B-escape (`branch NLP`) is still counted.
+    ran = {s[0] for s in cc["solves"]} - {"l1 penalty", "branch polish"}
     expected = {
         "both": {"Scholtes continuation", "exact product"},
         "exact": {"exact product"},

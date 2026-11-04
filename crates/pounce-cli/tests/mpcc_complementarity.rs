@@ -251,7 +251,7 @@ fn a_nearly_biactive_answer_is_re_solved_onto_its_branch() {
         r.json.as_ref().unwrap()["solution"]["status_upstream"],
         "Solve_Succeeded"
     );
-    assert_eq!(last_stage(&r).0, "branch NLP");
+    assert_eq!(last_stage(&r).0, "branch polish");
     let x = x_by_name(&r, "opf_vv_lower_knee.nl");
     assert!(
         natural_residual(&x) <= 1e-9,
@@ -280,7 +280,7 @@ fn a_branch_the_answer_cannot_hold_leaves_the_answer_as_it_was() {
     let r = run("opf_vv_lower_knee_held.nl", &[]);
     assert_eq!(r.code, Some(0), "{}", r.stderr);
     let (stage, status) = last_stage(&r);
-    assert_eq!(stage, "branch NLP");
+    assert_eq!(stage, "branch polish");
     assert_eq!(status, "Infeasible_Problem_Detected");
     assert_eq!(
         r.json.as_ref().unwrap()["solution"]["status_upstream"],

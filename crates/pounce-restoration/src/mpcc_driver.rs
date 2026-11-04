@@ -31,12 +31,12 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, RUNG_RETRY_FLOOR,
-    Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass, Strategy,
-    TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter, certify,
-    check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
-    finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, relaxation_slack,
-    warm_start_assignments,
+    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, POLISH_TRIGGER,
+    RUNG_RETRY_FLOOR, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass,
+    Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter,
+    certify, check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
+    finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, polish_class,
+    polish_objective_ok, polish_tightened, relaxation_slack, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -739,7 +739,7 @@ pub fn solve_mpcc(
                 }
             }
             // Not in STAGES: run only from a reported point, below.
-            MpccStage::Branch => Vec::new(),
+            MpccStage::Branch | MpccStage::Polish => Vec::new(),
             MpccStage::Penalty => {
                 let _ = app
                     .options_mut()
@@ -868,58 +868,85 @@ pub fn solve_mpcc(
         (None, None, None, None) => None,
     };
 
-    // The polish ([`natural_residual`]): a reported point whose pairs are
-    // complementary only to more than `tol` in `min(|G|, |H|)` -- every stage
-    // stops at a product near the last `τ`, so a nearly biactive pair keeps
-    // both sides near `sqrt(τ)` -- is re-solved once on the branch that
-    // holds each pair's smaller side at zero, warm from the point. The
-    // polished point replaces it if it converged, is feasible, certifies S
-    // or W, removes the residual, and did not move the objective by more
-    // than [`POLISH_DRIFT`]; otherwise the point is kept as it was.
-    if let Some((reported, chosen, known_cert)) = selection.as_mut() {
-        let feasible = matches!(known_cert, Some(Some(ct)) if ct.feasible);
-        let residual =
-            (feasible && !halted() && accepts(chosen.status, chosen.max_abs_product, tol))
-                .then(|| model_at(&inner, &chosen.x, sense))
-                .flatten()
-                .and_then(|mp| {
-                    let inp = mp.input(&pairs, solver_tol, tol);
-                    natural_residual(&inp).map(|(r, held)| (r, branch_bounds(&inp, &held)))
-                });
-        if let Some((r_old, bounds)) = residual.filter(|(r, _)| *r > solver_tol) {
-            wrapper.borrow_mut().set_branch(Some(bounds));
-            app.set_in_retry_sequence(true);
-            baseline(app);
-            // Warm from the whole point, at the barrier it ended on, as a
-            // finish is: the branch can be nonconvex, and a re-solve from
-            // `x` alone is pushed `bound_push` off its bounds and may settle
-            // in another well of the same branch. Measured on the capacity
-            // best responses (CapacityEquilibriaBenchmarks.jl): from `x`
-            // alone, B's corner-start base-load problem moved 5.5e-5 above
-            // its global optimum to remove a residual of 1.6e-8.
-            for a in warm_start_assignments(chosen.statistics.final_mu) {
+    // One branch NLP: `bounds` pinned, `stage` recorded, every option back to
+    // the caller's afterwards. The polish and the B-escape both run through
+    // it, so a change to how a branch solve is set up is made once.
+    let branch_solve = |app: &mut IpoptApplication,
+                        stage: MpccStage,
+                        bounds,
+                        start: StartOverride,
+                        warm: Option<(Number, usize)>,
+                        solves: &mut Vec<MpccSolveRecord>|
+     -> Captured {
+        wrapper.borrow_mut().set_branch(Some(bounds));
+        app.set_in_retry_sequence(true);
+        baseline(app);
+        if let Some((final_mu, budget)) = warm {
+            for a in warm_start_assignments(final_mu) {
                 let _ = app.options_mut().read_from_str(&a, true);
             }
-            set_budget(
+            set_budget(app, budget);
+        }
+        let c = run(app, stage, Lowering::Ineq, Some(start), solves);
+        wrapper.borrow_mut().set_branch(None);
+        app.set_in_retry_sequence(false);
+        restore(app);
+        c
+    };
+
+    // The polish ([`natural_residual`]). Every stage stops at a product near
+    // the last `τ`, so a pair nearly biactive at the answer keeps both sides
+    // near `sqrt(τ)`. A reported point whose largest `min(|G|, |H|)` exceeds
+    // [`POLISH_TRIGGER`]` · tol` is re-solved once on the branch holding each
+    // pair's smaller side at zero. The re-solved point replaces it if it
+    // converged, tightened the residual ([`polish_tightened`]), did not raise
+    // the objective by more than removing the residual can cost
+    // ([`polish_objective_ok`]), and certifies as the ladder accepts; an S
+    // answer is demoted to W only where no branch descends from the new
+    // point. Otherwise the point is kept as it was.
+    if let Some((reported, chosen, known_cert)) = selection.as_mut() {
+        let feasible = matches!(known_cert, Some(Some(ct)) if ct.feasible);
+        let found = (feasible && !halted() && accepts(chosen.status, chosen.max_abs_product, tol))
+            .then(|| model_at(&inner, &chosen.x, sense))
+            .flatten()
+            .and_then(|mp| {
+                let inp = mp.input(&pairs, solver_tol, tol);
+                natural_residual(&inp).map(|(r, held)| (r, branch_bounds(&inp, &held)))
+            });
+        if let Some((r_old, bounds)) = found.filter(|(r, _)| *r > POLISH_TRIGGER * solver_tol) {
+            // Warm from the whole point at the barrier it ended on, as a
+            // finish is: the branch can be nonconvex, and from `x` alone the
+            // re-solve is pushed `bound_push` off its bounds and may settle in
+            // another well (a capacity best response from
+            // CapacityEquilibriaBenchmarks.jl moved 5.5e-5 above its global
+            // optimum to remove a residual of 1.6e-8). The product rows'
+            // multipliers are zeroed: they come from whichever lowering
+            // produced the answer (an exact product's can take either sign),
+            // and on the branch, with one side of each pair held at zero, those
+            // rows are inactive and their multiplier is 0.
+            let mut start = chosen.warm();
+            let m_inner = wrapper.borrow().m_inner();
+            if let Some(rows) = start.lambda.get_mut(m_inner..) {
+                rows.fill(0.0);
+            }
+            let budget = finish_budget(solves.iter().map(|s| s.iterations).sum());
+            let c = branch_solve(
                 app,
-                finish_budget(solves.iter().map(|s| s.iterations).sum()),
-            );
-            let c = run(
-                app,
-                MpccStage::Branch,
-                Lowering::Ineq,
-                Some(chosen.warm()),
+                MpccStage::Polish,
+                bounds,
+                start,
+                Some((chosen.statistics.final_mu, budget)),
                 &mut solves,
             );
-            wrapper.borrow_mut().set_branch(None);
-            app.set_in_retry_sequence(false);
-            restore(app);
             if !halted() {
                 let f_old = sense * objective_at(&inner, &chosen.x);
                 let f_new = sense * objective_at(&inner, &c.x);
-                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
-                let r_new = model_at(&inner, &c.x, sense)
-                    .and_then(|mp| natural_residual(&mp.input(&pairs, solver_tol, tol)))
+                let mp = model_at(&inner, &c.x, sense);
+                let inp = mp.as_ref().map(|mp| mp.input(&pairs, solver_tol, tol));
+                let cert = inp.as_ref().map(certify);
+                let r_new = inp
+                    .as_ref()
+                    .and_then(natural_residual)
                     .map_or(Number::INFINITY, |(r, _)| r);
                 let class = cert.as_ref().filter(|ct| ct.feasible).map(|ct| ct.class);
                 let stage = match *reported {
@@ -928,26 +955,40 @@ pub fn solve_mpcc(
                     | Reported::FeasibleUncertified(s) => Some(s),
                     Reported::Verdict => None,
                 };
-                // The same classes the ladder accepts: S, or not searched
-                // (`answers`; MacMPEC `siouxfls`, 2403 variables, is not
-                // searched and tightened from 1.7e-7 to 2.4e-11), as an
-                // answer; W as the weak fallback; a point the certificate
-                // calls not stationary is not taken.
-                let next = match (stage, class) {
-                    (Some(s), Some(k)) if answers(k) => Some(Reported::Answer(s)),
-                    (Some(s), Some(k)) if kept_if_nothing_better(k) => {
-                        Some(Reported::WeakFallback(s))
-                    }
-                    _ => None,
+                let was_answer = matches!(*reported, Reported::Answer(_));
+                let next = match stage {
+                    Some(s) => polish_class(was_answer, class, || {
+                        inp.as_ref().is_some_and(|inp| {
+                            matches!(check_b_stationarity(inp).verdict, BVerdict::B)
+                        })
+                    })
+                    .map(|answer| {
+                        if answer {
+                            Reported::Answer(s)
+                        } else {
+                            Reported::WeakFallback(s)
+                        }
+                    }),
+                    None => Err("the reported point is a verdict, not an answer".into()),
                 };
-                let drift = f_new - f_old;
+                let next = next.and_then(|n| {
+                    if !accepts(c.status, c.max_abs_product, tol) {
+                        Err(format!("{:?}", c.status))
+                    } else if !polish_tightened(r_new, r_old, solver_tol) {
+                        Err(format!(
+                            "its pairs are still complementary only to {r_new:.1e}"
+                        ))
+                    } else if !polish_objective_ok(f_old, f_new, r_old) {
+                        Err(format!(
+                            "the minimized objective rose from {f_old:.6e} to {f_new:.6e}, more \
+                             than removing {r_old:.1e} can cost"
+                        ))
+                    } else {
+                        Ok(n)
+                    }
+                });
                 match next {
-                    Some(next)
-                        if accepts(c.status, c.max_abs_product, tol)
-                            && r_new <= solver_tol
-                            && f_new.is_finite()
-                            && drift.abs() <= POLISH_DRIFT * f_old.abs().max(1.0) =>
-                    {
+                    Ok(next) => {
                         report(&format!(
                             "pounce: complementarity: the answer's pairs were complementary only \
                              to {r_old:.1e} (min(|G|,|H|)); re-solved on its branch with each \
@@ -958,12 +999,10 @@ pub fn solve_mpcc(
                         *chosen = c;
                         *known_cert = Some(cert);
                     }
-                    _ => report(&format!(
+                    Err(why) => report(&format!(
                         "pounce: complementarity: the answer's pairs are complementary only to \
                          {r_old:.1e} (min(|G|,|H|)), and the branch re-solve did not tighten it \
-                         ({:?}, {r_new:.1e}, minimized objective {f_old:.6e} -> {f_new:.6e}); \
-                         keeping it.",
-                        c.status
+                         ({why}); keeping it."
                     )),
                 }
             }
@@ -994,23 +1033,11 @@ pub fn solve_mpcc(
                 break;
             };
             let bounds = branch_bounds(&inp, held);
-            wrapper.borrow_mut().set_branch(Some(bounds));
-            app.set_in_retry_sequence(true);
-            baseline(app);
             let start = StartOverride {
                 x: chosen.x.clone(),
                 ..Default::default()
             };
-            let c = run(
-                app,
-                MpccStage::Branch,
-                Lowering::Ineq,
-                Some(start),
-                &mut solves,
-            );
-            wrapper.borrow_mut().set_branch(None);
-            app.set_in_retry_sequence(false);
-            restore(app);
+            let c = branch_solve(app, MpccStage::Branch, bounds, start, None, &mut solves);
             b_check = Some(bc);
             if halted() {
                 break;
@@ -1147,14 +1174,6 @@ fn acceptable(c: Captured) -> Captured {
 
 /// At most this many branch NLPs from one reported point.
 const MAX_BRANCH_ESCAPES: usize = 3;
-
-/// How far, relative to `max(1, |f|)`, the polish may move the minimized
-/// objective and still be the same answer made complementary. It removes
-/// slack the point was using, so it moves the objective by what that slack
-/// bought: on the OPF volt-var cases up to 3.9e-4 at `|f| = 0.4` (a VW cap
-/// exceeded by 3.9e-4 at unit cost). A re-solve that moves it more has left
-/// the answer's branch, and the point is kept.
-const POLISH_DRIFT: Number = 1e-2;
 
 /// The console line for a B-stationarity check.
 fn describe_b_check(bc: &BCheck) -> String {

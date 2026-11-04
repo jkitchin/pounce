@@ -320,7 +320,7 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    sides near zero at the answer, e.g. a hinge at a curve knot) used to
    be left with both sides near `sqrt(1e-8) = 1e-4`, reported as
    `Solve_Succeeded`. The driver now re-solves such an answer onto its
-   branch; a `branch NLP` entry in `solves` and the console line
+   branch; a `branch polish` entry in `solves` and the console line
    `… complementary only to X …; re-solved on its branch …` mean it did.
    `… did not tighten it …; keeping it` means the pairs are complementary
    only to `X` — say so, and judge the answer by recomputing

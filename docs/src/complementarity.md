@@ -258,28 +258,37 @@ optimum by what the slack bought (MPCCModels.jl's OPF volt-var cases, 13 of
 37).
 
 So before the B-stationarity check, the driver measures the reported point's
-largest `min(|G_k|, |H_k|)`. If that exceeds `tol`, it re-solves once on the
-branch that holds each pair's smaller side at zero, warm-started from the
-whole point. The re-solved point replaces the answer when four conditions
-hold:
+largest `min(|G_k|, |H_k|)`. It acts only if that exceeds `10·tol`. A strictly
+complementary pair ends near `τ = tol`, and a re-solve there would buy
+nothing. When it acts, it re-solves once on the branch that holds each pair's
+smaller side at zero. The re-solve is warm-started from the whole point,
+except that the pairs' own multipliers are zeroed; they are inactive on the
+branch. The re-solved point replaces the answer when four conditions hold:
 
 - it converged;
-- it removed the residual;
-- it certifies as the stages require (S or not searched for an answer, W for
-  the weak fallback);
-- it moved the objective by at most 1% relative.
+- it tightened the residual to `max(tol, 1e-3 × before)`. The second term
+  is there because a held row is pinned only to its constraint tolerance;
+- the objective did not rise by more than removing the residual can cost:
+  `100 × residual × max(1, |f|)`. Over 54 measured re-solves the largest rise
+  was 15.7 of those units, on a curve of slope 16. A *fall* is a lower,
+  complementary point, and is accepted whatever its size;
+- it certifies as the stages require: S or not searched for an answer, W for
+  the weak fallback. An S answer is demoted to W only when the B-stationarity
+  check at the new point finds no descending branch. The stages report W only
+  when no S exists, and here the S was S only because a nearly biactive pair
+  had counted as one-sided.
 
-Otherwise the answer is kept as it was, and the console says which happened:
+Otherwise the answer is kept as it was, and the console says which happened
+and why:
 
 ```text
 pounce: complementarity: the answer's pairs were complementary only to 7.8e-5 (min(|G|,|H|)); re-solved on its branch with each pair's smaller side held at zero: 6.0e-14, minimized objective -3.954779e-1 -> -3.954731e-1.
-pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (InfeasibleProblemDetected, 1.9e-5, ...); keeping it.
+pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (InfeasibleProblemDetected); keeping it.
 ```
 
-The re-solve appears in `solves` as a `branch NLP` stage. A kept answer is no
-worse than before, but its pairs are complementary only to the residual
-printed. On MacMPEC, 29 answers are tightened and 5 kept, 4 of them because
-the held branch is infeasible.
+The re-solve appears in `solves` as a `branch polish` stage, distinct from a
+B-escape's `branch NLP`. A kept answer is no worse than before, but its pairs
+are complementary only to the residual printed.
 
 ### B-stationarity: when the certificate is not S
 

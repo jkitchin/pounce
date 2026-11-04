@@ -74,6 +74,12 @@ pub enum MpccStage {
     /// along the branch its B-stationarity check found a descent on
     /// ([`check_b_stationarity`]). Not in [`STAGES`].
     Branch,
+    /// The polish: the reported point re-solved on the branch that holds
+    /// each pair's smaller side at zero, when its pairs are complementary
+    /// only to more than [`POLISH_TRIGGER`]` · tol` ([`natural_residual`]).
+    /// A branch NLP like [`Self::Branch`], but a refinement of the answer
+    /// rather than a move off it, so it is recorded apart. Not in [`STAGES`].
+    Polish,
 }
 
 impl MpccStage {
@@ -83,6 +89,7 @@ impl MpccStage {
             Self::Continuation => "Scholtes continuation",
             Self::Penalty => "l1 penalty",
             Self::Branch => "branch NLP",
+            Self::Polish => "branch polish",
         }
     }
 }
@@ -1648,6 +1655,75 @@ fn branch_lp(
     matches!(sol.status, QpStatus::Optimal).then_some((sol.obj, sol.x))
 }
 
+/// The polish runs when the reported point's [`natural_residual`] exceeds
+/// this times `tol`. Not `tol` itself: the last relaxation is `τ = 1e-8 =
+/// tol`, so a strictly complementary pair ends with its smaller side near
+/// `τ`, on the threshold, and would trigger a re-solve that buys nothing. The
+/// symptom it exists for sits near `sqrt(τ)`.
+pub const POLISH_TRIGGER: Number = 10.0;
+
+/// A polished point must bring the natural residual to `max(tol,
+/// POLISH_TIGHTEN · r_old)`. Not `tol` alone: a held `H` side is a row pinned
+/// to zero, which the branch solve satisfies only to its constraint
+/// tolerance, so a correct polish can end at `|h| = 3e-8`. On the 54
+/// polishes measured (MacMPEC, the OPF and capacity suites) every one reached
+/// `1e-8` or below, so this rejects nothing those accepted.
+pub const POLISH_TIGHTEN: Number = 1e-3;
+
+/// How far a polish may *raise* the minimized objective: this times `r_old ·
+/// max(1, |f|)`. Removing a residual `r` costs, to first order, `r` times the
+/// slope the pair carries (a curve's slope change, a cost): measured over 54
+/// polishes the rise was at most 15.7 times `r · max(1, |f|)`
+/// (`vw_knot_2_right`, volt-watt slope 16). A larger rise has left the
+/// answer's neighbourhood and the answer is kept. A *fall* is a lower,
+/// complementary point and is taken whatever its size, as the B-escape takes
+/// one.
+pub const POLISH_RISE: Number = 100.0;
+
+/// May a polish that moved the minimized objective from `f_old` to `f_new`,
+/// removing a natural residual `r_old`, replace the answer?
+pub fn polish_objective_ok(f_old: Number, f_new: Number, r_old: Number) -> bool {
+    f_new.is_finite()
+        && f_old.is_finite()
+        && f_new - f_old <= POLISH_RISE * r_old * f_old.abs().max(1.0)
+}
+
+/// Is a polished point's natural residual `r_new` tight enough, given
+/// `r_old` and the solver's `tol`?
+pub fn polish_tightened(r_new: Number, r_old: Number, tol: Number) -> bool {
+    r_new <= tol.max(POLISH_TIGHTEN * r_old)
+}
+
+/// What a polished point may be reported as, from its certificate class.
+/// `Ok(true)`: an answer (S, or not searched: what [`answers`] accepts).
+/// `Ok(false)`: the weak fallback (W, [`kept_if_nothing_better`]). `Err`:
+/// not taken, with the reason. An answer (`was_answer`) is demoted to W only
+/// when `no_branch_descends()` -- the B-stationarity check at the polished
+/// point reads B: the ladder reports W only when no S exists, and the S it
+/// had was S only because a nearly biactive pair counted as one-sided (the
+/// OPF volt-var knots, which polish to W and B-stationary). The check runs
+/// only in that case.
+pub fn polish_class(
+    was_answer: bool,
+    class: Option<StationarityClass>,
+    no_branch_descends: impl FnOnce() -> bool,
+) -> Result<bool, String> {
+    match class {
+        Some(k) if answers(k) => Ok(true),
+        Some(k) if kept_if_nothing_better(k) => {
+            if !was_answer || no_branch_descends() {
+                Ok(false)
+            } else {
+                Err(
+                    "it certifies only W where the answer was S, and a branch descends from it"
+                        .into(),
+                )
+            }
+        }
+        k => Err(format!("its certificate is {k:?}")),
+    }
+}
+
 /// The largest natural residual `min(|G_k|, |H_k|)` over the pairs at a
 /// point, with the branch that removes it: each pair's smaller side held at
 /// zero. A mixed pair is read as the one-sided pair of its nearer bound, as
@@ -1728,6 +1804,38 @@ mod tests {
             .map(|i| (b[i] - x[0] * a[i] - x[1] * a2[i] + x[2] * a[i]).powi(2))
             .sum();
         assert!(r.sqrt() < 1e-9, "residual {}", r.sqrt());
+    }
+
+    /// Every branch of the polish's acceptance, one assertion per branch.
+    #[test]
+    fn the_polish_takes_only_a_tightened_nearby_point_of_an_accepted_class() {
+        use StationarityClass::*;
+        // Class: S and not searched answer; W demotes an answer only where no
+        // branch descends, and that check is not even run otherwise.
+        assert_eq!(polish_class(true, Some(S), || unreachable!()), Ok(true));
+        assert_eq!(
+            polish_class(true, Some(NotSearched), || unreachable!()),
+            Ok(true)
+        );
+        assert_eq!(polish_class(true, Some(W), || true), Ok(false));
+        assert!(polish_class(true, Some(W), || false).is_err());
+        assert_eq!(polish_class(false, Some(W), || unreachable!()), Ok(false));
+        assert!(polish_class(false, Some(StationarityClass::None), || true).is_err());
+        assert!(polish_class(true, Option::None, || true).is_err());
+        // Tightening: to tol, or by POLISH_TIGHTEN where that is looser.
+        assert!(polish_tightened(1e-12, 7.8e-5, 1e-8));
+        assert!(polish_tightened(3e-8, 7.8e-5, 1e-8)); // a held row at 3e-8
+        assert!(!polish_tightened(1e-6, 7.8e-5, 1e-8));
+        // Objective: a fall of any size; a rise up to POLISH_RISE r max(1,|f|).
+        assert!(polish_objective_ok(0.2028, 0.1, 2.5e-5));
+        assert!(polish_objective_ok(0.2027957, 0.2031882, 2.5e-5)); // vw_knot_2_right
+        assert!(!polish_objective_ok(
+            0.2028,
+            0.2028 + 101.0 * 2.5e-5,
+            2.5e-5
+        ));
+        assert!(!polish_objective_ok(-322.0, -322.0 * (1.0 - 0.009), 1e-6)); // 0.9% worse
+        assert!(!polish_objective_ok(1.0, Number::NAN, 1e-5));
     }
 
     #[test]
