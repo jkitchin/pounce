@@ -93,6 +93,86 @@ pub struct SolveReport {
     /// reports loaded with `#[serde(default)] = None`.
     #[serde(default)]
     pub linear_solver: Option<LinearSolverSummaryInfo>,
+    /// What the complementarity driver did, for a model with declared
+    /// pairs; `None` for every other model and on older reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complementarity: Option<ComplementarityReport>,
+}
+
+/// The fields of the report's `complementarity` block that the analyses
+/// read. Every field defaults, so a block written by an older or newer
+/// solver still parses: this mirror is a reader, not the schema (that is
+/// `pounce_solve_report::ComplementarityInfo`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComplementarityReport {
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub accepted_by: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// `answer`, `weak_fallback`, `feasible_uncertified` or `verdict`.
+    #[serde(default)]
+    pub reported: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub solves: Vec<ComplementaritySolve>,
+    #[serde(default)]
+    pub total_iterations: usize,
+    #[serde(default)]
+    pub max_abs_product: Option<f64>,
+    #[serde(default)]
+    pub certificate: Option<ComplementarityCertificate>,
+    #[serde(default)]
+    pub natural_residual: Option<f64>,
+    #[serde(default)]
+    pub polish: Option<ComplementarityPolish>,
+    /// The `natural_residual` above which the driver runs the branch
+    /// re-solve (`10·tol`); `None` on reports written before the field.
+    #[serde(default)]
+    pub polish_threshold: Option<f64>,
+    #[serde(default)]
+    pub escapes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComplementaritySolve {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub tau: Option<f64>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub iterations: usize,
+    #[serde(default)]
+    pub seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComplementarityCertificate {
+    /// `S`, `W`, `none` or `not_searched`.
+    #[serde(default)]
+    pub class: String,
+    #[serde(default)]
+    pub n_pairs: usize,
+    #[serde(default)]
+    pub n_biactive: usize,
+    #[serde(default)]
+    pub feasible: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComplementarityPolish {
+    #[serde(default)]
+    pub taken: bool,
+    #[serde(default)]
+    pub residual_before: Option<f64>,
+    #[serde(default)]
+    pub residual_after: Option<f64>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl SolveReport {

@@ -101,7 +101,9 @@ summary fields (`n_factors`, `n_pattern_reuse`, `max_fill_ratio`, …).
 
 Known finding codes: `converged`, `max_iter_exceeded`,
 `restoration_used`, `restoration_loop`, `mu_stuck`,
-`heavy_line_search`, `hessian_regularized`, `convergence_stall`.
+`heavy_line_search`, `hessian_regularized`, `convergence_stall`; and,
+for a model with declared complementarity pairs, `mpcc_outcome`,
+`mpcc_cost`, `mpcc_loose_pairs`, `mpcc_polished`.
 
 ### Pre-flight on an input file
 
@@ -303,11 +305,12 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    limit) or mixed (`l <= x <= u ⟂ g` with the row free); a boxed row is
    refused with the reason. Cone complementarity is not supported.
 3. **Read the verdict.** The JSON report carries it under
-   `complementarity` (`certificate.class`, `solves`, `b_stationarity`,
-   `escapes`), but `pounce-studio diagnose` does not read that block yet:
-   read the JSON directly, the console line
-   (`pounce: complementarity: answered by …; stationarity: S`) or Python
-   `info["complementarity"]`:
+   `complementarity` (`certificate.class`, `natural_residual`, `polish`,
+   `solves`, `b_stationarity`, `escapes`), and `pounce-studio diagnose`
+   turns it into findings (`mpcc_outcome`, `mpcc_cost`,
+   `mpcc_loose_pairs`, `mpcc_polished`). Also on the console line
+   (`pounce: complementarity: answered by …; stationarity: S`) and in
+   Python `info["complementarity"]`:
    - `S` — strongly stationary, a local-minimum candidate. Done.
    - `W` (`fallback` set, `accepted_by` None) — weakly stationary only:
      a descent direction may switch which side of a pair is zero. Try
@@ -320,12 +323,13 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    sides near zero at the answer, e.g. a hinge at a curve knot) used to
    be left with both sides near `sqrt(1e-8) = 1e-4`, reported as
    `Solve_Succeeded`. The driver now re-solves such an answer onto its
-   branch; a `branch polish` entry in `solves` and the console line
-   `… complementary only to X …; re-solved on its branch …` mean it did.
-   `… did not tighten it …; keeping it` means the pairs are complementary
-   only to `X` — say so, and judge the answer by recomputing
-   `min(G_k, H_k)` (and any quantity the pairs encode, such as a curve
-   value) from the returned point.
+   branch; `polish.taken` true (a `branch polish` entry in `solves`)
+   means it did. `natural_residual` is how complementary the reported
+   point is, whatever happened: above ~1e-6, with `polish.taken` false
+   (`polish.reason` says why) or no `polish` at all, the pairs are
+   complementary only to that — say so, and judge the answer by
+   recomputing `min(G_k, H_k)` (and any quantity the pairs encode, such
+   as a curve value) from the returned point.
 5. **Comparing against an NLP solver.** Ipopt refuses declared pairs
    ("Ipopt does not support complementarity constraints"); handed the
    usual rewrite `G ≥ 0, H ≥ 0, G·H ≤ 0` it — and pounce on the same

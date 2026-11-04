@@ -9,7 +9,69 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The solve report says how complementary an MPCC answer is.** The JSON
+  `complementarity` block, and Python's `info["complementarity"]`, gain:
+  - `natural_residual`, the reported point's largest `min(|G|, |H|)`;
+  - `polish`, present when the branch re-solve ran: `taken`,
+    `residual_before`, `residual_after` and the `reason` it was not taken;
+  - `polish_threshold`, the `natural_residual` above which the re-solve
+    runs (`10·tol`);
+  - in the JSON only, each lowered solve's wall-clock `seconds`.
+
+  Before this, only the console said that an answer certified S could have
+  pairs complementary only to 7.8e-5. All fields are additive; older reports
+  read back unchanged.
+- **`pounce-studio diagnose` reads the complementarity block.** It has four
+  findings, each with a glossary entry in the Rust core and the MCP server:
+  - `mpcc_outcome`: which point was reported, and its certificate class;
+  - `mpcc_cost`: solves, iterations and seconds by stage;
+  - `mpcc_loose_pairs`: `natural_residual` above 1e-6, or above
+    `polish_threshold` when that is larger, with the polish's outcome;
+  - `mpcc_polished`.
+- **The fixture sweep reaches the complementarity driver.**
+  `scripts/sweep-fixtures.sh` also runs the declared-pair fixtures in
+  `tests/fixtures_mpcc/` as `cc:` lines. Each carries the reported point and
+  class, the lowered solves and their iterations, `natural_residual`, the
+  polish outcome and escapes. The new fixture `infeasible_pair.nl` reaches
+  the verdict branch. No fixture reaches a B-escape, and neither do the 120
+  smallest MacMPEC models.
+- **The release sweep covers complementarity.** `make benchmark` now runs
+  `macmpec-run` and `mpcc-compare`. `BENCHMARK_REPORT.md` gains a
+  "Complementarity (MPCC)" section that judges each arm by its returned
+  pairs, never by status.
+
+### Changed
+- **A warm-started continuation rung is budgeted.** Its `max_iter` is 10×
+  the iterations of the attempt that produced the previous rung's point
+  (not its call's total, which includes a capped attempt the fallback
+  rescued), at least 500, and never above the caller's. The budget is set
+  only while `mu_strategy_fallback` will run; with it off, or with a
+  caller-named `mu_strategy`, a rung keeps the caller's `max_iter`. `mu_strategy_fallback` stays live, so a rung that crawls is
+  re-solved cold early instead of after the full `max_iter`. On
+  `ieee300_reserve_q98` the `τ = 1e-4` rung took all 3000 iterations
+  (16 s of 20) after rungs of 25–41; the run now takes 6.7 s, in the same 13
+  solves, to the same objective. Measured against `e42a18ad`:
+  - MPCCModels.jl transmission cases (59): 350 → 247 s and 66 626 → 50 275
+    iterations, with every answer and best-known match unchanged.
+  - MacMPEC: the standing is unchanged (157 at, 7 better, 5 worse,
+    1 unsolved). There are no status moves, iterations are identical on the
+    114 models with logs, and time is −3.3%.
+  - `mpcc_nl` (16/16), the 37 OPF cases and the 36 capacity cases are
+    unchanged.
+  - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
+
 ### Fixed
+- **The branch re-solve says why it was refused.** It now checks the
+  re-solve's status, tightening and objective before its stationarity class.
+  A failed re-solve reads "the re-solve returned
+  Infeasible_Problem_Detected", where it used to read "its certificate is
+  Some(None)". It also no longer runs a demotion B-check whose result could
+  not be used.
+- **`IPOPT_MA57_BIN` defaults to an Ipopt that runs.** `benchmarks/Makefile`
+  tries the `ref/` install and then `ipopt-ma57` on PATH, checking each by
+  running it. `ipopt-ma57-check` fails with the path it tried, instead of
+  letting every Ipopt arm read `NO_STATUS`.
 - **A complementarity answer at a nearly biactive pair is complementary to
   the solver's tolerance, not to `sqrt(tol)`.** Every stage of the driver
   stops at a pair product near the last `τ` (1e-8). That is harmless where a

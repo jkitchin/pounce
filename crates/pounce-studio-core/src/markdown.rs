@@ -248,6 +248,7 @@ mod tests {
             },
             iterations: vec![],
             linear_solver: None,
+            complementarity: None,
         }
     }
 

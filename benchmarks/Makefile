@@ -36,7 +36,13 @@ POUNCE_BENCH_DATA ?= $(REPO_ROOT)/benchmarks
 # needed any more — the compiled CUTEst and large_scale Rust harnesses
 # that linked libipopt have been retired.
 IPOPT_MA57_INSTALL ?= $(REPO_ROOT)/ref/Ipopt/install-ma57
-IPOPT_MA57_BIN     ?= $(IPOPT_MA57_INSTALL)/bin/ipopt
+# The first candidate that runs: the install above, else an `ipopt-ma57` on
+# PATH. Checked by running it, not by existence -- a wrapper script can
+# outlive the build it points at, and then every Ipopt arm reads NO_STATUS.
+# Neither running, the install path is kept so the error names it;
+# `ipopt-ma57-check` (a prerequisite of the Ipopt targets that use it) fails
+# loudly then. Override with IPOPT_MA57_BIN=<path>/bin/ipopt.
+IPOPT_MA57_BIN     ?= $(firstword $(foreach c,$(IPOPT_MA57_INSTALL)/bin/ipopt $(shell command -v ipopt-ma57 2>/dev/null),$(if $(shell $(c) --version >/dev/null 2>&1 && echo ok),$(c))) $(IPOPT_MA57_INSTALL)/bin/ipopt)
 # Ipopt's compiled default linear solver is ma27 even in this HSL build,
 # so the driver passes `linear_solver=$(IPOPT_LINEAR_SOLVER)` explicitly —
 # otherwise the "ma57" reference would silently run ma27. Exported so the
@@ -44,7 +50,7 @@ IPOPT_MA57_BIN     ?= $(IPOPT_MA57_INSTALL)/bin/ipopt
 IPOPT_LINEAR_SOLVER ?= ma57
 export IPOPT_LINEAR_SOLVER
 
-.PHONY: help benchmark benchmark-rerun benchmark-report build-ipopt-ma57 \
+.PHONY: ipopt-ma57-check help benchmark benchmark-rerun benchmark-report build-ipopt-ma57 \
 	vanderbei-run vanderbei-rerun \
 	electrolyte-run electrolyte-rerun grid-run grid-rerun cho-run cho-rerun \
 	grid-ecf-run grid-ecf-rerun grid-polar-run grid-polar-rerun \
@@ -588,7 +594,14 @@ capacity-equilibria-run: capacity-equilibria-selftest $(POUNCE_BIN)
 mpcc-opf-transmission-selftest:
 	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf_transmission.selftest
 
-mpcc-compare: mpcc-opf-selftest capacity-equilibria-selftest mpcc-opf-transmission-selftest $(POUNCE_BIN)
+# Fails with the path it tried, instead of letting a missing Ipopt turn every
+# Ipopt arm into NO_STATUS.
+ipopt-ma57-check:
+	@$(IPOPT_MA57_BIN) --version >/dev/null 2>&1 || { \
+	  echo "IPOPT_MA57_BIN=$(IPOPT_MA57_BIN) does not run. Set IPOPT_MA57_BIN=<path>/bin/ipopt" \
+	       "(an Ipopt built with CoinHSL MA57 and the AMPL interface)." >&2; exit 1; }
+
+mpcc-compare: ipopt-ma57-check mpcc-opf-selftest capacity-equilibria-selftest mpcc-opf-transmission-selftest $(POUNCE_BIN)
 	cd $(POUNCE_BENCH_DATA) && IPOPT_MA57_BIN=$(IPOPT_MA57_BIN) $(PYTHON) -m mpcc_compare.compare --pounce $(POUNCE_BIN)
 
 # --- MacMPEC (Leyffer) ---------------------------------------------------
@@ -851,6 +864,10 @@ benchmark: pounce-bin
 	-$(MAKE) lbfgs-run
 	-$(MAKE) lpopt-run
 	-$(MAKE) gams-bench
+# Complementarity: judged by the returned point's pairs, not by status, so
+# they render in a section of their own in the report.
+	-$(MAKE) macmpec-run
+	-$(MAKE) mpcc-compare
 	-$(MAKE) benchmark-report
 	@echo "Benchmark sweep complete. Report: benchmarks/BENCHMARK_REPORT.md"
 

@@ -321,6 +321,7 @@ def test_findings_codes_match_rust_source():
         "converged", "max_iter_exceeded", "restoration_used", "mu_stuck",
         "heavy_line_search", "hessian_regularized", "restoration_loop",
         "convergence_stall",
+        "mpcc_outcome", "mpcc_cost", "mpcc_loose_pairs", "mpcc_polished",
     }
     missing = rust_codes - set(G.FINDINGS)
     assert not missing, f"glossary missing finding codes: {missing}"

@@ -275,6 +275,14 @@ def test_the_solve_report_carries_the_complementarity_block(tmp_path):
     assert block["certificate"]["class"] == cc["certificate"]["class"] == "S"
     assert block["summary"] == cc["summary"]
     assert block["total_iterations"] > report["statistics"]["iteration_count"]
+    # How complementary the answer is, and what the branch re-solve did, the
+    # same both ways. This QPEC's exact stage ends at min(G, H) = 5e-7, above
+    # 10*tol, so the re-solve runs and is taken.
+    assert block["natural_residual"] == cc["natural_residual"] <= 1e-7, cc
+    assert block["polish"] == cc["polish"], cc
+    assert cc["polish"]["taken"] is True, cc
+    assert block["polish_threshold"] == cc["polish_threshold"] > 0.0, cc
+    assert all(s["seconds"] >= 0.0 for s in block["solves"])
 
 
 def test_the_solve_report_carries_the_b_stationarity_check(tmp_path):

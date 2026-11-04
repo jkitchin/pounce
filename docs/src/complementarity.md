@@ -167,6 +167,13 @@ iterations by a third, with no answer changed:
   step's point and barrier parameter, with twice that step's iterations,
   rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried
   and dropped: on the CALIPSO rocket the later steps reach a better branch.
+- **A warm step that crawls is cut short.** Each warm-started step may take
+  10× the previous step's iterations, at least 500 (never more than your
+  `max_iter`). Tightening `τ` leaves the previous point slightly infeasible,
+  and at a small barrier parameter the iterate can creep along its bounds:
+  on an IEEE 300-bus volt-var case one step took all 3000 iterations after
+  steps of 25–41. Cut at 500, it is re-solved cold by `mu_strategy_fallback`
+  and the run takes a third of the time, to the same answer.
 
 The remaining cost of running both is a choice you can undo when you know
 your model. Two
@@ -225,8 +232,9 @@ number is `max_abs_product` in Python and in the JSON report.
 From Python, `info["complementarity"]` holds `accepted_by` (the stage that
 answered with an S point, or `None` if none did), `fallback` (the stage
 whose W point is reported when none answered, else `None`), `n_solves`,
-`total_iterations`, `max_abs_product`, the per-solve records, and
-`certificate`:
+`total_iterations`, `max_abs_product`, `natural_residual` (how
+complementary the reported point is; see below), `polish`, the per-solve
+records, and `certificate`:
 
 | `class` | meaning |
 | --- | --- |
@@ -283,12 +291,23 @@ and why:
 
 ```text
 pounce: complementarity: the answer's pairs were complementary only to 7.8e-5 (min(|G|,|H|)); re-solved on its branch with each pair's smaller side held at zero: 6.0e-14, minimized objective -3.954779e-1 -> -3.954731e-1.
-pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (InfeasibleProblemDetected); keeping it.
+pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (the re-solve returned Infeasible_Problem_Detected); keeping it.
 ```
 
 The re-solve appears in `solves` as a `branch polish` stage, distinct from a
 B-escape's `branch NLP`. A kept answer is no worse than before, but its pairs
 are complementary only to the residual printed.
+
+The report says the same without the console. `natural_residual` is the
+reported point's largest `min(|G_k|, |H_k|)`, on every run. `polish`,
+present only when the re-solve ran, holds `taken`, `residual_before`,
+`residual_after` and the `reason` it was not taken. Read
+`natural_residual` alongside `certificate.class`: the kept answer above
+certifies S with its pairs complementary only to 7.8e-5. `pounce-studio
+diagnose` warns about it (`mpcc_loose_pairs`) when `natural_residual`
+exceeds 1e-6, or `polish_threshold` (the `10·tol` above which the driver
+re-solves) when that is larger: under a looser `tol`, a residual below the
+threshold was left alone on purpose.
 
 ### B-stationarity: when the certificate is not S
 
