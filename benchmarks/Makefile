@@ -66,6 +66,9 @@ export IPOPT_LINEAR_SOLVER
 	mpcc-selftest mpcc-smoke mpcc-run mpcc-report mpcc-manifest \
 	mpcc-nl-run mpcc-nl-rerun mpcc-nl-check \
 	macmpec-run macmpec-rerun macmpec-check \
+	mpcc-opf-selftest mpcc-opf-run \
+	capacity-equilibria-selftest capacity-equilibria-run \
+	mpcc-opf-transmission-selftest mpcc-compare \
 	flash-selftest flash-smoke flash-run \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
 	pounce-bin
@@ -122,6 +125,12 @@ help:
 	@echo "  mpcc-nl-check              re-check an existing mpcc_nl/pounce.json against answers.json"
 	@echo "  macmpec-run / -rerun       MacMPEC (178 .nl), classified against best-known objectives"
 	@echo "  macmpec-check              re-check an existing macmpec/pounce.json against answers.json"
+	@echo "  mpcc-opf-selftest          OPF volt-var/volt-watt MPCCs: port checks against the analytic references (no solver)"
+	@echo "  mpcc-opf-run               OPF volt-var/volt-watt MPCCs (37, data root), CLI, held to the upstream regime gate"
+	@echo "  capacity-equilibria-selftest  Murphy-Smeers capacity equilibria: port and ground-truth checks (no solver)"
+	@echo "  capacity-equilibria-run    Murphy-Smeers LCPs and best-response MPCCs (36, data root), CLI"
+	@echo "  mpcc-opf-transmission-selftest  IEEE 118/300 volt-var/volt-watt cases: Pyomo model vs upstream's evaluations"
+	@echo "  mpcc-compare               pounce (declared pairs, and the NLP form) vs Ipopt MA57 (NLP form) on the complementarity suites"
 	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
 	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
 	@echo "  flash-selftest             Gate 1 flash: derivatives, oracle cross-check, regime coverage (no solver)"
@@ -535,6 +544,52 @@ mpcc-nl-check:
 mpcc-nl-rerun:
 	rm -f $(MPCC_NL_DIR)/pounce.json
 	$(MAKE) mpcc-nl-run
+
+# --- OPF volt-var / volt-watt MPCCs ---------------------------------------
+#
+# The 37 small balanced AC OPF cases of MPCCModels.jl PR #13. The suite
+# lives in the data root ($(POUNCE_BENCH_DATA)/mpcc_opf/): case data, the
+# Pyomo generator and the checks, run in place; the .nl are regenerated
+# into its nl/ on every run. Each answer is held to upstream's integration
+# gate: converged, physical residuals <= 1e-5 with the curves evaluated
+# directly, every controller in its target regime. `mpcc-opf-selftest`
+# needs no solver and checks the port against each case's analytic
+# reference. See $(POUNCE_BENCH_DATA)/mpcc_opf/README.md.
+
+mpcc-opf-selftest:
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf.selftest
+
+mpcc-opf-run: mpcc-opf-selftest $(POUNCE_BIN)
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf.run --pounce $(POUNCE_BIN)
+
+# --- Capacity-expansion equilibria --------------------------------------
+#
+# Murphy-Smeers capacity equilibria from CapacityEquilibriaBenchmarks.jl
+# (Archie Chapman): 4 square LCPs and 32 best-response MPCCs, every one
+# with an answer known without a solver. Lives in the data root like
+# mpcc_opf; the selftest writes the truth.json the run reads. Attribution:
+# $(POUNCE_BENCH_DATA)/capacity_equilibria/SOURCE.md.
+
+capacity-equilibria-selftest:
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m capacity_equilibria.selftest
+
+capacity-equilibria-run: capacity-equilibria-selftest $(POUNCE_BIN)
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m capacity_equilibria.run --pounce $(POUNCE_BIN)
+
+# --- Complementarity: pounce against Ipopt --------------------------------
+#
+# mpcc-compare runs three arms on mpcc_opf, mpcc_opf_transmission and
+# capacity_equilibria (all in the data root): pounce on the declared pairs,
+# Ipopt + MA57 on Pyomo's NLP rewrite (G*H <= 0; Ipopt refuses declared
+# complementarity), and pounce on that same NLP. Every answer is judged by
+# the suite's own physical checks. IPOPT_MA57_BIN must name an Ipopt with
+# MA57 linked in. See $(POUNCE_BENCH_DATA)/mpcc_compare/README.md.
+
+mpcc-opf-transmission-selftest:
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf_transmission.selftest
+
+mpcc-compare: mpcc-opf-selftest capacity-equilibria-selftest mpcc-opf-transmission-selftest $(POUNCE_BIN)
+	cd $(POUNCE_BENCH_DATA) && IPOPT_MA57_BIN=$(IPOPT_MA57_BIN) $(PYTHON) -m mpcc_compare.compare --pounce $(POUNCE_BIN)
 
 # --- MacMPEC (Leyffer) ---------------------------------------------------
 #

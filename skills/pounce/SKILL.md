@@ -302,8 +302,10 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    variable's matching bound is in the pair, a second one an ordinary
    limit) or mixed (`l <= x <= u ⟂ g` with the row free); a boxed row is
    refused with the reason. Cone complementarity is not supported.
-3. **Read the verdict.** The JSON report does **not** carry the
-   certificate yet, so `diagnose` cannot see it. Read the console line
+3. **Read the verdict.** The JSON report carries it under
+   `complementarity` (`certificate.class`, `solves`, `b_stationarity`,
+   `escapes`), but `pounce-studio diagnose` does not read that block yet:
+   read the JSON directly, the console line
    (`pounce: complementarity: answered by …; stationarity: S`) or Python
    `info["complementarity"]`:
    - `S` — strongly stationary, a local-minimum candidate. Done.
@@ -314,10 +316,30 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
      feasible but not stationary; the solve stalled. Treat as a failure.
    - `not_searched` — not determined (the multipliers form a set too
      large to search). Accepted like S; say so when reporting.
-4. **Cost.** Running both formulations costs about the iterations of
+4. **Check the pairs, not the status.** A nearly biactive pair (both
+   sides near zero at the answer, e.g. a hinge at a curve knot) used to
+   be left with both sides near `sqrt(1e-8) = 1e-4`, reported as
+   `Solve_Succeeded`. The driver now re-solves such an answer onto its
+   branch; a `branch polish` entry in `solves` and the console line
+   `… complementary only to X …; re-solved on its branch …` mean it did.
+   `… did not tighten it …; keeping it` means the pairs are complementary
+   only to `X` — say so, and judge the answer by recomputing
+   `min(G_k, H_k)` (and any quantity the pairs encode, such as a curve
+   value) from the returned point.
+5. **Comparing against an NLP solver.** Ipopt refuses declared pairs
+   ("Ipopt does not support complementarity constraints"); handed the
+   usual rewrite `G ≥ 0, H ≥ 0, G·H ≤ 0` it — and pounce on the same
+   rewrite — routinely reports `Optimal Solution Found` at points that
+   violate complementarity by ~1e-4 (51 of 59 IEEE OPF cases in the
+   benchmark below). Never compare on status or objective alone: an
+   objective slightly *below* the declared-pair answer is usually the
+   slack. The data root's `mpcc_compare/` (`make -C benchmarks
+   mpcc-compare`) runs pounce, Ipopt+MA57 and CCOpt on three suites and
+   judges every answer by its physics.
+6. **Cost.** Running both formulations costs about the iterations of
    both. When one is known to work for the model,
    `complementarity_strategy=exact` (or `=continuation`) runs only it.
-5. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian
+7. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian
    requests, the debugger, `pounce verify`, `check-x0`, the WASM build,
    `pounce.Solver`, `find_minima`, `solve_nlp_batch` and
    `solve_with_sens` refuse a model with pairs rather than solve it

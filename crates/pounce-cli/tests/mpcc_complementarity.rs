@@ -206,3 +206,90 @@ fn a_model_without_pairs_has_no_complementarity_block() {
         serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
     assert!(j.get("complementarity").is_none(), "{j}");
 }
+
+/// `x` by `.col` name, for a fixture that ships its Pyomo column names.
+fn x_by_name(r: &Run, nl: &str) -> std::collections::HashMap<String, f64> {
+    let col = std::fs::read_to_string(fixture(&nl.replace(".nl", ".col"))).unwrap();
+    col.split_whitespace()
+        .map(String::from)
+        .zip(x_of(r))
+        .collect()
+}
+
+/// The largest `min(r_h, s_h)` over the OPF fixtures' six hinge pairs.
+fn natural_residual(x: &std::collections::HashMap<String, f64>) -> f64 {
+    (1..=6)
+        .map(|h| x[&format!("r[{h}]")].min(x[&format!("s[{h}]")]).abs())
+        .fold(0.0, f64::max)
+}
+
+fn last_stage(r: &Run) -> (String, String) {
+    let s = r.json.as_ref().unwrap()["complementarity"]["solves"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    (
+        s["stage"].as_str().unwrap().to_string(),
+        s["status"].as_str().unwrap().to_string(),
+    )
+}
+
+/// The polish's accepted branch (`mpcc_driver`, `natural_residual`). At a
+/// knot of the volt-var curve the hinge pair is biactive, and every stage
+/// stops at a product near the last `τ` with both sides near `sqrt(τ)`:
+/// `r = 7.8e-5`, `s = 1.3e-4` at a product of `1e-8`, which put `q`
+/// 5.9e-4 off its curve (slope 7.5) while reporting `Solve_Succeeded`. The
+/// re-solve on the branch that holds each pair's smaller side at zero
+/// removes it.
+#[test]
+fn a_nearly_biactive_answer_is_re_solved_onto_its_branch() {
+    let r = run("opf_vv_lower_knee.nl", &[]);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    assert_eq!(
+        r.json.as_ref().unwrap()["solution"]["status_upstream"],
+        "Solve_Succeeded"
+    );
+    assert_eq!(last_stage(&r).0, "branch polish");
+    let x = x_by_name(&r, "opf_vv_lower_knee.nl");
+    assert!(
+        natural_residual(&x) <= 1e-9,
+        "min(r, s) = {:e}",
+        natural_residual(&x)
+    );
+    // q on its volt-var curve, evaluated directly: (0.94, 0.3) to (0.98, 0).
+    let (v, q) = (x["v[2]"], x["q[1]"]);
+    let vv = if v <= 0.94 {
+        0.3
+    } else if v >= 0.98 {
+        0.0
+    } else {
+        0.3 * (0.98 - v) / 0.04
+    };
+    assert!((q - vv).abs() <= 1e-7, "v = {v}, q = {q}, VV(v) = {vv}");
+}
+
+/// The polish's other branch: `opf_vv_lower_knee_held.nl` adds `r[1] >=
+/// 5e-5`, which the stages' near-biactive point satisfies and the branch
+/// holding `r[1]` at zero cannot. The re-solve is refused as infeasible and
+/// the answer is reported as it was, unpolished; it is never replaced by
+/// the failed re-solve's point.
+#[test]
+fn a_branch_the_answer_cannot_hold_leaves_the_answer_as_it_was() {
+    let r = run("opf_vv_lower_knee_held.nl", &[]);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    let (stage, status) = last_stage(&r);
+    assert_eq!(stage, "branch polish");
+    assert_eq!(status, "Infeasible_Problem_Detected");
+    assert_eq!(
+        r.json.as_ref().unwrap()["solution"]["status_upstream"],
+        "Solve_Succeeded"
+    );
+    let x = x_by_name(&r, "opf_vv_lower_knee_held.nl");
+    assert!(x["r[1]"] >= 5e-5 - 1e-9, "r[1] = {}", x["r[1]"]);
+    assert!(
+        natural_residual(&x) > 1e-6,
+        "the kept point is the stages' own"
+    );
+}

@@ -187,6 +187,24 @@ purpose-built fixture that reaches an acceptable-level exit above
 `dual_inf_tol`; an empty sweep is not evidence about it. Full account:
 `dev-notes/mpcc-biactive-dual-divergence.md`.
 
+**The complementarity driver is not in the sweep either.** The corpus's
+`mpcc_*` fixtures write their pairs as product rows, so they solve as plain
+NLPs and never reach `pounce_restoration::mpcc_driver`. A change to the driver
+or to `pounce_algorithm::mpcc` diffs the sweep empty by construction, as the
+nearly-biactive re-solve did. Measure it on the declared-pair corpora against
+a baseline binary instead:
+- MacMPEC (`macmpec-run`; answers checked against best known);
+- `mpcc-nl-run`;
+- CALIPSO;
+- `python -m mpcc.declared` (from `benchmarks/`);
+- `flash-smoke`;
+- the data-root suites `mpcc-opf-run`, `capacity-equilibria-run` and
+  `mpcc-compare`.
+
+The OPF suites are the ones with answers at nearly biactive pairs: hinges at
+curve knots. MacMPEC has few of those, and that is why an answer
+complementary only to `sqrt(tol)` went unseen.
+
 **The `--minima` search has its own sweep.** `scripts/sweep-fixtures.sh` never
 passes `--minima`, so a change to `crates/pounce-minima` or
 `crates/pounce-cli/src/minima` diffs it empty by construction. Run

@@ -1798,8 +1798,9 @@ fn a_failed_warm_rung_is_retried_from_its_primal_point_at_its_barrier() {
         &[("mu_strategy_fallback", "no")],
     );
     let mu0 = mu0.borrow();
-    // The branch stage's solves send this model no iteration 0 of their
-    // own, and come last, so the count is every other solve's.
+    // One iteration 0 per solve, the polish's included. A B-escape's branch
+    // pins every variable of this model and never reaches iteration 0; the
+    // escapes run last, so `mu0` stays indexed by solve position.
     assert_eq!(
         mu0.len(),
         out.solves

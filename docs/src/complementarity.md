@@ -246,6 +246,50 @@ whose sign-free residual is inside the band but not the `max(1e-6, tol)` floor
 alone is not `tight`: the driver keeps it, runs the remaining formulations, and
 reports it only if none of them produces a tight answer.
 
+### Complementary to `tol`, not to `sqrt(tol)`
+
+Every formulation stops at a pair product near the last relaxation, `τ =
+1e-8`. Where a pair is strictly complementary that is harmless: the other side
+is `O(1)`, so the smaller one is about `τ`. Where a pair is **nearly biactive**
+at the answer, both sides sit near `sqrt(τ) = 1e-4`. On a hinge
+`r − s = V − knot` with slope 7.5 behind it, that leaves the controlled
+quantity 6e-4 off its curve, at an objective that reads better than the true
+optimum by what the slack bought (MPCCModels.jl's OPF volt-var cases, 13 of
+37).
+
+So before the B-stationarity check, the driver measures the reported point's
+largest `min(|G_k|, |H_k|)`. It acts only if that exceeds `10·tol`. A strictly
+complementary pair ends near `τ = tol`, and a re-solve there would buy
+nothing. When it acts, it re-solves once on the branch that holds each pair's
+smaller side at zero. The re-solve is warm-started from the whole point,
+except that the pairs' own multipliers are zeroed; they are inactive on the
+branch. The re-solved point replaces the answer when four conditions hold:
+
+- it converged;
+- it tightened the residual to `max(tol, 1e-3 × before)`. The second term
+  is there because a held row is pinned only to its constraint tolerance;
+- the objective did not rise by more than removing the residual can cost:
+  `100 × residual × max(1, |f|)`. Over 54 measured re-solves the largest rise
+  was 15.7 of those units, on a curve of slope 16. A *fall* is a lower,
+  complementary point, and is accepted whatever its size;
+- it certifies as the stages require: S or not searched for an answer, W for
+  the weak fallback. An S answer is demoted to W only when the B-stationarity
+  check at the new point finds no descending branch. The stages report W only
+  when no S exists, and here the S was S only because a nearly biactive pair
+  had counted as one-sided.
+
+Otherwise the answer is kept as it was, and the console says which happened
+and why:
+
+```text
+pounce: complementarity: the answer's pairs were complementary only to 7.8e-5 (min(|G|,|H|)); re-solved on its branch with each pair's smaller side held at zero: 6.0e-14, minimized objective -3.954779e-1 -> -3.954731e-1.
+pounce: complementarity: the answer's pairs are complementary only to 7.8e-5 (min(|G|,|H|)), and the branch re-solve did not tighten it (InfeasibleProblemDetected); keeping it.
+```
+
+The re-solve appears in `solves` as a `branch polish` stage, distinct from a
+B-escape's `branch NLP`. A kept answer is no worse than before, but its pairs
+are complementary only to the residual printed.
+
 ### B-stationarity: when the certificate is not S
 
 S is the strongest first-order statement, but a point can fail it and still
@@ -282,15 +326,14 @@ same keys; there an unrun check is omitted rather than `null`
 
 On MacMPEC the check confirms the W fallbacks `ralph1`, `scholtes4` and `qpec2`
 (10 biactive pairs, 1024 branch LPs, about a second) as B-stationary. On
-`siouxfls` it finds a descending branch at the continuation's point
-(minimized objective −207.36); the branch NLP reaches −208.258, the published
-best known, where the check then reads B.
+`siouxfls` (1748 pairs, too many to certify, so `not_searched`), the
+continuation's answer is first re-solved onto its branch (residual 1.7e-7 →
+2.4e-11), and the check then reads B at −208.258, the published best known.
 
 The check is on the **linearized** constraints. Where constraint
 qualifications fail it can read B at a point the multiplier certificate calls
-`none` — the escaped `siouxfls` point, with 1748 pairs, is one — and each is
-right about its own question: no linearized branch descends, and no
-multipliers reproduce `∇f`. The status then stays
+`none`, and each is right about its own question: no linearized branch
+descends, and no multipliers reproduce `∇f`. The status then stays
 `Solved_To_Acceptable_Level`.
 
 ### The exit status and the certificate answer different questions
