@@ -58,6 +58,17 @@ changes.
   pairs, never by status.
 
 ### Changed
+- **The exact stage's cold solve is skipped once two exact answers are in
+  hand.** When the continuation's certified answer and the exact stage's
+  relaxed path disagree, the cold `G·H = 0` solve used to run as a third
+  opinion. It is now skipped when both answers came from converged
+  exact-product finishes, and still runs when either is only a relaxed point
+  (CALIPSO bunny-hop seed 1, the one case where it wins). The console names
+  which case applied. No outcome changed on any corpus: the fixture sweep,
+  MacMPEC, `mpcc_nl`, CALIPSO, `mpcc.declared`, `flash-smoke`, and the OPF,
+  capacity, transmission and `relu_nn` suites. MacMPEC's solve time fell from
+  1,595 s to 1,149 s, transmission's from 269 s to 240 s, and `relu_nn`'s
+  from 178 s to 88 s.
 - **A warm-started continuation rung is budgeted.** Its `max_iter` is 10×
   the iterations of the attempt that produced the previous rung's point
   (not its call's total, which includes a capped attempt the fallback

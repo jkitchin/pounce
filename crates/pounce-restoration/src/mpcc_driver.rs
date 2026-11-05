@@ -36,7 +36,7 @@ use pounce_algorithm::mpcc::{
     Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter,
     certify, check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
     finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, polish_class,
-    polish_objective_ok, polish_tightened, relaxation_slack, warm_rung_max_iter,
+    polish_objective_ok, polish_tightened, relaxation_slack, skips_cold_solve, warm_rung_max_iter,
     warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
@@ -238,6 +238,11 @@ struct Captured {
     /// its branch's optimum stopping at tolerance can leave it. `+inf` with
     /// no point, or when the model declines an evaluation.
     gap: Number,
+    /// Whether the point came from an exact-product solve (`Eq`/`Ineq`),
+    /// not a relaxation: a continuation whose finish did not converge keeps
+    /// its last relaxed point, which is an answer but not a solution of the
+    /// exact product.
+    exact_lowering: bool,
 }
 
 impl Captured {
@@ -432,6 +437,7 @@ pub fn solve_mpcc(
             max_abs_product,
             slack,
             gap,
+            exact_lowering: matches!(lowering, Lowering::Eq | Lowering::Ineq),
         };
         solves.push(MpccSolveRecord {
             stage,
@@ -554,12 +560,14 @@ pub fn solve_mpcc(
                 //   that reaches the better branch (MacMPEC `water-net`: 927,
                 //   where both relaxed paths settle on 953 and 964).
                 //
-                // Neither dominates on MacMPEC or CALIPSO, so both run. With
-                // an answer already in hand (the continuation's, or a converged
-                // relaxed path's), the cold solve is a second opinion and runs
-                // on a budget proportional to what the stages before it spent
-                // ([`EXACT_BUDGET_FACTOR`]); the relaxed path is budgeted only
-                // on the continuation's answer.
+                // Neither dominates on MacMPEC or CALIPSO, so both run -- the
+                // cold solve only until the continuation and the relaxed path
+                // both hold an exact answer (below). With an answer already in hand
+                // (the continuation's, or a converged relaxed path's), the cold
+                // solve is a second opinion and runs on a budget proportional
+                // to what the stages before it spent ([`EXACT_BUDGET_FACTOR`]);
+                // the relaxed path is budgeted only on the continuation's
+                // answer.
                 let mut cands: Vec<Captured> = Vec::new();
                 let budget = exact_stage_budget(
                     accepted.is_some(),
@@ -633,19 +641,39 @@ pub fn solve_mpcc(
                 // can refuse an over-determined model with a proven verdict
                 // (`Infeasible_Problem_Detected`) rather than
                 // `Not_Enough_Degrees_Of_Freedom`.
-                // Skipped when the continuation's answer and the relaxed
-                // path's agree ([`answers_agree`]): two routes landing on one
-                // point, and the cold solve exists for the models where they
-                // do not.
+                // Skipped once two exact answers are in hand: the
+                // continuation's certified answer and the relaxed path's, each
+                // from an exact-product solve (its finish converged). Whether
+                // they agree ([`answers_agree`]: one point reached twice) or
+                // not (two branches, of which the comparison below keeps the
+                // better), a third route to the same exact problem is a third
+                // opinion. It used to run whenever the two disagreed. Skipping
+                // it here changed no outcome on MacMPEC (178 models, every
+                // status and objective identical to 1e-9; solve time 1595 s ->
+                // 1149 s), mpcc_nl, CALIPSO, the OPF, capacity and transmission
+                // suites, or `relu_nn` (42; 178 s -> 88 s, where the relaxed
+                // path won all 12 problems the exact stage improved). It still
+                // runs when either answer is only a
+                // relaxed point: CALIPSO bunny-hop seed 1, whose continuation
+                // finish fails (`RestorationFailed`) and leaves the `τ = 1e-8`
+                // point, is the one case where the cold solve wins (462.605
+                // against 463.195, in 58 iterations).
                 let path_answer = cands
                     .first()
                     .filter(|c| accepts(c.status, c.max_abs_product, tol));
                 if let (Some((_, cont, _, f_cont)), Some(p)) = (&accepted, path_answer) {
                     let f_path = min_obj(p);
-                    if answers_agree(*f_cont, f_path, cont.slack + p.slack, cont.gap + p.gap) {
+                    let agree =
+                        answers_agree(*f_cont, f_path, cont.slack + p.slack, cont.gap + p.gap);
+                    if skips_cold_solve(agree, cont.exact_lowering, p.exact_lowering) {
+                        let how = if agree {
+                            "agree"
+                        } else {
+                            "both reached the exact product"
+                        };
                         report(&format!(
                             "pounce: complementarity: the continuation and the exact stage's \
-                             relaxed path agree (minimized objective {f_cont:.6e} and \
+                             relaxed path {how} (minimized objective {f_cont:.6e} and \
                              {f_path:.6e}); skipping the cold exact product."
                         ));
                         exact = exact_stage_verdict(path_verdict, None);
@@ -1506,6 +1534,7 @@ mod tests {
             max_abs_product: if x.is_empty() { Number::INFINITY } else { 0.25 },
             slack: if x.is_empty() { Number::INFINITY } else { 0.0 },
             gap: if x.is_empty() { Number::INFINITY } else { 0.0 },
+            exact_lowering: true,
             x,
             z_l: Vec::new(),
             z_u: Vec::new(),

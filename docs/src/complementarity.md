@@ -97,7 +97,8 @@ first one that *answers* winning:
    of freedom).
 2. **Exact** — two solves from your start. A relaxed path: `G·H <= 1e-6`,
    one warm step to `1e-8`, then the same exact finish as the continuation.
-   And the exact product solved cold, `G·H = 0` (with the same fallback).
+   And, until the continuation and that path both hold an exact answer,
+   the exact product solved cold, `G·H = 0` (with the same fallback).
 3. **Penalty** — the complementarity products moved into the objective with
    an exact ℓ₁ weight; run only if neither of the first two answers.
 
@@ -109,11 +110,11 @@ on 60, while on the CALIPSO bunny-hop the continuation alone settles on a
 trajectory 2.4× worse on 3 of 5 starts that the exact product avoids.
 Running both reaches the best known answer on every one of them.
 
-The exact stage runs two solves because they, too, find different minima.
+The exact stage can run two solves because they, too, find different minima.
 The cold exact product has no interior to work in (each product row is
 parallel to its pair's active bound), so on larger models it stalls, but it
-takes the path least like the continuation's and is the only one that
-reaches MacMPEC `water-net`'s better branch (927 against 953). The relaxed
+takes the path least like the continuation's. It runs only until the
+continuation and the relaxed path both hold an exact answer (below). The relaxed
 path converges where the cold solve stalls (on the 28 MacMPEC models where
 the exact stage costs or matters most it takes about 1,900 iterations
 against 25,700) and reaches branches the cold solve misses: `dempe` (28.25)
@@ -158,11 +159,23 @@ iterations by a third, with no answer changed:
   biactive corner is about `sqrt(τ)`, not `τ` (`scholtes4`'s `τ = 1e-8` point
   sits at `-2e-4` against the exact `0`), so the allowance is
   `max(1e-4, 10·sqrt(product))·max(1, |f|)`.
-- **The cold solve runs only when the cheap paths disagree.** When the
-  continuation's answer and the exact stage's relaxed path agree to `1e-4`
-  relative, the cold `G·H = 0` solve is skipped: two routes landing on one
-  point. It still runs where they differ, which is where it earns its cost
-  (`water-net`: 953 and 964, and the cold solve finds 927).
+- **The cold solve runs only until two exact answers are in hand.** Once the
+  continuation has a certified answer and the exact stage's relaxed path has
+  answered too, the cold `G·H = 0` solve is skipped if the two agree (to
+  `1e-4` relative: one point reached twice), or if both came from a
+  converged exact-product finish (two branches, of which the lower is kept).
+  It still runs when either answer is only a relaxed point. A continuation
+  whose finish fails keeps its `τ = 1e-8` point, and that is where the cold
+  solve has been measured to win: CALIPSO bunny-hop seed 1, 462.605 against
+  463.195. The console says which case applied.
+
+  Skipping it otherwise changed no outcome on MacMPEC (178 models, every
+  status and objective identical to `1e-9`), `mpcc_nl`, CALIPSO, the OPF,
+  capacity and transmission suites, or `relu_nn`. It cut MacMPEC's solve
+  time from 1,595 s to 1,149 s and `relu_nn`'s from 178 s to 88 s. On
+  `relu_nn` the relaxed path produced all 12 of the exact stage's
+  improvements. `water-net`, which the cold solve once lifted to 927, reads
+  953 with or without it.
 - **A failed relaxation step is retried warm.** It restarts from the previous
   step's point and barrier parameter, with twice that step's iterations,
   rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried

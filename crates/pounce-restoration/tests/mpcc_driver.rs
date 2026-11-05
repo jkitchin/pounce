@@ -1410,14 +1410,23 @@ fn the_exact_stage_runs_its_relaxed_path_and_the_cold_exact_product() {
     assert_eq!(exact[1].tau, None, "no cold solve: {:?}", failed.solves);
 }
 
-/// The exact stage's cold `G·H = 0` solve runs only when the cheap paths
-/// disagree. On qpec_small the continuation and the exact stage's relaxed
-/// path land on the same answer, so the cold solve is skipped; on the
-/// two-branch model below them, from `(0.9, 0.01)`, the relaxed path settles
-/// on the near branch (1.0) and the continuation on the optimum (0.81), so
-/// it runs. Either way the reported answer is the optimum.
+/// The exact stage's cold `G·H = 0` solve runs only until two exact answers
+/// are in hand ([`skips_cold_solve`] holds the relaxed-point branch). Three
+/// branches:
+///
+/// * qpec_small: the continuation and the exact stage's relaxed path land on
+///   the same answer ("agree"); no cold solve.
+/// * the two-branch model, from `(0.9, 0.01)`: the relaxed path settles on
+///   the near branch (1.0) and the continuation on the optimum (0.81). Both
+///   finishes converge, so two exact answers are in hand: the better is kept
+///   and there is still no cold solve (it used to run here, as a third
+///   opinion that never changed a MacMPEC or `relu_nn` outcome).
+/// * the same model under `complementarity_strategy=exact`: no continuation
+///   answer, so the cold solve runs after the relaxed path. It lands on the
+///   near branch too, `(0.9, 0)`: without the continuation, nothing reaches
+///   the optimum from this start.
 #[test]
-fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
+fn the_cold_exact_product_runs_only_until_two_exact_answers_are_in_hand() {
     let exact_taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
         out.solves
             .iter()
@@ -1453,18 +1462,60 @@ fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
     }
 
     // Disagree: the continuation reaches the optimum (0.81) and the relaxed
-    // path the near branch (1.0), so after the relaxed path's three solves
-    // the cold exact product runs as well.
-    let mut app = crate::app();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
-    let mut lines = Vec::new();
-    let out = solve_mpcc(
-        &mut app,
-        tnlp,
-        vec![ComplementarityPair { row: 0, var: 0 }],
-        &mut |l| lines.push(l.to_string()),
-    )
-    .unwrap();
+    // path the near branch (1.0), both from converged finishes: no cold
+    // solve, and the comparison keeps the continuation's optimum.
+    let disagree = |strategy: Option<&str>| {
+        let mut app = crate::app();
+        if let Some(st) = strategy {
+            app.options_mut()
+                .set_string_value("complementarity_strategy", st, true, false)
+                .unwrap();
+        }
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(
+            &mut app,
+            tnlp,
+            vec![ComplementarityPair { row: 0, var: 0 }],
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        (out, lines)
+    };
+    let (out, lines) = disagree(None);
+    assert_eq!(
+        exact_taus(&out),
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None],
+        "{:?} {lines:#?}",
+        out.solves
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("both reached the exact product")
+                && l.contains("skipping the cold exact product")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("exact product solved the model") && l.contains("1.000000e0")),
+        "the relaxed path's answer is the near branch: {lines:#?}"
+    );
+    assert_eq!(
+        out.reported,
+        Reported::Answer(MpccStage::Continuation),
+        "{lines:#?}"
+    );
+    assert!(
+        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        "{:?} {lines:#?}",
+        out.x
+    );
+
+    // No continuation (strategy `exact`): the relaxed path alone has
+    // answered, so the cold exact product runs after its three solves.
+    let (out, lines) = disagree(Some("exact"));
     assert_eq!(
         exact_taus(&out),
         [Some(EXACT_STAGE_TAU), Some(1e-8), None, None],
@@ -1478,13 +1529,7 @@ fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
         "{lines:#?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("exact product solved the model") && l.contains("1.000000e0")),
-        "the relaxed path's answer is the near branch: {lines:#?}"
-    );
-    assert!(
-        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        (out.x[0] - 0.9).abs() < 1e-5 && out.x[1].abs() < 1e-5,
         "{:?} {lines:#?}",
         out.x
     );
