@@ -412,6 +412,22 @@ the declared pairs meet every target with an `S` certificate, and it measures
 scaled rows a wrong point certifies `S`, because every tolerance is relative
 to the model's own scale.
 
+Notebook
+[`48_relu_networks_as_complementarity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/48_relu_networks_as_complementarity.ipynb)
+optimizes over a trained ReLU network. Each hidden unit `y = max(0, z)` is
+the pair `0 <= y ⟂ y - z >= 0`, so the network is linear rows plus one pair
+per unit. From 40 starts:
+
+- **Declared pairs** reach the MILP-certified global minimum 18 times, and
+  every answer is a local minimum of the network.
+- **Products written by hand** converge just as often, but never reach the
+  global minimum, and 23 of their answers sit on a kink the network still
+  descends from.
+
+It also times the global alternative: the big-M MILP's time to a proof grows
+from 0.1 s to beyond 120 s between 16 and 96 hidden units, while one MPCC
+solve stays near a second.
+
 ## Evidence
 
 `benchmarks/calipso/` ports the trajectory-optimization problems of the

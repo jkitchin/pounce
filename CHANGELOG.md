@@ -10,6 +10,22 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Notebook 48: optimizing over a trained ReLU network as declared
+  complementarity.** A ReLU unit `y = max(0, z)` is exactly the pair
+  `0 <= y ⟂ y - z >= 0`, so a network is linear rows plus one pair per
+  hidden unit. On a `peaks` surrogate, from 40 starts:
+  - the declared pairs reach the MILP-certified global minimum 18 times, and
+    every answer is a local minimum of the network, certified `S`;
+  - the same pairs written as products `y·(y - z) <= 0` also converge 40/40,
+    but never reach it, and 23 answers sit on a kink the network still
+    descends from.
+
+  It also times the exact alternative: the big-M MILP (SciPy/HiGHS) takes
+  0.1 s to a proof at 16 hidden units and exceeds a 120 s cap at 96, while
+  an MPCC solve stays near a second. The benchmark behind it, `relu_nn` (42
+  problems, ten frozen networks, truth by MILP and input-space branch and
+  bound), is in the data root and runs under `make -C benchmarks
+  mpcc-compare` against Ipopt and CCOpt, with a new `relu-nn-selftest`.
 - **The solve report says how complementary an MPCC answer is.** The JSON
   `complementarity` block, and Python's `info["complementarity"]`, gain:
   - `natural_residual`, the reported point's largest `min(|G|, |H|)`;
