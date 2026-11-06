@@ -197,6 +197,20 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **An infeasible LP with a near-constant row is no longer reported
+  unbounded (gh#1143).**
+  - **What changed:** the convex interior-point's unboundedness test now
+    scales each row's tolerance by that row's own size when it is below 1,
+    as the active-set engine already did (gh#1034).
+  - **Why:** `min −3x₀ + 2x₁` s.t. `1e-14·x₀ ≤ −1`, `x₀ ≥ 0`, `x₁ ≥ 0` has
+    no feasible point, yet `solve_qp_ipm` returned `DualInfeasible` after 2
+    iterations: a direction violating row 0 by 300 of its own units passed
+    the old absolute tolerance. It now returns `PrimalInfeasible`.
+    The same holds through `solve_socp_ipm`, including when the model also
+    carries second-order, PSD, exponential or power cone blocks.
+  - **Known limitation:** at `ε = 1e-14` this model ends `NumericalFailure`
+    (not the wrong `DualInfeasible`) through `solve_socp_ipm`, and with
+    `equilibrate = false`; see `dev-notes/known-limitations.md`.
 - **A constant row its cone forbids is reported primal infeasible
   (gh#1138).** Through `solve_socp`, `solve_qp` and the CLI's convex arm, an
   SOC whose head row has no `x` in it and a negative constant (`‖Ax + b‖ ≤

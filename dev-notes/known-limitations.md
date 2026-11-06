@@ -607,3 +607,40 @@ A fix would need a status between certified and not, like Clarabel's
 ray. It works if `farkas_far_feasible_no_box.nl` stays uncertified, the
 `two_row` borderline in `ipm.rs` with `ε = 1e-4` stops being certified,
 and the netlib/MIPLIB counts above hold.
+
+## Convex LP: a near-constant infeasible row needs equilibration (gh#1143)
+
+`ε·x₀ ≤ −1` beside `x₀ ≥ 0` is infeasible for every `ε > 0`. Two paths no
+longer reach a verdict on it at the smallest `ε`. Before gh#1143 they reported
+it, wrongly, as unbounded (or rightly by accident, below); they now end
+`NumericalFailure`:
+
+| path | ε | before gh#1143 | now |
+|---|---|---|---|
+| `solve_qp_ipm`, default | 1e-14 | `DualInfeasible` (wrong) | `PrimalInfeasible`, 24 it |
+| `solve_qp_ipm`, `equilibrate = false`, HSDE | 1e-14 | `DualInfeasible` (wrong) | `NumericalFailure`, 159 it |
+| `solve_qp_ipm`, `equilibrate = false`, direct | 1e-14 … 1e-10 | `PrimalInfeasible`, 1 it (by accident) | `NumericalFailure`, ~100 it |
+| `solve_socp_ipm` (`solver_selection=socp`), default, orthant or orthant + SOC | 1e-14 | `DualInfeasible` (wrong) | `NumericalFailure`, 155–159 it |
+| `solve_socp_ipm`, same | 1e-10 | `DualInfeasible` (wrong) | `PrimalInfeasible`, 13 it |
+
+What reaches the verdict through `solve_qp_ipm` is its gh#293 equilibrated
+retry after a failed solve. The conic entry has no such retry, and Ruiz
+equilibration is only sound per row on orthant rows, so adding one there is a
+separate change to that arm's trajectory, not part of this fix.
+
+Before gh#1143 the direct unequilibrated driver answered `PrimalInfeasible`
+at iteration **1** — not by finding a Farkas ray, but by accepting the
+non-diverging iterate `x ≈ (8.2, 0.06)` as a recession direction (row 0's
+`(Gd)₀ = 8e-14` passed the absolute `1e-7·‖d‖` slack), issuing a false
+`DualInfeasible`, and having the objective-free twin relabel it. The answer
+was right by accident; the fix (a per-row recession slack, `min(1, ‖Gᵢ‖∞)`)
+removes the false certificate and with it the accident.
+
+### How to tell whether a fix works
+
+In `crates/pounce-convex/tests/issue1143_tiny_row_false_unbounded.rs`,
+`conic_entry_near_constant_infeasible_row_is_not_unbounded` can assert
+`PrimalInfeasible` at `ε = 1e-14` too (it asserts only "not
+`DualInfeasible`" there today), `near_constant_infeasible_row_is_primal_infeasible`
+passes with `equilibrate: false` added to its option sets, and both
+`*_satisfied_row_stays_unbounded` tests keep `DualInfeasible`.

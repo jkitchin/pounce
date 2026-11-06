@@ -6324,6 +6324,7 @@ pub(crate) fn detect_infeasibility(
         true,
         |z, tol| z.iter().all(|&zi| zi >= -tol),
         |gd, tol| gd.iter().all(|&v| v <= tol),
+        || vec![true; prob.m_ineq()],
     )
 }
 
@@ -6363,6 +6364,7 @@ pub(crate) fn detect_infeasibility_cone(
             let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
             cone.in_dual_cone(&neg, tol)
         },
+        || cone.nonneg_row_mask(),
     )
 }
 
@@ -6376,6 +6378,7 @@ pub(crate) fn detect_infeasibility_with(
     orthant: bool,
     dual_cone_ok: impl Fn(&[f64], f64) -> bool,
     primal_recession_ok: impl Fn(&[f64], f64) -> bool,
+    nonneg_rows: impl FnOnce() -> Vec<bool>,
 ) -> Option<QpStatus> {
     let n = prob.n;
     // Certificate *value* threshold and cone-membership slack: a modest
@@ -6476,7 +6479,57 @@ pub(crate) fn detect_infeasibility_with(
         let curv = dot(x, &pd); // dᵀPd (pd = P·d)
         let d_norm_sq = dot(x, x); // ‖d‖² > 0 (guarded by x_norm > 0)
         let curv_ok = curv <= RECESSION_CURV_TOL * d_norm_sq;
-        if cd < -ctol * x_norm && curv_ok && inf_norm(&ad) <= rtol * x_norm && gd_ok {
+        // gh#1143: the slacks above are absolute in the row's own units, so a
+        // row whose coefficients sit below the slack is invisible to them.
+        // `1e-14·x₀ ≤ −1` beside `x₀ ≥ 0` (infeasible) read the HSDE ray
+        // `d = (297, 420)` as a recession direction — `(Gd)₀ = 3e-12` passes
+        // `≤ 1e-7·‖d‖` — and the LP was reported unbounded after 2 iterations.
+        // Scale each row's slack by that row's own size when it is below 1,
+        // exactly as the active-set engine's `ray_certifies_unbounded` does
+        // (gh#1034). Rows of norm ≥ 1 keep the slack they had, so this only
+        // ever rejects a certificate the old test accepted.
+        //
+        // Equality rows are cone-independent. Inequality rows are tested per
+        // row when they belong to a nonnegative-orthant block (`nonneg_rows`),
+        // whatever else the cone holds: gating on a whole-problem orthant flag
+        // left the false verdict standing on the same model plus one unrelated
+        // SOC block. SOC/PSD/exp/power block rows stay with the cone test —
+        // their membership is not a per-row property.
+        //
+        // Evaluated only once every other recession condition holds — i.e. on
+        // a candidate certificate, not on every iterate — so the O(nnz) row
+        // norms are not paid per iteration.
+        let rows_ok = |resid: &[f64],
+                       rows: &[crate::qp::Triplet],
+                       m: usize,
+                       tol: f64,
+                       two_sided: bool,
+                       mask: Option<&[bool]>| {
+            let norms = crate::active_set::row_inf_norms(rows, m);
+            resid
+                .iter()
+                .zip(&norms)
+                .enumerate()
+                .filter(|(i, _)| mask.is_none_or(|mk| mk.get(*i).copied().unwrap_or(false)))
+                .all(|(_, (&v, &nrm))| {
+                    let v = if two_sided { v.abs() } else { v };
+                    v <= tol * x_norm * nrm.min(1.0)
+                })
+        };
+        if cd < -ctol * x_norm
+            && curv_ok
+            && inf_norm(&ad) <= rtol * x_norm
+            && gd_ok
+            && rows_ok(&ad, &prob.a, prob.m_eq(), rtol, true, None)
+            && rows_ok(
+                &gd,
+                &prob.g,
+                prob.m_ineq(),
+                ctol,
+                false,
+                Some(&nonneg_rows()),
+            )
+        {
             return Some(QpStatus::DualInfeasible);
         }
     }
@@ -6966,6 +7019,57 @@ mod detect_infeasibility_tests {
     use crate::QpOptions;
     use crate::cones::{CompositeCone, ConeSpec};
     use crate::qp::{QpProblem, QpStatus, Triplet};
+
+    /// gh#1143 with an unrelated SOC block: rows 0–2 are the issue's orthant
+    /// rows (`σ·1e-14·x₀ ≤ σ·(−1)`, `−x₀ ≤ 0`, `−x₁ ≤ 0`), rows 3–4 put
+    /// `(1, x₂)` in an SOC. The ray `d = (297, 420, 0)` — the HSDE iterate that
+    /// was certified — has `−Gd = 0` on the SOC block.
+    fn issue1143_mixed(sign: f64) -> (QpProblem, CompositeCone) {
+        let prob = QpProblem {
+            n: 3,
+            p_lower: vec![],
+            c: vec![-3.0, 2.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, sign * 1e-14),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(2, 1, -1.0),
+                Triplet::new(4, 2, -1.0),
+            ],
+            h: vec![-sign, 0.0, 0.0, 1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(3), ConeSpec::SecondOrder(2)]);
+        (prob, cone)
+    }
+
+    /// The per-row slack reaches the orthant rows of a *mixed* cone: gating
+    /// it on `cone.is_orthant()` left this ray certified (review of gh#1144).
+    #[test]
+    fn issue1143_mixed_cone_orthant_row_violated_is_not_a_ray() {
+        let (prob, cone) = issue1143_mixed(1.0);
+        let d = [297.0, 420.0, 0.0];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility_cone(&prob, &d, &[], &[0.0; 5], &opts, &cone),
+            None,
+        );
+    }
+
+    /// Other branch: the tiny row is *satisfied* by the ray (`−1e-14·x₀ ≤ 1`),
+    /// so `d` is a genuine recession direction and must still certify.
+    #[test]
+    fn issue1143_mixed_cone_orthant_row_satisfied_is_a_ray() {
+        let (prob, cone) = issue1143_mixed(-1.0);
+        let d = [297.0, 420.0, 0.0];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility_cone(&prob, &d, &[], &[0.0; 5], &opts, &cone),
+            Some(QpStatus::DualInfeasible),
+        );
+    }
 
     /// `min −x₀` with the single SOC row block `Gx ⪯_{SOC} h`,
     /// `G = [[−0.1], [−0.5]]`. Recession direction `d = (1)` gives

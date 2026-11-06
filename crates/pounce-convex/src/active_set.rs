@@ -1916,7 +1916,7 @@ fn data_scale(prob: &QpProblem) -> f64 {
 }
 
 /// `‖row_j‖∞` for each of `m` rows of a triplet matrix.
-fn row_inf_norms(rows: &[Triplet], m: usize) -> Vec<f64> {
+pub(crate) fn row_inf_norms(rows: &[Triplet], m: usize) -> Vec<f64> {
     let mut out = vec![0.0_f64; m];
     for t in rows {
         if t.row < m {
