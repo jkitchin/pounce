@@ -227,3 +227,92 @@ end
     @test Pounce.FreeIpoptProblem(prob) === nothing
     @test_throws ErrorException Pounce.IpoptSolve(prob)
 end
+
+@testset "C strings reject embedded NULs" begin
+    prob = hs071_problem()
+    try
+        @test_throws ArgumentError Pounce.AddIpoptStrOption(
+            prob,
+            "hessian_approximation\0ignored",
+            "limited-memory",
+        )
+        @test_throws ArgumentError Pounce.AddIpoptStrOption(
+            prob,
+            "hessian_approximation",
+            "limited-memory\0ignored",
+        )
+        @test_throws ArgumentError Pounce.AddIpoptNumOption(prob, "tol\0ignored", 1e-8)
+        @test_throws ArgumentError Pounce.AddIpoptIntOption(prob, "max_iter\0ignored", 0)
+        mktempdir() do dir
+            filename = joinpath(dir, "solver.log")
+            @test_throws ArgumentError Pounce.OpenIpoptOutputFile(
+                prob,
+                filename * "\0ignored",
+                0,
+            )
+            @test !isfile(filename)
+        end
+        # Rejected option calls must not change the native problem.
+        @test Pounce.IpoptSolve(prob) == 0
+        @test prob.obj_val ≈ 17.014017145179164 atol = 1e-6
+    finally
+        Pounce.FreeIpoptProblem(prob)
+    end
+end
+
+@testset "Missing and structurally zero Hessians" begin
+    prob = Pounce.CreateIpoptProblem(
+        1,
+        [-5.0],
+        [5.0],
+        0,
+        Float64[],
+        Float64[],
+        0,
+        0,
+        x -> (x[1] - 1)^2,
+        (x, g) -> nothing,
+        (x, grad) -> (grad[1] = 2 * (x[1] - 1)),
+        (args...) -> nothing,
+        nothing,
+    )
+    try
+        Pounce.AddIpoptIntOption(prob, "print_level", 0)
+        @test_throws ArgumentError Pounce.IpoptSolve(prob) # default exact mode
+        for mode in ("limited-memory", "finite-difference", "LIMITED-MEMORY")
+            Pounce.AddIpoptStrOption(prob, "hessian_approximation", mode)
+            prob.x .= 0.0
+            @test Pounce.IpoptSolve(prob) == 0
+            @test prob.x[1] ≈ 1.0 atol = 1e-6
+        end
+        Pounce.AddIpoptStrOption(prob, "HESSIAN_APPROXIMATION", "EXACT")
+        @test_throws ArgumentError Pounce.IpoptSolve(prob)
+        @test !prob.solving
+        @test !prob.solved
+    finally
+        Pounce.FreeIpoptProblem(prob)
+    end
+    # A linear objective has a genuinely zero Hessian and is valid in exact mode.
+    linear = Pounce.CreateIpoptProblem(
+        1,
+        [0.0],
+        [5.0],
+        0,
+        Float64[],
+        Float64[],
+        0,
+        0,
+        x -> x[1],
+        (x, g) -> nothing,
+        (x, grad) -> (grad[1] = 1.0),
+        (args...) -> nothing,
+        (args...) -> nothing,
+    )
+    try
+        Pounce.AddIpoptIntOption(linear, "print_level", 0)
+        @test Pounce.IpoptSolve(linear) == 0
+        @test linear.x[1] ≈ 0.0 atol = 1e-6
+    finally
+        Pounce.FreeIpoptProblem(linear)
+    end
+end

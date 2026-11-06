@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ["Pounce.jl/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/julia.yml"]
   pull_request:
-    paths: ["Pounce.jl/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/julia.yml"]
+    paths: ["Pounce.jl/**", "crates/pounce-cinterface/**", ".github/workflows/julia.yml"]
   workflow_dispatch:
 
 permissions:

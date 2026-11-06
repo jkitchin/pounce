@@ -51,6 +51,8 @@ end
 
 function _dispatch_callback(model::Optimizer, args...)
     state = model.callback_state
+    # IpoptSolve pins this task for the whole native call, including yields.
+    # The task check below also rejects other tasks running on that same thread.
     state.task = current_task()
     state.mode = args[1]
     state.has_primal = false

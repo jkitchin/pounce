@@ -43,7 +43,10 @@ end
 @testset "Native version compatibility" begin
     @test Pounce._check_native_version(v"0.15.0") === nothing
     @test Pounce._check_native_version(v"0.15.1") === nothing
-    for version in (v"0.14.9", v"0.15.0-rc1", v"0.16.0-rc1", v"0.16.0", v"1.0.0")
+    @test Pounce._check_native_version(v"0.16.0-rc1") === nothing
+    @test Pounce._check_native_version(v"0.16.0") === nothing
+    @test Pounce._check_native_version(v"0.16.99") === nothing
+    for version in (v"0.14.9", v"0.15.0-rc1", v"0.17.0-rc1", v"0.17.0", v"1.0.0")
         @test_throws ErrorException Pounce._check_native_version(version)
     end
 end

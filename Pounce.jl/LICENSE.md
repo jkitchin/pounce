@@ -2,6 +2,7 @@ The Pounce.jl wrapper, including code adapted from Ipopt.jl, is licensed under
 the MIT Expat License. The separately built POUNCE Rust library is EPL-2.0.
 
 Copyright (c) 2013: Iain Dunning, Miles Lubin, and contributors
+Copyright (c) 2026: Frederik Geth (POUNCE-specific additions)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -11,11 +11,11 @@ libpounce = ""
 const _library_handle = Ref{Ptr{Cvoid}}(C_NULL)
 
 # POUNCE is pre-1.0: audit the C ABI before accepting another minor release.
-# Required symbols also catch incomplete/custom builds within this version line.
+# Required symbols also catch incomplete/custom builds within these version lines.
 function _check_native_version(version::VersionNumber)
-    v"0.15.0" <= version < v"0.16.0-0" || error(
+    v"0.15.0" <= version < v"0.17.0-0" || error(
         "Unsupported POUNCE native version $version. Pounce.jl 0.1 supports " *
-        "POUNCE 0.15.x; use a compatible library or update the Julia wrapper.",
+        "POUNCE 0.15.x and 0.16.x; use a compatible library or update the Julia wrapper.",
     )
     return
 end

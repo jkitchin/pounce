@@ -35,7 +35,7 @@ libraries; do not rebuild a loaded library in a running Julia process.
 `Pounce.library_path()` identifies the loaded file;
 `Pounce.GetIpoptVersion()` reports the POUNCE version compiled into it.
 The C entry-point names retain the Ipopt spelling used in `pounce.h`.
-Pounce.jl 0.1 accepts native POUNCE 0.15.x and verifies all required C symbols
+Pounce.jl 0.1 accepts native POUNCE 0.15.x and 0.16.x and verifies all required C symbols
 before exposing the library. A new native minor version requires a wrapper ABI
 review; an arbitrary Ipopt library is not compatible with POUNCE's callback ABI.
 
@@ -173,7 +173,20 @@ removes a low-level callback between solves.
 Indices are one-based and Hessian structure is lower triangular. Callback
 buffers are borrowed: do not retain them or resize solve buffers.
 Use separate problem objects for separate solves; recursive solves on the
-same object and freeing it during a callback are rejected.
+same object and freeing it during a callback are rejected. Concurrent access to
+one problem is unsupported. The wrapper pins the solving task to its current
+thread for the duration of the native call and restores its prior scheduling
+policy afterward. Callbacks may yield, but a different task cannot start another
+POUNCE solve on that occupied thread; independent solves on other threads remain
+available. This protects the native thread-local iterate and callback state.
+Idle problems may be freed or finalized on another thread; explicit
+`FreeIpoptProblem` gives deterministic cleanup.
+
+If the low-level constructor receives `eval_h = nothing`, select
+`hessian_approximation=limited-memory` or `finite-difference` before solving.
+Exact mode requires a Hessian callback, including an explicit empty callback for
+a structurally zero Hessian. String options and output filenames reject embedded
+NUL characters instead of silently truncating them.
 
 A callback `DomainError` or nonfinite numerical output rejects the evaluation,
 allowing the solver to backtrack. Other exceptions, including interrupts, are

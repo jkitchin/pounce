@@ -25,7 +25,7 @@ The default library is in the repository's `target/release` directory.
 For another build, set `ENV["POUNCE_LIBRARY_PATH"]` to the library file or its
 directory before loading Pounce. `Pounce.library_path()` reports the loaded
 file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
-Pounce.jl 0.1 accepts native POUNCE 0.15.x and checks the required C symbols
+Pounce.jl 0.1 accepts native POUNCE 0.15.x and 0.16.x and checks the required C symbols
 at import. Other native minor versions require a wrapper ABI review.
 There is no registered Julia package or bundled JLL binary yet.
 

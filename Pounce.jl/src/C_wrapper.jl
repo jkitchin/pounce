@@ -20,6 +20,7 @@ mutable struct IpoptProblem
     eval_grad_f::Function
     eval_jac_g::Function
     eval_h::Union{Function,Nothing}
+    hessian_approximation::String
     intermediate::Union{Function,Nothing}
     callback_error::Any
     solving::Bool
@@ -199,6 +200,9 @@ Create a POUNCE problem. Sparse indices are one-based; the Hessian is lower
 triangular. Jacobian/Hessian callbacks receive `values === nothing` to request
 the structure (x/lambda are empty), otherwise rows/cols are empty and only
 values must be filled. Callback arrays are borrowed and must not be retained.
+With `eval_h === nothing`, select `hessian_approximation=limited-memory` or
+`finite-difference` before solving. An explicit callback with zero declared
+entries represents a genuinely zero Hessian.
 Use `FreeIpoptProblem` for deterministic cleanup; a finalizer is also installed.
 """
 function CreateIpoptProblem(
@@ -266,6 +270,9 @@ function CreateIpoptProblem(
             Ptr{Cvoid},
         )
     )
+    # None and a supplied, structurally zero Hessian are different contracts.
+    # Rust must see None when exact second derivatives are unavailable.
+    eval_h === nothing && (hess = C_NULL)
     ptr = @ccall libpounce.CreateIpoptProblem(
         n::Cint,
         x_L::Ptr{Cdouble},
@@ -299,11 +306,18 @@ function CreateIpoptProblem(
         eval_grad_f,
         eval_jac_g,
         eval_h,
+        "exact",
         nothing,
         nothing,
         false,
         false,
     )
+    # FreeIpoptProblem only drops the owned IpoptProblemInfo graph. Its Rc
+    # aliases remain inside that graph after IpoptSolve returns; no live solver
+    # or thread-local bridge remains, and dropping it does not invoke callbacks.
+    # GC.@preserve in IpoptSolve prevents finalization while Rust borrows it.
+    # Thus the idle handle may be finalized on a different thread. Concurrent
+    # access to the same problem is unsupported; prefer explicit cleanup.
     finalizer(FreeIpoptProblem, prob)
     return prob
 end
@@ -335,11 +349,14 @@ function AddIpoptStrOption(prob::IpoptProblem, keyword::String, value::String)
     end
     ret = @ccall libpounce.AddIpoptStrOption(
         prob::Ptr{Cvoid},
-        keyword::Ptr{UInt8},
-        value::Ptr{UInt8},
+        keyword::Cstring,
+        value::Cstring,
     )::Bool
     if !ret
         error("POUNCE: Couldn't set option '$keyword' to value '$value'.")
+    end
+    if lowercase(keyword) == "hessian_approximation"
+        prob.hessian_approximation = lowercase(value)
     end
     return
 end
@@ -350,7 +367,7 @@ function AddIpoptNumOption(prob::IpoptProblem, keyword::String, value::Float64)
     end
     ret = @ccall libpounce.AddIpoptNumOption(
         prob::Ptr{Cvoid},
-        keyword::Ptr{UInt8},
+        keyword::Cstring,
         value::Cdouble,
     )::Bool
     if !ret
@@ -365,7 +382,7 @@ function AddIpoptIntOption(prob::IpoptProblem, keyword::String, value::Integer)
     end
     ret = @ccall libpounce.AddIpoptIntOption(
         prob::Ptr{Cvoid},
-        keyword::Ptr{UInt8},
+        keyword::Cstring,
         value::Cint,
     )::Bool
     if !ret
@@ -384,7 +401,7 @@ function OpenIpoptOutputFile(prob::IpoptProblem, file_name::String, print_level:
     end
     ret = @ccall libpounce.OpenIpoptOutputFile(
         prob::Ptr{Cvoid},
-        file_name::Ptr{UInt8},
+        file_name::Cstring,
         print_level::Cint,
     )::Bool
     if !ret
@@ -474,6 +491,41 @@ function GetIpoptSolveTime(prob::IpoptProblem)
     return @ccall libpounce.GetIpoptSolveTime(prob::Ptr{Cvoid})::Cdouble
 end
 
+# Rust's bridge and iterate snapshots are thread-local. Julia does not promise
+# to pin tasks across ordinary foreign calls, so pin the whole native solve,
+# including derivative callbacks. Restore the caller's scheduling policy on exit.
+# See https://docs.julialang.org/en/v1/base/parallel/#Core.Task
+const _solve_threads = Dict{Int,Task}()
+const _solve_threads_lock = ReentrantLock()
+
+function _with_solve_thread(f)
+    task = current_task()
+    sticky = task.sticky
+    task.sticky = true
+    tid = Threads.threadid()
+    registered = false
+    try
+        lock(_solve_threads_lock) do
+            owner = get(_solve_threads, tid, nothing)
+            if owner !== nothing && owner !== task
+                error("Another task has an active POUNCE solve on this thread")
+            end
+            if owner === nothing
+                _solve_threads[tid] = task
+                registered = true
+            end
+        end
+        return f()
+    finally
+        if registered
+            lock(_solve_threads_lock) do
+                return delete!(_solve_threads, tid)
+            end
+        end
+        task.sticky = sticky
+    end
+end
+
 function IpoptSolve(prob::IpoptProblem)
     prob.solving && error("A POUNCE problem cannot be solved recursively")
     for v in (prob.x, prob.mult_x_L, prob.mult_x_U)
@@ -483,21 +535,31 @@ function IpoptSolve(prob::IpoptProblem)
     _check_length(prob.mult_g, prob.m)
     prob.callback_error = nothing
     prob.solved = false
+    if prob.eval_h === nothing && prob.hessian_approximation == "exact"
+        throw(
+            ArgumentError(
+                "Exact Hessians require an eval_h callback; supply one or select " *
+                "hessian_approximation=limited-memory or finite-difference",
+            ),
+        )
+    end
     prob.solving = true
     p_objval = Ref{Cdouble}(NaN)
     try
         GC.@preserve prob begin
-            disable_sigint() do
-                prob.status = @ccall libpounce.IpoptSolve(
-                    prob::Ptr{Cvoid},
-                    prob.x::Ptr{Cdouble},
-                    prob.g::Ptr{Cdouble},
-                    p_objval::Ptr{Cdouble},
-                    prob.mult_g::Ptr{Cdouble},
-                    prob.mult_x_L::Ptr{Cdouble},
-                    prob.mult_x_U::Ptr{Cdouble},
-                    pointer_from_objref(prob)::Ptr{Cvoid},
-                )::Cint
+            _with_solve_thread() do
+                disable_sigint() do
+                    prob.status = @ccall libpounce.IpoptSolve(
+                        prob::Ptr{Cvoid},
+                        prob.x::Ptr{Cdouble},
+                        prob.g::Ptr{Cdouble},
+                        p_objval::Ptr{Cdouble},
+                        prob.mult_g::Ptr{Cdouble},
+                        prob.mult_x_L::Ptr{Cdouble},
+                        prob.mult_x_U::Ptr{Cdouble},
+                        pointer_from_objref(prob)::Ptr{Cvoid},
+                    )::Cint
+                end
             end
         end
     finally
