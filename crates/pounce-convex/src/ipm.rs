@@ -6346,7 +6346,30 @@ pub(crate) fn detect_infeasibility_with(
         let curv = dot(x, &pd); // dᵀPd (pd = P·d)
         let d_norm_sq = dot(x, x); // ‖d‖² > 0 (guarded by x_norm > 0)
         let curv_ok = curv <= RECESSION_CURV_TOL * d_norm_sq;
-        if cd < -ctol * x_norm && curv_ok && inf_norm(&ad) <= rtol * x_norm && gd_ok {
+        // gh#1143: the slacks above are absolute in the row's own units, so a
+        // row whose coefficients sit below the slack is invisible to them.
+        // `1e-14·x₀ ≤ −1` beside `x₀ ≥ 0` (infeasible) read the HSDE ray
+        // `d = (297, 420)` as a recession direction — `(Gd)₀ = 3e-12` passes
+        // `≤ 1e-7·‖d‖` — and the LP was reported unbounded after 2 iterations.
+        // Scale each row's slack by that row's own size when it is below 1,
+        // exactly as the active-set engine's `ray_certifies_unbounded` does
+        // (gh#1034). Rows of norm ≥ 1 keep the slack they had, so this only
+        // ever rejects a certificate the old test accepted. Equality rows are
+        // cone-independent; inequality rows are tested per row only on the
+        // orthant, where rows are independent (a SOC/PSD block's membership is
+        // not a per-row property, and its scale is the cone test's business).
+        let rows_ok =
+            |resid: &[f64], rows: &[crate::qp::Triplet], m: usize, tol: f64, two_sided: bool| {
+                let norms = crate::active_set::row_inf_norms(rows, m);
+                resid.iter().zip(&norms).all(|(&v, &nrm)| {
+                    let v = if two_sided { v.abs() } else { v };
+                    v <= tol * x_norm * nrm.min(1.0)
+                })
+            };
+        let ad_ok =
+            inf_norm(&ad) <= rtol * x_norm && rows_ok(&ad, &prob.a, prob.m_eq(), rtol, true);
+        let gd_ok = gd_ok && (!orthant || rows_ok(&gd, &prob.g, prob.m_ineq(), ctol, false));
+        if cd < -ctol * x_norm && curv_ok && ad_ok && gd_ok {
             return Some(QpStatus::DualInfeasible);
         }
     }

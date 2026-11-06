@@ -607,3 +607,25 @@ A fix would need a status between certified and not, like Clarabel's
 ray. It works if `farkas_far_feasible_no_box.nl` stays uncertified, the
 `two_row` borderline in `ipm.rs` with `ε = 1e-4` stops being certified,
 and the netlib/MIPLIB counts above hold.
+
+## Convex LP: a near-constant infeasible row needs equilibration (gh#1143)
+
+`ε·x₀ ≤ −1` beside `x₀ ≥ 0` is infeasible for every `ε > 0`. At
+`ε ≤ 1e-10`, with `equilibrate = false` (not the default), the IPM no longer
+reaches a verdict: both drivers end `NumericalFailure` (HSDE at 159
+iterations, direct at ~100). On the default options it is `PrimalInfeasible`
+(HSDE: 24 iterations at `ε = 1e-14`, 13 at `1e-10`).
+
+Before gh#1143 the direct unequilibrated driver answered `PrimalInfeasible`
+at iteration **1** — not by finding a Farkas ray, but by accepting the
+non-diverging iterate `x ≈ (8.2, 0.06)` as a recession direction (row 0's
+`(Gd)₀ = 8e-14` passed the absolute `1e-7·‖d‖` slack), issuing a false
+`DualInfeasible`, and having the objective-free twin relabel it. The answer
+was right by accident; the fix (a per-row recession slack, `min(1, ‖Gᵢ‖∞)`)
+removes the false certificate and with it the accident.
+
+### How to tell whether a fix works
+
+`crates/pounce-convex/tests/issue1143_tiny_row_false_unbounded.rs` with
+`equilibrate: false` added to its option sets passes, and its
+`near_constant_satisfied_row_stays_unbounded` leg keeps `DualInfeasible`.
