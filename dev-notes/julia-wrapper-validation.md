@@ -284,9 +284,9 @@ not compatibility with an independently built native binary.
 | Platform | Artifact 1.10.13 | Artifact 1.13.3 | Override 1.10.13 | Override 1.13.3 |
 |---|---|---|---|---|
 | Linux arm64 | Passed | Passed | Pending | Pending |
-| Linux x86_64 | Passed | Passed | Pending | Pending |
-| macOS arm64 | Passed | Passed | Pending | Pending |
-| macOS x86_64 | Passed | Passed | Pending | Passed |
+| Linux x86_64 | Passed | Passed | Pending | Passed |
+| macOS arm64 | Passed | Passed | Passed | Passed |
+| macOS x86_64 | Passed | Passed | Passed | Passed |
 
 The earlier measurements deliberately retain their Julia 1.10.12/1.12.6
 versions. On 2026-11-06 the official [Julia downloads page](https://julialang.org/downloads/)

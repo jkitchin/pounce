@@ -87,6 +87,22 @@
           },
           "container_image_digest": "sha256:46a7e2f54218c89aaadbe6cbcdbb2e68ced31f118247f6a1366d4a07a75b3ec2",
           "container_platform": "linux/amd64"
+        },
+        {
+          "julia": "1.13.3",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "acfcbe71ae358bcf06fb7058dddcb9c7f4bbe398f4425f15f1138cda61a91360",
+          "custom_library_sha256": "65615b2dec1065c61428e001daa90756be222740cd00f028c963455eb2e87759",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "Debian 12 x86_64 container under Rosetta in a dedicated arm64 VM; existing artifact-test depot; no Rust/source-build library; Julia worker and GC thread counts each 1; copied audited library selected outside artifact store; decompressor-only ELF-loader shim",
+          "container_image_digest": "sha256:e1d9cc82c37456e83d8a4cda9de17732aac7cd6a766c502bd5a94fb60a6db7c7",
+          "container_platform": "linux/amd64"
         }
       ],
       "library_sha256": "65615b2dec1065c61428e001daa90756be222740cd00f028c963455eb2e87759",
@@ -99,7 +115,7 @@
       "git_tree_sha1": "3eb5a4b359039259aa9db75130616c897e893fb7",
       "recipe_commit": "73f45e96039651570b7197e4868f369945be292f",
       "audit": "passed",
-      "runtime_tests": "in_progress",
+      "runtime_tests": "passed",
       "validated_runs": [
         {
           "julia": "1.13.3",
@@ -126,6 +142,34 @@
             "MathOptInterface": "1.54.0",
             "Ipopt": "1.16.0"
           }
+        },
+        {
+          "julia": "1.13.3",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "cf77f532aea8c8c948f916ef10831d9aa8c364328b1f5dfa4c928972da4aef8f",
+          "custom_library_sha256": "347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "macOS 26.7.2 arm64 host; existing artifact-test depot; cargo and rustc absent from PATH; copied audited dylib selected outside artifact store"
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "1245a6c3b8ec40a837352826fe32c9f11258a0e3b72a81a86baeb32a6caa846a",
+          "custom_library_sha256": "347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "macOS 26.7.2 arm64 host; existing artifact-test depot; cargo and rustc absent from PATH; copied audited dylib selected outside artifact store"
         }
       ],
       "library_sha256": "347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339",
@@ -138,7 +182,7 @@
       "git_tree_sha1": "06c70b12bab389c97069eafc98a1357a3248af75",
       "recipe_commit": "73f45e96039651570b7197e4868f369945be292f",
       "audit": "passed",
-      "runtime_tests": "in_progress",
+      "runtime_tests": "passed",
       "validated_runs": [
         {
           "julia": "1.13.3",
@@ -179,6 +223,20 @@
             "Ipopt": "1.16.0"
           },
           "custom_library_sha256": "cc2d1bf2cee09e07d974d88d43130799f9d68ecb5540c974fadf0d187489382b"
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "eb7a3279148cd5762155d89810424f213475a4cddde9529475a26c65058a6da8",
+          "custom_library_sha256": "cc2d1bf2cee09e07d974d88d43130799f9d68ecb5540c974fadf0d187489382b",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "macOS 26.7.2 arm64 host; Intel Julia under Rosetta; existing artifact-test depot; cargo and rustc absent from PATH; copied audited dylib selected outside artifact store"
         }
       ],
       "library_sha256": "cc2d1bf2cee09e07d974d88d43130799f9d68ecb5540c974fadf0d187489382b",
