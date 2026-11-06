@@ -272,6 +272,14 @@ the older MOI conformance suite has fewer tests; no wrapper tests were disabled.
 
 ## Local binary release preparation — incomplete
 
+The earlier measurements deliberately retain their Julia 1.10.12/1.12.6
+versions. On 2026-11-06 the official [Julia downloads page](https://julialang.org/downloads/)
+lists stable **1.13.3** and LTS **1.10.13**; the local `release` channel still
+points to 1.12.6. Current-release validation must therefore also cover 1.13.3
+and 1.10.13. Those runs remain pending, and no prior test counts are being
+attributed to the newer versions. The manual binary workflow exposes all four
+versions for reproducibility and defaults to 1.13.3.
+
 The local-only BinaryBuilder recipe first built Linux arm64 from native
 `b4e5ffb6` using BinaryBuilder 0.6.6 and Rust 1.91.0. Its audit found the Linux
 `libgcc_s.so.1` runtime dependency unresolved. Recipe correction `350f204c`

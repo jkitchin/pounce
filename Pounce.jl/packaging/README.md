@@ -99,7 +99,9 @@ The roadmap and validation notes record which gates actually have evidence.
 The current recipe and staging scripts alone do not prove release readiness.
 
 The manually dispatched `Julia binary candidate` workflow reproduces the Linux
-build/audit/stage/container-test sequence for either architecture and either
-supported Julia version. It has read-only repository permissions and no upload,
+build/audit/stage/container-test sequence for either architecture. Its Julia
+choices include current stable 1.13.3 and LTS 1.10.13, as listed on the
+[Julia downloads page](https://julialang.org/downloads/) on 2026-11-06, plus the
+earlier 1.10.12/1.12.6 validation versions. It has read-only repository permissions and no upload,
 push, or registration steps. It has not been launched as part of local work;
 hosted execution requires the separately authorized publication of this branch.

@@ -12,8 +12,8 @@ on:
       julia:
         description: Julia version for the clean-container test
         type: choice
-        options: ['1.10.12', '1.12.6']
-        default: '1.12.6'
+        options: ['1.10.13', '1.13.3', '1.10.12', '1.12.6']
+        default: '1.13.3'
 
 permissions:
   contents: read
