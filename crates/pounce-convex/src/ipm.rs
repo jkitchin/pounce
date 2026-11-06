@@ -385,6 +385,10 @@ where
             &snapped
         }
     };
+    // gh#1138: a row with no `x` in it that its constant violates.
+    if let Some(sol) = constant_row_certificate(prob, None) {
+        return sol;
+    }
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
     let (sol, sigma_uncertified) =
@@ -1523,6 +1527,10 @@ where
             &snapped
         }
     };
+    // gh#1138: a row with no `x` in it that its constant violates.
+    if let Some(sol) = constant_row_certificate(prob, None) {
+        return sol;
+    }
     let direct = QpOptions {
         use_hsde: false,
         equilibrate: false,
@@ -1660,6 +1668,10 @@ where
             vec![0.0; prob.m_ineq()],
             0,
         );
+    }
+    // gh#1138: a row with no `x` in it that its cone forbids.
+    if let Some(sol) = constant_row_certificate(prob, Some(cones)) {
+        return sol;
     }
     // Non-symmetric cones (exponential / power) route to the dedicated HSDE
     // driver; self-scaled cones (orthant / SOC / PSD) stay on the symmetric
@@ -2256,6 +2268,10 @@ where
             vec![0.0; prob.m_ineq()],
             0,
         );
+    }
+    // gh#1138: a row with no `x` in it that its cone forbids.
+    if let Some(sol) = constant_row_certificate(prob, Some(cones)) {
+        return sol;
     }
     let has_nonsym = cones
         .iter()
@@ -5650,6 +5666,120 @@ fn trivial_primal_infeasible_solution(prob: &QpProblem) -> QpSolution {
         iters: 0,
         iterates: Vec::new(),
     }
+}
+
+/// gh#1138: a constraint row with no dependence on `x` whose constant the cone
+/// forbids, reported with its exact Farkas certificate before any iteration.
+///
+/// The IPM cannot certify these. The certificate's multiplier sits on a row
+/// with no column coupling, so it enters the value `bᵀy + hᵀz` but never the
+/// column magnitudes `|A|ᵀ|y| + |G|ᵀ|z|` that [`farkas_margin`] measures the
+/// residual against. Every iterate's radius then reads about 1 against
+/// [`FARKAS_MARGIN_MIN`], and the solve runs on until it breaks down: an SOC
+/// with constant head `-1` (`‖x‖ ≤ -1`) ended `NumericalFailure` after 155
+/// iterations for any nonzero `c`, as did an orthant row `0 ≤ -1`, through
+/// `solve_socp` and `solve_qp` alike. Loosening the margin is not the fix: a
+/// constant tail row of a feasible SOC can carry a negative `hᵢzᵢ`, so the
+/// margin would then pass spurious rays. (A *near*-constant row, such as a
+/// head `1e-14·x₁ − 1`, is not affected: measured, the iteration certifies it
+/// in 3 to 6 iterations.)
+///
+/// Each case below is an exact proof: `Aᵀy + Gᵀz` is identically zero, and
+/// the multiplier has unit `∞`-norm, the norm the HSDE's detector scales its
+/// value margin by:
+/// - an equality row with no `A` entry and `bᵢ ≠ 0`: `y = −sign(bᵢ) eᵢ`;
+/// - an orthant row with no `G` entry and `hᵢ < 0`: `z = eᵢ`;
+/// - an SOC whose head row has no `G` entry, with `C` the tail rows that have
+///   none either: `‖h_C‖ > h₀` gives `z = (1, −h_C/‖h_C‖)` on `C`, zero on the
+///   other tail rows, on the boundary of `K* = K`, and `hᵀz = h₀ − ‖h_C‖`.
+///   With `C` empty that is `h₀ < 0` and `z = e₀`, since `s₀ = h₀` must be
+///   `≥ ‖s₁‖ ≥ 0`; with every row constant it is `(h₀, h₁) ∉ K`.
+///
+/// "≠ 0" and "<" are taken to presolve's empty-row tolerance,
+/// [`crate::presolve::EMPTY_ROW_TOL`] `× (1 + scale)`, with `scale` the size
+/// of the constants involved, so a row presolve calls inconsistent is called
+/// inconsistent here too. The certificate is exact at any magnitude; the
+/// tolerance only keeps a constant at rounding level from being read as a
+/// conflict. A block whose constants are not finite is left to the iteration
+/// (and to its finiteness guard), as are PSD, exponential and power blocks
+/// (the last two to the gh #283 domain screen). `cones = None` reads every
+/// inequality row as orthant, the QP entry points' layout. Returns `None`
+/// when no row is decisive.
+fn constant_row_certificate(prob: &QpProblem, cones: Option<&[ConeSpec]>) -> Option<QpSolution> {
+    use crate::presolve::EMPTY_ROW_TOL;
+    let exceeds = |violation: f64, scale: f64| violation > EMPTY_ROW_TOL * (1.0 + scale);
+    let (m_eq, m_ineq) = (prob.m_eq(), prob.m_ineq());
+    let mut a_used = vec![false; m_eq];
+    for t in prob.a.iter().filter(|t| t.val != 0.0) {
+        a_used[t.row] = true;
+    }
+    let mut g_used = vec![false; m_ineq];
+    for t in prob.g.iter().filter(|t| t.val != 0.0) {
+        g_used[t.row] = true;
+    }
+    let infeasible = |y: Vec<f64>, z: Vec<f64>| QpSolution {
+        y,
+        z,
+        ..trivial_primal_infeasible_solution(prob)
+    };
+    let decisive_eq = (0..m_eq).find(|&i| {
+        let b = prob.b[i];
+        !a_used[i] && b.is_finite() && exceeds(b.abs(), b.abs())
+    });
+    if let Some(i) = decisive_eq {
+        let mut y = vec![0.0; m_eq];
+        y[i] = -prob.b[i].signum();
+        return Some(infeasible(y, vec![0.0; m_ineq]));
+    }
+    let orthant = [ConeSpec::Nonneg(m_ineq)];
+    let mut r = 0;
+    for spec in cones.unwrap_or(&orthant) {
+        let d = spec.dim();
+        match *spec {
+            ConeSpec::Nonneg(_) => {
+                let hit = (r..r + d).find(|&i| {
+                    let h = prob.h[i];
+                    !g_used[i] && h.is_finite() && exceeds(-h, h.abs())
+                });
+                if let Some(i) = hit {
+                    let mut z = vec![0.0; m_ineq];
+                    z[i] = 1.0;
+                    return Some(infeasible(vec![0.0; m_eq], z));
+                }
+            }
+            ConeSpec::SecondOrder(_) if d >= 1 && !g_used[r] => {
+                let block = &prob.h[r..r + d];
+                if block.iter().all(|v| v.is_finite()) {
+                    let h0 = block[0];
+                    let tail = (r + 1..r + d).filter(|&i| !g_used[i]);
+                    // ‖h_C‖, scaled so that no square overflows.
+                    let big = tail.clone().map(|i| prob.h[i].abs()).fold(0.0, f64::max);
+                    let t = if big > 0.0 {
+                        big * tail
+                            .clone()
+                            .map(|i| (prob.h[i] / big).powi(2))
+                            .sum::<f64>()
+                            .sqrt()
+                    } else {
+                        0.0
+                    };
+                    if t.is_finite() && exceeds(t - h0, t + h0.abs()) {
+                        let mut z = vec![0.0; m_ineq];
+                        z[r] = 1.0;
+                        if t > 0.0 {
+                            for i in tail {
+                                z[i] = -prob.h[i] / t;
+                            }
+                        }
+                        return Some(infeasible(vec![0.0; m_eq], z));
+                    }
+                }
+            }
+            _ => {}
+        }
+        r += d;
+    }
+    None
 }
 
 /// Build the Newton RHS `[−r_d; −r_p; −r_g + r_c ⊘ z]` for a given
