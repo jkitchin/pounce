@@ -298,6 +298,23 @@ matching CompilerSupportLibraries artifact trees: arm64
 `ignore_audit_errors=false`. A clean rebuilt artifact/audit is still required;
 the metadata probe does not establish binary compatibility.
 
+The complete Linux arm64 rebuild at recipe
+`b892f46a51ce42fd5192c6f9633b14bd24200d4c` now **passes the fatal audit**.
+BinaryBuilder resolves `libgcc_s.so.1` through CompilerSupportLibraries_jll,
+sets the library SONAME, and finds the EPL license. The generated runtime wrapper
+initializes CompilerSupportLibraries_jll before POUNCE. The archive contains only
+the POUNCE library, public header, and license; it does not duplicate the runtime
+dependency's libraries. Native source remains `b4e5ffb6`, with Rust 1.91.0 and
+GCC 10.2.0. Artifact tree: `a796ceec2106222a27debcc6bc909869492c09b6`;
+archive SHA-256: `1b0d2946e91b4893641af83468496479585d76da4fd01a7cae3b025e9f94bd03`.
+Full artifact-backed runtime tests remain pending.
+
+The earlier Linux x86_64 build at recipe `350f204c` also finished and confirmed
+the unavailable libgfortran3 runtime mapping. Its archive is exploratory and
+will be rebuilt with GCC 10. The auditor also identifies CPUID-based instruction
+dispatch and therefore cannot statically establish a minimum instruction set;
+x86 runtime checks remain necessary.
+
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
 dependency. Inspection of the actual library's 93 undefined symbols found no
