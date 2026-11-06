@@ -28,6 +28,15 @@ mutable struct _VectorNonlinearOracleCache
     end
 end
 
+mutable struct _CallbackState
+    task::Union{Nothing,Task}
+    mode::Cint
+    primal::Vector{Float64}
+    has_primal::Bool
+end
+
+_CallbackState() = _CallbackState(nothing, Cint(0), Float64[], false)
+
 """
     Optimizer()
 
@@ -40,6 +49,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     silent::Bool
     options::Dict{String,Any}
     solve_time::Float64
+    native_solve_time::Float64
     sense::MOI.OptimizationSense
     parameters::Dict{MOI.VariableIndex,MOI.Nonlinear.ParameterIndex}
     variables::MOI.Utilities.VariablesContainer{Float64}
@@ -53,6 +63,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     qp_data::QPBlockData{Float64}
     nlp_model::Union{Nothing,MOI.Nonlinear.Model}
     callback::Union{Nothing,Function}
+    callback_state::_CallbackState
     barrier_iterations::Int
     ad_backend::MOI.Nonlinear.AbstractAutomaticDifferentiation
     vector_nonlinear_oracle_constraints::Vector{
@@ -71,6 +82,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             false,
             Dict{String,Any}(),
             NaN,
+            NaN,
             MOI.FEASIBILITY_SENSE,
             Dict{MOI.VariableIndex,Float64}(),
             MOI.Utilities.VariablesContainer{Float64}(),
@@ -84,6 +96,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
             QPBlockData{Float64}(),
             nothing,
             nothing,
+            _CallbackState(),
             0,
             MOI.Nonlinear.SparseReverseMode(),
             Tuple{MOI.VectorOfVariables,_VectorNonlinearOracleCache}[],
@@ -134,6 +147,7 @@ function MOI.empty!(model::Optimizer)
     # SKIP: model.silent
     # SKIP: model.options
     model.solve_time = 0.0
+    model.native_solve_time = NaN
     model.sense = MOI.FEASIBILITY_SENSE
     empty!(model.parameters)
     MOI.empty!(model.variables)
@@ -147,6 +161,7 @@ function MOI.empty!(model::Optimizer)
     model.qp_data = QPBlockData{Float64}()
     model.nlp_model = nothing
     model.callback = nothing
+    model.callback_state = _CallbackState()
     model.barrier_iterations = 0
     # SKIP: model.ad_backend
     empty!(model.vector_nonlinear_oracle_constraints)
@@ -240,6 +255,25 @@ function MOI.set(
         model.inner.solved = false
     end
     return
+end
+
+function MOI.get(
+    model::Optimizer,
+    ::MOI.ConstraintSet,
+    ci::MOI.ConstraintIndex{MOI.VariableIndex,MOI.Parameter{Float64}},
+)
+    MOI.throw_if_not_valid(model, ci)
+    p = model.parameters[MOI.VariableIndex(ci.value)]
+    return MOI.Parameter(model.nlp_model[p])
+end
+
+function MOI.get(
+    model::Optimizer,
+    ::MOI.ConstraintFunction,
+    ci::MOI.ConstraintIndex{MOI.VariableIndex,MOI.Parameter{Float64}},
+)
+    MOI.throw_if_not_valid(model, ci)
+    return MOI.VariableIndex(ci.value)
 end
 
 _replace_parameters(model::Optimizer, f) = f
@@ -1283,15 +1317,6 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
             Pounce.AddIpoptStrOption(inner, "hessian_constant", "yes")
         end
     end
-    function _moi_callback(args...)
-        # iter_count is args[2]
-        model.barrier_iterations = args[2]
-        if model.callback !== nothing
-            return model.callback(args...)
-        end
-        return true
-    end
-    Pounce.SetIntermediateCallback(inner, _moi_callback)
     model.needs_new_inner = false
     return model.inner
 end
@@ -1340,7 +1365,22 @@ function _setup_model(model::Optimizer)
 end
 
 function MOI.optimize!(model::Optimizer)
-    start_time = time()
+    if model.inner !== nothing && model.inner.solving
+        error("A POUNCE optimizer cannot be solved recursively")
+    end
+    start_time = time_ns()
+    model.solve_time = NaN
+    model.native_solve_time = NaN
+    model.barrier_iterations = 0
+    try
+        _optimize!(model)
+    finally
+        model.solve_time = (time_ns() - start_time) / 1e9
+    end
+    return
+end
+
+function _optimize!(model::Optimizer)
     if model.inner !== nothing
         model.inner.solved = false
     end
@@ -1351,6 +1391,7 @@ function MOI.optimize!(model::Optimizer)
         return
     end
     inner = _setup_inner(model)
+    _setup_callback!(model, inner)
     if model.nlp_model !== nothing
         empty!(model.qp_data.parameters)
         for (p, index) in model.parameters
@@ -1412,14 +1453,14 @@ function MOI.optimize!(model::Optimizer)
         inner.mult_x_U[i] = _dual_start(model, model.mult_x_U[i], -1)
     end
     # Reset timers
-    model.barrier_iterations = 0
     for (_, s) in model.vector_nonlinear_oracle_constraints
         s.eval_f_timer = 0.0
         s.eval_jacobian_timer = 0.0
         s.eval_hessian_lagrangian_timer = 0.0
     end
     Pounce.IpoptSolve(inner)
-    model.solve_time = time() - start_time
+    model.barrier_iterations = Pounce.GetIpoptIterCount(inner)
+    model.native_solve_time = Pounce.GetIpoptSolveTime(inner)
     return
 end
 
@@ -1541,6 +1582,19 @@ end
 ### MOI.SolveTimeSec
 
 MOI.get(model::Optimizer, ::MOI.SolveTimeSec) = model.solve_time
+
+"""
+    NativeSolveTimeSec()
+
+Native solver wall time from the most recent `optimize!`, excluding Julia-side
+setup. `NaN` before solving or when the attempt throws or never reaches the
+native solve. A native return without statistics reports zero. In contrast,
+`MOI.SolveTimeSec` measures the entire optimizer call, including setup.
+"""
+struct NativeSolveTimeSec <: MOI.AbstractModelAttribute end
+
+MOI.is_set_by_optimize(::NativeSolveTimeSec) = true
+MOI.get(model::Optimizer, ::NativeSolveTimeSec) = model.native_solve_time
 
 ### MOI.BarrierIterations
 
@@ -1681,59 +1735,4 @@ function MOI.get(model::Optimizer, attr::MOI.NLPBlockDual)
     return s .* model.inner.mult_g[(length(model.qp_data)+1):end]
 end
 
-### Pounce.CallbackFunction
-
-"""
-    CallbackFunction()
-
-A solver-dependent callback for POUNCE's intermediate callback.
-During restoration (alg_mod == 1), metrics describe the restoration subproblem.
-
-The callback should be a function like the following:
-```julia
-function my_intermediate_callback(
-    alg_mod::Cint,
-    iter_count::Cint,
-    obj_value::Float64,
-    inf_pr::Float64,
-    inf_du::Float64,
-    mu::Float64,
-    d_norm::Float64,
-    regularization_size::Float64,
-    alpha_du::Float64,
-    alpha_pr::Float64,
-    ls_trials::Cint,
-)
-    # ... user code ...
-    return true # or `return false` to terminate the solve.
-end
-```
-
-The arguments are defined in the Ipopt documentation:
-https://coin-or.github.io/Ipopt/OUTPUT.html
-
-Note: Calling `SetIntermediateCallback` will over-write this callback! Don't
-call both.
-"""
-struct CallbackFunction <: MOI.AbstractCallback end
-
-function MOI.set(model::Optimizer, ::CallbackFunction, f::Function)
-    model.callback = f
-    return
-end
-
-function MOI.get(model::Optimizer, ::MOI.CallbackVariablePrimal, x::MOI.VariableIndex)
-    values = zeros(model.inner.n)
-    Pounce.GetIpoptCurrentIterate(
-        model.inner,
-        false,
-        model.inner.n,
-        values,
-        C_NULL,
-        C_NULL,
-        model.inner.m,
-        C_NULL,
-        C_NULL,
-    )
-    return values[Pounce.column(x)]
-end
+include("MOI_callbacks.jl")

@@ -97,15 +97,29 @@ multipliers with `set_dual_start_value`, then enable
 `set_optimizer_attribute(model, "warm_start_init_point", "yes")`.
 Use JuMP/MOI dual conventions; the wrapper converts signs for POUNCE, including
 maximization. Repeated solves do not automatically reuse the previous solution.
-They also do not promise reuse of native solver factorizations. The current
-`MOI.SolveTimeSec` includes wrapper setup as well as the native solve; measure
-Julia compilation and model construction separately when benchmarking.
+They also do not promise reuse of native solver factorizations.
+
+After `optimize!`, two timers are available:
+
+```julia
+MOI.get(model, MOI.SolveTimeSec())          # entire optimizer call, including setup
+MOI.get(model, Pounce.NativeSolveTimeSec()) # native solver's reported wall time
+```
+
+The wrapper timer uses a monotonic clock. Native time includes Julia callbacks
+executed inside the solve, but excludes wrapper setup. Model construction before
+`optimize!` is outside both timers. Measure first-call compilation separately
+from subsequent solves. After a thrown error, the optimizer records elapsed
+wrapper time, resets iterations to zero, and leaves native time unavailable
+(`NaN`); JuMP's normal result-access guards still apply.
 
 ## Callbacks and low-level use
 
 ```julia
 MOI = JuMP.MOI
 MOI.set(model, Pounce.CallbackFunction(), (args...) -> args[2] < 100)
+# Between solves, remove the callback:
+MOI.set(model, Pounce.CallbackFunction(), nothing)
 ```
 
 The callback receives the C intermediate-callback arguments; return `false`
@@ -113,9 +127,20 @@ to stop. `args[1]` distinguishes regular iterations (0) from restoration (1).
 Restoration metrics describe the feasibility subproblem; current-iterate
 inspection is unavailable during restoration.
 
+Within a regular callback, `MOI.CallbackVariablePrimal` reads a single lazily
+copied primal snapshot, shared by all variable queries in that invocation.
+The snapshot cannot be queried outside that callback's task or after it returns.
+Each new invocation refreshes it. Callback replacement/removal takes effect on
+the next solve. Ordinary solves install no intermediate callback; final iteration
+counts come directly from the native solver's statistics.
+
 The qualified low-level API includes `Pounce.CreateIpoptProblem`,
 `Pounce.IpoptSolve`, `Pounce.FreeIpoptProblem`, the option setters, and iterate
 inspectors. See the constructor's docstring and `test/cinterface.jl`.
+`Pounce.GetIpoptIterCount` and `Pounce.GetIpoptSolveTime` expose native statistics
+between solves; they return zero before the first solve and reject use during a
+solve or after freeing the problem. `Pounce.SetIntermediateCallback(prob, nothing)`
+removes a low-level callback between solves.
 Indices are one-based and Hessian structure is lower triangular. Callback
 buffers are borrowed: do not retain them or resize solve buffers.
 Use separate problem objects for separate solves; recursive solves on the

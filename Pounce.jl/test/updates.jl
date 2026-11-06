@@ -104,11 +104,14 @@ end
     JuMP.set_silent(model)
     JuMP.@variable(model, 0 <= x <= 3)
     JuMP.@variable(model, p in JuMP.Parameter(1.0))
+    @test JuMP.parameter_value(p) == 1.0
+    @test MOI.get(model, MOI.ConstraintFunction(), JuMP.ParameterRef(p)) == JuMP.index(p)
     JuMP.@objective(model, Min, (x - p)^2)
     JuMP.optimize!(model)
     @test JuMP.termination_status(model) == MOI.LOCALLY_SOLVED
     @test JuMP.value(x) ≈ 1.0 atol = 1e-6
     JuMP.set_parameter_value(p, 2.0)
+    @test JuMP.parameter_value(p) == 2.0
     @test JuMP.termination_status(model) == MOI.OPTIMIZE_NOT_CALLED
     @test JuMP.result_count(model) == 0
     JuMP.optimize!(model)

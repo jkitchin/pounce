@@ -64,6 +64,12 @@ returned points before comparing timing; solver status alone is not a
 validation of application-level feasibility. Record the POUNCE commit,
 library path, package versions, options, and linear solver with measurements.
 
+`MOI.get(model, MOI.SolveTimeSec())` measures the entire optimizer call,
+including wrapper setup. `MOI.get(model, Pounce.NativeSolveTimeSec())` reports
+native solver wall time, including Julia callbacks invoked during that solve.
+Model construction is outside both timers; distinguish first-call compilation
+from subsequent solves. Final iteration counts do not require a user callback.
+
 BMOPFTools accepts `solve_opf(net; optimizer=Pounce.Optimizer)`; its
 `profile_solution(net, result)` can check the returned network solution.
 The wrapper's own tests do not yet constitute a BMOPFTools benchmark.

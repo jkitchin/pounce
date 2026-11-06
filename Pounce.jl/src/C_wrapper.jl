@@ -411,25 +411,36 @@ function SetIpoptProblemScaling(
     return
 end
 
-function SetIntermediateCallback(prob::IpoptProblem, intermediate::Function)
-    intermediate_cb = @cfunction(
-        _Intermediate_CB,
-        UInt8,
-        (
-            Cint,
-            Cint,
-            Float64,
-            Float64,
-            Float64,
-            Float64,
-            Float64,
-            Float64,
-            Float64,
-            Float64,
-            Cint,
-            Ptr{Cvoid},
-        ),
-    )
+"""
+    SetIntermediateCallback(prob, callback::Union{Function,Nothing})
+
+Install a per-iteration callback, or remove it with `nothing`. Change callbacks
+only between solves. Returning `false` requests a user stop.
+"""
+function SetIntermediateCallback(prob::IpoptProblem, intermediate::Union{Function,Nothing})
+    prob.solving && error("Cannot change the intermediate callback during a solve")
+    intermediate_cb = if intermediate === nothing
+        C_NULL
+    else
+        @cfunction(
+            _Intermediate_CB,
+            UInt8,
+            (
+                Cint,
+                Cint,
+                Float64,
+                Float64,
+                Float64,
+                Float64,
+                Float64,
+                Float64,
+                Float64,
+                Float64,
+                Cint,
+                Ptr{Cvoid},
+            ),
+        )
+    end
     ret = @ccall libpounce.SetIntermediateCallback(
         prob::Ptr{Cvoid},
         intermediate_cb::Ptr{Cvoid},
@@ -437,6 +448,30 @@ function SetIntermediateCallback(prob::IpoptProblem, intermediate::Function)
     ret || error("POUNCE rejected the operation")
     prob.intermediate = intermediate
     return
+end
+
+"""
+    GetIpoptIterCount(prob)
+
+Return the native iteration count for the most recent solve, or zero before
+the first solve. Unavailable during a solve or after the problem is freed.
+"""
+function GetIpoptIterCount(prob::IpoptProblem)
+    prob.solving && error("Native statistics are only available between solves")
+    return Int(@ccall libpounce.GetIpoptIterCount(prob::Ptr{Cvoid})::Cint)
+end
+
+"""
+    GetIpoptSolveTime(prob)
+
+Return the native solver's reported wall time in seconds, or zero before the
+first solve. This includes callbacks invoked by the solver and excludes
+Julia-side problem setup. Unavailable during a solve or after the problem
+is freed.
+"""
+function GetIpoptSolveTime(prob::IpoptProblem)
+    prob.solving && error("Native statistics are only available between solves")
+    return @ccall libpounce.GetIpoptSolveTime(prob::Ptr{Cvoid})::Cdouble
 end
 
 function IpoptSolve(prob::IpoptProblem)

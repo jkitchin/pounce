@@ -10,5 +10,6 @@ flush(stdout)
     include("cinterface.jl")
     include("jump.jl")
     include("updates.jl")
+    include("callbacks.jl")
     include("MOI_wrapper.jl")
 end

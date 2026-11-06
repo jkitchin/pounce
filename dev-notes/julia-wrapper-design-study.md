@@ -102,6 +102,9 @@ the application's residual checks, not only termination status or objective.
 
 ## POUNCE-specific performance follow-ups
 
+The following findings describe the study baseline. Their implementation and
+validation are tracked in the [refactoring roadmap](julia-wrapper-roadmap.md).
+
 Two costs are visible in the source; neither has been benchmarked in this study:
 
 1. The inherited adapter registers an intermediate callback even without a

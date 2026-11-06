@@ -148,6 +148,41 @@ function hs071_problem()
     return prob
 end
 
+@testset "Native statistics and callback removal" begin
+    prob = hs071_problem()
+    @test Pounce.GetIpoptIterCount(prob) == 0
+    @test Pounce.GetIpoptSolveTime(prob) == 0.0
+    calls = Ref(0)
+    Pounce.SetIntermediateCallback(
+        prob,
+        function (args...)
+            calls[] += 1
+            @test_throws ErrorException Pounce.GetIpoptIterCount(prob)
+            @test_throws ErrorException Pounce.GetIpoptSolveTime(prob)
+            @test_throws ErrorException Pounce.SetIntermediateCallback(prob, nothing)
+            return false
+        end,
+    )
+    @test Pounce.IpoptSolve(prob) == 5
+    @test calls[] == 1
+    @test Pounce.GetIpoptIterCount(prob) == 0
+    @test Pounce.GetIpoptSolveTime(prob) >= 0.0
+    Pounce.SetIntermediateCallback(prob, nothing)
+    prob.x .= [1.0, 5.0, 5.0, 1.0]
+    @test Pounce.IpoptSolve(prob) == 0
+    @test calls[] == 1
+    @test Pounce.GetIpoptIterCount(prob) > 0
+    @test isfinite(Pounce.GetIpoptSolveTime(prob))
+    Pounce.AddIpoptIntOption(prob, "max_iter", 0)
+    prob.x .= [1.0, 5.0, 5.0, 1.0]
+    @test Pounce.IpoptSolve(prob) == -1
+    @test Pounce.GetIpoptIterCount(prob) == 0
+    Pounce.FreeIpoptProblem(prob)
+    @test_throws ErrorException Pounce.GetIpoptIterCount(prob)
+    @test_throws ErrorException Pounce.GetIpoptSolveTime(prob)
+    @test_throws ErrorException Pounce.SetIntermediateCallback(prob, nothing)
+end
+
 @testset "C ABI, lifetime, and failure handling" begin
     prob = hs071_problem()
     @test Pounce.IpoptSolve(prob) == 0
