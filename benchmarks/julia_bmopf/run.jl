@@ -1,5 +1,5 @@
 # Run setup.jl first. Each solver gets a fresh Julia process for first-call timing.
-using BMOPFTools, JuMP, Pounce, Ipopt, JSON3, SHA, Pkg, Dates
+using BMOPFTools, JuMP, Pounce, Ipopt, JSON3, SHA, Pkg, Dates, TOML
 include("physics.jl")
 
 const MODEL_REVISION = "542a48ba7f4c95e50b8acdc790a5323a4ef24930"
@@ -142,11 +142,24 @@ function run(solver)
             Dict("version" => string(p.version), "tree_hash" => string(p.tree_hash)) for
         p in values(Pkg.dependencies())
     )
+    wrapper_path = pkgdir(Pounce)
+    candidate_file = joinpath(dirname(wrapper_path), "Candidate.toml")
+    candidate = isfile(candidate_file) ? TOML.parsefile(candidate_file) : nothing
+    wrapper_commit =
+        candidate === nothing ? readchomp(`git -C $wrapper_path rev-parse HEAD`) :
+        candidate["wrapper_commit"]
+    wrapper_working_tree =
+        candidate === nothing ? readchomp(`git -C $wrapper_path status --porcelain`) :
+        candidate["working_tree"]
     return Dict(
         "schema" => "pounce.julia-bmopf/v1",
         "timestamp_utc" => string(now(UTC)),
-        "wrapper_commit" => readchomp(`git -C $REPO rev-parse HEAD`),
-        "working_tree" => readchomp(`git -C $REPO status --porcelain`),
+        "wrapper_commit" => wrapper_commit,
+        "working_tree" => wrapper_working_tree,
+        "wrapper_package_path" => wrapper_path,
+        "release_candidate" => candidate,
+        "harness_commit" => readchomp(`git -C $REPO rev-parse HEAD`),
+        "harness_working_tree" => readchomp(`git -C $REPO status --porcelain`),
         "native_commit" => native_revision,
         "pounce_version" => string(Pounce.GetIpoptVersion()),
         "ipopt_version" => string(Ipopt.GetIpoptVersion()),

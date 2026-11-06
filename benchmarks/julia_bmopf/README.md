@@ -22,6 +22,9 @@ julia --project=/tmp/pounce-bmopf-env --startup-file=no \
 Keep the generated environment's `Project.toml` and `Manifest.toml` with the JSON
 results. Each output records package versions/tree hashes, model/source commits,
 fixture and native-library SHA-256 hashes, Julia/CPU, options, and worktree state.
+For a staged binary-backed wrapper, its source commit/worktree come from
+`Candidate.toml`; the harness commit/worktree are recorded separately. The
+wrapper package path and complete candidate metadata identify the local copy.
 Use a clean committed checkout for reportable measurements. Run sequentially on
 an otherwise idle host, with warm package caches, and repeat in fresh processes
 for timing distributions. The first row still includes first-call compilation;
