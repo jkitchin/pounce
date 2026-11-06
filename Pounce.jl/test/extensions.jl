@@ -25,9 +25,15 @@
     # A fresh environment containing only Pounce must not resolve/install MOI.
     mktempdir() do dir
         path = pkgdir(Pounce)
+        # A locally generated, unpublished JLL is developed alongside the release
+        # candidate. The normal source-checkout package has no JLL dependency.
+        paths = [path]
+        if isdefined(Pounce, :Pounce_jll)
+            push!(paths, pkgdir(Pounce.Pounce_jll))
+        end
         code = """
             import Pkg
-            Pkg.develop(path = $(repr(path)))
+            Pkg.develop([Pkg.PackageSpec(path = p) for p in $(repr(paths))])
             @assert all(info.name != "MathOptInterface" for info in values(Pkg.dependencies()))
             import Pounce
             @assert Base.get_extension(Pounce, :PounceMathOptInterfaceExt) === nothing

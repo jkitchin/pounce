@@ -25,6 +25,8 @@ The default library is in the repository's `target/release` directory.
 For another build, set `ENV["POUNCE_LIBRARY_PATH"]` to the library file or its
 directory before loading Pounce. `Pounce.library_path()` reports the loaded
 file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
+Pounce.jl 0.1 accepts native POUNCE 0.15.x and checks the required C symbols
+at import. Other native minor versions require a wrapper ABI review.
 There is no registered Julia package or bundled JLL binary yet.
 
 JuMP/MathOptInterface support is an optional package extension. Load JuMP or
@@ -76,7 +78,11 @@ from subsequent solves. Final iteration counts do not require a user callback.
 
 BMOPFTools accepts `solve_opf(net; optimizer=Pounce.Optimizer)`; its
 `profile_solution(net, result)` can check the returned network solution.
-The wrapper's own tests do not yet constitute a BMOPFTools benchmark.
+The repository's `benchmarks/julia_bmopf/` harness pins a small teaching feeder
+and its Julia dependency graph. It compares parameter updates, explicit starts,
+and recovery with Ipopt, including independent current/KCL reconstruction.
+Its README defines the timing boundaries, residual checks, and reproduction
+commands; the results do not establish performance on large OPF networks.
 
 ## Testing and callback details
 

@@ -237,3 +237,28 @@ this harness. A separate warmed diagnostic initializes AD/sparsity in 16.3 μs
 (Pounce) / 19.0 μs (Ipopt) on disposable models; it is not an additive breakdown
 of the timed solves. The sizeable first-call ranges and different backends limit
 what can be inferred from these timings. No solver-wide ranking is claimed.
+
+## Native compatibility and Linux validation
+
+At wrapper `1d985b52d4901479967b01cce91c476e17bf09a9`, the complete package suite
+passes **3,662 assertions** on each of macOS arm64 Julia 1.10.12 and 1.12.6.
+The additional nine assertions cover rejection of an unrelated shared library
+and native version boundaries. The loader now validates every C symbol used by
+the bindings and accepts POUNCE 0.15.x. Other minor versions require an explicit
+ABI review; matching Ipopt symbol names alone do not establish compatibility.
+
+The earlier extension revision `7527a8fe` passes **3,653 assertions** on Linux
+arm64 Julia 1.12.6, in the official `julia:1.12.6-bookworm` image
+(`sha256:0d9424d38430320596424b22a7d03add630ea24313e139eaff5b521093f74f17`).
+Its native library was built from the same pinned `b4e5ffb6` source using Rust
+1.91.1 in `rust:1.91-bookworm`, whose pulled manifest digest was
+`sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33`.
+All 95 `cargo test --locked -p pounce-cinterface` tests also pass in that Linux
+environment. These are local container checks on a dedicated Colima VM, not
+hosted CI and not evidence of an audited portable JLL artifact. The existing
+user VM and default Docker context were left unchanged.
+
+After the complete Linux run, the updated `1d985b52` loader and its library tests
+were copied into the isolated Linux test checkout. All 15 library-selection and
+native-version assertions pass there too, including extension solves through
+file/directory overrides and rejection of `libjulia` as an unrelated library.

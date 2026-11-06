@@ -126,9 +126,13 @@ to describe the initial package as a source-checkout JuMP adapter.
 ## 5. Binary distribution and release — in progress
 
 The pinned native source passes all 95 C-interface tests in a local Linux arm64
-container. Full Julia platform validation and JLL packaging remain in progress;
-the source-checkout installation still requires a native build. No binary has
-been published and no registry submission or PR has been opened.
+container; wrapper `7527a8fe` also passes all 3,653 Julia assertions there.
+At `1d985b52`, native-version/symbol checks pass the complete 3,662-assertion
+suite on both macOS Julia versions. The local-only BinaryBuilder recipe and
+binary-backed release staging tool are under validation. JLL builds, artifact
+installation and remaining platform gates are not yet complete. The working
+source-checkout installation still requires a native build. No binary has been
+published and no registry submission or PR has been opened.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add
