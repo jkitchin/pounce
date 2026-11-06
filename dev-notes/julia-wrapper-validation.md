@@ -339,6 +339,21 @@ toolchain's GNU linker for Linux x86_64 using the
 [documented Rust opt-out](https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/).
 The complete corrected POUNCE build/audit is still required.
 
+That complete Linux x86_64 build now **passes the fatal audit** at recipe
+`28297b0b`, with the GNU linker and runtime dependency resolved. The CPUID
+inspection warning remains; it is not an unresolved library dependency.
+Intel macOS also **passes the fatal audit** at recipe `73f45e96`, with only
+libSystem linked and a minimum macOS load command of **10.12**. Julia itself
+may impose a newer OS requirement. Neither audit substitutes for runtime tests.
+
+The [artifact inventory](julia-wrapper-artifacts.json) records all four accepted
+archives, tree hashes, and exact recipe commits. Their archive SHA-256 values
+were checked before copying to one local product directory. BinaryBuilder's
+`--skip-build --deploy=local` then generated a combined Pounce_jll 0.15.0+0,
+recomputing all four matching tree hashes and locating the library products.
+This assembly step does not rerun the audits; the accepted individual builds
+above supply that evidence. All generated download URLs are local file URLs.
+
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
 dependency. Inspection of the actual library's 93 undefined symbols found no

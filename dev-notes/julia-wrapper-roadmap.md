@@ -140,14 +140,14 @@ Its audit identified the Linux unwind runtime. Adding that dependency at
 `350f204c` alone did not resolve it: the default compiler selected an unavailable
 runtime ABI tag. The recipe now selects GCC 10 and makes audit failures fatal;
 the resulting platform tags resolve the runtime artifacts on both Linux targets.
-The full Linux arm64 rebuild at `b892f46a` passes the fatal audit and resolves
-the runtime dependency. Full artifact-backed tests and the remaining target
-builds are still required before this stage is complete.
-The corrected macOS arm64 artifact at `73f45e96` also passes the fatal audit;
-its unused system libiconv dependency is gone. Linux x86_64 additionally needs
-the GNU-linker selection at `28297b0b`, verified in a matching linker control;
-the complete rebuild and Intel macOS artifact are still pending. The inspected
-arm64 build baselines are glibc 2.19 on Linux and macOS 11.0 on Apple platforms.
+All four candidate targets now pass their fatal build audits: Linux arm64 at
+`b892f46a`, Linux x86_64 with GNU-linker selection at `28297b0b`, and both macOS
+architectures at `73f45e96`. The unused macOS libiconv dependency is gone. Their
+unchanged archives have been combined into one local JLL package; hashes and
+recipe commits are in the [artifact inventory](julia-wrapper-artifacts.json).
+Full artifact-backed and custom-library tests are still required before this
+stage is complete. The inspected arm64 build baselines are glibc 2.19 on Linux
+and macOS 11.0 on Apple platforms; Intel macOS declares 10.12 at the binary level.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add
