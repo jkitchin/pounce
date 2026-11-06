@@ -161,18 +161,18 @@ function _optimize!(model::Optimizer)
         inner.mult_g[i] = _dual_start(model, start, -1)
     end
     offset = length(model.data.qp_data.mult_g)
-    if model.data.nlp_dual_start === nothing
-        inner.mult_g[(offset+1):end] .= 0.0
-        # First there is VectorNonlinearOracle...
-        for (_, cache) in model.data.vector_nonlinear_oracle_constraints
-            if cache.start !== nothing
-                for i = 1:cache.set.output_dimension
-                    inner.mult_g[offset+i] = _dual_start(model, cache.start[i], -1)
-                end
+    inner.mult_g[(offset+1):end] .= 0.0
+    # Oracle rows precede the NLP block, and their starts are independent of
+    # whether the NLP block has an explicit start vector.
+    for (_, cache) in model.data.vector_nonlinear_oracle_constraints
+        if cache.start !== nothing
+            for i = 1:cache.set.output_dimension
+                inner.mult_g[offset+i] = _dual_start(model, cache.start[i], -1)
             end
-            offset += cache.set.output_dimension
         end
-        # then come the ScalarNonlinearFunctions....
+        offset += cache.set.output_dimension
+    end
+    if model.data.nlp_dual_start === nothing
         for (key, val) in model.data.mult_g_nlp
             inner.mult_g[offset+key.value] = _dual_start(model, val, -1)
         end

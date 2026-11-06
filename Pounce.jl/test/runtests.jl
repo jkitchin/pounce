@@ -13,5 +13,6 @@ flush(stdout)
     include("updates.jl")
     include("callbacks.jl")
     include("lifecycle.jl")
+    include("mixed_nlp.jl")
     include("MOI_wrapper.jl")
 end

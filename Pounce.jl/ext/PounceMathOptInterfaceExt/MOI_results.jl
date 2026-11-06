@@ -163,12 +163,16 @@ function row(
     return ci.value
 end
 
-function row(model::Optimizer, ci::MOI.ConstraintIndex{MOI.ScalarNonlinearFunction})
+function _nlp_constraint_offset(model::Optimizer)
     offset = length(model.data.qp_data)
     for (_, s) in model.data.vector_nonlinear_oracle_constraints
         offset += s.set.output_dimension
     end
-    return offset + ci.value
+    return offset
+end
+
+function row(model::Optimizer, ci::MOI.ConstraintIndex{MOI.ScalarNonlinearFunction})
+    return _nlp_constraint_offset(model) + ci.value
 end
 
 function MOI.get(
@@ -267,5 +271,5 @@ end
 function MOI.get(model::Optimizer, attr::MOI.NLPBlockDual)
     MOI.check_result_index_bounds(model, attr)
     s = -_dual_multiplier(model)
-    return s .* model.result.problem.mult_g[(length(model.data.qp_data)+1):end]
+    return s .* model.result.problem.mult_g[(_nlp_constraint_offset(model)+1):end]
 end
