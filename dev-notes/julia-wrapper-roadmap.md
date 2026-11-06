@@ -9,7 +9,11 @@ C interface usable throughout. Make each stage independently reviewable. The
 native Rust solver and its ABI remain unchanged in the first stage. Publishing
 the branch or opening a PR requires the user's permission.
 
-## 1. Native statistics and callback lifetime — implementing
+## 1. Native statistics and callback lifetime — completed
+
+Implemented in `cc42dec83da1f1a1e95cdf29b50f3b905b4bc2c4`. Both supported local
+Julia test runs pass; version-stamped results and the allocation comparison are
+in the [validation notes](julia-wrapper-validation.md#statistics-and-callback-refactor).
 
 Expose `GetIpoptIterCount` and `GetIpoptSolveTime`. Obtain final MOI iteration
 counts from native statistics so ordinary solves need no intermediate callback.
@@ -38,6 +42,25 @@ Replace implicit coupling between `inner === nothing`, `needs_new_inner`, and
 and results. Centralize invalidation in named helpers and document a mutation
 table: structural changes, bound changes, parameter values, starts, options,
 callback changes, and failed solves.
+
+Group existing fields into model data, evaluator cache, native problem, and
+solve result/statistics containers. Track the model revision each cache/result
+belongs to. Keep native ownership in the low-level problem; do not duplicate
+large result buffers unless their lifetime requires it. The intended rules are:
+
+| Change | Evaluator/derivatives | Native problem | Results |
+|---|---|---|---|
+| Variables, constraints, expressions, AD backend | Rebuild | Rebuild | Invalidate |
+| Bounds only | Refresh bounds; reuse derivative structure | Rebuild until a supported update path exists | Invalidate |
+| Parameter values | Update values in place | Reuse compatible handle | Invalidate |
+| Primal/dual starts | Reuse | Apply on next solve | Keep last completed result until next attempt |
+| Solver options | Reuse unless derivative requirements change | Apply or rebuild when options are removed | Keep last result until next attempt |
+| Callback registration | Reuse | Install/remove before next solve | Keep last result until next attempt |
+| New solve attempt | Reuse valid caches | Reuse compatible handle | Clear before setup; publish only completed results |
+
+Test these rules at the optimizer level and through JuMP's caching model;
+JuMP may independently guard result access after model edits. Evaluate option
+removal explicitly so omitted settings cannot survive on a reused handle.
 
 Separate MOI model storage/mutation, evaluator assembly, solve orchestration,
 and results into focused files. Preserve current behavior with scenario tests

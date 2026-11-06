@@ -82,3 +82,47 @@ Ipopt.jl 1.16.0. Updated Pounce and its fresh-model control both returned
 old result after the bound update; their fresh-model controls returned the
 expected new optimum. Package identities and the pre-fix values are recorded
 in the study. No upstream issue or PR was published as part of this work.
+
+## Statistics and callback refactor
+
+Implementation commit: `cc42dec83da1f1a1e95cdf29b50f3b905b4bc2c4`.
+Native library: unchanged POUNCE 0.15.0 built from
+`b4e5ffb641990738fd69cb53c02ae5966fd68edc`.
+
+On macOS arm64, the full package suite passed 3,586 assertions on each of
+Julia 1.10.12 and 1.12.6, with MathOptInterface 1.54.0, JuMP 1.32.1, and
+Ipopt.jl 1.16.0. The 133 additional assertions cover native statistics,
+callback installation/replacement/removal, snapshot freshness and task scope,
+restoration restrictions, exceptions/recovery, recursive solve rejection, and
+direct-model parameter introspection. The callback tests exposed missing
+parameter constraint getters; these are now implemented too.
+
+The documentation consistency check passed (54 reachable pages, no dead links),
+as did whitespace checks. No Rust source changed, so the native test suite was
+not rerun for this Julia-only refactor. Hosted CI remains unrun/unpublished.
+
+The allocation probe used Julia 1.12.6 and the same native library/MOI version
+before and after the change:
+
+| Variables queried | Baseline `85cb9d43` | Refactor `cc42dec8` |
+|---|---:|---:|
+| 128 | 155,648 bytes | 0 bytes |
+| 512 | 2,179,072 bytes | 0 bytes |
+
+These are Julia allocations for a warmed scalar-query sweep inside one regular
+callback. Warmup populates the new cache, so the first snapshot copy is excluded.
+They are not total callback/solver allocations or a wall-time speedup measurement.
+Both probes record wrapper and native source revisions, Julia/MOI/native versions,
+library path, and working-tree state. The baseline wrapper code was unchanged;
+only the new roadmap document was untracked.
+
+Reproduce from the repository root, setting the native revision to the commit
+actually used to build the selected library:
+
+```sh
+POUNCE_NATIVE_REVISION=b4e5ffb641990738fd69cb53c02ae5966fd68edc \
+  julia --project=Pounce.jl --startup-file=no dev-notes/julia-callback-allocation-probe.jl
+```
+
+The same script can be copied to a baseline checkout for comparison. The probe's
+diagonal quadratic model is self-contained and uses no external benchmark data.
