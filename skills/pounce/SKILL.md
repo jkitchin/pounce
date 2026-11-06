@@ -347,7 +347,7 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    `complementarity_continuation=schedule` runs one solve per `τ` instead
    (12% faster on the OPF transmission suite, slower on MacMPEC, `relu_nn`
    and the small OPF and capacity suites). A pair whose row has 8 or more
-   Jacobian entries (a ReLU unit's weight row) is lifted, `g(x) - w = c`
+   Jacobian entries (a ReLU unit's weight row) is lifted when the Hessian is exact, `g(x) - w = c`
    with `w >= 0` and the product `G·w`, so the factorization does not fill
    in; `complementarity_lift=yes|no` forces it either way.
 7. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian

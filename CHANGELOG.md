@@ -59,8 +59,8 @@ changes.
 
 ### Changed
 - **A declared pair on a wide row is lifted into a variable (gh#1136).**
-  - **What changed:** a one-sided pair whose row has 8 or more Jacobian
-    entries is now solved with its row `g(x) >= c` written as `g(x) - w =
+  - **What changed:** with an exact Hessian, a one-sided pair whose row has
+    8 or more Jacobian entries is now solved with its row `g(x) >= c` written as `g(x) - w =
     c`, `w >= 0`, and its product row as `G·w` instead of `G·(g(x) - c)`.
     The two models have the same solutions and the same KKT dimension.
     The new option `complementarity_lift` (`auto`, the default; `yes` for
@@ -94,20 +94,40 @@ changes.
     each way: pack-comp1p-32 and qpec-100-2 drop off the best-known value,
     and qpec-100-3 and qpec-200-1 reach it. The rest are bit-identical.
     `mpcc_nl` (16) lifts nothing and is identical.
+  - **Limited memory does not lift.** Under
+    `hessian_approximation=limited-memory`, `auto` lifts nothing, so that
+    path is exactly as before. On the 30 MacMPEC models `auto` lifts,
+    limited memory lost two answers when lifted: `design-cent-3` ended
+    `Restoration_Failed` with no answer, and `pack-comp2p-32` fell back to a
+    weakly stationary point, where both are strongly stationary unlifted.
+    It also took 27% more iterations on the 29 others (68,524 against
+    53,746). The new `design_cent_3` fixture's L-BFGS sweep leg is what
+    showed it. `yes` still lifts there.
   - **The ℓ1 penalty stage runs unlifted.** The penalty makes every equality
     row elastic and keeps inequalities hard. On the lifted model it would
     soften each lifted row `g - w = c`, the paired row's own feasibility,
     which is a hard inequality when unlifted. It would also add two elastic
     variables per pair, giving a different and larger subproblem. With the
     penalty run lifted, pack-comp1p-32 and pack-comp2p-32 went from about
-    300 penalty iterations to `max_iter` (3,000, about 220 s each).
+    300 penalty iterations to `max_iter` (3,000, about 220 s each). The
+    wrapper switches to the unlifted structure for that solve
+    (`MpccTnlp::set_lift`); it is the same model object throughout.
+  - **A branch's warm start keeps the lifted variable's upper multiplier.**
+    Under a branch NLP a lifted variable can have a finite upper bound, or
+    be fixed. The start used to put the row multiplier's whole sign on
+    `z_L` and drop the negative part, so the start was not the inverse of
+    the reported multipliers. It now goes to `z_U` when there is an upper
+    bound to carry it.
   - **The products the acceptance tests read are `G·H(x)`.** On a lifted
     pair the solver's product row is `G·w`, which matches `G·H(x)` only up
     to the residual of the lifted row. The driver's "every product in
     tolerance" check now reads the declared model's product.
-  - **Fixtures:** no fixture's paired row is wide enough for `auto`. The
-    fixture sweep diffs empty against the commit before (280 lines, both
-    legs), and CALIPSO's 12 declared runs and `declared.py` are identical
+  - **Fixtures:** one new declared-pair fixture, MacMPEC `design-cent-3`
+    (`tests/fixtures_mpcc/design_cent_3.nl`), has paired rows exactly at
+    `auto`'s threshold. It is lifted at the default and reaches the same S
+    answer as unlifted, in 69 iterations against 451. No other fixture's
+    paired row is that wide. Apart from that new line, the fixture sweep
+    diffs empty against the commit before (280 lines, both legs), and CALIPSO's 12 declared runs and `declared.py` are identical
     under `auto`. Lifting every pair (`yes`) is not uniformly better, which
     is why `yes` is not the default:
     - every `cc:` line of the sweep keeps its answer and certificate class;
