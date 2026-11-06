@@ -35,6 +35,12 @@
             print("installed-core-only")
         """
         cmd = `$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`
+        # Pkg.test restricts JULIA_LOAD_PATH. The fresh project must be able to
+        # load the Pkg stdlib, while still excluding the user's global project.
+        cmd = addenv(
+            cmd,
+            "JULIA_LOAD_PATH" => join(["@", "@stdlib"], Sys.iswindows() ? ';' : ':'),
+        )
         @test read(cmd, String) == "installed-core-only"
     end
 end
