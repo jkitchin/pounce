@@ -290,6 +290,50 @@ fn the_reproducer_converges_with_a_multiplier_a_reader_can_check() {
     );
 }
 
+/// A retry's cost is reported, not just its answer. `iteration_count` is
+/// one attempt's (here the promoted retry's), so a total built from it
+/// dropped the base attempt: the MPCC driver's per-solve record read 7
+/// iterations for a `relu_nn` finish whose base had spent 86 more, and 71
+/// in restoration. `dual_divergence_retry_iterations` is both attempts', and
+/// is checked here against the one place each attempt's count is printed;
+/// with the retry off it is absent.
+#[test]
+fn a_retry_reports_both_attempts_iterations() {
+    let (r, stdout) = solve(REPRO_PRE945);
+    assert!(
+        r.statistics.dual_divergence_retry_promoted,
+        "{FIXTURE}: stdout=\n{stdout}"
+    );
+    let counts = iteration_counts(&stdout);
+    assert_eq!(
+        counts.len(),
+        2,
+        "{FIXTURE}: expected one summary per attempt, base then retry \
+         (REPRO_PRE945 turns the mu fallback off); stdout=\n{stdout}"
+    );
+    assert_eq!(
+        r.statistics.dual_divergence_retry_iterations,
+        Some(counts.iter().sum::<i64>()),
+        "{FIXTURE}: counts {counts:?}; stdout=\n{stdout}"
+    );
+    assert!(
+        counts[0] > 0,
+        "{FIXTURE}: the base attempt must have spent something for this test \
+         to mean anything; counts {counts:?}"
+    );
+
+    let opts: Vec<&str> = REPRO_PRE945
+        .iter()
+        .copied()
+        .chain(["dual_divergence_retry=no"])
+        .collect();
+    let (off, off_out) = solve(&opts);
+    assert_eq!(
+        off.statistics.dual_divergence_retry_iterations, None,
+        "{FIXTURE}: no retry ran; stdout=\n{off_out}"
+    );
+}
+
 /// **At the shipped default the reproducer does not stall** (gh#945), and
 /// that is why every test in this family that needs the stall now names
 /// [`REPRO_PRE945`].

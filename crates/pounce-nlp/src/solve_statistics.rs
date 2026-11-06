@@ -437,6 +437,15 @@ pub struct SolveStatistics {
     /// and lost — in the latter case the returned point, status and
     /// residuals are the base attempt's.
     pub dual_divergence_retry_promoted: bool,
+    /// Every iteration both attempts of a gh#884 dual-divergence retry spent
+    /// (each attempt's [`Self::spent_iteration_count`], so a
+    /// `mu_strategy_fallback` re-solve inside either is counted), when the
+    /// retry ran; `None` otherwise. Promoted or declined, `iteration_count`
+    /// is one attempt's, and nothing else kept the other's: the MPCC driver's
+    /// per-solve record read 7 iterations for a `relu_nn` finish whose base
+    /// attempt had spent 86 more, and 71 in restoration, in 3.9 s of its 4.0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dual_divergence_retry_iterations: Option<Index>,
     /// gh#1042 C1. The `mu_strategy_fallback` retry's record when it ran in
     /// this solve, `None` otherwise. Sticky across the attempts of one solve
     /// (like `dual_divergence_signature`): a later attempt an outer driver
@@ -571,6 +580,7 @@ impl Default for SolveStatistics {
             dual_divergence_signature: false,
             returned_run_dual_divergence_signature: false,
             dual_divergence_retry_promoted: false,
+            dual_divergence_retry_iterations: None,
             mu_strategy_fallback: None,
             sqp_qp_solves: 0,
             sqp_qp_working_set_changes: 0,
@@ -595,7 +605,14 @@ impl SolveStatistics {
     /// ladder's `total_iteration_count` did: on `square_flowsheet_resto`'s
     /// lbfgs leg, rung 4's re-solve hit the cap at 500 and its flip spent 82
     /// more, and the report said 812 for a solve that cost 894.
+    ///
+    /// A gh#884 dual-divergence retry is counted the same way: when one ran,
+    /// [`Self::dual_divergence_retry_iterations`] holds both attempts' spend
+    /// and is the answer.
     pub fn spent_iteration_count(&self) -> Index {
+        if let Some(total) = self.dual_divergence_retry_iterations {
+            return total;
+        }
         self.mu_strategy_fallback
             .as_ref()
             .map_or(self.iteration_count, |r| r.total_iteration_count())

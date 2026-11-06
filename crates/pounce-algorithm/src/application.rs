@@ -5147,6 +5147,12 @@ impl IpoptApplication {
         &mut self,
         tnlp: Rc<RefCell<dyn TNLP>>,
     ) -> ApplicationReturnStatus {
+        // A total left by an earlier attempt on this application (a
+        // second-opinion rung re-enters below `optimize_tnlp`'s reset) is not
+        // this attempt's.
+        self.statistics
+            .borrow_mut()
+            .dual_divergence_retry_iterations = None;
         let first_status = self.dispatch_standard_solve(Rc::clone(&tnlp));
         if !self.dual_divergence_signature.get() {
             return first_status;
@@ -5283,7 +5289,29 @@ impl IpoptApplication {
         let _ = scope
             .options
             .set_string_value("perturb_always_cd", "yes", true, false);
+        // Each attempt's spend, measured on its own. `iteration_count` is
+        // overwritten by the retry, and the `mu_strategy_fallback` record is
+        // sticky across attempts: it lives on the application and is copied
+        // into the statistics at the end of every run. So the base's record
+        // is set aside, in both places, while the retry runs, and put back
+        // afterwards exactly as the sticky rule leaves it (the retry's own
+        // record if it ran a fallback, the base's otherwise). Nothing reads
+        // the record to decide anything; it is reporting only.
+        let base_spent = scope.statistics.borrow().spent_iteration_count();
+        let base_fallback = scope.mu_strategy_fallback_record.borrow_mut().take();
+        scope.statistics.borrow_mut().mu_strategy_fallback = None;
         let retry_status = scope.dispatch_standard_solve(Rc::clone(&tnlp));
+        {
+            let retry_spent = scope.statistics.borrow().spent_iteration_count();
+            if scope.mu_strategy_fallback_record.borrow().is_none() {
+                *scope.mu_strategy_fallback_record.borrow_mut() = base_fallback.clone();
+                scope.statistics.borrow_mut().mu_strategy_fallback = base_fallback;
+            }
+            scope
+                .statistics
+                .borrow_mut()
+                .dual_divergence_retry_iterations = Some(base_spent + retry_spent);
+        }
         // Exactly as it was, absence as absence, so a later solve on the
         // same application does not read a caller-set `no`.
         scope.options.restore_entry("perturb_always_cd", saved_cd);

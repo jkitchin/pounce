@@ -169,6 +169,32 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **A gh#884 dual-divergence retry's iterations are counted.**
+  - **What changed:** when the retry runs, the statistics and the JSON
+    report now carry `dual_divergence_retry_iterations`, the base attempt's
+    iterations plus the retry's. `SolveStatistics::spent_iteration_count`
+    returns it. So do the complementarity driver's per-solve `iterations`,
+    its `total_iterations`, and the second-opinion ladder's totals.
+  - **Why:** `iteration_count` is one attempt's, whether the retry was
+    promoted or declined, and nothing kept the other attempt's. On
+    `relu_nn` `digits_128x3_img372_eps25` a coupled-continuation finish was
+    recorded as 7 iterations. Its base attempt had spent 86 more, 71 of them
+    in restoration, in 3.9 s of the call's 4.0 s. Across the corpora the
+    reported totals were low by 5.2% on MacMPEC (77,913 against 82,001), 4.7%
+    on `relu_nn`, 4.0% on `capacity_equilibria` and 0.4% on `mpcc_opf`. On
+    single models it was worse: MacMPEC `scholtes4` reported 381 against
+    1,381 spent, and `ralph1` 386 against 974.
+  - **What did not change:** no answer, status or trajectory. The
+    complementarity driver's iteration budgets still read the count they
+    read before (`MpccSolveRecord::budget_iterations`), so reporting the
+    true cost moves no budget. Totals on solves where the retry ran go up.
+    The `mu_strategy_fallback` record keeps its sticky behaviour across the
+    two attempts. Measured against the previous head: the fixture sweep
+    moves one reported total (lbfgs `opf_vv_lower_knee`, 804 to 861) and no
+    status, objective or `it=`. MacMPEC, `mpcc_nl`, the OPF, transmission,
+    capacity and `relu_nn` suites keep every status, objective and verdict.
+    No fixture reaches a retry whose base attempt itself ran the
+    `mu_strategy_fallback`, so that branch of the count is untested.
 - **Restoration ran under a stale `max_iter`.** The restoration provider
   read the options once, when it was built: the CLI builds it before any
   solve. A solve whose `max_iter` changed afterwards therefore had its
