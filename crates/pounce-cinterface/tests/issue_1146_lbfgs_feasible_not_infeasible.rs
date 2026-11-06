@@ -32,6 +32,20 @@
 //! The rule branches on whether the point is declared-feasible, so the
 //! genuinely infeasible variant (`log(x) >= 0`, i.e. `x >= 1`, against
 //! `x <= 0.75`) is here too: it must still be convicted.
+//!
+//! **The exact-Hessian leg** fails differently, so it gets its own test. It
+//! matches Ipopt digit for digit through iteration 9, and Ipopt's 10th step
+//! reaches `inf_pr = 0`. Pounce instead convicted at iteration 9 (`x = 0.349`),
+//! where the `log` row really is violated (by `0.057`), so the gate above
+//! rightly stays out of it. What failed was the no-descent probe the detector
+//! convicts on. It measured `θ = ‖(c, d − s)‖` with the slacks held fixed, so
+//! every probe step opened a gap `Δx` on the two linear rows. Their slacks sat
+//! exactly on `d(x)`; those rows are satisfied and stay satisfied for any small
+//! move. And under row scaling `(1, 1, 1e-8)` the `log` row's real `0.057`
+//! counted as `5.7e-10`. A step of `+0.1`, which makes the model feasible,
+//! read as a 17 000-fold increase. The probe now measures the model's own
+//! violation, per-row in user units, and the solve takes Ipopt's step and
+//! lands on Ipopt's answer (`x = 0.612028`).
 
 use pounce_cinterface::*;
 use std::ffi::{CString, c_void};
@@ -231,15 +245,32 @@ fn lbfgs_from_a_feasible_start_still_solves() {
 }
 
 #[test]
+fn exact_hessian_from_the_log_singularity_is_not_convicted_one_step_from_feasible() {
+    let (status, x, g) = solve("exact", 0.0, -1.0);
+    assert_eq!(
+        status, SOLVE_SUCCEEDED,
+        "gh#1146 exact leg: x = {x}, g = {g:?} (every row holds on [1/e, 0.75])"
+    );
+    let tol = 1e-6;
+    assert!(
+        (-1.0f64).exp() - tol <= x && x <= 0.75 + tol,
+        "x = {x} outside the feasible set [1/e, 0.75]"
+    );
+}
+
+#[test]
 fn the_infeasible_variant_is_still_convicted() {
     // `log(x) >= 0` needs `x >= 1`, but `x <= 0.75`: genuinely infeasible.
-    // The point the solver stops at violates a declared row, so the gate
-    // must let the verdict through — from either start.
-    for x0 in [0.0, 0.5] {
-        let (status, x, g) = solve("limited-memory", x0, 0.0);
-        assert_eq!(
-            status, INFEASIBLE_PROBLEM_DETECTED,
-            "x0 = {x0}: x = {x}, g = {g:?}"
-        );
+    // The point the solver stops at violates a declared row, so neither the
+    // gate nor the model-measured descent probe may acquit it — from either
+    // start, on either Hessian.
+    for hessian in ["limited-memory", "exact"] {
+        for x0 in [0.0, 0.5] {
+            let (status, x, g) = solve(hessian, x0, 0.0);
+            assert_eq!(
+                status, INFEASIBLE_PROBLEM_DETECTED,
+                "{hessian}, x0 = {x0}: x = {x}, g = {g:?}"
+            );
+        }
     }
 }

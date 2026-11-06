@@ -479,7 +479,9 @@ pub struct IpoptAlgorithm {
     last_resto_unreleased_s: Option<Box<dyn Vector>>,
     /// Unscaled max-norm violation of the original NLP at
     /// [`Self::last_resto_unreleased_x`] — what the gh#1042 exit judges its
-    /// verdict on (gh#1076). Meaningful only while that point is held.
+    /// verdict on (gh#1076). The model's rows and box against their declared
+    /// bounds, not the slack gap `d − s` (gh#1146). Meaningful only while that
+    /// point is held.
     last_resto_unreleased_theta_unscaled: Number,
     /// An unreleased hand-back whose shot the outer has not yet taken
     /// (gh#1076). Set by every unreleased recovery; cleared by the first
@@ -4278,8 +4280,18 @@ impl IpoptAlgorithm {
         // a library embedder setting `ConvCheckOptions` directly is not bound
         // by that, and `0 >= 0` would turn an exactly-feasible iterate into an
         // infeasibility certificate. A zero violation never proves anything.
+        //
+        // And the violation is the **model's** — `|c(x)|` and
+        // `dist(d(x), [d_l, d_u])` against the declared bounds and box — not
+        // the slack reformulation's `‖(c, d − s)‖` (gh#1146). `s` is confined
+        // to `[d_l, d_u]`, so a gap `d − s` can be any size while `d(x)` sits
+        // inside its bounds: an iterate the user's own rows call feasible
+        // would be certified infeasible on the slack's say-so. The model
+        // measure is never larger than the slack one, so this can only move a
+        // cycle exit from `LocalInfeasibility` to `ErrorInStepComputation`,
+        // and only at a point that satisfies the model to `constr_viol_tol`.
         let cycle_viol_tol = self.bundle.conv_check.constr_viol_tol_or_default();
-        let reference_theta_unscaled = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+        let reference_theta_unscaled = self.cq.borrow().curr_declared_primal_violation_max();
         let cycle_exit =
             if reference_theta_unscaled > 0.0 && reference_theta_unscaled >= cycle_viol_tol {
                 SolverReturn::LocalInfeasibility
@@ -4733,8 +4745,10 @@ impl IpoptAlgorithm {
                 if recovery_unreleased {
                     self.last_resto_unreleased_x = Some(recovered.x.make_new_copy());
                     self.last_resto_unreleased_s = Some(recovered.s.make_new_copy());
+                    // The model's violation, not the slack gap — same
+                    // reason as the cycle exit's measure (gh#1146).
                     self.last_resto_unreleased_theta_unscaled =
-                        self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+                        self.cq.borrow().curr_declared_primal_violation_max();
                 } else {
                     self.last_resto_unreleased_x = None;
                     self.last_resto_unreleased_s = None;

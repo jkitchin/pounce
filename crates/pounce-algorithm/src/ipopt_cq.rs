@@ -2219,8 +2219,30 @@ impl IpoptCalculatedQuantities {
     /// the targeted set. A single absolute threshold on a surrogate cannot do
     /// this job.
     ///
-    /// Comparing `θ` at two points is scale-free by construction — the row
-    /// scaling cancels out of the ratio — so this needs no calibration at all.
+    /// `θ` here is the violation of the **model**, not of the slack
+    /// reformulation, and in user units:
+    /// [`unscaled_nlp_constraint_violation_max`] — `|c(x)|` and
+    /// `dist(d(x), [d_l, d_u])` against the declared bounds, each row
+    /// unscaled. Both halves of that matter, and both were measured wrong
+    /// once (gh#1146):
+    ///
+    /// * **Slack-free.** The verdict claims no nearby `x` violates the
+    ///   *model* less. Measured as `‖(c, d − s)‖` with `s` held fixed, every
+    ///   probe step also opens a gap `Δx` on each inequality row whose slack
+    ///   currently sits exactly on `d(x)` — rows that are satisfied, and stay
+    ///   satisfied, for any small move. On the gh#1146 model (`x ≥ 0.1`,
+    ///   `0.25 ≤ x`, `log x ≥ −1`, exact Hessian, `x0 = 0`) that turned a
+    ///   step of `+0.1` — which makes the model **feasible** — into a
+    ///   17 000-fold *increase*, and the verdict went out at `x = 0.349`, one
+    ///   Newton step from a solution.
+    /// * **Per-row unscaled.** A ratio of max-norms is scale-free only when
+    ///   one row dominates both. Under row scaling `(1, 1, 1e-8)` — the `log`
+    ///   row, scaled at `x0 = 0` where its derivative is infinite — the
+    ///   `0.057` violation that the verdict was about counted as `5.7e-10`,
+    ///   below roundoff on every other row.
+    ///
+    /// A model-feasible point (`θ = 0`) has nothing to certify, and reports
+    /// descent — the caller must not convict it.
     ///
     /// Costs one `eval_c`/`eval_d` pair per probed step, and runs only where the
     /// detector was about to fire (both gates already passed for a full streak),
@@ -2233,11 +2255,16 @@ impl IpoptCalculatedQuantities {
     pub fn infeasibility_descent_available(&self) -> bool {
         use pounce_linalg::DenseVector;
 
-        let theta_curr = self.curr_primal_infeasibility_max();
-        if theta_curr <= 0.0 {
+        let theta_curr = self.curr_unscaled_nlp_constraint_violation_max();
+        if !theta_curr.is_finite() {
             return false;
         }
-        // -grad of 1/2||(c, d-s)||^2 w.r.t. x.
+        if theta_curr <= 0.0 {
+            // Feasible as declared: no infeasibility to confirm.
+            return true;
+        }
+        // -grad of 1/2||(c, d-s)||^2 w.r.t. x. Only the direction is used;
+        // the probe below measures the model's violation along it.
         let c = self.curr_c();
         let dms = self.curr_d_minus_s();
         let jc_t_c = self.curr_jac_c_t_times_vec(&*c);
@@ -2341,9 +2368,11 @@ impl IpoptCalculatedQuantities {
     /// a few percent and most of the way separates them; 10 % sits in the middle.
     const INFEAS_PROBE_MARGIN: Number = 0.1;
 
-    /// Max-norm constraint violation at an arbitrary `x`, evaluated on scratch
-    /// vectors so the algorithm's `curr`/`trial` state is untouched. `None` if
-    /// the evaluation is unusable.
+    /// The model's max-norm constraint violation at an arbitrary `x`, in user
+    /// units ([`unscaled_nlp_constraint_violation_max`], the measure
+    /// [`Self::infeasibility_descent_available`] compares against), evaluated
+    /// on scratch vectors so the algorithm's `curr`/`trial` state is
+    /// untouched. `None` if the evaluation is unusable.
     fn theta_at(&self, x: &dyn Vector) -> Option<Number> {
         let iv = self.curr_iv();
         let mut nlp = self.nlp.borrow_mut();
@@ -2351,11 +2380,7 @@ impl IpoptCalculatedQuantities {
         nlp.eval_c(x, &mut *c);
         let mut d = iv.s.make_new();
         nlp.eval_d(x, &mut *d);
-        // `d - s` against the CURRENT slacks, matching how `curr_d_minus_s`
-        // measures the violation: the probe moves x only.
-        let mut dms = iv.s.make_new();
-        dms.add_two_vectors(1.0, &*d, -1.0, &*iv.s, 0.0);
-        let t = c.amax().max(dms.amax());
+        let t = unscaled_nlp_constraint_violation_max(&*nlp, &*c, &*d);
         t.is_finite().then_some(t)
     }
 
