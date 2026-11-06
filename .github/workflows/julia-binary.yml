@@ -67,6 +67,15 @@ jobs:
           docker run --rm --platform "$docker_platform" \
             --mount "type=bind,src=$RUNNER_TEMP,dst=$RUNNER_TEMP" \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE,readonly" \
-            "julia:$TEST_JULIA-bookworm" julia --startup-file=no \
+            -e JULIA_NUM_PRECOMPILE_TASKS=1 -e OPENBLAS_NUM_THREADS=1 \
+            "julia:$TEST_JULIA-bookworm" sh -eu -c '
+              julia --startup-file=no "$1" "$2" --no-rust
+              artifact_library=$(julia --startup-file=no --project="$2" -e \
+                "using Pounce_jll; print(Pounce_jll.libpounce_cinterface_path)")
+              custom_dir=$(mktemp -d)
+              cp "$artifact_library" "$custom_dir/libpounce_cinterface.so"
+              POUNCE_LIBRARY_PATH="$custom_dir/libpounce_cinterface.so" \
+                julia --startup-file=no "$1" "$2" --no-rust --custom-library
+            ' -- \
             "$GITHUB_WORKSPACE/Pounce.jl/packaging/validate_release.jl" \
-            "$RUNNER_TEMP/candidate" --no-rust
+            "$RUNNER_TEMP/candidate"

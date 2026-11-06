@@ -83,6 +83,20 @@ It requires no `cargo`/`rustc` on PATH, no custom-library override, core-only
 loading without MOI, and a default library inside Julia's artifact store before
 running the complete package suite. Run in a fresh process after staging.
 
+Repeat the suite with an explicit custom library in a separate process:
+
+```sh
+POUNCE_LIBRARY_PATH=/absolute/path/to/libpounce_cinterface.so \
+  julia --startup-file=no /path/to/pounce/Pounce.jl/packaging/validate_release.jl \
+  /tmp/pounce-release-candidate --no-rust --custom-library
+```
+
+Use the platform's library suffix (`.dylib` on macOS). The validator checks that
+the selected library is the override and differs from the JLL product path.
+A copy of the audited library outside the artifact store tests path selection;
+it does not establish compatibility with a separately built native library.
+The manual CI workflow runs both modes using such a copy.
+
 ## Release gates
 
 - Build and audit each advertised platform; record archive and tree hashes.
