@@ -207,6 +207,9 @@ pub struct MpccTnlp {
     defer_inner_finalize: bool,
     start_override: Option<StartOverride>,
     branch: Option<BranchBounds>,
+    /// Per inner row: the bounds `branch` gives it, or `None`. Built in
+    /// [`MpccTnlp::set_branch`], so a lookup by row is O(1).
+    branch_rows: Vec<Option<(Number, Number)>>,
 }
 
 /// Everything in the lowered model's structure that lifting changes. Built
@@ -544,6 +547,7 @@ impl MpccTnlp {
             defer_inner_finalize: false,
             start_override: None,
             branch: None,
+            branch_rows: vec![None; m],
             pairs: declared,
             lowered: pairs,
             signless,
@@ -628,18 +632,13 @@ impl MpccTnlp {
         )
     }
 
-    /// Fill a lifted start from an inner-shaped one already in `sp`'s inner
-    /// slices: `w = H(x)`, its bound multiplier from the row's (sign-clipped
-    /// at zero), and the row's multiplier from the stationarity in `w`,
-    /// `s_H λ_i = ν_k G_k - z_w` (module docs, "Lifting"). The inverse of
-    /// [`Self::inner_duals`] at a stationary point.
     /// The box a branch NLP puts on a lifted row's variable: `g_i` in the
     /// branch's `[l, u]` is `w = s_H (g_i - c)` in the image of that box,
     /// infinite ends kept infinite. `None` when row `i` is not lifted or the
     /// branch does not bound it; `w`'s own bounds are then `[0, inf)`.
     fn lifted_box(&self, i: usize) -> Option<(Number, Number)> {
         let (k, _) = self.layout.lift_of_row.get(i).copied().flatten()?;
-        let &(_, l, u) = self.branch.as_ref()?.rows.iter().find(|r| r.0 == i)?;
+        let (l, u) = self.branch_rows.get(i).copied().flatten()?;
         let (sh, c) = self.h_side[k];
         let img = |v: Number| {
             if v <= -INF {
@@ -654,6 +653,13 @@ impl MpccTnlp {
         Some((a.min(z), a.max(z)))
     }
 
+    /// Fill a lifted start from an inner-shaped one already in `sp`'s inner
+    /// slices: `w = H(x)`; its bound multipliers from the row's, `z_L - z_U =
+    /// -s_H λ_i`, the negative part on `z_U` when a branch gives `w` a finite
+    /// upper bound and clipped at zero otherwise; and the row's multiplier
+    /// from the stationarity in `w`, `s_H λ_i = ν_k G_k - (z_L - z_U)`
+    /// (module docs, "Lifting"). The inverse of [`Self::inner_duals`] at a
+    /// stationary point, wherever `w`'s bounds can carry the sign.
     fn lift_start(&mut self, sp: &mut StartingPoint<'_>) -> bool {
         if self.layout.lifted.is_empty() {
             return true;
@@ -724,6 +730,12 @@ impl MpccTnlp {
     /// Solve a branch NLP instead of a lowering (`None` restores the
     /// lowering); see [`BranchBounds`].
     pub fn set_branch(&mut self, branch: Option<BranchBounds>) {
+        self.branch_rows = vec![None; self.m_inner];
+        for &(i, l, u) in branch.iter().flat_map(|b| &b.rows) {
+            if let Some(slot) = self.branch_rows.get_mut(i) {
+                *slot = Some((l, u));
+            }
+        }
         self.branch = branch;
     }
 
