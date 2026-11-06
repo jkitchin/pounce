@@ -143,9 +143,11 @@ the resulting platform tags resolve the runtime artifacts on both Linux targets.
 The full Linux arm64 rebuild at `b892f46a` passes the fatal audit and resolves
 the runtime dependency. Full artifact-backed tests and the remaining target
 builds are still required before this stage is complete.
-The first macOS arm64 build also needs a linker correction: its audit found an
-unused system libiconv dependency. A small linker control verifies the removal
-flag; the complete corrected artifact still requires rebuild and validation.
+The corrected macOS arm64 artifact at `73f45e96` also passes the fatal audit;
+its unused system libiconv dependency is gone. Linux x86_64 additionally needs
+the GNU-linker selection at `28297b0b`, verified in a matching linker control;
+the complete rebuild and Intel macOS artifact are still pending. The inspected
+arm64 build baselines are glibc 2.19 on Linux and macOS 11.0 on Apple platforms.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add

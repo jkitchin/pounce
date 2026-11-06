@@ -309,6 +309,19 @@ GCC 10.2.0. Artifact tree: `a796ceec2106222a27debcc6bc909869492c09b6`;
 archive SHA-256: `1b0d2946e91b4893641af83468496479585d76da4fd01a7cae3b025e9f94bd03`.
 Full artifact-backed runtime tests remain pending.
 
+ELF inspection records `$ORIGIN` as the runpath and library SHA-256
+`2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e`.
+The library has a weak `__cxa_thread_atexit_impl@GLIBC_2.18` reference.
+An actual `ctypes.CDLL` load on CentOS 7 arm64 fails for that versioned symbol,
+even though `ldd -v` finds the version namespace. CentOS 7 is therefore not
+covered by this artifact. The build's GCC 10 shard
+`d5a9463d95b3ebf75ac06d8ab163ee9fe43e3d0d` contains glibc **2.19**, verified
+from its libc binary; this is the conservative Linux arm64 build baseline.
+The CentOS image used was arm64 manifest
+`73f11afcbb50d8bc70eab9f0850b3fa30e61a419bc48cf426e63527d14a8373b`
+from the official `centos:7` manifest list. This loader check is separate from
+the pending complete Julia suites on Debian 12.
+
 The earlier Linux x86_64 build at recipe `350f204c` also finished and confirmed
 the unavailable libgfortran3 runtime mapping. Its archive is exploratory and
 will be rebuilt with GCC 10. The auditor also identifies CPUID-based instruction
@@ -337,6 +350,19 @@ while retaining libSystem. The recipe applies this flag on Darwin, but the full 
 its audit and runtime tests. The first macOS archive is exploratory
 (tree `95e88077236cbcc37b850a0b26af149421cb2ec1`, SHA-256
 `d898dd529763ad0ebe59accdcf8a147ea682672389d0e09f5ea5044b7237b94a`).
+
+The corrected macOS arm64 artifact at recipe
+`73f45e96039651570b7197e4868f369945be292f` now **passes the fatal audit**.
+Inspection confirms only `/usr/lib/libSystem.B.dylib` remains as a dependency,
+with dylib ID `@rpath/libpounce_cinterface.dylib` and minimum macOS **11.0**.
+Native source and Rust version remain `b4e5ffb6` / 1.91.0. Artifact tree:
+`3eb5a4b359039259aa9db75130616c897e893fb7`; archive SHA-256:
+`3d1569f1c4410a03e5ba4a73194f9486a27f1ca6e4045945f50257c6633ea757`;
+library SHA-256:
+`347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339`.
+Full artifact-backed runtime tests remain pending. An earlier corrected macOS
+compile was deliberately stopped to switch the dedicated VM from QEMU to its
+supported Rosetta mode; this accepted archive comes from a fresh complete build.
 
 An exploratory full-suite run of the earlier Linux artifact at staged wrapper
 `350f204c` failed during the core-only installation subprocess: the VM kernel
