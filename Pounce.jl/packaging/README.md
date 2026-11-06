@@ -60,6 +60,17 @@ Compare the staged `Project.toml` and `src/Pounce.jl` with the source package
 before adopting them for release. The generated README explains binary-backed
 installation. Keep the candidate and its generated JLL together until publication;
 the temporary local artifact URLs are not suitable for public distribution.
+`Candidate.toml` records the source revision/worktree state and generated JLL
+identity. On a clean target machine or container, use the stricter validator:
+
+```sh
+julia --startup-file=no /path/to/pounce/Pounce.jl/packaging/validate_release.jl \
+  /tmp/pounce-release-candidate --no-rust
+```
+
+It requires no `cargo`/`rustc` on PATH, no custom-library override, core-only
+loading without MOI, and a default library inside Julia's artifact store before
+running the complete package suite. Run in a fresh process after staging.
 
 ## Release gates
 

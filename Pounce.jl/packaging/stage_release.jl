@@ -71,6 +71,16 @@ Instantiate the environment one directory above this package and run
     )
     Pkg.activate(destination)
     Pkg.develop([PackageSpec(path = jll), PackageSpec(path = package)])
+    metadata = Dict(
+        "wrapper_commit" => readchomp(`git -C $source rev-parse HEAD`),
+        "working_tree" => readchomp(`git -C $source status --porcelain`),
+        "jll_version" => jll_project["version"],
+        "jll_uuid" => jll_project["uuid"],
+        "jll_path" => jll,
+    )
+    open(joinpath(destination, "Candidate.toml"), "w") do io
+        TOML.print(io, metadata; sorted = true)
+    end
     println("Staged binary-backed package: ", package)
     return package
 end
