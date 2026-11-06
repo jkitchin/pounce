@@ -141,7 +141,13 @@
 # a `complementarity` block, so every other line is unchanged and a baseline
 # from before it still diffs cleanly; the cc: lines themselves are new.
 # `nr` and `pol` read `-` on a binary predating those report fields, so
-# against one every cc: line moves in them and nowhere else.
+# against one every cc: line moves in them and nowhere else. A trailing
+# `,lift=<k>` appears only when the driver lifted k pairs' rows into
+# variables (`complementarity_lift`, gh#1136): the product rows were then
+# `G·w`, a different formulation of the same model. No fixture's row is wide
+# enough for the default `auto` to lift it, so the default sweep never shows
+# the field and never reaches that branch: sweep a lift change a second time
+# with `complementarity_lift=yes` appended, and measure the relu_nn suite.
 # This is not the driver's benchmark: six small models cannot measure
 # magnitude, which the declared-pair corpora (MacMPEC, the data-root OPF
 # suites; CLAUDE.md) still must.
@@ -282,7 +288,7 @@ if cc:
     cert = cc.get("certificate") or {}
     nr = cc.get("natural_residual")
     pol = cc.get("polish")
-    ccol = " cc=%s/%s,n=%d,tot=%d,nr=%s,pol=%s,esc=%d" % (
+    ccol = " cc=%s/%s,n=%d,tot=%d,nr=%s,pol=%s,esc=%d%s" % (
         cc.get("reported", "?"),
         cert.get("class", "?"),
         len(cc.get("solves", [])),
@@ -290,6 +296,9 @@ if cc:
         "%.1e" % nr if nr is not None else "-",
         "-" if not pol else ("taken" if pol.get("taken") else "kept"),
         cc.get("escapes", 0),
+        # Only when pairs were lifted, so a line from a binary predating the
+        # field, or on a model with none, is unchanged.
+        ",lift=%d" % cc["lifted"] if cc.get("lifted") else "",
     )
 print("%-6s %-40s %-9s %-32s it=%-6s q=%-4s 2nd=%-46s mu=%-56s obj=%s%s" % (
     sys.argv[3],

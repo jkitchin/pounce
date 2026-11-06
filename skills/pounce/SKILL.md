@@ -346,7 +346,10 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    The continuation tightens `τ` with the barrier in one solve by default;
    `complementarity_continuation=schedule` runs one solve per `τ` instead
    (12% faster on the OPF transmission suite, slower on MacMPEC, `relu_nn`
-   and the small OPF and capacity suites).
+   and the small OPF and capacity suites). A pair whose row has 8 or more
+   Jacobian entries (a ReLU unit's weight row) is lifted, `g(x) - w = c`
+   with `w >= 0` and the product `G·w`, so the factorization does not fill
+   in; `complementarity_lift=yes|no` forces it either way.
 7. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian
    requests, the debugger, `pounce verify`, `check-x0`, the WASM build,
    `pounce.Solver`, `find_minima`, `solve_nlp_batch` and

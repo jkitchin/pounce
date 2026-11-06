@@ -42,7 +42,7 @@ use pounce_algorithm::mpcc::{
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
 use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::mpcc::{ComplementarityPair, Lowering, MpccTnlp, StartOverride};
+use pounce_nlp::mpcc::{ComplementarityPair, Lift, Lowering, MpccTnlp, StartOverride};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, IpoptCq, IpoptData, SparsityRequest, TNLP};
 
@@ -111,6 +111,8 @@ pub struct MpccOutcome {
     pub b_check: Option<BCheck>,
     /// Branch NLPs that moved the point off a non-B-stationary one.
     pub escapes: usize,
+    /// Pairs whose row was lifted into a variable (`complementarity_lift`).
+    pub lifted: usize,
     /// The forwarded point's largest `min(|G|, |H|)` over its pairs
     /// ([`natural_residual`]): how complementary it is, in the units of the
     /// pair sides. `None` when the model could not be evaluated there.
@@ -204,6 +206,7 @@ impl MpccOutcome {
                 }
             }),
             escapes: self.escapes,
+            lifted: self.lifted,
             natural_residual: self.natural_residual.and_then(finite),
             polish: self.polish.as_ref().map(|p| ComplementarityPolishInfo {
                 taken: p.taken,
@@ -321,12 +324,30 @@ pub fn solve_mpcc(
     pairs: Vec<ComplementarityPair>,
     report: &mut dyn FnMut(&str),
 ) -> Result<MpccOutcome, String> {
-    let wrapper = Rc::new(RefCell::new(MpccTnlp::new(
+    let lift = match app
+        .options()
+        .get_string_value("complementarity_lift", "")
+        .map(|(v, _)| v)
+        .as_deref()
+    {
+        Ok("yes") => Lift::Yes,
+        Ok("no") => Lift::No,
+        _ => Lift::Auto,
+    };
+    let wrapper = Rc::new(RefCell::new(MpccTnlp::with_lift(
         Rc::clone(&inner),
         pairs,
         Lowering::Eq,
+        lift,
     )?));
     wrapper.borrow_mut().set_defer_inner_finalize(true);
+    let n_lifted = wrapper.borrow().n_lifted();
+    if n_lifted > 0 {
+        report(&format!(
+            "pounce: complementarity: {n_lifted} of {} pairs lifted (complementarity_lift).",
+            wrapper.borrow().pairs().len()
+        ));
+    }
     let lowered: Rc<RefCell<dyn TNLP>> = wrapper.clone();
 
     let tol = app
@@ -1492,6 +1513,7 @@ pub fn solve_mpcc(
             certificate: None,
             b_check: None,
             escapes,
+            lifted: n_lifted,
             natural_residual: None,
             polish,
             polish_threshold: POLISH_TRIGGER * solver_tol,
@@ -1541,6 +1563,7 @@ pub fn solve_mpcc(
         certificate,
         b_check,
         escapes,
+        lifted: n_lifted,
         natural_residual: nat_res,
         polish,
         polish_threshold: POLISH_TRIGGER * solver_tol,

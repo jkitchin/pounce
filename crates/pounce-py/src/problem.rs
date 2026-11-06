@@ -591,6 +591,7 @@ impl PyProblem {
                 };
                 d.set_item("b_stationarity", b)?;
                 d.set_item("escapes", out.escapes)?;
+                d.set_item("lifted", out.lifted)?;
                 // How complementary the reported point is (largest
                 // min(|G|, |H|)), and what the branch re-solve did, if it ran.
                 d.set_item("natural_residual", out.natural_residual)?;

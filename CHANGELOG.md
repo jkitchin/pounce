@@ -58,6 +58,35 @@ changes.
   pairs, never by status.
 
 ### Changed
+- **A declared pair on a wide row is lifted into a variable (gh#1136).**
+  - **What changed:** a one-sided pair whose row has 8 or more Jacobian
+    entries is now solved with its row `g(x) >= c` written as `g(x) - w =
+    c`, `w >= 0`, and its product row as `G·w` instead of `G·(g(x) - c)`.
+    The two models have the same solutions and the same KKT dimension.
+    The new option `complementarity_lift` (`auto`, the default; `yes` for
+    every one-sided pair; `no` for the old formulation) sets it, and the
+    report's `complementarity.lifted` counts the lifted pairs. Answers come
+    back in the model's own terms: `x` has its `n` entries, and a lifted
+    row's multiplier is the one its inequality would carry.
+  - **Why:** an unlifted product row repeats its whole row in the Jacobian
+    and adds a Hessian entry for each column, so on a ReLU network, where
+    the rows are rows of the weight matrices, the factorization did nearly
+    all the work. On the 64-128-128-128-10 network of gh#1136 each
+    factorization goes from 98 to 41 Mflop, and an iteration from about
+    115 ms to 21–30 ms. The default solve goes from 89 s to 24 s, and
+    `complementarity_strategy=continuation` from 26 s to 1.6 s, both to a
+    lower objective (−7.0786, against −7.0137).
+  - **What did not change:** no paired row in the fixture sweep or
+    `benchmarks/mpcc/declared.py` is wide enough for `auto`. The fixture
+    sweep diffs empty against the commit before (280 lines, both legs).
+    MacMPEC and the data-root suites (OPF, capacity, `relu_nn`) were not
+    run for this change. CALIPSO's 12 declared runs are identical under `auto`. Lifting every
+    pair (`yes`) is not uniformly better, which is why it is not the
+    default:
+    - every `cc:` line of the sweep keeps its answer and certificate class;
+    - `declared.py` takes 30% fewer iterations to the same answers;
+    - CALIPSO takes 14% fewer in total, but rocket ends 0.14% worse after
+      2.6 times the iterations.
 - **The complementarity continuation tightens its relaxation with the
   barrier parameter, in one solve.**
   - **What changed:** `τ = 1` is still solved as an ordinary relaxation.

@@ -273,6 +273,46 @@ its own near-active product rows. Measured on MacMPEC, turning the budget off
 for these solves moves one model back to its best known value and changes no
 other outcome, at under 1% in total time.
 
+### Wide rows are lifted
+
+A pair's product row `G·H(x)` repeats the whole row `g(x)` in the
+Jacobian, and its second derivative couples the pair's variable to every
+column of that row. For a row with a few entries that costs nothing. For a
+wide one — a ReLU unit `y ⟂ y - (W h + b)`, whose row holds a full row of
+the weight matrix — every product row becomes a dense block of the KKT
+factorization, and the factorization becomes the solve.
+
+So by default a one-sided pair whose row has 8 or more Jacobian entries is
+*lifted*: its row `g(x) >= c` becomes the equality `g(x) - w = c` with a
+new variable `w >= 0`, and the product row is `G·w`, with two Jacobian
+entries and one Hessian entry. The two models have the same solutions, and
+the KKT system the same dimension (`w` takes the place of the row's slack).
+Everything you get back is in your model's terms: `x` has your `n` entries,
+and a lifted row's multiplier is the one its inequality would carry.
+`complementarity_lift` sets it:
+
+| value | lifts |
+| --- | --- |
+| `auto` (default) | a one-sided pair whose row has at least 8 Jacobian entries |
+| `yes` | every one-sided pair |
+| `no` | none: every product row is `G·H(x)` |
+
+A mixed pair (the row free) is never lifted, since its row has no sign to
+give `w`. The report's `complementarity.lifted` counts the lifted pairs.
+
+On a 64-128-128-128-10 ReLU network (384 pairs, rows of 65 and 129
+entries), lifting cuts the floating-point work of each factorization from
+98 to 41 Mflop. Time per iteration falls from about 115 ms to 21–30 ms, and
+the default solve falls from 89 s to 24 s. `complementarity_strategy=
+continuation` falls from 26 s to 1.6 s. Both reach a lower objective than
+unlifted (−7.0786 against −7.0137). No paired row of the fixture
+corpus or of `benchmarks/mpcc/declared.py` is that wide, so `auto` leaves
+those models as they were. Lifting every pair (`yes`) is not uniformly
+better there. It cuts the iterations on `declared.py` by 30% to the same
+answers, and on CALIPSO's declared models by 14%. But CALIPSO's rocket ends
+0.14% worse after 2.6 times the iterations. MacMPEC and the OPF suites have
+not been measured. That is why `yes` is not the default.
+
 ## What you get back
 
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:
