@@ -47,6 +47,12 @@ uvx knowhow add jkitchin/pounce --skill pounce        # this project
 uvx knowhow add jkitchin/pounce --skill pounce -g     # all projects
 ```
 
+This skill is about *using* pounce and reading its reports. For questions
+about pounce's internals (where the source is, how a solve is routed and
+run, what a status or option comes from) the repository also ships a
+`pounce-expert` Claude Code subagent in `.claude/agents/`. Install it with
+`uvx knowhow add jkitchin/pounce --list`, then choose it by name.
+
 Building from a checkout needs no sibling repository either: the committed
 `Cargo.toml` pins [`feral`][feral] to a published release, so no
 `[patch.crates-io]` override is required. (Solver-core

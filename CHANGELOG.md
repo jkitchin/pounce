@@ -56,6 +56,13 @@ changes.
   `macmpec-run` and `mpcc-compare`. `BENCHMARK_REPORT.md` gains a
   "Complementarity (MPCC)" section that judges each arm by its returned
   pairs, never by status.
+- **A `pounce-expert` subagent** (`.claude/agents/pounce-expert.md`). It knows
+  where the source lives, how a solve flows through the crates (routing, the
+  IPM loop, restoration, the second-opinion ladder), where options and statuses
+  come from, how to diagnose a solve, and which checks a change needs. It reads
+  the source rather than answering from memory. Claude Code picks it up in
+  this repository. Elsewhere, `uvx knowhow add jkitchin/pounce` lists it beside
+  the skill, the commands and the MCP server. discopt ships the same file.
 
 ### Changed
 - **The complementarity continuation tightens its relaxation with the
