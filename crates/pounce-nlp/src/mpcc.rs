@@ -218,8 +218,9 @@ pub struct MpccTnlp {
     /// Per lowered pair: the 0-based index of its lifted variable `w_k`
     /// (`n + l`), or `None` when its product row is `G(x)·H(x)`.
     lift_var: Vec<Option<usize>>,
-    /// The lifted pairs (lowered indices), in the order of their variables.
-    lifted: Vec<usize>,
+    /// The lifted pairs, `(lowered index, variable index)`, in the order of
+    /// their variables.
+    lifted: Vec<(usize, usize)>,
 }
 
 /// `(sign, bound)` for a side with exactly one finite bound: `(+1, lo)` when
@@ -386,8 +387,9 @@ impl MpccTnlp {
                     Lift::Yes => true,
                 };
             if on {
-                lift_var.push(Some(n + lifted.len()));
-                lifted.push(k);
+                let w = n + lifted.len();
+                lift_var.push(Some(w));
+                lifted.push((k, w));
             } else {
                 lift_var.push(None);
             }
@@ -539,8 +541,7 @@ impl MpccTnlp {
     ) -> (Vec<Number>, Vec<Number>, Vec<Number>) {
         let n = self.n;
         let mut lam = lambda.to_vec();
-        for &k in &self.lifted {
-            let w = self.lift_var[k].expect("lifted");
+        for &(k, w) in &self.lifted {
             let i = self.lowered[k].row;
             if i < lam.len() {
                 let zl = z_l.get(w).copied().unwrap_or(0.0);
@@ -572,8 +573,7 @@ impl MpccTnlp {
         {
             return false;
         }
-        for &k in &self.lifted {
-            let w = self.lift_var[k].expect("lifted");
+        for &(k, w) in &self.lifted {
             let p = self.lowered[k];
             let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
             sp.x[w] = sh * (self.g_inner[p.row] - c);
@@ -790,8 +790,7 @@ impl TNLP for MpccTnlp {
         }
         // A lifted row is the equality `g_i - s_H w = c_i`, its sign carried
         // by `w >= 0`.
-        for &k in &self.lifted {
-            let w = self.lift_var[k].expect("lifted");
+        for &(k, w) in &self.lifted {
             let i = self.lowered[k].row;
             let c = self.h_side[k].1;
             b.g_l[i] = c;
@@ -815,13 +814,8 @@ impl TNLP for MpccTnlp {
             for &(i, l, u) in &br.rows {
                 // A lifted row's bounds move to its variable: `g_i` in
                 // `[l, u]` is `w = s_H (g_i - c)` in the image of that box.
-                if let Some(k) = self
-                    .lifted
-                    .iter()
-                    .copied()
-                    .find(|&k| self.lowered[k].row == i)
+                if let Some(&(k, w)) = self.lifted.iter().find(|&&(k, _)| self.lowered[k].row == i)
                 {
-                    let w = self.lift_var[k].expect("lifted");
                     let (sh, c) = self.h_side[k];
                     let img = |v: Number| {
                         if v <= -INF {
@@ -927,8 +921,7 @@ impl TNLP for MpccTnlp {
             return false;
         }
         self.g_inner.copy_from_slice(&g[..m]);
-        for &k in &self.lifted {
-            let w = self.lift_var[k].expect("lifted");
+        for &(k, w) in &self.lifted {
             g[self.lowered[k].row] -= self.h_side[k].0 * x[w];
         }
         // Under `Coupled` the bound stays at `tau0` and the row carries the
@@ -959,9 +952,9 @@ impl TNLP for MpccTnlp {
                 ) {
                     return false;
                 }
-                for (l, &k) in self.lifted.iter().enumerate() {
+                for (l, &(k, w)) in self.lifted.iter().enumerate() {
                     irow[jnnz + l] = self.lowered[k].row as Index + off;
-                    jcol[jnnz + l] = self.lift_var[k].expect("lifted") as Index + off;
+                    jcol[jnnz + l] = w as Index + off;
                 }
                 for (k, p) in self.lowered.iter().enumerate() {
                     let b = self.jac_block[k];
@@ -1003,7 +996,7 @@ impl TNLP for MpccTnlp {
                         return false;
                     }
                 }
-                for (l, &k) in self.lifted.iter().enumerate() {
+                for (l, &(k, _)) in self.lifted.iter().enumerate() {
                     values[jnnz + l] = -self.h_side[k].0;
                 }
                 let pv = self.product_factors(x);
@@ -1168,8 +1161,8 @@ impl TNLP for MpccTnlp {
         }
         // A lifted row's value is `g_i - s_H w`; the inner model gets `g_i`.
         let mut g = sol.g[..m.min(sol.g.len())].to_vec();
-        for &k in &self.lifted {
-            let (i, w) = (self.lowered[k].row, self.lift_var[k].expect("lifted"));
+        for &(k, w) in &self.lifted {
+            let i = self.lowered[k].row;
             if i < g.len() && w < sol.x.len() {
                 g[i] += self.h_side[k].0 * sol.x[w];
             }
@@ -1209,7 +1202,7 @@ impl TNLP for MpccTnlp {
             let names: Vec<String> = self
                 .lifted
                 .iter()
-                .map(|k| format!("complementarity_lift[{k}]"))
+                .map(|(k, _)| format!("complementarity_lift[{k}]"))
                 .collect();
             for v in var.strings.values_mut() {
                 if v.len() == self.n {
