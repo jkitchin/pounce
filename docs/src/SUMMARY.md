@@ -32,6 +32,7 @@
 - [GAMS](gams.md)
 - [CasADi](casadi.md)
 - [Python API](python.md)
+- [Julia and JuMP](julia.md)
 - [Rust API](rust.md)
   - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)

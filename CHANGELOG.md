@@ -10,6 +10,14 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Julia native diagnostics.** Pounce.jl exposes final residuals, restoration,
+  linear-solver and finite-difference statistics, JSON solve reports, and opt-in
+  iteration history through its low-level API and optional MOI extension.
+- **Julia/JuMP interface from a source checkout.** `Pounce.jl` wraps the C
+  library with a MathOptInterface optimizer, sparse derivative callbacks,
+  primal/dual results and starts, and modern and legacy JuMP nonlinear support.
+  Includes callback safety tests, MOI conformance tests, and Linux/macOS CI.
+  Build the C library locally; Julia registry/JLL distribution is deferred.
 - **Notebook 48: optimizing over a trained ReLU network as declared
   complementarity.** A ReLU unit `y = max(0, z)` is exactly the pair
   `0 <= y ⟂ y - z >= 0`, so a network is linear rows plus one pair per

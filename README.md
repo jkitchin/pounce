@@ -168,6 +168,7 @@ Optional extras, none of them required for a normal solve:
 | Plots | `pip install "pounce-solver[viz]"` | debugger `viz` / `pounce-dbg-viz` |
 | GAMS link | `pip install "pounce-solver[gams]"` | `option nlp = pounce;` — see [GAMS](docs/src/gams.md) |
 | CasADi plugin | build from source, `make -C casadi install` | `nlpsol("S", "pounce", nlp)` / `opti.solver("pounce")` — see [CasADi](docs/src/casadi.md) |
+| Julia / JuMP | build `pounce-cinterface`, then `Pkg.develop(path="Pounce.jl")` | `Model(Pounce.Optimizer)` — see [Julia](docs/src/julia.md) |
 
 ### With a container (clusters, or no install at all)
 

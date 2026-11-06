@@ -27,6 +27,7 @@
 # (logs, JSON results, .sol files) are regenerated locally.
 /benchmarks/*
 !/benchmarks/README.md
+!/benchmarks/SOURCES.md
 !/benchmarks/Makefile
 !/benchmarks/benchmark_report.py
 # The corpus-root resolver is source, not generated data — every harness
@@ -43,6 +44,9 @@
 !/benchmarks/*/
 /benchmarks/*/*
 !/benchmarks/*/README.md
+!/benchmarks/julia_bmopf/SOURCE.md
+!/benchmarks/julia_bmopf/*.jl
+!/benchmarks/julia_bmopf/*.toml
 !/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
 # Model generators that reproduce a Mittelmann instance *without* an AMPL

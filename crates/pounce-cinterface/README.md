@@ -2,6 +2,10 @@
 
 C ABI for POUNCE. Port of Ipopt's `Interfaces/IpStdCInterface.{h,cpp}`.
 
+For Julia and JuMP, use the source-checkout
+[`Pounce.jl` package](../../Pounce.jl/README.md), which provides bindings for
+this ABI and a tested MathOptInterface optimizer.
+
 Provides the `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem`
 entry points so existing PyIpopt, cyipopt, JuMP, and AMPL wrappers can link
 against POUNCE without source changes. Function names and signatures

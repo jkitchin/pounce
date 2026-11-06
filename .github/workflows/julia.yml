@@ -1,0 +1,47 @@
+name: Julia
+on:
+  push:
+    branches: [main]
+    paths: ["Pounce.jl/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/julia.yml"]
+  pull_request:
+    paths: ["Pounce.jl/**", "crates/pounce-cinterface/**", ".github/workflows/julia.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: julia-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            julia: '1.10'
+          - os: ubuntu-latest
+            julia: '1'
+          - os: macos-latest
+            julia: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: julia-cinterface-${{ runner.os }}
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      - name: Build native library
+        run: cargo build --release --locked -p pounce-cinterface
+      - name: Record source revision
+        run: git rev-parse HEAD
+      - name: Test Julia wrapper
+        run: julia --project=Pounce.jl --startup-file=no -e 'using Pkg; Pkg.test()'
