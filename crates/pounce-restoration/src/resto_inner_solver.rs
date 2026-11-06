@@ -256,7 +256,25 @@ fn build_resto_conv_check_adapter(
 pub fn make_resto_inner_solver(
     resto_builder: RestoAlgorithmBuilder,
     inner_alg_builder: AlgorithmBuilder,
+    backend_factory_factory: InnerBackendFactoryFactory,
+) -> crate::min_c_1nrm::RestoInnerSolver {
+    make_resto_inner_solver_capped(
+        resto_builder,
+        inner_alg_builder,
+        backend_factory_factory,
+        Rc::new(std::cell::Cell::new(None)),
+    )
+}
+
+/// [`make_resto_inner_solver`], with the nested solve capped at the solve's
+/// own `max_iter` once the outer loop has set it in `solve_max_iter`
+/// ([`pounce_algorithm::restoration::RestorationPhase::set_solve_max_iter`])
+/// rather than at the value `inner_alg_builder` was built with.
+pub fn make_resto_inner_solver_capped(
+    resto_builder: RestoAlgorithmBuilder,
+    inner_alg_builder: AlgorithmBuilder,
     mut backend_factory_factory: InnerBackendFactoryFactory,
+    solve_max_iter: Rc<std::cell::Cell<Option<pounce_common::types::Index>>>,
 ) -> crate::min_c_1nrm::RestoInnerSolver {
     Box::new(
         move |outer_data,
@@ -266,12 +284,22 @@ pub fn make_resto_inner_solver(
               print_iter_output,
               debug_hook,
               intermediate_tnlp| {
+            let capped;
+            let builder = match solve_max_iter.get() {
+                Some(m) if m != inner_alg_builder.conv_check.max_iter => {
+                    let mut b = inner_alg_builder.clone();
+                    b.conv_check.max_iter = m;
+                    capped = b;
+                    &capped
+                }
+                _ => &inner_alg_builder,
+            };
             run_inner_resto(
                 outer_data,
                 outer_cq,
                 outer_nlp,
                 &resto_builder,
-                &inner_alg_builder,
+                builder,
                 backend_factory_factory(),
                 orig_progress_cb,
                 print_iter_output,
@@ -340,8 +368,11 @@ pub fn make_default_restoration_factory(
             .take()
             .expect("restoration factory invoked more than once");
         apply_outer_resto_options(&mut rb, &ab);
-        let inner = make_resto_inner_solver(rb, ab, bff);
-        let driver = crate::min_c_1nrm::MinC1NormRestoration::new().with_inner_solver(inner);
+        let cap = Rc::new(std::cell::Cell::new(None));
+        let inner = make_resto_inner_solver_capped(rb, ab, bff, Rc::clone(&cap));
+        let driver = crate::min_c_1nrm::MinC1NormRestoration::new()
+            .with_inner_solver(inner)
+            .with_solve_max_iter_cell(cap);
         Box::new(driver) as Box<dyn pounce_algorithm::restoration::RestorationPhase>
     })
 }

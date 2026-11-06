@@ -10,7 +10,7 @@ use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
 };
 use pounce_algorithm::mpcc::{
-    EXACT_STAGE_TAU, MpccStage, Reported, StationarityClass, TOUCHED_OPTIONS,
+    EXACT_STAGE_TAU, MpccStage, Reported, SCHOLTES_SCHEDULE, StationarityClass, TOUCHED_OPTIONS,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
@@ -474,9 +474,14 @@ fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
         })
         .collect();
     let out = solve_mpcc(&mut app, tnlp, pairs, &mut |_| {}).unwrap();
-    assert_eq!(
-        out.accepted_by,
-        Some(MpccStage::Continuation),
+    // The S optimum is the answer, whichever stage's copy of it is reported:
+    // under the coupled continuation the exact stage's relaxed path reaches
+    // the same point and wins the comparison by solver noise.
+    assert!(
+        matches!(
+            out.accepted_by,
+            Some(MpccStage::Continuation | MpccStage::Exact)
+        ),
         "{:?}",
         out.solves
     );
@@ -1410,14 +1415,23 @@ fn the_exact_stage_runs_its_relaxed_path_and_the_cold_exact_product() {
     assert_eq!(exact[1].tau, None, "no cold solve: {:?}", failed.solves);
 }
 
-/// The exact stage's cold `G·H = 0` solve runs only when the cheap paths
-/// disagree. On qpec_small the continuation and the exact stage's relaxed
-/// path land on the same answer, so the cold solve is skipped; on the
-/// two-branch model below them, from `(0.9, 0.01)`, the relaxed path settles
-/// on the near branch (1.0) and the continuation on the optimum (0.81), so
-/// it runs. Either way the reported answer is the optimum.
+/// The exact stage's cold `G·H = 0` solve runs only until two exact answers
+/// are in hand ([`skips_cold_solve`] holds the relaxed-point branch). Three
+/// branches:
+///
+/// * qpec_small: the continuation and the exact stage's relaxed path land on
+///   the same answer ("agree"); no cold solve.
+/// * the two-branch model, from `(0.9, 0.01)`: the relaxed path settles on
+///   the near branch (1.0) and the continuation on the optimum (0.81). Both
+///   finishes converge, so two exact answers are in hand: the better is kept
+///   and there is still no cold solve (it used to run here, as a third
+///   opinion that never changed a MacMPEC or `relu_nn` outcome).
+/// * the same model under `complementarity_strategy=exact`: no continuation
+///   answer, so the cold solve runs after the relaxed path. It lands on the
+///   near branch too, `(0.9, 0)`: without the continuation, nothing reaches
+///   the optimum from this start.
 #[test]
-fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
+fn the_cold_exact_product_runs_only_until_two_exact_answers_are_in_hand() {
     let exact_taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
         out.solves
             .iter()
@@ -1453,18 +1467,60 @@ fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
     }
 
     // Disagree: the continuation reaches the optimum (0.81) and the relaxed
-    // path the near branch (1.0), so after the relaxed path's three solves
-    // the cold exact product runs as well.
-    let mut app = crate::app();
-    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
-    let mut lines = Vec::new();
-    let out = solve_mpcc(
-        &mut app,
-        tnlp,
-        vec![ComplementarityPair { row: 0, var: 0 }],
-        &mut |l| lines.push(l.to_string()),
-    )
-    .unwrap();
+    // path the near branch (1.0), both from converged finishes: no cold
+    // solve, and the comparison keeps the continuation's optimum.
+    let disagree = |strategy: Option<&str>| {
+        let mut app = crate::app();
+        if let Some(st) = strategy {
+            app.options_mut()
+                .set_string_value("complementarity_strategy", st, true, false)
+                .unwrap();
+        }
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(
+            &mut app,
+            tnlp,
+            vec![ComplementarityPair { row: 0, var: 0 }],
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        (out, lines)
+    };
+    let (out, lines) = disagree(None);
+    assert_eq!(
+        exact_taus(&out),
+        [Some(EXACT_STAGE_TAU), Some(1e-8), None],
+        "{:?} {lines:#?}",
+        out.solves
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("both reached the exact product")
+                && l.contains("skipping the cold exact product")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("exact product solved the model") && l.contains("1.000000e0")),
+        "the relaxed path's answer is the near branch: {lines:#?}"
+    );
+    assert_eq!(
+        out.reported,
+        Reported::Answer(MpccStage::Continuation),
+        "{lines:#?}"
+    );
+    assert!(
+        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        "{:?} {lines:#?}",
+        out.x
+    );
+
+    // No continuation (strategy `exact`): the relaxed path alone has
+    // answered, so the cold exact product runs after its three solves.
+    let (out, lines) = disagree(Some("exact"));
     assert_eq!(
         exact_taus(&out),
         [Some(EXACT_STAGE_TAU), Some(1e-8), None, None],
@@ -1478,13 +1534,7 @@ fn the_cold_exact_product_runs_only_when_the_cheap_paths_disagree() {
         "{lines:#?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("exact product solved the model") && l.contains("1.000000e0")),
-        "the relaxed path's answer is the near branch: {lines:#?}"
-    );
-    assert!(
-        out.x[0].abs() < 1e-5 && (out.x[1] - 1.0).abs() < 1e-5,
+        (out.x[0] - 0.9).abs() < 1e-5 && out.x[1].abs() < 1e-5,
         "{:?} {lines:#?}",
         out.x
     );
@@ -1990,4 +2040,96 @@ fn the_fallback_stays_live_on_every_rung_of_a_run() {
         .map(|s| s.tau)
         .collect();
     assert!(taus.windows(2).all(|w| w[0] != w[1]), "{:?}", out.solves);
+}
+
+/// `complementarity_continuation`: the default runs the first rung, one
+/// coupled solve that ends at the schedule's last `τ` (so every decorator
+/// between the algorithm and `MpccTnlp` forwarded `update_with_barrier`: a
+/// missing forwarder leaves `τ` where it started and the schedule resumes),
+/// then the finish; `schedule` runs the nine rungs. Both reach the optimum.
+#[test]
+fn the_coupled_continuation_replaces_the_schedule_in_one_solve() {
+    let cont_taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
+        out.solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Continuation)
+            .map(|s| s.tau)
+            .collect()
+    };
+    for continuation in ["coupled", "schedule"] {
+        let mut app = app();
+        app.options_mut()
+            .set_string_value("complementarity_continuation", continuation, true, false)
+            .unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
+            [0.0, 0.5, 0.5],
+            Rc::new(RefCell::new(Vec::new())),
+        )));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        let taus = cont_taus(&out);
+        if continuation == "coupled" {
+            assert_eq!(taus.len(), 3, "{taus:?} {lines:#?}");
+            assert_eq!(taus[0], Some(1.0));
+            let t = taus[1].unwrap();
+            assert!(
+                (t - 1e-8).abs() < 1e-15,
+                "the coupled solve ends at the floor: {taus:?}"
+            );
+            assert_eq!(taus[2], None, "then the finish");
+            assert!(
+                !lines.iter().any(|l| l.contains("resuming the schedule")),
+                "{lines:#?}"
+            );
+        } else {
+            let mut want: Vec<Option<f64>> = SCHOLTES_SCHEDULE.iter().map(|&t| Some(t)).collect();
+            want.push(None);
+            assert_eq!(taus, want, "{lines:#?}");
+        }
+        for (got, want) in out.x.iter().zip([1.0, 1.0, 0.0]) {
+            assert!((got - want).abs() < 1e-4, "{continuation}: x = {:?}", out.x);
+        }
+    }
+}
+
+/// The coupled continuation's first-rung branch (review of #1135, item 2):
+/// a `τ = 1` solve that does not converge ends the continuation, as the
+/// schedule's own first rung does (no earlier rung to retry from), rather
+/// than being solved again. Both settings run exactly one continuation solve.
+#[test]
+fn a_first_rung_that_fails_ends_the_continuation_either_way() {
+    for continuation in ["coupled", "schedule"] {
+        let mut app = app();
+        app.options_mut()
+            .set_string_value("complementarity_continuation", continuation, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 1, true, false)
+            .unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(
+            &mut app,
+            tnlp,
+            vec![ComplementarityPair { row: 0, var: 0 }],
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        let cont: Vec<_> = out
+            .solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Continuation)
+            .collect();
+        assert_eq!(cont.len(), 1, "{continuation}: {:?}", out.solves);
+        assert_eq!(cont[0].tau, Some(1.0));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("did not solve its first relaxation")),
+            "{continuation}: {lines:#?}"
+        );
+    }
 }

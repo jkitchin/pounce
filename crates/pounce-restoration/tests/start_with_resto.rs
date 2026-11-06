@@ -204,3 +204,57 @@ fn start_with_resto_forces_the_first_iteration_into_restoration() {
          did not actually change the path"
     );
 }
+
+/// The restoration sub-solve runs under the solve's own `max_iter`, not the
+/// one the restoration provider was built with. The provider is built here
+/// at `max_iter = 500` and the cap then lowered to 1, as the complementarity
+/// driver budgets each stage on one application. Forced into restoration at
+/// iteration 0, the solve stops at the cap: before the forwarding
+/// (`RestorationPhase::set_solve_max_iter`), restoration ran on under the
+/// provider's 500, and MacMPEC `ralph1`'s 100-iteration finish ran 3000.
+#[test]
+fn restoration_runs_under_the_solves_max_iter_not_the_providers() {
+    let mut app = IpoptApplication::new();
+    for (k, v) in [
+        ("hessian_approximation", "limited-memory"),
+        ("start_with_resto", "yes"),
+    ] {
+        app.options_mut()
+            .set_string_value(k, v, true, true)
+            .unwrap();
+    }
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, true)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("max_iter", 500, true, true)
+        .unwrap();
+    app.initialize().unwrap();
+    let feral_cfg = feral_config_from_options(app.options());
+    let bff_mint = move || -> InnerBackendFactoryFactory {
+        let feral_cfg = feral_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone(), Ma57Config::default()))
+    };
+    app.set_restoration_factory_provider(make_default_restoration_factory_provider(
+        RestoAlgorithmBuilder::new(),
+        app.algorithm_builder_from_options(),
+        bff_mint,
+    ));
+    // Lowered after the provider took its snapshot.
+    app.options_mut()
+        .set_integer_value("max_iter", 1, true, true)
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Smooth));
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    assert!(
+        stats.restoration_calls > 0,
+        "the fixture must enter restoration"
+    );
+    assert!(
+        stats.iteration_count <= 1 && stats.restoration_inner_iters <= 1,
+        "restoration ran past the solve's max_iter: {} iterations, {} in restoration ({status:?})",
+        stats.iteration_count,
+        stats.restoration_inner_iters
+    );
+}

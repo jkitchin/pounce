@@ -2490,6 +2490,15 @@ impl Nlp for OrigIpoptNlp {
 }
 
 impl IpoptNlp for OrigIpoptNlp {
+    fn invalidate_constraint_values(&self) -> bool {
+        // `c` and `d` slice one `eval_g` result (`full_g_cache`), each with
+        // its own scaled cache; the derivative caches stay.
+        self.c_cache.borrow_mut().clear();
+        self.d_cache.borrow_mut().clear();
+        self.full_g_cache.borrow_mut().clear();
+        true
+    }
+
     /// The Hessian's sparsity with zero values, built straight from
     /// `h_space` — no `eval_h`, no callback, no cache traffic. Falls
     /// back to a structurally empty block when the TNLP declared no

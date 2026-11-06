@@ -74,7 +74,7 @@ export IPOPT_LINEAR_SOLVER
 	macmpec-run macmpec-rerun macmpec-check \
 	mpcc-opf-selftest mpcc-opf-run \
 	capacity-equilibria-selftest capacity-equilibria-run \
-	mpcc-opf-transmission-selftest mpcc-compare \
+	mpcc-opf-transmission-selftest relu-nn-selftest mpcc-compare \
 	flash-selftest flash-smoke flash-run \
 	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report \
 	pounce-bin
@@ -136,6 +136,7 @@ help:
 	@echo "  capacity-equilibria-selftest  Murphy-Smeers capacity equilibria: port and ground-truth checks (no solver)"
 	@echo "  capacity-equilibria-run    Murphy-Smeers LCPs and best-response MPCCs (36, data root), CLI"
 	@echo "  mpcc-opf-transmission-selftest  IEEE 118/300 volt-var/volt-watt cases: Pyomo model vs upstream's evaluations"
+	@echo "  relu-nn-selftest           ReLU networks as MPCCs: encoding checks and solver-free global truth (resumable)"
 	@echo "  mpcc-compare               pounce (declared pairs, and the NLP form) vs Ipopt MA57 (NLP form) on the complementarity suites"
 	@echo "  mpcc-report                Re-render mpcc/results-full.md from the existing results-full.json"
 	@echo "  mpcc-manifest              Regenerate mpcc/manifest.json after a corpus edit"
@@ -584,8 +585,8 @@ capacity-equilibria-run: capacity-equilibria-selftest $(POUNCE_BIN)
 
 # --- Complementarity: pounce against Ipopt --------------------------------
 #
-# mpcc-compare runs three arms on mpcc_opf, mpcc_opf_transmission and
-# capacity_equilibria (all in the data root): pounce on the declared pairs,
+# mpcc-compare runs its arms on mpcc_opf, mpcc_opf_transmission,
+# capacity_equilibria and relu_nn (all in the data root): pounce on the declared pairs,
 # Ipopt + MA57 on Pyomo's NLP rewrite (G*H <= 0; Ipopt refuses declared
 # complementarity), and pounce on that same NLP. Every answer is judged by
 # the suite's own physical checks. IPOPT_MA57_BIN must name an Ipopt with
@@ -594,6 +595,15 @@ capacity-equilibria-run: capacity-equilibria-selftest $(POUNCE_BIN)
 mpcc-opf-transmission-selftest:
 	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m mpcc_opf_transmission.selftest
 
+# Optimization over trained ReLU networks, one declared pair per hidden unit
+# (y >= 0 _|_ y - z >= 0): surrogate minimization and adversarial margins.
+# Truth comes from a big-M MILP (HiGHS) and an input-space branch and bound,
+# never from a compared solver. With truth.json present this only re-checks
+# the encoding and the certificates (seconds); computing it from scratch
+# takes about an hour. See $(POUNCE_BENCH_DATA)/relu_nn/README.md.
+relu-nn-selftest:
+	cd $(POUNCE_BENCH_DATA) && $(PYTHON) -m relu_nn.selftest
+
 # Fails with the path it tried, instead of letting a missing Ipopt turn every
 # Ipopt arm into NO_STATUS.
 ipopt-ma57-check:
@@ -601,7 +611,8 @@ ipopt-ma57-check:
 	  echo "IPOPT_MA57_BIN=$(IPOPT_MA57_BIN) does not run. Set IPOPT_MA57_BIN=<path>/bin/ipopt" \
 	       "(an Ipopt built with CoinHSL MA57 and the AMPL interface)." >&2; exit 1; }
 
-mpcc-compare: ipopt-ma57-check mpcc-opf-selftest capacity-equilibria-selftest mpcc-opf-transmission-selftest $(POUNCE_BIN)
+mpcc-compare: ipopt-ma57-check mpcc-opf-selftest capacity-equilibria-selftest mpcc-opf-transmission-selftest \
+		relu-nn-selftest $(POUNCE_BIN)
 	cd $(POUNCE_BENCH_DATA) && IPOPT_MA57_BIN=$(IPOPT_MA57_BIN) $(PYTHON) -m mpcc_compare.compare --pounce $(POUNCE_BIN)
 
 # --- MacMPEC (Leyffer) ---------------------------------------------------

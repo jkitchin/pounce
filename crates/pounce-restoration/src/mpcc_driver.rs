@@ -31,13 +31,13 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mpcc::{
-    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, MpccStage, POLISH_TRIGGER,
-    RUNG_RETRY_FLOOR, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE, STAGES, StationarityClass,
-    Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree, branch_bounds, budgeted_max_iter,
-    certify, check_b_stationarity, compared, complementarity_gap, converged, exact_stage_budget,
-    finish_budget, finish_drifted, kept_if_nothing_better, natural_residual, polish_class,
-    polish_objective_ok, polish_tightened, relaxation_slack, warm_rung_max_iter,
-    warm_start_assignments,
+    BCheck, BVerdict, Certificate, CertificateInput, EXACT_STAGE_TAU, FINISH_BUDGET_FLOOR,
+    MpccStage, POLISH_TRIGGER, RUNG_RETRY_FLOOR, Reported, SAFE_DEFAULTS, SCHOLTES_SCHEDULE,
+    STAGES, StationarityClass, Strategy, TOUCHED_OPTIONS, accepts, answers, answers_agree,
+    branch_bounds, budgeted_max_iter, certify, check_b_stationarity, compared, complementarity_gap,
+    converged, exact_stage_budget, finish_budget, finish_drifted, kept_if_nothing_better,
+    natural_residual, polish_class, polish_objective_ok, polish_tightened, relaxation_slack,
+    skips_cold_solve, warm_rung_max_iter, warm_start_assignments,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
@@ -238,6 +238,11 @@ struct Captured {
     /// its branch's optimum stopping at tolerance can leave it. `+inf` with
     /// no point, or when the model declines an evaluation.
     gap: Number,
+    /// Whether the point came from an exact-product solve (`Eq`/`Ineq`),
+    /// not a relaxation: a continuation whose finish did not converge keeps
+    /// its last relaxed point, which is an answer but not a solution of the
+    /// exact product.
+    exact_lowering: bool,
 }
 
 impl Captured {
@@ -255,6 +260,61 @@ impl Captured {
 /// `report` receives one line per stage transition (what the console shows
 /// at `print_level > 0`). Errors only if the pairs cannot be lowered — the
 /// reason is the [`MpccTnlp::new`] refusal.
+/// The coupled continuation's law, `τ = max(floor, COUPLED_TAU_PER_MU · μ)`,
+/// never cut by more than a factor [`COUPLED_MAX_CUT`] per `μ` update.
+/// CCOpt's proportional relaxation update uses the same ratio; the cap keeps a
+/// sharp `μ` drop from collapsing the relaxation in one step.
+const COUPLED_TAU_PER_MU: Number = 1.0;
+/// See [`COUPLED_TAU_PER_MU`].
+const COUPLED_MAX_CUT: Number = 0.1;
+/// The coupled solve's budget: this many times the first rung's iterations,
+/// at least [`COUPLED_BUDGET_FLOOR`]. Where it converges it takes a few dozen
+/// iterations (`relu_nn`: 33 to 114); one that reaches the budget is crawling,
+/// and the schedule takes over from the first rung.
+const COUPLED_BUDGET_FACTOR: usize = 5;
+/// See [`COUPLED_BUDGET_FACTOR`].
+const COUPLED_BUDGET_FLOOR: usize = 200;
+
+/// Whether finish attempt `a` came closer than `b`: one that returned a
+/// point beats one that did not, a converged one beats one that did not, and
+/// otherwise the smaller product violation wins.
+fn closer_finish(a: Option<&Captured>, b: Option<&Captured>) -> bool {
+    let rank = |c: &Captured| (!c.x.is_empty(), converged(c.status));
+    match (a, b) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(a), Some(b)) => {
+            let (ra, rb) = (rank(a), rank(b));
+            ra > rb || (ra == rb && a.max_abs_product < b.max_abs_product)
+        }
+    }
+}
+
+/// How an exact finish is started from a relaxed point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FinishStart {
+    /// The relaxed point and its duals, the barrier where it ended.
+    Warm,
+    /// The same, with the barrier restarted at this `μ`.
+    WarmAtMu(Number),
+    /// The relaxed point alone: fresh duals, the default barrier start.
+    Primal,
+}
+
+/// The coupled continuation's finish attempts, in order (measured on
+/// `relu_nn`: no one of them converges on every model, and each converges
+/// where some other fails).
+const COUPLED_FINISH_STARTS: [FinishStart; 3] = [
+    FinishStart::WarmAtMu(1e-6),
+    FinishStart::Warm,
+    FinishStart::Primal,
+];
+
+/// Each coupled finish attempt's iteration budget. A finish that converges
+/// from the coupled endpoint takes a few dozen iterations; one that does not
+/// runs to its limit.
+const COUPLED_FINISH_BUDGET: usize = 100;
+
 pub fn solve_mpcc(
     app: &mut IpoptApplication,
     inner: Rc<RefCell<dyn TNLP>>,
@@ -372,6 +432,20 @@ pub fn solve_mpcc(
         .ok()
         .and_then(|(v, _)| Strategy::parse(&v))
         .unwrap_or(Strategy::Both);
+    // The coupling rides the interior-point loop's μ updates
+    // (`TNLP::update_with_barrier`); under another engine (`algorithm =
+    // active-set-sqp`) τ would never move, and the coupled solve would only
+    // spend its budget before the schedule took over.
+    let interior_point = app
+        .options()
+        .get_string_value("algorithm", "")
+        .map_or(true, |(v, _)| v == "interior-point");
+    let coupled = interior_point
+        && app
+            .options()
+            .get_string_value("complementarity_continuation", "")
+            .map(|(v, _)| v != "schedule")
+            .unwrap_or(true);
 
     // One lowered solve: options already set by the caller of `run`.
     let run = |app: &mut IpoptApplication,
@@ -405,7 +479,7 @@ pub fn solve_mpcc(
         let m_inner = w.m_inner();
         let slack = match lowering {
             _ if w.last_x().is_empty() => Number::INFINITY,
-            Lowering::Relaxed(_) => {
+            Lowering::Relaxed(_) | Lowering::Coupled { .. } => {
                 relaxation_slack(w.last_products(), lam.get(m_inner..).unwrap_or(&[]))
             }
             _ => 0.0,
@@ -432,13 +506,12 @@ pub fn solve_mpcc(
             max_abs_product,
             slack,
             gap,
+            exact_lowering: matches!(lowering, Lowering::Eq | Lowering::Ineq),
         };
         solves.push(MpccSolveRecord {
             stage,
-            tau: match lowering {
-                Lowering::Relaxed(t) => Some(t),
-                _ => None,
-            },
+            // The `τ` the solve ended at: a coupled solve's last.
+            tau: w.current_tau(),
             status,
             iterations: statistics.spent_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
@@ -459,6 +532,7 @@ pub fn solve_mpcc(
                        stage: MpccStage,
                        relaxed: &Captured,
                        budget: usize,
+                       start: FinishStart,
                        solves: &mut Vec<MpccSolveRecord>|
      -> Option<Captured> {
         let mut finish = None;
@@ -468,7 +542,24 @@ pub fn solve_mpcc(
                 let _ = app.options_mut().read_from_str(&a, true);
             }
             set_budget(app, budget);
-            let c = run(app, stage, lowering, Some(relaxed.warm()), solves);
+            if let FinishStart::WarmAtMu(mu) = start {
+                let _ = app
+                    .options_mut()
+                    .read_from_str(&format!("mu_init {mu:e}\n"), true);
+            }
+            let point = if start == FinishStart::Primal {
+                // The override carries no duals; asking for them would refuse it.
+                let _ = app
+                    .options_mut()
+                    .read_from_str("warm_start_init_point no\n", true);
+                StartOverride {
+                    x: relaxed.x.clone(),
+                    ..Default::default()
+                }
+            } else {
+                relaxed.warm()
+            };
+            let c = run(app, stage, lowering, Some(point), solves);
             if halted() {
                 return Some(c);
             }
@@ -521,7 +612,22 @@ pub fn solve_mpcc(
         }
     };
 
+    // The certificate of a point, computed once per point: the coupled
+    // continuation certifies its candidate to decide whether to keep it, and
+    // the acceptance loop below certifies the same candidate again (review of
+    // #1135, item 8: on MacMPEC's 961-pair models that is not free).
+    let cert_cache: RefCell<Vec<(Vec<Number>, Option<Certificate>)>> = RefCell::new(Vec::new());
+    let certify_cached = |x: &[Number]| -> Option<Certificate> {
+        if let Some((_, c)) = cert_cache.borrow().iter().find(|(p, _)| p.as_slice() == x) {
+            return c.clone();
+        }
+        let c = certify_at(&inner, &pairs, x, solver_tol, tol, sense);
+        cert_cache.borrow_mut().push((x.to_vec(), c.clone()));
+        c
+    };
     let mut stages_run = 0;
+    // Whether the coupled continuation supplied the continuation's answer.
+    let mut coupled_kept = false;
     'ladder: for &stage in STAGES.iter() {
         // An answer from a compared stage ends the ladder before the first
         // stage that is not compared (the penalty).
@@ -554,17 +660,27 @@ pub fn solve_mpcc(
                 //   that reaches the better branch (MacMPEC `water-net`: 927,
                 //   where both relaxed paths settle on 953 and 964).
                 //
-                // Neither dominates on MacMPEC or CALIPSO, so both run. With
-                // an answer already in hand (the continuation's, or a converged
-                // relaxed path's), the cold solve is a second opinion and runs
-                // on a budget proportional to what the stages before it spent
-                // ([`EXACT_BUDGET_FACTOR`]); the relaxed path is budgeted only
-                // on the continuation's answer.
+                // Neither dominates on MacMPEC or CALIPSO, so both run -- the
+                // cold solve only until the continuation and the relaxed path
+                // both hold an exact answer (below). With an answer already in hand
+                // (the continuation's, or a converged relaxed path's), the cold
+                // solve is a second opinion and runs on a budget proportional
+                // to what the stages before it spent ([`EXACT_BUDGET_FACTOR`]);
+                // the relaxed path is budgeted only on the continuation's
+                // answer.
                 let mut cands: Vec<Captured> = Vec::new();
+                // The budgets are proportional to what the continuation
+                // spent, and the coupled continuation spends a fraction of
+                // what the schedule does: floored at the finish's own floor
+                // then, or the relaxed path is cut short of answers the
+                // schedule's budget allowed (`relu_nn` digits_128x3: 285
+                // iterations needed, 200 given).
+                let exp_floor: usize = if coupled_kept { FINISH_BUDGET_FLOOR } else { 0 };
                 let budget = exact_stage_budget(
                     accepted.is_some(),
                     iterations_of(&solves, MpccStage::Continuation),
-                );
+                )
+                .map(|b| b.max(exp_floor));
                 if let Some(b) = budget {
                     set_budget(app, b);
                 }
@@ -610,7 +726,8 @@ pub fn solve_mpcc(
                         relaxed
                     };
                     let fb = finish_budget(iterations_of(&solves, MpccStage::Exact));
-                    let finish = finish_from(app, stage, &relaxed, fb, &mut solves);
+                    let finish =
+                        finish_from(app, stage, &relaxed, fb, FinishStart::Warm, &mut solves);
                     if halted() {
                         break 'ladder;
                     }
@@ -633,19 +750,39 @@ pub fn solve_mpcc(
                 // can refuse an over-determined model with a proven verdict
                 // (`Infeasible_Problem_Detected`) rather than
                 // `Not_Enough_Degrees_Of_Freedom`.
-                // Skipped when the continuation's answer and the relaxed
-                // path's agree ([`answers_agree`]): two routes landing on one
-                // point, and the cold solve exists for the models where they
-                // do not.
+                // Skipped once two exact answers are in hand: the
+                // continuation's certified answer and the relaxed path's, each
+                // from an exact-product solve (its finish converged). Whether
+                // they agree ([`answers_agree`]: one point reached twice) or
+                // not (two branches, of which the comparison below keeps the
+                // better), a third route to the same exact problem is a third
+                // opinion. It used to run whenever the two disagreed. Skipping
+                // it here changed no outcome on MacMPEC (178 models, every
+                // status and objective identical to 1e-9; solve time 1595 s ->
+                // 1149 s), mpcc_nl, CALIPSO, the OPF, capacity and transmission
+                // suites, or `relu_nn` (42; 178 s -> 88 s, where the relaxed
+                // path won all 12 problems the exact stage improved). It still
+                // runs when either answer is only a
+                // relaxed point: CALIPSO bunny-hop seed 1, whose continuation
+                // finish fails (`RestorationFailed`) and leaves the `τ = 1e-8`
+                // point, is the one case where the cold solve wins (462.605
+                // against 463.195, in 58 iterations).
                 let path_answer = cands
                     .first()
                     .filter(|c| accepts(c.status, c.max_abs_product, tol));
                 if let (Some((_, cont, _, f_cont)), Some(p)) = (&accepted, path_answer) {
                     let f_path = min_obj(p);
-                    if answers_agree(*f_cont, f_path, cont.slack + p.slack, cont.gap + p.gap) {
+                    let agree =
+                        answers_agree(*f_cont, f_path, cont.slack + p.slack, cont.gap + p.gap);
+                    if skips_cold_solve(agree, cont.exact_lowering, p.exact_lowering) {
+                        let how = if agree {
+                            "agree"
+                        } else {
+                            "both reached the exact product"
+                        };
                         report(&format!(
                             "pounce: complementarity: the continuation and the exact stage's \
-                             relaxed path agree (minimized objective {f_cont:.6e} and \
+                             relaxed path {how} (minimized objective {f_cont:.6e} and \
                              {f_path:.6e}); skipping the cold exact product."
                         ));
                         exact = exact_stage_verdict(path_verdict, None);
@@ -657,7 +794,8 @@ pub fn solve_mpcc(
                     answered,
                     iterations_of(&solves, MpccStage::Continuation)
                         + iterations_of(&solves, MpccStage::Exact),
-                );
+                )
+                .map(|b| b.max(exp_floor));
                 let mut c = None;
                 for lowering in [Lowering::Eq, Lowering::Ineq] {
                     baseline(app);
@@ -689,7 +827,150 @@ pub fn solve_mpcc(
                 // Iterations of the attempt that produced the last rung's
                 // point, not every attempt in its call ([`warm_rung_max_iter`]).
                 let mut last_point_its = 0;
-                for &tau in &SCHOLTES_SCHEDULE {
+                // The coupled continuation (`complementarity_continuation =
+                // coupled`): the first rung as an ordinary relaxation, then
+                // one solve with τ tied to μ ([`Lowering::Coupled`]) from the
+                // second τ to the last, then the exact finish. Kept on the
+                // test the schedule's own answer passes; otherwise the
+                // schedule resumes at its second rung, warm from the first.
+                //
+                // The first rung stays ordinary on purpose: solving the
+                // smoothest relaxation fully is what reaches the better
+                // basin (MacMPEC `bilevel1`: 0 where coupling from the start
+                // settles on 5), and the rungs after it are where the
+                // schedule spends (on `relu_nn`, τ = 0.1 and 0.01 alone are
+                // 60% of its iterations).
+                let last_tau = SCHOLTES_SCHEDULE[SCHOLTES_SCHEDULE.len() - 1];
+                let mut resume_below = Number::INFINITY;
+                let mut coupled_finish: Option<Option<Captured>> = None;
+                if coupled {
+                    let (factor, max_cut) = (COUPLED_TAU_PER_MU, COUPLED_MAX_CUT);
+                    baseline(app);
+                    let first = run(
+                        app,
+                        stage,
+                        Lowering::Relaxed(SCHOLTES_SCHEDULE[0]),
+                        None,
+                        &mut solves,
+                    );
+                    if halted() {
+                        break 'ladder;
+                    }
+                    if !converged(first.status) {
+                        // The schedule stops at a first rung that does not
+                        // converge (below: no earlier rung to retry from), so
+                        // this does too, rather than solving it again.
+                        resume_below = 0.0;
+                    } else {
+                        baseline(app);
+                        for a in warm_start_assignments(first.statistics.final_mu) {
+                            let _ = app.options_mut().read_from_str(&a, true);
+                        }
+                        // The barrier restarts where τ = factor·μ puts it:
+                        // warm at the first rung's tiny μ, the coupled solve
+                        // crawls (digits_128x3: 251 iterations against 66).
+                        let mu0 = (SCHOLTES_SCHEDULE[1] / factor).clamp(1e-9, 1e-1);
+                        let _ = app
+                            .options_mut()
+                            .read_from_str(&format!("mu_init {mu0:e}\n"), true);
+                        // On a budget: where the coupled solve crawls (IEEE 300
+                        // transmission cases: 3100 iterations to the floor,
+                        // against 900 for the whole schedule) the schedule is
+                        // the cheaper route, and it resumes from here.
+                        let first_its = first.statistics.iteration_count.max(0) as usize;
+                        set_budget(
+                            app,
+                            (COUPLED_BUDGET_FACTOR * first_its).max(COUPLED_BUDGET_FLOOR),
+                        );
+                        let c = run(
+                            app,
+                            stage,
+                            Lowering::Coupled {
+                                tau0: SCHOLTES_SCHEDULE[1],
+                                floor: last_tau,
+                                factor,
+                                max_cut,
+                            },
+                            Some(first.warm()),
+                            &mut solves,
+                        );
+                        if halted() {
+                            break 'ladder;
+                        }
+                        let at_floor = wrapper
+                            .borrow()
+                            .current_tau()
+                            .is_some_and(|t| t <= last_tau * (1.0 + 1e-9));
+                        let mut kept = false;
+                        if converged(c.status) && at_floor {
+                            // The exact product is degenerate at the coupled
+                            // endpoint, and which start converges from it
+                            // differs by model: three, each on a short budget,
+                            // the first that converges kept.
+                            let mut fin = None;
+                            for start in COUPLED_FINISH_STARTS {
+                                let f = finish_from(
+                                    app,
+                                    stage,
+                                    &c,
+                                    COUPLED_FINISH_BUDGET,
+                                    start,
+                                    &mut solves,
+                                );
+                                if halted() {
+                                    break 'ladder;
+                                }
+                                let done = f
+                                    .as_ref()
+                                    .is_some_and(|f| accepts(f.status, f.max_abs_product, tol));
+                                // Kept: the attempt that came closest, not the
+                                // last one (it becomes the verdict when nothing
+                                // answers under `strategy = continuation`).
+                                if done || closer_finish(f.as_ref(), fin.as_ref()) {
+                                    fin = f;
+                                }
+                                if done {
+                                    break;
+                                }
+                            }
+                            // Kept on the test the schedule's own answer
+                            // passes below: the candidate (the finish, or the
+                            // relaxed point it falls back to) converged with
+                            // every product in tolerance and certifies tight S.
+                            let mut sink = |_: &str| {};
+                            let cand =
+                                keep_finish(fin.clone(), c.clone(), stage.label(), &mut sink);
+                            let answers_tight = accepts(cand.status, cand.max_abs_product, tol)
+                                && certify_cached(&cand.x)
+                                    .is_some_and(|ct| answers(ct.class) && ct.tight);
+                            if answers_tight {
+                                // The schedule loop below is skipped
+                                // (`resume_below = 0`), so its retry budgets
+                                // are not read.
+                                kept = true;
+                                coupled_kept = true;
+                                coupled_finish = Some(fin);
+                                resume_below = 0.0;
+                                last = Some(c);
+                            }
+                        }
+                        if !kept {
+                            report(&format!(
+                                "pounce: complementarity: the coupled continuation did not reach \
+                                 an exact answer; resuming the schedule at τ = {:.0e}.",
+                                SCHOLTES_SCHEDULE[1]
+                            ));
+                            resume_below = SCHOLTES_SCHEDULE[0];
+                            last_its = first.statistics.iteration_count.max(0) as usize;
+                            last_point_its = last_its;
+                            last = Some(first);
+                        }
+                    }
+                }
+                for &tau in SCHOLTES_SCHEDULE
+                    .iter()
+                    .filter(|&&t| t < resume_below * (1.0 - 1e-12))
+                {
                     baseline(app);
                     // Read after `baseline`: a budget is set only while the
                     // fallback that rescues a capped rung will run.
@@ -781,8 +1062,21 @@ pub fn solve_mpcc(
                         // On a budget ([`FINISH_BUDGET_FLOOR`], or what the
                         // schedule spent if more): a finish that has not
                         // converged by then leaves the schedule's answer.
-                        let budget = finish_budget(iterations_of(&solves, MpccStage::Continuation));
-                        let finish = finish_from(app, stage, &relaxed, budget, &mut solves);
+                        let finish = match coupled_finish.take() {
+                            Some(f) => f,
+                            None => {
+                                let budget =
+                                    finish_budget(iterations_of(&solves, MpccStage::Continuation));
+                                finish_from(
+                                    app,
+                                    stage,
+                                    &relaxed,
+                                    budget,
+                                    FinishStart::Warm,
+                                    &mut solves,
+                                )
+                            }
+                        };
                         if halted() {
                             break;
                         }
@@ -825,7 +1119,7 @@ pub fn solve_mpcc(
                 // Converged and physical; the certificate decides whether it
                 // is an answer. A lowered solve can stall short of a biactive
                 // pair and still exit "acceptable" with every product at 0.
-                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
+                let cert = certify_cached(&c.x);
                 if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
                     let f = match sense * objective_at(&inner, &c.x) {
                         f if f.is_finite() => f,
@@ -1506,6 +1800,7 @@ mod tests {
             max_abs_product: if x.is_empty() { Number::INFINITY } else { 0.25 },
             slack: if x.is_empty() { Number::INFINITY } else { 0.0 },
             gap: if x.is_empty() { Number::INFINITY } else { 0.0 },
+            exact_lowering: true,
             x,
             z_l: Vec::new(),
             z_u: Vec::new(),

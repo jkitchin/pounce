@@ -180,6 +180,18 @@ pub fn finish_budget(schedule_iterations: usize) -> usize {
     schedule_iterations.max(FINISH_BUDGET_FLOOR)
 }
 
+/// Whether the exact stage's cold `G·H = 0` solve is skipped, given the
+/// continuation's certified answer and the relaxed path's answer: when the two
+/// agree ([`answers_agree`]), or when both are exact-product points (each
+/// route's finish converged). Two exact answers in hand make a third route to
+/// the same exact problem a third opinion; it still runs when either answer is
+/// only a relaxed point (a continuation whose finish failed keeps its
+/// `τ = 1e-8` point; CALIPSO bunny-hop seed 1 is where the cold solve then
+/// wins, 462.605 against 463.195).
+pub fn skips_cold_solve(agree: bool, continuation_exact: bool, path_exact: bool) -> bool {
+    agree || (continuation_exact && path_exact)
+}
+
 /// How far, relative to `max(|f_a|, |f_b|)`, two minimized objectives may
 /// differ and still be "the same answer" in the driver's two tests below, on
 /// top of what the relaxations' slack accounts for ([`same_answer_allowance`]).
@@ -2027,6 +2039,16 @@ mod tests {
             -2e-3,
             relaxation_slack(&[1e-8], &[1e5])
         ));
+    }
+
+    /// Every branch of the cold-solve skip: agreement alone skips, two exact
+    /// answers skip, and a relaxed point on either side keeps the cold solve.
+    #[test]
+    fn the_cold_solve_is_skipped_only_with_agreement_or_two_exact_answers() {
+        assert!(skips_cold_solve(true, false, false));
+        assert!(skips_cold_solve(false, true, true));
+        assert!(!skips_cold_solve(false, false, true));
+        assert!(!skips_cold_solve(false, true, false));
     }
 
     #[test]

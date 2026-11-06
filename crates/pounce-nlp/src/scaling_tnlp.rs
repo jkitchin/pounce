@@ -709,6 +709,10 @@ impl TNLP for ScalingTnlp {
         self.inner.borrow().wants_current_iterate()
     }
 
+    fn update_with_barrier(&mut self, mu: Number) -> bool {
+        self.inner.borrow_mut().update_with_barrier(mu)
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

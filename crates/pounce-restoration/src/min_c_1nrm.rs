@@ -229,6 +229,11 @@ pub struct MinC1NormRestoration {
     /// `print_level == 0` actually silences the restoration `r`-row
     /// table instead of leaking it to stdout.
     pub(crate) print_iter_output: bool,
+    /// The solve's `max_iter`, set at restoration entry
+    /// ([`pounce_algorithm::restoration::RestorationPhase::set_solve_max_iter`])
+    /// and shared with the inner-solver hook, which caps the nested solve at
+    /// it. `None` until the first entry: the hook's own builder value stands.
+    pub(crate) solve_max_iter: Rc<std::cell::Cell<Option<Index>>>,
     /// Shared debugger forwarded onto the inner IPM (set by the outer
     /// driver via `RestorationPhase::set_debug_hook`).
     pub(crate) debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
@@ -295,6 +300,7 @@ impl Default for MinC1NormRestoration {
             orig_progress: None,
             last_inner_iter_count: 0,
             print_iter_output: true,
+            solve_max_iter: Rc::new(std::cell::Cell::new(None)),
             debug_hook: None,
             intermediate_tnlp: None,
             square_certificate: None,
@@ -313,6 +319,13 @@ impl MinC1NormRestoration {
     /// `RestorationOutcome::Failed` immediately.
     pub fn with_inner_solver(mut self, hook: RestoInnerSolver) -> Self {
         self.inner_solver = hook;
+        self
+    }
+
+    /// Share the cell the inner-solver hook reads its cap from (see
+    /// `solve_max_iter`).
+    pub fn with_solve_max_iter_cell(mut self, cell: Rc<std::cell::Cell<Option<Index>>>) -> Self {
+        self.solve_max_iter = cell;
         self
     }
 
@@ -370,6 +383,10 @@ impl RestorationPhase for MinC1NormRestoration {
 
     fn set_print_iter_output(&mut self, enabled: bool) {
         self.print_iter_output = enabled;
+    }
+
+    fn set_solve_max_iter(&mut self, max_iter: Index) {
+        self.solve_max_iter.set(Some(max_iter));
     }
 
     fn set_debug_hook(

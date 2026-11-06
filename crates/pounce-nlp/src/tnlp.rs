@@ -302,6 +302,22 @@ pub trait TNLP {
         true
     }
 
+    /// A model whose functions are coupled to the barrier parameter: called
+    /// by the interior-point loop after every `μ` update with the new `μ`.
+    /// Return `true` when the model's functions changed as a result; the
+    /// loop then discards every evaluation cached at the current point and
+    /// resets the line search (the filter's entries were measured against
+    /// the old functions). The bounds must not change.
+    ///
+    /// The complementarity driver's coupled continuation uses it: the
+    /// Scholtes rows `G·H <= τ` tighten with `μ` inside one solve, rather
+    /// than one solve per `τ` (`MpccTnlp`, `Lowering::Coupled`). The default
+    /// is "nothing moved". A decorator must forward it, or the coupling
+    /// silently stops at that layer.
+    fn update_with_barrier(&mut self, _mu: Number) -> bool {
+        false
+    }
+
     /// Per-iteration intermediate callback. Returning false requests
     /// early termination with `User_Requested_Stop`.
     fn intermediate_callback(
