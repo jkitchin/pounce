@@ -4,6 +4,8 @@
 `b4e5ffb641990738fd69cb53c02ae5966fd68edc`. It builds the pure-Rust FERAL C
 interface, installs its public header and EPL-2.0 license, and requests
 BinaryBuilder's library audit. Optional HSL/MA57 binaries are not included.
+Linux declares `CompilerSupportLibraries_jll` for Rust's `libgcc_s` unwinder;
+the initial local audit identified this dependency explicitly.
 The four candidate targets are Linux glibc and macOS, each x86_64/aarch64.
 Listing a candidate is not evidence that it passed a build or test. Windows
 remains outside the advertised platform set until its binary and suite pass.

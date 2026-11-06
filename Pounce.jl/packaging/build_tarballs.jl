@@ -32,7 +32,10 @@ install_license LICENSE
 platforms =
     [Platform(arch, os) for arch in ("x86_64", "aarch64") for os in ("linux", "macos")]
 products = [LibraryProduct("libpounce_cinterface", :libpounce_cinterface)]
-dependencies = Dependency[] # Pure-Rust FERAL build; no optional HSL dependency.
+# Rust's Linux unwinder links libgcc_s. Declare it so the audit resolves the
+# dependency and JLL initialization loads the matching runtime explicitly.
+dependencies =
+    [Dependency("CompilerSupportLibraries_jll"; platforms = filter(Sys.islinux, platforms))]
 
 build_tarballs(
     ARGS,
