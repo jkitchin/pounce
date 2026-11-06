@@ -206,8 +206,11 @@ changes.
     no feasible point, yet `solve_qp_ipm` returned `DualInfeasible` after 2
     iterations: a direction violating row 0 by 300 of its own units passed
     the old absolute tolerance. It now returns `PrimalInfeasible`.
-  - **Known limitation:** with `equilibrate = false` (not the default) this
-    model now ends `NumericalFailure`; see `dev-notes/known-limitations.md`.
+    The same holds through `solve_socp_ipm`, including when the model also
+    carries second-order, PSD, exponential or power cone blocks.
+  - **Known limitation:** at `ε = 1e-14` this model ends `NumericalFailure`
+    (not the wrong `DualInfeasible`) through `solve_socp_ipm`, and with
+    `equilibrate = false`; see `dev-notes/known-limitations.md`.
 - **A constant row its cone forbids is reported primal infeasible
   (gh#1138).** Through `solve_socp`, `solve_qp` and the CLI's convex arm, an
   SOC whose head row has no `x` in it and a negative constant (`‖Ax + b‖ ≤

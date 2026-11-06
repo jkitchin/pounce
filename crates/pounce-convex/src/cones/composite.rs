@@ -226,6 +226,19 @@ impl CompositeCone {
         alpha
     }
 
+    /// `true` for each row that belongs to a `Nonneg` block — the rows whose
+    /// recession test is per-row (gh#1143), whatever other blocks the cone
+    /// holds.
+    pub(crate) fn nonneg_row_mask(&self) -> Vec<bool> {
+        let mut mask = vec![false; self.dim];
+        for (off, k) in &self.blocks {
+            if let ConeKind::Nonneg(_) = k {
+                mask[*off..*off + k.dim()].fill(true);
+            }
+        }
+        mask
+    }
+
     /// True iff every block is a nonnegative orthant (the LP/QP case). The
     /// complementarity product `s ∘ z` is then elementwise, so a corrector can
     /// box-project the products directly on `(s, z)` without the Jordan-algebra

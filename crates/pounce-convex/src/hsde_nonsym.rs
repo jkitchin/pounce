@@ -363,6 +363,18 @@ pub(crate) struct NsCone {
 }
 
 impl NsCone {
+    /// `true` for each row that belongs to an `Orthant` block — the rows whose
+    /// recession test is per-row (gh#1143); see `detect_infeasibility_with`.
+    pub(crate) fn nonneg_row_mask(&self) -> Vec<bool> {
+        let mut mask = vec![false; self.dim];
+        for (off, b) in &self.blocks {
+            if let NsBlock::Orthant(_) = b {
+                mask[*off..*off + b.dim()].fill(true);
+            }
+        }
+        mask
+    }
+
     pub(crate) fn new(specs: &[NsBlock]) -> Self {
         let mut blocks = Vec::with_capacity(specs.len());
         let (mut dim, mut degree) = (0, 0);
@@ -1253,6 +1265,7 @@ fn detect_infeasibility_nscone(
             let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
             cone.in_primal_closure(&neg, tol)
         },
+        || cone.nonneg_row_mask(),
     )
 }
 
@@ -2574,6 +2587,54 @@ mod tests {
             detect_infeasibility_nscone(&prob, &x, &y, &z, &opts, &cone),
             None,
             "cone-aware test must reject z=(1,1,1): not in K_exp*"
+        );
+    }
+
+    /// gh#1143 on the non-symmetric detector, which always passed
+    /// `orthant = false` and so never applied the per-row slack. Rows 0–2 are
+    /// the issue's orthant rows; rows 3–5 put `(x₂, 1, 1)` in an exp cone. The
+    /// ray `d = (297, 420, 0)` has `−Gd = 0` on the exp block (in its closure).
+    /// End-to-end models of this shape are caught first by the gh#283 FBBT
+    /// screen, so the detector is exercised directly.
+    fn issue1143_exp(sign: f64) -> (QpProblem, NsCone) {
+        let prob = QpProblem {
+            n: 3,
+            p_lower: vec![],
+            c: vec![-3.0, 2.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, sign * 1e-14),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(2, 1, -1.0),
+                Triplet::new(3, 2, -1.0),
+            ],
+            h: vec![-sign, 0.0, 0.0, 0.0, 1.0, 1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        (prob, NsCone::new(&[NsBlock::Orthant(3), NsBlock::exp()]))
+    }
+
+    #[test]
+    fn issue1143_exp_cone_orthant_row_violated_is_not_a_ray() {
+        let (prob, cone) = issue1143_exp(1.0);
+        let d = [297.0, 420.0, 0.0];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &d, &[], &[0.0; 6], &opts, &cone),
+            None,
+        );
+    }
+
+    #[test]
+    fn issue1143_exp_cone_orthant_row_satisfied_is_a_ray() {
+        let (prob, cone) = issue1143_exp(-1.0);
+        let d = [297.0, 420.0, 0.0];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &d, &[], &[0.0; 6], &opts, &cone),
+            Some(QpStatus::DualInfeasible),
         );
     }
 

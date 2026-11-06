@@ -610,11 +610,23 @@ and the netlib/MIPLIB counts above hold.
 
 ## Convex LP: a near-constant infeasible row needs equilibration (gh#1143)
 
-`ε·x₀ ≤ −1` beside `x₀ ≥ 0` is infeasible for every `ε > 0`. At
-`ε ≤ 1e-10`, with `equilibrate = false` (not the default), the IPM no longer
-reaches a verdict: both drivers end `NumericalFailure` (HSDE at 159
-iterations, direct at ~100). On the default options it is `PrimalInfeasible`
-(HSDE: 24 iterations at `ε = 1e-14`, 13 at `1e-10`).
+`ε·x₀ ≤ −1` beside `x₀ ≥ 0` is infeasible for every `ε > 0`. Two paths no
+longer reach a verdict on it at the smallest `ε`. Before gh#1143 they reported
+it, wrongly, as unbounded (or rightly by accident, below); they now end
+`NumericalFailure`:
+
+| path | ε | before gh#1143 | now |
+|---|---|---|---|
+| `solve_qp_ipm`, default | 1e-14 | `DualInfeasible` (wrong) | `PrimalInfeasible`, 24 it |
+| `solve_qp_ipm`, `equilibrate = false`, HSDE | 1e-14 | `DualInfeasible` (wrong) | `NumericalFailure`, 159 it |
+| `solve_qp_ipm`, `equilibrate = false`, direct | 1e-14 … 1e-10 | `PrimalInfeasible`, 1 it (by accident) | `NumericalFailure`, ~100 it |
+| `solve_socp_ipm` (`solver_selection=socp`), default, orthant or orthant + SOC | 1e-14 | `DualInfeasible` (wrong) | `NumericalFailure`, 155–159 it |
+| `solve_socp_ipm`, same | 1e-10 | `DualInfeasible` (wrong) | `PrimalInfeasible`, 13 it |
+
+What reaches the verdict through `solve_qp_ipm` is its gh#293 equilibrated
+retry after a failed solve. The conic entry has no such retry, and Ruiz
+equilibration is only sound per row on orthant rows, so adding one there is a
+separate change to that arm's trajectory, not part of this fix.
 
 Before gh#1143 the direct unequilibrated driver answered `PrimalInfeasible`
 at iteration **1** — not by finding a Farkas ray, but by accepting the
@@ -626,6 +638,9 @@ removes the false certificate and with it the accident.
 
 ### How to tell whether a fix works
 
-`crates/pounce-convex/tests/issue1143_tiny_row_false_unbounded.rs` with
-`equilibrate: false` added to its option sets passes, and its
-`near_constant_satisfied_row_stays_unbounded` leg keeps `DualInfeasible`.
+In `crates/pounce-convex/tests/issue1143_tiny_row_false_unbounded.rs`,
+`conic_entry_near_constant_infeasible_row_is_not_unbounded` can assert
+`PrimalInfeasible` at `ε = 1e-14` too (it asserts only "not
+`DualInfeasible`" there today), `near_constant_infeasible_row_is_primal_infeasible`
+passes with `equilibrate: false` added to its option sets, and both
+`*_satisfied_row_stays_unbounded` tests keep `DualInfeasible`.
