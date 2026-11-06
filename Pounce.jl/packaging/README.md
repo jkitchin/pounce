@@ -9,6 +9,9 @@ the initial local audit identified this dependency explicitly. GCC 10 selects
 the libgfortran5 platform tag used by the runtime artifacts (POUNCE itself has
 no Fortran API). Audit failures stop the build; BinaryBuilder's permissive
 default is explicitly disabled.
+On macOS, the linker removes unused dylib dependencies, including the system
+libiconv linkage found in the first artifact. The complete library must
+still pass the audit and runtime tests after linking.
 The four candidate targets are Linux glibc and macOS, each x86_64/aarch64.
 Listing a candidate is not evidence that it passed a build or test. Windows
 remains outside the advertised platform set until its binary and suite pass.

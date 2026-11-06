@@ -21,6 +21,11 @@ sources = [
 
 script = raw"""
 cd ${WORKSPACE}/srcdir/pounce
+if [[ "${target}" == *-apple-darwin* ]]; then
+    # The initial Darwin artifact retained an unused system libiconv linkage.
+    # Remove unused dylib load commands instead of retaining that dependency.
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-dead_strip_dylibs"
+fi
 cargo build --release --locked -p pounce-cinterface
 install -Dvm 0755 target/${rust_target}/release/*pounce_cinterface.${dlext} ${libdir}/libpounce_cinterface.${dlext}
 install -Dvm 0644 crates/pounce-cinterface/include/pounce.h ${includedir}/pounce.h

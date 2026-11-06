@@ -142,6 +142,9 @@ runtime ABI tag. The recipe now selects GCC 10 and makes audit failures fatal;
 the resulting platform tags resolve the runtime artifacts on both Linux targets.
 A clean rebuild/audit, full artifact-backed tests and the
 remaining target builds are still required before this stage is complete.
+The first macOS arm64 build also needs a linker correction: its audit found an
+unused system libiconv dependency. A small linker control verifies the removal
+flag; the complete corrected artifact still requires rebuild and validation.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add

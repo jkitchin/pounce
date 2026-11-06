@@ -290,6 +290,26 @@ matching CompilerSupportLibraries artifact trees: arm64
 `ignore_audit_errors=false`. A clean rebuilt artifact/audit is still required;
 the metadata probe does not establish binary compatibility.
 
+The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
+completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
+dependency. Inspection of the actual library's 93 undefined symbols found no
+iconv references. A minimal Rust program did not reproduce the extra linkage,
+so it does not establish where that link was added. A separate linker control
+at wrapper `b892f46a` explicitly requests an unused iconv library; inspection
+and audit output confirm that `-Wl,-dead_strip_dylibs` removes that dependency
+while retaining libSystem. The recipe applies this flag on Darwin, but the full rebuilt solver still needs
+its audit and runtime tests. The first macOS archive is exploratory
+(tree `95e88077236cbcc37b850a0b26af149421cb2ec1`, SHA-256
+`d898dd529763ad0ebe59accdcf8a147ea682672389d0e09f5ea5044b7237b94a`).
+
+An exploratory full-suite run of the earlier Linux artifact at staged wrapper
+`350f204c` failed during the core-only installation subprocess: the VM kernel
+killed Julia's Pkg precompiler for lack of memory while three native builds
+were active. The run was then stopped deliberately (exit 143). Its test and
+kernel logs are retained locally; it is not a passing validation result or
+evidence of a wrapper defect. Final suites are scheduled separately from the
+native builds.
+
 The staging tool at wrapper `350f204c586fe9de625fbc77dbe6cb5d8e940c8d` generated a
 separate Pounce package with the actual generated Pounce_jll UUID
 `96a3a933-3cb5-5901-bb57-278b133f379d`, version 0.15.0+0. Its source loader diff
