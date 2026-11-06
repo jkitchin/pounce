@@ -262,3 +262,10 @@ After the complete Linux run, the updated `1d985b52` loader and its library test
 were copied into the isolated Linux test checkout. All 15 library-selection and
 native-version assertions pass there too, including extension solves through
 file/directory overrides and rejection of `libjulia` as an unrelated library.
+
+The declared dependency floors were tested separately at wrapper
+`0e81791fb82decde80b262e4c396de95500f2149`: Julia 1.10.12, MOI **1.48.0**, JuMP
+**1.29.0**, and Ipopt.jl 1.16.0, with those three packages pinned and
+`Pkg.test("Pounce"; allow_reresolve=false)`. All **3,610 assertions** pass on
+macOS arm64 with the same native `b4e5ffb6` library. The count is lower because
+the older MOI conformance suite has fewer tests; no wrapper tests were disabled.

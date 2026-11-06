@@ -191,13 +191,20 @@ julia --project=Pounce.jl --startup-file=no -e 'using Pkg; Pkg.test()'
 Tests cover direct C callbacks, forced garbage collection, callback failures,
 JuMP's modern/legacy APIs, warm starts, dual signs, an independent Ipopt solve,
 and MOI conformance. Ipopt and JuMP are test dependencies, not runtime
-dependencies. CI builds the library and runs the suite on Linux and macOS;
+dependencies. CI is configured to build and test the library on Linux and macOS;
 Windows packaging is not part of this first release.
+Local validation covers macOS arm64 on Julia 1.10.12/1.12.6 and Linux arm64 on
+Julia 1.12.6. The minimum MOI 1.48.0 / JuMP 1.29.0 combination also passes on
+Julia 1.10.12. Exact revisions and test counts are in the validation notes below.
 
-For BMOPFTools, the intended integration is
+For BMOPFTools, use
 `solve_opf(net; optimizer=Pounce.Optimizer)`. Validate the returned point with
-`profile_solution(net, result)`. The package test suite does not yet run
-BMOPFTools or claim distribution-network benchmark results.
+`profile_solution(net, result)`. The separate
+[application harness](../benchmarks/julia_bmopf/README.md) pins a small teaching
+feeder and dependency graph, exercises parameter/start/recovery scenarios, and
+adds independent SI current/KCL checks. It does not establish utility-scale
+performance. Local JLL release preparation is documented in
+[packaging/README.md](packaging/README.md); those artifacts remain unpublished.
 
 ## Attribution
 

@@ -51,6 +51,8 @@ function stage_release(jll, destination)
     text = read(readme, String)
     first_api_section = findfirst("## JuMP example", text)
     first_api_section === nothing && error("README structure changed")
+    end_api_section = findfirst("## Tests and development", text)
+    end_api_section === nothing && error("README structure changed")
     write(
         readme,
         """
@@ -67,7 +69,11 @@ This directory is local release preparation, not a published package.
 Instantiate the environment one directory above this package and run
 `Pkg.test("Pounce")`. The native library is supplied by JLL artifacts.
 
-""" * text[first(first_api_section):end],
+        """ *
+        text[first(first_api_section):prevind(text, first(end_api_section))] *
+        "## Attribution\n\nSee [NOTICE.md](NOTICE.md) for upstream attribution and " *
+        "[LICENSE.md](LICENSE.md) for the Julia wrapper's MIT license. " *
+        "The separately packaged native POUNCE library is EPL-2.0.\n",
     )
     Pkg.activate(destination)
     Pkg.develop([PackageSpec(path = jll), PackageSpec(path = package)])
