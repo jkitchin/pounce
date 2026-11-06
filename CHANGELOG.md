@@ -205,10 +205,14 @@ changes.
   An orthant row `0 ≤ -1` and an empty equality row `0 = 2` failed the same
   way. The certificate's multiplier sits on a row with no column entries, so
   the Farkas margin never accepted it. A screen before the iteration now
-  proves these with the exact certificate (a unit multiplier on the row,
-  `Aᵀy + Gᵀz = 0`), at iteration 0. It also covers an SOC whose rows are all
-  constant and lie outside the cone. Feasible constant rows are solved as
-  before, and the fixture sweep diffs empty on both legs.
+  proves these with the exact certificate, at iteration 0. The certificate
+  is a unit (`∞`-norm) multiplier on the offending rows, with `Aᵀy + Gᵀz =
+  0`. For an SOC with a constant head it also covers constant tail rows
+  beside ones that depend on `x` (`‖(x, 2)‖ ≤ 1`) and blocks whose rows are
+  all constant. The tolerance is presolve's empty-row one (`1e-9 × (1 +
+  scale)`), so the two agree on the same row. A constant at rounding level,
+  or a non-finite one, is left to the iteration. Feasible constant rows are
+  solved as before, and the fixture sweep diffs empty on both legs.
 - **A re-solve's iterations are counted (gh#884 retry, gh#983 scale
   re-solve).**
   - **What changed:** when either re-solve runs, the statistics and the

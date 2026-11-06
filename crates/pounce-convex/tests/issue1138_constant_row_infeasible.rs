@@ -11,10 +11,10 @@
 //! the same way, through `solve_qp_ipm` too.
 //!
 //! The screen proves these before the iteration. Every certificate here is
-//! checked exactly: `Aᵀy + Gᵀz = 0`, `bᵀy + hᵀz < 0`, and `z` in the dual
-//! cone. The cases that must *not* fire are pinned beside them: a feasible
-//! constant head, a feasible SOC whose constant tail row carries a negative
-//! `h`, and a violation inside the tolerance.
+//! checked exactly: `Aᵀy + Gᵀz = 0` and `bᵀy + hᵀz < 0`. The cases that must
+//! *not* fire are pinned beside them: a feasible constant head, a feasible
+//! SOC whose constant tail row carries a negative `h`, a violation inside the
+//! tolerance, and a non-finite constant.
 
 use pounce_convex::{
     ConeSpec, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet, solve_qp_ipm,
@@ -132,21 +132,69 @@ fn a_constant_soc_block_outside_the_cone_is_infeasible() {
     assert_eq!(sol.z, vec![1.0, -1.0, 0.0], "z on the boundary of SOC*");
 }
 
+/// Every certificate type through every entry point it can reach (#1142
+/// review): the orthant row and the empty equality row through both QP and
+/// SOCP entries, cold and warm; the SOC head and the all-constant SOC
+/// through both SOCP entries.
 #[test]
-fn the_warm_entry_points_screen_too() {
-    let prob = constant_head([1.0, 1.0], [-1.0, 0.0, 0.0]);
-    let warm = QpWarmStart {
-        x: vec![0.1, 0.1],
-        y: vec![],
-        z: vec![1.0, 0.0, 0.0],
-        z_lb: vec![0.0; 2],
-        z_ub: vec![0.0; 2],
-    };
+fn every_certificate_type_through_every_entry_point() {
     let opts = QpOptions::default();
-    let s = solve_socp_ipm_warm(&prob, &[ConeSpec::SecondOrder(3)], &warm, &opts, backend);
-    assert_certified(&prob, &s, "solve_socp_ipm_warm");
-    let q = solve_qp_ipm_warm(&prob, &opts, &warm, backend);
-    assert_certified(&prob, &q, "solve_qp_ipm_warm");
+    let warm_for = |p: &QpProblem| QpWarmStart {
+        x: vec![0.1; p.n],
+        y: vec![0.0; p.m_eq()],
+        z: vec![0.5; p.m_ineq()],
+        z_lb: vec![0.0; p.n],
+        z_ub: vec![0.0; p.n],
+    };
+    let all = |prob: &QpProblem, cones: &[ConeSpec], qp_too: bool, what: &str| {
+        let w = warm_for(prob);
+        assert_certified(prob, &solve_socp_ipm(prob, cones, &opts, backend), what);
+        assert_certified(
+            prob,
+            &solve_socp_ipm_warm(prob, cones, &w, &opts, backend),
+            what,
+        );
+        if qp_too {
+            assert_certified(prob, &solve_qp_ipm(prob, &opts, backend), what);
+            assert_certified(prob, &solve_qp_ipm_warm(prob, &opts, &w, backend), what);
+        }
+    };
+    // Orthant row `0 ≤ −1`.
+    let orth = constant_head([1.0, 1.0], [-1.0, 0.0, 0.0]);
+    all(&orth, &[ConeSpec::Nonneg(3)], true, "orthant row");
+    // Empty equality row `0 = 2`, beside an ordinary orthant block.
+    let eq = QpProblem {
+        a: vec![Triplet::new(1, 0, 1.0)],
+        b: vec![2.0, 0.5],
+        ..constant_head([1.0, 1.0], [1.0, 0.0, 0.0])
+    };
+    all(&eq, &[ConeSpec::Nonneg(3)], true, "equality row");
+    all(
+        &eq,
+        &[ConeSpec::SecondOrder(3)],
+        false,
+        "equality row, SOC present",
+    );
+    // SOC head `‖x‖ ≤ −1`.
+    all(&orth, &[ConeSpec::SecondOrder(3)], false, "SOC head");
+    // All-constant SOC `(1, 2) ∉ K`.
+    let cst = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(2, 0, -1.0)],
+        h: vec![1.0, 2.0, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    all(
+        &cst,
+        &[ConeSpec::SecondOrder(2), ConeSpec::Nonneg(1)],
+        false,
+        "all-constant SOC",
+    );
 }
 
 /// The other branch: feasible models with constant rows are solved, not
@@ -185,12 +233,86 @@ fn feasible_constant_rows_are_left_to_the_solve() {
     assert!((sol.obj - 1.0).abs() < 1e-6, "obj {}", sol.obj);
 }
 
-/// A violation inside `infeas_tol` is not a proof: the screen stands down
-/// and the iteration decides, as before.
+/// The tolerance is presolve's empty-row one, `EMPTY_ROW_TOL (1e-9) × (1 +
+/// scale)` (#1142 review): a constant at rounding level is not read as a
+/// conflict, and the iteration then finds the point feasible to its own
+/// tolerance. Anything clearly above it is certified at any magnitude, so
+/// scaling the row does not flip the verdict (`infeas_tol`, an absolute
+/// `1e-7`, let `0 ≤ −5e-8` stand down into the gh#1138 failure).
 #[test]
-fn a_violation_inside_the_tolerance_is_not_screened() {
+fn the_tolerance_is_presolves_and_the_verdict_survives_scaling() {
     let opts = QpOptions::default();
-    let prob = constant_head([1.0, 1.0], [-0.1 * opts.infeas_tol, 0.0, 0.0]);
+    let soc = [ConeSpec::SecondOrder(3)];
+    for h0 in [-5e-8, -5e-6, -2e-9] {
+        let prob = constant_head([1.0, 1.0], [h0, 0.0, 0.0]);
+        assert_certified(&prob, &solve_socp_ipm(&prob, &soc, &opts, backend), "socp");
+        assert_certified(&prob, &solve_qp_ipm(&prob, &opts, backend), "qp");
+    }
+    let prob = constant_head([1.0, 1.0], [-5e-10, 0.0, 0.0]);
+    let sol = solve_socp_ipm(&prob, &soc, &opts, backend);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "inside the tolerance: {sol:?}"
+    );
+    let sol = solve_qp_ipm(&prob, &opts, backend);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "inside the tolerance: {sol:?}"
+    );
+}
+
+/// A constant head with *some* constant tail rows beside rows that depend
+/// on `x` (#1142 review): `s = (1, x, 2) ∈ SOC`, i.e. `‖(x, 2)‖ ≤ 1`. The
+/// certificate is `z = (1, 0, −1)`, all on rows with no `G` entry.
+#[test]
+fn a_constant_head_with_constant_tail_rows_is_infeasible() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(1, 0, -1.0)],
+        h: vec![1.0, 0.0, 2.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let sol = solve_socp_ipm(
+        &prob,
+        &[ConeSpec::SecondOrder(3)],
+        &QpOptions::default(),
+        backend,
+    );
+    assert_certified(&prob, &sol, "‖(x, 2)‖ ≤ 1");
+    assert_eq!(sol.z, vec![1.0, 0.0, -1.0]);
+}
+
+/// Extreme constants (#1142 review): the tail norm is computed scaled, so
+/// `(1e10, 1e160)` gets a valid certificate rather than `z = (1, −0)` with
+/// `hᵀz > 0`; and a non-finite constant is left to the iteration and its
+/// finiteness guard, never certified with a NaN multiplier.
+#[test]
+fn extreme_constants_give_a_valid_certificate_or_none() {
+    let opts = QpOptions::default();
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(2, 0, -1.0)],
+        h: vec![1e10, 1e160, 0.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::SecondOrder(2), ConeSpec::Nonneg(1)];
+    let sol = solve_socp_ipm(&prob, &cones, &opts, backend);
+    assert_certified(&prob, &sol, "(1e10, 1e160)");
+
+    let prob = constant_head([1.0, 1.0], [1.0, f64::INFINITY, 0.0]);
     let sol = solve_socp_ipm(&prob, &[ConeSpec::SecondOrder(3)], &opts, backend);
-    assert!(sol.iters > 0, "the iteration ran: {sol:?}");
+    assert_ne!(sol.status, QpStatus::PrimalInfeasible, "{sol:?}");
+    assert!(sol.z.iter().all(|v| v.is_finite()), "{sol:?}");
 }
