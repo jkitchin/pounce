@@ -50,7 +50,22 @@
       "git_tree_sha1": "81bf7ad84ff4e624bd1eb49c9386d3d00a439b8d",
       "recipe_commit": "28297b0b1aa1d743d0c07a2abaf6b7196ee4c636",
       "audit": "passed",
-      "runtime_tests": "pending"
+      "runtime_tests": "in_progress",
+      "validated_runs": [
+        {
+          "julia": "1.13.3",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "Debian 12 x86_64 container under Rosetta in a dedicated arm64 VM; isolated depot; no Rust/source-build library; decompressor-only ELF-loader shim; Julia worker and GC thread counts each 1",
+          "log_sha256": "51fcefdb337e6a3281ec1bcf89b2fdef421da4e710fe37a6d589446fdc43e43b",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
+        }
+      ]
     },
     {
       "platform": "aarch64-apple-darwin",

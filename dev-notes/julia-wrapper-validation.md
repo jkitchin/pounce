@@ -276,8 +276,8 @@ The earlier measurements deliberately retain their Julia 1.10.12/1.12.6
 versions. On 2026-11-06 the official [Julia downloads page](https://julialang.org/downloads/)
 lists stable **1.13.3** and LTS **1.10.13**; the local `release` channel still
 points to 1.12.6. Current-release validation must therefore also cover 1.13.3
-and 1.10.13. Those runs remain pending, and no prior test counts are being
-attributed to the newer versions. The manual binary workflow exposes all four
+and 1.10.13. The results below and the artifact inventory track that matrix;
+no prior test counts are attributed to the newer versions. The manual binary workflow exposes all four
 versions for reproducibility and defaults to 1.13.3.
 
 The local-only BinaryBuilder recipe first built Linux arm64 from native
@@ -295,8 +295,8 @@ BinaryBuilder 0.6.6 confirms libgfortran5 tags for both Linux architectures and
 matching CompilerSupportLibraries artifact trees: arm64
 `3cd2fb12f766ee959993b19d1c546f9b1e3aa868`, x86_64
 `e0ae8e1988425737cec3f6c615497f3284d9e771`. The recipe also explicitly sets
-`ignore_audit_errors=false`. A clean rebuilt artifact/audit is still required;
-the metadata probe does not establish binary compatibility.
+`ignore_audit_errors=false`. This metadata probe alone did not establish binary
+compatibility; the subsequent complete builds supply the audit evidence.
 
 The complete Linux arm64 rebuild at recipe
 `b892f46a51ce42fd5192c6f9633b14bd24200d4c` now **passes the fatal audit**.
@@ -307,7 +307,8 @@ the POUNCE library, public header, and license; it does not duplicate the runtim
 dependency's libraries. Native source remains `b4e5ffb6`, with Rust 1.91.0 and
 GCC 10.2.0. Artifact tree: `a796ceec2106222a27debcc6bc909869492c09b6`;
 archive SHA-256: `1b0d2946e91b4893641af83468496479585d76da4fd01a7cae3b025e9f94bd03`.
-Full artifact-backed runtime tests remain pending.
+Runtime tests were pending when this artifact was built; combined-JLL results
+are recorded below.
 
 ELF inspection records `$ORIGIN` as the runpath and library SHA-256
 `2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e`.
@@ -320,11 +321,11 @@ from its libc binary; this is the conservative Linux arm64 build baseline.
 The CentOS image used was arm64 manifest
 `73f11afcbb50d8bc70eab9f0850b3fa30e61a419bc48cf426e63527d14a8373b`
 from the official `centos:7` manifest list. This loader check is separate from
-the pending complete Julia suites on Debian 12.
+the complete Julia suites on Debian 12 recorded below.
 
 The earlier Linux x86_64 build at recipe `350f204c` also finished and confirmed
 the unavailable libgfortran3 runtime mapping. Its archive is exploratory and
-will be rebuilt with GCC 10. The auditor also identifies CPUID-based instruction
+was superseded by the GCC 10 build below. The auditor also identifies CPUID-based instruction
 dispatch and therefore cannot statically establish a minimum instruction set;
 x86 runtime checks remain necessary.
 
@@ -337,7 +338,7 @@ The first control using `gcc` instead of Cargo's `cc` did not reproduce the
 failure and is not counted as that evidence. The recipe now selects the
 toolchain's GNU linker for Linux x86_64 using the
 [documented Rust opt-out](https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/).
-The complete corrected POUNCE build/audit is still required.
+The following full POUNCE build verifies this linker change on the solver.
 
 That complete Linux x86_64 build now **passes the fatal audit** at recipe
 `28297b0b`, with the GNU linker and runtime dependency resolved. The CPUID
@@ -364,8 +365,8 @@ available. On macOS, Cargo and rustc are excluded from PATH. Both resolve the
 expected artifact library and leave MOI unloaded until requested. These runs
 also pass all **3,662 assertions** on Julia **1.10.13** on each arm64 platform,
 with the same staged wrapper and dependency versions. These four runs cover the
-default artifact path; x86_64 and complete override runs remain pending. Log
-hashes and exact environments are in the artifact inventory.
+default artifact path. Intel results follow, and complete override runs remain
+pending. Log hashes and exact environments are in the artifact inventory.
 
 Intel macOS also passes **3,662 assertions** on Julia **1.13.3** with the same
 staged wrapper and dependencies. This runs the x86_64 Julia executable and native
@@ -379,10 +380,11 @@ executable succeeds. A container-local shim applies that invocation only to
 the decompressor, without changing Julia/Pounce's library search environment.
 The next run received SIGSEGV in Julia's GC safepoint during `Pkg.instantiate`,
 also before loading Pounce. A subsequent run explicitly sets
-`JULIA_NUM_THREADS=1` and `JULIA_NUM_GC_THREADS=1`; it has loaded the audited
-artifact and reached the full suite. These exploratory failures are not passing
-tests, nor evidence of a Pounce native failure. The completed runtime matrix must
-record the translation mode and these settings; native hosted Linux CI remains
+`JULIA_NUM_THREADS=1` and `JULIA_NUM_GC_THREADS=1`; it **passes all 3,662
+assertions** at staged wrapper `add2e6e3`, with MOI 1.54.0, JuMP 1.32.1, and
+Ipopt.jl 1.16.0. The selected library is the accepted Intel Linux artifact. These exploratory failures are not passing
+tests, nor evidence of a Pounce native failure. The artifact inventory records
+the translation mode, settings, and successful log hash; native hosted Linux CI remains
 a separate release gate.
 
 The combined macOS arm64 artifact also passes the pinned BMOPFTools application
@@ -409,8 +411,8 @@ iconv references. A minimal Rust program did not reproduce the extra linkage,
 so it does not establish where that link was added. A separate linker control
 at wrapper `b892f46a` explicitly requests an unused iconv library; inspection
 and audit output confirm that `-Wl,-dead_strip_dylibs` removes that dependency
-while retaining libSystem. The recipe applies this flag on Darwin, but the full rebuilt solver still needs
-its audit and runtime tests. The first macOS archive is exploratory
+while retaining libSystem. The recipe applies this flag on Darwin; the subsequent full solver build and
+combined-JLL runs supply its audit and runtime evidence. The first macOS archive is exploratory
 (tree `95e88077236cbcc37b850a0b26af149421cb2ec1`, SHA-256
 `d898dd529763ad0ebe59accdcf8a147ea682672389d0e09f5ea5044b7237b94a`).
 
@@ -447,7 +449,7 @@ with a new depot, no Cargo/Rust on PATH, and no `POUNCE_LIBRARY_PATH` successful
 loads native 0.15.0 from
 `/depot/artifacts/3e988b8297986233f5da66668143e7ca91b684ee/lib/libpounce_cinterface.so`.
 The optimizer/extension remains unloaded in this core-only process. This proves
-the staging/default-artifact mechanism, but does not waive the runtime-dependency
-audit correction or the pending full artifact-backed package/platform suites.
+the staging/default-artifact mechanism. It did not waive the runtime-dependency
+audit correction or replace the later full artifact-backed package suites.
 All generated JLLs and archives remain local; nothing has been uploaded,
 registered, pushed, or submitted as a PR.
