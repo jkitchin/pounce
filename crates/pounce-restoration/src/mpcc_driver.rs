@@ -332,11 +332,25 @@ pub fn solve_mpcc(
     {
         Ok("yes") => Lift::Yes,
         Ok("no") => Lift::No,
+        // `auto` lifts on the exact-Hessian path only. Under limited memory
+        // it lost two answers of the 30 MacMPEC models it lifts
+        // (design-cent-3: no answer, against S unlifted; pack-comp2p-32: the
+        // weak fallback, against S) and took 27% more iterations on the rest
+        // (68,524 against 53,746), where the exact path gains. The Python
+        // frontend and the CasADi plugin select limited memory on their own
+        // when there is no exact Hessian, so this is not a rare path.
+        _ if app
+            .options()
+            .get_string_value("hessian_approximation", "")
+            .is_ok_and(|(v, _)| v == "limited-memory") =>
+        {
+            Lift::No
+        }
         _ => Lift::Auto,
     };
     let wrapper = Rc::new(RefCell::new(MpccTnlp::with_lift(
         Rc::clone(&inner),
-        pairs.clone(),
+        pairs,
         Lowering::Eq,
         lift,
     )?));
@@ -349,27 +363,6 @@ pub fn solve_mpcc(
         ));
     }
     let lowered: Rc<RefCell<dyn TNLP>> = wrapper.clone();
-    // The ℓ₁ penalty stage solves the model unlifted. The penalty makes every
-    // equality row elastic and keeps inequalities hard, so on the lifted
-    // model it would soften each lifted row `g - s_H w = c` -- the paired
-    // row's own feasibility, hard when unlifted -- and add two elastic
-    // variables per lifted pair: a different, larger subproblem. Measured on
-    // MacMPEC pack-comp1p-32 / pack-comp2p-32 (492 pairs lifted): the
-    // penalty went from 255 / 310 iterations (3 s) to max_iter (3000, 220 s).
-    let plain = if n_lifted > 0 {
-        let p = Rc::new(RefCell::new(MpccTnlp::with_lift(
-            Rc::clone(&inner),
-            pairs,
-            Lowering::Eq,
-            Lift::No,
-        )?));
-        p.borrow_mut().set_defer_inner_finalize(true);
-        Some(p)
-    } else {
-        None
-    };
-    let plain_lowered: Option<Rc<RefCell<dyn TNLP>>> =
-        plain.as_ref().map(|p| p.clone() as Rc<RefCell<dyn TNLP>>);
 
     let tol = app
         .options()
@@ -496,13 +489,19 @@ pub fn solve_mpcc(
                start: Option<StartOverride>,
                solves: &mut Vec<MpccSolveRecord>|
      -> Captured {
-        // The penalty stage alone runs on the unlifted wrapper (above).
-        let (wrapper, lowered) = match (stage, &plain, &plain_lowered) {
-            (MpccStage::Penalty, Some(p), Some(l)) => (p, l),
-            _ => (&wrapper, &lowered),
-        };
         {
             let mut w = wrapper.borrow_mut();
+            // The l1 penalty stage solves the model unlifted. The penalty
+            // makes every equality row elastic and keeps inequalities hard,
+            // so on the lifted model it would soften each lifted row
+            // `g - s_H w = c`, the paired row's own feasibility, hard when
+            // unlifted, and add two elastic variables per lifted pair: a
+            // different, larger subproblem. Measured on MacMPEC
+            // pack-comp1p-32 / pack-comp2p-32 (492 pairs lifted): the penalty
+            // went from 255 / 310 iterations (3 s) to max_iter (3000, 220 s).
+            // Every other stage solves the model as `complementarity_lift`
+            // set it; a no-op when nothing was lifted.
+            w.set_lift(stage != MpccStage::Penalty);
             // A solve refused before iteration 0 never reaches
             // `finalize_solution`, so without this it would report the
             // previous stage's point and products under its own status.
@@ -515,7 +514,7 @@ pub fn solve_mpcc(
         // opinion within the call resets it (ieee300_reserve_q98: 2.9 s of
         // 20 s by the statistics).
         let t0 = std::time::Instant::now();
-        let status = app.optimize_tnlp(Rc::clone(lowered));
+        let status = app.optimize_tnlp(Rc::clone(&lowered));
         let seconds = t0.elapsed().as_secs_f64();
         let statistics = app.statistics();
         let w = wrapper.borrow();

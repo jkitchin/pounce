@@ -293,12 +293,19 @@ and a lifted row's multiplier is the one its inequality would carry.
 
 | value | lifts |
 | --- | --- |
-| `auto` (default) | a one-sided pair whose row has at least 8 Jacobian entries |
+| `auto` (default) | a one-sided pair whose row has at least 8 Jacobian entries, with an exact Hessian; nothing under `hessian_approximation=limited-memory` |
 | `yes` | every one-sided pair |
 | `no` | none: every product row is `G·H(x)` |
 
 A mixed pair (the row free) is never lifted, since its row has no sign to
-give `w`. The report's `complementarity.lifted` counts the lifted pairs.
+give `w`.
+
+Under `hessian_approximation=limited-memory` (what the Python frontend and
+the CasADi plugin use when there is no exact Hessian), `auto` does not lift.
+On the 30 MacMPEC models it lifts, limited memory lost two answers when
+lifted: `design-cent-3` ends with no answer and `pack-comp2p-32` falls back
+to a weakly stationary point, where both are strongly stationary unlifted.
+It also took 27% more iterations on the rest. `yes` still lifts there. The report's `complementarity.lifted` counts the lifted pairs.
 
 On a 64-128-128-128-10 ReLU network (384 pairs, rows of 65 and 129
 entries), lifting cuts the floating-point work of each factorization from

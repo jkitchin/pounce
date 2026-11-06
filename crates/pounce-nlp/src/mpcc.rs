@@ -188,19 +188,11 @@ pub struct MpccTnlp {
     /// Per pair: positions in the inner Jacobian value array of row `i`'s
     /// entries, and their (0-based) columns.
     row_entries: Vec<Vec<(usize, usize)>>,
-    /// Per pair: the position, within this pair's block of the lowered
-    /// Jacobian, of the `x_j` entry (it is appended unless `x_j` is already
-    /// a column of row `i`).
-    var_slot: Vec<usize>,
-    /// Per pair: offset of its block in the lowered Jacobian value array.
-    jac_block: Vec<usize>,
-    jac_nnz: usize,
-    /// Lowered Hessian: inner structure, then appended cross entries
-    /// (0-based, lower triangle).
-    h_extra: Vec<(usize, usize)>,
-    /// (row, col), lower triangle, 0-based -> position in the lowered
-    /// Hessian value array.
-    h_pos: HashMap<(usize, usize), usize>,
+    /// The lowered model's structure as lifting leaves it: the active one.
+    layout: Layout,
+    /// The other one, when lifting changed anything: unlifted if `layout`
+    /// lifts, absent otherwise. [`MpccTnlp::set_lift`] swaps them.
+    other_layout: Option<Layout>,
     // Scratch.
     g_inner: Vec<Number>,
     jac_inner: Vec<Number>,
@@ -215,12 +207,119 @@ pub struct MpccTnlp {
     defer_inner_finalize: bool,
     start_override: Option<StartOverride>,
     branch: Option<BranchBounds>,
+}
+
+/// Everything in the lowered model's structure that lifting changes. Built
+/// once per setting in [`MpccTnlp::with_lift`]; the rest of the wrapper is
+/// the same either way.
+#[derive(Debug, Clone)]
+struct Layout {
     /// Per lowered pair: the 0-based index of its lifted variable `w_k`
     /// (`n + l`), or `None` when its product row is `G(x)·H(x)`.
     lift_var: Vec<Option<usize>>,
     /// The lifted pairs, `(lowered index, variable index)`, in the order of
     /// their variables.
     lifted: Vec<(usize, usize)>,
+    /// Per inner row: its lifted pair `(lowered index, variable index)`, or
+    /// `None`. Rows are unique to a pair, so there is at most one.
+    lift_of_row: Vec<Option<(usize, usize)>>,
+    /// Per pair: the position, within this pair's block of the lowered
+    /// Jacobian, of the `x_j` entry (it is appended unless `x_j` is already
+    /// a column of row `i`).
+    var_slot: Vec<usize>,
+    /// Per pair: offset of its block in the lowered Jacobian value array.
+    jac_block: Vec<usize>,
+    jac_nnz: usize,
+    /// Lowered Hessian: inner structure, then appended cross entries
+    /// (0-based, lower triangle).
+    h_extra: Vec<(usize, usize)>,
+    /// (row, col), lower triangle, 0-based -> position in the lowered
+    /// Hessian value array.
+    h_pos: HashMap<(usize, usize), usize>,
+}
+
+/// The lowered structure for one lifting setting (module docs,
+/// "Lifting"): which pairs are lifted, the lowered Jacobian's blocks and the
+/// Hessian entries the products add to the inner model's (`inner_h_pos`).
+fn layout(
+    pairs: &[ComplementarityPair],
+    signless: &[bool],
+    row_entries: &[Vec<(usize, usize)>],
+    lift: Lift,
+    (n, m, jnnz, hnnz): (usize, usize, usize, usize),
+    inner_h_pos: &HashMap<(usize, usize), usize>,
+) -> Layout {
+    // One-sided pairs only: a mixed pair's row is free, so it has no sign to
+    // give a variable bound.
+    let mut lift_var = Vec::with_capacity(pairs.len());
+    let mut lifted = Vec::new();
+    let mut lift_of_row = vec![None; m];
+    for (k, p) in pairs.iter().enumerate() {
+        let on = !signless[k]
+            && match lift {
+                Lift::No => false,
+                Lift::Auto => row_entries[k].len() >= LIFT_AUTO_MIN_ENTRIES,
+                Lift::Yes => true,
+            };
+        if on {
+            let w = n + lifted.len();
+            lift_var.push(Some(w));
+            lifted.push((k, w));
+            lift_of_row[p.row] = Some((k, w));
+        } else {
+            lift_var.push(None);
+        }
+    }
+    // Lowered Jacobian: the inner entries, one `-s_H` entry per lifted row on
+    // its variable, then one block per product row.
+    let mut var_slot = Vec::with_capacity(pairs.len());
+    let mut jac_block = Vec::with_capacity(pairs.len());
+    let mut jac_nnz = jnnz + lifted.len();
+    for (k, p) in pairs.iter().enumerate() {
+        let ents = &row_entries[k];
+        jac_block.push(jac_nnz);
+        if lift_var[k].is_some() {
+            // `G·w`: the entries on x_j and on w_k.
+            jac_nnz += 2;
+            var_slot.push(0);
+        } else {
+            let slot = ents
+                .iter()
+                .position(|&(_, c)| c == p.var)
+                .unwrap_or(ents.len());
+            jac_nnz += ents.len() + usize::from(slot == ents.len());
+            var_slot.push(slot);
+        }
+    }
+    // Cross entries are (j, c) for each column c of row i; the diagonal
+    // (j, j) is touched only when x_j itself appears in row i. A lifted
+    // pair's product `G·w` has the one cross entry (w_k, j).
+    let mut h_pos = inner_h_pos.clone();
+    let mut h_extra = Vec::new();
+    for (k, (p, ents)) in pairs.iter().zip(row_entries).enumerate() {
+        if let Some(w) = lift_var[k] {
+            h_pos.insert((w, p.var), hnnz + h_extra.len());
+            h_extra.push((w, p.var));
+            continue;
+        }
+        for c in ents.iter().map(|&(_, c)| c) {
+            let key = (p.var.max(c), p.var.min(c));
+            if let std::collections::hash_map::Entry::Vacant(e) = h_pos.entry(key) {
+                e.insert(hnnz + h_extra.len());
+                h_extra.push(key);
+            }
+        }
+    }
+    Layout {
+        lift_var,
+        lifted,
+        lift_of_row,
+        var_slot,
+        jac_block,
+        jac_nnz,
+        h_extra,
+        h_pos,
+    }
 }
 
 /// `(sign, bound)` for a side with exactly one finite bound: `(+1, lo)` when
@@ -375,52 +474,11 @@ impl MpccTnlp {
         for k in 0..jnnz {
             by_row[irow[k] as usize - off].push((k, jcol[k] as usize - off));
         }
-        // Which pairs are lifted: one-sided ones (a mixed pair's row is free,
-        // so it has no sign to give a variable bound), as `lift` selects.
-        let mut lift_var = Vec::with_capacity(pairs.len());
-        let mut lifted = Vec::new();
-        for (k, p) in pairs.iter().enumerate() {
-            let on = !signless[k]
-                && match lift {
-                    Lift::No => false,
-                    Lift::Auto => by_row[p.row].len() >= LIFT_AUTO_MIN_ENTRIES,
-                    Lift::Yes => true,
-                };
-            if on {
-                let w = n + lifted.len();
-                lift_var.push(Some(w));
-                lifted.push((k, w));
-            } else {
-                lift_var.push(None);
-            }
-        }
-        // Lowered Jacobian: the inner entries, one `-s_H` entry per lifted
-        // row on its variable, then one block per product row.
-        let mut row_entries = Vec::with_capacity(pairs.len());
-        let mut var_slot = Vec::with_capacity(pairs.len());
-        let mut jac_block = Vec::with_capacity(pairs.len());
-        let mut jac_nnz = jnnz + lifted.len();
-        for (k, p) in pairs.iter().enumerate() {
-            let ents = by_row[p.row].clone();
-            jac_block.push(jac_nnz);
-            if lift_var[k].is_some() {
-                // `G·w`: the entries on x_j and on w_k.
-                jac_nnz += 2;
-                var_slot.push(0);
-            } else {
-                let slot = ents
-                    .iter()
-                    .position(|&(_, c)| c == p.var)
-                    .unwrap_or(ents.len());
-                jac_nnz += ents.len() + usize::from(slot == ents.len());
-                var_slot.push(slot);
-            }
-            row_entries.push(ents);
-        }
-
+        let row_entries: Vec<Vec<(usize, usize)>> =
+            pairs.iter().map(|p| by_row[p.row].clone()).collect();
         // Inner Hessian structure, 0-based, lower triangle.
         let hnnz = info.nnz_h_lag as usize;
-        let mut h_pos = HashMap::new();
+        let mut inner_h_pos = HashMap::new();
         if hnnz > 0 {
             let mut hr = vec![0 as Index; hnnz];
             let mut hc = vec![0 as Index; hnnz];
@@ -439,27 +497,23 @@ impl MpccTnlp {
             }
             for k in 0..hnnz {
                 let (a, b) = (hr[k] as usize - off, hc[k] as usize - off);
-                h_pos.insert((a.max(b), a.min(b)), k);
+                inner_h_pos.insert((a.max(b), a.min(b)), k);
             }
         }
-        let mut h_extra = Vec::new();
-        // Cross entries are (j, c) for each column c of row i; the diagonal
-        // (j, j) is touched only when x_j itself appears in row i. A lifted
-        // pair's product `G·w` has the one cross entry (w_k, j).
-        for (k, (p, ents)) in pairs.iter().zip(&row_entries).enumerate() {
-            if let Some(w) = lift_var[k] {
-                h_pos.insert((w, p.var), hnnz + h_extra.len());
-                h_extra.push((w, p.var));
-                continue;
-            }
-            for c in ents.iter().map(|&(_, c)| c) {
-                let key = (p.var.max(c), p.var.min(c));
-                if let std::collections::hash_map::Entry::Vacant(e) = h_pos.entry(key) {
-                    e.insert(hnnz + h_extra.len());
-                    h_extra.push(key);
-                }
-            }
-        }
+        let build = |lift: Lift| {
+            layout(
+                &pairs,
+                &signless,
+                &row_entries,
+                lift,
+                (n, m, jnnz, hnnz),
+                &inner_h_pos,
+            )
+        };
+        let layout = build(lift);
+        // The unlifted structure too, when lifting changed anything, so a
+        // stage that must not see the lift (the l1 penalty) can switch.
+        let other_layout = (!layout.lifted.is_empty()).then(|| build(Lift::No));
 
         Ok(Self {
             inner,
@@ -476,11 +530,8 @@ impl MpccTnlp {
             g_side,
             h_side,
             row_entries,
-            var_slot,
-            jac_block,
-            jac_nnz,
-            h_extra,
-            h_pos,
+            layout,
+            other_layout,
             g_inner: vec![0.0; m],
             jac_inner: vec![0.0; jnnz],
             lam_inner: vec![0.0; m],
@@ -496,43 +547,64 @@ impl MpccTnlp {
             pairs: declared,
             lowered: pairs,
             signless,
-            lift_var,
-            lifted,
         })
+    }
+
+    /// Solve the lifted model (`true`, the setting [`Self::with_lift`] was
+    /// given) or the unlifted one (`false`). A no-op when nothing was lifted.
+    /// The dimensions change with it, and every `optimize_tnlp` re-reads
+    /// them; starts, results and multipliers are in the inner model's terms
+    /// either way, so a driver switches between solves and nothing else.
+    pub fn set_lift(&mut self, on: bool) {
+        if on == !self.layout.lifted.is_empty() {
+            return;
+        }
+        if let Some(other) = self.other_layout.take() {
+            self.other_layout = Some(std::mem::replace(&mut self.layout, other));
+        }
     }
 
     /// How many pairs are lifted (module docs, "Lifting").
     pub fn n_lifted(&self) -> usize {
-        self.lifted.len()
+        self.layout.lifted.len()
     }
 
     /// The lowered model's variable count: the inner `n` plus one per
     /// lifted pair.
     pub fn n_lowered(&self) -> usize {
-        self.n + self.lifted.len()
+        self.n + self.layout.lifted.len()
     }
 
-    /// `(G_k, H_k)` for every product row at a lowered `x`, with `H_k` read
-    /// off the lifted variable where there is one; `g_inner` must hold the
-    /// inner rows at `x[..n]`.
+    /// `(G_k, H_k)` as the lowered model's product rows use them, at a
+    /// lowered `x`: [`Self::pair_values_from`], except that a lifted pair's
+    /// `H_k` is its variable `w_k`, which equals `H_k(x)` only to the lifted
+    /// row's residual. `g_inner` must hold the inner rows at `x[..n]`.
     fn product_factors(&self, x: &[Number]) -> Vec<(Number, Number)> {
-        self.lowered
-            .iter()
-            .enumerate()
-            .map(|(k, p)| {
-                let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
-                let h = match self.lift_var[k] {
-                    Some(w) => x[w],
-                    None => sh * (self.g_inner[p.row] - c),
-                };
-                (sg * (x[p.var] - b), h)
-            })
-            .collect()
+        let mut v = self.pair_values_from(x);
+        for &(k, w) in &self.layout.lifted {
+            v[k].1 = x[w];
+        }
+        v
     }
 
     /// Inner-model duals from a lowered point's: a lifted row's multiplier
     /// is the one its unlifted inequality would carry, `-s_H (z_L - z_U)` of
     /// its variable (module docs, "Lifting"); the rest pass through.
+    ///
+    /// At a point where `w`'s stationarity holds this equals
+    /// `λ_lifted - s_H ν_k G_k`, the mapping that keeps the declared model's
+    /// `x`-stationarity exact. Off it the two differ by that residual, and
+    /// this one is chosen deliberately. It is sign-correct by construction
+    /// and keeps `λ_i (g_i - c)` the lifted solve's own complementarity
+    /// `z_w w`. The driver's `gap_at` reads exactly that product, and the
+    /// gap decides whether the cold exact solve runs (`answers_agree`). The
+    /// other mapping would move the gap by `r_w H`, and with it a trajectory.
+    /// Its own error is what is reported in `mult_g`. Measured on three
+    /// `relu_nn` networks, the declared model's dual residual from these
+    /// multipliers is about 1e-13 at the reported point, against 1e3 to 2e15
+    /// for the same models unlifted (the exact product's degenerate
+    /// multipliers). At forced `max_iter` exits it is dominated by that same
+    /// degeneracy on both formulations.
     fn inner_duals(
         &self,
         z_l: &[Number],
@@ -541,7 +613,7 @@ impl MpccTnlp {
     ) -> (Vec<Number>, Vec<Number>, Vec<Number>) {
         let n = self.n;
         let mut lam = lambda.to_vec();
-        for &(k, w) in &self.lifted {
+        for &(k, w) in &self.layout.lifted {
             let i = self.lowered[k].row;
             if i < lam.len() {
                 let zl = z_l.get(w).copied().unwrap_or(0.0);
@@ -561,8 +633,29 @@ impl MpccTnlp {
     /// at zero), and the row's multiplier from the stationarity in `w`,
     /// `s_H λ_i = ν_k G_k - z_w` (module docs, "Lifting"). The inverse of
     /// [`Self::inner_duals`] at a stationary point.
+    /// The box a branch NLP puts on a lifted row's variable: `g_i` in the
+    /// branch's `[l, u]` is `w = s_H (g_i - c)` in the image of that box,
+    /// infinite ends kept infinite. `None` when row `i` is not lifted or the
+    /// branch does not bound it; `w`'s own bounds are then `[0, inf)`.
+    fn lifted_box(&self, i: usize) -> Option<(Number, Number)> {
+        let (k, _) = self.layout.lift_of_row.get(i).copied().flatten()?;
+        let &(_, l, u) = self.branch.as_ref()?.rows.iter().find(|r| r.0 == i)?;
+        let (sh, c) = self.h_side[k];
+        let img = |v: Number| {
+            if v <= -INF {
+                -sh * 2.0 * INF
+            } else if v >= INF {
+                sh * 2.0 * INF
+            } else {
+                sh * (v - c)
+            }
+        };
+        let (a, z) = (img(l), img(u));
+        Some((a.min(z), a.max(z)))
+    }
+
     fn lift_start(&mut self, sp: &mut StartingPoint<'_>) -> bool {
-        if self.lifted.is_empty() {
+        if self.layout.lifted.is_empty() {
             return true;
         }
         let (n, m) = (self.n, self.m_inner);
@@ -573,7 +666,7 @@ impl MpccTnlp {
         {
             return false;
         }
-        for &(k, w) in &self.lifted {
+        for &(k, w) in &self.layout.lifted {
             let p = self.lowered[k];
             let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
             sp.x[w] = sh * (self.g_inner[p.row] - c);
@@ -582,14 +675,19 @@ impl MpccTnlp {
             } else {
                 0.0
             };
-            let z_w = (-sh * lam_i).max(0.0);
+            // `z_L - z_U` of `w` is `-s_H λ_i` ([`Self::inner_duals`]). The
+            // negative part has somewhere to go only when `w` has a finite
+            // upper bound, under a branch; otherwise it is clipped at zero.
+            let v = -sh * lam_i;
+            let has_upper = self.lifted_box(p.row).is_some_and(|(_, hi)| hi < INF);
+            let (zl, zu) = (v.max(0.0), if has_upper { (-v).max(0.0) } else { 0.0 });
             if sp.init_z {
-                sp.z_l[w] = z_w;
-                sp.z_u[w] = 0.0;
+                sp.z_l[w] = zl;
+                sp.z_u[w] = zu;
             }
             if sp.init_lambda {
                 let nu = sp.lambda[m + k];
-                sp.lambda[p.row] = sh * (nu * sg * (sp.x[p.var] - b) - z_w);
+                sp.lambda[p.row] = sh * (nu * sg * (sp.x[p.var] - b) - (zl - zu));
             }
         }
         true
@@ -712,7 +810,9 @@ impl MpccTnlp {
             })
     }
 
-    /// `(G_k(x), H_k(x))` for every pair at `x`.
+    /// `(G_k(x), H_k(x))` for every pair at an inner-shaped `x`: the declared
+    /// model's sides, `H` from the row itself whether or not it is lifted.
+    /// [`Self::product_factors`] is what the lowered rows use instead.
     pub fn pair_values(&mut self, x: &[Number]) -> Option<Vec<(Number, Number)>> {
         if !self.inner.borrow_mut().eval_g(x, true, &mut self.g_inner) {
             return None;
@@ -772,8 +872,8 @@ impl TNLP for MpccTnlp {
         Some(NlpInfo {
             n: self.n_lowered() as Index,
             m: (self.m_inner + self.lowered.len()) as Index,
-            nnz_jac_g: self.jac_nnz as Index,
-            nnz_h_lag: (self.inner_h_nnz + self.h_extra.len()) as Index,
+            nnz_jac_g: self.layout.jac_nnz as Index,
+            nnz_h_lag: (self.inner_h_nnz + self.layout.h_extra.len()) as Index,
             index_style: self.index_style,
         })
     }
@@ -790,7 +890,7 @@ impl TNLP for MpccTnlp {
         }
         // A lifted row is the equality `g_i - s_H w = c_i`, its sign carried
         // by `w >= 0`.
-        for &(k, w) in &self.lifted {
+        for &(k, w) in &self.layout.lifted {
             let i = self.lowered[k].row;
             let c = self.h_side[k].1;
             b.g_l[i] = c;
@@ -812,23 +912,13 @@ impl TNLP for MpccTnlp {
                 b.x_u[j] = u;
             }
             for &(i, l, u) in &br.rows {
-                // A lifted row's bounds move to its variable: `g_i` in
-                // `[l, u]` is `w = s_H (g_i - c)` in the image of that box.
-                if let Some(&(k, w)) = self.lifted.iter().find(|&&(k, _)| self.lowered[k].row == i)
+                // A lifted row's bounds move to its variable (`lifted_box`);
+                // the row stays the equality.
+                if let (Some((lo, hi)), Some((_, w))) =
+                    (self.lifted_box(i), self.layout.lift_of_row[i])
                 {
-                    let (sh, c) = self.h_side[k];
-                    let img = |v: Number| {
-                        if v <= -INF {
-                            -sh * 2.0 * INF
-                        } else if v >= INF {
-                            sh * 2.0 * INF
-                        } else {
-                            sh * (v - c)
-                        }
-                    };
-                    let (a, z) = (img(l), img(u));
-                    b.x_l[w] = a.min(z);
-                    b.x_u[w] = a.max(z);
+                    b.x_l[w] = lo;
+                    b.x_u[w] = hi;
                     continue;
                 }
                 b.g_l[i] = l;
@@ -921,7 +1011,7 @@ impl TNLP for MpccTnlp {
             return false;
         }
         self.g_inner.copy_from_slice(&g[..m]);
-        for &(k, w) in &self.lifted {
+        for &(k, w) in &self.layout.lifted {
             g[self.lowered[k].row] -= self.h_side[k].0 * x[w];
         }
         // Under `Coupled` the bound stays at `tau0` and the row carries the
@@ -952,14 +1042,14 @@ impl TNLP for MpccTnlp {
                 ) {
                     return false;
                 }
-                for (l, &(k, w)) in self.lifted.iter().enumerate() {
+                for (l, &(k, w)) in self.layout.lifted.iter().enumerate() {
                     irow[jnnz + l] = self.lowered[k].row as Index + off;
                     jcol[jnnz + l] = w as Index + off;
                 }
                 for (k, p) in self.lowered.iter().enumerate() {
-                    let b = self.jac_block[k];
+                    let b = self.layout.jac_block[k];
                     let row = (m + k) as Index + off;
-                    if let Some(w) = self.lift_var[k] {
+                    if let Some(w) = self.layout.lift_var[k] {
                         irow[b] = row;
                         jcol[b] = p.var as Index + off;
                         irow[b + 1] = row;
@@ -971,7 +1061,7 @@ impl TNLP for MpccTnlp {
                         irow[b + s] = row;
                         jcol[b + s] = c as Index + off;
                     }
-                    if self.var_slot[k] == ents.len() {
+                    if self.layout.var_slot[k] == ents.len() {
                         irow[b + ents.len()] = row;
                         jcol[b + ents.len()] = p.var as Index + off;
                     }
@@ -996,14 +1086,14 @@ impl TNLP for MpccTnlp {
                         return false;
                     }
                 }
-                for (l, &(k, _)) in self.lifted.iter().enumerate() {
+                for (l, &(k, _)) in self.layout.lifted.iter().enumerate() {
                     values[jnnz + l] = -self.h_side[k].0;
                 }
                 let pv = self.product_factors(x);
                 for (k, &(gk, hk)) in pv.iter().enumerate() {
                     let (sg, sh) = (self.g_side[k].0, self.h_side[k].0);
-                    let b = self.jac_block[k];
-                    if self.lift_var[k].is_some() {
+                    let b = self.layout.jac_block[k];
+                    if self.layout.lift_var[k].is_some() {
                         // ∇(G·w) = s_G w e_j + G e_w.
                         values[b] = hk * sg;
                         values[b + 1] = gk;
@@ -1015,7 +1105,7 @@ impl TNLP for MpccTnlp {
                         values[b + s] = gk * sh * values[pos];
                     }
                     // ... plus H on column j, in place or appended.
-                    let slot = self.var_slot[k];
+                    let slot = self.layout.var_slot[k];
                     if slot == ents.len() {
                         values[b + slot] = hk * sg;
                     } else {
@@ -1056,7 +1146,7 @@ impl TNLP for MpccTnlp {
                 {
                     return false;
                 }
-                for (e, &(a, b)) in self.h_extra.iter().enumerate() {
+                for (e, &(a, b)) in self.layout.h_extra.iter().enumerate() {
                     irow[hnnz + e] = a as Index + off;
                     jcol[hnnz + e] = b as Index + off;
                 }
@@ -1078,11 +1168,11 @@ impl TNLP for MpccTnlp {
                 // product carries `G·∇²g_i`; a lifted one's is bilinear).
                 self.lam_inner.copy_from_slice(&lambda[..m]);
                 for (k, p) in self.lowered.iter().enumerate() {
-                    if self.lift_var[k].is_none() {
+                    if self.layout.lift_var[k].is_none() {
                         self.lam_inner[p.row] += lambda[m + k] * pv[k].0 * self.h_side[k].0;
                     }
                 }
-                let any_unlifted = self.lifted.len() < self.lowered.len();
+                let any_unlifted = self.layout.lifted.len() < self.lowered.len();
                 values.fill(0.0);
                 {
                     let mut inner = self.inner.borrow_mut();
@@ -1114,9 +1204,9 @@ impl TNLP for MpccTnlp {
                 }
                 // Cross terms μ_k (e_j ∇g_iᵀ + ∇g_i e_jᵀ), lower triangle.
                 for (k, p) in self.lowered.iter().enumerate() {
-                    if let Some(w) = self.lift_var[k] {
+                    if let Some(w) = self.layout.lift_var[k] {
                         // ∂²(G·w)/∂x_j∂w = s_G.
-                        values[self.h_pos[&(w, p.var)]] += lambda[m + k] * self.g_side[k].0;
+                        values[self.layout.h_pos[&(w, p.var)]] += lambda[m + k] * self.g_side[k].0;
                         continue;
                     }
                     let mu = lambda[m + k] * self.g_side[k].0 * self.h_side[k].0;
@@ -1126,7 +1216,7 @@ impl TNLP for MpccTnlp {
                     for &(pos, c) in &self.row_entries[k] {
                         let d = mu * self.jac_inner[pos];
                         let key = (p.var.max(c), p.var.min(c));
-                        let at = self.h_pos[&key];
+                        let at = self.layout.h_pos[&key];
                         values[at] += if c == p.var { 2.0 * d } else { d };
                     }
                 }
@@ -1156,27 +1246,27 @@ impl TNLP for MpccTnlp {
             .get(m..)
             .map(|p| p.iter().map(|v| v - shift).collect())
             .unwrap_or_default();
-        // A lifted product row holds `G·w`, which equals `G·H(x)` only to
-        // the lifted row's residual; the acceptance gates read these as the
-        // declared model's products, so take `H` from `g_i` itself.
-        for &(k, w) in &self.lifted {
-            let (p, i) = (self.lowered[k], self.lowered[k].row);
-            if k < self.last_products.len() && i < sol.g.len() && w < sol.x.len() {
-                let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
-                let g_i = sol.g[i] + sh * sol.x[w];
-                self.last_products[k] = sg * (sol.x[p.var] - b) * sh * (g_i - c);
-            }
-        }
-        if self.defer_inner_finalize {
-            return;
-        }
-        // A lifted row's value is `g_i - s_H w`; the inner model gets `g_i`.
+        // The inner rows at `x`: a lifted row's value is `g_i - s_H w`, and
+        // `g_i` is what the inner model is handed and what `H` is read from.
         let mut g = sol.g[..m.min(sol.g.len())].to_vec();
-        for &(k, w) in &self.lifted {
+        for &(k, w) in &self.layout.lifted {
             let i = self.lowered[k].row;
             if i < g.len() && w < sol.x.len() {
                 g[i] += self.h_side[k].0 * sol.x[w];
             }
+        }
+        // A lifted product row holds `G·w`, which equals `G·H(x)` only to the
+        // lifted row's residual; the acceptance gates read these as the
+        // declared model's products, so `H` comes from `g_i` itself.
+        for &(k, _) in &self.layout.lifted {
+            let (p, i) = (self.lowered[k], self.lowered[k].row);
+            if k < self.last_products.len() && i < g.len() && p.var < sol.x.len() {
+                let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
+                self.last_products[k] = sg * (sol.x[p.var] - b) * sh * (g[i] - c);
+            }
+        }
+        if self.defer_inner_finalize {
+            return;
         }
         self.inner.borrow_mut().finalize_solution(
             Solution {
@@ -1211,6 +1301,7 @@ impl TNLP for MpccTnlp {
         let n_total = self.n_lowered();
         if n_total > self.n {
             let names: Vec<String> = self
+                .layout
                 .lifted
                 .iter()
                 .map(|(k, _)| format!("complementarity_lift[{k}]"))
@@ -1443,7 +1534,7 @@ impl MpccTnlp {
     fn product_vars(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self.lowered.iter().map(|p| p.var).collect();
         for (k, entries) in self.row_entries.iter().enumerate() {
-            match self.lift_var[k] {
+            match self.layout.lift_var[k] {
                 Some(w) => v.push(w),
                 None => v.extend(entries.iter().map(|&(_, col)| col)),
             }
@@ -2808,6 +2899,26 @@ mod tests {
                     pu[3 + k]
                 );
             }
+            // Off `w`-stationarity the row multiplier is still `-s_H (z_L -
+            // z_U)` of `w`: the mapping that keeps `λ_i (g_i - c)` the
+            // solve's own complementarity, which `gap_at` reads (see
+            // `inner_duals` for why not `λ_lifted - s_H ν G`).
+            let mut zo = zl.clone();
+            zo[3] += 0.3;
+            w.finalize_solution(
+                Solution {
+                    status: SolverReturn::Success,
+                    x: &x,
+                    z_l: &zo,
+                    z_u: &zu,
+                    g: &g,
+                    lambda: &lam,
+                    obj_value: 0.0,
+                },
+                &IpoptData::default(),
+                &IpoptCq::default(),
+            );
+            assert_eq!(w.last_lambda()[0], -sh * (zo[3] - zu[3]));
         }
     }
 
@@ -2854,6 +2965,97 @@ mod tests {
             assert_eq!((bl[0], bu[0]), (0.5, 0.5));
             assert_eq!((bl[3], bu[3]), (-2e19, 2e19), "the product row is free");
         }
+    }
+
+    /// A branch that gives a lifted variable a finite upper bound gives the
+    /// negative part of `z_L - z_U` somewhere to go: a start whose row
+    /// multiplier has the "wrong" sign for `w >= 0` lands in `z_U`, and maps
+    /// back to the same multiplier. Without the branch it is clipped, as `w`
+    /// has no upper bound to carry it.
+    #[test]
+    fn a_lifted_start_under_a_branch_keeps_the_upper_multiplier() {
+        let start = |w: &mut MpccTnlp| {
+            let lam_o = vec![0.7, -1.3, 0.25, 0.9, -0.6];
+            w.set_start_override(Some(StartOverride {
+                x: X.to_vec(),
+                z_l: vec![0.1, 0.2, 0.3],
+                z_u: vec![0.05, 0.0, 0.01],
+                lambda: lam_o.clone(),
+            }));
+            let (mut x, mut zl, mut zu, mut lam) =
+                (vec![0.0; 5], vec![9.0; 5], vec![9.0; 5], vec![0.0; 5]);
+            assert!(w.get_starting_point(StartingPoint {
+                init_x: true,
+                x: &mut x,
+                init_z: true,
+                z_l: &mut zl,
+                z_u: &mut zu,
+                init_lambda: true,
+                lambda: &mut lam,
+            }));
+            let g = lowered_g(w, &x);
+            w.finalize_solution(
+                Solution {
+                    status: SolverReturn::Success,
+                    x: &x,
+                    z_l: &zl,
+                    z_u: &zu,
+                    g: &g,
+                    lambda: &lam,
+                    obj_value: 0.0,
+                },
+                &IpoptData::default(),
+                &IpoptCq::default(),
+            );
+            (zl[3], zu[3], w.last_lambda()[0], lam_o[0])
+        };
+        let mut w = lifted(
+            Toy {
+                style: IndexStyle::C,
+            },
+            Lowering::Eq,
+        );
+        // Unbranched: `-s_H λ = -0.7` has no upper multiplier to go to.
+        assert_eq!(start(&mut w), (0.0, 0.0, 0.0, 0.7));
+        // Branched to `g_0 = 0.5`, so `w` is fixed at 0 with a finite upper
+        // bound: the start carries it, and it maps back exactly.
+        w.set_branch(Some(BranchBounds {
+            vars: vec![],
+            rows: vec![(0, 0.5, 0.5)],
+        }));
+        let (zl, zu, back, orig) = start(&mut w);
+        assert_eq!((zl, zu), (0.0, 0.7));
+        assert!((back - orig).abs() < 1e-15, "{back} vs {orig}");
+    }
+
+    /// `set_lift(false)` is the unlifted model, structure and values, and
+    /// `set_lift(true)` returns to the lifted one: one wrapper serves a stage
+    /// that must not see the lift (the l1 penalty) and the rest.
+    #[test]
+    fn set_lift_switches_between_the_two_structures() {
+        let style = IndexStyle::C;
+        let mut w = lifted(Toy { style }, Lowering::Eq);
+        let mut u = wrap(style, Lowering::Eq);
+        let x5 = [X[0], X[1], X[2], 0.37, -0.21];
+        let lifted_jac = jac_n(&mut w, &x5);
+        assert_eq!(w.get_nlp_info().unwrap().n, 5);
+
+        w.set_lift(false);
+        let (iw, iu) = (w.get_nlp_info().unwrap(), u.get_nlp_info().unwrap());
+        assert_eq!(
+            (iw.n, iw.m, iw.nnz_jac_g, iw.nnz_h_lag),
+            (iu.n, iu.m, iu.nnz_jac_g, iu.nnz_h_lag)
+        );
+        assert_eq!(jac_n(&mut w, &X), jac_n(&mut u, &X));
+        let l = [0.3, -0.2, 0.1, 0.7, -0.4];
+        assert_eq!(hess_n(&mut w, &X, 1.1, &l), hess_n(&mut u, &X, 1.1, &l));
+
+        w.set_lift(true);
+        assert_eq!(w.get_nlp_info().unwrap().n, 5);
+        assert_eq!(jac_n(&mut w, &x5), lifted_jac);
+        // A wrapper with nothing lifted has nothing to switch.
+        u.set_lift(true);
+        assert_eq!(u.get_nlp_info().unwrap().n, 3);
     }
 
     /// `Auto` lifts by row width: the toy's rows (three and two entries) are

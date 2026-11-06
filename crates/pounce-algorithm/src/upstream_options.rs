@@ -2569,11 +2569,11 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Whether a declared pair's row is lifted into a variable before its product row is formed (pounce extension; not in upstream Ipopt).",
         "auto",
         &[
-            ("auto", "lift a one-sided pair whose row has at least 8 Jacobian entries"),
+            ("auto", "lift a one-sided pair whose row has at least 8 Jacobian entries, with an exact Hessian; never under hessian_approximation=limited-memory"),
             ("yes", "lift every one-sided pair"),
             ("no", "never lift: every product row is G(x)*H(x)"),
         ],
-        "Only read when the model declares complementarity pairs. Lifting rewrites a pair's row g(x) >= c as the equality g(x) - w = c with w >= 0, and forms the product row as G*w instead of G*(g(x) - c). The two models have the same solutions and the same KKT dimension (w takes the place of the row's slack), but the unlifted product repeats the whole row in the Jacobian and adds a Hessian entry for each of its columns, which a wide row (a dense weight row of a ReLU network) turns into a dense block of the factorization. Lifted, each product row has two Jacobian entries and one Hessian entry. Mixed pairs (the row free) are never lifted. Duals are reported for the declared model either way: a lifted row's multiplier is -s_H times its variable's bound multiplier, what the unlifted inequality carries.",
+        "Only read when the model declares complementarity pairs. Lifting rewrites a pair's row g(x) >= c as the equality g(x) - w = c with w >= 0, and forms the product row as G*w instead of G*(g(x) - c). The two models have the same solutions and the same KKT dimension (w takes the place of the row's slack), but the unlifted product repeats the whole row in the Jacobian and adds a Hessian entry for each of its columns, which a wide row (a dense weight row of a ReLU network) turns into a dense block of the factorization. Lifted, each product row has two Jacobian entries and one Hessian entry. Mixed pairs (the row free) are never lifted. Under hessian_approximation=limited-memory, auto does not lift: on the 30 MacMPEC models it lifts, limited memory lost two answers lifted (design-cent-3, pack-comp2p-32) and took 27% more iterations on the rest; yes still lifts there. Duals are reported for the declared model either way: a lifted row's multiplier is -s_H times its variable's bound multiplier, what the unlifted inequality carries.",
     )?;
 
     // ===== ℓ₁-exact penalty-barrier wrapper (pounce-l1penalty / pounce#10) =====

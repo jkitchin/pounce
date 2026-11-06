@@ -144,10 +144,14 @@
 # against one every cc: line moves in them and nowhere else. A trailing
 # `,lift=<k>` appears only when the driver lifted k pairs' rows into
 # variables (`complementarity_lift`, gh#1136): the product rows were then
-# `G·w`, a different formulation of the same model. No fixture's row is wide
-# enough for the default `auto` to lift it, so the default sweep never shows
-# the field and never reaches that branch: sweep a lift change a second time
-# with `complementarity_lift=yes` appended, and measure the relu_nn suite.
+# `G·w`, a different formulation of the same model. One fixture reaches it
+# at the default: `cc:design_cent_3` (MacMPEC), whose three paired rows are
+# exactly as wide as `auto`'s threshold, reads `,lift=3` on the exact leg.
+# The lbfgs leg does not lift (`auto` is exact-Hessian only). Every other fixture's
+# rows are narrower, so for a lift change also sweep a second time with
+# `complementarity_lift=yes` appended, and measure MacMPEC, where `auto` lifts
+# on 30 models. Pyomo-built models (the data-root suites, `relu_nn`
+# included) are never lifted: `mpec.nl` already writes them that way.
 # This is not the driver's benchmark: six small models cannot measure
 # magnitude, which the declared-pair corpora (MacMPEC, the data-root OPF
 # suites; CLAUDE.md) still must.
