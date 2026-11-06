@@ -35,6 +35,9 @@ libraries; do not rebuild a loaded library in a running Julia process.
 `Pounce.library_path()` identifies the loaded file;
 `Pounce.GetIpoptVersion()` reports the POUNCE version compiled into it.
 The C entry-point names retain the Ipopt spelling used in `pounce.h`.
+Pounce.jl 0.1 accepts native POUNCE 0.15.x and verifies all required C symbols
+before exposing the library. A new native minor version requires a wrapper ABI
+review; an arbitrary Ipopt library is not compatible with POUNCE's callback ABI.
 
 POUNCE and Ipopt.jl can be loaded in the same process. Pounce does not replace
 Ipopt_jll or modify Ipopt's library preferences.
