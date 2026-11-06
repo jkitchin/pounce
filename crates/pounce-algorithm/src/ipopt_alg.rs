@@ -3218,27 +3218,30 @@ impl IpoptAlgorithm {
 
         // A model coupled to the barrier parameter
         // (`TNLP::update_with_barrier`; the complementarity driver's coupled
-        // continuation tightens `G·H <= τ` with μ) moves its functions here,
-        // after μ and before the next step is computed. Everything cached
-        // at the current point was evaluated against the old functions, and
-        // every cache is keyed on the iterate's tags, so the current `x` is
-        // re-issued under a fresh tag: the next read of `c`, `d`, their
-        // Jacobians and every quantity built on them evaluates again. The
-        // filter's entries were measured against the old functions too, so
-        // the line search is reset, as after a μ decrease. Not during
-        // restoration, whose iterate belongs to the feasibility problem.
-        if !self.fires_as_restoration && self.nlp.is_some() {
+        // continuation tightens `G·H <= τ` with μ) moves its constraint
+        // values here, after μ and before the next step is computed: a shift
+        // constant in x, so the derivatives stand. The NLP drops its cached
+        // `c`/`d` and keeps the Jacobians and Hessian; one that cannot has the
+        // current `x` re-issued under a fresh tag instead, which invalidates
+        // everything keyed on it. The filter's entries were measured against
+        // the old values, so the line search is reset, as after a μ decrease.
+        // Not during restoration, whose iterate belongs to the feasibility
+        // problem.
+        if !self.fires_as_restoration
+            && let Some(nlp) = self.nlp.as_ref()
+        {
             let moved = self
                 .tnlp
                 .as_ref()
                 .is_some_and(|t| t.borrow_mut().update_with_barrier(next_mu));
             if moved {
-                let mut d = self.data.borrow_mut();
-                if let Some(curr) = d.curr.clone() {
-                    let x: Rc<dyn Vector> = Rc::from(curr.x.make_new_copy());
-                    d.set_curr(curr.with_x(x));
+                if !nlp.borrow().invalidate_constraint_values() {
+                    let mut d = self.data.borrow_mut();
+                    if let Some(curr) = d.curr.clone() {
+                        let x: Rc<dyn Vector> = Rc::from(curr.x.make_new_copy());
+                        d.set_curr(curr.with_x(x));
+                    }
                 }
-                drop(d);
                 self.bundle.line_search.reset();
             }
         }

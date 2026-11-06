@@ -655,6 +655,15 @@ impl TNLP for MpccTnlp {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        // Every attempt starts at `tau0`: a re-solve inside one
+        // `optimize_tnlp` call (`mu_strategy_fallback`, the second-opinion
+        // ladder) asks for the starting point again, and τ never rises, so
+        // without this the retry would start from the first attempt's
+        // near-exact τ at a fresh μ: the cold, tight start the coupling
+        // exists to avoid.
+        if let Lowering::Coupled { tau0, .. } = self.lowering {
+            self.coupled_tau = tau0;
+        }
         if let Some(st) = &self.start_override {
             if st.x.len() != sp.x.len()
                 || (sp.init_z && (st.z_l.len() != sp.z_l.len() || st.z_u.len() != sp.z_u.len()))
@@ -1477,6 +1486,29 @@ mod tests {
             "{:?}",
             w.last_products()
         );
+    }
+
+    /// A re-solve inside one `optimize_tnlp` call asks for the starting
+    /// point again, and starts back at `tau0` (review of #1135, item 1).
+    #[test]
+    fn a_coupled_resolve_starts_back_at_tau0() {
+        let mut w = wrap(IndexStyle::C, COUPLED);
+        for _ in 0..20 {
+            w.update_with_barrier(1e-12);
+        }
+        assert_eq!(w.current_tau(), Some(1e-8));
+        let (mut x, mut zl, mut zu, mut lam) =
+            (vec![0.0; 3], vec![0.0; 3], vec![0.0; 3], vec![0.0; 5]);
+        assert!(w.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut zl,
+            z_u: &mut zu,
+            init_lambda: false,
+            lambda: &mut lam,
+        }));
+        assert_eq!(w.current_tau(), Some(0.1));
     }
 
     /// The law, one assertion per branch: proportional to μ, never more than

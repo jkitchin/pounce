@@ -95,6 +95,17 @@ pub fn zeroed_sym_t(space: Rc<SymTMatrixSpace>) -> SymTMatrix {
 }
 
 pub trait IpoptNlp: Nlp {
+    /// Drop every cached constraint value (`c`, `d`) so the next read
+    /// evaluates again, keeping the cached derivatives. For a model whose
+    /// constraint values moved at a fixed point while its derivatives did
+    /// not ([`crate::tnlp::TNLP::update_with_barrier`]: the coupled
+    /// continuation shifts its rows by a constant). Returns `false` when the
+    /// implementor cannot, and the caller must invalidate by re-issuing the
+    /// point under a fresh tag instead.
+    fn invalidate_constraint_values(&self) -> bool {
+        false
+    }
+
     /// Per-evaluation call counts accumulated over the solve, ordered
     /// `[f, grad_f, c, d, jac_c, jac_d, h]`. Populates the end-of-run
     /// summary's evaluation tallies (#206). Default is all zeros for

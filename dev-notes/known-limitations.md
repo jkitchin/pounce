@@ -78,6 +78,61 @@ data root, `mpcc_opf.model.build` plus one `Constraint`.
 
 ---
 
+## MPCC: what the coupled continuation costs where it falls back
+
+*Measured on `mpcc/fast-continuation` (`5180695f` against `ecc2e4ff`, which
+`complementarity_continuation=schedule` reproduces exactly). Recorded
+2026-11-06. Tracked with the rest of pounce's MPCC cost in #1136.*
+
+**Scope.** The default continuation (`complementarity_continuation =
+coupled`, `docs/src/complementarity.md`) solves `τ = 1`, then one solve with
+`τ` tied to `μ`, then the exact finish from three starts. Where its answer
+does not pass the schedule's test, or the coupled solve reaches its budget,
+the schedule resumes at `τ = 0.1` from the `τ = 1` solve, and what the coupled
+attempt spent is the cost. Every case below falls back or loses an answer
+the schedule found; none changes a status.
+
+### What is worse
+
+| case | schedule | coupled | why |
+|---|---|---|---|
+| fixture `ralph1`, lbfgs leg | 321 iterations | 584 | the coupled solve reaches the floor; all three finish attempts (100 each) miss; the schedule runs |
+| fixture `opf_vv_lower_knee`, lbfgs leg | 554 | 804 | the same |
+| OPF transmission (59), `mpcc-compare` | 240 s | 270 s (+12%), answers identical | on the IEEE 300 cases the coupled solve crawls toward the floor (about 3100 iterations unbudgeted, against about 900 for the whole schedule); its budget, `max(5 × first solve, 200)`, hands over |
+| CALIPSO bunny-hop seed 1 | 462.605 | 463.195 (+0.13%) | both cheap routes reach the same exact answer, so the cold exact product, which finds 462.605 from this start, is skipped (`skips_cold_solve`); under the schedule the continuation's finish fails and the cold solve runs |
+
+Elsewhere it is ahead: MacMPEC 158 at / 0 unsolved against 157 / 1 and
+1149 s → 1000 s, `relu_nn` −23% wall, OPF and capacity −27% iterations,
+CALIPSO ball-in-cup seed 1 better.
+
+### Already tried, did not work
+
+- **Each rung to `tol = κ·τ`** instead of coupling: −3% on `relu_nn`, and on
+  MacMPEC 35 outcomes changed and `tap-15` turned `Infeasible_Problem_Detected`.
+- **Coupling from `τ = 1`**: MacMPEC `bilevel1` 0 → 5 (the full `τ = 1` solve
+  is what reaches the basin); net 154 at / 9 worse / 1 FAIL.
+- **`τ = 1` first, the coupled solve warm at its `μ`**: crawls (`digits_128x3`
+  251 iterations against 66 with `μ` restarted at `τ`).
+- **A cleanup rung at `τ = 1e-8` before the finish**: converges in one
+  iteration; the finish still fails. A monotone `μ` for the finish: no effect.
+- **`κ < 1`** (`τ` reaches its floor earlier, so `μ ≪ τ` at the end): the
+  finish still fails from the same endpoints.
+
+The finish failures are the multipliers, not the point: the coupled and
+scheduled endpoints agree to 1.4e-7 in `x`, but at degenerate pairs the
+product-row multipliers differ (0.50 against 0.18 on rows at `G·H ≈ τ/2`).
+
+### How to tell whether a fix works
+
+Sweep against a baseline binary (`scripts/sweep-fixtures.sh`) and check the
+two lbfgs `cc:` lines above; run `make -C benchmarks mpcc-compare` (the
+transmission suite's wall time against `complementarity_continuation=schedule`)
+and CALIPSO declared (`benchmarks/calipso`, the `declared` route, bunny-hop
+seed 1). A fix should move those toward the schedule's numbers without
+giving back MacMPEC's 158 / 0 or `relu_nn`'s time. The console line "the
+coupled continuation did not reach an exact answer; resuming the schedule"
+marks every fallback.
+
 ## MPCC: the exact-product stage is slow on dense degenerate QPECs
 
 *Measured in the PR review of declared complementarity (jkitchin/pounce#1103),

@@ -275,6 +275,21 @@ const COUPLED_BUDGET_FACTOR: usize = 5;
 /// See [`COUPLED_BUDGET_FACTOR`].
 const COUPLED_BUDGET_FLOOR: usize = 200;
 
+/// Whether finish attempt `a` came closer than `b`: one that returned a
+/// point beats one that did not, a converged one beats one that did not, and
+/// otherwise the smaller product violation wins.
+fn closer_finish(a: Option<&Captured>, b: Option<&Captured>) -> bool {
+    let rank = |c: &Captured| (!c.x.is_empty(), converged(c.status));
+    match (a, b) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(a), Some(b)) => {
+            let (ra, rb) = (rank(a), rank(b));
+            ra > rb || (ra == rb && a.max_abs_product < b.max_abs_product)
+        }
+    }
+}
+
 /// How an exact finish is started from a relaxed point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FinishStart {
@@ -417,11 +432,20 @@ pub fn solve_mpcc(
         .ok()
         .and_then(|(v, _)| Strategy::parse(&v))
         .unwrap_or(Strategy::Both);
-    let coupled = app
+    // The coupling rides the interior-point loop's μ updates
+    // (`TNLP::update_with_barrier`); under another engine (`algorithm =
+    // active-set-sqp`) τ would never move, and the coupled solve would only
+    // spend its budget before the schedule took over.
+    let interior_point = app
         .options()
-        .get_string_value("complementarity_continuation", "")
-        .map(|(v, _)| v != "schedule")
-        .unwrap_or(true);
+        .get_string_value("algorithm", "")
+        .map_or(true, |(v, _)| v == "interior-point");
+    let coupled = interior_point
+        && app
+            .options()
+            .get_string_value("complementarity_continuation", "")
+            .map(|(v, _)| v != "schedule")
+            .unwrap_or(true);
 
     // One lowered solve: options already set by the caller of `run`.
     let run = |app: &mut IpoptApplication,
@@ -588,6 +612,19 @@ pub fn solve_mpcc(
         }
     };
 
+    // The certificate of a point, computed once per point: the coupled
+    // continuation certifies its candidate to decide whether to keep it, and
+    // the acceptance loop below certifies the same candidate again (review of
+    // #1135, item 8: on MacMPEC's 961-pair models that is not free).
+    let cert_cache: RefCell<Vec<(Vec<Number>, Option<Certificate>)>> = RefCell::new(Vec::new());
+    let certify_cached = |x: &[Number]| -> Option<Certificate> {
+        if let Some((_, c)) = cert_cache.borrow().iter().find(|(p, _)| p.as_slice() == x) {
+            return c.clone();
+        }
+        let c = certify_at(&inner, &pairs, x, solver_tol, tol, sense);
+        cert_cache.borrow_mut().push((x.to_vec(), c.clone()));
+        c
+    };
     let mut stages_run = 0;
     // Whether the coupled continuation supplied the continuation's answer.
     let mut coupled_kept = false;
@@ -886,7 +923,12 @@ pub fn solve_mpcc(
                                 let done = f
                                     .as_ref()
                                     .is_some_and(|f| accepts(f.status, f.max_abs_product, tol));
-                                fin = f;
+                                // Kept: the attempt that came closest, not the
+                                // last one (it becomes the verdict when nothing
+                                // answers under `strategy = continuation`).
+                                if done || closer_finish(f.as_ref(), fin.as_ref()) {
+                                    fin = f;
+                                }
                                 if done {
                                     break;
                                 }
@@ -899,15 +941,16 @@ pub fn solve_mpcc(
                             let cand =
                                 keep_finish(fin.clone(), c.clone(), stage.label(), &mut sink);
                             let answers_tight = accepts(cand.status, cand.max_abs_product, tol)
-                                && certify_at(&inner, &pairs, &cand.x, solver_tol, tol, sense)
+                                && certify_cached(&cand.x)
                                     .is_some_and(|ct| answers(ct.class) && ct.tight);
                             if answers_tight {
+                                // The schedule loop below is skipped
+                                // (`resume_below = 0`), so its retry budgets
+                                // are not read.
                                 kept = true;
                                 coupled_kept = true;
                                 coupled_finish = Some(fin);
                                 resume_below = 0.0;
-                                last_its = solves.last().map_or(0, |s| s.iterations);
-                                last_point_its = c.statistics.iteration_count.max(0) as usize;
                                 last = Some(c);
                             }
                         }
@@ -1076,7 +1119,7 @@ pub fn solve_mpcc(
                 // Converged and physical; the certificate decides whether it
                 // is an answer. A lowered solve can stall short of a biactive
                 // pair and still exit "acceptable" with every product at 0.
-                let cert = certify_at(&inner, &pairs, &c.x, solver_tol, tol, sense);
+                let cert = certify_cached(&c.x);
                 if cert.as_ref().is_none_or(|ct| answers(ct.class)) {
                     let f = match sense * objective_at(&inner, &c.x) {
                         f if f.is_finite() => f,

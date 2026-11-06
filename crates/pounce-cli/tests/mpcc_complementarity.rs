@@ -361,3 +361,64 @@ fn a_pair_no_point_satisfies_reports_the_verdict() {
         .collect();
     assert!(stages.contains(&"l1 penalty"), "{stages:?}");
 }
+
+fn continuation_taus(r: &Run) -> Vec<Option<f64>> {
+    r.json.as_ref().unwrap()["complementarity"]["solves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["stage"] == "Scholtes continuation")
+        .map(|s| s["tau"].as_f64())
+        .collect()
+}
+
+/// The coupled continuation's other branch (review of #1135, item 2): its
+/// answer does not pass the schedule's test, so the schedule resumes at
+/// `τ = 0.1` warm from the `τ = 1` solve. `ralph1` under limited memory is
+/// the measured case (the sweep's lbfgs leg): the coupled solve reaches the
+/// floor, all three finish attempts miss, and the schedule's eight rungs and
+/// finish follow. The answer is the schedule's own.
+#[test]
+fn a_coupled_continuation_that_does_not_answer_hands_over_to_the_schedule() {
+    let lbfgs = "hessian_approximation=limited-memory";
+    let r = run("ralph1.nl", &[lbfgs]);
+    assert!(
+        r.stderr.contains("resuming the schedule at τ = 1e-1"),
+        "{}",
+        r.stderr
+    );
+    let taus = continuation_taus(&r);
+    assert_eq!(taus[0], Some(1.0), "{taus:?}");
+    let resumed = taus
+        .iter()
+        .position(|t| *t == Some(0.1))
+        .expect("schedule resumed");
+    assert_eq!(
+        &taus[resumed..resumed + 8],
+        &[1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8].map(Some),
+        "{taus:?}"
+    );
+    let s = run(
+        "ralph1.nl",
+        &[lbfgs, "complementarity_continuation=schedule"],
+    );
+    let f = |r: &Run| {
+        r.json.as_ref().unwrap()["solution"]["objective"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!((f(&r) - f(&s)).abs() <= 1e-9, "{} vs {}", f(&r), f(&s));
+}
+
+/// The coupling rides the interior-point loop's μ updates; under another
+/// engine there are none, so the schedule runs from the start (review of
+/// #1135, item 5).
+#[test]
+fn the_active_set_engine_runs_the_schedule() {
+    let r = run("qpec_small.nl", &["algorithm=active-set-sqp"]);
+    let mut want: Vec<Option<f64>> = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8]
+        .map(Some)
+        .to_vec();
+    want.push(None);
+    assert_eq!(continuation_taus(&r), want, "{}", r.stderr);
+}

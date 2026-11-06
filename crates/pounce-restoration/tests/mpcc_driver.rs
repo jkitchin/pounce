@@ -2094,3 +2094,42 @@ fn the_coupled_continuation_replaces_the_schedule_in_one_solve() {
         }
     }
 }
+
+/// The coupled continuation's first-rung branch (review of #1135, item 2):
+/// a `τ = 1` solve that does not converge ends the continuation, as the
+/// schedule's own first rung does (no earlier rung to retry from), rather
+/// than being solved again. Both settings run exactly one continuation solve.
+#[test]
+fn a_first_rung_that_fails_ends_the_continuation_either_way() {
+    for continuation in ["coupled", "schedule"] {
+        let mut app = app();
+        app.options_mut()
+            .set_string_value("complementarity_continuation", continuation, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 1, true, false)
+            .unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(two_branch([0.9, 0.01])));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(
+            &mut app,
+            tnlp,
+            vec![ComplementarityPair { row: 0, var: 0 }],
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        let cont: Vec<_> = out
+            .solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Continuation)
+            .collect();
+        assert_eq!(cont.len(), 1, "{continuation}: {:?}", out.solves);
+        assert_eq!(cont[0].tau, Some(1.0));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("did not solve its first relaxation")),
+            "{continuation}: {lines:#?}"
+        );
+    }
+}
