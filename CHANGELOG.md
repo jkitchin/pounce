@@ -61,8 +61,94 @@ changes.
   `macmpec-run` and `mpcc-compare`. `BENCHMARK_REPORT.md` gains a
   "Complementarity (MPCC)" section that judges each arm by its returned
   pairs, never by status.
+- **A `pounce-expert` subagent** (`.claude/agents/pounce-expert.md`). It knows
+  where the source lives, how a solve flows through the crates (routing, the
+  IPM loop, restoration, the second-opinion ladder), where options and statuses
+  come from, how to diagnose a solve, and which checks a change needs. It reads
+  the source rather than answering from memory. Claude Code picks it up in
+  this repository. Elsewhere, `uvx knowhow add jkitchin/pounce` lists it beside
+  the skill, the commands and the MCP server. discopt's `discopt-expert` hands
+  POUNCE questions to it.
 
 ### Changed
+- **A declared pair on a wide row is lifted into a variable (gh#1136).**
+  - **What changed:** with an exact Hessian, a one-sided pair whose row has
+    8 or more Jacobian entries is now solved with its row `g(x) >= c` written as `g(x) - w =
+    c`, `w >= 0`, and its product row as `G·w` instead of `G·(g(x) - c)`.
+    The two models have the same solutions and the same KKT dimension.
+    The new option `complementarity_lift` (`auto`, the default; `yes` for
+    every one-sided pair; `no` for the old formulation) sets it, and the
+    report's `complementarity.lifted` counts the lifted pairs. Answers come
+    back in the model's own terms: `x` has its `n` entries, and a lifted
+    row's multiplier is the one its inequality would carry.
+  - **Why:** an unlifted product row repeats its whole row in the Jacobian
+    and adds a Hessian entry for each column, so on a ReLU network, where
+    the rows are rows of the weight matrices, the factorization did nearly
+    all the work. On the 64-128-128-128-10 network of gh#1136 each
+    factorization goes from 98 to 41 Mflop, and an iteration from about
+    115 ms to 21–30 ms. The default solve goes from 89 s to 24 s, and
+    `complementarity_strategy=continuation` from 26 s to 1.6 s, both to a
+    lower objective (−7.0786, against −7.0137).
+  - **Pyomo models are not affected.** Pyomo's `mpec.nl` transformation,
+    which `pyomo-pounce` and the data-root suites use, already writes each
+    pair's expression as an equality on a new variable. The paired row it
+    declares has one Jacobian entry, so `auto` lifts nothing there. On
+    `relu_nn`, `mpcc_opf`, `mpcc_opf_transmission` and `capacity_equilibria`
+    (173 models), it lifts 0 pairs and every result is identical. Lifting
+    applies to models that write the paired expression directly: the Python
+    `Problem(complementarity=...)` API, as in the gh#1136 repro, and AMPL
+    `complements`.
+  - **MacMPEC:** `auto` lifts pairs on 30 of the 178 models (the pack-comp,
+    qpec-100/200 and flp4 families, design-cent-3/31 and ralphmod). On
+    those 30, run one at a time, iterations go from 20,701 to 17,456 and
+    time from 518 s to 419 s. Every certificate class is unchanged or
+    better (pack-comp1p-32 goes from W to S). Against best-known values the
+    counts are unchanged (26 at, 2 worse, 3 better), with two models moving
+    each way: pack-comp1p-32 and qpec-100-2 drop off the best-known value,
+    and qpec-100-3 and qpec-200-1 reach it. The rest are bit-identical.
+    `mpcc_nl` (16) lifts nothing and is identical.
+  - **Limited memory does not lift.** Under
+    `hessian_approximation=limited-memory`, `auto` lifts nothing, so that
+    path is exactly as before. On the 30 MacMPEC models `auto` lifts,
+    limited memory lost two answers when lifted: `design-cent-3` ended
+    `Restoration_Failed` with no answer, and `pack-comp2p-32` fell back to a
+    weakly stationary point, where both are strongly stationary unlifted.
+    It also took 27% more iterations on the 29 others (68,524 against
+    53,746). The new `design_cent_3` fixture's L-BFGS sweep leg is what
+    showed it. `yes` still lifts there.
+  - **The ℓ1 penalty stage runs unlifted.** The penalty makes every equality
+    row elastic and keeps inequalities hard. On the lifted model it would
+    soften each lifted row `g - w = c`, the paired row's own feasibility,
+    which is a hard inequality when unlifted. It would also add two elastic
+    variables per pair, giving a different and larger subproblem. With the
+    penalty run lifted, pack-comp1p-32 and pack-comp2p-32 went from about
+    300 penalty iterations to `max_iter` (3,000, about 220 s each). The
+    wrapper switches to the unlifted structure for that solve
+    (`MpccTnlp::set_lift`); it is the same model object throughout.
+  - **A branch's warm start keeps the lifted variable's upper multiplier.**
+    Under a branch NLP a lifted variable can have a finite upper bound, or
+    be fixed. The start used to put the row multiplier's whole sign on
+    `z_L` and drop the negative part, so the start was not the inverse of
+    the reported multipliers. It now goes to `z_U` when there is an upper
+    bound to carry it.
+  - **The products the acceptance tests read are `G·H(x)`.** On a lifted
+    pair the solver's product row is `G·w`, which matches `G·H(x)` only up
+    to the residual of the lifted row. The driver's "every product in
+    tolerance" check now reads the declared model's product.
+  - **Fixtures:** one new declared-pair fixture, MacMPEC `design-cent-3`
+    (`tests/fixtures_mpcc/design_cent_3.nl`), has paired rows exactly at
+    `auto`'s threshold. It is lifted at the default and reaches the same S
+    answer as unlifted, in 69 iterations against 451. No other fixture's
+    paired row is that wide. Apart from that new line, the fixture sweep
+    diffs empty against the commit before (280 lines, both legs), and CALIPSO's 12 declared runs and `declared.py` are identical
+    under `auto`. Lifting every pair (`yes`) is not uniformly better, which
+    is why `yes` is not the default:
+    - every `cc:` line of the sweep keeps its answer and certificate class;
+    - `declared.py` takes 30% fewer iterations to the same answers;
+    - CALIPSO takes 14% fewer in total, but rocket ends 0.14% worse after
+      2.6 times the iterations.
+    - The `declared.py` and CALIPSO figures were measured before the penalty
+      stage ran unlifted.
 - **The complementarity continuation tightens its relaxation with the
   barrier parameter, in one solve.**
   - **What changed:** `τ = 1` is still solved as an ordinary relaxation.
@@ -116,6 +202,54 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **A constant row its cone forbids is reported primal infeasible
+  (gh#1138).** Through `solve_socp`, `solve_qp` and the CLI's convex arm, an
+  SOC whose head row has no `x` in it and a negative constant (`‖Ax + b‖ ≤
+  -1`) is infeasible for any objective. With `c = 0` it was certified; with
+  any nonzero `c` it ended `numerical_failure` after about 155 iterations.
+  An orthant row `0 ≤ -1` and an empty equality row `0 = 2` failed the same
+  way. The certificate's multiplier sits on a row with no column entries, so
+  the Farkas margin never accepted it. A screen before the iteration now
+  proves these with the exact certificate, at iteration 0. The certificate
+  is a unit (`∞`-norm) multiplier on the offending rows, with `Aᵀy + Gᵀz =
+  0`. For an SOC with a constant head it also covers constant tail rows
+  beside ones that depend on `x` (`‖(x, 2)‖ ≤ 1`) and blocks whose rows are
+  all constant. The tolerance is presolve's empty-row one (`1e-9 × (1 +
+  scale)`), so the two agree on the same row. A constant at rounding level,
+  or a non-finite one, is left to the iteration. Feasible constant rows are
+  solved as before, and the fixture sweep diffs empty on both legs.
+- **A re-solve's iterations are counted (gh#884 retry, gh#983 scale
+  re-solve).**
+  - **What changed:** when either re-solve runs, the statistics and the
+    JSON report now carry `retry_total_iterations`: every attempt's
+    iterations, including a `mu_strategy_fallback` re-solve inside either.
+    The two nest: the gh#983 audit runs inside each attempt, and the gh#884
+    retry runs around them. `SolveStatistics::spent_iteration_count` returns
+    the total. So do the complementarity driver's per-solve `iterations`,
+    its `total_iterations`, and the second-opinion ladder's totals.
+  - **Why:** promoted or declined, `iteration_count` is one attempt's, and
+    nothing kept the other's.
+    - On `relu_nn` `digits_128x3_img372_eps25` a coupled-continuation
+      finish was recorded as 7 iterations. Its base attempt had spent 86
+      more, 71 of them in restoration, in 3.9 s of the call's 4.0 s.
+    - On `meyer3` a declined scale re-solve's 768 iterations sat behind the
+      base's 256.
+    - Across the corpora the reported totals were low by 7.3% on MacMPEC
+      (77,913 reported against 84,016 spent), 5.1% on `mpcc_nl`,
+      4.5% on `relu_nn` (15,884 against 16,632), 3.9% on
+      `capacity_equilibria` and 0.4% on `mpcc_opf`. On
+      single models it was worse: MacMPEC `scholtes4` reported 381 against
+      1,381 spent.
+  - **What did not change:** no answer, status or trajectory. Iteration
+    budgets read `SolveStatistics::budget_iteration_count`, the count they
+    read before (in the complementarity driver,
+    `MpccSolveRecord::budget_iterations`), so reporting the true cost moves
+    no budget. The `mu_strategy_fallback` record keeps its sticky behaviour
+    across attempts. Measured against the previous head:
+    - the fixture sweep moves three reported totals and no status,
+      objective or `it=`;
+    - MacMPEC, `mpcc_nl`, and the OPF, transmission, capacity and `relu_nn`
+      suites keep every status, objective and verdict.
 - **Restoration ran under a stale `max_iter`.** The restoration provider
   read the options once, when it was built: the CLI builds it before any
   solve. A solve whose `max_iter` changed afterwards therefore had its

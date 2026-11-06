@@ -273,6 +273,71 @@ its own near-active product rows. Measured on MacMPEC, turning the budget off
 for these solves moves one model back to its best known value and changes no
 other outcome, at under 1% in total time.
 
+### Wide rows are lifted
+
+A pair's product row `G·H(x)` repeats the whole row `g(x)` in the
+Jacobian, and its second derivative couples the pair's variable to every
+column of that row. For a row with a few entries that costs nothing. For a
+wide one — a ReLU unit `y ⟂ y - (W h + b)`, whose row holds a full row of
+the weight matrix — every product row becomes a dense block of the KKT
+factorization, and the factorization becomes the solve.
+
+So by default a one-sided pair whose row has 8 or more Jacobian entries is
+*lifted*: its row `g(x) >= c` becomes the equality `g(x) - w = c` with a
+new variable `w >= 0`, and the product row is `G·w`, with two Jacobian
+entries and one Hessian entry. The two models have the same solutions, and
+the KKT system the same dimension (`w` takes the place of the row's slack).
+Everything you get back is in your model's terms: `x` has your `n` entries,
+and a lifted row's multiplier is the one its inequality would carry.
+`complementarity_lift` sets it:
+
+| value | lifts |
+| --- | --- |
+| `auto` (default) | a one-sided pair whose row has at least 8 Jacobian entries, with an exact Hessian; nothing under `hessian_approximation=limited-memory` |
+| `yes` | every one-sided pair |
+| `no` | none: every product row is `G·H(x)` |
+
+A mixed pair (the row free) is never lifted, since its row has no sign to
+give `w`.
+
+Under `hessian_approximation=limited-memory` (what the Python frontend and
+the CasADi plugin use when there is no exact Hessian), `auto` does not lift.
+On the 30 MacMPEC models it lifts, limited memory lost two answers when
+lifted: `design-cent-3` ends with no answer and `pack-comp2p-32` falls back
+to a weakly stationary point, where both are strongly stationary unlifted.
+It also took 27% more iterations on the rest. `yes` still lifts there. The report's `complementarity.lifted` counts the lifted pairs.
+
+On a 64-128-128-128-10 ReLU network (384 pairs, rows of 65 and 129
+entries), lifting cuts the floating-point work of each factorization from
+98 to 41 Mflop. Time per iteration falls from about 115 ms to 21–30 ms, and
+the default solve falls from 89 s to 24 s. `complementarity_strategy=
+continuation` falls from 26 s to 1.6 s. Both reach a lower objective than
+unlifted (−7.0786 against −7.0137).
+
+The ℓ1 penalty stage (the last resort when no formulation answers) always
+solves the model unlifted. The penalty makes every equality row elastic,
+and a lifted row `g(x) - w = c` is an equality. Lifted, the penalty would
+relax the paired row's own feasibility, which it keeps hard when unlifted.
+
+A Pyomo model is never lifted. Pyomo's `mpec.nl` transformation already
+writes each pair's expression as an equality on a new variable and
+declares the pair on a one-entry row. So `auto` lifts nothing on the OPF,
+capacity and `relu_nn` suites, which are built through Pyomo, and leaves
+them as they were. Lifting applies to models that pose the paired
+expression directly: `Problem(complementarity=...)` from Python, and AMPL
+`complements`.
+
+On MacMPEC, `auto` lifts pairs on 30 of 178 models. Run one at a time,
+those 30 take 16% fewer iterations and 19% less time in total. The other
+148 are unchanged. The effect is not uniform: qpec-200-4 takes 2.8 times
+as long through a longer exact stage, and four models change local
+optimum, two onto the best-known value and two off it. No fixture or
+`benchmarks/mpcc/declared.py` paired row is wide enough for `auto`.
+Lifting every pair (`yes`) is not uniformly better. It cuts the iterations
+on `declared.py` by 30% to the same answers, and on CALIPSO's declared
+models by 14%, but CALIPSO's rocket ends 0.14% worse after 2.6 times the
+iterations. That is why `yes` is not the default.
+
 ## What you get back
 
 The CLI prints one summary line on stderr, e.g. for `qpec_small`:

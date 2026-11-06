@@ -319,3 +319,94 @@ def test_a_solve_report_without_pairs_has_no_complementarity_block(tmp_path):
     path = tmp_path / "report.json"
     qpec_problem().solve(np.zeros(3), report_path=str(path))
     assert "complementarity" not in json.loads(path.read_text())
+
+
+class SmallRelu:
+    """A ReLU network 4-10-10-1 (seed 3) as declared pairs: v = (x, y1, y2),
+    row r_j = y_j - (W y_prev + b)_j >= 0 paired with y_j >= 0, minimising
+    the output over x in [-1, 1]^4. The first layer's rows have 5 Jacobian
+    entries and the second's 11, so `complementarity_lift=auto` (rows of 8
+    or more) lifts the second layer only: all three settings reach a lifted
+    branch or the unlifted one, and both in one model under `auto`."""
+
+    def __init__(self):
+        rng = np.random.default_rng(3)
+        sizes = [4, 10, 10, 1]
+        self.W = [rng.normal(0, np.sqrt(2 / m), (n, m)) for m, n in zip(sizes, sizes[1:])]
+        self.b = [rng.normal(0, 0.1, n) for n in sizes[1:]]
+        A = np.zeros((20, 24))
+        a = np.zeros(20)
+        for l, (src, dst) in enumerate([(slice(0, 4), 4), (slice(4, 14), 14)]):
+            for j in range(10):
+                A[10 * l + j, dst + j] = 1.0
+                A[10 * l + j, src] -= self.W[l][j]
+                a[10 * l + j] = -self.b[l][j]
+        self.A, self.a = A, a
+        self.jr, self.jc = np.nonzero(A)
+        self.g = np.zeros(24)
+        self.g[14:] = self.W[2][0]
+
+    def forward(self, x):
+        h = x
+        for l in range(2):
+            h = np.maximum(self.W[l] @ h + self.b[l], 0)
+        return float(self.W[2][0] @ h + self.b[2][0])
+
+    def objective(self, v):
+        return float(self.g @ v + self.b[2][0])
+
+    def gradient(self, v):
+        return self.g.copy()
+
+    def constraints(self, v):
+        return self.A @ v + self.a
+
+    def jacobianstructure(self):
+        return self.jr, self.jc
+
+    def jacobian(self, v):
+        return self.A[self.jr, self.jc]
+
+    def hessianstructure(self):
+        return np.array([], int), np.array([], int)
+
+    def hessian(self, v, lagrange, obj_factor):
+        return np.array([])
+
+    def start(self):
+        v = np.zeros(24)
+        h = np.zeros(4)
+        for l in range(2):
+            h = np.maximum(self.W[l] @ h + self.b[l], 0)
+            v[4 + 10 * l : 14 + 10 * l] = h
+        return v
+
+
+@pytest.mark.parametrize("lift, n_lifted", [("auto", 10), ("yes", 20), ("no", 0)])
+def test_lifting_a_pairs_row_reaches_the_same_answer(lift, n_lifted):
+    """`complementarity_lift` changes the formulation, not the model: each
+    setting reaches the same certified point, a genuine evaluation of the
+    network (every unit at its ReLU), and reports how many pairs it lifted."""
+    P = SmallRelu()
+    p = pounce.Problem(
+        n=24,
+        m=20,
+        problem_obj=P,
+        lb=np.r_[-np.ones(4), np.zeros(20)],
+        ub=np.r_[np.ones(4), np.full(20, INF)],
+        cl=np.zeros(20),
+        cu=np.full(20, INF),
+        complementarity=[(j, 4 + j) for j in range(20)],
+    )
+    p.add_option("print_level", 0)
+    p.add_option("complementarity_lift", lift)
+    v, info = p.solve(P.start())
+    cc = info["complementarity"]
+    assert info["status"] == 0, info["status_msg"]
+    assert cc["lifted"] == n_lifted
+    assert cc["certificate"]["class"] == "S"
+    assert cc["max_abs_product"] < 1e-6
+    assert P.objective(v) == pytest.approx(-4.3531735, abs=1e-6)
+    # The reported point is the network's own: the output at x matches.
+    assert P.forward(v[:4]) == pytest.approx(P.objective(v), abs=1e-6)
+    assert len(v) == 24 and len(info["mult_g"]) == 20
