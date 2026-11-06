@@ -27,6 +27,10 @@ directory before loading Pounce. `Pounce.library_path()` reports the loaded
 file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
 There is no registered Julia package or bundled JLL binary yet.
 
+JuMP/MathOptInterface support is an optional package extension. Load JuMP or
+MathOptInterface along with Pounce before constructing `Pounce.Optimizer`;
+either load order works. Low-level C API users need not install MOI.
+
 ## Solve a model
 
 ```julia

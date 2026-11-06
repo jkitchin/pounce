@@ -116,12 +116,13 @@ Both probes record wrapper and native source revisions, Julia/MOI/native version
 library path, and working-tree state. The baseline wrapper code was unchanged;
 only the new roadmap document was untracked.
 
-Reproduce from the repository root, setting the native revision to the commit
-actually used to build the selected library:
+Reproduce from the repository root in an environment containing Pounce and
+MathOptInterface, setting the native revision to the commit actually used to
+build the selected library:
 
 ```sh
 POUNCE_NATIVE_REVISION=b4e5ffb641990738fd69cb53c02ae5966fd68edc \
-  julia --project=Pounce.jl --startup-file=no dev-notes/julia-callback-allocation-probe.jl
+  julia --project=/path/to/environment --startup-file=no dev-notes/julia-callback-allocation-probe.jl
 ```
 
 The same script can be copied to a baseline checkout for comparison. The probe's

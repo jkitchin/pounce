@@ -1,7 +1,8 @@
 module Pounce
 
 import Libdl
-import MathOptInterface as MOI
+# Populated by the optional MOI extension when JuMP/MathOptInterface is loaded.
+global Optimizer, CallbackFunction, NativeSolveTimeSec, MOI
 
 # Set at runtime, never serialize an absolute library path or a dlopen handle
 # into Julia's precompile cache. Calls name this library explicitly, so Ipopt.jl
@@ -38,6 +39,5 @@ library_path() = libpounce
 
 include("C_wrapper.jl")
 function column end
-include("MOI_wrapper.jl")
 
 end # module Pounce

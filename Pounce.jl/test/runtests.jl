@@ -7,6 +7,7 @@ flush(stdout)
 
 @testset "Pounce.jl" begin
     include("library.jl")
+    include("extensions.jl")
     include("cinterface.jl")
     include("jump.jl")
     include("updates.jl")

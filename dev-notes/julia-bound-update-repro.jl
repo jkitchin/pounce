@@ -1,7 +1,7 @@
 # Optional arguments: Ipopt MadNLP (installed in the selected environment).
 # See julia-wrapper-design-study.md for the original versions and measurements.
 import Pounce
-const MOI = Pounce.MOI
+import MathOptInterface as MOI
 
 repo = normpath(joinpath(@__DIR__, ".."))
 println("Wrapper checkout: ", readchomp(`git -C $repo rev-parse HEAD`))

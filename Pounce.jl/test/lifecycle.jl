@@ -135,4 +135,5 @@ end
     MOI.optimize!(model)
     @test MOI.get(model, MOI.VariablePrimal(), x) ≈ log(2) atol = 1e-6
 end
+
 end

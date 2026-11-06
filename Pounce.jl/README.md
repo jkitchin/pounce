@@ -39,6 +39,18 @@ The C entry-point names retain the Ipopt spelling used in `pounce.h`.
 POUNCE and Ipopt.jl can be loaded in the same process. Pounce does not replace
 Ipopt_jll or modify Ipopt's library preferences.
 
+The low-level C API can be installed and loaded without MathOptInterface.
+Loading JuMP or MathOptInterface activates `PounceMathOptInterfaceExt` and makes
+`Pounce.Optimizer`, `Pounce.CallbackFunction`, and `Pounce.NativeSolveTimeSec`
+available. Either load order works. Existing `using JuMP, Pounce` code keeps the
+same API. For code that needs the concrete optimizer type as a constant, use
+`Base.get_extension(Pounce, :PounceMathOptInterfaceExt).Optimizer` after loading
+both packages, or pass `Pounce.Optimizer` through a function barrier.
+
+The extension precompiles a small nonlinear solve to reduce first-solve latency.
+Library selection still happens at runtime; precompilation stores no native
+problem or library handle in a global cache.
+
 ## JuMP example
 
 ```julia

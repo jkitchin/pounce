@@ -9,10 +9,10 @@ copyright (c) 2013 Iain Dunning, Miles Lubin, and contributors:
 
 | Pounce.jl file | Ipopt.jl source |
 |---|---|
-| `src/MOI_wrapper.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
-| `src/MOI_state.jl`, `src/MOI_model.jl`, `src/MOI_evaluator.jl`, `src/MOI_solve.jl`, `src/MOI_results.jl` | Refactored from `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
-| Callback API documentation in `src/MOI_callbacks.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
-| `src/utils.jl` | `ext/IpoptMathOptInterfaceExt/utils.jl` |
+| `ext/PounceMathOptInterfaceExt/MOI_wrapper.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
+| `ext/PounceMathOptInterfaceExt/MOI_state.jl`, `ext/PounceMathOptInterfaceExt/MOI_model.jl`, `ext/PounceMathOptInterfaceExt/MOI_evaluator.jl`, `ext/PounceMathOptInterfaceExt/MOI_solve.jl`, `ext/PounceMathOptInterfaceExt/MOI_results.jl` | Refactored from `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
+| Callback API documentation in `ext/PounceMathOptInterfaceExt/MOI_callbacks.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
+| `ext/PounceMathOptInterfaceExt/utils.jl` | `ext/IpoptMathOptInterfaceExt/utils.jl` |
 | `src/C_wrapper.jl` | `src/C_wrapper.jl` |
 | `test/MOI_wrapper.jl` | `test/MOI_wrapper.jl` |
 | HS071 fixture in `test/cinterface.jl` | `test/C_wrapper.jl` |

@@ -2,7 +2,7 @@
 # Self-contained diagonal quadratic fixture; no external benchmark data.
 # This does not measure total solve allocations or wall-time speedups.
 import Pounce
-const MOI = Pounce.MOI
+import MathOptInterface as MOI
 println("Wrapper commit: ", readchomp(`git rev-parse HEAD`))
 println("Working tree: ", readchomp(`git status --short`))
 println(

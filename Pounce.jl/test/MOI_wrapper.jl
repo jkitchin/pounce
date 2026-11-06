@@ -652,7 +652,7 @@ function test_VariablePrimalStart()
 end
 
 function test_manually_evaluated_primal_status()
-    Ext = Pounce
+    Ext = Base.get_extension(Pounce, :PounceMathOptInterfaceExt)
     model = Pounce.Optimizer()
     MOI.set(model, MOI.Silent(), true)
     x = MOI.add_variable(model)

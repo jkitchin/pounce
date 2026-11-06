@@ -1,5 +1,5 @@
 # Copyright (c) 2013: Iain Dunning, Miles Lubin, and contributors
-# Adapted for POUNCE; see ../NOTICE.md and ../LICENSE.md.
+# Adapted for POUNCE; see ../../NOTICE.md and ../../LICENSE.md.
 #
 # POUNCE-specific MOI intermediate callbacks and live primal inspection.
 

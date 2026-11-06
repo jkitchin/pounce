@@ -160,7 +160,10 @@ end
             return true
         end,
     )
-    @test Pounce._dispatch_callback(optimizer, Cint(1))
+    @test Base.get_extension(Pounce, :PounceMathOptInterfaceExt)._dispatch_callback(
+        optimizer,
+        Cint(1),
+    )
     @test_throws MOI.GetAttributeNotAllowed MOI.get(optimizer, attr, xs[1])
     MOI.set(model, Pounce.CallbackFunction(), nothing)
     JuMP.optimize!(model)
