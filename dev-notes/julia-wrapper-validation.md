@@ -31,6 +31,40 @@ To verify downloaded JSON files, compare their SHA-256 values:
 d86bfddc8cf135d3e2b100137db2605723aa25c9aef69d0e4ec67c4b44deed9b  julia-wrapper-artifacts.json
 ```
 
+## Native diagnostics coverage
+
+Commit `06ba2dee022fffa18af81999e27aa464bce92620` adds eight C entry points: the
+three final-residual getters, restoration/linear-solver/finite-difference
+statistics, iteration-history enabling, and JSON report writing. Custom MOI
+attributes support direct and cached JuMP models. Statistics contain no MOI
+indices, so cache forwarding explicitly preserves their named-tuple values.
+Reports retain native column/row order, not a JuMP name/index map.
+
+The new diagnostics require a completed solve and obey model/result
+invalidation. Tests compare getters with native reports, exercise nonzero
+restoration via `start_with_resto`, finite-difference Hessians, absent backend
+summaries, invalid report paths/details/NULs, UTF-8 paths, callback and setup
+failures, and history across parameter updates, rebuilds and disabling capture.
+History is opt-in; disabling it rebuilds the native handle at the next solve.
+Native residuals retain their scaled convention and are not independent physical
+or MPCC feasibility certificates. JSON is a test-only dependency.
+
+At this commit on macOS arm64, the full suite passes **3,975 assertions** on
+each of Julia **1.10.13** and **1.13.3**, including the parent check of the
+separate two-worker threading subprocess. Both use JuMP 1.32.1, MOI 1.54.0
+and native POUNCE 0.15.0 from upstream `bbf97b28`, with the same native-library
+SHA-256 recorded below. The **259 new diagnostic assertions** also pass with
+JuMP **1.29.0** and MOI **1.48.0** on Julia **1.10.13**.
+
+A C program compiled against this checkout's `pounce.h` agrees with Julia on
+the linear-statistics struct's 96-byte size and all twelve field offsets.
+Documentation consistency and `git diff --check` pass. The worktree was clean
+at full-suite launch. Log SHA-256 values:
+
+- Full Julia 1.10.13: `39294d18db58bc960674b3446731c479a3e153ceef764b979dbabadd549b1d02`.
+- Full Julia 1.13.3: `8c3b4cc73ded9ed40d31b5730a54e4cc07aefd2eaba059c78172669a351cc9e7`.
+- Minimum-dependency focused checks: `356e289aab9ab8a96e8cadbc4dfca0612bf84bd65706bbedb9e086740ab922dc`.
+
 ## Review fixes before 0.16
 
 Wrapper commit `52d76977fd120652644ec9a99df17bf7c590ead7` addresses the remaining
