@@ -197,6 +197,38 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **A re-solve's iterations are counted (gh#884 retry, gh#983 scale
+  re-solve).**
+  - **What changed:** when either re-solve runs, the statistics and the
+    JSON report now carry `retry_total_iterations`: every attempt's
+    iterations, including a `mu_strategy_fallback` re-solve inside either.
+    The two nest: the gh#983 audit runs inside each attempt, and the gh#884
+    retry runs around them. `SolveStatistics::spent_iteration_count` returns
+    the total. So do the complementarity driver's per-solve `iterations`,
+    its `total_iterations`, and the second-opinion ladder's totals.
+  - **Why:** promoted or declined, `iteration_count` is one attempt's, and
+    nothing kept the other's.
+    - On `relu_nn` `digits_128x3_img372_eps25` a coupled-continuation
+      finish was recorded as 7 iterations. Its base attempt had spent 86
+      more, 71 of them in restoration, in 3.9 s of the call's 4.0 s.
+    - On `meyer3` a declined scale re-solve's 768 iterations sat behind the
+      base's 256.
+    - Across the corpora the reported totals were low by 7.3% on MacMPEC
+      (77,913 reported against 84,016 spent), 5.1% on `mpcc_nl`,
+      4.5% on `relu_nn` (15,884 against 16,632), 3.9% on
+      `capacity_equilibria` and 0.4% on `mpcc_opf`. On
+      single models it was worse: MacMPEC `scholtes4` reported 381 against
+      1,381 spent.
+  - **What did not change:** no answer, status or trajectory. Iteration
+    budgets read `SolveStatistics::budget_iteration_count`, the count they
+    read before (in the complementarity driver,
+    `MpccSolveRecord::budget_iterations`), so reporting the true cost moves
+    no budget. The `mu_strategy_fallback` record keeps its sticky behaviour
+    across attempts. Measured against the previous head:
+    - the fixture sweep moves three reported totals and no status,
+      objective or `it=`;
+    - MacMPEC, `mpcc_nl`, and the OPF, transmission, capacity and `relu_nn`
+      suites keep every status, objective and verdict.
 - **Restoration ran under a stale `max_iter`.** The restoration provider
   read the options once, when it was built: the CLI builds it before any
   solve. A solve whose `max_iter` changed afterwards therefore had its

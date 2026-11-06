@@ -53,7 +53,18 @@ pub struct MpccSolveRecord {
     /// `None` for an exact-product solve, `Some(τ)` for a relaxed one.
     pub tau: Option<Number>,
     pub status: ApplicationReturnStatus,
+    /// The solve's iteration count: every attempt inside the call, a
+    /// `mu_strategy_fallback` re-solve's, a gh#983 scale re-solve's and a
+    /// gh#884 dual-divergence retry's included
+    /// (`SolveStatistics::spent_iteration_count`).
     pub iterations: usize,
+    /// What the driver's iteration budgets read
+    /// (`SolveStatistics::budget_iteration_count`): `iterations` without a
+    /// gh#983 or gh#884 re-solve's other attempt, the count they were
+    /// measured and tuned against before `iterations` counted it. Kept apart
+    /// so that reporting the true cost does not move a budget, and with it a
+    /// trajectory.
+    pub budget_iterations: usize,
     pub max_abs_product: Number,
     /// Wall-clock seconds of the whole `optimize_tnlp` call, retries and
     /// second opinions inside it included.
@@ -560,6 +571,7 @@ pub fn solve_mpcc(
             tau: w.current_tau(),
             status,
             iterations: statistics.spent_iteration_count().max(0) as usize,
+            budget_iterations: statistics.budget_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
             seconds,
         });
@@ -1082,7 +1094,7 @@ pub fn solve_mpcc(
                             break;
                         }
                     }
-                    last_its = solves.last().map_or(0, |s| s.iterations);
+                    last_its = solves.last().map_or(0, |s| s.budget_iterations);
                     last_point_its = c.statistics.iteration_count.max(0) as usize;
                     last = Some(c);
                 }
@@ -1333,7 +1345,7 @@ pub fn solve_mpcc(
             if let Some(rows) = start.lambda.get_mut(m_inner..) {
                 rows.fill(0.0);
             }
-            let budget = finish_budget(solves.iter().map(|s| s.iterations).sum());
+            let budget = finish_budget(solves.iter().map(|s| s.budget_iterations).sum());
             let c = branch_solve(
                 app,
                 MpccStage::Polish,
@@ -1600,7 +1612,7 @@ fn iterations_of(solves: &[MpccSolveRecord], stage: MpccStage) -> usize {
     solves
         .iter()
         .filter(|s| s.stage == stage)
-        .map(|s| s.iterations)
+        .map(|s| s.budget_iterations)
         .sum()
 }
 

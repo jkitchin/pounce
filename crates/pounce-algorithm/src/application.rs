@@ -2553,6 +2553,35 @@ impl IpoptApplication {
         self.finalize_quality_verdict(status)
     }
 
+    /// Open a counted re-solve: the base attempt's spend, and its sticky
+    /// `mu_strategy_fallback` record set aside. That record lives on the
+    /// application and is copied into the statistics at the end of every
+    /// run, so without this a re-solve that runs no fallback would be
+    /// measured with the base's. Nothing reads the record to decide anything.
+    fn begin_counted_resolve(&self) -> CountedResolve {
+        let base_spent = self.statistics.borrow().spent_iteration_count();
+        let base_fallback = self.mu_strategy_fallback_record.borrow_mut().take();
+        self.statistics.borrow_mut().mu_strategy_fallback = None;
+        CountedResolve {
+            base_spent,
+            base_fallback,
+        }
+    }
+
+    /// Close a counted re-solve: measure its spend, put the base's fallback
+    /// record back as the sticky rule leaves it (the re-solve's own record
+    /// if it ran a fallback, the base's otherwise), and record both attempts'
+    /// spend in [`SolveStatistics::retry_total_iterations`]. Promoted or
+    /// declined, that total stands: `restore_into` does not touch it.
+    fn end_counted_resolve(&self, mark: CountedResolve) {
+        let retry_spent = self.statistics.borrow().spent_iteration_count();
+        if self.mu_strategy_fallback_record.borrow().is_none() {
+            *self.mu_strategy_fallback_record.borrow_mut() = mark.base_fallback.clone();
+            self.statistics.borrow_mut().mu_strategy_fallback = mark.base_fallback;
+        }
+        self.statistics.borrow_mut().retry_total_iterations = Some(mark.base_spent + retry_spent);
+    }
+
     /// The standard solve dispatch: the μ-strategy fallback if it is
     /// enabled, otherwise one `optimize_constrained` call.
     ///
@@ -2560,6 +2589,10 @@ impl IpoptApplication {
     /// [`Self::run_with_dual_divergence_retry`] can wrap the whole of it
     /// rather than only the bare IPM call (gh#884).
     fn dispatch_standard_solve(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        // This attempt's re-solve total starts empty: one left by an earlier
+        // attempt (the gh#884 retry's base, a second-opinion rung that
+        // re-enters below `optimize_tnlp`'s reset) is not this attempt's.
+        self.statistics.borrow_mut().retry_total_iterations = None;
         let status = self.dispatch_standard_solve_inner(Rc::clone(&tnlp));
         self.audit_solve_quality(tnlp, status)
     }
@@ -5283,7 +5316,9 @@ impl IpoptApplication {
         let _ = scope
             .options
             .set_string_value("perturb_always_cd", "yes", true, false);
+        let mark = scope.begin_counted_resolve();
         let retry_status = scope.dispatch_standard_solve(Rc::clone(&tnlp));
+        scope.end_counted_resolve(mark);
         // Exactly as it was, absence as absence, so a later solve on the
         // same application does not read a caller-set `no`.
         scope.options.restore_entry("perturb_always_cd", saved_cd);
@@ -5822,7 +5857,9 @@ impl IpoptApplication {
                  replaced the answer above."
             );
         }
+        let mark = scope.begin_counted_resolve();
         let retry_status = scope.optimize_constrained(Rc::clone(&seeded));
+        scope.end_counted_resolve(mark);
         drop(scope);
         // A re-solve the caller's intermediate callback stopped is declined
         // like any unclean one -- the audit only runs after a converged base,
@@ -9792,6 +9829,13 @@ struct SolutionCertificate {
     returned_run_signature: bool,
 }
 
+/// A re-solve's counting state between [`IpoptApplication::begin_counted_resolve`]
+/// and [`IpoptApplication::end_counted_resolve`].
+struct CountedResolve {
+    base_spent: Index,
+    base_fallback: Option<pounce_nlp::MuStrategyFallbackRecord>,
+}
+
 impl SolutionCertificate {
     fn of(s: &pounce_nlp::solve_statistics::SolveStatistics) -> Self {
         Self {
@@ -12559,6 +12603,58 @@ mod tests {
         // Failures carry no success caveat.
         assert!(quality_warnings(RestorationFailed, 0.144, 3.55e9, 1.0, 1e-6, false).is_empty());
         assert!(quality_warnings(SolveSucceeded, f64::NAN, f64::NAN, 1.0, 1e-6, false).is_empty());
+    }
+
+    /// A counted re-solve (gh#983 scale audit, gh#884 retry) records every
+    /// attempt's spend, and the total survives a decline (#1140 review). The
+    /// base attempt here ran a `mu_strategy_fallback` (30 + 11 iterations)
+    /// and the re-solve ran none (19): its spend is measured without the
+    /// base's sticky record, which goes back afterwards. A decline restores
+    /// the base's tally with `restore_into`, which must not touch the total.
+    /// No CLI fixture reaches either branch (a declined retry, a base with a
+    /// fallback), which is why this is a unit test.
+    #[test]
+    fn a_counted_resolve_keeps_every_attempts_spend_through_a_decline() {
+        use pounce_nlp::solve_statistics::MuStrategyFallbackRecord;
+        let app = IpoptApplication::new();
+        let fallback = MuStrategyFallbackRecord {
+            base_iteration_count: 30,
+            retry_iteration_count: 11,
+            ..Default::default()
+        };
+        *app.mu_strategy_fallback_record.borrow_mut() = Some(fallback.clone());
+        {
+            let mut st = app.statistics.borrow_mut();
+            st.iteration_count = 30;
+            st.mu_strategy_fallback = Some(fallback.clone());
+        }
+        let floor = SolutionCertificate::of(&app.statistics.borrow());
+        let mark = app.begin_counted_resolve();
+        // The re-solve: no fallback of its own, so the copy at the end of a
+        // run leaves the (set-aside, now empty) record empty.
+        {
+            let mut st = app.statistics.borrow_mut();
+            st.iteration_count = 19;
+            st.mu_strategy_fallback = app.mu_strategy_fallback_record.borrow().clone();
+        }
+        app.end_counted_resolve(mark);
+        let st = app.statistics.borrow().clone();
+        assert_eq!(st.retry_total_iterations, Some(30 + 11 + 19));
+        assert_eq!(st.spent_iteration_count(), 60);
+        // The sticky record is back, as the rule leaves it.
+        assert_eq!(
+            app.mu_strategy_fallback_record
+                .borrow()
+                .as_ref()
+                .map(|r| r.total_iteration_count()),
+            Some(41)
+        );
+        // Declined: the base's tally comes back, the total stays.
+        floor.restore_into(&mut app.statistics.borrow_mut());
+        let st = app.statistics.borrow();
+        assert_eq!(st.iteration_count, 30);
+        assert_eq!(st.retry_total_iterations, Some(60));
+        assert_eq!(st.budget_iteration_count(), 41);
     }
 
     /// gh#983 item 5: flooring an attempt must floor everything a solve

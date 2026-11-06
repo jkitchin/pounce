@@ -908,6 +908,13 @@ pub struct StatisticsInfo {
     /// latter case every other field here describes the base attempt.
     #[serde(default)]
     pub dual_divergence_retry_promoted: bool,
+    /// Every attempt's iterations when the solve re-solved itself (a gh#983
+    /// scale re-solve, a gh#884 dual-divergence retry, or both, each with any
+    /// `mu_strategy_fallback` re-solve inside it), absent otherwise.
+    /// `iteration_count` above is one attempt's either way. Additive; absent
+    /// on reports written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_total_iterations: Option<i64>,
     /// gh#1042 C1. What the `mu_strategy_fallback` retry did, when it ran:
     /// the first attempt's status, iterations, restoration calls and
     /// objective, the re-solve's status and iterations, and whether the
@@ -1051,6 +1058,7 @@ impl ReportBuilder {
             quality_escalations: src.quality_escalations,
             dual_divergence_signature: src.dual_divergence_signature,
             dual_divergence_retry_promoted: src.dual_divergence_retry_promoted,
+            retry_total_iterations: src.retry_total_iterations.map(i64::from),
             mu_strategy_fallback: src.mu_strategy_fallback.clone(),
             warnings: src.warnings.clone(),
             derivative_check: src.derivative_check.as_ref().map(DerivativeCheckInfo::from),
@@ -1175,6 +1183,7 @@ fn empty_stats() -> StatisticsInfo {
         quality_escalations: 0,
         dual_divergence_signature: false,
         dual_divergence_retry_promoted: false,
+        retry_total_iterations: None,
         mu_strategy_fallback: None,
         warnings: Vec::new(),
         derivative_check: None,
