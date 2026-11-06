@@ -77,7 +77,13 @@ Acceptance: all supported edits have consistent result availability; failed
 setup/solves cannot expose stale results or statistics; nonstructural updates
 preserve usable derivative caches; repeated solves match fresh-model controls.
 
-## 3. Optional MOI and predictable startup — in progress
+## 3. Optional MOI and predictable startup — completed
+
+Implemented in `b1e02486`, with derivative correction `9247e5a3` and subprocess
+test fix `7527a8fe`. Both Julia 1.10.12 and 1.12.6 pass 3,653 assertions.
+The measured import/build/first-solve median fell from 6.34 s to 3.28 s on the
+HS071 probe; subsequent solves stayed near 1.85 ms. See the versioned
+[validation evidence](julia-wrapper-validation.md#optional-moi-and-startup).
 
 Make the low-level package independent of MOI through a Julia package extension.
 Keep `Pounce.Optimizer` discoverable after loading JuMP/MOI, and document the
@@ -93,7 +99,14 @@ JuMP entry-point compatibility; subprocess library-override checks; measured
 startup effect on a pinned environment. Extension conversion and precompile
 workloads may be separate commits.
 
-## 4. Application validation and benchmark protocol — before OPF claims
+## 4. Application validation and benchmark protocol — completed
+
+The [pinned BMOPFTools harness](../benchmarks/julia_bmopf/README.md) at `06f3d312`
+passes ten solve scenarios per solver, repeated in three measured fresh processes
+for Pounce and Ipopt. Checks include independent SI branch-current reconstruction
+and terminal KCL, parameter sweeps with fresh controls, explicit primal/dual
+starts, and iteration-limit recovery. The full dependency graph and measurements
+are retained. This small teaching feeder does not support utility-scale claims.
 
 Add a small, reproducible BMOPFTools case pinned to its source version, with
 application-level feasibility checks and documented solver/backend options.
@@ -110,7 +123,12 @@ Acceptance: reproducible scripts and residual checks, no performance claim
 based only on solver status or a different timer boundary. This is not required
 to describe the initial package as a source-checkout JuMP adapter.
 
-## 5. Binary distribution and release — after the adapter is validated
+## 5. Binary distribution and release — in progress
+
+The pinned native source passes all 95 C-interface tests in a local Linux arm64
+container. Full Julia platform validation and JLL packaging remain in progress;
+the source-checkout installation still requires a native build. No binary has
+been published and no registry submission or PR has been opened.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add

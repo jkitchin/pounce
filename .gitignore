@@ -46,6 +46,7 @@
 !/benchmarks/*/README.md
 !/benchmarks/julia_bmopf/SOURCE.md
 !/benchmarks/julia_bmopf/*.jl
+!/benchmarks/julia_bmopf/*.toml
 !/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
 # Model generators that reproduce a Mittelmann instance *without* an AMPL

@@ -141,3 +141,99 @@ Existing tests continue to compare updated nonlinear models with fresh models.
 Public MOI/JuMP entry points and low-level C bindings are retained. Tests that
 inspect implementation details now use the explicit native/data containers.
 These fields are not a supported user API; model/result queries use MOI.
+
+## Optional MOI and startup
+
+Wrapper commit `7527a8fe2d2771a01c8f9091202959152d545f21` passes **3,653 assertions**
+on each of Julia 1.10.12 and 1.12.6 (macOS arm64), with MOI 1.54.0, JuMP 1.32.1,
+and Ipopt.jl 1.16.0. Native POUNCE remains 0.15.0 from
+`b4e5ffb641990738fd69cb53c02ae5966fd68edc`. Tests cover an installation with no
+MOI dependency, both import orders, and native-library overrides after
+precompilation, including a solve through the extension.
+
+The objective-transition probe exposed an inherited Hessian assembly defect:
+after replacing `x²` with `x³`, the Hessian at `x=2` summed to 14 instead of 12.
+Commit `9247e5a3` weights only the active objective and suppresses objective
+curvature in feasibility mode while retaining constraint curvature. Five
+regression assertions cover these transitions. This is an analytic derivative
+contract check, not a diagnosis of a reported native solver failure.
+
+The [startup probe](julia-startup-probe.jl) uses one fresh Julia process per
+sample, warm package caches, and the same HS071 model/environment/native library.
+Three samples compare lifecycle baseline `b8a9f4e3` against the extension code
+at `7527a8fe`. Two after-samples carry commit `06f3d312`, which adds only the
+application harness and does not change `Pounce.jl`. Raw selected observations
+are retained in [julia-wrapper-measurements.json](julia-wrapper-measurements.json).
+Initial cache-building samples and exploratory after-samples overlapping image
+downloads are excluded; the retained samples are baseline 2–4 and extension 4–6.
+
+| Phase | Before median (range), seconds | After median (range), seconds |
+|---|---:|---:|
+| `import Pounce` | 0.651 (0.598–0.663) | 0.0054 (0.0044–0.0095) |
+| `using JuMP` after Pounce | 0.077 (0.075–0.081) | 0.844 (0.819–1.103) |
+| First model construction | 1.138 (1.088–1.152) | 0.526 (0.522–0.540) |
+| First `optimize!` | 4.467 (4.290–4.479) | 1.913 (1.906–1.936) |
+| Sum through first solve, median of per-process sums | 6.345 | 3.277 |
+| Subsequent model construction | 0.000491 | 0.000484 |
+| Subsequent `optimize!` | 0.001845 | 0.001853 |
+
+MOI loading now occurs with JuMP, so that individual import phase increases.
+The combined startup measurement decreases by about 48% on this probe.
+Precompilation shifts work into cache creation (the new extension took about
+7 s to precompile on this host); this table excludes installation/cache creation.
+It is neither a steady-state solver speedup nor a broad performance guarantee.
+At `06f3d312`, the callback allocation probe still reports zero Julia bytes for
+warmed sweeps of both 128 and 512 scalar queries; the initial snapshot is excluded.
+
+## BMOPFTools application validation
+
+Harness/wrapper revision: `06f3d31259bc81239c2c8b45ce2bdf0889112b0a`, clean worktree
+for all measured application runs. Native revision is unchanged as above.
+BMOPFTools 0.1.0 is pinned to `542a48ba7f4c95e50b8acdc790a5323a4ef24930`.
+The [source record](../benchmarks/julia_bmopf/SOURCE.md) identifies the author,
+CC BY 4.0 teaching fixture, modifications, and limits. The committed benchmark
+Manifest captures the entire dependency graph, including Julia 1.12.6,
+JuMP 1.32.1, MOI 1.54.0, Ipopt.jl 1.16.0/native 3.14.19, and native dependencies.
+
+Three fresh-process samples per solver (samples 2–4) each pass ten scenarios:
+first/repeat, explicit primal/dual starts, demand parameters 0.5/1.4/1.0 with
+fresh-model controls, and recovery after `max_iter=0`. Sample 1 is retained only
+as exploratory correctness evidence because an allocation probe overlapped it.
+All 30 cross-solver objective comparisons pass `rtol=atol=1e-6`. The 77-variable,
+149-constraint model uses the unchanged four-bus fixture, per-unit formulation,
+exact derivatives, `tol=1e-8`, and `max_iter=500`. Pounce uses FERAL; Ipopt uses
+MUMPS. This is a small adapter/latency exercise with fixed demand, not evidence
+about large OPF cases or matched-backend algorithm performance.
+
+All solutions have zero physical-profiler errors. Because BMOPFTools explicitly
+leaves branch/device equations and terminal KCL unassessed, the harness also
+reconstructs SI line currents from the impedance matrix and bus voltages, checks
+returned branch currents, recomputes load currents from specified complex powers,
+and checks downstream KCL, source/operating voltages, thermal limits, and losses.
+Worst residuals across the selected scenarios:
+
+| Check | Pounce | Ipopt | Acceptance |
+|---|---:|---:|---:|
+| Model constraint violation, model units | 7.79e-13 | 1.13e-10 | ≤1e-6 |
+| Independently reconstructed terminal KCL, A | 3.65e-9 | 9.12e-7 | ≤1e-5 |
+| Returned vs reconstructed branch current, A | 1.13e-12 | 2.08e-8 | ≤1e-5 |
+
+Timing medians and ranges over the three selected processes:
+
+| Phase | Pounce seconds | Ipopt seconds |
+|---|---:|---:|
+| First model construction | 6.535 (6.507–6.667) | 7.388 (6.455–11.256) |
+| First JuMP `optimize!` | 2.149 (2.139–2.161) | 2.339 (2.053–3.259) |
+| Repeated JuMP `optimize!` | 0.00181 (0.00180–0.00193) | 0.00111 (0.00109–0.00126) |
+| Explicit-start JuMP `optimize!` | 0.00188 (0.00185–0.00255) | 0.000827 (0.000776–0.000946) |
+| Recovery JuMP `optimize!` | 0.01127 (0.01107–0.01137) | 0.00584 (0.00542–0.00593) |
+
+First/repeat solves take two iterations, explicit starts one; recovery takes
+31 Pounce / 30 Ipopt iterations. Parameter-update counts and all timer boundaries
+are preserved in the measurements JSON. Pounce's median native timer is 1.611 s
+on the first solve and 0.00154 s on the repeated solve; first-call compilation
+can occur inside that timer. Ipopt has no equivalent native timer exposed by
+this harness. A separate warmed diagnostic initializes AD/sparsity in 16.3 μs
+(Pounce) / 19.0 μs (Ipopt) on disposable models; it is not an additive breakdown
+of the timed solves. The sizeable first-call ranges and different backends limit
+what can be inferred from these timings. No solver-wide ranking is claimed.

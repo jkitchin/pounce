@@ -3,6 +3,9 @@
 This application harness tests the pinned four-bus teaching feeder described in
 [SOURCE.md](SOURCE.md). It is separate from the `.nl` composite report.
 No external private benchmark data are needed. Build the native C library first.
+The committed Julia 1.12 lockfile pins the complete measured dependency graph.
+The setup script copies it into a new environment and adjusts only Pounce's
+local checkout path; it does not resolve newer dependency versions.
 
 ```sh
 julia --startup-file=no benchmarks/julia_bmopf/setup.jl /tmp/pounce-bmopf-env
