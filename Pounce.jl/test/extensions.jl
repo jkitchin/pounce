@@ -7,7 +7,7 @@
         import Pounce
         @assert Base.get_extension(Pounce, :PounceMathOptInterfaceExt) === nothing
         @assert !isdefined(Pounce, :Optimizer)
-        @assert all(id.name != "MathOptInterface" for id in keys(Base.loaded_modules))
+        @assert all(id.name ∉ ("MathOptInterface", "JSON") for id in keys(Base.loaded_modules))
         print("core-only")
     """) == "core-only"
     for imports in
@@ -17,6 +17,9 @@
             @assert Pounce.Optimizer === ext.Optimizer
             @assert Pounce.CallbackFunction === ext.CallbackFunction
             @assert Pounce.NativeSolveTimeSec === ext.NativeSolveTimeSec
+            @assert Pounce.NativeResiduals === ext.NativeResiduals
+            @assert Pounce.SolveReport === ext.SolveReport
+            @assert Pounce.RecordIterationHistory === ext.RecordIterationHistory
             @assert Pounce.MOI === MathOptInterface
             @assert Pounce.Optimizer() isa MathOptInterface.AbstractOptimizer
             print("extension")

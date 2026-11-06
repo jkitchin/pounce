@@ -142,6 +142,60 @@ from subsequent solves. After a thrown error, the optimizer records elapsed
 wrapper time, resets iterations to zero, and leaves native time unavailable
 (`NaN`); JuMP's normal result-access guards still apply.
 
+## Native diagnostics and solve reports
+
+```julia
+MOI = JuMP.MOI
+MOI.set(model, Pounce.RecordIterationHistory(), true) # opt-in, before solving
+optimize!(model)
+residuals = MOI.get(model, Pounce.NativeResiduals())
+restoration = MOI.get(model, Pounce.RestorationStatistics())
+linear = MOI.get(model, Pounce.LinearSolverStatistics())
+fd = MOI.get(model, Pounce.FiniteDifferenceHessianStatistics())
+write("solve.json", MOI.get(model, Pounce.SolveReport("full")))
+```
+
+These attributes work with direct and cached JuMP models. Reports use the native
+`pounce.solve-report/v1` JSON schema and can be consumed by pounce-studio tools.
+Their solution arrays use native solver column/row order, including any bridge
+variables; the report does not provide a JuMP name/index map.
+`SolveReport()` defaults to summary detail, which omits iteration history.
+The wrapper returns a JSON string and does not load a JSON parser; report
+serialization uses a temporary file that is removed before returning.
+
+`NativeResiduals()` returns `primal_infeasibility`, `dual_infeasibility`, and
+`complementarity` in the solver's internally scaled convention. The last value
+measures NLP bound/multiplier complementarity, not declared MPCC pairs. Continue
+to recompute application residuals from returned points for physical validation.
+The native getters return zero when a completed native call has no statistics;
+zero alone is not a feasibility certificate.
+
+The statistics attributes return owned named tuples. `LinearSolverStatistics()`
+returns `nothing` if no backend summary exists; optional native fields retain
+`NaN`/-1 sentinels. The returned `fd.pattern_used` is -1 when finite differences did not run, 0 for declared
+sparsity, or 1 for Jacobian-derived sparsity. Counts and flags describe the
+pattern actually used. Linear statistics cover counts, fill, pivots and inertia;
+the C struct does not expose separate factorization timings.
+
+Diagnostics reject queries before a solve, during callbacks, after a thrown
+solve, and after model changes invalidate the result. Completed unsuccessful
+solves can still supply diagnostics. At the MOI optimizer level, changing options
+or history capture keeps the previous result until the next solve starts. JuMP
+may additionally mark a cached model dirty when a setting changes, requiring
+`optimize!` before querying through the JuMP model again. History is off by default;
+toggling it takes effect on the next solve. Turning it off rebuilds the native
+handle because the C API only supports enabling it. Like other optimizer
+options, the history setting survives `MOI.empty!`.
+
+Core-only users can call `GetIpoptPrimalInf`, `GetIpoptDualInf`,
+`GetIpoptComplInf`, `GetPounceRestorationStats`, `GetPounceLinearSolverStats`,
+`GetPounceFdHessianStats`, `IpoptEnableIterHistory`, and
+`IpoptWriteSolveReport(prob, path; detail="full")`, all qualified with `Pounce.`.
+The new diagnostic getters require a completed solve and reject freed handles.
+Report writing accepts UTF-8 paths, rejects embedded NULs, raises an error on a
+failed write, and overwrites an existing file. Low-level handles must be
+recreated to disable history capture.
+
 ## Callbacks and low-level use
 
 ```julia

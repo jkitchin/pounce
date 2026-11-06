@@ -125,6 +125,9 @@ function _optimize!(model::Optimizer)
     end
     inner = _setup_inner(model)
     _setup_callback!(model, inner)
+    if model.record_iteration_history
+        Pounce.IpoptEnableIterHistory(inner)
+    end
     if model.data.nlp_model !== nothing
         empty!(model.data.qp_data.parameters)
         for (p, index) in model.data.parameters

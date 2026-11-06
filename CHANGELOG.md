@@ -10,6 +10,9 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Julia native diagnostics.** Pounce.jl exposes final residuals, restoration,
+  linear-solver and finite-difference statistics, JSON solve reports, and opt-in
+  iteration history through its low-level API and optional MOI extension.
 - **Julia/JuMP interface from a source checkout.** `Pounce.jl` wraps the C
   library with a MathOptInterface optimizer, sparse derivative callbacks,
   primal/dual results and starts, and modern and legacy JuMP nonlinear support.

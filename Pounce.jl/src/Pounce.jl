@@ -3,6 +3,7 @@ module Pounce
 import Libdl
 # Populated by the optional MOI extension when JuMP/MathOptInterface is loaded.
 global Optimizer, CallbackFunction, NativeSolveTimeSec, MOI
+global NativeResiduals, RestorationStatistics, FiniteDifferenceHessianStatistics, LinearSolverStatistics, SolveReport, RecordIterationHistory
 
 # Set at runtime, never serialize an absolute library path or a dlopen handle
 # into Julia's precompile cache. Calls name this library explicitly, so Ipopt.jl
@@ -36,6 +37,14 @@ const _required_native_symbols = (
     :IpoptSolve,
     :GetIpoptCurrentIterate,
     :GetIpoptCurrentViolations,
+    :GetIpoptPrimalInf,
+    :GetIpoptDualInf,
+    :GetIpoptComplInf,
+    :GetPounceRestorationStats,
+    :GetPounceFdHessianStats,
+    :GetPounceLinearSolverStats,
+    :IpoptEnableIterHistory,
+    :IpoptWriteSolveReport,
 )
 
 function __init__()
@@ -79,6 +88,7 @@ end
 library_path() = libpounce
 
 include("C_wrapper.jl")
+include("diagnostics.jl")
 function column end
 
 end # module Pounce

@@ -14,6 +14,7 @@ flush(stdout)
         cmd = `$(Base.julia_cmd()) --startup-file=no --threads=2 --project=$(Base.active_project()) $script`
         @test success(run(cmd))
     end
+    include("diagnostics.jl")
     include("jump.jl")
     include("updates.jl")
     include("callbacks.jl")

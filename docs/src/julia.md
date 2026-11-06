@@ -84,6 +84,30 @@ and recovery with Ipopt, including independent current/KCL reconstruction.
 Its README defines the timing boundaries, residual checks, and reproduction
 commands; the results do not establish performance on large OPF networks.
 
+## Native diagnostics
+
+Use `MOI.get(model, attr)` with `Pounce.NativeResiduals()`,
+`Pounce.RestorationStatistics()`, `Pounce.LinearSolverStatistics()`, and
+`Pounce.FiniteDifferenceHessianStatistics()` to inspect a completed solve.
+The residuals use the native scaled convention; they do not replace independent
+physical residual checks. The complementarity statistic concerns NLP bounds and
+multipliers, not declared MPCC pairs. A missing linear-backend summary returns
+`nothing`; other optional fields retain their documented native sentinels.
+
+```julia
+MOI = JuMP.MOI
+MOI.set(model, Pounce.RecordIterationHistory(), true)
+optimize!(model)
+write("solve.json", MOI.get(model, Pounce.SolveReport("full")))
+```
+
+The JSON follows the [solve-report schema](schema/solve-report-v1.md).
+`SolveReport()` defaults to summary detail. Full reports include the trajectory
+only if capture was enabled before solving. History defaults to off; changing
+it affects the next solve. Disabling it rebuilds the native handle at that point.
+Diagnostics obey result invalidation and are unavailable during callbacks.
+See the wrapper README for low-level entry points and complete field semantics.
+
 ## Testing and callback details
 
 ```sh

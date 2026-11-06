@@ -100,6 +100,7 @@ Base.@kwdef mutable struct Optimizer <: MOI.AbstractOptimizer
     result::_SolveResult = _SolveResult()
     name::String = ""
     silent::Bool = false
+    record_iteration_history::Bool = false
     options::Dict{String,Any} = Dict{String,Any}()
     options_revision::UInt = 1
     callback::Union{Nothing,Function} = nothing
