@@ -91,3 +91,9 @@ running the complete package suite. Run in a fresh process after staging.
 
 The roadmap and validation notes record which gates actually have evidence.
 The current recipe and staging scripts alone do not prove release readiness.
+
+The manually dispatched `Julia binary candidate` workflow reproduces the Linux
+build/audit/stage/container-test sequence for either architecture and either
+supported Julia version. It has read-only repository permissions and no upload,
+push, or registration steps. It has not been launched as part of local work;
+hosted execution requires the separately authorized publication of this branch.

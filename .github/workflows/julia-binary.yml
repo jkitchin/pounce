@@ -1,0 +1,72 @@
+name: Julia binary candidate
+
+# Explicit release-preparation check. No upload, push, or registration steps.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Linux artifact target
+        type: choice
+        options: [x86_64-linux-gnu, aarch64-linux-gnu]
+        default: x86_64-linux-gnu
+      julia:
+        description: Julia version for the clean-container test
+        type: choice
+        options: ['1.10.12', '1.12.6']
+        default: '1.12.6'
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BUILD_TARGET: ${{ inputs.platform }}
+      TEST_JULIA: ${{ inputs.julia }}
+      BINARYBUILDER_RUNNER: docker
+      BINARYBUILDER_NPROC: '2'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ inputs.julia }}
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+          cache-image: false
+      - name: Install pinned build tooling
+        run: |
+          julia --project="$RUNNER_TEMP/builder" --startup-file=no -e \
+            'using Pkg; Pkg.add(PackageSpec(name="BinaryBuilder", version="0.6.6"))'
+      - name: Build and audit local JLL
+        run: |
+          mkdir -p "$RUNNER_TEMP/build"
+          cd "$RUNNER_TEMP/build"
+          export JULIA_PKG_DEVDIR="$RUNNER_TEMP/jll-dev"
+          julia --project="$RUNNER_TEMP/builder" --startup-file=no -e \
+            'using BinaryBuilder, Pkg; BinaryBuilder.devdir[] = Pkg.devdir(); include(popfirst!(ARGS))' \
+            "$GITHUB_WORKSPACE/Pounce.jl/packaging/build_tarballs.jl" \
+            --verbose --deploy=local "$BUILD_TARGET"
+      - name: Stage binary-backed package
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: '0'
+        run: |
+          julia --startup-file=no "$GITHUB_WORKSPACE/Pounce.jl/packaging/stage_release.jl" \
+            "$RUNNER_TEMP/jll-dev/Pounce_jll" "$RUNNER_TEMP/candidate"
+      - name: Validate in a clean container without Rust
+        run: |
+          case "$BUILD_TARGET" in
+            x86_64-linux-gnu) docker_platform=linux/amd64 ;;
+            aarch64-linux-gnu) docker_platform=linux/arm64 ;;
+            *) exit 1 ;;
+          esac
+          docker run --rm --platform "$docker_platform" \
+            --mount "type=bind,src=$RUNNER_TEMP,dst=$RUNNER_TEMP" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE,readonly" \
+            "julia:$TEST_JULIA-bookworm" julia --startup-file=no \
+            "$GITHUB_WORKSPACE/Pounce.jl/packaging/validate_release.jl" \
+            "$RUNNER_TEMP/candidate" --no-rust
