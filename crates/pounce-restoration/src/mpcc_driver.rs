@@ -54,13 +54,16 @@ pub struct MpccSolveRecord {
     pub tau: Option<Number>,
     pub status: ApplicationReturnStatus,
     /// The solve's iteration count: every attempt inside the call, a
-    /// `mu_strategy_fallback` re-solve's and a gh#884 dual-divergence
-    /// retry's included (`SolveStatistics::spent_iteration_count`).
+    /// `mu_strategy_fallback` re-solve's, a gh#983 scale re-solve's and a
+    /// gh#884 dual-divergence retry's included
+    /// (`SolveStatistics::spent_iteration_count`).
     pub iterations: usize,
-    /// What the driver's iteration budgets read: `iterations` without a
-    /// gh#884 retry's other attempt, the count they were measured and tuned
-    /// against before `iterations` counted it. Kept apart so that reporting
-    /// the true cost does not move a budget, and with it a trajectory.
+    /// What the driver's iteration budgets read
+    /// (`SolveStatistics::budget_iteration_count`): `iterations` without a
+    /// gh#983 or gh#884 re-solve's other attempt, the count they were
+    /// measured and tuned against before `iterations` counted it. Kept apart
+    /// so that reporting the true cost does not move a budget, and with it a
+    /// trajectory.
     pub budget_iterations: usize,
     pub max_abs_product: Number,
     /// Wall-clock seconds of the whole `optimize_tnlp` call, retries and
@@ -568,11 +571,7 @@ pub fn solve_mpcc(
             tau: w.current_tau(),
             status,
             iterations: statistics.spent_iteration_count().max(0) as usize,
-            budget_iterations: statistics
-                .mu_strategy_fallback
-                .as_ref()
-                .map_or(statistics.iteration_count, |r| r.total_iteration_count())
-                .max(0) as usize,
+            budget_iterations: statistics.budget_iteration_count().max(0) as usize,
             max_abs_product: cap.max_abs_product,
             seconds,
         });

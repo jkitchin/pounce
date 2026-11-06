@@ -78,3 +78,29 @@ fn the_caller_max_iter_still_caps_the_re_solve() {
         );
     }
 }
+
+/// The declined re-solve's iterations are counted (#1140 review). The answer
+/// is the base attempt's, and so is `iteration_count`, but the solve spent
+/// both attempts: `retry_total_iterations` must be their sum, read against
+/// the two printed summaries, the one place each attempt's count survives.
+#[test]
+fn a_declined_re_solve_is_counted_in_the_total() {
+    let json = std::env::temp_dir().join(format!("pounce-983-total-{}.json", std::process::id()));
+    let out = run(&["--json-output", json.to_str().unwrap()]);
+    let its = iteration_counts(&out);
+    assert_eq!(its.len(), 2, "{out}");
+    assert!(out.contains("gh#983 scale audit: declined"), "{out}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let st = &report["statistics"];
+    assert_eq!(
+        st["iteration_count"], its[0],
+        "the base attempt's is reported"
+    );
+    assert_eq!(
+        st["retry_total_iterations"],
+        its[0] + its[1],
+        "counts {its:?}"
+    );
+    let _ = std::fs::remove_file(&json);
+}

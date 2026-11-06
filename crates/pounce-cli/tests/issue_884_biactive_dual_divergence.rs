@@ -294,7 +294,7 @@ fn the_reproducer_converges_with_a_multiplier_a_reader_can_check() {
 /// one attempt's (here the promoted retry's), so a total built from it
 /// dropped the base attempt: the MPCC driver's per-solve record read 7
 /// iterations for a `relu_nn` finish whose base had spent 86 more, and 71
-/// in restoration. `dual_divergence_retry_iterations` is both attempts', and
+/// in restoration. `retry_total_iterations` is both attempts', and
 /// is checked here against the one place each attempt's count is printed;
 /// with the retry off it is absent.
 #[test]
@@ -312,7 +312,7 @@ fn a_retry_reports_both_attempts_iterations() {
          (REPRO_PRE945 turns the mu fallback off); stdout=\n{stdout}"
     );
     assert_eq!(
-        r.statistics.dual_divergence_retry_iterations,
+        r.statistics.retry_total_iterations,
         Some(counts.iter().sum::<i64>()),
         "{FIXTURE}: counts {counts:?}; stdout=\n{stdout}"
     );
@@ -329,7 +329,7 @@ fn a_retry_reports_both_attempts_iterations() {
         .collect();
     let (off, off_out) = solve(&opts);
     assert_eq!(
-        off.statistics.dual_divergence_retry_iterations, None,
+        off.statistics.retry_total_iterations, None,
         "{FIXTURE}: no retry ran; stdout=\n{off_out}"
     );
 }
