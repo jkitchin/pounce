@@ -128,9 +128,13 @@ to describe the initial package as a source-checkout JuMP adapter.
 The pinned native source passes all 95 C-interface tests in a local Linux arm64
 container; wrapper `7527a8fe` also passes all 3,653 Julia assertions there.
 At `1d985b52`, native-version/symbol checks pass the complete 3,662-assertion
-suite on both macOS Julia versions. The local-only BinaryBuilder recipe and
-binary-backed release staging tool are under validation. JLL builds, artifact
-installation and remaining platform gates are not yet complete. The working
+suite on both macOS Julia versions. The local-only BinaryBuilder recipe passes
+all four target audits. The combined binary-backed candidate passes the full
+3,662-assertion suite on arm64 Linux and macOS with Julia 1.10.13 and 1.13.3,
+and Intel macOS under Rosetta with Julia 1.13.3. Its macOS arm64 artifact also
+passes all ten BMOPFTools scenarios per solver and cross-solver comparisons.
+The remaining Intel and full custom-library matrix entries are in progress.
+The working
 source-checkout installation still requires a native build. No binary has been
 published and no registry submission or PR has been opened.
 
@@ -145,8 +149,10 @@ All four candidate targets now pass their fatal build audits: Linux arm64 at
 architectures at `73f45e96`. The unused macOS libiconv dependency is gone. Their
 unchanged archives have been combined into one local JLL package; hashes and
 recipe commits are in the [artifact inventory](julia-wrapper-artifacts.json).
-Full artifact-backed and custom-library tests are still required before this
-stage is complete. The inspected arm64 build baselines are glibc 2.19 on Linux
+The remaining artifact-backed and custom-library tests are required before this
+stage is complete. The validator and manual CI now explicitly check custom
+selection outside the JLL product path before running the complete suite.
+The inspected arm64 build baselines are glibc 2.19 on Linux
 and macOS 11.0 on Apple platforms; Intel macOS declares 10.12 at the binary level.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an

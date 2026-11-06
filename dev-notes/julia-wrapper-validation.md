@@ -372,6 +372,19 @@ staged wrapper and dependencies. This runs the x86_64 Julia executable and nativ
 artifact under Rosetta on macOS **26.7.2**; it is not a physical Intel-machine run.
 Its fresh depot, no-Rust check, artifact path, and log hash are recorded separately.
 
+The first Intel Linux Julia 1.13.3 run under the dedicated VM's Rosetta translator
+failed before loading Pounce: Julia's zstd executable selected system libzstd
+1.5.4 instead of bundled 1.5.7. Direct ELF-loader invocation of that same
+executable succeeds. A container-local shim applies that invocation only to
+the decompressor, without changing Julia/Pounce's library search environment.
+The next run received SIGSEGV in Julia's GC safepoint during `Pkg.instantiate`,
+also before loading Pounce. A subsequent run explicitly sets
+`JULIA_NUM_THREADS=1` and `JULIA_NUM_GC_THREADS=1`; it has loaded the audited
+artifact and reached the full suite. These exploratory failures are not passing
+tests, nor evidence of a Pounce native failure. The completed runtime matrix must
+record the translation mode and these settings; native hosted Linux CI remains
+a separate release gate.
+
 The combined macOS arm64 artifact also passes the pinned BMOPFTools application
 checks on Julia **1.12.6**, at staged wrapper
 `204c80e9f57c5649ec38a0197800706510237a34` and harness
