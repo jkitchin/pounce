@@ -12,6 +12,9 @@ default is explicitly disabled.
 On macOS, the linker removes unused dylib dependencies, including the system
 libiconv linkage found in the first artifact. The complete library must
 still pass the audit and runtime tests after linking.
+Linux x86_64 uses the toolchain's GNU linker: Rust 1.91's bundled LLD cannot
+read compressed debug sections in this GCC sysroot. The recipe uses Rust's
+[documented linker opt-out](https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/).
 The four candidate targets are Linux glibc and macOS, each x86_64/aarch64.
 Listing a candidate is not evidence that it passed a build or test. Windows
 remains outside the advertised platform set until its binary and suite pass.

@@ -25,6 +25,9 @@ if [[ "${target}" == *-apple-darwin* ]]; then
     # The initial Darwin artifact retained an unused system libiconv linkage.
     # Remove unused dylib load commands instead of retaining that dependency.
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-dead_strip_dylibs"
+elif [[ "${target}" == x86_64-linux-gnu* ]]; then
+    # Bundled rust-lld lacks zlib support for this sysroot's debug sections.
+    export RUSTFLAGS="${RUSTFLAGS:-} -C linker-features=-lld"
 fi
 cargo build --release --locked -p pounce-cinterface
 install -Dvm 0755 target/${rust_target}/release/*pounce_cinterface.${dlext} ${libdir}/libpounce_cinterface.${dlext}

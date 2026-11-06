@@ -315,6 +315,17 @@ will be rebuilt with GCC 10. The auditor also identifies CPUID-based instruction
 dispatch and therefore cannot statically establish a minimum instruction set;
 x86 runtime checks remain necessary.
 
+The GCC 10 x86_64 rebuild at recipe `73f45e96` reached the final link, where
+Rust 1.91's bundled LLD rejected compressed debug sections in
+`libc_nonshared.a` because it lacks zlib support. A small control using the
+same explicit `x86_64-linux-gnu-cc` linker reproduces that error; adding
+`-C linker-features=-lld` produces a library that passes the control's audit.
+The first control using `gcc` instead of Cargo's `cc` did not reproduce the
+failure and is not counted as that evidence. The recipe now selects the
+toolchain's GNU linker for Linux x86_64 using the
+[documented Rust opt-out](https://blog.rust-lang.org/2025/09/18/Rust-1.90.0/).
+The complete corrected POUNCE build/audit is still required.
+
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
 dependency. Inspection of the actual library's 93 undefined symbols found no
