@@ -151,7 +151,7 @@ All four candidate targets now pass their fatal build audits: Linux arm64 at
 `b892f46a`, Linux x86_64 with GNU-linker selection at `28297b0b`, and both macOS
 architectures at `73f45e96`. The unused macOS libiconv dependency is gone. Their
 unchanged archives have been combined into one local JLL package; hashes and
-recipe commits are in the [artifact inventory](julia-wrapper-artifacts.json).
+recipe commits are in the [artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json).
 The validator and manual CI explicitly check custom
 selection outside the JLL product path before running the complete suite.
 The inspected arm64 build baselines are glibc 2.19 on Linux
@@ -167,7 +167,7 @@ installs without Rust on all four candidate targets, and both artifact and
 custom-library paths pass the full suite on Julia 1.10.13 and 1.13.3.
 Core-only installation, both MOI
 load orders, Ipopt coexistence, and the pinned application checks also pass.
-The [inventory](julia-wrapper-artifacts.json) identifies every tested artifact
+The [inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json) identifies every tested artifact
 and environment; Intel checks use Rosetta and do not replace native hosted CI.
 
 Final review found incorrect legacy NLP dual slicing and overlapping dual starts

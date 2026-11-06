@@ -11,8 +11,25 @@ runs, each with **3,662 assertions**. The subsequent mixed-NLP dual correction
 and its separate validation are recorded below. The pinned BMOPFTools validation,
 startup measurements, minimum-dependency tests, and native C tests are detailed
 below. Exact binary hashes and runtime environments are in the
-[artifact inventory](julia-wrapper-artifacts.json). These are local validation
+[artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json). These are local validation
 results; hosted CI results, binary publication, and registration are not claimed here.
+
+## Archived raw evidence
+
+The [raw JSON archive](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c) preserves the measurement records and
+artifact inventory byte-for-byte from repository commit
+`7d72b435bf1323f349f69c4a871676e72ee128e5`. Links in these notes pin the
+gist revision; each record retains its original measurement revisions.
+The narrative, reproduction scripts, and pinned BMOPFTools Manifest remain
+in the repository. The archive contains metadata and results, not the native
+binaries or the full logs referenced by their hashes.
+
+To verify downloaded JSON files, compare their SHA-256 values:
+
+```text
+31aed76961c6404bc2bcb5b972b33604e573b54d63590581f6364255eb389137  julia-wrapper-measurements.json
+d86bfddc8cf135d3e2b100137db2605723aa25c9aef69d0e4ec67c4b44deed9b  julia-wrapper-artifacts.json
+```
 
 ## Upstream integration before PR publication
 
@@ -246,7 +263,7 @@ sample, warm package caches, and the same HS071 model/environment/native library
 Three samples compare lifecycle baseline `b8a9f4e3` against the extension code
 at `7527a8fe`. Two after-samples carry commit `06f3d312`, which adds only the
 application harness and does not change `Pounce.jl`. Raw selected observations
-are retained in [julia-wrapper-measurements.json](julia-wrapper-measurements.json).
+are retained in [julia-wrapper-measurements.json](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-measurements-json).
 Initial cache-building samples and exploratory after-samples overlapping image
 downloads are excluded; the retained samples are baseline 2–4 and extension 4–6.
 
@@ -366,7 +383,7 @@ The original binary-preparation runtime matrix is below. Each passed cell is the
 complete **3,662-assertion** suite at staged wrapper `add2e6e3`, with the four audited
 native `b4e5ffb6` artifacts. Exact environment settings, artifact/library hashes,
 build-audit log hashes, and test log hashes are retained in the
-[artifact inventory](julia-wrapper-artifacts.json). Intel runs use Rosetta;
+[artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json). Intel runs use Rosetta;
 the Linux 1.13.3 setup workaround is detailed below. Override tests select a copy
 of the audited library outside its artifact directory; they test path selection,
 not compatibility with an independently built native binary.
@@ -453,7 +470,7 @@ Intel macOS also **passes the fatal audit** at recipe `73f45e96`, with only
 libSystem linked and a minimum macOS load command of **10.12**. Julia itself
 may impose a newer OS requirement. Neither audit substitutes for runtime tests.
 
-The [artifact inventory](julia-wrapper-artifacts.json) records all four accepted
+The [artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json) records all four accepted
 archives, tree hashes, and exact recipe commits. Their archive SHA-256 values
 were checked before copying to one local product directory. BinaryBuilder's
 `--skip-build --deploy=local` then generated a combined Pounce_jll 0.15.0+0,
@@ -522,7 +539,7 @@ has the accepted artifact's SHA-256
 `347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339`.
 Adding the staged package/JLL with `Pkg.PRESERVE_ALL` leaves every original
 application dependency record unchanged except Pounce, adding only Pounce_jll.
-The [measurement data](julia-wrapper-measurements.json) retain source/dependency
+The [measurement data](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-measurements-json) retain source/dependency
 identities, per-scenario correctness results, and report/manifest hashes. These
 are correctness checks; their timings are excluded because a separate Linux VM
 validation was active. The earlier three-process performance evidence stands

@@ -59,7 +59,7 @@ BinaryBuilder recomputes artifact tree hashes and generates the platform
 wrappers; this assembly does **not** rerun the build audits. Retain each original
 successful audit and verify the combined JLL's tree hashes against the inventory.
 
-The [local artifact inventory](../../dev-notes/julia-wrapper-artifacts.json)
+The [archived artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json)
 records the accepted builds and completed runtime checks. The arm64 Linux
 toolchain contains glibc 2.19; the library fails to load on CentOS 7 arm64 despite
 that distribution's partial GLIBC_2.18 symbol-version backports. The macOS
