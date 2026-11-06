@@ -12,6 +12,63 @@ merges.
 
 ---
 
+## NLP: three L-BFGS fixtures slower after restoration matched upstream (gh#1146)
+
+*Measured on `claude/charming-carson-cz5psg` against `main` at `358ecbb`,
+`scripts/sweep-fixtures.sh`, L-BFGS leg. Recorded 2026-11-06.*
+
+**The change.** Under `hessian_approximation=limited-memory`, restoration's
+quasi-Newton update ran over the whole restoration primal
+`[x | n_c | p_c | n_d | p_d]`. Upstream (`update_for_resto_`) confines it to
+the `x` block and leaves the linear slack blocks at zero curvature. Pounce
+now does the same (`LimMemQuasiNewtonUpdater::leading_block`). On the gh#1146
+model under `nlp_scaling_method=none` that turns `Restoration_Failed` at
+`x = 0.0429` into Ipopt's own trajectory and answer (`x = 0.44927`,
+14 iterations, iterate for iterate).
+
+### What is worse
+
+No status moved, and the exact leg is untouched. On the L-BFGS leg:
+
+| fixture | before | after |
+|---|---|---|
+| `circle_parabola_t1p5` | 66 it (206 with ladder) | 154 it (553) |
+| `eigena2` | 239 it | 263 it |
+| `cc:design_cent_3` | 4724 lowered-solve iterations | 10967 |
+
+Against those: `square_flowsheet_resto` 2834 → 314, `cresc4` solves on
+the first attempt (was 3200 with the ladder), `circle_parabola_t0p5` and
+`discs` no longer need the ladder, `dallass` 301 → 272, and four smaller
+moves go each way.
+
+### Why it is not the restoration change itself
+
+Both regressing NLP fixtures had already left Ipopt's path in the **main
+loop, before any restoration call**, on `main` and on the branch alike.
+Measured against Ipopt 3.14.20 (`amplpy` `ampl_module_ipopt`), same options:
+
+- `circle_parabola_t1p5`: Ipopt takes 31 iterations. Pounce leaves
+  Ipopt's path at main-loop iteration 2 (`‖d‖ = 7.66` against Ipopt's
+  `25.7`).
+- `eigena2`: Ipopt takes 167 iterations and first enters restoration at
+  iteration 132. Pounce leaves its path at main-loop iteration 6.
+
+So restoration is entered from points Ipopt never visits, and its
+iteration count there measures that earlier gap, not this change.
+`cc:design_cent_3` goes through the complementarity driver's lowered
+solves and has no direct Ipopt comparison; it was not traced.
+
+### How to tell whether a fix works
+
+Close the main-loop gap: `circle_parabola_t1p5` and `eigena2` under
+`hessian_approximation=limited-memory` should match Ipopt's iteration log
+through their first restoration call. Do not restore the whole-compound
+update to win these back. It is what made the gh#1146 model fail, and
+`crates/pounce-cinterface/tests/issue_1146_lbfgs_feasible_not_infeasible.rs`
+(`unscaled_lbfgs_restoration_recovers_as_upstream_does`) pins it.
+
+---
+
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
 
 *Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through

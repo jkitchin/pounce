@@ -165,6 +165,16 @@ fn set_str(prob: IpoptProblem, k: &str, v: &str) {
 /// Solve from `x0`, with the `log` row's lower bound `log_lo`, returning
 /// `(status, x, g)`. Every second-opinion rung is off.
 fn solve(hessian: &str, x0: Number, log_lo: Number) -> (i32, Number, [Number; M]) {
+    solve_with(hessian, x0, log_lo, &[])
+}
+
+/// [`solve`] with extra string options.
+fn solve_with(
+    hessian: &str,
+    x0: Number,
+    log_lo: Number,
+    extra: &[(&str, &str)],
+) -> (i32, Number, [Number; M]) {
     unsafe {
         let x_l = [0.0 as Number];
         let x_u = [1.0 as Number];
@@ -198,6 +208,9 @@ fn solve(hessian: &str, x0: Number, log_lo: Number) -> (i32, Number, [Number; M]
             "infeasibility_saddle_escape_retry",
         ] {
             set_str(prob, rung, "no");
+        }
+        for &(k, v) in extra {
+            set_str(prob, k, v);
         }
         let mut x = [x0];
         let mut g = [0.0 as Number; M];
@@ -256,6 +269,24 @@ fn exact_hessian_from_the_log_singularity_is_not_convicted_one_step_from_feasibl
         (-1.0f64).exp() - tol <= x && x <= 0.75 + tol,
         "x = {x} outside the feasible set [1/e, 0.75]"
     );
+}
+
+/// The third defect gh#1146 surfaced, in restoration. Unscaled, the L-BFGS
+/// run enters restoration at outer iteration 7 and matches Ipopt exactly up
+/// to there. Pounce's restoration then ran its limited-memory update over
+/// the whole compound primal `[x | n_c | p_c | n_d | p_d]`; upstream confines
+/// it to the `x` block and leaves the linear slack blocks at zero curvature.
+/// The slack motion diluted every curvature pair. The first restoration step
+/// came out `‖d‖ = 3.63e3` against Ipopt's `2.10e3`, and the solve ended
+/// `Restoration_Failed` at `x = 0.0429`. Confined to the `x` block, it
+/// follows Ipopt to the iterate and returns Ipopt's answer, `x = 0.44927`,
+/// in 14 iterations.
+#[test]
+fn unscaled_lbfgs_restoration_recovers_as_upstream_does() {
+    let (status, x, g) =
+        solve_with("limited-memory", 0.0, -1.0, &[("nlp_scaling_method", "none")]);
+    assert_eq!(status, SOLVE_SUCCEEDED, "x = {x}, g = {g:?}");
+    assert!((x - 0.44927).abs() < 1e-4, "x = {x}; Ipopt 3.11.9 returns 0.44927");
 }
 
 #[test]
