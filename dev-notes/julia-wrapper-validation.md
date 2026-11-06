@@ -6,12 +6,54 @@ The Rust solver is unchanged by the wrapper contribution.
 Ipopt.jl sources and adapted tests are pinned in `Pounce.jl/NOTICE.md`.
 
 The local refactoring and release-preparation gates are complete. The staged
-JLL candidate passes all **16** platform/version/library-selection runs, each
-with **3,662 assertions**. The pinned BMOPFTools validation, startup measurements,
-minimum-dependency tests, and native C tests are detailed below. Exact binary
-hashes and runtime environments are in the
+JLL candidate at `add2e6e3` passed all **16** platform/version/library-selection
+runs, each with **3,662 assertions**. The subsequent mixed-NLP dual correction
+and its separate validation are recorded below. The pinned BMOPFTools validation,
+startup measurements, minimum-dependency tests, and native C tests are detailed
+below. Exact binary hashes and runtime environments are in the
 [artifact inventory](julia-wrapper-artifacts.json). Hosted CI, publication, and
 registration remain separately authorized release actions; none is claimed here.
+
+## Final review: mixed legacy NLP and vector-oracle duals
+
+Review at `7a05e65b129203c98599c53aaa24b809eb1a58cb` reproduced two adapter
+defects when legacy nonlinear constraints and vector nonlinear oracles coexist.
+`NLPBlockDual` included oracle multipliers, and explicit `NLPBlockDualStart`
+values overwrote oracle starts. The native multiplier output was correct.
+
+Correction `67f3ff0b08e08c457519928c047140f45fa26ce1` counts all oracle output
+rows before extracting the NLP block and initializes oracle starts independently
+of the NLP block starts. It clears missing starts on each solve so reused native
+buffers cannot retain stale multipliers. The new mixed-model regression has
+30 assertions covering affine rows, multiple oracles with different output
+dimensions, legacy constraints, both objective senses, explicit starts, and
+clearing starts across repeated solves.
+
+The original review reproducer now reports the slack legacy constraint's dual
+as `-3.58e-10` instead of approximately `2`, returns exactly one legacy block
+dual, and passes native input multipliers `[-11, 7]` for oracle/legacy starts
+instead of `[7, 0]`. These observations are from correction `67f3ff0b` with the
+unchanged native POUNCE 0.15.0 library from `b4e5ffb6` on Julia 1.12.6/macOS arm64.
+
+At `67f3ff0b`, the full source-package suite passes **3,692 assertions** on each
+of Julia **1.10.13** and **1.13.3**, on macOS arm64 with MOI 1.54.0, JuMP 1.32.1,
+and Ipopt.jl 1.16.0. Both runs use the same unchanged source-build native library.
+The package worktree was clean at launch; only validation documentation was
+edited while the tests ran. Full-suite log SHA-256 values:
+
+- Julia 1.10.13: `0ef396db1e05c4ec6c010ab57984c04feab6c6d8f0062190d88921dd4012d0d1`.
+- Julia 1.13.3: `4b3bda0f4207cb7c429b1f954b6f5312f9dcb1c584e942e164ba7916ab90f746`.
+
+A separately staged candidate from the same clean `67f3ff0b` source also passes
+all **3,692 assertions** on macOS arm64/Julia **1.13.3**, using the accepted
+`3eb5a4b359039259aa9db75130616c897e893fb7` artifact. The validator confirms
+core-only loading and default artifact selection with Cargo/Rust excluded from
+PATH and no library override. This follow-up reuses the existing artifact depot;
+it is not a new fresh-depot installation check. Dependency versions match the
+source runs. Log SHA-256:
+`ddbd306b7039f4553b65bac4b9947bbfd80d6d1253e5dbea4ddafec0107d70a2`.
+The unchanged native binaries were not rebuilt and the original 16-cell matrix
+was not rerun for this Julia-only correction. Hosted CI remains unrun.
 
 ## An inherited test exposed a native limited-memory limitation
 
@@ -288,8 +330,8 @@ uncommitted during this check. Test-log SHA-256:
 
 ## Local binary release preparation — local gates complete
 
-The current runtime matrix is below. Each passed cell is the complete
-**3,662-assertion** suite at staged wrapper `add2e6e3`, with the four audited
+The original binary-preparation runtime matrix is below. Each passed cell is the
+complete **3,662-assertion** suite at staged wrapper `add2e6e3`, with the four audited
 native `b4e5ffb6` artifacts. Exact environment settings, artifact/library hashes,
 build-audit log hashes, and test log hashes are retained in the
 [artifact inventory](julia-wrapper-artifacts.json). Intel runs use Rosetta;
@@ -428,9 +470,10 @@ artifact matrix. The complete override matrix now also passes: each of the eight
 platform/version pairs runs the full suite against an explicit copy outside the
 artifact store. Every copy's SHA-256 matches its accepted native artifact.
 
-The staged wrapper's `src`, `ext`, and `test` files remain identical to the
-current branch except for the staging tool's documented JLL import/default-path
-changes. The manual CI definition uses Julia 1.12.6 for BinaryBuilder, stages
+Those staged wrappers predate the mixed-NLP dual correction recorded above;
+their results remain attributed to `add2e6e3`. The correction changes only the
+Julia adapter and tests, with no native, ABI, loader, or packaging changes.
+The manual CI definition uses Julia 1.12.6 for BinaryBuilder, stages
 with the chosen test Julia, and mounts only the candidate, generated JLL, product
 archives, and validator scripts into its clean test container. It runs both
 selection modes. YAML and shell syntax checks pass; hosted execution has not

@@ -218,6 +218,19 @@
             "Ipopt": "1.16.0"
           },
           "environment": "macOS 26.7.2 arm64 host; existing artifact-test depot; cargo and rustc absent from PATH; copied audited dylib selected outside artifact store"
+        },
+        {
+          "julia": "1.13.3",
+          "mode": "artifact",
+          "assertions": 3692,
+          "wrapper_commit": "67f3ff0b08e08c457519928c047140f45fa26ce1",
+          "environment": "macOS arm64 host; existing artifact-test depot; cargo and rustc absent from PATH; no library override; mixed-NLP dual correction follow-up",
+          "log_sha256": "ddbd306b7039f4553b65bac4b9947bbfd80d6d1253e5dbea4ddafec0107d70a2",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
         }
       ],
       "library_sha256": "347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339",

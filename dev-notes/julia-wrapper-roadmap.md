@@ -129,8 +129,8 @@ The pinned native source passes all 95 C-interface tests in a local Linux arm64
 container; wrapper `7527a8fe` also passes all 3,653 Julia assertions there.
 At `1d985b52`, native-version/symbol checks pass the complete 3,662-assertion
 suite on both macOS Julia versions. The local-only BinaryBuilder recipe passes
-all four target audits. The combined binary-backed candidate passes the full
-3,662-assertion suite on Linux and macOS, each arm64 and x86_64, with Julia
+all four target audits. The combined binary-backed candidate at `add2e6e3` passes
+the full 3,662-assertion suite on Linux and macOS, each arm64 and x86_64, with Julia
 1.10.13 and 1.13.3. Intel runs use Rosetta; exact settings and the Linux current
 Julia setup workaround are recorded in the validation notes. Its macOS arm64 artifact also
 passes all ten BMOPFTools scenarios per solver and cross-solver comparisons.
@@ -161,12 +161,20 @@ explicit custom-library override, and test clean-machine installation. Add
 Windows coverage once its binary path is supported. Establish native-version
 compatibility checks and release/registration documentation.
 
-Local acceptance is complete: the staged binary-backed package installs without
-Rust on all four candidate targets, and both artifact and custom-library paths
-pass the full suite on Julia 1.10.13 and 1.13.3. Core-only installation, both MOI
+Local binary-preparation acceptance at `add2e6e3` is complete: the staged package
+installs without Rust on all four candidate targets, and both artifact and
+custom-library paths pass the full suite on Julia 1.10.13 and 1.13.3.
+Core-only installation, both MOI
 load orders, Ipopt coexistence, and the pinned application checks also pass.
 The [inventory](julia-wrapper-artifacts.json) identifies every tested artifact
 and environment; Intel checks use Rosetta and do not replace native hosted CI.
+
+Final review found incorrect legacy NLP dual slicing and overlapping dual starts
+when vector nonlinear oracles precede the NLP block. Commit `67f3ff0b` fixes both
+and adds 30 mixed-model regression assertions. Its validation is recorded
+separately in the [validation notes](julia-wrapper-validation.md); the earlier
+16-run matrix retains its original wrapper revision. Native code, artifacts,
+loader behavior, and the ABI are unchanged.
 
 Remaining release actions require separate authorization: adopt the staged
 package and published JLL URLs, publish the branch/artifacts, obtain green hosted
