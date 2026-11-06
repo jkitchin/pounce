@@ -362,8 +362,10 @@ suite. The Linux container has no Rust toolchain and mounts only the candidate,
 generated JLL, archives, and validation scripts, so no source-build library is
 available. On macOS, Cargo and rustc are excluded from PATH. Both resolve the
 expected artifact library and leave MOI unloaded until requested. These runs
-cover the default artifact path; LTS, x86_64, and complete override runs remain
-pending. Log hashes and exact environments are in the artifact inventory.
+also pass all **3,662 assertions** on Julia **1.10.13** on each arm64 platform,
+with the same staged wrapper and dependency versions. These four runs cover the
+default artifact path; x86_64 and complete override runs remain pending. Log
+hashes and exact environments are in the artifact inventory.
 
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
@@ -386,7 +388,7 @@ Native source and Rust version remain `b4e5ffb6` / 1.91.0. Artifact tree:
 `3d1569f1c4410a03e5ba4a73194f9486a27f1ca6e4045945f50257c6633ea757`;
 library SHA-256:
 `347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339`.
-Full artifact-backed runtime tests remain pending. An earlier corrected macOS
+The later combined-JLL arm64 runtime results are recorded above. An earlier corrected macOS
 compile was deliberately stopped to switch the dedicated VM from QEMU to its
 supported Rosetta mode; this accepted archive comes from a fresh complete build.
 

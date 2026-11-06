@@ -27,6 +27,19 @@
             "MathOptInterface": "1.54.0",
             "Ipopt": "1.16.0"
           }
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "Linux arm64, Debian 12 container; fresh depot; no Rust toolchain",
+          "log_sha256": "ce1ffb71a13691f768a5bdb790226d5728ebc40225366a2db5a86b8bbdd540b6",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
         }
       ]
     },
@@ -55,6 +68,19 @@
           "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
           "environment": "macOS arm64 host; fresh depot; cargo and rustc absent from PATH",
           "log_sha256": "d92936aef80cc0f226adae5ea4b21abd783ffbfe644bde6bdfa98af92e3b1f8e",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "macOS arm64 host; fresh depot; cargo and rustc absent from PATH",
+          "log_sha256": "9e42e77897ed95a6b61e49751ea00bc1b05006f1017e5a13f2417fb0c5916e06",
           "dependencies": {
             "JuMP": "1.32.1",
             "MathOptInterface": "1.54.0",
