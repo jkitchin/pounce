@@ -61,3 +61,24 @@ the wrapper instead checks callback outputs for finiteness.
 
 Binary distribution, Windows CI, and BMOPFTools integration benchmarks remain
 follow-up work. The first contribution does not claim those are validated.
+
+## Wrapper design study and model updates
+
+The [Ipopt.jl and MadNLP study](julia-wrapper-design-study.md) identified stale
+nonlinear bounds after a solve–modify–solve sequence. The fix, regression tests,
+and comparative reproducer are committed at
+`8b142ab0adb8752d9925bd35e781a6484f3e792d`.
+
+On that commit, using the unchanged native library from
+`b4e5ffb641990738fd69cb53c02ae5966fd68edc`, the full package suite passed
+3,453 assertions on each of Julia 1.10.12 and 1.12.6 (macOS arm64). This includes
+82 new assertions for nonlinear bound updates, fresh-model comparisons,
+cached/direct JuMP models, parameter updates, and consistent result invalidation.
+The runs used MathOptInterface 1.54.0, JuMP 1.32.1, and Ipopt.jl 1.16.0.
+
+The committed reproducer also ran against registered MadNLP 0.11.0 and
+Ipopt.jl 1.16.0. Updated Pounce and its fresh-model control both returned
+`1.3862943686119529` for the new bound. Both reference packages retained their
+old result after the bound update; their fresh-model controls returned the
+expected new optimum. Package identities and the pre-fix values are recorded
+in the study. No upstream issue or PR was published as part of this work.
