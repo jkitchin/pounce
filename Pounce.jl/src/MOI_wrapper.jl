@@ -234,6 +234,11 @@ function MOI.set(
 )
     p = model.parameters[MOI.VariableIndex(ci.value)]
     model.nlp_model[p] = set.value
+    # Parameters update the evaluator in place, but the previous solution no
+    # longer describes the current model. Keep its derivative caches reusable.
+    if model.inner !== nothing
+        model.inner.solved = false
+    end
     return
 end
 
@@ -616,7 +621,9 @@ function MOI.set(
     index = MOI.Nonlinear.ConstraintIndex(ci.value)
     func = model.nlp_model[index].expression
     model.nlp_model.constraints[index] = MOI.Nonlinear.Constraint(func, set)
-    model.needs_new_inner = true
+    # NLPBlockData stores a snapshot of the nonlinear bounds. Rebuilding just
+    # the native handle would reuse that snapshot and solve the old problem.
+    _invalidate_inner!(model)
     return
 end
 
@@ -1460,7 +1467,7 @@ end
 function MOI.get(model::Optimizer, ::MOI.TerminationStatus)
     if model.invalid_model
         return MOI.INVALID_MODEL
-    elseif model.inner === nothing || !model.inner.solved
+    elseif model.inner === nothing || !model.inner.solved || model.needs_new_inner
         return MOI.OPTIMIZE_NOT_CALLED
     end
     status, _ = _STATUS_CODES[Pounce.ApplicationReturnStatus(model.inner.status)]
@@ -1472,7 +1479,7 @@ end
 function MOI.get(model::Optimizer, ::MOI.RawStatusString)
     if model.invalid_model
         return "The model has no variable"
-    elseif model.inner === nothing || !model.inner.solved
+    elseif model.inner === nothing || !model.inner.solved || model.needs_new_inner
         return "Optimize not called"
     end
     return string(Pounce.ApplicationReturnStatus(model.inner.status))

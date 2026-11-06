@@ -97,6 +97,9 @@ multipliers with `set_dual_start_value`, then enable
 `set_optimizer_attribute(model, "warm_start_init_point", "yes")`.
 Use JuMP/MOI dual conventions; the wrapper converts signs for POUNCE, including
 maximization. Repeated solves do not automatically reuse the previous solution.
+They also do not promise reuse of native solver factorizations. The current
+`MOI.SolveTimeSec` includes wrapper setup as well as the native solve; measure
+Julia compilation and model construction separately when benchmarking.
 
 ## Callbacks and low-level use
 
