@@ -42,7 +42,7 @@ use pounce_algorithm::mpcc::{
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
 use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::mpcc::{ComplementarityPair, Lowering, MpccTnlp, StartOverride};
+use pounce_nlp::mpcc::{ComplementarityPair, Lift, Lowering, MpccTnlp, StartOverride};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, IpoptCq, IpoptData, SparsityRequest, TNLP};
 
@@ -111,6 +111,8 @@ pub struct MpccOutcome {
     pub b_check: Option<BCheck>,
     /// Branch NLPs that moved the point off a non-B-stationary one.
     pub escapes: usize,
+    /// Pairs whose row was lifted into a variable (`complementarity_lift`).
+    pub lifted: usize,
     /// The forwarded point's largest `min(|G|, |H|)` over its pairs
     /// ([`natural_residual`]): how complementary it is, in the units of the
     /// pair sides. `None` when the model could not be evaluated there.
@@ -204,6 +206,7 @@ impl MpccOutcome {
                 }
             }),
             escapes: self.escapes,
+            lifted: self.lifted,
             natural_residual: self.natural_residual.and_then(finite),
             polish: self.polish.as_ref().map(|p| ComplementarityPolishInfo {
                 taken: p.taken,
@@ -321,12 +324,44 @@ pub fn solve_mpcc(
     pairs: Vec<ComplementarityPair>,
     report: &mut dyn FnMut(&str),
 ) -> Result<MpccOutcome, String> {
-    let wrapper = Rc::new(RefCell::new(MpccTnlp::new(
+    let lift = match app
+        .options()
+        .get_string_value("complementarity_lift", "")
+        .map(|(v, _)| v)
+        .as_deref()
+    {
+        Ok("yes") => Lift::Yes,
+        Ok("no") => Lift::No,
+        // `auto` lifts on the exact-Hessian path only. Under limited memory
+        // it lost two answers of the 30 MacMPEC models it lifts
+        // (design-cent-3: no answer, against S unlifted; pack-comp2p-32: the
+        // weak fallback, against S) and took 27% more iterations on the rest
+        // (68,524 against 53,746), where the exact path gains. The Python
+        // frontend and the CasADi plugin select limited memory on their own
+        // when there is no exact Hessian, so this is not a rare path.
+        _ if app
+            .options()
+            .get_string_value("hessian_approximation", "")
+            .is_ok_and(|(v, _)| v == "limited-memory") =>
+        {
+            Lift::No
+        }
+        _ => Lift::Auto,
+    };
+    let wrapper = Rc::new(RefCell::new(MpccTnlp::with_lift(
         Rc::clone(&inner),
         pairs,
         Lowering::Eq,
+        lift,
     )?));
     wrapper.borrow_mut().set_defer_inner_finalize(true);
+    let n_lifted = wrapper.borrow().n_lifted();
+    if n_lifted > 0 {
+        report(&format!(
+            "pounce: complementarity: {n_lifted} of {} pairs lifted (complementarity_lift).",
+            wrapper.borrow().pairs().len()
+        ));
+    }
     let lowered: Rc<RefCell<dyn TNLP>> = wrapper.clone();
 
     let tol = app
@@ -456,6 +491,17 @@ pub fn solve_mpcc(
      -> Captured {
         {
             let mut w = wrapper.borrow_mut();
+            // The l1 penalty stage solves the model unlifted. The penalty
+            // makes every equality row elastic and keeps inequalities hard,
+            // so on the lifted model it would soften each lifted row
+            // `g - s_H w = c`, the paired row's own feasibility, hard when
+            // unlifted, and add two elastic variables per lifted pair: a
+            // different, larger subproblem. Measured on MacMPEC
+            // pack-comp1p-32 / pack-comp2p-32 (492 pairs lifted): the penalty
+            // went from 255 / 310 iterations (3 s) to max_iter (3000, 220 s).
+            // Every other stage solves the model as `complementarity_lift`
+            // set it; a no-op when nothing was lifted.
+            w.set_lift(stage != MpccStage::Penalty);
             // A solve refused before iteration 0 never reaches
             // `finalize_solution`, so without this it would report the
             // previous stage's point and products under its own status.
@@ -1492,6 +1538,7 @@ pub fn solve_mpcc(
             certificate: None,
             b_check: None,
             escapes,
+            lifted: n_lifted,
             natural_residual: None,
             polish,
             polish_threshold: POLISH_TRIGGER * solver_tol,
@@ -1541,6 +1588,7 @@ pub fn solve_mpcc(
         certificate,
         b_check,
         escapes,
+        lifted: n_lifted,
         natural_residual: nat_res,
         polish,
         polish_threshold: POLISH_TRIGGER * solver_tol,

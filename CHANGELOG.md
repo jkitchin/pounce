@@ -65,6 +65,84 @@ changes.
   the skill, the commands and the MCP server. discopt ships the same file.
 
 ### Changed
+- **A declared pair on a wide row is lifted into a variable (gh#1136).**
+  - **What changed:** with an exact Hessian, a one-sided pair whose row has
+    8 or more Jacobian entries is now solved with its row `g(x) >= c` written as `g(x) - w =
+    c`, `w >= 0`, and its product row as `G·w` instead of `G·(g(x) - c)`.
+    The two models have the same solutions and the same KKT dimension.
+    The new option `complementarity_lift` (`auto`, the default; `yes` for
+    every one-sided pair; `no` for the old formulation) sets it, and the
+    report's `complementarity.lifted` counts the lifted pairs. Answers come
+    back in the model's own terms: `x` has its `n` entries, and a lifted
+    row's multiplier is the one its inequality would carry.
+  - **Why:** an unlifted product row repeats its whole row in the Jacobian
+    and adds a Hessian entry for each column, so on a ReLU network, where
+    the rows are rows of the weight matrices, the factorization did nearly
+    all the work. On the 64-128-128-128-10 network of gh#1136 each
+    factorization goes from 98 to 41 Mflop, and an iteration from about
+    115 ms to 21–30 ms. The default solve goes from 89 s to 24 s, and
+    `complementarity_strategy=continuation` from 26 s to 1.6 s, both to a
+    lower objective (−7.0786, against −7.0137).
+  - **Pyomo models are not affected.** Pyomo's `mpec.nl` transformation,
+    which `pyomo-pounce` and the data-root suites use, already writes each
+    pair's expression as an equality on a new variable. The paired row it
+    declares has one Jacobian entry, so `auto` lifts nothing there. On
+    `relu_nn`, `mpcc_opf`, `mpcc_opf_transmission` and `capacity_equilibria`
+    (173 models), it lifts 0 pairs and every result is identical. Lifting
+    applies to models that write the paired expression directly: the Python
+    `Problem(complementarity=...)` API, as in the gh#1136 repro, and AMPL
+    `complements`.
+  - **MacMPEC:** `auto` lifts pairs on 30 of the 178 models (the pack-comp,
+    qpec-100/200 and flp4 families, design-cent-3/31 and ralphmod). On
+    those 30, run one at a time, iterations go from 20,701 to 17,456 and
+    time from 518 s to 419 s. Every certificate class is unchanged or
+    better (pack-comp1p-32 goes from W to S). Against best-known values the
+    counts are unchanged (26 at, 2 worse, 3 better), with two models moving
+    each way: pack-comp1p-32 and qpec-100-2 drop off the best-known value,
+    and qpec-100-3 and qpec-200-1 reach it. The rest are bit-identical.
+    `mpcc_nl` (16) lifts nothing and is identical.
+  - **Limited memory does not lift.** Under
+    `hessian_approximation=limited-memory`, `auto` lifts nothing, so that
+    path is exactly as before. On the 30 MacMPEC models `auto` lifts,
+    limited memory lost two answers when lifted: `design-cent-3` ended
+    `Restoration_Failed` with no answer, and `pack-comp2p-32` fell back to a
+    weakly stationary point, where both are strongly stationary unlifted.
+    It also took 27% more iterations on the 29 others (68,524 against
+    53,746). The new `design_cent_3` fixture's L-BFGS sweep leg is what
+    showed it. `yes` still lifts there.
+  - **The ℓ1 penalty stage runs unlifted.** The penalty makes every equality
+    row elastic and keeps inequalities hard. On the lifted model it would
+    soften each lifted row `g - w = c`, the paired row's own feasibility,
+    which is a hard inequality when unlifted. It would also add two elastic
+    variables per pair, giving a different and larger subproblem. With the
+    penalty run lifted, pack-comp1p-32 and pack-comp2p-32 went from about
+    300 penalty iterations to `max_iter` (3,000, about 220 s each). The
+    wrapper switches to the unlifted structure for that solve
+    (`MpccTnlp::set_lift`); it is the same model object throughout.
+  - **A branch's warm start keeps the lifted variable's upper multiplier.**
+    Under a branch NLP a lifted variable can have a finite upper bound, or
+    be fixed. The start used to put the row multiplier's whole sign on
+    `z_L` and drop the negative part, so the start was not the inverse of
+    the reported multipliers. It now goes to `z_U` when there is an upper
+    bound to carry it.
+  - **The products the acceptance tests read are `G·H(x)`.** On a lifted
+    pair the solver's product row is `G·w`, which matches `G·H(x)` only up
+    to the residual of the lifted row. The driver's "every product in
+    tolerance" check now reads the declared model's product.
+  - **Fixtures:** one new declared-pair fixture, MacMPEC `design-cent-3`
+    (`tests/fixtures_mpcc/design_cent_3.nl`), has paired rows exactly at
+    `auto`'s threshold. It is lifted at the default and reaches the same S
+    answer as unlifted, in 69 iterations against 451. No other fixture's
+    paired row is that wide. Apart from that new line, the fixture sweep
+    diffs empty against the commit before (280 lines, both legs), and CALIPSO's 12 declared runs and `declared.py` are identical
+    under `auto`. Lifting every pair (`yes`) is not uniformly better, which
+    is why `yes` is not the default:
+    - every `cc:` line of the sweep keeps its answer and certificate class;
+    - `declared.py` takes 30% fewer iterations to the same answers;
+    - CALIPSO takes 14% fewer in total, but rocket ends 0.14% worse after
+      2.6 times the iterations.
+    - The `declared.py` and CALIPSO figures were measured before the penalty
+      stage ran unlifted.
 - **The complementarity continuation tightens its relaxation with the
   barrier parameter, in one solve.**
   - **What changed:** `τ = 1` is still solved as an ordinary relaxation.

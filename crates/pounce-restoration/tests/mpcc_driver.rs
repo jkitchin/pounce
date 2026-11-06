@@ -752,6 +752,43 @@ fn infeasible_pair(finalized: Rc<RefCell<Vec<Vec<Number>>>>) -> Dense {
     }
 }
 
+/// The ℓ₁ penalty stage solves the model unlifted (gh#1136 review). The
+/// penalty makes equality rows elastic and keeps inequalities hard, so run on
+/// the lifted model it would soften each lifted row `g - s_H w = c` (the
+/// paired row, an inequality kept hard when unlifted): a different
+/// subproblem, which took MacMPEC pack-comp2p-32 from 310 penalty
+/// iterations to max_iter. It starts from the model's own start, so lifted
+/// or not, the penalty solve must be the same solve, to the bit.
+#[test]
+fn the_penalty_stage_runs_unlifted() {
+    let penalty = |lift: &str| {
+        let mut app = app();
+        app.options_mut()
+            .read_from_str(&format!("complementarity_lift {lift}\n"), true)
+            .unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(infeasible_pair(Rc::new(
+            RefCell::new(Vec::new()),
+        ))));
+        let out = solve_mpcc(
+            &mut app,
+            tnlp,
+            vec![ComplementarityPair { row: 1, var: 0 }],
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(out.lifted, usize::from(lift == "yes"));
+        let p: Vec<_> = out
+            .solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Penalty)
+            .map(|s| (s.status, s.iterations, s.max_abs_product.to_bits()))
+            .collect();
+        assert_eq!(p.len(), 1, "{:?}", out.solves);
+        p[0]
+    };
+    assert_eq!(penalty("yes"), penalty("no"));
+}
+
 /// No stage can succeed: the driver reports the exact-product stage's
 /// verdict — what a plain solve of the lowered model says — forwards that
 /// one point to the model, and has run every stage.

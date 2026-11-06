@@ -422,3 +422,49 @@ fn the_active_set_engine_runs_the_schedule() {
     want.push(None);
     assert_eq!(continuation_taus(&r), want, "{}", r.stderr);
 }
+
+/// The lifted path at the default (#1137 review, item 3). Every other
+/// fixture here has paired rows narrower than `LIFT_AUTO_MIN_ENTRIES`, so the
+/// lift was reached only under `complementarity_lift=yes`, and the sweep's
+/// `cc:` lines diffed empty on it by construction. MacMPEC `design-cent-3`
+/// pairs three rows of exactly the threshold width (8 Jacobian entries), so
+/// `auto` lifts all three with an exact Hessian. Lifted or not, it must be
+/// the same strongly stationary answer; MacMPEC's best known is 3.7237
+/// (maximize).
+#[test]
+fn a_wide_paired_row_is_lifted_at_the_default() {
+    let f = |r: &Run| {
+        r.json.as_ref().unwrap()["solution"]["objective"]
+            .as_f64()
+            .unwrap()
+    };
+    let cc = |r: &Run| r.json.as_ref().unwrap()["complementarity"].clone();
+    let lifted = run("design_cent_3.nl", &[]);
+    let plain = run("design_cent_3.nl", &["complementarity_lift=no"]);
+    for (r, n) in [(&lifted, 3), (&plain, 0)] {
+        assert_eq!(r.code, Some(0), "stderr: {}", r.stderr);
+        assert_eq!(cc(r)["lifted"], n, "stderr: {}", r.stderr);
+        assert_eq!(cc(r)["certificate"]["class"], "S", "stderr: {}", r.stderr);
+        assert!((f(r) - 3.7237).abs() < 1e-3, "objective {}", f(r));
+    }
+    assert!(
+        (f(&lifted) - f(&plain)).abs() < 1e-8,
+        "lifted {} vs unlifted {}",
+        f(&lifted),
+        f(&plain)
+    );
+    // Under limited memory `auto` does not lift: lifted, this model ends
+    // Restoration_Failed with no answer, where unlifted it is the S answer.
+    let lbfgs = run(
+        "design_cent_3.nl",
+        &["hessian_approximation=limited-memory"],
+    );
+    assert_eq!(cc(&lbfgs)["lifted"], 0, "stderr: {}", lbfgs.stderr);
+    assert_eq!(
+        cc(&lbfgs)["certificate"]["class"],
+        "S",
+        "stderr: {}",
+        lbfgs.stderr
+    );
+    assert!((f(&lbfgs) - 3.7237).abs() < 1e-3, "objective {}", f(&lbfgs));
+}
