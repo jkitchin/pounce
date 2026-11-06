@@ -19,6 +19,25 @@ julia --project=/tmp/pounce-bmopf-env --startup-file=no \
   benchmarks/julia_bmopf/compare.jl /tmp/pounce-bmopf.json /tmp/ipopt-bmopf.json
 ```
 
+To validate an unpublished binary-backed candidate, first run `setup.jl` with
+a new environment directory, then develop its wrapper and generated JLL together
+before invoking the same harness. Preserve the pinned application graph:
+
+```julia
+using Pkg
+Pkg.activate("/tmp/pounce-bmopf-artifact") # already created by setup.jl
+Pkg.develop([
+    PackageSpec(path="/tmp/pounce-release-candidate/Pounce.jl"),
+    PackageSpec(path="/tmp/pounce-jll-dev/Pounce_jll"),
+]; preserve=Pkg.PRESERVE_ALL)
+```
+
+Unset `POUNCE_LIBRARY_PATH` to exercise default artifact selection. Check that
+the JSON's native library path/hash match the accepted artifact, and retain the
+resulting manifest. This adds the local JLL without upgrading application
+dependencies. Use the Julia version of the committed benchmark lockfile even
+when separate package compatibility suites cover newer Julia versions.
+
 Keep the generated environment's `Project.toml` and `Manifest.toml` with the JSON
 results. Each output records package versions/tree hashes, model/source commits,
 fixture and native-library SHA-256 hashes, Julia/CPU, options, and worktree state.

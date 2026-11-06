@@ -51,6 +51,23 @@ BinaryBuilder produces archive/tree hashes, audit output, and a generated
 versions, and test logs. Inspect dynamic dependencies; an unaudited host build
 does not establish the binary's minimum supported Linux/macOS version.
 
+For builds performed in separate directories, copy the accepted archives into
+one `products` directory only after comparing their SHA-256 values with the
+recorded inventory. Run the same launcher from its parent directory with
+`--skip-build --deploy=local` and all four target triplets to assemble one JLL.
+BinaryBuilder recomputes artifact tree hashes and generates the platform
+wrappers; this assembly does **not** rerun the build audits. Retain each original
+successful audit and verify the combined JLL's tree hashes against the inventory.
+
+The [local artifact inventory](../../dev-notes/julia-wrapper-artifacts.json)
+records the accepted builds and completed runtime checks. The arm64 Linux
+toolchain contains glibc 2.19; the library fails to load on CentOS 7 arm64 despite
+that distribution's partial GLIBC_2.18 symbol-version backports. The macOS
+libraries declare minimum versions 11.0 (arm64) and 10.12 (x86_64). These are
+binary/toolchain limits, not tests on every older OS release: Julia and other
+dependencies may impose newer requirements. Release notes must distinguish
+these limits from the exact operating systems used for runtime validation.
+
 ## Stage the Julia release candidate
 
 The working source-checkout package remains installable while the JLL is
