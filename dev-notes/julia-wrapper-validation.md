@@ -31,6 +31,58 @@ To verify downloaded JSON files, compare their SHA-256 values:
 d86bfddc8cf135d3e2b100137db2605723aa25c9aef69d0e4ec67c4b44deed9b  julia-wrapper-artifacts.json
 ```
 
+## Review fixes before 0.16
+
+Wrapper commit `52d76977fd120652644ec9a99df17bf7c590ead7` addresses the remaining
+[review items](https://github.com/jkitchin/pounce/pull/1145#pullrequestreview-5806619057):
+
+- Native compatibility accepts `0.15.0 <= v < 0.17.0-0`. The reviewed C ABI
+  comparison from `v0.15.0` to upstream `bbf97b28` is empty; version-boundary
+  tests cover 0.16 and rejection of 0.17 prereleases/releases. This is a gate
+  test, not a claim to have run against a released 0.16 binary.
+- PR CI triggers cover the wrapper, C interface, and workflow. Pushes to `main`
+  retain the broad crate/Cargo filters; manual dispatch is retained.
+- Missing Hessian callbacks are passed as null. Because the native zero-entry
+  path can still proceed without exact derivatives, the wrapper also rejects
+  exact mode without a callback before entering the solve. Tests cover default
+  and explicit exact mode, both approximation modes, case-insensitive option
+  names/values, and a genuinely zero Hessian supplied explicitly.
+- All option strings and output filenames use `Cstring`; embedded NULs are
+  rejected before native code can truncate them or create a truncated filename.
+- Native solves pin the current Julia task temporarily, including across
+  derivative/intermediate callback yields. Another task cannot start a solve on
+  the occupied thread; separate threads can solve independently. The prior
+  sticky setting and thread ownership are restored even after callback errors.
+- The idle C handle owns its allocation graph. Its internal `Rc` aliases do not
+  escape that graph through this API, and `FreeIpoptProblem` only drops it; it
+  does not invoke callbacks or manipulate the live thread-local bridge.
+  `GC.@preserve` keeps it alive throughout a solve. Regression tests invoke
+  the registered finalizer on a different worker for both unsolved and solved
+  problems. Concurrent access to one problem remains unsupported.
+- Frederik Geth's POUNCE-specific additions are explicitly MIT licensed, with
+  the original Ipopt.jl copyright and permission notice preserved.
+
+Julia's [task documentation](https://docs.julialang.org/en/v1/base/parallel/#Core.Task)
+defines sticky scheduling. We do not assume an ordinary foreign call pins a task.
+The native ownership audit covers `IpoptProblemInfo`, `FreeIpoptProblem`,
+`IpoptApplication::new`, and the C solve's restoration-provider captures at
+upstream `bbf97b28`; future C-API ownership changes need the same review.
+
+On macOS arm64, the complete package suite passes **3,716 assertions** on
+each of Julia **1.10.13** and **1.13.3**, plus the separate two-worker callback
+and finalization subprocess on each version. These runs use JuMP 1.32.1,
+MOI 1.54.0, Ipopt.jl 1.16.0, and the existing POUNCE 0.15.0 library built from
+`bbf97b289c649c84730485695240a6c8a704a187` with Rust 1.96.0. Its SHA-256 remains
+`c608771fa562eec1a55e8f4937e34cbb5722fe5d809905770347f080e8cc60a4`.
+The worktree was clean at test launch. Full-suite log SHA-256 values:
+
+- Julia 1.10.13: `9e65946c9d3f52fea39c6c86f71aced92d46ba267d788bbca00afc468be3c456`.
+- Julia 1.13.3: `6a473f74645c35e8f3350cf6a5f3e666a172f01fb31402df2b469e046a7caa22`.
+
+Documentation consistency and `git diff --check` pass. PR/main path-filter
+checks confirm that unrelated crates and Cargo files trigger the main-push
+workflow but not the PR workflow. Hosted CI for this revision is separate.
+
 ## Upstream integration before PR publication
 
 Merge commit `f0e253e9f7cbd8b50ebe9a6b08092871bf496189` incorporates upstream
