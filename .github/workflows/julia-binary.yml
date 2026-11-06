@@ -33,7 +33,8 @@ jobs:
           persist-credentials: false
       - uses: julia-actions/setup-julia@v2
         with:
-          version: ${{ inputs.julia }}
+          # Match the runtime used for the audited local BinaryBuilder builds.
+          version: '1.12.6'
       - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
@@ -51,6 +52,10 @@ jobs:
             'using BinaryBuilder, Pkg; BinaryBuilder.devdir[] = Pkg.devdir(); include(popfirst!(ARGS))' \
             "$GITHUB_WORKSPACE/Pounce.jl/packaging/build_tarballs.jl" \
             --verbose --deploy=local "$BUILD_TARGET"
+      - name: Select the candidate Julia version
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ inputs.julia }}
       - name: Stage binary-backed package
         env:
           JULIA_PKG_PRECOMPILE_AUTO: '0'

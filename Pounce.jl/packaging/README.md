@@ -139,3 +139,5 @@ choices include current stable 1.13.3 and LTS 1.10.13, as listed on the
 earlier 1.10.12/1.12.6 validation versions. It has read-only repository permissions and no upload,
 push, or registration steps. It has not been launched as part of local work;
 hosted execution requires the separately authorized publication of this branch.
+BinaryBuilder runs on the validated Julia 1.12.6 build host; the workflow then
+switches to the selected test Julia before staging its candidate manifest.
