@@ -586,10 +586,10 @@ function test_ad_backend()
     @test MOI.supports(model, attr)
     @test MOI.get(model, attr) == MOI.Nonlinear.SparseReverseMode()
     MOI.optimize!(model)
-    @test model.inner isa Pounce.IpoptProblem
+    @test model.native.problem isa Pounce.IpoptProblem
     MOI.set(model, attr, MOI.Nonlinear.ExprGraphOnly())
     @test MOI.get(model, attr) == MOI.Nonlinear.ExprGraphOnly()
-    @test model.inner === nothing
+    @test model.native.problem === nothing
     f = MOI.ScalarNonlinearFunction(:^, Any[x, 4])
     MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
     MOI.set(model, MOI.ObjectiveFunction{typeof(f)}(), f)
@@ -674,8 +674,8 @@ function test_manually_evaluated_primal_status()
     MOI.add_constraint(model, MOI.VectorOfVariables([x]), set)
     MOI.optimize!(model)
     @test MOI.get(model, MOI.TerminationStatus()) == MOI.LOCALLY_SOLVED
-    x_star = copy(model.inner.x)
-    g_star = copy(model.inner.g)
+    x_star = copy(model.native.problem.x)
+    g_star = copy(model.native.problem.g)
     for (xi, status) in (
         x_star[1] => MOI.FEASIBLE_POINT,
         -1.0 => MOI.INFEASIBLE_POINT,
@@ -684,10 +684,10 @@ function test_manually_evaluated_primal_status()
         0.0 => MOI.FEASIBLE_POINT,
         1.0 => MOI.FEASIBLE_POINT,
     )
-        model.inner.x[1] = xi
+        model.native.problem.x[1] = xi
         @test Ext._manually_evaluated_primal_status(model) == status
     end
-    model.inner.x .= x_star
+    model.native.problem.x .= x_star
     for (gi, status) in (
         g_star => MOI.FEASIBLE_POINT,
         [0.0, 0.0, 0.0] => MOI.INFEASIBLE_POINT,
@@ -702,7 +702,7 @@ function test_manually_evaluated_primal_status()
         [0.5, 0.75 + 1e-7, 0.5] => MOI.NEARLY_FEASIBLE_POINT,
         [0.5, 0.75 - 1e-7, 0.5] => MOI.FEASIBLE_POINT,
     )
-        model.inner.g .= gi
+        model.native.problem.g .= gi
         @test Ext._manually_evaluated_primal_status(model) == status
     end
     return
@@ -864,9 +864,9 @@ function test_vector_nonlinear_oracle()
     @test !((F, S) in MOI.get(model, MOI.ListOfConstraintTypesPresent()))
     @test isempty(MOI.get(model, MOI.ListOfConstraintIndices{F,S}()))
     @test MOI.get(model, MOI.NumberOfConstraints{F,S}()) == 0
-    @test model.inner !== nothing
+    @test model.native.problem !== nothing
     c = MOI.add_constraint(model, f, set)
-    @test model.inner === nothing
+    @test model.native.problem === nothing
     @test MOI.is_valid(model, c)
     @test !MOI.is_valid(model, typeof(c)(c.value - 1))
     @test !MOI.is_valid(model, typeof(c)(c.value + 1))
@@ -879,7 +879,7 @@ function test_vector_nonlinear_oracle()
     @test isapprox(y_v, [x_v[1]^2, x_v[2]^2 + x_v[3]^3], atol = 1e-5)
     @test MOI.get(model, MOI.ConstraintPrimal(), c) ≈ [x_v; y_v]
     @test MOI.get(model, MOI.ConstraintDual(), c) ≈ zeros(5)
-    for (_, cache) in model.vector_nonlinear_oracle_constraints
+    for (_, cache) in model.data.vector_nonlinear_oracle_constraints
         @test cache.eval_f_timer > 0
         @test cache.eval_jacobian_timer > 0
         @test cache.eval_hessian_lagrangian_timer > 0
@@ -890,7 +890,7 @@ function test_vector_nonlinear_oracle()
         cache.eval_hessian_lagrangian_timer = Inf
     end
     MOI.optimize!(model)
-    for (_, cache) in model.vector_nonlinear_oracle_constraints
+    for (_, cache) in model.data.vector_nonlinear_oracle_constraints
         @test 0 < cache.eval_f_timer < Inf
         @test 0 < cache.eval_jacobian_timer < Inf
         @test 0 < cache.eval_hessian_lagrangian_timer < Inf
@@ -1165,9 +1165,9 @@ function test_issue_491()
     g = [MOI.ScalarNonlinearFunction(:log, Any[x[i]]) for i = 1:2]
     c = MOI.add_constraint.(model, g, MOI.LessThan(1.0))
     MOI.set.(model, MOI.ConstraintDualStart(), c, 0.5)
-    @test length(model.mult_g_nlp) == 2
+    @test length(model.data.mult_g_nlp) == 2
     MOI.empty!(model)
-    @test isempty(model.mult_g_nlp)
+    @test isempty(model.data.mult_g_nlp)
     return
 end
 

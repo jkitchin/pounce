@@ -15,7 +15,7 @@ function model_with_variables()
 end
 
 function check_statistics(model)
-    inner = JuMP.backend(model).inner
+    inner = JuMP.backend(model).native.problem
     native = MOI.get(model, Pounce.NativeSolveTimeSec())
     @test isfinite(native) && native >= 0.0
     @test MOI.get(model, MOI.SolveTimeSec()) >= native
@@ -31,7 +31,7 @@ end
     @test JuMP.termination_status(model) == MOI.LOCALLY_SOLVED
     @test JuMP.value.(x) ≈ [1, 2] atol = 1e-6
     # No native callback is installed merely for iteration counting.
-    @test JuMP.backend(model).inner.intermediate === nothing
+    @test JuMP.backend(model).native.problem.intermediate === nothing
     @test MOI.get(model, MOI.BarrierIterations()) > 0
     check_statistics(model)
 
@@ -80,13 +80,13 @@ end
         @test MOI.get(optimizer, attr, reverse(xs)) == reverse(values)
         raw = zeros(length(xs))
         Pounce.GetIpoptCurrentIterate(
-            optimizer.inner,
+            optimizer.native.problem,
             false,
             length(xs),
             raw,
             C_NULL,
             C_NULL,
-            optimizer.inner.m,
+            optimizer.native.problem.m,
             C_NULL,
             C_NULL,
         )
@@ -136,7 +136,7 @@ end
     @test JuMP.termination_status(model) == MOI.LOCALLY_SOLVED
     @test JuMP.value.(x) ≈ [1, 2] atol = 1e-6
     @test replacement_calls[] == 1
-    @test optimizer.inner.intermediate === nothing
+    @test optimizer.native.problem.intermediate === nothing
     check_statistics(model)
 
     MOI.set(model, Pounce.CallbackFunction(), function (args...)

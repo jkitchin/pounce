@@ -10,6 +10,7 @@ copyright (c) 2013 Iain Dunning, Miles Lubin, and contributors:
 | Pounce.jl file | Ipopt.jl source |
 |---|---|
 | `src/MOI_wrapper.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
+| `src/MOI_state.jl`, `src/MOI_model.jl`, `src/MOI_evaluator.jl`, `src/MOI_solve.jl`, `src/MOI_results.jl` | Refactored from `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
 | Callback API documentation in `src/MOI_callbacks.jl` | `ext/IpoptMathOptInterfaceExt/MOI_wrapper.jl` |
 | `src/utils.jl` | `ext/IpoptMathOptInterfaceExt/utils.jl` |
 | `src/C_wrapper.jl` | `src/C_wrapper.jl` |

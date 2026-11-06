@@ -42,7 +42,7 @@ struct CallbackFunction <: MOI.AbstractCallback end
 MOI.supports(::Optimizer, ::CallbackFunction) = true
 
 function MOI.set(model::Optimizer, ::CallbackFunction, f::Union{Function,Nothing})
-    if model.inner !== nothing && model.inner.solving
+    if model.native.problem !== nothing && model.native.problem.solving
         error("Cannot change the intermediate callback during a solve")
     end
     model.callback = f
@@ -97,10 +97,10 @@ function MOI.get(model::Optimizer, attr::MOI.CallbackVariablePrimal, x::MOI.Vari
     end
     MOI.throw_if_not_valid(model, x)
     if _is_parameter(x)
-        return model.nlp_model[model.parameters[x]]
+        return model.data.nlp_model[model.data.parameters[x]]
     end
     if !state.has_primal
-        inner = model.inner::Pounce.IpoptProblem
+        inner = model.native.problem::Pounce.IpoptProblem
         resize!(state.primal, inner.n)
         Pounce.GetIpoptCurrentIterate(
             inner,

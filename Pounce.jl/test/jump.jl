@@ -99,7 +99,7 @@ end
     @test objective_value(model) ≈ 17.014017145179164 atol = 1e-6
 
     optimizer = unsafe_backend(model)
-    problem = optimizer.inner
+    problem = optimizer.native.problem
     MOI.empty!(optimizer)
     @test problem.ipopt_problem == C_NULL
     @test MOI.get(optimizer, MOI.ResultCount()) == 0

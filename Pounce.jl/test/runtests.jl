@@ -11,5 +11,6 @@ flush(stdout)
     include("jump.jl")
     include("updates.jl")
     include("callbacks.jl")
+    include("lifecycle.jl")
     include("MOI_wrapper.jl")
 end

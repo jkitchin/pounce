@@ -99,6 +99,20 @@ Use JuMP/MOI dual conventions; the wrapper converts signs for POUNCE, including
 maximization. Repeated solves do not automatically reuse the previous solution.
 They also do not promise reuse of native solver factorizations.
 
+Model edits invalidate results immediately. Bound changes refresh the bound
+snapshot while retaining the initialized derivative evaluator; parameter updates
+reuse compatible evaluator and native-handle caches. Structural edits rebuild
+them. Changes to starts, solver options, or callbacks retain the last completed
+optimizer result until another solve starts (JuMP may apply its own access
+guards). Every new attempt clears result availability before setup. Options are
+applied to a fresh handle when changed, including removal of a time limit, so
+old native option values cannot leak into the next solve. Mutating a model from
+inside its callback is rejected before the model data is changed.
+
+Optimizer fields are implementation details. Use MOI attributes to query models
+and results; use the qualified low-level C bindings for explicitly owned native
+problems.
+
 After `optimize!`, two timers are available:
 
 ```julia
