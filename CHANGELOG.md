@@ -76,17 +76,46 @@ changes.
     115 ms to 21–30 ms. The default solve goes from 89 s to 24 s, and
     `complementarity_strategy=continuation` from 26 s to 1.6 s, both to a
     lower objective (−7.0786, against −7.0137).
-  - **What did not change:** no paired row in the fixture sweep or
-    `benchmarks/mpcc/declared.py` is wide enough for `auto`. The fixture
-    sweep diffs empty against the commit before (280 lines, both legs).
-    MacMPEC and the data-root suites (OPF, capacity, `relu_nn`) were not
-    run for this change. CALIPSO's 12 declared runs are identical under `auto`. Lifting every
-    pair (`yes`) is not uniformly better, which is why it is not the
-    default:
+  - **Pyomo models are not affected.** Pyomo's `mpec.nl` transformation,
+    which `pyomo-pounce` and the data-root suites use, already writes each
+    pair's expression as an equality on a new variable. The paired row it
+    declares has one Jacobian entry, so `auto` lifts nothing there. On
+    `relu_nn`, `mpcc_opf`, `mpcc_opf_transmission` and `capacity_equilibria`
+    (173 models), it lifts 0 pairs and every result is identical. Lifting
+    applies to models that write the paired expression directly: the Python
+    `Problem(complementarity=...)` API, as in the gh#1136 repro, and AMPL
+    `complements`.
+  - **MacMPEC:** `auto` lifts pairs on 30 of the 178 models (the pack-comp,
+    qpec-100/200 and flp4 families, design-cent-3/31 and ralphmod). On
+    those 30, run one at a time, iterations go from 20,701 to 17,456 and
+    time from 518 s to 419 s. Every certificate class is unchanged or
+    better (pack-comp1p-32 goes from W to S). Against best-known values the
+    counts are unchanged (26 at, 2 worse, 3 better), with two models moving
+    each way: pack-comp1p-32 and qpec-100-2 drop off the best-known value,
+    and qpec-100-3 and qpec-200-1 reach it. The rest are bit-identical.
+    `mpcc_nl` (16) lifts nothing and is identical.
+  - **The ℓ1 penalty stage runs unlifted.** The penalty makes every equality
+    row elastic and keeps inequalities hard. On the lifted model it would
+    soften each lifted row `g - w = c`, the paired row's own feasibility,
+    which is a hard inequality when unlifted. It would also add two elastic
+    variables per pair, giving a different and larger subproblem. With the
+    penalty run lifted, pack-comp1p-32 and pack-comp2p-32 went from about
+    300 penalty iterations to `max_iter` (3,000, about 220 s each).
+  - **The products the acceptance tests read are `G·H(x)`.** On a lifted
+    pair the solver's product row is `G·w`, which matches `G·H(x)` only up
+    to the residual of the lifted row. The driver's "every product in
+    tolerance" check now reads the declared model's product.
+  - **Fixtures:** no fixture's paired row is wide enough for `auto`. The
+    fixture sweep diffs empty against the commit before (280 lines, both
+    legs), and CALIPSO's 12 declared runs and `declared.py` are identical
+    under `auto`. Lifting every pair (`yes`) is not uniformly better, which
+    is why `yes` is not the default:
     - every `cc:` line of the sweep keeps its answer and certificate class;
     - `declared.py` takes 30% fewer iterations to the same answers;
     - CALIPSO takes 14% fewer in total, but rocket ends 0.14% worse after
       2.6 times the iterations.
+    - The `declared.py` and CALIPSO figures were measured before the penalty
+      stage ran unlifted.
 - **The complementarity continuation tightens its relaxation with the
   barrier parameter, in one solve.**
   - **What changed:** `τ = 1` is still solved as an ordinary relaxation.

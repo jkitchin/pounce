@@ -305,13 +305,31 @@ entries), lifting cuts the floating-point work of each factorization from
 98 to 41 Mflop. Time per iteration falls from about 115 ms to 21–30 ms, and
 the default solve falls from 89 s to 24 s. `complementarity_strategy=
 continuation` falls from 26 s to 1.6 s. Both reach a lower objective than
-unlifted (−7.0786 against −7.0137). No paired row of the fixture
-corpus or of `benchmarks/mpcc/declared.py` is that wide, so `auto` leaves
-those models as they were. Lifting every pair (`yes`) is not uniformly
-better there. It cuts the iterations on `declared.py` by 30% to the same
-answers, and on CALIPSO's declared models by 14%. But CALIPSO's rocket ends
-0.14% worse after 2.6 times the iterations. MacMPEC and the OPF suites have
-not been measured. That is why `yes` is not the default.
+unlifted (−7.0786 against −7.0137).
+
+The ℓ1 penalty stage (the last resort when no formulation answers) always
+solves the model unlifted. The penalty makes every equality row elastic,
+and a lifted row `g(x) - w = c` is an equality. Lifted, the penalty would
+relax the paired row's own feasibility, which it keeps hard when unlifted.
+
+A Pyomo model is never lifted. Pyomo's `mpec.nl` transformation already
+writes each pair's expression as an equality on a new variable and
+declares the pair on a one-entry row. So `auto` lifts nothing on the OPF,
+capacity and `relu_nn` suites, which are built through Pyomo, and leaves
+them as they were. Lifting applies to models that pose the paired
+expression directly: `Problem(complementarity=...)` from Python, and AMPL
+`complements`.
+
+On MacMPEC, `auto` lifts pairs on 30 of 178 models. Run one at a time,
+those 30 take 16% fewer iterations and 19% less time in total. The other
+148 are unchanged. The effect is not uniform: qpec-200-4 takes 2.8 times
+as long through a longer exact stage, and four models change local
+optimum, two onto the best-known value and two off it. No fixture or
+`benchmarks/mpcc/declared.py` paired row is wide enough for `auto`.
+Lifting every pair (`yes`) is not uniformly better. It cuts the iterations
+on `declared.py` by 30% to the same answers, and on CALIPSO's declared
+models by 14%, but CALIPSO's rocket ends 0.14% worse after 2.6 times the
+iterations. That is why `yes` is not the default.
 
 ## What you get back
 

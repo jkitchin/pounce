@@ -1156,6 +1156,17 @@ impl TNLP for MpccTnlp {
             .get(m..)
             .map(|p| p.iter().map(|v| v - shift).collect())
             .unwrap_or_default();
+        // A lifted product row holds `G·w`, which equals `G·H(x)` only to
+        // the lifted row's residual; the acceptance gates read these as the
+        // declared model's products, so take `H` from `g_i` itself.
+        for &(k, w) in &self.lifted {
+            let (p, i) = (self.lowered[k], self.lowered[k].row);
+            if k < self.last_products.len() && i < sol.g.len() && w < sol.x.len() {
+                let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
+                let g_i = sol.g[i] + sh * sol.x[w];
+                self.last_products[k] = sg * (sol.x[p.var] - b) * sh * (g_i - c);
+            }
+        }
         if self.defer_inner_finalize {
             return;
         }
@@ -2764,6 +2775,38 @@ mod tests {
             let pu = lowered_g(&mut u, &X);
             for k in 0..2 {
                 assert!((w.last_products()[k] - pu[3 + k]).abs() < 1e-14);
+            }
+            // Off the lifted row (w ≠ H(x), as at any point the solver
+            // returns to a nonzero residual) the products are still the
+            // declared model's G·H(x), not the row value G·w.
+            let mut xo = x.clone();
+            xo[3] += 0.37;
+            xo[4] -= 0.21;
+            let go = lowered_g(&mut w, &xo);
+            assert!(
+                (go[3] - pu[3]).abs() > 1e-3,
+                "the perturbation must move G·w"
+            );
+            w.finalize_solution(
+                Solution {
+                    status: SolverReturn::Success,
+                    x: &xo,
+                    z_l: &zl,
+                    z_u: &zu,
+                    g: &go,
+                    lambda: &lam,
+                    obj_value: 0.0,
+                },
+                &IpoptData::default(),
+                &IpoptCq::default(),
+            );
+            for k in 0..2 {
+                assert!(
+                    (w.last_products()[k] - pu[3 + k]).abs() < 1e-14,
+                    "product {k}: {} vs G·H(x) = {}",
+                    w.last_products()[k],
+                    pu[3 + k]
+                );
             }
         }
     }
