@@ -354,6 +354,17 @@ recomputing all four matching tree hashes and locating the library products.
 This assembly step does not rerun the audits; the accepted individual builds
 above supply that evidence. All generated download URLs are local file URLs.
 
+At staged wrapper `add2e6e3388d0ed5d27d72ceaf4265bc49f21524`, the combined JLL
+passes **3,662 assertions** on Julia **1.13.3** on each of Linux arm64 and
+macOS arm64, with MOI 1.54.0, JuMP 1.32.1, and Ipopt.jl 1.16.0. Each run uses
+a fresh depot and validates core-only artifact loading before the complete
+suite. The Linux container has no Rust toolchain and mounts only the candidate,
+generated JLL, archives, and validation scripts, so no source-build library is
+available. On macOS, Cargo and rustc are excluded from PATH. Both resolve the
+expected artifact library and leave MOI unloaded until requested. These runs
+cover the default artifact path; LTS, x86_64, and complete override runs remain
+pending. Log hashes and exact environments are in the artifact inventory.
+
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
 dependency. Inspection of the actual library's 93 undefined symbols found no

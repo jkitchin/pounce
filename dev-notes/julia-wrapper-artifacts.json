@@ -13,7 +13,22 @@
       "git_tree_sha1": "a796ceec2106222a27debcc6bc909869492c09b6",
       "recipe_commit": "b892f46a51ce42fd5192c6f9633b14bd24200d4c",
       "audit": "passed",
-      "runtime_tests": "pending"
+      "runtime_tests": "in_progress",
+      "validated_runs": [
+        {
+          "julia": "1.13.3",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "Linux arm64, Debian 12 container; fresh depot; no Rust toolchain",
+          "log_sha256": "9c608065491109ad41c4d42189c73b0d670e28e28d5b99be8b4b23ed8d3d1d0d",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
+        }
+      ]
     },
     {
       "platform": "x86_64-linux-gnu",
@@ -31,7 +46,22 @@
       "git_tree_sha1": "3eb5a4b359039259aa9db75130616c897e893fb7",
       "recipe_commit": "73f45e96039651570b7197e4868f369945be292f",
       "audit": "passed",
-      "runtime_tests": "pending"
+      "runtime_tests": "in_progress",
+      "validated_runs": [
+        {
+          "julia": "1.13.3",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "macOS arm64 host; fresh depot; cargo and rustc absent from PATH",
+          "log_sha256": "d92936aef80cc0f226adae5ea4b21abd783ffbfe644bde6bdfa98af92e3b1f8e",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
+        }
+      ]
     },
     {
       "platform": "x86_64-apple-darwin",
