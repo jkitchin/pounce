@@ -136,4 +136,39 @@ end
     @test MOI.get(model, MOI.VariablePrimal(), x) ≈ log(2) atol = 1e-6
 end
 
+@testset "Objective replacement updates objective curvature" begin
+    model = Pounce.Optimizer()
+    MOI.set(model, MOI.Silent(), true)
+    x, _ = MOI.add_constrained_variable(model, MOI.Interval(1.0, 3.0))
+    q = MOI.ScalarQuadraticFunction(
+        [MOI.ScalarQuadraticTerm(2.0, x, x)],
+        MOI.ScalarAffineTerm{Float64}[],
+        0.0,
+    )
+    MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+    MOI.set(model, MOI.ObjectiveFunction{typeof(q)}(), q)
+    MOI.optimize!(model)
+    f = MOI.ScalarNonlinearFunction(:^, Any[x, 3])
+    MOI.set(model, MOI.ObjectiveFunction{typeof(f)}(), f)
+    MOI.optimize!(model)
+    @test MOI.get(model, MOI.TerminationStatus()) == MOI.LOCALLY_SOLVED
+    H = zeros(length(MOI.hessian_lagrangian_structure(model)))
+    MOI.eval_hessian_lagrangian(model, H, [2.0], 1.0, Float64[])
+    @test sum(H) == 12.0 # d²(x³)/dx² at x=2; no contribution from old x².
+    MOI.set(model, MOI.ObjectiveSense(), MOI.FEASIBILITY_SENSE)
+    MOI.optimize!(model)
+    MOI.eval_hessian_lagrangian(model, H, [2.0], 1.0, Float64[])
+    @test sum(H) == 0.0
+    MOI.add_constraint(model, q, MOI.LessThan(9.0))
+    MOI.optimize!(model)
+    H = zeros(length(MOI.hessian_lagrangian_structure(model)))
+    MOI.eval_hessian_lagrangian(model, H, [2.0], 1.0, [4.0])
+    @test sum(H) == 8.0 # Feasibility mode still includes constraint curvature.
+    MOI.set(model, MOI.ObjectiveFunction{typeof(q)}(), q)
+    MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+    MOI.optimize!(model)
+    H = zeros(length(MOI.hessian_lagrangian_structure(model)))
+    MOI.eval_hessian_lagrangian(model, H, [2.0], 1.0, [0.0])
+    @test sum(H) == 2.0
+end
 end

@@ -158,7 +158,11 @@ function _eval_hessian_lagrangian(
 end
 
 function MOI.eval_hessian_lagrangian(model::Optimizer, H, x, σ, μ)
-    offset = MOI.eval_hessian_lagrangian(model.data.qp_data, H, x, σ, μ)
+    # Match eval_objective/gradient: a nonlinear objective overrides the QP
+    # objective, and feasibility mode has no objective curvature at all.
+    σ = model.data.sense == MOI.FEASIBILITY_SENSE ? 0.0 : σ
+    qp_σ = model.evaluator.nlp_data.has_objective ? 0.0 : σ
+    offset = MOI.eval_hessian_lagrangian(model.data.qp_data, H, x, qp_σ, μ)
     offset -= 1  # .qp_data returns one-indexed offset
     μ_offset = length(model.data.qp_data)
     for (f, s) in model.data.vector_nonlinear_oracle_constraints
@@ -166,7 +170,8 @@ function MOI.eval_hessian_lagrangian(model::Optimizer, H, x, σ, μ)
     end
     H_nlp = view(H, (offset+1):length(H))
     μ_nlp = view(μ, (μ_offset+1):length(μ))
-    MOI.eval_hessian_lagrangian(model.evaluator.nlp_data.evaluator, H_nlp, x, σ, μ_nlp)
+    nlp_σ = model.evaluator.nlp_data.has_objective ? σ : 0.0
+    MOI.eval_hessian_lagrangian(model.evaluator.nlp_data.evaluator, H_nlp, x, nlp_σ, μ_nlp)
     return
 end
 
