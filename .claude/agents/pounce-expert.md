@@ -298,7 +298,6 @@ misbehaves, reproduce it in pounce alone first. Write the model out, or rebuild 
 
 ---
 
-*This agent ships identically in jkitchin/pounce (`.claude/agents/pounce-expert.md`, the
-canonical copy) and jkitchin/discopt (`python/discopt/skills/agents/pounce-expert.md`), so
-installing it with knowhow from either repository gives the same file. Edit pounce's copy
-and copy it across.*
+*This agent ships from jkitchin/pounce only:
+`uvx knowhow add jkitchin/pounce --subagent pounce-expert`. Its counterpart for discopt's
+internals is discopt's `discopt-expert`, which hands POUNCE questions back here.*

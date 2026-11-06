@@ -62,7 +62,8 @@ changes.
   come from, how to diagnose a solve, and which checks a change needs. It reads
   the source rather than answering from memory. Claude Code picks it up in
   this repository. Elsewhere, `uvx knowhow add jkitchin/pounce` lists it beside
-  the skill, the commands and the MCP server. discopt ships the same file.
+  the skill, the commands and the MCP server. discopt's `discopt-expert` hands
+  POUNCE questions to it.
 
 ### Changed
 - **A declared pair on a wide row is lifted into a variable (gh#1136).**
