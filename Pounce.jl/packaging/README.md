@@ -141,3 +141,6 @@ push, or registration steps. It has not been launched as part of local work;
 hosted execution requires the separately authorized publication of this branch.
 BinaryBuilder runs on the validated Julia 1.12.6 build host; the workflow then
 switches to the selected test Julia before staging its candidate manifest.
+The test container mounts only the candidate, generated JLL, product archives,
+and validator scripts. The native build tree and source-checkout library are
+not mounted, matching the isolated local artifact checks.

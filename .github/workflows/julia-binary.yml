@@ -70,8 +70,10 @@ jobs:
             *) exit 1 ;;
           esac
           docker run --rm --platform "$docker_platform" \
-            --mount "type=bind,src=$RUNNER_TEMP,dst=$RUNNER_TEMP" \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/candidate,dst=$RUNNER_TEMP/candidate,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/jll-dev/Pounce_jll,dst=$RUNNER_TEMP/jll-dev/Pounce_jll,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/build/products,dst=$RUNNER_TEMP/build/products,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/Pounce.jl/packaging,dst=/validation,readonly" \
             -e JULIA_NUM_PRECOMPILE_TASKS=1 -e OPENBLAS_NUM_THREADS=1 \
             "julia:$TEST_JULIA-bookworm" sh -eu -c '
               julia --startup-file=no "$1" "$2" --no-rust
@@ -82,5 +84,5 @@ jobs:
               POUNCE_LIBRARY_PATH="$custom_dir/libpounce_cinterface.so" \
                 julia --startup-file=no "$1" "$2" --no-rust --custom-library
             ' -- \
-            "$GITHUB_WORKSPACE/Pounce.jl/packaging/validate_release.jl" \
+            /validation/validate_release.jl \
             "$RUNNER_TEMP/candidate"
