@@ -46,7 +46,11 @@ build_tarballs(
     platforms,
     products,
     dependencies;
+    ignore_audit_errors = false,
     julia_compat = "1.10",
     compilers = [:c, :rust],
+    # Match the libgfortran5-tagged CompilerSupportLibraries artifacts during
+    # dependency setup/audit, even though POUNCE itself has no Fortran API.
+    preferred_gcc_version = v"10",
     preferred_rust_version = v"1.91.0",
 )

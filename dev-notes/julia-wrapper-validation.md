@@ -275,8 +275,20 @@ the older MOI conformance suite has fewer tests; no wrapper tests were disabled.
 The local-only BinaryBuilder recipe first built Linux arm64 from native
 `b4e5ffb6` using BinaryBuilder 0.6.6 and Rust 1.91.0. Its audit found the Linux
 `libgcc_s.so.1` runtime dependency unresolved. Recipe correction `350f204c`
-declares `CompilerSupportLibraries_jll`; its rebuild/audit is still pending.
-The first archive is exploratory evidence, not an accepted release artifact.
+declares `CompilerSupportLibraries_jll`, but its completed rebuild still could
+not resolve the dependency: the default GCC 5 compiler selected libgfortran3,
+while the runtime package supplies libgfortran5 artifacts. Both archives are
+exploratory evidence, not accepted release artifacts. BinaryBuilder's default
+allows audit failures without a failing exit code, so exit status alone is
+insufficient evidence.
+
+At `08fc113f` plus the GCC 10 recipe change, a dependency-resolution probe with
+BinaryBuilder 0.6.6 confirms libgfortran5 tags for both Linux architectures and
+matching CompilerSupportLibraries artifact trees: arm64
+`3cd2fb12f766ee959993b19d1c546f9b1e3aa868`, x86_64
+`e0ae8e1988425737cec3f6c615497f3284d9e771`. The recipe also explicitly sets
+`ignore_audit_errors=false`. A clean rebuilt artifact/audit is still required;
+the metadata probe does not establish binary compatibility.
 
 The staging tool at wrapper `350f204c586fe9de625fbc77dbe6cb5d8e940c8d` generated a
 separate Pounce package with the actual generated Pounce_jll UUID

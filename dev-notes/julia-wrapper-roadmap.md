@@ -136,8 +136,11 @@ published and no registry submission or PR has been opened.
 
 A first staged JLL candidate loads from a fresh Linux artifact depot with no
 Rust toolchain and no custom-library override, while leaving MOI unloaded.
-Its audit identified the Linux unwind runtime; `350f204c` adds that dependency
-and the corrected artifact is rebuilding. Full artifact-backed tests and the
+Its audit identified the Linux unwind runtime. Adding that dependency at
+`350f204c` alone did not resolve it: the default compiler selected an unavailable
+runtime ABI tag. The recipe now selects GCC 10 and makes audit failures fatal;
+the resulting platform tags resolve the runtime artifacts on both Linux targets.
+A clean rebuild/audit, full artifact-backed tests and the
 remaining target builds are still required before this stage is complete.
 
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
