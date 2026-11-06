@@ -217,8 +217,15 @@ fn the_exact_leg_is_no_longer_lost_to_the_rung() {
 /// with it on the second run reads `Optimal` whatever this option does). If
 /// the option starts recovering this leg again, the second assertion fails
 /// and the 0.20 pin — `Optimal` in under 1000 — is the one to restore.
+///
+/// **gh#1146 restored it.** Restoration's limited-memory update had been
+/// running over the whole restoration primal, slack blocks included, where
+/// upstream confines it to the `x` block. Matching upstream took this leg from
+/// the cap to `Optimal` at 197 iterations with the rung off, and to `Optimal`
+/// at 314 with it on (still reported, not asserted). So the rung-off run is
+/// the recovery again, and the pin is the 0.20 one.
 #[test]
-fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
+fn the_limited_memory_leg_recovers_with_the_rung_off() {
     let (_out, exit, iters) = solve(&[
         "hessian_approximation=limited-memory",
         "feral_increase_quality_retry=no",
@@ -238,8 +245,8 @@ fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
         "square_system_recovery=no",
     ]);
     assert!(
-        exit.starts_with("Maximum Number of Iterations Exceeded"),
-        "on FERAL 0.21 this leg runs to the cap with the rung off as well; \
+        exit.starts_with("Optimal Solution Found") && iters < 1000,
+        "since gh#1146 this leg reaches Optimal at 197 with the rung off; \
          got {exit:?} at {iters}"
     );
 }
