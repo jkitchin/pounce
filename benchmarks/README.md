@@ -102,6 +102,7 @@ reference](#pounce-runs-vs-the-ipopt-reference) below.
 
 | Suite | Problem class | Size | Notes |
 |-------|---------------|------|-------|
+| [`julia_bmopf/`](julia_bmopf/README.md) | Julia/JuMP distribution OPF adapter | One pinned synthetic four-bus feeder, parameter/start/recovery scenarios | Pounce and Ipopt, independent SI current/KCL checks; separate from the `.nl` composite report |
 | [`vanderbei/`](vanderbei/README.md) | Canonical NLP collection | 733 problems | Vanderbei's CUTE-in-AMPL transliteration; the `.nl` replacement for the retired compiled CUTEst suite |
 | [`cho/`](cho/README.md)             | Parameter estimation, kinetic ODE | 1 problem, medium dense | CHO cell kinetics from Pyomo `parmest`; stress test for restoration |
 | [`electrolyte/`](electrolyte/README.md) | Gibbs free-energy minimization | 13 problems | Aqueous electrolyte equilibrium; ill-conditioned by construction |
