@@ -269,3 +269,28 @@ The declared dependency floors were tested separately at wrapper
 `Pkg.test("Pounce"; allow_reresolve=false)`. All **3,610 assertions** pass on
 macOS arm64 with the same native `b4e5ffb6` library. The count is lower because
 the older MOI conformance suite has fewer tests; no wrapper tests were disabled.
+
+## Local binary release preparation — incomplete
+
+The local-only BinaryBuilder recipe first built Linux arm64 from native
+`b4e5ffb6` using BinaryBuilder 0.6.6 and Rust 1.91.0. Its audit found the Linux
+`libgcc_s.so.1` runtime dependency unresolved. Recipe correction `350f204c`
+declares `CompilerSupportLibraries_jll`; its rebuild/audit is still pending.
+The first archive is exploratory evidence, not an accepted release artifact.
+
+The staging tool at wrapper `350f204c586fe9de625fbc77dbe6cb5d8e940c8d` generated a
+separate Pounce package with the actual generated Pounce_jll UUID
+`96a3a933-3cb5-5901-bb57-278b133f379d`, version 0.15.0+0. Its source loader diff
+consists of importing Pounce_jll and selecting its product as the default;
+custom-library override behavior and the optional MOI extension are preserved.
+`Candidate.toml` records the clean source revision and local JLL identity.
+
+An exploratory install into a fresh `julia:1.12.6-bookworm` Linux arm64 container
+with a new depot, no Cargo/Rust on PATH, and no `POUNCE_LIBRARY_PATH` successfully
+loads native 0.15.0 from
+`/depot/artifacts/3e988b8297986233f5da66668143e7ca91b684ee/lib/libpounce_cinterface.so`.
+The optimizer/extension remains unloaded in this core-only process. This proves
+the staging/default-artifact mechanism, but does not waive the runtime-dependency
+audit correction or the pending full artifact-backed package/platform suites.
+All generated JLLs and archives remain local; nothing has been uploaded,
+registered, pushed, or submitted as a PR.

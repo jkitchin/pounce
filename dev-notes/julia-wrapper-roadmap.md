@@ -134,6 +134,12 @@ installation and remaining platform gates are not yet complete. The working
 source-checkout installation still requires a native build. No binary has been
 published and no registry submission or PR has been opened.
 
+A first staged JLL candidate loads from a fresh Linux artifact depot with no
+Rust toolchain and no custom-library override, while leaving MOI unloaded.
+Its audit identified the Linux unwind runtime; `350f204c` adds that dependency
+and the corrected artifact is rebuilding. Full artifact-backed tests and the
+remaining target builds are still required before this stage is complete.
+
 Build a Pounce JLL/artifact distribution for supported platforms, retain an
 explicit custom-library override, and test clean-machine installation. Add
 Windows coverage once its binary path is supported. Establish native-version
