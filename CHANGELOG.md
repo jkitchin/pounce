@@ -197,6 +197,17 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **An infeasible LP with a near-constant row is no longer reported
+  unbounded (gh#1143).**
+  - **What changed:** the convex interior-point's unboundedness test now
+    scales each row's tolerance by that row's own size when it is below 1,
+    as the active-set engine already did (gh#1034).
+  - **Why:** `min −3x₀ + 2x₁` s.t. `1e-14·x₀ ≤ −1`, `x₀ ≥ 0`, `x₁ ≥ 0` has
+    no feasible point, yet `solve_qp_ipm` returned `DualInfeasible` after 2
+    iterations: a direction violating row 0 by 300 of its own units passed
+    the old absolute tolerance. It now returns `PrimalInfeasible`.
+  - **Known limitation:** with `equilibrate = false` (not the default) this
+    model now ends `NumericalFailure`; see `dev-notes/known-limitations.md`.
 - **A re-solve's iterations are counted (gh#884 retry, gh#983 scale
   re-solve).**
   - **What changed:** when either re-solve runs, the statistics and the
