@@ -96,7 +96,22 @@
       "git_tree_sha1": "06c70b12bab389c97069eafc98a1357a3248af75",
       "recipe_commit": "73f45e96039651570b7197e4868f369945be292f",
       "audit": "passed",
-      "runtime_tests": "pending"
+      "runtime_tests": "in_progress",
+      "validated_runs": [
+        {
+          "julia": "1.13.3",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "macOS 26.7.2 arm64 host; Intel Julia under Rosetta; fresh depot; cargo and rustc absent from PATH",
+          "log_sha256": "bf19112760310773dbd1278c7bbd657fe2b58771953c657a8171428dba6fccca",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
+        }
+      ]
     }
   ]
 }

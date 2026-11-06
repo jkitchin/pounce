@@ -367,6 +367,28 @@ with the same staged wrapper and dependency versions. These four runs cover the
 default artifact path; x86_64 and complete override runs remain pending. Log
 hashes and exact environments are in the artifact inventory.
 
+Intel macOS also passes **3,662 assertions** on Julia **1.13.3** with the same
+staged wrapper and dependencies. This runs the x86_64 Julia executable and native
+artifact under Rosetta on macOS **26.7.2**; it is not a physical Intel-machine run.
+Its fresh depot, no-Rust check, artifact path, and log hash are recorded separately.
+
+The combined macOS arm64 artifact also passes the pinned BMOPFTools application
+checks on Julia **1.12.6**, at staged wrapper
+`204c80e9f57c5649ec38a0197800706510237a34` and harness
+`11a215aca2d2b20e3f669f663853d20412b9e4b4`, both clean. Each solver passes all ten
+scenarios, and all ten cross-solver objective comparisons pass. Maximum model
+residuals are **7.79e-13** for Pounce and **1.13e-10** for Ipopt; independent
+terminal KCL errors are **3.65e-9 A** and **9.12e-7 A**. The loaded Pounce library
+has the accepted artifact's SHA-256
+`347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339`.
+Adding the staged package/JLL with `Pkg.PRESERVE_ALL` leaves every original
+application dependency record unchanged except Pounce, adding only Pounce_jll.
+The [measurement data](julia-wrapper-measurements.json) retain source/dependency
+identities, per-scenario correctness results, and report/manifest hashes. These
+are correctness checks; their timings are excluded because a separate Linux VM
+validation was active. The earlier three-process performance evidence stands
+on its own.
+
 The first macOS arm64 build (recipe `350f204c`, native `b4e5ffb6`, Rust 1.91.0)
 completed, but its audit reported an unwanted `/usr/lib/libiconv.2.dylib`
 dependency. Inspection of the actual library's 93 undefined symbols found no
