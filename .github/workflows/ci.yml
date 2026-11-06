@@ -863,7 +863,8 @@ jobs:
       - name: Compile against every codegen-memory shape
         run: python3 casadi/tests/codegen_mem_compat/run.py
 
-  # `skills/pounce`, the commands in `.claude/commands/` and the server in
+  # `skills/pounce`, the commands in `.claude/commands/`, the subagent in
+  # `.claude/agents/` and the server in
   # `mcp/pounce-studio.json` are installable from this repo with
   # `uvx knowhow add jkitchin/pounce ...`. knowhow's validator checks the
   # skill against the Agent Skills spec (name matches its directory, a
