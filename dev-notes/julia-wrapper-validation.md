@@ -11,8 +11,40 @@ runs, each with **3,662 assertions**. The subsequent mixed-NLP dual correction
 and its separate validation are recorded below. The pinned BMOPFTools validation,
 startup measurements, minimum-dependency tests, and native C tests are detailed
 below. Exact binary hashes and runtime environments are in the
-[artifact inventory](julia-wrapper-artifacts.json). Hosted CI, publication, and
-registration remain separately authorized release actions; none is claimed here.
+[artifact inventory](julia-wrapper-artifacts.json). These are local validation
+results; hosted CI results, binary publication, and registration are not claimed here.
+
+## Upstream integration before PR publication
+
+Merge commit `f0e253e9f7cbd8b50ebe9a6b08092871bf496189` incorporates upstream
+`bbf97b289c649c84730485695240a6c8a704a187` without conflicts. Native Rust sources
+match that upstream revision; the Julia contribution does not modify them.
+The rebuilt native library remains POUNCE 0.15.0, built with Rust **1.96.0**;
+its SHA-256 is
+`c608771fa562eec1a55e8f4937e34cbb5722fe5d809905770347f080e8cc60a4`.
+
+At that merge commit, on macOS arm64, the full package suite passes **3,692
+assertions** on each of Julia **1.10.13** and **1.13.3**, using MOI 1.54.0,
+JuMP 1.32.1, and Ipopt.jl 1.16.0. All **95 C-interface tests** also pass.
+Only these validation notes were edited during the test runs. Log SHA-256 values:
+
+- Julia 1.10.13: `5919d2539b3bf50bbeb7e606a11bda5467ef500a899f8db69ec1ee99237aba0f`.
+- Julia 1.13.3: `c66f4df39c3d6f042fd58ca76dfab45f441d2f90315235803b1812106950f3d3`.
+- C interface: `b518718413f74991f7384958eecaf77af5fa110c40746b9cb5e4e8e29089f32d`.
+
+`cargo fmt --all -- --check`, documentation consistency, and C-interface Clippy
+with the CI policy (`--all-targets -- -D clippy::correctness -D clippy::suspicious`)
+pass. Existing upstream Clippy warnings remain; an exploratory `-D warnings`
+check rejects those unchanged warnings and is not claimed as passing.
+The release consistency guard also passes when its `CRATES` array is sourced
+from a temporary file instead of process substitution, which returned an empty
+array under this host's Bash. The checked array and remaining guard logic are
+unchanged; no repository script was modified for that local workaround.
+
+Earlier binary audits and application measurements retain their original native
+source revisions. The audited JLL and provisional PGLib measurements were not
+rebuilt or rerun against this upstream merge. Full workspace/Python coverage and
+hosted Julia execution remain CI checks for the PR.
 
 ## Final review: mixed legacy NLP and vector-oracle duals
 
@@ -543,5 +575,6 @@ loads native 0.15.0 from
 The optimizer/extension remains unloaded in this core-only process. This proves
 the staging/default-artifact mechanism. It did not waive the runtime-dependency
 audit correction or replace the later full artifact-backed package suites.
-All generated JLLs and archives remain local; nothing has been uploaded,
-registered, pushed, or submitted as a PR.
+All generated JLLs and archives remain local. At completion of the original
+local release preparation (`7a05e65b`), nothing had been uploaded, registered,
+pushed, or submitted as a PR. Branch publication is separate from binary release.

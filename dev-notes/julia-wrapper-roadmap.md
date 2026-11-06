@@ -138,7 +138,8 @@ The same full suite also passes through a custom-library override on every
 platform/version pair: **16 complete runs** across both selection modes.
 The working source-checkout installation still requires a native build; the
 separate staged candidate uses the audited JLL without Rust. No binary has been
-published and no registry submission or PR has been opened.
+published and no registry submission has been made. Branch publication is
+separate from binary release.
 
 A first staged JLL candidate loads from a fresh Linux artifact depot with no
 Rust toolchain and no custom-library override, while leaving MOI unloaded.
@@ -177,7 +178,7 @@ separately in the [validation notes](julia-wrapper-validation.md); the earlier
 loader behavior, and the ABI are unchanged.
 
 Remaining release actions require separate authorization: adopt the staged
-package and published JLL URLs, publish the branch/artifacts, obtain green hosted
+package and published JLL URLs, publish the artifacts, obtain green hosted
 CI before release, and submit registration. These actions have not been taken.
 The implementation, local release preparation, compatibility evidence, and PR
 draft are ready for review. Persistent sessions remain outside this roadmap.
