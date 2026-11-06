@@ -3216,6 +3216,33 @@ impl IpoptAlgorithm {
             self.bundle.line_search.reset();
         }
 
+        // A model coupled to the barrier parameter
+        // (`TNLP::update_with_barrier`; the complementarity driver's coupled
+        // continuation tightens `G·H <= τ` with μ) moves its functions here,
+        // after μ and before the next step is computed. Everything cached
+        // at the current point was evaluated against the old functions, and
+        // every cache is keyed on the iterate's tags, so the current `x` is
+        // re-issued under a fresh tag: the next read of `c`, `d`, their
+        // Jacobians and every quantity built on them evaluates again. The
+        // filter's entries were measured against the old functions too, so
+        // the line search is reset, as after a μ decrease. Not during
+        // restoration, whose iterate belongs to the feasibility problem.
+        if !self.fires_as_restoration && self.nlp.is_some() {
+            let moved = self
+                .tnlp
+                .as_ref()
+                .is_some_and(|t| t.borrow_mut().update_with_barrier(next_mu));
+            if moved {
+                let mut d = self.data.borrow_mut();
+                if let Some(curr) = d.curr.clone() {
+                    let x: Rc<dyn Vector> = Rc::from(curr.x.make_new_copy());
+                    d.set_curr(curr.with_x(x));
+                }
+                drop(d);
+                self.bundle.line_search.reset();
+            }
+        }
+
         // pounce#58 — iterate-quality guard for the probing oracle.
         // The μ-update layer sets `request_resto` when the input
         // iterate is too corrupted for the probing rule to produce a
@@ -4556,6 +4583,8 @@ impl IpoptAlgorithm {
         // solve too (gh#645). `None` when the caller installed no
         // callback, which keeps the whole path inert for them.
         resto.set_intermediate_tnlp(self.tnlp.as_ref().map(Rc::clone));
+        // And this solve's iteration cap, not the provider's snapshot of it.
+        resto.set_solve_max_iter(self.max_iter);
         let mut pd_guard = sd.pd_solver_mut();
         let aug = pd_guard.aug_solver_mut();
         // Audit counters (pounce#12). Increment call count + outer-iter

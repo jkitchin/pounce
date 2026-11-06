@@ -184,6 +184,10 @@ impl<T: TNLP> TNLP for CaptureTnlp<T> {
         self.inner.wants_current_iterate()
     }
 
+    fn update_with_barrier(&mut self, mu: Number) -> bool {
+        self.inner.update_with_barrier(mu)
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
@@ -592,6 +596,10 @@ impl<T: TNLP> TNLP for WarmStartTnlp<T> {
 
     fn wants_current_iterate(&self) -> bool {
         self.inner.wants_current_iterate()
+    }
+
+    fn update_with_barrier(&mut self, mu: Number) -> bool {
+        self.inner.update_with_barrier(mu)
     }
 
     fn intermediate_callback(

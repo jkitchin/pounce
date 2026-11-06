@@ -178,4 +178,16 @@ pub trait RestorationPhase {
     /// `print_level == 0` instead of leaking its `r`-suffixed iteration
     /// table to stdout. Default no-op for drivers without a nested IPM.
     fn set_print_iter_output(&mut self, _enabled: bool) {}
+
+    /// The solve's own `max_iter`, forwarded at every restoration entry.
+    /// The nested solve's iteration counter is seeded from the outer one,
+    /// so this is the cap the restoration sub-solve runs under, as upstream
+    /// (`IpRestoConvCheck` reads `max_iter` through the solve's options).
+    /// Without it the cap was whatever `max_iter` read when the restoration
+    /// provider was built: the CLI builds it once, before any solve, so a
+    /// driver that budgets a solve (the complementarity stages) saw that
+    /// budget ignored the moment the solve entered restoration (MacMPEC
+    /// `ralph1` under limited memory: a 100-iteration finish ran 3000).
+    /// Default no-op for drivers without a nested IPM.
+    fn set_solve_max_iter(&mut self, _max_iter: pounce_common::types::Index) {}
 }

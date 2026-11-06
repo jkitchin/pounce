@@ -318,10 +318,13 @@ fn a_branch_the_answer_cannot_hold_leaves_the_answer_as_it_was() {
 }
 
 /// A point already complementary to `tol` is not re-solved, and the report
-/// says how complementary it is with no `polish` record.
+/// says how complementary it is with no `polish` record. Pinned to the
+/// schedule: it is this branch's fixture, and under the coupled continuation
+/// `qpec_small`'s answer starts at a residual of 1e-6 and is polished (to 0),
+/// which is the other branch.
 #[test]
 fn a_tight_answer_reports_its_residual_and_no_polish() {
-    let r = run("qpec_small.nl", &[]);
+    let r = run("qpec_small.nl", &["complementarity_continuation=schedule"]);
     assert_eq!(r.code, Some(0), "{}", r.stderr);
     let c = &r.json.as_ref().unwrap()["complementarity"];
     let nr = c["natural_residual"].as_f64().expect("natural_residual");

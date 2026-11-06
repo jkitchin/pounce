@@ -2553,6 +2553,17 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Only read when the model declares complementarity pairs (AMPL complements, Pyomo mpec, or Problem(complementarity=...)). The default runs both formulations, each a local solve from different starting conditions, and keeps the strongly stationary answer with the lower objective: on the MPCC benchmark corpus (benchmarks/mpcc/declared.py) the exact product alone reaches the optimum on 48 of 60 cells and the continuation alone on 60, while on the CALIPSO bunny-hop the continuation alone settles 2.4x worse on 3 of 5 starts that the exact product avoids. The cost is roughly the iterations of both (median 99 against 57 for the best single route on that corpus). Set exact or continuation when one route is known to work for the model, to pay for one. In every setting the l1 penalty formulation still runs if no formulation answers, and the verdict reported when nothing answers is an exact-product solve's (with continuation, the continuation's own exact finish), never a relaxed solve's success.",
     )?;
 
+    r.add_string_option(
+        "complementarity_continuation",
+        "How the Scholtes continuation tightens its relaxation G*H <= tau (pounce extension; not in upstream Ipopt).",
+        "coupled",
+        &[
+            ("coupled", "solve tau = 1 as an ordinary relaxation, then tighten tau with the barrier parameter inside one solve, falling back to the schedule when that does not answer"),
+            ("schedule", "one warm-started solve per tau in 1, 1e-1, ..., 1e-8"),
+        ],
+        "Only read when the model declares complementarity pairs and the continuation runs (complementarity_strategy both or continuation). coupled ties tau to mu (tau = max(1e-8, mu), at most a tenfold cut per barrier update), so the relaxation tightens as the barrier falls instead of each tighter rung starting outside its relaxation and climbing back. Its answer is kept only if it passes the same acceptance as the schedule's (converged, every product in tolerance, a tight S certificate); otherwise the schedule resumes from the first rung. schedule is the behaviour before this option.",
+    )?;
+
     // ===== ℓ₁-exact penalty-barrier wrapper (pounce-l1penalty / pounce#10) =====
     // Not in upstream Ipopt 3.14 — pounce extension porting Thierry &
     // Biegler 2020 (originally implemented in ripopt#23). Default off;

@@ -92,9 +92,12 @@ pairing it is not convex), through a short ladder of formulations, the
 first one that *answers* winning:
 
 1. **Continuation** — Scholtes relaxation `G·H <= τ`, `τ` from 1 down to
-   1e-8, each solve warm-started from the last, then an exact finish
-   (`G·H = 0`, or `G·H <= 0` when the equality form leaves too few degrees
-   of freedom).
+   1e-8, then an exact finish (`G·H = 0`, or `G·H <= 0` when the equality
+   form leaves too few degrees of freedom). By default `τ = 1` is solved as
+   an ordinary relaxation and the rest of the way is one solve in which `τ`
+   falls with the barrier parameter (below); the schedule of one
+   warm-started solve per `τ` is the fallback, and
+   `complementarity_continuation=schedule` selects it outright.
 2. **Exact** — two solves from your start. A relaxed path: `G·H <= 1e-6`,
    one warm step to `1e-8`, then the same exact finish as the continuation.
    And, until the continuation and that path both hold an exact answer,
@@ -176,11 +179,47 @@ iterations by a third, with no answer changed:
   `relu_nn` the relaxed path produced all 12 of the exact stage's
   improvements. `water-net`, which the cold solve once lifted to 927, reads
   953 with or without it.
+- **The continuation tightens `τ` with the barrier parameter.** A schedule
+  of one solve per `τ` pays at each step for starting outside the tighter
+  relaxation: on the `relu_nn` suite the `τ = 0.1` and `0.01` steps alone
+  are 60% of the continuation's iterations, because each starts from a point
+  whose products sit at the previous `τ`. The coupled continuation keeps
+  `G·H <= τ` with `τ = max(1e-8, μ)` inside one solve, cut at most tenfold
+  per barrier update, so the relaxation and the barrier fall together (the
+  ratio CCOpt's relaxation uses). `τ` is carried in the row, `G·H + (τ₀ − τ)
+  <= τ₀`, so no bound moves and every slack stays interior; the solver
+  re-evaluates the point and resets its filter when `τ` moves.
+
+  Three things keep it safe, each measured:
+  - **`τ = 1` stays an ordinary solve.** Solving the smoothest relaxation
+    fully is what reaches the better basin. Coupled from the start, MacMPEC
+    `bilevel1` settles on 5 where the schedule finds 0.
+  - **Its finish has three starts.** The exact product is degenerate at the
+    coupled endpoint, and which start converges from it differs by model:
+    the warm point at `μ = 1e-6`, the warm point as it ended, the point with
+    fresh duals, 100 iterations each.
+  - **Its answer passes the schedule's own test or is dropped.** Converged,
+    every product in tolerance, a tight S certificate; otherwise the schedule
+    resumes at `τ = 0.1` from the `τ = 1` solve. The coupled solve runs on a
+    budget (five times the `τ = 1` solve's iterations, at least 200), so one
+    that crawls hands over early.
+
+  Against the schedule, on the same build:
+
+  | suite | answers | cost |
+  |---|---|---|
+  | MacMPEC (178) | 158 at the best known value, 7 better, 5 worse, 0 unsolved, against 157, 7, 5, 1 | solve time 1,149 s → 1,000 s |
+  | `relu_nn` (42) | same 32 answers; 4 objectives lower, 1 higher | iterations −25%, wall 88 s → 68 s |
+  | OPF volt-var/volt-watt (37) | unchanged | iterations −27% |
+  | capacity equilibria (36) | same 32; 4 near-ties land in the other well each way | iterations −27% |
+  | OPF transmission (59) | unchanged | wall 240 s → 270 s (+12%): the coupled solve reaches its budget and hands over |
+  | CALIPSO declared (12) | one start better (ball-in-cup), one worse (bunny-hop, 0.13%) | iterations −9% |
+
 - **A failed relaxation step is retried warm.** It restarts from the previous
   step's point and barrier parameter, with twice that step's iterations,
   rather than from `mu_init`'s 0.1. Skipping straight to the finish was tried
   and dropped: on the CALIPSO rocket the later steps reach a better branch.
-- **A warm step that crawls is cut short.** Each warm-started step may take
+- **A warm step that crawls is cut short** (the schedule). Each warm-started step may take
   10× the previous step's iterations, at least 500 (never more than your
   `max_iter`). Tightening `τ` leaves the previous point slightly infeasible,
   and at a small barrier parameter the iterate can creep along its bounds:
@@ -203,6 +242,11 @@ known to work the other is overhead. `complementarity_strategy` picks:
 ```bash
 pounce model.nl complementarity_strategy=exact
 ```
+
+`complementarity_continuation` picks how the continuation tightens `τ`:
+`coupled` (the default, above) or `schedule` (one warm-started solve per
+`τ`). On the OPF transmission suite `schedule` is 12% faster to the same
+answers.
 
 The penalty still runs under every setting if nothing answers, and the
 verdict reported then is still an exact-product solve's — with

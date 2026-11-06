@@ -58,6 +58,28 @@ changes.
   pairs, never by status.
 
 ### Changed
+- **The complementarity continuation tightens its relaxation with the
+  barrier parameter, in one solve.**
+  - **What changed:** `τ = 1` is still solved as an ordinary relaxation.
+    The rest of the way, `G·H <= τ` follows `τ = max(1e-8, μ)` inside one
+    interior-point solve, instead of one warm-started solve per `τ`.
+  - **Safeguards:** the coupled path's answer must pass the schedule's own
+    acceptance test (converged, products in tolerance, a tight S
+    certificate), and the coupled solve runs on a budget. Otherwise the
+    schedule resumes from the `τ = 1` solve.
+  - **Option:** `complementarity_continuation` picks `coupled` (the new
+    default) or `schedule`.
+  - **Results:** MacMPEC goes from 157 at the best known value and 1
+    unsolved to 158 and 0, with solve time from 1,149 s to 1,000 s.
+    `relu_nn` runs 23% faster, and the OPF and capacity suites take 27%
+    fewer iterations.
+  - **Cost:** the OPF transmission suite is 12% slower to the same answers.
+    On CALIPSO one start gets better and one gets worse (bunny-hop seed 1,
+    by 0.13%).
+  - **Mechanism:** a new TNLP hook, `update_with_barrier`, is called after
+    every `μ` update. `MpccTnlp`'s `Lowering::Coupled` carries `τ` in the
+    row rather than the bound. When the hook reports a change, the
+    interior-point loop re-issues the current point and resets its filter.
 - **The exact stage's cold solve is skipped once two exact answers are in
   hand.** When the continuation's certified answer and the exact stage's
   relaxed path disagree, the cold `G·H = 0` solve used to run as a third
@@ -89,6 +111,16 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **Restoration ran under a stale `max_iter`.** The restoration provider
+  read the options once, when it was built: the CLI builds it before any
+  solve. A solve whose `max_iter` changed afterwards therefore had its
+  budget ignored as soon as it entered restoration. The complementarity
+  driver budgets every stage this way, so its budgets were affected. On
+  MacMPEC `ralph1` under limited memory, a 100-iteration finish ran 3,000
+  iterations. The outer loop now forwards the solve's own `max_iter` at
+  every restoration entry, as upstream's `IpRestoConvCheck` reads it. No
+  fixture outside the complementarity lines moves in the sweep, on either
+  leg.
 - **The branch re-solve says why it was refused.** It now checks the
   re-solve's status, tightening and objective before its stationarity class.
   A failed re-solve reads "the re-solve returned

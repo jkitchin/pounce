@@ -47,6 +47,13 @@
 //! | `Eq` | `G·H = 0` (the exact product; `ncp_eq` in the benchmarks) |
 //! | `Ineq` | `G·H <= 0` (same feasible set given `G, H >= 0`; adds no equality) |
 //! | `Relaxed(τ)` | `G·H <= τ` (Scholtes' relaxation, for continuation) |
+//! | `Coupled { .. }` | `G·H <= τ(μ)`: the relaxation tightened with the barrier parameter inside one solve |
+//!
+//! Under `Coupled` the row is written `G·H + (τ₀ - τ) <= τ₀`: the bound
+//! stays put and the shift carries `τ`, so a tighter `τ` raises the row's
+//! residual and leaves every slack interior. [`TNLP::update_with_barrier`]
+//! moves `τ` after each `μ` update to `max(floor, factor·μ)`, never up and
+//! never by more than a factor `max_cut` at once.
 //!
 //! The lowering can be changed between solves ([`MpccTnlp::set_lowering`])
 //! without rebuilding, so a continuation walks `τ` on one object.
@@ -94,6 +101,15 @@ pub enum Lowering {
     Eq,
     Ineq,
     Relaxed(Number),
+    /// `G·H <= τ` with `τ` coupled to the barrier parameter: it starts at
+    /// `tau0` and follows `max(floor, factor·μ)` down, by at most a factor
+    /// `max_cut` per `μ` update. See the module docs.
+    Coupled {
+        tau0: Number,
+        floor: Number,
+        factor: Number,
+        max_cut: Number,
+    },
 }
 
 /// A primal-dual point for the next solve to start from, in the lowered
@@ -138,6 +154,9 @@ pub struct MpccTnlp {
     /// violation is the product's positive part.
     signless: Vec<bool>,
     lowering: Lowering,
+    /// The current `τ` under [`Lowering::Coupled`] (its `tau0` until the
+    /// first barrier update); unused otherwise.
+    coupled_tau: Number,
     n: usize,
     m_inner: usize,
     index_style: IndexStyle,
@@ -375,6 +394,10 @@ impl MpccTnlp {
 
         Ok(Self {
             inner,
+            coupled_tau: match lowering {
+                Lowering::Coupled { tau0, .. } => tau0,
+                _ => 0.0,
+            },
             lowering,
             n,
             m_inner: m,
@@ -420,6 +443,19 @@ impl MpccTnlp {
     /// Change how the product rows are bounded for the next solve.
     pub fn set_lowering(&mut self, lowering: Lowering) {
         self.lowering = lowering;
+        if let Lowering::Coupled { tau0, .. } = lowering {
+            self.coupled_tau = tau0;
+        }
+    }
+
+    /// The relaxation `τ` the product rows are held to now: `Relaxed`'s own,
+    /// the coupled solve's current one, `None` for the exact lowerings.
+    pub fn current_tau(&self) -> Option<Number> {
+        match self.lowering {
+            Lowering::Relaxed(t) => Some(t),
+            Lowering::Coupled { .. } => Some(self.coupled_tau),
+            Lowering::Eq | Lowering::Ineq => None,
+        }
     }
 
     /// Solve a branch NLP instead of a lowering (`None` restores the
@@ -591,6 +627,7 @@ impl TNLP for MpccTnlp {
             Lowering::Eq => (0.0, 0.0),
             Lowering::Ineq => (-2.0 * INF, 0.0),
             Lowering::Relaxed(tau) => (-2.0 * INF, tau),
+            Lowering::Coupled { tau0, .. } => (-2.0 * INF, tau0),
         };
         if let Some(br) = &self.branch {
             // A branch NLP: the pinned sides carry the complementarity, and
@@ -668,8 +705,14 @@ impl TNLP for MpccTnlp {
             return false;
         }
         self.g_inner.copy_from_slice(&g[..m]);
+        // Under `Coupled` the bound stays at `tau0` and the row carries the
+        // shift (module docs); a branch NLP leaves the rows unbounded.
+        let shift = match self.lowering {
+            Lowering::Coupled { tau0, .. } if self.branch.is_none() => tau0 - self.coupled_tau,
+            _ => 0.0,
+        };
         for (k, (gk, hk)) in self.pair_values_from(x).into_iter().enumerate() {
-            g[m + k] = gk * hk;
+            g[m + k] = gk * hk + shift;
         }
         true
     }
@@ -849,7 +892,17 @@ impl TNLP for MpccTnlp {
         self.last_lambda = sol.lambda.to_vec();
         self.last_z_l = sol.z_l.to_vec();
         self.last_z_u = sol.z_u.to_vec();
-        self.last_products = sol.g.get(m..).map(<[Number]>::to_vec).unwrap_or_default();
+        // The products themselves, `G·H`: under `Coupled` the rows carry the
+        // shift `tau0 - τ` too (module docs), which is not part of them.
+        let shift = match self.lowering {
+            Lowering::Coupled { tau0, .. } if self.branch.is_none() => tau0 - self.coupled_tau,
+            _ => 0.0,
+        };
+        self.last_products = sol
+            .g
+            .get(m..)
+            .map(|p| p.iter().map(|v| v - shift).collect())
+            .unwrap_or_default();
         if self.defer_inner_finalize {
             return;
         }
@@ -908,6 +961,28 @@ impl TNLP for MpccTnlp {
 
     fn wants_intermediate_callback(&self) -> bool {
         self.inner.borrow().wants_intermediate_callback()
+    }
+
+    fn update_with_barrier(&mut self, mu: Number) -> bool {
+        let inner_moved = self.inner.borrow_mut().update_with_barrier(mu);
+        let Lowering::Coupled {
+            floor,
+            factor,
+            max_cut,
+            ..
+        } = self.lowering
+        else {
+            return inner_moved;
+        };
+        if self.branch.is_some() || !(mu.is_finite() && mu > 0.0) {
+            return inner_moved;
+        }
+        let target = (factor * mu).max(floor).max(max_cut * self.coupled_tau);
+        if target < self.coupled_tau {
+            self.coupled_tau = target;
+            return true;
+        }
+        inner_moved
     }
 
     fn intermediate_callback(
@@ -1352,6 +1427,83 @@ mod tests {
             assert_eq!((gl[3], gu[3], gl[4], gu[4]), (lo, hi, lo, hi));
             assert_eq!(gl[..3], [0.5, 0.0, -10.0]);
         }
+    }
+
+    const COUPLED: Lowering = Lowering::Coupled {
+        tau0: 0.1,
+        floor: 1e-8,
+        factor: 1.0,
+        max_cut: 0.1,
+    };
+
+    /// Under `Coupled` the bound is `tau0` throughout and the row carries
+    /// `tau0 - τ`, so the row reads `G·H <= τ`; the products recorded at
+    /// the end are `G·H` alone.
+    #[test]
+    fn a_coupled_row_carries_the_shift_and_its_product_does_not() {
+        let mut w = wrap(IndexStyle::C, COUPLED);
+        let (mut xl, mut xu, mut gl, mut gu) =
+            (vec![0.0; 3], vec![0.0; 3], vec![0.0; 5], vec![0.0; 5]);
+        assert!(w.get_bounds_info(BoundsInfo {
+            x_l: &mut xl,
+            x_u: &mut xu,
+            g_l: &mut gl,
+            g_u: &mut gu
+        }));
+        assert_eq!((gl[3], gu[3]), (-2e19, 0.1));
+        let p = lowered_g(&mut wrap(IndexStyle::C, Lowering::Eq), &X);
+        assert_eq!(w.current_tau(), Some(0.1));
+        assert_eq!(lowered_g(&mut w, &X)[3], p[3], "no shift before τ moves");
+        assert!(w.update_with_barrier(1e-3));
+        let tau = w.current_tau().unwrap();
+        let g = lowered_g(&mut w, &X);
+        assert!((g[3] - (p[3] + 0.1 - tau)).abs() < 1e-15);
+        let zeros = [0.0; 3];
+        w.finalize_solution(
+            Solution {
+                status: SolverReturn::Success,
+                x: &X,
+                z_l: &zeros,
+                z_u: &zeros,
+                g: &g,
+                lambda: &[0.0; 5],
+                obj_value: 0.0,
+            },
+            &IpoptData::default(),
+            &IpoptCq::default(),
+        );
+        assert!(
+            (w.last_products()[0] - p[3]).abs() < 1e-15,
+            "{:?}",
+            w.last_products()
+        );
+    }
+
+    /// The law, one assertion per branch: proportional to μ, never more than
+    /// a factor `max_cut` at once, never below the floor, never up; a move is
+    /// reported, no move is not, and the other lowerings never move.
+    #[test]
+    fn the_coupled_tau_follows_mu_down_within_its_limits() {
+        let mut w = wrap(IndexStyle::C, COUPLED);
+        assert!(w.update_with_barrier(5e-2));
+        assert_eq!(w.current_tau(), Some(5e-2), "factor·μ");
+        assert!(w.update_with_barrier(1e-6));
+        assert!(
+            (w.current_tau().unwrap() - 5e-3).abs() < 1e-18,
+            "capped at max_cut"
+        );
+        assert!(!w.update_with_barrier(1.0), "never up");
+        assert!((w.current_tau().unwrap() - 5e-3).abs() < 1e-18);
+        for _ in 0..20 {
+            w.update_with_barrier(1e-12);
+        }
+        assert_eq!(w.current_tau(), Some(1e-8), "the floor");
+        assert!(!w.update_with_barrier(1e-12), "at the floor nothing moves");
+        w.set_lowering(COUPLED);
+        assert_eq!(w.current_tau(), Some(0.1), "set_lowering restarts at tau0");
+        let mut r = wrap(IndexStyle::C, Lowering::Relaxed(0.1));
+        assert!(!r.update_with_barrier(1e-6));
+        assert_eq!(r.current_tau(), Some(0.1));
     }
 
     /// The lowered Jacobian against central differences of the lowered

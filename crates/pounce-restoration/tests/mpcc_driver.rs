@@ -10,7 +10,7 @@ use pounce_algorithm::application::{
     IpoptApplication, Ma57Config, default_backend_factory_with_sink, feral_config_from_options,
 };
 use pounce_algorithm::mpcc::{
-    EXACT_STAGE_TAU, MpccStage, Reported, StationarityClass, TOUCHED_OPTIONS,
+    EXACT_STAGE_TAU, MpccStage, Reported, SCHOLTES_SCHEDULE, StationarityClass, TOUCHED_OPTIONS,
 };
 use pounce_common::types::{Index, Number};
 use pounce_nlp::mpcc::ComplementarityPair;
@@ -474,9 +474,14 @@ fn a_weakly_stationary_point_does_not_stop_the_search_for_a_strong_one() {
         })
         .collect();
     let out = solve_mpcc(&mut app, tnlp, pairs, &mut |_| {}).unwrap();
-    assert_eq!(
-        out.accepted_by,
-        Some(MpccStage::Continuation),
+    // The S optimum is the answer, whichever stage's copy of it is reported:
+    // under the coupled continuation the exact stage's relaxed path reaches
+    // the same point and wins the comparison by solver noise.
+    assert!(
+        matches!(
+            out.accepted_by,
+            Some(MpccStage::Continuation | MpccStage::Exact)
+        ),
         "{:?}",
         out.solves
     );
@@ -2035,4 +2040,57 @@ fn the_fallback_stays_live_on_every_rung_of_a_run() {
         .map(|s| s.tau)
         .collect();
     assert!(taus.windows(2).all(|w| w[0] != w[1]), "{:?}", out.solves);
+}
+
+/// `complementarity_continuation`: the default runs the first rung, one
+/// coupled solve that ends at the schedule's last `τ` (so every decorator
+/// between the algorithm and `MpccTnlp` forwarded `update_with_barrier`: a
+/// missing forwarder leaves `τ` where it started and the schedule resumes),
+/// then the finish; `schedule` runs the nine rungs. Both reach the optimum.
+#[test]
+fn the_coupled_continuation_replaces_the_schedule_in_one_solve() {
+    let cont_taus = |out: &MpccOutcome| -> Vec<Option<f64>> {
+        out.solves
+            .iter()
+            .filter(|s| s.stage == MpccStage::Continuation)
+            .map(|s| s.tau)
+            .collect()
+    };
+    for continuation in ["coupled", "schedule"] {
+        let mut app = app();
+        app.options_mut()
+            .set_string_value("complementarity_continuation", continuation, true, false)
+            .unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(qpec_small(
+            [0.0, 0.5, 0.5],
+            Rc::new(RefCell::new(Vec::new())),
+        )));
+        let mut lines = Vec::new();
+        let out = solve_mpcc(&mut app, tnlp, qpec_pairs(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        let taus = cont_taus(&out);
+        if continuation == "coupled" {
+            assert_eq!(taus.len(), 3, "{taus:?} {lines:#?}");
+            assert_eq!(taus[0], Some(1.0));
+            let t = taus[1].unwrap();
+            assert!(
+                (t - 1e-8).abs() < 1e-15,
+                "the coupled solve ends at the floor: {taus:?}"
+            );
+            assert_eq!(taus[2], None, "then the finish");
+            assert!(
+                !lines.iter().any(|l| l.contains("resuming the schedule")),
+                "{lines:#?}"
+            );
+        } else {
+            let mut want: Vec<Option<f64>> = SCHOLTES_SCHEDULE.iter().map(|&t| Some(t)).collect();
+            want.push(None);
+            assert_eq!(taus, want, "{lines:#?}");
+        }
+        for (got, want) in out.x.iter().zip([1.0, 1.0, 0.0]) {
+            assert!((got - want).abs() < 1e-4, "{continuation}: x = {:?}", out.x);
+        }
+    }
 }

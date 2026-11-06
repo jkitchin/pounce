@@ -338,11 +338,15 @@ Reference: the *Complementarity Constraints (MPCC)* chapter
    benchmark below). Never compare on status or objective alone: an
    objective slightly *below* the declared-pair answer is usually the
    slack. The data root's `mpcc_compare/` (`make -C benchmarks
-   mpcc-compare`) runs pounce, Ipopt+MA57 and CCOpt on three suites and
+   mpcc-compare`) runs pounce, Ipopt+MA57 and CCOpt on four suites (OPF, transmission, capacity, `relu_nn`) and
    judges every answer by its physics.
 6. **Cost.** Running both formulations costs about the iterations of
    both. When one is known to work for the model,
    `complementarity_strategy=exact` (or `=continuation`) runs only it.
+   The continuation tightens `τ` with the barrier in one solve by default;
+   `complementarity_continuation=schedule` runs one solve per `τ` instead
+   (12% faster on the OPF transmission suite, slower on MacMPEC, `relu_nn`
+   and the small OPF and capacity suites).
 7. **What refuses pairs.** `--minima`, sensitivity / reduced-Hessian
    requests, the debugger, `pounce verify`, `check-x0`, the WASM build,
    `pounce.Solver`, `find_minima`, `solve_nlp_batch` and
