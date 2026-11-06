@@ -1204,7 +1204,40 @@ impl ConvCheck for OptErrorConvCheck {
                 stationarity,
                 primal_resolvable,
             ) {
-                if cq.borrow().infeasibility_descent_available() {
+                // gh#1146: `constr_viol` is the violation of the internal
+                // slack reformulation, `max(‖c‖, ‖d − s‖)`, and the slack can
+                // drift from `d(x)` while `d(x)` itself stays inside its
+                // declared bounds — `s` is confined to `[d_l, d_u]`, so a gap
+                // `d − s` never says `d` left them. An infeasibility verdict
+                // is a claim about the *model*, and a point that satisfies
+                // every declared row and the declared box to `constr_viol_tol`
+                // refutes it outright, whatever the slack says. Measured: a
+                // 1-variable `log(x)` model from `x0 = 0` under L-BFGS, whose
+                // `log` row was scaled by ~1e-8 at the start, so the scaled
+                // gap (1.4e-10) looked stationary while the unscaled one
+                // (1.4e-2) cleared the floor — at `x = 0.444`, inside every
+                // row, where the `inf_pr` column already printed `0.00`.
+                //
+                // Feasible means feasible on *both* arms the detector
+                // convicts on. `rel_viol` is already a property of the
+                // point (`d(x)` against its declared bounds, `c(x)` against
+                // its right-hand side — no slack), so it is reused as is: a
+                // model whose rows all live below `constr_viol_tol`
+                // (`infeasible_square_scaled_1em4`, rows scaled by 1e-4) is
+                // infeasible only relative to the rows' own magnitude, and
+                // the absolute test alone would acquit it.
+                let point_feasible = rel_viol <= self.relative_viol_threshold()
+                    && cq.borrow().curr_declared_primal_violation_max() < self.constr_viol_tol;
+                if point_feasible {
+                    tracing::debug!(
+                        target: "pounce::algorithm",
+                        constr_viol,
+                        "rapid infeasibility detection: refusing the verdict, the iterate \
+                         satisfies every declared row and bound (the violation is the \
+                         slack gap d(x) - s only); continuing (gh#1146)"
+                    );
+                    self.infeas_streak = 0;
+                } else if cq.borrow().infeasibility_descent_available() {
                     // Descent exists: not a stationary point of the violation,
                     // so the surrogate was wrong here. Drop the streak and keep
                     // solving.
