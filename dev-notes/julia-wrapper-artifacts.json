@@ -41,7 +41,8 @@
             "Ipopt": "1.16.0"
           }
         }
-      ]
+      ],
+      "library_sha256": "2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e"
     },
     {
       "platform": "x86_64-linux-gnu",
@@ -65,7 +66,8 @@
             "Ipopt": "1.16.0"
           }
         }
-      ]
+      ],
+      "library_sha256": "65615b2dec1065c61428e001daa90756be222740cd00f028c963455eb2e87759"
     },
     {
       "platform": "aarch64-apple-darwin",
@@ -102,7 +104,8 @@
             "Ipopt": "1.16.0"
           }
         }
-      ]
+      ],
+      "library_sha256": "347e1edb48c44f35317bc1a51e72e65009f42ad25d870d680c55c86ccf78b339"
     },
     {
       "platform": "x86_64-apple-darwin",
@@ -125,8 +128,22 @@
             "MathOptInterface": "1.54.0",
             "Ipopt": "1.16.0"
           }
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "artifact",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "environment": "macOS 26.7.2 arm64 host; Intel Julia under Rosetta; fresh depot; cargo and rustc absent from PATH",
+          "log_sha256": "1fb3e0ef9a75588afebaf40fc76b0a5b468bbc561beeb1e49be5bfba1570dee9",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          }
         }
-      ]
+      ],
+      "library_sha256": "cc2d1bf2cee09e07d974d88d43130799f9d68ecb5540c974fadf0d187489382b"
     }
   ]
 }

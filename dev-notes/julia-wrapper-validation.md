@@ -368,10 +368,11 @@ with the same staged wrapper and dependency versions. These four runs cover the
 default artifact path. Intel results follow, and complete override runs remain
 pending. Log hashes and exact environments are in the artifact inventory.
 
-Intel macOS also passes **3,662 assertions** on Julia **1.13.3** with the same
+Intel macOS also passes **3,662 assertions** on each of Julia **1.10.13** and
+**1.13.3** with the same
 staged wrapper and dependencies. This runs the x86_64 Julia executable and native
 artifact under Rosetta on macOS **26.7.2**; it is not a physical Intel-machine run.
-Its fresh depot, no-Rust check, artifact path, and log hash are recorded separately.
+Each fresh depot, no-Rust check, artifact path, and log hash is recorded separately.
 
 The first Intel Linux Julia 1.13.3 run under the dedicated VM's Rosetta translator
 failed before loading Pounce: Julia's zstd executable selected system libzstd
