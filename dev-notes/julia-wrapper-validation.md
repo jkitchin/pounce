@@ -272,6 +272,22 @@ the older MOI conformance suite has fewer tests; no wrapper tests were disabled.
 
 ## Local binary release preparation — incomplete
 
+The current runtime matrix is below. Each passed cell is the complete
+**3,662-assertion** suite at staged wrapper `add2e6e3`, with the four audited
+native `b4e5ffb6` artifacts. Exact environment settings, artifact/library hashes,
+build-audit log hashes, and test log hashes are retained in the
+[artifact inventory](julia-wrapper-artifacts.json). Intel runs use Rosetta;
+the Linux 1.13.3 setup workaround is detailed below. Override tests select a copy
+of the audited library outside its artifact directory; they test path selection,
+not compatibility with an independently built native binary.
+
+| Platform | Artifact 1.10.13 | Artifact 1.13.3 | Override 1.10.13 | Override 1.13.3 |
+|---|---|---|---|---|
+| Linux arm64 | Passed | Passed | Pending | Pending |
+| Linux x86_64 | Passed | Passed | Pending | Pending |
+| macOS arm64 | Passed | Passed | Pending | Pending |
+| macOS x86_64 | Passed | Passed | Pending | Passed |
+
 The earlier measurements deliberately retain their Julia 1.10.12/1.12.6
 versions. On 2026-11-06 the official [Julia downloads page](https://julialang.org/downloads/)
 lists stable **1.13.3** and LTS **1.10.13**; the local `release` channel still
@@ -365,8 +381,8 @@ available. On macOS, Cargo and rustc are excluded from PATH. Both resolve the
 expected artifact library and leave MOI unloaded until requested. These runs
 also pass all **3,662 assertions** on Julia **1.10.13** on each arm64 platform,
 with the same staged wrapper and dependency versions. These four runs cover the
-default artifact path. Intel results follow, and complete override runs remain
-pending. Log hashes and exact environments are in the artifact inventory.
+default artifact path. Intel results follow; the remaining override runs are
+tracked in the matrix above. Log hashes and exact environments are in the inventory.
 
 Intel macOS also passes **3,662 assertions** on each of Julia **1.10.13** and
 **1.13.3** with the same
@@ -387,6 +403,12 @@ Ipopt.jl 1.16.0. The selected library is the accepted Intel Linux artifact. Thes
 tests, nor evidence of a Pounce native failure. The artifact inventory records
 the translation mode, settings, and successful log hash; native hosted Linux CI remains
 a separate release gate.
+
+Intel Linux also passes **3,662 assertions** on Julia **1.10.13** with the same
+staged wrapper, native artifact, and package dependency versions. This run uses
+a fresh depot under Rosetta with one Julia worker and GC thread. Julia 1.10's
+decompressor needs no shim. Together these runs complete the eight-cell default
+artifact matrix; the complete override matrix remains in progress.
 
 The combined macOS arm64 artifact also passes the pinned BMOPFTools application
 checks on Julia **1.12.6**, at staged wrapper
