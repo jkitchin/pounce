@@ -5,6 +5,14 @@ The first wrapper was developed against native POUNCE commit
 The Rust solver is unchanged by the wrapper contribution.
 Ipopt.jl sources and adapted tests are pinned in `Pounce.jl/NOTICE.md`.
 
+The local refactoring and release-preparation gates are complete. The staged
+JLL candidate passes all **16** platform/version/library-selection runs, each
+with **3,662 assertions**. The pinned BMOPFTools validation, startup measurements,
+minimum-dependency tests, and native C tests are detailed below. Exact binary
+hashes and runtime environments are in the
+[artifact inventory](julia-wrapper-artifacts.json). Hosted CI, publication, and
+registration remain separately authorized release actions; none is claimed here.
+
 ## An inherited test exposed a native limited-memory limitation
 
 The Ipopt.jl test `test_manually_evaluated_primal_status` constructs:
@@ -59,8 +67,9 @@ interrupts, so the interrupt test expects an exception and no usable result.
 Native `check_derivatives_for_naninf=yes` is refused by POUNCE (gh #483);
 the wrapper instead checks callback outputs for finiteness.
 
-Binary distribution, Windows CI, and BMOPFTools integration benchmarks remain
-follow-up work. The first contribution does not claim those are validated.
+At the initial wrapper revision, binary distribution, Windows CI, and BMOPFTools
+benchmarks were follow-up work. Later application and binary results are recorded
+below; Windows remains outside the advertised binary platform set.
 
 ## Wrapper design study and model updates
 
@@ -270,7 +279,14 @@ The declared dependency floors were tested separately at wrapper
 macOS arm64 with the same native `b4e5ffb6` library. The count is lower because
 the older MOI conformance suite has fewer tests; no wrapper tests were disabled.
 
-## Local binary release preparation — incomplete
+A final macOS arm64 C-interface check at branch commit
+`75c206dd142f6d148734c1976f500a72b8f7b6ed` passes all **95 tests** with Rust
+**1.91.1**, using `cargo +1.91.1 test --locked -p pounce-cinterface`. Native
+Rust sources and Cargo files still match `b4e5ffb6`; only validation notes were
+uncommitted during this check. Test-log SHA-256:
+`a86f4c306c376c1a2fd3e452534ef0dc248c866e329295ac5ef5e6f6a93f4246`.
+
+## Local binary release preparation — local gates complete
 
 The current runtime matrix is below. Each passed cell is the complete
 **3,662-assertion** suite at staged wrapper `add2e6e3`, with the four audited
@@ -283,8 +299,8 @@ not compatibility with an independently built native binary.
 
 | Platform | Artifact 1.10.13 | Artifact 1.13.3 | Override 1.10.13 | Override 1.13.3 |
 |---|---|---|---|---|
-| Linux arm64 | Passed | Passed | Pending | Pending |
-| Linux x86_64 | Passed | Passed | Pending | Passed |
+| Linux arm64 | Passed | Passed | Passed | Passed |
+| Linux x86_64 | Passed | Passed | Passed | Passed |
 | macOS arm64 | Passed | Passed | Passed | Passed |
 | macOS x86_64 | Passed | Passed | Passed | Passed |
 
@@ -381,8 +397,8 @@ available. On macOS, Cargo and rustc are excluded from PATH. Both resolve the
 expected artifact library and leave MOI unloaded until requested. These runs
 also pass all **3,662 assertions** on Julia **1.10.13** on each arm64 platform,
 with the same staged wrapper and dependency versions. These four runs cover the
-default artifact path. Intel results follow; the remaining override runs are
-tracked in the matrix above. Log hashes and exact environments are in the inventory.
+default artifact path. Intel results follow; all override runs also pass, as
+shown in the matrix above. Log hashes and exact environments are in the inventory.
 
 Intel macOS also passes **3,662 assertions** on each of Julia **1.10.13** and
 **1.13.3** with the same
@@ -408,7 +424,17 @@ Intel Linux also passes **3,662 assertions** on Julia **1.10.13** with the same
 staged wrapper, native artifact, and package dependency versions. This run uses
 a fresh depot under Rosetta with one Julia worker and GC thread. Julia 1.10's
 decompressor needs no shim. Together these runs complete the eight-cell default
-artifact matrix; the complete override matrix remains in progress.
+artifact matrix. The complete override matrix now also passes: each of the eight
+platform/version pairs runs the full suite against an explicit copy outside the
+artifact store. Every copy's SHA-256 matches its accepted native artifact.
+
+The staged wrapper's `src`, `ext`, and `test` files remain identical to the
+current branch except for the staging tool's documented JLL import/default-path
+changes. The manual CI definition uses Julia 1.12.6 for BinaryBuilder, stages
+with the chosen test Julia, and mounts only the candidate, generated JLL, product
+archives, and validator scripts into its clean test container. It runs both
+selection modes. YAML and shell syntax checks pass; hosted execution has not
+been launched and remains a release gate after authorization to publish.
 
 The combined macOS arm64 artifact also passes the pinned BMOPFTools application
 checks on Julia **1.12.6**, at staged wrapper

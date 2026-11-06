@@ -123,7 +123,7 @@ Acceptance: reproducible scripts and residual checks, no performance claim
 based only on solver status or a different timer boundary. This is not required
 to describe the initial package as a source-checkout JuMP adapter.
 
-## 5. Binary distribution and release — in progress
+## 5. Binary distribution — local preparation completed
 
 The pinned native source passes all 95 C-interface tests in a local Linux arm64
 container; wrapper `7527a8fe` also passes all 3,653 Julia assertions there.
@@ -134,9 +134,10 @@ all four target audits. The combined binary-backed candidate passes the full
 1.10.13 and 1.13.3. Intel runs use Rosetta; exact settings and the Linux current
 Julia setup workaround are recorded in the validation notes. Its macOS arm64 artifact also
 passes all ten BMOPFTools scenarios per solver and cross-solver comparisons.
-The remaining full custom-library matrix entries are in progress.
-The working
-source-checkout installation still requires a native build. No binary has been
+The same full suite also passes through a custom-library override on every
+platform/version pair: **16 complete runs** across both selection modes.
+The working source-checkout installation still requires a native build; the
+separate staged candidate uses the audited JLL without Rust. No binary has been
 published and no registry submission or PR has been opened.
 
 A first staged JLL candidate loads from a fresh Linux artifact depot with no
@@ -150,8 +151,7 @@ All four candidate targets now pass their fatal build audits: Linux arm64 at
 architectures at `73f45e96`. The unused macOS libiconv dependency is gone. Their
 unchanged archives have been combined into one local JLL package; hashes and
 recipe commits are in the [artifact inventory](julia-wrapper-artifacts.json).
-The remaining custom-library tests are required before this
-stage is complete. The validator and manual CI now explicitly check custom
+The validator and manual CI explicitly check custom
 selection outside the JLL product path before running the complete suite.
 The inspected arm64 build baselines are glibc 2.19 on Linux
 and macOS 11.0 on Apple platforms; Intel macOS declares 10.12 at the binary level.
@@ -161,10 +161,18 @@ explicit custom-library override, and test clean-machine installation. Add
 Windows coverage once its binary path is supported. Establish native-version
 compatibility checks and release/registration documentation.
 
-Acceptance: installing the Julia package needs no Rust toolchain on supported
-platforms; artifact and custom-library paths both pass the package suite;
-hosted CI is green before release. Registry submission and publication remain
-separately authorized actions.
+Local acceptance is complete: the staged binary-backed package installs without
+Rust on all four candidate targets, and both artifact and custom-library paths
+pass the full suite on Julia 1.10.13 and 1.13.3. Core-only installation, both MOI
+load orders, Ipopt coexistence, and the pinned application checks also pass.
+The [inventory](julia-wrapper-artifacts.json) identifies every tested artifact
+and environment; Intel checks use Rosetta and do not replace native hosted CI.
+
+Remaining release actions require separate authorization: adopt the staged
+package and published JLL URLs, publish the branch/artifacts, obtain green hosted
+CI before release, and submit registration. These actions have not been taken.
+The implementation, local release preparation, compatibility evidence, and PR
+draft are ready for review. Persistent sessions remain outside this roadmap.
 
 ## Separate future feature: persistent solver sessions
 

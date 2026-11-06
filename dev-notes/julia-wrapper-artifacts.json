@@ -13,7 +13,7 @@
       "git_tree_sha1": "a796ceec2106222a27debcc6bc909869492c09b6",
       "recipe_commit": "b892f46a51ce42fd5192c6f9633b14bd24200d4c",
       "audit": "passed",
-      "runtime_tests": "in_progress",
+      "runtime_tests": "passed",
       "validated_runs": [
         {
           "julia": "1.13.3",
@@ -44,6 +44,38 @@
           },
           "container_image_digest": "sha256:46a7e2f54218c89aaadbe6cbcdbb2e68ced31f118247f6a1366d4a07a75b3ec2",
           "container_platform": "linux/arm64"
+        },
+        {
+          "julia": "1.13.3",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "39696601015b878e3e34cd20724e847d7873a27daefc9f256bd23bff62186f26",
+          "custom_library_sha256": "2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "Debian 12 arm64 container in a dedicated arm64 VM; existing artifact-test depot; no Rust/source-build library; Julia worker and GC thread counts each 1; copied audited library selected outside artifact store",
+          "container_image_digest": "sha256:e1d9cc82c37456e83d8a4cda9de17732aac7cd6a766c502bd5a94fb60a6db7c7",
+          "container_platform": "linux/arm64"
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "54a14e86239b31a79117beff8c06f91b9b9aab5deebedee11da4085d984ffe02",
+          "custom_library_sha256": "2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "Debian 12 arm64 container in a dedicated arm64 VM; existing artifact-test depot; no Rust/source-build library; Julia worker and GC thread counts each 1; copied audited library selected outside artifact store",
+          "container_image_digest": "sha256:46a7e2f54218c89aaadbe6cbcdbb2e68ced31f118247f6a1366d4a07a75b3ec2",
+          "container_platform": "linux/arm64"
         }
       ],
       "library_sha256": "2c7b6c155b0ae50611d5c43ed5676fdc59b50c5b3e836ace92199a9e54da6d9e",
@@ -56,7 +88,7 @@
       "git_tree_sha1": "81bf7ad84ff4e624bd1eb49c9386d3d00a439b8d",
       "recipe_commit": "28297b0b1aa1d743d0c07a2abaf6b7196ee4c636",
       "audit": "passed",
-      "runtime_tests": "in_progress",
+      "runtime_tests": "passed",
       "validated_runs": [
         {
           "julia": "1.13.3",
@@ -102,6 +134,22 @@
           },
           "environment": "Debian 12 x86_64 container under Rosetta in a dedicated arm64 VM; existing artifact-test depot; no Rust/source-build library; Julia worker and GC thread counts each 1; copied audited library selected outside artifact store; decompressor-only ELF-loader shim",
           "container_image_digest": "sha256:e1d9cc82c37456e83d8a4cda9de17732aac7cd6a766c502bd5a94fb60a6db7c7",
+          "container_platform": "linux/amd64"
+        },
+        {
+          "julia": "1.10.13",
+          "mode": "custom",
+          "assertions": 3662,
+          "wrapper_commit": "add2e6e3388d0ed5d27d72ceaf4265bc49f21524",
+          "log_sha256": "935e19f8003917bcba5c50cd728c65df54e85dae5cdf2079053414dcd454ca5c",
+          "custom_library_sha256": "65615b2dec1065c61428e001daa90756be222740cd00f028c963455eb2e87759",
+          "dependencies": {
+            "JuMP": "1.32.1",
+            "MathOptInterface": "1.54.0",
+            "Ipopt": "1.16.0"
+          },
+          "environment": "Debian 12 x86_64 container under Rosetta in a dedicated arm64 VM; existing artifact-test depot; no Rust/source-build library; Julia worker and GC thread counts each 1; copied audited library selected outside artifact store",
+          "container_image_digest": "sha256:46a7e2f54218c89aaadbe6cbcdbb2e68ced31f118247f6a1366d4a07a75b3ec2",
           "container_platform": "linux/amd64"
         }
       ],
