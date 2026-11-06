@@ -35,7 +35,12 @@ statistics after successful, interrupted, and failed attempts; full package
 suite on Julia 1.10 and 1.12. A version-stamped allocation probe must show that
 reading n scalar callback values no longer copies n entire primal vectors.
 
-## 2. Explicit model, cache, and result state — next
+## 2. Explicit model, cache, and result state — completed
+
+Implemented in `b8a9f4e3` and verified by 3,642 assertions on each of Julia
+1.10.12 and 1.12.6. Model data, evaluator cache, native cache, and completed
+results now have separate containers/revisions. The MOI implementation is split
+into focused state, model, evaluator, solve, results, and callback files.
 
 Replace implicit coupling between `inner === nothing`, `needs_new_inner`, and
 `inner.solved` with separate validity for the model/evaluator, native problem,
@@ -72,7 +77,7 @@ Acceptance: all supported edits have consistent result availability; failed
 setup/solves cannot expose stale results or statistics; nonstructural updates
 preserve usable derivative caches; repeated solves match fresh-model controls.
 
-## 3. Optional MOI and predictable startup — after state separation
+## 3. Optional MOI and predictable startup — in progress
 
 Make the low-level package independent of MOI through a Julia package extension.
 Keep `Pounce.Optimizer` discoverable after loading JuMP/MOI, and document the

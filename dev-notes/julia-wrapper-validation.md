@@ -126,3 +126,17 @@ POUNCE_NATIVE_REVISION=b4e5ffb641990738fd69cb53c02ae5966fd68edc \
 
 The same script can be copied to a baseline checkout for comparison. The probe's
 diagonal quadratic model is self-contained and uses no external benchmark data.
+
+## Explicit model/cache/result lifecycle
+
+At wrapper commit `b8a9f4e3`, the full suite passed 3,642 assertions on each of
+Julia 1.10.12 and 1.12.6 on macOS arm64, using the unchanged native library from
+`b4e5ffb641990738fd69cb53c02ae5966fd68edc`. The 56 new lifecycle assertions check
+derivative-cache reuse across bound/parameter updates, rebuilds after structural
+edits, result retention for settings/starts, option resets, failed-attempt
+invalidation/recovery, and rejection of callback mutations before data changes.
+Existing tests continue to compare updated nonlinear models with fresh models.
+
+Public MOI/JuMP entry points and low-level C bindings are retained. Tests that
+inspect implementation details now use the explicit native/data containers.
+These fields are not a supported user API; model/result queries use MOI.
