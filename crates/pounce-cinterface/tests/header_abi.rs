@@ -108,3 +108,45 @@ fn bool_is_the_c99_bool_the_header_promises() {
         "the Rust side must be one byte to match"
     );
 }
+
+/// `POUNCE_VERSION_*` in the header must name the library it ships with.
+///
+/// They said `0.1.0` from the first release until 0.16.0 and nothing
+/// noticed: a C caller gating on `POUNCE_VERSION_MINOR` was told it had a
+/// library fifteen minors older than the one `GetIpoptVersion` reports.
+/// `scripts/check-release-consistency.sh` repeats this check so a version
+/// bump that forgets the header fails before the tag, not only here.
+#[test]
+fn header_version_defines_match_the_crate() {
+    let header = include_str!("../include/pounce.h");
+    let define = |name: &str| -> String {
+        let prefix = format!("#define {name} ");
+        let mut hits = header
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(prefix.as_str()))
+            .map(|v| v.trim().to_string());
+        let v = hits
+            .next()
+            .unwrap_or_else(|| panic!("pounce.h has no `#define {name}`"));
+        assert!(hits.next().is_none(), "pounce.h defines `{name}` twice");
+        v
+    };
+    let crate_version = env!("CARGO_PKG_VERSION");
+    let mut parts = crate_version.split(['.', '-', '+']);
+    for (name, want) in [
+        ("POUNCE_VERSION_MAJOR", parts.next()),
+        ("POUNCE_VERSION_MINOR", parts.next()),
+        ("POUNCE_VERSION_PATCH", parts.next()),
+    ] {
+        assert_eq!(
+            Some(define(name).as_str()),
+            want,
+            "pounce.h `{name}` disagrees with the crate version {crate_version}"
+        );
+    }
+    assert_eq!(
+        define("POUNCE_VERSION"),
+        format!("\"{crate_version}\""),
+        "pounce.h `POUNCE_VERSION` disagrees with the crate version"
+    );
+}

@@ -2617,6 +2617,7 @@ mod tests {
 
     #[test]
     fn create_returns_null_on_missing_required_callbacks() {
+        // error-path: CreateIpoptProblem
         let xl = [-1.0; 4];
         let xu = [1.0; 4];
         let p = unsafe {
@@ -2717,6 +2718,9 @@ mod tests {
 
     #[test]
     fn add_options_on_null_problem_returns_false() {
+        // error-path: AddIpoptIntOption
+        // error-path: AddIpoptNumOption
+        // error-path: AddIpoptStrOption
         let key = CString::new("print_level").unwrap();
         let v = CString::new("yes").unwrap();
         unsafe {
@@ -2764,6 +2768,7 @@ mod tests {
 
     #[test]
     fn solve_returns_internal_error_on_null_problem() {
+        // error-path: IpoptSolve
         let rc = unsafe {
             IpoptSolve(
                 std::ptr::null_mut(),
@@ -2781,6 +2786,7 @@ mod tests {
 
     #[test]
     fn free_null_is_safe() {
+        // error-path: FreeIpoptProblem
         unsafe { FreeIpoptProblem(std::ptr::null_mut()) };
     }
 
@@ -3019,6 +3025,7 @@ mod tests {
 
     #[test]
     fn get_version_tolerates_null_buffers() {
+        // error-path: GetIpoptVersion
         // None of these should crash.
         unsafe {
             GetIpoptVersion(
@@ -3045,6 +3052,7 @@ mod tests {
 
     #[test]
     fn set_scaling_on_null_problem_returns_false() {
+        // error-path: SetIpoptProblemScaling
         let ok = unsafe {
             SetIpoptProblemScaling(
                 std::ptr::null_mut(),
@@ -3080,6 +3088,7 @@ mod tests {
 
     #[test]
     fn open_output_file_with_null_inputs_returns_false() {
+        // error-path: OpenIpoptOutputFile
         let key = CString::new("nope").unwrap();
         unsafe {
             assert_eq!(
@@ -3096,6 +3105,7 @@ mod tests {
 
     #[test]
     fn get_current_iterate_returns_false_outside_callback() {
+        // error-path: GetIpoptCurrentIterate
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentIterate(
@@ -3116,6 +3126,7 @@ mod tests {
 
     #[test]
     fn get_current_violations_returns_false_outside_callback() {
+        // error-path: GetIpoptCurrentViolations
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentViolations(
@@ -3138,6 +3149,11 @@ mod tests {
 
     #[test]
     fn post_solve_stats_zero_before_solve() {
+        // error-path: GetIpoptIterCount
+        // error-path: GetIpoptSolveTime
+        // error-path: GetIpoptPrimalInf
+        // error-path: GetIpoptDualInf
+        // error-path: GetIpoptComplInf
         let p = create_unconstrained();
         unsafe {
             assert_eq!(GetIpoptIterCount(p), 0);
@@ -3205,6 +3221,7 @@ mod tests {
     /// `linear_solver` is really asking.
     #[test]
     fn linear_solver_stats_populated_after_solve() {
+        // error-path: GetPounceLinearSolverStats
         let xl = [-1.0e20];
         let xu = [1.0e20];
         let p = unsafe {
@@ -3265,6 +3282,7 @@ mod tests {
 
     #[test]
     fn option_type_reports_the_setter_a_keyword_expects() {
+        // error-path: GetPounceOptionType
         let p = create_unconstrained();
         let ty = |s: &str| {
             let c = std::ffi::CString::new(s).unwrap();
@@ -3817,6 +3835,7 @@ mod tests {
 
     #[test]
     fn solver_create_null_inputs_return_null() {
+        // error-path: IpoptCreateSolver
         // NULL pointer-to-handle.
         let s = unsafe { IpoptCreateSolver(std::ptr::null_mut()) };
         assert!(s.is_null());
@@ -3828,6 +3847,7 @@ mod tests {
 
     #[test]
     fn solver_free_null_is_safe() {
+        // error-path: IpoptFreeSolver
         unsafe { IpoptFreeSolver(std::ptr::null_mut()) };
     }
 
@@ -3890,6 +3910,7 @@ mod tests {
 
     #[test]
     fn solver_kkt_dim_minus_one_before_solve() {
+        // error-path: IpoptSolverGetKktDim
         let mut p = create_unconstrained();
         let s = unsafe { IpoptCreateSolver(&mut p) };
         assert_eq!(unsafe { IpoptSolverGetKktDim(s) }, -1);
@@ -3902,6 +3923,7 @@ mod tests {
 
     #[test]
     fn c_get_working_set_returns_false_before_any_solve() {
+        // error-path: IpoptGetWorkingSet
         let p = create_unconstrained();
         let mut bound_buf = [0; 4];
         let rc = unsafe { IpoptGetWorkingSet(p, bound_buf.as_mut_ptr(), std::ptr::null_mut()) };
@@ -3919,6 +3941,7 @@ mod tests {
 
     #[test]
     fn c_set_warm_start_with_bad_status_code_returns_false() {
+        // error-path: IpoptSetWarmStartWorkingSet
         let p = create_unconstrained();
         // Length n = 4; '7' is out of range (valid: 0..=3).
         let bogus = [

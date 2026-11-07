@@ -25,36 +25,72 @@ in the workspace root drops `libpounce_cinterface.{dylib,so}` into
 
 ## Surface
 
+Every exported symbol is listed here and in the book's
+[C API page](../../docs/src/c-api.md); `include/pounce.h` documents each
+prototype. `tests/export_surface.rs` fails if an export is missing from the
+header, either doc, or the tests, or if the header and the Rust signature
+disagree.
+
+Upstream Ipopt 3.14 entry points (same names, arguments and return codes):
+
 - `CreateIpoptProblem(n, x_L, x_U, m, g_L, g_U, nele_jac, nele_hess,
-  index_style, eval_f, eval_grad_f, eval_g, eval_jac_g, eval_h)` →
-  `IpoptProblem` handle.
+  index_style, eval_f, eval_g, eval_grad_f, eval_jac_g, eval_h)` →
+  `IpoptProblem` handle; `FreeIpoptProblem(problem)`.
+- `AddIpoptStrOption` / `AddIpoptNumOption` / `AddIpoptIntOption` — forward
+  to the application's `OptionsList`.
+- `OpenIpoptOutputFile`, `SetIpoptProblemScaling`, `SetIntermediateCallback`.
 - `IpoptSolve(problem, x, g, obj_val, mult_g, mult_x_L, mult_x_U,
   user_data)` → `ApplicationReturnStatus`.
-- `FreeIpoptProblem(problem)`.
-- `AddIpoptStrOption` / `AddIpoptIntOption` / `AddIpoptNumOption` —
-  forward to the application's `OptionsList`.
-- `SetIntermediateCallback`.
-- Post-solve accessors: `GetIpoptIterCount`, `GetIpoptSolveTime`,
-  termination-detail getters.
-- `IpoptWriteSolveReport` — emits the structured
+- In-callback inspectors: `GetIpoptCurrentIterate`,
+  `GetIpoptCurrentViolations`.
+- Post-solve: `GetIpoptIterCount`, `GetIpoptSolveTime`, `GetIpoptPrimalInf`,
+  `GetIpoptDualInf`, `GetIpoptComplInf`; `GetIpoptVersion`.
+
+POUNCE extensions:
+
+- Post-solve diagnostics: `GetPounceRestorationStats`,
+  `GetPounceFdHessianStats`, `GetPounceLinearSolverStats` (fills the
+  `#[repr(C)]` `PounceLinearSolverStats`).
+- `GetPounceOptionType` — which `AddIpopt*Option` setter a keyword expects
+  (works with a NULL handle).
+- `IpoptSetNonlinearVariables` / `IpoptClearNonlinearVariables` — restrict
+  the limited-memory Hessian to the variables that enter nonlinearly.
+- `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most
   recent solve. Schema-compatible with the CLI's `--json-output`.
-- Working-set warm start: `IpoptGetWorkingSet`,
+- Working-set warm start (active-set SQP): `IpoptGetWorkingSet`,
   `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
-  `IpoptSolveWarmStart`.
+  `IpoptSolveWarmStart`. Example: `examples/sqp_warm_start.c`.
 - Factor-once / solve-many session: `IpoptCreateSolver`,
   `IpoptSolverSolve`, `IpoptSolverGetKktDim`, `IpoptSolverKktSolve`,
-  `IpoptSolverParametricStep`, `IpoptSolverReducedHessian`,
-  `IpoptFreeSolver`. Reuses the converged KKT factor across
-  parametric sweeps, reduced-Hessian queries, and raw back-solves.
-  The classic `IpoptSolve` API is unchanged and unaffected. See
+  `IpoptSolverKktSolveScaled`, `IpoptSolverParametricStep`,
+  `IpoptSolverReducedHessian`, `IpoptFreeSolver`. Reuses the converged KKT
+  factor across parametric sweeps, reduced-Hessian queries, and raw
+  back-solves. The classic `IpoptSolve` API is unchanged and unaffected. See
   [`docs/src/sessions.md`](../../docs/src/sessions.md) for the
   walkthrough.
 
 All entry points are `extern "C"` and `#[no_mangle]`. Pointers are raw
 and the caller owns lifetimes; the `IpoptProblem` handle is opaque
 (`void*` from C).
+
+### Fortran shim
+
+`src/fortran.rs` ports `IpStdFInterface.c`: the eight gfortran-mangled
+symbols `ipcreate_`, `ipfree_`, `ipsolve_`, `ipaddstroption_`,
+`ipaddnumoption_`, `ipaddintoption_`, `ipsetcallback_` and
+`ipunsetcallback_`. Arguments are by reference, strings are
+`(buffer, length)` pairs with the lengths trailing, and the option setters
+return 0 (`OKRetVal`) or 1. POUNCE's C extensions are not mirrored here.
+
+### Versioning
+
+`GetIpoptVersion` reports the crate version, and the header's
+`POUNCE_VERSION_*` defines must equal it (`tests/header_abi.rs` and
+`scripts/check-release-consistency.sh` both check). The ABI changes by
+addition only: no existing prototype, struct layout or `#define` value
+changes.
 
 ## Status
 

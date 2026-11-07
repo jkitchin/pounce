@@ -38,6 +38,12 @@
 #      perfectly good older wheel. Stale version references in the docs are
 #      reported too, but only as advisory.
 #
+#   6. THE C HEADER NAMES THIS VERSION. crates/pounce-cinterface/include/
+#      pounce.h carries POUNCE_VERSION_{MAJOR,MINOR,PATCH} and POUNCE_VERSION.
+#      They said 0.1.0 through 0.16.0 while GetIpoptVersion reported the real
+#      version; a C caller gating on the defines was misinformed. The crate's
+#      header_abi.rs test checks the same thing.
+#
 # `cargo metadata` is the single source of truth: it is the real workspace and
 # cannot drift. The explicit list in publish-crates.sh stays because it makes
 # the publish set reviewable in a PR diff — this guard is what keeps it honest.
@@ -180,6 +186,23 @@ if [[ "$docker_ver" == "$cargo_ver" ]]; then
 else
   note "DRIFT — the release image would install ${docker_ver:-?}, not ${cargo_ver}."
   note "Bump ARG POUNCE_VERSION in docker/Dockerfile.release."
+  fail=1
+fi
+echo
+
+# --- 6. The C header's version defines name the version we are releasing ---
+echo "== pounce.h version defines =="
+hdr=crates/pounce-cinterface/include/pounce.h
+hdr_def() { grep -m1 -E "^#define $1 " "$hdr" | sed -E "s/^#define $1 +//; s/[[:space:]]*$//"; }
+hdr_ver="$(hdr_def POUNCE_VERSION_MAJOR).$(hdr_def POUNCE_VERSION_MINOR).$(hdr_def POUNCE_VERSION_PATCH)"
+hdr_str="$(hdr_def POUNCE_VERSION | tr -d '"')"
+note "pounce.h POUNCE_VERSION_*        : ${hdr_ver}"
+note "pounce.h POUNCE_VERSION          : ${hdr_str:-<not found>}"
+if [[ "$hdr_ver" == "$cargo_ver" && "$hdr_str" == "$cargo_ver" ]]; then
+  note "OK — matches the workspace version"
+else
+  note "DRIFT — the C header would announce ${hdr_str:-?} (${hdr_ver}), not ${cargo_ver}."
+  note "Bump the POUNCE_VERSION* defines in $hdr."
   fail=1
 fi
 echo

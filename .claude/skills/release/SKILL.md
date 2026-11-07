@@ -14,7 +14,9 @@ manual; it is now automated by `release-crates.yml` (tag-triggered).
 A pre-tag guard, `scripts/check-release-consistency.sh` (run in CI on every
 PR), fails the build unless all three versions below agree **and** the
 crates.io publish list matches the workspace's publishable crates in
-topological order. Run it before tagging.
+topological order. Run it before tagging. It also checks that the C header's
+`POUNCE_VERSION*` defines (`crates/pounce-cinterface/include/pounce.h`) equal
+the workspace version: bump them with `Cargo.toml`.
 
 1. **PyPI `pounce-solver`** — `.github/workflows/release-pounce.yml`, triggered
    by pushing a `python-vX.Y.Z` tag. Builds wheels (incl. Windows) + sdist,

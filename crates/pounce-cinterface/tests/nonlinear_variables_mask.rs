@@ -293,6 +293,7 @@ fn declaring_every_variable_is_the_same_as_declaring_nothing() {
 
 #[test]
 fn bad_declarations_are_refused_and_leave_the_problem_untouched() {
+    // error-path: IpoptSetNonlinearVariables
     unsafe {
         let x_l = [-5.0 as Number; N];
         let x_u = [5.0 as Number; N];

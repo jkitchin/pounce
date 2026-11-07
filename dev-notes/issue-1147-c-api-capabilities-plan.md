@@ -19,7 +19,7 @@ that ticks it.
 ### Stage 1 — declared complementarity through the C API
 
 - [x] **S1-I1** Shared pair classifier in `pounce-nlp` (`validate_pairs`), `MpccTnlp::with_lift` uses it; every shape branch has a unit test; cc: sweep lines diff empty.
-- [ ] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
+- [x] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
 - [ ] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
 - [ ] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
 - [ ] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
@@ -1232,6 +1232,77 @@ Gate (all on the ticking commit's tree):
 Noticed: `cargo clippy -p pounce-nlp --all-targets -- -D warnings` fails on
 five pre-existing lints in `pounce-common` (collapsible `if`, `expect`) with
 this toolchain; nothing in `mpcc.rs` warns. Not touched (out of scope).
+
+### S1-I2 — export-surface guard (commit that ticks S1-I2)
+
+What moved:
+- `crates/pounce-cinterface/tests/export_surface.rs` (new): scans
+  `src/lib.rs` + `src/solver.rs` for `#[unsafe(no_mangle)] pub unsafe extern
+  "C" fn` (a `no_mangle` not followed within three lines by one is an error)
+  and `src/fortran.rs` separately; parses top-level prototypes out of
+  `pounce.h` (comments, preprocessor lines and the `#ifdef __cplusplus`
+  blocks stripped; `typedef`/`enum {}`/struct statements skipped). Asserts
+  equal name sets, equal arity, positional width-class agreement. Function
+  pointers carry their typedef name (`fnptr(Eval_G_CB)`), so swapped
+  callbacks of the same width are caught too — stricter than the plan's bare
+  `fnptr`. Also: every name in backticks in README and `docs/src/c-api.md`,
+  Fortran names in README's Fortran section; every name called as `NAME(`;
+  every name has a `// error-path: NAME` marker; markers naming no export
+  fail; the Fortran shim is exactly the eight upstream symbols. Nine unit
+  tests feed the comparison broken inputs (missing prototype, phantom
+  prototype, arity, width on a parameter and on a return, swapped callbacks,
+  unparseable export, doc/marker scanner branches).
+- **Deviation from the plan text, deliberate:** items 5 and 6 (called /
+  error-path marker) also look in the `#[cfg(test)]` part of `src/*.rs`
+  (everything after its first `#[cfg(test)]`), not only `tests/` and
+  `examples/`. Most existing error-path tests (NULL handle, no prior solve,
+  bad status code) are unit tests in `src/lib.rs`/`src/solver.rs`; the
+  markers were added there (comment lines only, 23) rather than duplicating
+  those tests.
+- `GRANDFATHERED_NO_ERROR_PATH` is **empty**. Exports with no test or no
+  failure-branch test got one in `tests/entry_point_error_paths.rs` (new, 10
+  tests): `GetPounceRestorationStats`, `GetPounceFdHessianStats` (did-not-run
+  vs FD-ran branches), `IpoptSolverKktSolveScaled` (agrees with
+  `IpoptSolverKktSolve` on an unscaled model), all eight Fortran symbols
+  (NULL handles; options set/refused; callback fires, then not after unset),
+  plus NULL-handle branches of `SetIntermediateCallback`,
+  `IpoptClear{NonlinearVariables,WarmStartWorkingSet}`,
+  `IpoptEnableIterHistory`, `IpoptSolveWarmStart`, `IpoptWriteSolveReport`
+  (NULL handle / no solve / NULL path / bad detail / success),
+  `IpoptSolverSolve`, `IpoptSolverParametricStep`,
+  `IpoptSolverReducedHessian`. One marker added to
+  `tests/nonlinear_variables_mask.rs`.
+- `pounce.h`: `POUNCE_VERSION_MINOR 1 → 16`, `POUNCE_VERSION "0.1.0" →
+  "0.16.0"` (nothing else). `header_abi.rs` gains
+  `header_version_defines_match_the_crate` (checked to fail with the old
+  value); `scripts/check-release-consistency.sh` gains check 6 (checked to
+  exit 1 with `MINOR 1`). The release skill now says to bump the defines.
+- `docs/src/c-api.md` (new, all nine sections), wired into `SUMMARY.md`
+  after Julia. Crate `README.md` Surface section completed (was missing 16
+  C symbols and all Fortran ones), plus Fortran and Versioning subsections.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface --test export_surface --test header_abi`
+  — `ok. 13 passed` / `ok. 3 passed`.
+- `cargo test -p pounce-cinterface` — all green (lib 52, the new
+  `entry_point_error_paths` 10, every other binary ok).
+- `scripts/check-release-consistency.sh` — `check-release-consistency: OK`,
+  exit 0.
+- `make book` (mdbook 0.5.2, the version `docs.yml` pins, via `cargo
+  install`) — builds, no warnings; `docs/book/c-api.html` written.
+- `make ask-check` — `top-1 17/20`, `top-5 20/20`, OK; identical to the
+  tree without `c-api.md`.
+- `cargo fmt --all -- --check` clean; `cargo clippy -p pounce-cinterface
+  --no-deps --all-targets -- -D clippy::correctness -D clippy::suspicious`
+  (the CI gate) clean. Under plain `-D warnings` the new tests carry only the
+  workspace's restriction-group `unwrap_used`/`expect_used` warns, which every
+  existing test in the crate also carries; `src/` has two pre-existing
+  style lints (`fortran.rs:493` unnecessary cast, `lib.rs:3711`
+  useless `vec!`), not touched.
+
+Noticed: the plan's loop rule 8 forbids changing an existing `#define`
+value; S1-I2 itself orders the `POUNCE_VERSION*` fix, which is done and
+flagged here for the ABI review. No C code in the repo reads those defines.
 
 ### Facts recorded while planning (2ac0ad9)
 
