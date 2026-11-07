@@ -259,6 +259,15 @@ fn compare_reports(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> PyResu
 
 #[pymodule]
 fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register(m)
+}
+
+/// Add the studio bindings to `m`. Shared by this crate's own `_native`
+/// module and by `pounce-py`, which links this crate and mounts the same
+/// bindings as `pounce._pounce.studio` — that is how `pip install
+/// pounce-solver[mcp]` ships the MCP server without a second extension
+/// module to build.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReport>()?;
     m.add_class::<PyIterDump>()?;
     m.add_function(wrap_pyfunction!(compare_reports, m)?)?;

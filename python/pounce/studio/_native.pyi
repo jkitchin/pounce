@@ -1,4 +1,4 @@
-"""Type stub for the pounce_studio_mcp._native PyO3 extension.
+"""Type stub for `pounce._pounce.studio`, the studio bindings mounted in the `_pounce` extension.
 
 Mirrors the surface area of `crates/pounce-studio-pyo3/src/lib.rs`.
 All analysis methods return JSON-encoded strings; callers typically go

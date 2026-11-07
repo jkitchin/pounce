@@ -77,14 +77,20 @@ _BUILTINS: dict[str, dict[str, Any]] = {
 def _find_pounce_bin() -> str:
     """Locate the pounce CLI binary.
 
-    Search order: POUNCE_BIN env var → `target/release/pounce` walking
-    up from this file → `pounce` on $PATH.
+    Search order: POUNCE_BIN env var → the binary bundled in this
+    pounce-solver wheel (`pounce/bin/pounce`), so the server runs the same
+    POUNCE version as its own analysis code → `target/release/pounce`
+    walking up from this file (a source checkout) → `pounce` on $PATH.
     """
     env = os.environ.get("POUNCE_BIN")
     if env:
         if not Path(env).exists():
             raise FileNotFoundError(f"POUNCE_BIN={env} does not exist")
         return env
+    exe = "pounce.exe" if os.name == "nt" else "pounce"
+    bundled = Path(__file__).resolve().parent.parent / "bin" / exe
+    if bundled.is_file():
+        return str(bundled)
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "target" / "release" / "pounce"
         if candidate.exists():
@@ -1795,11 +1801,22 @@ _GAMS_SUITES = (
 
 
 def _find_repo_root() -> Path:
-    """Walk up to find the pounce repo root (contains gams/ and Cargo.toml)."""
-    for parent in Path(__file__).resolve().parents:
+    """Locate a pounce source checkout (contains gams/ and Cargo.toml).
+
+    The GAMS example suites are not shipped in the pounce-solver wheel, so
+    an installed server finds them only through `POUNCE_REPO`; a server run
+    from a checkout finds them by walking up from this file.
+    """
+    env = os.environ.get("POUNCE_REPO")
+    candidates = [Path(env)] if env else []
+    candidates += list(Path(__file__).resolve().parents)
+    for parent in candidates:
         if (parent / "Cargo.toml").exists() and (parent / "gams").is_dir():
             return parent
-    raise FileNotFoundError("could not locate pounce repo root from MCP server")
+    raise FileNotFoundError(
+        "the GAMS example suites need a pounce source checkout; they are not "
+        "in the pounce-solver wheel. Set POUNCE_REPO=/path/to/pounce."
+    )
 
 
 def _find_gams_bin() -> str:
@@ -2321,7 +2338,7 @@ def run_gams_problem(
 
 
 def main() -> None:
-    """Entry point used by `python -m pounce_studio_mcp`."""
+    """Entry point used by `python -m pounce.studio`."""
     mcp.run()
 
 

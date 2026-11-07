@@ -276,7 +276,7 @@ jobs:
       - name: Install wheel + test deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax jsonschema
+          python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax jsonschema "mcp>=1.0,<2"
           # `gamsapi[core]` is GAMS's own PyPI package: pure Python, no GAMS
           # install and no license needed. It is here so the GAMS link's
           # `gmoModelStat_*` / `gmoSolveStat_*` constants can be checked

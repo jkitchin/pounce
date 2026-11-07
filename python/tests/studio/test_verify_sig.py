@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from pounce_studio_mcp.verify_sig import check_signature, signing_preimage
+from pounce.studio.verify_sig import check_signature, signing_preimage
 
 
 def _sample_receipt() -> dict:

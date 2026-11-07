@@ -134,5 +134,12 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // import this instead of each hardcoding `1e-6`, so the producer's
     // `info["active_tol"]` and every consumer's threshold can never drift.
     m.add("DEFAULT_ACTIVE_TOL", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
+    // Solve-report analysis for the MCP server in `pounce.studio` (the
+    // `[mcp]` extra). Reached as the attribute `pounce._pounce.studio`; a
+    // PyO3 submodule is not registered in `sys.modules`, so it is not
+    // importable as `pounce._pounce.studio` by `import` statement.
+    let studio = PyModule::new_bound(m.py(), "studio")?;
+    pounce_studio_pyo3::register(&studio)?;
+    m.add_submodule(&studio)?;
     Ok(())
 }

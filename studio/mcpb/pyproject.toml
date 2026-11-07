@@ -1,0 +1,13 @@
+# Dependencies for the POUNCE Studio .mcpb bundle (server.type "uv"): the
+# host runs `uv run src/server.py` here, which installs these. The version
+# pin is stamped from python/pyproject.toml by scripts/build-mcpb.sh, so the
+# bundle and the solver it runs always come from the same release.
+[project]
+name = "pounce-studio-mcpb"
+version = "0.16.0"
+description = "Claude Desktop extension bundle for the POUNCE solver's MCP server"
+requires-python = ">=3.10"
+dependencies = ["pounce-solver[mcp]==0.16.0"]
+
+[tool.uv]
+package = false

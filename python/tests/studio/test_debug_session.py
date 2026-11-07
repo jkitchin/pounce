@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pounce_studio_mcp.server import (
+from pounce.studio.server import (
     debug_close,
     debug_command,
     debug_sessions,
@@ -19,7 +19,7 @@ from pounce_studio_mcp.server import (
 
 
 def _pounce_available() -> bool:
-    from pounce_studio_mcp.server import _find_pounce_bin
+    from pounce.studio.server import _find_pounce_bin
     try:
         _find_pounce_bin()
         return True
