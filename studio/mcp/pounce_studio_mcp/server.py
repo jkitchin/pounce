@@ -1356,7 +1356,7 @@ class _DebugSession:
                 return events, "terminated"
             if e == "pause":
                 self.last_pause = ev
-                if ev.get("checkpoint") == "terminated":
+                if _is_final_stop(ev):
                     # The terminal checkpoint is a real stop: the solve is
                     # done (status is non-null) but parked here so the
                     # final/failing iterate stays inspectable. The summary
@@ -1374,6 +1374,16 @@ class _DebugSession:
                     self._send({"cmd": "quit"})
                 except OSError:
                     pass
+            # Close stdin before waiting, not after: in JSON mode EOF on
+            # stdin also stops the solve, so this ends the child even if
+            # `quit` lands somewhere it is not read (a pounce older than the
+            # quit latch parked a follow-on solve on stdin, so every close
+            # used to wait out the 5 s below and end in SIGKILL).
+            try:
+                self.proc.stdin.close()  # type: ignore[union-attr]
+            except OSError:
+                pass
+            if self.alive():
                 try:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -1382,7 +1392,7 @@ class _DebugSession:
                         self.proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
-            for stream in (self.proc.stdin, self.proc.stdout):
+            for stream in (self.proc.stdout,):
                 try:
                     stream.close()  # type: ignore[union-attr]
                 except OSError:
@@ -1392,6 +1402,23 @@ class _DebugSession:
             except OSError:
                 pass
             return self.proc.poll()
+
+
+def _is_final_stop(ev: dict[str, Any]) -> bool:
+    """True for the pause at the *real* end of the solve.
+
+    The `terminated` checkpoint also fires when restoration's inner solve
+    returns (gh#987); those pauses carry `final: false` and the solve goes on
+    after them. Treating them as the end reported a restoration sub-solve's
+    status (`LocalInfeasibility`, even `Success`) as the solve's result and
+    left the client believing it had finished. Older pounce builds without
+    the `final` field are judged by `in_restoration`.
+    """
+    if ev.get("checkpoint") != "terminated":
+        return False
+    if "final" in ev:
+        return bool(ev["final"])
+    return not ev.get("in_restoration", False)
 
 
 def _spawn_session(argv: list[str], label: str) -> _DebugSession:

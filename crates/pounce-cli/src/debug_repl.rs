@@ -1014,6 +1014,15 @@ pub struct SolverDebugger {
     in_restoration: bool,
     /// Once true, never pause again (`detach`).
     detached: bool,
+    /// Set by `quit` (and by a closed stdin in JSON mode). Final: every
+    /// later checkpoint returns `Stop` at once, without pausing or reading
+    /// stdin. The driver can launch further solves after the one the user
+    /// quit — the `mu_strategy_fallback` re-solve, the restoration and
+    /// second-opinion ladders — and each re-enters this hook. Without the
+    /// latch those solves paused again at their terminal checkpoint and sat
+    /// waiting on a stdin the client had stopped writing to, so `quit`
+    /// never ended the process.
+    quit: bool,
     /// Whether the JSON `hello` handshake has been emitted (once per
     /// session, at the first checkpoint).
     hello_sent: bool,
@@ -1124,6 +1133,7 @@ impl SolverDebugger {
             mu_stall: 0,
             in_restoration: false,
             detached: false,
+            quit: false,
             hello_sent: false,
             pause_iters: true,
             pause_terminal: true,
@@ -1481,7 +1491,10 @@ impl SolverDebugger {
             "pause" => CmdOut::ok(vec!["already paused".into()]),
             // Easter egg — not in COMMANDS / help / Tab, so it stays hidden.
             "coffee" | "brew" | "espresso" => self.cmd_coffee(),
-            "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
+            "quit" | "q" | "exit" => {
+                self.quit = true;
+                CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop)
+            }
             other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
         }
     }
@@ -4081,6 +4094,11 @@ impl DebugHook for SolverDebugger {
     }
 
     fn at_checkpoint(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
+        // `quit` is final: no further pause, prompt or stdin read, for this
+        // solve or any the driver launches after it.
+        if self.quit {
+            return DebugAction::Stop;
+        }
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
         if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
@@ -4248,7 +4266,10 @@ impl SolverDebugger {
                             self.detached = true;
                             DebugAction::Resume
                         }
-                        DebugMode::Json => DebugAction::Stop,
+                        DebugMode::Json => {
+                            self.quit = true;
+                            DebugAction::Stop
+                        }
                     };
                 }
             };

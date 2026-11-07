@@ -204,3 +204,64 @@ def test_close_reports_final_status(session):
     # idempotent: second close is a clean error
     with pytest.raises(ValueError):
         debug_close(sid)
+
+
+# ---- restoration-inner terminal pauses / close latency ---------------
+
+# Waechter-Biegler (2000): min x1 s.t. x1^2 - x2 - 1 = 0, x1 - x3 - 0.5 = 0,
+# x2, x3 >= 0, from (-2, 1, 1). Enters restoration and ends locally
+# infeasible, so its run has `terminated` pauses from restoration's inner
+# solve (final: false) before the real one.
+_WB_NL = (
+    "g3 1 1 0\n 3 2 1 0 2\n 1 0\n 0 0\n 1 0 0\n 0 0 0 1 0\n 0 0 0 0 0\n"
+    " 4 1\n 0 0\n 0 0 0 0 0\nC0\no5\nv0\nn2.0\nC1\nn0\nO0 0\nn0\nr\n"
+    "4 1.0\n4 0.5\nb\n3\n2 0.0\n2 0.0\nx3\n0 -2.0\n1 1.0\n2 1.0\nk2\n2\n3\n"
+    "J0 2\n0 0.0\n1 -1.0\nJ1 2\n0 1.0\n2 -1.0\nG0 1\n0 1.0\n"
+)
+
+
+@pytest.fixture
+def wb_nl(tmp_path):
+    p = tmp_path / "wb.nl"
+    p.write_text(_WB_NL)
+    return str(p)
+
+
+def test_restoration_terminal_pause_is_not_the_end(wb_nl):
+    """`continue` must not report `finished` at a restoration sub-solve's
+    terminal checkpoint: that read the inner solve's status as the result."""
+    st = debug_start(nl_file=wb_nl)
+    sid = st["session_id"]
+    try:
+        stops = []
+        for _ in range(20):
+            out = debug_command(sid, "continue", timeout_seconds=60)
+            stops.append((out["outcome"], (out.get("state") or {}).get("in_restoration")))
+            if out["outcome"] in ("finished", "terminated"):
+                break
+        assert stops[-1][0] == "finished", stops
+        # every earlier stop was an inner restoration termination
+        assert all(o == "paused" and resto for o, resto in stops[:-1]), stops
+        assert len(stops) >= 2, "fixture no longer reaches restoration"
+        final = debug_state(sid)["state"]
+        assert final["final"] is True and final["in_restoration"] is False
+        assert final["status"] == "LocalInfeasibility"
+    finally:
+        debug_close(sid)
+
+
+def test_close_after_finish_exits_promptly(wb_nl):
+    """Closing a session parked at the real end used to wait out the 5 s
+    grace and SIGKILL the child (`quit` was ignored and follow-on solves
+    re-parked on stdin)."""
+    import time
+
+    st = debug_start(nl_file=wb_nl)
+    sid = st["session_id"]
+    for _ in range(20):
+        if debug_command(sid, "continue", timeout_seconds=60)["outcome"] != "paused":
+            break
+    t0 = time.monotonic()
+    out = debug_close(sid)
+    assert time.monotonic() - t0 < 3.0
+    assert out["exit_code"] is not None and out["exit_code"] >= 0, out
