@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 
-use super::nl_tape::{Tape, TapeOp};
+use super::nl_tape::{Tape, TapeOp, div_u_ln10, log_d2, log10_d2, sqrt_d2};
 
 /// One primitive operation in the compiled Hessian program.
 /// `dst`/`a`/`b`/etc. are `u32` offsets into the caller's scratch
@@ -928,10 +928,13 @@ impl HessianProgram {
                     va,
                     dot_b,
                 } => {
+                    // Kahan form, as `Tape`'s Div tangent: `(ȧ - q·ḃ)/b` with
+                    // `q = a/b`, never `(ȧ·b - a·ḃ)/b²`, whose `b*b` overflows
+                    // for |b| > 1.3e154 and underflows below 1.5e-154.
                     let v_b = scratch[vb as usize];
-                    scratch[dst as usize] = (scratch[dot_a as usize] * v_b
-                        - scratch[va as usize] * scratch[dot_b as usize])
-                        / (v_b * v_b);
+                    let q = scratch[va as usize] / v_b;
+                    scratch[dst as usize] =
+                        (scratch[dot_a as usize] - q * scratch[dot_b as usize]) / v_b;
                 }
                 HOp::DotSqrt { dst, dot_a, vd } => {
                     let svd = scratch[vd as usize];
@@ -949,7 +952,7 @@ impl HessianProgram {
                 }
                 HOp::DotLog10 { dst, dot_a, va } => {
                     scratch[dst as usize] =
-                        scratch[dot_a as usize] / (scratch[va as usize] * std::f64::consts::LN_10);
+                        div_u_ln10(scratch[dot_a as usize], scratch[va as usize]);
                 }
                 HOp::DotSin { dst, dot_a, va } => {
                     scratch[dst as usize] = scratch[dot_a as usize] * scratch[va as usize].cos();
@@ -1058,15 +1061,21 @@ impl HessianProgram {
                     let wd_v = scratch[wd as usize];
                     let va_v = scratch[va as usize];
                     let vb_v = scratch[vb as usize];
-                    let vb2 = vb_v * vb_v;
-                    let vb3 = vb2 * vb_v;
+                    // Kahan form, as `Tape::hessian_accumulate`'s Div arm: every
+                    // 1/b² regrouped as (·/b)/b, so nothing squares or cubes
+                    // `b` (vb2/vb3 overflowed for |b| > 1.3e154 and zeroed
+                    // representable second-order terms). `q`/`qd` are the
+                    // node's value and tangent, recomputed exactly as the
+                    // forward and tangent sweeps produce them.
                     let da_v = scratch[dot_a as usize];
                     let db_v = scratch[dot_b as usize];
+                    let q = va_v / vb_v;
+                    let qd = (da_v - q * db_v) / vb_v;
                     scratch[adj_a as usize] += w_v / vb_v;
-                    scratch[adj_dot_a as usize] += wd_v / vb_v + w_v * (-db_v / vb2);
-                    scratch[adj_b as usize] += w_v * (-va_v / vb2);
+                    scratch[adj_dot_a as usize] += wd_v / vb_v - w_v * (db_v / vb_v) / vb_v;
+                    scratch[adj_b as usize] -= w_v * q / vb_v;
                     scratch[adj_dot_b as usize] +=
-                        wd_v * (-va_v / vb2) + w_v * (-da_v / vb2 + 2.0 * va_v * db_v / vb3);
+                        -(wd_v * q) / vb_v + (w_v / vb_v) * (-qd + q * (db_v / vb_v));
                 }
                 HOp::RevPow {
                     adj_a,
@@ -1147,14 +1156,16 @@ impl HessianProgram {
                     adj_dot_a,
                     w,
                     wd,
-                    va: _,
+                    va,
                     vd,
                     dot_a,
                 } => {
                     let sv = scratch[vd as usize];
                     if sv > 0.0 {
                         let fp = 0.5 / sv;
-                        let fpp = -0.25 / (sv * sv * sv);
+                        // Shared with `Tape`: `sv*sv*sv` overflowed at
+                        // u ≈ 2.6e205 where the true value is still ~1e-308.
+                        let fpp = sqrt_d2(scratch[va as usize], sv);
                         let w_v = scratch[w as usize];
                         let wd_v = scratch[wd as usize];
                         scratch[adj_a as usize] += w_v * fp;
@@ -1189,7 +1200,7 @@ impl HessianProgram {
                     let wd_v = scratch[wd as usize];
                     scratch[adj_a as usize] += w_v / u;
                     scratch[adj_dot_a as usize] +=
-                        wd_v / u + w_v * (-1.0 / (u * u)) * scratch[dot_a as usize];
+                        wd_v / u + w_v * log_d2(u) * scratch[dot_a as usize];
                 }
                 HOp::RevLog10 {
                     adj_a,
@@ -1200,12 +1211,11 @@ impl HessianProgram {
                     dot_a,
                 } => {
                     let u = scratch[va as usize];
-                    let c = std::f64::consts::LN_10;
                     let w_v = scratch[w as usize];
                     let wd_v = scratch[wd as usize];
-                    scratch[adj_a as usize] += w_v / (u * c);
+                    scratch[adj_a as usize] += div_u_ln10(w_v, u);
                     scratch[adj_dot_a as usize] +=
-                        wd_v / (u * c) + w_v * (-1.0 / (u * u * c)) * scratch[dot_a as usize];
+                        div_u_ln10(wd_v, u) + w_v * log10_d2(u) * scratch[dot_a as usize];
                 }
                 HOp::RevSin {
                     adj_a,
@@ -1520,6 +1530,56 @@ mod tests {
         let e = add(div(var(0), var(1)), unary(UnaryOp::Cos, var(0)));
         let tape = Tape::build(&e);
         assert_program_matches_tape(&tape, &[0.5, 1.2], 1.0);
+    }
+
+    #[test]
+    fn division_log_log10_sqrt_accurate_at_extreme_magnitudes() {
+        // This program carried the pre-fix forms after `Tape` was fixed:
+        // division's `vb*vb`/`vb2*vb` (and `/(v_b*v_b)` in its tangent),
+        // `log''`'s `-1/(u*u)`, `log10`'s `u*c`/`u*u*c`, and `sqrt''`'s
+        // `sv*sv*sv`. Each overflowed and read `0` where the true entry is
+        // representable. `assert_program_matches_tape`'s absolute 1e-12
+        // floor cannot see that at these magnitudes, so this compares each
+        // entry with a 100-digit reference, relatively.
+        let e = Expr::Sum(vec![
+            div(var(0), var(1)),
+            div(var(2), var(3)),
+            unary(UnaryOp::Log, var(4)),
+            unary(UnaryOp::Log10, var(5)),
+            unary(UnaryOp::Sqrt, var(6)),
+        ]);
+        let tape = Tape::build(&e);
+        let x = [1e300, 1e200, 1e-10, 1e155, 1e155, 1e155, 1e206];
+        let want: HashMap<(usize, usize), f64> = [
+            ((1, 1), 2.0000000000000004e-300), // 2a/b³, b² = 1e400 overflows
+            ((3, 2), -1e-310),                 // -1/b², b = 1e155
+            ((4, 4), -1e-310),                 // log''
+            ((5, 5), -4.3429448190326e-311),   // log10''
+            ((6, 6), -2.5e-310),               // sqrt''
+        ]
+        .into_iter()
+        .collect();
+        let (hess_map, pairs) = build_hess_map(&tape);
+        let program =
+            HessianProgram::compile(&tape, &hess_map).expect("tape uses only supported opcodes");
+        let mut scratch = vec![0.0; program.n_slots()];
+        let mut prog_vals = vec![0.0; pairs.len()];
+        program.execute(&x, 1.0, &mut scratch, &mut prog_vals);
+        let mut tape_vals = vec![0.0; pairs.len()];
+        tape.hessian_accumulate(&x, 1.0, &hess_map, &mut tape_vals);
+        for (k, &rc) in pairs.iter().enumerate() {
+            let w = want.get(&rc).copied().unwrap_or(0.0);
+            for (who, got) in [("program", prog_vals[k]), ("tape", tape_vals[k])] {
+                let ok = if w == 0.0 {
+                    got == 0.0
+                } else if w.abs() < f64::MIN_POSITIVE {
+                    (got - w).abs() <= f64::from_bits(1)
+                } else {
+                    ((got - w) / w).abs() < 2e-15
+                };
+                assert!(ok, "{who} H{rc:?}: got {got:.17e}, want {w:.17e}");
+            }
+        }
     }
 
     #[test]

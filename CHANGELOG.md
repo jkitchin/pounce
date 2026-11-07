@@ -25,6 +25,16 @@ changes.
   the true value is still a nonzero subnormal. All are now accurate to a few
   ulps wherever the result is a normal double, and underflow gradually below
   that.
+- **`log`, `log10` and `sqrt` second derivatives no longer vanish at large
+  arguments.** `log''` and `log10''` read `0` past `|x| ≈ 1.3e154`, `log10'`
+  past `|x| ≈ 7.8e307`, and `sqrt''` past `x ≈ 2.6e205`, where each true
+  value is still representable. Results below those magnitudes are
+  unchanged bit for bit.
+- **`HessianProgram` (`pounce_cli::nl_hessian_program`) matches the tape's
+  numerics.** It still carried the pre-fix division, `log`, `log10` and
+  `sqrt` derivative forms after the tape was fixed, and zeroed the same
+  representable Hessian entries. It now calls the tape's kernels. Nothing in
+  POUNCE calls it today; this matters only to direct users of the API.
 
 ## [0.16.0] - 2026-11-07
 

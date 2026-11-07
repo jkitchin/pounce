@@ -382,6 +382,59 @@ pub(crate) fn atanh_d2(u: f64) -> f64 {
     2.0 * (u * g) * g
 }
 
+// The four kernels below are `pub` because `pounce-cli`'s `HessianProgram`
+// lowers the same ops and must not carry its own copies: it held the
+// pre-fix forms of all of them (and of division's) after the tape was fixed.
+
+/// `log''(u) = -1/u²`. Past `|u| = 1e150` as `-(1/u)/u`: `u*u` overflows at
+/// `|u| ≈ 1.3e154` and read `0` where the true value is subnormal (nonzero to
+/// `|u| ≈ 1.3e162`). Below the threshold the old form is kept bit for bit.
+#[inline]
+pub fn log_d2(u: f64) -> f64 {
+    if u.abs() > 1e150 {
+        -(1.0 / u) / u
+    } else {
+        -1.0 / (u * u)
+    }
+}
+
+/// `x / (u·ln 10)`, i.e. `x · log10'(u)`. Past `|u| = 1e300` as
+/// `(x/u)/ln 10`: `u·ln 10` overflows at `|u| ≈ 7.8e307`. It takes the
+/// numerator so that below the threshold every arm still performs the single
+/// division it always did, bit for bit.
+#[inline]
+pub fn div_u_ln10(x: f64, u: f64) -> f64 {
+    let c = std::f64::consts::LN_10;
+    if u.abs() > 1e300 {
+        (x / u) / c
+    } else {
+        x / (u * c)
+    }
+}
+
+/// `log10''(u) = -1/(u²·ln 10)`, with the same threshold as [`log_d2`].
+#[inline]
+pub fn log10_d2(u: f64) -> f64 {
+    let c = std::f64::consts::LN_10;
+    if u.abs() > 1e150 {
+        -((1.0 / u) / u) / c
+    } else {
+        -1.0 / (u * u * c)
+    }
+}
+
+/// `sqrt''(u) = -1/(4·u^{3/2})`, given `sv = sqrt(u)`. Past `u = 1e200` as
+/// `(-0.25/u)/sv`: `u·sv` overflows at `u ≈ 2.6e205`, where the true value is
+/// still ~1e-308. Below the threshold the old form is kept bit for bit.
+#[inline]
+pub fn sqrt_d2(u: f64, sv: f64) -> f64 {
+    if u > 1e200 {
+        (-0.25 / u) / sv
+    } else {
+        -0.25 / (u * sv)
+    }
+}
+
 /// `(y/k, x/k, hypot(y/k, x/k), k)` for the `atan2` derivative kernels:
 /// `k = 2` once either argument passes `1e300`, else `k = 1`.
 ///
@@ -727,7 +780,7 @@ impl Tape {
                     adj[*j] += a / vals[*j];
                 }
                 TapeOp::Log10(j) => {
-                    adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+                    adj[*j] += div_u_ln10(a, vals[*j]);
                 }
                 TapeOp::Sin(j) => {
                     adj[*j] += a * vals[*j].cos();
@@ -902,7 +955,7 @@ impl Tape {
                 }
                 TapeOp::Exp(a) => dot[*a] * vals[i],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
                 TapeOp::Tan(a) => {
@@ -1138,7 +1191,7 @@ impl Tape {
                 }
                 TapeOp::Exp(a) => vals[i] * dot[*a],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
                 TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
                 TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
                 TapeOp::Tan(a) => {
@@ -1313,7 +1366,7 @@ impl Tape {
                     let sv = vals[i];
                     if sv > 0.0 {
                         let fp = 0.5 / sv;
-                        let fpp = -0.25 / (vals[*a] * sv);
+                        let fpp = sqrt_d2(vals[*a], sv);
                         adj[*a] += w * fp;
                         adj_dot[*a] += wd * fp + w * fpp * dot[*a];
                     }
@@ -1326,13 +1379,12 @@ impl Tape {
                 TapeOp::Log(a) => {
                     let u = vals[*a];
                     adj[*a] += w / u;
-                    adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+                    adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
                 }
                 TapeOp::Log10(a) => {
                     let u = vals[*a];
-                    let c = std::f64::consts::LN_10;
-                    adj[*a] += w / (u * c);
-                    adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                    adj[*a] += div_u_ln10(w, u);
+                    adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
                 }
                 TapeOp::Sin(a) => {
                     let u = vals[*a];
@@ -1639,7 +1691,7 @@ impl Tape {
                         let sv = v[i];
                         if sv > 0.0 {
                             let fp = 0.5 / sv;
-                            let fpp = -0.25 / (v[*a] * sv);
+                            let fpp = sqrt_d2(v[*a], sv);
                             adj[*a] += w * fp;
                             adj_dot[*a] += wd * fp + w * fpp * dot[*a];
                         }
@@ -1652,13 +1704,12 @@ impl Tape {
                     TapeOp::Log(a) => {
                         let u = v[*a];
                         adj[*a] += w / u;
-                        adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+                        adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
                     }
                     TapeOp::Log10(a) => {
                         let u = v[*a];
-                        let c = std::f64::consts::LN_10;
-                        adj[*a] += w / (u * c);
-                        adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                        adj[*a] += div_u_ln10(w, u);
+                        adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
                     }
                     TapeOp::Sin(a) => {
                         let u = v[*a];
@@ -3616,7 +3667,7 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             adj[*j] += a / vals[*j];
         }
         TapeOp::Log10(j) => {
-            adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+            adj[*j] += div_u_ln10(a, vals[*j]);
         }
         TapeOp::Sin(j) => {
             adj[*j] += a * vals[*j].cos();
@@ -3755,7 +3806,7 @@ fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) 
         }
         TapeOp::Exp(a) => vals[i] * dot[*a],
         TapeOp::Log(a) => dot[*a] / vals[*a],
-        TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+        TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
         TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
         TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
         TapeOp::Tan(a) => {
@@ -3921,7 +3972,7 @@ fn ror_dir_step(
             let sv = vals[i];
             if sv > 0.0 {
                 let fp = 0.5 / sv;
-                let fpp = -0.25 / (vals[*a] * sv);
+                let fpp = sqrt_d2(vals[*a], sv);
                 adj[*a] += w * fp;
                 adj_dot[*a] += wd * fp + w * fpp * dot[*a];
             }
@@ -3934,13 +3985,12 @@ fn ror_dir_step(
         TapeOp::Log(a) => {
             let u = vals[*a];
             adj[*a] += w / u;
-            adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+            adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
         }
         TapeOp::Log10(a) => {
             let u = vals[*a];
-            let c = std::f64::consts::LN_10;
-            adj[*a] += w / (u * c);
-            adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+            adj[*a] += div_u_ln10(w, u);
+            adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
         }
         TapeOp::Sin(a) => {
             let u = vals[*a];
@@ -4675,7 +4725,13 @@ mod tests {
         // a zero derivative at large |u|. Checked through the tape — the
         // reverse gradient and `hessian_accumulate` — so the arms are
         // pinned, not just the kernels.
-        for &(op, u, want_d1, want_d2) in INVERSE_DERIV_CASES {
+        assert_unary_derivs(INVERSE_DERIV_CASES);
+    }
+
+    /// Checks each (op, u, f', f'') through the tape: the reverse gradient
+    /// and `hessian_accumulate`, so the arms are pinned, not just the kernels.
+    fn assert_unary_derivs(cases: &[(UnaryOp, f64, f64, f64)]) {
+        for &(op, u, want_d1, want_d2) in cases {
             let t = Tape::build(&unary(op, var(0)));
             let mut g = [0.0];
             t.gradient_seed(&[u], 1.0, &mut g);
@@ -4698,6 +4754,49 @@ mod tests {
                 h[0]
             );
         }
+    }
+
+    /// The same overflow class in `log`/`log10`/`sqrt`: `-1/(u*u)`,
+    /// `1/(u·ln 10)` and `-0.25/(u·sqrt u)` read `0` once the product
+    /// overflowed, while the true value is still representable (normal or
+    /// subnormal). Each op has points on both sides of its switch, since the
+    /// old form is kept bit for bit below it and the rescaled form takes over
+    /// above: `log''`/`log10''` at 1e150, `log10'` at 1e300, `sqrt''` at 1e200.
+    const LOG_SQRT_DERIV_CASES: &[(UnaryOp, f64, f64, f64)] = &[
+        (UnaryOp::Log, 2.0, 0.5, -0.25),
+        (UnaryOp::Log, 1e100, 1e-100, -1e-200),
+        (UnaryOp::Log, 1e155, 1e-155, -1e-310),
+        (UnaryOp::Log, 1e160, 1e-160, -1e-320),
+        (
+            UnaryOp::Log10,
+            2.0,
+            0.2171472409516259,
+            -0.10857362047581295,
+        ),
+        (
+            UnaryOp::Log10,
+            1e100,
+            4.342944819032518e-101,
+            -4.342944819032518e-201,
+        ),
+        (
+            UnaryOp::Log10,
+            1e155,
+            4.3429448190325184e-156,
+            -4.3429448190326e-311,
+        ),
+        (UnaryOp::Log10, 1e305, 4.3429448190325186e-306, 0.0),
+        (UnaryOp::Log10, 1.7e308, 2.554673422960305e-309, 0.0),
+        (UnaryOp::Sqrt, 2.0, 0.3535533905932738, -0.08838834764831845),
+        (UnaryOp::Sqrt, 1e150, 5e-76, -2.5e-226),
+        (UnaryOp::Sqrt, 1e206, 5e-104, -2.5e-310),
+        (UnaryOp::Sqrt, 1e300, 5e-151, 0.0),
+        (UnaryOp::Sqrt, 1.7e308, 3.8348249442368524e-155, 0.0),
+    ];
+
+    #[test]
+    fn log_log10_sqrt_derivatives_accurate_at_large_arguments() {
+        assert_unary_derivs(LOG_SQRT_DERIV_CASES);
     }
 
     #[test]

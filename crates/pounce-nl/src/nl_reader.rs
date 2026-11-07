@@ -3462,7 +3462,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Neg => -1.0,
                 UnaryOp::Sqrt => 0.5 / va.sqrt(),
                 UnaryOp::Log => 1.0 / va,
-                UnaryOp::Log10 => 1.0 / (va * std::f64::consts::LN_10),
+                UnaryOp::Log10 => crate::nl_tape::div_u_ln10(1.0, va),
                 UnaryOp::Exp => va.exp(),
                 UnaryOp::Abs => {
                     if va > 0.0 {
