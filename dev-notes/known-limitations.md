@@ -89,6 +89,14 @@ architectures): rounding-chaotic, so a single run is not a measurement.**
   | `dallass`, defaults | 10 succeed (7 Optimal, 3 Acceptable), 14 `ErrorInStepComputation`; median 239.5 it | 8 succeed (7 + 1), 16 `ErrorInStepComputation`; median 243.5 it |
 
   On `dallass` the two distributions are the same within sampling noise.
+  *One ulp in one derivative is enough to move it.* The gh#1151 follow-up
+  rewrote `asin'` from `1/sqrt(1 - u*u)` to `1/sqrt((1-u)(1+u))`, which at
+  `dallass`'s interior arguments changes the gradient by about an ulp, and
+  its sweep moved this line `SolveSucceeded`/272 → `ErrorInStepComputation`/243.
+  Scaling the *old* `asin'` by `1 ± f64::EPSILON` alone gives
+  `ErrorInStepComputation` at 396 (+) and 220 (−); the exact leg stays at 28
+  under both. A single `dallass` L-BFGS line in a sweep diff is therefore not
+  evidence about the change that moved it.
   On `square_flowsheet_resto` the branch trades false infeasibility verdicts
   for budget exits. That is the right direction for the verdict, but it also
   succeeds less often over these 24 draws. Ipopt's own L-BFGS is *not*
