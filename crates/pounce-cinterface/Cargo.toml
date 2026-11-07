@@ -36,7 +36,10 @@ pounce-hsl = { workspace = true, optional = true }
 ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 
 [dev-dependencies]
-serde_json = "1"
+# `float_roundtrip`: the report tests compare the reals a report carries with
+# the getters' bitwise, and serde_json's default parser can land one ulp off
+# the value the writer printed (9.035978839861492e-24 read back as ...493e-24).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [lints]
 workspace = true

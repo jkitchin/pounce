@@ -24,7 +24,7 @@ that ticks it.
 - [x] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
 - [x] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
 - [x] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
-- [ ] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
+- [x] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
 - [ ] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
 - [ ] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
 - [ ] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
@@ -1630,6 +1630,72 @@ Gate (all on the ticking commit's tree):
 - `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean;
   `make ask-check` top-1 17/20, top-5 20/20, OK; `make c-api-examples`
   green.
+
+### S1-I7 — `IpoptWriteSolveReport` carries the block (commit that ticks S1-I7)
+
+What moved:
+- `src/lib.rs`: `IpoptWriteSolveReport` adds `if let Some(out) =
+  &last.mpcc { builder.set_complementarity(out.report_info()) }` — the
+  conversion the CLI (`pounce-cli/src/main.rs`) and Python
+  (`pounce-py/src/problem.rs::write_solve_report`) already share, so there
+  is no second emitter. `ReportBuilder::finish` copies the block whatever
+  the detail level, so `"summary"` carries it too. Doc comment, `pounce.h`,
+  README, `c-api.md`, `schema/solve-report-v1.md` (the C API named as a
+  producer) and one CHANGELOG sentence.
+- Not changed, noticed: the C report still omits the `second_opinion`
+  block the CLI and Python write when the ladder ran. Outside this item.
+- Tests: the S1-I6 models and getter readers moved, unchanged, from
+  `complementarity_getters.rs` to `tests/common/cc_models.rs`, shared with
+  the new `tests/complementarity_report.rs` (10).
+- `Cargo.toml`: dev-dependency `serde_json` gains `float_roundtrip`.
+  Measured: without it serde_json reads `9.035978839861492e-24` (what the
+  writer printed, Python's value) back as `...493e-24`, and 7 of the 10
+  tests fail on 1-ulp reals. Parsing only; `Cargo.lock` unchanged.
+
+Tests (`complementarity_report.rs`), on each class S1-I6 reached — `S`
+(QpecSmall from `(0, 0.5, 0.5)`), polish taken (from the origin), `W`
+(ralph1), `none` (infeasible_pair), `not searched` (605 variables) — plus
+`complementarity_strategy=exact`:
+- Getters vs block, same solve, **every** field: each
+  `PounceComplementarityStats` field, each `PounceComplementaritySolve`
+  record (stage, relaxed/tau, status by upstream name, iterations, product,
+  `seconds` too, bitwise: both come from one record), and the three texts
+  against `summary` / `polish.reason` / `b_stationarity.reason`; the getters'
+  NaN / `-1` / `""` are the block's `null` or missing key. Every block key
+  must be one of the compared ones, so a field added to `report_info()`
+  without a getter fails here. **Agreed on all six runs; no disagreement
+  found.** Also `solution.status_upstream` = the solve's status,
+  `statistics.iteration_count` = `GetIpoptIterCount`.
+- Python: the block minus `seconds` equals, as a JSON value, the block
+  Python's `solve(report_path=, report_detail=)` wrote on the same callbacks
+  and start (`tests/common/cc_python_report_blocks.json`, from the venv's
+  editable 0.16.0 build of this branch; Python's `full` and `summary` blocks
+  identical). **Equal on all five Python runs.** The CLI writes the block
+  through the same `report_info()`; its qpec_small trajectory differs (191
+  against 139 iterations, S1-I5) and is left to S1-I8.
+- `summary` block == `full` block (seconds included).
+- Absent: before any solve the write returns `FALSE` (no file); after a
+  solve without pairs, no key at either level (what the CLI and Python do:
+  Python checked on the same model); clearing the pairs keeps the block of
+  the solve that used them (most-recent-solve, as the getters), the
+  re-solve drops it; a refused solve (staged working set) after a driver
+  solve leaves no report (`FALSE`, no file).
+- With the `set_complementarity` line removed, 8 of 10 fail (the two that
+  pass are the no-solve and no-pairs tests).
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 21 binaries (lib 58,
+  `complementarity_report` 10, `complementarity_getters` 13,
+  `complementarity_solve` 16, `complementarity_declare` 34,
+  `export_surface` 13, `header_abi` 4, `c_examples_build_and_run` 6).
+- Export guard (`--test export_surface --test header_abi`) — `ok. 13
+  passed` / `ok. 4 passed`.
+- Clippy under the CI flags (`--all-targets --no-deps -D clippy::correctness
+  -D clippy::suspicious`) clean; `cargo fmt --all -- --check` clean;
+  `mdbook build docs` (0.5.2) clean; `make ask-check` top-1 17/20, top-5
+  20/20, OK; `make c-api-examples` green.
+- Sweep not run: no solver code moved, and the CLI does not link
+  `pounce-cinterface`.
 
 ### Facts recorded while planning (2ac0ad9)
 

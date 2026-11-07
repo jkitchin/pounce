@@ -371,10 +371,12 @@ cost. Written by the CLI's `--json-output` and by Python's
 ### `complementarity` (object, optional)
 
 What the complementarity driver did, for a model with declared
-complementarity pairs (AMPL `complements`, Pyomo `mpec`, or
-`Problem(..., complementarity=...)`); omitted for every other model. Keyed like
+complementarity pairs (AMPL `complements`, Pyomo `mpec`,
+`Problem(..., complementarity=...)`, or the C API's
+`SetPounceComplementarityPairs`); omitted for every other model. Keyed like
 Python's `info["complementarity"]`, and written through one conversion by
-both the CLI's `--json-output` and Python's `solve(report_path=...)`. See
+the CLI's `--json-output`, Python's `solve(report_path=...)` and the C API's
+`IpoptWriteSolveReport`. See
 [Complementarity Constraints](../complementarity.md).
 
 The driver runs several lowered solves. `statistics.iteration_count` is the

@@ -94,7 +94,9 @@ POUNCE extensions:
 - `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most
-  recent solve. Schema-compatible with the CLI's `--json-output`.
+  recent solve. Schema-compatible with the CLI's `--json-output`; after a
+  complementarity-driver solve it carries the same `complementarity` block
+  the CLI and Python write for the same driver outcome.
 - Working-set warm start (active-set SQP): `IpoptGetWorkingSet`,
   `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
   `IpoptSolveWarmStart`. Example: `examples/sqp_warm_start.c`.

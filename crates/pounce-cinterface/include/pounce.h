@@ -942,6 +942,15 @@ Bool IpoptEnableIterHistory(IpoptProblem ipopt_problem);
  * because the C API receives callbacks rather than an .nl file or
  * builtin name.
  *
+ * When that solve ran the complementarity driver (pairs were declared),
+ * the report carries the `complementarity` block at either detail level:
+ * the same block, from the same conversion, as the CLI's --json-output
+ * and Python's report_path write for the same driver outcome. Its fields
+ * are the ones GetPounceComplementarityStats / GetPounceComplementaritySolve
+ * / GetPounceComplementarityText return, with `null` (or an absent key)
+ * where those read NaN, -1 or "". The block is absent after a solve that
+ * did not run the driver, and a refused solve leaves no report at all.
+ *
  * Returns 1 (TRUE) on a successful write, 0 (FALSE) for: NULL handle,
  * no prior solve, an invalid `detail`, a bad path, or an I/O error.
  */

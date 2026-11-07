@@ -3262,6 +3262,11 @@ pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> 
 /// produces. The input descriptor is recorded as `tnlp-direct`
 /// because the cinterface receives callbacks rather than a file.
 ///
+/// When that solve ran the complementarity driver (pairs were declared),
+/// the report carries the `complementarity` block at either detail level,
+/// built by the same conversion as the CLI's and Python's reports; it is
+/// absent otherwise.
+///
 /// Returns `TRUE` on a successful write, `FALSE` for NULL handle,
 /// no prior solve, an invalid `detail`, a bad path, or an I/O error.
 ///
@@ -3325,6 +3330,15 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
         builder.ingest_stats(&last.stats);
         if let Some(linsol) = last.linear_solver.clone() {
             builder.set_linear_solver_summary(linsol);
+        }
+        // Declared complementarity (gh#1147): what the driver did, through the
+        // same conversion the CLI's `--json-output` and Python's `report_path`
+        // use, so the three frontends write one block for one driver outcome.
+        // `ingest_stats` above wrote the reported lowered solve's statistics;
+        // the block carries every lowered solve and the true total. Absent for
+        // a solve that did not run the driver (no pairs declared).
+        if let Some(out) = &last.mpcc {
+            builder.set_complementarity(out.report_info());
         }
 
         let report = builder.finish();

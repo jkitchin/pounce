@@ -27,7 +27,8 @@ changes.
   `PounceComplementarityStats`), `GetPounceComplementaritySolve` and
   `GetPounceComplementarityText` read back what the driver did: the
   solve report's `complementarity` block as scalars, one lowered solve at a
-  time, and its texts.
+  time, and its texts. `IpoptWriteSolveReport` writes that block after a
+  driver solve, the same block the CLI and Python write.
 
 ### Fixed
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost

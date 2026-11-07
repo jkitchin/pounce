@@ -163,6 +163,14 @@ same schema as the CLI's `--json-output` (see
 [JSON Solve Report](json-output.md)). It returns `FALSE` for a `NULL`
 handle, no prior solve, an unknown detail level or an I/O error.
 
+After a solve that ran the complementarity driver, the report carries the
+`complementarity` block at either detail level, written by the conversion
+the CLI and Python use, so the three frontends write the same block for the
+same driver outcome. Its fields are the ones the
+`GetPounceComplementarity*` getters return, with `null` or an absent key
+where a getter reads `NaN`, `-1` or an empty label. A solve without pairs
+writes no block. A refused solve leaves no report: the write returns `FALSE`.
+
 ## Fortran shim
 
 The same library exports the eight Fortran 77 entry points of Ipopt's
