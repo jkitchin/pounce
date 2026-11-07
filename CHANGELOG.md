@@ -27,9 +27,17 @@ changes.
 - **The debugger's `quit` ends the solve.** `quit` stopped the solve at the
   current pause, but the terminal pause that follows (and, during
   restoration, the outer solve's pauses) paused again. In `--debug-json`
-  mode that left the process waiting for input it would never get. `quit`,
-  and EOF on the JSON command stream, now latch a stop for the rest of the
-  run, so the process reports `User_Requested_Stop` and exits.
+  mode that left the process waiting for input it would never get. In
+  `--debug-json` mode `quit`, and EOF on the command stream, now latch a stop
+  for the rest of the run, so the process reports `User_Requested_Stop` and
+  exits. The REPL is unchanged: `quit` still lands on the post-mortem pause.
+- **The debugger's `final` pause is the end of the run.** The automatic
+  re-solves inside the application (`mu_strategy_fallback`, the ℓ₁ fallback,
+  `dual_divergence_retry`, the scale-audit retry) ran after the debugger's
+  `final: true` pause without pausing, since the hook drives one solve, and
+  could replace the verdict it had shown: a capped Waechter-Biegler run under
+  `--debug-json` re-solved under `mu_strategy=adaptive` unseen. Like the
+  second-opinion ladder, they now stand down while a debugger is attached.
 - **The MCP server's live debugger stops at the real end of a solve, and
   `debug_close` returns promptly.** The terminal pause of restoration's inner
   solve (`final: false`) was reported as the end of the run, so a session

@@ -81,6 +81,11 @@ def _find_pounce_bin() -> str:
     pounce-solver wheel (`pounce/bin/pounce`), so the server runs the same
     POUNCE version as its own analysis code → `target/release/pounce`
     walking up from this file (a source checkout) → `pounce` on $PATH.
+
+    When both of the middle two exist this is an editable install in a
+    checkout, where `pounce/bin/pounce` is a staged copy refreshed only by
+    `make python-cli-bin`; the newer of the two wins, so a plain
+    `cargo build --release` is not shadowed by a stale copy.
     """
     env = os.environ.get("POUNCE_BIN")
     if env:
@@ -89,14 +94,17 @@ def _find_pounce_bin() -> str:
         return env
     exe = "pounce.exe" if os.name == "nt" else "pounce"
     bundled = Path(__file__).resolve().parent.parent / "bin" / exe
-    if bundled.is_file():
-        return str(bundled)
+    checkout: Path | None = None
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "target" / "release" / "pounce"
-        if candidate.exists():
-            return str(candidate)
+        candidate = parent / "target" / "release" / exe
+        if candidate.is_file():
+            checkout = candidate
+            break
         if parent == parent.parent:
             break
+    found = [c for c in (bundled, checkout) if c is not None and c.is_file()]
+    if found:
+        return str(max(found, key=lambda c: c.stat().st_mtime))
     which = shutil.which("pounce")
     if which:
         return which
@@ -1398,11 +1406,10 @@ class _DebugSession:
                         self.proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
-            for stream in (self.proc.stdout,):
-                try:
-                    stream.close()  # type: ignore[union-attr]
-                except OSError:
-                    pass
+            try:
+                self.proc.stdout.close()  # type: ignore[union-attr]
+            except OSError:
+                pass
             try:
                 self._stderr_fh.close()
             except OSError:
@@ -1807,11 +1814,23 @@ def _find_repo_root() -> Path:
     an installed server finds them only through `POUNCE_REPO`; a server run
     from a checkout finds them by walking up from this file.
     """
+    def is_checkout(p: Path) -> bool:
+        return (p / "Cargo.toml").exists() and (p / "gams").is_dir()
+
     env = os.environ.get("POUNCE_REPO")
-    candidates = [Path(env)] if env else []
-    candidates += list(Path(__file__).resolve().parents)
-    for parent in candidates:
-        if (parent / "Cargo.toml").exists() and (parent / "gams").is_dir():
+    if env:
+        # Expanded like POUNCE_WORKDIR, and an explicit setting that does not
+        # point at a checkout is reported as such: falling through to the
+        # generic message would ask the user to set the variable they set.
+        repo = Path(os.path.expandvars(os.path.expanduser(env)))
+        if is_checkout(repo):
+            return repo
+        raise FileNotFoundError(
+            f"POUNCE_REPO={env} is not a pounce source checkout (expected "
+            f"Cargo.toml and gams/ in {repo})."
+        )
+    for parent in Path(__file__).resolve().parents:
+        if is_checkout(parent):
             return parent
     raise FileNotFoundError(
         "the GAMS example suites need a pounce source checkout; they are not "
@@ -2338,7 +2357,12 @@ def run_gams_problem(
 
 
 def main() -> None:
-    """Entry point used by `python -m pounce.studio`."""
+    """Run the stdio server: `pounce-studio-mcp`, `python -m pounce.studio`
+    and `python -m pounce.studio.server` all land here, so each honours
+    `POUNCE_WORKDIR`."""
+    from . import _enter_workdir
+
+    _enter_workdir()
     mcp.run()
 
 

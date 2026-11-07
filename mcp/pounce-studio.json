@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "pounce-studio": {
-      "description": "Solve, diagnose, verify and live-debug optimization models with POUNCE (runs pounce-solver's [mcp] extra via uvx; see studio/mcp/README.md)",
+      "description": "Solve, diagnose, verify and live-debug optimization models with POUNCE (runs pounce-solver's [mcp] extra via uvx; needs a pounce-solver release after 0.16.0, the first to ship it; see studio/mcp/README.md)",
       "command": "uvx",
-      "args": ["--from", "pounce-solver[mcp]", "pounce-studio-mcp"]
+      "args": ["--from", "pounce-solver[mcp]>0.16.0", "pounce-studio-mcp"]
     }
   }
 }

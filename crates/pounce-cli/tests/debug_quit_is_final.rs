@@ -1,15 +1,20 @@
 //! `quit` in the JSON debugger must end the process, not just the solve it
-//! was typed at.
+//! was typed at; and the pause the debugger marks `final` must really be the
+//! end of the run.
 //!
-//! The terminal checkpoint's action is advisory, and the driver can launch
-//! further solves after the one the user quit (restoration's inner solve
-//! returns into the outer one; the `mu_strategy_fallback` and
-//! second-opinion ladders re-solve). Each re-entered the debugger hook,
-//! paused again, and blocked on a stdin the client had stopped writing to —
-//! so a client that sent `quit` and kept the pipe open (the pounce-studio
-//! MCP server did) waited forever. The fix latches `quit`: every later
+//! Stopping at one checkpoint is advisory: the solve's own terminal
+//! checkpoint follows, and a `quit` typed inside restoration returns into
+//! the outer solve. Each re-entered the debugger hook, paused again, and
+//! blocked on a stdin the client had stopped writing to — so a client that
+//! sent `quit` and kept the pipe open (the pounce-studio MCP server did)
+//! waited forever. The fix latches `quit` in JSON mode: every later
 //! checkpoint returns `Stop` without pausing.
-
+//!
+//! The application's automatic re-solves (`mu_strategy_fallback`, the ℓ₁
+//! fallback, the gh#884 retry, the scale retry) never re-entered the hook,
+//! which drives one solve; they ran unobserved *after* the `final: true`
+//! pause and could replace the verdict it showed. They stand down while a
+//! debugger is attached.
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -96,4 +101,74 @@ fn quit_at_an_inner_terminal_pause_ends_the_process() {
     drop(stdin);
     let _ = std::fs::remove_file(&nl);
     assert!(exited, "pounce did not exit after `quit` with stdin open");
+}
+
+/// Under the debugger a capped solve is the whole run: the
+/// `mu_strategy_fallback` flip (which fires on `Maximum_Iterations_Exceeded`)
+/// must not re-solve after the `final: true` pause. Without the stand-down
+/// the JSON report carries a `mu_strategy_fallback` record for a retry the
+/// debugger never showed.
+#[test]
+fn no_unobserved_resolve_after_the_final_pause() {
+    let dir = std::env::temp_dir();
+    let nl = dir.join(format!("pounce_final_is_final_{}.nl", std::process::id()));
+    let report = dir.join(format!("pounce_final_is_final_{}.json", std::process::id()));
+    std::fs::write(&nl, WB).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pounce"))
+        .arg(&nl)
+        .args(["--no-sol", "--debug-json", "--json-output"])
+        .arg(&report)
+        .arg("max_iter=4")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut events = Vec::new();
+    {
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        // Answer every pause with `continue` until the run reports its end.
+        let mut id = 0;
+        for line in lines.by_ref() {
+            let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let is_pause = ev["event"] == "pause";
+            let done = ev["event"] == "terminated";
+            events.push(ev);
+            if done {
+                break;
+            }
+            if is_pause {
+                id += 1;
+                assert!(id < 50, "too many pauses: {events:?}");
+                writeln!(stdin, r#"{{"cmd":"continue","id":{id}}}"#).unwrap();
+                stdin.flush().unwrap();
+            }
+        }
+    }
+    drop(stdin);
+    let _ = child.wait();
+    let finals: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"] == "pause" && e["final"] == true)
+        .collect();
+    assert_eq!(finals.len(), 1, "exactly one final pause: {events:?}");
+    let terminated = events.last().unwrap();
+    assert_eq!(
+        terminated["status"], "MaximumIterationsExceeded",
+        "{terminated}"
+    );
+
+    let rep: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&nl);
+    let _ = std::fs::remove_file(&report);
+    assert!(
+        rep["statistics"]["mu_strategy_fallback"].is_null(),
+        "a fallback re-solve ran after the debugger's final pause: {}",
+        rep["statistics"]["mu_strategy_fallback"]
+    );
 }

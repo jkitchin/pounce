@@ -54,7 +54,6 @@ def main() -> None:
             '    uvx --from "pounce-solver[mcp]" pounce-studio-mcp\n'
         )
         raise SystemExit(1)
-    _enter_workdir()
     from .server import main as _run
 
     _run()
