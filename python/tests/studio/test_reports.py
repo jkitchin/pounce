@@ -332,12 +332,24 @@ def test_findings_codes_match_rust_source():
 
 
 def _pounce_available() -> bool:
+    """True only if the located CLI actually runs.
+
+    `_find_pounce_bin()` falls back to `pounce` on $PATH, which in a wheel
+    built without `pounce/bin/` staged (CI's maturin-action jobs) is the
+    console-script shim: present, but it exits 1 on every call. Probing
+    `--version` turns that into a skip instead of a page of
+    "exited before the handshake" errors.
+    """
+    import subprocess
+
     from pounce.studio.server import _find_pounce_bin
     try:
-        _find_pounce_bin()
-        return True
-    except FileNotFoundError:
+        binary = _find_pounce_bin()
+        proc = subprocess.run([binary, "--version"], capture_output=True,
+                              timeout=60)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return False
+    return proc.returncode == 0
 
 
 PARAMETRIC_NL = (
