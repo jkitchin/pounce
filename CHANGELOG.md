@@ -16,7 +16,7 @@ changes.
   for `min atanh(x)` on `[-1 + 1e-13, 0]`. It now uses `libm::atanh`.
 - **Derivatives of the inverse trig/hyperbolic functions, `tanh` and `atan2`
   are accurate at the edges of their domains.** Gradients and Hessians of
-  `asin`, `acos`, `atanh` and `acosh` lost up to ~9 digits near `±1`. `tanh`'s
+  `asin`, `acos`, `atanh` and `acosh` were only ~8 digits accurate near `±1`. `tanh`'s
   gradient was ~1e-8 off at `x = 10` and exactly `0` past `|x| ≈ 19`. `asinh`
   and `acosh` returned a zero gradient past `|x| ≈ 1e154`, `atan`'s second
   derivative was `0` past `|x| ≈ 1e77`, and `atan2`'s derivatives were `0` at
