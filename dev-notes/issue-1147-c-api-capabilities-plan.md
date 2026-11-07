@@ -22,7 +22,7 @@ that ticks it.
 - [x] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
 - [x] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
 - [x] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
-- [ ] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
+- [x] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
 - [ ] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
 - [ ] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
 - [ ] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
@@ -1419,6 +1419,120 @@ Gate (all on the ticking commit's tree):
   -D clippy::suspicious`, `--no-deps`) clean.
 - `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean, the
   `complementarity.html#c-api` anchor `c-api.md` links to exists.
+
+### S1-I5 — `IpoptSolve` routes through the driver (commit that ticks S1-I5)
+
+What moved:
+- `src/lib.rs`: `LastSolve.mpcc: Option<MpccOutcome>` (`None` on every
+  non-driver solve and every session solve). `IpoptSolve`: with pairs and a
+  staged working set, refuse with `Invalid_Problem_Definition` (one
+  `print_level`-gated line) **before** the working set is taken or the
+  bridge built — no callback runs, and neither the set nor the pairs is
+  consumed (so it refuses again until one is cleared; `IpoptSolveWarmStart`
+  with an input set inherits this). After restoration wiring and
+  `defer_end_verdict`, the solve is one `if`: pairs → `solve_mpcc(&mut app,
+  bridge, pairs.clone(), narration)`, `describe_outcome` narrated, verdict
+  released and printed with the driver's status, `(out.status,
+  out.statistics, Some(out))`; else the old `optimize_tnlp` + ladder,
+  moved into the `else` arm verbatim (re-indented; `ladder.statistics` is
+  moved instead of cloned). The `LastSolve` fill and the copy-back are the
+  shared tail. The driver's `Err` arm (narrated, verdict released, returns
+  `Invalid_Problem_Definition`, `last_solve` stays `None`) is marked
+  unreachable from C: its only source is `with_lift`'s `validate_pairs` on
+  the bridge's bounds, which are the bounds the declaration was validated
+  against.
+- Live inspectors: a thread-local `IN_LOWERED_SOLVE`, set by a drop guard
+  around `solve_mpcc` only; `GetIpoptCurrentIterate` and
+  `GetIpoptCurrentViolations` return `FALSE` while it is set, before reading
+  the handle. **Deviation from §3.5**, measured: the plan said the
+  inspectors already return `FALSE` in a lowered solve; that holds only when
+  `g`/`lambda` is requested. An `x`-only `GetIpoptCurrentIterate` returned
+  `TRUE` on every fire of every lowered solve (the lowered `n` equals the
+  caller's when nothing is lifted). The guard is load-bearing for that
+  shape; the test checks x-only, x+g and violations.
+- `IpoptGetWorkingSet` returns `FALSE` when `last_solve.mpcc.is_some()`.
+  Measured **not** load-bearing on today's code: with the guard disabled
+  the test still passes (the lowered set has `m + n_pairs` rows and fails
+  the length check). Kept as stated in §3.5.
+- `src/solver.rs`: `IpoptCreateSolver` returns `NULL` with pairs, after a
+  `print_level`-gated line, **without** consuming or nulling the handle.
+  `IpoptSolverSolve` guard (unreachable from C) returns
+  `Invalid_Problem_Definition`; unit test `session_solve_refuses_pairs_planted_past_create`
+  plants a pair on a session's problem, then clears it and solves.
+- `MpccTnlp` forwarding, read and pinned (no wrapper change):
+  `get_scaling_parameters` passes the bridge's user scaling for the
+  caller's rows/variables and `1` for product rows/lifts;
+  `get_list_of_nonlinear_variables` forwards the caller's mask plus every
+  product variable. Stated in `pounce.h` (scaling) and pinned by tests.
+- Docs: the five S1-I4 "in development" notes are gone (`pounce.h`,
+  README, `c-api.md`, `complementarity.md`, CHANGELOG), replaced by the
+  routing contract; `pounce.h` also documents it on `IpoptSolve`,
+  `SetIntermediateCallback`, the inspectors block, `IpoptGetWorkingSet`,
+  `IpoptSetWarmStartWorkingSet`, `IpoptCreateSolver`, and
+  `SetIpoptProblemScaling`. No new prototype, no new `#define`.
+
+Tests (`tests/complementarity_solve.rs`, new, 16; a `Probe` through
+`user_data` counts eval_f calls, callback fires, iteration-0 starts and
+records the inspectors' answers): pairs routed (status, `x` to the bit,
+`g`, objective, `GetIpoptIterCount` = 12 = the reported solve's, 139 total
+iterations, report writes with `iteration_count` 12, a second solve on the
+same handle identical); **no pairs** and **pairs declared then cleared**
+both pinned to the pre-change path, measured with the same test on
+`5aa87107` before any code changed — `Solve_Succeeded`, 15 iterations,
+objective `7.732176659546963e-9` and `x` to the bit, one start, 16 fires,
+17 `eval_f` calls; session refused (handle intact, solves, then with pairs
+cleared a session is created and consumes it); staged working set + pairs
+refused with 0 `eval_f` calls and 0 fires, refused again, then solves once
+cleared; the same working set without pairs solves on active-set SQP;
+`IpoptSolveWarmStart` + pairs refused, output buffers untouched;
+`IpoptGetWorkingSet` `TRUE` after a pair-less SQP solve, `FALSE` after a
+driver solve on the same handle; inspectors `FALSE` on every fire of a
+driver solve and `TRUE` on every fire of a plain one; a stop on fire 20
+(inside the second lowered solve) ends the run with `User_Requested_Stop`,
+two starts, no later fire; seven option rows (`complementarity_strategy`
+both/exact/continuation, `complementarity_continuation` coupled/schedule,
+`complementarity_lift` no/yes) each matching Python's reported `x` to the
+bit and its total iterations (schedule: callback sees 145 against the
+driver's 142 — three gh#983 scale-audit candidates inside lowered solves
+fire the callback and are discarded); bad option values refused at set
+time; `SetIpoptProblemScaling` + `user-scaling` under pairs matches
+Python's `set_problem_scaling` to the bit (83 iterations against 139
+unscaled); an L-BFGS nonlinear mask `{x}` under pairs gives the unmasked
+run to the bit (product variables cover all three), while without pairs
+the same mask changes the run (15 → 46 iterations). Before the code, 9 of
+the 13 then-written tests failed on `5aa87107` (the stop test was then
+rewritten because it passed there).
+
+**Reference: Python, not the CLI, for the trajectory.** From the `.nl`
+file's own start `(0, 0.5, 0.5)` the C API matches Python's
+`Problem(complementarity=)` on the same callbacks exactly (point, `g`,
+objective, `iter_count`, total iterations, every option row). The CLI on
+`qpec_small.nl` agrees on the answer (`1e-6`) but not the trajectory: 191
+iterations in all against 139, its first three lowered solves identical
+(15, 24, 12) and the fourth 40 against 12. Both callback frontends agree,
+so this is not an option the C side forgot; the CLI's `.nl` TNLP reports
+model structure a callback bridge does not (linearity, derivative proofs),
+the likely seat of the difference — not investigated further. **S1-I8
+(CLI parity through the C API) will meet this**; flagged for the human.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 19 binaries (lib 53,
+  `complementarity_solve` 16, `complementarity_declare` 34, `export_surface`
+  13, `header_abi` 4, `c_examples_build_and_run` 4).
+- `cargo clippy -p pounce-cinterface --all-targets -- -D warnings` — fails
+  before this crate on the five pre-existing `pounce-common` lints (as in
+  S1-I1/S1-I4). With `--no-deps -D warnings` the only `src/` hits are the
+  two pre-existing ones (`fortran.rs:493`, `lib.rs` useless `vec!` now at
+  `:4101`); `complementarity_solve.rs` has none. CI flags (`--no-deps -D
+  clippy::correctness -D clippy::suspicious`) clean.
+- `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean;
+  `make ask-check` top-1 17/20, top-5 20/20, OK.
+- Sweep: baseline `5aa87107` built `--release -p pounce-cli` in a `git
+  worktree` with its own `CARGO_TARGET_DIR`; head = this tree's
+  `target/release/pounce`. **Empty diff**, 282 lines each (141 exact, 141
+  lbfgs, 14 `cc:`). Empty by construction: the CLI does not link
+  `pounce-cinterface`; the no-pairs pins above are the evidence for the C
+  path.
 
 ### Facts recorded while planning (2ac0ad9)
 

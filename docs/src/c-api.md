@@ -62,8 +62,8 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   and are checked when declared, by the same classifier the solve's
   lowering runs; a refusal returns a `POUNCE_CC_ERR_*` code (out of range,
   variable or row already paired, unsupported shape, NULL, negative count)
-  and leaves the declared set unchanged. *In development: `IpoptSolve` does
-  not solve with declared pairs yet.*
+  and leaves the declared set unchanged. With pairs declared, `IpoptSolve`
+  solves through the complementarity driver (see *Solving*).
 
 ## Solving
 
@@ -77,6 +77,16 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   complementarity and Lagrangian gradient, in scaled or unscaled space, as in
   Ipopt 3.14. Both return `FALSE` outside the callback or when the dimensions
   passed do not match the problem's.
+- With complementarity pairs declared, `IpoptSolve` runs the complementarity
+  driver instead of one solve and the second-opinion ladder, exactly as the
+  CLI and Python do, and honours the `complementarity_strategy`,
+  `complementarity_continuation` and `complementarity_lift` options. The
+  buffers receive the reported point; the post-solve statistics describe
+  that reported solve, not the whole run. The intermediate callback fires
+  from every lowered solve (each restarts at iteration 0), and returning
+  `FALSE` from it ends the run with `User_Requested_Stop`; the inspectors
+  return `FALSE` throughout. See [Complementarity
+  Constraints](complementarity.md#c-api).
 
 ## Post-solve statistics
 
@@ -107,6 +117,10 @@ nearby problem; see the [active-set SQP warm-start design note](active-set-sqp-w
 - `IpoptSetWarmStartWorkingSet` stages one for the next solve (validated
   before it is stored); `IpoptClearWarmStartWorkingSet` drops it.
 - `IpoptSolveWarmStart` is set + solve + get in one call.
+- None of this combines with complementarity pairs: a staged working set
+  plus declared pairs makes `IpoptSolve` (and `IpoptSolveWarmStart`) return
+  `Invalid_Problem_Definition` without solving, and `IpoptGetWorkingSet`
+  returns `FALSE` after a solve with pairs.
 
 ## Sessions
 
@@ -118,7 +132,9 @@ solver's internal scaling) back-solve against the factor;
 `IpoptSolverParametricStep` and `IpoptSolverReducedHessian` answer
 first-order sensitivity questions; `IpoptFreeSolver` releases it. A session
 solve does not run the second-opinion ladder that `IpoptSolve` does. The
-walkthrough is [Sessions](sessions.md).
+walkthrough is [Sessions](sessions.md). A problem with complementarity pairs
+is refused: `IpoptCreateSolver` returns `NULL` and leaves the handle with
+the caller, because the session would hold the lowered model's factor.
 
 ## Solve report
 

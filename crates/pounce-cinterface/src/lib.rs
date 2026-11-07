@@ -210,6 +210,9 @@ pub(crate) struct LastSolve {
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_lambda: Vec<Number>,
     pub(crate) final_obj: Number,
+    /// The complementarity driver's record when the solve declared pairs
+    /// (gh#1147); `None` on every other solve, including every session solve.
+    pub(crate) mpcc: Option<pounce_restoration::mpcc_driver::MpccOutcome>,
 }
 
 impl Default for LastSolve {
@@ -221,6 +224,7 @@ impl Default for LastSolve {
             final_x: Vec::new(),
             final_lambda: Vec::new(),
             final_obj: 0.0,
+            mpcc: None,
         }
     }
 }
@@ -612,6 +616,13 @@ pub unsafe extern "C" fn SetIpoptProblemScaling(
 /// and bounds, runs it through [`IpoptApplication::optimize_tnlp`],
 /// and writes back the final iterate.
 ///
+/// With complementarity pairs declared (gh#1147) the bridge goes to
+/// [`pounce_restoration::mpcc_driver::solve_mpcc`] instead of one
+/// `optimize_tnlp` and the second-opinion ladder, as in the CLI and Python;
+/// the driver forwards its reported point to the bridge once, so the
+/// write-back is the same. A staged SQP working set plus pairs is refused
+/// with `Invalid_Problem_Definition` before any callback.
+///
 /// # Safety
 ///
 /// All pointer arguments are read/written per the
@@ -656,6 +667,22 @@ pub unsafe extern "C" fn IpoptSolve(
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
             if info.n > 0 && x.is_null() {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            // A staged SQP working set is over the caller's rows and
+            // variables; the complementarity driver solves a lowered model
+            // with more rows (and possibly lifted variables), so there is no
+            // set it could seed. Refused before any callback runs, and
+            // neither the working set nor the pairs are consumed (gh#1147).
+            if !info.complementarity.is_empty() && info.pending_working_set.is_some() {
+                if pounce_algorithm::second_opinion::narration_is_wanted(info.app.options()) {
+                    eprintln!(
+                        "pounce: a warm-start working set cannot seed a solve with \
+                         complementarity pairs ({} declared); clear one of them \
+                         (IpoptClearWarmStartWorkingSet or ClearPounceComplementarityPairs).",
+                        info.complementarity.len()
+                    );
+                }
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
 
@@ -780,43 +807,106 @@ pub unsafe extern "C" fn IpoptSolve(
             // driver's attempt printed its own verdict and a run that recovered
             // reported a mid-run one that read as the final answer.
             info.app.defer_end_verdict();
-            let status = info.app.optimize_tnlp(bridge_for_solve);
-            let stats = info.app.statistics();
-            // Second-opinion ladder, on by default as it is in the CLI and the
-            // Python frontend: an `Infeasible_Problem_Detected` or
-            // `Invalid_Number_Detected` is re-solved along up to three
-            // deliberately different trajectories and a re-solve is promoted
-            // only if it converges. A converged solve pays nothing — the
-            // ladder reads the status and returns. The three `*_retry`
-            // options turn individual rungs off.
-            //
-            // Narration goes to stderr, where the solver's own banners already
-            // go -- but gated on `print_level >= 1`. This crate is the Ipopt
-            // drop-in, so `print_level=0 sb=yes` is a caller asking for
-            // silence, and eight unexpected `pounce:` lines on a failing
-            // solve is exactly what that asks not to happen. The ladder still runs;
-            // only the console is quiet.
-            let narrate = pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
-            let ladder = run_second_opinion_ladder(
-                &mut info.app,
-                bridge.clone() as Rc<RefCell<dyn TNLP>>,
-                status,
-                stats,
-                &mut |line| {
-                    if narrate {
-                        eprintln!("{line}");
+            // Declared complementarity (gh#1147): the driver chooses the
+            // formulation, runs the lowered solves and certifies the answer,
+            // as in the CLI and Python. It replaces the single solve and the
+            // second-opinion ladder, which both assume one solve of one model,
+            // and forwards the reported point to the bridge's
+            // `finalize_solution` exactly once, so the copy-back below is the
+            // same for both paths.
+            let (status, statistics, mpcc) = if !info.complementarity.is_empty() {
+                let narrate =
+                    pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
+                let result = {
+                    let _lowered = LoweredSolveGuard::enter();
+                    pounce_restoration::mpcc_driver::solve_mpcc(
+                        &mut info.app,
+                        bridge_for_solve,
+                        info.complementarity.clone(),
+                        &mut |line| {
+                            if narrate {
+                                eprintln!("{line}");
+                            }
+                        },
+                    )
+                };
+                let out = match result {
+                    Ok(out) => out,
+                    // Unreachable from C: the only `Err` is `MpccTnlp::with_lift`
+                    // refusing the pairs, and the stored set passed the same
+                    // validator against the same bounds at declaration. Kept
+                    // as a refusal rather than an assumption.
+                    Err(e) => {
+                        if narrate {
+                            eprintln!(
+                                "pounce: cannot solve this model's complementarity constraints: {e}"
+                            );
+                        }
+                        let status = ApplicationReturnStatus::InvalidProblemDefinition;
+                        if info.app.release_end_verdict() {
+                            info.app.print_end_verdict(status);
+                        }
+                        return status as Index;
                     }
-                },
-            );
-            let status = ladder.status;
+                };
+                if narrate {
+                    eprintln!(
+                        "{}",
+                        pounce_algorithm::mpcc::describe_outcome(
+                            out.reported,
+                            out.solves.len(),
+                            out.total_iterations,
+                            out.max_abs_product,
+                            out.certificate.as_ref(),
+                        )
+                    );
+                }
+                if info.app.release_end_verdict() {
+                    info.app.print_end_verdict(out.status);
+                }
+                (out.status, out.statistics.clone(), Some(out))
+            } else {
+                // The path without pairs, unchanged: one solve, then the ladder.
+                let status = info.app.optimize_tnlp(bridge_for_solve);
+                let stats = info.app.statistics();
+                // Second-opinion ladder, on by default as it is in the CLI and the
+                // Python frontend: an `Infeasible_Problem_Detected` or
+                // `Invalid_Number_Detected` is re-solved along up to three
+                // deliberately different trajectories and a re-solve is promoted
+                // only if it converges. A converged solve pays nothing — the
+                // ladder reads the status and returns. The three `*_retry`
+                // options turn individual rungs off.
+                //
+                // Narration goes to stderr, where the solver's own banners already
+                // go -- but gated on `print_level >= 1`. This crate is the Ipopt
+                // drop-in, so `print_level=0 sb=yes` is a caller asking for
+                // silence, and eight unexpected `pounce:` lines on a failing
+                // solve is exactly what that asks not to happen. The ladder still runs;
+                // only the console is quiet.
+                let narrate =
+                    pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
+                let ladder = run_second_opinion_ladder(
+                    &mut info.app,
+                    bridge.clone() as Rc<RefCell<dyn TNLP>>,
+                    status,
+                    stats,
+                    &mut |line| {
+                        if narrate {
+                            eprintln!("{line}");
+                        }
+                    },
+                );
+                (ladder.status, ladder.statistics, None)
+            };
             let bridge_ref = bridge.borrow();
             info.last_solve = Some(LastSolve {
-                stats: ladder.statistics.clone(),
+                stats: statistics,
                 status,
                 linear_solver: info.app.linear_solver_summary(),
                 final_x: bridge_ref.final_x.clone(),
                 final_lambda: bridge_ref.final_lambda.clone(),
                 final_obj: bridge_ref.final_obj,
+                mpcc,
             });
             if !x.is_null() && n_us > 0 {
                 std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
@@ -920,6 +1010,12 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 ) -> Bool {
     unsafe {
         if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        // During a complementarity solve the algorithm's iterate is the
+        // lowered model's, not the caller's (gh#1147): no data, whatever
+        // the request shape. Checked before the handle is read.
+        if in_lowered_solve() {
             return FALSE;
         }
         let info = &*ipopt_problem;
@@ -1089,6 +1185,12 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
 ) -> Bool {
     unsafe {
         if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        // During a complementarity solve the algorithm's iterate is the
+        // lowered model's, not the caller's (gh#1147): no data, whatever
+        // the request shape. Checked before the handle is read.
+        if in_lowered_solve() {
             return FALSE;
         }
         let info = &*ipopt_problem;
@@ -1619,6 +1721,12 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             return FALSE;
         }
         let info = &*ipopt_problem;
+        // A complementarity solve ran on the lowered model (gh#1147); no
+        // working set over the caller's rows exists, and one left over from
+        // an earlier solve must not read as this one's.
+        if info.last_solve.as_ref().is_some_and(|l| l.mpcc.is_some()) {
+            return FALSE;
+        }
         let ws = match info.app.last_sqp_working_set() {
             Some(w) => w,
             None => return FALSE,
@@ -2229,6 +2337,39 @@ pub(crate) fn bridge_violation_options(
         num("nlp_upper_bound_inf", NLP_UPPER_BOUND_INF),
         !relax,
     )
+}
+
+thread_local! {
+    /// `true` while [`IpoptSolve`] runs the complementarity driver on this
+    /// thread (gh#1147). The live inspectors report no data then: the
+    /// algorithm's iterate is the lowered model's — product rows appended,
+    /// possibly lifted variables — not the caller's, and a prefix of it is
+    /// not the caller's iterate either (a lifted row's bounds are rewritten).
+    static IN_LOWERED_SOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets [`IN_LOWERED_SOLVE`] for its lifetime, restoring the previous value
+/// on drop (so a panic caught by [`ffi_guard`] cannot leave it set).
+struct LoweredSolveGuard {
+    prev: bool,
+}
+
+impl LoweredSolveGuard {
+    fn enter() -> Self {
+        Self {
+            prev: IN_LOWERED_SOLVE.with(|c| c.replace(true)),
+        }
+    }
+}
+
+impl Drop for LoweredSolveGuard {
+    fn drop(&mut self) {
+        IN_LOWERED_SOLVE.with(|c| c.set(self.prev));
+    }
+}
+
+fn in_lowered_solve() -> bool {
+    IN_LOWERED_SOLVE.with(|c| c.get())
 }
 
 struct BridgeGuard {

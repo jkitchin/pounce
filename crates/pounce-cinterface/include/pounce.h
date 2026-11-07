@@ -202,7 +202,11 @@ bool OpenIpoptOutputFile(
  *  `x_scaling` is applied as a change of variables, so the solution
  *  and bound multipliers IpoptSolve writes back are in your own units.
  *  A factor that is not finite and positive is refused by IpoptSolve,
- *  which returns Invalid_Option and prints why. */
+ *  which returns Invalid_Option and prints why.
+ *
+ *  With complementarity pairs declared, every lowered solve uses these
+ *  factors for your rows and variables; the rows the lowering adds (one
+ *  product row per pair) and any lifted variables are unscaled. */
 bool SetIpoptProblemScaling(
     IpoptProblem ipopt_problem,
     ipnumber     obj_scaling,
@@ -229,6 +233,13 @@ bool SetIpoptProblemScaling(
  *   - The GetIpoptCurrent* inspectors report no data for the duration.
  *     The restoration iterate is not a point of your problem, and does
  *     not even have its dimensions.
+ *
+ *  With complementarity pairs declared, the callback fires from every
+ *  lowered solve the driver runs (each starts again at iter_count 0), and
+ *  its scalars describe the lowered model. The GetIpoptCurrent*
+ *  inspectors report no data during such a solve, whatever is requested.
+ *  Returning false ends the whole run: the driver starts no further solve
+ *  and IpoptSolve returns User_Requested_Stop.
  *
  *  Returning false from a restoration fire ends the solve at the last
  *  iterate accepted for your NLP, not at the subproblem's iterate — so
@@ -261,6 +272,22 @@ bool SetIntermediateCallback(
  * rejects a NULL here.
  *
  * Returns an ApplicationReturnStatus (see IpoptReturnCodes.h).
+ *
+ * Complementarity pairs (AddPounceComplementarityPair and friends): with
+ * pairs declared, IpoptSolve hands the model to POUNCE's complementarity
+ * driver, as the CLI and Python do. The driver runs a sequence of solves of
+ * a lowered model (a product row per pair, possibly lifted variables),
+ * certifies the answer, and reports one point; that point, its g, objective
+ * and multipliers are what come back in the buffers above, and the status
+ * is that solve's. GetIpoptIterCount and the other post-solve accessors
+ * describe the same reported solve, not the whole run. The
+ * complementarity_strategy, complementarity_continuation and
+ * complementarity_lift options steer the driver. The second-opinion ladder
+ * does not run after it. With no pairs declared nothing here changes.
+ * A staged SQP working set (IpoptSetWarmStartWorkingSet) cannot seed a
+ * solve with pairs: IpoptSolve then returns Invalid_Problem_Definition
+ * before any callback runs, and leaves both the working set and the pairs
+ * in place (clear one of them).
  * ----------------------------------------------------------------- */
 enum ApplicationReturnStatus IpoptSolve(
     IpoptProblem ipopt_problem,
@@ -283,6 +310,10 @@ enum ApplicationReturnStatus IpoptSolve(
  * one — before the first iteration, after IpoptSolve returns, or from
  * another thread — they return false and write nothing, which is the
  * upstream contract.
+ *
+ * During a solve with complementarity pairs declared they also return
+ * false and write nothing, for every request shape: the iterate is the
+ * lowered model's, not a point of your problem's shape.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -524,7 +555,9 @@ typedef int IpoptConsStatus;
  *
  * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
  * available — e.g. no SQP solve has been run, the IPM path was
- * used, or the SQP solve converged at iter 0 (no QP solved).
+ * used, the SQP solve converged at iter 0 (no QP solved), or the
+ * last solve had complementarity pairs (its solves were of a lowered
+ * model with more rows).
  */
 Bool IpoptGetWorkingSet(
     IpoptProblem      ipopt_problem,
@@ -564,6 +597,12 @@ Bool IpoptGetWorkingSet(
  *
  * The staged working set is consumed by one solve. A following
  * IpoptSolve without a fresh call here cold-starts its working set.
+ *
+ * Not with complementarity pairs: an IpoptSolve on a problem with both a
+ * staged working set and declared pairs returns Invalid_Problem_Definition
+ * without solving and consumes neither (the working set is over your rows;
+ * the driver solves a lowered model with more). The same holds for
+ * IpoptSolveWarmStart with an input working set.
  */
 Bool IpoptSetWarmStartWorkingSet(
     IpoptProblem            ipopt_problem,
@@ -634,8 +673,10 @@ Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
  * runs; a refused declaration leaves the declared set unchanged. Pairs
  * persist on the handle across solves.
  *
- * NOTE (in development): this build validates and stores the pairs, but
- * IpoptSolve does not solve with them yet.
+ * IpoptSolve solves a problem with pairs through the complementarity
+ * driver (see IpoptSolve). Sessions (IpoptCreateSolver) and SQP
+ * working-set warm starts refuse pairs; the live inspectors report no
+ * data during such a solve.
  * ------------------------------------------------------------------- */
 #define POUNCE_CC_OK                   0
 #define POUNCE_CC_ERR_NULL            -1   /* NULL handle, or NULL array with n_pairs > 0 */
@@ -783,6 +824,14 @@ typedef struct IpoptSolverInfo* IpoptSolver;
  * `*prob_handle` (the inner pointer is nulled out so the caller
  * cannot accidentally double-free). Returns NULL on a NULL/empty
  * input handle.
+ *
+ * Also returns NULL when the problem has declared complementarity pairs,
+ * and then does NOT consume it: `*prob_handle` stays valid, the caller
+ * still owns it (solve it with IpoptSolve, free it with FreeIpoptProblem).
+ * A session keeps the KKT factor of the model it solved, which with pairs
+ * would be the lowered model's, so the parametric step and reduced Hessian
+ * over your rows would answer a different system. At print_level >= 1 one
+ * line on stderr says why.
  */
 IpoptSolver IpoptCreateSolver(IpoptProblem* prob_handle);
 

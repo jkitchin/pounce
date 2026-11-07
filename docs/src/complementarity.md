@@ -111,8 +111,18 @@ Python or the `.nl` reader would refuse is refused here with a code:
 `POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments). A refused
 call leaves the declared set as it was. See also the [C API](c-api.md) page.
 
-*In development:* this build validates and stores the pairs; `IpoptSolve`
-does not yet solve with them.
+`IpoptSolve` then solves the model through the same driver the CLI and
+Python use, with the same `complementarity_*` options, and writes the
+reported point, its constraint values, objective and multipliers into the
+caller's buffers; `GetIpoptIterCount` and the other post-solve accessors
+describe that reported solve, not the whole run. With no pairs declared
+`IpoptSolve` is unchanged. Three things refuse pairs: `IpoptCreateSolver`
+returns `NULL` and leaves the handle with the caller (a session would hold
+the lowered model's factor); an `IpoptSolve` with a staged SQP working set
+returns `Invalid_Problem_Definition` before any callback; and
+`IpoptGetWorkingSet` reports no set after a driver solve. The intermediate
+callback fires from every lowered solve, and `GetIpoptCurrentIterate` /
+`GetIpoptCurrentViolations` report no data during them.
 
 ## What POUNCE does with them
 

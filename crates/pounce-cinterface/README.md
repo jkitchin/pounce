@@ -77,8 +77,11 @@ POUNCE extensions:
   `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
   `GetPounceComplementarityPairs`. Indices in the problem's index style;
   each declaration is validated at once by the classifier the lowering runs
-  and refused with a `POUNCE_CC_ERR_*` code. (In development: `IpoptSolve`
-  does not solve with them yet.)
+  and refused with a `POUNCE_CC_ERR_*` code. With pairs declared,
+  `IpoptSolve` solves through the complementarity driver (as the CLI and
+  Python do; the `complementarity_*` options apply); `IpoptCreateSolver`
+  and a staged SQP working set refuse them, and the live inspectors report
+  no data during such a solve.
 - `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most
