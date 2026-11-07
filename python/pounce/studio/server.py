@@ -1181,6 +1181,12 @@ _FLOW_VERBS = frozenset({
 
 _STARTUP_TIMEOUT = 30.0   # seconds to see hello + the first pause
 _PAUSE_GRACE = 30.0       # after an in-band pause, seconds to reach a checkpoint
+# Floor on the wait for a command's own `result`. `timeout` bounds how long
+# a flow verb may run before it is paused (`_drain`); it is not a deadline
+# for the acknowledgement, which the CLI sends before resuming. Without the
+# floor, a tiny timeout on a slow machine raised TimeoutError where it should
+# have returned "interrupted" (seen in CI with timeout_seconds=0.0001).
+_RESULT_GRACE = 10.0
 
 
 class _DebugSession:
@@ -1303,12 +1309,13 @@ class _DebugSession:
             # 1) read up to the matching result; stash any stray events.
             result: dict[str, Any] | None = None
             pre: list[dict[str, Any]] = []
-            r_deadline = time.monotonic() + timeout
+            r_wait = max(timeout, _RESULT_GRACE)
+            r_deadline = time.monotonic() + r_wait
             while result is None:
                 kind, ev = self._read(r_deadline - time.monotonic())
                 if kind == "timeout":
                     raise TimeoutError(
-                        f"no `result` for command {cmd!r} within {timeout}s"
+                        f"no `result` for command {cmd!r} within {r_wait}s"
                     )
                 if kind == "eof":
                     raise RuntimeError(

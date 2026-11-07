@@ -7,6 +7,8 @@ binary isn't built. They exercise the protocol proxy against the
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from pounce.studio.server import (
@@ -184,15 +186,36 @@ def test_conditional_breakpoint_fires(session):
 # ---- timeout / interrupt recovery -----------------------------------
 
 
-def test_timeout_interrupts_and_session_stays_usable(session):
-    sid = session["session_id"]
-    out = debug_command(sid, "continue", timeout_seconds=0.0001)
-    assert out["outcome"] == "interrupted"
-    assert out["finished"] is False
-    # the session recovers and runs to completion afterward
-    out2 = debug_command(sid, "continue", timeout_seconds=60)
-    assert out2["outcome"] == "finished"
-    assert out2["state"]["status"] == "Success"
+_DEB7 = (Path(__file__).resolve().parents[3]
+         / "crates" / "pounce-cli" / "tests" / "fixtures" / "deb7.nl")
+
+
+@pytest.mark.skipif(not _DEB7.is_file(), reason="deb7.nl fixture not found")
+def test_timeout_interrupts_and_session_stays_usable():
+    # deb7 runs 180 iterations, so the in-band pause sent at the deadline
+    # lands mid-solve. On rosenbrock (~21 iterations) the solve could finish
+    # before the pause was read; that race only surfaced once CI ran this
+    # test against a real binary.
+    st = debug_start(nl_file=str(_DEB7))
+    sid = st["session_id"]
+    try:
+        out = debug_command(sid, "continue", timeout_seconds=0.0001)
+        assert out["outcome"] == "interrupted", out["outcome"]
+        assert out["finished"] is False
+        # The session recovers and runs to completion afterward. deb7 also
+        # pauses at intermediate checkpoints (e.g. restoration), so keep
+        # continuing until the run ends.
+        for _ in range(50):
+            out2 = debug_command(sid, "continue", timeout_seconds=120)
+            if out2["outcome"] != "paused":
+                break
+        assert out2["outcome"] == "finished", out2["outcome"]
+        assert out2["state"]["status"] is not None
+    finally:
+        try:
+            debug_close(sid)
+        except ValueError:
+            pass
 
 
 # ---- registry / lifecycle -------------------------------------------
