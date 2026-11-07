@@ -74,17 +74,22 @@ jobs:
             manylinux: manylinux2014
             rust_target: aarch64-unknown-linux-gnu
             binary_name: pounce
-          - os: macos-14       # macOS arm64 runner (Apple Silicon)
+          # macOS arm64 runner (Apple Silicon). macos-15, not macos-14:
+          # GitHub retired the macos-14 image, and the 0.16.0 tag run had both
+          # macOS wheel jobs rejected at start ("The configuration
+          # 'macos-14-arm64-us-default' is not supported"), so PyPI publish
+          # was skipped while every other wheel built.
+          - os: macos-15
             target: aarch64
             manylinux: ""
             rust_target: aarch64-apple-darwin
             binary_name: pounce
           # x86_64 macOS wheel — cross-compiled from the Apple Silicon
           # runner. The macos-13 (Intel) runner pool is unreliable
-          # (jobs queue for hours); cross-compiling from macos-14 has
-          # the same coverage for Intel Mac users at a fraction of
+          # (jobs queue for hours); cross-compiling from the arm64 runner
+          # has the same coverage for Intel Mac users at a fraction of
           # the wait time.
-          - os: macos-14
+          - os: macos-15
             target: x86_64
             manylinux: ""
             rust_target: x86_64-apple-darwin
