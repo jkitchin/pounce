@@ -121,7 +121,7 @@ POUNCE is in research use outside its authors' group:
 - Opyrability, a process-operability package [@Alves2024], uses POUNCE as its
   default solver.
 - SiNDAE, which trains neural differential-algebraic equations by the
-  simultaneous approach [@Lueg2025], runs its whole pipeline on POUNCE.
+  simultaneous approach [@Lueg2026], runs its whole pipeline on POUNCE.
 - oximo, a Rust algebraic modeling library, has a POUNCE backend, and
   tellegen runs live interactive power-flow analysis on it.
 - The Julia interface was contributed by power-systems researchers and is
