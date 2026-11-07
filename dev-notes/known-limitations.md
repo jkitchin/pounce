@@ -103,6 +103,31 @@ architectures): rounding-chaotic, so a single run is not a measurement.**
   `square_system_recovery.rs`'s options), so the budget exit those tests
   need is stable.
 
+**The same trade beyond the fixture corpus: Mittelmann's `qcqp…nc`.**
+Measured in the PR #1148 review on arm64 (macOS), `hessian_approximation=limited-memory`,
+120 s per problem, both binaries run concurrently:
+
+| problem | `main` | branch |
+|---|---|---|
+| `qcqp1000-1nc` | `Restoration_Failed`, 611 it | `MaxIter`, 3000 |
+| `qcqp500-3nc` | `Restoration_Failed`, 428 | `MaxIter`, 3000 |
+| `qcqp750-2nc` | `Restoration_Failed`, 1026 | `MaxIter`, 3000 |
+| `qcqp750-2c` | `Restoration_Failed`, 290 | **`Solve_Succeeded`**, 2987 |
+
+- **Same shape as `square_flowsheet_resto`:** restoration no longer gives
+  up early, and the outer loop then runs to the iteration cap. Each `nc` row
+  is a failure before and after, but the new failure spends the whole budget.
+- **Objective:** in all three, the objective at the cap is lower than at
+  the old restoration exit.
+- **Suite totals:** 31 solved before and after over the 47 problems. On the
+  30 both solve, 8,996 → 9,020 iterations.
+- **Not traced:** these models were not reproduced for this PR. The `.mod`
+  sources need AMPL to translate, and Mittelmann's server could not be
+  reached from the PR's environment. Whether the extra iterations buy a
+  better point or only spend the budget is open.
+- **How to tell:** if a later change makes these exit early again, check
+  that it does so without losing `qcqp750-2c`.
+
 **`cc:` totals (both architectures).** `cc:design_cent_3` and
 `cc:infeasible_pair` go through the complementarity driver's lowered solves
 and have no direct Ipopt comparison. Not traced.
