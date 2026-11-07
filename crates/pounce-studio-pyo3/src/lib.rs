@@ -1,8 +1,8 @@
 //! PyO3 bindings for `pounce-studio-core`.
 //!
-//! Built as the `_native` extension module of the `pounce-studio-mcp`
-//! Python package (see `studio/mcp/pyproject.toml`). The Python MCP
-//! server in `studio/mcp/pounce_studio_mcp/` delegates all analysis
+//! Linked into `pounce-solver`'s extension and mounted as
+//! `pounce._pounce.studio` (see [`register`]). The Python MCP server in
+//! `python/pounce/studio/` (the `[mcp]` extra) delegates all analysis
 //! through these bindings so the Rust core is the single source of
 //! truth for derived series and diagnostics.
 //!
@@ -259,6 +259,15 @@ fn compare_reports(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> PyResu
 
 #[pymodule]
 fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register(m)
+}
+
+/// Add the studio bindings to `m`. Shared by this crate's own `_native`
+/// module and by `pounce-py`, which links this crate and mounts the same
+/// bindings as `pounce._pounce.studio` — that is how `pip install
+/// pounce-solver[mcp]` ships the MCP server without a second extension
+/// module to build.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReport>()?;
     m.add_class::<PyIterDump>()?;
     m.add_function(wrap_pyfunction!(compare_reports, m)?)?;

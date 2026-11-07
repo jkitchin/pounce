@@ -10,7 +10,7 @@ rediscover them from source.
 | You want to… | Use | Discover it via |
 |---|---|---|
 | Step/inspect/mutate a **live** solve | `pounce <model> --debug-json` | the `hello` handshake (self-describing) |
-| Post-mortem a **finished** solve | pounce-studio MCP server, or `--json-output` | `studio/mcp/`, `docs/src/schema/` |
+| Post-mortem a **finished** solve | pounce-studio MCP server, or `--json-output` | `python/pounce/studio/`, `docs/src/schema/` |
 | Solve and get machine-readable output | `pounce <model> --json-output r.json --json-detail full` | `docs/src/schema/solve-report-v1.md` |
 
 ### Interactive debugger — `--debug-json` (live)
@@ -33,7 +33,9 @@ Full contract and a worked transcript: **`docs/src/debugger.md`**
 
 ### pounce-studio MCP server
 
-`studio/mcp/` is a FastMCP server with two tool families:
+`python/pounce/studio/` (`pip install "pounce-solver[mcp]"`, then
+`pounce-studio-mcp`; a Claude Desktop extension is built from
+`studio/mcpb/`) is a FastMCP server with two tool families:
 
 - **Post-mortem** (`diagnose`, `find_stalls`, `restoration_windows`,
   `convergence_trace`, `compare_runs`, `run_problem`, …) — analyze a

@@ -8,7 +8,7 @@ description: Install pounce, and inspect and diagnose pounce solve reports via t
 This skill wraps the `pounce-studio` CLI for AI-assisted post-mortem of
 pounce solve reports plus pre-flight inspection of `.nl` and `.gms`
 input files. It is the CLI-and-skill counterpart to the
-`pounce-studio-mcp` MCP server (in `studio/mcp/`); both backends
+`pounce-studio-mcp` MCP server (`pounce-solver[mcp]`); both backends
 ultimately call the same Rust analysis core, so findings agree.
 
 Use this skill when the user asks any of:

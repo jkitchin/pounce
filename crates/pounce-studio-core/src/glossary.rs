@@ -1,7 +1,7 @@
 //! Static glossary for solve-report column names, diagnose finding codes,
 //! and citation metadata. Backs the `explain` and `citations` CLI tools.
 //!
-//! Ported from `studio/mcp/pounce_studio_mcp/glossary.py` so the
+//! Ported from `python/pounce/studio/glossary.py` so the
 //! Rust-CLI / skill path returns the same definitions as the Python MCP
 //! path. Entries are intentionally terse — Claude can elaborate at call
 //! time; the job here is to surface canonical names, numeric ranges,

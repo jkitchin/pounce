@@ -101,7 +101,7 @@ corresponding `pounce-studio` subcommand:
 - **Skill (this)** — preferred default. Single CLI on PATH, no
   background server, works in every Claude session including
   remote/web. Setup is one `make` target.
-- **MCP server** (`studio/mcp/`) — keep if you prefer structured
+- **MCP server** (`pip install "pounce-solver[mcp]"`, see `studio/mcp/`) — keep if you prefer structured
   tool-call args in the Claude UI, or if you want to drive it from a
   non-Claude MCP client (Cursor, Zed, Continue).
 

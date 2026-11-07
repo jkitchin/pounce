@@ -36,7 +36,7 @@ Request (the agent, with NO key in its env):
     # → the signed receipt JSON (verdict + signature)
 
 Verify the returned receipt (consumer holding the same key):
-    from pounce_studio_mcp.verify_sig import check_signature
+    from pounce.studio.verify_sig import check_signature
     assert check_signature(receipt, key) and receipt["verified"]
 """
 from __future__ import annotations

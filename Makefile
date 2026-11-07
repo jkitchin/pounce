@@ -21,7 +21,8 @@
 #   make docker           # container image compiled from the current tree
 #   make docker-release   # container image from the published PyPI wheels
 #   make dev              # build the CLI + extension for a source checkout
-#   make install-mcp      # build studio/mcp + register with Claude Code
+#   make install-mcp      # build pounce-solver[mcp] + register with Claude Code
+#   make mcpb             # build the Claude Desktop extension into dist/
 #   make uninstall-mcp    # unregister + remove the studio/mcp venv
 #   make install-skill    # build pounce + pounce-studio, drop SKILL.md into ~/.claude/skills/
 #   make uninstall-skill  # remove the installed skill directory
@@ -78,7 +79,7 @@ else
 endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
-        install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
+        install-mcp uninstall-mcp mcpb install-skill uninstall-skill pounce-ma57 \
         test-ma57 \
         dev python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
@@ -354,23 +355,26 @@ benchmark-%-rerun:
 benchmark-%:
 	$(MAKE) -C benchmarks $*-run
 
-# ---- MCP server (studio/mcp) --------------------------------------------
-# Builds the pounce-studio-mcp server into a private venv under
-# studio/mcp/.venv (PyO3 extension compiled in release mode) and
-# registers it with Claude Code via `claude mcp add`. Idempotent — rerun
-# after pulling new studio changes to rebuild the extension.
+# ---- MCP server (pounce.studio, the `[mcp]` extra) -----------------------
+# Builds pounce-solver from this checkout, with the `mcp` extra, into a
+# private venv under studio/mcp/.venv, and registers its
+# `pounce-studio-mcp` script with Claude Code via `claude mcp add`. The
+# CLI is staged into python/pounce/bin/ first (python-cli-bin), so the
+# debugger and run_problem spawn this checkout's pounce. Idempotent —
+# rerun after pulling to rebuild. Users of a release need none of this:
+# `uvx --from "pounce-solver[mcp]" pounce-studio-mcp`.
 #
 #   make install-mcp                   # user scope (visible to all sessions)
 #   make install-mcp MCP_SCOPE=local   # this project only
 #   make uninstall-mcp                 # unregister + delete the venv
+#   make mcpb                          # Claude Desktop extension -> dist/
 
-MCP_DIR   := studio/mcp
-MCP_VENV  := $(MCP_DIR)/.venv
+MCP_VENV  := studio/mcp/.venv
 MCP_PY    := $(MCP_VENV)/bin/python
 MCP_BIN   := $(MCP_VENV)/bin/pounce-studio-mcp
 MCP_SCOPE ?= user
 
-install-mcp:
+install-mcp: python-cli-bin
 	@command -v claude >/dev/null 2>&1 || { \
 	  echo "install-mcp: 'claude' CLI not on PATH (install Claude Code first)"; exit 1; }
 	@if [ ! -d "$(MCP_VENV)" ]; then \
@@ -378,8 +382,9 @@ install-mcp:
 	  python3 -m venv "$(MCP_VENV)"; \
 	fi
 	@$(MCP_PY) -m pip install --quiet --upgrade pip maturin
-	@echo "Building native extension (maturin develop --release)"
-	@cd $(MCP_DIR) && . .venv/bin/activate && maturin develop --release
+	@echo "Building pounce-solver[mcp] (maturin develop --release)"
+	@VIRTUAL_ENV="$(abspath $(MCP_VENV))" PATH="$(abspath $(MCP_VENV))/bin:$$PATH" \
+	  maturin develop --release -m python/pyproject.toml -E mcp
 	@echo "Registering with Claude Code (scope=$(MCP_SCOPE))"
 	@claude mcp remove pounce-studio --scope $(MCP_SCOPE) >/dev/null 2>&1 || true
 	@claude mcp add pounce-studio --scope $(MCP_SCOPE) -- "$(abspath $(MCP_BIN))"
@@ -392,6 +397,11 @@ uninstall-mcp:
 	  claude mcp remove pounce-studio --scope $(MCP_SCOPE) >/dev/null 2>&1 || true
 	rm -rf "$(MCP_VENV)"
 	@echo "Removed $(MCP_VENV) and unregistered pounce-studio (scope=$(MCP_SCOPE))"
+
+# The Claude Desktop extension (studio/mcpb/). It pins pounce-solver[mcp]
+# to python/pyproject.toml's version, which must be on PyPI to install.
+mcpb:
+	scripts/build-mcpb.sh
 
 # ---- Claude skill (skills/pounce) --------------------------------------
 # Build the pounce + pounce-studio binaries, install them under $(PREFIX),

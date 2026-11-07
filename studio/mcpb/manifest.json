@@ -1,0 +1,166 @@
+{
+  "manifest_version": "0.4",
+  "name": "pounce-studio",
+  "display_name": "POUNCE Studio",
+  "version": "0.16.0",
+  "description": "Solve, diagnose, verify and live-debug nonlinear optimization models with the POUNCE solver.",
+  "long_description": "POUNCE is a pure-Rust interior-point optimizer (a port of Ipopt 3.14 with convex QP/conic, active-set, sensitivity and MPCC engines). This extension lets Claude solve AMPL .nl models, explain why a solve failed, check a .sol file against the canonical model, preflight a starting point, and step through a live solve in POUNCE's debugger. Relative model paths are resolved against the Workspace folder you choose.",
+  "author": {
+    "name": "John Kitchin",
+    "url": "https://github.com/jkitchin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jkitchin/pounce"
+  },
+  "homepage": "https://github.com/jkitchin/pounce",
+  "documentation": "https://jkitchin.github.io/pounce/",
+  "support": "https://github.com/jkitchin/pounce/issues",
+  "icon": "icon.png",
+  "license": "EPL-2.0",
+  "keywords": [
+    "optimization",
+    "nonlinear programming",
+    "ipopt",
+    "solver",
+    "ampl"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "src/server.py"
+      ],
+      "env": {
+        "POUNCE_WORKDIR": "${user_config.workspace}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "analyze_problem",
+      "description": "Inspect a problem without solving it."
+    },
+    {
+      "name": "run_problem",
+      "description": "Run a pounce solve and return the resulting report."
+    },
+    {
+      "name": "verify_solution",
+      "description": "Independently verify that a .sol satisfies a .nl's constraints."
+    },
+    {
+      "name": "check_x0",
+      "description": "Preflight a model's starting point before any solve."
+    },
+    {
+      "name": "suggest_initialization",
+      "description": "Preflight a model's starting point and propose concrete fixes."
+    },
+    {
+      "name": "explain",
+      "description": "Look up a per-iter column name or a diagnose finding code."
+    },
+    {
+      "name": "citations",
+      "description": "Return curated paper references."
+    },
+    {
+      "name": "load_solve_report",
+      "description": "Load a pounce.solve-report/v1 JSON file and return a headline summary."
+    },
+    {
+      "name": "convergence_trace",
+      "description": "Return per-iteration trajectory as column-oriented arrays."
+    },
+    {
+      "name": "get_iterate",
+      "description": "Full per-iteration record for iter k (0-indexed)."
+    },
+    {
+      "name": "find_stalls",
+      "description": "Detect convergence-stall windows."
+    },
+    {
+      "name": "diagnose",
+      "description": "Run common Ipopt-failure heuristics over a solve report."
+    },
+    {
+      "name": "debug_session_guide",
+      "description": "How to drive POUNCE's *live* interactive debugger (--debug-json)."
+    },
+    {
+      "name": "debug_start",
+      "description": "Start a LIVE, steppable solve and hold it open across calls."
+    },
+    {
+      "name": "debug_command",
+      "description": "Send ONE command to a live debug session and read its response."
+    },
+    {
+      "name": "debug_state",
+      "description": "Cached state of a live debug session (no child I/O)."
+    },
+    {
+      "name": "debug_sessions",
+      "description": "List all live debug sessions held by this server."
+    },
+    {
+      "name": "debug_close",
+      "description": "Stop a live debug session and reap its process."
+    },
+    {
+      "name": "restoration_windows",
+      "description": "Identify contiguous runs of iterations spent in restoration."
+    },
+    {
+      "name": "compare_runs",
+      "description": "Compare multiple solve reports side-by-side."
+    },
+    {
+      "name": "linear_solver_summary",
+      "description": "Aggregate post-mortem from the symmetric linear solver."
+    },
+    {
+      "name": "list_gams_examples",
+      "description": "Enumerate the GAMS .gms instances bundled under gams/."
+    },
+    {
+      "name": "analyze_gams_problem",
+      "description": "Inspect a .gms file without solving it."
+    },
+    {
+      "name": "parse_gams_listing",
+      "description": "Parse the SOLVE SUMMARY block from a GAMS .lst file."
+    },
+    {
+      "name": "run_gams_problem",
+      "description": "Run a .gms problem through GAMS with POUNCE and capture the JSON report."
+    }
+  ],
+  "tools_generated": false,
+  "user_config": {
+    "workspace": {
+      "type": "directory",
+      "title": "Workspace",
+      "description": "Folder that relative model paths (e.g. cstr.nl) are resolved against. Solution files are written next to the model.",
+      "required": false,
+      "default": "${HOME}"
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

@@ -19,7 +19,7 @@ Phase 0 of the studio roadmap.
   collapse, restoration loops, regularization growth).
 - Renders a Markdown inspection report.
 
-Output mirrors the Python MCP server (`studio/mcp/`) one-for-one so the
+Output mirrors the Python MCP server (`python/pounce/studio/`) one-for-one so the
 desktop / VS Code shells and Claude tools agree on every notion.
 
 ## WASM-readiness

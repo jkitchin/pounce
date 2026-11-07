@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pounce_studio_mcp import _native
+from pounce._pounce import studio as _native
 
 
 SCHEMA = _native.SOLVE_REPORT_SCHEMA

@@ -70,8 +70,21 @@ small set of commands whose availability is backend-conditional.
 > those re-solves run *unhooked* and would otherwise report success for a
 > solve you deliberately stopped.
 >
-> Anything that differs between the debugged and the plain run is a bug;
-> please report it.
+> The same holds for a solve you did not stop. The debugger drives one solve,
+> so the automatic retries that would follow it — the `mu_strategy_fallback`
+> flip, the ℓ₁ fallback, the `dual_divergence_retry`, the scale-audit re-solve
+> and the second-opinion ladder — stand down while it is attached. The pause
+> marked `"final": true` is therefore the end of the run, and its status is the
+> one reported. Run without `--debug` to get those retries back.
+>
+> In `--debug-json` mode `quit` (and closing stdin) is final for the rest of
+> the run: no later checkpoint pauses, so the process exits. At the REPL,
+> `quit` still stops at the post-mortem pause, where you can inspect the
+> stopped iterate before typing `quit` again.
+>
+> Apart from those retries, which are documented above, the debugged run
+> follows the plain run's trajectory exactly. Up to the `final` pause, any
+> difference between the two is a bug; please report it.
 
 ---
 

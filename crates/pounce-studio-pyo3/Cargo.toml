@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "PyO3 bindings for pounce-studio-core; built as the _native extension module of pounce-studio-mcp."
+description = "PyO3 bindings for pounce-studio-core; mounted as pounce._pounce.studio for pounce-solver's [mcp] extra."
 publish = false
 
 [lib]

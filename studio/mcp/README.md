@@ -1,5 +1,11 @@
 # pounce-studio-mcp
 
+> **Where the code lives:** the server is the `pounce.studio` package of
+> `pounce-solver` (`python/pounce/studio/`), shipped as the `[mcp]` extra.
+> Its tests are in `python/tests/studio/`; the Claude Desktop extension is
+> `studio/mcpb/`. This directory keeps the report fixtures (which
+> `pounce-studio-core`'s tests also read) and `examples/`.
+
 MCP server exposing pounce solve reports as Claude-callable tools. Lets any
 MCP client (Claude Code, Claude Desktop, Cursor, Zed, ...) load a
 `pounce.solve-report/v1` JSON file and ask questions about convergence,
@@ -17,51 +23,48 @@ restoration, stalls, and per-iteration state.
 Phase 0. Post-mortem analysis of solve-report JSON and POUNCEIT v1
 binary `.iterdump` traces. Backed by `pounce-studio-core` via PyO3 —
 the Rust core is the single source of truth, this package marshals
-across the FFI.
+across the FFI. The bindings are compiled into `pounce-solver`'s own
+extension and reached as `pounce._pounce.studio`.
 
 ## Install
 
-A Rust toolchain (1.75+) and Python 3.10+ are required.
-
-**One-liner — build, install, and register with Claude Code:**
-
-```bash
-cd studio/mcp
-./install.sh --register --user
-```
-
-This:
-1. Builds the `pounce` CLI (`cargo build --release -p pounce-cli`).
-2. Creates a venv at `studio/mcp/.venv` (override with `POUNCE_VENV=...`).
-3. Installs `maturin`, `mcp`, and the native extension (`maturin develop --release`).
-4. Runs the test suite to confirm the build is healthy.
-5. With `--register`: invokes `claude mcp add pounce-studio ...` so Claude
-   Code picks it up immediately. `--user` registers it at user scope so it's
-   available in every project. Drop `--user` for project-local scope.
-
-After install, `claude mcp list` should show `pounce-studio: ✓ Connected`.
-
-**Build without registering** (manual config or non-Claude-Code clients):
+Python 3.10+. The server is the `[mcp]` extra of `pounce-solver`, whose
+wheel already carries the `pounce` binary that `run_problem` and the live
+debugger spawn — no Rust toolchain and no separate build:
 
 ```bash
-./install.sh
+pip install "pounce-solver[mcp]"
+pounce-studio-mcp              # stdio MCP server
 ```
 
-The script prints the absolute path to the installed binary and a copy-pasteable
-JSON snippet for Claude Desktop / Cursor / Zed at the end.
-
-**Manual install** (if you prefer step-by-step):
+or, with nothing installed beforehand:
 
 ```bash
-cd studio/mcp
-python3 -m venv .venv
-source .venv/bin/activate
-pip install maturin mcp
-maturin develop --release
+uvx --from "pounce-solver[mcp]" pounce-studio-mcp
 ```
 
-Either path exposes a `pounce-studio-mcp` console script that speaks MCP over
-stdio.
+(`python -m pounce.studio` is the same entry point.) The extra needs a
+`pounce-solver` release newer than 0.16.0; 0.16.0 and earlier do not
+contain `pounce.studio`.
+
+**From a source checkout** — build the extension into a venv and register
+it with Claude Code:
+
+```bash
+make install-mcp                   # user scope
+make install-mcp MCP_SCOPE=local   # this project only
+```
+
+The GAMS example tools (`list_examples`, ...) read suites from a pounce
+source checkout. Run from inside one, or set `POUNCE_REPO=/path/to/pounce`.
+
+Environment variables:
+
+| Variable         | Effect                                                              |
+|------------------|---------------------------------------------------------------------|
+| `POUNCE_WORKDIR` | Directory relative model paths resolve against (Desktop starts servers in `/`) |
+| `POUNCE_BIN`     | `pounce` binary to spawn instead of the bundled one                 |
+| `POUNCE_REPO`    | pounce source checkout, for the GAMS example suites                 |
 
 ## Tools
 
@@ -123,61 +126,48 @@ reference signer.
 
 ## Wire it into an MCP client
 
-The same server (`pounce-studio-mcp`) speaks stdio MCP and works with any
-client that follows the spec. The config object is identical across
-clients; only the file location differs.
+The same server speaks stdio MCP and works with any client that follows
+the spec.
+
+### Claude Desktop — one-click extension
+
+Download `pounce-studio-<version>.mcpb` from the GitHub release (or build it
+with `make mcpb`, which writes `dist/`) and open it: Claude Desktop installs
+`pounce-solver[mcp]` with uv and asks for a **Workspace** folder, which
+relative model paths resolve against. Source: [`studio/mcpb/`](../mcpb/).
+
+### Claude Desktop — manual config
+
+Add to `claude_desktop_config.json`
+(macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`):
+
+```json
+{
+  "mcpServers": {
+    "pounce-studio": {
+      "command": "uvx",
+      "args": ["--from", "pounce-solver[mcp]", "pounce-studio-mcp"],
+      "env": { "POUNCE_WORKDIR": "/abs/path/to/your/models" }
+    }
+  }
+}
+```
+
+Desktop does not inherit your shell `PATH`; if `uvx` is not found, give its
+absolute path (`which uvx`). Restart the app after editing the config.
 
 ### Claude Code
 
-The fastest path is `./install.sh --register --user` (see [Install](#install)).
-That runs the equivalent of:
-
 ```bash
-claude mcp add pounce-studio --scope user \
-    --env "POUNCE_BIN=$PWD/../../target/release/pounce" \
-    -- "$PWD/.venv/bin/pounce-studio-mcp"
+claude mcp add pounce-studio --scope user -- uvx --from "pounce-solver[mcp]" pounce-studio-mcp
 ```
 
-Drop `--scope user` for project-local scope (writes `.mcp.json` in the cwd).
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
-
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux** (community builds): `~/.config/Claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "pounce-studio": {
-      "command": "pounce-studio-mcp"
-    }
-  }
-}
-```
-
-If `pounce-studio-mcp` is installed inside a venv that the desktop app
-can't see on `$PATH`, give the absolute path instead:
-
-```json
-{
-  "mcpServers": {
-    "pounce-studio": {
-      "command": "/abs/path/to/studio/mcp/.venv/bin/pounce-studio-mcp"
-    }
-  }
-}
-```
-
-Restart the app after editing the config.
+or `make install-mcp` from a checkout (see [Install](#install)).
 
 ### Other MCP clients
 
 Cursor, Zed, and Continue all consume the same `mcpServers` object —
-check each client's docs for the file path. The `command` value is
-always `pounce-studio-mcp` (or an absolute path).
+check each client's docs for the file path.
 
 ### Any agent, via knowhow
 
@@ -191,11 +181,10 @@ OpenCode, ...):
 uvx knowhow add jkitchin/pounce --mcp pounce-studio -a claude-code -a vscode
 ```
 
-That only registers the server; `pounce-studio-mcp` must already be on
-`PATH` (build it with `./install.sh` above). The file lives in `mcp/`
-rather than a root `.mcp.json` on purpose: Claude Code loads a root
-`.mcp.json` as this repository's own project config, which would offer
-every contributor a server they have not built.
+It launches the server through `uvx`, so nothing needs to be installed
+first. The file lives in `mcp/` rather than a root `.mcp.json` on purpose:
+Claude Code loads a root `.mcp.json` as this repository's own project
+config, which would offer every contributor a server they did not ask for.
 
 ### Example prompts
 
@@ -227,35 +216,27 @@ return empty.
 ## Tests
 
 ```bash
-cd studio/mcp
-source .venv/bin/activate
-python -m pytest tests/ -v
+pip install -e "python[dev]"     # or: maturin develop -m python/pyproject.toml -E dev
+python -m pytest python/tests/studio -v
 ```
 
-The Rust side has its own tests covering the same logic at the source —
-run with `cargo test -p pounce-studio-core` from the repo root.
+The directory skips when `mcp` is not installed. The debugger tests spawn a
+real `pounce`, and skip when none is found (bundled, `POUNCE_BIN`,
+`target/release`, or `PATH`). The Rust side has its own tests covering the
+same logic at the source — `cargo test -p pounce-studio-core`.
 
 ## Troubleshooting
 
-**`ImportError: cannot import name '_native' from 'pounce_studio_mcp'`**
-The native extension hasn't been built. Activate the venv and run
-`maturin develop --release` inside `studio/mcp/`. If pytest still
-fails with this even after a successful build, you're probably running
-Python from a working directory that puts `studio/mcp/` on `sys.path`
-and shadows the installed wheel — activate the venv (`source
-.venv/bin/activate`) so the editable install wins.
+**`pounce-studio-mcp needs the mcp package`**
+Install the extra: `pip install "pounce-solver[mcp]"` (Python 3.10+).
 
-**`maturin: Couldn't find a virtualenv or conda environment`**
-`maturin develop` needs an active venv to know where to install. Create
-one with `python3 -m venv .venv && source .venv/bin/activate` and rerun.
+**`No module named 'pounce.studio'`**
+The installed `pounce-solver` predates the `[mcp]` extra (0.16.0 or older).
+Upgrade it, or build from source.
 
-**Wheel install fails with `Cannot uninstall <pkg>, RECORD file not found`**
-A system-Python install is blocking pip's upgrade path. Always work
-inside a venv for this package; never `pip install` it against the
-system interpreter.
-
-**Rust toolchain too old**
-PyO3 0.22 requires rustc 1.75+. Update via `rustup update stable`.
+**A relative model path is not found from Claude Desktop**
+Desktop starts servers with `/` as the working directory. Set
+`POUNCE_WORKDIR` (the extension's Workspace setting), or use absolute paths.
 
 **`Error: unexpected schema "..." (expected "pounce.solve-report/v1")`**
 The JSON file isn't a pounce solve report — maybe an AMPL `.sol`, a
@@ -266,11 +247,6 @@ pounce CLI with `--json-output <path>`.
 The report was written at `--json-detail summary` (the default), which
 omits per-iteration history. Rerun the solve with `--json-detail full`.
 
-**`pounce-studio-mcp: command not found` from an MCP client**
-Either the venv isn't activated for the client's environment, or the
-client doesn't inherit your shell `$PATH`. Use the absolute path to the
-venv-installed script (see the Claude Desktop snippet above).
-
 ## See also
 
 - `crates/pounce-studio-core/README.md` — the Rust core that does the
@@ -279,4 +255,4 @@ venv-installed script (see the Claude Desktop snippet above).
 - `tools/iter-dump/FORMAT.md` — POUNCEIT v1 binary spec. The MCP tools
   currently only consume JSON solve reports; the binary `.iterdump`
   format is handled by `pounce-studio dump-summary <trace.bin>` on the
-  CLI side, and exposed to Python via `_native.IterDump.from_path`.
+  CLI side, and exposed to Python via `pounce._pounce.studio.IterDump.from_path`.

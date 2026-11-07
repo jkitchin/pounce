@@ -49,6 +49,10 @@ pounce-gams-link = "pounce.gams.link:main"
 # whole parametric sequence of models, carrying each solve's answer into
 # the next, and writes a single trace report. See docs/src/continuation.md.
 pounce-continue = "pounce._continuation_cli:main"
+# The pounce-studio MCP server (the `[mcp]` extra): solve, diagnose, verify
+# and live-debug tools for Claude Desktop / Claude Code / any MCP client.
+# Without the extra it prints how to install it and exits.
+pounce-studio-mcp = "pounce.studio:main"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
@@ -70,6 +74,9 @@ viz = ["plotly>=5"]
 # is used to merge POUNCE into an existing gamsconfig.yaml without clobbering
 # other solvers.
 gams = ["gamsapi[core]>=45", "pyyaml>=6"]
+# The pounce-studio MCP server (`pounce-studio-mcp`, `pounce.studio`). The mcp
+# SDK needs Python >= 3.10; 2.x renames FastMCP, which the server imports.
+mcp = ["mcp>=1.0,<2; python_version >= '3.10'"]
 dev = [
     "pytest>=7",
     "scipy>=1.11",
@@ -79,6 +86,7 @@ dev = [
     "plotly>=5",
     "pyyaml>=6",
     "jsonschema>=4",
+    "mcp>=1.0,<2; python_version >= '3.10'",
 ]
 
 [project.urls]
