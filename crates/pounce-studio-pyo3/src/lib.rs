@@ -1,8 +1,8 @@
 //! PyO3 bindings for `pounce-studio-core`.
 //!
-//! Built as the `_native` extension module of the `pounce-studio-mcp`
-//! Python package (see `studio/mcp/pyproject.toml`). The Python MCP
-//! server in `studio/mcp/pounce_studio_mcp/` delegates all analysis
+//! Linked into `pounce-solver`'s extension and mounted as
+//! `pounce._pounce.studio` (see [`register`]). The Python MCP server in
+//! `python/pounce/studio/` (the `[mcp]` extra) delegates all analysis
 //! through these bindings so the Rust core is the single source of
 //! truth for derived series and diagnostics.
 //!
