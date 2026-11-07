@@ -64,25 +64,44 @@ on `main` and on the branch alike. Measured against Ipopt 3.14.20
 So restoration is entered from points Ipopt never visits, and its
 iteration count there measures that earlier gap, not this change.
 
-**`square_flowsheet_resto` and `dallass` (architecture-dependent).** These
-are the two lines that move in opposite directions on the two machines.
-Neither direction is a property of the change alone:
+**`square_flowsheet_resto` and `dallass` (opposite directions on the two
+architectures): rounding-chaotic, so a single run is not a measurement.**
 
-- The baselines already differ: on `main`, `square_flowsheet_resto` ends
-  `Optimal` at 2834 on x86_64 and at the cap on arm64 (gh#1076: FERAL's AVX2
-  and NEON kernels take different trajectories here), and `dallass` takes
-  301 against 218.
-- `square_flowsheet_resto` is square (32×32), constant-objective, with a
-  Jacobian nearly singular even at the solution. Its L-BFGS leg is chaotic in
-  the factorization's pivot choices, which is why the tests that use it as a
-  failing baseline cap `max_iter` at 150 on both architectures.
+- *It is not FERAL's NEON kernels.* Cross-compiled for
+  `aarch64-unknown-linux-gnu` and run under `qemu-aarch64`, both binaries
+  reproduce the **x86_64** numbers exactly: on `square_flowsheet_resto`,
+  `main` 2834 and the branch 314 and 197. Thread count (`RAYON_NUM_THREADS`
+  1–16) changes nothing either. What differs on the reviewer's machine is
+  therefore macOS itself, most likely libm's `exp`/`log` in the last ulp.
+- *`square_flowsheet_resto` has a singular start.* `cond(J(x0)) = 1.5e19`,
+  measured by central differences on the residual in
+  `crates/pounce-cli/tests/square_system_recovery.rs`. Every solver's first
+  step is a regularized guess. Ipopt 3.14.20 takes `‖dx‖ = 7.6e7` and pounce
+  `1.1e7`, where the exact `J⁻¹c` is `5.6e16`; neither satisfies `J·dx = −c`
+  to better than 40·‖c‖. Pounce leaves Ipopt's path at iteration 1, on `main`
+  and on the branch alike, before any restoration.
+- *Measured as distributions.* Perturbing `bound_push` to
+  `1e-2·(1 + k·1e-12)`, k = 0…23 (x86_64, L-BFGS):
 
-Neither line was traced on arm64: the PR was measured in an x86_64
-container. **Not understood** is whether the arm64 cost on
-`square_flowsheet_resto` comes from the restoration change acting through a
-different pivot sequence, or from the trajectory reaching restoration at a
-different point in the first place. The x86 traces that settled
-`circle_parabola_t1p5` and `eigena2` would settle this too.
+  | fixture, options | `main` | branch |
+  |---|---|---|
+  | `square_flowsheet_resto`, default ladder, `square_system_recovery=no`, `feral_increase_quality_retry=no` | 10 succeed, 5 false verdicts (`Infeasible`/`Restoration_Failed`), 9 at the cap | 6 succeed, 1 false verdict, 17 at the cap |
+  | `dallass`, defaults | 10 succeed (7 Optimal, 3 Acceptable), 14 `ErrorInStepComputation`; median 239.5 it | 8 succeed (7 + 1), 16 `ErrorInStepComputation`; median 243.5 it |
+
+  On `dallass` the two distributions are the same within sampling noise.
+  On `square_flowsheet_resto` the branch trades false infeasibility verdicts
+  for budget exits. That is the right direction for the verdict, but it also
+  succeeds less often over these 24 draws. Ipopt's own L-BFGS is *not*
+  chaotic on this model: all 12 perturbations end "Converged to a point of
+  local infeasibility" at 42 iterations, a false verdict, since the model is
+  feasible by construction.
+- *Consequence for tests.* No test pins this fixture's L-BFGS outcome.
+  `issue850_increase_quality_regression.rs` reports both runs.
+  `square_system_recovery.rs` and `issue857_escalation_gated_quality_rung.rs`
+  cap `max_iter` at 150: across the same 24 perturbations, with their
+  options, no branch base solve succeeds before 197 iterations (277 with
+  `square_system_recovery.rs`'s options), so the budget exit those tests
+  need is stable.
 
 **`cc:` totals (both architectures).** `cc:design_cent_3` and
 `cc:infeasible_pair` go through the complementarity driver's lowered solves
@@ -93,10 +112,10 @@ and have no direct Ipopt comparison. Not traced.
 - `circle_parabola_t1p5` and `eigena2` under
   `hessian_approximation=limited-memory` should match Ipopt's iteration log
   through their first restoration call.
-- On arm64, trace `square_flowsheet_resto` (L-BFGS, `square_system_recovery=no`)
-  on `main` and on the branch, and find the first iteration where they part.
-  If it is inside restoration, the `leading_block` change is acting through
-  FERAL's pivoting there. If it is earlier, it is the gh#1076 platform split.
+- For `square_flowsheet_resto` and `dallass`, compare the perturbation
+  distributions above, not single runs. A fix for `square_flowsheet_resto`
+  belongs at its singular first step (pounce leaves Ipopt at iteration 1),
+  not in restoration.
 - Do not restore the whole-compound update to win any of these back. It is
   what made the gh#1146 model fail, and
   `crates/pounce-cinterface/tests/issue_1146_lbfgs_feasible_not_infeasible.rs`

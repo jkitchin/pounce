@@ -229,10 +229,11 @@ changes.
     and CasADi plugin whenever no Hessian is supplied. Solves that enter
     restoration under L-BFGS take a different path. No fixture's status
     changed on x86_64 or arm64. Three fixtures no longer need a re-solve on
-    either, and several get slower. One fixture moves in opposite directions
-    on the two architectures: `square_flowsheet_resto` drops from 2834 to 314
-    iterations on x86_64, but its total rises from 3402 to 6210 on arm64.
-    The measurements are in `dev-notes/known-limitations.md`.
+    either, and several get slower. Two fixtures, `square_flowsheet_resto`
+    and `dallass`, move in opposite directions on the two architectures, but
+    each is chaotic under last-ulp perturbations, so a single run is not a
+    measurement of them. The measurements, including their distributions,
+    are in `dev-notes/known-limitations.md`.
 - **An infeasible LP with a near-constant row is no longer reported
   unbounded (gh#1143).**
   - **What changed:** the convex interior-point's unboundedness test now
