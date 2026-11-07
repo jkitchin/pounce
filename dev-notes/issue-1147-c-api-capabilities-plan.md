@@ -18,7 +18,7 @@ that ticks it.
 
 ### Stage 1 — declared complementarity through the C API
 
-- [ ] **S1-I1** Shared pair classifier in `pounce-nlp` (`validate_pairs`), `MpccTnlp::with_lift` uses it; every shape branch has a unit test; cc: sweep lines diff empty.
+- [x] **S1-I1** Shared pair classifier in `pounce-nlp` (`validate_pairs`), `MpccTnlp::with_lift` uses it; every shape branch has a unit test; cc: sweep lines diff empty.
 - [ ] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
 - [ ] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
 - [ ] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
@@ -1194,6 +1194,44 @@ To be completed at S1-I10 with the final symbol list. Template:
 
 Append one entry per iteration: `### <item> — <commit>` then what moved,
 what was measured (with the command), and anything that surprised you.
+
+### S1-I1 — shared pair classifier (commit that ticks S1-I1)
+
+What moved: `crates/pounce-nlp/src/mpcc.rs` only. New public
+`PairShape`, `PairErrorKind`, `PairError` (`Display` = `message`,
+`std::error::Error`), `classify_pair(xl, xu, gl, gu)` and
+`validate_pairs(n, m, x_l, x_u, g_l, g_u, pairs)`; `MpccTnlp::with_lift` now
+calls `validate_pairs(..).map_err(|e| e.to_string())` and builds
+`lowered/g_side/h_side/signless` from the shapes. Check order unchanged
+(per pair: range, duplicate var, duplicate row, shape). `is_mixed` stays
+public (used by `pounce-algorithm/src/mpcc.rs`). The four message format
+strings were extracted from the base and head files and diffed: identical.
+
+Tests added (all in `mpcc.rs` tests): one per `classify_pair` branch
+(one-sided lower/lower, upper/upper, lower/upper, upper/lower; plus-bound
+with row lower and row upper; plus-bound with a fixed variable; mixed) and
+per refusal (boxed row; both free; fixed variable with free row; equality
+row; var out of range; row out of range; duplicate var; duplicate row; first
+refusal in declaration order), each asserting `PairErrorKind` and the
+literal pre-refactor text; plus one that `MpccTnlp::new`'s `Err` equals
+`validate_pairs`'s `Display`.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-nlp` — `test result: ok. 188 passed` (lib).
+- `cargo test -p pounce-restoration` — all green (lib 157 passed).
+- `cargo test -p pounce-cli --test mpcc_complementarity` — `ok. 13 passed`.
+- `make python-ext && python -m pytest python/tests/test_complementarity.py -q`
+  — `19 passed` (needed a virtualenv: `maturin develop` refuses without one).
+- `cargo test -p pounce-cinterface` — all green (lib 52 passed).
+- Sweep: baseline = `73a98e9` (2ac0ad9 + this plan, no code change) built
+  `--release -p pounce-cli` in a `git worktree` with its own
+  `CARGO_TARGET_DIR`; head = this commit's `target/release/pounce`.
+  `scripts/sweep-fixtures.sh <bin> <out>` for each, `diff` — **empty**,
+  282 lines each (141 exact, 141 lbfgs, 14 of them `cc:` lines).
+
+Noticed: `cargo clippy -p pounce-nlp --all-targets -- -D warnings` fails on
+five pre-existing lints in `pounce-common` (collapsible `if`, `expect`) with
+this toolchain; nothing in `mpcc.rs` warns. Not touched (out of scope).
 
 ### Facts recorded while planning (2ac0ad9)
 
