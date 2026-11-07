@@ -1,13 +1,13 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-11-03 13:44:49
+Generated: 2026-11-07 01:38:12
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.15.0 (HEAD @ 18ddf795) |
-| POUNCE binary | pounce 0.15.0 (commit 18ddf795, built 2026-11-03T15:13:53Z) |
+| POUNCE | v0.15.0 (HEAD @ cfd2ff58) |
+| POUNCE binary | pounce 0.15.0 (commit cfd2ff58, built 2026-11-07T02:16:56Z) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -137,16 +137,16 @@ On 681 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 32.6ms | 44.3ms |
-| Total time | 277.66s | 234.88s |
+| Median time | 33.5ms | 44.3ms |
+| Total time | 284.12s | 234.88s |
 | Mean iterations | 45.8 | 47.2 |
 | Median iterations | 15 | 16 |
 
-- **Geometric mean speedup**: 1.1x
-- **Median speedup**: 1.2x
-- POUNCE faster: 504/681 (74%)
+- **Geometric mean speedup**: 1.0x
+- **Median speedup**: 1.1x
+- POUNCE faster: 497/681 (73%)
 - POUNCE 10x+ faster: 1/681
-- Ipopt faster: 177/681
+- Ipopt faster: 184/681
 
 ## Electrolyte Suite — Performance
 
@@ -154,13 +154,13 @@ On 13 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 29.1ms | 37.6ms |
-| Total time | 383.3ms | 503.3ms |
+| Median time | 30.0ms | 37.6ms |
+| Total time | 397.3ms | 503.3ms |
 | Mean iterations | 9.5 | 12.2 |
 | Median iterations | 7 | 10 |
 
 - **Geometric mean speedup**: 1.3x
-- **Median speedup**: 1.2x
+- **Median speedup**: 1.3x
 - POUNCE faster: 13/13 (100%)
 - POUNCE 10x+ faster: 0/13
 - Ipopt faster: 0/13
@@ -171,8 +171,8 @@ On 22 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 194.8ms | 88.5ms |
-| Total time | 49.59s | 27.54s |
+| Median time | 200.8ms | 88.5ms |
+| Total time | 50.83s | 27.54s |
 | Mean iterations | 41.3 | 59.7 |
 | Median iterations | 36 | 36 |
 
@@ -188,8 +188,8 @@ On 1 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 3.06s | 1.76s |
-| Total time | 3.06s | 1.76s |
+| Median time | 3.09s | 1.76s |
+| Total time | 3.09s | 1.76s |
 | Mean iterations | 31.0 | 33.0 |
 | Median iterations | 31 | 33 |
 
@@ -205,13 +205,13 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 97.6ms | 122.5ms |
-| Total time | 732.0ms | 696.0ms |
+| Median time | 105.2ms | 122.5ms |
+| Total time | 773.2ms | 696.0ms |
 | Mean iterations | 233.5 | 205.2 |
 | Median iterations | 197 | 209 |
 
-- **Geometric mean speedup**: 1.0x
-- **Median speedup**: 1.0x
+- **Geometric mean speedup**: 0.9x
+- **Median speedup**: 0.9x
 - POUNCE faster: 2/6 (33%)
 - POUNCE 10x+ faster: 0/6
 - Ipopt faster: 4/6
@@ -222,8 +222,8 @@ On 3 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 80.9ms | 113.3ms |
-| Total time | 279.5ms | 374.0ms |
+| Median time | 82.2ms | 113.3ms |
+| Total time | 286.2ms | 374.0ms |
 | Mean iterations | 39.7 | 39.7 |
 | Median iterations | 20 | 20 |
 
@@ -240,7 +240,7 @@ On 6 commonly-solved problems:
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
 | Median time | 3.11s | 1.27s |
-| Total time | 259.24s | 119.55s |
+| Total time | 260.59s | 119.55s |
 | Mean iterations | 385.7 | 295.2 |
 | Median iterations | 13 | 6 |
 
@@ -256,8 +256,8 @@ On 41 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 9.73s | 6.88s |
-| Total time | 1065.77s | 2634.84s |
+| Median time | 9.84s | 6.88s |
+| Total time | 1065.27s | 2634.84s |
 | Mean iterations | 88.5 | 121.5 |
 | Median iterations | 42 | 55 |
 
@@ -273,16 +273,16 @@ On 133 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 77.1ms | 92.9ms |
-| Total time | 94.37s | 172.97s |
+| Median time | 92.5ms | 92.9ms |
+| Total time | 102.66s | 172.97s |
 | Mean iterations | 19.8 | 75.6 |
 | Median iterations | 18 | 24 |
 
-- **Geometric mean speedup**: 1.2x
-- **Median speedup**: 1.2x
-- POUNCE faster: 89/133 (67%)
-- POUNCE 10x+ faster: 2/133
-- Ipopt faster: 44/133
+- **Geometric mean speedup**: 1.0x
+- **Median speedup**: 1.0x
+- POUNCE faster: 70/133 (53%)
+- POUNCE 10x+ faster: 1/133
+- Ipopt faster: 63/133
 
 ## LP Suite — Performance
 
@@ -290,16 +290,16 @@ On 352 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 144.4ms | 157.8ms |
-| Total time | 315.28s | 422.20s |
+| Median time | 145.5ms | 157.8ms |
+| Total time | 316.04s | 422.20s |
 | Mean iterations | 35.5 | 107.3 |
 | Median iterations | 24 | 56 |
 
 - **Geometric mean speedup**: 1.2x
-- **Median speedup**: 1.0x
-- POUNCE faster: 191/352 (54%)
+- **Median speedup**: 1.1x
+- POUNCE faster: 194/352 (55%)
 - POUNCE 10x+ faster: 8/352
-- Ipopt faster: 161/352
+- Ipopt faster: 158/352
 
 ## Failure Analysis
 
@@ -439,12 +439,12 @@ These suites currently run POUNCE only — no Ipopt-side comparison is captured 
 
 | Problem | n | m | Status | Objective | Iters | Time |
 |---------|---|---|--------|-----------|-------|------|
-| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.13s |
-| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 725 | 300.06s |
-| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 38.18s |
-| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 119.70s |
+| ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.09s |
+| irish-electricity | 61,728 | 104,259 | Maximum_CpuTime_Exceeded | N/A | 893 | 300.04s |
+| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 26 | 33.96s |
+| supportcase10 | 14,630 | 165,684 | Optimal | 3.3839e+00 | 32 | 110.06s |
 
-POUNCE: **2/4 Optimal** in 758.08s total
+POUNCE: **2/4 Optimal** in 744.15s total
 
 ## Dedicated Convex Solver vs. General NLP (head-to-head)
 
@@ -479,16 +479,16 @@ On 349 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 142.3ms | 174.0ms |
-| Total time | 133.48s | 360.99s |
+| Median time | 143.4ms | 173.9ms |
+| Total time | 134.22s | 363.57s |
 | Mean iterations | 25.6 | 105.1 |
 | Median iterations | 24 | 56 |
 
 - **Geometric-mean speedup (pounce-convex over pounce-nlp)**: 1.3x
 - **Median speedup**: 1.1x
-- pounce-convex faster: 229/349 (66%)
+- pounce-convex faster: 230/349 (66%)
 - pounce-convex 10x+ faster: 6/349
-- pounce-nlp faster: 120/349
+- pounce-nlp faster: 119/349
 
 ### QP — convex vs NLP
 
@@ -503,40 +503,75 @@ On 136 problems solved by both arms:
 
 | Metric | pounce-convex | pounce-nlp |
 |--------|---------------|------------|
-| Median time | 77.8ms | 90.4ms |
-| Total time | 357.22s | 336.84s |
+| Median time | 78.2ms | 91.1ms |
+| Total time | 357.35s | 338.25s |
 | Mean iterations | 20.4 | 81.6 |
 | Median iterations | 18 | 24 |
 
 - **Geometric-mean speedup (pounce-convex over pounce-nlp)**: 1.0x
 - **Median speedup**: 1.0x
-- pounce-convex faster: 54/136 (40%)
+- pounce-convex faster: 55/136 (40%)
 - pounce-convex 10x+ faster: 1/136
-- pounce-nlp faster: 82/136
+- pounce-nlp faster: 81/136
 
 ### Mittelmann — exact vs L-BFGS
 
 | Metric | exact Hessian | L-BFGS |
 |--------|---------------|------------|
-| Optimal | 46/47 (97.9%) | 32/47 (68.1%) |
-| Solved exclusively | 15 | 1 |
-| Both Optimal | 31 | |
-| Matching objectives (< 0.01%) | 29/31 | |
+| Optimal | 46/47 (97.9%) | 33/47 (70.2%) |
+| Solved exclusively | 14 | 1 |
+| Both Optimal | 32 | |
+| Matching objectives (< 0.01%) | 30/32 | |
 
-On 31 problems solved by both arms:
+On 32 problems solved by both arms:
 
 | Metric | exact Hessian | L-BFGS |
 |--------|---------------|------------|
-| Median time | 10.11s | 10.30s |
-| Total time | 555.68s | 758.79s |
-| Mean iterations | 67.6 | 280.8 |
-| Median iterations | 35 | 71 |
+| Median time | 10.09s | 10.26s |
+| Total time | 563.96s | 726.81s |
+| Mean iterations | 67.8 | 366.1 |
+| Median iterations | 42 | 74 |
 
 - **Geometric-mean speedup (exact Hessian over L-BFGS)**: 1.6x
 - **Median speedup**: 1.6x
-- exact Hessian faster: 22/31 (71%)
-- exact Hessian 10x+ faster: 2/31
-- L-BFGS faster: 9/31
+- exact Hessian faster: 22/32 (69%)
+- exact Hessian 10x+ faster: 2/32
+- L-BFGS faster: 10/32
+
+## Complementarity (MPCC)
+
+Judged by the returned point, not by status: `min(G, H)` and what the
+pairs encode are recomputed by each suite's own check. Ipopt refuses
+declared pairs; on the `G·H <= 0` rewrite it reports `Optimal` at
+points whose pairs are not complementary, counted below as
+*converged, check failed*.
+
+**MacMPEC** (`make -C benchmarks macmpec-run`, results of 2026-11-07, 178 problems, against best-known objectives): 4 pass, 158 at, 7 BETTER, 5 worse, 4 note; 6247 iterations, 906.9 s.
+
+**mpcc-compare** (`make -C benchmarks mpcc-compare`; pounce `/Users/jkitchin/projects/pounce/target/release/pounce`, Ipopt `/Users/jkitchin/projects/research/pglib-bench/opt/ipopt-ma57/bin/ipopt` (ma57), CCOpt 0.1.0 (registered), MadNLP 0.10.3, defaults):
+
+| suite | arm | answer | local | FAIL | converged, check failed | at best | iterations | wall (s) |
+|---|---|---|---|---|---|---|---|---|
+| mpcc_opf | pounce-mpcc | 37 | 0 | 0 | 0 | 37 | 6812 | 1.8 |
+| mpcc_opf | ipopt-nlp | 20 | 0 | 17 | 17 | 20 | 1563 | 0.5 |
+| mpcc_opf | pounce-nlp | 20 | 0 | 17 | 17 | 20 | 1563 | 0.5 |
+| mpcc_opf | ccopt-relax | 11 | 0 | 26 | 24 | 11 | 1913 | 0.1 |
+| mpcc_opf | ccopt-penalty | 37 | 0 | 0 | 0 | 37 | 979 | 0.0 |
+| capacity_equilibria | pounce-mpcc | 32 | 4 | 0 | 0 | 31 | 6197 | 1.4 |
+| capacity_equilibria | ipopt-nlp | 28 | 8 | 0 | 0 | 27 | 1599 | 0.4 |
+| capacity_equilibria | pounce-nlp | 28 | 8 | 0 | 0 | 27 | 1557 | 0.4 |
+| capacity_equilibria | ccopt-relax | 24 | 12 | 0 | 0 | 23 | 1153 | 0.0 |
+| capacity_equilibria | ccopt-penalty | 30 | 6 | 0 | 0 | 29 | 819 | 0.0 |
+| mpcc_opf_transmission | pounce-mpcc | 59 | 0 | 0 | 0 | 58 | 50275 | 244.9 |
+| mpcc_opf_transmission | ipopt-nlp | 7 | 0 | 52 | 51 | 7 | 4363 | 9.2 |
+| mpcc_opf_transmission | pounce-nlp | 8 | 0 | 51 | 51 | 7 | 3993 | 29.7 |
+| mpcc_opf_transmission | ccopt-relax | 0 | 0 | 58 | 36 | 0 | 100049 | 316.2 |
+| mpcc_opf_transmission | ccopt-penalty | 24 | 0 | 34 | 0 | 23 | 38205 | 90.8 |
+
+*answer*: feasible to the suite's gate (or the proven verdict on a
+certified-infeasible case); *at best*: within 1e-6 relative of the best
+objective any arm or reference reached at residual <= 1e-7. Sources and
+licences: `$POUNCE_BENCH_DATA/SOURCES.md`.
 
 ---
 *Generated by benchmark_report.py*
