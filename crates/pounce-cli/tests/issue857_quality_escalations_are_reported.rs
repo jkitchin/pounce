@@ -144,37 +144,47 @@ fn per_solve_counts(out: &str) -> Vec<i64> {
         .collect()
 }
 
-/// A promotion in which both solves escalate: the console reports each solve's
-/// own count, and the JSON report carries the promoted solve's.
+/// A promotion in which every solve escalates: the console reports each
+/// solve's own count, and the JSON report carries the promoted solve's.
 ///
-/// `circle_parabola_t0p5` on the lbfgs leg: the base solve escalates 8 times
-/// and exits `Infeasible_Problem_Detected` at 48; the ladder's first rung,
-/// `feral_scaling=mc64`, escalates 4 times and promotes. On FERAL 0.20 the
-/// test ran on `square_flowsheet_resto`'s exact leg (`[2, 4]`, rung 3
-/// promoting), which on 0.21 is a single solve with nothing to tell apart.
-/// The ladder record is asserted first, so a run that stops promoting fails
-/// here rather than as a puzzling count.
+/// `circle_parabola_t0p5` on the lbfgs leg with `mu_strategy=monotone`: the
+/// base solve escalates once and exits `Infeasible_Problem_Detected` at 85;
+/// rung 1, `feral_scaling=mc64`, escalates 4 times and fails too; rung 2,
+/// `mu_strategy=adaptive`, escalates 6 times and promotes at 112. Three
+/// different counts, so the reported one is distinguishable from the base
+/// solve's (1), from rung 1's (4), and from the sum (11).
+///
+/// The witness has moved twice. On FERAL 0.20 the test ran on
+/// `square_flowsheet_resto`'s exact leg (`[2, 4]`, rung 3 promoting). From
+/// 0.21 it was `circle_parabola_t0p5` at default options (`[8, 4]`). Since
+/// gh#1146 confined restoration's limited-memory update to the `x` block, as
+/// upstream does, that run solves on its first attempt with nothing to tell
+/// apart. The ladder record is asserted first, so a run that stops promoting
+/// fails here rather than as a puzzling count.
 #[test]
 fn a_promoted_run_reports_each_solves_escalations_and_ships_the_last() {
     let (out, reported) = solve(
         "circle_parabola_t0p5.nl",
-        &["hessian_approximation=limited-memory"],
+        &[
+            "hessian_approximation=limited-memory",
+            "mu_strategy=monotone",
+        ],
     );
     assert!(
-        out.contains("feral_scaling=mc64 re-solve recovered the problem — promoting"),
-        "premise: the base solve fails and rung 1 promotes:\n{out}"
+        out.contains("mu_strategy=adaptive re-solve recovered the problem — promoting"),
+        "premise: the base solve fails and rung 2 promotes:\n{out}"
     );
     let counts = per_solve_counts(&out);
     assert_eq!(
         counts,
-        vec![8, 4],
-        "expected the base solve to report 8 escalations and the promoted \
-         rung 4 — one line per solve, each its own:\n{out}"
+        vec![1, 4, 6],
+        "expected the base solve to report 1 escalation, rung 1 4 and the \
+         promoted rung 2 6 — one line per solve, each its own:\n{out}"
     );
     assert_eq!(
-        reported, 4,
+        reported, 6,
         "the JSON report carries the promoted rung's statistics, as `it=` \
-         does, so it should report that solve's 4 — not the base solve's 8, \
+         does, so it should report that solve's 6 — not the base solve's 1, \
          and not their sum"
     );
 }

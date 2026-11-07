@@ -209,16 +209,27 @@ fn the_exact_leg_is_no_longer_lost_to_the_rung() {
 ///
 /// On FERAL 0.20 turning the rung off recovered this leg (`Optimal`/178). On
 /// 0.21 it does not: the leg runs to the cap either way, so the rung is not
-/// what loses it any more. That is pinned here as the inverted claim, with the
-/// recovery paths switched off on both runs so the verdict read is the base
-/// solve's — `feral_increase_quality_retry=no` on the first (rung 4 would
-/// re-solve with the option off, which is the second run), and
+/// what loses it any more. That was pinned here as the inverted claim until
+/// gh#1146. The recovery paths stay switched off on both runs, so the verdict
+/// read is the base solve's: `feral_increase_quality_retry=no` on the first
+/// (rung 4 would re-solve with the option off, which is the second run), and
 /// `square_system_recovery=no` on both (the stage recovers the leg in 8, and
-/// with it on the second run reads `Optimal` whatever this option does). If
-/// the option starts recovering this leg again, the second assertion fails
-/// and the 0.20 pin — `Optimal` in under 1000 — is the one to restore.
+/// with it on, the second run reads `Optimal` whatever this option does).
+///
+/// **Since gh#1146 neither run is pinned, because neither outcome is a
+/// property of the code.** At the start point this fixture's Jacobian has
+/// condition number 1.5e19, which is singular in double precision. The first
+/// Newton step is therefore decided by rounding: Ipopt 3.14.20 and pounce take
+/// steps of size 7.6e7 and 1.1e7, where the exact `J⁻¹c` has size 5.6e16, and
+/// everything after inherits that. Measured, with the rung off, over 24
+/// `bound_push` values `1e-2·(1 + k·1e-12)`: 10 `Optimal`, 11 at the cap and 3
+/// false local-infeasibility verdicts on x86_64. One run sits at each extreme
+/// on the two architectures it was measured on: `Optimal` at 197 on x86_64 and
+/// aarch64 Linux, the cap on arm64 macOS. Pinning either one tests libm and
+/// rounding, not the rung. Both runs are reported and asserted only to finish
+/// with a verdict.
 #[test]
-fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
+fn the_limited_memory_leg_is_reported_not_pinned() {
     let (_out, exit, iters) = solve(&[
         "hessian_approximation=limited-memory",
         "feral_increase_quality_retry=no",
@@ -228,8 +239,9 @@ fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
     // 3000 cap. With a zero pivot read under a reused MC64 scaling now
     // refactored under a fresh one, it stops in restoration at 250 on arm64
     // and reaches `Optimal` at 2834 on x86_64 — 166 short of the cap, so a
-    // trajectory this close to the limit is not a verdict either way. Only
-    // the rung-off claim below is pinned; this run is reported, not asserted.
+    // trajectory this close to the limit is not a verdict either way. This
+    // run is reported, not asserted (see the doc comment for why the rung-off
+    // run below is now reported too).
     eprintln!("rung on: {exit:?} at {iters}");
 
     let (_out, exit, iters) = solve(&[
@@ -237,9 +249,12 @@ fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
         "feral_increase_quality=no",
         "square_system_recovery=no",
     ]);
+    eprintln!("rung off: {exit:?} at {iters}");
     assert!(
-        exit.starts_with("Maximum Number of Iterations Exceeded"),
-        "on FERAL 0.21 this leg runs to the cap with the rung off as well; \
-         got {exit:?} at {iters}"
+        exit.starts_with("Optimal Solution Found")
+            || exit.starts_with("Maximum Number of Iterations Exceeded")
+            || exit.starts_with("Converged to a point of local infeasibility"),
+        "the rung-off run must end with one of the verdicts this leg is \
+         measured to reach; got {exit:?} at {iters}"
     );
 }

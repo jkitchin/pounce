@@ -324,6 +324,11 @@ pub struct AlgorithmBuilder {
     /// The restoration sub-IPM must clear this: the mask indexes the
     /// original NLP's variables, not the restoration compound primal.
     pub limited_memory_nonlinear_vars: Option<Vec<Index>>,
+    /// Restoration only: length of the original-`x` block leading the
+    /// restoration primal, to which the limited-memory update is confined
+    /// as upstream's restoration updater does (gh#1146). See
+    /// `LimMemQuasiNewtonUpdater::leading_block`. `None` everywhere else.
+    pub limited_memory_leading_block: Option<Index>,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
     /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
@@ -1271,6 +1276,7 @@ impl Default for AlgorithmBuilder {
             limited_memory_init_val: 1.0,
             limited_memory_max_skipping: 2,
             limited_memory_nonlinear_vars: None,
+            limited_memory_leading_block: None,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
@@ -1756,6 +1762,7 @@ impl AlgorithmBuilder {
                 init_val: self.limited_memory_init_val,
                 max_skipping: self.limited_memory_max_skipping,
                 nonlinear_vars: self.limited_memory_nonlinear_vars.clone(),
+                leading_block: self.limited_memory_leading_block,
                 ..LimMemQuasiNewtonUpdater::default()
             }),
             HessianApproxChoice::Partitioned => {
@@ -1919,6 +1926,7 @@ mod tests {
                             limited_memory_init_val: 1.0,
                             limited_memory_max_skipping: 2,
                             limited_memory_nonlinear_vars: None,
+                            limited_memory_leading_block: None,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,

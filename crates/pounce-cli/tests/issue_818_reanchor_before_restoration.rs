@@ -28,13 +28,13 @@
 //! iterations on `eigena2` and `infeasible_square_scaled_1em4` to the same
 //! verdict and bought only `deb7` and `issue_508_infeasible_gap_1em4`.
 //!
-//! **At the gate this now ships (6) that ledger has changed**, and the
-//! table in `the_rung_ledger_that_decided_the_default` carries the current
-//! numbers: `eigena2` gains a reportable point rather than costing
-//! iterations. It stays off regardless, because turning it on is a
-//! trajectory change over the whole corpus that needs its own
-//! `scripts/sweep-fixtures.sh` run, and because `deb7` changes verdict
-//! under it. The case for switching it on is open, not settled.
+//! **That ledger has changed since**, twice (the gate of 6, then gh#1146's
+//! restoration fix), and the table in `the_rung_ledger_that_decided_the_default`
+//! carries the current numbers: `eigena2` is now a large gain to the same
+//! verdict, and the cost has moved to `issue_508_infeasible_gap_1em4`. It
+//! stays off regardless, because turning it on is a trajectory change over
+//! the whole corpus that needs its own `scripts/sweep-fixtures.sh` run. The
+//! case for switching it on is open, not settled.
 //!
 //! Every test here therefore sets the option explicitly on both sides, and
 //! both directions are pinned deliberately: the gain is why the code stays
@@ -125,16 +125,20 @@ fn solve_counting_reanchors(fixture: &str, tag: &str, restarts: u32) -> (usize, 
     (fires, combined)
 }
 
-/// `issue_508_infeasible_gap_1em4` is the cheap, unambiguous win: the rung
-/// fires, the solve reaches the *same* verdict — the problem really is
-/// infeasible — and gets there in fewer iterations (79 -> 76).
+/// `issue_508_infeasible_gap_1em4`: the rung fires on a genuinely infeasible
+/// model and the solve reaches the *same* verdict.
 ///
 /// The verdict assertion is the load-bearing half. A rung that reached the
 /// answer faster by giving up on a genuine restoration would show here as a
 /// changed status, which is precisely the failure mode the ordering against
 /// the acceptable-point decline is meant to prevent.
+///
+/// It used to assert a speed-up as well (79 -> 76). Since gh#1146 confined
+/// restoration's limited-memory update to the `x` block, as upstream does,
+/// the rung-off run is 73 and the rung-on run 74: the rung no longer pays
+/// for itself here, and that is now the *cost* side of the ledger below.
 #[test]
-fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
+fn reanchor_does_not_change_the_infeasibility_certificate() {
     let off = solve("issue_508_infeasible_gap_1em4.nl", "gap_off", 0);
     let on = solve("issue_508_infeasible_gap_1em4.nl", "gap_on", 1);
 
@@ -149,12 +153,6 @@ fn reanchor_shortens_the_infeasibility_certificate_without_changing_it() {
         ),
         "expected an infeasibility certificate, got {:?}",
         off.solution.status
-    );
-    assert!(
-        iters(&on) < iters(&off),
-        "the rung fired but cost iterations: {} with, {} without",
-        iters(&on),
-        iters(&off)
     );
 }
 
@@ -231,54 +229,59 @@ fn the_rung_fires_on_the_model_it_was_designed_from() {
 
 /// The other half of the measurement, and the one that decided the default.
 ///
-/// **Re-measured at `ALPHA_INTERP_MIN_TRIALS = 6`, and the ledger is no
-/// longer the one that set the default.** At the gate of 5 this file
-/// shipped with, the rung cost iterations on both `eigena2` and
-/// `infeasible_square_scaled_1em4` to the same verdict, and that pair is
-/// what kept it off. At 6, rung off against rung on:
+/// **Re-measured for gh#1146**, which confined restoration's limited-memory
+/// update to the `x` block as upstream does. That moved every restoration
+/// these fixtures enter. Rung off against rung on, `limited-memory`:
 ///
 /// | fixture | rung off | rung on |
 /// |---|---|---|
-/// | `eigena2` | `ErrorInStepComputation`/201 | **`SolvedToAcceptableLevel`/174** |
-/// | `issue_508_infeasible_gap_1em4` | `InfeasibleProblemDetected`/79 | `InfeasibleProblemDetected`/76 |
-/// | `infeasible_square_scaled_1em4` | `InfeasibleProblemDetected`/24 | `InfeasibleProblemDetected`/26 |
-/// | `deb7` | `ErrorInStepComputation`/1010 | `RestorationFailed`/460 |
+/// | `eigena2` | `ErrorInStepComputation`/263 | `ErrorInStepComputation`/**163** |
+/// | `issue_508_infeasible_gap_1em4` | `InfeasibleProblemDetected`/73 | `InfeasibleProblemDetected`/74 |
+/// | `infeasible_square_scaled_1em4` | `InfeasibleProblemDetected`/26 | `InfeasibleProblemDetected`/26 |
+/// | `deb7` | `MaximumIterationsExceeded`/3000 | `MaximumIterationsExceeded`/3000 |
 ///
-/// `eigena2` now *gains* a reportable point rather than costing
-/// iterations. The rung stays off anyway, for two reasons that are about
-/// the scope of this change rather than about the rung: switching it on is
-/// a trajectory change over the whole corpus and needs its own
-/// `scripts/sweep-fixtures.sh` run to justify, and `deb7` changes verdict
-/// under it — `ErrorInStepComputation` to `RestorationFailed` — which is a
-/// different answer, not a faster one. **The case for turning it on has
-/// improved and is worth re-opening on its own measurement.** What is
-/// pinned below is only that both directions are still real, so that a
-/// change to either is visible to the next reader.
+/// Before gh#1146 (same binary otherwise, `358ecbb`) the rows read 239/161,
+/// 79/76, 24/26 and 3000/3000. Earlier still, at `ALPHA_INTERP_MIN_TRIALS = 5`,
+/// the rung cost iterations on `eigena2` and `infeasible_square_scaled_1em4`,
+/// and that pair is what kept it off. The witnesses have moved since: the
+/// cost now shows on `issue_508_infeasible_gap_1em4` (one iteration, same
+/// verdict) and `infeasible_square_scaled_1em4` is neutral; the gain is still
+/// `eigena2`, now 263 -> 163 to the same verdict.
+///
+/// The rung stays off for the reason it always has: switching it on is a
+/// trajectory change over the whole corpus and needs its own
+/// `scripts/sweep-fixtures.sh` run to justify. What is pinned below is only
+/// that both directions are still real, so a change to either is visible to
+/// the next reader.
 #[test]
 fn the_rung_ledger_that_decided_the_default() {
     // The cost: same verdict, more iterations.
-    let cost_off = solve("infeasible_square_scaled_1em4.nl", "infeas_sq_off", 0);
-    let cost_on = solve("infeasible_square_scaled_1em4.nl", "infeas_sq_on", 1);
+    let cost_off = solve("issue_508_infeasible_gap_1em4.nl", "gap_cost_off", 0);
+    let cost_on = solve("issue_508_infeasible_gap_1em4.nl", "gap_cost_on", 1);
     assert_eq!(
         cost_off.solution.status, cost_on.solution.status,
-        "infeasible_square_scaled_1em4: the rung must not change the verdict"
+        "issue_508_infeasible_gap_1em4: the rung must not change the verdict"
     );
     assert!(
         iters(&cost_on) > iters(&cost_off),
-        "infeasible_square_scaled_1em4: the rung was measured as a cost here \
+        "issue_508_infeasible_gap_1em4: the rung was measured as a cost here \
          ({} on against {} off); a reversal means the ledger above needs \
          re-measuring",
         iters(&cost_on),
         iters(&cost_off)
     );
 
-    // The gain: fewer iterations, at the gate this change ships.
+    // The gain: fewer iterations to the same verdict.
     let gain_off = solve("eigena2.nl", "eigena2_gain_off", 0);
     let gain_on = solve("eigena2.nl", "eigena2_gain_on", 1);
+    assert_eq!(
+        gain_off.solution.status, gain_on.solution.status,
+        "eigena2: the rung must not change the verdict"
+    );
     assert!(
         iters(&gain_on) < iters(&gain_off),
-        "eigena2: the rung was measured as a gain at this gate ({} on against \
-         {} off); a reversal means the ledger above needs re-measuring",
+        "eigena2: the rung was measured as a gain ({} on against {} off); a \
+         reversal means the ledger above needs re-measuring",
         iters(&gain_on),
         iters(&gain_off)
     );

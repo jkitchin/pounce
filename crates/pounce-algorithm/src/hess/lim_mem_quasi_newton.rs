@@ -131,6 +131,33 @@ pub struct LimMemQuasiNewtonUpdater {
     /// `update_hessian` for why σ stays on the full diagonal where
     /// upstream drops it.
     pub nonlinear_vars: Option<Vec<Index>>,
+    /// Restoration only: the length of the original-`x` block that leads
+    /// the restoration primal `[x | n_c | p_c | n_d | p_d]` (gh#1146).
+    ///
+    /// Upstream's restoration updater (`LimMemQuasiNewtonUpdater` built
+    /// with `update_for_resto = true`) approximates the `(0, 0)` block of
+    /// a compound `W` and leaves the slack blocks **zero**: the
+    /// restoration objective is linear in `n` and `p`, and their
+    /// constraint columns are constant, so they carry no curvature. Its
+    /// curvature pairs are the `x` parts of `s` and `y` only.
+    ///
+    /// Run over the whole compound instead, every pair carried the
+    /// slack components of the step in `s` against an exactly-zero `y`
+    /// there, so `σ = sᵀy/‖s‖²` and every `V`/`U` column were built from
+    /// a step diluted by motion that has no curvature at all, and only
+    /// then truncated to the `x` rows by `AugRestoSystemSolver`. Measured
+    /// on the gh#1146 model under `nlp_scaling_method=none`: identical to
+    /// Ipopt through iteration 6, then the first restoration step was
+    /// `‖d‖ = 3.63e3` against Ipopt's `2.10e3`, and the run ended
+    /// `Restoration_Failed` where Ipopt converges.
+    ///
+    /// When set, pairs are projected onto `0..k` before they enter the
+    /// history (upstream's `P_LMᵀ`), and `W` is published in the
+    /// compound's own shape — σ on the `x` diagonal, zero on the slack
+    /// blocks, the curvature columns zero-padded there — so the
+    /// restoration KKT solver reads the same `(0, 0)` block it always
+    /// has, with no expansion matrix to account for.
+    pub leading_block: Option<Index>,
     /// `limited_memory_max_skipping` — consecutive skipped curvature
     /// updates after which the whole approximation is discarded and
     /// re-anchored at the current iterate. Upstream default 2
@@ -165,6 +192,7 @@ impl Default for LimMemQuasiNewtonUpdater {
             last_jac_c: None,
             last_jac_d: None,
             nonlinear_vars: None,
+            leading_block: None,
             max_skipping: 2,
             skipped_iter: 0,
         }
@@ -267,7 +295,8 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
             // SR1 recurrences, the stored columns) then lives in the
             // reduced space, exactly as upstream does once `P_LM` is
             // present.
-            let accepted = match self.active_mask(curr_x.dim()) {
+            let pair_mask = self.pair_mask(curr_x.dim());
+            let accepted = match pair_mask.as_deref() {
                 Some(mask) => {
                     let s_red = project_onto(&*s, mask);
                     let y_red = project_onto(&*y, mask);
@@ -308,6 +337,10 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         self.last_jac_d = Some(Rc::clone(&curr_jac_d));
 
         let n_idx = curr_x.dim();
+        if let Some(k) = self.active_leading_block(n_idx) {
+            self.publish_leading_block(data, &curr_x, k);
+            return true;
+        }
         // Dimension the low-rank build runs in: the nonlinear subspace
         // when a mask is active, the full primal space otherwise.
         let n_red = match self.active_mask(n_idx) {
@@ -474,6 +507,62 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
 }
 
 impl LimMemQuasiNewtonUpdater {
+    /// The restoration `x` block length, if one applies to a primal space
+    /// of dimension `n` — see [`Self::leading_block`]. `None` (the
+    /// whole-space approximation) when unset, empty, or not a proper
+    /// leading block of `n`.
+    fn active_leading_block(&self, n: Index) -> Option<Index> {
+        self.leading_block.filter(|&k| k > 0 && k < n)
+    }
+
+    /// The positions a curvature pair is projected onto before it enters
+    /// the history: the restoration `x` block when
+    /// [`Self::leading_block`] applies, else the nonlinear-variable mask,
+    /// else `None` (the whole space).
+    fn pair_mask(&self, n: Index) -> Option<Vec<Index>> {
+        match self.active_leading_block(n) {
+            Some(k) => Some((0..k).collect()),
+            None => self.active_mask(n).map(<[Index]>::to_vec),
+        }
+    }
+
+    /// Publish `W` for [`Self::leading_block`]: the history lives in the
+    /// `k`-dimensional `x` block; `W` is laid out in `curr_x`'s compound
+    /// space with σ on the first `k` diagonal entries, zero on the rest,
+    /// and the curvature columns zero beyond row `k`.
+    fn publish_leading_block(&mut self, data: &IpoptDataHandle, curr_x: &Rc<dyn Vector>, k: Index) {
+        let n_idx = curr_x.dim();
+        let (n, ku) = (n_idx as usize, k as usize);
+        let sigma = self.compute_sigma_bfgs();
+        let (v_cols, u_cols) = self.build_low_rank(sigma, ku);
+        let pad = |cols: Vec<Vec<Number>>| -> Vec<Vec<Number>> {
+            cols.into_iter()
+                .map(|mut c| {
+                    c.resize(n, 0.0);
+                    c
+                })
+                .collect()
+        };
+        let (v_cols, u_cols) = (pad(v_cols), pad(u_cols));
+
+        let mut diag_vals = vec![0.0; n];
+        diag_vals[..ku].fill(sigma);
+        let mut diag = curr_x.make_new();
+        set_expanded(diag.as_mut(), &diag_vals);
+
+        let col_space = DenseVectorSpace::new(n_idx);
+        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(Rc::from(diag));
+        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &v_cols) {
+            lr.set_v(Rc::new(mvm));
+        }
+        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &u_cols) {
+            lr.set_u(Rc::new(mvm));
+        }
+        data.borrow_mut().w = Some(Rc::new(lr));
+    }
+
     /// The nonlinear-variable mask, if one applies to a primal space of
     /// dimension `n`.
     ///
@@ -1145,6 +1234,96 @@ mod tests {
         let up = LimMemQuasiNewtonUpdater::new();
         let (v, u) = up.build_low_rank(1.0, 4);
         assert!(v.is_empty() && u.is_empty());
+    }
+
+    // ---- gh#1146: restoration leading block ----
+
+    #[test]
+    fn leading_block_applies_only_as_a_proper_prefix() {
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        assert_eq!(u.active_leading_block(5), None);
+        u.leading_block = Some(2);
+        assert_eq!(u.active_leading_block(5), Some(2));
+        assert_eq!(u.pair_mask(5), Some(vec![0, 1]));
+        // Not a proper prefix: whole-space approximation, never a gather
+        // past the end or an empty block.
+        assert_eq!(u.active_leading_block(2), None);
+        assert_eq!(u.active_leading_block(1), None);
+        u.leading_block = Some(0);
+        assert_eq!(u.active_leading_block(5), None);
+    }
+
+    #[test]
+    fn leading_block_wins_over_a_nonlinear_mask() {
+        // Restoration clears the mask anyway; if both were ever set, the
+        // restoration block is the space the pairs live in.
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.nonlinear_vars = Some(vec![1, 3]);
+        u.leading_block = Some(3);
+        assert_eq!(u.pair_mask(6), Some(vec![0, 1, 2]));
+    }
+
+    /// The restoration `W`: σ and the curvature on the `x` block, exactly
+    /// zero on the slack blocks, no expansion matrix — and on the `x`
+    /// block the same operator a plain `k`-dimensional L-BFGS builds from
+    /// the projected pair.
+    #[test]
+    fn leading_block_publishes_x_curvature_and_zero_slack_blocks() {
+        use crate::ipopt_data::IpoptData;
+        use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrix;
+        use pounce_linalg::matrix::Matrix;
+        use std::cell::RefCell;
+        let mut u = LimMemQuasiNewtonUpdater::new();
+        u.leading_block = Some(2);
+        // A step whose slack part (entries 2, 3) is large and whose `y`
+        // there is zero — the shape every restoration pair has.
+        let s = rcv(&[1.0, 2.0, 50.0, -40.0]);
+        let y = rcv(&[3.0, 1.0, 0.0, 0.0]);
+        let mask = u.pair_mask(4).unwrap();
+        assert!(u.ingest_pair(project_onto(&*s, &mask), project_onto(&*y, &mask)));
+        assert_eq!(u.history[0].s.dim(), 2);
+
+        let data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::new()));
+        let curr_x = rcv(&[0.0; 4]);
+        u.publish_leading_block(&data, &curr_x, 2);
+        let w = data.borrow().w.clone().unwrap();
+        let lr = w.as_any().downcast_ref::<LowRankUpdateSymMatrix>().unwrap();
+        assert!(lr.p_lowrank().is_none());
+
+        // σ from the projected pair (scalar1 = sᵀy/sᵀs = 5/5), not from the
+        // full one, which the slack motion would dilute to 5/4105.
+        let diag = expanded_of(lr.get_diag().unwrap().as_ref());
+        assert!(
+            (diag[0] - 1.0).abs() < 1e-12 && (diag[1] - 1.0).abs() < 1e-12,
+            "{diag:?}"
+        );
+        assert_eq!(&diag[2..], &[0.0, 0.0]);
+
+        // Apply W to the unit vectors: slack rows and columns are zero, and
+        // the x block satisfies the secant condition B s_x = y_x.
+        let col = |j: usize| {
+            let mut e = vec![0.0; 4];
+            e[j] = 1.0;
+            let mut out = curr_x.make_new();
+            out.set(0.0);
+            lr.mult_vector(1.0, &*rcv(&e), 0.0, &mut *out);
+            expanded_of(&*out)
+        };
+        let cols: Vec<Vec<Number>> = (0..4).map(col).collect();
+        for (j, c) in cols.iter().enumerate() {
+            assert_eq!(c[2], 0.0, "column {j}");
+            assert_eq!(c[3], 0.0, "column {j}");
+        }
+        assert_eq!(cols[2], vec![0.0; 4]);
+        assert_eq!(cols[3], vec![0.0; 4]);
+        let bs = [
+            cols[0][0] * 1.0 + cols[1][0] * 2.0,
+            cols[0][1] * 1.0 + cols[1][1] * 2.0,
+        ];
+        assert!(
+            (bs[0] - 3.0).abs() < 1e-12 && (bs[1] - 1.0).abs() < 1e-12,
+            "{bs:?}"
+        );
     }
 
     // ---- gh#624: nonlinear-variable mask ----

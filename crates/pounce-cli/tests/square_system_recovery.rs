@@ -24,6 +24,9 @@
 //! reason: the free-running lbfgs leg exits `Maximum_Iterations_Exceeded` on
 //! macOS and `Infeasible_Problem_Detected` on linux, and the cap fires long
 //! before the two part company.
+//! Since gh#1146 the cap is 150: with restoration's limited-memory update
+//! confined to the `x` block, as upstream does, this leg converges at 314,
+//! so 500 no longer produces the failure the stage answers.
 //!
 //! # The branches the gate takes, each with its own fixture
 //!
@@ -198,11 +201,17 @@ fn flowsheet_residual(x: &[f64]) -> Vec<f64> {
 // `Maximum_Iterations_Exceeded`/500 on x86_64 — and on x86_64 the monotone
 // μ re-solve then recovers the model in 155, ahead of the stage. These tests
 // are about the stage, so the fallback is kept out of their way.
+//
+// `max_iter=150`, not 500: since gh#1146 confined restoration's
+// limited-memory update to the `x` block, as upstream does, the base solve
+// *converges* on x86_64, at 314 iterations (197 with the escalation off).
+// These tests need it to fail. 150 keeps a budget exit with margin, and the
+// stage still recovers the model in 8 LM iterations to max|c| ~2e-10.
 const FAILING_LBFGS: &[&str] = &[
     "hessian_approximation=limited-memory",
     "feral_increase_quality_retry=no",
     "mu_strategy_fallback=no",
-    "max_iter=500",
+    "max_iter=150",
 ];
 
 /// The recovery: the IPM fails, no option rung opens, the LM solves it, and

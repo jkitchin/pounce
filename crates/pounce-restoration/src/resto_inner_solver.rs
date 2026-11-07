@@ -586,6 +586,11 @@ fn run_inner_resto_impl(
     // too (gh#823 review).
     let mut inner_alg_builder = inner_alg_builder.clone();
     inner_alg_builder.limited_memory_nonlinear_vars = None;
+    // What restoration's limited-memory update *does* get is upstream's
+    // own restoration shape: curvature on the leading orig-`x` block of
+    // the compound primal only, the linear slack blocks exactly zero
+    // (gh#1146; see `LimMemQuasiNewtonUpdater::leading_block`).
+    inner_alg_builder.limited_memory_leading_block = Some(n_orig);
     // Orig-`x_var` indices, and the compound primal is a different space
     // — the same reason the mask above is dropped. It is not enough that
     // the orig block leads the compound, which makes the indices merely
