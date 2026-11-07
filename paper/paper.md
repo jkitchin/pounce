@@ -14,7 +14,7 @@ authors:
     orcid: 0000-0000-0000-0000
     affiliation: 1
   - name: David E. Bernal Neira
-    orcid: 0000-0000-0000-0000
+    orcid: 0000-0002-8308-5016
     affiliation: 2
   - name: Johannes P. Dürholt
     orcid: 0000-0000-0000-0000
