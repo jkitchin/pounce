@@ -25,7 +25,7 @@ that ticks it.
 - [x] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
 - [x] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
 - [x] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
-- [ ] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
+- [x] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
 - [ ] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
 - [ ] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
 - [ ] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
@@ -1696,6 +1696,143 @@ Gate (all on the ticking commit's tree):
   20/20, OK; `make c-api-examples` green.
 - Sweep not run: no solver code moved, and the CLI does not link
   `pounce-cinterface`.
+
+### S1-I8 — CLI parity over the fixture corpus (commit that ticks S1-I8)
+
+**First: why the S1-I5 trajectory differed (191 vs 139 on `qpec_small`).**
+Investigated before any test was written, as the human asked. Bisected in
+Rust with `solve_mpcc` called directly on the `.nl` model's `NlTnlp` behind
+a wrapper that forwards the required TNLP methods and switches each
+optional one on or off (scaling suffixes, variable / objective /
+constraint linearity, the nonlinear-variable list, derivative proofs,
+metadata, `wants_intermediate_callback`), and that can substitute a
+hand-written `f`, `g` or row bound:
+
+| `NlTnlp` wrapped as | lowered solves | total |
+|---|---|---|
+| all optional methods on, or each one alone, or all off | 15, 36, 47, 32, 13, 46, 2 | **191** |
+| hand-written `g = 2y1 - x` (the `.nl` form), `g_l = 1` | same | 191 |
+| `.nl` `g` minus 1, `g_l = 0` | 15, 36, 87, 32, 12, 19, 2 | 203 |
+| hand-written `g = 2y1 - 1 - x`, `g_l = 0` (QpecSmall's row) | 15, 36, 24, 32, 12, 20 | **139** |
+| the same plus QpecSmall's `f = (x-1)^2 + ...` | 15, 36, 24, 32, 12, 20 | 139 |
+
+**Root cause: the model encoding, not a frontend.** AMPL writes a row's
+constant into its bound, so the `.nl` reader hands the solver `2 y1 - x >= 1`
+and `x + 2 y2 >= 1` (`g(x0) = (1, 1)`, `g_l = (1, 1)`), where the
+hand-written `QpecSmall` of `python/tests/test_complementarity.py` and
+`pounce-cinterface/tests/common/qpec.rs` says `2 y1 - 1 - x >= 0`. The same
+feasible set; `g`, and the products the driver forms from it, differ in the
+last bits, and on this degenerate model the third Scholtes solve takes 47
+iterations one way and 24 the other; a third rounding of the same row gives
+203. No optional TNLP answer moves an exact-Hessian run, and no option the
+CLI sets does either: with `NlTnlp` itself behind the C callbacks the C API
+reproduces the CLI **bit for bit** at the default on every fixture. Not a
+bug in the `.nl` frontend, the driver or the C API; a sensitivity of this
+model's trajectory to rounding, which the plan's exact-iteration rule
+assumed away by comparing "same model" without saying which encoding.
+
+Two differences remain, both information the `.nl` carries and a callback
+model expresses differently or not at all:
+- **The nonlinear-variable list, under `hessian_approximation=limited-memory`.**
+  `NlTnlp::get_list_of_nonlinear_variables` restricts the L-BFGS
+  approximation to the variables the `.nl` header calls nonlinear; the C
+  bridge treats every variable as nonlinear unless told. Passing the `.nl`
+  list through `IpoptSetNonlinearVariables` makes the C API exact against
+  the CLI on all three fixtures where it matters; Python's `Problem` has no
+  such declaration, so Python matches the unmasked C run exactly.
+  `qpec_small` is nonlinear in all three variables, so its limited-memory
+  row is exact without the list.
+- **The objective sense.** `NlTnlp` negates a maximize objective, so its
+  callbacks minimize `-f`: the C API and Python report `-f*`, the CLI `f*`.
+  `design_cent_3` (maximize) is exact up to that sign.
+
+Comparison (`total` = the driver's total iterations; status `OK` =
+`SolveSucceeded`, `Acc` = `SolvedToAcceptableLevel`, `Inf` =
+`InfeasibleProblemDetected`; C / Python on `NlTnlp`'s callbacks from the
+`.nl` start; Python = the venv's editable build of this tree):
+
+| fixture, options | CLI | C (`.nl` list) | C (no list) | Python | class | objective (CLI) |
+|---|---|---|---|---|---|---|
+| qpec_small | OK 191 | OK 191 | = | OK 191 | S | 0 |
+| ralph1 | OK 303 | OK 303 | = | OK 303 | W | 2.0e-9 |
+| mixed_pair | OK 357 | OK 357 | = | OK 357 | W | -1.37e-8 |
+| design_cent_3 | OK 69 | OK 69 | = | OK 69 | S | 3.7233690686801 (C, Python: its negation) |
+| infeasible_pair | Inf 178 | Inf 178 | = | Inf 178 | none | 1.9841530 |
+| opf_vv_lower_knee | OK 219 | OK 219 | = | OK 219 | W | -0.3954730634 |
+| opf_vv_lower_knee_held | OK 182 | OK 182 | = | OK 182 | S | -0.3954779015 |
+| qpec_small, strategy=exact | OK 171 | OK 171 | = | OK 171 | S | 0 |
+| qpec_small, strategy=continuation | OK 100 | OK 100 | = | OK 100 | S | 0 |
+| qpec_small, continuation=schedule | OK 215 | OK 215 | = | OK 215 | S | 0 |
+| qpec_small, lift=yes | OK 181 | OK 181 | = | OK 181 | S | 2.2e-13 |
+| qpec_small, lift=no | OK 191 | OK 191 | = | OK 191 | S | 0 |
+| qpec_small, limited-memory | OK 128 | OK 128 | OK 128 | OK 128 | S | 0 |
+| ralph1, limited-memory | Acc 584 | — | Acc 584 | — | W | (measured, not in the test) |
+| mixed_pair, limited-memory | OK 373 | — | OK 373 | — | W | (measured, not in the test) |
+| design_cent_3, limited-memory | OK 10967 | — | OK 10967 | — | S | (measured; too slow for the test) |
+| infeasible_pair, limited-memory | Inf 3672 | Inf 3672 | Inf 3206 | Inf 3206 | none | verdict; last iterates differ by 6.2e-2 |
+| opf_vv_lower_knee, limited-memory | Acc 748 | Acc 748 | OK 506 | OK 506 | W | -0.39547306 vs -0.39546824 (no list); `x` 4.9e-6; polish taken only without the list |
+| opf_vv_lower_knee_held, limited-memory | OK 390 | OK 390 | OK 380 | OK 380 | S | `x` 5.3e-8; accepted by `exact product` (CLI) vs `Scholtes continuation` (no list) |
+
+"=" : the list changes nothing under the exact Hessian (it is not read).
+Every "C (`.nl` list)" cell equals the CLI to the bit: status, objective (in
+the CLI's sense), point, `statistics.iteration_count` and the whole
+`complementarity` block bar `seconds`. Every Python cell equals the
+matching C cell the same way.
+
+What moved:
+- Root `Cargo.toml`: `pounce-cinterface` in `[workspace.dependencies]`
+  (path + `version = "0.16.0"`). `crates/pounce-cli/Cargo.toml`: first
+  `[dev-dependencies]` section, `pounce-cinterface.workspace = true`
+  (stripped on publish; `pounce-cinterface` is published before
+  `pounce-cli` in `scripts/publish-crates.sh` anyway). `Cargo.lock` gains
+  the edge only. `scripts/check-release-consistency.sh` OK.
+- `crates/pounce-cli/tests/common/nl_c_harness.rs` (new): `NlTnlp` behind
+  five `extern "C"` trampolines (`user_data` = the harness), bounds and
+  start from the TNLP, pairs through `SetPounceComplementarityPairs`,
+  options typed by how the value parses, `print_level 0`, `IpoptSolve`,
+  `GetIpoptIterCount`, `IpoptWriteSolveReport(.., "full")`;
+  `solve_with(.., forward_nonlinear)` passes the `.nl` list through
+  `IpoptSetNonlinearVariables`.
+- `crates/pounce-cli/tests/cinterface_mpcc_parity.rs` (new, 16 tests, ~3 s):
+  one `#[test]` per row of the table except the four "measured" rows. Each
+  default and `qpec_small` option row: exact vs the CLI and exact vs
+  Python, plus the branch it is listed for (class S/W/none; reported
+  answer/weak_fallback/verdict; polish taken / declined with a reason / not
+  run; B verdict `B`; `lifted > 0` at the default and on request; strategy
+  `both`/`exact`/`continuation`; maximize). Limited-memory on the three
+  list-sensitive fixtures: with the list, exact vs the CLI; without it,
+  exact vs Python and the answer only vs the CLI (same class and reported
+  kind, statuses equal or both converged; for a non-verdict, objective
+  within `1e-4` relative and `x` within `1e-5`), **and** the block must
+  differ from the CLI's — so the masked row stays evidence that the list is
+  what restores parity. Mutation: with the list forwarding disabled the
+  three masked rows fail (13 pass, 3 fail). `not searched` is reached by no
+  fixture (stated in the test header; `complementarity_getters.rs` covers
+  it through callbacks).
+- `crates/pounce-cli/tests/common/cinterface_mpcc_python.json` +
+  `gen_cinterface_mpcc_python.py` (new): the Python side, 16 rows, reals
+  copied as the report writer printed them. **Deviation, noted:** the
+  bitwise comparisons are between reports (C vs CLI vs Python), not between
+  `IpoptSolve`'s buffers and a report: `pounce-cli`'s `serde_json` has no
+  `float_roundtrip` (adding it would change the CLI binary's parser), so a
+  printed real can read back one ulp off (`1.0000000019942585` read as
+  `...583`). Equal text from the same writer is equal bits; the buffers are
+  checked against the C report to `4 ulp`.
+- Not done: the plan's per-solve `{stage, status, iterations}` comparison is
+  subsumed by the whole-block equality.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cli --test cinterface_mpcc_parity` — `ok. 16 passed`.
+- `cargo test -p pounce-cli --test mpcc_complementarity` — `ok. 13 passed`.
+- `cargo test -p pounce-cinterface` — all green, 20 binaries (lib,
+  `complementarity_report` 10, `complementarity_getters` 13,
+  `complementarity_solve` 16, `complementarity_declare` 34,
+  `export_surface` 13, `header_abi` 4, `c_examples_build_and_run` 6, …).
+- `cargo clippy -p pounce-cli --all-targets --no-deps -- -D
+  clippy::correctness -D clippy::suspicious` clean; the new files carry
+  only the restriction-group `unwrap_used` / `expect_used` warns other
+  tests carry. `cargo fmt --all -- --check` clean.
+- Sweep not run: no solver or CLI code moved (test-only change).
 
 ### Facts recorded while planning (2ac0ad9)
 

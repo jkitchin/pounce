@@ -914,6 +914,7 @@ dependencies = [
  "anstyle",
  "nix",
  "pounce-algorithm",
+ "pounce-cinterface",
  "pounce-common",
  "pounce-convex",
  "pounce-feral",

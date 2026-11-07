@@ -90,6 +90,7 @@ pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.16.0" 
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.16.0" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.16.0" }
 pounce-minima = { path = "crates/pounce-minima", version = "0.16.0" }
+pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.16.0" }
 # feral: pinned to the published crates.io release so the pounce crates stay
 # publishable — a git rev would block the crates.io publish and is rejected by
 # scripts/check-release-consistency.sh ("git dependency … needs a crates.io
