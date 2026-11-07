@@ -97,6 +97,26 @@ architectures): rounding-chaotic, so a single run is not a measurement.**
   `ErrorInStepComputation` at 396 (+) and 220 (−); the exact leg stays at 28
   under both. A single `dallass` L-BFGS line in a sweep diff is therefore not
   evidence about the change that moved it.
+
+  The same sweep's other moved lines are the same ulp, measured the same
+  way. Each baseline variant scales one old form by `1 ± f64::EPSILON`; a
+  clean `main` build gives every row's first column on every rerun.
+
+  | line | `main` | branch | old `asin″` ×(1±ε) | old `sqrt(1-u*u)` ×(1+ε) | ×(1−ε) |
+  |---|---|---|---|---|---|
+  | `exact dallass` | 28, `q=0` | 27, `q=5` | 28, `q=0` (both) | 28, `q=0` | 28, **`q=5`** |
+  | `exact cresc4` | 68 | 69 | 68 (both) | **69** | 68 |
+  | `lbfgs cresc4` | 222 | 101 | 222 (both) | 81 | 124 |
+
+  - `sqrt(1-u*u)` is the old `asin′`/`acos′` (`dallass` uses `asin`,
+    `cresc4` `acos`).
+  - One ulp in it, with nothing else changed, reproduces the `exact dallass`
+    escalations and the `exact cresc4` count.
+  - It spreads `lbfgs cresc4` over 81–222, so neither 222 nor 101 is
+    evidence about the change.
+  - Perturbing the old `asin″` at its three second-order sites moves
+    nothing. The escalations come from the gradient, not from the more
+    accurate Hessian term.
   On `square_flowsheet_resto` the branch trades false infeasibility verdicts
   for budget exits. That is the right direction for the verdict, but it also
   succeeds less often over these 24 draws. Ipopt's own L-BFGS is *not*

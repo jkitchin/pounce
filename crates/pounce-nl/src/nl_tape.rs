@@ -4636,12 +4636,16 @@ mod tests {
                 "{op:?}'({u:e}): got {:.17e}, want {want_d1:.17e}",
                 g[0]
             );
+            // Second derivatives get 2e-15: the kernels are a few roundings
+            // deep (`acosh″` reaches 1.06e-15 on random inputs), and
+            // `tanh`/`asinh`/`atan2` go through the platform's `cosh`/`hypot`,
+            // which CI only runs on Linux.
             let mut hess_map = HashMap::new();
             hess_map.insert((0usize, 0usize), 0usize);
             let mut h = [0.0];
             t.hessian_accumulate(&[u], 1.0, &hess_map, &mut h);
             assert!(
-                close(h[0], want_d2, 1e-15),
+                close(h[0], want_d2, 2e-15),
                 "{op:?}''({u:e}): got {:.17e}, want {want_d2:.17e}",
                 h[0]
             );
@@ -4694,7 +4698,7 @@ mod tests {
             }
             for k in 0..3 {
                 assert!(
-                    close(h[k], want_h[k], 1e-15),
+                    close(h[k], want_h[k], 2e-15),
                     "atan2({y:e},{x:e}) hess[{k}]: got {:.17e}, want {:.17e}",
                     h[k],
                     want_h[k]
