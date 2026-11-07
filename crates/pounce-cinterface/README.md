@@ -23,6 +23,23 @@ The `cdylib` is what wrappers link against. The `make install` target
 in the workspace root drops `libpounce_cinterface.{dylib,so}` into
 `$PREFIX/lib` (default `$HOME/.local/lib`).
 
+### Examples
+
+`examples/*.c` are C programs against `include/pounce.h`. From the workspace
+root, build and run all of them with
+
+```sh
+make c-api-examples            # release cdylib; PROFILE=debug, CC=clang also work
+```
+
+which compiles each with `-std=c99 -Wall -Wextra -Werror -pedantic`, links
+`-lpounce_cinterface -lm` with an rpath to the cdylib's directory, and runs
+it. `cargo test -p pounce-cinterface` does the same through
+`tests/c_examples_build_and_run.rs` and also checks the line each example
+prints on success; a new example needs an entry in that test's
+`EXPECTED_STDOUT`. The test fails when no C compiler (`$CC`, else `cc`) can
+be run; set `POUNCE_C_EXAMPLES_SKIP=1` to skip it knowingly.
+
 ## Surface
 
 Every exported symbol is listed here and in the book's

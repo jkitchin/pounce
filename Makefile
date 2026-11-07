@@ -82,7 +82,7 @@ endif
         test-ma57 \
         dev python-ext python-cli-bin python-test coverage coverage-quick \
         benchmark benchmark-rerun benchmark-report benchmark-gams wasm wasm-serve \
-        docker docker-release book-site ask-check
+        docker docker-release book-site ask-check c-api-examples
 
 all: build
 
@@ -162,6 +162,27 @@ book-site:
 ask-check:
 	python3 scripts/build-docs-index.py -o /tmp/pounce-ask-index.json --quiet
 	node docs/tests/ask_retrieval.mjs /tmp/pounce-ask-index.json
+
+# Build every crates/pounce-cinterface/examples/*.c against pounce.h and the
+# cdylib with the strict flags the test suite holds them to, then run each.
+# `cargo test -p pounce-cinterface` does the same through
+# tests/c_examples_build_and_run.rs (which also checks each example's output);
+# this is the outside-cargo spelling of it. Binaries land in
+# $(TARGET_DIR)/c-api-examples/. Override the compiler with CC=...
+C_EXAMPLES_DIR    := crates/pounce-cinterface/examples
+C_EXAMPLES_OUT    := $(TARGET_DIR)/c-api-examples
+C_EXAMPLES_CFLAGS ?= -std=c99 -Wall -Wextra -Werror -pedantic
+c-api-examples:
+	$(CARGO) build -p pounce-cinterface $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS)
+	@mkdir -p "$(C_EXAMPLES_OUT)"
+	@set -e; libdir="$$(cd "$(TARGET_DIR)" && pwd)"; \
+	for src in $(C_EXAMPLES_DIR)/*.c; do \
+	  bin="$(C_EXAMPLES_OUT)/$$(basename "$$src" .c)"; \
+	  echo "==> $$src"; \
+	  $(CC) $(C_EXAMPLES_CFLAGS) -I crates/pounce-cinterface/include "$$src" \
+	    -o "$$bin" -L "$$libdir" -lpounce_cinterface -lm -Wl,-rpath,"$$libdir"; \
+	  LD_LIBRARY_PATH="$$libdir" DYLD_LIBRARY_PATH="$$libdir" "$$bin"; \
+	done
 
 # Record asciinema screencasts of `pounce --debug` (one per scenario in
 # scripts/demo/scenarios/) into docs/demo/*.{cast,gif}. Requires asciinema,

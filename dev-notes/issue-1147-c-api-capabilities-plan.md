@@ -20,7 +20,7 @@ that ticks it.
 
 - [x] **S1-I1** Shared pair classifier in `pounce-nlp` (`validate_pairs`), `MpccTnlp::with_lift` uses it; every shape branch has a unit test; cc: sweep lines diff empty.
 - [x] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
-- [ ] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
+- [x] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
 - [ ] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
 - [ ] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
 - [ ] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
@@ -1303,6 +1303,57 @@ Gate (all on the ticking commit's tree):
 Noticed: the plan's loop rule 8 forbids changing an existing `#define`
 value; S1-I2 itself orders the `POUNCE_VERSION*` fix, which is done and
 flagged here for the ABI review. No C code in the repo reads those defines.
+
+### S1-I3 — C examples compile and run (commit that ticks S1-I3)
+
+What moved:
+- `crates/pounce-cinterface/tests/c_examples_build_and_run.rs` (new,
+  `#![cfg(unix)]`, 4 tests). Finds the cdylib as
+  `current_exe().parent().parent()/libpounce_cinterface.{so,dylib}` (follows
+  `CARGO_TARGET_DIR`, profile and `--target` without reading them) and
+  fails, with the path, if it is absent. Compiler is `$CC` if non-empty,
+  else `cc`; if it cannot run, the test fails unless
+  `POUNCE_C_EXAMPLES_SKIP=1` (documented in the module docs). Each
+  `examples/*.c` is built with `-std=c99 -Wall -Wextra -Werror -pedantic
+  -I include <src> -o <tmp> -L <libdir> -lpounce_cinterface -lm
+  -Wl,-rpath,<libdir>` into `CARGO_TARGET_TMPDIR`, run with
+  `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` = `<libdir>`, and must exit 0 and
+  print its `EXPECTED_STDOUT` line (`sqp_warm_start.c`: `all 4 solves
+  succeeded`). Other tests: every example has an `EXPECTED_STDOUT` entry and
+  every entry a file; the flag assembly (`compile_args`, pure) carries the
+  strict flags, puts `-l` after the source, keeps a spaced path one argv
+  entry; and the negative branch — a header-including file with one unused
+  parameter must *fail* the strict build while the same file without it
+  builds, links and runs.
+- `-lm` is added (the plan's command line omitted it): `sqp_warm_start.c`
+  calls `fabs`.
+- `examples/sqp_warm_start.c`: did **not** build under the strict flags —
+  `unused parameter 'n'` in `eval_jac_g` and `eval_h` (gcc and clang). Fixed
+  with `(void)n;`; its header comment now gives the strict build line and
+  `make c-api-examples`. The header itself was already clean C99.
+- `Makefile`: `c-api-examples` (builds the cdylib for `$(PROFILE)`, compiles
+  every example with `C_EXAMPLES_CFLAGS` into
+  `$(TARGET_DIR)/c-api-examples/`, runs each). Crate README gains an
+  *Examples* subsection.
+- `.github/workflows/ci.yml` unchanged: the `test` job is `ubuntu-latest`
+  (gcc preinstalled, `CC` and `POUNCE_C_EXAMPLES_SKIP` unset) and its
+  `cargo test --workspace --exclude pounce-hsl` step runs this test.
+
+Checked that the test bites: with the original example restored it fails
+(`unused parameter 'n'`, 1 failed); `CC=/nonexistent` fails both compiler
+tests with the "no C compiler" message; `CC=/nonexistent
+POUNCE_C_EXAMPLES_SKIP=1` passes (skips); `CC=clang` passes.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface --test c_examples_build_and_run` —
+  `ok. 4 passed`.
+- `make c-api-examples` — release build, four `status = 0` steps, `all 4
+  solves succeeded; final sum(x) = 1.000000000`.
+- `cargo test -p pounce-cinterface` — all green (lib 52, every binary ok).
+- `cargo fmt --all -- --check` clean; CI clippy flags
+  (`-D clippy::correctness -D clippy::suspicious`) clean; under plain
+  warnings the new file carries only the workspace's restriction-group
+  `expect_used` warns, as every test in the crate does.
 
 ### Facts recorded while planning (2ac0ad9)
 
