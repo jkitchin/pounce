@@ -3323,7 +3323,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Asin => va.asin(),
                 UnaryOp::Acosh => va.acosh(),
                 UnaryOp::Asinh => va.asinh(),
-                UnaryOp::Atanh => va.atanh(),
+                UnaryOp::Atanh => crate::nl_tape::atanh(va),
                 UnaryOp::Erf => crate::nl_tape::erf(va),
                 UnaryOp::XLogX => crate::nl_tape::xlogx(va),
             }
@@ -3490,7 +3490,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Asin => 1.0 / (1.0 - va * va).sqrt(),
                 UnaryOp::Acosh => 1.0 / (va * va - 1.0).sqrt(),
                 UnaryOp::Asinh => 1.0 / (va * va + 1.0).sqrt(),
-                UnaryOp::Atanh => 1.0 / (1.0 - va * va),
+                UnaryOp::Atanh => 1.0 / crate::nl_tape::atanh_d1_denom(va),
                 UnaryOp::Erf => crate::nl_tape::erf_d1(va),
                 UnaryOp::XLogX => crate::nl_tape::xlogx_d1(va),
             };
