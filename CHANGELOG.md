@@ -7,6 +7,35 @@ once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
 
+## [Unreleased]
+
+### Fixed
+- **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost
+  most of its digits close to `-1`: relative error 3.6e-5 at `-1 + 1e-13` and
+  3.0e-3 at `-1 + 1e-15`, enough for discopt to certify the wrong objective
+  for `min atanh(x)` on `[-1 + 1e-13, 0]`. It now uses `libm::atanh`.
+- **Derivatives of the inverse trig/hyperbolic functions, `tanh` and `atan2`
+  are accurate at the edges of their domains.** Gradients and Hessians of
+  `asin`, `acos`, `atanh` and `acosh` were only ~8 digits accurate near
+  `±1`. `tanh`'s gradient was ~1e-8 off at `x = 10` and exactly `0` past
+  `|x| ≈ 19`. `asinh` and `acosh` returned a zero gradient past
+  `|x| ≈ 1e154`, `atan`'s second derivative was `0` past `|x| ≈ 1e77`, and
+  `atan2`'s derivatives were `0` at large arguments, `NaN` at tiny ones and
+  `NaN` near `f64::MAX`. `atan`'s gradient was `0` past `|x| ≈ 1.3e154`, where
+  the true value is still a nonzero subnormal. All are now accurate to a few
+  ulps wherever the result is a normal double, and underflow gradually below
+  that.
+- **`log`, `log10` and `sqrt` second derivatives no longer vanish at large
+  arguments.** `log''` and `log10''` read `0` past `|x| ≈ 1.3e154`, `log10'`
+  past `|x| ≈ 7.8e307`, and `sqrt''` past `x ≈ 2.6e205`, where each true
+  value is still representable. Results below those magnitudes are
+  unchanged bit for bit.
+- **`HessianProgram` (`pounce_cli::nl_hessian_program`) matches the tape's
+  numerics.** It still carried the pre-fix division, `log`, `log10` and
+  `sqrt` derivative forms after the tape was fixed, and zeroed the same
+  representable Hessian entries. It now calls the tape's kernels. Nothing in
+  POUNCE calls it today; this matters only to direct users of the API.
+
 ## [0.16.0] - 2026-11-07
 
 ### Added

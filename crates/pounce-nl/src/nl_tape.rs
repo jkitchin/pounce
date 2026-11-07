@@ -246,6 +246,251 @@ pub(crate) fn centropy_dbb(a: f64, b: f64) -> f64 {
     (a / b) / b
 }
 
+/// Inverse hyperbolic tangent, the value arm of [`TapeOp::Atanh`] (gh#1151).
+///
+/// Delegates to `libm` (fdlibm's algorithm) rather than `f64::atanh`. The
+/// standard library computes `0.5 * ln_1p(2u / (1 - u))`, and near `u = -1`
+/// the argument of `ln_1p` is `-1 + δ` with `δ` lost to rounding: relative
+/// error 3.6e-5 at `u = -1 + 1e-13` and 3.0e-3 at `u = -1 + 1e-15`, enough
+/// for a downstream global solver to certify the wrong objective.
+#[inline]
+pub(crate) fn atanh(u: f64) -> f64 {
+    libm::atanh(u)
+}
+
+// ---------------------------------------------------------------------------
+// Inverse-trig / hyperbolic derivative kernels (gh#1151 and its neighbours).
+//
+// Every AD sweep — reverse, forward-tangent, second-order, on both the `Tape`
+// and the `GlobalTape` paths, plus the `.nl` reader's derivative table — calls
+// these, so each formula is written (and tested) once. The textbook forms they
+// replace lose accuracy in one of two ways:
+//
+// * Cancellation. `1 - u*u` near `|u| = 1` and `u*u - 1` near `u = 1` subtract
+//   two nearly equal numbers after `u*u` has already rounded. For `u = 1 - δ`
+//   that rounding error is ~`δ²` until it reaches an ulp, so the relative
+//   error in `1 - u*u` peaks at ~4e-9 around `δ ≈ 3e-9` (measured against
+//   100-digit decimal) — small, but it is the gradient of a term a global
+//   solver is bounding. Factored as `(1-u)(1+u)` / `(u-1)(u+1)`, the factor
+//   that approaches zero is computed exactly (Sterbenz) and the product
+//   keeps full relative accuracy.
+//   `tanh'` written as `1 - tanh(u)²` cancels the same way once `tanh(u)` has
+//   rounded toward ±1 (rel. error ~1e-8 at `u = 10`, exactly 0 past `|u| ≈ 19`);
+//   `sech²(u)` does not.
+// * Overflow of an intermediate square. `u*u ± 1` is `inf` past
+//   `|u| ≈ 1.3e154`, so `1/sqrt(u*u ± 1)` returned `0` where the true value is
+//   `1/|u|`; `d*d` in the second derivatives overflows sooner still (`atan''`
+//   at `|u| > 1e77`). Second derivatives are therefore built from the first as
+//   `(u·g)·g·g` — `u·g` is O(1) — rather than as `u / (s·sqrt(s))`.
+// ---------------------------------------------------------------------------
+
+/// `atan'(u) = 1 / (1 + u²)`.
+///
+/// `1 + u*u` has no cancellation, but `u*u` overflows past `|u| ≈ 1.3e154`
+/// while the true value stays nonzero (subnormal) up to `|u| ≈ 6e161`. Past
+/// `|u| = 1e150` it is therefore taken as `r²` with `r = 1/u`: there
+/// `1 + r²` rounds to exactly `1`, so `r²` is the same quantity, and it
+/// underflows gradually instead of jumping to `0`. Below the threshold the
+/// textbook form is kept bit for bit.
+#[inline]
+pub(crate) fn atan_d1(u: f64) -> f64 {
+    if u.abs() > 1e150 {
+        let r = 1.0 / u;
+        r * r
+    } else {
+        1.0 / (1.0 + u * u)
+    }
+}
+
+/// `atan''(u) = -2u / (1 + u²)²`, as `-2·(u·g)·g`.
+#[inline]
+pub(crate) fn atan_d2(u: f64) -> f64 {
+    let g = atan_d1(u);
+    -2.0 * (u * g) * g
+}
+
+/// `asin'(u) = 1 / sqrt(1 - u²)`, with `1 - u²` as `(1-u)(1+u)`.
+#[inline]
+pub(crate) fn asin_d1(u: f64) -> f64 {
+    1.0 / ((1.0 - u) * (1.0 + u)).sqrt()
+}
+
+/// `asin''(u) = u / (1 - u²)^{3/2}`, as `(u·g)·g·g`.
+#[inline]
+pub(crate) fn asin_d2(u: f64) -> f64 {
+    let g = asin_d1(u);
+    (u * g) * g * g
+}
+
+/// `acos'(u) = -asin'(u)`.
+#[inline]
+pub(crate) fn acos_d1(u: f64) -> f64 {
+    -asin_d1(u)
+}
+
+/// `acos''(u) = -asin''(u)`.
+#[inline]
+pub(crate) fn acos_d2(u: f64) -> f64 {
+    -asin_d2(u)
+}
+
+/// `tanh'(u) = sech²(u)`, never `1 - tanh(u)²` (see the section comment).
+/// `1/cosh` underflows to `0` only where the true value does.
+#[inline]
+pub(crate) fn tanh_d1(u: f64) -> f64 {
+    let s = 1.0 / u.cosh();
+    s * s
+}
+
+/// `acosh'(u) = 1 / sqrt(u² - 1)`, as `1 / (sqrt(u-1)·sqrt(u+1))`: exact
+/// factor near `u = 1`, and no `u*u` to overflow at large `u`.
+#[inline]
+pub(crate) fn acosh_d1(u: f64) -> f64 {
+    1.0 / ((u - 1.0).sqrt() * (u + 1.0).sqrt())
+}
+
+/// `acosh''(u) = -u / (u² - 1)^{3/2}`, as `-(u·g)·g·g`.
+#[inline]
+pub(crate) fn acosh_d2(u: f64) -> f64 {
+    let g = acosh_d1(u);
+    -(u * g) * g * g
+}
+
+/// `asinh'(u) = 1 / sqrt(u² + 1)`, via `hypot` so `u*u` cannot overflow.
+#[inline]
+pub(crate) fn asinh_d1(u: f64) -> f64 {
+    1.0 / u.hypot(1.0)
+}
+
+/// `asinh''(u) = -u / (u² + 1)^{3/2}`, as `-(u·g)·g·g`.
+#[inline]
+pub(crate) fn asinh_d2(u: f64) -> f64 {
+    let g = asinh_d1(u);
+    -(u * g) * g * g
+}
+
+/// `atanh'(u) = 1 / (1 - u²)`, with `1 - u²` as `(1-u)(1+u)`.
+#[inline]
+pub(crate) fn atanh_d1(u: f64) -> f64 {
+    1.0 / ((1.0 - u) * (1.0 + u))
+}
+
+/// `atanh''(u) = 2u / (1 - u²)²`, as `2·(u·g)·g`.
+#[inline]
+pub(crate) fn atanh_d2(u: f64) -> f64 {
+    let g = atanh_d1(u);
+    2.0 * (u * g) * g
+}
+
+// The four kernels below are `pub` because `pounce-cli`'s `HessianProgram`
+// lowers the same ops and must not carry its own copies: it held the
+// pre-fix forms of all of them (and of division's) after the tape was fixed.
+// They are `#[doc(hidden)]`: shared with a sibling crate, not part of
+// `pounce-nl`'s documented interface.
+
+/// `log''(u) = -1/u²`. Past `|u| = 1e150` as `-(1/u)/u`: `u*u` overflows at
+/// `|u| ≈ 1.3e154` and read `0` where the true value is subnormal (nonzero to
+/// `|u| ≈ 1.3e162`). Below the threshold the old form is kept bit for bit.
+#[doc(hidden)]
+#[inline]
+pub fn log_d2(u: f64) -> f64 {
+    if u.abs() > 1e150 {
+        -(1.0 / u) / u
+    } else {
+        -1.0 / (u * u)
+    }
+}
+
+/// `x / (u·ln 10)`, i.e. `x · log10'(u)`. Past `|u| = 1e300` as
+/// `(x/u)/ln 10`: `u·ln 10` overflows at `|u| ≈ 7.8e307`. It takes the
+/// numerator so that below the threshold every arm still performs the single
+/// division it always did, bit for bit.
+#[doc(hidden)]
+#[inline]
+pub fn div_u_ln10(x: f64, u: f64) -> f64 {
+    let c = std::f64::consts::LN_10;
+    if u.abs() > 1e300 {
+        (x / u) / c
+    } else {
+        x / (u * c)
+    }
+}
+
+/// `log10''(u) = -1/(u²·ln 10)`, with the same threshold as [`log_d2`].
+#[doc(hidden)]
+#[inline]
+pub fn log10_d2(u: f64) -> f64 {
+    let c = std::f64::consts::LN_10;
+    if u.abs() > 1e150 {
+        -((1.0 / u) / u) / c
+    } else {
+        -1.0 / (u * u * c)
+    }
+}
+
+/// `sqrt''(u) = -1/(4·u^{3/2})`, given `sv = sqrt(u)`. Past `u = 1e200` as
+/// `(-0.25/u)/sv`: `u·sv` overflows at `u ≈ 2.6e205`, where the true value is
+/// still ~1e-308. Below the threshold the old form is kept bit for bit.
+#[doc(hidden)]
+#[inline]
+pub fn sqrt_d2(u: f64, sv: f64) -> f64 {
+    if u > 1e200 {
+        (-0.25 / u) / sv
+    } else {
+        -0.25 / (u * sv)
+    }
+}
+
+/// `(y/k, x/k, hypot(y/k, x/k), k)` for the `atan2` derivative kernels:
+/// `k = 2` once either argument passes `1e300`, else `k = 1`.
+///
+/// Near `f64::MAX` the plain forms overflow twice over: `hypot(y, x)` itself
+/// (`hypot(1.5e308, 1e308) ≈ 1.8e308`, so `h = inf` and a subnormal gradient
+/// reads `0`), and `y ± x` in the Hessian (`inf` beside `y = -x`, and
+/// `inf · 0 = NaN` on it). Halving a value that large is exact, so `y/k` and
+/// `x/k` carry the same ratios; the kernels divide by `k` again at the end.
+/// With `k = 1` every kernel is bit-identical to the unscaled form.
+#[inline]
+fn atan2_frame(y: f64, x: f64) -> (f64, f64, f64, f64) {
+    let k = if y.abs().max(x.abs()) > 1e300 {
+        2.0
+    } else {
+        1.0
+    };
+    let (ys, xs) = (y / k, x / k);
+    (ys, xs, ys.hypot(xs), k)
+}
+
+/// `∇atan2(y, x) = (x, -y) / (x² + y²)`, scaled by `h = hypot(y, x)`.
+///
+/// Never via `d = y*y + x*x`: `d` overflows past `|·| ≈ 1.3e154` (gradient
+/// `0` where the true one is `~1/h`) and underflows below `~1e-162` (`inf`).
+/// `(x/h)/h` keeps every intermediate O(1) or O(1/h). See [`atan2_frame`]
+/// for arguments near `f64::MAX`.
+#[inline]
+pub(crate) fn atan2_d1(y: f64, x: f64) -> (f64, f64) {
+    let (ys, xs, hs, k) = atan2_frame(y, x);
+    let (cy, cx) = (ys / hs, xs / hs);
+    // `/ k` while the quotient is still O(1), so it is exact; `/ hs` last,
+    // where a subnormal result rounds once.
+    ((cx / k) / hs, (-cy / k) / hs)
+}
+
+/// Hessian of `atan2(y, x)`: `(∂yy, ∂yx, ∂xx) = (-2xy, y² - x², 2xy) / (x² + y²)²`,
+/// with the same `hypot` scaling as [`atan2_d1`] and `y² - x²` factored as
+/// `(y-x)(y+x)` so it does not cancel near `y = ±x`.
+#[inline]
+pub(crate) fn atan2_d2(y: f64, x: f64) -> (f64, f64, f64) {
+    let (ys, xs, hs, k) = atan2_frame(y, x);
+    let (cy, cx) = (ys / hs, xs / hs);
+    let kk = k * k;
+    let q = 2.0 * cy * cx / kk / hs / hs;
+    // `y - x` before scaling, where it is exact near `y = x` (Sterbenz);
+    // `y/h - x/h` would subtract two already-rounded quotients.
+    let r = ((ys - xs) / hs) * ((ys + xs) / hs);
+    (-q, r / kk / hs / hs, q)
+}
+
 /// Gauss error function, the value arm of [`TapeOp::Erf`].
 ///
 /// Delegates to `libm` (the rust-lang port of musl's libm) rather than a
@@ -388,7 +633,7 @@ impl Tape {
                 TapeOp::Asin(a) => vals[*a].asin(),
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
-                TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Atanh(a) => atanh(vals[*a]),
                 TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::XLogX(a) => xlogx(vals[*a]),
                 TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
@@ -541,7 +786,7 @@ impl Tape {
                     adj[*j] += a / vals[*j];
                 }
                 TapeOp::Log10(j) => {
-                    adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+                    adj[*j] += div_u_ln10(a, vals[*j]);
                 }
                 TapeOp::Sin(j) => {
                     adj[*j] += a * vals[*j].cos();
@@ -554,12 +799,10 @@ impl Tape {
                     adj[*j] += a * (1.0 + t * t);
                 }
                 TapeOp::Atan(j) => {
-                    let u = vals[*j];
-                    adj[*j] += a / (1.0 + u * u);
+                    adj[*j] += a * atan_d1(vals[*j]);
                 }
                 TapeOp::Acos(j) => {
-                    let u = vals[*j];
-                    adj[*j] -= a / (1.0 - u * u).sqrt();
+                    adj[*j] += a * acos_d1(vals[*j]);
                 }
                 TapeOp::Sinh(j) => {
                     adj[*j] += a * vals[*j].cosh();
@@ -568,24 +811,19 @@ impl Tape {
                     adj[*j] += a * vals[*j].sinh();
                 }
                 TapeOp::Tanh(j) => {
-                    let t = vals[i];
-                    adj[*j] += a * (1.0 - t * t);
+                    adj[*j] += a * tanh_d1(vals[*j]);
                 }
                 TapeOp::Asin(j) => {
-                    let u = vals[*j];
-                    adj[*j] += a / (1.0 - u * u).sqrt();
+                    adj[*j] += a * asin_d1(vals[*j]);
                 }
                 TapeOp::Acosh(j) => {
-                    let u = vals[*j];
-                    adj[*j] += a / (u * u - 1.0).sqrt();
+                    adj[*j] += a * acosh_d1(vals[*j]);
                 }
                 TapeOp::Asinh(j) => {
-                    let u = vals[*j];
-                    adj[*j] += a / (u * u + 1.0).sqrt();
+                    adj[*j] += a * asinh_d1(vals[*j]);
                 }
                 TapeOp::Atanh(j) => {
-                    let u = vals[*j];
-                    adj[*j] += a / (1.0 - u * u);
+                    adj[*j] += a * atanh_d1(vals[*j]);
                 }
                 TapeOp::Erf(j) => {
                     adj[*j] += a * erf_d1(vals[*j]);
@@ -600,9 +838,9 @@ impl Tape {
                 TapeOp::Atan2(l, r) => {
                     let y = vals[*l];
                     let x = vals[*r];
-                    let d = y * y + x * x;
-                    adj[*l] += a * (x / d);
-                    adj[*r] += a * (-y / d);
+                    let (fa, fb) = atan2_d1(y, x);
+                    adj[*l] += a * fa;
+                    adj[*r] += a * fb;
                 }
                 // min/max are piecewise linear: the adjoint flows to the
                 // selected operand only (ties pick the first, a valid
@@ -723,43 +961,22 @@ impl Tape {
                 }
                 TapeOp::Exp(a) => dot[*a] * vals[i],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
                 TapeOp::Tan(a) => {
                     let t = vals[i];
                     dot[*a] * (1.0 + t * t)
                 }
-                TapeOp::Atan(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 + u * u)
-                }
-                TapeOp::Acos(a) => {
-                    let u = vals[*a];
-                    -dot[*a] / (1.0 - u * u).sqrt()
-                }
+                TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
+                TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
                 TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
                 TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-                TapeOp::Tanh(a) => {
-                    let t = vals[i];
-                    dot[*a] * (1.0 - t * t)
-                }
-                TapeOp::Asin(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 - u * u).sqrt()
-                }
-                TapeOp::Acosh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (u * u - 1.0).sqrt()
-                }
-                TapeOp::Asinh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (u * u + 1.0).sqrt()
-                }
-                TapeOp::Atanh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 - u * u)
-                }
+                TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
+                TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
+                TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
+                TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
+                TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
                 TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
                 TapeOp::CEntropy(a, b) => {
@@ -769,8 +986,8 @@ impl Tape {
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
-                    let d = y * y + x * x;
-                    (x * dot[*a] - y * dot[*b]) / d
+                    let (fa, fb) = atan2_d1(y, x);
+                    fa * dot[*a] + fb * dot[*b]
                 }
                 // min/max: the tangent follows the selected operand.
                 TapeOp::Min(a, b) => {
@@ -846,7 +1063,7 @@ impl Tape {
                 TapeOp::Asin(a) => vals[*a].asin(),
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
-                TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Atanh(a) => atanh(vals[*a]),
                 TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::XLogX(a) => xlogx(vals[*a]),
                 TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
@@ -980,43 +1197,22 @@ impl Tape {
                 }
                 TapeOp::Exp(a) => vals[i] * dot[*a],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
                 TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
                 TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
                 TapeOp::Tan(a) => {
                     let t = vals[i];
                     (1.0 + t * t) * dot[*a]
                 }
-                TapeOp::Atan(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 + u * u)
-                }
-                TapeOp::Acos(a) => {
-                    let u = vals[*a];
-                    -dot[*a] / (1.0 - u * u).sqrt()
-                }
+                TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
+                TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
                 TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
                 TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-                TapeOp::Tanh(a) => {
-                    let t = vals[i];
-                    (1.0 - t * t) * dot[*a]
-                }
-                TapeOp::Asin(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 - u * u).sqrt()
-                }
-                TapeOp::Acosh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (u * u - 1.0).sqrt()
-                }
-                TapeOp::Asinh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (u * u + 1.0).sqrt()
-                }
-                TapeOp::Atanh(a) => {
-                    let u = vals[*a];
-                    dot[*a] / (1.0 - u * u)
-                }
+                TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
+                TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
+                TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
+                TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
+                TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
                 TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
                 TapeOp::CEntropy(a, b) => {
@@ -1026,8 +1222,8 @@ impl Tape {
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
-                    let d = y * y + x * x;
-                    (x * dot[*a] - y * dot[*b]) / d
+                    let (fa, fb) = atan2_d1(y, x);
+                    fa * dot[*a] + fb * dot[*b]
                 }
                 // min/max: the tangent follows the selected operand.
                 TapeOp::Min(a, b) => {
@@ -1176,7 +1372,7 @@ impl Tape {
                     let sv = vals[i];
                     if sv > 0.0 {
                         let fp = 0.5 / sv;
-                        let fpp = -0.25 / (vals[*a] * sv);
+                        let fpp = sqrt_d2(vals[*a], sv);
                         adj[*a] += w * fp;
                         adj_dot[*a] += wd * fp + w * fpp * dot[*a];
                     }
@@ -1189,13 +1385,12 @@ impl Tape {
                 TapeOp::Log(a) => {
                     let u = vals[*a];
                     adj[*a] += w / u;
-                    adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+                    adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
                 }
                 TapeOp::Log10(a) => {
                     let u = vals[*a];
-                    let c = std::f64::consts::LN_10;
-                    adj[*a] += w / (u * c);
-                    adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                    adj[*a] += div_u_ln10(w, u);
+                    adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
                 }
                 TapeOp::Sin(a) => {
                     let u = vals[*a];
@@ -1218,18 +1413,15 @@ impl Tape {
                 }
                 TapeOp::Atan(a) => {
                     let u = vals[*a];
-                    let d = 1.0 + u * u;
-                    let gp = 1.0 / d;
-                    let gpp = -2.0 * u / (d * d);
+                    let gp = atan_d1(u);
+                    let gpp = atan_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
                 TapeOp::Acos(a) => {
                     let u = vals[*a];
-                    let s = 1.0 - u * u;
-                    let r = s.sqrt();
-                    let gp = -1.0 / r;
-                    let gpp = -u / (s * r);
+                    let gp = acos_d1(u);
+                    let gpp = acos_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
@@ -1249,43 +1441,36 @@ impl Tape {
                 }
                 TapeOp::Tanh(a) => {
                     let t = vals[i];
-                    let gp = 1.0 - t * t;
+                    let gp = tanh_d1(vals[*a]);
                     let gpp = -2.0 * t * gp;
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
                 TapeOp::Asin(a) => {
                     let u = vals[*a];
-                    let s = 1.0 - u * u;
-                    let r = s.sqrt();
-                    let gp = 1.0 / r;
-                    let gpp = u / (s * r);
+                    let gp = asin_d1(u);
+                    let gpp = asin_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
                 TapeOp::Acosh(a) => {
                     let u = vals[*a];
-                    let s = u * u - 1.0;
-                    let r = s.sqrt();
-                    let gp = 1.0 / r;
-                    let gpp = -u / (s * r);
+                    let gp = acosh_d1(u);
+                    let gpp = acosh_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
                 TapeOp::Asinh(a) => {
                     let u = vals[*a];
-                    let s = u * u + 1.0;
-                    let r = s.sqrt();
-                    let gp = 1.0 / r;
-                    let gpp = -u / (s * r);
+                    let gp = asinh_d1(u);
+                    let gpp = asinh_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
                 TapeOp::Atanh(a) => {
                     let u = vals[*a];
-                    let d = 1.0 - u * u;
-                    let gp = 1.0 / d;
-                    let gpp = 2.0 * u / (d * d);
+                    let gp = atanh_d1(u);
+                    let gpp = atanh_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
@@ -1321,13 +1506,8 @@ impl Tape {
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
-                    let d = y * y + x * x;
-                    let d2 = d * d;
-                    let fa = x / d;
-                    let fb = -y / d;
-                    let faa = -2.0 * y * x / d2;
-                    let fab = (y * y - x * x) / d2;
-                    let fbb = 2.0 * y * x / d2;
+                    let (fa, fb) = atan2_d1(y, x);
+                    let (faa, fab, fbb) = atan2_d2(y, x);
                     adj[*a] += w * fa;
                     adj[*b] += w * fb;
                     adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
@@ -1517,7 +1697,7 @@ impl Tape {
                         let sv = v[i];
                         if sv > 0.0 {
                             let fp = 0.5 / sv;
-                            let fpp = -0.25 / (v[*a] * sv);
+                            let fpp = sqrt_d2(v[*a], sv);
                             adj[*a] += w * fp;
                             adj_dot[*a] += wd * fp + w * fpp * dot[*a];
                         }
@@ -1530,13 +1710,12 @@ impl Tape {
                     TapeOp::Log(a) => {
                         let u = v[*a];
                         adj[*a] += w / u;
-                        adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+                        adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
                     }
                     TapeOp::Log10(a) => {
                         let u = v[*a];
-                        let c = std::f64::consts::LN_10;
-                        adj[*a] += w / (u * c);
-                        adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                        adj[*a] += div_u_ln10(w, u);
+                        adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
                     }
                     TapeOp::Sin(a) => {
                         let u = v[*a];
@@ -1559,18 +1738,15 @@ impl Tape {
                     }
                     TapeOp::Atan(a) => {
                         let u = v[*a];
-                        let d = 1.0 + u * u;
-                        let gp = 1.0 / d;
-                        let gpp = -2.0 * u / (d * d);
+                        let gp = atan_d1(u);
+                        let gpp = atan_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
                     TapeOp::Acos(a) => {
                         let u = v[*a];
-                        let s = 1.0 - u * u;
-                        let r = s.sqrt();
-                        let gp = -1.0 / r;
-                        let gpp = -u / (s * r);
+                        let gp = acos_d1(u);
+                        let gpp = acos_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
@@ -1590,43 +1766,36 @@ impl Tape {
                     }
                     TapeOp::Tanh(a) => {
                         let t = v[i];
-                        let gp = 1.0 - t * t;
+                        let gp = tanh_d1(v[*a]);
                         let gpp = -2.0 * t * gp;
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
                     TapeOp::Asin(a) => {
                         let u = v[*a];
-                        let s = 1.0 - u * u;
-                        let r = s.sqrt();
-                        let gp = 1.0 / r;
-                        let gpp = u / (s * r);
+                        let gp = asin_d1(u);
+                        let gpp = asin_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
                     TapeOp::Acosh(a) => {
                         let u = v[*a];
-                        let s = u * u - 1.0;
-                        let r = s.sqrt();
-                        let gp = 1.0 / r;
-                        let gpp = -u / (s * r);
+                        let gp = acosh_d1(u);
+                        let gpp = acosh_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
                     TapeOp::Asinh(a) => {
                         let u = v[*a];
-                        let s = u * u + 1.0;
-                        let r = s.sqrt();
-                        let gp = 1.0 / r;
-                        let gpp = -u / (s * r);
+                        let gp = asinh_d1(u);
+                        let gpp = asinh_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
                     TapeOp::Atanh(a) => {
                         let u = v[*a];
-                        let d = 1.0 - u * u;
-                        let gp = 1.0 / d;
-                        let gpp = 2.0 * u / (d * d);
+                        let gp = atanh_d1(u);
+                        let gpp = atanh_d2(u);
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
@@ -1662,13 +1831,8 @@ impl Tape {
                     TapeOp::Atan2(a, b) => {
                         let y = v[*a];
                         let x = v[*b];
-                        let d = y * y + x * x;
-                        let d2 = d * d;
-                        let fa = x / d;
-                        let fb = -y / d;
-                        let faa = -2.0 * y * x / d2;
-                        let fab = (y * y - x * x) / d2;
-                        let fbb = 2.0 * y * x / d2;
+                        let (fa, fb) = atan2_d1(y, x);
+                        let (faa, fab, fbb) = atan2_d2(y, x);
                         adj[*a] += w * fa;
                         adj[*b] += w * fb;
                         adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
@@ -3424,7 +3588,7 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Asin(a) => vals[*a].asin(),
         TapeOp::Acosh(a) => vals[*a].acosh(),
         TapeOp::Asinh(a) => vals[*a].asinh(),
-        TapeOp::Atanh(a) => vals[*a].atanh(),
+        TapeOp::Atanh(a) => atanh(vals[*a]),
         TapeOp::Erf(a) => erf(vals[*a]),
         TapeOp::XLogX(a) => xlogx(vals[*a]),
         TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
@@ -3509,7 +3673,7 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             adj[*j] += a / vals[*j];
         }
         TapeOp::Log10(j) => {
-            adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+            adj[*j] += div_u_ln10(a, vals[*j]);
         }
         TapeOp::Sin(j) => {
             adj[*j] += a * vals[*j].cos();
@@ -3522,12 +3686,10 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             adj[*j] += a * (1.0 + t * t);
         }
         TapeOp::Atan(j) => {
-            let u = vals[*j];
-            adj[*j] += a / (1.0 + u * u);
+            adj[*j] += a * atan_d1(vals[*j]);
         }
         TapeOp::Acos(j) => {
-            let u = vals[*j];
-            adj[*j] -= a / (1.0 - u * u).sqrt();
+            adj[*j] += a * acos_d1(vals[*j]);
         }
         TapeOp::Sinh(j) => {
             adj[*j] += a * vals[*j].cosh();
@@ -3536,24 +3698,19 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             adj[*j] += a * vals[*j].sinh();
         }
         TapeOp::Tanh(j) => {
-            let t = vals[i];
-            adj[*j] += a * (1.0 - t * t);
+            adj[*j] += a * tanh_d1(vals[*j]);
         }
         TapeOp::Asin(j) => {
-            let u = vals[*j];
-            adj[*j] += a / (1.0 - u * u).sqrt();
+            adj[*j] += a * asin_d1(vals[*j]);
         }
         TapeOp::Acosh(j) => {
-            let u = vals[*j];
-            adj[*j] += a / (u * u - 1.0).sqrt();
+            adj[*j] += a * acosh_d1(vals[*j]);
         }
         TapeOp::Asinh(j) => {
-            let u = vals[*j];
-            adj[*j] += a / (u * u + 1.0).sqrt();
+            adj[*j] += a * asinh_d1(vals[*j]);
         }
         TapeOp::Atanh(j) => {
-            let u = vals[*j];
-            adj[*j] += a / (1.0 - u * u);
+            adj[*j] += a * atanh_d1(vals[*j]);
         }
         TapeOp::Erf(j) => {
             adj[*j] += a * erf_d1(vals[*j]);
@@ -3568,9 +3725,9 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
         TapeOp::Atan2(l, r) => {
             let y = vals[*l];
             let x = vals[*r];
-            let d = y * y + x * x;
-            adj[*l] += a * (x / d);
-            adj[*r] += a * (-y / d);
+            let (fa, fb) = atan2_d1(y, x);
+            adj[*l] += a * fa;
+            adj[*r] += a * fb;
         }
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -3655,43 +3812,22 @@ fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) 
         }
         TapeOp::Exp(a) => vals[i] * dot[*a],
         TapeOp::Log(a) => dot[*a] / vals[*a],
-        TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+        TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
         TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
         TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
         TapeOp::Tan(a) => {
             let t = vals[i];
             (1.0 + t * t) * dot[*a]
         }
-        TapeOp::Atan(a) => {
-            let u = vals[*a];
-            dot[*a] / (1.0 + u * u)
-        }
-        TapeOp::Acos(a) => {
-            let u = vals[*a];
-            -dot[*a] / (1.0 - u * u).sqrt()
-        }
+        TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
+        TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
         TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
         TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-        TapeOp::Tanh(a) => {
-            let t = vals[i];
-            (1.0 - t * t) * dot[*a]
-        }
-        TapeOp::Asin(a) => {
-            let u = vals[*a];
-            dot[*a] / (1.0 - u * u).sqrt()
-        }
-        TapeOp::Acosh(a) => {
-            let u = vals[*a];
-            dot[*a] / (u * u - 1.0).sqrt()
-        }
-        TapeOp::Asinh(a) => {
-            let u = vals[*a];
-            dot[*a] / (u * u + 1.0).sqrt()
-        }
-        TapeOp::Atanh(a) => {
-            let u = vals[*a];
-            dot[*a] / (1.0 - u * u)
-        }
+        TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
+        TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
+        TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
+        TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
+        TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
         TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
         TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
         TapeOp::CEntropy(a, b) => {
@@ -3700,8 +3836,8 @@ fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) 
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
-            let d = y * y + x * x;
-            (x * dot[*a] - y * dot[*b]) / d
+            let (fa, fb) = atan2_d1(y, x);
+            fa * dot[*a] + fb * dot[*b]
         }
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -3842,7 +3978,7 @@ fn ror_dir_step(
             let sv = vals[i];
             if sv > 0.0 {
                 let fp = 0.5 / sv;
-                let fpp = -0.25 / (vals[*a] * sv);
+                let fpp = sqrt_d2(vals[*a], sv);
                 adj[*a] += w * fp;
                 adj_dot[*a] += wd * fp + w * fpp * dot[*a];
             }
@@ -3855,13 +3991,12 @@ fn ror_dir_step(
         TapeOp::Log(a) => {
             let u = vals[*a];
             adj[*a] += w / u;
-            adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+            adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
         }
         TapeOp::Log10(a) => {
             let u = vals[*a];
-            let c = std::f64::consts::LN_10;
-            adj[*a] += w / (u * c);
-            adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+            adj[*a] += div_u_ln10(w, u);
+            adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
         }
         TapeOp::Sin(a) => {
             let u = vals[*a];
@@ -3884,18 +4019,15 @@ fn ror_dir_step(
         }
         TapeOp::Atan(a) => {
             let u = vals[*a];
-            let d = 1.0 + u * u;
-            let gp = 1.0 / d;
-            let gpp = -2.0 * u / (d * d);
+            let gp = atan_d1(u);
+            let gpp = atan_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
         TapeOp::Acos(a) => {
             let u = vals[*a];
-            let s = 1.0 - u * u;
-            let r = s.sqrt();
-            let gp = -1.0 / r;
-            let gpp = -u / (s * r);
+            let gp = acos_d1(u);
+            let gpp = acos_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
@@ -3915,43 +4047,36 @@ fn ror_dir_step(
         }
         TapeOp::Tanh(a) => {
             let t = vals[i];
-            let gp = 1.0 - t * t;
+            let gp = tanh_d1(vals[*a]);
             let gpp = -2.0 * t * gp;
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
         TapeOp::Asin(a) => {
             let u = vals[*a];
-            let s = 1.0 - u * u;
-            let r = s.sqrt();
-            let gp = 1.0 / r;
-            let gpp = u / (s * r);
+            let gp = asin_d1(u);
+            let gpp = asin_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
         TapeOp::Acosh(a) => {
             let u = vals[*a];
-            let s = u * u - 1.0;
-            let r = s.sqrt();
-            let gp = 1.0 / r;
-            let gpp = -u / (s * r);
+            let gp = acosh_d1(u);
+            let gpp = acosh_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
         TapeOp::Asinh(a) => {
             let u = vals[*a];
-            let s = u * u + 1.0;
-            let r = s.sqrt();
-            let gp = 1.0 / r;
-            let gpp = -u / (s * r);
+            let gp = asinh_d1(u);
+            let gpp = asinh_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
         TapeOp::Atanh(a) => {
             let u = vals[*a];
-            let d = 1.0 - u * u;
-            let gp = 1.0 / d;
-            let gpp = 2.0 * u / (d * d);
+            let gp = atanh_d1(u);
+            let gpp = atanh_d2(u);
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
@@ -3987,13 +4112,8 @@ fn ror_dir_step(
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
-            let d = y * y + x * x;
-            let d2 = d * d;
-            let fa = x / d;
-            let fb = -y / d;
-            let faa = -2.0 * x * y / d2;
-            let fab = (y * y - x * x) / d2;
-            let fbb = 2.0 * x * y / d2;
+            let (fa, fb) = atan2_d1(y, x);
+            let (faa, fab, fbb) = atan2_d2(y, x);
             adj[*a] += w * fa;
             adj[*b] += w * fb;
             adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
@@ -4431,6 +4551,324 @@ mod tests {
         // most often breaks.
         assert!((t.eval(&[-0.3]) + t.eval(&[0.3])).abs() < 1e-16);
         assert!((t.eval(&[10.0]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn atanh_value_and_derivative_accurate_near_boundary() {
+        // gh#1151: `f64::atanh` computes `0.5 * ln_1p(2u / (1 - u))`, which
+        // loses `δ` at `u = -1 + δ` (rel. error 3.6e-5 at δ = 1e-13, 3.0e-3
+        // at δ = 1e-15). The derivative's `1 - u*u` is accurate this close to
+        // the boundary; its worst case is further in — see
+        // `INVERSE_DERIV_CASES`.
+        // References: `0.5·ln((1+u)/(1-u))` and `1/((1-u)(1+u))` in 60-digit
+        // decimal at the exact f64 input. Both signs of the boundary are
+        // pinned — the defect was asymmetric, so a symmetric fixture alone
+        // would not reach the branch that broke.
+        let t = Tape::build(&unary(UnaryOp::Atanh, var(0)));
+        let rel = |got: f64, want: f64| ((got - want) / want).abs();
+        for (u, want_v, want_d) in [
+            (-0.9999999999999, -15.31322124631433, 4998445757348.192),
+            (-0.999999999999999, -17.616361586450413, 500399958596722.0),
+            (0.999999999999999, 17.616361586450413, 500399958596722.0),
+            (0.9999999999999998, 18.36840028483855, 2251799813685248.5),
+            (-0.9, -1.4722194895832204, 5.263157894736843),
+            (0.5, 0.5493061443340549, 1.3333333333333333),
+            (1e-10, 1e-10, 1.0),
+        ] {
+            let got_v = t.eval(&[u]);
+            assert!(
+                rel(got_v, want_v) < 4e-16,
+                "atanh({u:e}): got {got_v:.17e}, want {want_v:.17e}"
+            );
+            let mut g = [0.0];
+            t.gradient_seed(&[u], 1.0, &mut g);
+            assert!(
+                rel(g[0], want_d) < 4e-16,
+                "atanh'({u:e}): got {:.17e}, want {want_d:.17e}",
+                g[0]
+            );
+        }
+    }
+
+    /// `got` matches `want` to `tol` relative, or both are zero. A subnormal
+    /// `want` carries fewer than 53 bits, so there one subnormal ulp of
+    /// absolute error is allowed as well.
+    fn close(got: f64, want: f64, tol: f64) -> bool {
+        if want == 0.0 {
+            got == 0.0
+        } else if want.abs() < f64::MIN_POSITIVE {
+            (got - want).abs() <= f64::from_bits(1)
+        } else {
+            ((got - want) / want).abs() < tol
+        }
+    }
+
+    /// (op, u, f'(u), f''(u)), references from 100-digit decimal at the exact
+    /// f64 input. Each op has an interior point (the textbook form was fine)
+    /// and the points where the textbook form failed: cancellation near the
+    /// boundary of the domain, or overflow of `u*u` / `d*d` at large `|u|`.
+    ///
+    /// The cancellation points sit at `δ ≈ 3e-9` from the boundary, not at
+    /// `δ = 1e-15`: for `u = 1 - δ` the rounding error of `u*u` is ~`δ²`
+    /// (until that reaches an ulp), so `1 - u*u` is accurate *at* the
+    /// boundary and worst (~4e-9 relative) where `δ²` is one ulp. The `1e-15`
+    /// points stay because they pin the fixed forms at the boundary itself.
+    const INVERSE_DERIV_CASES: &[(UnaryOp, f64, f64, f64)] = &[
+        (UnaryOp::Asin, 0.3, 1.0482848367219182, 0.3455884077105225),
+        (
+            UnaryOp::Asin,
+            -0.999999999999999,
+            22369621.33333334,
+            -1.1193757589024341e22,
+        ),
+        (
+            UnaryOp::Asin,
+            0.999999999999999,
+            22369621.33333334,
+            1.1193757589024341e22,
+        ),
+        (
+            UnaryOp::Asin,
+            0.999999992554274,
+            8194.670143394766,
+            550293555898.1869,
+        ),
+        (UnaryOp::Acos, 0.3, -1.0482848367219182, -0.3455884077105225),
+        (
+            UnaryOp::Acos,
+            -0.999999999999999,
+            -22369621.33333334,
+            1.1193757589024341e22,
+        ),
+        (
+            UnaryOp::Acos,
+            0.999999992554274,
+            -8194.670143394766,
+            -550293555898.1869,
+        ),
+        (UnaryOp::Acosh, 2.0, 0.5773502691896257, -0.3849001794597505),
+        (
+            UnaryOp::Acosh,
+            1.0000000000001,
+            2236962.1333332774,
+            -1.1193757589024625e19,
+        ),
+        (
+            UnaryOp::Acosh,
+            1.0000000050104683,
+            9989.54813402654,
+            -996867721306.0283,
+        ),
+        (UnaryOp::Acosh, 1e100, 1e-100, -1e-200),
+        (UnaryOp::Acosh, 1e200, 1e-200, 0.0),
+        (
+            UnaryOp::Asinh,
+            0.5,
+            0.8944271909999159,
+            -0.35777087639996635,
+        ),
+        (UnaryOp::Asinh, 1e100, 1e-100, -1e-200),
+        (UnaryOp::Asinh, -1e100, 1e-100, 1e-200),
+        (UnaryOp::Asinh, 1e200, 1e-200, 0.0),
+        (UnaryOp::Asinh, -1e200, 1e-200, 0.0),
+        (UnaryOp::Atanh, 0.5, 1.3333333333333333, 1.7777777777777777),
+        (
+            UnaryOp::Atanh,
+            -0.999999999999999,
+            500399958596722.0,
+            -5.008002371272017e29,
+        ),
+        (
+            UnaryOp::Atanh,
+            0.999999999999999,
+            500399958596722.0,
+            5.008002371272017e29,
+        ),
+        (
+            UnaryOp::Atanh,
+            -0.999999992554274,
+            67152618.75904559,
+            -9018948345242822.0,
+        ),
+        (UnaryOp::Atan, 0.7, 0.6711409395973155, -0.6306022251249944),
+        (UnaryOp::Atan, 1e100, 1e-200, -2e-300),
+        (UnaryOp::Atan, -1e100, 1e-200, 2e-300),
+        // Past `|u| ≈ 1.3e154`, `1 + u*u` is `inf` and the old `atan'` read
+        // `0`; the true value stays subnormal up to `|u| ≈ 6e161`. 2e150 is
+        // just past the `r = 1/u` switch, where the value is still normal.
+        (UnaryOp::Atan, 2e150, 2.5e-301, 0.0),
+        (UnaryOp::Atan, 1e155, 1e-310, 0.0),
+        (UnaryOp::Atan, -1e158, 1e-316, 0.0),
+        (UnaryOp::Atan, 1e160, 1e-320, 0.0),
+        (UnaryOp::Atan, 5e161, 5e-324, 0.0),
+        (UnaryOp::Tanh, 0.3, 0.9151369618266292, -0.5331818782014544),
+        (
+            UnaryOp::Tanh,
+            10.0,
+            8.244614455767397e-9,
+            -1.6489228843561127e-8,
+        ),
+        (
+            UnaryOp::Tanh,
+            25.0,
+            7.714999391855671e-22,
+            -1.5429998783711343e-21,
+        ),
+        (
+            UnaryOp::Tanh,
+            -30.0,
+            3.502604305078608e-26,
+            7.005208610157216e-26,
+        ),
+    ];
+
+    #[test]
+    fn inverse_and_tanh_derivatives_accurate_at_boundaries_and_extremes() {
+        // The neighbours of gh#1151: every one of these failed in the
+        // textbook form — `1 - u*u` / `u*u - 1` cancelled at the domain
+        // boundary, `1 - tanh²` cancelled once tanh rounded toward ±1 (and
+        // was exactly 0 past |u| ≈ 19), and `u*u + 1` / `d*d` overflowed to
+        // a zero derivative at large |u|. Checked through the tape — the
+        // reverse gradient and `hessian_accumulate` — so the arms are
+        // pinned, not just the kernels.
+        assert_unary_derivs(INVERSE_DERIV_CASES);
+    }
+
+    /// Checks each (op, u, f', f'') through the tape: the reverse gradient
+    /// and `hessian_accumulate`, so the arms are pinned, not just the kernels.
+    fn assert_unary_derivs(cases: &[(UnaryOp, f64, f64, f64)]) {
+        for &(op, u, want_d1, want_d2) in cases {
+            let t = Tape::build(&unary(op, var(0)));
+            let mut g = [0.0];
+            t.gradient_seed(&[u], 1.0, &mut g);
+            assert!(
+                close(g[0], want_d1, 1e-15),
+                "{op:?}'({u:e}): got {:.17e}, want {want_d1:.17e}",
+                g[0]
+            );
+            // Second derivatives get 2e-15: the kernels are a few roundings
+            // deep (`acosh″` reaches 1.06e-15 on random inputs), and
+            // `tanh`/`asinh`/`atan2` go through the platform's `cosh`/`hypot`,
+            // which CI only runs on Linux.
+            let mut hess_map = HashMap::new();
+            hess_map.insert((0usize, 0usize), 0usize);
+            let mut h = [0.0];
+            t.hessian_accumulate(&[u], 1.0, &hess_map, &mut h);
+            assert!(
+                close(h[0], want_d2, 2e-15),
+                "{op:?}''({u:e}): got {:.17e}, want {want_d2:.17e}",
+                h[0]
+            );
+        }
+    }
+
+    /// The same overflow class in `log`/`log10`/`sqrt`: `-1/(u*u)`,
+    /// `1/(u·ln 10)` and `-0.25/(u·sqrt u)` read `0` once the product
+    /// overflowed, while the true value is still representable (normal or
+    /// subnormal). Each op has points on both sides of its switch, since the
+    /// old form is kept bit for bit below it and the rescaled form takes over
+    /// above: `log''`/`log10''` at 1e150, `log10'` at 1e300, `sqrt''` at 1e200.
+    const LOG_SQRT_DERIV_CASES: &[(UnaryOp, f64, f64, f64)] = &[
+        (UnaryOp::Log, 2.0, 0.5, -0.25),
+        (UnaryOp::Log, 1e100, 1e-100, -1e-200),
+        (UnaryOp::Log, 1e155, 1e-155, -1e-310),
+        (UnaryOp::Log, 1e160, 1e-160, -1e-320),
+        (
+            UnaryOp::Log10,
+            2.0,
+            0.2171472409516259,
+            -0.10857362047581295,
+        ),
+        (
+            UnaryOp::Log10,
+            1e100,
+            4.342944819032518e-101,
+            -4.342944819032518e-201,
+        ),
+        (
+            UnaryOp::Log10,
+            1e155,
+            4.3429448190325184e-156,
+            -4.3429448190326e-311,
+        ),
+        (UnaryOp::Log10, 1e305, 4.3429448190325186e-306, 0.0),
+        (UnaryOp::Log10, 1.7e308, 2.554673422960305e-309, 0.0),
+        (UnaryOp::Sqrt, 2.0, 0.3535533905932738, -0.08838834764831845),
+        (UnaryOp::Sqrt, 1e150, 5e-76, -2.5e-226),
+        (UnaryOp::Sqrt, 1e206, 5e-104, -2.5e-310),
+        (UnaryOp::Sqrt, 1e300, 5e-151, 0.0),
+        (UnaryOp::Sqrt, 1.7e308, 3.8348249442368524e-155, 0.0),
+    ];
+
+    #[test]
+    fn log_log10_sqrt_derivatives_accurate_at_large_arguments() {
+        assert_unary_derivs(LOG_SQRT_DERIV_CASES);
+    }
+
+    #[test]
+    fn atan2_derivatives_accurate_at_extreme_magnitudes() {
+        // `d = y*y + x*x` overflowed past ~1e154 (zero gradient) and
+        // underflowed below ~1e-162 (infinite gradient); `d*d` in the
+        // Hessian did both at the square root of those magnitudes. The last
+        // case has |y| ≈ |x|, where an unfactored `y² - x²` cancels.
+        let e = Expr::Binary(BinOp::Atan2, Box::new(var(0)), Box::new(var(1)));
+        let t = Tape::build(&e);
+        let mut hess_map = HashMap::new();
+        hess_map.insert((0usize, 0usize), 0usize);
+        hess_map.insert((1usize, 0usize), 1usize);
+        hess_map.insert((1usize, 1usize), 2usize);
+        for (y, x, want_g, want_h) in [
+            (
+                1e100,
+                2e100,
+                [4e-101, -2e-101],
+                [-1.6e-201, -1.2e-201, 1.6e-201],
+            ),
+            (1e-100, -3e-100, [-3e99, -1e99], [6e198, -8e198, -6e198]),
+            (1.0, 2.0, [0.4, -0.2], [-0.16, -0.12, 0.16]),
+            // `y ± x` overflows here: the old off-diagonal was `NaN` at
+            // `y = -x` (`inf · 0`) and `inf` beside it. The true Hessian
+            // underflows to `0`; the gradient is subnormal.
+            (1e308, -1e308, [-5e-309, -5e-309], [0.0, 0.0, 0.0]),
+            (
+                1.5e308,
+                -1e308,
+                [-3.076923076923076e-309, -4.615384615384614e-309],
+                [0.0, 0.0, 0.0],
+            ),
+            (1e308, 1e308, [5e-309, -5e-309], [0.0, 0.0, 0.0]),
+            (
+                3.0,
+                3.0000000001,
+                [0.16666666666666666, -0.1666666666611111],
+                [
+                    -0.0555555555537037,
+                    -1.8518520049821686e-12,
+                    0.0555555555537037,
+                ],
+            ),
+        ] {
+            let mut g = [0.0; 2];
+            t.gradient_seed(&[y, x], 1.0, &mut g);
+            let mut h = [0.0; 3];
+            t.hessian_accumulate(&[y, x], 1.0, &hess_map, &mut h);
+            for k in 0..2 {
+                assert!(
+                    close(g[k], want_g[k], 1e-15),
+                    "atan2({y:e},{x:e}) grad[{k}]: got {:.17e}, want {:.17e}",
+                    g[k],
+                    want_g[k]
+                );
+            }
+            for k in 0..3 {
+                assert!(
+                    close(h[k], want_h[k], 2e-15),
+                    "atan2({y:e},{x:e}) hess[{k}]: got {:.17e}, want {:.17e}",
+                    h[k],
+                    want_h[k]
+                );
+            }
+        }
     }
 
     #[test]

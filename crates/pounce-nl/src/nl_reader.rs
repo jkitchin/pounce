@@ -3323,7 +3323,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Asin => va.asin(),
                 UnaryOp::Acosh => va.acosh(),
                 UnaryOp::Asinh => va.asinh(),
-                UnaryOp::Atanh => va.atanh(),
+                UnaryOp::Atanh => crate::nl_tape::atanh(va),
                 UnaryOp::Erf => crate::nl_tape::erf(va),
                 UnaryOp::XLogX => crate::nl_tape::xlogx(va),
             }
@@ -3446,9 +3446,9 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 }
                 BinOp::Atan2 => {
                     // atan2(y=a, x=b): d/dy = x/(x²+y²), d/dx = -y/(x²+y²)
-                    let d = va * va + vb * vb;
-                    grad_expr(a, x, seed * vb / d, grad);
-                    grad_expr(b, x, -seed * va / d, grad);
+                    let (fa, fb) = crate::nl_tape::atan2_d1(va, vb);
+                    grad_expr(a, x, seed * fa, grad);
+                    grad_expr(b, x, seed * fb, grad);
                 }
                 BinOp::CEntropy => {
                     grad_expr(a, x, seed * crate::nl_tape::centropy_da(va, vb), grad);
@@ -3462,7 +3462,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Neg => -1.0,
                 UnaryOp::Sqrt => 0.5 / va.sqrt(),
                 UnaryOp::Log => 1.0 / va,
-                UnaryOp::Log10 => 1.0 / (va * std::f64::consts::LN_10),
+                UnaryOp::Log10 => crate::nl_tape::div_u_ln10(1.0, va),
                 UnaryOp::Exp => va.exp(),
                 UnaryOp::Abs => {
                     if va > 0.0 {
@@ -3479,18 +3479,15 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                     let t = va.tan();
                     1.0 + t * t
                 }
-                UnaryOp::Atan => 1.0 / (1.0 + va * va),
-                UnaryOp::Acos => -1.0 / (1.0 - va * va).sqrt(),
+                UnaryOp::Atan => crate::nl_tape::atan_d1(va),
+                UnaryOp::Acos => crate::nl_tape::acos_d1(va),
                 UnaryOp::Sinh => va.cosh(),
                 UnaryOp::Cosh => va.sinh(),
-                UnaryOp::Tanh => {
-                    let t = va.tanh();
-                    1.0 - t * t
-                }
-                UnaryOp::Asin => 1.0 / (1.0 - va * va).sqrt(),
-                UnaryOp::Acosh => 1.0 / (va * va - 1.0).sqrt(),
-                UnaryOp::Asinh => 1.0 / (va * va + 1.0).sqrt(),
-                UnaryOp::Atanh => 1.0 / (1.0 - va * va),
+                UnaryOp::Tanh => crate::nl_tape::tanh_d1(va),
+                UnaryOp::Asin => crate::nl_tape::asin_d1(va),
+                UnaryOp::Acosh => crate::nl_tape::acosh_d1(va),
+                UnaryOp::Asinh => crate::nl_tape::asinh_d1(va),
+                UnaryOp::Atanh => crate::nl_tape::atanh_d1(va),
                 UnaryOp::Erf => crate::nl_tape::erf_d1(va),
                 UnaryOp::XLogX => crate::nl_tape::xlogx_d1(va),
             };
