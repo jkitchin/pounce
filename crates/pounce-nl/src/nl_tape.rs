@@ -385,10 +385,13 @@ pub(crate) fn atanh_d2(u: f64) -> f64 {
 // The four kernels below are `pub` because `pounce-cli`'s `HessianProgram`
 // lowers the same ops and must not carry its own copies: it held the
 // pre-fix forms of all of them (and of division's) after the tape was fixed.
+// They are `#[doc(hidden)]`: shared with a sibling crate, not part of
+// `pounce-nl`'s documented interface.
 
 /// `log''(u) = -1/u²`. Past `|u| = 1e150` as `-(1/u)/u`: `u*u` overflows at
 /// `|u| ≈ 1.3e154` and read `0` where the true value is subnormal (nonzero to
 /// `|u| ≈ 1.3e162`). Below the threshold the old form is kept bit for bit.
+#[doc(hidden)]
 #[inline]
 pub fn log_d2(u: f64) -> f64 {
     if u.abs() > 1e150 {
@@ -402,6 +405,7 @@ pub fn log_d2(u: f64) -> f64 {
 /// `(x/u)/ln 10`: `u·ln 10` overflows at `|u| ≈ 7.8e307`. It takes the
 /// numerator so that below the threshold every arm still performs the single
 /// division it always did, bit for bit.
+#[doc(hidden)]
 #[inline]
 pub fn div_u_ln10(x: f64, u: f64) -> f64 {
     let c = std::f64::consts::LN_10;
@@ -413,6 +417,7 @@ pub fn div_u_ln10(x: f64, u: f64) -> f64 {
 }
 
 /// `log10''(u) = -1/(u²·ln 10)`, with the same threshold as [`log_d2`].
+#[doc(hidden)]
 #[inline]
 pub fn log10_d2(u: f64) -> f64 {
     let c = std::f64::consts::LN_10;
@@ -426,6 +431,7 @@ pub fn log10_d2(u: f64) -> f64 {
 /// `sqrt''(u) = -1/(4·u^{3/2})`, given `sv = sqrt(u)`. Past `u = 1e200` as
 /// `(-0.25/u)/sv`: `u·sv` overflows at `u ≈ 2.6e205`, where the true value is
 /// still ~1e-308. Below the threshold the old form is kept bit for bit.
+#[doc(hidden)]
 #[inline]
 pub fn sqrt_d2(u: f64, sv: f64) -> f64 {
     if u > 1e200 {
