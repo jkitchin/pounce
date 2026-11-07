@@ -413,9 +413,15 @@ fn a_budget_exit_that_never_escalated_is_left_alone() {
 /// could only show that nothing was re-solved on a run that never failed. On
 /// 0.21 the lbfgs leg runs to the cap with the escalation off as well, which
 /// is the case the drop is for: a budget exit, from a baseline that already
-/// declined the escalation, gets no rung 4. The cap is 500 for the reason the
-/// module header gives, and the square-system stage is switched off because
-/// it would otherwise answer this budget exit of a square model.
+/// declined the escalation, gets no rung 4. The square-system stage is
+/// switched off because it would otherwise answer this budget exit of a
+/// square model.
+///
+/// The cap is 150, not the module header's 500. Since gh#1146 confined
+/// restoration's limited-memory update to the `x` block, as upstream does,
+/// this leg *converges* with the escalation off, at 197 iterations, so a cap
+/// of 500 no longer produces the budget exit the test is about. 150 sits
+/// below that with margin and still well into the run.
 ///
 /// Read what this can and cannot catch. With the escalation off the solve
 /// cannot escalate, so `quality_escalations` is 0 and the `>= 1` gate drops
@@ -432,16 +438,16 @@ fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
         &[
             "hessian_approximation=limited-memory",
             "feral_increase_quality=no",
-            "max_iter=500",
+            "max_iter=150",
             "square_system_recovery=no",
         ],
     );
     assert!(
         run.out
             .contains("EXIT: Maximum Number of Iterations Exceeded"),
-        "premise: with the escalation off this leg still runs to the cap on \
-         FERAL 0.21; if it now converges the test has lost its failing \
-         baseline:\n{}",
+        "premise: with the escalation off this leg runs to a cap of 150 (it \
+         converges at 197 since gh#1146); if it now converges inside 150 the \
+         test has lost its failing baseline:\n{}",
         run.out
     );
     assert!(ladder_lines(&run.out).is_empty(), "{}", run.out);
@@ -450,32 +456,37 @@ fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
         "no rung may be recorded either: {:?}",
         run.tried()
     );
-    assert!(run.iterations >= 500, "{}", run.out);
+    assert!(run.iterations >= 150, "{}", run.out);
 }
 
 /// Appended, not prepended — the ordering claim, measured.
 ///
-/// `circle_parabola_t0p5` on the lbfgs leg exits `Infeasible_Problem_Detected`
-/// at 48 having escalated, so every rung that is a different trajectory is
+/// `circle_parabola_t0p5` on the lbfgs leg with
+/// `limited_memory_initialization=scalar2` exits `Infeasible_Problem_Detected`
+/// at 128 having escalated, so every rung that is a different trajectory is
 /// open, rung 4 last. That is three, not four: under L-BFGS an unset
 /// `mu_strategy` already resolves to adaptive (gh#746), so the
 /// `mu_strategy=adaptive` rung would re-run the base solve byte-for-byte and
-/// is not offered (gh#1042 review). Rung 1
-/// (`feral_scaling=mc64`) runs first and promotes at 77, so the leg reaches
-/// the same answer at the same cost it would without rung 4: 48 in the base
-/// solve plus 77 in the rung, 125 total — identical on FERAL 0.20 and 0.21.
-/// Rung 4 is announced and never run.
+/// is not offered (gh#1042 review). Rung 1 (`feral_scaling=mc64`) runs first
+/// and promotes at 82. Rung 4 is announced and never run.
 ///
-/// On 0.20 this was `square_flowsheet_resto`'s exact leg (`Restoration_Failed`,
-/// rung 3 promoting at 54); on 0.21 that leg opens no ladder at all, and no
-/// restoration failure in the corpus is recovered by any rung. The claim is
-/// the same one either way: rung 4 cannot cost an earlier rung's promotion
-/// anything.
+/// The witness has moved twice. On FERAL 0.20 it was
+/// `square_flowsheet_resto`'s exact leg (`Restoration_Failed`, rung 3
+/// promoting at 54). From 0.21 it was `circle_parabola_t0p5` at default
+/// options (48, then rung 1 at 77). Since gh#1146 confined restoration's
+/// limited-memory update to the `x` block, as upstream does, that run solves
+/// on its first attempt, and no corpus fixture at default options is
+/// rescued by rung 1 any more. `scalar2` is the nearest run that still is.
+/// The claim is the same one throughout: rung 4 cannot cost an earlier
+/// rung's promotion anything.
 #[test]
 fn the_new_rung_is_last_so_an_earlier_promotion_is_unchanged() {
     let run = solve(
         "circle_parabola_t0p5.nl",
-        &["hessian_approximation=limited-memory"],
+        &[
+            "hessian_approximation=limited-memory",
+            "limited_memory_initialization=scalar2",
+        ],
     );
     let lines = ladder_lines(&run.out);
     assert!(
@@ -508,8 +519,8 @@ fn the_new_rung_is_last_so_an_earlier_promotion_is_unchanged() {
         "the report must record one rung tried, the first"
     );
     assert_eq!(
-        run.iterations, 77,
-        "the promoted rung's own count, unchanged by gh#857 and by FERAL 0.21"
+        run.iterations, 82,
+        "the promoted rung's own count (82 when gh#1146 moved this test here)"
     );
 }
 

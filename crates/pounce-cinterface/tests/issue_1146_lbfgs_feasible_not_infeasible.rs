@@ -283,10 +283,17 @@ fn exact_hessian_from_the_log_singularity_is_not_convicted_one_step_from_feasibl
 /// in 14 iterations.
 #[test]
 fn unscaled_lbfgs_restoration_recovers_as_upstream_does() {
-    let (status, x, g) =
-        solve_with("limited-memory", 0.0, -1.0, &[("nlp_scaling_method", "none")]);
+    let (status, x, g) = solve_with(
+        "limited-memory",
+        0.0,
+        -1.0,
+        &[("nlp_scaling_method", "none")],
+    );
     assert_eq!(status, SOLVE_SUCCEEDED, "x = {x}, g = {g:?}");
-    assert!((x - 0.44927).abs() < 1e-4, "x = {x}; Ipopt 3.11.9 returns 0.44927");
+    assert!(
+        (x - 0.44927).abs() < 1e-4,
+        "x = {x}; Ipopt 3.11.9 returns 0.44927"
+    );
 }
 
 #[test]
