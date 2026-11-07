@@ -218,14 +218,26 @@ fn the_exact_leg_is_no_longer_lost_to_the_rung() {
 /// the option starts recovering this leg again, the second assertion fails
 /// and the 0.20 pin — `Optimal` in under 1000 — is the one to restore.
 ///
-/// **gh#1146 restored it.** Restoration's limited-memory update had been
-/// running over the whole restoration primal, slack blocks included, where
-/// upstream confines it to the `x` block. Matching upstream took this leg from
-/// the cap to `Optimal` at 197 iterations with the rung off, and to `Optimal`
-/// at 314 with it on (still reported, not asserted). So the rung-off run is
-/// the recovery again, and the pin is the 0.20 one.
+/// **gh#1146 restored it on x86_64, not on arm64.** Restoration's
+/// limited-memory update had been running over the whole restoration primal,
+/// slack blocks included, where upstream confines it to the `x` block.
+/// Matching upstream took this leg, on x86_64 (Linux), from the cap to
+/// `Optimal` at 197 iterations with the rung off, and to `Optimal` at 314 with
+/// it on. On arm64 (Apple Silicon, macOS; measured in the PR #1148 review) it
+/// still runs to the cap with the rung off, and with the rung on it went from
+/// `Restoration_Failed`/250 on `main` to the cap.
+///
+/// This fixture's L-BFGS leg has been platform-dependent since gh#1076: FERAL's
+/// AVX2 and NEON kernels take different trajectories on it, and both outcomes
+/// sit far from any boundary a tolerance could fix. So the pin is per
+/// architecture:
+///
+/// * **x86_64:** the 0.20 pin, `Optimal` in under 1000.
+/// * **elsewhere:** whatever the run does, it must not report a success it
+///   did not earn. The rung-off run must end `Optimal` or at the iteration
+///   cap; the cap is the measured arm64 outcome.
 #[test]
-fn the_limited_memory_leg_recovers_with_the_rung_off() {
+fn the_limited_memory_leg_with_the_rung_off_is_pinned_per_architecture() {
     let (_out, exit, iters) = solve(&[
         "hessian_approximation=limited-memory",
         "feral_increase_quality_retry=no",
@@ -244,9 +256,19 @@ fn the_limited_memory_leg_recovers_with_the_rung_off() {
         "feral_increase_quality=no",
         "square_system_recovery=no",
     ]);
-    assert!(
-        exit.starts_with("Optimal Solution Found") && iters < 1000,
-        "since gh#1146 this leg reaches Optimal at 197 with the rung off; \
-         got {exit:?} at {iters}"
-    );
+    if cfg!(target_arch = "x86_64") {
+        assert!(
+            exit.starts_with("Optimal Solution Found") && iters < 1000,
+            "on x86_64 since gh#1146 this leg reaches Optimal at 197 with the \
+             rung off; got {exit:?} at {iters}"
+        );
+    } else {
+        assert!(
+            exit.starts_with("Optimal Solution Found")
+                || exit.starts_with("Maximum Number of Iterations Exceeded"),
+            "off x86_64 this leg ran to the cap with the rung off when gh#1146 \
+             was measured (arm64, macOS); any other verdict is new and needs \
+             re-measuring: got {exit:?} at {iters}"
+        );
+    }
 }

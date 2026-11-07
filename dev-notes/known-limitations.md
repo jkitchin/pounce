@@ -12,10 +12,12 @@ merges.
 
 ---
 
-## NLP: three L-BFGS fixtures slower after restoration matched upstream (gh#1146)
+## NLP: L-BFGS fixtures slower after restoration matched upstream (gh#1146)
 
 *Measured on `claude/charming-carson-cz5psg` against `main` at `358ecbb`,
-`scripts/sweep-fixtures.sh`, L-BFGS leg. Recorded 2026-11-06.*
+`scripts/sweep-fixtures.sh`, L-BFGS leg, on **two architectures**: x86_64
+(Linux) by the PR, arm64 (Apple Silicon, macOS) in the PR #1148 review.
+Recorded 2026-11-07.*
 
 **The change.** Under `hessian_approximation=limited-memory`, restoration's
 quasi-Newton update ran over the whole restoration primal
@@ -28,44 +30,77 @@ model under `nlp_scaling_method=none` that turns `Restoration_Failed` at
 
 ### What is worse
 
-No status moved, and the exact leg is untouched. On the L-BFGS leg:
+No status moved on either architecture, and the exact leg is untouched on
+both. L-BFGS lines, `main` → branch:
 
-| fixture | before | after |
+| fixture | x86_64 | arm64 |
 |---|---|---|
-| `circle_parabola_t1p5` | 66 it (206 with ladder) | 154 it (553) |
-| `eigena2` | 239 it | 263 it |
-| `cc:design_cent_3` | 4724 lowered-solve iterations | 10967 |
+| `square_flowsheet_resto` | 2834 → **314** | total **3402 → 6210**: first attempt now at the cap, rescued later by `square_system_lm` |
+| `dallass` | 301 → 272 | **218 → 279** |
+| `circle_parabola_t1p5` | 66 → 154 (206 → 553 with ladder) | same |
+| `eigena2` | 239 → 263 | same |
+| `infeasible_square_scaled_1em4` | 24 → 26 (90 → 115) | same |
+| `cc:design_cent_3` (lowered-solve total) | 4724 → 10967 | 4724 → 8210 |
+| `cc:infeasible_pair` | 36 → 29 it | 36 → 29 it, driver total 3233 → 3672 |
 
-Against those: `square_flowsheet_resto` 2834 → 314, `cresc4` solves on
-the first attempt (was 3200 with the ladder), `circle_parabola_t0p5` and
-`discs` no longer need the ladder, `dallass` 301 → 272, and four smaller
-moves go each way.
+Better on both: `cresc4` solves on the first attempt (was the ladder,
+3200 total), `circle_parabola_t0p5` and `discs` no longer need the ladder,
+`eigmaxa` 19 → 16, `issue981_water_main` 25 → 21 (100 → 67),
+`issue_508_infeasible_gap_1em4` 79 → 73 (550 → 369),
+`degenerate_start_infeasible` total 69 → 43.
 
-### Why it is not the restoration change itself
+### What is understood, and what is not
 
-Both regressing NLP fixtures had already left Ipopt's path in the **main
-loop, before any restoration call**, on `main` and on the branch alike.
-Measured against Ipopt 3.14.20 (`amplpy` `ampl_module_ipopt`), same options:
+**`circle_parabola_t1p5` and `eigena2` (both architectures).** Both had
+already left Ipopt's path in the **main loop, before any restoration call**,
+on `main` and on the branch alike. Measured against Ipopt 3.14.20
+(`amplpy` `ampl_module_ipopt`), same options, x86_64:
 
-- `circle_parabola_t1p5`: Ipopt takes 31 iterations. Pounce leaves
-  Ipopt's path at main-loop iteration 2 (`‖d‖ = 7.66` against Ipopt's
-  `25.7`).
+- `circle_parabola_t1p5`: Ipopt takes 31 iterations. Pounce leaves its
+  path at main-loop iteration 2 (`‖d‖ = 7.66` against Ipopt's `25.7`).
 - `eigena2`: Ipopt takes 167 iterations and first enters restoration at
   iteration 132. Pounce leaves its path at main-loop iteration 6.
 
 So restoration is entered from points Ipopt never visits, and its
 iteration count there measures that earlier gap, not this change.
-`cc:design_cent_3` goes through the complementarity driver's lowered
-solves and has no direct Ipopt comparison; it was not traced.
+
+**`square_flowsheet_resto` and `dallass` (architecture-dependent).** These
+are the two lines that move in opposite directions on the two machines.
+Neither direction is a property of the change alone:
+
+- The baselines already differ: on `main`, `square_flowsheet_resto` ends
+  `Optimal` at 2834 on x86_64 and at the cap on arm64 (gh#1076: FERAL's AVX2
+  and NEON kernels take different trajectories here), and `dallass` takes
+  301 against 218.
+- `square_flowsheet_resto` is square (32×32), constant-objective, with a
+  Jacobian nearly singular even at the solution. Its L-BFGS leg is chaotic in
+  the factorization's pivot choices, which is why the tests that use it as a
+  failing baseline cap `max_iter` at 150 on both architectures.
+
+Neither line was traced on arm64: the PR was measured in an x86_64
+container. **Not understood** is whether the arm64 cost on
+`square_flowsheet_resto` comes from the restoration change acting through a
+different pivot sequence, or from the trajectory reaching restoration at a
+different point in the first place. The x86 traces that settled
+`circle_parabola_t1p5` and `eigena2` would settle this too.
+
+**`cc:` totals (both architectures).** `cc:design_cent_3` and
+`cc:infeasible_pair` go through the complementarity driver's lowered solves
+and have no direct Ipopt comparison. Not traced.
 
 ### How to tell whether a fix works
 
-Close the main-loop gap: `circle_parabola_t1p5` and `eigena2` under
-`hessian_approximation=limited-memory` should match Ipopt's iteration log
-through their first restoration call. Do not restore the whole-compound
-update to win these back. It is what made the gh#1146 model fail, and
-`crates/pounce-cinterface/tests/issue_1146_lbfgs_feasible_not_infeasible.rs`
-(`unscaled_lbfgs_restoration_recovers_as_upstream_does`) pins it.
+- `circle_parabola_t1p5` and `eigena2` under
+  `hessian_approximation=limited-memory` should match Ipopt's iteration log
+  through their first restoration call.
+- On arm64, trace `square_flowsheet_resto` (L-BFGS, `square_system_recovery=no`)
+  on `main` and on the branch, and find the first iteration where they part.
+  If it is inside restoration, the `leading_block` change is acting through
+  FERAL's pivoting there. If it is earlier, it is the gh#1076 platform split.
+- Do not restore the whole-compound update to win any of these back. It is
+  what made the gh#1146 model fail, and
+  `crates/pounce-cinterface/tests/issue_1146_lbfgs_feasible_not_infeasible.rs`
+  (`unscaled_lbfgs_restoration_recovers_as_upstream_does`) pins it.
 
 ---
 

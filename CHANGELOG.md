@@ -227,11 +227,12 @@ changes.
     iterates and return its answer.
   - **Who notices:** L-BFGS users most, which includes the Python frontend
     and CasADi plugin whenever no Hessian is supplied. Solves that enter
-    restoration under L-BFGS take a different path:
-    `square_flowsheet_resto` drops from 2834 to 314 iterations, three
-    fixtures no longer need a re-solve, and three get slower. Those three are
-    recorded in `dev-notes/known-limitations.md`. No fixture's status
-    changed.
+    restoration under L-BFGS take a different path. No fixture's status
+    changed on x86_64 or arm64. Three fixtures no longer need a re-solve on
+    either, and several get slower. One fixture moves in opposite directions
+    on the two architectures: `square_flowsheet_resto` drops from 2834 to 314
+    iterations on x86_64, but its total rises from 3402 to 6210 on arm64.
+    The measurements are in `dev-notes/known-limitations.md`.
 - **An infeasible LP with a near-constant row is no longer reported
   unbounded (gh#1143).**
   - **What changed:** the convex interior-point's unboundedness test now
