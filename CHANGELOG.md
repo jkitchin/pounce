@@ -205,6 +205,33 @@ changes.
   - The fixture sweep's diff is empty: no fixture's rung reaches the budget.
 
 ### Fixed
+- **A feasible model is no longer reported infeasible at a point that
+  satisfies it (gh#1146).**
+  - **What changed:** an infeasibility verdict is now judged on the model's
+    own constraint violation, not on the gap between `d(x)` and its internal
+    slack. This applies to rapid infeasibility detection, the no-descent check
+    behind it, and the restoration exits. Separately, restoration's
+    limited-memory Hessian now covers only the original variables, as
+    upstream's does, instead of also covering restoration's own slack
+    variables.
+  - **Why:** `min 0` s.t. `0.25 ≤ x ≤ 0.75`, `−1 ≤ log x ≤ 1`, started at
+    `x0 = 0`:
+    - under L-BFGS it returned `Infeasible_Problem_Detected` at
+      `x = 0.444`, where every row holds;
+    - with the exact Hessian and the second-opinion ladder off, it was
+      convicted at `x = 0.349`, one step from feasible;
+    - under L-BFGS with `nlp_scaling_method=none`, it ended
+      `Restoration_Failed` at `x = 0.0429`.
+
+    Each now solves on the first attempt, and the last two follow Ipopt's
+    iterates and return its answer.
+  - **Who notices:** L-BFGS users most, which includes the Python frontend
+    and CasADi plugin whenever no Hessian is supplied. Solves that enter
+    restoration under L-BFGS take a different path:
+    `square_flowsheet_resto` drops from 2834 to 314 iterations, three
+    fixtures no longer need a re-solve, and three get slower. Those three are
+    recorded in `dev-notes/known-limitations.md`. No fixture's status
+    changed.
 - **An infeasible LP with a near-constant row is no longer reported
   unbounded (gh#1143).**
   - **What changed:** the convex interior-point's unboundedness test now
