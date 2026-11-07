@@ -29,14 +29,24 @@ def _pounce_available() -> bool:
     """
     import subprocess
 
+    import os
+
     from pounce.studio.server import _find_pounce_bin
     try:
         binary = _find_pounce_bin()
         proc = subprocess.run([binary, "--version"], capture_output=True,
                               timeout=60)
+        ok = proc.returncode == 0
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+        ok = False
+    if not ok and os.environ.get("POUNCE_STUDIO_REQUIRE_CLI"):
+        # A CI job that is there to run these tests must not report a skip
+        # as success (ci.yml, `wheel smoke (pounce-solver)`).
+        raise RuntimeError(
+            "POUNCE_STUDIO_REQUIRE_CLI is set but no working pounce CLI "
+            "was found; set POUNCE_BIN to a built binary"
+        )
+    return ok
 
 
 pytestmark = pytest.mark.skipif(

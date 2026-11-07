@@ -85,7 +85,9 @@ def _find_pounce_bin() -> str:
     When both of the middle two exist this is an editable install in a
     checkout, where `pounce/bin/pounce` is a staged copy refreshed only by
     `make python-cli-bin`; the newer of the two wins, so a plain
-    `cargo build --release` is not shadowed by a stale copy.
+    `cargo build --release` is not shadowed by a stale copy. This is a
+    heuristic: a fresh `pip install` can make the bundled copy newer than a
+    build from newer source. Set POUNCE_BIN when it matters which one runs.
     """
     env = os.environ.get("POUNCE_BIN")
     if env:

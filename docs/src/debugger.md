@@ -82,8 +82,9 @@ small set of commands whose availability is backend-conditional.
 > `quit` still stops at the post-mortem pause, where you can inspect the
 > stopped iterate before typing `quit` again.
 >
-> Anything that differs between the debugged and the plain run is a bug;
-> please report it.
+> Apart from those retries, which are documented above, the debugged run
+> follows the plain run's trajectory exactly. Up to the `final` pause, any
+> difference between the two is a bug; please report it.
 
 ---
 
