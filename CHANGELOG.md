@@ -20,10 +20,11 @@ changes.
   `±1`. `tanh`'s gradient was ~1e-8 off at `x = 10` and exactly `0` past
   `|x| ≈ 19`. `asinh` and `acosh` returned a zero gradient past
   `|x| ≈ 1e154`, `atan`'s second derivative was `0` past `|x| ≈ 1e77`, and
-  `atan2`'s derivatives were `0` at large arguments and `NaN` at tiny ones.
-  All are now accurate to a few ulps wherever the result is a normal double.
-  (`atan`'s gradient still rounds to `0` for `|x|` above ~1.3e154, where the
-  true value is subnormal.)
+  `atan2`'s derivatives were `0` at large arguments, `NaN` at tiny ones and
+  `NaN` near `f64::MAX`. `atan`'s gradient was `0` past `|x| ≈ 1.3e154`, where
+  the true value is still a nonzero subnormal. All are now accurate to a few
+  ulps wherever the result is a normal double, and underflow gradually below
+  that.
 
 ## [0.16.0] - 2026-11-07
 

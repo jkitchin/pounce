@@ -284,11 +284,22 @@ pub(crate) fn atanh(u: f64) -> f64 {
 //   `(u·g)·g·g` — `u·g` is O(1) — rather than as `u / (s·sqrt(s))`.
 // ---------------------------------------------------------------------------
 
-/// `atan'(u) = 1 / (1 + u²)`. `1 + u*u` has no cancellation, and it overflows
-/// only where the true value is already subnormal.
+/// `atan'(u) = 1 / (1 + u²)`.
+///
+/// `1 + u*u` has no cancellation, but `u*u` overflows past `|u| ≈ 1.3e154`
+/// while the true value stays nonzero (subnormal) up to `|u| ≈ 6e161`. Past
+/// `|u| = 1e150` it is therefore taken as `r²` with `r = 1/u`: there
+/// `1 + r²` rounds to exactly `1`, so `r²` is the same quantity, and it
+/// underflows gradually instead of jumping to `0`. Below the threshold the
+/// textbook form is kept bit for bit.
 #[inline]
 pub(crate) fn atan_d1(u: f64) -> f64 {
-    1.0 / (1.0 + u * u)
+    if u.abs() > 1e150 {
+        let r = 1.0 / u;
+        r * r
+    } else {
+        1.0 / (1.0 + u * u)
+    }
 }
 
 /// `atan''(u) = -2u / (1 + u²)²`, as `-2·(u·g)·g`.
@@ -371,16 +382,39 @@ pub(crate) fn atanh_d2(u: f64) -> f64 {
     2.0 * (u * g) * g
 }
 
+/// `(y/k, x/k, hypot(y/k, x/k), k)` for the `atan2` derivative kernels:
+/// `k = 2` once either argument passes `1e300`, else `k = 1`.
+///
+/// Near `f64::MAX` the plain forms overflow twice over: `hypot(y, x)` itself
+/// (`hypot(1.5e308, 1e308) ≈ 1.8e308`, so `h = inf` and a subnormal gradient
+/// reads `0`), and `y ± x` in the Hessian (`inf` beside `y = -x`, and
+/// `inf · 0 = NaN` on it). Halving a value that large is exact, so `y/k` and
+/// `x/k` carry the same ratios; the kernels divide by `k` again at the end.
+/// With `k = 1` every kernel is bit-identical to the unscaled form.
+#[inline]
+fn atan2_frame(y: f64, x: f64) -> (f64, f64, f64, f64) {
+    let k = if y.abs().max(x.abs()) > 1e300 {
+        2.0
+    } else {
+        1.0
+    };
+    let (ys, xs) = (y / k, x / k);
+    (ys, xs, ys.hypot(xs), k)
+}
+
 /// `∇atan2(y, x) = (x, -y) / (x² + y²)`, scaled by `h = hypot(y, x)`.
 ///
 /// Never via `d = y*y + x*x`: `d` overflows past `|·| ≈ 1.3e154` (gradient
 /// `0` where the true one is `~1/h`) and underflows below `~1e-162` (`inf`).
-/// `(x/h)/h` keeps every intermediate O(1) or O(1/h).
+/// `(x/h)/h` keeps every intermediate O(1) or O(1/h). See [`atan2_frame`]
+/// for arguments near `f64::MAX`.
 #[inline]
 pub(crate) fn atan2_d1(y: f64, x: f64) -> (f64, f64) {
-    let h = y.hypot(x);
-    let (cy, cx) = (y / h, x / h);
-    (cx / h, -cy / h)
+    let (ys, xs, hs, k) = atan2_frame(y, x);
+    let (cy, cx) = (ys / hs, xs / hs);
+    // `/ k` while the quotient is still O(1), so it is exact; `/ hs` last,
+    // where a subnormal result rounds once.
+    ((cx / k) / hs, (-cy / k) / hs)
 }
 
 /// Hessian of `atan2(y, x)`: `(∂yy, ∂yx, ∂xx) = (-2xy, y² - x², 2xy) / (x² + y²)²`,
@@ -388,12 +422,14 @@ pub(crate) fn atan2_d1(y: f64, x: f64) -> (f64, f64) {
 /// `(y-x)(y+x)` so it does not cancel near `y = ±x`.
 #[inline]
 pub(crate) fn atan2_d2(y: f64, x: f64) -> (f64, f64, f64) {
-    let h = y.hypot(x);
-    let (cy, cx) = (y / h, x / h);
-    let q = 2.0 * cy * cx / h / h;
+    let (ys, xs, hs, k) = atan2_frame(y, x);
+    let (cy, cx) = (ys / hs, xs / hs);
+    let kk = k * k;
+    let q = 2.0 * cy * cx / kk / hs / hs;
     // `y - x` before scaling, where it is exact near `y = x` (Sterbenz);
     // `y/h - x/h` would subtract two already-rounded quotients.
-    (-q, ((y - x) / h) * ((y + x) / h) / h / h, q)
+    let r = ((ys - xs) / hs) * ((ys + xs) / hs);
+    (-q, r / kk / hs / hs, q)
 }
 
 /// Gauss error function, the value arm of [`TapeOp::Erf`].
@@ -4498,10 +4534,14 @@ mod tests {
         }
     }
 
-    /// `got` matches `want` to `tol` relative, or both are zero.
+    /// `got` matches `want` to `tol` relative, or both are zero. A subnormal
+    /// `want` carries fewer than 53 bits, so there one subnormal ulp of
+    /// absolute error is allowed as well.
     fn close(got: f64, want: f64, tol: f64) -> bool {
         if want == 0.0 {
             got == 0.0
+        } else if want.abs() < f64::MIN_POSITIVE {
+            (got - want).abs() <= f64::from_bits(1)
         } else {
             ((got - want) / want).abs() < tol
         }
@@ -4597,6 +4637,14 @@ mod tests {
         (UnaryOp::Atan, 0.7, 0.6711409395973155, -0.6306022251249944),
         (UnaryOp::Atan, 1e100, 1e-200, -2e-300),
         (UnaryOp::Atan, -1e100, 1e-200, 2e-300),
+        // Past `|u| ≈ 1.3e154`, `1 + u*u` is `inf` and the old `atan'` read
+        // `0`; the true value stays subnormal up to `|u| ≈ 6e161`. 2e150 is
+        // just past the `r = 1/u` switch, where the value is still normal.
+        (UnaryOp::Atan, 2e150, 2.5e-301, 0.0),
+        (UnaryOp::Atan, 1e155, 1e-310, 0.0),
+        (UnaryOp::Atan, -1e158, 1e-316, 0.0),
+        (UnaryOp::Atan, 1e160, 1e-320, 0.0),
+        (UnaryOp::Atan, 5e161, 5e-324, 0.0),
         (UnaryOp::Tanh, 0.3, 0.9151369618266292, -0.5331818782014544),
         (
             UnaryOp::Tanh,
@@ -4673,6 +4721,17 @@ mod tests {
             ),
             (1e-100, -3e-100, [-3e99, -1e99], [6e198, -8e198, -6e198]),
             (1.0, 2.0, [0.4, -0.2], [-0.16, -0.12, 0.16]),
+            // `y ± x` overflows here: the old off-diagonal was `NaN` at
+            // `y = -x` (`inf · 0`) and `inf` beside it. The true Hessian
+            // underflows to `0`; the gradient is subnormal.
+            (1e308, -1e308, [-5e-309, -5e-309], [0.0, 0.0, 0.0]),
+            (
+                1.5e308,
+                -1e308,
+                [-3.076923076923076e-309, -4.615384615384614e-309],
+                [0.0, 0.0, 0.0],
+            ),
+            (1e308, 1e308, [5e-309, -5e-309], [0.0, 0.0, 0.0]),
             (
                 3.0,
                 3.0000000001,
