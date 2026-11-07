@@ -21,7 +21,7 @@ that ticks it.
 - [x] **S1-I1** Shared pair classifier in `pounce-nlp` (`validate_pairs`), `MpccTnlp::with_lift` uses it; every shape branch has a unit test; cc: sweep lines diff empty.
 - [x] **S1-I2** Export-surface guard: `tests/export_surface.rs` + `header_abi.rs` prototype check; stale `POUNCE_VERSION` fixed; new book page `docs/src/c-api.md`; README completed for the *existing* surface.
 - [x] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
-- [ ] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
+- [x] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
 - [ ] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
 - [ ] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
 - [ ] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
@@ -1354,6 +1354,71 @@ Gate (all on the ticking commit's tree):
   (`-D clippy::correctness -D clippy::suspicious`) clean; under plain
   warnings the new file carries only the workspace's restriction-group
   `expect_used` warns, as every test in the crate does.
+
+### S1-I4 — declaration API (commit that ticks S1-I4)
+
+What moved:
+- `src/lib.rs`: `IpoptProblemInfo.complementarity: Vec<ComplementarityPair>`
+  (0-based, empty at create); `pub const POUNCE_CC_OK` .. `POUNCE_CC_ERR_COUNT`
+  as §3.2 plus **`POUNCE_CC_ERR_INTERNAL = -7`** (not in §3.2: the
+  `ffi_guard` fallback for the two `int`-returning entry points needed a
+  value that cannot be read as a diagnosis of the input; flagged for the
+  ABI review). `declare_pairs(info, new, replace)` maps each index through
+  `zero_based` (`checked_sub` of the style offset; anything outside
+  `[0, len)` becomes `usize::MAX`), so `validate_pairs` reports the **first
+  refusal in declaration order** with its own range check rather than after
+  a range pre-pass; stores only on `Ok`; `bad_index` is the position in
+  the batch. Five entry points, all through `ffi_guard`:
+  `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`,
+  `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
+  `GetPounceComplementarityPairs`. Precedence in `Set`: NULL handle, then
+  `n_pairs < 0`, then NULL arrays with `n_pairs > 0`; `bad_index` is `-1`
+  on success and on those three. `Get` with no pairs returns `TRUE` and
+  accepts NULL arrays.
+- `pounce.h`: the eight `#define POUNCE_CC_*` and five prototypes after
+  `IpoptClearNonlinearVariables`, with the shape/index-style contract and an
+  explicit **"in development: IpoptSolve does not solve with them yet"**
+  note. The same note is in README, `c-api.md`, `complementarity.md` ("C
+  API" subsection) and the CHANGELOG `[Unreleased] ### Added` entry —
+  **S1-I5 must remove all five** when it routes the solve.
+- `tests/header_abi.rs`: `header_complementarity_codes_match_the_implementation`
+  parses every `#define POUNCE_CC_` and holds names and values equal to the
+  Rust constants in both directions (S1-I6 must add its `POUNCE_CC_CLASS_*`
+  etc. to the list there).
+- `tests/common/qpec.rs` (new): `QpecSmall` as C callbacks, Jacobian/Hessian
+  structure generic over the index offset (`ev_jac_g::<1>` for Fortran
+  style), `create(bounds.., index_style)` / `create_qpec(style)`.
+- `tests/complementarity_declare.rs` (new, 34 tests): success paths (fresh
+  handle; add + read back; both index styles; Fortran last index accepted,
+  0 refused, `i32::MIN` no overflow; `Set` replaces; `Add` after `Set`
+  appends; `Set` with 0 clears and accepts NULL; NULL `bad_index`; `Clear`;
+  every lowered shape accepted) and one test per refusal: NULL handle on all
+  five, negative count, each NULL-array combination, var and row out of
+  range (incl. `Index::MAX`/`MIN`), a model with `m = 0`, duplicate var and
+  duplicate row across two `Add`s, duplicate var and row inside one `Set`
+  (`bad_index` = the second), out of range in `Set`, first-refusal order,
+  all-or-nothing against a prior set, Fortran `bad_index`, and six shape
+  refusals (boxed row, equality row, both free, free var + one-sided row,
+  one-sided var + free row, fixed var + free row) with an accepting control
+  through the same helper. Every refusal test runs on a handle that already
+  holds a pair and asserts it is unchanged. `// error-path:` markers for all
+  five names.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 18 binaries (lib 52,
+  `complementarity_declare` 34, `export_surface` 13, `header_abi` 4,
+  `c_examples_build_and_run` 4 — `sqp_warm_start.c` still builds strict
+  against the extended header).
+- `cargo clippy -p pounce-cinterface --all-targets -- -D warnings` — **fails
+  before reaching this crate**, on the five pre-existing `pounce-common`
+  lints S1-I1 recorded. With `--no-deps` the only warnings in `src/` are the
+  two pre-existing ones (`fortran.rs` cast, `lib.rs` useless `vec!`, now at
+  `:3967`); the three files this item adds or extends
+  (`complementarity_declare.rs`, `common/qpec.rs`, `header_abi.rs`) have
+  **zero** warnings even under plain clippy. CI flags (`-D clippy::correctness
+  -D clippy::suspicious`, `--no-deps`) clean.
+- `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean, the
+  `complementarity.html#c-api` anchor `c-api.md` links to exists.
 
 ### Facts recorded while planning (2ac0ad9)
 

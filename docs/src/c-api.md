@@ -52,6 +52,18 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   which variables enter nonlinearly, which restricts the limited-memory
   Hessian approximation to them. Indices are in the problem's index style;
   a bad declaration is refused whole.
+- `AddPounceComplementarityPair` declares one complementarity pair (a
+  constraint row and a variable); `SetPounceComplementarityPairs` replaces
+  the declared set with a batch, all or nothing, and reports the position of
+  the first refused pair; `ClearPounceComplementarityPairs` drops them;
+  `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`
+  read them back. Indices are in the problem's index style. Pairs are in
+  the native shapes of [Complementarity Constraints](complementarity.md#c-api)
+  and are checked when declared, by the same classifier the solve's
+  lowering runs; a refusal returns a `POUNCE_CC_ERR_*` code (out of range,
+  variable or row already paired, unsupported shape, NULL, negative count)
+  and leaves the declared set unchanged. *In development: `IpoptSolve` does
+  not solve with declared pairs yet.*
 
 ## Solving
 

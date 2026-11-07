@@ -85,6 +85,35 @@ info["complementarity"]["certificate"]["class"]   # 'S'
 `pounce.read_nl(path).complementarity` lists the pairs of a `.nl` file as
 `(row, var, flags)`.
 
+### C API
+
+The C library takes the same pairs, in the same native shapes, on an
+`IpoptProblem` handle:
+
+```c
+#include "pounce.h"
+/* QpecSmall, index_style 0: pair row 0 with x1, row 1 with x2. */
+ipindex rows[] = {0, 1}, vars[] = {1, 2}, bad;
+int rc = SetPounceComplementarityPairs(nlp, 2, rows, vars, &bad);
+if (rc != POUNCE_CC_OK) { /* pair `bad` was refused; see rc */ }
+```
+
+`AddPounceComplementarityPair(nlp, row, var)` appends one pair;
+`SetPounceComplementarityPairs` replaces the set, all or nothing;
+`ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount` and
+`GetPounceComplementarityPairs` drop and read them. Indices are in the
+problem's index style (`CreateIpoptProblem`'s `index_style`). Each
+declaration is checked at once against the bounds given to
+`CreateIpoptProblem`, by the same classifier the lowering runs, and a pair
+Python or the `.nl` reader would refuse is refused here with a code:
+`POUNCE_CC_ERR_OUT_OF_RANGE`, `POUNCE_CC_ERR_VAR_ALREADY`,
+`POUNCE_CC_ERR_ROW_ALREADY` or `POUNCE_CC_ERR_SHAPE` (plus
+`POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments). A refused
+call leaves the declared set as it was. See also the [C API](c-api.md) page.
+
+*In development:* this build validates and stores the pairs; `IpoptSolve`
+does not yet solve with them.
+
 ## What POUNCE does with them
 
 The model is solved as an NLP (never routed to a convex engine — with the

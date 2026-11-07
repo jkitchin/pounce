@@ -72,6 +72,13 @@ POUNCE extensions:
   (works with a NULL handle).
 - `IpoptSetNonlinearVariables` / `IpoptClearNonlinearVariables` — restrict
   the limited-memory Hessian to the variables that enter nonlinearly.
+- Declared complementarity pairs (gh#1147): `AddPounceComplementarityPair`,
+  `SetPounceComplementarityPairs` (replace, all or nothing),
+  `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
+  `GetPounceComplementarityPairs`. Indices in the problem's index style;
+  each declaration is validated at once by the classifier the lowering runs
+  and refused with a `POUNCE_CC_ERR_*` code. (In development: `IpoptSolve`
+  does not solve with them yet.)
 - `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most

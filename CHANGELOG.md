@@ -9,6 +9,18 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **Declaring complementarity pairs through the C API (gh#1147, in
+  progress).** `AddPounceComplementarityPair`,
+  `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`,
+  `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`
+  declare and read back pairs on an `IpoptProblem`, in the problem's index
+  style and in the native shapes Python's `Problem(complementarity=)` and
+  the `.nl` reader accept. Each declaration is checked at once by the same
+  classifier the lowering runs and refused with a `POUNCE_CC_ERR_*` code,
+  leaving the declared set unchanged. `IpoptSolve` does not solve with them
+  yet.
+
 ### Fixed
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost
   most of its digits close to `-1`: relative error 3.6e-5 at `-1 + 1e-13` and

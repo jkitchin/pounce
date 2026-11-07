@@ -150,3 +150,63 @@ fn header_version_defines_match_the_crate() {
         "pounce.h `POUNCE_VERSION` disagrees with the crate version"
     );
 }
+
+/// The `POUNCE_CC_*` codes are an ABI too: a C caller compares the `int`
+/// it gets back against the header's value, the library returns the Rust
+/// constant's. Read every `#define POUNCE_CC_` out of the header and hold
+/// the two sides to the same names and values, so adding a code to one
+/// side only, or renumbering one, fails here (gh#1147).
+#[test]
+fn header_complementarity_codes_match_the_implementation() {
+    use pounce_cinterface::*;
+    let rust: HashMap<&str, i64> = [
+        ("POUNCE_CC_OK", POUNCE_CC_OK),
+        ("POUNCE_CC_ERR_NULL", POUNCE_CC_ERR_NULL),
+        ("POUNCE_CC_ERR_OUT_OF_RANGE", POUNCE_CC_ERR_OUT_OF_RANGE),
+        ("POUNCE_CC_ERR_VAR_ALREADY", POUNCE_CC_ERR_VAR_ALREADY),
+        ("POUNCE_CC_ERR_ROW_ALREADY", POUNCE_CC_ERR_ROW_ALREADY),
+        ("POUNCE_CC_ERR_SHAPE", POUNCE_CC_ERR_SHAPE),
+        ("POUNCE_CC_ERR_COUNT", POUNCE_CC_ERR_COUNT),
+        ("POUNCE_CC_ERR_INTERNAL", POUNCE_CC_ERR_INTERNAL),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k, i64::from(v)))
+    .collect();
+
+    let header = include_str!("../include/pounce.h");
+    let mut defined: HashMap<String, i64> = HashMap::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim().strip_prefix("#define ") else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(name) = words.next().filter(|n| n.starts_with("POUNCE_CC_")) else {
+            continue;
+        };
+        let value = words
+            .next()
+            .unwrap_or_else(|| panic!("`#define {name}` has no value"));
+        let value: i64 = value
+            .parse()
+            .unwrap_or_else(|_| panic!("`#define {name} {value}` is not an integer literal"));
+        assert!(
+            defined.insert(name.to_string(), value).is_none(),
+            "pounce.h defines `{name}` twice"
+        );
+    }
+
+    for (name, value) in &rust {
+        assert_eq!(
+            defined.get(*name),
+            Some(value),
+            "pounce.h `{name}` disagrees with the Rust constant {value} (or is missing)"
+        );
+    }
+    for name in defined.keys() {
+        assert!(
+            rust.contains_key(name.as_str()),
+            "pounce.h defines `{name}` but this test does not know the Rust constant; \
+             add it to the list (and to the library, if it is missing there)"
+        );
+    }
+}

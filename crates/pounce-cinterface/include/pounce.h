@@ -611,6 +611,84 @@ Bool IpoptSetNonlinearVariables(
 /** Drop a declared nonlinear-variable subset (back to "all nonlinear"). */
 Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
 
+/* ---------------------------------------------------------------------
+ * Declared complementarity pairs (gh#1147)
+ *
+ * A pair (row, var) declares   0 <= x_var - x_L[var]  _|_  g_row(x) - g_L[row] >= 0
+ * (or the upper-bound orientation of either side), in POUNCE's native
+ * shapes, exactly as Python's Problem(complementarity=) and the .nl
+ * reader accept them:
+ *   one-sided           the variable and the row each have exactly one
+ *                       finite bound;
+ *   one-sided + bound   the row has one finite side, the variable is boxed
+ *                       (the row's side picks the bound in the pair);
+ *   mixed               the variable is boxed with x_L < x_U, the row free.
+ * Anything else (a boxed or equality row, both sides free, a fixed
+ * variable with a free row, ...) is refused with POUNCE_CC_ERR_SHAPE.
+ * Bounds at or beyond +-1e19 are infinite. See docs/src/complementarity.md.
+ *
+ * Indices are in the problem's index style (the index_style given to
+ * CreateIpoptProblem), like IpoptSetNonlinearVariables. Each declaration
+ * is validated at once, against the bounds given to CreateIpoptProblem and
+ * the pairs already declared, by the same classifier the solve's lowering
+ * runs; a refused declaration leaves the declared set unchanged. Pairs
+ * persist on the handle across solves.
+ *
+ * NOTE (in development): this build validates and stores the pairs, but
+ * IpoptSolve does not solve with them yet.
+ * ------------------------------------------------------------------- */
+#define POUNCE_CC_OK                   0
+#define POUNCE_CC_ERR_NULL            -1   /* NULL handle, or NULL array with n_pairs > 0 */
+#define POUNCE_CC_ERR_OUT_OF_RANGE    -2   /* row or var outside [0,m) / [0,n) (in index style) */
+#define POUNCE_CC_ERR_VAR_ALREADY     -3   /* variable already in a pair (declared or in this batch) */
+#define POUNCE_CC_ERR_ROW_ALREADY     -4   /* row already in a pair */
+#define POUNCE_CC_ERR_SHAPE           -5   /* neither one-sided, one-sided+bound, nor mixed */
+#define POUNCE_CC_ERR_COUNT           -6   /* n_pairs < 0 */
+#define POUNCE_CC_ERR_INTERNAL        -7   /* internal error caught at the boundary */
+
+/** Append one pair. Returns POUNCE_CC_OK or a POUNCE_CC_ERR_* code. */
+int AddPounceComplementarityPair(
+    IpoptProblem ipopt_problem,
+    ipindex      row,
+    ipindex      var
+);
+
+/**
+ * Replace the declared pairs with (rows[k], vars[k]), k < n_pairs. All or
+ * nothing: the batch is validated on its own (not against the set it
+ * replaces) and stored only if every pair passes. n_pairs == 0 clears the
+ * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
+ * receives the batch position of the first refused pair (the second
+ * occurrence, for a duplicate), or -1 on success, POUNCE_CC_ERR_NULL and
+ * POUNCE_CC_ERR_COUNT.
+ */
+int SetPounceComplementarityPairs(
+    IpoptProblem   ipopt_problem,
+    ipindex        n_pairs,
+    const ipindex *rows,
+    const ipindex *vars,
+    ipindex       *bad_index
+);
+
+/** Drop every declared pair. FALSE only on a NULL handle. */
+Bool ClearPounceComplementarityPairs(IpoptProblem ipopt_problem);
+
+/** Number of declared pairs; -1 on a NULL handle. */
+ipindex GetPounceComplementarityPairCount(IpoptProblem ipopt_problem);
+
+/**
+ * Copy the declared pairs, in declaration order and in the problem's index
+ * style, into `rows` and `vars` (each sized by
+ * GetPounceComplementarityPairCount). FALSE, writing nothing, on a NULL
+ * handle or a NULL array while pairs are declared; with no pairs, TRUE and
+ * the arrays may be NULL.
+ */
+Bool GetPounceComplementarityPairs(
+    IpoptProblem ipopt_problem,
+    ipindex     *rows,
+    ipindex     *vars
+);
+
 /**
  * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,
  * IpoptSolve, and IpoptGetWorkingSet. Any of the in/out buffers

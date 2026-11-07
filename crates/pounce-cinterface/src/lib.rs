@@ -40,6 +40,7 @@ use pounce_algorithm::application::{
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_nlp::mpcc::{ComplementarityPair, PairErrorKind, validate_pairs};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -179,6 +180,12 @@ pub struct IpoptProblemInfo {
     /// reads it. `None` — the default — means "every variable is
     /// nonlinear".
     pub(crate) nonlinear_vars: Option<Vec<Index>>,
+    /// Complementarity pairs declared by [`AddPounceComplementarityPair`] /
+    /// [`SetPounceComplementarityPairs`] (gh#1147), **0-based** whatever
+    /// the problem's index style, in declaration order. Every stored set
+    /// passed [`pounce_nlp::mpcc::validate_pairs`] against this handle's
+    /// bounds when it was declared. Empty — the default — means no pairs.
+    pub(crate) complementarity: Vec<ComplementarityPair>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -382,6 +389,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             intermediate_cb: None,
             user_scaling: None,
             nonlinear_vars: None,
+            complementarity: Vec::new(),
             last_solve: None,
             pending_working_set: None,
         });
@@ -1863,6 +1871,254 @@ pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProble
         (*ipopt_problem).nonlinear_vars = None;
         TRUE
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declared complementarity pairs (gh#1147)
+// ---------------------------------------------------------------------------
+
+/// The declaration succeeded.
+pub const POUNCE_CC_OK: c_int = 0;
+/// NULL handle, or a NULL `rows`/`vars` array with `n_pairs > 0`.
+pub const POUNCE_CC_ERR_NULL: c_int = -1;
+/// A row or variable index outside `[0, m)` / `[0, n)`, read in the
+/// problem's index style.
+pub const POUNCE_CC_ERR_OUT_OF_RANGE: c_int = -2;
+/// The variable is already in a pair (declared earlier or earlier in the
+/// same batch).
+pub const POUNCE_CC_ERR_VAR_ALREADY: c_int = -3;
+/// The row is already in a pair (declared earlier or earlier in the same
+/// batch).
+pub const POUNCE_CC_ERR_ROW_ALREADY: c_int = -4;
+/// The pair's bounds are none of the lowered shapes: one-sided, one-sided
+/// plus a plain bound, or mixed.
+pub const POUNCE_CC_ERR_SHAPE: c_int = -5;
+/// `n_pairs < 0`.
+pub const POUNCE_CC_ERR_COUNT: c_int = -6;
+/// A Rust panic inside the library, caught at the boundary. Not expected;
+/// it exists so the panic guard has a code that cannot be mistaken for a
+/// diagnosis of the caller's input.
+pub const POUNCE_CC_ERR_INTERNAL: c_int = -7;
+
+fn pair_error_code(kind: &PairErrorKind) -> c_int {
+    match kind {
+        PairErrorKind::OutOfRange => POUNCE_CC_ERR_OUT_OF_RANGE,
+        PairErrorKind::VarAlreadyPaired => POUNCE_CC_ERR_VAR_ALREADY,
+        PairErrorKind::RowAlreadyPaired => POUNCE_CC_ERR_ROW_ALREADY,
+        PairErrorKind::UnsupportedShape => POUNCE_CC_ERR_SHAPE,
+    }
+}
+
+/// An index in the problem's index style, as a 0-based `usize` when it is
+/// in `[0, len)`, else `usize::MAX` — which [`validate_pairs`] refuses as
+/// out of range in its own order (range, duplicate variable, duplicate
+/// row, shape, pair by pair). `checked_sub` keeps `i32::MIN` in Fortran
+/// style from overflowing.
+fn zero_based(p: Index, offset: Index, len: Index) -> usize {
+    match p.checked_sub(offset) {
+        Some(z) if z >= 0 && z < len => z as usize,
+        _ => usize::MAX,
+    }
+}
+
+/// Validate `new` (pairs in the problem's index style) against the
+/// handle's bounds and the pairs already declared — or alone, when
+/// `replace` — and store the result only if every pair passes. On refusal
+/// the declared set is untouched and the error names the refused pair's
+/// position **in `new`** and the reason.
+fn declare_pairs(
+    info: &mut IpoptProblemInfo,
+    new: &[(Index, Index)],
+    replace: bool,
+) -> Result<(), (usize, PairErrorKind)> {
+    let offset = if info.index_style == 1 { 1 } else { 0 };
+    let base: &[ComplementarityPair] = if replace { &[] } else { &info.complementarity };
+    let mut candidate = Vec::with_capacity(base.len() + new.len());
+    candidate.extend_from_slice(base);
+    candidate.extend(new.iter().map(|&(row, var)| ComplementarityPair {
+        row: zero_based(row, offset, info.m),
+        var: zero_based(var, offset, info.n),
+    }));
+    match validate_pairs(
+        info.n as usize,
+        info.m as usize,
+        &info.x_l,
+        &info.x_u,
+        &info.g_l,
+        &info.g_u,
+        &candidate,
+    ) {
+        Ok(_) => {
+            info.complementarity = candidate;
+            Ok(())
+        }
+        // `base` passed this validator when it was stored and the bounds
+        // it was checked against have not changed, so the refused pair is
+        // one of `new`; `saturating_sub` keeps that an assumption rather
+        // than a way to underflow.
+        Err(e) => Err((e.pair.saturating_sub(base.len()), e.kind)),
+    }
+}
+
+/// Declare one complementarity pair: constraint row `row` with variable
+/// `var`, both **in the problem's index style** (gh#1147). The pair is in
+/// POUNCE's native shapes — one-sided, one-sided plus a plain bound, or
+/// mixed — exactly as Python's `Problem(complementarity=)` and the `.nl`
+/// reader accept, and is checked at once by the same classifier the
+/// solve's lowering runs (`pounce_nlp::mpcc::validate_pairs`), against the
+/// bounds given to [`CreateIpoptProblem`] and the pairs already declared.
+///
+/// Returns [`POUNCE_CC_OK`] or a negative `POUNCE_CC_ERR_*` code; a refused
+/// pair leaves the declared set unchanged. Pairs persist on the handle
+/// until [`SetPounceComplementarityPairs`] replaces them or
+/// [`ClearPounceComplementarityPairs`] drops them.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn AddPounceComplementarityPair(
+    ipopt_problem: IpoptProblem,
+    row: Index,
+    var: Index,
+) -> c_int {
+    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+        if ipopt_problem.is_null() {
+            return POUNCE_CC_ERR_NULL;
+        }
+        match declare_pairs(&mut *ipopt_problem, &[(row, var)], false) {
+            Ok(()) => POUNCE_CC_OK,
+            Err((_, kind)) => pair_error_code(&kind),
+        }
+    })
+}
+
+/// Replace the declared pairs with `n_pairs` pairs `(rows[k], vars[k])`,
+/// indices in the problem's index style. All or nothing: the new set is
+/// validated as a whole (on its own, not against the pairs it replaces)
+/// and stored only if every pair passes; otherwise the previous set stays.
+/// `n_pairs == 0` clears the set (the arrays may then be NULL).
+///
+/// `bad_index`, when non-NULL, receives the position in the batch of the
+/// first refused pair (for a duplicate, the second occurrence), or `-1`
+/// on success and on the errors that concern no single pair
+/// ([`POUNCE_CC_ERR_NULL`], [`POUNCE_CC_ERR_COUNT`]).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `rows` and
+/// `vars`, when non-NULL, must each point at `n_pairs` readable `ipindex`
+/// values; `bad_index` must be NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetPounceComplementarityPairs(
+    ipopt_problem: IpoptProblem,
+    n_pairs: Index,
+    rows: *const Index,
+    vars: *const Index,
+    bad_index: *mut Index,
+) -> c_int {
+    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+        let report = |k: Index| {
+            if !bad_index.is_null() {
+                *bad_index = k;
+            }
+        };
+        report(-1);
+        if ipopt_problem.is_null() {
+            return POUNCE_CC_ERR_NULL;
+        }
+        if n_pairs < 0 {
+            return POUNCE_CC_ERR_COUNT;
+        }
+        if n_pairs > 0 && (rows.is_null() || vars.is_null()) {
+            return POUNCE_CC_ERR_NULL;
+        }
+        let new: Vec<(Index, Index)> = if n_pairs == 0 {
+            Vec::new()
+        } else {
+            let r = std::slice::from_raw_parts(rows, n_pairs as usize);
+            let v = std::slice::from_raw_parts(vars, n_pairs as usize);
+            r.iter().copied().zip(v.iter().copied()).collect()
+        };
+        match declare_pairs(&mut *ipopt_problem, &new, true) {
+            Ok(()) => POUNCE_CC_OK,
+            Err((k, kind)) => {
+                report(k as Index);
+                pair_error_code(&kind)
+            }
+        }
+    })
+}
+
+/// Drop every declared complementarity pair. Returns `FALSE` only on a
+/// NULL handle.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ClearPounceComplementarityPairs(ipopt_problem: IpoptProblem) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        (*ipopt_problem).complementarity.clear();
+        TRUE
+    })
+}
+
+/// Number of declared complementarity pairs, or `-1` on a NULL handle.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityPairCount(ipopt_problem: IpoptProblem) -> Index {
+    ffi_guard(-1, || unsafe {
+        if ipopt_problem.is_null() {
+            return -1;
+        }
+        (*ipopt_problem).complementarity.len() as Index
+    })
+}
+
+/// Copy the declared pairs, in declaration order and **in the problem's
+/// index style**, into `rows` and `vars` (each sized by
+/// [`GetPounceComplementarityPairCount`]). Returns `FALSE`, writing
+/// nothing, on a NULL handle or a NULL array while pairs are declared;
+/// with no pairs it returns `TRUE` and the arrays may be NULL.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `rows` and
+/// `vars`, when non-NULL, must each have room for the declared count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityPairs(
+    ipopt_problem: IpoptProblem,
+    rows: *mut Index,
+    vars: *mut Index,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &*ipopt_problem;
+        let k = info.complementarity.len();
+        if k == 0 {
+            return TRUE;
+        }
+        if rows.is_null() || vars.is_null() {
+            return FALSE;
+        }
+        let offset = if info.index_style == 1 { 1 } else { 0 };
+        let rows = std::slice::from_raw_parts_mut(rows, k);
+        let vars = std::slice::from_raw_parts_mut(vars, k);
+        for (i, p) in info.complementarity.iter().enumerate() {
+            rows[i] = p.row as Index + offset;
+            vars[i] = p.var as Index + offset;
+        }
+        TRUE
+    })
 }
 
 /// Drop any pending warm-start working set without solving. The
