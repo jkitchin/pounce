@@ -87,6 +87,24 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   `FALSE` from it ends the run with `User_Requested_Stop`; the inspectors
   return `FALSE` throughout. See [Complementarity
   Constraints](complementarity.md#c-api).
+- After a driver solve, `GetPounceComplementarityStats` fills a
+  `PounceComplementarityStats` with what the driver did: the strategy, what
+  was reported (`POUNCE_CC_REPORTED_*`) and by which formulation, the number
+  of lowered solves and their total iterations (`GetIpoptIterCount` is the
+  reported solve's alone), the stationarity certificate of the reported
+  point (`POUNCE_CC_CLASS_S`, `_W`, `_NONE`, `_NOT_SEARCHED`, or `_ABSENT`
+  when the model could not be evaluated there), the B-stationarity check
+  (`POUNCE_CC_B_VERDICT_*`), escapes, lifted pairs, the natural residual
+  and the polish. `GetPounceComplementaritySolve` reads lowered solve `k`
+  (stage, `tau`, status, iterations, violation, seconds) into a
+  `PounceComplementaritySolve`, and `GetPounceComplementarityText` copies
+  the driver's summary line, the polish's reason or the B-check's reason
+  with `snprintf`'s contract (`buf = NULL, buflen = 0` returns the length).
+  These are the fields of the solve report's `complementarity` block, with
+  `NaN` for a real the report writes as `null` and `-1` for a count whose
+  record is absent. All three answer `FALSE` (`-1` for the text) when the
+  most recent solve did not run the driver: before any solve, or a solve
+  without pairs.
 
 ## Post-solve statistics
 

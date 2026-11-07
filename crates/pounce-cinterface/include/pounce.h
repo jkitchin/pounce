@@ -730,6 +730,161 @@ Bool GetPounceComplementarityPairs(
     ipindex     *vars
 );
 
+/* ---------------------------------------------------------------------
+ * Complementarity outcome (gh#1147)
+ *
+ * What the complementarity driver did on the most recent IpoptSolve: the
+ * same fields, through the same encodings, as the solve report's
+ * "complementarity" block and Python's info["complementarity"]. The
+ * getters answer "nothing" (FALSE, or -1 for the text getter) when the
+ * most recent solve did not run the driver: no solve yet, a solve without
+ * declared pairs, or a solve refused or failed before the driver returned.
+ * The record describes the most recent solve: clearing the pairs does not
+ * erase it, the next solve replaces it.
+ *
+ * Sentinels instead of discriminants: a real that was not measured, or is
+ * not finite (the report's null), reads NaN; a count or 0/1 flag whose
+ * record is absent (no certificate, the B-check did not run) reads -1.
+ * Stage labels are "exact product", "Scholtes continuation",
+ * "l1 penalty", "branch NLP", "branch polish". The structs are versioned
+ * with the library; never reorder their fields.
+ * ------------------------------------------------------------------- */
+#define POUNCE_CC_CLASS_S             0   /* strongly stationary */
+#define POUNCE_CC_CLASS_W             1   /* weakly stationary only */
+#define POUNCE_CC_CLASS_NONE          2   /* not a stationary point of the model */
+#define POUNCE_CC_CLASS_NOT_SEARCHED  3   /* not determined: multiplier set too large to search */
+#define POUNCE_CC_CLASS_ABSENT       -1   /* no certificate: model not evaluable there */
+
+#define POUNCE_CC_REPORTED_ANSWER               0   /* a formulation answered */
+#define POUNCE_CC_REPORTED_WEAK_FALLBACK        1   /* a W point, when none answered */
+#define POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED 2   /* converged, products in tolerance, uncertified */
+#define POUNCE_CC_REPORTED_VERDICT              3   /* no feasible point: the exact-product verdict */
+
+#define POUNCE_CC_B_VERDICT_B            0   /* B-stationary */
+#define POUNCE_CC_B_VERDICT_NOT_B        1   /* a branch descends */
+#define POUNCE_CC_B_VERDICT_NOT_CHECKED  2   /* not decided: see POUNCE_CC_TEXT_B_REASON */
+#define POUNCE_CC_B_VERDICT_ABSENT      -1   /* the check did not run */
+
+typedef struct {
+    /** complementarity_strategy: "both", "exact" or "continuation". */
+    char     strategy[16];
+    /** POUNCE_CC_REPORTED_*. */
+    ipindex  reported;
+    /** Stage label of the formulation that answered; "" when none did. */
+    char     accepted_by[32];
+    /** Stage label of the weakly stationary fallback; "" when not one. */
+    char     fallback[32];
+    /** Lowered solves run (see GetPounceComplementaritySolve). */
+    ipindex  n_solves;
+    /** Iterations summed over every lowered solve. GetIpoptIterCount is
+     *  the reported solve's alone. */
+    ipindex  total_iterations;
+    /** Reported point's complementarity violation; NaN when unmeasured. */
+    ipnumber max_abs_product;
+    /** POUNCE_CC_CLASS_*. The fields from n_pairs to primal_violation are
+     *  the certificate's: -1 / NaN when certificate_class is ABSENT. */
+    ipindex  certificate_class;
+    ipindex  n_pairs;
+    ipindex  n_biactive;
+    /** Pairs with neither side at zero. */
+    ipindex  n_neither;
+    /** 0/1: the stationarity multipliers are unique (MPCC-LICQ). */
+    ipindex  multipliers_unique;
+    /** Stationarity residual and the band it is judged against; NaN when
+     *  unmeasured. */
+    ipnumber residual;
+    ipnumber resid_tol;
+    /** 0/1: residual within the tight floor. */
+    ipindex  tight;
+    /** 0/1: primal_violation within the feasibility tolerance. */
+    ipindex  feasible;
+    /** Largest row or bound violation; NaN when unmeasured. */
+    ipnumber primal_violation;
+    /** POUNCE_CC_B_VERDICT_*. The three fields after it are -1 when
+     *  b_verdict is ABSENT. */
+    ipindex  b_verdict;
+    ipindex  b_n_biactive;
+    /** Branch LPs solved. */
+    ipindex  b_branches_solved;
+    /** 0/1: every branch was enumerated. */
+    ipindex  b_enumerated;
+    /** Branch NLPs that moved the point off a non-B-stationary one. */
+    ipindex  escapes;
+    /** Pairs whose row was lifted into a variable (complementarity_lift). */
+    ipindex  lifted;
+    /** Largest min(|G|, |H|) over the pairs; NaN when unmeasured. */
+    ipnumber natural_residual;
+    /** 0/1: the branch polish ran; polish_taken (0/1) is meaningful only
+     *  when it did, and reads 0 otherwise. */
+    ipindex  polish_ran;
+    ipindex  polish_taken;
+    /** The polish's natural_residual before and after; NaN when it did not
+     *  run or the value was not measured. */
+    ipnumber polish_residual_before;
+    ipnumber polish_residual_after;
+    /** natural_residual above which the polish runs (10 tol). */
+    ipnumber polish_threshold;
+} PounceComplementarityStats;
+
+/**
+ * Fill `stats` with what the driver did on the most recent solve. FALSE,
+ * leaving `stats` untouched, on a NULL argument, before any solve, and when
+ * the most recent solve did not run the driver.
+ */
+Bool GetPounceComplementarityStats(
+    IpoptProblem                ipopt_problem,
+    PounceComplementarityStats *stats
+);
+
+typedef struct {
+    /** Stage label (see above). */
+    char     stage[32];
+    /** 0/1: a relaxed solve (G.H <= tau); tau is NaN when 0. */
+    ipindex  relaxed;
+    ipnumber tau;
+    /** ApplicationReturnStatus of this lowered solve. */
+    ipindex  status;
+    /** Its iterations, every attempt inside it included. */
+    ipindex  iterations;
+    /** Complementarity violation at its point; NaN when unmeasured. */
+    ipnumber max_abs_product;
+    /** Wall-clock seconds; NaN when unmeasured. */
+    ipnumber seconds;
+} PounceComplementaritySolve;
+
+/**
+ * Fill `solve` with lowered solve k (0-based, in the order run, k <
+ * n_solves). FALSE, leaving `solve` untouched, on a NULL argument, k out
+ * of range, and whenever GetPounceComplementarityStats would be FALSE.
+ */
+Bool GetPounceComplementaritySolve(
+    IpoptProblem                ipopt_problem,
+    ipindex                     k,
+    PounceComplementaritySolve *solve
+);
+
+#define POUNCE_CC_TEXT_SUMMARY        0   /* the driver's one-line account */
+#define POUNCE_CC_TEXT_POLISH_REASON  1   /* why the polish's point was not taken */
+#define POUNCE_CC_TEXT_B_REASON       2   /* why the B-check was not decided */
+
+/**
+ * One of the driver's texts (POUNCE_CC_TEXT_*), with snprintf's contract:
+ * writes at most buflen-1 bytes plus a NUL and returns the text's full
+ * length in bytes without the NUL, so buf = NULL, buflen = 0 sizes the
+ * buffer and a return >= buflen means it was truncated. A NULL buf or
+ * buflen <= 0 writes nothing. -1, writing nothing, when there is no such
+ * text: a NULL handle, an unknown `which`, whenever
+ * GetPounceComplementarityStats would be FALSE, a POLISH_REASON unless the
+ * polish ran and its point was not taken, a B_REASON unless b_verdict is
+ * NOT_CHECKED.
+ */
+ipindex GetPounceComplementarityText(
+    IpoptProblem ipopt_problem,
+    int          which,
+    char        *buf,
+    ipindex      buflen
+);
+
 /**
  * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,
  * IpoptSolve, and IpoptGetWorkingSet. Any of the in/out buffers

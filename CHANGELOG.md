@@ -23,7 +23,11 @@ changes.
   point; without pairs it is unchanged. `IpoptCreateSolver` and a staged SQP
   working set refuse pairs, `IpoptGetWorkingSet` reports no set after a
   driver solve, and `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations`
-  report no data during one.
+  report no data during one. `GetPounceComplementarityStats` (a `#[repr(C)]`
+  `PounceComplementarityStats`), `GetPounceComplementaritySolve` and
+  `GetPounceComplementarityText` read back what the driver did: the
+  solve report's `complementarity` block as scalars, one lowered solve at a
+  time, and its texts.
 
 ### Fixed
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost

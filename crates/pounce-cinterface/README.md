@@ -82,6 +82,15 @@ POUNCE extensions:
   Python do; the `complementarity_*` options apply); `IpoptCreateSolver`
   and a staged SQP working set refuse them, and the live inspectors report
   no data during such a solve.
+- Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
+  (`#[repr(C)]` `PounceComplementarityStats`: strategy, what was reported
+  and by which formulation, total iterations, the stationarity certificate,
+  the B-stationarity check, the polish), `GetPounceComplementaritySolve`
+  (one lowered solve, `PounceComplementaritySolve`) and
+  `GetPounceComplementarityText` (summary, polish reason, B-check reason;
+  `snprintf` contract). The fields and encodings of the solve report's
+  `complementarity` block; all three answer `FALSE` / `-1` when the most
+  recent solve did not run the driver.
 - `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most

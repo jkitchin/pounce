@@ -2229,6 +2229,383 @@ pub unsafe extern "C" fn GetPounceComplementarityPairs(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Complementarity outcome getters (gh#1147)
+//
+// What the complementarity driver did on the most recent `IpoptSolve`: the
+// same fields, through the same encodings, as the solve report's
+// `complementarity` block (`MpccOutcome::report_info`) and Python's
+// `info["complementarity"]`. Every getter answers "nothing" (`FALSE` / `-1`)
+// when the most recent solve did not run the driver: no solve yet, a solve
+// without pairs, a refused or failed solve, or a session solve.
+// ---------------------------------------------------------------------------
+
+/// `certificate_class`: strongly stationary.
+pub const POUNCE_CC_CLASS_S: c_int = 0;
+/// `certificate_class`: weakly stationary only.
+pub const POUNCE_CC_CLASS_W: c_int = 1;
+/// `certificate_class`: not a stationary point of the model.
+pub const POUNCE_CC_CLASS_NONE: c_int = 2;
+/// `certificate_class`: not determined (the multiplier set is too large to
+/// search).
+pub const POUNCE_CC_CLASS_NOT_SEARCHED: c_int = 3;
+/// `certificate_class`: no certificate (the model could not be evaluated at
+/// the reported point).
+pub const POUNCE_CC_CLASS_ABSENT: c_int = -1;
+
+/// `reported`: a formulation answered.
+pub const POUNCE_CC_REPORTED_ANSWER: c_int = 0;
+/// `reported`: a weakly stationary point, reported when none answered.
+pub const POUNCE_CC_REPORTED_WEAK_FALLBACK: c_int = 1;
+/// `reported`: a converged point with every product in tolerance, no
+/// stationarity certified.
+pub const POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED: c_int = 2;
+/// `reported`: no feasible point; the exact-product solve's verdict.
+pub const POUNCE_CC_REPORTED_VERDICT: c_int = 3;
+
+/// `b_verdict`: B-stationary.
+pub const POUNCE_CC_B_VERDICT_B: c_int = 0;
+/// `b_verdict`: a branch descends.
+pub const POUNCE_CC_B_VERDICT_NOT_B: c_int = 1;
+/// `b_verdict`: not decided (the reason is `POUNCE_CC_TEXT_B_REASON`).
+pub const POUNCE_CC_B_VERDICT_NOT_CHECKED: c_int = 2;
+/// `b_verdict`: the check did not run.
+pub const POUNCE_CC_B_VERDICT_ABSENT: c_int = -1;
+
+/// [`GetPounceComplementarityText`]: the driver's one-line account.
+pub const POUNCE_CC_TEXT_SUMMARY: c_int = 0;
+/// [`GetPounceComplementarityText`]: why the polish's point was not taken.
+pub const POUNCE_CC_TEXT_POLISH_REASON: c_int = 1;
+/// [`GetPounceComplementarityText`]: why the B-stationarity check was not
+/// decided.
+pub const POUNCE_CC_TEXT_B_REASON: c_int = 2;
+
+/// C mirror of the driver's [`MpccOutcome`](pounce_restoration::mpcc_driver::MpccOutcome)
+/// for `pounce.h`'s `PounceComplementarityStats`. Field order is the ABI
+/// (Pounce.jl mirrors structs field for field); `tests/c_examples_build_and_run.rs`
+/// holds every offset to the C compiler's. Sentinels instead of
+/// discriminants: `NaN` for a real that was not measured (or is not
+/// finite, as the report's `null`), `-1` for a count or flag whose record
+/// is absent.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceComplementarityStats {
+    pub strategy: [c_char; 16],
+    pub reported: Index,
+    pub accepted_by: [c_char; 32],
+    pub fallback: [c_char; 32],
+    pub n_solves: Index,
+    pub total_iterations: Index,
+    pub max_abs_product: Number,
+    pub certificate_class: Index,
+    pub n_pairs: Index,
+    pub n_biactive: Index,
+    pub n_neither: Index,
+    pub multipliers_unique: Index,
+    pub residual: Number,
+    pub resid_tol: Number,
+    pub tight: Index,
+    pub feasible: Index,
+    pub primal_violation: Number,
+    pub b_verdict: Index,
+    pub b_n_biactive: Index,
+    pub b_branches_solved: Index,
+    pub b_enumerated: Index,
+    pub escapes: Index,
+    pub lifted: Index,
+    pub natural_residual: Number,
+    pub polish_ran: Index,
+    pub polish_taken: Index,
+    pub polish_residual_before: Number,
+    pub polish_residual_after: Number,
+    pub polish_threshold: Number,
+}
+
+/// C mirror of one [`MpccSolveRecord`](pounce_restoration::mpcc_driver::MpccSolveRecord),
+/// for `pounce.h`'s `PounceComplementaritySolve`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceComplementaritySolve {
+    pub stage: [c_char; 32],
+    pub relaxed: Index,
+    pub tau: Number,
+    pub status: Index,
+    pub iterations: Index,
+    pub max_abs_product: Number,
+    pub seconds: Number,
+}
+
+/// Copy `s` into a fixed C char array, truncated on a byte boundary so that
+/// a NUL always fits; the rest of the array is zeroed.
+fn copy_label<const N: usize>(dst: &mut [c_char; N], s: &str) {
+    dst.fill(0);
+    let keep = s.len().min(N.saturating_sub(1));
+    for (slot, b) in dst.iter_mut().zip(&s.as_bytes()[..keep]) {
+        *slot = *b as c_char;
+    }
+}
+
+/// A count as an `Index`, saturating rather than wrapping.
+fn cc_count(v: usize) -> Index {
+    Index::try_from(v).unwrap_or(Index::MAX)
+}
+
+/// The report's `finite` rule, in C's terms: a non-finite or unmeasured
+/// real reads `NaN` where the JSON reads `null`.
+fn cc_real(v: Number) -> Number {
+    if v.is_finite() { v } else { Number::NAN }
+}
+
+fn cc_flag(b: bool) -> Index {
+    Index::from(b)
+}
+
+/// The struct [`GetPounceComplementarityStats`] fills, from the driver's
+/// record. The encodings are `MpccOutcome::report_info`'s field for field
+/// (strings become the `POUNCE_CC_*` codes, `null` becomes `NaN` or `-1`).
+pub(crate) fn complementarity_stats(
+    out: &pounce_restoration::mpcc_driver::MpccOutcome,
+) -> PounceComplementarityStats {
+    use pounce_algorithm::mpcc::{BVerdict, Reported, StationarityClass};
+    let mut s = PounceComplementarityStats {
+        strategy: [0; 16],
+        reported: match out.reported {
+            Reported::Answer(_) => POUNCE_CC_REPORTED_ANSWER,
+            Reported::WeakFallback(_) => POUNCE_CC_REPORTED_WEAK_FALLBACK,
+            Reported::FeasibleUncertified(_) => POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED,
+            Reported::Verdict => POUNCE_CC_REPORTED_VERDICT,
+        },
+        accepted_by: [0; 32],
+        fallback: [0; 32],
+        n_solves: cc_count(out.solves.len()),
+        total_iterations: cc_count(out.total_iterations),
+        max_abs_product: cc_real(out.max_abs_product),
+        certificate_class: POUNCE_CC_CLASS_ABSENT,
+        n_pairs: -1,
+        n_biactive: -1,
+        n_neither: -1,
+        multipliers_unique: -1,
+        residual: Number::NAN,
+        resid_tol: Number::NAN,
+        tight: -1,
+        feasible: -1,
+        primal_violation: Number::NAN,
+        b_verdict: POUNCE_CC_B_VERDICT_ABSENT,
+        b_n_biactive: -1,
+        b_branches_solved: -1,
+        b_enumerated: -1,
+        escapes: cc_count(out.escapes),
+        lifted: cc_count(out.lifted),
+        natural_residual: out.natural_residual.map_or(Number::NAN, cc_real),
+        polish_ran: 0,
+        polish_taken: 0,
+        polish_residual_before: Number::NAN,
+        polish_residual_after: Number::NAN,
+        polish_threshold: cc_real(out.polish_threshold),
+    };
+    copy_label(&mut s.strategy, out.strategy.name());
+    if let Some(stage) = out.accepted_by {
+        copy_label(&mut s.accepted_by, stage.label());
+    }
+    if let Some(stage) = out.fallback {
+        copy_label(&mut s.fallback, stage.label());
+    }
+    if let Some(c) = &out.certificate {
+        s.certificate_class = match c.class {
+            StationarityClass::S => POUNCE_CC_CLASS_S,
+            StationarityClass::W => POUNCE_CC_CLASS_W,
+            StationarityClass::None => POUNCE_CC_CLASS_NONE,
+            StationarityClass::NotSearched => POUNCE_CC_CLASS_NOT_SEARCHED,
+        };
+        s.n_pairs = cc_count(c.n_pairs);
+        s.n_biactive = cc_count(c.n_biactive);
+        s.n_neither = cc_count(c.n_neither);
+        s.multipliers_unique = cc_flag(c.multipliers_unique);
+        s.residual = cc_real(c.residual);
+        s.resid_tol = cc_real(c.resid_tol);
+        s.tight = cc_flag(c.tight);
+        s.feasible = cc_flag(c.feasible);
+        s.primal_violation = cc_real(c.primal_violation);
+    }
+    if let Some(b) = &out.b_check {
+        s.b_verdict = match b.verdict {
+            BVerdict::B => POUNCE_CC_B_VERDICT_B,
+            BVerdict::NotB { .. } => POUNCE_CC_B_VERDICT_NOT_B,
+            BVerdict::NotChecked(_) => POUNCE_CC_B_VERDICT_NOT_CHECKED,
+        };
+        s.b_n_biactive = cc_count(b.n_biactive);
+        s.b_branches_solved = cc_count(b.branches_solved);
+        s.b_enumerated = cc_flag(b.enumerated);
+    }
+    if let Some(p) = &out.polish {
+        s.polish_ran = 1;
+        s.polish_taken = cc_flag(p.taken);
+        s.polish_residual_before = cc_real(p.residual_before);
+        s.polish_residual_after = cc_real(p.residual_after);
+    }
+    s
+}
+
+/// The record [`GetPounceComplementaritySolve`] fills for one lowered solve.
+pub(crate) fn complementarity_solve(
+    r: &pounce_restoration::mpcc_driver::MpccSolveRecord,
+) -> PounceComplementaritySolve {
+    let mut s = PounceComplementaritySolve {
+        stage: [0; 32],
+        relaxed: cc_flag(r.tau.is_some()),
+        tau: r.tau.unwrap_or(Number::NAN),
+        status: r.status as Index,
+        iterations: cc_count(r.iterations),
+        max_abs_product: cc_real(r.max_abs_product),
+        seconds: cc_real(r.seconds),
+    };
+    copy_label(&mut s.stage, r.stage.label());
+    s
+}
+
+/// The text [`GetPounceComplementarityText`] returns for `which`, or `None`
+/// when that text is absent on this run (or `which` names none).
+pub(crate) fn complementarity_text(
+    out: &pounce_restoration::mpcc_driver::MpccOutcome,
+    which: c_int,
+) -> Option<String> {
+    use pounce_algorithm::mpcc::BVerdict;
+    match which {
+        POUNCE_CC_TEXT_SUMMARY => Some(pounce_algorithm::mpcc::describe_outcome(
+            out.reported,
+            out.solves.len(),
+            out.total_iterations,
+            out.max_abs_product,
+            out.certificate.as_ref(),
+        )),
+        POUNCE_CC_TEXT_POLISH_REASON => out.polish.as_ref().and_then(|p| p.reason.clone()),
+        POUNCE_CC_TEXT_B_REASON => match out.b_check.as_ref().map(|b| &b.verdict) {
+            Some(BVerdict::NotChecked(why)) => Some((*why).to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The driver's record of the most recent solve, if that solve ran it.
+unsafe fn last_mpcc<'a>(
+    ipopt_problem: IpoptProblem,
+) -> Option<&'a pounce_restoration::mpcc_driver::MpccOutcome> {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return None;
+        }
+        (*ipopt_problem)
+            .last_solve
+            .as_ref()
+            .and_then(|ls| ls.mpcc.as_ref())
+    }
+}
+
+/// What the complementarity driver did on the most recent [`IpoptSolve`]
+/// (gh#1147): the strategy, what was reported and by which formulation,
+/// the iteration totals, the stationarity certificate, the B-stationarity
+/// check and the polish — the solve report's `complementarity` block as a
+/// struct of scalars. Returns `FALSE`, leaving `stats` untouched, on a NULL
+/// argument, before any solve, and when the most recent solve did not run
+/// the driver (no pairs were declared, or it was refused or failed before
+/// the driver returned). The record describes the most recent solve: clearing
+/// the pairs afterwards does not erase it, the next solve does.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `stats`, when
+/// non-NULL, must point at a writable `PounceComplementarityStats`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityStats(
+    ipopt_problem: IpoptProblem,
+    stats: *mut PounceComplementarityStats,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if stats.is_null() {
+            return FALSE;
+        }
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return FALSE;
+        };
+        *stats = complementarity_stats(out);
+        TRUE
+    })
+}
+
+/// Lowered solve `k` (0-based, in the order the driver ran them, `k <
+/// n_solves`) of the most recent driver solve. Returns `FALSE`, leaving
+/// `solve` untouched, on a NULL argument, a `k` out of range, and whenever
+/// [`GetPounceComplementarityStats`] would.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `solve`, when
+/// non-NULL, must point at a writable `PounceComplementaritySolve`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementaritySolve(
+    ipopt_problem: IpoptProblem,
+    k: Index,
+    solve: *mut PounceComplementaritySolve,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if solve.is_null() {
+            return FALSE;
+        }
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return FALSE;
+        };
+        let Some(r) = usize::try_from(k).ok().and_then(|k| out.solves.get(k)) else {
+            return FALSE;
+        };
+        *solve = complementarity_solve(r);
+        TRUE
+    })
+}
+
+/// One of the driver's free-form texts for the most recent driver solve,
+/// with C's `snprintf` contract: writes at most `buflen - 1` bytes of it
+/// plus a NUL into `buf` and returns its full length in bytes, without the
+/// NUL — so `buf = NULL, buflen = 0` sizes the buffer, and a return `>=
+/// buflen` means it was truncated. Returns `-1`, writing nothing, when
+/// there is no such text: a NULL handle, a `which` that names none,
+/// whenever [`GetPounceComplementarityStats`] would return `FALSE`, or a
+/// text this run does not have (`POUNCE_CC_TEXT_POLISH_REASON` unless the
+/// polish ran and was not taken; `POUNCE_CC_TEXT_B_REASON` unless the
+/// B-stationarity check ran and was not decided). A NULL `buf` or a
+/// `buflen <= 0` writes nothing and still returns the length.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `buf`, when
+/// non-NULL and `buflen > 0`, must have room for `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityText(
+    ipopt_problem: IpoptProblem,
+    which: c_int,
+    buf: *mut c_char,
+    buflen: Index,
+) -> Index {
+    ffi_guard(-1, || unsafe {
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return -1;
+        };
+        let Some(text) = complementarity_text(out, which) else {
+            return -1;
+        };
+        let bytes = text.as_bytes();
+        if !buf.is_null() && buflen > 0 {
+            let keep = bytes.len().min(buflen as usize - 1);
+            let dst = std::slice::from_raw_parts_mut(buf, keep + 1);
+            for (slot, b) in dst.iter_mut().zip(&bytes[..keep]) {
+                *slot = *b as c_char;
+            }
+            dst[keep] = 0;
+        }
+        cc_count(bytes.len())
+    })
+}
+
 /// Drop any pending warm-start working set without solving. The
 /// next [`IpoptSolve`] will cold-start.
 ///
@@ -4438,5 +4815,246 @@ mod tests {
         assert!((0..=3).contains(&cons_out[0]));
 
         unsafe { FreeIpoptProblem(p) };
+    }
+
+    // ---- complementarity outcome encodings (gh#1147) ----
+    //
+    // The integration tests (`tests/complementarity_getters.rs`) reach the
+    // S, W, none and not-searched classes, the answer / weak-fallback /
+    // verdict reports, the B verdict and a taken polish through real
+    // solves. What no in-repo model reaches is held here, on a synthetic
+    // driver record: no certificate, a feasible-uncertified report, the
+    // not_B and not_checked verdicts, a polish that was not taken, and
+    // non-finite reals.
+
+    fn synthetic_outcome() -> pounce_restoration::mpcc_driver::MpccOutcome {
+        use pounce_algorithm::mpcc::{
+            Certificate, MpccStage, Reported, StationarityClass, Strategy,
+        };
+        use pounce_restoration::mpcc_driver::{MpccOutcome, MpccSolveRecord};
+        MpccOutcome {
+            status: ApplicationReturnStatus::SolveSucceeded,
+            statistics: SolveStatistics::default(),
+            accepted_by: Some(MpccStage::Exact),
+            fallback: None,
+            reported: Reported::Answer(MpccStage::Exact),
+            strategy: Strategy::Continuation,
+            solves: vec![MpccSolveRecord {
+                stage: MpccStage::Branch,
+                tau: None,
+                status: ApplicationReturnStatus::MaximumIterationsExceeded,
+                iterations: 7,
+                budget_iterations: 7,
+                max_abs_product: Number::INFINITY,
+                seconds: Number::NAN,
+            }],
+            total_iterations: 7,
+            x: vec![0.0],
+            max_abs_product: Number::INFINITY,
+            certificate: Some(Certificate {
+                class: StationarityClass::S,
+                n_pairs: 1,
+                n_biactive: 0,
+                n_neither: 0,
+                multipliers_unique: true,
+                residual: 0.0,
+                resid_tol: Number::INFINITY,
+                tight: true,
+                primal_violation: 0.0,
+                feasible: true,
+                worst_biactive_sign: 0.0,
+            }),
+            b_check: None,
+            escapes: 3,
+            lifted: 2,
+            natural_residual: None,
+            polish: None,
+            polish_threshold: 1e-7,
+        }
+    }
+
+    fn c_label(chars: &[c_char]) -> String {
+        unsafe { CStr::from_ptr(chars.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn complementarity_encodings_absent_certificate_and_non_finite_reals() {
+        let mut out = synthetic_outcome();
+        out.certificate = None;
+        let s = complementarity_stats(&out);
+        assert_eq!(s.certificate_class, POUNCE_CC_CLASS_ABSENT);
+        assert_eq!(
+            (
+                s.n_pairs,
+                s.n_biactive,
+                s.n_neither,
+                s.multipliers_unique,
+                s.tight,
+                s.feasible
+            ),
+            (-1, -1, -1, -1, -1, -1)
+        );
+        assert!(s.residual.is_nan() && s.resid_tol.is_nan() && s.primal_violation.is_nan());
+        // Non-finite reals read NaN (the report's `null`), an absent
+        // natural residual too.
+        assert!(s.max_abs_product.is_nan() && s.natural_residual.is_nan());
+        assert_eq!(c_label(&s.strategy), "continuation");
+        assert_eq!(c_label(&s.accepted_by), "exact product");
+        assert_eq!(c_label(&s.fallback), "");
+        assert_eq!((s.escapes, s.lifted), (3, 2));
+        // The summary still exists without a certificate.
+        assert!(complementarity_text(&out, POUNCE_CC_TEXT_SUMMARY).is_some());
+
+        // With a certificate, a non-finite band reads NaN, the rest as is.
+        let s = complementarity_stats(&synthetic_outcome());
+        assert_eq!(s.certificate_class, POUNCE_CC_CLASS_S);
+        assert!(s.resid_tol.is_nan());
+        assert_eq!(
+            (s.n_pairs, s.multipliers_unique, s.tight, s.feasible),
+            (1, 1, 1, 1)
+        );
+
+        let r = complementarity_solve(&out.solves[0]);
+        assert_eq!(c_label(&r.stage), "branch NLP");
+        assert_eq!((r.relaxed, r.status, r.iterations), (0, -1, 7));
+        assert!(r.tau.is_nan() && r.max_abs_product.is_nan() && r.seconds.is_nan());
+    }
+
+    #[test]
+    fn complementarity_encodings_every_reported_and_class() {
+        use pounce_algorithm::mpcc::{MpccStage, Reported, StationarityClass};
+        let mut out = synthetic_outcome();
+        for (reported, code) in [
+            (
+                Reported::Answer(MpccStage::Exact),
+                POUNCE_CC_REPORTED_ANSWER,
+            ),
+            (
+                Reported::WeakFallback(MpccStage::Penalty),
+                POUNCE_CC_REPORTED_WEAK_FALLBACK,
+            ),
+            (
+                Reported::FeasibleUncertified(MpccStage::Continuation),
+                POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED,
+            ),
+            (Reported::Verdict, POUNCE_CC_REPORTED_VERDICT),
+        ] {
+            out.reported = reported;
+            assert_eq!(complementarity_stats(&out).reported, code, "{reported:?}");
+        }
+        for (class, code) in [
+            (StationarityClass::S, POUNCE_CC_CLASS_S),
+            (StationarityClass::W, POUNCE_CC_CLASS_W),
+            (StationarityClass::None, POUNCE_CC_CLASS_NONE),
+            (StationarityClass::NotSearched, POUNCE_CC_CLASS_NOT_SEARCHED),
+        ] {
+            out.certificate.as_mut().unwrap().class = class;
+            assert_eq!(
+                complementarity_stats(&out).certificate_class,
+                code,
+                "{class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complementarity_encodings_b_verdicts_and_b_reason() {
+        use pounce_algorithm::mpcc::{BCheck, BVerdict};
+        let mut out = synthetic_outcome();
+        assert_eq!(
+            complementarity_stats(&out).b_verdict,
+            POUNCE_CC_B_VERDICT_ABSENT
+        );
+        assert_eq!(complementarity_text(&out, POUNCE_CC_TEXT_B_REASON), None);
+        for (verdict, code, reason) in [
+            (BVerdict::B, POUNCE_CC_B_VERDICT_B, None),
+            (
+                BVerdict::NotB {
+                    held: vec![],
+                    decrease: -1.0,
+                },
+                POUNCE_CC_B_VERDICT_NOT_B,
+                None,
+            ),
+            (
+                BVerdict::NotChecked("a branch LP did not solve"),
+                POUNCE_CC_B_VERDICT_NOT_CHECKED,
+                Some("a branch LP did not solve"),
+            ),
+        ] {
+            out.b_check = Some(BCheck {
+                verdict,
+                n_biactive: 12,
+                branches_solved: 1,
+                enumerated: false,
+            });
+            let s = complementarity_stats(&out);
+            assert_eq!(s.b_verdict, code);
+            assert_eq!(
+                (s.b_n_biactive, s.b_branches_solved, s.b_enumerated),
+                (12, 1, 0)
+            );
+            assert_eq!(
+                complementarity_text(&out, POUNCE_CC_TEXT_B_REASON).as_deref(),
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn complementarity_encodings_polish_not_taken_has_a_reason() {
+        use pounce_restoration::mpcc_driver::PolishRecord;
+        let mut out = synthetic_outcome();
+        out.polish = Some(PolishRecord {
+            taken: false,
+            residual_before: 1e-5,
+            residual_after: Number::INFINITY,
+            reason: Some("the re-solve did not converge".to_string()),
+        });
+        let s = complementarity_stats(&out);
+        assert_eq!((s.polish_ran, s.polish_taken), (1, 0));
+        assert_eq!(s.polish_residual_before, 1e-5);
+        assert!(
+            s.polish_residual_after.is_nan(),
+            "unmeasured after reads NaN"
+        );
+        assert_eq!(
+            complementarity_text(&out, POUNCE_CC_TEXT_POLISH_REASON).as_deref(),
+            Some("the re-solve did not converge")
+        );
+        // Taken: no reason.
+        out.polish = Some(PolishRecord {
+            taken: true,
+            residual_before: 1e-5,
+            residual_after: 0.0,
+            reason: None,
+        });
+        assert_eq!(complementarity_stats(&out).polish_taken, 1);
+        assert_eq!(
+            complementarity_text(&out, POUNCE_CC_TEXT_POLISH_REASON),
+            None
+        );
+        assert_eq!(complementarity_text(&out, 3), None);
+    }
+
+    #[test]
+    fn complementarity_labels_truncate_and_terminate() {
+        let mut a = [0x7f as c_char; 4];
+        copy_label(&mut a, "abcdef");
+        assert_eq!(a, [b'a' as c_char, b'b' as c_char, b'c' as c_char, 0]);
+        copy_label(&mut a, "x");
+        assert_eq!(a, [b'x' as c_char, 0, 0, 0], "the tail is cleared");
+        // Every stage label fits the 32-byte fields with room for the NUL.
+        use pounce_algorithm::mpcc::MpccStage::*;
+        for s in [Exact, Continuation, Penalty, Branch, Polish] {
+            assert!(s.label().len() < 32, "{}", s.label());
+        }
+        use pounce_algorithm::mpcc::Strategy;
+        for s in [Strategy::Both, Strategy::Exact, Strategy::Continuation] {
+            assert!(s.name().len() < 16, "{}", s.name());
+        }
     }
 }

@@ -23,7 +23,7 @@ that ticks it.
 - [x] **S1-I3** C compile-and-run test: `tests/c_examples_build_and_run.rs` builds and runs every `examples/*.c` against `pounce.h` and the cdylib.
 - [x] **S1-I4** Declaration API: `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`, `GetPounceComplementarityPairs`; every error code tested.
 - [x] **S1-I5** `IpoptSolve` routes through `solve_mpcc` when pairs are declared; sessions and SQP working-set warm starts refuse pairs; live inspectors pinned.
-- [ ] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
+- [x] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
 - [ ] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
 - [ ] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
 - [ ] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
@@ -1533,6 +1533,103 @@ Gate (all on the ticking commit's tree):
   lbfgs, 14 `cc:`). Empty by construction: the CLI does not link
   `pounce-cinterface`; the no-pairs pins above are the evidence for the C
   path.
+
+### S1-I6 — outcome getters (commit that ticks S1-I6)
+
+What moved:
+- `src/lib.rs`: `#[repr(C)] PounceComplementarityStats` and
+  `PounceComplementaritySolve`, field for field as §3.4 (the header writes
+  `n_pairs, n_biactive, n_neither` and the polish reals one per line; same
+  layout). The 16 `POUNCE_CC_CLASS_*`, `_REPORTED_*`, `_B_VERDICT_*`,
+  `_TEXT_*` constants. `complementarity_stats(&MpccOutcome)`,
+  `complementarity_solve(&MpccSolveRecord)`, `complementarity_text(.., which)`
+  with `report_info()`'s encodings, matched on the enums (exhaustive, so a
+  new variant fails to compile) rather than on its strings; `copy_label`
+  truncates and NUL-terminates. Three exports through `ffi_guard`:
+  `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`,
+  `GetPounceComplementarityText` (snprintf: NULL buf or `buflen <= 0` is a
+  pure size query; `-1` for NULL handle, unknown `which`, no driver record,
+  absent text).
+- **Sentinels, not in §3.4:** with no certificate, its counts and 0/1
+  flags read `-1` (reals NaN); with no B-check, `b_n_biactive`,
+  `b_branches_solved`, `b_enumerated` read `-1`; `polish_taken` reads `0`
+  when `polish_ran` is `0`. The `PounceLinearSolverStats` precedent.
+  Stated in `pounce.h`.
+- **"Did not run" semantics, a choice to confirm at the ABI review:** the
+  getters describe the most recent solve, like every post-solve accessor.
+  Clearing the pairs after a driver solve does **not** erase the record;
+  the next solve (without pairs) does, as does a refused solve (`IpoptSolve`
+  clears `last_solve` up front). Both pinned.
+- `pounce.h` (structs, defines, three prototypes, the sentinel and
+  most-recent-solve contract), README, `c-api.md`, CHANGELOG `[Unreleased]`
+  (one sentence; not in this item's Touch list).
+- `tests/header_abi.rs`: the 16 new defines in the known-names list, held
+  both ways.
+- `tests/c_examples_build_and_run.rs`: `repr_c_structs_match_the_header_layout`
+  compiles a C program against `pounce.h` that prints `sizeof` of each
+  struct and `offsetof` **and** `sizeof` of every field; each is held to
+  `size_of` / `offset_of!` / `size_of_val` on the Rust side, and the
+  header's field list (parsed) to the Rust list, in order. Covers
+  `PounceLinearSolverStats` too (unchanged, now guarded). Field widths were
+  added after a mutation `ipindex relaxed` → `ipnumber relaxed` passed an
+  offsets-only version (it widens into padding, no offset moves); with
+  widths it fails, as does a renamed header field. Parser unit test added.
+
+Tests (`tests/complementarity_getters.rs`, new, 13). Each certificate class
+reached by a real solve through `IpoptSolve`, every value held **to the
+bit** against Python's `info["complementarity"]` for the same callbacks,
+start and options (generated from the venv's 0.16.0 extension; point,
+`iter_count`, every struct field, every lowered solve's stage/tau/status/
+iterations/product, the summary text):
+- `S`: QpecSmall from `(0, 0.5, 0.5)` — answer, `both`, 6 solves, 139
+  iterations (`GetIpoptIterCount` 12), no B-check, no polish.
+- polish ran and taken: QpecSmall from the origin — 7 solves, last
+  `branch polish`, `natural_residual` 0, no polish reason.
+- `strategy == "exact"`: 4 solves, all `exact product`.
+- `W`: ralph1 (callbacks) — weak fallback, `accepted_by` "", B verdict B
+  (1 biactive, 2 branches, enumerated).
+- `none`: infeasible_pair (callbacks; the pair's row is `y` itself rather
+  than Pyomo's auxiliary) — verdict, 8 solves ending `l1 penalty`,
+  residual NaN (Python `inf`, report `null`).
+- `not searched`: new model, `min Σx`, 605 variables `x >= 0`, row 0 = `x_0`
+  (duplicates a bound: multipliers a set), row 1 = `x_1 ⟂ x_2` — more than
+  `MAX_SEARCHED_COLUMNS` sign-constrained columns; reported as an answer,
+  `Solved_To_Acceptable_Level`, B verdict B.
+- Not run: before any solve; after a pair-less solve; pairs cleared then
+  re-solved; a refused solve (staged working set) after a driver solve —
+  stats `FALSE` with the 0xA5-filled struct byte-identical, solve `FALSE`
+  for `k = 0, 1, -1`, every text `-1`. NULL handle on all three, NULL
+  output pointers; `k` = `n_solves`, `n_solves + 1`, `-1`, `MIN`, `MAX`.
+  snprintf: size query, NULL buf with positive length, exact and roomy
+  buffers (nothing past the NUL), truncation at `len`, 5, 2, a one-byte
+  buffer (just the NUL), `buflen` 0 / -1 / `MIN` (nothing written),
+  unknown `which` 3 / -1 / 99.
+- **Unreached by any in-repo model, unit-tested on a synthetic
+  `MpccOutcome` in `src/lib.rs`** (5 tests): `CLASS_ABSENT` (no
+  certificate), `REPORTED_FEASIBLE_UNCERTIFIED`, `B_VERDICT_NOT_B`,
+  `B_VERDICT_NOT_CHECKED` with its `B_REASON` text, a polish not taken with
+  its `POLISH_REASON`, non-finite reals → NaN, an unrelaxed `branch NLP`
+  record, label truncation; every class and reported code.
+- Mutation check: mapping W to `CLASS_NONE` and an unrelaxed `tau` to 0
+  fails 6 of the 13 integration tests.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 20 binaries (lib 58,
+  `complementarity_getters` 13, `complementarity_solve` 16,
+  `complementarity_declare` 34, `export_surface` 13, `header_abi` 4,
+  `c_examples_build_and_run` 6).
+- Export guard (`--test export_surface --test header_abi`) — `ok. 13
+  passed` / `ok. 4 passed`.
+- `cargo clippy -p pounce-cinterface --all-targets -- -D warnings` — fails
+  before this crate on the five pre-existing `pounce-common` lints (as in
+  S1-I1/I4/I5). CI flags (`--no-deps -D clippy::correctness -D
+  clippy::suspicious`) clean. Under plain `--no-deps`, `src/` has only the
+  pre-existing useless `vec!` (now `lib.rs:4485`) and `fortran.rs:493`; the
+  new and extended tests carry only restriction-group `unwrap_used` /
+  `expect_used` warns, as the crate's other tests do.
+- `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean;
+  `make ask-check` top-1 17/20, top-5 20/20, OK; `make c-api-examples`
+  green.
 
 ### Facts recorded while planning (2ac0ad9)
 

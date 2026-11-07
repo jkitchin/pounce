@@ -321,3 +321,172 @@ fn compile_args_carry_strict_flags_and_link_after_the_source() {
     // A path with a space stays one argument; nothing is shell-joined.
     assert!(s.iter().any(|a| a == "-Wl,-rpath,/lib dir"), "{s:?}");
 }
+
+/// Field names, in declaration order, of `typedef struct { ... } NAME;` in
+/// the header (comments stripped; `char x[32]` reads as `x`).
+fn header_struct_fields(header: &str, name: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut rest = header;
+    while let Some(i) = rest.find("/*") {
+        text.push_str(&rest[..i]);
+        let j = rest[i..].find("*/").expect("unterminated comment") + i + 2;
+        rest = &rest[j..];
+    }
+    text.push_str(rest);
+    let close = format!("}} {name};");
+    let end = text
+        .find(&close)
+        .unwrap_or_else(|| panic!("pounce.h has no `typedef struct {{ .. }} {name};`"));
+    let open = text[..end]
+        .rfind("typedef struct {")
+        .expect("typedef struct {")
+        + 16;
+    text[open..end]
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            let last = d.split_whitespace().last().expect("a declarator");
+            last.split('[')
+                .next()
+                .expect("a name")
+                .trim_start_matches('*')
+                .to_string()
+        })
+        .collect()
+}
+
+/// `(field, offset, size)` for each named field of a `#[repr(C)]` Rust
+/// struct of plain scalars and arrays (all-zero bytes are a valid value).
+macro_rules! layout {
+    ($t:ty; $($f:ident),* $(,)?) => {{
+        // SAFETY: the structs measured here hold only integers, floats
+        // and arrays of them.
+        let v: $t = unsafe { std::mem::zeroed() };
+        (
+            stringify!($t),
+            std::mem::size_of::<$t>(),
+            vec![$((
+                stringify!($f),
+                std::mem::offset_of!($t, $f),
+                std::mem::size_of_val(&v.$f),
+            )),*],
+        )
+    }};
+}
+
+/// The `#[repr(C)]` structs the library writes into caller memory must
+/// have the header's layout exactly: same fields in the same order, same
+/// offsets and widths, same size. The C side is measured by the C compiler,
+/// not restated: a program built against `pounce.h` prints `sizeof` of the
+/// struct and the `offsetof` and `sizeof` of every field, and each is held
+/// to Rust's `size_of` / `offset_of!` / `size_of_val` (a field widened into
+/// padding moves no offset, so the widths are checked too). The
+/// header's field list is parsed and held to the Rust list too, so a field
+/// added to one side only fails here even when it lands in padding.
+#[test]
+fn repr_c_structs_match_the_header_layout() {
+    use pounce_cinterface::{
+        PounceComplementaritySolve, PounceComplementarityStats, PounceLinearSolverStats,
+    };
+    let structs = [
+        layout!(PounceLinearSolverStats;
+            solver_name, n_factors, n_pattern_reuse, n_pattern_changes, max_fill_ratio,
+            min_abs_pivot, max_abs_pivot, last_inertia_positive, last_inertia_negative,
+            last_inertia_zero, last_nnz_a, last_nnz_l),
+        layout!(PounceComplementarityStats;
+            strategy, reported, accepted_by, fallback, n_solves, total_iterations,
+            max_abs_product, certificate_class, n_pairs, n_biactive, n_neither,
+            multipliers_unique, residual, resid_tol, tight, feasible, primal_violation,
+            b_verdict, b_n_biactive, b_branches_solved, b_enumerated, escapes, lifted,
+            natural_residual, polish_ran, polish_taken, polish_residual_before,
+            polish_residual_after, polish_threshold),
+        layout!(PounceComplementaritySolve;
+            stage, relaxed, tau, status, iterations, max_abs_product, seconds),
+    ];
+
+    let header =
+        std::fs::read_to_string(manifest_dir().join("include/pounce.h")).expect("read pounce.h");
+    for (name, _, fields) in &structs {
+        let rust: Vec<&str> = fields.iter().map(|(f, _, _)| *f).collect();
+        assert_eq!(
+            header_struct_fields(&header, name),
+            rust,
+            "{name}: the header's fields differ from the Rust struct's (or their order)"
+        );
+    }
+
+    let cc = c_compiler();
+    if skip_for_missing_compiler(&cc) {
+        return;
+    }
+    let mut c = String::from(
+        "#include <stddef.h>\n#include <stdio.h>\n#include \"pounce.h\"\nint main(void) {\n",
+    );
+    for (name, _, fields) in &structs {
+        c.push_str(&format!(
+            "    printf(\"{name} sizeof %lu\\n\", (unsigned long)sizeof({name}));\n"
+        ));
+        for (f, _, _) in fields {
+            c.push_str(&format!(
+                "    printf(\"{name} {f} %lu\\n\", (unsigned long)offsetof({name}, {f}));\n"
+            ));
+            c.push_str(&format!(
+                "    printf(\"{name} sizeof.{f} %lu\\n\", \
+                 (unsigned long)sizeof((({name} *)0)->{f}));\n"
+            ));
+        }
+    }
+    c.push_str("    return 0;\n}\n");
+    let work = work_dir("layout");
+    let src = work.join("layout.c");
+    std::fs::write(&src, c).expect("write layout.c");
+    let lib_dir = lib_dir();
+    let out = work.join("layout");
+    let build = compile(&cc, &src, &out, &lib_dir);
+    assert!(
+        build.status.success(),
+        "layout.c failed to build:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &lib_dir)
+        .env("DYLD_LIBRARY_PATH", &lib_dir)
+        .output()
+        .expect("spawn layout binary");
+    assert!(run.status.success(), "layout binary exited {}", run.status);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let measured: std::collections::HashMap<(String, String), usize> = stdout
+        .lines()
+        .map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            assert_eq!(w.len(), 3, "unexpected line {l:?}");
+            (
+                (w[0].to_string(), w[1].to_string()),
+                w[2].parse().expect("a number"),
+            )
+        })
+        .collect();
+    for (name, size, fields) in &structs {
+        let get = |f: &str| measured[&(name.to_string(), f.to_string())];
+        assert_eq!(get("sizeof"), *size, "sizeof({name}): C vs Rust");
+        for (f, off, width) in fields {
+            assert_eq!(get(f), *off, "offsetof({name}, {f}): C vs Rust");
+            assert_eq!(
+                get(&format!("sizeof.{f}")),
+                *width,
+                "sizeof({name}.{f}): C vs Rust"
+            );
+        }
+    }
+}
+
+/// The parser above is what makes the field-list comparison bite; check it
+/// on a header fragment with comments, arrays and pointers.
+#[test]
+fn header_struct_fields_parses_declarations() {
+    let h = "typedef struct { int a; } Other;\n\
+             typedef struct {\n  /** doc; with a semicolon */\n  char  s[16];\n  ipindex k; /* c */\n  double *p;\n} Wanted;\n";
+    assert_eq!(header_struct_fields(h, "Wanted"), ["s", "k", "p"]);
+    assert_eq!(header_struct_fields(h, "Other"), ["a"]);
+}
