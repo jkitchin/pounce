@@ -26,6 +26,9 @@
 //!   family of QPs rather than one: it owns the convex → `pounce-qp`
 //!   translation ([`ActiveSetQp`]) and the presolve/postsolve wrapper, and
 //!   reuses the previous solve parametrically when that is valid (gh #769).
+//! - [`pipeline`] — the matrix-form frontend pipeline (engine-switch and PSD
+//!   screens, [`solve_presolved`], [`demote_unverified_optimal`]) that Python's
+//!   `solve_qp` runs, lifted so the planned C QP handle shares it (gh#1147).
 //! - [`certify_psd_lower_triangle`] — conservatively certify a sparse
 //!   symmetric matrix from a caller-supplied inertia-reporting backend;
 //!   malformed input is returned as [`PsdCertificateError`].
@@ -51,6 +54,7 @@ pub mod hsde_scalars;
 pub mod ipm;
 pub(crate) mod nonsym_polish;
 mod options;
+pub mod pipeline;
 pub mod presolve;
 mod psd_certificate;
 pub mod qp;
@@ -75,6 +79,10 @@ pub use ipm::{
     solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
 pub use options::ConvexPresolveOptions;
+pub use pipeline::{
+    EngineSwitches, PipelineError, PresolveReport, check_ipm_inertia, demote_unverified_optimal,
+    solve_presolved,
+};
 pub use presolve::{ConvexPresolveFingerprint, ConvexWarmReport, convex_presolve_fingerprint};
 // Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared
 // with the SQP subproblem reader there; re-exported so the public path is

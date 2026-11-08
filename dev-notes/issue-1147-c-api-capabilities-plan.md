@@ -39,7 +39,7 @@ that ticks it.
 
 ### Stage 3 — matrix-form convex/conic entry
 
-- [ ] **S3-I1** Lift `solve_presolved` / `demote_unverified_optimal` from `pounce-py/src/qp.rs` into `pounce-convex` (pure move).
+- [x] **S3-I1** Lift `solve_presolved` / `demote_unverified_optimal` from `pounce-py/src/qp.rs` into `pounce-convex` (pure move).
 - [ ] **S3-I2** `PounceQp*` handle, builder, solve and getters.
 - [ ] **S3-I3** Tests for every cone kind and every error path; parity against Python `solve_qp` / `solve_socp` anchors.
 - [ ] **S3-I4** Docs, README, CHANGELOG, `examples/qp_socp.c`; export guard green.
@@ -2366,6 +2366,78 @@ Gate (all on the ticking commit's tree):
 - Sweep not run, and not needed: no solver code moved, and the CLI binary
   the sweep runs does not link `pounce-cinterface` (it is a dev-dependency
   of `pounce-cli`, S1-I8, i.e. test binaries only).
+
+### S3-I1 — convex pipeline lifted into `pounce_convex::pipeline` (commit that ticks S3-I1)
+
+Approved by the human after Stage 1, on this branch.
+
+What moved (pure move; no solve-behaviour change):
+- New `crates/pounce-convex/src/pipeline.rs`, re-exported at the crate
+  root: `solve_presolved`, `demote_unverified_optimal`, `PresolveReport`
+  (fields now `pub`), `EngineSwitches` (fields `pub`, `check`/`apply`), and
+  the PSD screen as `check_ipm_inertia(HessianInertia)`. Bodies are the
+  bindings' own.
+- The two `PyResult` screens now return `Result<(), PipelineError>`. The
+  enum's `Display` is the old message minus the `"solve_qp: "` prefix, and
+  `pounce-py` adds that prefix back (`pipeline_err`). Before the edit, the
+  five literals on both sides were compared after Rust's line-continuation
+  rule: identical. `check` takes `active_set: bool` (Python passes
+  `method == "active-set"`), not the method string. So the check order
+  is unchanged, including `method="bogus", qp_reg=-2` reporting `qp_reg`
+  first.
+- `pounce-py/src/qp.rs` keeps the Python-only pieces: dict building
+  (`attach_engine_reports`), `parse_hessian_inertia`, `check_tau`, option
+  parsing.
+- Not moved: Python's eigenvalue PSD verdict (`python/pounce/qp.py::
+  _psd_verdict`, numpy/LDL). It is a Python implementation, not Rust code in
+  `pounce-py`, so porting it would not be a move, and Python could not stay
+  bit-identical. The Rust-side verdict that S3-I2 can reuse already exists:
+  `pounce_convex::certify_psd_lower_triangle` (the CLI's dispatch uses it).
+  §7's design bullet ("if only Python checks PSD") is therefore answered
+  without a lift.
+- CLI untouched: `crates/pounce-cli/src/dispatch.rs` imports only `Triplet`
+  and `certify_psd_lower_triangle` from `pounce_convex`. Nothing in
+  `crates/pounce-cli/src` names a `pipeline` item, and the diff does not
+  touch `pounce-cli`. `run_convex_qp` stays a separate pipeline.
+
+Tests (`pipeline::tests`, 10, one fixture per branch):
+- `demote_unverified_optimal`: demoted (HSDE, `Optimal`, KKT above tol at
+  `x = (5, 5)`); kept on each failed conjunct (point passes KKT; HSDE off;
+  status not `Optimal`).
+- `solve_presolved`: `reduced` (fixed column turns the row into a bound;
+  the engine sees 0 rows; postsolved to the original size; `obj = −0.5`);
+  `infeasible` and `unbounded` (the engine closure panics if it is called).
+- `EngineSwitches::check`: every refusal and each pass. `apply`: unset
+  leaves the defaults alone, set writes each field. `check_ipm_inertia`:
+  `Psd` and `Unknown` pass, `Indefinite` is refused.
+
+Python bit-identity, measured directly as well as through the suites. A
+script (scratchpad, not committed) dumps `solve_qp` results as hex floats
+over 7 models (reduced, infeasible, unbounded, 4 random convex QPs) × both
+engines × `qp_presolve` {None, True} × `qp_hsde` {unset, True, False}, plus
+every refusal message. I ran it once on a wheel built from the parent
+commit and once on this tree: 147 lines, `cmp` identical.
+
+Gate (all on the ticking commit's tree):
+- Fixture sweep, release baseline from the parent commit in its own
+  worktree and target dir against this tree: **diff empty**, engine column
+  included. exact leg 141 lines (52 `cvx-qp`, 15 `cvx-qcqp`, 74 `nlp`),
+  lbfgs leg 141 lines (the same split); `cc:` lines included.
+- `cargo test -p pounce-convex -p pounce-py`: 81 binaries, 818 passed,
+  0 failed. This includes `issue414_cost_normalized_false_optimal` and
+  `illconditioned_huge_scale`, run although the move does not touch
+  `normalized_optimum_is_genuine` / `hsde_cost_scale`.
+- `test_qp_host.py`, `test_socp_jax.py`, `test_qp_sensitivity.py`: 129
+  passed. `make python-test` (extension rebuilt from this tree): 2016 passed,
+  36 skipped, 0 failed.
+- `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
+  clippy::correctness -D clippy::suspicious` (CI's flags): exit 0, and no
+  warning in `pipeline.rs`. `pounce-py/src/qp.rs` shows only the existing
+  `field_reassign_with_default` in `opts_tau`, which this item does not
+  touch.
+- `cargo fmt --all -- --check` clean.
+- `cargo test -p pounce-cinterface` (loop rule 4): 23 binaries, 235 passed.
+- `benchmarks/qp` not run: no convex line moved.
 
 ### Facts recorded while planning (2ac0ad9)
 
