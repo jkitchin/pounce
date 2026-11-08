@@ -16,6 +16,10 @@
 //!   test is only evidence about the branch it reaches"): a zero-row nonneg
 //!   cone, an exponent just inside `(0, 1)`, NULL arrays at `nnz = 0`, the
 //!   conic path's accepted options, the switches the active-set engine reads;
+//! * **variable bounds combined with a cone**, with the bound active and
+//!   inactive (the handle appends the box as a trailing nonnegative block);
+//! * **the `struct_size` contract** of `PounceQpResiduals` and
+//!   `PounceQpCertificate` (`common/struct_size.rs`), one case per branch;
 //! * **every status a model can reach**: `primal_infeasible` and
 //!   `dual_infeasible` with their certificate kinds on the QP and the conic
 //!   path, `iteration_limit` on both, and `time_limit`.
@@ -27,10 +31,13 @@
 
 #[path = "common/qp_c.rs"]
 mod qp_c;
+#[path = "common/struct_size.rs"]
+mod struct_size;
 
 use pounce_cinterface::*;
 use qp_c::{FALSE, Qp, TRUE, close, cs};
 use std::ptr::{null, null_mut};
+use struct_size::check_struct_size_contract;
 
 const TOL: f64 = 1e-6;
 
@@ -648,6 +655,7 @@ fn get_solution_before_solve_is_false() {
 fn get_residuals_before_solve_is_false() {
     let qp = nonneg_model();
     let mut r = PounceQpResiduals {
+        struct_size: size_of::<PounceQpResiduals>() as Index,
         kkt_error: 7.0,
         ..Default::default()
     };
@@ -660,6 +668,7 @@ fn get_residuals_before_solve_is_false() {
 fn get_certificate_before_solve_is_false() {
     let qp = nonneg_model();
     let mut c = PounceQpCertificate {
+        struct_size: size_of::<PounceQpCertificate>() as Index,
         kind: 7,
         ..Default::default()
     };
@@ -918,4 +927,158 @@ fn presolved_infeasible_and_unbounded_on_the_active_set_engine() {
     assert_eq!(qp.str_opt("qp_presolve", "yes"), TRUE);
     assert_eq!(qp.solve(), POUNCE_QP_STATUS_DUAL_INFEASIBLE);
     assert_eq!(qp.certificate().kind, POUNCE_QP_CERT_DUAL_INFEASIBLE);
+}
+
+// ---------------------------------------------------------------------------
+// Bounds combined with cones
+// ---------------------------------------------------------------------------
+
+/// The SOC distance model of `examples/qp_socp.c`: variables `(t, x1, x2)`,
+/// `min t` s.t. `x1 + x2 = 0` and `s = h − G x = (t, x1 − 2, x2 + 1) ∈ Q³`
+/// (`G = −I`, `h = (0, −2, 1)`): `t ≥` the distance from `(x1, x2)` to
+/// `(2, −1)`, over the line `x2 = −x1`.
+///
+/// By hand, on the line `x = (a, −a)` the squared distance is
+/// `f(a) = (a − 2)² + (1 − a)²`, convex with `f'(a) = 4a − 6`: the free
+/// minimum is `a = 3/2`, `t = √f(3/2) = 1/√2`.
+fn soc_distance() -> Qp {
+    let qp = Qp::new(3, 1, 3, 0);
+    assert_eq!(qp.objective(&[], &[1.0, 0.0, 0.0]), TRUE);
+    assert_eq!(qp.equalities(&[(0, 1, 1.0), (0, 2, 1.0)], &[0.0]), TRUE);
+    let g = [(0, 0, -1.0), (1, 1, -1.0), (2, 2, -1.0)];
+    assert_eq!(qp.inequalities(&g, &[0.0, -2.0, 1.0]), TRUE);
+    assert_eq!(qp.cone(POUNCE_CONE_SOC, 3, 0.0), 0);
+    qp
+}
+
+const NO_LB: f64 = -1e20;
+const NO_UB: f64 = 1e20;
+
+/// Bounds with a cone, the bound **active**: `x1 ≤ 1` cuts the free
+/// minimum `a = 3/2` off, and `f` is increasing past `a = 3/2`, so the
+/// constrained minimum is at the bound, `a = 1`: `x = (1, 1, −1)`,
+/// `t = √(1 + 0) = 1`. Multipliers, from `c + Aᵀy + Gᵀz + z_ub = 0` (`Gᵀ =
+/// −I`) with `s = (1, −1, 0)` on the cone's boundary, so `z = μ(1, 1, 0)`
+/// (the reflection of `s`, complementary to it): the `t` row gives
+/// `1 − z0 = 0`, so `μ = 1`; the `x2` row `y − z2 = 0`, so `y = 0`; the `x1`
+/// row `y − z1 + z_ub1 = 0`, so `z_ub1 = 1`.
+///
+/// No Python parity row: `pounce.qp.solve_socp` takes no `lb`/`ub` and
+/// `solve_qp` takes no cones, so Python cannot pose this `QpProblem` (a box
+/// *and* a cone list); `qp_python_parity.rs` compares the same `QpProblem`
+/// on both sides, so a reformulated model would not be a parity row. What
+/// Python *can* solve — the bound written as a trailing `nonneg(1)` row,
+/// which is what `solve_socp_ipm` expands the box into — is checked here
+/// against the bounded solve instead, on the C handle.
+#[test]
+fn bounds_with_a_cone_active_bound() {
+    let qp = soc_distance();
+    assert_eq!(qp.bounds(None, Some(&[NO_UB, 1.0, NO_UB])), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let s = qp.solution();
+    close("x", &s.x, &[1.0, 1.0, -1.0], TOL);
+    close("obj", &[s.obj], &[1.0], TOL);
+    // The duals to 1e-4, not TOL: `z2 = 0` is pinned only by `z` sitting on
+    // the cone's boundary (`z0 = ‖(z1, z2)‖`), which the interior point
+    // approaches like the square root of its gap (measured: `y = z2 ≈
+    // −7.5e-6`, `z_ub1 ≈ 1 + 7.5e-6` in 8 iterations).
+    const DUAL_TOL: f64 = 1e-4;
+    close("y", &s.y, &[0.0], DUAL_TOL);
+    close("z", &s.z, &[1.0, 1.0, 0.0], DUAL_TOL);
+    close("z_ub", &s.z_ub, &[0.0, 1.0, 0.0], DUAL_TOL);
+    close("z_lb", &s.z_lb, &[0.0; 3], DUAL_TOL);
+    assert!(qp.residuals().kkt_error_raw <= TOL);
+
+    // The same bound as a G row in a trailing nonneg block: x1 <= 1.
+    let row = Qp::new(3, 1, 4, 0);
+    assert_eq!(row.objective(&[], &[1.0, 0.0, 0.0]), TRUE);
+    assert_eq!(row.equalities(&[(0, 1, 1.0), (0, 2, 1.0)], &[0.0]), TRUE);
+    let g = [(0, 0, -1.0), (1, 1, -1.0), (2, 2, -1.0), (3, 1, 1.0)];
+    assert_eq!(row.inequalities(&g, &[0.0, -2.0, 1.0, 1.0]), TRUE);
+    assert_eq!(row.cone(POUNCE_CONE_SOC, 3, 0.0), 0);
+    assert_eq!(row.cone(POUNCE_CONE_NONNEG, 1, 0.0), 1);
+    assert_eq!(row.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let r = row.solution();
+    close("x (bound as a row)", &r.x, &s.x, TOL);
+    close("obj (bound as a row)", &[r.obj], &[s.obj], TOL);
+    close("row multiplier = z_ub1", &[r.z[3]], &[s.z_ub[1]], 1e-4);
+}
+
+/// Bounds with a cone, every bound **inactive** (the other branch): `x1 ≤
+/// 2` and `x2 ≥ −10` both hold strictly at the free minimum `(3/2, −3/2)`,
+/// so the answer is the unbounded one, `t = 1/√2`, with zero bound
+/// multipliers — and it matches the same model solved with no box.
+#[test]
+fn bounds_with_a_cone_inactive_bounds() {
+    let free = soc_distance();
+    assert_eq!(free.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let f = free.solution();
+    let r2 = 1.0 / 2f64.sqrt();
+    close("x (no box)", &f.x, &[r2, 1.5, -1.5], 1e-5);
+
+    let qp = soc_distance();
+    assert_eq!(
+        qp.bounds(Some(&[NO_LB, NO_LB, -10.0]), Some(&[NO_UB, 2.0, NO_UB])),
+        TRUE
+    );
+    assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let s = qp.solution();
+    close("x", &s.x, &[r2, 1.5, -1.5], 1e-5);
+    close("obj", &[s.obj], &[r2], TOL);
+    close("z_ub", &s.z_ub, &[0.0; 3], TOL);
+    close("z_lb", &s.z_lb, &[0.0; 3], TOL);
+    close("x = the unbounded x", &s.x, &f.x, 1e-5);
+    close("obj = the unbounded obj", &[s.obj], &[f.obj], TOL);
+}
+
+// ---------------------------------------------------------------------------
+// The struct_size contract of the extensible output structs
+// ---------------------------------------------------------------------------
+
+/// `PounceQpGetResiduals` under (a)–(d) of `common/struct_size.rs`, after a
+/// solve, so the size check is the branch that decides. Case (c) is the
+/// fill every `residuals()` reads.
+// error-path: PounceQpGetResiduals
+#[test]
+fn residuals_struct_size_contract() {
+    let qp = nonneg_model();
+    assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let r = check_struct_size_contract("PounceQpResiduals", |p| unsafe {
+        PounceQpGetResiduals(qp.h, p)
+    });
+    assert_eq!(r, qp.residuals());
+    assert!(r.kkt_error_raw <= TOL);
+}
+
+/// `PounceQpGetCertificate` likewise, on a primal-infeasible model so every
+/// field carries a value (kind 1, a finite scale, `tau`/`kappa` from HSDE).
+// error-path: PounceQpGetCertificate
+#[test]
+fn certificate_struct_size_contract() {
+    let qp = Qp::new(1, 0, 1, 0);
+    assert_eq!(qp.objective(&[], &[1.0]), TRUE);
+    assert_eq!(qp.inequalities(&[(0, 0, 1.0)], &[-1.0]), TRUE);
+    assert_eq!(qp.bounds(Some(&[0.0]), None), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_STATUS_PRIMAL_INFEASIBLE);
+    let c = check_struct_size_contract("PounceQpCertificate", |p| unsafe {
+        PounceQpGetCertificate(qp.h, p)
+    });
+    assert_eq!(c.kind, POUNCE_QP_CERT_PRIMAL_INFEASIBLE);
+    assert!(c.scale.is_finite() && c.scale > 0.0);
+    assert!(c.tau.is_finite() && c.kappa.is_finite());
+    let again = qp.certificate();
+    assert_eq!(
+        (
+            again.kind,
+            again.scale.to_bits(),
+            again.tau.to_bits(),
+            again.kappa.to_bits()
+        ),
+        (
+            c.kind,
+            c.scale.to_bits(),
+            c.tau.to_bits(),
+            c.kappa.to_bits()
+        )
+    );
 }

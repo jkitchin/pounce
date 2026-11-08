@@ -107,7 +107,7 @@ POUNCE extensions:
   survive `ClearPounceComplementarityPairs`; to get the original row bounds
   back, free the problem and create it again.
 - Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
-  (`#[repr(C)]` `PounceComplementarityStats`: strategy, what was reported
+  (`#[repr(C)]`, extensible `PounceComplementarityStats`: strategy, what was reported
   and by which formulation, total iterations, the stationarity certificate,
   the B-stationarity check, the polish), `GetPounceComplementaritySolve`
   (one lowered solve, `PounceComplementaritySolve`) and
@@ -146,8 +146,8 @@ POUNCE extensions:
   options `PounceQpSetNumOption`, `PounceQpSetStrOption`; `PounceQpSolve`
   (a `POUNCE_QP_STATUS_*`, or a negative `POUNCE_QP_ERR_*` before any
   engine runs); getters `PounceQpGetSolution`, `PounceQpGetResiduals`
-  (`#[repr(C)]` `PounceQpResiduals`), `PounceQpGetCertificate`
-  (`PounceQpCertificate`); and `PounceQpWriteSolveReport`. It runs
+  (`#[repr(C)]`, extensible `PounceQpResiduals`), `PounceQpGetCertificate`
+  (`PounceQpCertificate`, likewise); and `PounceQpWriteSolveReport`. It runs
   `pounce_convex::pipeline`, the code Python's `solve_qp` / `solve_socp`
   run, and matches Python's results bit for bit on Linux x86_64
   (`tests/qp_python_parity.rs`). Standard form `min ½xᵀPx + cᵀx`,
@@ -181,11 +181,25 @@ return 0 (`OKRetVal`) or 1. POUNCE's C extensions are not mirrored here.
 `POUNCE_VERSION_*` defines must equal it (`tests/header_abi.rs` and
 `scripts/check-release-consistency.sh` both check). The ABI changes by
 addition only: no existing prototype, struct layout or `#define` value
-changes. The `#[repr(C)]` structs (`PounceLinearSolverStats`,
+changes (the extensible structs below may gain fields at their end). The
+`#[repr(C)]` structs (`PounceLinearSolverStats`,
 `PounceComplementarityStats`, `PounceComplementaritySolve`,
 `PounceQpResiduals`, `PounceQpCertificate`) are held to the
 header field by field (size, offset, width) by a C program in
 `tests/c_examples_build_and_run.rs`.
+
+The four gh#1147 output structs (`PounceComplementarityStats`,
+`PounceComplementaritySolve`, `PounceQpResiduals`, `PounceQpCertificate`)
+are *extensible*: their first field is `ipindex struct_size`, which the
+caller sets to `sizeof` the struct. A smaller value (a forgotten `= {0}`) is
+refused — `FALSE`, nothing written — and the getter otherwise writes this
+release's fields only, never `struct_size` and never a byte past this
+release's `sizeof` (`write_extensible` in `src/lib.rs`). Growth rule: later
+releases only append fields and write `min(struct_size, their sizeof)`, so
+old callers and new libraries, and new callers and old libraries, both
+work. `PounceLinearSolverStats` shipped before the convention and stays
+frozen, with no `struct_size`. Tests: `tests/common/struct_size.rs`, run by
+`complementarity_getters.rs` and `qp_cones_and_errors.rs`.
 
 ## Status
 

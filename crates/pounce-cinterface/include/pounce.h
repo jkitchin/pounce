@@ -797,6 +797,37 @@ int AddPounceComplementsConstraint(
 );
 
 /* ---------------------------------------------------------------------
+ * Extensible output structs (gh#1147)
+ *
+ * PounceComplementarityStats, PounceComplementaritySolve,
+ * PounceQpResiduals and PounceQpCertificate begin with
+ *
+ *     ipindex struct_size;
+ *
+ * which the caller sets to sizeof(the struct) before the call:
+ *
+ *     PounceQpResiduals r;
+ *     r.struct_size = sizeof r;
+ *     if (PounceQpGetResiduals(qp, &r)) ...
+ *
+ * A struct_size smaller than this release's sizeof (0 from "= {0}", or an
+ * uninitialized value) is refused: the getter returns FALSE and writes
+ * nothing. Otherwise the getter writes this release's fields only: it
+ * never writes struct_size, nor any byte past this release's sizeof.
+ *
+ * Growth rule: a later release only appends fields at the end (nothing is
+ * removed, reordered or retyped), and writes min(struct_size, its sizeof)
+ * bytes. A program built against this header keeps working with a newer
+ * library, which honours its smaller struct_size; a program built
+ * against a newer header gets this release's fields from this library,
+ * the rest of its buffer untouched.
+ *
+ * PounceLinearSolverStats has no struct_size: it shipped before this
+ * convention, and adding one would change its layout under existing
+ * callers. Its layout is frozen.
+ * ------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------
  * Complementarity outcome (gh#1147)
  *
  * What the complementarity driver did on the most recent IpoptSolve: the
@@ -812,8 +843,8 @@ int AddPounceComplementsConstraint(
  * not finite (the report's null), reads NaN; a count or 0/1 flag whose
  * record is absent (no certificate, the B-check did not run) reads -1.
  * Stage labels are "exact product", "Scholtes continuation",
- * "l1 penalty", "branch NLP", "branch polish". The structs are versioned
- * with the library; never reorder their fields.
+ * "l1 penalty", "branch NLP", "branch polish". Both structs are
+ * extensible (struct_size first; see above).
  * ------------------------------------------------------------------- */
 #define POUNCE_CC_CLASS_S             0   /* strongly stationary */
 #define POUNCE_CC_CLASS_W             1   /* weakly stationary only */
@@ -832,6 +863,8 @@ int AddPounceComplementsConstraint(
 #define POUNCE_CC_B_VERDICT_ABSENT      -1   /* the check did not run */
 
 typedef struct {
+    /** Set by the caller to sizeof(PounceComplementarityStats). */
+    ipindex  struct_size;
     /** complementarity_strategy: "both", "exact" or "continuation". */
     char     strategy[16];
     /** POUNCE_CC_REPORTED_*. */
@@ -894,8 +927,9 @@ typedef struct {
 
 /**
  * Fill `stats` with what the driver did on the most recent solve. FALSE,
- * leaving `stats` untouched, on a NULL argument, before any solve, and when
- * the most recent solve did not run the driver.
+ * leaving `stats` untouched, on a NULL argument, a stats->struct_size
+ * smaller than sizeof(PounceComplementarityStats), before any solve, and
+ * when the most recent solve did not run the driver.
  */
 Bool GetPounceComplementarityStats(
     IpoptProblem                ipopt_problem,
@@ -903,6 +937,8 @@ Bool GetPounceComplementarityStats(
 );
 
 typedef struct {
+    /** Set by the caller to sizeof(PounceComplementaritySolve). */
+    ipindex  struct_size;
     /** Stage label (see above). */
     char     stage[32];
     /** 0/1: a relaxed solve (G.H <= tau); tau is NaN when 0. */
@@ -920,8 +956,9 @@ typedef struct {
 
 /**
  * Fill `solve` with lowered solve k (0-based, in the order run, k <
- * n_solves). FALSE, leaving `solve` untouched, on a NULL argument, k out
- * of range, and whenever GetPounceComplementarityStats would be FALSE.
+ * n_solves). FALSE, leaving `solve` untouched, on a NULL argument, a short
+ * solve->struct_size, k out of range, and whenever
+ * GetPounceComplementarityStats would be FALSE.
  */
 Bool GetPounceComplementaritySolve(
     IpoptProblem                ipopt_problem,
@@ -1252,8 +1289,11 @@ typedef struct PounceQpInfo* PounceQp;
  *  first four are read above their finite-precision floor in the
  *  objective's units (what the Optimal verdict is judged on); the
  *  _raw four are the plain absolute values. With cones both sets are
- *  the plain conic residuals. */
+ *  the plain conic residuals. Extensible (struct_size first; see
+ *  "Extensible output structs" above). */
 typedef struct {
+    /** Set by the caller to sizeof(PounceQpResiduals). */
+    ipindex  struct_size;
     ipnumber primal_infeasibility;
     ipnumber dual_infeasibility;
     ipnumber complementarity;
@@ -1269,8 +1309,11 @@ typedef struct {
  *  when kind is POUNCE_QP_CERT_NONE. The ray carries the embedding's
  *  1/tau scale; divide by `scale` for a unit ray. tau and kappa are NaN
  *  when the driver records none: the direct IPM (qp_hsde=no), the
- *  active-set engine, and the exponential/power-cone driver. */
+ *  active-set engine, and the exponential/power-cone driver.
+ *  Extensible (struct_size first). */
 typedef struct {
+    /** Set by the caller to sizeof(PounceQpCertificate). */
+    ipindex  struct_size;
     ipindex  kind;
     ipnumber scale;
     ipnumber tau;
@@ -1329,11 +1372,14 @@ Bool PounceQpGetSolution(PounceQp qp, ipnumber* x, ipnumber* y, ipnumber* z,
                          ipnumber* z_lb, ipnumber* z_ub, ipnumber* obj,
                          ipindex* iters);
 
-/** FALSE for a NULL handle or out, or no result. */
+/** FALSE (nothing written) for a NULL handle or out, an
+ *  out->struct_size smaller than sizeof(PounceQpResiduals), or no
+ *  result. */
 Bool PounceQpGetResiduals(PounceQp qp, PounceQpResiduals* out);
 
 /** TRUE after every solve that returned a status; kind says whether a
- *  certificate is present. FALSE for a NULL handle or out, or no result. */
+ *  certificate is present. FALSE (nothing written) for a NULL handle or
+ *  out, a short out->struct_size, or no result. */
 Bool PounceQpGetCertificate(PounceQp qp, PounceQpCertificate* out);
 
 /** pounce.solve-report/v1 JSON at detail "summary" (or NULL) / "full".

@@ -144,13 +144,19 @@ impl Qp {
     }
 
     pub fn residuals(&self) -> PounceQpResiduals {
-        let mut r = PounceQpResiduals::default();
+        let mut r = PounceQpResiduals {
+            struct_size: size_of::<PounceQpResiduals>() as Index,
+            ..Default::default()
+        };
         assert_eq!(unsafe { PounceQpGetResiduals(self.h, &mut r) }, TRUE);
         r
     }
 
     pub fn certificate(&self) -> PounceQpCertificate {
-        let mut c = PounceQpCertificate::default();
+        let mut c = PounceQpCertificate {
+            struct_size: size_of::<PounceQpCertificate>() as Index,
+            ..Default::default()
+        };
         assert_eq!(unsafe { PounceQpGetCertificate(self.h, &mut c) }, TRUE);
         c
     }

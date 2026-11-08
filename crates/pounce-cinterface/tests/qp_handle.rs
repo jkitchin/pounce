@@ -130,13 +130,19 @@ fn solution(qp: &Qp, n: usize, m_eq: usize, m_ineq: usize) -> Sol {
 }
 
 fn residuals(qp: &Qp) -> PounceQpResiduals {
-    let mut r = PounceQpResiduals::default();
+    let mut r = PounceQpResiduals {
+        struct_size: size_of::<PounceQpResiduals>() as Index,
+        ..Default::default()
+    };
     assert_eq!(unsafe { PounceQpGetResiduals(qp.0, &mut r) }, 1);
     r
 }
 
 fn certificate(qp: &Qp) -> PounceQpCertificate {
-    let mut c = PounceQpCertificate::default();
+    let mut c = PounceQpCertificate {
+        struct_size: size_of::<PounceQpCertificate>() as Index,
+        ..Default::default()
+    };
     assert_eq!(unsafe { PounceQpGetCertificate(qp.0, &mut c) }, 1);
     c
 }
@@ -411,7 +417,10 @@ fn solve_refusals_discard_the_previous_result() {
     );
     assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_CONES);
     // ... and the earlier result is gone.
-    let mut r = PounceQpResiduals::default();
+    let mut r = PounceQpResiduals {
+        struct_size: size_of::<PounceQpResiduals>() as Index,
+        ..Default::default()
+    };
     assert_eq!(unsafe { PounceQpGetResiduals(qp.0, &mut r) }, 0);
 
     let qp = create(1, 0, 4, 0);
@@ -616,12 +625,14 @@ fn getters_answer_false_without_a_result() {
         );
         assert_eq!((x, obj, iters), ([7.0; 2], 7.0, 7), "nothing written");
         let mut r = PounceQpResiduals {
+            struct_size: size_of::<PounceQpResiduals>() as Index,
             kkt_error: 7.0,
             ..Default::default()
         };
         assert_eq!(PounceQpGetResiduals(h, &mut r), 0);
         assert_eq!(r.kkt_error, 7.0);
         let mut c = PounceQpCertificate {
+            struct_size: size_of::<PounceQpCertificate>() as Index,
             kind: 7,
             ..Default::default()
         };

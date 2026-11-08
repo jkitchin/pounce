@@ -24,7 +24,9 @@
 //! [`pounce_convex::certify_psd_lower_triangle`], as the CLI's dispatch does,
 //! at the CLI's tolerance band. See [`psd_inertia`].
 
-use crate::{Bool, FALSE, Index, Number, TRUE, ffi_guard};
+use crate::{
+    Bool, ExtensibleOut, FALSE, Index, Number, TRUE, ffi_guard, struct_size_of, write_extensible,
+};
 use pounce_convex::hsde_scalars::{self, HsdeScalars};
 use pounce_convex::pipeline::{
     EngineSwitches, check_ipm_inertia, demote_unverified_optimal, solve_presolved,
@@ -90,9 +92,14 @@ const PSD_TOL: f64 = 1e-9;
 /// finite-precision floor, in the objective's units (gh#984): the measurement
 /// the `Optimal` verdict is judged on. The `_raw` four are the plain absolute
 /// values. With cones both sets are the plain conic residuals.
+///
+/// Extensible: `struct_size` first, set by the caller to
+/// `sizeof(PounceQpResiduals)` (`Default` leaves it 0, as C's `= {0}` does,
+/// which the getter refuses); fields are only ever appended.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PounceQpResiduals {
+    pub struct_size: Index,
     pub primal_infeasibility: Number,
     pub dual_infeasibility: Number,
     pub complementarity: Number,
@@ -114,14 +121,21 @@ pub struct PounceQpResiduals {
 /// when `kind` is NONE. `tau` and `kappa` are the homogeneous embedding's at
 /// termination, NaN when the answer came from a driver that records none (the
 /// direct IPM, the active-set engine, the exponential/power-cone driver).
+///
+/// Extensible, like [`PounceQpResiduals`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PounceQpCertificate {
+    pub struct_size: Index,
     pub kind: Index,
     pub scale: Number,
     pub tau: Number,
     pub kappa: Number,
 }
+
+// SAFETY: both are `#[repr(C)]` with `struct_size: Index` first.
+unsafe impl ExtensibleOut for PounceQpResiduals {}
+unsafe impl ExtensibleOut for PounceQpCertificate {}
 
 // ---------------------------------------------------------------------------
 // The handle
@@ -361,6 +375,7 @@ fn residuals(sol: &QpSolution, prob: &QpProblem, cones: &[ConeSpec]) -> PounceQp
         raw
     };
     PounceQpResiduals {
+        struct_size: struct_size_of::<PounceQpResiduals>(),
         primal_infeasibility: r.primal_infeasibility,
         dual_infeasibility: r.dual_infeasibility,
         complementarity: r.complementarity,
@@ -873,11 +888,15 @@ pub unsafe extern "C" fn PounceQpGetSolution(
     })
 }
 
-/// Copy the most recent solve's KKT residuals into `*out`. FALSE (nothing
-/// written) for a NULL handle or `out`, or no solve result.
+/// Copy the most recent solve's KKT residuals into `*out`, whose
+/// `struct_size` the caller sets to `sizeof(PounceQpResiduals)`. FALSE
+/// (nothing written) for a NULL handle or `out`, a `struct_size` smaller
+/// than this release's size, or no solve result.
 ///
 /// # Safety
-/// `qp` is NULL or live; `out` is NULL or writable.
+/// `qp` is NULL or live; `out` is NULL or points at a `PounceQpResiduals`
+/// whose `struct_size` is readable, writable for this release's size when
+/// `struct_size` is that size or more.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PounceQpGetResiduals(qp: PounceQp, out: *mut PounceQpResiduals) -> Bool {
     ffi_guard(FALSE, || {
@@ -887,14 +906,16 @@ pub unsafe extern "C" fn PounceQpGetResiduals(qp: PounceQp, out: *mut PounceQpRe
         if out.is_null() {
             return FALSE;
         }
-        *out = last.residuals;
-        TRUE
+        // Bounded write of this release's size (see `write_extensible`).
+        Bool::from(write_extensible(out, &last.residuals))
     })
 }
 
 /// Copy the most recent solve's certificate and HSDE scalars into `*out`
-/// (see `PounceQpCertificate`). TRUE after every solve, whatever its status;
-/// FALSE (nothing written) for a NULL handle or `out`, or no solve result.
+/// (see `PounceQpCertificate`; the caller sets `struct_size` as for
+/// [`PounceQpGetResiduals`]). TRUE after every solve, whatever its status;
+/// FALSE (nothing written) for a NULL handle or `out`, a short
+/// `struct_size`, or no solve result.
 ///
 /// # Safety
 /// As [`PounceQpGetResiduals`].
@@ -924,13 +945,15 @@ pub unsafe extern "C" fn PounceQpGetCertificate(
             QpStatus::DualInfeasible => (POUNCE_QP_CERT_DUAL_INFEASIBLE, norm(&[&sol.x])),
             _ => (POUNCE_QP_CERT_NONE, f64::NAN),
         };
-        *out = PounceQpCertificate {
+        let cert = PounceQpCertificate {
+            struct_size: struct_size_of::<PounceQpCertificate>(),
             kind,
             scale,
             tau: last.hsde.map_or(f64::NAN, |h| h.tau),
             kappa: last.hsde.map_or(f64::NAN, |h| h.kappa),
         };
-        TRUE
+        // Bounded write of this release's size (see `write_extensible`).
+        Bool::from(write_extensible(out, &cert))
     })
 }
 

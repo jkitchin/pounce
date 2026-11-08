@@ -414,20 +414,48 @@ fn repr_c_structs_match_the_header_layout() {
             min_abs_pivot, max_abs_pivot, last_inertia_positive, last_inertia_negative,
             last_inertia_zero, last_nnz_a, last_nnz_l),
         layout!(PounceComplementarityStats;
-            strategy, reported, accepted_by, fallback, n_solves, total_iterations,
+            struct_size, strategy, reported, accepted_by, fallback, n_solves, total_iterations,
             max_abs_product, certificate_class, n_pairs, n_biactive, n_neither,
             multipliers_unique, residual, resid_tol, tight, feasible, primal_violation,
             b_verdict, b_n_biactive, b_branches_solved, b_enumerated, escapes, lifted,
             natural_residual, polish_ran, polish_taken, polish_residual_before,
             polish_residual_after, polish_threshold),
         layout!(PounceComplementaritySolve;
-            stage, relaxed, tau, status, iterations, max_abs_product, seconds),
+            struct_size, stage, relaxed, tau, status, iterations, max_abs_product, seconds),
         layout!(PounceQpResiduals;
-            primal_infeasibility, dual_infeasibility, complementarity, kkt_error,
+            struct_size, primal_infeasibility, dual_infeasibility, complementarity, kkt_error,
             primal_infeasibility_raw, dual_infeasibility_raw, complementarity_raw,
             kkt_error_raw),
-        layout!(PounceQpCertificate; kind, scale, tau, kappa),
+        layout!(PounceQpCertificate; struct_size, kind, scale, tau, kappa),
     ];
+
+    // The extensible output structs (`pounce.h`, "Extensible output
+    // structs"): `struct_size` is the first field, at offset 0, and is an
+    // `ipindex`; their sizes are this release's, pinned so that a change is
+    // a decision (the growth rule only ever adds bytes at the end).
+    // `PounceLinearSolverStats` shipped before the convention and has none.
+    for (name, size) in [
+        ("PounceComplementarityStats", 224),
+        ("PounceComplementaritySolve", 72),
+        ("PounceQpResiduals", 72),
+        ("PounceQpCertificate", 32),
+    ] {
+        let (_, rust_size, fields) = structs.iter().find(|(n, _, _)| *n == name).unwrap();
+        assert_eq!(*rust_size, size, "sizeof({name})");
+        assert_eq!(
+            fields[0],
+            (
+                "struct_size",
+                0,
+                std::mem::size_of::<pounce_cinterface::Index>()
+            ),
+            "{name}: struct_size must be the first field, at offset 0"
+        );
+    }
+    assert!(
+        structs[0].2.iter().all(|(f, _, _)| *f != "struct_size"),
+        "PounceLinearSolverStats is frozen: no struct_size"
+    );
 
     let header =
         std::fs::read_to_string(manifest_dir().join("include/pounce.h")).expect("read pounce.h");

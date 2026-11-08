@@ -1228,6 +1228,10 @@ No Fortran symbol added (`src/fortran.rs` is still the eight upstream
 
 ### 8.4 Structs added (`PounceLinearSolverStats` untouched: 96 bytes, offsets guarded)
 
+> Superseded before release: both structs now begin with `ipindex
+> struct_size` (§8.5, and §9 "ABI hardening before release" for the new
+> offsets). The tables below are the S1-I10 layout.
+
 - [ ] `PounceComplementarityStats`, 224 bytes, align 8:
 
   | field | type | offset |
@@ -1324,6 +1328,17 @@ No Fortran symbol added (`src/fortran.rs` is still the eight upstream
       iteration count (row constant in `g` or in its bound; the `.nl`
       nonlinear-variable list under L-BFGS). Documented as frontend
       guidance in `docs/src/c-api.md` ("Matching the CLI"), not changed.
+- [x] **The output structs could not grow** (ABI review before release):
+      `PounceComplementarityStats` and `PounceComplementaritySolve` (and
+      §8.7's two) would have frozen at release, and a field added later
+      would overflow an old caller's buffer. **Resolved by `struct_size`**,
+      which the human approved: each now begins with `ipindex struct_size`
+      (caller sets `sizeof`); a smaller value is refused with nothing
+      written; the getter writes this release's bytes only, never
+      `struct_size` and never past its own size; later releases append only
+      and write `min(struct_size, sizeof)`. Layouts in §8.4 are superseded
+      by the §9 "ABI hardening before release" entry (224 and 72 bytes).
+      `PounceLinearSolverStats` unchanged (it shipped).
 
 ### 8.6 Release and Pounce.jl
 
@@ -1442,11 +1457,17 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
       `d·(d+1)` `checked_mul` and `PounceQpSolve`'s cone-row `checked_add`
       cannot overflow on a 64-bit target with a 32-bit `ipindex`; kept as
       guards, not tested.
-- [ ] **Bounds with cones** (noticed in S3-I4): the handle accepts a box with
+- [x] **Bounds with cones** (noticed in S3-I4): the handle accepts a box with
       cones (`solve_socp_ipm` appends it as a trailing nonnegative block),
       which Python's `solve_socp` does not offer, so that combination has no
       Python parity row. Checked by hand once in S3-I4 (SOC distance with
       `x1 ≤ 1`: `x = (1, 1, −1)`, `z_ub[1] = 1`), not by a test.
+      **Resolved** (ABI hardening, §9): `bounds_with_a_cone_active_bound` and
+      `bounds_with_a_cone_inactive_bounds` in `tests/qp_cones_and_errors.rs`,
+      answers re-derived by hand; still no Python row (reason in the test).
+- [x] **`PounceQpResiduals` / `PounceQpCertificate` could not grow**:
+      resolved by `struct_size`, as §8.5's item; layouts now 72/8 (padding 4
+      at 4) and 32/8 (no padding), see §9.
 
 ## 9. Per-iteration log
 
@@ -2825,6 +2846,110 @@ Gate (all on the ticking commit's tree):
 - `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
   clippy::correctness -D clippy::suspicious`: exit 0.
 - `cargo fmt --all -- --check` clean.
+- No sweep: no solver source changed.
+
+### ABI hardening before release (commit that follows S3-I4)
+
+Approved by the human on this branch (PR #1154), before 0.17.0 ships the
+Stage 1 and Stage 3 surface. No solver code changed: `git diff` touches
+`crates/pounce-cinterface` (`src/lib.rs`, `src/qp.rs`, `include/pounce.h`,
+examples, tests, README), `docs/src/c-api.md`, `docs/src/complementarity.md`,
+`CHANGELOG.md` and this file. `crates/pounce-convex`, `crates/pounce-cli/src`
+and `crates/pounce-py` are untouched, so no fixture sweep.
+
+What moved:
+- **Extensible output structs.** `PounceComplementarityStats`,
+  `PounceComplementaritySolve`, `PounceQpResiduals`, `PounceQpCertificate`
+  gain `ipindex struct_size` as their first member (Rust and header). The
+  getters go through one helper, `write_extensible` (`src/lib.rs`, behind an
+  `unsafe trait ExtensibleOut`): `struct_size < size_of::<T>()` (0, negative,
+  one short) → `FALSE`, nothing written; otherwise a bounded byte copy of
+  bytes `4..size_of::<T>()` of the value, never `struct_size`, never past
+  this release's size. Its comment states the growth rule for a maintainer
+  appending a field. No `#define` for the sizes (`sizeof` is what callers
+  pass; `header_abi.rs` unchanged). `PounceLinearSolverStats` untouched.
+  Convention documented once in `pounce.h` (block before the complementarity
+  outcome section), once in `c-api.md` (*Extensible output structs*, in the
+  ABI section), the crate README, a pointer in `complementarity.md`, and the
+  CHANGELOG.
+- New layouts (x86_64 Linux, gcc and the Rust side, asserted by
+  `repr_c_structs_match_the_header_layout`, which now also pins the four
+  sizes and `struct_size` at offset 0 with `ipindex` width, and that
+  `PounceLinearSolverStats` has none):
+  - `PounceComplementarityStats` 224 bytes, align 8 (unchanged size: the
+    new field fills old padding). `struct_size` 0, `strategy` 4,
+    `reported` 20, `accepted_by` 24, `fallback` 56, `n_solves` 88,
+    `total_iterations` 92, `max_abs_product` 96; from `certificate_class`
+    (104) on, §8.4's offsets are unchanged. Padding: 4 bytes at 124 only.
+  - `PounceComplementaritySolve` 72 bytes, align 8 (unchanged size):
+    `struct_size` 0, `stage` 4, `relaxed` 36, `tau` 40, then §8.4's offsets.
+    No padding.
+  - `PounceQpResiduals` 72 bytes (was 64): `struct_size` 0, 4 bytes padding,
+    then the eight reals at 8..64.
+  - `PounceQpCertificate` 32 bytes (unchanged): `struct_size` 0, `kind` 4,
+    `scale` 8, `tau` 16, `kappa` 24. No padding.
+- Callers: `examples/complementarity.c` and `examples/qp_socp.c` set
+  `struct_size = sizeof`; `qp_socp.c` also checks a zeroed `struct_size` is
+  refused with the struct untouched (no new output line). Rust helpers
+  (`common/cc_models.rs` `stats`/`solve_record`, `common/qp_c.rs`,
+  `qp_handle.rs`), the NULL/before-solve tests and `complementarity_moi.rs`
+  set it, so each still reaches the branch it was written for. The
+  `pounce-cli` parity tests read the C report, not these getters: nothing to
+  change there.
+- Tests, one per branch (`tests/common/struct_size.rs`,
+  `check_struct_size_contract`, on a handle with a result so the size check
+  is what decides): (a) `struct_size` 0, −1 and `0xA5A5A5A5` → `FALSE`,
+  buffer byte-identical; (b) `sizeof − 1` → same; (c) `sizeof` → filled,
+  equal to the ordinary helper's fill, `struct_size` unchanged, nothing past
+  `sizeof`; (d) `sizeof + 64` in a buffer that large, sentinels after
+  `sizeof` → `TRUE`, the same values, every byte past `sizeof` untouched.
+  Run as `stats_struct_size_contract`, `solve_struct_size_contract` (every
+  lowered-solve `k`) in `complementarity_getters.rs`, and
+  `residuals_struct_size_contract`, `certificate_struct_size_contract`
+  (primal infeasible, so every field holds a value) in
+  `qp_cones_and_errors.rs`, each with `// error-path:` markers.
+- Shown to bite (then reverted, `diff` against a saved copy empty): with
+  `write_extensible` also zeroing the caller's bytes `sizeof..struct_size`,
+  all four tests fail at (d) ("struct_size = sizeof + 64 wrote bytes past
+  sizeof at offsets [224, …]", `[72, …]`, `[72, …]`, `[32, …]`) while (c)
+  passes; with the size check removed, all four fail at (a) ("struct_size = 0
+  was accepted").
+- **Bounds with cones**, `tests/qp_cones_and_errors.rs`, on the SOC distance
+  model (`t ≥ ‖(x1 − 2, x2 + 1)‖`, `x1 + x2 = 0`). Re-derived: on the line
+  `x = (a, −a)`, `f(a) = (a − 2)² + (1 − a)²`, `f' = 4a − 6`, free minimum
+  `a = 3/2`, `t = 1/√2`. `bounds_with_a_cone_active_bound`: `x1 ≤ 1` cuts it
+  off and `f` increases past `3/2`, so `a = 1`, `x = (1, 1, −1)`, `t = 1`;
+  with `s = (1, −1, 0)` on the boundary, `z = μ(1, 1, 0)`, the `t` row gives
+  `μ = 1`, the `x2` row `y = 0`, the `x1` row `z_ub1 = 1`. Measured `x` to
+  1e-8, duals off by 7.5e-6 (asserted to 1e-4: `z2 = 0` is fixed only by
+  `z` on the cone's boundary, approached like the root of the gap), 8
+  iterations; and the same bound written as a trailing `nonneg(1)` G row
+  gives the same `x`, `obj`, and row multiplier `= z_ub1`.
+  `bounds_with_a_cone_inactive_bounds` (the other branch): `x1 ≤ 2`,
+  `x2 ≥ −10`, both slack at `(3/2, −3/2)`: `t = 1/√2`, zero bound
+  multipliers, equal to the box-free solve. No Python parity row:
+  `solve_socp` takes no `lb`/`ub`, `solve_qp` no cones, and
+  `qp_python_parity.rs` compares one `QpProblem` on both sides, so a
+  reformulation is not a row; the test's comment says so.
+
+Gate (on the committed tree):
+- `cargo test -p pounce-cinterface`: 26 results (lib, 24 integration
+  binaries, doc-tests), 348 passed, 0 failed (`complementarity_getters` 15,
+  `qp_cones_and_errors` 67, `c_examples_build_and_run` 6, `export_surface`
+  13, `header_abi` 5, `qp_handle` 14, `qp_python_parity` 26, lib 64).
+- `cargo test -p pounce-cli --test cinterface_mpcc_parity`: 16 passed.
+- `make c-api-examples`, gcc and `CC=clang`: all three examples print their
+  last lines (`qp_socp example: QP (1/2, 1/2), SOC distance 1/sqrt(2),
+  infeasibility certified, 3 refusals`; output unchanged).
+- `make book` (mdbook 0.5.2): no warning; `c-api.html#extensible-output-structs`
+  exists and the links to it from `c-api.html` and `complementarity.html`
+  resolve. Build dir removed.
+- `make ask-check`: top-1 17/20, top-5 20/20, OK (unchanged).
+- `scripts/check-release-consistency.sh`: OK.
+- `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
+  clippy::correctness -D clippy::suspicious`: exit 0; no new warning in
+  `pounce-cinterface` (599 before and after).
+- `cargo fmt --all -- --check`: clean.
 - No sweep: no solver source changed.
 
 ### Facts recorded while planning (2ac0ad9)

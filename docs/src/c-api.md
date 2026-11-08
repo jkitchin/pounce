@@ -245,6 +245,8 @@ ipindex GetPounceComplementarityText(IpoptProblem, int which,
                                      char *buf, ipindex buflen);
 ```
 
+Both structs are [extensible](#extensible-output-structs): set
+`struct_size = sizeof` before each call, or the getter returns `FALSE`.
 `GetPounceComplementarityStats` fills a `PounceComplementarityStats`: the
 strategy, what was reported (`POUNCE_CC_REPORTED_ANSWER`, `_WEAK_FALLBACK`,
 `_FEASIBLE_UNCERTIFIED`, `_VERDICT`) and by which formulation, the number of
@@ -516,6 +518,9 @@ result.
   the engine's iteration count; any output may be `NULL`. Signs:
   `Px + c + Aᵀy + Gᵀz − z_lb + z_ub = 0` with `z, z_lb, z_ub ≥ 0` (`z` in the
   dual cone with cones; in `svec` coordinates on a PSD block).
+- `PounceQpGetResiduals` and `PounceQpGetCertificate` fill
+  [extensible](#extensible-output-structs) structs: set `struct_size =
+  sizeof` first, or the getter returns `FALSE`.
 - `PounceQpGetResiduals` fills a `PounceQpResiduals` (Python's
   `QpResult.residuals`): `primal_infeasibility`, `dual_infeasibility`,
   `complementarity`, `kkt_error` and their four `_raw` twins. Without cones the
@@ -585,10 +590,44 @@ extensions are mirrored there: they are C-only.
   `#[repr(C)]` struct layout (`PounceLinearSolverStats`,
   `PounceComplementarityStats`, `PounceComplementaritySolve`,
   `PounceQpResiduals`, `PounceQpCertificate`) or `#define`
-  value changes within the 0.x line. New capabilities arrive as new
+  value changes within the 0.x line, except that the four extensible structs
+  below may gain fields at their end. New capabilities arrive as new
   symbols. A test compiles a C program against the header and holds every
   struct's size and every field's offset and width to the Rust side.
 - POUNCE is pre-1.0, so wrappers gate on the minor version. Pounce.jl
   accepts a fixed range of native minors and checks its required symbols at
   load; widening that range is an ABI review (see
   [Julia and JuMP](julia.md)).
+
+### Extensible output structs
+
+`PounceComplementarityStats`, `PounceComplementaritySolve`,
+`PounceQpResiduals` and `PounceQpCertificate` are caller-allocated and begin
+with `ipindex struct_size`, which the caller sets to `sizeof` the struct
+before every call:
+
+```c
+PounceQpResiduals r;
+r.struct_size = sizeof r;
+if (PounceQpGetResiduals(qp, &r)) { /* ... */ }
+```
+
+- A `struct_size` smaller than this release's `sizeof` — `0` from `= {0}`, or
+  an uninitialized value — is refused: the getter returns `FALSE` and writes
+  nothing.
+- Otherwise the getter writes this release's fields only. It never writes
+  `struct_size`, and never writes a byte past this release's `sizeof`,
+  however large `struct_size` is.
+- **Growth rule:** a later release only appends fields at the end (nothing is
+  removed, reordered or retyped) and writes `min(struct_size, its sizeof)`
+  bytes. A program built against an older header keeps working with a newer
+  library, which honours its smaller `struct_size`; a program built against a
+  newer header gets the older library's fields, with the rest of its struct
+  left as it was.
+
+This release's sizes (x86_64 Linux, 32-bit `ipindex`) are 224, 72, 72 and 32
+bytes; a mirror in another language must reproduce the header's layout,
+padding included, and the C layout test holds it to the Rust side.
+`PounceLinearSolverStats` has no `struct_size`: it shipped before this
+convention, and adding one would move every field under existing callers.
+Its layout is frozen.

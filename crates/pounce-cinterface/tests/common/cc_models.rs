@@ -329,6 +329,7 @@ pub fn bytes_of<T>(v: &T) -> Vec<u8> {
 
 pub fn stats(prob: IpoptProblem) -> Option<PounceComplementarityStats> {
     let mut s: PounceComplementarityStats = sentinel();
+    s.struct_size = size_of::<PounceComplementarityStats>() as Index;
     let before = bytes_of(&s);
     let ok = unsafe { GetPounceComplementarityStats(prob, &mut s) };
     if ok == 0 {
@@ -336,11 +337,16 @@ pub fn stats(prob: IpoptProblem) -> Option<PounceComplementarityStats> {
         return None;
     }
     assert_eq!(ok, 1);
+    assert_eq!(
+        s.struct_size,
+        size_of::<PounceComplementarityStats>() as Index
+    );
     Some(s)
 }
 
 pub fn solve_record(prob: IpoptProblem, k: Index) -> Option<PounceComplementaritySolve> {
     let mut s: PounceComplementaritySolve = sentinel();
+    s.struct_size = size_of::<PounceComplementaritySolve>() as Index;
     let before = bytes_of(&s);
     let ok = unsafe { GetPounceComplementaritySolve(prob, k, &mut s) };
     if ok == 0 {
@@ -348,6 +354,10 @@ pub fn solve_record(prob: IpoptProblem, k: Index) -> Option<PounceComplementarit
         return None;
     }
     assert_eq!(ok, 1);
+    assert_eq!(
+        s.struct_size,
+        size_of::<PounceComplementaritySolve>() as Index
+    );
     Some(s)
 }
 

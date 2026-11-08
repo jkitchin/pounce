@@ -42,8 +42,11 @@
 mod cc_models;
 #[path = "common/qpec.rs"]
 mod qpec;
+#[path = "common/struct_size.rs"]
+mod struct_size;
 
 use cc_models::*;
+use struct_size::check_struct_size_contract;
 
 use pounce_cinterface::*;
 use std::ffi::c_char;
@@ -678,8 +681,10 @@ fn nothing_after_a_refused_solve() {
 fn null_arguments_answer_nothing() {
     unsafe {
         let mut s: PounceComplementarityStats = sentinel();
+        s.struct_size = size_of::<PounceComplementarityStats>() as Index;
         assert_eq!(GetPounceComplementarityStats(ptr::null_mut(), &mut s), 0);
         let mut r: PounceComplementaritySolve = sentinel();
+        r.struct_size = size_of::<PounceComplementaritySolve>() as Index;
         assert_eq!(GetPounceComplementaritySolve(ptr::null_mut(), 0, &mut r), 0);
         let mut buf = [0 as c_char; 8];
         assert_eq!(
@@ -794,5 +799,45 @@ fn text_follows_the_snprintf_contract() {
             "which {which}"
         );
         assert!(buf.iter().all(|&c| c == PAT));
+    }
+}
+
+/// The `struct_size` contract (`pounce.h`, "Extensible output structs"),
+/// on a handle that has a record, so the size check is the branch that
+/// decides: refused untouched below `sizeof`, filled at `sizeof`, and never
+/// a byte past `sizeof` when the caller's struct is larger. Case (c)'s fill
+/// is the same one `stats()` reads for every value test.
+#[test]
+fn stats_struct_size_contract() {
+    // error-path: GetPounceComplementarityStats
+    let m = Model::qpec([0.0, 0.5, 0.5]);
+    m.solve();
+    let s = check_struct_size_contract("PounceComplementarityStats", |p| unsafe {
+        GetPounceComplementarityStats(m.prob, p)
+    });
+    assert_eq!(
+        format!("{s:?}"),
+        format!("{:?}", stats(m.prob).unwrap()),
+        "case (c) is the ordinary fill"
+    );
+}
+
+/// The same for every lowered-solve record (`solve_record()`'s fill).
+#[test]
+fn solve_struct_size_contract() {
+    // error-path: GetPounceComplementaritySolve
+    let m = Model::qpec([0.0, 0.5, 0.5]);
+    m.solve();
+    let n = stats(m.prob).unwrap().n_solves;
+    assert!(n >= 1);
+    for k in 0..n {
+        let r = check_struct_size_contract("PounceComplementaritySolve", |p| unsafe {
+            GetPounceComplementaritySolve(m.prob, k, p)
+        });
+        assert_eq!(
+            format!("{r:?}"),
+            format!("{:?}", solve_record(m.prob, k).unwrap()),
+            "case (c) is the ordinary fill"
+        );
     }
 }

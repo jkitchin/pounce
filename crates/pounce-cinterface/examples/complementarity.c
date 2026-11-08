@@ -173,8 +173,10 @@ int main(int argc, char **argv)
     }
     AddIpoptIntOption(prob, "print_level", 0);
 
-    /* Before any solve there is no driver record. */
+    /* Before any solve there is no driver record. The outcome structs are
+     * extensible: struct_size = sizeof first, or the getter refuses. */
     PounceComplementarityStats st;
+    st.struct_size = sizeof st;
     if (GetPounceComplementarityStats(prob, &st))
         return fail(prob, "stats reported before any solve");
 
@@ -237,6 +239,7 @@ int main(int argc, char **argv)
 
     for (ipindex k = 0; k < st.n_solves; k++) {
         PounceComplementaritySolve s;
+        s.struct_size = sizeof s;
         if (!GetPounceComplementaritySolve(prob, k, &s))
             return fail(prob, "missing lowered-solve record");
         if (s.relaxed)
@@ -248,6 +251,7 @@ int main(int argc, char **argv)
     }
     {
         PounceComplementaritySolve s;
+        s.struct_size = sizeof s;
         if (GetPounceComplementaritySolve(prob, st.n_solves, &s))
             return fail(prob, "record k = n_solves accepted");
     }

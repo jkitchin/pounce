@@ -116,9 +116,17 @@ static int convex_qp(const char *report_path)
         || !close_to(z_lb[0], 0.0) || !close_to(z_lb[1], 0.0))
         return fail(qp, "QP answer is not x = (1/2, 1/2), y = -1/2, z = 1");
 
+    /* The output structs are extensible: struct_size = sizeof first. A
+     * zeroed struct_size is refused and nothing is written. */
+    res.struct_size = 0;
+    res.kkt_error = -1.0;
+    if (PounceQpGetResiduals(qp, &res) || res.kkt_error != -1.0)
+        return fail(qp, "struct_size 0 was not refused untouched");
+    res.struct_size = sizeof res;
     if (!PounceQpGetResiduals(qp, &res)) return fail(qp, "no QP residuals");
     if (!(res.kkt_error <= TOL && res.kkt_error_raw <= TOL))
         return fail(qp, "QP KKT residual above tolerance");
+    cert.struct_size = sizeof cert;
     if (!PounceQpGetCertificate(qp, &cert)) return fail(qp, "no QP certificate");
     if (cert.kind != POUNCE_QP_CERT_NONE || !isnan(cert.scale))
         return fail(qp, "certificate on an optimal QP");
@@ -160,6 +168,7 @@ static int socp(const char *report_path)
     if (!close_to(x[0], 1.0 / sqrt(2.0)) || !close_to(obj, 1.0 / sqrt(2.0))
         || !close_to(x[1], 1.5) || !close_to(x[2], -1.5))
         return fail(qp, "SOCP answer is not t = 1/sqrt(2), x = (3/2, -3/2)");
+    res.struct_size = sizeof res;
     if (!PounceQpGetResiduals(qp, &res) || !(res.kkt_error_raw <= TOL))
         return fail(qp, "SOCP KKT residual missing or above tolerance");
 
@@ -188,6 +197,7 @@ static int infeasible(void)
         return fail(qp, "an LP builder refused valid input");
     if (PounceQpSolve(qp) != POUNCE_QP_STATUS_PRIMAL_INFEASIBLE)
         return fail(qp, "infeasible LP not reported PRIMAL_INFEASIBLE");
+    cert.struct_size = sizeof cert;
     if (!PounceQpGetCertificate(qp, &cert)) return fail(qp, "no certificate");
     printf("LP:   primal infeasible, Farkas ray scale %.3g\n", cert.scale);
     if (cert.kind != POUNCE_QP_CERT_PRIMAL_INFEASIBLE

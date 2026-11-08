@@ -42,6 +42,14 @@ changes.
     `snprintf` contract) return the solve report's `complementarity` block
     as scalars, and `IpoptWriteSolveReport` writes that block, the same one
     the CLI and Python write.
+  - *Extensible output structs:* `PounceComplementarityStats`,
+    `PounceComplementaritySolve` and Stage 3's `PounceQpResiduals` and
+    `PounceQpCertificate` begin with `ipindex struct_size`, which the caller
+    sets to `sizeof` the struct; a smaller value (a forgotten `= {0}`) is
+    refused with nothing written, and a getter never writes past its own
+    release's size. Later releases may then append fields without breaking
+    callers built against this header. `PounceLinearSolverStats` is
+    unchanged.
   - `IpoptWriteSolveReport` also writes the `second_opinion` block (gh#850)
     after a solve without pairs on which the second-opinion ladder ran,
     under the same condition and through the same conversion as the CLI

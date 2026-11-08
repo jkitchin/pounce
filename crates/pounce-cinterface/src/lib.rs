@@ -122,6 +122,80 @@ pub(crate) fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     }
 }
 
+/// An *extensible* caller-allocated output struct (gh#1147): its first
+/// member is `ipindex struct_size`, which the caller sets to `sizeof(T)`
+/// before the call. `PounceComplementarityStats`, `PounceComplementaritySolve`,
+/// `PounceQpResiduals` and `PounceQpCertificate` follow it;
+/// `PounceLinearSolverStats` does not (it shipped before the convention).
+///
+/// # The growth rule
+///
+/// A later release may only **append** fields at the end; nothing is
+/// removed, reordered or widened. Every getter then writes
+/// `min(caller's struct_size, its own size_of::<T>())` bytes — which is what
+/// `write_extensible` does for this release, whose size is the minimum
+/// whenever the call is accepted at all.
+///
+/// # Safety
+///
+/// Implementors must be `#[repr(C)]` with `struct_size: Index` as the first
+/// field, so it sits at offset 0 (asserted by
+/// `tests/c_examples_build_and_run.rs`).
+pub(crate) unsafe trait ExtensibleOut: Copy {}
+
+/// This release's `sizeof(T)`, as the `struct_size` value a caller passes.
+pub(crate) const fn struct_size_of<T: ExtensibleOut>() -> Index {
+    std::mem::size_of::<T>() as Index
+}
+
+/// Write `value` into the caller's `out` under the `struct_size` contract.
+///
+/// Returns `false`, writing nothing at all, when the caller's
+/// `struct_size` is smaller than this release's `size_of::<T>()` (a
+/// forgotten or garbage initializer: `0`, negative, or a size from a
+/// release that predates a field of `T` — there is none yet). Otherwise
+/// copies **exactly this release's bytes** of `value` after `struct_size`
+/// and returns `true`; `struct_size` itself is read, never written, and no
+/// byte past `size_of::<T>()` is touched, however large `struct_size` is
+/// (a caller built against a newer header keeps its newer fields as they
+/// were).
+///
+/// The copy is a bounded byte copy, not `*out = value`, on purpose: a
+/// whole-struct assignment is a contract about *this* release's size that
+/// would silently stay one when a field is appended. When appending a field
+/// to `T` in a later release, keep this function, and change the refusal
+/// below to the size of the oldest layout still accepted (the size *before*
+/// the first appended field), writing `min(struct_size, size_of::<T>())`
+/// bytes; never lower the floor to accept `struct_size` values a getter
+/// cannot tell from an uninitialized one.
+///
+/// # Safety
+///
+/// `out` must be non-NULL, aligned for `T`, readable for its first
+/// `size_of::<Index>()` bytes and, when the call is accepted, writable for
+/// `size_of::<T>()` bytes (the caller promised `struct_size` of them).
+pub(crate) unsafe fn write_extensible<T: ExtensibleOut>(out: *mut T, value: &T) -> bool {
+    const HEAD: usize = std::mem::size_of::<Index>();
+    let size = std::mem::size_of::<T>();
+    // SAFETY: `struct_size` is at offset 0 (the trait's contract) and the
+    // caller guarantees the first `HEAD` bytes are readable.
+    let claimed = unsafe { std::ptr::read(out.cast::<Index>()) };
+    if usize::try_from(claimed).map_or(true, |c| c < size) {
+        return false;
+    }
+    // SAFETY: `claimed >= size`, so the caller promised `size` writable
+    // bytes; `value` is a distinct Rust value, so the ranges cannot overlap.
+    // Only bytes `HEAD..size` are written: `struct_size` stays the caller's.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (value as *const T).cast::<u8>().add(HEAD),
+            out.cast::<u8>().add(HEAD),
+            size - HEAD,
+        );
+    }
+    true
+}
+
 /// C-ABI encoding of [`pounce_qp::BoundStatus`] (§7.2 of the
 /// active-set-SQP design note). Stable values:
 /// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Fixed`.
@@ -2514,9 +2588,14 @@ pub const POUNCE_CC_TEXT_B_REASON: c_int = 2;
 /// discriminants: `NaN` for a real that was not measured (or is not
 /// finite, as the report's `null`), `-1` for a count or flag whose record
 /// is absent.
+///
+/// Extensible (see `ExtensibleOut` in this crate): `struct_size` first, set by the
+/// caller to `sizeof(PounceComplementarityStats)`; fields are only ever
+/// appended.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct PounceComplementarityStats {
+    pub struct_size: Index,
     pub strategy: [c_char; 16],
     pub reported: Index,
     pub accepted_by: [c_char; 32],
@@ -2549,10 +2628,12 @@ pub struct PounceComplementarityStats {
 }
 
 /// C mirror of one [`MpccSolveRecord`](pounce_restoration::mpcc_driver::MpccSolveRecord),
-/// for `pounce.h`'s `PounceComplementaritySolve`.
+/// for `pounce.h`'s `PounceComplementaritySolve`. Extensible, like
+/// [`PounceComplementarityStats`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct PounceComplementaritySolve {
+    pub struct_size: Index,
     pub stage: [c_char; 32],
     pub relaxed: Index,
     pub tau: Number,
@@ -2561,6 +2642,10 @@ pub struct PounceComplementaritySolve {
     pub max_abs_product: Number,
     pub seconds: Number,
 }
+
+// SAFETY: both are `#[repr(C)]` with `struct_size: Index` first.
+unsafe impl ExtensibleOut for PounceComplementarityStats {}
+unsafe impl ExtensibleOut for PounceComplementaritySolve {}
 
 /// Copy `s` into a fixed C char array, truncated on a byte boundary so that
 /// a NUL always fits; the rest of the array is zeroed.
@@ -2595,6 +2680,7 @@ pub(crate) fn complementarity_stats(
 ) -> PounceComplementarityStats {
     use pounce_algorithm::mpcc::{BVerdict, Reported, StationarityClass};
     let mut s = PounceComplementarityStats {
+        struct_size: struct_size_of::<PounceComplementarityStats>(),
         strategy: [0; 16],
         reported: match out.reported {
             Reported::Answer(_) => POUNCE_CC_REPORTED_ANSWER,
@@ -2678,6 +2764,7 @@ pub(crate) fn complementarity_solve(
     r: &pounce_restoration::mpcc_driver::MpccSolveRecord,
 ) -> PounceComplementaritySolve {
     let mut s = PounceComplementaritySolve {
+        struct_size: struct_size_of::<PounceComplementaritySolve>(),
         stage: [0; 32],
         relaxed: cc_flag(r.tau.is_some()),
         tau: r.tau.unwrap_or(Number::NAN),
@@ -2733,8 +2820,10 @@ unsafe fn last_mpcc<'a>(
 /// (gh#1147): the strategy, what was reported and by which formulation,
 /// the iteration totals, the stationarity certificate, the B-stationarity
 /// check and the polish — the solve report's `complementarity` block as a
-/// struct of scalars. Returns `FALSE`, leaving `stats` untouched, on a NULL
-/// argument, before any solve, and when the most recent solve did not run
+/// struct of scalars. The caller sets `stats->struct_size =
+/// sizeof(PounceComplementarityStats)` first. Returns `FALSE`, leaving
+/// `stats` untouched, on a NULL argument, a `struct_size` smaller than this
+/// release's size, before any solve, and when the most recent solve did not run
 /// the driver (no pairs were declared, or it was refused or failed before
 /// the driver returned). The record describes the most recent solve: clearing
 /// the pairs afterwards does not erase it, the next solve does.
@@ -2742,7 +2831,8 @@ unsafe fn last_mpcc<'a>(
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `stats`, when
-/// non-NULL, must point at a writable `PounceComplementarityStats`.
+/// non-NULL, must point at a writable `PounceComplementarityStats` (at
+/// least `struct_size` bytes when that is this release's size or more).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetPounceComplementarityStats(
     ipopt_problem: IpoptProblem,
@@ -2755,20 +2845,24 @@ pub unsafe extern "C" fn GetPounceComplementarityStats(
         let Some(out) = last_mpcc(ipopt_problem) else {
             return FALSE;
         };
-        *stats = complementarity_stats(out);
-        TRUE
+        // Bounded write of this release's size; FALSE, nothing written,
+        // when `stats->struct_size` is short (see `write_extensible`).
+        Bool::from(write_extensible(stats, &complementarity_stats(out)))
     })
 }
 
 /// Lowered solve `k` (0-based, in the order the driver ran them, `k <
-/// n_solves`) of the most recent driver solve. Returns `FALSE`, leaving
-/// `solve` untouched, on a NULL argument, a `k` out of range, and whenever
+/// n_solves`) of the most recent driver solve; the caller sets
+/// `solve->struct_size = sizeof(PounceComplementaritySolve)` first. Returns
+/// `FALSE`, leaving `solve` untouched, on a NULL argument, a short
+/// `struct_size`, a `k` out of range, and whenever
 /// [`GetPounceComplementarityStats`] would.
 ///
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `solve`, when
-/// non-NULL, must point at a writable `PounceComplementaritySolve`.
+/// non-NULL, must point at a writable `PounceComplementaritySolve` (at
+/// least `struct_size` bytes when that is this release's size or more).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetPounceComplementaritySolve(
     ipopt_problem: IpoptProblem,
@@ -2785,8 +2879,7 @@ pub unsafe extern "C" fn GetPounceComplementaritySolve(
         let Some(r) = usize::try_from(k).ok().and_then(|k| out.solves.get(k)) else {
             return FALSE;
         };
-        *solve = complementarity_solve(r);
-        TRUE
+        Bool::from(write_extensible(solve, &complementarity_solve(r)))
     })
 }
 

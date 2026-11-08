@@ -130,7 +130,9 @@ callback fires from every lowered solve, and `GetIpoptCurrentIterate` /
 
 After the solve, `GetPounceComplementarityStats`,
 `GetPounceComplementaritySolve` and `GetPounceComplementarityText` read
-back what is described under [What you get back](#what-you-get-back), and
+back what is described under [What you get back](#what-you-get-back) (set
+each struct's `struct_size` first: [Extensible output
+structs](c-api.md#extensible-output-structs)), and
 `IpoptWriteSolveReport` writes the same `complementarity` block as the CLI
 and Python. A callback model reaches the same answer as the CLI on the
 `.nl` file of the same model, but can take a different number of

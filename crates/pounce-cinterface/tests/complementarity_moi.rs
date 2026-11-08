@@ -243,6 +243,7 @@ fn solve(prob: IpoptProblem, p: Params, x0: [Number; 2]) -> Solved {
         )
     };
     let mut stats = std::mem::MaybeUninit::<PounceComplementarityStats>::zeroed();
+    unsafe { (*stats.as_mut_ptr()).struct_size = size_of::<PounceComplementarityStats>() as Index };
     let total_iterations = (unsafe { GetPounceComplementarityStats(prob, stats.as_mut_ptr()) }
         == 1)
         .then(|| unsafe { stats.assume_init() }.total_iterations);
