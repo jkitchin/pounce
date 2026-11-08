@@ -33,7 +33,10 @@ the workspace version: bump them with `Cargo.toml`.
    Crates with `publish = false` (pounce-py, pounce-studio-pyo3, iter-diff)
    are intentionally excluded. Full procedure: `dev-notes/cargo-release.md`.
    Version: root `Cargo.toml` `[workspace.package]` (all crates inherit it via
-   `version.workspace = true`).
+   `version.workspace = true`), **and** the `POUNCE_VERSION`,
+   `POUNCE_VERSION_MAJOR`/`_MINOR`/`_PATCH` defines in
+   `crates/pounce-cinterface/include/pounce.h` — the guard fails the release
+   if they lag.
 
    The CLI binary is also bundled inside the PyPI wheels, so an end user
    `pip install pounce-solver` does not require the crates.io publish — but the

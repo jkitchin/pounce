@@ -100,7 +100,8 @@ POUNCE extensions:
   declaration; the `POUNCE_COMPLEMENTS_*` return code says which row of the
   table applied, or why the call was refused (nothing changes then). The
   edits, and the record of which rows and variables the helper has used,
-  survive `ClearPounceComplementarityPairs`.
+  survive `ClearPounceComplementarityPairs`; to get the original row bounds
+  back, free the problem and create it again.
 - Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
   (`#[repr(C)]` `PounceComplementarityStats`: strategy, what was reported
   and by which formulation, total iterations, the stationarity certificate,

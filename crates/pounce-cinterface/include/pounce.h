@@ -767,6 +767,10 @@ Bool GetPounceComplementarityPairs(
  * crossed. A refused call changes nothing. The edits are permanent:
  * ClearPounceComplementarityPairs / SetPounceComplementarityPairs drop
  * pairs, not edits, and do not free a row or variable for another call.
+ * So after a clear the handle solves a plain NLP with the edited row
+ * bounds -- neither the original model nor the complementarity one. The
+ * only way back to the original bounds is FreeIpoptProblem and
+ * CreateIpoptProblem again.
  * A row that already has a side is a native declaration: use
  * AddPounceComplementarityPair. GetPounceComplementarityPairs lists the
  * pairs declared here like any other.

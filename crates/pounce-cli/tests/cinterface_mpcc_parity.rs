@@ -53,6 +53,21 @@
 //! the model's sense. `design_cent_3` is a maximize model; its C objective is
 //! the CLI's negated, bit for bit.
 //!
+//! **Python parity is pinned on Linux x86_64 only.** The CLI and the C API
+//! run on the same machine in this test, so `assert_cli_exact` holds to the
+//! bit on every platform. The Python side is a checked-in reference,
+//! generated on Linux x86_64, and the last bits of a real depend on the
+//! platform's math library: on macOS arm64 four rows differ only in
+//! `certificate.residual` at round-off (`2.3276935934291032e-12` against
+//! `2.327249504219253e-12`), and the unmasked limited-memory
+//! `opf_vv_lower_knee` row ends `SolvedToAcceptableLevel` instead of
+//! `SolveSucceeded`. That is the same sensitivity that keeps the unmasked
+//! limited-memory rows off exact parity with the CLI, showing up across
+//! platforms instead of across frontends. So `assert_python_exact` compares
+//! only where the reference was made, and says so on stderr elsewhere; to pin
+//! another platform, regenerate the reference there
+//! (`common/gen_cinterface_mpcc_python.py`) rather than loosening the check.
+//!
 //! **Branches reached** (CLAUDE.md, "A test is only evidence about the branch
 //! it reaches"): certificate classes `S` (`qpec_small`, `design_cent_3`,
 //! `opf_vv_lower_knee_held`), `W` (`ralph1`, `mixed_pair`,
@@ -265,8 +280,17 @@ impl Row {
     }
 
     /// Exact parity with Python's run of the same row
-    /// (`common/cinterface_mpcc_python.json`).
+    /// (`common/cinterface_mpcc_python.json`), on the platform the reference
+    /// was generated on (module docs, "Python parity is pinned on Linux
+    /// x86_64 only"). Elsewhere it is a no-op that says so.
     fn assert_python_exact(&self, key: &str) -> &Self {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            eprintln!(
+                "{key}: Python parity not compared: the reference was generated on \
+                 Linux x86_64 and is exact only there (C against the CLI still is)"
+            );
+            return self;
+        }
         let all: Value = serde_json::from_str(include_str!("common/cinterface_mpcc_python.json"))
             .expect("parse the Python reference");
         let py = &all["rows"][key];

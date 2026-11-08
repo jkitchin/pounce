@@ -2022,9 +2022,10 @@ pub const POUNCE_CC_ERR_ROW_ALREADY: c_int = -4;
 pub const POUNCE_CC_ERR_SHAPE: c_int = -5;
 /// `n_pairs < 0`.
 pub const POUNCE_CC_ERR_COUNT: c_int = -6;
-/// A Rust panic inside the library, caught at the boundary. Not expected;
-/// it exists so the panic guard has a code that cannot be mistaken for a
-/// diagnosis of the caller's input.
+/// A Rust panic inside the library, caught at the boundary, or (from
+/// `AddPounceComplementarityPair`) a pair already stored on the handle that
+/// no longer validates. Not expected; it exists so neither has to be
+/// reported as a diagnosis of the caller's input.
 pub const POUNCE_CC_ERR_INTERNAL: c_int = -7;
 
 fn pair_error_code(kind: &PairErrorKind) -> c_int {
@@ -2052,12 +2053,13 @@ fn zero_based(p: Index, offset: Index, len: Index) -> usize {
 /// handle's bounds and the pairs already declared — or alone, when
 /// `replace` — and store the result only if every pair passes. On refusal
 /// the declared set is untouched and the error names the refused pair's
-/// position **in `new`** and the reason.
+/// position **in `new`** and the reason — or `None` for the position when
+/// the refused pair is one already stored, which no caller's input caused.
 fn declare_pairs(
     info: &mut IpoptProblemInfo,
     new: &[(Index, Index)],
     replace: bool,
-) -> Result<(), (usize, PairErrorKind)> {
+) -> Result<(), (Option<usize>, PairErrorKind)> {
     let offset = if info.index_style == 1 { 1 } else { 0 };
     let base: &[ComplementarityPair] = if replace { &[] } else { &info.complementarity };
     let mut candidate = Vec::with_capacity(base.len() + new.len());
@@ -2079,11 +2081,13 @@ fn declare_pairs(
             info.complementarity = candidate;
             Ok(())
         }
-        // `base` passed this validator when it was stored and the bounds
-        // it was checked against have not changed, so the refused pair is
-        // one of `new`; `saturating_sub` keeps that an assumption rather
-        // than a way to underflow.
-        Err(e) => Err((e.pair.saturating_sub(base.len()), e.kind)),
+        // `base` passed this validator when it was stored, against bounds
+        // no public call changes under a declared pair, so the refused pair
+        // is normally one of `new`. If a stored pair is the one refused (the
+        // state an in-place bound update that skipped the re-check would
+        // leave), say so with `None` rather than remap its index onto the
+        // caller's first new pair.
+        Err(e) => Err((e.pair.checked_sub(base.len()), e.kind)),
     }
 }
 
@@ -2117,7 +2121,9 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
         }
         match declare_pairs(&mut *ipopt_problem, &[(row, var)], false) {
             Ok(()) => POUNCE_CC_OK,
-            Err((_, kind)) => pair_error_code(&kind),
+            Err((Some(_), kind)) => pair_error_code(&kind),
+            // A stored pair no longer validates: not the caller's pair.
+            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
         }
     })
 }
@@ -2171,10 +2177,13 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
         };
         match declare_pairs(&mut *ipopt_problem, &new, true) {
             Ok(()) => POUNCE_CC_OK,
-            Err((k, kind)) => {
+            Err((Some(k), kind)) => {
                 report(k as Index);
                 pair_error_code(&kind)
             }
+            // Unreachable: `replace` validates `new` alone, so every
+            // refused pair is one of the caller's.
+            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
         }
     })
 }
@@ -4729,7 +4738,7 @@ mod tests {
         // aborts the embedding process. The fix adds the same length guard
         // the sibling (`compl_*`, `grad_lag_x`) branches already had.
         let n_us = 1usize;
-        let packed = vec![0.5_f64, -0.3]; // len 2 != n_us == 1
+        let packed = [0.5_f64, -0.3]; // len 2 != n_us == 1
 
         // Pre-fix: the unguarded scatter panics on the oversized pack.
         let unguarded = std::panic::catch_unwind(|| {
@@ -5425,6 +5434,34 @@ mod tests {
             );
             let i = &*p;
             assert_eq!((i.g_l[1], i.g_u[1]), (0.0, 0.0));
+            FreeIpoptProblem(p);
+        }
+    }
+
+    #[test]
+    fn add_pair_does_not_blame_the_new_pair_for_a_stored_one_that_no_longer_validates() {
+        // error-path: AddPounceComplementarityPair
+        // PR #1154 review: `declare_pairs` used to remap the refused pair's
+        // position with `saturating_sub(base.len())`, so a stored pair gone
+        // invalid was reported as the caller's new pair (index 0) with the
+        // stored pair's reason. Plant that state (var 0's box collapsed under
+        // its mixed pair, as in the test above) and declare a pair that is
+        // valid on its own: the answer is an internal error, and the stored
+        // set is unchanged.
+        let p = create_two_by_two([0.0, 0.0], [2.0, 2.0]);
+        unsafe {
+            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_CC_OK);
+            (&mut (*p).x_u)[0] = 0.0;
+            let before = (*p).complementarity.clone();
+            assert_eq!(
+                AddPounceComplementarityPair(p, 1, 1),
+                POUNCE_CC_ERR_INTERNAL
+            );
+            assert_eq!((*p).complementarity, before);
+            // Restored, the same pair goes through: it was never the problem.
+            (&mut (*p).x_u)[0] = 2.0;
+            assert_eq!(AddPounceComplementarityPair(p, 1, 1), POUNCE_CC_OK);
+            assert_eq!(GetPounceComplementarityPairCount(p), 2);
             FreeIpoptProblem(p);
         }
     }
