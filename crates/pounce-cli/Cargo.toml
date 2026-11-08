@@ -76,7 +76,13 @@ nix = { version = "0.28", features = ["signal"] }
 
 # The CLI-parity test (`tests/cinterface_mpcc_parity.rs`, gh#1147) solves
 # each declared-complementarity fixture through the C API as well and holds
-# it to this binary. Test-only: stripped on publish.
+# it to this binary. Test-only, but NOT stripped on publish: a workspace
+# dev-dependency inherits a version, and cargo keeps a versioned
+# dev-dependency in the published manifest, so `cargo publish -p pounce-cli`
+# resolves pounce-cinterface against crates.io. pounce-cli can therefore
+# publish only after pounce-cinterface is live; `scripts/publish-crates.sh`
+# orders them so, and `scripts/check-release-consistency.sh` (dev-deps count
+# as edges) refuses a list that does not.
 [dev-dependencies]
 pounce-cinterface.workspace = true
 
