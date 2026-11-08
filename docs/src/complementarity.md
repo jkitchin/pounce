@@ -85,6 +85,94 @@ info["complementarity"]["certificate"]["class"]   # 'S'
 `pounce.read_nl(path).complementarity` lists the pairs of a `.nl` file as
 `(row, var, flags)`.
 
+### C API
+
+The C library takes the same pairs, in the same native shapes, on an
+`IpoptProblem` handle:
+
+```c
+#include "pounce.h"
+/* QpecSmall, index_style 0: pair row 0 with x1, row 1 with x2. */
+ipindex rows[] = {0, 1}, vars[] = {1, 2}, bad;
+int rc = SetPounceComplementarityPairs(nlp, 2, rows, vars, &bad);
+if (rc != POUNCE_CC_OK) { /* pair `bad` was refused; see rc */ }
+```
+
+`AddPounceComplementarityPair(nlp, row, var)` appends one pair;
+`SetPounceComplementarityPairs` replaces the set, all or nothing;
+`ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount` and
+`GetPounceComplementarityPairs` drop and read them. Indices are in the
+problem's index style (`CreateIpoptProblem`'s `index_style`). Each
+declaration is checked at once against the handle's bounds (those given
+to `CreateIpoptProblem`, as `AddPounceComplementsConstraint` below may have
+edited them), by the same classifier the lowering runs, and a pair
+Python or the `.nl` reader would refuse is refused here with a code:
+`POUNCE_CC_ERR_OUT_OF_RANGE`, `POUNCE_CC_ERR_VAR_ALREADY`,
+`POUNCE_CC_ERR_ROW_ALREADY` or `POUNCE_CC_ERR_SHAPE` (plus
+`POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments, and
+`POUNCE_CC_ERR_INTERNAL` for an internal error). A refused call leaves the
+declared set as it was. The [C API](c-api.md#complementarity) page has
+every prototype and code; `examples/complementarity.c` in
+`crates/pounce-cinterface` declares, solves and reads back QpecSmall.
+
+`IpoptSolve` then solves the model through the same driver the CLI and
+Python use, with the same `complementarity_*` options, and writes the
+reported point, its constraint values, objective and multipliers into the
+caller's buffers; `GetIpoptIterCount` and the other post-solve accessors
+describe that reported solve, not the whole run. With no pairs declared
+`IpoptSolve` is unchanged. Three things refuse pairs: `IpoptCreateSolver`
+returns `NULL` and leaves the handle with the caller (a session would hold
+the lowered model's factor); an `IpoptSolve` with a staged SQP working set
+returns `Invalid_Problem_Definition` before any callback; and
+`IpoptGetWorkingSet` reports no set after a driver solve. The intermediate
+callback fires from every lowered solve, and `GetIpoptCurrentIterate` /
+`GetIpoptCurrentViolations` report no data during them.
+
+After the solve, `GetPounceComplementarityStats`,
+`GetPounceComplementaritySolve` and `GetPounceComplementarityText` read
+back what is described under [What you get back](#what-you-get-back) (set
+each struct's `struct_size` first: [Extensible output
+structs](c-api.md#extensible-output-structs)), and
+`IpoptWriteSolveReport` writes the same `complementarity` block as the CLI
+and Python. A callback model reaches the same answer as the CLI on the
+`.nl` file of the same model, but can take a different number of
+iterations: AMPL moves a row's constant into its bound, and under
+`hessian_approximation=limited-memory` the `.nl` file says which variables
+are nonlinear. [Matching the CLI](c-api.md#matching-the-cli) says how to
+reproduce the CLI's run exactly.
+
+### From MOI / JuMP `Complements`
+
+MathOptInterface writes a complementarity constraint as `[F, x] ∈
+Complements`: `F` is a free function and the sign it must have is read off
+`x`'s bounds. The native pairs above read both signs off bounds instead.
+`AddPounceComplementsConstraint(nlp, row, var)` transcribes one into the
+other, on a row `F` that has **no finite bound**, by editing the handle's
+copy of that row's bounds and then declaring the native pair:
+
+| `x` bounds | meaning | edit on the handle | pair declared | returns |
+|---|---|---|---|---|
+| `l < u`, both finite | mixed complementarity | none | native mixed | `POUNCE_COMPLEMENTS_PAIR_MIXED` |
+| `x >= l` only | `F >= 0`, `(x - l)·F = 0` | `g_L[row] = 0` | one-sided | `POUNCE_COMPLEMENTS_PAIR_LOWER` |
+| `x <= u` only | `F <= 0`, `(u - x)·F = 0` | `g_U[row] = 0` | one-sided | `POUNCE_COMPLEMENTS_PAIR_UPPER` |
+| free | `F = 0` | `g_L[row] = g_U[row] = 0` | none | `POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR` |
+| `l == u` | `F` free | none | none | `POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR` |
+
+Writing the bound is not a solver trick: `F >= 0` is a constraint of the
+MPCC, and the return code says that it was written. The edits are
+permanent on the handle — clearing or replacing the pairs does not undo
+them. A negative return is a refusal that changes nothing:
+`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` (the row already has a side, whether
+or not it agrees with the one MOI implies: declare it natively with
+`AddPounceComplementarityPair`), `_ERR_VAR_ALREADY_PAIRED` /
+`_ERR_ROW_ALREADY_PAIRED` (the variable or row is in a declared pair or in
+an earlier accepted call of this function, with or without a pair, even if
+the pairs have since been cleared, so one `F` or one `x` is never in two
+`Complements` constraints), `_ERR_VAR_BOUNDS`
+(NaN or crossed bounds), `_ERR_OUT_OF_RANGE`, `_ERR_NULL` and
+`_ERR_INTERNAL`. Each row of the table is solved against a hand-worked
+answer in `crates/pounce-cinterface/tests/complementarity_moi.rs`.
+
 ## What POUNCE does with them
 
 The model is solved as an NLP (never routed to a convex engine — with the
@@ -495,9 +583,10 @@ can disagree, and when they do, each is right about its own question:
 
 Pyomo reads `Solved_To_Acceptable_Level` as `optimal`, as it does for any
 model, so the certificate is the only place the `none` and `W` cases show.
-Read it from `info["complementarity"]`, the console line (`tee=True`), or
-the `complementarity` block of the JSON solve report (`--json-output`, or
-`solve(report_path=...)` from Python).
+Read it from `info["complementarity"]`, the console line (`tee=True`), the
+`complementarity` block of the JSON solve report (`--json-output`, or
+`solve(report_path=...)` from Python), or, from C,
+`GetPounceComplementarityStats`.
 
 ## Limits
 
@@ -516,6 +605,11 @@ the `complementarity` block of the JSON solve report (`--json-output`, or
   `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
   `solve_nlp_batch` and `solve_with_sens` refuse pairs rather than solve
   the model without them.
+- On the C API, sessions (`IpoptCreateSolver`) and SQP working-set warm
+  starts (a staged `IpoptSetWarmStartWorkingSet`) refuse pairs, and the
+  live inspectors (`GetIpoptCurrentIterate`, `GetIpoptCurrentViolations`)
+  report no data during a driver solve. The Fortran shim has no way to
+  declare pairs.
 - The certificate is sparse above 2.5·10⁵ entries in its stationarity
   system, so a model with unique multipliers is certified at any size (a
   3 000-pair chain, `n = 9 000`, in 2.3 s for the whole solve). Where the

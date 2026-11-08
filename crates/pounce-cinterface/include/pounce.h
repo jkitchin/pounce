@@ -38,9 +38,9 @@
  * Version
  * ----------------------------------------------------------------- */
 #define POUNCE_VERSION_MAJOR 0
-#define POUNCE_VERSION_MINOR 1
+#define POUNCE_VERSION_MINOR 16
 #define POUNCE_VERSION_PATCH 0
-#define POUNCE_VERSION "0.1.0"
+#define POUNCE_VERSION "0.16.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -202,7 +202,11 @@ bool OpenIpoptOutputFile(
  *  `x_scaling` is applied as a change of variables, so the solution
  *  and bound multipliers IpoptSolve writes back are in your own units.
  *  A factor that is not finite and positive is refused by IpoptSolve,
- *  which returns Invalid_Option and prints why. */
+ *  which returns Invalid_Option and prints why.
+ *
+ *  With complementarity pairs declared, every lowered solve uses these
+ *  factors for your rows and variables; the rows the lowering adds (one
+ *  product row per pair) and any lifted variables are unscaled. */
 bool SetIpoptProblemScaling(
     IpoptProblem ipopt_problem,
     ipnumber     obj_scaling,
@@ -229,6 +233,13 @@ bool SetIpoptProblemScaling(
  *   - The GetIpoptCurrent* inspectors report no data for the duration.
  *     The restoration iterate is not a point of your problem, and does
  *     not even have its dimensions.
+ *
+ *  With complementarity pairs declared, the callback fires from every
+ *  lowered solve the driver runs (each starts again at iter_count 0), and
+ *  its scalars describe the lowered model. The GetIpoptCurrent*
+ *  inspectors report no data during such a solve, whatever is requested.
+ *  Returning false ends the whole run: the driver starts no further solve
+ *  and IpoptSolve returns User_Requested_Stop.
  *
  *  Returning false from a restoration fire ends the solve at the last
  *  iterate accepted for your NLP, not at the subproblem's iterate — so
@@ -261,6 +272,22 @@ bool SetIntermediateCallback(
  * rejects a NULL here.
  *
  * Returns an ApplicationReturnStatus (see IpoptReturnCodes.h).
+ *
+ * Complementarity pairs (AddPounceComplementarityPair and friends): with
+ * pairs declared, IpoptSolve hands the model to POUNCE's complementarity
+ * driver, as the CLI and Python do. The driver runs a sequence of solves of
+ * a lowered model (a product row per pair, possibly lifted variables),
+ * certifies the answer, and reports one point; that point, its g, objective
+ * and multipliers are what come back in the buffers above, and the status
+ * is that solve's. GetIpoptIterCount and the other post-solve accessors
+ * describe the same reported solve, not the whole run. The
+ * complementarity_strategy, complementarity_continuation and
+ * complementarity_lift options steer the driver. The second-opinion ladder
+ * does not run after it. With no pairs declared nothing here changes.
+ * A staged SQP working set (IpoptSetWarmStartWorkingSet) cannot seed a
+ * solve with pairs: IpoptSolve then returns Invalid_Problem_Definition
+ * before any callback runs, and leaves both the working set and the pairs
+ * in place (clear one of them).
  * ----------------------------------------------------------------- */
 enum ApplicationReturnStatus IpoptSolve(
     IpoptProblem ipopt_problem,
@@ -283,6 +310,10 @@ enum ApplicationReturnStatus IpoptSolve(
  * one — before the first iteration, after IpoptSolve returns, or from
  * another thread — they return false and write nothing, which is the
  * upstream contract.
+ *
+ * During a solve with complementarity pairs declared they also return
+ * false and write nothing, for every request shape: the iterate is the
+ * lowered model's, not a point of your problem's shape.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -524,7 +555,9 @@ typedef int IpoptConsStatus;
  *
  * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
  * available — e.g. no SQP solve has been run, the IPM path was
- * used, or the SQP solve converged at iter 0 (no QP solved).
+ * used, the SQP solve converged at iter 0 (no QP solved), or the
+ * last solve had complementarity pairs (its solves were of a lowered
+ * model with more rows).
  */
 Bool IpoptGetWorkingSet(
     IpoptProblem      ipopt_problem,
@@ -564,6 +597,12 @@ Bool IpoptGetWorkingSet(
  *
  * The staged working set is consumed by one solve. A following
  * IpoptSolve without a fresh call here cold-starts its working set.
+ *
+ * Not with complementarity pairs: an IpoptSolve on a problem with both a
+ * staged working set and declared pairs returns Invalid_Problem_Definition
+ * without solving and consumes neither (the working set is over your rows;
+ * the driver solves a lowered model with more). The same holds for
+ * IpoptSolveWarmStart with an input working set.
  */
 Bool IpoptSetWarmStartWorkingSet(
     IpoptProblem            ipopt_problem,
@@ -610,6 +649,344 @@ Bool IpoptSetNonlinearVariables(
 
 /** Drop a declared nonlinear-variable subset (back to "all nonlinear"). */
 Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
+
+/* ---------------------------------------------------------------------
+ * Declared complementarity pairs (gh#1147)
+ *
+ * A pair (row, var) declares   0 <= x_var - x_L[var]  _|_  g_row(x) - g_L[row] >= 0
+ * (or the upper-bound orientation of either side), in POUNCE's native
+ * shapes, exactly as Python's Problem(complementarity=) and the .nl
+ * reader accept them:
+ *   one-sided           the variable and the row each have exactly one
+ *                       finite bound;
+ *   one-sided + bound   the row has one finite side, the variable is boxed
+ *                       (the row's side picks the bound in the pair);
+ *   mixed               the variable is boxed with x_L < x_U, the row free.
+ * Anything else (a boxed or equality row, both sides free, a fixed
+ * variable with a free row, ...) is refused with POUNCE_CC_ERR_SHAPE.
+ * Bounds at or beyond +-1e19 are infinite. See docs/src/complementarity.md.
+ *
+ * Indices are in the problem's index style (the index_style given to
+ * CreateIpoptProblem), like IpoptSetNonlinearVariables. Each declaration
+ * is validated at once, against the handle's bounds (those given to
+ * CreateIpoptProblem, as AddPounceComplementsConstraint may have edited
+ * them) and the pairs already declared, by the same classifier the
+ * solve's lowering runs; a refused declaration leaves the declared set
+ * unchanged. Pairs persist on the handle across solves.
+ *
+ * IpoptSolve solves a problem with pairs through the complementarity
+ * driver (see IpoptSolve). Sessions (IpoptCreateSolver) and SQP
+ * working-set warm starts refuse pairs; the live inspectors report no
+ * data during such a solve. The Fortran shim declares no pairs.
+ *
+ * The driver's path through its lowered solves is sensitive to how the
+ * model is written: a row's constant in g (g = 2y - 1 - x, g_L = 0) or in
+ * its bound (g = 2y - x, g_L = 1) is the same feasible set but can take a
+ * different number of iterations. Under hessian_approximation=limited-memory
+ * declare the nonlinear variables (IpoptSetNonlinearVariables) as an .nl
+ * file's header does, or the run differs from the CLI's on the same model.
+ * See docs/src/c-api.md, "Matching the CLI".
+ * examples/complementarity.c uses every function below.
+ * ------------------------------------------------------------------- */
+#define POUNCE_CC_OK                   0
+#define POUNCE_CC_ERR_NULL            -1   /* NULL handle, or NULL array with n_pairs > 0 */
+#define POUNCE_CC_ERR_OUT_OF_RANGE    -2   /* row or var outside [0,m) / [0,n) (in index style) */
+#define POUNCE_CC_ERR_VAR_ALREADY     -3   /* variable already in a pair (declared or in this batch) */
+#define POUNCE_CC_ERR_ROW_ALREADY     -4   /* row already in a pair */
+#define POUNCE_CC_ERR_SHAPE           -5   /* neither one-sided, one-sided+bound, nor mixed */
+#define POUNCE_CC_ERR_COUNT           -6   /* n_pairs < 0 */
+#define POUNCE_CC_ERR_INTERNAL        -7   /* internal error caught at the boundary */
+
+/** Append one pair. Returns POUNCE_CC_OK or a POUNCE_CC_ERR_* code. */
+int AddPounceComplementarityPair(
+    IpoptProblem ipopt_problem,
+    ipindex      row,
+    ipindex      var
+);
+
+/**
+ * Replace the declared pairs with (rows[k], vars[k]), k < n_pairs. All or
+ * nothing: the batch is validated on its own (not against the set it
+ * replaces) and stored only if every pair passes. n_pairs == 0 clears the
+ * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
+ * receives the batch position of the first refused pair (the second
+ * occurrence, for a duplicate), or -1 on success, POUNCE_CC_ERR_NULL and
+ * POUNCE_CC_ERR_COUNT.
+ */
+int SetPounceComplementarityPairs(
+    IpoptProblem   ipopt_problem,
+    ipindex        n_pairs,
+    const ipindex *rows,
+    const ipindex *vars,
+    ipindex       *bad_index
+);
+
+/** Drop every declared pair. FALSE only on a NULL handle. Bounds written
+ *  by AddPounceComplementsConstraint stay written, and the outcome record of
+ *  the most recent solve (GetPounceComplementarityStats) stays readable
+ *  until the next solve. */
+Bool ClearPounceComplementarityPairs(IpoptProblem ipopt_problem);
+
+/** Number of declared pairs; -1 on a NULL handle. */
+ipindex GetPounceComplementarityPairCount(IpoptProblem ipopt_problem);
+
+/**
+ * Copy the declared pairs, in declaration order and in the problem's index
+ * style, into `rows` and `vars` (each sized by
+ * GetPounceComplementarityPairCount). FALSE, writing nothing, on a NULL
+ * handle or a NULL array while pairs are declared; with no pairs, TRUE and
+ * the arrays may be NULL.
+ */
+Bool GetPounceComplementarityPairs(
+    IpoptProblem ipopt_problem,
+    ipindex     *rows,
+    ipindex     *vars
+);
+
+/* ---------------------------------------------------------------------
+ * MOI / JuMP [F, x] in Complements (gh#1147)
+ *
+ * AddPounceComplementsConstraint(problem, row, var) takes MOI's semantics
+ * -- F = g_row is a free function, and the sign it must have is read off
+ * x_var's bounds -- and transcribes it onto the native pairs above by
+ * EDITING THE HANDLE'S COPY OF THE ROW BOUNDS, then declaring the native
+ * pair. The row must be free (g_L <= -1e19 and g_U >= 1e19). The return
+ * code says what was done (bounds at or beyond +-1e19 are infinite):
+ *
+ *   x bounds        row edit               pair          returns
+ *   l < u, finite   none                   native mixed  POUNCE_COMPLEMENTS_PAIR_MIXED
+ *   l only          g_L = 0     (F >= 0)   one-sided     POUNCE_COMPLEMENTS_PAIR_LOWER
+ *   u only          g_U = 0     (F <= 0)   one-sided     POUNCE_COMPLEMENTS_PAIR_UPPER
+ *   free            g_L = g_U = 0 (F = 0)  none          POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
+ *   l == u          none        (F free)   none          POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR
+ *
+ * Checks, in order: NULL handle; row/var in range (index style); row free;
+ * the variable, then the row, not already used -- by a declared pair or by
+ * an earlier accepted call of this function, pair or not, so one F or one
+ * x cannot be in two Complements constraints; x's bounds neither NaN nor
+ * crossed. A refused call changes nothing. The edits are permanent:
+ * ClearPounceComplementarityPairs / SetPounceComplementarityPairs drop
+ * pairs, not edits, and do not free a row or variable for another call.
+ * So after a clear the handle solves a plain NLP with the edited row
+ * bounds -- neither the original model nor the complementarity one. The
+ * only way back to the original bounds is FreeIpoptProblem and
+ * CreateIpoptProblem again.
+ * A row that already has a side is a native declaration: use
+ * AddPounceComplementarityPair. GetPounceComplementarityPairs lists the
+ * pairs declared here like any other.
+ * ------------------------------------------------------------------- */
+#define POUNCE_COMPLEMENTS_PAIR_MIXED              0
+#define POUNCE_COMPLEMENTS_PAIR_LOWER              1
+#define POUNCE_COMPLEMENTS_PAIR_UPPER              2
+#define POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR       3
+#define POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR       4
+#define POUNCE_COMPLEMENTS_ERR_NULL               -1   /* NULL handle */
+#define POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE       -2   /* row or var outside [0,m) / [0,n) (in index style) */
+#define POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED -3   /* var in a pair or an earlier accepted call */
+#define POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED -4   /* row in a pair or an earlier accepted call */
+#define POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE       -5   /* row has a finite bound (incl. one written here) */
+#define POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS         -6   /* var bounds NaN or crossed (l > u) */
+#define POUNCE_COMPLEMENTS_ERR_INTERNAL           -7   /* inconsistent handle or internal error; nothing changed */
+
+/** Declare [F, x] in Complements for (row, var); see the table above. A
+ *  non-negative return is success, a negative one a refusal. */
+int AddPounceComplementsConstraint(
+    IpoptProblem ipopt_problem,
+    ipindex      row,
+    ipindex      var
+);
+
+/* ---------------------------------------------------------------------
+ * Extensible output structs (gh#1147)
+ *
+ * PounceComplementarityStats, PounceComplementaritySolve,
+ * PounceQpResiduals and PounceQpCertificate begin with
+ *
+ *     ipindex struct_size;
+ *
+ * which the caller sets to sizeof(the struct) before the call:
+ *
+ *     PounceQpResiduals r;
+ *     r.struct_size = sizeof r;
+ *     if (PounceQpGetResiduals(qp, &r)) ...
+ *
+ * A struct_size smaller than this release's sizeof (0 from "= {0}", or an
+ * uninitialized value) is refused: the getter returns FALSE and writes
+ * nothing. Otherwise the getter writes this release's fields only: it
+ * never writes struct_size, nor any byte past this release's sizeof.
+ *
+ * Growth rule: a later release only appends fields at the end (nothing is
+ * removed, reordered or retyped), and writes min(struct_size, its sizeof)
+ * bytes. A program built against this header keeps working with a newer
+ * library, which honours its smaller struct_size; a program built
+ * against a newer header gets this release's fields from this library,
+ * the rest of its buffer untouched.
+ *
+ * PounceLinearSolverStats has no struct_size: it shipped before this
+ * convention, and adding one would change its layout under existing
+ * callers. Its layout is frozen.
+ * ------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------
+ * Complementarity outcome (gh#1147)
+ *
+ * What the complementarity driver did on the most recent IpoptSolve: the
+ * same fields, through the same encodings, as the solve report's
+ * "complementarity" block and Python's info["complementarity"]. The
+ * getters answer "nothing" (FALSE, or -1 for the text getter) when the
+ * most recent solve did not run the driver: no solve yet, a solve without
+ * declared pairs, or a solve refused or failed before the driver returned.
+ * The record describes the most recent solve: clearing the pairs does not
+ * erase it, the next solve replaces it.
+ *
+ * Sentinels instead of discriminants: a real that was not measured, or is
+ * not finite (the report's null), reads NaN; a count or 0/1 flag whose
+ * record is absent (no certificate, the B-check did not run) reads -1.
+ * Stage labels are "exact product", "Scholtes continuation",
+ * "l1 penalty", "branch NLP", "branch polish". Both structs are
+ * extensible (struct_size first; see above).
+ * ------------------------------------------------------------------- */
+#define POUNCE_CC_CLASS_S             0   /* strongly stationary */
+#define POUNCE_CC_CLASS_W             1   /* weakly stationary only */
+#define POUNCE_CC_CLASS_NONE          2   /* not a stationary point of the model */
+#define POUNCE_CC_CLASS_NOT_SEARCHED  3   /* not determined: multiplier set too large to search */
+#define POUNCE_CC_CLASS_ABSENT       -1   /* no certificate: model not evaluable there */
+
+#define POUNCE_CC_REPORTED_ANSWER               0   /* a formulation answered */
+#define POUNCE_CC_REPORTED_WEAK_FALLBACK        1   /* a W point, when none answered */
+#define POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED 2   /* converged, products in tolerance, uncertified */
+#define POUNCE_CC_REPORTED_VERDICT              3   /* no feasible point: the exact-product verdict */
+
+#define POUNCE_CC_B_VERDICT_B            0   /* B-stationary */
+#define POUNCE_CC_B_VERDICT_NOT_B        1   /* a branch descends */
+#define POUNCE_CC_B_VERDICT_NOT_CHECKED  2   /* not decided: see POUNCE_CC_TEXT_B_REASON */
+#define POUNCE_CC_B_VERDICT_ABSENT      -1   /* the check did not run */
+
+typedef struct {
+    /** Set by the caller to sizeof(PounceComplementarityStats). */
+    ipindex  struct_size;
+    /** complementarity_strategy: "both", "exact" or "continuation". */
+    char     strategy[16];
+    /** POUNCE_CC_REPORTED_*. */
+    ipindex  reported;
+    /** Stage label of the formulation that answered; "" when none did. */
+    char     accepted_by[32];
+    /** Stage label of the weakly stationary fallback; "" when not one. */
+    char     fallback[32];
+    /** Lowered solves run (see GetPounceComplementaritySolve). */
+    ipindex  n_solves;
+    /** Iterations summed over every lowered solve. GetIpoptIterCount is
+     *  the reported solve's alone. */
+    ipindex  total_iterations;
+    /** Reported point's complementarity violation; NaN when unmeasured. */
+    ipnumber max_abs_product;
+    /** POUNCE_CC_CLASS_*. The fields from n_pairs to primal_violation are
+     *  the certificate's: -1 / NaN when certificate_class is ABSENT. */
+    ipindex  certificate_class;
+    ipindex  n_pairs;
+    ipindex  n_biactive;
+    /** Pairs with neither side at zero. */
+    ipindex  n_neither;
+    /** 0/1: the stationarity multipliers are unique (MPCC-LICQ). */
+    ipindex  multipliers_unique;
+    /** Stationarity residual and the band it is judged against; NaN when
+     *  unmeasured. */
+    ipnumber residual;
+    ipnumber resid_tol;
+    /** 0/1: residual within the tight floor. */
+    ipindex  tight;
+    /** 0/1: primal_violation within the feasibility tolerance. */
+    ipindex  feasible;
+    /** Largest row or bound violation; NaN when unmeasured. */
+    ipnumber primal_violation;
+    /** POUNCE_CC_B_VERDICT_*. The three fields after it are -1 when
+     *  b_verdict is ABSENT. */
+    ipindex  b_verdict;
+    ipindex  b_n_biactive;
+    /** Branch LPs solved. */
+    ipindex  b_branches_solved;
+    /** 0/1: every branch was enumerated. */
+    ipindex  b_enumerated;
+    /** Branch NLPs that moved the point off a non-B-stationary one. */
+    ipindex  escapes;
+    /** Pairs whose row was lifted into a variable (complementarity_lift). */
+    ipindex  lifted;
+    /** Largest min(|G|, |H|) over the pairs; NaN when unmeasured. */
+    ipnumber natural_residual;
+    /** 0/1: the branch polish ran; polish_taken (0/1) is meaningful only
+     *  when it did, and reads 0 otherwise. */
+    ipindex  polish_ran;
+    ipindex  polish_taken;
+    /** The polish's natural_residual before and after; NaN when it did not
+     *  run or the value was not measured. */
+    ipnumber polish_residual_before;
+    ipnumber polish_residual_after;
+    /** natural_residual above which the polish runs (10 tol). */
+    ipnumber polish_threshold;
+} PounceComplementarityStats;
+
+/**
+ * Fill `stats` with what the driver did on the most recent solve. FALSE,
+ * leaving `stats` untouched, on a NULL argument, a stats->struct_size
+ * smaller than sizeof(PounceComplementarityStats), before any solve, and
+ * when the most recent solve did not run the driver.
+ */
+Bool GetPounceComplementarityStats(
+    IpoptProblem                ipopt_problem,
+    PounceComplementarityStats *stats
+);
+
+typedef struct {
+    /** Set by the caller to sizeof(PounceComplementaritySolve). */
+    ipindex  struct_size;
+    /** Stage label (see above). */
+    char     stage[32];
+    /** 0/1: a relaxed solve (G.H <= tau); tau is NaN when 0. */
+    ipindex  relaxed;
+    ipnumber tau;
+    /** ApplicationReturnStatus of this lowered solve. */
+    ipindex  status;
+    /** Its iterations, every attempt inside it included. */
+    ipindex  iterations;
+    /** Complementarity violation at its point; NaN when unmeasured. */
+    ipnumber max_abs_product;
+    /** Wall-clock seconds; NaN when unmeasured. */
+    ipnumber seconds;
+} PounceComplementaritySolve;
+
+/**
+ * Fill `solve` with lowered solve k (0-based, in the order run, k <
+ * n_solves). FALSE, leaving `solve` untouched, on a NULL argument, a short
+ * solve->struct_size, k out of range, and whenever
+ * GetPounceComplementarityStats would be FALSE.
+ */
+Bool GetPounceComplementaritySolve(
+    IpoptProblem                ipopt_problem,
+    ipindex                     k,
+    PounceComplementaritySolve *solve
+);
+
+#define POUNCE_CC_TEXT_SUMMARY        0   /* the driver's one-line account */
+#define POUNCE_CC_TEXT_POLISH_REASON  1   /* why the polish's point was not taken */
+#define POUNCE_CC_TEXT_B_REASON       2   /* why the B-check was not decided */
+
+/**
+ * One of the driver's texts (POUNCE_CC_TEXT_*), with snprintf's contract:
+ * writes at most buflen-1 bytes plus a NUL and returns the text's full
+ * length in bytes without the NUL, so buf = NULL, buflen = 0 sizes the
+ * buffer and a return >= buflen means it was truncated. A NULL buf or
+ * buflen <= 0 writes nothing. -1, writing nothing, when there is no such
+ * text: a NULL handle, an unknown `which`, whenever
+ * GetPounceComplementarityStats would be FALSE, a POLISH_REASON unless the
+ * polish ran and its point was not taken, a B_REASON unless b_verdict is
+ * NOT_CHECKED.
+ */
+ipindex GetPounceComplementarityText(
+    IpoptProblem ipopt_problem,
+    int          which,
+    char        *buf,
+    ipindex      buflen
+);
 
 /**
  * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,
@@ -668,6 +1045,22 @@ Bool IpoptEnableIterHistory(IpoptProblem ipopt_problem);
  * because the C API receives callbacks rather than an .nl file or
  * builtin name.
  *
+ * When that solve ran the complementarity driver (pairs were declared),
+ * the report carries the `complementarity` block at either detail level:
+ * the same block, from the same conversion, as the CLI's --json-output
+ * and Python's report_path write for the same driver outcome. Its fields
+ * are the ones GetPounceComplementarityStats / GetPounceComplementaritySolve
+ * / GetPounceComplementarityText return, with `null` (or an absent key)
+ * where those read NaN, -1 or "". The block is absent after a solve that
+ * did not run the driver, and a refused solve leaves no report at all.
+ *
+ * When that solve ran no driver and the second-opinion ladder ran at
+ * least one rung, the report carries the `second_opinion` block at either
+ * detail level, the same block the CLI and Python write: the rungs tried,
+ * the promoted one, and the base solve's status and iteration count (on a
+ * promotion, the report's status and iteration count are the promoted
+ * rung's). Absent when no rung ran and after a solve with pairs.
+ *
  * Returns 1 (TRUE) on a successful write, 0 (FALSE) for: NULL handle,
  * no prior solve, an invalid `detail`, a bad path, or an I/O error.
  */
@@ -705,6 +1098,14 @@ typedef struct IpoptSolverInfo* IpoptSolver;
  * `*prob_handle` (the inner pointer is nulled out so the caller
  * cannot accidentally double-free). Returns NULL on a NULL/empty
  * input handle.
+ *
+ * Also returns NULL when the problem has declared complementarity pairs,
+ * and then does NOT consume it: `*prob_handle` stays valid, the caller
+ * still owns it (solve it with IpoptSolve, free it with FreeIpoptProblem).
+ * A session keeps the KKT factor of the model it solved, which with pairs
+ * would be the lowered model's, so the parametric step and reduced Hessian
+ * over your rows would answer a different system. At print_level >= 1 one
+ * line on stderr says why.
  */
 IpoptSolver IpoptCreateSolver(IpoptProblem* prob_handle);
 
@@ -803,6 +1204,189 @@ Bool IpoptSolverReducedHessian(
     Number         obj_scal,
     Number        *hr_out
 );
+
+/* -----------------------------------------------------------------
+ * Matrix-form convex QP / conic entry (gh#1147 Stage 3). Not an Ipopt
+ * API: every name carries the Pounce prefix.
+ *
+ *   minimize    1/2 x'P x + c'x
+ *   subject to  A x = b,   G x <= h  (G x <=_K h with cones),   lb <= x <= ub
+ *
+ * P is given as its LOWER triangle (row >= col); A and G as full
+ * triplets. Triplet indices are 0-based for index_style 0 and 1-based
+ * for index_style 1. Duplicate triplets are summed. Every builder
+ * validates all of its input first and changes nothing when it
+ * returns FALSE (NULL handle or array, index out of range, an
+ * upper-triangle entry of P, a non-finite value).
+ *
+ * Cones (PounceQpAddCone) partition the G rows in order; each block's
+ * slack s = h - G x must lie in its cone (table at POUNCE_CONE_*). A PSD
+ * block of order k holds svec(S): the lower triangle of the k x k slack
+ * column by column, (0,0), (1,0), ..., (k-1,0), (1,1), (2,1), ..., with
+ * every off-diagonal entry scaled by sqrt(2), so <X,Y> = svec(X).svec(Y).
+ * Variable bounds are allowed with cones (a trailing nonnegative block).
+ *
+ * Without cones the solve is Python's solve_qp pipeline (presolve when
+ * qp_presolve=yes, then the IPM or the active-set engine, postsolve,
+ * the unverified-Optimal demotion); with any cone it is solve_socp's
+ * conic IPM. Both run pounce_convex::pipeline, the code Python runs.
+ *
+ * PSD screen (gh#112). Under method=ipm (with or without cones) a P
+ * that is not certified
+ * positive semidefinite is refused (POUNCE_QP_ERR_INDEFINITE). With
+ * hessian_inertia=auto (the default) the verdict comes from
+ * pounce_convex::certify_psd_lower_triangle, as in the CLI's dispatch:
+ * P passes when the inertia of P + t*I has no negative eigenvalue, at
+ * the CLI's band t = 1e-9 * min(max|P_ij|, 1). A factorization that
+ * cannot decide counts as not certified. Python decides the same
+ * question in numpy (relative tolerance 1e-8*max|P_ij|, eigenvalues
+ * for n <= 1500), so on a borderline P (lambda_min within a few
+ * tolerances of zero, or a badly scaled rank-deficient P) the two can
+ * disagree; this entry errs toward refusing. hessian_inertia=psd,
+ * indefinite or unknown replaces the verdict with the caller's claim.
+ * Under method=active-set the verdict is handed to the engine
+ * (indefinite P is solved to a local point, not refused).
+ *
+ * Getters describe the most recent PounceQpSolve that returned a
+ * status (>= 0): before one, and after a solve that returned an
+ * error (< 0), they return FALSE and write nothing. A builder or
+ * option call does not erase the result.
+ * ----------------------------------------------------------------- */
+struct PounceQpInfo;
+typedef struct PounceQpInfo* PounceQp;
+
+/* PounceQpSolve statuses (>= 0), one per pounce_convex::QpStatus. */
+#define POUNCE_QP_STATUS_OPTIMAL             0
+#define POUNCE_QP_STATUS_OPTIMAL_INACCURATE  1
+#define POUNCE_QP_STATUS_PRIMAL_INFEASIBLE   2
+#define POUNCE_QP_STATUS_DUAL_INFEASIBLE     3
+#define POUNCE_QP_STATUS_ITERATION_LIMIT     4
+#define POUNCE_QP_STATUS_TIME_LIMIT          5
+#define POUNCE_QP_STATUS_NUMERICAL_FAILURE   6
+
+/* Negative returns of PounceQpSolve and PounceQpAddCone. */
+#define POUNCE_QP_ERR_NULL        -1   /* NULL handle */
+#define POUNCE_QP_ERR_ARGUMENT    -2   /* bad cone kind/dim/alpha; P entries whose sum overflows */
+#define POUNCE_QP_ERR_INCOMPLETE  -3   /* no objective, or declared rows never set */
+#define POUNCE_QP_ERR_CONES       -4   /* cones do not partition the m_ineq rows; PSD mixed with exp/pow */
+#define POUNCE_QP_ERR_OPTIONS     -5   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_* */
+#define POUNCE_QP_ERR_INDEFINITE  -6   /* method=ipm and P not certified PSD */
+#define POUNCE_QP_ERR_INTERNAL    -7   /* internal error caught at the boundary */
+
+/* PounceQpAddCone kinds. */
+#define POUNCE_CONE_NONNEG  0   /* dim rows, dim >= 0: s >= 0 */
+#define POUNCE_CONE_SOC     1   /* dim rows, dim >= 1: s0 >= ||s[1:]|| */
+#define POUNCE_CONE_EXP     2   /* dim must be 3: s1*exp(s0/s1) <= s2, s1 > 0 (closure) */
+#define POUNCE_CONE_POW     3   /* dim must be 3; alpha in (0, 1): |s0| <= s1^alpha s2^(1-alpha) */
+#define POUNCE_CONE_PSD     4   /* dim = matrix order k >= 1; k(k+1)/2 svec rows: smat(s) PSD */
+
+/* PounceQpCertificate.kind. */
+#define POUNCE_QP_CERT_NONE               0
+#define POUNCE_QP_CERT_PRIMAL_INFEASIBLE  1   /* Farkas ray in y, z, z_lb, z_ub */
+#define POUNCE_QP_CERT_DUAL_INFEASIBLE    2   /* recession ray in x */
+
+/** Final KKT residuals (Python's QpResult.residuals). Without cones the
+ *  first four are read above their finite-precision floor in the
+ *  objective's units (what the Optimal verdict is judged on); the
+ *  _raw four are the plain absolute values. With cones both sets are
+ *  the plain conic residuals. Extensible (struct_size first; see
+ *  "Extensible output structs" above). */
+typedef struct {
+    /** Set by the caller to sizeof(PounceQpResiduals). */
+    ipindex  struct_size;
+    ipnumber primal_infeasibility;
+    ipnumber dual_infeasibility;
+    ipnumber complementarity;
+    ipnumber kkt_error;
+    ipnumber primal_infeasibility_raw;
+    ipnumber dual_infeasibility_raw;
+    ipnumber complementarity_raw;
+    ipnumber kkt_error_raw;
+} PounceQpResiduals;
+
+/** Infeasibility certificate and HSDE scalars (Python's
+ *  certificate_scale, tau, kappa). `scale` is the ray's inf-norm, NaN
+ *  when kind is POUNCE_QP_CERT_NONE. The ray carries the embedding's
+ *  1/tau scale; divide by `scale` for a unit ray. tau and kappa are NaN
+ *  when the driver records none: the direct IPM (qp_hsde=no), the
+ *  active-set engine, and the exponential/power-cone driver.
+ *  Extensible (struct_size first). */
+typedef struct {
+    /** Set by the caller to sizeof(PounceQpCertificate). */
+    ipindex  struct_size;
+    ipindex  kind;
+    ipnumber scale;
+    ipnumber tau;
+    ipnumber kappa;
+} PounceQpCertificate;
+
+/** n >= 1 variables, m_eq >= 0 and m_ineq >= 0 rows, index_style 0 or
+ *  1. NULL on any other argument. */
+PounceQp PounceCreateQp(ipindex n, ipindex m_eq, ipindex m_ineq, ipindex index_style);
+
+/** Free a handle. NULL is a no-op. The handle must not be used after. */
+void PounceFreeQp(PounceQp qp);
+
+/** P (lower triangle, nnz_p triplets) and c (length n, required). */
+Bool PounceQpSetObjective(PounceQp qp, ipindex nnz_p, const ipindex* p_row,
+                          const ipindex* p_col, const ipnumber* p_val,
+                          const ipnumber* c);
+
+/** A (m_eq x n) and b (length m_eq). Required when m_eq > 0. */
+Bool PounceQpSetEqualities(PounceQp qp, ipindex nnz_a, const ipindex* a_row,
+                           const ipindex* a_col, const ipnumber* a_val,
+                           const ipnumber* b);
+
+/** G (m_ineq x n) and h (length m_ineq). Required when m_ineq > 0. */
+Bool PounceQpSetInequalities(PounceQp qp, ipindex nnz_g, const ipindex* g_row,
+                             const ipindex* g_col, const ipnumber* g_val,
+                             const ipnumber* h);
+
+/** Variable box, each length n or NULL (no bound on that side). An
+ *  entry <= -1e19 in lb or >= 1e19 in ub is no bound; NaN is refused. */
+Bool PounceQpSetBounds(PounceQp qp, const ipnumber* lb, const ipnumber* ub);
+
+/** Append a cone (POUNCE_CONE_*) to the partition of the G rows, in
+ *  order. Returns its 0-based position, or POUNCE_QP_ERR_NULL /
+ *  POUNCE_QP_ERR_ARGUMENT. alpha is read for POUNCE_CONE_POW only. */
+int PounceQpAddCone(PounceQp qp, int kind, ipindex dim, ipnumber alpha);
+
+/** tol (0,1); max_iter (whole, >= 1); time_limit (seconds, >= 0);
+ *  tau, tau_max (0,1); qp_reg (>= 0). FALSE on an unknown key or a
+ *  value out of range. */
+Bool PounceQpSetNumOption(PounceQp qp, const char* key, ipnumber value);
+
+/** method: ipm | active-set; hessian_inertia: auto | psd | indefinite |
+ *  unknown; qp_presolve, qp_hsde, qp_equilibrate, qp_crossover: yes |
+ *  no. FALSE on an unknown key or value. */
+Bool PounceQpSetStrOption(PounceQp qp, const char* key, const char* value);
+
+/** POUNCE_QP_STATUS_* (>= 0), or POUNCE_QP_ERR_* (< 0) before any
+ *  engine runs. Discards the previous result either way. */
+int PounceQpSolve(PounceQp qp);
+
+/** Copy the solution out; any output may be NULL. x, z_lb, z_ub: n;
+ *  y: m_eq; z: m_ineq. Signs: P x + c + A'y + G'z - z_lb + z_ub = 0,
+ *  z, z_lb, z_ub >= 0 (z cone-dual with cones). */
+Bool PounceQpGetSolution(PounceQp qp, ipnumber* x, ipnumber* y, ipnumber* z,
+                         ipnumber* z_lb, ipnumber* z_ub, ipnumber* obj,
+                         ipindex* iters);
+
+/** FALSE (nothing written) for a NULL handle or out, an
+ *  out->struct_size smaller than sizeof(PounceQpResiduals), or no
+ *  result. */
+Bool PounceQpGetResiduals(PounceQp qp, PounceQpResiduals* out);
+
+/** TRUE after every solve that returned a status; kind says whether a
+ *  certificate is present. FALSE (nothing written) for a NULL handle or
+ *  out, a short out->struct_size, or no result. */
+Bool PounceQpGetCertificate(PounceQp qp, PounceQpCertificate* out);
+
+/** pounce.solve-report/v1 JSON at detail "summary" (or NULL) / "full".
+ *  solution.engine is cvx-qp, qp-active-set, or cvx-qcqp (any cone);
+ *  solution.lambda is y then z. FALSE for a NULL handle or path, no
+ *  result, an unknown detail, or an I/O error. */
+Bool PounceQpWriteSolveReport(PounceQp qp, const char* path, const char* detail);
 
 #ifdef __cplusplus
 } /* extern "C" */

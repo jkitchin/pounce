@@ -14,7 +14,9 @@ manual; it is now automated by `release-crates.yml` (tag-triggered).
 A pre-tag guard, `scripts/check-release-consistency.sh` (run in CI on every
 PR), fails the build unless all three versions below agree **and** the
 crates.io publish list matches the workspace's publishable crates in
-topological order. Run it before tagging.
+topological order. Run it before tagging. It also checks that the C header's
+`POUNCE_VERSION*` defines (`crates/pounce-cinterface/include/pounce.h`) equal
+the workspace version: bump them with `Cargo.toml`.
 
 1. **PyPI `pounce-solver`** — `.github/workflows/release-pounce.yml`, triggered
    by pushing a `python-vX.Y.Z` tag. Builds wheels (incl. Windows) + sdist,
@@ -31,7 +33,10 @@ topological order. Run it before tagging.
    Crates with `publish = false` (pounce-py, pounce-studio-pyo3, iter-diff)
    are intentionally excluded. Full procedure: `dev-notes/cargo-release.md`.
    Version: root `Cargo.toml` `[workspace.package]` (all crates inherit it via
-   `version.workspace = true`).
+   `version.workspace = true`), **and** the `POUNCE_VERSION`,
+   `POUNCE_VERSION_MAJOR`/`_MINOR`/`_PATCH` defines in
+   `crates/pounce-cinterface/include/pounce.h` — the guard fails the release
+   if they lag.
 
    The CLI binary is also bundled inside the PyPI wheels, so an end user
    `pip install pounce-solver` does not require the crates.io publish — but the

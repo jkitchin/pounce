@@ -341,6 +341,156 @@ pub fn is_mixed(xl: Number, xu: Number, gl: Number, gu: Number) -> bool {
     xl > -INF && xu < INF && xl < xu && gl <= -INF && gu >= INF
 }
 
+/// How a declared pair is lowered, as [`classify_pair`] reads it off the
+/// variable's and the row's bounds; see the module docs ("Pairs").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PairShape {
+    /// Both sides have exactly one finite bound. `g` is the variable side
+    /// and `h` the row side, each as `(sign, bound)`: `(+1, lo)` for a lower
+    /// bound, `(-1, hi)` for an upper.
+    OneSided {
+        g: (Number, Number),
+        h: (Number, Number),
+    },
+    /// The row has exactly one finite bound and the variable two: the row's
+    /// side names the variable bound in the pair (`g >= c` with `x`'s lower
+    /// bound, `g <= c` with its upper, as the `.nl` flag does), and the
+    /// other bound stays an ordinary limit. `complements(s >= 0, L >= 0)`
+    /// with `L <= 1` declared writes this.
+    OneSidedPlusBound {
+        g: (Number, Number),
+        h: (Number, Number),
+    },
+    /// The variable boxed `l < u`, the row free: lowered to two product rows.
+    Mixed { l: Number, u: Number },
+}
+
+/// Why [`validate_pairs`] refused a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairErrorKind {
+    /// The variable or the row index is outside `[0, n)` / `[0, m)`.
+    OutOfRange,
+    /// The variable is already in an earlier pair.
+    VarAlreadyPaired,
+    /// The row is already in an earlier pair.
+    RowAlreadyPaired,
+    /// The bounds are none of the shapes [`PairShape`] names.
+    UnsupportedShape,
+}
+
+/// A refused pair: its position in the declared list, why, and the message
+/// [`MpccTnlp::new`] reports (its `Display`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairError {
+    /// Index of the refused pair in the list passed to [`validate_pairs`].
+    pub pair: usize,
+    pub kind: PairErrorKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for PairError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PairError {}
+
+/// The shape of a pair whose variable has bounds `[xl, xu]` and whose row
+/// has `[gl, gu]`, or `None` when it is none of the shapes the wrapper
+/// lowers. Bounds at or beyond `±1e19` are infinite.
+pub fn classify_pair(xl: Number, xu: Number, gl: Number, gu: Number) -> Option<PairShape> {
+    let row = one_sided(gl, gu);
+    if let (Some(g), Some(h)) = (one_sided(xl, xu), row) {
+        return Some(PairShape::OneSided { g, h });
+    }
+    if let Some(h) = row
+        && xl > -INF
+        && xu < INF
+    {
+        let g = if h.0 > 0.0 { (1.0, xl) } else { (-1.0, xu) };
+        return Some(PairShape::OneSidedPlusBound { g, h });
+    }
+    if is_mixed(xl, xu, gl, gu) {
+        return Some(PairShape::Mixed { l: xl, u: xu });
+    }
+    None
+}
+
+/// Check `pairs` against a model with `n` variables and `m` rows and the
+/// given bounds, in order: per pair, the indices are in range, the variable
+/// and then the row are not in an earlier pair, and the bounds have a shape
+/// [`classify_pair`] accepts. Returns one shape per pair, or the first
+/// refusal. This is the validator [`MpccTnlp::with_lift`] runs, exposed so a
+/// frontend can refuse a pair when it is declared rather than at solve time.
+pub fn validate_pairs(
+    n: usize,
+    m: usize,
+    x_l: &[Number],
+    x_u: &[Number],
+    g_l: &[Number],
+    g_u: &[Number],
+    pairs: &[ComplementarityPair],
+) -> Result<Vec<PairShape>, PairError> {
+    let mut seen_row = vec![false; m];
+    let mut seen_var = vec![false; n];
+    let mut shapes = Vec::with_capacity(pairs.len());
+    let err = |pair, kind, message| {
+        Err(PairError {
+            pair,
+            kind,
+            message,
+        })
+    };
+    for (k, p) in pairs.iter().enumerate() {
+        if p.var >= n || p.row >= m {
+            return err(
+                k,
+                PairErrorKind::OutOfRange,
+                format!(
+                    "pair {k}: variable {} / row {} out of range (n = {n}, m = {m})",
+                    p.var, p.row
+                ),
+            );
+        }
+        if std::mem::replace(&mut seen_var[p.var], true) {
+            return err(
+                k,
+                PairErrorKind::VarAlreadyPaired,
+                format!("pair {k}: variable {} is already in a pair", p.var),
+            );
+        }
+        if std::mem::replace(&mut seen_row[p.row], true) {
+            return err(
+                k,
+                PairErrorKind::RowAlreadyPaired,
+                format!("pair {k}: row {} is already in a pair", p.row),
+            );
+        }
+        let (xl, xu, gl, gu) = (x_l[p.var], x_u[p.var], g_l[p.row], g_u[p.row]);
+        match classify_pair(xl, xu, gl, gu) {
+            Some(shape) => shapes.push(shape),
+            None => {
+                return err(
+                    k,
+                    PairErrorKind::UnsupportedShape,
+                    format!(
+                        "pair {k}: variable {} has bounds [{xl:e}, {xu:e}] and row {} has \
+                         [{gl:e}, {gu:e}]. Two shapes are lowered: one-sided (the row has exactly \
+                         one finite bound, and the variable a matching one: `x >= l ⟂ g >= 0`, \
+                         either orientation; a second variable bound is kept as an ordinary limit) \
+                         and mixed (the variable boxed, the row free: `l <= x <= u ⟂ g`, g >= 0 at l, \
+                         g <= 0 at u, g = 0 between). For a box on the row side, put it on a \
+                         variable instead (`g(x) = y` as a row, `l <= y <= u ⟂ ...`)",
+                        p.var, p.row
+                    ),
+                );
+            }
+        }
+    }
+    Ok(shapes)
+}
+
 fn base(style: IndexStyle) -> Index {
     match style {
         IndexStyle::C => 0,
@@ -391,70 +541,34 @@ impl MpccTnlp {
             return Err("the inner model did not report its bounds".into());
         }
 
-        let mut seen_row = vec![false; m];
-        let mut seen_var = vec![false; n];
+        let shapes =
+            validate_pairs(n, m, &x_l, &x_u, &g_l, &g_u, &pairs).map_err(|e| e.to_string())?;
         // Each declared pair becomes one product row (one-sided) or two
         // (mixed); the rest of the wrapper works on these lowered pairs.
         let mut lowered = Vec::with_capacity(pairs.len());
         let mut g_side = Vec::with_capacity(pairs.len());
         let mut h_side = Vec::with_capacity(pairs.len());
         let mut signless = Vec::with_capacity(pairs.len());
-        for (k, p) in pairs.iter().enumerate() {
-            if p.var >= n || p.row >= m {
-                return Err(format!(
-                    "pair {k}: variable {} / row {} out of range (n = {n}, m = {m})",
-                    p.var, p.row
-                ));
-            }
-            if std::mem::replace(&mut seen_var[p.var], true) {
-                return Err(format!("pair {k}: variable {} is already in a pair", p.var));
-            }
-            if std::mem::replace(&mut seen_row[p.row], true) {
-                return Err(format!("pair {k}: row {} is already in a pair", p.row));
-            }
-            let (xl, xu, gl, gu) = (x_l[p.var], x_u[p.var], g_l[p.row], g_u[p.row]);
-            if let (Some(gs), Some(hs)) = (one_sided(xl, xu), one_sided(gl, gu)) {
-                lowered.push(*p);
-                g_side.push(gs);
-                h_side.push(hs);
-                signless.push(false);
-                continue;
-            }
-            // One-sided with an ordinary second bound on the variable: the
-            // row's one finite side names the variable bound in the pair
-            // (`g >= c` with `x`'s lower bound, `g <= c` with its upper, as
-            // the `.nl` flag does), and the other bound stays a plain limit.
-            // `complements(s >= 0, L >= 0)` with `L <= 1` declared writes this.
-            if let Some(hs) = one_sided(gl, gu) {
-                if xl > -INF && xu < INF {
+        for (p, shape) in pairs.iter().zip(&shapes) {
+            match *shape {
+                PairShape::OneSided { g, h } | PairShape::OneSidedPlusBound { g, h } => {
                     lowered.push(*p);
-                    g_side.push(if hs.0 > 0.0 { (1.0, xl) } else { (-1.0, xu) });
-                    h_side.push(hs);
+                    g_side.push(g);
+                    h_side.push(h);
                     signless.push(false);
-                    continue;
+                }
+                // Mixed: `l <= x <= u ⟂ g` with the row free -- g >= 0 at l,
+                // g <= 0 at u, g = 0 strictly between -- is exactly the box
+                // with `(x - l)·g <= 0` and `(u - x)·(-g) <= 0`: two product
+                // rows on the same variable and row, g itself unconstrained
+                // in sign.
+                PairShape::Mixed { l, u } => {
+                    lowered.extend([*p, *p]);
+                    g_side.extend([(1.0, l), (-1.0, u)]);
+                    h_side.extend([(1.0, 0.0), (-1.0, 0.0)]);
+                    signless.extend([true, true]);
                 }
             }
-            // Mixed: `l <= x <= u ⟂ g` with the row free -- g >= 0 at l,
-            // g <= 0 at u, g = 0 strictly between -- is exactly the box with
-            // `(x - l)·g <= 0` and `(u - x)·(-g) <= 0`: two product rows on
-            // the same variable and row, g itself unconstrained in sign.
-            if is_mixed(xl, xu, gl, gu) {
-                lowered.extend([*p, *p]);
-                g_side.extend([(1.0, xl), (-1.0, xu)]);
-                h_side.extend([(1.0, 0.0), (-1.0, 0.0)]);
-                signless.extend([true, true]);
-                continue;
-            }
-            return Err(format!(
-                "pair {k}: variable {} has bounds [{xl:e}, {xu:e}] and row {} has \
-                 [{gl:e}, {gu:e}]. Two shapes are lowered: one-sided (the row has exactly \
-                 one finite bound, and the variable a matching one: `x >= l ⟂ g >= 0`, \
-                 either orientation; a second variable bound is kept as an ordinary limit) \
-                 and mixed (the variable boxed, the row free: `l <= x <= u ⟂ g`, g >= 0 at l, \
-                 g <= 0 at u, g = 0 between). For a box on the row side, put it on a \
-                 variable instead (`g(x) = y` as a row, `l <= y <= u ⟂ ...`)",
-                p.var, p.row
-            ));
         }
         let declared = pairs;
         let pairs = lowered;
@@ -560,7 +674,7 @@ impl MpccTnlp {
     /// them; starts, results and multipliers are in the inner model's terms
     /// either way, so a driver switches between solves and nothing else.
     pub fn set_lift(&mut self, on: bool) {
-        if on == !self.layout.lifted.is_empty() {
+        if on != self.layout.lifted.is_empty() {
             return;
         }
         if let Some(other) = self.other_layout.take() {
@@ -2518,6 +2632,256 @@ mod tests {
             .err()
             .unwrap();
         assert!(e.contains("out of range"), "{e}");
+    }
+
+    // ---- `classify_pair` / `validate_pairs`: one test per branch. ----
+
+    const F: Number = 1e19;
+
+    /// The refusal text as `MpccTnlp::new` wrote it before the classifier
+    /// was factored out, after the `pair k: variable .. row .. has [..]. `
+    /// prefix; pinned literally so a reworded message fails here.
+    const SHAPE_TAIL: &str = "Two shapes are lowered: one-sided (the row has exactly \
+        one finite bound, and the variable a matching one: `x >= l ⟂ g >= 0`, \
+        either orientation; a second variable bound is kept as an ordinary limit) \
+        and mixed (the variable boxed, the row free: `l <= x <= u ⟂ g`, g >= 0 at l, \
+        g <= 0 at u, g = 0 between). For a box on the row side, put it on a \
+        variable instead (`g(x) = y` as a row, `l <= y <= u ⟂ ...`)";
+
+    fn one(xl: Number, xu: Number, gl: Number, gu: Number) -> Result<Vec<PairShape>, PairError> {
+        validate_pairs(
+            1,
+            1,
+            &[xl],
+            &[xu],
+            &[gl],
+            &[gu],
+            &[ComplementarityPair { row: 0, var: 0 }],
+        )
+    }
+
+    fn refused(r: Result<Vec<PairShape>, PairError>, kind: PairErrorKind, text: &str) {
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, kind, "{e}");
+        assert_eq!(e.to_string(), text);
+        assert_eq!(e.message, text);
+    }
+
+    #[test]
+    fn classify_one_sided_lower_lower() {
+        let s = PairShape::OneSided {
+            g: (1.0, 2.0),
+            h: (1.0, 0.5),
+        };
+        assert_eq!(classify_pair(2.0, F, 0.5, F), Some(s));
+        assert_eq!(one(2.0, F, 0.5, F).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn classify_one_sided_upper_upper() {
+        let s = PairShape::OneSided {
+            g: (-1.0, 3.0),
+            h: (-1.0, -1.0),
+        };
+        assert_eq!(classify_pair(-F, 3.0, -F, -1.0), Some(s));
+        assert_eq!(one(-F, 3.0, -F, -1.0).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn classify_one_sided_lower_upper() {
+        let s = PairShape::OneSided {
+            g: (1.0, 0.0),
+            h: (-1.0, 4.0),
+        };
+        assert_eq!(classify_pair(0.0, F, -F, 4.0), Some(s));
+        assert_eq!(one(0.0, F, -F, 4.0).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn classify_one_sided_upper_lower() {
+        let s = PairShape::OneSided {
+            g: (-1.0, 1.0),
+            h: (1.0, 0.0),
+        };
+        assert_eq!(classify_pair(-F, 1.0, 0.0, F), Some(s));
+        assert_eq!(one(-F, 1.0, 0.0, F).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn classify_plus_bound_row_lower_takes_the_variable_lower() {
+        let s = PairShape::OneSidedPlusBound {
+            g: (1.0, 0.0),
+            h: (1.0, 0.0),
+        };
+        assert_eq!(classify_pair(0.0, 1.0, 0.0, F), Some(s));
+        assert_eq!(one(0.0, 1.0, 0.0, F).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn classify_plus_bound_row_upper_takes_the_variable_upper() {
+        let s = PairShape::OneSidedPlusBound {
+            g: (-1.0, 1.0),
+            h: (-1.0, 2.0),
+        };
+        assert_eq!(classify_pair(0.0, 1.0, -F, 2.0), Some(s));
+        assert_eq!(one(0.0, 1.0, -F, 2.0).unwrap(), vec![s]);
+    }
+
+    /// A fixed variable against a one-sided row has two finite bounds, so
+    /// it is the plus-bound shape (not refused): only the free-row case of a
+    /// fixed variable is.
+    #[test]
+    fn classify_plus_bound_with_a_fixed_variable() {
+        assert_eq!(
+            classify_pair(1.0, 1.0, 0.0, F),
+            Some(PairShape::OneSidedPlusBound {
+                g: (1.0, 1.0),
+                h: (1.0, 0.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_mixed() {
+        let s = PairShape::Mixed { l: -1.0, u: 2.0 };
+        assert_eq!(classify_pair(-1.0, 2.0, -F, F), Some(s));
+        assert_eq!(one(-1.0, 2.0, -F, F).unwrap(), vec![s]);
+    }
+
+    #[test]
+    fn refuses_a_boxed_row() {
+        assert_eq!(classify_pair(0.0, F, -1.0, 1.0), None);
+        refused(
+            one(0.0, F, -1.0, 1.0),
+            PairErrorKind::UnsupportedShape,
+            &format!(
+                "pair 0: variable 0 has bounds [0e0, 1e19] and row 0 has [-1e0, 1e0]. {SHAPE_TAIL}"
+            ),
+        );
+    }
+
+    #[test]
+    fn refuses_both_sides_free() {
+        assert_eq!(classify_pair(-F, F, -F, F), None);
+        refused(
+            one(-F, F, -F, F),
+            PairErrorKind::UnsupportedShape,
+            &format!(
+                "pair 0: variable 0 has bounds [-1e19, 1e19] and row 0 has [-1e19, 1e19]. {SHAPE_TAIL}"
+            ),
+        );
+    }
+
+    /// Refused today; the C API's MOI helper (gh#1147 S1-I9) maps this case
+    /// to "no pair" itself and relies on the wrapper refusing it.
+    #[test]
+    fn refuses_a_fixed_variable_with_a_free_row() {
+        assert_eq!(classify_pair(1.0, 1.0, -F, F), None);
+        refused(
+            one(1.0, 1.0, -F, F),
+            PairErrorKind::UnsupportedShape,
+            &format!(
+                "pair 0: variable 0 has bounds [1e0, 1e0] and row 0 has [-1e19, 1e19]. {SHAPE_TAIL}"
+            ),
+        );
+    }
+
+    /// A row equality (`gl == gu`) is a boxed row, not one-sided.
+    #[test]
+    fn refuses_an_equality_row() {
+        assert_eq!(classify_pair(0.0, F, 0.0, 0.0), None);
+    }
+
+    fn two(pairs: &[ComplementarityPair]) -> Result<Vec<PairShape>, PairError> {
+        // n = 3, m = 2, every pair shape-valid, so only the index checks bite.
+        validate_pairs(3, 2, &[0.0; 3], &[F; 3], &[0.0; 2], &[F; 2], pairs)
+    }
+
+    const fn cp(row: usize, var: usize) -> ComplementarityPair {
+        ComplementarityPair { row, var }
+    }
+
+    #[test]
+    fn refuses_a_variable_out_of_range() {
+        refused(
+            two(&[cp(0, 0), cp(1, 3)]),
+            PairErrorKind::OutOfRange,
+            "pair 1: variable 3 / row 1 out of range (n = 3, m = 2)",
+        );
+        assert_eq!(two(&[cp(0, 0), cp(1, 3)]).unwrap_err().pair, 1);
+    }
+
+    #[test]
+    fn refuses_a_row_out_of_range() {
+        refused(
+            two(&[cp(2, 0)]),
+            PairErrorKind::OutOfRange,
+            "pair 0: variable 0 / row 2 out of range (n = 3, m = 2)",
+        );
+    }
+
+    #[test]
+    fn refuses_a_duplicate_variable() {
+        refused(
+            two(&[cp(0, 1), cp(1, 1)]),
+            PairErrorKind::VarAlreadyPaired,
+            "pair 1: variable 1 is already in a pair",
+        );
+    }
+
+    #[test]
+    fn refuses_a_duplicate_row() {
+        refused(
+            two(&[cp(1, 0), cp(1, 2)]),
+            PairErrorKind::RowAlreadyPaired,
+            "pair 1: row 1 is already in a pair",
+        );
+    }
+
+    /// Checks run per pair in order: an earlier pair's bad shape is reported
+    /// before a later pair's bad index, as `MpccTnlp::new` always did.
+    #[test]
+    fn reports_the_first_refusal_in_declaration_order() {
+        let e = validate_pairs(
+            2,
+            2,
+            &[-F, 0.0],
+            &[F, F],
+            &[0.0, 0.0],
+            &[F, F],
+            &[cp(0, 0), cp(5, 1)],
+        )
+        .unwrap_err();
+        assert_eq!((e.pair, e.kind), (0, PairErrorKind::UnsupportedShape));
+    }
+
+    /// `MpccTnlp::new` reports `validate_pairs`'s message unchanged.
+    #[test]
+    fn the_wrapper_reports_the_classifier_message() {
+        let e = MpccTnlp::new(
+            Rc::new(RefCell::new(Toy {
+                style: IndexStyle::C,
+            })),
+            vec![cp(2, 1)],
+            Lowering::Eq,
+        )
+        .err()
+        .unwrap();
+        // Toy's bounds, read back rather than restated.
+        let mut t = Toy {
+            style: IndexStyle::C,
+        };
+        let (mut xl, mut xu, mut gl, mut gu) =
+            (vec![0.0; 3], vec![0.0; 3], vec![0.0; 3], vec![0.0; 3]);
+        assert!(t.get_bounds_info(BoundsInfo {
+            x_l: &mut xl,
+            x_u: &mut xu,
+            g_l: &mut gl,
+            g_u: &mut gu,
+        }));
+        let want = validate_pairs(3, 3, &xl, &xu, &gl, &gu, &[cp(2, 1)]).unwrap_err();
+        assert_eq!(want.kind, PairErrorKind::UnsupportedShape);
+        assert_eq!(e, want.to_string());
     }
 
     #[test]

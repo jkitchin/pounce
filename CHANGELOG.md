@@ -10,6 +10,99 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Declared complementarity through the C API (gh#1147).** A C program, or
+  a wrapper linking `libpounce_cinterface`, can now solve a model with
+  complementarity pairs through the same driver, options and certificate
+  as the CLI and Python. All additions; no existing prototype, struct or
+  `#define` value changed.
+  - *Declaring:* `AddPounceComplementarityPair`,
+    `SetPounceComplementarityPairs` (replace, all or nothing, with the
+    position of the first refused pair), `ClearPounceComplementarityPairs`,
+    `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`,
+    in the problem's index style and in the native shapes Python's
+    `Problem(complementarity=)` and the `.nl` reader accept. Each
+    declaration is checked at once by the classifier the lowering runs and
+    refused with a `POUNCE_CC_ERR_*` code, changing nothing.
+  - *MOI semantics:* `AddPounceComplementsConstraint` takes JuMP's
+    `[F, x] ∈ Complements` on a free row and maps it onto the native pairs
+    by writing the sign MOI implies into the handle's row bounds (`F >= 0`,
+    `F <= 0` or `F = 0`, or nothing for a boxed or fixed `x`), returning a
+    `POUNCE_COMPLEMENTS_*` code that says which.
+  - *Solving:* with pairs declared, `IpoptSolve` solves through the
+    complementarity driver, honours the `complementarity_*` options and
+    writes back the reported point; without pairs it is unchanged.
+    `IpoptCreateSolver` and a staged SQP working set refuse pairs,
+    `IpoptGetWorkingSet` reports no set after a driver solve, and
+    `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` report no data
+    during one.
+  - *Reading back:* `GetPounceComplementarityStats` (the `#[repr(C)]`
+    `PounceComplementarityStats`), `GetPounceComplementaritySolve`
+    (`PounceComplementaritySolve`, one lowered solve) and
+    `GetPounceComplementarityText` (summary, polish and B-check reasons,
+    `snprintf` contract) return the solve report's `complementarity` block
+    as scalars, and `IpoptWriteSolveReport` writes that block, the same one
+    the CLI and Python write.
+  - *Extensible output structs:* `PounceComplementarityStats`,
+    `PounceComplementaritySolve` and Stage 3's `PounceQpResiduals` and
+    `PounceQpCertificate` begin with `ipindex struct_size`, which the caller
+    sets to `sizeof` the struct; a smaller value (a forgotten `= {0}`) is
+    refused with nothing written, and a getter never writes past its own
+    release's size. Later releases may then append fields without breaking
+    callers built against this header. `PounceLinearSolverStats` is
+    unchanged.
+  - `IpoptWriteSolveReport` also writes the `second_opinion` block (gh#850)
+    after a solve without pairs on which the second-opinion ladder ran,
+    under the same condition and through the same conversion as the CLI
+    and Python. It had kept only the ladder's status and statistics, so a
+    solve a rung rescued read as a clean, fast one: the report's iteration
+    count is the promoted rung's alone. Solve behaviour is unchanged.
+  - `examples/complementarity.c` exercises all of it, and the book's
+    `docs/src/c-api.md` documents it, including how to make a
+    callback model reproduce the CLI's run on the same `.nl` model.
+- **Matrix-form convex QP and conic programs through the C API (gh#1147).**
+  A new opaque `PounceQp` handle takes `min ½xᵀPx + cᵀx` subject to
+  `Ax = b`, `Gx ≤ h` (or `Gx ⪯_K h`) and `lb ≤ x ≤ ub` as triplets (0- or
+  1-based, `P` lower triangle) and solves it with the convex engines, through
+  the pipeline Python's `solve_qp` and `solve_socp` run, now shared as
+  `pounce_convex::pipeline`. Additions only; nothing existing changed.
+  - *Building:* `PounceCreateQp`, `PounceFreeQp`, `PounceQpSetObjective`,
+    `PounceQpSetEqualities`, `PounceQpSetInequalities`, `PounceQpSetBounds`,
+    and `PounceQpAddCone` for nonnegative, second-order, exponential, power
+    and PSD (`svec`) blocks. Each builder validates everything first and
+    changes nothing on `FALSE`.
+  - *Options and solving:* `PounceQpSetNumOption` / `PounceQpSetStrOption`
+    take `tol`, `max_iter`, `time_limit`, `tau`, `tau_max`, `qp_reg`,
+    `method` (`ipm` / `active-set`), `hessian_inertia` and the `qp_presolve`,
+    `qp_hsde`, `qp_equilibrate`, `qp_crossover` switches. `PounceQpSolve`
+    returns a `POUNCE_QP_STATUS_*`, or a `POUNCE_QP_ERR_*` before any engine
+    runs: an option the engine would drop is refused, not ignored (with a
+    cone, `active-set`, `tau`, `tau_max` and every `qp_*` switch), and so is a
+    `P` the IPM's PSD screen does not certify. The screen is
+    `certify_psd_lower_triangle` at the CLI's band, not Python's numpy check,
+    so it can refuse a borderline `P` Python accepts; `hessian_inertia=psd`
+    overrides it.
+  - *Reading back:* `PounceQpGetSolution`, `PounceQpGetResiduals`
+    (`PounceQpResiduals`), `PounceQpGetCertificate` (`PounceQpCertificate`:
+    Farkas or recession ray, `tau`, `kappa`) and `PounceQpWriteSolveReport`
+    (`pounce.solve-report/v1`; `solution.engine` is `cvx-qp`,
+    `qp-active-set`, or `cvx-qcqp` for any cone).
+  - On Linux x86_64 the results equal Python's bit for bit on 25 models
+    covering every cone kind and both engines. `examples/qp_socp.c` runs a QP,
+    an SOCP, an infeasibility certificate and three refusals, and the book's
+    `docs/src/c-api.md` documents the cone layouts, every option, status and
+    error code.
+- **The C examples are built and run by `cargo test`.** Every
+  `crates/pounce-cinterface/examples/*.c` is compiled with
+  `-std=c99 -Wall -Wextra -Werror -pedantic` against `pounce.h` and run;
+  `make c-api-examples` does the same by hand. A guard holds the exported
+  symbols, the header's prototypes and the docs to one another, and the
+  header's structs to the Rust layout.
+
+### Fixed
+- **`pounce.h`'s version defines match the library.** `POUNCE_VERSION_MINOR`
+  and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
+  `0.16.0`; they now equal the crate version, and a test and the release
+  guard (`scripts/check-release-consistency.sh`) keep them so.
 - **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
   `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
   `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"

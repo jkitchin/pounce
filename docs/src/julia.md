@@ -27,6 +27,9 @@ directory before loading Pounce. `Pounce.library_path()` reports the loaded
 file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
 Pounce.jl 0.1 accepts native POUNCE 0.15.x and 0.16.x and checks the required C symbols
 at import. Other native minor versions require a wrapper ABI review.
+POUNCE 0.17 adds C symbols (declared complementarity, see
+[C API](c-api.md#complementarity)) and changes none, but Pounce.jl refuses
+to load it until that review widens its version gate.
 There is no registered Julia package or bundled JLL binary yet.
 
 JuMP/MathOptInterface support is an optional package extension. Load JuMP or

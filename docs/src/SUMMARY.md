@@ -33,6 +33,7 @@
 - [CasADi](casadi.md)
 - [Python API](python.md)
 - [Julia and JuMP](julia.md)
+- [C API](c-api.md)
 - [Rust API](rust.md)
   - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)

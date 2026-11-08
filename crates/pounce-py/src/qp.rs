@@ -17,7 +17,10 @@
 //! data; `P` is the **lower triangle** of the symmetric Hessian.
 
 use numpy::IntoPyArray;
-use pounce_convex::presolve::{PresolveOutcome, PresolveStats, presolve};
+use pounce_convex::pipeline::{
+    EngineSwitches, PipelineError, PresolveReport, check_ipm_inertia, demote_unverified_optimal,
+    solve_presolved,
+};
 use pounce_convex::{ActiveSetOverrides, HessianInertia, solve_qp_active_set_inertia};
 use pounce_convex::{
     ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution, QpStatus,
@@ -508,174 +511,10 @@ fn time_limit_duration(secs: Option<f64>, func: &str) -> PyResult<Option<Duratio
     }
 }
 
-/// The CLI's convex-engine switches (`qp_presolve`, `qp_reg`, `qp_hsde`,
-/// `qp_equilibrate`, `qp_crossover`) as `solve_qp` takes them (gh#990; asked for by discopt#1615).
-///
-/// They were CLI-only until here: a Python caller had no way to ask for a
-/// presolve, an exact LP vertex, or the direct driver. `None` leaves each at
-/// what this entry point did before, which is the [`QpOptions`] default for the
-/// last four and **no presolve** — the CLI presolves by default, but this path
-/// never has, and an omitted argument must not change a solve.
-///
-/// What each engine reads, and therefore what is refused rather than accepted
-/// and dropped:
-///
-/// * `method="ipm"` reads all five.
-/// * `method="active-set"` reads `qp_presolve` (the CLI presolves for both
-///   engines) and `qp_equilibrate` (its retry on a badly-scaled problem). It has
-///   no KKT regularization, no embedding, and already returns a vertex, so
-///   `qp_reg`, `qp_hsde` and `qp_crossover` are refused there.
-/// * With `warm_start=`, the IPM's warm path runs no crossover and the warm
-///   point lives in the unreduced space, so `qp_crossover=True` and
-///   `qp_presolve=True` are refused. (`False` asks for what happens anyway.)
-struct EngineSwitches {
-    presolve: Option<bool>,
-    reg: Option<f64>,
-    hsde: Option<bool>,
-    equilibrate: Option<bool>,
-    crossover: Option<bool>,
-}
-
-impl EngineSwitches {
-    fn check(&self, method: &str, warm: bool) -> PyResult<()> {
-        if let Some(r) = self.reg
-            && (!r.is_finite() || r < 0.0)
-        {
-            return Err(PyValueError::new_err(format!(
-                "solve_qp: `qp_reg` must be a finite, non-negative number (the static \
-                 KKT regularization δ); got {r}"
-            )));
-        }
-        if method == "active-set" {
-            let ipm_only = [
-                ("qp_reg", self.reg.is_some()),
-                ("qp_hsde", self.hsde.is_some()),
-                ("qp_crossover", self.crossover.is_some()),
-            ];
-            if let Some((name, _)) = ipm_only.iter().find(|(_, set)| *set) {
-                return Err(PyValueError::new_err(format!(
-                    "solve_qp: `{name}` is an option of the convex interior-point engine \
-                     (method='ipm'); the active-set engine has no such setting, so it is \
-                     refused rather than ignored"
-                )));
-            }
-        }
-        if warm {
-            if self.presolve == Some(true) {
-                return Err(PyValueError::new_err(
-                    "solve_qp: qp_presolve=True cannot be combined with warm_start=: the \
-                     warm point is in the original variables and presolve solves a reduced \
-                     problem, so the start would be discarded",
-                ));
-            }
-            if self.crossover == Some(true) {
-                return Err(PyValueError::new_err(
-                    "solve_qp: qp_crossover=True cannot be combined with warm_start=: the \
-                     warm-start path runs no crossover",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn apply(&self, o: &mut QpOptions) {
-        if let Some(r) = self.reg {
-            o.reg = r;
-        }
-        if let Some(h) = self.hsde {
-            o.use_hsde = h;
-        }
-        if let Some(e) = self.equilibrate {
-            o.equilibrate = e;
-        }
-        if let Some(c) = self.crossover {
-            o.crossover = c;
-        }
-    }
-}
-
-/// What `qp_presolve=True` did, for the result's `presolve` entry.
-struct PresolveReport {
-    outcome: &'static str,
-    stats: Option<PresolveStats>,
-    /// The screen that proved infeasibility, or the one whose unconfirmed claim
-    /// was discarded (gh #523) — `None` when neither happened.
-    reason: Option<String>,
-}
-
-/// Presolve, solve the reduced problem with `solve`, postsolve — the CLI's
-/// `run_convex_qp` sequence, minus its `.nl` plumbing. The reduced problem's
-/// objective is offset from the original's by `ps.obj_offset()`, which the
-/// stopping test is told about through `obj_constant`, and the budget left
-/// after presolve is what the solve gets.
-fn solve_presolved<S>(prob: &QpProblem, o: &QpOptions, solve: S) -> (QpSolution, PresolveReport)
-where
-    S: FnOnce(&QpProblem, &QpOptions) -> QpSolution,
-{
-    let t0 = std::time::Instant::now();
-    let trivial = |status| QpSolution {
-        status,
-        x: vec![0.0; prob.n],
-        y: vec![0.0; prob.m_eq()],
-        z: vec![0.0; prob.m_ineq()],
-        z_lb: vec![0.0; prob.n],
-        z_ub: vec![0.0; prob.n],
-        obj: 0.0,
-        iters: 0,
-        iterates: Vec::new(),
-    };
-    match presolve(prob) {
-        PresolveOutcome::Reduced(ps) => {
-            let mut ro = QpOptions {
-                obj_constant: o.obj_constant + ps.obj_offset(),
-                ..*o
-            };
-            if let Some(limit) = ro.time_limit {
-                ro.time_limit = Some(limit.saturating_sub(t0.elapsed()));
-            }
-            let red = solve(&ps.reduced, &ro);
-            let report = PresolveReport {
-                outcome: "reduced",
-                stats: Some(ps.stats()),
-                reason: ps.discarded_infeasibility().map(|t| t.to_string()),
-            };
-            (ps.postsolve(&red), report)
-        }
-        PresolveOutcome::Infeasible(trigger) => (
-            trivial(QpStatus::PrimalInfeasible),
-            PresolveReport {
-                outcome: "infeasible",
-                stats: None,
-                reason: Some(trigger.to_string()),
-            },
-        ),
-        PresolveOutcome::Unbounded => (
-            trivial(QpStatus::DualInfeasible),
-            PresolveReport {
-                outcome: "unbounded",
-                stats: None,
-                reason: Some("a free column with a nonzero objective coefficient".to_string()),
-            },
-        ),
-    }
-}
-
-/// The CLI's post-presolve demotion (gh#984 review): the IPM judged `Optimal`
-/// on the *reduced* problem, so re-judge the postsolved point on the problem
-/// the caller passed. A demotion only, and only for the HSDE driver, exactly
-/// as `run_convex_qp` applies it.
-fn demote_unverified_optimal(prob: &QpProblem, o: &QpOptions, sol: QpSolution) -> QpSolution {
-    if o.use_hsde
-        && sol.status == QpStatus::Optimal
-        && sol.kkt_residuals_above_floor(prob).kkt_error() > o.tol
-    {
-        QpSolution {
-            status: QpStatus::OptimalInaccurate,
-            ..sol
-        }
-    } else {
-        sol
-    }
+/// Map a [`PipelineError`] from the shared convex pipeline to the
+/// `ValueError` `solve_qp` raises, with its own name in front.
+fn pipeline_err(e: PipelineError) -> PyErr {
+    PyValueError::new_err(format!("solve_qp: {e}"))
 }
 
 /// Attach `presolve` and `crossover` to a result dict: each `None` when that
@@ -768,7 +607,8 @@ fn attach_engine_reports(
 /// the CLI options of the same names (gh#990; asked for by discopt#1615), with the CLI's meaning. `None`
 /// (the default for each) keeps this entry point's behaviour from before they
 /// existed: no presolve, and the [`QpOptions`] defaults for the other four. See
-/// [`EngineSwitches`] for which engine reads which, and what is refused.
+/// [`EngineSwitches`] (moved to `pounce_convex::pipeline`, gh#1147) for
+/// which engine reads which, and what is refused.
 #[pyfunction]
 #[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None, hessian_inertia="psd", qp_presolve=None, qp_reg=None, qp_hsde=None, qp_equilibrate=None, qp_crossover=None))]
 #[allow(clippy::too_many_arguments)]
@@ -801,7 +641,9 @@ pub fn solve_qp<'py>(
         equilibrate: qp_equilibrate,
         crossover: qp_crossover,
     };
-    switches.check(method, warm_start.is_some())?;
+    switches
+        .check(method == "active-set", warm_start.is_some())
+        .map_err(pipeline_err)?;
     let mut o = opts_tau(tol, max_iter, collect_iterates, tau, tau_max, limit);
     switches.apply(&mut o);
     let presolve_on = switches.presolve.unwrap_or(false);
@@ -813,14 +655,7 @@ pub fn solve_qp<'py>(
     // `minimize` — one selector naming two different algorithms, silently.
     match method {
         "ipm" => {
-            if inertia == HessianInertia::Indefinite {
-                return Err(PyValueError::new_err(
-                    "solve_qp: the convex interior-point engine (method='ipm') requires a \
-                     positive-semidefinite P and reports a silently-wrong 'optimal' at a \
-                     saddle point without one; pass method='active-set' to solve an \
-                     indefinite QP",
-                ));
-            }
+            check_ipm_inertia(inertia).map_err(pipeline_err)?;
             let (sol, hs, pre, cross) = py.allow_threads(|| {
                 pounce_convex::hsde_scalars::clear();
                 pounce_convex::crossover::clear_report();

@@ -1,0 +1,2343 @@
+{
+ "generator": "crates/pounce-cinterface/tests/common/gen_qp_python.py",
+ "platform": "linux-x86_64",
+ "rows": {
+  "lp_ipm": {
+   "entry": "qp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 1,
+    "m_ineq": 1,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -2.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.4999999988574022,
+    "iters": 7,
+    "x": [
+     0.4999999996191273,
+     0.4999999996191375
+    ],
+    "y": [
+     -0.49999999913498494
+    ],
+    "z": [
+     1.5000000013541568
+    ],
+    "z_lb": [
+     3.949208091247663e-09,
+     3.949208074570485e-09
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 9.873018555263331e-10,
+     "complementarity_raw": 1.9746040441196858e-09,
+     "dual_infeasibility": 1.729919540949128e-09,
+     "dual_infeasibility_raw": 3.4600664555739513e-09,
+     "kkt_error": 1.729919540949128e-09,
+     "kkt_error_raw": 3.4600664555739513e-09,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 1.021405182655144e-14
+    },
+    "tau": 1.2410205812148558,
+    "kappa": 1.1954826268283162e-09,
+    "certificate_scale": null
+   }
+  },
+  "lp_presolve_crossover": {
+   "entry": "qp",
+   "options": {
+    "qp_presolve": true,
+    "qp_crossover": true
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 1,
+    "m_ineq": 1,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -2.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.5,
+    "iters": 0,
+    "x": [
+     0.5,
+     0.5
+    ],
+    "y": [
+     -0.5
+    ],
+    "z": [
+     1.5
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.0,
+     "complementarity_raw": 0.0,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 0.0,
+     "kkt_error_raw": 0.0,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 1.0,
+    "kappa": 1.0,
+    "certificate_scale": null
+   }
+  },
+  "lp_direct": {
+   "entry": "qp",
+   "options": {
+    "qp_hsde": false
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 1,
+    "m_ineq": 1,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -2.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.499999999989409,
+    "iters": 5,
+    "x": [
+     0.49999999999646966,
+     0.49999999999646966
+    ],
+    "y": [
+     -0.5000000000000001
+    ],
+    "z": [
+     1.5000000000211822
+    ],
+    "z_lb": [
+     2.118206890623194e-11,
+     2.118206890623194e-11
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 5.295350693066601e-12,
+     "complementarity_raw": 1.059103445304119e-11,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 5.295350693066601e-12,
+     "kkt_error_raw": 1.059103445304119e-11,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "lp_active_set": {
+   "entry": "qp",
+   "options": {
+    "method": "active-set"
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 1,
+    "m_ineq": 1,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -2.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.5,
+    "iters": 2,
+    "x": [
+     0.5,
+     0.5
+    ],
+    "y": [
+     -0.5
+    ],
+    "z": [
+     1.5
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.0,
+     "complementarity_raw": 0.0,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 0.0,
+     "kkt_error_raw": 0.0,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "qp_ipm": {
+   "entry": "qp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [
+     10.0,
+     10.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.749999999655312,
+    "iters": 9,
+    "x": [
+     0.49999999965531206,
+     0.49999999965531206
+    ],
+    "y": [],
+    "z": [
+     0.5000000006202959
+    ],
+    "z_lb": [
+     2.932069076555447e-10,
+     2.9320690765554365e-10
+    ],
+    "z_ub": [
+     1.7592851201202823e-11,
+     1.7592851201202758e-11
+    ],
+    "residuals": {
+     "complementarity": 3.4463082430615525e-10,
+     "complementarity_raw": 3.4468794528082293e-10,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 6.217248937900877e-15,
+     "kkt_error": 3.4463082430615525e-10,
+     "kkt_error_raw": 3.4468794528082293e-10,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.41331182816448536,
+    "kappa": 6.864453315134286e-11,
+    "certificate_scale": null
+   }
+  },
+  "qp_ipm_tau": {
+   "entry": "qp",
+   "options": {
+    "tau": 0.9,
+    "tau_max": 0.99
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [
+     10.0,
+     10.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.7499999988186441,
+    "iters": 11,
+    "x": [
+     0.49999999881864415,
+     0.49999999881864415
+    ],
+    "y": [],
+    "z": [
+     0.5000000024835721
+    ],
+    "z_lb": [
+     1.3777075134619712e-09,
+     1.3777075134619761e-09
+    ],
+    "z_ub": [
+     7.54413979905248e-11,
+     7.544139799052487e-11
+    ],
+    "residuals": {
+     "complementarity": 1.1812987313732923e-09,
+     "complementarity_raw": 1.1813558523481237e-09,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 4.984901380566953e-14,
+     "kkt_error": 1.1812987313732923e-09,
+     "kkt_error_raw": 1.1813558523481237e-09,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.3285746133496256,
+    "kappa": 2.2790080967872812e-10,
+    "certificate_scale": null
+   }
+  },
+  "qp_ipm_reg_no_equilibrate": {
+   "entry": "qp",
+   "options": {
+    "qp_reg": 1e-08,
+    "qp_equilibrate": false,
+    "tol": 1e-10
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [
+     10.0,
+     10.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.7499999999983201,
+    "iters": 11,
+    "x": [
+     0.4999999999983201,
+     0.4999999999983201
+    ],
+    "y": [],
+    "z": [
+     0.49999999999462613
+    ],
+    "z_lb": [
+     3.460933930938389e-12,
+     3.460933930938389e-12
+    ],
+    "z_ub": [
+     1.8216659083598626e-13,
+     1.8216659083598626e-13
+    ],
+    "residuals": {
+     "complementarity": 1.7303050571859117e-12,
+     "complementarity_raw": 1.7305826129421757e-12,
+     "dual_infeasibility": 1.0218992319011216e-11,
+     "dual_infeasibility_raw": 1.0332679156732638e-11,
+     "kkt_error": 1.0218992319011216e-11,
+     "kkt_error_raw": 1.0332679156732638e-11,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.4231050871169056,
+    "kappa": 7.322158093418199e-13,
+    "certificate_scale": null
+   }
+  },
+  "qp_active_set_presolve": {
+   "entry": "qp",
+   "options": {
+    "method": "active-set",
+    "qp_presolve": true
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [
+     10.0,
+     10.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.75,
+    "iters": 1,
+    "x": [
+     0.5,
+     0.5
+    ],
+    "y": [],
+    "z": [
+     0.5
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.0,
+     "complementarity_raw": 0.0,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 0.0,
+     "kkt_error_raw": 0.0,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "qp_coupled": {
+   "entry": "qp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 0,
+    "p": [
+     [
+      0,
+      1,
+      1
+     ],
+     [
+      0,
+      0,
+      1
+     ],
+     [
+      2.0,
+      -1.0,
+      2.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [],
+     [],
+     []
+    ],
+    "h": [],
+    "lb": [],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.0,
+    "iters": 1,
+    "x": [
+     0.9999999999,
+     0.9999999999
+    ],
+    "y": [],
+    "z": [],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.0,
+     "complementarity_raw": 0.0,
+     "dual_infeasibility": 4.988631729930546e-11,
+     "dual_infeasibility_raw": 1.000000082740371e-10,
+     "kkt_error": 4.988631729930546e-11,
+     "kkt_error_raw": 1.000000082740371e-10,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.26291723824130464,
+    "kappa": 0.5258344764300259,
+    "certificate_scale": null
+   }
+  },
+  "indefinite_active_set": {
+   "entry": "qp",
+   "options": {
+    "method": "active-set"
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 0,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "c": [
+     0.0,
+     0.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [],
+     [],
+     []
+    ],
+    "h": [],
+    "lb": [
+     -1.0,
+     -1.0
+    ],
+    "ub": [
+     1.0,
+     1.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.5,
+    "iters": 1,
+    "x": [
+     0.0,
+     -1.0
+    ],
+    "y": [],
+    "z": [],
+    "z_lb": [
+     0.0,
+     1.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.0,
+     "complementarity_raw": 0.0,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 0.0,
+     "kkt_error_raw": 0.0,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "qp_iteration_limit": {
+   "entry": "qp",
+   "options": {
+    "max_iter": 1
+   },
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0
+    ],
+    "lb": [
+     0.0,
+     0.0
+    ],
+    "ub": [
+     10.0,
+     10.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "iteration_limit",
+    "obj": -0.35928505270657335,
+    "iters": 1,
+    "x": [
+     0.19955328266434372,
+     0.1995532826643454
+    ],
+    "y": [],
+    "z": [
+     4.413431752874737
+    ],
+    "z_lb": [
+     3.827886463416664,
+     3.8278864634166623
+    ],
+    "z_ub": [
+     0.21490142785763294,
+     0.2149014278576296
+    ],
+    "residuals": {
+     "complementarity": 2.6520021646719734,
+     "complementarity_raw": 2.6520021646723246,
+     "dual_infeasibility": 1.940228469682021e-11,
+     "dual_infeasibility_raw": 1.9951151841723913e-11,
+     "kkt_error": 2.6520021646719734,
+     "kkt_error_raw": 2.6520021646723246,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.23266481055270016,
+    "kappa": 0.8032444196676232,
+    "certificate_scale": null
+   }
+  },
+  "qp_primal_infeasible": {
+   "entry": "qp",
+   "options": {},
+   "model": {
+    "n": 1,
+    "m_eq": 0,
+    "m_ineq": 1,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0
+     ],
+     [
+      0
+     ],
+     [
+      -1.0
+     ]
+    ],
+    "h": [
+     -1.0
+    ],
+    "lb": [],
+    "ub": [
+     0.0
+    ],
+    "cones": []
+   },
+   "result": {
+    "status": "primal_infeasible",
+    "obj": 1.5061789447071608e-12,
+    "iters": 2,
+    "x": [
+     1.5061789447071608e-12
+    ],
+    "y": [],
+    "z": [
+     400.0950056405297
+    ],
+    "z_lb": [
+     0.0
+    ],
+    "z_ub": [
+     400.09500564052644
+    ],
+    "residuals": {
+     "complementarity": 400.09500563990434,
+     "complementarity_raw": 400.0950056399271,
+     "dual_infeasibility": 0.9999999999512176,
+     "dual_infeasibility_raw": 0.9999999999967599,
+     "kkt_error": 400.09500563990434,
+     "kkt_error_raw": 400.0950056399271,
+     "primal_infeasibility": 0.999999999998437,
+     "primal_infeasibility_raw": 0.9999999999984939
+    },
+    "tau": 0.0025000000000001896,
+    "kappa": 1.0002375141013966,
+    "certificate_scale": 400.0950056405297
+   }
+  },
+  "qp_dual_infeasible": {
+   "entry": "qp",
+   "options": {},
+   "model": {
+    "n": 1,
+    "m_eq": 0,
+    "m_ineq": 0,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [],
+     [],
+     []
+    ],
+    "h": [],
+    "lb": [
+     0.0
+    ],
+    "ub": [],
+    "cones": []
+   },
+   "result": {
+    "status": "dual_infeasible",
+    "obj": -399.09500556861104,
+    "iters": 2,
+    "x": [
+     399.09500556861104
+    ],
+    "y": [],
+    "z": [],
+    "z_lb": [
+     0.9999999999999861
+    ],
+    "z_ub": [
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 399.09500556858274,
+     "complementarity_raw": 399.09500556860553,
+     "dual_infeasibility": 1.9999999999998725,
+     "dual_infeasibility_raw": 1.9999999999999862,
+     "kkt_error": 399.09500556858274,
+     "kkt_error_raw": 399.09500556860553,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.002500000000000037,
+    "kappa": 1.000237513916786,
+    "certificate_scale": 399.09500556861104
+   }
+  },
+  "nonneg": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 2,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     1.0,
+     2.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "nonneg",
+      2.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -2.9999999976582465,
+    "iters": 7,
+    "x": [
+     0.99999999921941,
+     1.9999999984388364
+    ],
+    "y": [],
+    "z": [
+     0.9999999999999876,
+     0.9999999999999752
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 1.5611636428047473e-09,
+     "complementarity_raw": 1.5611636428047473e-09,
+     "dual_infeasibility": 2.475797344914099e-14,
+     "dual_infeasibility_raw": 2.475797344914099e-14,
+     "kkt_error": 1.5611636428047473e-09,
+     "kkt_error_raw": 1.5611636428047473e-09,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 1.0008296965773305,
+    "kappa": 7.812500000000041e-10,
+    "certificate_scale": null
+   }
+  },
+  "soc_distance": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 3,
+    "m_eq": 1,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     1.0,
+     0.0,
+     0.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      1,
+      2
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     -2.0,
+     1.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": 0.7071067779849232,
+    "iters": 7,
+    "x": [
+     0.7071067779849232,
+     1.499999994908372,
+     -1.499999994908363
+    ],
+    "y": [
+     0.7071067803276787
+    ],
+    "z": [
+     1.0000000000000058,
+     0.7071067803276913,
+     0.7071067803276662
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 2.3427451645297026e-09,
+     "complementarity_raw": 2.3427451645297026e-09,
+     "dual_infeasibility": 1.2545520178264269e-14,
+     "dual_infeasibility_raw": 1.2545520178264269e-14,
+     "kkt_error": 3.201618081760671e-09,
+     "kkt_error_raw": 3.201618081760671e-09,
+     "primal_infeasibility": 3.201618081760671e-09,
+     "primal_infeasibility_raw": 3.201618081760671e-09
+    },
+    "tau": 0.7517435102633668,
+    "kappa": 4.312914354767454e-09,
+    "certificate_scale": null
+   }
+  },
+  "soc_distance_tol": {
+   "entry": "socp",
+   "options": {
+    "tol": 1e-10
+   },
+   "model": {
+    "n": 3,
+    "m_eq": 1,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     1.0,
+     0.0,
+     0.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      1,
+      2
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     -2.0,
+     1.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": 0.7071067811785458,
+    "iters": 9,
+    "x": [
+     0.7071067811785458,
+     1.4999999999872746,
+     -1.499999999987272
+    ],
+    "y": [
+     0.7071067811843897
+    ],
+    "z": [
+     1.0000000000000024,
+     0.7071067811843951,
+     0.7071067811843842
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 5.8402171987381735e-12,
+     "complementarity_raw": 5.8402171987381735e-12,
+     "dual_infeasibility": 5.551115123125783e-15,
+     "dual_infeasibility_raw": 5.551115123125783e-15,
+     "kkt_error": 7.99993404854149e-12,
+     "kkt_error_raw": 7.99993404854149e-12,
+     "primal_infeasibility": 7.99993404854149e-12,
+     "primal_infeasibility_raw": 7.99993404854149e-12
+    },
+    "tau": 0.751823005916609,
+    "kappa": 1.07822858869187e-11,
+    "certificate_scale": null
+   }
+  },
+  "soc_projection": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 3,
+    "m_eq": 0,
+    "m_ineq": 3,
+    "p": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      1.0,
+      1.0,
+      1.0
+     ]
+    ],
+    "c": [
+     -1.0,
+     -2.0,
+     0.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -2.2499999982223793,
+    "iters": 9,
+    "x": [
+     1.5000000020096484,
+     1.4999999984544066,
+     0.0
+    ],
+    "y": [],
+    "z": [
+     0.500000002009661,
+     -0.5000000015455809,
+     0.0
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 2.4737412118724933e-09,
+     "complementarity_raw": 2.4737412118724933e-09,
+     "dual_infeasibility": 1.2545520178264269e-14,
+     "dual_infeasibility_raw": 1.2545520178264269e-14,
+     "kkt_error": 2.4737412118724933e-09,
+     "kkt_error_raw": 2.4737412118724933e-09,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.10212712727166758,
+    "kappa": 1.351212247909659e-10,
+    "certificate_scale": null
+   }
+  },
+  "nonneg_and_soc": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     1.0,
+     1.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "nonneg",
+      1.0
+     ],
+     [
+      "soc",
+      2.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -1.999999999474443,
+    "iters": 8,
+    "x": [
+     0.9999999995790108,
+     0.9999999998954324
+    ],
+    "y": [],
+    "z": [
+     0.9999999999999906,
+     1.0000000000161307,
+     -0.9999999996790985
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 4.4159975676194563e-10,
+     "complementarity_raw": 4.4159975676194563e-10,
+     "dual_infeasibility": 3.2090152757291435e-10,
+     "dual_infeasibility_raw": 3.2090152757291435e-10,
+     "kkt_error": 4.4159975676194563e-10,
+     "kkt_error_raw": 4.4159975676194563e-10,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.8119059401081306,
+    "kappa": 3.4181094562638257e-10,
+    "certificate_scale": null
+   }
+  },
+  "exp_geometric_program": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 3,
+    "m_eq": 0,
+    "m_ineq": 6,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     0.0,
+     1.0,
+     1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      2,
+      3,
+      5
+     ],
+     [
+      0,
+      1,
+      0,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     1.0,
+     0.0,
+     0.0,
+     1.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "exp",
+      3.0
+     ],
+     [
+      "exp",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": 2.0,
+    "iters": 8,
+    "x": [
+     5.55169502972644e-17,
+     1.0,
+     0.9999999999999999
+    ],
+    "y": [],
+    "z": [
+     -1.0,
+     -1.0,
+     1.0,
+     -1.0,
+     -1.0,
+     1.0000000000000002
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 1.1102230246251565e-16,
+     "complementarity_raw": 1.1102230246251565e-16,
+     "dual_infeasibility": 2.220446049250313e-16,
+     "dual_infeasibility_raw": 2.220446049250313e-16,
+     "kkt_error": 2.220446049250313e-16,
+     "kkt_error_raw": 2.220446049250313e-16,
+     "primal_infeasibility": 5.55169502972644e-17,
+     "primal_infeasibility_raw": 5.55169502972644e-17
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "soc_and_exp": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 6,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     1.0,
+     1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      5
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     3.0,
+     4.0,
+     1.0,
+     1.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      3.0
+     ],
+     [
+      "exp",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": 7.718281823551709,
+    "iters": 10,
+    "x": [
+     4.999999994918278,
+     2.7182818286334305
+    ],
+    "y": [],
+    "z": [
+     1.000000000001605,
+     -0.5999999999697961,
+     -0.7999999997163719,
+     -2.7182863861547237,
+     4.560940167244498e-06,
+     1.0000000002326472
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 4.051274871130772e-09,
+     "complementarity_raw": 4.051274871130772e-09,
+     "dual_infeasibility": 2.3264723481020155e-10,
+     "dual_infeasibility_raw": 2.3264723481020155e-10,
+     "kkt_error": 5.0817217100984635e-09,
+     "kkt_error_raw": 5.0817217100984635e-09,
+     "primal_infeasibility": 5.0817217100984635e-09,
+     "primal_infeasibility_raw": 5.0817217100984635e-09
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "power": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 3,
+    "m_eq": 2,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0,
+     0.0,
+     0.0
+    ],
+    "a": [
+     [
+      0,
+      1
+     ],
+     [
+      1,
+      2
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "b": [
+     2.0,
+     0.5
+    ],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "pow",
+      0.3
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.7578582832551993,
+    "iters": 7,
+    "x": [
+     0.7578582832551993,
+     2.0,
+     0.5000000000000001
+    ],
+    "y": [
+     0.11367874248827989,
+     1.0610015965572788
+    ],
+    "z": [
+     -1.0,
+     0.11367874248827987,
+     1.0610015965572785
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 2.220446049250313e-16,
+     "complementarity_raw": 2.220446049250313e-16,
+     "dual_infeasibility": 2.220446049250313e-16,
+     "dual_infeasibility_raw": 2.220446049250313e-16,
+     "kkt_error": 2.220446049250313e-16,
+     "kkt_error_raw": 2.220446049250313e-16,
+     "primal_infeasibility": 1.1102230246251565e-16,
+     "primal_infeasibility_raw": 1.1102230246251565e-16
+    },
+    "tau": null,
+    "kappa": null,
+    "certificate_scale": null
+   }
+  },
+  "psd": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 1,
+    "m_eq": 0,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      0
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "h": [
+     2.0,
+     1.4142135623730951,
+     2.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "psd",
+      2.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "optimal",
+    "obj": -0.999999999724522,
+    "iters": 8,
+    "x": [
+     0.999999999724522
+    ],
+    "y": [],
+    "z": [
+     0.5000000000782566,
+     -0.7071067812013145,
+     0.5000000000783945
+    ],
+    "z_lb": [
+     0.0
+    ],
+    "z_ub": [
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 4.112452600679717e-10,
+     "complementarity_raw": 4.112452600679717e-10,
+     "dual_infeasibility": 1.5665113650698004e-10,
+     "dual_infeasibility_raw": 1.5665113650698004e-10,
+     "kkt_error": 4.112452600679717e-10,
+     "kkt_error_raw": 4.112452600679717e-10,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.7631997678429112,
+    "kappa": 1.64369077410954e-10,
+    "certificate_scale": null
+   }
+  },
+  "soc_primal_infeasible": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     0.0,
+     0.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      0,
+      1
+     ],
+     [
+      1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     -1.0,
+     0.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "nonneg",
+      1.0
+     ],
+     [
+      "soc",
+      2.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "primal_infeasible",
+    "obj": 0.0,
+    "iters": 2,
+    "x": [
+     -1.2432416207630652e-12,
+     0.0
+    ],
+    "y": [],
+    "z": [
+     400.0712531727992,
+     400.0712531727992,
+     0.0
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 400.0712531723018,
+     "complementarity_raw": 400.0712531723018,
+     "dual_infeasibility": 0.0,
+     "dual_infeasibility_raw": 0.0,
+     "kkt_error": 400.0712531723018,
+     "kkt_error_raw": 400.0712531723018,
+     "primal_infeasibility": 0.9999999999987568,
+     "primal_infeasibility_raw": 0.9999999999987568
+    },
+    "tau": 0.002500000000000016,
+    "kappa": 1.0001781329320043,
+    "certificate_scale": 400.0712531727992
+   }
+  },
+  "soc_dual_infeasible": {
+   "entry": "socp",
+   "options": {},
+   "model": {
+    "n": 2,
+    "m_eq": 0,
+    "m_ineq": 2,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     0.0,
+     -1.0
+    ],
+    "a": [
+     [],
+     [],
+     []
+    ],
+    "b": [],
+    "g": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     0.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      2.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "dual_infeasible",
+    "obj": -962.8656038189415,
+    "iters": 3,
+    "x": [
+     1925.7312073782534,
+     962.8656038189415
+    ],
+    "y": [],
+    "z": [
+     0.6316893647136201,
+     -0.3683106375534051
+    ],
+    "z_lb": [
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 861.830278577163,
+     "complementarity_raw": 861.830278577163,
+     "dual_infeasibility": 0.6316893647136201,
+     "dual_infeasibility_raw": 0.6316893647136201,
+     "kkt_error": 861.830278577163,
+     "kkt_error_raw": 861.830278577163,
+     "primal_infeasibility": 0.0,
+     "primal_infeasibility_raw": 0.0
+    },
+    "tau": 0.0007135610453010734,
+    "kappa": 0.6875141356656489,
+    "certificate_scale": 1925.7312073782534
+   }
+  },
+  "soc_iteration_limit": {
+   "entry": "socp",
+   "options": {
+    "max_iter": 2
+   },
+   "model": {
+    "n": 3,
+    "m_eq": 1,
+    "m_ineq": 3,
+    "p": [
+     [],
+     [],
+     []
+    ],
+    "c": [
+     1.0,
+     0.0,
+     0.0
+    ],
+    "a": [
+     [
+      0,
+      0
+     ],
+     [
+      1,
+      2
+     ],
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    "b": [
+     0.0
+    ],
+    "g": [
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      0,
+      1,
+      2
+     ],
+     [
+      -1.0,
+      -1.0,
+      -1.0
+     ]
+    ],
+    "h": [
+     0.0,
+     -2.0,
+     1.0
+    ],
+    "lb": [],
+    "ub": [],
+    "cones": [
+     [
+      "soc",
+      3.0
+     ]
+    ]
+   },
+   "result": {
+    "status": "iteration_limit",
+    "obj": 0.6968922955373025,
+    "iters": 2,
+    "x": [
+     0.6968922955373025,
+     1.4837442086441037,
+     -1.4837442081397958
+    ],
+    "y": [
+     0.704403483009737
+    ],
+    "z": [
+     1.0000000000208953,
+     0.7044034830436446,
+     0.7044034829758294
+    ],
+    "z_lb": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "z_ub": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "residuals": {
+     "complementarity": 0.007511187103738881,
+     "complementarity_raw": 0.007511187103738881,
+     "dual_infeasibility": 3.3907654461984293e-11,
+     "dual_infeasibility_raw": 3.3907654461984293e-11,
+     "kkt_error": 0.010588093602425408,
+     "kkt_error_raw": 0.010588093602425408,
+     "primal_infeasibility": 0.010588093602425408,
+     "primal_infeasibility_raw": 0.010588093602425408
+    },
+    "tau": 0.7521821788311365,
+    "kappa": 0.013801325935255793,
+    "certificate_scale": null
+   }
+  }
+ }
+}

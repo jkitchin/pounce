@@ -1,0 +1,51 @@
+{
+  "hs008_rescued": {
+    "second_opinion": {
+      "tried": [
+        "feral_scaling=mc64",
+        "mu_strategy=adaptive",
+        "start_point_perturbation=1e-2"
+      ],
+      "promoted_by": "start_point_perturbation=1e-2",
+      "base_status": "Infeasible_Problem_Detected",
+      "base_iteration_count": 9,
+      "rung_iteration_counts": [
+        9,
+        7,
+        5
+      ],
+      "total_iteration_count": 30
+    },
+    "status": "SolveSucceeded",
+    "iteration_count": 5
+  },
+  "no_real_solution": {
+    "second_opinion": {
+      "tried": [
+        "feral_scaling=mc64",
+        "mu_strategy=adaptive",
+        "start_point_perturbation=1e-2"
+      ],
+      "base_status": "Infeasible_Problem_Detected",
+      "base_iteration_count": 17,
+      "rung_iteration_counts": [
+        17,
+        14,
+        26
+      ],
+      "total_iteration_count": 74
+    },
+    "status": "InfeasibleProblemDetected",
+    "iteration_count": 17
+  },
+  "hs008_clean_resolve": {
+    "has_second_opinion": false,
+    "status": "SolveSucceeded",
+    "iteration_count": 5
+  },
+  "infeasible_pair_pairs": {
+    "has_second_opinion": false,
+    "has_complementarity": true,
+    "status": "InfeasibleProblemDetected"
+  }
+}

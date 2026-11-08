@@ -32,7 +32,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod fortran;
+pub mod qp;
 pub mod solver;
+
+pub use qp::*;
 
 use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
@@ -40,6 +43,9 @@ use pounce_algorithm::application::{
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_nlp::mpcc::{
+    ComplementarityPair, PairErrorKind, PairShape, classify_pair, validate_pairs,
+};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -116,6 +122,80 @@ pub(crate) fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     }
 }
 
+/// An *extensible* caller-allocated output struct (gh#1147): its first
+/// member is `ipindex struct_size`, which the caller sets to `sizeof(T)`
+/// before the call. `PounceComplementarityStats`, `PounceComplementaritySolve`,
+/// `PounceQpResiduals` and `PounceQpCertificate` follow it;
+/// `PounceLinearSolverStats` does not (it shipped before the convention).
+///
+/// # The growth rule
+///
+/// A later release may only **append** fields at the end; nothing is
+/// removed, reordered or widened. Every getter then writes
+/// `min(caller's struct_size, its own size_of::<T>())` bytes — which is what
+/// `write_extensible` does for this release, whose size is the minimum
+/// whenever the call is accepted at all.
+///
+/// # Safety
+///
+/// Implementors must be `#[repr(C)]` with `struct_size: Index` as the first
+/// field, so it sits at offset 0 (asserted by
+/// `tests/c_examples_build_and_run.rs`).
+pub(crate) unsafe trait ExtensibleOut: Copy {}
+
+/// This release's `sizeof(T)`, as the `struct_size` value a caller passes.
+pub(crate) const fn struct_size_of<T: ExtensibleOut>() -> Index {
+    std::mem::size_of::<T>() as Index
+}
+
+/// Write `value` into the caller's `out` under the `struct_size` contract.
+///
+/// Returns `false`, writing nothing at all, when the caller's
+/// `struct_size` is smaller than this release's `size_of::<T>()` (a
+/// forgotten or garbage initializer: `0`, negative, or a size from a
+/// release that predates a field of `T` — there is none yet). Otherwise
+/// copies **exactly this release's bytes** of `value` after `struct_size`
+/// and returns `true`; `struct_size` itself is read, never written, and no
+/// byte past `size_of::<T>()` is touched, however large `struct_size` is
+/// (a caller built against a newer header keeps its newer fields as they
+/// were).
+///
+/// The copy is a bounded byte copy, not `*out = value`, on purpose: a
+/// whole-struct assignment is a contract about *this* release's size that
+/// would silently stay one when a field is appended. When appending a field
+/// to `T` in a later release, keep this function, and change the refusal
+/// below to the size of the oldest layout still accepted (the size *before*
+/// the first appended field), writing `min(struct_size, size_of::<T>())`
+/// bytes; never lower the floor to accept `struct_size` values a getter
+/// cannot tell from an uninitialized one.
+///
+/// # Safety
+///
+/// `out` must be non-NULL, aligned for `T`, readable for its first
+/// `size_of::<Index>()` bytes and, when the call is accepted, writable for
+/// `size_of::<T>()` bytes (the caller promised `struct_size` of them).
+pub(crate) unsafe fn write_extensible<T: ExtensibleOut>(out: *mut T, value: &T) -> bool {
+    const HEAD: usize = std::mem::size_of::<Index>();
+    let size = std::mem::size_of::<T>();
+    // SAFETY: `struct_size` is at offset 0 (the trait's contract) and the
+    // caller guarantees the first `HEAD` bytes are readable.
+    let claimed = unsafe { std::ptr::read(out.cast::<Index>()) };
+    if usize::try_from(claimed).map_or(true, |c| c < size) {
+        return false;
+    }
+    // SAFETY: `claimed >= size`, so the caller promised `size` writable
+    // bytes; `value` is a distinct Rust value, so the ranges cannot overlap.
+    // Only bytes `HEAD..size` are written: `struct_size` stays the caller's.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (value as *const T).cast::<u8>().add(HEAD),
+            out.cast::<u8>().add(HEAD),
+            size - HEAD,
+        );
+    }
+    true
+}
+
 /// C-ABI encoding of [`pounce_qp::BoundStatus`] (§7.2 of the
 /// active-set-SQP design note). Stable values:
 /// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Fixed`.
@@ -179,6 +259,19 @@ pub struct IpoptProblemInfo {
     /// reads it. `None` — the default — means "every variable is
     /// nonlinear".
     pub(crate) nonlinear_vars: Option<Vec<Index>>,
+    /// Complementarity pairs declared by [`AddPounceComplementarityPair`] /
+    /// [`SetPounceComplementarityPairs`] (gh#1147), **0-based** whatever
+    /// the problem's index style, in declaration order. Every stored set
+    /// passed [`pounce_nlp::mpcc::validate_pairs`] against this handle's
+    /// bounds when it was declared. Empty — the default — means no pairs.
+    pub(crate) complementarity: Vec<ComplementarityPair>,
+    /// Every `(row, var)`, 0-based, that [`AddPounceComplementsConstraint`]
+    /// accepted on this handle, whether or not it declared a pair. The
+    /// helper refuses a row or variable already in here (or in
+    /// `complementarity`), so one `F` or one `x` cannot be in two MOI
+    /// `Complements` constraints. Never cleared: the bound edits it records
+    /// are not undone either.
+    pub(crate) complements_used: Vec<ComplementarityPair>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -203,6 +296,16 @@ pub(crate) struct LastSolve {
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_lambda: Vec<Number>,
     pub(crate) final_obj: Number,
+    /// The complementarity driver's record when the solve declared pairs
+    /// (gh#1147); `None` on every other solve, including every session solve.
+    pub(crate) mpcc: Option<pounce_restoration::mpcc_driver::MpccOutcome>,
+    /// The second-opinion ladder's outcome when the solve took the path
+    /// without pairs (gh#850, gh#1147); `None` on a driver solve and on
+    /// every session solve, neither of which runs the ladder. Kept whether
+    /// or not a rung ran: [`IpoptWriteSolveReport`] writes the block under
+    /// the same `ran()` test as the CLI and Python.
+    pub(crate) second_opinion:
+        Option<pounce_restoration::second_opinion_driver::SecondOpinionOutcome>,
 }
 
 impl Default for LastSolve {
@@ -214,6 +317,8 @@ impl Default for LastSolve {
             final_x: Vec::new(),
             final_lambda: Vec::new(),
             final_obj: 0.0,
+            mpcc: None,
+            second_opinion: None,
         }
     }
 }
@@ -382,6 +487,8 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             intermediate_cb: None,
             user_scaling: None,
             nonlinear_vars: None,
+            complementarity: Vec::new(),
+            complements_used: Vec::new(),
             last_solve: None,
             pending_working_set: None,
         });
@@ -604,6 +711,13 @@ pub unsafe extern "C" fn SetIpoptProblemScaling(
 /// and bounds, runs it through [`IpoptApplication::optimize_tnlp`],
 /// and writes back the final iterate.
 ///
+/// With complementarity pairs declared (gh#1147) the bridge goes to
+/// [`pounce_restoration::mpcc_driver::solve_mpcc`] instead of one
+/// `optimize_tnlp` and the second-opinion ladder, as in the CLI and Python;
+/// the driver forwards its reported point to the bridge once, so the
+/// write-back is the same. A staged SQP working set plus pairs is refused
+/// with `Invalid_Problem_Definition` before any callback.
+///
 /// # Safety
 ///
 /// All pointer arguments are read/written per the
@@ -648,6 +762,22 @@ pub unsafe extern "C" fn IpoptSolve(
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
             if info.n > 0 && x.is_null() {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            // A staged SQP working set is over the caller's rows and
+            // variables; the complementarity driver solves a lowered model
+            // with more rows (and possibly lifted variables), so there is no
+            // set it could seed. Refused before any callback runs, and
+            // neither the working set nor the pairs are consumed (gh#1147).
+            if !info.complementarity.is_empty() && info.pending_working_set.is_some() {
+                if pounce_algorithm::second_opinion::narration_is_wanted(info.app.options()) {
+                    eprintln!(
+                        "pounce: a warm-start working set cannot seed a solve with \
+                         complementarity pairs ({} declared); clear one of them \
+                         (IpoptClearWarmStartWorkingSet or ClearPounceComplementarityPairs).",
+                        info.complementarity.len()
+                    );
+                }
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
 
@@ -772,43 +902,107 @@ pub unsafe extern "C" fn IpoptSolve(
             // driver's attempt printed its own verdict and a run that recovered
             // reported a mid-run one that read as the final answer.
             info.app.defer_end_verdict();
-            let status = info.app.optimize_tnlp(bridge_for_solve);
-            let stats = info.app.statistics();
-            // Second-opinion ladder, on by default as it is in the CLI and the
-            // Python frontend: an `Infeasible_Problem_Detected` or
-            // `Invalid_Number_Detected` is re-solved along up to three
-            // deliberately different trajectories and a re-solve is promoted
-            // only if it converges. A converged solve pays nothing — the
-            // ladder reads the status and returns. The three `*_retry`
-            // options turn individual rungs off.
-            //
-            // Narration goes to stderr, where the solver's own banners already
-            // go -- but gated on `print_level >= 1`. This crate is the Ipopt
-            // drop-in, so `print_level=0 sb=yes` is a caller asking for
-            // silence, and eight unexpected `pounce:` lines on a failing
-            // solve is exactly what that asks not to happen. The ladder still runs;
-            // only the console is quiet.
-            let narrate = pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
-            let ladder = run_second_opinion_ladder(
-                &mut info.app,
-                bridge.clone() as Rc<RefCell<dyn TNLP>>,
-                status,
-                stats,
-                &mut |line| {
-                    if narrate {
-                        eprintln!("{line}");
+            // Declared complementarity (gh#1147): the driver chooses the
+            // formulation, runs the lowered solves and certifies the answer,
+            // as in the CLI and Python. It replaces the single solve and the
+            // second-opinion ladder, which both assume one solve of one model,
+            // and forwards the reported point to the bridge's
+            // `finalize_solution` exactly once, so the copy-back below is the
+            // same for both paths.
+            let (status, statistics, mpcc, second_opinion) = if !info.complementarity.is_empty() {
+                let narrate =
+                    pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
+                let result = {
+                    let _lowered = LoweredSolveGuard::enter();
+                    pounce_restoration::mpcc_driver::solve_mpcc(
+                        &mut info.app,
+                        bridge_for_solve,
+                        info.complementarity.clone(),
+                        &mut |line| {
+                            if narrate {
+                                eprintln!("{line}");
+                            }
+                        },
+                    )
+                };
+                let out = match result {
+                    Ok(out) => out,
+                    // Unreachable from C: the only `Err` is `MpccTnlp::with_lift`
+                    // refusing the pairs, and the stored set passed the same
+                    // validator against the same bounds at declaration. Kept
+                    // as a refusal rather than an assumption.
+                    Err(e) => {
+                        if narrate {
+                            eprintln!(
+                                "pounce: cannot solve this model's complementarity constraints: {e}"
+                            );
+                        }
+                        let status = ApplicationReturnStatus::InvalidProblemDefinition;
+                        if info.app.release_end_verdict() {
+                            info.app.print_end_verdict(status);
+                        }
+                        return status as Index;
                     }
-                },
-            );
-            let status = ladder.status;
+                };
+                if narrate {
+                    eprintln!(
+                        "{}",
+                        pounce_algorithm::mpcc::describe_outcome(
+                            out.reported,
+                            out.solves.len(),
+                            out.total_iterations,
+                            out.max_abs_product,
+                            out.certificate.as_ref(),
+                        )
+                    );
+                }
+                if info.app.release_end_verdict() {
+                    info.app.print_end_verdict(out.status);
+                }
+                (out.status, out.statistics.clone(), Some(out), None)
+            } else {
+                // The path without pairs, unchanged: one solve, then the ladder.
+                let status = info.app.optimize_tnlp(bridge_for_solve);
+                let stats = info.app.statistics();
+                // Second-opinion ladder, on by default as it is in the CLI and the
+                // Python frontend: an `Infeasible_Problem_Detected` or
+                // `Invalid_Number_Detected` is re-solved along up to three
+                // deliberately different trajectories and a re-solve is promoted
+                // only if it converges. A converged solve pays nothing — the
+                // ladder reads the status and returns. The three `*_retry`
+                // options turn individual rungs off.
+                //
+                // Narration goes to stderr, where the solver's own banners already
+                // go -- but gated on `print_level >= 1`. This crate is the Ipopt
+                // drop-in, so `print_level=0 sb=yes` is a caller asking for
+                // silence, and eight unexpected `pounce:` lines on a failing
+                // solve is exactly what that asks not to happen. The ladder still runs;
+                // only the console is quiet.
+                let narrate =
+                    pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
+                let ladder = run_second_opinion_ladder(
+                    &mut info.app,
+                    bridge.clone() as Rc<RefCell<dyn TNLP>>,
+                    status,
+                    stats,
+                    &mut |line| {
+                        if narrate {
+                            eprintln!("{line}");
+                        }
+                    },
+                );
+                (ladder.status, ladder.statistics.clone(), None, Some(ladder))
+            };
             let bridge_ref = bridge.borrow();
             info.last_solve = Some(LastSolve {
-                stats: ladder.statistics.clone(),
+                stats: statistics,
                 status,
                 linear_solver: info.app.linear_solver_summary(),
                 final_x: bridge_ref.final_x.clone(),
                 final_lambda: bridge_ref.final_lambda.clone(),
                 final_obj: bridge_ref.final_obj,
+                mpcc,
+                second_opinion,
             });
             if !x.is_null() && n_us > 0 {
                 std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
@@ -912,6 +1106,12 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 ) -> Bool {
     unsafe {
         if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        // During a complementarity solve the algorithm's iterate is the
+        // lowered model's, not the caller's (gh#1147): no data, whatever
+        // the request shape. Checked before the handle is read.
+        if in_lowered_solve() {
             return FALSE;
         }
         let info = &*ipopt_problem;
@@ -1081,6 +1281,12 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
 ) -> Bool {
     unsafe {
         if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        // During a complementarity solve the algorithm's iterate is the
+        // lowered model's, not the caller's (gh#1147): no data, whatever
+        // the request shape. Checked before the handle is read.
+        if in_lowered_solve() {
             return FALSE;
         }
         let info = &*ipopt_problem;
@@ -1611,6 +1817,12 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             return FALSE;
         }
         let info = &*ipopt_problem;
+        // A complementarity solve ran on the lowered model (gh#1147); no
+        // working set over the caller's rows exists, and one left over from
+        // an earlier solve must not read as this one's.
+        if info.last_solve.as_ref().is_some_and(|l| l.mpcc.is_some()) {
+            return FALSE;
+        }
         let ws = match info.app.last_sqp_working_set() {
             Some(w) => w,
             None => return FALSE,
@@ -1865,6 +2077,855 @@ pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProble
     }
 }
 
+// ---------------------------------------------------------------------------
+// Declared complementarity pairs (gh#1147)
+// ---------------------------------------------------------------------------
+
+/// The declaration succeeded.
+pub const POUNCE_CC_OK: c_int = 0;
+/// NULL handle, or a NULL `rows`/`vars` array with `n_pairs > 0`.
+pub const POUNCE_CC_ERR_NULL: c_int = -1;
+/// A row or variable index outside `[0, m)` / `[0, n)`, read in the
+/// problem's index style.
+pub const POUNCE_CC_ERR_OUT_OF_RANGE: c_int = -2;
+/// The variable is already in a pair (declared earlier or earlier in the
+/// same batch).
+pub const POUNCE_CC_ERR_VAR_ALREADY: c_int = -3;
+/// The row is already in a pair (declared earlier or earlier in the same
+/// batch).
+pub const POUNCE_CC_ERR_ROW_ALREADY: c_int = -4;
+/// The pair's bounds are none of the lowered shapes: one-sided, one-sided
+/// plus a plain bound, or mixed.
+pub const POUNCE_CC_ERR_SHAPE: c_int = -5;
+/// `n_pairs < 0`.
+pub const POUNCE_CC_ERR_COUNT: c_int = -6;
+/// A Rust panic inside the library, caught at the boundary, or (from
+/// `AddPounceComplementarityPair`) a pair already stored on the handle that
+/// no longer validates. Not expected; it exists so neither has to be
+/// reported as a diagnosis of the caller's input.
+pub const POUNCE_CC_ERR_INTERNAL: c_int = -7;
+
+fn pair_error_code(kind: &PairErrorKind) -> c_int {
+    match kind {
+        PairErrorKind::OutOfRange => POUNCE_CC_ERR_OUT_OF_RANGE,
+        PairErrorKind::VarAlreadyPaired => POUNCE_CC_ERR_VAR_ALREADY,
+        PairErrorKind::RowAlreadyPaired => POUNCE_CC_ERR_ROW_ALREADY,
+        PairErrorKind::UnsupportedShape => POUNCE_CC_ERR_SHAPE,
+    }
+}
+
+/// An index in the problem's index style, as a 0-based `usize` when it is
+/// in `[0, len)`, else `usize::MAX` — which [`validate_pairs`] refuses as
+/// out of range in its own order (range, duplicate variable, duplicate
+/// row, shape, pair by pair). `checked_sub` keeps `i32::MIN` in Fortran
+/// style from overflowing.
+fn zero_based(p: Index, offset: Index, len: Index) -> usize {
+    match p.checked_sub(offset) {
+        Some(z) if z >= 0 && z < len => z as usize,
+        _ => usize::MAX,
+    }
+}
+
+/// Validate `new` (pairs in the problem's index style) against the
+/// handle's bounds and the pairs already declared — or alone, when
+/// `replace` — and store the result only if every pair passes. On refusal
+/// the declared set is untouched and the error names the refused pair's
+/// position **in `new`** and the reason — or `None` for the position when
+/// the refused pair is one already stored, which no caller's input caused.
+fn declare_pairs(
+    info: &mut IpoptProblemInfo,
+    new: &[(Index, Index)],
+    replace: bool,
+) -> Result<(), (Option<usize>, PairErrorKind)> {
+    let offset = if info.index_style == 1 { 1 } else { 0 };
+    let base: &[ComplementarityPair] = if replace { &[] } else { &info.complementarity };
+    let mut candidate = Vec::with_capacity(base.len() + new.len());
+    candidate.extend_from_slice(base);
+    candidate.extend(new.iter().map(|&(row, var)| ComplementarityPair {
+        row: zero_based(row, offset, info.m),
+        var: zero_based(var, offset, info.n),
+    }));
+    match validate_pairs(
+        info.n as usize,
+        info.m as usize,
+        &info.x_l,
+        &info.x_u,
+        &info.g_l,
+        &info.g_u,
+        &candidate,
+    ) {
+        Ok(_) => {
+            info.complementarity = candidate;
+            Ok(())
+        }
+        // `base` passed this validator when it was stored, against bounds
+        // no public call changes under a declared pair, so the refused pair
+        // is normally one of `new`. If a stored pair is the one refused (the
+        // state an in-place bound update that skipped the re-check would
+        // leave), say so with `None` rather than remap its index onto the
+        // caller's first new pair.
+        Err(e) => Err((e.pair.checked_sub(base.len()), e.kind)),
+    }
+}
+
+/// Declare one complementarity pair: constraint row `row` with variable
+/// `var`, both **in the problem's index style** (gh#1147). The pair is in
+/// POUNCE's native shapes — one-sided, one-sided plus a plain bound, or
+/// mixed — exactly as Python's `Problem(complementarity=)` and the `.nl`
+/// reader accept, and is checked at once by the same classifier the
+/// solve's lowering runs (`pounce_nlp::mpcc::validate_pairs`), against the
+/// handle's bounds — those given to [`CreateIpoptProblem`], as
+/// [`AddPounceComplementsConstraint`] may have edited them — and the pairs
+/// already declared.
+///
+/// Returns [`POUNCE_CC_OK`] or a negative `POUNCE_CC_ERR_*` code; a refused
+/// pair leaves the declared set unchanged. Pairs persist on the handle
+/// until [`SetPounceComplementarityPairs`] replaces them or
+/// [`ClearPounceComplementarityPairs`] drops them.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn AddPounceComplementarityPair(
+    ipopt_problem: IpoptProblem,
+    row: Index,
+    var: Index,
+) -> c_int {
+    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+        if ipopt_problem.is_null() {
+            return POUNCE_CC_ERR_NULL;
+        }
+        match declare_pairs(&mut *ipopt_problem, &[(row, var)], false) {
+            Ok(()) => POUNCE_CC_OK,
+            Err((Some(_), kind)) => pair_error_code(&kind),
+            // A stored pair no longer validates: not the caller's pair.
+            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
+        }
+    })
+}
+
+/// Replace the declared pairs with `n_pairs` pairs `(rows[k], vars[k])`,
+/// indices in the problem's index style. All or nothing: the new set is
+/// validated as a whole (on its own, not against the pairs it replaces)
+/// and stored only if every pair passes; otherwise the previous set stays.
+/// `n_pairs == 0` clears the set (the arrays may then be NULL).
+///
+/// `bad_index`, when non-NULL, receives the position in the batch of the
+/// first refused pair (for a duplicate, the second occurrence), or `-1`
+/// on success and on the errors that concern no single pair
+/// ([`POUNCE_CC_ERR_NULL`], [`POUNCE_CC_ERR_COUNT`]).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `rows` and
+/// `vars`, when non-NULL, must each point at `n_pairs` readable `ipindex`
+/// values; `bad_index` must be NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetPounceComplementarityPairs(
+    ipopt_problem: IpoptProblem,
+    n_pairs: Index,
+    rows: *const Index,
+    vars: *const Index,
+    bad_index: *mut Index,
+) -> c_int {
+    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+        let report = |k: Index| {
+            if !bad_index.is_null() {
+                *bad_index = k;
+            }
+        };
+        report(-1);
+        if ipopt_problem.is_null() {
+            return POUNCE_CC_ERR_NULL;
+        }
+        if n_pairs < 0 {
+            return POUNCE_CC_ERR_COUNT;
+        }
+        if n_pairs > 0 && (rows.is_null() || vars.is_null()) {
+            return POUNCE_CC_ERR_NULL;
+        }
+        let new: Vec<(Index, Index)> = if n_pairs == 0 {
+            Vec::new()
+        } else {
+            let r = std::slice::from_raw_parts(rows, n_pairs as usize);
+            let v = std::slice::from_raw_parts(vars, n_pairs as usize);
+            r.iter().copied().zip(v.iter().copied()).collect()
+        };
+        match declare_pairs(&mut *ipopt_problem, &new, true) {
+            Ok(()) => POUNCE_CC_OK,
+            Err((Some(k), kind)) => {
+                report(k as Index);
+                pair_error_code(&kind)
+            }
+            // Unreachable: `replace` validates `new` alone, so every
+            // refused pair is one of the caller's.
+            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
+        }
+    })
+}
+
+/// Drop every declared complementarity pair. Returns `FALSE` only on a
+/// NULL handle.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ClearPounceComplementarityPairs(ipopt_problem: IpoptProblem) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        (*ipopt_problem).complementarity.clear();
+        TRUE
+    })
+}
+
+/// Number of declared complementarity pairs, or `-1` on a NULL handle.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityPairCount(ipopt_problem: IpoptProblem) -> Index {
+    ffi_guard(-1, || unsafe {
+        if ipopt_problem.is_null() {
+            return -1;
+        }
+        (*ipopt_problem).complementarity.len() as Index
+    })
+}
+
+/// Copy the declared pairs, in declaration order and **in the problem's
+/// index style**, into `rows` and `vars` (each sized by
+/// [`GetPounceComplementarityPairCount`]). Returns `FALSE`, writing
+/// nothing, on a NULL handle or a NULL array while pairs are declared;
+/// with no pairs it returns `TRUE` and the arrays may be NULL.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `rows` and
+/// `vars`, when non-NULL, must each have room for the declared count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityPairs(
+    ipopt_problem: IpoptProblem,
+    rows: *mut Index,
+    vars: *mut Index,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &*ipopt_problem;
+        let k = info.complementarity.len();
+        if k == 0 {
+            return TRUE;
+        }
+        if rows.is_null() || vars.is_null() {
+            return FALSE;
+        }
+        let offset = if info.index_style == 1 { 1 } else { 0 };
+        let rows = std::slice::from_raw_parts_mut(rows, k);
+        let vars = std::slice::from_raw_parts_mut(vars, k);
+        for (i, p) in info.complementarity.iter().enumerate() {
+            rows[i] = p.row as Index + offset;
+            vars[i] = p.var as Index + offset;
+        }
+        TRUE
+    })
+}
+
+// ---------------------------------------------------------------------------
+// MOI `[F, x] ∈ Complements` semantics (gh#1147)
+// ---------------------------------------------------------------------------
+
+/// `x` boxed, `l < u` both finite: a native **mixed** pair was declared;
+/// the row's bounds are unchanged (free).
+pub const POUNCE_COMPLEMENTS_PAIR_MIXED: c_int = 0;
+/// `x >= l` only: the row's lower bound was set to `0` (`F >= 0`) and a
+/// native one-sided pair declared.
+pub const POUNCE_COMPLEMENTS_PAIR_LOWER: c_int = 1;
+/// `x <= u` only: the row's upper bound was set to `0` (`F <= 0`) and a
+/// native one-sided pair declared.
+pub const POUNCE_COMPLEMENTS_PAIR_UPPER: c_int = 2;
+/// `x` free: both row bounds were set to `0` (`F = 0`); no pair.
+pub const POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR: c_int = 3;
+/// `x` fixed (`l == u`): nothing changed, `F` stays free; no pair.
+pub const POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR: c_int = 4;
+/// NULL handle.
+pub const POUNCE_COMPLEMENTS_ERR_NULL: c_int = -1;
+/// Row or variable outside `[0, m)` / `[0, n)`, read in the problem's
+/// index style.
+pub const POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE: c_int = -2;
+/// The variable is in a declared pair or in an earlier accepted
+/// [`AddPounceComplementsConstraint`] call.
+pub const POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED: c_int = -3;
+/// The row is in a declared pair or in an earlier accepted
+/// [`AddPounceComplementsConstraint`] call.
+pub const POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED: c_int = -4;
+/// The row has a finite bound (`g_L > -1e19` or `g_U < 1e19`), including
+/// one an earlier call of this helper set: MOI's `F` is a free function.
+/// Declare such a row with [`AddPounceComplementarityPair`].
+pub const POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE: c_int = -5;
+/// The variable's bounds are NaN or crossed (`l > u`, both finite): no row
+/// of the MOI table applies.
+pub const POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS: c_int = -6;
+/// The handle's state is inconsistent (a declared pair no longer passes
+/// validation against its bounds), or a Rust panic was caught at the
+/// boundary. Nothing was changed.
+pub const POUNCE_COMPLEMENTS_ERR_INTERNAL: c_int = -7;
+
+/// Which row of the MOI `Complements` table a variable with bounds
+/// `[xl, xu]` takes, read with the same `±1e19` convention as the pair
+/// classifier; `None` for NaN or crossed bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComplementsRow {
+    Mixed,
+    Lower,
+    Upper,
+    RowFixed,
+    VarFixed,
+}
+
+fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
+    if xl.is_nan() || xu.is_nan() {
+        return None;
+    }
+    match (xl > NLP_LOWER_BOUND_INF, xu < NLP_UPPER_BOUND_INF) {
+        (true, true) if xl < xu => Some(ComplementsRow::Mixed),
+        (true, true) if xl == xu => Some(ComplementsRow::VarFixed),
+        (true, true) => None,
+        (true, false) => Some(ComplementsRow::Lower),
+        (false, true) => Some(ComplementsRow::Upper),
+        (false, false) => Some(ComplementsRow::RowFixed),
+    }
+}
+
+impl ComplementsRow {
+    /// The row bounds the table gives a free row, and whether it declares a
+    /// pair.
+    fn row_bounds(self, gl: Number, gu: Number) -> (Number, Number, bool) {
+        match self {
+            ComplementsRow::Mixed => (gl, gu, true),
+            ComplementsRow::Lower => (0.0, gu, true),
+            ComplementsRow::Upper => (gl, 0.0, true),
+            ComplementsRow::RowFixed => (0.0, 0.0, false),
+            ComplementsRow::VarFixed => (gl, gu, false),
+        }
+    }
+
+    fn code(self) -> c_int {
+        match self {
+            ComplementsRow::Mixed => POUNCE_COMPLEMENTS_PAIR_MIXED,
+            ComplementsRow::Lower => POUNCE_COMPLEMENTS_PAIR_LOWER,
+            ComplementsRow::Upper => POUNCE_COMPLEMENTS_PAIR_UPPER,
+            ComplementsRow::RowFixed => POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR,
+            ComplementsRow::VarFixed => POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR,
+        }
+    }
+
+    /// The native shape the edited bounds must classify as (pair rows).
+    fn shape_matches(self, shape: Option<PairShape>) -> bool {
+        matches!(
+            (self, shape),
+            (ComplementsRow::Mixed, Some(PairShape::Mixed { .. }))
+                | (ComplementsRow::Lower, Some(PairShape::OneSided { .. }))
+                | (ComplementsRow::Upper, Some(PairShape::OneSided { .. }))
+        )
+    }
+}
+
+fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int {
+    let offset = if info.index_style == 1 { 1 } else { 0 };
+    let (r, v) = (
+        zero_based(row, offset, info.m),
+        zero_based(var, offset, info.n),
+    );
+    if r == usize::MAX || v == usize::MAX {
+        return POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE;
+    }
+    let (gl, gu) = (info.g_l[r], info.g_u[r]);
+    if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
+        return POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE;
+    }
+    let used = || info.complementarity.iter().chain(&info.complements_used);
+    if used().any(|p| p.var == v) {
+        return POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED;
+    }
+    if used().any(|p| p.row == r) {
+        return POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED;
+    }
+    let Some(table_row) = complements_row(info.x_l[v], info.x_u[v]) else {
+        return POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS;
+    };
+    let (new_gl, new_gu, declares) = table_row.row_bounds(gl, gu);
+    debug_assert!(
+        !declares
+            || table_row.shape_matches(classify_pair(info.x_l[v], info.x_u[v], new_gl, new_gu)),
+        "MOI table row {table_row:?} edits to a bound pair that is not its native shape"
+    );
+    // Tentative edit, then validate the declared pairs (and the new one)
+    // against the edited bounds through the same path every declaration
+    // takes. The edited row is in no declared pair, so this passes by
+    // construction; if it does not, the handle was already inconsistent,
+    // and it is restored rather than left half-edited.
+    info.g_l[r] = new_gl;
+    info.g_u[r] = new_gu;
+    let new: &[(Index, Index)] = if declares { &[(row, var)] } else { &[] };
+    match declare_pairs(info, new, false) {
+        Ok(()) => {
+            info.complements_used
+                .push(ComplementarityPair { row: r, var: v });
+            table_row.code()
+        }
+        Err(_) => {
+            info.g_l[r] = gl;
+            info.g_u[r] = gu;
+            POUNCE_COMPLEMENTS_ERR_INTERNAL
+        }
+    }
+}
+
+/// Declare MOI's `[F, x] ∈ Complements` for constraint row `row` (`F`) and
+/// variable `var` (`x`), both **in the problem's index style** (gh#1147).
+///
+/// MOI writes `F` as a free function and reads the sign it must have off
+/// `x`'s bounds; POUNCE's native pairs read both sides' signs off their
+/// bounds. This helper transcribes one into the other **by editing the
+/// handle's copy of the row bounds**, then declares the native pair, as
+/// the table says (bounds at or beyond `±1e19` are infinite):
+///
+/// | `x` bounds         | row edit            | pair            | returns |
+/// |--------------------|---------------------|-----------------|---------|
+/// | `l < u`, finite    | none                | native mixed    | [`POUNCE_COMPLEMENTS_PAIR_MIXED`] |
+/// | `l` only           | `g_L = 0` (`F ≥ 0`) | one-sided       | [`POUNCE_COMPLEMENTS_PAIR_LOWER`] |
+/// | `u` only           | `g_U = 0` (`F ≤ 0`) | one-sided       | [`POUNCE_COMPLEMENTS_PAIR_UPPER`] |
+/// | free               | `g_L = g_U = 0`     | none (`F = 0`)  | [`POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR`] |
+/// | `l == u`           | none (`F` free)     | none            | [`POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR`] |
+///
+/// The row must be free (else [`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE`]:
+/// use [`AddPounceComplementarityPair`] for a row that already has a
+/// side). Checks, in order: NULL handle, range, row free, variable then
+/// row not already used (by a declared pair or by an earlier accepted call
+/// of this helper), the variable's bounds neither NaN nor crossed. A
+/// refused call changes nothing. Bound edits are permanent on the handle:
+/// [`ClearPounceComplementarityPairs`] and
+/// [`SetPounceComplementarityPairs`] drop pairs, not edits.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn AddPounceComplementsConstraint(
+    ipopt_problem: IpoptProblem,
+    row: Index,
+    var: Index,
+) -> c_int {
+    ffi_guard(POUNCE_COMPLEMENTS_ERR_INTERNAL, || unsafe {
+        if ipopt_problem.is_null() {
+            return POUNCE_COMPLEMENTS_ERR_NULL;
+        }
+        add_complements(&mut *ipopt_problem, row, var)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Complementarity outcome getters (gh#1147)
+//
+// What the complementarity driver did on the most recent `IpoptSolve`: the
+// same fields, through the same encodings, as the solve report's
+// `complementarity` block (`MpccOutcome::report_info`) and Python's
+// `info["complementarity"]`. Every getter answers "nothing" (`FALSE` / `-1`)
+// when the most recent solve did not run the driver: no solve yet, a solve
+// without pairs, a refused or failed solve, or a session solve.
+// ---------------------------------------------------------------------------
+
+/// `certificate_class`: strongly stationary.
+pub const POUNCE_CC_CLASS_S: c_int = 0;
+/// `certificate_class`: weakly stationary only.
+pub const POUNCE_CC_CLASS_W: c_int = 1;
+/// `certificate_class`: not a stationary point of the model.
+pub const POUNCE_CC_CLASS_NONE: c_int = 2;
+/// `certificate_class`: not determined (the multiplier set is too large to
+/// search).
+pub const POUNCE_CC_CLASS_NOT_SEARCHED: c_int = 3;
+/// `certificate_class`: no certificate (the model could not be evaluated at
+/// the reported point).
+pub const POUNCE_CC_CLASS_ABSENT: c_int = -1;
+
+/// `reported`: a formulation answered.
+pub const POUNCE_CC_REPORTED_ANSWER: c_int = 0;
+/// `reported`: a weakly stationary point, reported when none answered.
+pub const POUNCE_CC_REPORTED_WEAK_FALLBACK: c_int = 1;
+/// `reported`: a converged point with every product in tolerance, no
+/// stationarity certified.
+pub const POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED: c_int = 2;
+/// `reported`: no feasible point; the exact-product solve's verdict.
+pub const POUNCE_CC_REPORTED_VERDICT: c_int = 3;
+
+/// `b_verdict`: B-stationary.
+pub const POUNCE_CC_B_VERDICT_B: c_int = 0;
+/// `b_verdict`: a branch descends.
+pub const POUNCE_CC_B_VERDICT_NOT_B: c_int = 1;
+/// `b_verdict`: not decided (the reason is `POUNCE_CC_TEXT_B_REASON`).
+pub const POUNCE_CC_B_VERDICT_NOT_CHECKED: c_int = 2;
+/// `b_verdict`: the check did not run.
+pub const POUNCE_CC_B_VERDICT_ABSENT: c_int = -1;
+
+/// [`GetPounceComplementarityText`]: the driver's one-line account.
+pub const POUNCE_CC_TEXT_SUMMARY: c_int = 0;
+/// [`GetPounceComplementarityText`]: why the polish's point was not taken.
+pub const POUNCE_CC_TEXT_POLISH_REASON: c_int = 1;
+/// [`GetPounceComplementarityText`]: why the B-stationarity check was not
+/// decided.
+pub const POUNCE_CC_TEXT_B_REASON: c_int = 2;
+
+/// C mirror of the driver's [`MpccOutcome`](pounce_restoration::mpcc_driver::MpccOutcome)
+/// for `pounce.h`'s `PounceComplementarityStats`. Field order is the ABI
+/// (Pounce.jl mirrors structs field for field); `tests/c_examples_build_and_run.rs`
+/// holds every offset to the C compiler's. Sentinels instead of
+/// discriminants: `NaN` for a real that was not measured (or is not
+/// finite, as the report's `null`), `-1` for a count or flag whose record
+/// is absent.
+///
+/// Extensible (see `ExtensibleOut` in this crate): `struct_size` first, set by the
+/// caller to `sizeof(PounceComplementarityStats)`; fields are only ever
+/// appended.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceComplementarityStats {
+    pub struct_size: Index,
+    pub strategy: [c_char; 16],
+    pub reported: Index,
+    pub accepted_by: [c_char; 32],
+    pub fallback: [c_char; 32],
+    pub n_solves: Index,
+    pub total_iterations: Index,
+    pub max_abs_product: Number,
+    pub certificate_class: Index,
+    pub n_pairs: Index,
+    pub n_biactive: Index,
+    pub n_neither: Index,
+    pub multipliers_unique: Index,
+    pub residual: Number,
+    pub resid_tol: Number,
+    pub tight: Index,
+    pub feasible: Index,
+    pub primal_violation: Number,
+    pub b_verdict: Index,
+    pub b_n_biactive: Index,
+    pub b_branches_solved: Index,
+    pub b_enumerated: Index,
+    pub escapes: Index,
+    pub lifted: Index,
+    pub natural_residual: Number,
+    pub polish_ran: Index,
+    pub polish_taken: Index,
+    pub polish_residual_before: Number,
+    pub polish_residual_after: Number,
+    pub polish_threshold: Number,
+}
+
+/// C mirror of one [`MpccSolveRecord`](pounce_restoration::mpcc_driver::MpccSolveRecord),
+/// for `pounce.h`'s `PounceComplementaritySolve`. Extensible, like
+/// [`PounceComplementarityStats`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PounceComplementaritySolve {
+    pub struct_size: Index,
+    pub stage: [c_char; 32],
+    pub relaxed: Index,
+    pub tau: Number,
+    pub status: Index,
+    pub iterations: Index,
+    pub max_abs_product: Number,
+    pub seconds: Number,
+}
+
+// SAFETY: both are `#[repr(C)]` with `struct_size: Index` first.
+unsafe impl ExtensibleOut for PounceComplementarityStats {}
+unsafe impl ExtensibleOut for PounceComplementaritySolve {}
+
+/// Copy `s` into a fixed C char array, truncated on a byte boundary so that
+/// a NUL always fits; the rest of the array is zeroed.
+fn copy_label<const N: usize>(dst: &mut [c_char; N], s: &str) {
+    dst.fill(0);
+    let keep = s.len().min(N.saturating_sub(1));
+    for (slot, b) in dst.iter_mut().zip(&s.as_bytes()[..keep]) {
+        *slot = *b as c_char;
+    }
+}
+
+/// A count as an `Index`, saturating rather than wrapping.
+fn cc_count(v: usize) -> Index {
+    Index::try_from(v).unwrap_or(Index::MAX)
+}
+
+/// The report's `finite` rule, in C's terms: a non-finite or unmeasured
+/// real reads `NaN` where the JSON reads `null`.
+fn cc_real(v: Number) -> Number {
+    if v.is_finite() { v } else { Number::NAN }
+}
+
+fn cc_flag(b: bool) -> Index {
+    Index::from(b)
+}
+
+/// The struct [`GetPounceComplementarityStats`] fills, from the driver's
+/// record. The encodings are `MpccOutcome::report_info`'s field for field
+/// (strings become the `POUNCE_CC_*` codes, `null` becomes `NaN` or `-1`).
+pub(crate) fn complementarity_stats(
+    out: &pounce_restoration::mpcc_driver::MpccOutcome,
+) -> PounceComplementarityStats {
+    use pounce_algorithm::mpcc::{BVerdict, Reported, StationarityClass};
+    let mut s = PounceComplementarityStats {
+        struct_size: struct_size_of::<PounceComplementarityStats>(),
+        strategy: [0; 16],
+        reported: match out.reported {
+            Reported::Answer(_) => POUNCE_CC_REPORTED_ANSWER,
+            Reported::WeakFallback(_) => POUNCE_CC_REPORTED_WEAK_FALLBACK,
+            Reported::FeasibleUncertified(_) => POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED,
+            Reported::Verdict => POUNCE_CC_REPORTED_VERDICT,
+        },
+        accepted_by: [0; 32],
+        fallback: [0; 32],
+        n_solves: cc_count(out.solves.len()),
+        total_iterations: cc_count(out.total_iterations),
+        max_abs_product: cc_real(out.max_abs_product),
+        certificate_class: POUNCE_CC_CLASS_ABSENT,
+        n_pairs: -1,
+        n_biactive: -1,
+        n_neither: -1,
+        multipliers_unique: -1,
+        residual: Number::NAN,
+        resid_tol: Number::NAN,
+        tight: -1,
+        feasible: -1,
+        primal_violation: Number::NAN,
+        b_verdict: POUNCE_CC_B_VERDICT_ABSENT,
+        b_n_biactive: -1,
+        b_branches_solved: -1,
+        b_enumerated: -1,
+        escapes: cc_count(out.escapes),
+        lifted: cc_count(out.lifted),
+        natural_residual: out.natural_residual.map_or(Number::NAN, cc_real),
+        polish_ran: 0,
+        polish_taken: 0,
+        polish_residual_before: Number::NAN,
+        polish_residual_after: Number::NAN,
+        polish_threshold: cc_real(out.polish_threshold),
+    };
+    copy_label(&mut s.strategy, out.strategy.name());
+    if let Some(stage) = out.accepted_by {
+        copy_label(&mut s.accepted_by, stage.label());
+    }
+    if let Some(stage) = out.fallback {
+        copy_label(&mut s.fallback, stage.label());
+    }
+    if let Some(c) = &out.certificate {
+        s.certificate_class = match c.class {
+            StationarityClass::S => POUNCE_CC_CLASS_S,
+            StationarityClass::W => POUNCE_CC_CLASS_W,
+            StationarityClass::None => POUNCE_CC_CLASS_NONE,
+            StationarityClass::NotSearched => POUNCE_CC_CLASS_NOT_SEARCHED,
+        };
+        s.n_pairs = cc_count(c.n_pairs);
+        s.n_biactive = cc_count(c.n_biactive);
+        s.n_neither = cc_count(c.n_neither);
+        s.multipliers_unique = cc_flag(c.multipliers_unique);
+        s.residual = cc_real(c.residual);
+        s.resid_tol = cc_real(c.resid_tol);
+        s.tight = cc_flag(c.tight);
+        s.feasible = cc_flag(c.feasible);
+        s.primal_violation = cc_real(c.primal_violation);
+    }
+    if let Some(b) = &out.b_check {
+        s.b_verdict = match b.verdict {
+            BVerdict::B => POUNCE_CC_B_VERDICT_B,
+            BVerdict::NotB { .. } => POUNCE_CC_B_VERDICT_NOT_B,
+            BVerdict::NotChecked(_) => POUNCE_CC_B_VERDICT_NOT_CHECKED,
+        };
+        s.b_n_biactive = cc_count(b.n_biactive);
+        s.b_branches_solved = cc_count(b.branches_solved);
+        s.b_enumerated = cc_flag(b.enumerated);
+    }
+    if let Some(p) = &out.polish {
+        s.polish_ran = 1;
+        s.polish_taken = cc_flag(p.taken);
+        s.polish_residual_before = cc_real(p.residual_before);
+        s.polish_residual_after = cc_real(p.residual_after);
+    }
+    s
+}
+
+/// The record [`GetPounceComplementaritySolve`] fills for one lowered solve.
+pub(crate) fn complementarity_solve(
+    r: &pounce_restoration::mpcc_driver::MpccSolveRecord,
+) -> PounceComplementaritySolve {
+    let mut s = PounceComplementaritySolve {
+        struct_size: struct_size_of::<PounceComplementaritySolve>(),
+        stage: [0; 32],
+        relaxed: cc_flag(r.tau.is_some()),
+        tau: r.tau.unwrap_or(Number::NAN),
+        status: r.status as Index,
+        iterations: cc_count(r.iterations),
+        max_abs_product: cc_real(r.max_abs_product),
+        seconds: cc_real(r.seconds),
+    };
+    copy_label(&mut s.stage, r.stage.label());
+    s
+}
+
+/// The text [`GetPounceComplementarityText`] returns for `which`, or `None`
+/// when that text is absent on this run (or `which` names none).
+pub(crate) fn complementarity_text(
+    out: &pounce_restoration::mpcc_driver::MpccOutcome,
+    which: c_int,
+) -> Option<String> {
+    use pounce_algorithm::mpcc::BVerdict;
+    match which {
+        POUNCE_CC_TEXT_SUMMARY => Some(pounce_algorithm::mpcc::describe_outcome(
+            out.reported,
+            out.solves.len(),
+            out.total_iterations,
+            out.max_abs_product,
+            out.certificate.as_ref(),
+        )),
+        POUNCE_CC_TEXT_POLISH_REASON => out.polish.as_ref().and_then(|p| p.reason.clone()),
+        POUNCE_CC_TEXT_B_REASON => match out.b_check.as_ref().map(|b| &b.verdict) {
+            Some(BVerdict::NotChecked(why)) => Some((*why).to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The driver's record of the most recent solve, if that solve ran it.
+unsafe fn last_mpcc<'a>(
+    ipopt_problem: IpoptProblem,
+) -> Option<&'a pounce_restoration::mpcc_driver::MpccOutcome> {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return None;
+        }
+        (*ipopt_problem)
+            .last_solve
+            .as_ref()
+            .and_then(|ls| ls.mpcc.as_ref())
+    }
+}
+
+/// What the complementarity driver did on the most recent [`IpoptSolve`]
+/// (gh#1147): the strategy, what was reported and by which formulation,
+/// the iteration totals, the stationarity certificate, the B-stationarity
+/// check and the polish — the solve report's `complementarity` block as a
+/// struct of scalars. The caller sets `stats->struct_size =
+/// sizeof(PounceComplementarityStats)` first. Returns `FALSE`, leaving
+/// `stats` untouched, on a NULL argument, a `struct_size` smaller than this
+/// release's size, before any solve, and when the most recent solve did not run
+/// the driver (no pairs were declared, or it was refused or failed before
+/// the driver returned). The record describes the most recent solve: clearing
+/// the pairs afterwards does not erase it, the next solve does.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `stats`, when
+/// non-NULL, must point at a writable `PounceComplementarityStats` (at
+/// least `struct_size` bytes when that is this release's size or more).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityStats(
+    ipopt_problem: IpoptProblem,
+    stats: *mut PounceComplementarityStats,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if stats.is_null() {
+            return FALSE;
+        }
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return FALSE;
+        };
+        // Bounded write of this release's size; FALSE, nothing written,
+        // when `stats->struct_size` is short (see `write_extensible`).
+        Bool::from(write_extensible(stats, &complementarity_stats(out)))
+    })
+}
+
+/// Lowered solve `k` (0-based, in the order the driver ran them, `k <
+/// n_solves`) of the most recent driver solve; the caller sets
+/// `solve->struct_size = sizeof(PounceComplementaritySolve)` first. Returns
+/// `FALSE`, leaving `solve` untouched, on a NULL argument, a short
+/// `struct_size`, a `k` out of range, and whenever
+/// [`GetPounceComplementarityStats`] would.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `solve`, when
+/// non-NULL, must point at a writable `PounceComplementaritySolve` (at
+/// least `struct_size` bytes when that is this release's size or more).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementaritySolve(
+    ipopt_problem: IpoptProblem,
+    k: Index,
+    solve: *mut PounceComplementaritySolve,
+) -> Bool {
+    ffi_guard(FALSE, || unsafe {
+        if solve.is_null() {
+            return FALSE;
+        }
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return FALSE;
+        };
+        let Some(r) = usize::try_from(k).ok().and_then(|k| out.solves.get(k)) else {
+            return FALSE;
+        };
+        Bool::from(write_extensible(solve, &complementarity_solve(r)))
+    })
+}
+
+/// One of the driver's free-form texts for the most recent driver solve,
+/// with C's `snprintf` contract: writes at most `buflen - 1` bytes of it
+/// plus a NUL into `buf` and returns its full length in bytes, without the
+/// NUL — so `buf = NULL, buflen = 0` sizes the buffer, and a return `>=
+/// buflen` means it was truncated. Returns `-1`, writing nothing, when
+/// there is no such text: a NULL handle, a `which` that names none,
+/// whenever [`GetPounceComplementarityStats`] would return `FALSE`, or a
+/// text this run does not have (`POUNCE_CC_TEXT_POLISH_REASON` unless the
+/// polish ran and was not taken; `POUNCE_CC_TEXT_B_REASON` unless the
+/// B-stationarity check ran and was not decided). A NULL `buf` or a
+/// `buflen <= 0` writes nothing and still returns the length.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL. `buf`, when
+/// non-NULL and `buflen > 0`, must have room for `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GetPounceComplementarityText(
+    ipopt_problem: IpoptProblem,
+    which: c_int,
+    buf: *mut c_char,
+    buflen: Index,
+) -> Index {
+    ffi_guard(-1, || unsafe {
+        let Some(out) = last_mpcc(ipopt_problem) else {
+            return -1;
+        };
+        let Some(text) = complementarity_text(out, which) else {
+            return -1;
+        };
+        let bytes = text.as_bytes();
+        if !buf.is_null() && buflen > 0 {
+            let keep = bytes.len().min(buflen as usize - 1);
+            let dst = std::slice::from_raw_parts_mut(buf, keep + 1);
+            for (slot, b) in dst.iter_mut().zip(&bytes[..keep]) {
+                *slot = *b as c_char;
+            }
+            dst[keep] = 0;
+        }
+        cc_count(bytes.len())
+    })
+}
+
 /// Drop any pending warm-start working set without solving. The
 /// next [`IpoptSolve`] will cold-start.
 ///
@@ -1973,6 +3034,39 @@ pub(crate) fn bridge_violation_options(
         num("nlp_upper_bound_inf", NLP_UPPER_BOUND_INF),
         !relax,
     )
+}
+
+thread_local! {
+    /// `true` while [`IpoptSolve`] runs the complementarity driver on this
+    /// thread (gh#1147). The live inspectors report no data then: the
+    /// algorithm's iterate is the lowered model's — product rows appended,
+    /// possibly lifted variables — not the caller's, and a prefix of it is
+    /// not the caller's iterate either (a lifted row's bounds are rewritten).
+    static IN_LOWERED_SOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets [`IN_LOWERED_SOLVE`] for its lifetime, restoring the previous value
+/// on drop (so a panic caught by [`ffi_guard`] cannot leave it set).
+struct LoweredSolveGuard {
+    prev: bool,
+}
+
+impl LoweredSolveGuard {
+    fn enter() -> Self {
+        Self {
+            prev: IN_LOWERED_SOLVE.with(|c| c.replace(true)),
+        }
+    }
+}
+
+impl Drop for LoweredSolveGuard {
+    fn drop(&mut self) {
+        IN_LOWERED_SOLVE.with(|c| c.set(self.prev));
+    }
+}
+
+fn in_lowered_solve() -> bool {
+    IN_LOWERED_SOLVE.with(|c| c.get())
 }
 
 struct BridgeGuard {
@@ -2488,6 +3582,17 @@ pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> 
 /// produces. The input descriptor is recorded as `tnlp-direct`
 /// because the cinterface receives callbacks rather than a file.
 ///
+/// When that solve ran the complementarity driver (pairs were declared),
+/// the report carries the `complementarity` block at either detail level,
+/// built by the same conversion as the CLI's and Python's reports; it is
+/// absent otherwise.
+///
+/// When that solve took the path without pairs and the second-opinion
+/// ladder ran at least one rung, the report carries the `second_opinion`
+/// block (gh#850) at either detail level, from the same conversion and
+/// under the same condition as the CLI's and Python's; absent when no rung
+/// ran, after a driver solve, and after a session solve.
+///
 /// Returns `TRUE` on a successful write, `FALSE` for NULL handle,
 /// no prior solve, an invalid `detail`, a bad path, or an I/O error.
 ///
@@ -2551,6 +3656,27 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
         builder.ingest_stats(&last.stats);
         if let Some(linsol) = last.linear_solver.clone() {
             builder.set_linear_solver_summary(linsol);
+        }
+        // Declared complementarity (gh#1147): what the driver did, through the
+        // same conversion the CLI's `--json-output` and Python's `report_path`
+        // use, so the three frontends write one block for one driver outcome.
+        // `ingest_stats` above wrote the reported lowered solve's statistics;
+        // the block carries every lowered solve and the true total. Absent for
+        // a solve that did not run the driver (no pairs declared).
+        if let Some(out) = &last.mpcc {
+            builder.set_complementarity(out.report_info());
+        }
+        // gh#850: what the second-opinion ladder did, and what the *base*
+        // solve did before it, under the CLI's and Python's `ran()` test and
+        // through the same `report_info()`. `ingest_stats` above wrote the
+        // promoted rung's iteration count as though it were the solve's;
+        // without this block a rescued solve reads as a clean, fast one.
+        // Absent when no rung ran, and on a driver solve, which does not run
+        // the ladder (the CLI and Python skip it there too).
+        if let Some(so) = &last.second_opinion
+            && so.ran()
+        {
+            builder.set_second_opinion(so.report_info());
         }
 
         let report = builder.finish();
@@ -2617,6 +3743,7 @@ mod tests {
 
     #[test]
     fn create_returns_null_on_missing_required_callbacks() {
+        // error-path: CreateIpoptProblem
         let xl = [-1.0; 4];
         let xu = [1.0; 4];
         let p = unsafe {
@@ -2717,6 +3844,9 @@ mod tests {
 
     #[test]
     fn add_options_on_null_problem_returns_false() {
+        // error-path: AddIpoptIntOption
+        // error-path: AddIpoptNumOption
+        // error-path: AddIpoptStrOption
         let key = CString::new("print_level").unwrap();
         let v = CString::new("yes").unwrap();
         unsafe {
@@ -2764,6 +3894,7 @@ mod tests {
 
     #[test]
     fn solve_returns_internal_error_on_null_problem() {
+        // error-path: IpoptSolve
         let rc = unsafe {
             IpoptSolve(
                 std::ptr::null_mut(),
@@ -2781,6 +3912,7 @@ mod tests {
 
     #[test]
     fn free_null_is_safe() {
+        // error-path: FreeIpoptProblem
         unsafe { FreeIpoptProblem(std::ptr::null_mut()) };
     }
 
@@ -3019,6 +4151,7 @@ mod tests {
 
     #[test]
     fn get_version_tolerates_null_buffers() {
+        // error-path: GetIpoptVersion
         // None of these should crash.
         unsafe {
             GetIpoptVersion(
@@ -3045,6 +4178,7 @@ mod tests {
 
     #[test]
     fn set_scaling_on_null_problem_returns_false() {
+        // error-path: SetIpoptProblemScaling
         let ok = unsafe {
             SetIpoptProblemScaling(
                 std::ptr::null_mut(),
@@ -3080,6 +4214,7 @@ mod tests {
 
     #[test]
     fn open_output_file_with_null_inputs_returns_false() {
+        // error-path: OpenIpoptOutputFile
         let key = CString::new("nope").unwrap();
         unsafe {
             assert_eq!(
@@ -3096,6 +4231,7 @@ mod tests {
 
     #[test]
     fn get_current_iterate_returns_false_outside_callback() {
+        // error-path: GetIpoptCurrentIterate
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentIterate(
@@ -3116,6 +4252,7 @@ mod tests {
 
     #[test]
     fn get_current_violations_returns_false_outside_callback() {
+        // error-path: GetIpoptCurrentViolations
         let p = create_unconstrained();
         let rc = unsafe {
             GetIpoptCurrentViolations(
@@ -3138,6 +4275,11 @@ mod tests {
 
     #[test]
     fn post_solve_stats_zero_before_solve() {
+        // error-path: GetIpoptIterCount
+        // error-path: GetIpoptSolveTime
+        // error-path: GetIpoptPrimalInf
+        // error-path: GetIpoptDualInf
+        // error-path: GetIpoptComplInf
         let p = create_unconstrained();
         unsafe {
             assert_eq!(GetIpoptIterCount(p), 0);
@@ -3205,6 +4347,7 @@ mod tests {
     /// `linear_solver` is really asking.
     #[test]
     fn linear_solver_stats_populated_after_solve() {
+        // error-path: GetPounceLinearSolverStats
         let xl = [-1.0e20];
         let xu = [1.0e20];
         let p = unsafe {
@@ -3265,6 +4408,7 @@ mod tests {
 
     #[test]
     fn option_type_reports_the_setter_a_keyword_expects() {
+        // error-path: GetPounceOptionType
         let p = create_unconstrained();
         let ty = |s: &str| {
             let c = std::ffi::CString::new(s).unwrap();
@@ -3690,7 +4834,7 @@ mod tests {
         // aborts the embedding process. The fix adds the same length guard
         // the sibling (`compl_*`, `grad_lag_x`) branches already had.
         let n_us = 1usize;
-        let packed = vec![0.5_f64, -0.3]; // len 2 != n_us == 1
+        let packed = [0.5_f64, -0.3]; // len 2 != n_us == 1
 
         // Pre-fix: the unguarded scatter panics on the oversized pack.
         let unguarded = std::panic::catch_unwind(|| {
@@ -3817,6 +4961,7 @@ mod tests {
 
     #[test]
     fn solver_create_null_inputs_return_null() {
+        // error-path: IpoptCreateSolver
         // NULL pointer-to-handle.
         let s = unsafe { IpoptCreateSolver(std::ptr::null_mut()) };
         assert!(s.is_null());
@@ -3828,6 +4973,7 @@ mod tests {
 
     #[test]
     fn solver_free_null_is_safe() {
+        // error-path: IpoptFreeSolver
         unsafe { IpoptFreeSolver(std::ptr::null_mut()) };
     }
 
@@ -3890,6 +5036,7 @@ mod tests {
 
     #[test]
     fn solver_kkt_dim_minus_one_before_solve() {
+        // error-path: IpoptSolverGetKktDim
         let mut p = create_unconstrained();
         let s = unsafe { IpoptCreateSolver(&mut p) };
         assert_eq!(unsafe { IpoptSolverGetKktDim(s) }, -1);
@@ -3902,6 +5049,7 @@ mod tests {
 
     #[test]
     fn c_get_working_set_returns_false_before_any_solve() {
+        // error-path: IpoptGetWorkingSet
         let p = create_unconstrained();
         let mut bound_buf = [0; 4];
         let rc = unsafe { IpoptGetWorkingSet(p, bound_buf.as_mut_ptr(), std::ptr::null_mut()) };
@@ -3919,6 +5067,7 @@ mod tests {
 
     #[test]
     fn c_set_warm_start_with_bad_status_code_returns_false() {
+        // error-path: IpoptSetWarmStartWorkingSet
         let p = create_unconstrained();
         // Length n = 4; '7' is out of range (valid: 0..=3).
         let bogus = [
@@ -4018,5 +5167,398 @@ mod tests {
         assert!((0..=3).contains(&cons_out[0]));
 
         unsafe { FreeIpoptProblem(p) };
+    }
+
+    // ---- complementarity outcome encodings (gh#1147) ----
+    //
+    // The integration tests (`tests/complementarity_getters.rs`) reach the
+    // S, W, none and not-searched classes, the answer / weak-fallback /
+    // verdict reports, the B verdict and a taken polish through real
+    // solves. What no in-repo model reaches is held here, on a synthetic
+    // driver record: no certificate, a feasible-uncertified report, the
+    // not_B and not_checked verdicts, a polish that was not taken, and
+    // non-finite reals.
+
+    fn synthetic_outcome() -> pounce_restoration::mpcc_driver::MpccOutcome {
+        use pounce_algorithm::mpcc::{
+            Certificate, MpccStage, Reported, StationarityClass, Strategy,
+        };
+        use pounce_restoration::mpcc_driver::{MpccOutcome, MpccSolveRecord};
+        MpccOutcome {
+            status: ApplicationReturnStatus::SolveSucceeded,
+            statistics: SolveStatistics::default(),
+            accepted_by: Some(MpccStage::Exact),
+            fallback: None,
+            reported: Reported::Answer(MpccStage::Exact),
+            strategy: Strategy::Continuation,
+            solves: vec![MpccSolveRecord {
+                stage: MpccStage::Branch,
+                tau: None,
+                status: ApplicationReturnStatus::MaximumIterationsExceeded,
+                iterations: 7,
+                budget_iterations: 7,
+                max_abs_product: Number::INFINITY,
+                seconds: Number::NAN,
+            }],
+            total_iterations: 7,
+            x: vec![0.0],
+            max_abs_product: Number::INFINITY,
+            certificate: Some(Certificate {
+                class: StationarityClass::S,
+                n_pairs: 1,
+                n_biactive: 0,
+                n_neither: 0,
+                multipliers_unique: true,
+                residual: 0.0,
+                resid_tol: Number::INFINITY,
+                tight: true,
+                primal_violation: 0.0,
+                feasible: true,
+                worst_biactive_sign: 0.0,
+            }),
+            b_check: None,
+            escapes: 3,
+            lifted: 2,
+            natural_residual: None,
+            polish: None,
+            polish_threshold: 1e-7,
+        }
+    }
+
+    fn c_label(chars: &[c_char]) -> String {
+        unsafe { CStr::from_ptr(chars.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn complementarity_encodings_absent_certificate_and_non_finite_reals() {
+        let mut out = synthetic_outcome();
+        out.certificate = None;
+        let s = complementarity_stats(&out);
+        assert_eq!(s.certificate_class, POUNCE_CC_CLASS_ABSENT);
+        assert_eq!(
+            (
+                s.n_pairs,
+                s.n_biactive,
+                s.n_neither,
+                s.multipliers_unique,
+                s.tight,
+                s.feasible
+            ),
+            (-1, -1, -1, -1, -1, -1)
+        );
+        assert!(s.residual.is_nan() && s.resid_tol.is_nan() && s.primal_violation.is_nan());
+        // Non-finite reals read NaN (the report's `null`), an absent
+        // natural residual too.
+        assert!(s.max_abs_product.is_nan() && s.natural_residual.is_nan());
+        assert_eq!(c_label(&s.strategy), "continuation");
+        assert_eq!(c_label(&s.accepted_by), "exact product");
+        assert_eq!(c_label(&s.fallback), "");
+        assert_eq!((s.escapes, s.lifted), (3, 2));
+        // The summary still exists without a certificate.
+        assert!(complementarity_text(&out, POUNCE_CC_TEXT_SUMMARY).is_some());
+
+        // With a certificate, a non-finite band reads NaN, the rest as is.
+        let s = complementarity_stats(&synthetic_outcome());
+        assert_eq!(s.certificate_class, POUNCE_CC_CLASS_S);
+        assert!(s.resid_tol.is_nan());
+        assert_eq!(
+            (s.n_pairs, s.multipliers_unique, s.tight, s.feasible),
+            (1, 1, 1, 1)
+        );
+
+        let r = complementarity_solve(&out.solves[0]);
+        assert_eq!(c_label(&r.stage), "branch NLP");
+        assert_eq!((r.relaxed, r.status, r.iterations), (0, -1, 7));
+        assert!(r.tau.is_nan() && r.max_abs_product.is_nan() && r.seconds.is_nan());
+    }
+
+    #[test]
+    fn complementarity_encodings_every_reported_and_class() {
+        use pounce_algorithm::mpcc::{MpccStage, Reported, StationarityClass};
+        let mut out = synthetic_outcome();
+        for (reported, code) in [
+            (
+                Reported::Answer(MpccStage::Exact),
+                POUNCE_CC_REPORTED_ANSWER,
+            ),
+            (
+                Reported::WeakFallback(MpccStage::Penalty),
+                POUNCE_CC_REPORTED_WEAK_FALLBACK,
+            ),
+            (
+                Reported::FeasibleUncertified(MpccStage::Continuation),
+                POUNCE_CC_REPORTED_FEASIBLE_UNCERTIFIED,
+            ),
+            (Reported::Verdict, POUNCE_CC_REPORTED_VERDICT),
+        ] {
+            out.reported = reported;
+            assert_eq!(complementarity_stats(&out).reported, code, "{reported:?}");
+        }
+        for (class, code) in [
+            (StationarityClass::S, POUNCE_CC_CLASS_S),
+            (StationarityClass::W, POUNCE_CC_CLASS_W),
+            (StationarityClass::None, POUNCE_CC_CLASS_NONE),
+            (StationarityClass::NotSearched, POUNCE_CC_CLASS_NOT_SEARCHED),
+        ] {
+            out.certificate.as_mut().unwrap().class = class;
+            assert_eq!(
+                complementarity_stats(&out).certificate_class,
+                code,
+                "{class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complementarity_encodings_b_verdicts_and_b_reason() {
+        use pounce_algorithm::mpcc::{BCheck, BVerdict};
+        let mut out = synthetic_outcome();
+        assert_eq!(
+            complementarity_stats(&out).b_verdict,
+            POUNCE_CC_B_VERDICT_ABSENT
+        );
+        assert_eq!(complementarity_text(&out, POUNCE_CC_TEXT_B_REASON), None);
+        for (verdict, code, reason) in [
+            (BVerdict::B, POUNCE_CC_B_VERDICT_B, None),
+            (
+                BVerdict::NotB {
+                    held: vec![],
+                    decrease: -1.0,
+                },
+                POUNCE_CC_B_VERDICT_NOT_B,
+                None,
+            ),
+            (
+                BVerdict::NotChecked("a branch LP did not solve"),
+                POUNCE_CC_B_VERDICT_NOT_CHECKED,
+                Some("a branch LP did not solve"),
+            ),
+        ] {
+            out.b_check = Some(BCheck {
+                verdict,
+                n_biactive: 12,
+                branches_solved: 1,
+                enumerated: false,
+            });
+            let s = complementarity_stats(&out);
+            assert_eq!(s.b_verdict, code);
+            assert_eq!(
+                (s.b_n_biactive, s.b_branches_solved, s.b_enumerated),
+                (12, 1, 0)
+            );
+            assert_eq!(
+                complementarity_text(&out, POUNCE_CC_TEXT_B_REASON).as_deref(),
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn complementarity_encodings_polish_not_taken_has_a_reason() {
+        use pounce_restoration::mpcc_driver::PolishRecord;
+        let mut out = synthetic_outcome();
+        out.polish = Some(PolishRecord {
+            taken: false,
+            residual_before: 1e-5,
+            residual_after: Number::INFINITY,
+            reason: Some("the re-solve did not converge".to_string()),
+        });
+        let s = complementarity_stats(&out);
+        assert_eq!((s.polish_ran, s.polish_taken), (1, 0));
+        assert_eq!(s.polish_residual_before, 1e-5);
+        assert!(
+            s.polish_residual_after.is_nan(),
+            "unmeasured after reads NaN"
+        );
+        assert_eq!(
+            complementarity_text(&out, POUNCE_CC_TEXT_POLISH_REASON).as_deref(),
+            Some("the re-solve did not converge")
+        );
+        // Taken: no reason.
+        out.polish = Some(PolishRecord {
+            taken: true,
+            residual_before: 1e-5,
+            residual_after: 0.0,
+            reason: None,
+        });
+        assert_eq!(complementarity_stats(&out).polish_taken, 1);
+        assert_eq!(
+            complementarity_text(&out, POUNCE_CC_TEXT_POLISH_REASON),
+            None
+        );
+        assert_eq!(complementarity_text(&out, 3), None);
+    }
+
+    #[test]
+    fn complementarity_labels_truncate_and_terminate() {
+        let mut a = [0x7f as c_char; 4];
+        copy_label(&mut a, "abcdef");
+        assert_eq!(a, [b'a' as c_char, b'b' as c_char, b'c' as c_char, 0]);
+        copy_label(&mut a, "x");
+        assert_eq!(a, [b'x' as c_char, 0, 0, 0], "the tail is cleared");
+        // Every stage label fits the 32-byte fields with room for the NUL.
+        use pounce_algorithm::mpcc::MpccStage::*;
+        for s in [Exact, Continuation, Penalty, Branch, Polish] {
+            assert!(s.label().len() < 32, "{}", s.label());
+        }
+        use pounce_algorithm::mpcc::Strategy;
+        for s in [Strategy::Both, Strategy::Exact, Strategy::Continuation] {
+            assert!(s.name().len() < 16, "{}", s.name());
+        }
+    }
+
+    // ----- AddPounceComplementsConstraint (gh#1147): the mapping and the
+    // re-validation branch no public call reaches.
+
+    #[test]
+    fn complements_row_reads_every_table_row_and_refuses_nan_and_crossed() {
+        use ComplementsRow::*;
+        let inf = 2e19;
+        assert_eq!(complements_row(0.0, 2.0), Some(Mixed));
+        assert_eq!(complements_row(-1.0, inf), Some(Lower));
+        assert_eq!(complements_row(-inf, 3.0), Some(Upper));
+        assert_eq!(complements_row(-inf, inf), Some(RowFixed));
+        assert_eq!(complements_row(1.0, 1.0), Some(VarFixed));
+        // The ±1e19 convention of the pair classifier: exactly 1e19 is
+        // infinite, just inside it is finite.
+        assert_eq!(complements_row(-1e19, 1e19), Some(RowFixed));
+        assert_eq!(complements_row(-9.9e18, 1e19), Some(Lower));
+        assert_eq!(complements_row(2.0, 1.0), None);
+        assert_eq!(complements_row(f64::NAN, 1.0), None);
+        assert_eq!(complements_row(0.0, f64::NAN), None);
+    }
+
+    #[test]
+    fn complements_edits_classify_as_the_native_shape_they_declare() {
+        // The debug_assert in `add_complements`, as a test: for each pair
+        // row of the table, the edited bounds of a free row are exactly the
+        // native shape, and a no-pair row declares nothing.
+        let inf = 2e19;
+        for (xl, xu, want) in [
+            (0.0, 2.0, ComplementsRow::Mixed),
+            (-1.0, inf, ComplementsRow::Lower),
+            (-inf, 3.0, ComplementsRow::Upper),
+        ] {
+            let row = complements_row(xl, xu).unwrap();
+            assert_eq!(row, want);
+            let (gl, gu, declares) = row.row_bounds(-inf, inf);
+            assert!(declares);
+            let shape = classify_pair(xl, xu, gl, gu);
+            assert!(row.shape_matches(shape), "{row:?}: {shape:?}");
+        }
+        assert_eq!(
+            ComplementsRow::RowFixed.row_bounds(-inf, inf),
+            (0.0, 0.0, false)
+        );
+        assert_eq!(
+            ComplementsRow::VarFixed.row_bounds(-inf, inf),
+            (-inf, inf, false)
+        );
+        // `shape_matches` refuses a wrong shape, so the assert can fire.
+        assert!(!ComplementsRow::Mixed.shape_matches(None));
+        assert!(!ComplementsRow::Lower.shape_matches(classify_pair(0.0, 2.0, -inf, inf)));
+    }
+
+    /// Two variables, two free rows, no callback is ever called.
+    fn create_two_by_two(x_l: [Number; 2], x_u: [Number; 2]) -> IpoptProblem {
+        let g_l = [-2e19, -2e19];
+        let g_u = [2e19, 2e19];
+        let p = unsafe {
+            CreateIpoptProblem(
+                2,
+                x_l.as_ptr(),
+                x_u.as_ptr(),
+                2,
+                g_l.as_ptr(),
+                g_u.as_ptr(),
+                0,
+                0,
+                0,
+                Some(quad_eval_f),
+                Some(cb_quad_eval_g),
+                Some(quad_eval_grad_f),
+                Some(cb_quad_eval_jac_g),
+                Some(cb_quad_eval_h),
+            )
+        };
+        assert!(!p.is_null());
+        p
+    }
+
+    #[test]
+    fn complements_refuses_on_a_handle_whose_declared_pairs_no_longer_validate() {
+        // error-path: AddPounceComplementsConstraint
+        // Carry-over from S1-I4: a declared pair is only known to pass
+        // validation against the bounds it was declared with. No public
+        // call edits a paired row or variable today, so plant the state a
+        // future in-place bound update could produce: var 0 in a mixed pair,
+        // then its box collapsed to a point (fixed var + free row is no
+        // native shape). The helper's re-validation must refuse with a
+        // status and change nothing, rather than store an edit beside an
+        // invalid set.
+        let p = create_two_by_two([0.0, -2e19], [2.0, 2e19]);
+        unsafe {
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 0, 0),
+                POUNCE_COMPLEMENTS_PAIR_MIXED
+            );
+            (&mut (*p).x_u)[0] = 0.0;
+            let snapshot = |p: IpoptProblem| {
+                let i = &*p;
+                (
+                    i.g_l.clone(),
+                    i.g_u.clone(),
+                    i.complementarity.clone(),
+                    i.complements_used.clone(),
+                )
+            };
+            let before = snapshot(p);
+            // Row 1 / var 1 (free var): would fix row 1 to F = 0.
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
+                POUNCE_COMPLEMENTS_ERR_INTERNAL
+            );
+            assert_eq!(before, snapshot(p));
+            // Restored, the same call goes through.
+            (&mut (*p).x_u)[0] = 2.0;
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
+                POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
+            );
+            let i = &*p;
+            assert_eq!((i.g_l[1], i.g_u[1]), (0.0, 0.0));
+            FreeIpoptProblem(p);
+        }
+    }
+
+    #[test]
+    fn add_pair_does_not_blame_the_new_pair_for_a_stored_one_that_no_longer_validates() {
+        // error-path: AddPounceComplementarityPair
+        // PR #1154 review: `declare_pairs` used to remap the refused pair's
+        // position with `saturating_sub(base.len())`, so a stored pair gone
+        // invalid was reported as the caller's new pair (index 0) with the
+        // stored pair's reason. Plant that state (var 0's box collapsed under
+        // its mixed pair, as in the test above) and declare a pair that is
+        // valid on its own: the answer is an internal error, and the stored
+        // set is unchanged.
+        let p = create_two_by_two([0.0, 0.0], [2.0, 2.0]);
+        unsafe {
+            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_CC_OK);
+            (&mut (*p).x_u)[0] = 0.0;
+            let before = (*p).complementarity.clone();
+            assert_eq!(
+                AddPounceComplementarityPair(p, 1, 1),
+                POUNCE_CC_ERR_INTERNAL
+            );
+            assert_eq!((*p).complementarity, before);
+            // Restored, the same pair goes through: it was never the problem.
+            (&mut (*p).x_u)[0] = 2.0;
+            assert_eq!(AddPounceComplementarityPair(p, 1, 1), POUNCE_CC_OK);
+            assert_eq!(GetPounceComplementarityPairCount(p), 2);
+            FreeIpoptProblem(p);
+        }
     }
 }

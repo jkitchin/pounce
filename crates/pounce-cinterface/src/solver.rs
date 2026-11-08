@@ -68,6 +68,16 @@ pub type IpoptSolver = *mut IpoptSolverInfo;
 /// Returns NULL if `prob_handle` is NULL, `*prob_handle` is NULL, or
 /// the IpoptProblem hasn't been fully initialized.
 ///
+/// Also returns NULL — **without** consuming the problem: the caller still
+/// owns `*prob_handle` and frees it with [`crate::FreeIpoptProblem`] — when
+/// the problem has declared complementarity pairs (gh#1147). A session
+/// keeps the KKT factor of the model it solved, and with pairs that is the
+/// lowered model (extra product rows, possibly lifted variables), so
+/// [`IpoptSolverParametricStep`] and [`IpoptSolverReducedHessian`] over the
+/// caller's rows would answer a different system. At `print_level >= 1` one
+/// line on stderr says why. Python's `pounce.Solver` refuses pairs for the
+/// same reason.
+///
 /// # Safety
 ///
 /// `prob_handle` must be a valid pointer to an [`IpoptProblem`]
@@ -80,6 +90,16 @@ pub unsafe extern "C" fn IpoptCreateSolver(prob_handle: *mut IpoptProblem) -> Ip
         }
         let prob = *prob_handle;
         if prob.is_null() {
+            return std::ptr::null_mut();
+        }
+        if !(*prob).complementarity.is_empty() {
+            if pounce_algorithm::second_opinion::narration_is_wanted((*prob).app.options()) {
+                eprintln!(
+                    "pounce: IpoptCreateSolver: a session cannot hold a problem with \
+                     complementarity pairs ({} declared); solve it with IpoptSolve.",
+                    (*prob).complementarity.len()
+                );
+            }
             return std::ptr::null_mut();
         }
         // Take ownership of the Box and null out the caller's handle.
@@ -172,6 +192,12 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
             if n > 0 && x.is_null() {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            // Unreachable: `IpoptCreateSolver` refuses a problem with pairs and
+            // a session's problem is not reachable from C afterwards. Guarded
+            // so a session can never run a solve that ignores declared pairs.
+            if !info.problem.complementarity.is_empty() {
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
             let n_us = n as usize;
@@ -271,6 +297,8 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 final_x: bridge_ref.final_x.clone(),
                 final_lambda: bridge_ref.final_lambda.clone(),
                 final_obj: bridge_ref.final_obj,
+                mpcc: None,
+                second_opinion: None,
             });
             if !x.is_null() && n_us > 0 {
                 std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
@@ -684,6 +712,59 @@ mod tests {
         unsafe { IpoptFreeSolver(solver) };
         // The (now-null) problem handle is safe to free.
         unsafe { FreeIpoptProblem(prob) };
+    }
+
+    /// gh#1147: `IpoptSolverSolve`'s guard against declared pairs. Not
+    /// reachable from C — `IpoptCreateSolver` refuses a problem with pairs
+    /// (`tests/complementarity_solve.rs`) and a session's problem has no C
+    /// handle — so the pair is planted on the session's problem directly.
+    /// The guard refuses before any solve: no stats, no callback, `x`
+    /// untouched.
+    #[test]
+    fn session_solve_refuses_pairs_planted_past_create() {
+        let mut prob = create_quad();
+        let solver = unsafe { IpoptCreateSolver(&mut prob) };
+        assert!(!solver.is_null());
+        unsafe { &mut *solver }
+            .problem
+            .complementarity
+            .push(pounce_nlp::mpcc::ComplementarityPair { row: 0, var: 0 });
+        let mut x = [0.5_f64];
+        let rc = unsafe {
+            IpoptSolverSolve(
+                solver,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            rc,
+            ApplicationReturnStatus::InvalidProblemDefinition as Index
+        );
+        assert_eq!(x, [0.5]);
+        assert!(unsafe { &*solver }.problem.last_solve.is_none());
+        // Without the planted pair the same session solves.
+        unsafe { &mut *solver }.problem.complementarity.clear();
+        let rc = unsafe {
+            IpoptSolverSolve(
+                solver,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert!((x[0] - 2.0).abs() < 1e-8);
+        unsafe { IpoptFreeSolver(solver) };
     }
 
     /// M37: a legal `n_pins == 0` call to the sensitivity entry points is

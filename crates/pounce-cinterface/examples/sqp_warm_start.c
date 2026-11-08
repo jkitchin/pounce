@@ -10,15 +10,24 @@
  *
  *     min ½‖x − p‖²   s.t.  sum(x) = 1,  x ≥ 0,    n = 3
  *
- * Build (against the workspace's pounce-cinterface library):
+ * Build and run every example in this directory, with the strict flags
+ * the test suite uses (`-std=c99 -Wall -Wextra -Werror -pedantic`):
+ *
+ *     make c-api-examples
+ *
+ * or by hand, against the workspace's pounce-cinterface library:
  *
  *     cargo build --release -p pounce-cinterface
- *     cc -I crates/pounce-cinterface/include \
- *        -L target/release \
+ *     cc -std=c99 -Wall -Wextra -Werror -pedantic \
+ *        -I crates/pounce-cinterface/include \
  *        crates/pounce-cinterface/examples/sqp_warm_start.c \
  *        -o sqp_warm_start \
- *        -lpounce_cinterface -Wl,-rpath,$PWD/target/release
+ *        -L target/release -lpounce_cinterface -lm \
+ *        -Wl,-rpath,$PWD/target/release
  *     ./sqp_warm_start
+ *
+ * `tests/c_examples_build_and_run.rs` compiles and runs this file on every
+ * `cargo test -p pounce-cinterface`, and checks the final line below.
  *
  * Expected output: 4 solves, each succeeds with the working set
  * carried forward. The first solve uses the SQP cold-start path
@@ -78,7 +87,7 @@ static bool eval_jac_g(ipindex n, ipnumber *x, bool new_x,
                        ipindex *irow, ipindex *jcol, ipnumber *values,
                        UserDataPtr user_data)
 {
-    (void)x; (void)new_x; (void)m; (void)user_data;
+    (void)n; (void)x; (void)new_x; (void)m; (void)user_data;
     if (irow != NULL && jcol != NULL) {
         for (int j = 0; j < nele_jac; j++) {
             irow[j] = 0;
@@ -98,7 +107,7 @@ static bool eval_h(ipindex n, ipnumber *x, bool new_x,
                    ipindex *irow, ipindex *jcol, ipnumber *values,
                    UserDataPtr user_data)
 {
-    (void)x; (void)new_x; (void)m; (void)lambda; (void)new_lambda; (void)user_data;
+    (void)n; (void)x; (void)new_x; (void)m; (void)lambda; (void)new_lambda; (void)user_data;
     if (irow != NULL && jcol != NULL) {
         for (int j = 0; j < nele_hess; j++) {
             irow[j] = j;

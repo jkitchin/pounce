@@ -32,7 +32,10 @@ through the general NLP solver (≈30–50% fewer on bound/inequality QPs).
 
 This chapter covers the **Python API** (`pounce.qp` and the differentiable
 `pounce.jax` layers). For automatic CLI/Pyomo routing of `.nl` LPs/QPs, see
-[LP / QP Solver Routing](lp-qp-routing.md). Runnable, progressive notebooks
+[LP / QP Solver Routing](lp-qp-routing.md). From C, the `PounceQp` handle runs
+the same pipeline as `solve_qp` and `solve_socp`, cones included: see
+[Matrix-form convex QP and conic programs](c-api.md#matrix-form-convex-qp-and-conic-programs)
+in the C API chapter. Runnable, progressive notebooks
 live in [`python/notebooks/`](https://github.com/jkitchin/pounce/tree/main/python/notebooks):
 `15_convex_qp.ipynb`, `16_socp.ipynb`, `17_differentiable_convex.ipynb`.
 

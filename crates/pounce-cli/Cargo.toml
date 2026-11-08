@@ -74,6 +74,12 @@ rustyline = { version = "14", features = ["derive"] }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal"] }
 
+# The CLI-parity test (`tests/cinterface_mpcc_parity.rs`, gh#1147) solves
+# each declared-complementarity fixture through the C API as well and holds
+# it to this binary. Test-only: stripped on publish.
+[dev-dependencies]
+pounce-cinterface.workspace = true
+
 [features]
 default = []
 # Enable the HSL MA57 backend (requires libcoinhsl). When enabled, also
