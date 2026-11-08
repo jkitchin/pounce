@@ -41,7 +41,7 @@ that ticks it.
 
 - [x] **S3-I1** Lift `solve_presolved` / `demote_unverified_optimal` from `pounce-py/src/qp.rs` into `pounce-convex` (pure move).
 - [x] **S3-I2** `PounceQp*` handle, builder, solve and getters.
-- [ ] **S3-I3** Tests for every cone kind and every error path; parity against Python `solve_qp` / `solve_socp` anchors.
+- [x] **S3-I3** Tests for every cone kind and every error path; parity against Python `solve_qp` / `solve_socp` anchors.
 - [ ] **S3-I4** Docs, README, CHANGELOG, `examples/qp_socp.c`; export guard green.
 
 ### Stage 4 — multistart over an NLP handle
@@ -2553,6 +2553,106 @@ Gate (all on the ticking commit's tree):
 - No sweep: `git diff` touches nothing under `crates/pounce-convex`,
   `crates/pounce-cli` or `crates/pounce-py`; the CLI does not link this
   crate. Existing solve paths unchanged.
+
+### S3-I3 — cone, refusal and status tests; Python parity (commit that ticks S3-I3)
+
+Approved by the human with Stage 3, on this branch. Tests only: nothing
+under `src/`, `pounce-convex`, `pounce-cli` or `pounce-py` changed, and no
+defect was found in S3-I2's handle (every new test passed on its first run;
+the mutations below show they bite).
+
+What was added (`crates/pounce-cinterface/tests/`):
+- `common/qp_c.rs`: the shared driver (self-freeing handle, one wrapper per
+  export).
+- `qp_cones_and_errors.rs` (63 tests), the handle alone:
+  - one model per cone kind with a hand-known optimum: nonneg (`(1, 2)`,
+    `−3`, `z = (1, 1)`), SOC with `P = I` (projection onto `Q³`,
+    `test_socp.py:15`), exp alone (`z = e`, `tau`/`kappa` NaN on the
+    non-symmetric driver), power `α = ½` (`x0 = 1`, `test_socp.py:115`) and
+    `α = 0.01`, PSD of order 3 (`λ_min = 1`); a zero-row nonneg block; `alpha`
+    ignored off the power cone;
+  - indefinite `P`: refused under the default and an explicit `ipm`, under a
+    claimed `indefinite` on a PSD `P`, and with a cone; solved under
+    `active-set`; `unknown`/`psd` claims pass the screen and `auto` restores
+    the verdict;
+  - cones vs `m_ineq`: short, long, an exp cone on 2 rows, a PSD cone counting
+    `k(k+1)/2` rows, PSD mixed with pow and with exp;
+  - `AddCone`: `dim ≤ 0` per kind (SOC, PSD, nonneg `< 0` and `Index::MIN`,
+    exp/pow `≠ 3`), `alpha` in `{0, 1, −½, 3/2, −0, NaN, ±∞}`, unknown kind,
+    NULL handle; each asserts nothing was added;
+  - NULL arrays: each of row/col/val/vector for each builder at `nnz = 1`,
+    each its own handle, then the `nnz = 0` side accepted; NULL `b`/`h` with
+    no rows; NULL bounds as unbounded sides (and both NULL resetting a box);
+    the `±1e19` convention on both sides and just inside it; NaN bound;
+  - `INCOMPLETE` per missing piece (objective, `A`/`b`, `G`/`h`);
+  - unknown option keys (numeric, string, wrong-type key, non-UTF-8 key);
+  - each getter and the report writer before any solve → FALSE, nothing
+    written;
+  - each conic refusal its own fixture: `method=active-set`, `tau`,
+    `tau_max`, `qp_presolve`, `qp_reg`, `qp_hsde` (at its default `yes`),
+    `qp_equilibrate`, `qp_crossover`; and the passing side (`method=ipm`,
+    `tol`, `max_iter`, `time_limit`);
+  - active-set refusals `qp_reg`, `qp_hsde`, `qp_crossover` and the switches
+    it reads (`qp_presolve` yes/no, `qp_equilibrate`); IPM `tau`/`tau_max`;
+  - statuses: conic primal infeasible (Farkas ray checked: `Gᵀz = 0`,
+    `hᵀz < 0`, `scale` = its inf-norm), conic dual infeasible (ray in the
+    cone with `cᵀd < 0`), conic `ITERATION_LIMIT`, `time_limit = 0` →
+    `TIME_LIMIT`, presolve proving infeasible/unbounded on the active-set
+    engine (`iters = 0`).
+- `qp_python_parity.rs` (26 tests: 25 rows + one that the reference holds
+  exactly the listed rows), with `common/gen_qp_python.py` and its output
+  `common/qp_python.json` (25 rows; regenerating is byte-identical). The
+  generator records the exact inputs Python's `_build` hands the binding
+  (`_lower_triangle_coo` / `_coo` triplets in their order) and the result;
+  the test feeds those inputs to the handle. Rows: LP on the HSDE IPM,
+  presolve + crossover (0 iterations), the direct driver, active-set; QP on
+  the IPM, with `tau`/`tau_max`, with `qp_reg` + `qp_equilibrate=no` + `tol`,
+  active-set presolved; a coupled `P`; indefinite `P` on active-set;
+  `max_iter = 1`; QP primal and dual infeasible; nonneg, SOC (distance, with
+  `tol`, projection with `P`), nonneg + SOC (`test_socp.py:22`), exp GP
+  (`test_socp.py:43`), SOC + exp (`test_socp.py:96`), pow `α = 0.3`
+  (`test_socp.py:115`), PSD (`test_socp.py:152`); conic primal and dual
+  infeasible and `max_iter = 2`. Each row is checked three ways:
+  1. against Python, **bit-exact on every compared field**: status, `obj`,
+     `iters`, `x`, `y`, `z`, `z_lb`, `z_ub`, all eight residuals, `tau`,
+     `kappa`, `certificate_scale` (null ↔ NaN) and the certificate kind. No
+     field needed an exemption. The one input difference — Python passes an
+     omitted `lb`/`ub` as an empty vector, the handle as `n` infinities — is
+     read identically by `QpProblem::lb_of`/`ub_of` (and `FixedColumns`
+     finds no pinned column in either), and the bitwise match on every row with an
+     omitted side is the evidence. Gated on
+     `cfg!(all(target_os = "linux", target_arch = "x86_64"))`; elsewhere the
+     row must still reach Python's status and, on a solution, `x` and `obj`
+     to `1e-6`.
+  2. against `pounce_convex` called directly on Python's own `QpProblem`
+     (empty box sides kept), bitwise, on every platform (same binary):
+     status, `iters`, `obj`, `x`, `y`, `z`, `z_lb`, `z_ub`.
+  3. against the row's hand-known answer to a tolerance, so a reference
+     regenerated from a broken build cannot pass by agreeing with itself.
+- PSD border: every parity `P` has eigenvalues in `{1, 2, 3, −1}`, far from
+  where `certify_psd_lower_triangle` and Python's numpy verdict can differ.
+- `// error-path:` markers added in the new file for the 12 exports whose
+  refusals it exercises (all 15 already had one from S3-I2).
+- Not reachable, recorded rather than tested: `AddCone`'s PSD
+  `d·(d+1)` overflow guard and `Solve`'s cone-row `checked_add` cannot
+  overflow on a 64-bit target with a 32-bit `ipindex`.
+
+Mutations (each reverted): dropping `switches.apply` in `qp_options` fails
+the parity rows `lp_direct` and `qp_ipm_reg_no_equilibrate`; dropping the
+conic `tau` refusal fails `conic_refuses_tau`; dropping the PSD/exp-pow mix
+check fails both mix tests; admitting `alpha = 0` fails the exponent test.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface`: 26 binaries, 342 passed, 0 failed
+  (`qp_cones_and_errors` 63, `qp_python_parity` 26, `qp_handle` 14,
+  `export_surface`, `header_abi`, `c_examples_build_and_run` green).
+- `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
+  clippy::correctness -D clippy::suspicious`: exit 0; `--no-deps` clippy on
+  this crate shows no warning in the new files.
+- `cargo fmt --all -- --check` clean.
+- `make python-test` (extension rebuilt from this tree): 2016 passed,
+  36 skipped, 0 failed.
+- No sweep: no solver source changed.
 
 ### Facts recorded while planning (2ac0ad9)
 

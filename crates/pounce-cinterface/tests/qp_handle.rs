@@ -2,11 +2,12 @@
 //! builders, `PounceQpSolve`, the getters and the report writer, driven
 //! through the exported C functions.
 //!
-//! Each model is tiny and has an optimum known by hand. The full per-cone and
-//! per-error matrix, and parity against Python's `solve_qp` / `solve_socp`, are
-//! S3-I3's; what is here is one model per path (LP, convex QP, SOC, exp) on
-//! each engine, every getter's NULL / before-solve / after-a-refused-solve
-//! branch, and the report.
+//! Each model is tiny and has an optimum known by hand. What is here is one
+//! model per path (LP, convex QP, SOC, exp) on each engine, every getter's
+//! NULL / before-solve / after-a-refused-solve branch, and the report. The
+//! per-cone and per-refusal matrix is `tests/qp_cones_and_errors.rs`, and
+//! parity against Python's `solve_qp` / `solve_socp` is
+//! `tests/qp_python_parity.rs` (both S3-I3).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
