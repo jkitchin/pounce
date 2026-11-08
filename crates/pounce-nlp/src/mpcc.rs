@@ -674,7 +674,7 @@ impl MpccTnlp {
     /// them; starts, results and multipliers are in the inner model's terms
     /// either way, so a driver switches between solves and nothing else.
     pub fn set_lift(&mut self, on: bool) {
-        if on == !self.layout.lifted.is_empty() {
+        if on != self.layout.lifted.is_empty() {
             return;
         }
         if let Some(other) = self.other_layout.take() {

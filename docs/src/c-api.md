@@ -199,7 +199,10 @@ call** of this function, pair or not; `_ERR_VAR_BOUNDS` (-6), NaN or crossed
 variable bounds; and `_ERR_INTERNAL` (-7). The edits and that ledger are
 permanent on the handle: `ClearPounceComplementarityPairs` and
 `SetPounceComplementarityPairs` drop pairs, not edits, and do not free a row
-or variable for another call. `GetPounceComplementarityPairs` lists the
+or variable for another call. So after a clear the handle solves a plain
+NLP with the edited row bounds, which is neither the original model nor the
+complementarity one; the only way back to the original bounds is to free the
+problem and create it again. `GetPounceComplementarityPairs` lists the
 pairs declared here like any other.
 
 ### Solving
