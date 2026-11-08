@@ -758,6 +758,12 @@ pub unsafe extern "C" fn IpoptSolve(
         // matching upstream Ipopt's exception handling. (See `ffi_guard`.)
         ffi_guard(ApplicationReturnStatus::InternalError as Index, || {
             let info = &mut *ipopt_problem;
+            // Every solve states, for its own duration, whether the live
+            // iterate on this thread is a lowered model's (gh#1147 review):
+            // a pair-free solve nested inside a lowered solve's callback
+            // clears the flag, so its own inspectors answer, and the outer
+            // value comes back when it returns.
+            let _lowered = LoweredSolveGuard::set(!info.complementarity.is_empty());
             if info.n < 0 || info.m < 0 {
                 return ApplicationReturnStatus::InvalidProblemDefinition as Index;
             }
@@ -912,19 +918,16 @@ pub unsafe extern "C" fn IpoptSolve(
             let (status, statistics, mpcc, second_opinion) = if !info.complementarity.is_empty() {
                 let narrate =
                     pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
-                let result = {
-                    let _lowered = LoweredSolveGuard::enter();
-                    pounce_restoration::mpcc_driver::solve_mpcc(
-                        &mut info.app,
-                        bridge_for_solve,
-                        info.complementarity.clone(),
-                        &mut |line| {
-                            if narrate {
-                                eprintln!("{line}");
-                            }
-                        },
-                    )
-                };
+                let result = pounce_restoration::mpcc_driver::solve_mpcc(
+                    &mut info.app,
+                    bridge_for_solve,
+                    info.complementarity.clone(),
+                    &mut |line| {
+                        if narrate {
+                            eprintln!("{line}");
+                        }
+                    },
+                );
                 let out = match result {
                     Ok(out) => out,
                     // Unreachable from C: the only `Err` is `MpccTnlp::with_lift`
@@ -1799,7 +1802,10 @@ fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
 /// Returns `TRUE` (1) on success, `FALSE` (0) if there is no
 /// working set to retrieve (e.g. no SQP solve has run, the IPM
 /// path was used, or the very first KKT check declared
-/// optimality before solving any QP).
+/// optimality before solving any QP), if the most recent
+/// [`IpoptSolve`] did not complete (refused, or failed before it
+/// finished), or if complementarity pairs are declared on the
+/// problem; nothing is written then.
 ///
 /// # Safety
 ///
@@ -1817,10 +1823,17 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             return FALSE;
         }
         let info = &*ipopt_problem;
-        // A complementarity solve ran on the lowered model (gh#1147); no
-        // working set over the caller's rows exists, and one left over from
-        // an earlier solve must not read as this one's.
-        if info.last_solve.as_ref().is_some_and(|l| l.mpcc.is_some()) {
+        // No completed solve (none yet, or the last one was refused or
+        // failed before it finished — `IpoptSolve` clears `last_solve` up
+        // front), or pairs are declared, or the last solve ran the
+        // complementarity driver on the lowered model (gh#1147): no working
+        // set over the caller's rows belongs to the handle's current state,
+        // and one left over from an earlier SQP solve must not read as if it
+        // did.
+        let Some(last) = info.last_solve.as_ref() else {
+            return FALSE;
+        };
+        if last.mpcc.is_some() || !info.complementarity.is_empty() {
             return FALSE;
         }
         let ws = match info.app.last_sqp_working_set() {
@@ -2999,7 +3012,12 @@ pub unsafe extern "C" fn IpoptSolveWarmStart(
             mult_x_U,
             user_data,
         );
-        let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
+        // Copy a set out only when this solve completed: a refused solve
+        // (pairs with a working set, gh#1147) leaves `last_solve` empty, and
+        // the handle's last SQP set is then an earlier solve's.
+        if (*ipopt_problem).last_solve.is_some() {
+            let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
+        }
         status
     })
 }
@@ -3037,24 +3055,31 @@ pub(crate) fn bridge_violation_options(
 }
 
 thread_local! {
-    /// `true` while [`IpoptSolve`] runs the complementarity driver on this
-    /// thread (gh#1147). The live inspectors report no data then: the
-    /// algorithm's iterate is the lowered model's — product rows appended,
-    /// possibly lifted variables — not the caller's, and a prefix of it is
-    /// not the caller's iterate either (a lifted row's bounds are rewritten).
+    /// `true` while the innermost [`IpoptSolve`] on this thread runs the
+    /// complementarity driver (gh#1147). The live inspectors report no data
+    /// then: the algorithm's iterate is the lowered model's — product rows
+    /// appended, possibly lifted variables — not the caller's, and a prefix
+    /// of it is not the caller's iterate either (a lifted row's bounds are
+    /// rewritten).
+    ///
+    /// Per *solve*, not per thread: every `IpoptSolve` sets it for its own
+    /// duration, so a pair-free solve of another problem started from inside
+    /// a lowered solve's callback reads `false` (its iterate is its own) and
+    /// the lowered solve reads `true` again once it returns.
     static IN_LOWERED_SOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Sets [`IN_LOWERED_SOLVE`] for its lifetime, restoring the previous value
-/// on drop (so a panic caught by [`ffi_guard`] cannot leave it set).
+/// on drop (so nesting unwinds in order, and a panic caught by [`ffi_guard`]
+/// cannot leave it set).
 struct LoweredSolveGuard {
     prev: bool,
 }
 
 impl LoweredSolveGuard {
-    fn enter() -> Self {
+    fn set(lowered: bool) -> Self {
         Self {
-            prev: IN_LOWERED_SOLVE.with(|c| c.replace(true)),
+            prev: IN_LOWERED_SOLVE.with(|c| c.replace(lowered)),
         }
     }
 }

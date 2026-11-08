@@ -313,7 +313,10 @@ enum ApplicationReturnStatus IpoptSolve(
  *
  * During a solve with complementarity pairs declared they also return
  * false and write nothing, for every request shape: the iterate is the
- * lowered model's, not a point of your problem's shape.
+ * lowered model's, not a point of your problem's shape. This holds per
+ * solve, not per thread: a pair-free IpoptSolve of another problem
+ * started from inside that solve's callback has working inspectors for
+ * its own duration.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -555,9 +558,11 @@ typedef int IpoptConsStatus;
  *
  * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
  * available — e.g. no SQP solve has been run, the IPM path was
- * used, the SQP solve converged at iter 0 (no QP solved), or the
+ * used, the SQP solve converged at iter 0 (no QP solved), the
  * last solve had complementarity pairs (its solves were of a lowered
- * model with more rows).
+ * model with more rows), pairs are declared now, or the most recent
+ * IpoptSolve did not complete (refused, or failed before it finished).
+ * Nothing is written when it returns 0.
  */
 Bool IpoptGetWorkingSet(
     IpoptProblem      ipopt_problem,
@@ -999,6 +1004,10 @@ ipindex GetPounceComplementarityText(
  * with cold-start instead. Callers who need to detect this fall-
  * back must invoke IpoptSetWarmStartWorkingSet directly first
  * and check its Bool return value before calling IpoptSolve.
+ *
+ * The output working-set buffers are written only when the solve
+ * completed and IpoptGetWorkingSet has a set to give; after a refused
+ * solve (complementarity pairs with a working set) they are untouched.
  */
 enum ApplicationReturnStatus IpoptSolveWarmStart(
     IpoptProblem            ipopt_problem,

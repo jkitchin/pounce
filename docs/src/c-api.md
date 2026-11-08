@@ -223,13 +223,19 @@ variables):
 - `IpoptCreateSolver` returns `NULL` and does not consume the handle.
 - `IpoptSolve` (and `IpoptSolveWarmStart`) with a staged SQP working set
   returns `Invalid_Problem_Definition` before any callback runs, and
-  consumes neither the working set nor the pairs. `IpoptGetWorkingSet`
-  returns `FALSE` after a driver solve.
+  consumes neither the working set nor the pairs; `IpoptSolveWarmStart`
+  then writes nothing to its output working-set buffers.
+  `IpoptGetWorkingSet` returns `FALSE`, writing nothing, while pairs are
+  declared, after a driver solve, and after any `IpoptSolve` that did not
+  complete, so a set left over from an earlier SQP solve on the handle is
+  never read as the current one.
 - The intermediate callback fires from every lowered solve (each restarts
   at iteration 0) and returning `FALSE` ends the run with
   `User_Requested_Stop`, but `GetIpoptCurrentIterate` and
   `GetIpoptCurrentViolations` return `FALSE` throughout, for every request
-  shape.
+  shape. This is per solve, not per thread: a pair-free `IpoptSolve` of
+  another problem started from inside that callback has working inspectors
+  for its own duration.
 
 `SetIpoptProblemScaling` applies to the caller's rows and variables in
 every lowered solve, and a nonlinear-variable declaration is forwarded with
