@@ -69,18 +69,24 @@ changes.
     `PounceQpSetEqualities`, `PounceQpSetInequalities`, `PounceQpSetBounds`,
     and `PounceQpAddCone` for nonnegative, second-order, exponential, power
     and PSD (`svec`) blocks. Each builder validates everything first and
-    changes nothing on `FALSE`.
+    changes nothing on `FALSE`; on `TRUE` it discards the previous result.
+    `PounceQpSetBounds` refuses a box no point satisfies (`lb ≥ 1e19`,
+    `ub ≤ -1e19`, `lb > ub`).
   - *Options and solving:* `PounceQpSetNumOption` / `PounceQpSetStrOption`
     take `tol`, `max_iter`, `time_limit`, `tau`, `tau_max`, `qp_reg`,
     `method` (`ipm` / `active-set`), `hessian_inertia` and the `qp_presolve`,
     `qp_hsde`, `qp_equilibrate`, `qp_crossover` switches. `PounceQpSolve`
     returns a `POUNCE_QP_STATUS_*`, or a `POUNCE_QP_ERR_*` before any engine
     runs: an option the engine would drop is refused, not ignored (with a
-    cone, `active-set`, `tau`, `tau_max` and every `qp_*` switch), and so is a
+    cone, `active-set`, `tau`, `tau_max`, every `qp_*` switch and any
+    `hessian_inertia` claim), and so is a
     `P` the IPM's PSD screen does not certify. The screen is
     `certify_psd_lower_triangle` at the CLI's band, not Python's numpy check,
     so it can refuse a borderline `P` Python accepts; `hessian_inertia=psd`
-    overrides it.
+    overrides it (without cones). The verdict is cached on the handle until
+    `P` or `hessian_inertia` changes. `PSD_TOL`/`psd_band`, the convex
+    status mapping, the residual block and the certificate scale now live in
+    `pounce_convex` (pure moves), called by the CLI, Python and C alike.
   - *Reading back:* `PounceQpGetSolution`, `PounceQpGetResiduals`
     (`PounceQpResiduals`), `PounceQpGetCertificate` (`PounceQpCertificate`:
     Farkas or recession ray, `tau`, `kappa`) and `PounceQpWriteSolveReport`

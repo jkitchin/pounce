@@ -154,8 +154,8 @@ POUNCE extensions:
   `Ax = b`, `Gx ≤ h` (`⪯_K` with cones), `lb ≤ x ≤ ub`; triplets 0- or
   1-based by the handle's index style, `P` lower triangle, a PSD cone's rows
   in `svec` order (lower triangle by columns, off-diagonals `×√2`). With a
-  cone, `method=active-set`, `tau`, `tau_max` and the `qp_*` switches are
-  refused (`POUNCE_QP_ERR_OPTIONS`), and the report's `solution.engine` is
+  cone, `method=active-set`, `tau`, `tau_max`, the `qp_*` switches and any
+  `hessian_inertia` but `auto` are refused (`POUNCE_QP_ERR_OPTIONS`), and the report's `solution.engine` is
   `cvx-qcqp` for every cone kind. The IPM's PSD screen comes from
   `pounce_convex::certify_psd_lower_triangle` at the CLI's band, not
   Python's numpy check, so it can refuse a borderline `P` that Python
