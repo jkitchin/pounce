@@ -30,6 +30,9 @@
 //!
 //! the pair being `[F, x]`; `x`'s bounds pick the table row.
 
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[path = "common/qpec.rs"]
 mod qpec;
 

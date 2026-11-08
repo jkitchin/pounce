@@ -5,6 +5,9 @@
 //! Each `// error-path: NAME` line marks the test that exercises NAME's
 //! failure branch; `export_surface.rs` requires one per export.
 
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use pounce_cinterface::fortran::{
     ipaddintoption_, ipaddnumoption_, ipaddstroption_, ipcreate_, ipfree_, ipsetcallback_,
     ipsolve_, ipunsetcallback_,

@@ -35,6 +35,9 @@
 //! solve, after a solve without pairs, after the pairs are cleared and the
 //! problem re-solved, after a refused solve, and on NULL arguments.
 
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[path = "common/cc_models.rs"]
 mod cc_models;
 #[path = "common/qpec.rs"]

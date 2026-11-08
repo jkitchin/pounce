@@ -40,6 +40,8 @@
 //! Run the same builds outside cargo with `make c-api-examples`.
 
 #![cfg(unix)]
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -72,25 +74,31 @@ fn cdylib_file_name() -> String {
 }
 
 /// The directory holding the cdylib cargo built for this test run.
+///
+/// `deps/` first: cargo always writes the cdylib there, next to this test
+/// binary, and uplifts it to the profile directory only when the lib is a
+/// root unit. Under `cargo test --workspace` from a clean target it is not
+/// (`pounce-cli` dev-depends on this crate), so only `deps/` has it; the
+/// uplifted file, when there, is a hard link to the same output.
 fn lib_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let deps = exe.parent().expect("test binary has a parent directory");
-    let dir = deps
-        .parent()
-        .expect("deps/ has a parent profile directory")
-        .to_path_buf();
-    let lib = dir.join(cdylib_file_name());
-    assert!(
-        lib.is_file(),
-        "expected the cdylib cargo builds for integration tests at {}, \
-         but it is not there (test binary: {}). The lib target must keep \
+    let profile = deps.parent().expect("deps/ has a parent profile directory");
+    for dir in [deps, profile] {
+        if dir.join(cdylib_file_name()).is_file() {
+            return dir.to_path_buf();
+        }
+    }
+    panic!(
+        "expected the cdylib cargo builds for integration tests in {} or {}, \
+         but it is in neither (test binary: {}). The lib target must keep \
          crate-type = [\"lib\", \"cdylib\"]; if this toolchain does not build \
          the cdylib for tests, build it first (`cargo build -p \
          pounce-cinterface`) — this test does not skip for a missing library.",
-        lib.display(),
+        deps.display(),
+        profile.display(),
         exe.display()
     );
-    dir
 }
 
 fn c_compiler() -> OsString {

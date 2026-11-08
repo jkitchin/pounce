@@ -30,6 +30,9 @@
 //! Unit tests at the bottom feed the comparison deliberately broken inputs,
 //! so the guard is itself shown to fail on each kind of drift.
 
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

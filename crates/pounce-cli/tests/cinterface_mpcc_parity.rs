@@ -69,6 +69,9 @@
 //! the branch it is listed for, so a fixture that drifts off its branch
 //! fails here rather than silently testing another.
 
+// Test code: a panicking unwrap/expect is the test failing, as intended.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[path = "common/nl_c_harness.rs"]
 mod nl_c_harness;
 

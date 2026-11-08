@@ -28,7 +28,7 @@ that ticks it.
 - [x] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
 - [x] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
 - [x] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
-- [ ] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
+- [x] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
 
 **Stop here and report to the human before starting any later stage.**
 
@@ -2190,6 +2190,93 @@ Gate (all on the ticking commit's tree):
   (`--all-targets --no-deps -D clippy::correctness -D clippy::suspicious`)
   clean.
 - Sweep not run: no Rust source outside a test moved.
+
+### S1-I11 — Stage-1 closing gate (commit that ticks S1-I11)
+
+Binaries: baseline `pounce` built `--release -p pounce-cli` from `2ac0ad9`
+(main before this branch) in its own `git worktree` and `CARGO_TARGET_DIR`;
+head `pounce` from `cargo build --release` on `363c05d` (S1-I10's tip; this
+commit changes test files and this plan only, so the binary is the same).
+Both report `pounce 0.16.0`.
+
+Gate results:
+- **Sweep** (`scripts/sweep-fixtures.sh <bin> <out>`, both legs): `diff`
+  **empty**, exit 0. 282 lines each: 141 `exact`, 141 `lbfgs`, of which 14
+  are `cc:` lines (7 per leg: the six named in `CLAUDE.md` plus
+  `opf_vv_lower_knee_held`); no `NO_JSON`. Engine, `mu=` and `cc=` columns
+  included.
+- **Minima sweep** (`scripts/sweep-minima.sh`; not in the gate, run because
+  `pounce-nlp` moved): `diff` empty, 54 lines each.
+- `make check` — exit 0, head and baseline.
+- `make fmt-check` — clean, head and baseline.
+- `make clippy` (`--workspace --all-targets -- -D warnings`) — **fails on
+  head and on baseline, pre-existing.** Head aborts in `pounce-common`
+  (5 errors: `expect_used` `diagnostics.rs:577`; `collapsible_if`
+  `options_list.rs:303,335,367`, `pd_perturbation.rs:587`). Baseline aborts
+  with the same 5 plus 8 `collapsible_if` in `pounce-studio-core`
+  (`markdown.rs`, `preflight.rs`), which head simply did not reach before
+  the abort (parallel job order). Head's error set is a subset of the
+  baseline's. Because the abort hides every downstream crate, the real
+  comparison is the full warning set: `cargo clippy --workspace
+  --all-targets --message-format=json` (no `-D`) on both trees, keyed by
+  (lint, file, message, span text). Baseline 3244 distinct diagnostics; head
+  first 3352: **109 new**, all `unwrap_used` / `expect_used` (restriction
+  group, `warn` in `Cargo.toml`) in seven test crates this branch added
+  (`complementarity_report` 36, `cinterface_mpcc_parity` 29,
+  `c_examples_build_and_run` 20, `complementarity_getters` 12,
+  `export_surface` 9, `entry_point_error_paths` 7, `complementarity_moi` 2),
+  and 1 gone (`collapsible_if` in `pounce-nlp/src/mpcc.rs`, removed by
+  S1-I1). Ours, so fixed: `#![allow(clippy::unwrap_used,
+  clippy::expect_used)]` at each of the seven crate roots (the spelling four
+  existing test files use). After: head 3243, **0 new**, 1 gone — head's
+  warnings are a strict subset of the baseline's. No lint in non-test code
+  was ever new.
+- CI's clippy steps (`ci.yml`: `cargo clippy --workspace --exclude
+  pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious`,
+  and the same flags on `-p pounce-rs --features full --all-targets`) —
+  exit 0 on head, before and after the fix.
+- `cargo test --workspace --exclude pounce-hsl` (from a clean
+  `target/debug`, `CARGO_PROFILE_DEV_DEBUG=0` for disk): 5328 passed, 11
+  ignored, **3 failed** — all of `c_examples_build_and_run` (S1-I3's), the
+  cdylib not found. From a clean target under `--workspace`, cargo writes
+  `libpounce_cinterface.so` to `deps/` only and does not uplift it to
+  `target/debug/` (the lib is not a root unit once `pounce-cli`
+  dev-depends on it, S1-I8); CI never saw it because its *Build* step runs
+  first, and every earlier iteration ran `-p pounce-cinterface`, which
+  uplifts. Not on baseline (the test is new). Fixed: `lib_dir()` looks in
+  `deps/` first (where the cdylib always is, next to the test binary;
+  the uplifted file is a hard link to it), then the profile directory, and
+  still panics, never skips, when neither has it. Re-run in the failing
+  configuration (`cargo test --workspace --exclude pounce-hsl --test
+  c_examples_build_and_run`, no uplifted `.so` present): `ok. 6 passed`.
+  `cargo test -p pounce-cinterface`: 22 binaries, 230 passed, 0 failed.
+- `make python-test` (extension and CLI binary rebuilt from this tree by
+  its `python-ext` prerequisite): first run stopped at collection on
+  `jsonschema` and `jax` missing from the venv (environment, not code);
+  with what `ci.yml` installs (`jax[cpu] diffrax jsonschema`) added, `cd
+  python && python -m pytest tests -q`: **2016 passed, 35 skipped**, 0
+  failed.
+- `make ask-check` — top-1 17/20 (floor 14), top-5 20/20 (floor 18), OK.
+- `make book` (mdbook 0.5.2) — builds, no warnings.
+- `scripts/check-release-consistency.sh` — `check-release-consistency: OK`.
+- `make c-api-examples` — both examples build strict and print their lines.
+
+Branch review (`git diff 2ac0ad9..HEAD`, 38 files, +14851/-121 before this
+commit): Stage 1 only — `pounce-cinterface` (src, header, README, tests,
+examples), `pounce-nlp/src/mpcc.rs`, `pounce-cli` (dev-dependency and two
+test files plus fixtures data), docs, CHANGELOG, `Makefile`
+(`c-api-examples`), release guard and its skill note, this plan. No Stage
+2-4 code. The `eprintln!`s added in `src/` are the deliberate refusal
+diagnostics, gated on `narration_is_wanted`; no `dbg!`/`todo!`/`FIXME`. No
+AI model name in code or commit text beyond the attribution trailers. The
+export guard (`export_surface` 13, `header_abi` 4) is green over all nine
+new functions.
+
+Manual runs still owed (not available to the loop): §8.6's data-root
+suites (`make -C benchmarks mpcc-opf-run`, `capacity-equilibria-run`,
+`mpcc-compare`) and the other declared-pair corpora in `CLAUDE.md` — only
+if review finds `pounce-nlp` changed beyond the classifier move; both
+sweeps say it did not.
 
 ### Facts recorded while planning (2ac0ad9)
 
