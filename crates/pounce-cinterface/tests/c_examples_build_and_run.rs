@@ -46,7 +46,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stdout line each example prints on success.
-const EXPECTED_STDOUT: &[(&str, &str)] = &[("sqp_warm_start.c", "all 4 solves succeeded")];
+const EXPECTED_STDOUT: &[(&str, &str)] = &[
+    (
+        "complementarity.c",
+        "complementarity example: S-stationary answer (1, 1, 0) certified",
+    ),
+    ("sqp_warm_start.c", "all 4 solves succeeded"),
+];
 
 /// Warning flags every example is held to.
 const STRICT_FLAGS: &[&str] = &["-std=c99", "-Wall", "-Wextra", "-Werror", "-pedantic"];

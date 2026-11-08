@@ -27,7 +27,7 @@ that ticks it.
 - [x] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
 - [x] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
 - [x] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
-- [ ] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
+- [x] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
 - [ ] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
 
 **Stop here and report to the human before starting any later stage.**
@@ -1170,25 +1170,180 @@ Iterations:
 
 ## 8. ABI-review checklist for the human (filled in by S1-I10)
 
-To be completed at S1-I10 with the final symbol list. Template:
+Written at S1-I10 against the tree that ticks it. Base for "added" /
+"changed" is `2ac0ad9` (0.16.0). Layouts measured on x86_64 Linux (gcc,
+LP64) with a `sizeof`/`offsetof` program against `pounce.h`; the same
+numbers are asserted against the Rust side on every `cargo test -p
+pounce-cinterface` by `repr_c_structs_match_the_header_layout`
+(`tests/c_examples_build_and_run.rs`).
 
-- [ ] Symbols added (names, prototypes) — none removed, none changed.
-- [ ] `#define`s added — none changed.
-- [ ] Structs added — `PounceLinearSolverStats` untouched (offsets verified by
-      the S1-I6 layout test).
+### 8.1 Surface added (nothing removed, no existing prototype changed)
+
+Nine functions, all `#[unsafe(no_mangle)] pub unsafe extern "C"`, bodies
+through `ffi_guard`, prototypes in `pounce.h` (held to the Rust signatures by
+`tests/export_surface.rs`):
+
+- [ ] `int AddPounceComplementarityPair(IpoptProblem, ipindex row, ipindex var)`
+- [ ] `int SetPounceComplementarityPairs(IpoptProblem, ipindex n_pairs, const ipindex *rows, const ipindex *vars, ipindex *bad_index)`
+- [ ] `Bool ClearPounceComplementarityPairs(IpoptProblem)`
+- [ ] `ipindex GetPounceComplementarityPairCount(IpoptProblem)` (`-1` on NULL)
+- [ ] `Bool GetPounceComplementarityPairs(IpoptProblem, ipindex *rows, ipindex *vars)`
+- [ ] `int AddPounceComplementsConstraint(IpoptProblem, ipindex row, ipindex var)`
+- [ ] `Bool GetPounceComplementarityStats(IpoptProblem, PounceComplementarityStats *)`
+- [ ] `Bool GetPounceComplementaritySolve(IpoptProblem, ipindex k, PounceComplementaritySolve *)`
+- [ ] `ipindex GetPounceComplementarityText(IpoptProblem, int which, char *buf, ipindex buflen)`
+
+No Fortran symbol added (`src/fortran.rs` is still the eight upstream
+`ip*_`; the export guard pins that).
+
+### 8.2 `#define`s added (values held to the Rust `pub const`s, both directions, by `tests/header_abi.rs`)
+
+- [ ] Declaration codes: `POUNCE_CC_OK 0`, `_ERR_NULL -1`, `_ERR_OUT_OF_RANGE -2`,
+      `_ERR_VAR_ALREADY -3`, `_ERR_ROW_ALREADY -4`, `_ERR_SHAPE -5`,
+      `_ERR_COUNT -6`, `_ERR_INTERNAL -7`.
+- [ ] MOI codes: `POUNCE_COMPLEMENTS_PAIR_MIXED 0`, `_PAIR_LOWER 1`,
+      `_PAIR_UPPER 2`, `_ROW_FIXED_NO_PAIR 3`, `_VAR_FIXED_NO_PAIR 4`,
+      `_ERR_NULL -1`, `_ERR_OUT_OF_RANGE -2`, `_ERR_VAR_ALREADY_PAIRED -3`,
+      `_ERR_ROW_ALREADY_PAIRED -4`, `_ERR_ROW_NOT_FREE -5`,
+      `_ERR_VAR_BOUNDS -6`, `_ERR_INTERNAL -7` (shared negatives equal the
+      `POUNCE_CC_*` ones).
+- [ ] Certificate: `POUNCE_CC_CLASS_S 0`, `_W 1`, `_NONE 2`,
+      `_NOT_SEARCHED 3`, `_ABSENT -1`.
+- [ ] Reported: `POUNCE_CC_REPORTED_ANSWER 0`, `_WEAK_FALLBACK 1`,
+      `_FEASIBLE_UNCERTIFIED 2`, `_VERDICT 3`.
+- [ ] B-check: `POUNCE_CC_B_VERDICT_B 0`, `_NOT_B 1`, `_NOT_CHECKED 2`,
+      `_ABSENT -1`.
+- [ ] Texts: `POUNCE_CC_TEXT_SUMMARY 0`, `_POLISH_REASON 1`, `_B_REASON 2`.
+
+### 8.3 `#define`s changed
+
+- [ ] `POUNCE_VERSION_MINOR 1 → 16`, `POUNCE_VERSION "0.1.0" → "0.16.0"`
+      (S1-I2). Loop rule 8 forbids changing an existing `#define` value;
+      S1-I2 ordered this fix because the old value was simply wrong (the
+      library has reported 0.16.0 all along). No C code in the repo reads
+      them. Now held to `CARGO_PKG_VERSION` by `header_abi.rs` and check 6
+      of `scripts/check-release-consistency.sh`. Confirm this is acceptable
+      as a fix rather than an ABI change.
+
+### 8.4 Structs added (`PounceLinearSolverStats` untouched: 96 bytes, offsets guarded)
+
+- [ ] `PounceComplementarityStats`, 224 bytes, align 8:
+
+  | field | type | offset |
+  |---|---|---|
+  | `strategy` | `char[16]` | 0 |
+  | `reported` | `ipindex` | 16 |
+  | `accepted_by` | `char[32]` | 20 |
+  | `fallback` | `char[32]` | 52 |
+  | `n_solves` | `ipindex` | 84 |
+  | `total_iterations` | `ipindex` | 88 |
+  | `max_abs_product` | `ipnumber` | 96 |
+  | `certificate_class` | `ipindex` | 104 |
+  | `n_pairs` | `ipindex` | 108 |
+  | `n_biactive` | `ipindex` | 112 |
+  | `n_neither` | `ipindex` | 116 |
+  | `multipliers_unique` | `ipindex` | 120 |
+  | `residual` | `ipnumber` | 128 |
+  | `resid_tol` | `ipnumber` | 136 |
+  | `tight` | `ipindex` | 144 |
+  | `feasible` | `ipindex` | 148 |
+  | `primal_violation` | `ipnumber` | 152 |
+  | `b_verdict` | `ipindex` | 160 |
+  | `b_n_biactive` | `ipindex` | 164 |
+  | `b_branches_solved` | `ipindex` | 168 |
+  | `b_enumerated` | `ipindex` | 172 |
+  | `escapes` | `ipindex` | 176 |
+  | `lifted` | `ipindex` | 180 |
+  | `natural_residual` | `ipnumber` | 184 |
+  | `polish_ran` | `ipindex` | 192 |
+  | `polish_taken` | `ipindex` | 196 |
+  | `polish_residual_before` | `ipnumber` | 200 |
+  | `polish_residual_after` | `ipnumber` | 208 |
+  | `polish_threshold` | `ipnumber` | 216 |
+
+  Padding: 4 bytes at 92, 124. A mirror in another language must
+  reproduce it (Julia: a plain `struct` with these field types does).
+- [ ] `PounceComplementaritySolve`, 72 bytes, align 8: `stage char[32]` 0,
+      `relaxed ipindex` 32, `tau ipnumber` 40, `status ipindex` 48,
+      `iterations ipindex` 52, `max_abs_product ipnumber` 56,
+      `seconds ipnumber` 64 (padding 4 bytes at 36).
+
+### 8.5 Decisions the plan did not settle, made conservatively, to confirm
+
+- [ ] **`POUNCE_CC_ERR_INTERNAL = -7`** (S1-I4): the `ffi_guard` fallback
+      for the `int`-returning declaration calls, a value that cannot be
+      read as a diagnosis of the input. Not in §3.2.
+- [ ] **`POUNCE_COMPLEMENTS_ERR_INTERNAL = -7`** (S1-I9): the same, plus the
+      re-validation refusal after a tentative bound edit (unreachable from
+      any public call today; Stage 2's in-place bound update would make it
+      reachable).
+- [ ] **`POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS = -6`** (S1-I9): NaN or crossed
+      (`l > u`) variable bounds match no row of the MOI table. Not in §3.1.
+- [ ] **`-1` sentinels** (S1-I6): with no certificate its counts and 0/1
+      flags read `-1` (reals `NaN`); with no B-check, `b_n_biactive`,
+      `b_branches_solved`, `b_enumerated` read `-1`; `polish_taken` reads
+      `0` when `polish_ran` is `0`. The `PounceLinearSolverStats` precedent,
+      instead of per-field "present" flags.
+- [ ] **The outcome record survives a clear** (S1-I6/I7): the getters and
+      the report's `complementarity` block describe the most recent solve;
+      `ClearPounceComplementarityPairs` after a driver solve does not erase
+      them; the next solve (with or without pairs) replaces them, and a
+      refused solve discards them.
+- [ ] **`complements_used` semantics** (S1-I9): a row or variable accepted
+      by `AddPounceComplementsConstraint` — pair or not — can never be used
+      by that function again on the handle; Clear/Set empty neither the
+      ledger nor the bound edits. The native `AddPounceComplementarityPair`
+      does not read the ledger.
+- [ ] **`ROW_NOT_FREE` for agreeing bounds** (S1-I9): a row whose bound
+      already agrees with MOI's sign (`g_L = 0` with `x >= 0`) is refused as
+      `ROW_NOT_FREE` (§3.1: "any other row"); a frontend must declare it
+      natively. Because the free check comes first, a row in a one-sided
+      pair reads `ROW_NOT_FREE`, not `ROW_ALREADY_PAIRED`.
+- [ ] **The live inspectors are guarded** (S1-I5, deviation from §3.5): the
+      plan thought they already returned `FALSE` during a lowered solve;
+      an `x`-only `GetIpoptCurrentIterate` returned `TRUE`. A thread-local
+      guard now makes both inspectors `FALSE` for every request shape.
+- [ ] **Header version fix** (§8.3).
+- [ ] **`pounce-cinterface` as a dev-dependency of `pounce-cli`** (S1-I8),
+      via `[workspace.dependencies]` (`version = "0.16.0"`, path). Stripped
+      on publish; `pounce-cinterface` publishes before `pounce-cli` in
+      `scripts/publish-crates.sh` anyway. Its `version` moves with the
+      other `[workspace.dependencies]` entries at a release bump.
+- [ ] **`serde_json` `float_roundtrip` dev feature** in
+      `pounce-cinterface` (S1-I7): tests only, so reals read back to the
+      bit; `Cargo.lock` unchanged. `pounce-cli`'s parser deliberately not
+      changed (its tests compare report text instead).
+- [ ] **No `second_opinion` block in the C report** (noticed in S1-I7, not
+      changed): the CLI and Python write one when the ladder ran;
+      `IpoptWriteSolveReport` never has. Now stated in `docs/src/c-api.md`.
+      Separate issue or accept?
+- [ ] **Trajectory vs the CLI** (S1-I5/I8): a callback model and the `.nl`
+      file of the same model agree on the answer but not always on the
+      iteration count (row constant in `g` or in its bound; the `.nl`
+      nonlinear-variable list under L-BFGS). Documented as frontend
+      guidance in `docs/src/c-api.md` ("Matching the CLI"), not changed.
+
+### 8.6 Release and Pounce.jl
+
 - [ ] `GetIpoptVersion` reports `0.17.0` once released; `pounce.h`
-      `POUNCE_VERSION` agrees (release guard).
-- [ ] Pounce.jl: `Pounce.jl/src/Pounce.jl:17` gate → `< v"0.18.0-0"`;
-      `README.md`/`docs/src/julia.md` text updated; `Pkg.test()` green against
-      the 0.17 cdylib **with no other Julia change** (additions only).
-- [ ] Optional for Pounce.jl: add the new symbols to `_required_native_symbols`
-      only when the MOI side starts using them.
-- [ ] Manual runs not available to the loop: `make -C benchmarks mpcc-opf-run`
-      (volt-var/volt-watt, data root) against a baseline, and the other
-      declared-pair corpora named in `CLAUDE.md` if `pounce-nlp` was changed
-      beyond the pure classifier move.
-
----
+      `POUNCE_VERSION_*` agree (release guard check 6). Stage 1 ships in
+      **0.17.0**; this branch bumps nothing.
+- [ ] Pounce.jl gate, `Pounce.jl/src/Pounce.jl` `_check_native_version`:
+      today `v"0.15.0" <= version < v"0.17.0-0"` (and its error text names
+      "0.15.x and 0.16.x"). After this review, widen to
+      `< v"0.18.0-0"` and the message to "0.15.x through 0.17.x"; update
+      `Pounce.jl/README.md` and `docs/src/julia.md` ("accepts native POUNCE
+      0.15.x and 0.16.x"; S1-I10 added a sentence there saying 0.17 needs
+      the widened gate). Then `Pkg.test()` must pass against the 0.17
+      cdylib **with no other Julia change** (additions only).
+- [ ] Optional for Pounce.jl: add the new symbols to
+      `_required_native_symbols` only when the MOI side starts using them
+      (it would otherwise refuse a 0.15/0.16 library it can still drive).
+- [ ] Manual runs not available to the loop: `make -C benchmarks
+      mpcc-opf-run` (volt-var/volt-watt, data root) against a baseline, and
+      the other declared-pair corpora named in `CLAUDE.md`, only if a review
+      finds `pounce-nlp` changed beyond the pure classifier move (S1-I1's
+      sweep and S1-I11's say it did not).
 
 ## 9. Per-iteration log
 
@@ -1953,6 +2108,88 @@ Gate (all on the ticking commit's tree):
   `make c-api-examples` green; `scripts/check-release-consistency.sh` OK.
 - Sweep not run: no solver code moved, and the CLI does not link
   `pounce-cinterface`.
+
+### S1-I10 — C example, docs, ABI-review checklist (commit that ticks S1-I10)
+
+What moved:
+- `examples/complementarity.c` (new): QpecSmall in C with row 1 created
+  **free**. Declares `(0, y1)` natively (`AddPounceComplementarityPair`) and
+  `(1, y2)` through `AddPounceComplementsConstraint` (`PAIR_LOWER`, writes
+  `g_L[1] = 0`, so the model is QpecSmall exactly); checks
+  `GetPounceComplementarityStats` is `FALSE` before any solve, three
+  refusals (`POUNCE_CC_ERR_VAR_ALREADY` for `y1` twice,
+  `_ERR_OUT_OF_RANGE` for row `m`, `POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` on
+  the edited row), the read-back of both pairs, `IpoptCreateSolver`
+  returning `NULL` without consuming the handle; solves from `(0, 0.5,
+  0.5)`; requires `Solve_Succeeded`, `x = (1, 1, 0)` to `1e-6`,
+  `REPORTED_ANSWER`, `CLASS_S`, 2 pairs; prints every lowered-solve record,
+  checks `k = n_solves` is refused, reads the summary through a size query,
+  checks `B_REASON` is `-1`; writes the `summary` report to
+  `argv[0].report.json` (next to the binary, so under `target/`) and checks
+  it has a `"complementarity"` key. Last line, registered in
+  `EXPECTED_STDOUT`: `complementarity example: S-stationary answer (1, 1, 0)
+  certified`. Measured output: 6 lowered solves, 139 iterations in all,
+  reported solve 12 — S1-I5's numbers for this start. Builds clean under
+  the strict flags with gcc and with clang (`make c-api-examples CC=clang`).
+- Docs accuracy pass. Corrected or added:
+  - `c-api.md`: the getters' "nothing" cases listed only "before any solve,
+    or a solve without pairs" — now also a refused solve (which discards
+    the record), and that clearing the pairs keeps the record until the
+    next solve; the error list lacked `POUNCE_CC_ERR_INTERNAL`; the
+    struct-layout sentence named only `PounceLinearSolverStats`. The
+    complementarity material, scattered over the Lifecycle and Solving
+    bullets, is now one *Complementarity* section: prototypes, both code
+    tables with values, the MOI table, the check order, `ROW_NOT_FREE` for
+    agreeing bounds, the permanent edits and ledger, the three refusals
+    (sessions, staged working sets, inspectors), scaling / nonlinear-list
+    forwarding, the getters and sentinels, and **Matching the CLI** (the
+    row constant in the bound; the `.nl` nonlinear-variable list under
+    L-BFGS; the maximize sign), from S1-I8's measurements. The report
+    section now says the C report lacks the `second_opinion` block.
+  - `complementarity.md`: `ERR_INTERNAL` in the C code list; the C getters
+    and report after the solve paragraph, with a pointer to *Matching the
+    CLI*; the `Complements` ledger "even if the pairs have since been
+    cleared"; `GetPounceComplementarityStats` as a place to read the
+    certificate; a *Limits* bullet for the C API (sessions, SQP working
+    sets, inspectors, Fortran shim).
+  - `pounce.h`: an over-long reflowed comment line; the declared-pairs block
+    now says the Fortran shim declares none and gives the two trajectory
+    notes with a pointer to `c-api.md`; `ClearPounceComplementarityPairs`
+    says bound edits and the outcome record stay. Comments only.
+  - Crate README: an example list, `ERR_INTERNAL`, `ROW_NOT_FREE` for
+    agreeing bounds, edits and ledger surviving a clear, the getters'
+    most-recent-solve contract, working sets not combined with pairs, the
+    *Status* paragraph (driver path and the trajectory note), the three
+    guarded structs under *Versioning*.
+  - `julia.md`: 0.17 adds symbols and changes none, but Pounce.jl refuses it
+    until the review widens the gate. No Julia code changed.
+  - `CHANGELOG.md`: the one long "(in progress)" paragraph accumulated over
+    I4–I9 is one entry with five sub-bullets (declaring, MOI, solving,
+    reading back, example/docs), plus an *Added* entry for the C-examples
+    build and the export guard and a *Fixed* entry for the header version
+    defines.
+- §8 written: nine functions, 36 defines, two structs with measured
+  offsets, the changed version defines, 13 decisions to confirm, and the
+  release / Pounce.jl steps (`_check_native_version` is `0.15.0 <= v <
+  0.17.0-0` today; widen to `< 0.18.0-0` after review).
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 22 binaries, 0 failures
+  (lib 61, `c_examples_build_and_run` 6 — both examples build strict and
+  print their lines —, `export_surface` 13, `header_abi` 4,
+  `complementarity_*` 34/13/17/10/16).
+- `make book` (mdbook 0.5.2) — builds; anchors `c-api.html#complementarity`,
+  `#matching-the-cli`, `#moi-f-x--complements`,
+  `complementarity.html#declaring-pairs` and `#what-you-get-back` exist.
+- `scripts/check-release-consistency.sh` — `check-release-consistency: OK`,
+  exit 0.
+- `make ask-check` — top-1 17/20, top-5 20/20, OK (unchanged).
+- `make c-api-examples` (gcc, and `CC=clang`) green;
+  `cargo build --release -p pounce-cinterface` produces the cdylib.
+- `cargo fmt --all -- --check` clean; clippy under the CI flags
+  (`--all-targets --no-deps -D clippy::correctness -D clippy::suspicious`)
+  clean.
+- Sweep not run: no Rust source outside a test moved.
 
 ### Facts recorded while planning (2ac0ad9)
 

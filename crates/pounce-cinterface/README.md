@@ -40,6 +40,13 @@ prints on success; a new example needs an entry in that test's
 `EXPECTED_STDOUT`. The test fails when no C compiler (`$CC`, else `cc`) can
 be run; set `POUNCE_C_EXAMPLES_SKIP=1` to skip it knowingly.
 
+- `examples/sqp_warm_start.c` — working-set warm starts across a sequence
+  of perturbed QPs on the active-set SQP path.
+- `examples/complementarity.c` — declared complementarity on QpecSmall: one
+  pair declared natively, one through `AddPounceComplementsConstraint`, the
+  refusal codes, the session refusal, the solve, the three outcome getters
+  and the JSON report's `complementarity` block.
+
 ## Surface
 
 Every exported symbol is listed here and in the book's
@@ -77,7 +84,8 @@ POUNCE extensions:
   `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
   `GetPounceComplementarityPairs`. Indices in the problem's index style;
   each declaration is validated at once by the classifier the lowering runs
-  and refused with a `POUNCE_CC_ERR_*` code. With pairs declared,
+  and refused with a `POUNCE_CC_ERR_*` code (`POUNCE_CC_ERR_INTERNAL` is an
+  internal error, not a diagnosis). With pairs declared,
   `IpoptSolve` solves through the complementarity driver (as the CLI and
   Python do; the `complementarity_*` options apply); `IpoptCreateSolver`
   and a staged SQP working set refuse them, and the live inspectors report
@@ -87,8 +95,12 @@ POUNCE extensions:
   maps them onto the native pairs by **editing the handle's copy of the row
   bounds** — `F >= 0` for `x >= l`, `F <= 0` for `x <= u`, `F = 0` for a free
   `x`, nothing for a boxed (mixed pair) or fixed (no pair) `x`. The row must
-  be free; the `POUNCE_COMPLEMENTS_*` return code says which row of the table
-  applied, or why the call was refused (nothing changes then).
+  be free — a row that already has a side, even one agreeing with MOI's
+  sign, is `POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` and is a native
+  declaration; the `POUNCE_COMPLEMENTS_*` return code says which row of the
+  table applied, or why the call was refused (nothing changes then). The
+  edits, and the record of which rows and variables the helper has used,
+  survive `ClearPounceComplementarityPairs`.
 - Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
   (`#[repr(C)]` `PounceComplementarityStats`: strategy, what was reported
   and by which formulation, total iterations, the stationarity certificate,
@@ -96,8 +108,10 @@ POUNCE extensions:
   (one lowered solve, `PounceComplementaritySolve`) and
   `GetPounceComplementarityText` (summary, polish reason, B-check reason;
   `snprintf` contract). The fields and encodings of the solve report's
-  `complementarity` block; all three answer `FALSE` / `-1` when the most
-  recent solve did not run the driver.
+  `complementarity` block (`NaN` for its `null`, `-1` for an absent
+  record). They describe the most recent solve: all three answer `FALSE` /
+  `-1` before any solve and after one without pairs or a refused one;
+  clearing the pairs keeps the record until the next solve.
 - `IpoptEnableIterHistory` + `IpoptWriteSolveReport` — emits the structured
   `pounce.solve-report/v1` JSON (see
   [`pounce-solve-report`](../pounce-solve-report)) from the most
@@ -107,6 +121,7 @@ POUNCE extensions:
 - Working-set warm start (active-set SQP): `IpoptGetWorkingSet`,
   `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
   `IpoptSolveWarmStart`. Example: `examples/sqp_warm_start.c`.
+  Not combined with complementarity pairs.
 - Factor-once / solve-many session: `IpoptCreateSolver`,
   `IpoptSolverSolve`, `IpoptSolverGetKktDim`, `IpoptSolverKktSolve`,
   `IpoptSolverKktSolveScaled`, `IpoptSolverParametricStep`,
@@ -135,14 +150,21 @@ return 0 (`OKRetVal`) or 1. POUNCE's C extensions are not mirrored here.
 `POUNCE_VERSION_*` defines must equal it (`tests/header_abi.rs` and
 `scripts/check-release-consistency.sh` both check). The ABI changes by
 addition only: no existing prototype, struct layout or `#define` value
-changes.
+changes. The `#[repr(C)]` structs (`PounceLinearSolverStats`,
+`PounceComplementarityStats`, `PounceComplementaritySolve`) are held to the
+header field by field (size, offset, width) by a C program in
+`tests/c_examples_build_and_run.rs`.
 
 ## Status
 
 Feature-complete for the upstream Ipopt C ABI surface. End-to-end
-solves run via `IpoptSolve` through the regular algorithm path; option
-forwarding, intermediate callback, post-solve stats, and the JSON
-solve-report writer are all wired. The C ABI is the path PyIpopt /
+solves run via `IpoptSolve` through the regular algorithm path, or through
+the complementarity driver when pairs are declared; option forwarding,
+intermediate callback, post-solve stats, and the JSON solve-report writer
+are all wired. A callback model can take a different path through the
+driver's solves than the CLI on the `.nl` file of the same model (a row's
+constant in `g` or in its bound; the `.nl` nonlinear-variable list under
+L-BFGS): see "Matching the CLI" in [`docs/src/c-api.md`](../../docs/src/c-api.md). The C ABI is the path PyIpopt /
 cyipopt / JuMP / AMPL drivers take when they link
 `libpounce_cinterface` in place of `libipopt`.
 

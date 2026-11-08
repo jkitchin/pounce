@@ -670,14 +670,23 @@ Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
  * CreateIpoptProblem), like IpoptSetNonlinearVariables. Each declaration
  * is validated at once, against the handle's bounds (those given to
  * CreateIpoptProblem, as AddPounceComplementsConstraint may have edited
- * them) and the pairs already declared, by the same classifier the solve's lowering
- * runs; a refused declaration leaves the declared set unchanged. Pairs
- * persist on the handle across solves.
+ * them) and the pairs already declared, by the same classifier the
+ * solve's lowering runs; a refused declaration leaves the declared set
+ * unchanged. Pairs persist on the handle across solves.
  *
  * IpoptSolve solves a problem with pairs through the complementarity
  * driver (see IpoptSolve). Sessions (IpoptCreateSolver) and SQP
  * working-set warm starts refuse pairs; the live inspectors report no
- * data during such a solve.
+ * data during such a solve. The Fortran shim declares no pairs.
+ *
+ * The driver's path through its lowered solves is sensitive to how the
+ * model is written: a row's constant in g (g = 2y - 1 - x, g_L = 0) or in
+ * its bound (g = 2y - x, g_L = 1) is the same feasible set but can take a
+ * different number of iterations. Under hessian_approximation=limited-memory
+ * declare the nonlinear variables (IpoptSetNonlinearVariables) as an .nl
+ * file's header does, or the run differs from the CLI's on the same model.
+ * See docs/src/c-api.md, "Matching the CLI".
+ * examples/complementarity.c uses every function below.
  * ------------------------------------------------------------------- */
 #define POUNCE_CC_OK                   0
 #define POUNCE_CC_ERR_NULL            -1   /* NULL handle, or NULL array with n_pairs > 0 */
@@ -712,7 +721,10 @@ int SetPounceComplementarityPairs(
     ipindex       *bad_index
 );
 
-/** Drop every declared pair. FALSE only on a NULL handle. */
+/** Drop every declared pair. FALSE only on a NULL handle. Bounds written
+ *  by AddPounceComplementsConstraint stay written, and the outcome record of
+ *  the most recent solve (GetPounceComplementarityStats) stays readable
+ *  until the next solve. */
 Bool ClearPounceComplementarityPairs(IpoptProblem ipopt_problem);
 
 /** Number of declared pairs; -1 on a NULL handle. */

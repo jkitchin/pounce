@@ -109,8 +109,11 @@ edited them), by the same classifier the lowering runs, and a pair
 Python or the `.nl` reader would refuse is refused here with a code:
 `POUNCE_CC_ERR_OUT_OF_RANGE`, `POUNCE_CC_ERR_VAR_ALREADY`,
 `POUNCE_CC_ERR_ROW_ALREADY` or `POUNCE_CC_ERR_SHAPE` (plus
-`POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments). A refused
-call leaves the declared set as it was. See also the [C API](c-api.md) page.
+`POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments, and
+`POUNCE_CC_ERR_INTERNAL` for an internal error). A refused call leaves the
+declared set as it was. The [C API](c-api.md#complementarity) page has
+every prototype and code; `examples/complementarity.c` in
+`crates/pounce-cinterface` declares, solves and reads back QpecSmall.
 
 `IpoptSolve` then solves the model through the same driver the CLI and
 Python use, with the same `complementarity_*` options, and writes the
@@ -124,6 +127,17 @@ returns `Invalid_Problem_Definition` before any callback; and
 `IpoptGetWorkingSet` reports no set after a driver solve. The intermediate
 callback fires from every lowered solve, and `GetIpoptCurrentIterate` /
 `GetIpoptCurrentViolations` report no data during them.
+
+After the solve, `GetPounceComplementarityStats`,
+`GetPounceComplementaritySolve` and `GetPounceComplementarityText` read
+back what is described under [What you get back](#what-you-get-back), and
+`IpoptWriteSolveReport` writes the same `complementarity` block as the CLI
+and Python. A callback model reaches the same answer as the CLI on the
+`.nl` file of the same model, but can take a different number of
+iterations: AMPL moves a row's constant into its bound, and under
+`hessian_approximation=limited-memory` the `.nl` file says which variables
+are nonlinear. [Matching the CLI](c-api.md#matching-the-cli) says how to
+reproduce the CLI's run exactly.
 
 ### From MOI / JuMP `Complements`
 
@@ -150,8 +164,9 @@ them. A negative return is a refusal that changes nothing:
 or not it agrees with the one MOI implies: declare it natively with
 `AddPounceComplementarityPair`), `_ERR_VAR_ALREADY_PAIRED` /
 `_ERR_ROW_ALREADY_PAIRED` (the variable or row is in a declared pair or in
-an earlier accepted call of this function, with or without a pair, so one
-`F` or one `x` is never in two `Complements` constraints), `_ERR_VAR_BOUNDS`
+an earlier accepted call of this function, with or without a pair, even if
+the pairs have since been cleared, so one `F` or one `x` is never in two
+`Complements` constraints), `_ERR_VAR_BOUNDS`
 (NaN or crossed bounds), `_ERR_OUT_OF_RANGE`, `_ERR_NULL` and
 `_ERR_INTERNAL`. Each row of the table is solved against a hand-worked
 answer in `crates/pounce-cinterface/tests/complementarity_moi.rs`.
@@ -566,9 +581,10 @@ can disagree, and when they do, each is right about its own question:
 
 Pyomo reads `Solved_To_Acceptable_Level` as `optimal`, as it does for any
 model, so the certificate is the only place the `none` and `W` cases show.
-Read it from `info["complementarity"]`, the console line (`tee=True`), or
-the `complementarity` block of the JSON solve report (`--json-output`, or
-`solve(report_path=...)` from Python).
+Read it from `info["complementarity"]`, the console line (`tee=True`), the
+`complementarity` block of the JSON solve report (`--json-output`, or
+`solve(report_path=...)` from Python), or, from C,
+`GetPounceComplementarityStats`.
 
 ## Limits
 
@@ -587,6 +603,11 @@ the `complementarity` block of the JSON solve report (`--json-output`, or
   `check-x0`, the WASM build, `pounce.Solver`, `find_minima`,
   `solve_nlp_batch` and `solve_with_sens` refuse pairs rather than solve
   the model without them.
+- On the C API, sessions (`IpoptCreateSolver`) and SQP working-set warm
+  starts (a staged `IpoptSetWarmStartWorkingSet`) refuse pairs, and the
+  live inspectors (`GetIpoptCurrentIterate`, `GetIpoptCurrentViolations`)
+  report no data during a driver solve. The Fortran shim has no way to
+  declare pairs.
 - The certificate is sparse above 2.5·10⁵ entries in its stationarity
   system, so a model with unique multipliers is certified at any size (a
   3 000-pair chain, `n = 9 000`, in 2.3 s for the whole solve). Where the

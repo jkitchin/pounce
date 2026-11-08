@@ -10,32 +10,53 @@ changes.
 ## [Unreleased]
 
 ### Added
-- **Declared complementarity through the C API (gh#1147, in progress).** `AddPounceComplementarityPair`,
-  `SetPounceComplementarityPairs`, `ClearPounceComplementarityPairs`,
-  `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`
-  declare and read back pairs on an `IpoptProblem`, in the problem's index
-  style and in the native shapes Python's `Problem(complementarity=)` and
-  the `.nl` reader accept. Each declaration is checked at once by the same
-  classifier the lowering runs and refused with a `POUNCE_CC_ERR_*` code,
-  leaving the declared set unchanged. With pairs declared, `IpoptSolve`
-  solves through the complementarity driver, as the CLI and Python do, with
-  the `complementarity_*` options honoured, and writes back the reported
-  point; without pairs it is unchanged. `IpoptCreateSolver` and a staged SQP
-  working set refuse pairs, `IpoptGetWorkingSet` reports no set after a
-  driver solve, and `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations`
-  report no data during one. `GetPounceComplementarityStats` (a `#[repr(C)]`
-  `PounceComplementarityStats`), `GetPounceComplementaritySolve` and
-  `GetPounceComplementarityText` read back what the driver did: the
-  solve report's `complementarity` block as scalars, one lowered solve at a
-  time, and its texts. `IpoptWriteSolveReport` writes that block after a
-  driver solve, the same block the CLI and Python write.
-  `AddPounceComplementsConstraint` takes MOI / JuMP `[F, x] ∈ Complements`
-  semantics on a free row and maps them onto the native pairs by writing
-  the sign MOI implies into the handle's row bounds (`F >= 0`, `F <= 0` or
-  `F = 0`, or nothing for a boxed or fixed `x`), returning a
-  `POUNCE_COMPLEMENTS_*` code that says which.
+- **Declared complementarity through the C API (gh#1147).** A C program, or
+  a wrapper linking `libpounce_cinterface`, can now solve a model with
+  complementarity pairs through the same driver, options and certificate
+  as the CLI and Python. All additions; no existing prototype, struct or
+  `#define` value changed.
+  - *Declaring:* `AddPounceComplementarityPair`,
+    `SetPounceComplementarityPairs` (replace, all or nothing, with the
+    position of the first refused pair), `ClearPounceComplementarityPairs`,
+    `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`,
+    in the problem's index style and in the native shapes Python's
+    `Problem(complementarity=)` and the `.nl` reader accept. Each
+    declaration is checked at once by the classifier the lowering runs and
+    refused with a `POUNCE_CC_ERR_*` code, changing nothing.
+  - *MOI semantics:* `AddPounceComplementsConstraint` takes JuMP's
+    `[F, x] ∈ Complements` on a free row and maps it onto the native pairs
+    by writing the sign MOI implies into the handle's row bounds (`F >= 0`,
+    `F <= 0` or `F = 0`, or nothing for a boxed or fixed `x`), returning a
+    `POUNCE_COMPLEMENTS_*` code that says which.
+  - *Solving:* with pairs declared, `IpoptSolve` solves through the
+    complementarity driver, honours the `complementarity_*` options and
+    writes back the reported point; without pairs it is unchanged.
+    `IpoptCreateSolver` and a staged SQP working set refuse pairs,
+    `IpoptGetWorkingSet` reports no set after a driver solve, and
+    `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` report no data
+    during one.
+  - *Reading back:* `GetPounceComplementarityStats` (the `#[repr(C)]`
+    `PounceComplementarityStats`), `GetPounceComplementaritySolve`
+    (`PounceComplementaritySolve`, one lowered solve) and
+    `GetPounceComplementarityText` (summary, polish and B-check reasons,
+    `snprintf` contract) return the solve report's `complementarity` block
+    as scalars, and `IpoptWriteSolveReport` writes that block, the same one
+    the CLI and Python write.
+  - `examples/complementarity.c` exercises all of it, and the book's
+    `docs/src/c-api.md` documents it, including how to make a
+    callback model reproduce the CLI's run on the same `.nl` model.
+- **The C examples are built and run by `cargo test`.** Every
+  `crates/pounce-cinterface/examples/*.c` is compiled with
+  `-std=c99 -Wall -Wextra -Werror -pedantic` against `pounce.h` and run;
+  `make c-api-examples` does the same by hand. A guard holds the exported
+  symbols, the header's prototypes and the docs to one another, and the
+  header's structs to the Rust layout.
 
 ### Fixed
+- **`pounce.h`'s version defines match the library.** `POUNCE_VERSION_MINOR`
+  and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
+  `0.16.0`; they now equal the crate version, and a test and the release
+  guard (`scripts/check-release-consistency.sh`) keep them so.
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost
   most of its digits close to `-1`: relative error 3.6e-5 at `-1 + 1e-13` and
   3.0e-3 at `-1 + 1e-15`, enough for discopt to certify the wrong objective

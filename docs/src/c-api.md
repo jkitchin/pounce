@@ -52,28 +52,10 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   which variables enter nonlinearly, which restricts the limited-memory
   Hessian approximation to them. Indices are in the problem's index style;
   a bad declaration is refused whole.
-- `AddPounceComplementarityPair` declares one complementarity pair (a
-  constraint row and a variable); `SetPounceComplementarityPairs` replaces
-  the declared set with a batch, all or nothing, and reports the position of
-  the first refused pair; `ClearPounceComplementarityPairs` drops them;
-  `GetPounceComplementarityPairCount` and `GetPounceComplementarityPairs`
-  read them back. Indices are in the problem's index style. Pairs are in
-  the native shapes of [Complementarity Constraints](complementarity.md#c-api)
-  and are checked when declared, by the same classifier the solve's
-  lowering runs; a refusal returns a `POUNCE_CC_ERR_*` code (out of range,
-  variable or row already paired, unsupported shape, NULL, negative count)
-  and leaves the declared set unchanged. With pairs declared, `IpoptSolve`
-  solves through the complementarity driver (see *Solving*).
-- `AddPounceComplementsConstraint` declares MOI's `[F, x] ∈ Complements`
-  for a free row `F` and a variable `x`: it writes the sign MOI implies
-  into the handle's copy of the row bounds (`F >= 0` when `x` has only a
-  lower bound, `F <= 0` for only an upper, `F = 0` when `x` is free) and
-  declares the native pair, or none when `x` is free or fixed. The returned
-  `POUNCE_COMPLEMENTS_*` code says which; a negative one is a refusal that
-  changed nothing (row not free, row or variable already used, NULL, out of
-  range, NaN or crossed variable bounds). The edits are permanent on the
-  handle. The table is in [Complementarity
-  Constraints](complementarity.md#from-moi--jump-complements).
+- `AddPounceComplementarityPair`, `SetPounceComplementarityPairs`,
+  `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
+  `GetPounceComplementarityPairs` and `AddPounceComplementsConstraint`
+  declare complementarity pairs; see [Complementarity](#complementarity).
 
 ## Solving
 
@@ -87,34 +69,8 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   complementarity and Lagrangian gradient, in scaled or unscaled space, as in
   Ipopt 3.14. Both return `FALSE` outside the callback or when the dimensions
   passed do not match the problem's.
-- With complementarity pairs declared, `IpoptSolve` runs the complementarity
-  driver instead of one solve and the second-opinion ladder, exactly as the
-  CLI and Python do, and honours the `complementarity_strategy`,
-  `complementarity_continuation` and `complementarity_lift` options. The
-  buffers receive the reported point; the post-solve statistics describe
-  that reported solve, not the whole run. The intermediate callback fires
-  from every lowered solve (each restarts at iteration 0), and returning
-  `FALSE` from it ends the run with `User_Requested_Stop`; the inspectors
-  return `FALSE` throughout. See [Complementarity
-  Constraints](complementarity.md#c-api).
-- After a driver solve, `GetPounceComplementarityStats` fills a
-  `PounceComplementarityStats` with what the driver did: the strategy, what
-  was reported (`POUNCE_CC_REPORTED_*`) and by which formulation, the number
-  of lowered solves and their total iterations (`GetIpoptIterCount` is the
-  reported solve's alone), the stationarity certificate of the reported
-  point (`POUNCE_CC_CLASS_S`, `_W`, `_NONE`, `_NOT_SEARCHED`, or `_ABSENT`
-  when the model could not be evaluated there), the B-stationarity check
-  (`POUNCE_CC_B_VERDICT_*`), escapes, lifted pairs, the natural residual
-  and the polish. `GetPounceComplementaritySolve` reads lowered solve `k`
-  (stage, `tau`, status, iterations, violation, seconds) into a
-  `PounceComplementaritySolve`, and `GetPounceComplementarityText` copies
-  the driver's summary line, the polish's reason or the B-check's reason
-  with `snprintf`'s contract (`buf = NULL, buflen = 0` returns the length).
-  These are the fields of the solve report's `complementarity` block, with
-  `NaN` for a real the report writes as `null` and `-1` for a count whose
-  record is absent. All three answer `FALSE` (`-1` for the text) when the
-  most recent solve did not run the driver: before any solve, or a solve
-  without pairs.
+- With complementarity pairs declared, `IpoptSolve` runs the
+  complementarity driver instead; see [Complementarity](#complementarity).
 
 ## Post-solve statistics
 
@@ -162,7 +118,181 @@ first-order sensitivity questions; `IpoptFreeSolver` releases it. A session
 solve does not run the second-opinion ladder that `IpoptSolve` does. The
 walkthrough is [Sessions](sessions.md). A problem with complementarity pairs
 is refused: `IpoptCreateSolver` returns `NULL` and leaves the handle with
-the caller, because the session would hold the lowered model's factor.
+the caller, because the session would hold the lowered model's factor
+(see [Complementarity](#complementarity)).
+
+## Complementarity
+
+The C API solves models with declared complementarity pairs through the
+same driver as the CLI and Python, described in [Complementarity
+Constraints](complementarity.md). `examples/complementarity.c` in the crate
+exercises every function in this section; `make c-api-examples` builds and
+runs it.
+
+### Declaring pairs
+
+A pair `(row, var)` pairs constraint row `g_row` with variable `x_var`, each
+measured from its finite bound, in the three native shapes Python's
+`Problem(complementarity=)` and the `.nl` reader accept (one-sided,
+one-sided plus a plain bound, mixed; the table is under [Declaring
+pairs](complementarity.md#declaring-pairs)):
+
+```c
+int     AddPounceComplementarityPair(IpoptProblem, ipindex row, ipindex var);
+int     SetPounceComplementarityPairs(IpoptProblem, ipindex n_pairs,
+                                      const ipindex *rows, const ipindex *vars,
+                                      ipindex *bad_index /* may be NULL */);
+Bool    ClearPounceComplementarityPairs(IpoptProblem);
+ipindex GetPounceComplementarityPairCount(IpoptProblem);   /* -1 on NULL */
+Bool    GetPounceComplementarityPairs(IpoptProblem, ipindex *rows, ipindex *vars);
+```
+
+`Add` appends; `Set` replaces the set with a batch, all or nothing, and
+writes the batch position of the first refused pair to `bad_index` (`-1` on
+success); `n_pairs = 0` clears. Indices are in the problem's index style,
+and are read back in it. Each declaration is checked at once, against the
+handle's bounds and the pairs already declared, by the classifier the
+solve's lowering runs, so a pair Python or the `.nl` reader would refuse is
+refused here, and a refused call changes nothing:
+
+| code | value | meaning |
+|---|---|---|
+| `POUNCE_CC_OK` | 0 | declared |
+| `POUNCE_CC_ERR_NULL` | -1 | NULL handle, or a NULL array with `n_pairs > 0` |
+| `POUNCE_CC_ERR_OUT_OF_RANGE` | -2 | row or variable outside the problem (in its index style) |
+| `POUNCE_CC_ERR_VAR_ALREADY` | -3 | the variable is already in a pair, or twice in the batch |
+| `POUNCE_CC_ERR_ROW_ALREADY` | -4 | the row is already in a pair, or twice in the batch |
+| `POUNCE_CC_ERR_SHAPE` | -5 | not a native shape (boxed or equality row, both sides free, a fixed variable with a free row, ...) |
+| `POUNCE_CC_ERR_COUNT` | -6 | `n_pairs < 0` |
+| `POUNCE_CC_ERR_INTERNAL` | -7 | an internal error caught at the boundary; not a diagnosis of the input |
+
+Pairs persist across solves until cleared or replaced.
+
+### MOI `[F, x] ∈ Complements`
+
+```c
+int AddPounceComplementsConstraint(IpoptProblem, ipindex row, ipindex var);
+```
+
+MathOptInterface reads the sign of `F` off `x`'s bounds; the native pairs
+read both signs off bounds. `AddPounceComplementsConstraint` takes MOI's
+semantics on a row with **no finite bound** and transcribes them by writing
+into the handle's copy of that row's bounds, then declaring the native
+pair:
+
+| `x` bounds | edit on the handle | pair declared | returns |
+|---|---|---|---|
+| `l < u`, both finite | none | native mixed | `POUNCE_COMPLEMENTS_PAIR_MIXED` (0) |
+| `x >= l` only | `g_L[row] = 0` (`F >= 0`) | one-sided | `POUNCE_COMPLEMENTS_PAIR_LOWER` (1) |
+| `x <= u` only | `g_U[row] = 0` (`F <= 0`) | one-sided | `POUNCE_COMPLEMENTS_PAIR_UPPER` (2) |
+| free | `g_L[row] = g_U[row] = 0` (`F = 0`) | none | `POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR` (3) |
+| `l == u` | none (`F` free) | none | `POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR` (4) |
+
+A negative return is a refusal that changed nothing, checked in this order:
+`POUNCE_COMPLEMENTS_ERR_NULL` (-1); `_ERR_OUT_OF_RANGE` (-2); `_ERR_ROW_NOT_FREE`
+(-5), for any row with a finite bound, **including one whose bound agrees
+with the sign MOI implies** (`g_L = 0` with `x >= 0`: that is a native
+declaration, use `AddPounceComplementarityPair`) and a row this function
+already wrote; `_ERR_VAR_ALREADY_PAIRED` (-3) and `_ERR_ROW_ALREADY_PAIRED`
+(-4), for a variable or row in a declared pair or in **any earlier accepted
+call** of this function, pair or not; `_ERR_VAR_BOUNDS` (-6), NaN or crossed
+variable bounds; and `_ERR_INTERNAL` (-7). The edits and that ledger are
+permanent on the handle: `ClearPounceComplementarityPairs` and
+`SetPounceComplementarityPairs` drop pairs, not edits, and do not free a row
+or variable for another call. `GetPounceComplementarityPairs` lists the
+pairs declared here like any other.
+
+### Solving
+
+With pairs declared, `IpoptSolve` runs the complementarity driver instead
+of one solve and the second-opinion ladder, honours the
+`complementarity_strategy`, `complementarity_continuation` and
+`complementarity_lift` options, and writes the reported point, its `g`,
+objective and multipliers into the caller's buffers. `GetIpoptIterCount`
+and the other post-solve accessors describe that reported solve, not the
+whole run. With no pairs declared nothing changes. Three things refuse
+pairs, because each is defined over the caller's rows while the driver
+solves a lowered model with more (a product row per pair, possibly lifted
+variables):
+
+- `IpoptCreateSolver` returns `NULL` and does not consume the handle.
+- `IpoptSolve` (and `IpoptSolveWarmStart`) with a staged SQP working set
+  returns `Invalid_Problem_Definition` before any callback runs, and
+  consumes neither the working set nor the pairs. `IpoptGetWorkingSet`
+  returns `FALSE` after a driver solve.
+- The intermediate callback fires from every lowered solve (each restarts
+  at iteration 0) and returning `FALSE` ends the run with
+  `User_Requested_Stop`, but `GetIpoptCurrentIterate` and
+  `GetIpoptCurrentViolations` return `FALSE` throughout, for every request
+  shape.
+
+`SetIpoptProblemScaling` applies to the caller's rows and variables in
+every lowered solve, and a nonlinear-variable declaration is forwarded with
+the product variables added.
+
+### What the driver did
+
+```c
+Bool    GetPounceComplementarityStats(IpoptProblem, PounceComplementarityStats *);
+Bool    GetPounceComplementaritySolve(IpoptProblem, ipindex k,
+                                      PounceComplementaritySolve *);
+ipindex GetPounceComplementarityText(IpoptProblem, int which,
+                                     char *buf, ipindex buflen);
+```
+
+`GetPounceComplementarityStats` fills a `PounceComplementarityStats`: the
+strategy, what was reported (`POUNCE_CC_REPORTED_ANSWER`, `_WEAK_FALLBACK`,
+`_FEASIBLE_UNCERTIFIED`, `_VERDICT`) and by which formulation, the number of
+lowered solves and their total iterations, the certificate of the reported
+point (`POUNCE_CC_CLASS_S`, `_W`, `_NONE`, `_NOT_SEARCHED`, or `_ABSENT` when
+the model could not be evaluated there), the B-stationarity check
+(`POUNCE_CC_B_VERDICT_*`), escapes, lifted pairs, the natural residual and
+the polish. `GetPounceComplementaritySolve` reads lowered solve `k`
+(`0 <= k < n_solves`: stage, `tau`, status, iterations, violation, seconds)
+into a `PounceComplementaritySolve`. `GetPounceComplementarityText` copies
+the summary line (`POUNCE_CC_TEXT_SUMMARY`), the polish's reason for not
+taking its point (`POUNCE_CC_TEXT_POLISH_REASON`) or the B-check's reason
+for not deciding (`POUNCE_CC_TEXT_B_REASON`) with `snprintf`'s contract:
+`buf = NULL, buflen = 0` returns the length without the NUL.
+
+These are the fields of the solve report's `complementarity` block, under
+the same encodings. Where the block has `null`, a real reads `NaN`; where a
+whole record is absent (no certificate, no B-check), its counts and 0/1
+flags read `-1`; `polish_taken` reads `0` when the polish did not run.
+
+The getters describe the **most recent solve**. They answer `FALSE` (`-1`
+for the text) before any solve, after a solve without pairs, and after a
+solve that was refused (a refused solve discards the previous record).
+Clearing the pairs does **not** erase the record of the solve that used
+them; the next solve replaces it.
+
+### Matching the CLI
+
+A frontend that builds callbacks for a model it also has as a `.nl` file
+(or compares against `pounce model.nl`) should expect the same **answer**
+but, in two cases, a different **path** through the lowered solves. Both
+were measured over the declared-pair fixtures
+(`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`); with them handled the
+C API reproduces the CLI bit for bit, report block included.
+
+- **Where a row's constant lives.** AMPL writes a row's constant into its
+  bound: the `.nl` reader hands the solver `2 y1 - x >= 1`, where a
+  hand-written model says `2 y1 - 1 - x >= 0`. The feasible set is the
+  same, but `g` and the products the driver forms from it differ in the
+  last bits, and on a degenerate model that moves the iteration count
+  (`qpec_small`: 191 iterations in all from the `.nl` form, 139 from the
+  hand-written one, same answer). To reproduce the CLI, pass the rows as
+  the `.nl` file writes them. Neither form is more correct.
+- **The nonlinear variables, under `hessian_approximation=limited-memory`.**
+  The `.nl` header says which variables enter nonlinearly and the CLI
+  restricts the L-BFGS approximation to them; a callback model is all
+  nonlinear unless told. Declare the same list with
+  `IpoptSetNonlinearVariables` (the product variables the lowering adds are
+  included automatically). The exact Hessian ignores it.
+
+A maximize objective is a third, cosmetic, difference: the `.nl` reader
+negates it, so the CLI reports `f*` where a callback that minimizes `-f`
+reports `-f*`.
 
 ## Solve report
 
@@ -180,6 +310,8 @@ same driver outcome. Its fields are the ones the
 `GetPounceComplementarity*` getters return, with `null` or an absent key
 where a getter reads `NaN`, `-1` or an empty label. A solve without pairs
 writes no block. A refused solve leaves no report: the write returns `FALSE`.
+The report does not yet carry the `second_opinion` block the CLI and Python
+write when the second-opinion ladder ran.
 
 ## Fortran shim
 
@@ -199,8 +331,11 @@ extensions are mirrored there: they are C-only.
   release guard both check this). Compare the two to detect a header/library
   mismatch at run time.
 - Changes to the C ABI are **additions only**: no existing prototype,
-  `#[repr(C)]` struct layout (`PounceLinearSolverStats`) or `#define` value
-  changes within the 0.x line. New capabilities arrive as new symbols.
+  `#[repr(C)]` struct layout (`PounceLinearSolverStats`,
+  `PounceComplementarityStats`, `PounceComplementaritySolve`) or `#define`
+  value changes within the 0.x line. New capabilities arrive as new
+  symbols. A test compiles a C program against the header and holds every
+  struct's size and every field's offset and width to the Rust side.
 - POUNCE is pre-1.0, so wrappers gate on the minor version. Pounce.jl
   accepts a fixed range of native minors and checks its required symbols at
   load; widening that range is an ABI review (see
