@@ -20,10 +20,10 @@ authors:
     orcid: 0000-0000-0000-0000
     affiliation: 3
   - name: Frederik Geth
-    orcid: 0000-0000-0000-0000
+    orcid: 0000-0002-9345-2959
     affiliation: 4
   - name: Devin Griffith
-    orcid: 0000-0000-0000-0000
+    orcid: 0009-0008-8619-0971
     affiliation: 5
   - name: John R. Kitchin
     orcid: 0000-0003-2625-9232
@@ -36,9 +36,9 @@ affiliations:
     index: 2
   - name: Evonik Operations GmbH, Germany
     index: 3
-  - name: The University of Queensland, Australia
+  - name: School of Electrical Engineering and Computer Science, The University of Queensland, Brisbane, Australia
     index: 4
-  - name: TODO (affiliation to confirm)
+  - name: Griffith Decision Science, Richmond, TX, United States
     index: 5
   - name: Department of Chemical Engineering, Carnegie Mellon University, Pittsburgh, PA, United States
     index: 6
