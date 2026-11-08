@@ -1457,9 +1457,11 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
       `report.rs`; `PSD_TOL`, `psd_band` beside
       `certify_psd_lower_triangle`), and the CLI, Python and C call those
       definitions. Sweep empty both legs; Python output byte-identical.
-      Still a re-statement, not in the review: Python's three-line `opts_tau`
-      rule (a bare `tau` lifts `tau_max`), pinned by the bit-exact parity
-      rows with `tau`/`tau_max`. `pounce-cli/src/bin/pounce_cblib.rs` keeps
+      The `opts_tau` override rule (a bare `tau` lifts `tau_max`) followed
+      as `pounce_convex::qp_options_from_overrides`, called by Python's
+      `opts_tau` and by `PounceQpSolve`; unit-tested in `pipeline.rs` and
+      pinned by the bit-exact parity rows with `tau`/`tau_max`; Python output
+      byte-identical (180 lines). `pounce-cli/src/bin/pounce_cblib.rs` keeps
       its own status map, which differs (`NumericalFailure → InternalError`),
       so sharing it would change that binary; left as is.
 - [x] **PSD cost per solve** (review): the C entry summed `P` into a map for

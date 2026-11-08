@@ -82,7 +82,7 @@ pub use ipm::{
 pub use options::ConvexPresolveOptions;
 pub use pipeline::{
     EngineSwitches, PipelineError, PresolveReport, check_ipm_inertia, demote_unverified_optimal,
-    solve_presolved,
+    qp_options_from_overrides, solve_presolved,
 };
 pub use presolve::{ConvexPresolveFingerprint, ConvexWarmReport, convex_presolve_fingerprint};
 // Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared

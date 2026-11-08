@@ -183,27 +183,18 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The [`QpOptions`] Python's `opts_tau` builds from the same inputs
-    /// (`pounce-py/src/qp.rs`): a bare `tau` raises the ceiling with it, an
-    /// explicit `tau_max` wins; then the engine switches are written on.
+    /// The [`QpOptions`] for this handle's overrides, by the rule Python's
+    /// `solve_qp`/`solve_socp` share
+    /// ([`pounce_convex::qp_options_from_overrides`]); then the engine
+    /// switches are written on.
     fn qp_options(&self) -> QpOptions {
-        let mut o = QpOptions {
-            time_limit: self.time_limit,
-            ..QpOptions::default()
-        };
-        if let Some(t) = self.tol {
-            o.tol = t;
-        }
-        if let Some(m) = self.max_iter {
-            o.max_iter = m;
-        }
-        if let Some(t) = self.tau {
-            o.tau = t;
-            o.tau_max = o.tau_max.max(t);
-        }
-        if let Some(t) = self.tau_max {
-            o.tau_max = t;
-        }
+        let mut o = pounce_convex::qp_options_from_overrides(
+            self.tol,
+            self.max_iter,
+            self.tau,
+            self.tau_max,
+            self.time_limit,
+        );
         self.switches.apply(&mut o);
         o
     }

@@ -416,27 +416,8 @@ fn opts_tau(
     tau_max: Option<f64>,
     time_limit: Option<Duration>,
 ) -> QpOptions {
-    let mut o = QpOptions::default();
-    // `None` leaves the field at its `None` default: no deadline at all, not a
-    // huge one. Every convex entry point opens its own deadline scope from this
-    // field, so the budget is **per solve** (per instance on the batch paths).
-    o.time_limit = time_limit;
-    if let Some(t) = tol {
-        o.tol = t;
-    }
-    if let Some(m) = max_iter {
-        o.max_iter = m;
-    }
-    if let Some(t) = tau {
-        o.tau = t;
-        // A bare `tau=` means "use this τ", so the ceiling follows it up when
-        // the caller raises the floor past the default ceiling; an explicit
-        // `tau_max=` below still wins (applied after).
-        o.tau_max = o.tau_max.max(t);
-    }
-    if let Some(t) = tau_max {
-        o.tau_max = t;
-    }
+    // The override rule is shared with the C API (`PounceQpSolve`).
+    let mut o = pounce_convex::qp_options_from_overrides(tol, max_iter, tau, tau_max, time_limit);
     o.collect_iterates = collect_iterates;
     o
 }
