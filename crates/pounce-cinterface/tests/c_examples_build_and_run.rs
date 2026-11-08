@@ -434,6 +434,11 @@ fn repr_c_structs_match_the_header_layout() {
     // `ipindex`; their sizes are this release's, pinned so that a change is
     // a decision (the growth rule only ever adds bytes at the end).
     // `PounceLinearSolverStats` shipped before the convention and has none.
+    // The pinned sizes assume an 8-byte-aligned `ipnumber`, which every
+    // 64-bit target has; on a 32-bit target (i386 System V aligns `double`
+    // to 4) they differ, so there only the Rust-against-C comparison above
+    // and the offset-0 check below apply.
+    let pin_sizes = cfg!(target_pointer_width = "64");
     for (name, size) in [
         ("PounceComplementarityStats", 224),
         ("PounceComplementaritySolve", 72),
@@ -441,7 +446,9 @@ fn repr_c_structs_match_the_header_layout() {
         ("PounceQpCertificate", 32),
     ] {
         let (_, rust_size, fields) = structs.iter().find(|(n, _, _)| *n == name).unwrap();
-        assert_eq!(*rust_size, size, "sizeof({name})");
+        if pin_sizes {
+            assert_eq!(*rust_size, size, "sizeof({name})");
+        }
         assert_eq!(
             fields[0],
             (
