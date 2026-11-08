@@ -1310,9 +1310,12 @@ No Fortran symbol added (`src/fortran.rs` is still the eight upstream
       guard now makes both inspectors `FALSE` for every request shape.
 - [ ] **Header version fix** (§8.3).
 - [ ] **`pounce-cinterface` as a dev-dependency of `pounce-cli`** (S1-I8),
-      via `[workspace.dependencies]` (`version = "0.16.0"`, path). Stripped
-      on publish; `pounce-cinterface` publishes before `pounce-cli` in
-      `scripts/publish-crates.sh` anyway. Its `version` moves with the
+      via `[workspace.dependencies]` (`version = "0.16.0"`, path). **Not**
+      stripped on publish (corrected in the second review round: cargo
+      keeps a versioned dev-dependency in the published manifest), so
+      `pounce-cli` can publish only after `pounce-cinterface` is live on
+      crates.io; `scripts/publish-crates.sh` orders them so and
+      `scripts/check-release-consistency.sh` counts dev-dependency edges. Its `version` moves with the
       other `[workspace.dependencies]` entries at a release bump.
 - [ ] **`serde_json` `float_roundtrip` dev feature** in
       `pounce-cinterface` (S1-I7): tests only, so reals read back to the
@@ -1444,15 +1447,29 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
       `TnlpDirect` (no `.nl` file, no matrix-form descriptor exists), and
       `solution.lambda` is `[y; z]` (equality then inequality multipliers);
       `z_lb`, `z_ub` are not in the report.
-- [ ] **Small re-statements of private helpers** (S3-I2), each pinned by a
-      test rather than shared, because the originals are private to their
-      crates: the status mapping (`qp_status_to_ars`,
-      `pounce-cli/src/main.rs`; unit test `status_mappings_cover_every_variant`
-      pins every variant and the AMPL codes), the PSD band
-      (`dispatch.rs::psd_band`), and Python's `opts_tau` rule (a bare `tau`
-      lifts `tau_max`; parity rows with `tau`/`tau_max` are bit-exact).
-      Lifting them would touch `pounce-cli` / `pounce-py`, which Stage 3
-      did not.
+- [x] **Small re-statements of private helpers** (S3-I2): three were
+      copies — the status mapping (`qp_status_to_ars`,
+      `pounce-cli/src/main.rs`), the PSD band (`dispatch.rs::PSD_TOL` /
+      `psd_band`), and Python's residual block and certificate inf-norms
+      (`pounce-py/src/qp.rs::solution_dict_hsde`). **Resolved** in the second
+      review round (§9): all three moved, unchanged, into `pounce_convex`
+      (`qp_status_to_ars`, `reported_kkt_residuals`, `certificate_scale` in
+      `report.rs`; `PSD_TOL`, `psd_band` beside
+      `certify_psd_lower_triangle`), and the CLI, Python and C call those
+      definitions. Sweep empty both legs; Python output byte-identical.
+      The `opts_tau` override rule (a bare `tau` lifts `tau_max`) followed
+      as `pounce_convex::qp_options_from_overrides`, called by Python's
+      `opts_tau` and by `PounceQpSolve`; unit-tested in `pipeline.rs` and
+      pinned by the bit-exact parity rows with `tau`/`tau_max`; Python output
+      byte-identical (180 lines). `pounce-cli/src/bin/pounce_cblib.rs` keeps
+      its own status map, which differs (`NumericalFailure → InternalError`),
+      so sharing it would change that binary; left as is.
+- [x] **PSD cost per solve** (review): the C entry summed `P` into a map for
+      the scale and the certificate summed it again, on every
+      `PounceQpSolve`. **Resolved**: `certify_psd_lower_triangle_in_band`
+      reads the band off the certificate's own sum, and the verdict is
+      cached on the handle, dropped only by `PounceQpSetObjective` and any
+      `hessian_inertia` setting.
 - [ ] **Two unreachable overflow guards** (S3-I3): `PounceQpAddCone`'s PSD
       `d·(d+1)` `checked_mul` and `PounceQpSolve`'s cone-row `checked_add`
       cannot overflow on a 64-bit target with a 32-bit `ipindex`; kept as
@@ -1465,6 +1482,23 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
       **Resolved** (ABI hardening, §9): `bounds_with_a_cone_active_bound` and
       `bounds_with_a_cone_inactive_bounds` in `tests/qp_cones_and_errors.rs`,
       answers re-derived by hand; still no Python row (reason in the test).
+- [ ] **Conic `hessian_inertia` refusal** (second review round): with any
+      cone, `hessian_inertia` other than `auto` (`psd`, `indefinite`,
+      `unknown`) is `POUNCE_QP_ERR_OPTIONS`. `solve_socp` takes no such
+      argument and always screens; `unknown` had skipped the screen (an
+      indefinite `P` reached the conic IPM), and `indefinite` had returned
+      `INDEFINITE` where the docs said `OPTIONS`.
+- [ ] **Bounds refusals** (second review round): `PounceQpSetBounds` refuses,
+      storing nothing, `lb[i] ≥ 1e19`, `ub[i] ≤ -1e19` and `lb[i] > ub[i]`
+      (as well as NaN); `lb == ub` is accepted.
+- [ ] **Results go with the problem** (second review round): every builder
+      that returns `TRUE` (`SetObjective`, `SetEqualities`,
+      `SetInequalities`, `SetBounds`, `AddCone`) discards the last result, so
+      the getters and the report return `FALSE` until the next solve; the
+      option setters keep it (decision: the result is still a solve of the
+      problem held, as `AddIpoptNumOption` keeps an `IpoptProblem`'s).
+      `PounceQpGetSolution` returns `FALSE`, writing nothing, if a result
+      vector is not of its declared length.
 - [x] **`PounceQpResiduals` / `PounceQpCertificate` could not grow**:
       resolved by `struct_size`, as §8.5's item; layouts now 72/8 (padding 4
       at 4) and 32/8 (no padding), see §9.
@@ -2062,8 +2096,11 @@ What moved:
 - Root `Cargo.toml`: `pounce-cinterface` in `[workspace.dependencies]`
   (path + `version = "0.16.0"`). `crates/pounce-cli/Cargo.toml`: first
   `[dev-dependencies]` section, `pounce-cinterface.workspace = true`
-  (stripped on publish; `pounce-cinterface` is published before
-  `pounce-cli` in `scripts/publish-crates.sh` anyway). `Cargo.lock` gains
+  (kept in the published manifest — a versioned dev-dependency is not
+  stripped — so `pounce-cinterface` must be live on crates.io before
+  `pounce-cli` publishes; `scripts/publish-crates.sh` orders them so, and
+  the release guard counts dev-dependency edges; corrected in the second
+  review round). `Cargo.lock` gains
   the edge only. `scripts/check-release-consistency.sh` OK.
 - `crates/pounce-cli/tests/common/nl_c_harness.rs` (new): `NlTnlp` behind
   five `extern "C"` trampolines (`user_data` = the harness), bounds and
@@ -2951,6 +2988,117 @@ Gate (on the committed tree):
   `pounce-cinterface` (599 before and after).
 - `cargo fmt --all -- --check`: clean.
 - No sweep: no solver source changed.
+
+### PR review, second round (on `67d84c71`)
+
+Ten threads from the review against `84b073e7`. Each behaviour fix has a test
+that fails with the fix reverted (reverted one fix at a time, test run, file
+restored); a fixture per branch.
+
+1. **Stale working set after the warm-start refusal** (`lib.rs`).
+   `IpoptSolveWarmStart` copies a set out only when `last_solve` is set, and
+   `IpoptGetWorkingSet` returns `FALSE` (nothing written) with no
+   `last_solve` or with pairs declared. Tests
+   (`tests/complementarity_solve.rs`):
+   `a_refused_warm_start_does_not_copy_out_an_earlier_working_set` (SQP
+   solve, pairs, warm start; sentinel buffers untouched) and
+   `no_working_set_is_reported_once_pairs_are_declared_or_a_solve_is_refused`
+   (branch 1: pairs declared, then cleared → readable again; branch 2: a
+   pair-free solve refused for a NULL `x`). Both failed with the fix
+   reverted.
+2. **Lowered-solve flag per thread** (`lib.rs`). Every `IpoptSolve` now sets
+   `IN_LOWERED_SOLVE` for its own duration (`LoweredSolveGuard::set(has
+   pairs)`, restored on drop), so a pair-free solve nested in a lowered
+   solve's callback clears it and the outer value returns after. Test
+   `a_pair_free_solve_nested_in_a_lowered_solve_has_working_inspectors`: B's
+   inspectors `[1, 1, 1]` on every fire, A's `[0, 0, 0]` before and after the
+   nested solve. Failed reverted (B read `FALSE`).
+3. **Conic `hessian_inertia`** (`qp.rs`): any value but `auto` with a cone is
+   `POUNCE_QP_ERR_OPTIONS`. Tests (`tests/qp_cones_and_errors.rs`)
+   `conic_refuses_hessian_inertia_{unknown,indefinite,psd}` on the
+   indefinite-`P`-with-a-cone model and on `nonneg_model`, and the passing
+   branch `conic_accepts_hessian_inertia_auto`. The three failed reverted
+   (`unknown`: the indefinite `P` reached the conic IPM and came back
+   `NUMERICAL_FAILURE` (6); `indefinite`: `INDEFINITE`; `psd`: solved).
+4. **Results stale after the problem changed** (`qp.rs`): each builder that
+   returns `TRUE` clears `info.last`. Decision: option setters keep it
+   (documented in `qp.rs`, `pounce.h`, `c-api.md`). Tests
+   (`tests/qp_handle.rs`): `every_builder_discards_the_previous_result` (one
+   fixture per builder; getters, certificate and report `FALSE`, the next
+   solve restores; a refused builder keeps the result) and
+   `option_setters_keep_the_previous_result`. The builder test failed
+   reverted, as did the updated `getters_answer_false_without_a_result`
+   (which had pinned the old behaviour).
+5. **`PounceQpGetSolution` length cap**: every source length is checked
+   against `n, m_eq, m_ineq, n, n` before anything is written. Unit test
+   `qp::tests::get_solution_refuses_a_result_of_the_wrong_shape` plants a
+   one-long vector in each of the five in turn. Failed reverted.
+6. **Unsatisfiable bounds**: `SetBounds` refuses `lb ≥ 1e19`, `ub ≤ -1e19`,
+   `lb > ub`. Tests `bounds_refuse_a_lower_bound_at_plus_infinity`,
+   `bounds_refuse_an_upper_bound_at_minus_infinity`,
+   `bounds_refuse_crossed_bounds` (each also shows nothing was stored) and
+   `bounds_accept_a_fixed_variable`. The three refusals failed reverted.
+7. **PSD band** moved, unchanged, to `pounce_convex::{PSD_TOL, psd_band}`
+   (`psd_certificate.rs`); `psd_band` takes the entries' values instead of
+   the CLI's `QuadHessian`. The CLI's dispatch and the C crate call it; the C
+   copy and its "must match" comment are gone. CLI tests
+   `psd_band_does_not_widen_above_unit_scale` /
+   `psd_threshold_is_psd_tol_at_unit_scale` pass unchanged;
+   `psd_band_scales_down_only` added in `pounce-convex`.
+8. **Status mapping, residuals, certificate scale** moved, unchanged, to
+   `pounce_convex::report` (`qp_status_to_ars`, `reported_kkt_residuals`,
+   `certificate_scale`); the CLI (`main.rs`), Python (`solution_dict_hsde`)
+   and C call them. `pounce-convex` gains a direct `pounce-nlp` dependency
+   (already transitive through `pounce-presolve`; acyclic). Nothing left as
+   a copy, so no cross-check test was needed; the CLI's mapping tests and
+   `status_mappings_cover_every_variant` (C) pass on the shared definition.
+   `pounce_cblib`'s map differs and is untouched (§8.7).
+9. **PSD work per solve**: `certify_psd_lower_triangle_in_band` reads the
+   band off the certificate's own summed map (one map, not two), and the
+   verdict is cached on the handle (`psd_verdict`), dropped by
+   `SetObjective` and by every `hessian_inertia` setting. Unit tests (a
+   `cfg(test)` thread-local counter):
+   `the_psd_certificate_runs_once_per_objective` (`b`, bounds, an option: 1
+   run; new `P`: 2; a claim: 2; back to `auto`: 3) and
+   `a_cached_verdict_never_outlives_its_objective`; both failed with the
+   cache disabled.
+   `the_in_band_certificate_is_the_certificate_at_the_band_of_the_sum`
+   checks the new entry against the old one on each branch.
+10. **Publish-order comment**: `crates/pounce-cli/Cargo.toml` now says the
+    versioned dev-dependency is kept on publish, so `pounce-cli` publishes
+    only after `pounce-cinterface` is live (what
+    `check-release-consistency.sh` enforces). §8.5's item and the S1-I8 log
+    entry here carried the same wrong claim and are corrected;
+    `CHANGELOG.md` did not have it.
+
+Sweep (items 7 and 8 touch `pounce-convex` and `dispatch.rs`): release
+baseline from `67d84c71` in its own worktree and target dir, head from this
+tree; `scripts/sweep-fixtures.sh` on both: 282 fixture-legs each (141 exact,
+141 lbfgs; engine column 15 `cvx-qcqp`, 52 `cvx-qp`, 74 `nlp` per leg), diff
+**empty** on both legs, engine column included. Python: `solve_qp` /
+`solve_socp` on ten models (QP, presolved QP, active-set, primal- and
+dual-infeasible LP, SOC ×2, power, PSD, conic infeasible; every field of the
+result, `repr`'d) byte-identical between the baseline and head extensions
+(180 lines).
+
+Gate:
+- `cargo test -p pounce-cinterface -p pounce-convex -p pounce-py`: 1184
+  passed, 0 failed.
+- `cargo test -p pounce-cli --lib --bins --test cinterface_mpcc_parity`
+  plus the dispatch/PSD-band and convex-report tests
+  (`issue872_qp_second_order_scale`, `issue848_nonconvex_qp_verdict`,
+  `issue871_nonconvex_qp_equality_row`,
+  `issue_767_convex_path_reports_like_nlp`, `json_report`,
+  `convex_time_limit`): 326 passed, 0 failed.
+- `make c-api-examples`: the three examples build and run.
+- Python suite with the extension rebuilt from this tree (`make python-ext`,
+  then `pytest tests`): 2112 passed, 33 skipped.
+- `make book`: OK. `make ask-check`: top-1 17/20, top-5 20/20, OK.
+- `scripts/check-release-consistency.sh`: OK.
+- `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
+  clippy::correctness -D clippy::suspicious`: exit 0, no warning in a file
+  this round touched.
+- `cargo fmt --check`: clean.
 
 ### Facts recorded while planning (2ac0ad9)
 

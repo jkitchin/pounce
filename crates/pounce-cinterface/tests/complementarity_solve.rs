@@ -110,50 +110,58 @@ unsafe extern "C" fn watch(
             p.resto_fires += 1;
         }
         if !p.prob.is_null() {
-            let mut x = [0.0; N];
-            let mut g = [0.0; M];
-            let mut z = [0.0; N];
-            let x_only = GetIpoptCurrentIterate(
-                p.prob,
-                0,
-                N as Index,
-                x.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                M as Index,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-            let x_and_g = GetIpoptCurrentIterate(
-                p.prob,
-                0,
-                N as Index,
-                x.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                M as Index,
-                g.as_mut_ptr(),
-                ptr::null_mut(),
-            );
-            let viol = GetIpoptCurrentViolations(
-                p.prob,
-                0,
-                N as Index,
-                z.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                M as Index,
-                g.as_mut_ptr(),
-                ptr::null_mut(),
-            );
-            p.inspected.push([x_only, x_and_g, viol]);
+            p.inspected.push(inspect(p.prob));
         }
         if p.stop_on_fire != 0 && p.fires == p.stop_on_fire {
             return 0;
         }
         1
+    }
+}
+
+/// `GetIpoptCurrentIterate` (x only; x and g) and `GetIpoptCurrentViolations`
+/// on `prob`, in that order.
+unsafe fn inspect(prob: IpoptProblem) -> [Bool; 3] {
+    unsafe {
+        let mut x = [0.0; N];
+        let mut g = [0.0; M];
+        let mut z = [0.0; N];
+        let x_only = GetIpoptCurrentIterate(
+            prob,
+            0,
+            N as Index,
+            x.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            M as Index,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+        let x_and_g = GetIpoptCurrentIterate(
+            prob,
+            0,
+            N as Index,
+            x.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            M as Index,
+            g.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        let viol = GetIpoptCurrentViolations(
+            prob,
+            0,
+            N as Index,
+            z.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            M as Index,
+            g.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        [x_only, x_and_g, viol]
     }
 }
 
@@ -505,6 +513,217 @@ fn no_working_set_is_reported_after_a_driver_solve() {
     assert_eq!(b, [-7; N]);
     assert_eq!(c, [-7; M]);
     free(prob);
+}
+
+/// An active-set SQP solve without pairs on `prob`, which leaves a working
+/// set on the handle (checked).
+fn sqp_solve_leaving_a_working_set(prob: IpoptProblem) {
+    assert_eq!(str_opt(prob, "algorithm", "active-set-sqp"), 1);
+    let mut p = Probe::default();
+    assert_eq!(solve(prob, &mut p).status, SOLVE_SUCCEEDED);
+    let mut b = [-7 as IpoptBoundStatus; N];
+    let mut c = [-7 as IpoptConsStatus; M];
+    assert_eq!(
+        unsafe { IpoptGetWorkingSet(prob, b.as_mut_ptr(), c.as_mut_ptr()) },
+        1,
+        "the control: an SQP solve leaves a set"
+    );
+    assert_ne!(b, [-7; N]);
+}
+
+fn declare_pairs(prob: IpoptProblem) {
+    for (r, v) in PAIRS {
+        assert_eq!(
+            unsafe { AddPounceComplementarityPair(prob, r, v) },
+            POUNCE_CC_OK
+        );
+    }
+}
+
+// error-path: IpoptSolveWarmStart
+/// PR review (gh#1147, thread 1): the refused warm start must not hand back
+/// the working set an *earlier* SQP solve on the handle left behind. Before
+/// the fix the refusal cleared `last_solve`, and `IpoptGetWorkingSet`'s
+/// guard, which looked only at `last_solve.mpcc`, fell through to that set.
+#[test]
+fn a_refused_warm_start_does_not_copy_out_an_earlier_working_set() {
+    let prob = create();
+    sqp_solve_leaving_a_working_set(prob);
+    declare_pairs(prob);
+    let bounds = [0 as IpoptBoundStatus; N];
+    let cons = [0 as IpoptConsStatus; M];
+    let mut bounds_out = [-7 as IpoptBoundStatus; N];
+    let mut cons_out = [-7 as IpoptConsStatus; M];
+    let mut x = START;
+    let mut p = Probe::default();
+    let status = unsafe {
+        IpoptSolveWarmStart(
+            prob,
+            x.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            bounds.as_ptr(),
+            cons.as_ptr(),
+            bounds_out.as_mut_ptr(),
+            cons_out.as_mut_ptr(),
+            &mut p as *mut Probe as *mut c_void,
+        )
+    };
+    assert_eq!(status, INVALID_PROBLEM_DEFINITION);
+    assert_eq!(p.eval_f_calls, 0);
+    assert_eq!(bounds_out, [-7; N], "stale bound statuses written");
+    assert_eq!(cons_out, [-7; M], "stale row statuses written");
+    free(prob);
+}
+
+// error-path: IpoptGetWorkingSet
+/// PR review (gh#1147, thread 1), one fixture per branch of the new guard:
+/// pairs declared after an SQP solve (no solve since), and an `IpoptSolve`
+/// refused without pairs (`last_solve` empty). Both used to return the
+/// earlier solve's set.
+#[test]
+fn no_working_set_is_reported_once_pairs_are_declared_or_a_solve_is_refused() {
+    // Branch 1: pairs declared, no solve since.
+    let prob = create();
+    sqp_solve_leaving_a_working_set(prob);
+    declare_pairs(prob);
+    let mut b = [-7 as IpoptBoundStatus; N];
+    let mut c = [-7 as IpoptConsStatus; M];
+    assert_eq!(
+        unsafe { IpoptGetWorkingSet(prob, b.as_mut_ptr(), c.as_mut_ptr()) },
+        0
+    );
+    assert_eq!((b, c), ([-7; N], [-7; M]));
+    // Clearing the pairs makes the set readable again: the guard is on the
+    // declaration, not on the set.
+    assert_eq!(unsafe { ClearPounceComplementarityPairs(prob) }, 1);
+    assert_eq!(
+        unsafe { IpoptGetWorkingSet(prob, b.as_mut_ptr(), c.as_mut_ptr()) },
+        1
+    );
+    free(prob);
+
+    // Branch 2: no pairs, the next solve refused (NULL `x`), so
+    // `last_solve` is empty.
+    let prob = create();
+    sqp_solve_leaving_a_working_set(prob);
+    let status = unsafe {
+        IpoptSolve(
+            prob,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, INVALID_PROBLEM_DEFINITION);
+    let mut b = [-7 as IpoptBoundStatus; N];
+    let mut c = [-7 as IpoptConsStatus; M];
+    assert_eq!(
+        unsafe { IpoptGetWorkingSet(prob, b.as_mut_ptr(), c.as_mut_ptr()) },
+        0
+    );
+    assert_eq!((b, c), ([-7; N], [-7; M]));
+    free(prob);
+}
+
+/// State for [`nesting_watch`]: the outer problem `a` (with pairs) and the
+/// inner pair-free problem `b` it solves from inside its own callback.
+struct Nest {
+    a: IpoptProblem,
+    b: IpoptProblem,
+    /// `inspect(a)` on the fire that starts the nested solve, before it.
+    a_before: Option<[Bool; 3]>,
+    /// `inspect(a)` on the same fire, after the nested solve returned.
+    a_after: Option<[Bool; 3]>,
+    /// What `b`'s own callback saw, and its status.
+    b_probe: Probe,
+    b_status: Option<Index>,
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn nesting_watch(
+    _alg_mod: Index,
+    _iter_count: Index,
+    _obj: Number,
+    _inf_pr: Number,
+    _inf_du: Number,
+    _mu: Number,
+    _d_norm: Number,
+    _reg: Number,
+    _alpha_du: Number,
+    _alpha_pr: Number,
+    _ls: Index,
+    u: *mut c_void,
+) -> Bool {
+    unsafe {
+        let nest = &mut *(u as *mut Nest);
+        if nest.b_status.is_none() {
+            nest.a_before = Some(inspect(nest.a));
+            nest.b_probe.prob = nest.b;
+            let s = solve(nest.b, &mut nest.b_probe);
+            nest.b_status = Some(s.status);
+            nest.a_after = Some(inspect(nest.a));
+        }
+        1
+    }
+}
+
+/// PR review (gh#1147, thread 2): the lowered-solve flag is per solve, not
+/// per thread. A pair-free problem solved from inside a lowered solve's
+/// callback on the same thread has working inspectors (it used to read
+/// FALSE on every fire), and the outer, lowered problem's stay FALSE before
+/// and after the nested solve.
+#[test]
+fn a_pair_free_solve_nested_in_a_lowered_solve_has_working_inspectors() {
+    let a = with_pairs();
+    assert_eq!(
+        unsafe { SetIntermediateCallback(a, Some(nesting_watch)) },
+        1
+    );
+    let b = create();
+    watched(b);
+    let mut nest = Nest {
+        a,
+        b,
+        a_before: None,
+        a_after: None,
+        b_probe: Probe::default(),
+        b_status: None,
+    };
+    let mut x = START;
+    let status = unsafe {
+        IpoptSolve(
+            a,
+            x.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut nest as *mut Nest as *mut c_void,
+        )
+    };
+    assert_eq!(status, SOLVE_SUCCEEDED);
+    assert_eq!(nest.b_status, Some(SOLVE_SUCCEEDED));
+    assert!(!nest.b_probe.inspected.is_empty());
+    assert!(
+        nest.b_probe.inspected.iter().all(|r| *r == [1, 1, 1]),
+        "the nested pair-free solve's inspectors: {:?}",
+        nest.b_probe.inspected
+    );
+    assert_eq!(nest.a_before, Some([0, 0, 0]));
+    assert_eq!(nest.a_after, Some([0, 0, 0]), "the lowered flag came back");
+    // And once both solves are over, the thread is back to "no solve".
+    assert_eq!(unsafe { inspect(a) }, [0, 0, 0]);
+    free(b);
+    free(a);
 }
 
 #[test]

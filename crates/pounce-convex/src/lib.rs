@@ -58,6 +58,7 @@ pub mod pipeline;
 pub mod presolve;
 mod psd_certificate;
 pub mod qp;
+pub mod report;
 pub mod sensitivity;
 mod sigma_verdict;
 pub(crate) mod simplex;
@@ -81,7 +82,7 @@ pub use ipm::{
 pub use options::ConvexPresolveOptions;
 pub use pipeline::{
     EngineSwitches, PipelineError, PresolveReport, check_ipm_inertia, demote_unverified_optimal,
-    solve_presolved,
+    qp_options_from_overrides, solve_presolved,
 };
 pub use presolve::{ConvexPresolveFingerprint, ConvexWarmReport, convex_presolve_fingerprint};
 // Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared
@@ -99,11 +100,15 @@ pub use pounce_qp::HessianInertia;
 // fills; re-exported for the same reason `HessianInertia` is.
 pub use activity::ConvexActivityReport;
 pub use pounce_qp::SecondOrderVerdict;
-pub use psd_certificate::{PsdCertificateError, certify_psd_lower_triangle};
+pub use psd_certificate::{
+    PSD_TOL, PsdCertificateError, certify_psd_lower_triangle, certify_psd_lower_triangle_in_band,
+    psd_band,
+};
 pub use qp::{
     BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,
     screen_variable_box,
 };
+pub use report::{certificate_scale, qp_status_to_ars, reported_kkt_residuals};
 pub use sensitivity::{
     ConeBlockKind, PathTarget, QpKktBacksolver, QpSensitivity, ReducedHessian, SensError,
 };

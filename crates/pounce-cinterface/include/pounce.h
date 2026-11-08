@@ -313,7 +313,10 @@ enum ApplicationReturnStatus IpoptSolve(
  *
  * During a solve with complementarity pairs declared they also return
  * false and write nothing, for every request shape: the iterate is the
- * lowered model's, not a point of your problem's shape.
+ * lowered model's, not a point of your problem's shape. This holds per
+ * solve, not per thread: a pair-free IpoptSolve of another problem
+ * started from inside that solve's callback has working inspectors for
+ * its own duration.
  * ----------------------------------------------------------------- */
 
 bool GetIpoptCurrentIterate(
@@ -555,9 +558,11 @@ typedef int IpoptConsStatus;
  *
  * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
  * available — e.g. no SQP solve has been run, the IPM path was
- * used, the SQP solve converged at iter 0 (no QP solved), or the
+ * used, the SQP solve converged at iter 0 (no QP solved), the
  * last solve had complementarity pairs (its solves were of a lowered
- * model with more rows).
+ * model with more rows), pairs are declared now, or the most recent
+ * IpoptSolve did not complete (refused, or failed before it finished).
+ * Nothing is written when it returns 0.
  */
 Bool IpoptGetWorkingSet(
     IpoptProblem      ipopt_problem,
@@ -999,6 +1004,10 @@ ipindex GetPounceComplementarityText(
  * with cold-start instead. Callers who need to detect this fall-
  * back must invoke IpoptSetWarmStartWorkingSet directly first
  * and check its Bool return value before calling IpoptSolve.
+ *
+ * The output working-set buffers are written only when the solve
+ * completed and IpoptGetWorkingSet has a set to give; after a refused
+ * solve (complementarity pairs with a working set) they are untouched.
  */
 enum ApplicationReturnStatus IpoptSolveWarmStart(
     IpoptProblem            ipopt_problem,
@@ -1217,7 +1226,8 @@ Bool IpoptSolverReducedHessian(
  * for index_style 1. Duplicate triplets are summed. Every builder
  * validates all of its input first and changes nothing when it
  * returns FALSE (NULL handle or array, index out of range, an
- * upper-triangle entry of P, a non-finite value).
+ * upper-triangle entry of P, a non-finite value). A builder that
+ * returns TRUE discards the previous solve's result.
  *
  * Cones (PounceQpAddCone) partition the G rows in order; each block's
  * slack s = h - G x must lie in its cone (table at POUNCE_CONE_*). A PSD
@@ -1238,19 +1248,22 @@ Bool IpoptSolverReducedHessian(
  * pounce_convex::certify_psd_lower_triangle, as in the CLI's dispatch:
  * P passes when the inertia of P + t*I has no negative eigenvalue, at
  * the CLI's band t = 1e-9 * min(max|P_ij|, 1). A factorization that
- * cannot decide counts as not certified. Python decides the same
+ * cannot decide counts as not certified. The verdict is kept on the
+ * handle until PounceQpSetObjective or a hessian_inertia setting. Python decides the same
  * question in numpy (relative tolerance 1e-8*max|P_ij|, eigenvalues
  * for n <= 1500), so on a borderline P (lambda_min within a few
  * tolerances of zero, or a badly scaled rank-deficient P) the two can
- * disagree; this entry errs toward refusing. hessian_inertia=psd,
- * indefinite or unknown replaces the verdict with the caller's claim.
+ * disagree; this entry errs toward refusing. Without cones,
+ * hessian_inertia=psd, indefinite or unknown replaces the verdict with
+ * the caller's claim; with cones any value but auto is refused
+ * (POUNCE_QP_ERR_OPTIONS), since solve_socp always screens.
  * Under method=active-set the verdict is handed to the engine
  * (indefinite P is solved to a local point, not refused).
  *
  * Getters describe the most recent PounceQpSolve that returned a
  * status (>= 0): before one, and after a solve that returned an
- * error (< 0), they return FALSE and write nothing. A builder or
- * option call does not erase the result.
+ * error (< 0), they return FALSE and write nothing. A builder call
+ * that returns TRUE erases the result; an option call does not.
  * ----------------------------------------------------------------- */
 struct PounceQpInfo;
 typedef struct PounceQpInfo* PounceQp;
@@ -1269,7 +1282,7 @@ typedef struct PounceQpInfo* PounceQp;
 #define POUNCE_QP_ERR_ARGUMENT    -2   /* bad cone kind/dim/alpha; P entries whose sum overflows */
 #define POUNCE_QP_ERR_INCOMPLETE  -3   /* no objective, or declared rows never set */
 #define POUNCE_QP_ERR_CONES       -4   /* cones do not partition the m_ineq rows; PSD mixed with exp/pow */
-#define POUNCE_QP_ERR_OPTIONS     -5   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_* */
+#define POUNCE_QP_ERR_OPTIONS     -5   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_*, hessian_inertia other than auto */
 #define POUNCE_QP_ERR_INDEFINITE  -6   /* method=ipm and P not certified PSD */
 #define POUNCE_QP_ERR_INTERNAL    -7   /* internal error caught at the boundary */
 
@@ -1343,7 +1356,9 @@ Bool PounceQpSetInequalities(PounceQp qp, ipindex nnz_g, const ipindex* g_row,
                              const ipnumber* h);
 
 /** Variable box, each length n or NULL (no bound on that side). An
- *  entry <= -1e19 in lb or >= 1e19 in ub is no bound; NaN is refused. */
+ *  entry <= -1e19 in lb or >= 1e19 in ub is no bound. FALSE, storing
+ *  nothing, for NaN, lb[i] >= 1e19, ub[i] <= -1e19 or lb[i] > ub[i];
+ *  lb[i] == ub[i] (fixed) is accepted. */
 Bool PounceQpSetBounds(PounceQp qp, const ipnumber* lb, const ipnumber* ub);
 
 /** Append a cone (POUNCE_CONE_*) to the partition of the G rows, in
@@ -1367,7 +1382,8 @@ int PounceQpSolve(PounceQp qp);
 
 /** Copy the solution out; any output may be NULL. x, z_lb, z_ub: n;
  *  y: m_eq; z: m_ineq. Signs: P x + c + A'y + G'z - z_lb + z_ub = 0,
- *  z, z_lb, z_ub >= 0 (z cone-dual with cones). */
+ *  z, z_lb, z_ub >= 0 (z cone-dual with cones). FALSE (nothing written)
+ *  without a result, or if a result vector is not of its stated length. */
 Bool PounceQpGetSolution(PounceQp qp, ipnumber* x, ipnumber* y, ipnumber* z,
                          ipnumber* z_lb, ipnumber* z_ub, ipnumber* obj,
                          ipindex* iters);

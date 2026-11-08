@@ -29,6 +29,9 @@ use pounce_cli::solve_report::{
 use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
 };
+// The convex status → `ApplicationReturnStatus` mapping, shared with the C
+// API's `PounceQp*` handle (gh#1147 PR review): one definition.
+use pounce_convex::qp_status_to_ars;
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
@@ -3155,37 +3158,6 @@ fn max_iter_explicitly_set(app: &IpoptApplication) -> bool {
     )
 }
 
-/// Solve a classified LP / convex-QP `.nl` problem through the
-/// specialized `pounce-convex` interior-point method, write a `.sol`,
-/// and return the process exit code. This is the LP/QP dispatch target
-/// (see `dev-notes/lp-qp-routing.md`).
-///
-/// Writes the primal solution `x` and the constraint duals recovered
-/// from the QP multipliers (`pounce_cli::qp_extract::recover_duals`).
-/// The objective is reported in the user's original sense, including the
-/// `.nl`'s constant term, which the standard-form QP drops.
-/// Map the convex solver's status onto the NLP-side `ApplicationReturnStatus`
-/// used by the JSON solve report, so QP and NLP reports share one status
-/// vocabulary.
-fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
-    use pounce_convex::QpStatus;
-    match s {
-        QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
-        // Reduced-accuracy solve (residual above `tol` but usable) — Ipopt's
-        // "Solved To Acceptable Level" is the matching NLP-side status.
-        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
-        QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
-        QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
-        QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
-        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
-        // gh#986: not `InternalError`, whose console rendering is "INTERNAL
-        // ERROR: Unknown SolverReturn value." — a crash-shaped message for an
-        // honest "no verified KKT point". `ErrorInStepComputation` is the
-        // known status the NLP path uses for a linear-algebra breakdown.
-        QpStatus::NumericalFailure => ApplicationReturnStatus::ErrorInStepComputation,
-    }
-}
-
 /// Map a convex-solver status onto the AMPL `.sol` terminal line: the message,
 /// whether the solve is treated as a success (drives the exit code), and the
 /// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved with a
@@ -3407,6 +3379,16 @@ fn charge_wall_budget(
     }
 }
 
+/// Solve a classified LP / convex-QP `.nl` problem through the
+/// specialized `pounce-convex` interior-point method, write a `.sol`,
+/// and return the process exit code. This is the LP/QP dispatch target
+/// (see `dev-notes/lp-qp-routing.md`).
+///
+/// Writes the primal solution `x` and the constraint duals recovered
+/// from the QP multipliers (`pounce_cli::qp_extract::recover_duals`).
+/// The objective is reported in the user's original sense, including the
+/// `.nl`'s constant term, which the standard-form QP drops.
+///
 /// Returns `None` when the LP→NLP fallback fires (gh #535): the problem is an
 /// LP, the caller allowed the fallback, and the convex solve finished without a
 /// certificate, so the caller falls through to the general NLP interior-point

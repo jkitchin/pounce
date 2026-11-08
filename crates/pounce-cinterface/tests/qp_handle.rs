@@ -662,9 +662,196 @@ fn getters_answer_false_without_a_result() {
         assert_eq!(PounceQpGetResiduals(qp.0, null_mut()), 0);
         assert_eq!(PounceQpGetCertificate(qp.0, null_mut()), 0);
     }
-    // A builder call does not erase the result.
+    // A builder call erases the result (gh#1147 PR review; it used not to,
+    // and the getters described a problem the handle no longer held). The
+    // per-builder matrix is `every_builder_discards_the_previous_result`.
     assert_eq!(objective(&qp, &[], &[-1.0, -2.0]), 1);
+    check(qp.0);
+}
+
+/// Every getter and the report writer answer FALSE and write nothing.
+fn assert_no_result(qp: &Qp, what: &str) {
+    unsafe {
+        let mut x = [7.0; 2];
+        let mut obj = 7.0;
+        assert_eq!(
+            PounceQpGetSolution(
+                qp.0,
+                x.as_mut_ptr(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut obj,
+                null_mut()
+            ),
+            0,
+            "{what}: GetSolution"
+        );
+        assert_eq!((x, obj), ([7.0; 2], 7.0), "{what}: nothing written");
+        let mut r = PounceQpResiduals {
+            struct_size: size_of::<PounceQpResiduals>() as Index,
+            ..Default::default()
+        };
+        assert_eq!(PounceQpGetResiduals(qp.0, &mut r), 0, "{what}: residuals");
+        let mut c = PounceQpCertificate {
+            struct_size: size_of::<PounceQpCertificate>() as Index,
+            ..Default::default()
+        };
+        assert_eq!(PounceQpGetCertificate(qp.0, &mut c), 0, "{what}: cert");
+    }
+    let path = tmp("discarded.json");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(write(qp.0, &path, None), 0, "{what}: report");
+    assert!(!path.exists(), "{what}: report written");
+}
+
+/// gh#1147 PR review (thread 4): each builder that changes the problem
+/// discards the previous result, one fixture per builder, and the next solve
+/// restores it. A builder that *refuses* its input changes nothing, the
+/// result included (the other branch).
+#[test]
+fn every_builder_discards_the_previous_result() {
+    type Builder = fn(&Qp) -> Bool;
+    let builders: [(&str, Builder); 5] = [
+        ("SetObjective", |qp| objective(qp, &[], &[-1.0, -2.0])),
+        ("SetEqualities", |qp| {
+            equalities(qp, &[(0, 0, 1.0), (0, 1, -1.0)], &[0.0])
+        }),
+        ("SetInequalities", |qp| {
+            inequalities(qp, &[(0, 0, 1.0), (0, 1, 1.0)], &[1.0])
+        }),
+        ("SetBounds", |qp| unsafe {
+            PounceQpSetBounds(qp.0, [0.0, 0.0].as_ptr(), null())
+        }),
+        ("AddCone", |qp| unsafe {
+            Bool::from(PounceQpAddCone(qp.0, POUNCE_CONE_NONNEG, 1, 0.0) == 0)
+        }),
+    ];
+    for (what, build) in builders {
+        let qp = lp();
+        assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_STATUS_OPTIMAL);
+        check_lp(&qp);
+        assert_eq!(build(&qp), 1, "{what}");
+        assert_no_result(&qp, what);
+        // Every builder above re-sets what `lp()` holds (the nonneg cone
+        // covers `lp()`'s one inequality row), so the next solve is `lp()`'s.
+        assert_eq!(
+            unsafe { PounceQpSolve(qp.0) },
+            POUNCE_QP_STATUS_OPTIMAL,
+            "{what}"
+        );
+        check_lp(&qp);
+    }
+
+    // A refused builder keeps the result.
+    let qp = lp();
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_STATUS_OPTIMAL);
+    assert_eq!(objective(&qp, &[(0, 1, 1.0)], &[0.0, 0.0]), 0);
+    assert_eq!(equalities(&qp, &[(1, 0, 1.0)], &[0.0]), 0);
+    assert_eq!(inequalities(&qp, &[(0, 2, 1.0)], &[0.0]), 0);
+    assert_eq!(
+        unsafe { PounceQpSetBounds(qp.0, [f64::NAN, 0.0].as_ptr(), null()) },
+        0
+    );
+    assert_eq!(
+        unsafe { PounceQpAddCone(qp.0, POUNCE_CONE_SOC, 0, 0.0) },
+        POUNCE_QP_ERR_ARGUMENT
+    );
     check_lp(&qp);
+}
+
+/// gh#1147 PR review (thread 4), the decision for the option setters: they
+/// keep the result. It is still a solve of the problem the handle holds,
+/// under the options it ran with, as `AddIpoptNumOption` leaves an
+/// `IpoptProblem`'s last solve readable. Every setter kind, accepted and
+/// refused.
+#[test]
+fn option_setters_keep_the_previous_result() {
+    let qp = lp();
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_STATUS_OPTIMAL);
+    assert_eq!(num_opt(&qp, "tol", 1e-6), 1);
+    assert_eq!(num_opt(&qp, "max_iter", 0.5), 0);
+    assert_eq!(str_opt(&qp, "method", "active-set"), 1);
+    assert_eq!(str_opt(&qp, "hessian_inertia", "psd"), 1);
+    assert_eq!(str_opt(&qp, "qp_presolve", "maybe"), 0);
+    check_lp(&qp);
+    let path = tmp("options_kept.json");
+    assert_eq!(write(qp.0, &path, None), 1);
+    assert_eq!(
+        read_report(&path).solution.engine,
+        "cvx-qp",
+        "the solve that ran"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `min x0 + x1` over the box `lb ≤ x ≤ ub` (no rows): the answer is `lb`.
+fn box_lp() -> Qp {
+    let qp = create(2, 0, 0, 0);
+    assert_eq!(objective(&qp, &[], &[1.0, 1.0]), 1);
+    let (lb, ub) = ([0.0, 0.0], [5.0, 5.0]);
+    assert_eq!(
+        unsafe { PounceQpSetBounds(qp.0, lb.as_ptr(), ub.as_ptr()) },
+        1
+    );
+    qp
+}
+
+/// A refused `SetBounds` stored nothing: the box is still `[0, 5]²`.
+fn assert_box_unchanged(qp: &Qp) {
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_STATUS_OPTIMAL);
+    let s = solution(qp, 2, 0, 0);
+    close(&s.x, &[0.0, 0.0]);
+}
+
+fn bounds(qp: &Qp, lb: Option<[f64; 2]>, ub: Option<[f64; 2]>) -> Bool {
+    let lp = lb.as_ref().map_or(null(), |v| v.as_ptr());
+    let up = ub.as_ref().map_or(null(), |v| v.as_ptr());
+    unsafe { PounceQpSetBounds(qp.0, lp, up) }
+}
+
+// error-path: PounceQpSetBounds
+/// gh#1147 PR review (thread 6): a lower bound at `+∞` (`≥ 1e19`, the
+/// Ipopt convention) is a box no point satisfies; refused, nothing stored.
+/// It was accepted and handed to the engine.
+#[test]
+fn bounds_refuse_a_lower_bound_at_plus_infinity() {
+    let qp = box_lp();
+    assert_eq!(bounds(&qp, Some([f64::INFINITY, 0.0]), None), 0);
+    assert_eq!(bounds(&qp, Some([0.0, 1e19]), Some([5.0, 2e19])), 0);
+    assert_box_unchanged(&qp);
+}
+
+// error-path: PounceQpSetBounds
+/// gh#1147 PR review (thread 6): an upper bound at `−∞` (`≤ -1e19`).
+#[test]
+fn bounds_refuse_an_upper_bound_at_minus_infinity() {
+    let qp = box_lp();
+    assert_eq!(bounds(&qp, None, Some([5.0, f64::NEG_INFINITY])), 0);
+    assert_eq!(bounds(&qp, Some([-2e19, 0.0]), Some([-1e19, 5.0])), 0);
+    assert_box_unchanged(&qp);
+}
+
+// error-path: PounceQpSetBounds
+/// gh#1147 PR review (thread 6): crossed bounds, `lb[i] > ub[i]`.
+#[test]
+fn bounds_refuse_crossed_bounds() {
+    let qp = box_lp();
+    assert_eq!(bounds(&qp, Some([0.0, 3.0]), Some([5.0, 2.0])), 0);
+    assert_box_unchanged(&qp);
+}
+
+/// gh#1147 PR review (thread 6), the accepted branch: `lb == ub` fixes the
+/// variable, and the answer sits on it.
+#[test]
+fn bounds_accept_a_fixed_variable() {
+    let qp = box_lp();
+    assert_eq!(bounds(&qp, Some([0.0, 2.5]), Some([5.0, 2.5])), 1);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_STATUS_OPTIMAL);
+    let s = solution(&qp, 2, 0, 0);
+    close(&s.x, &[0.0, 2.5]);
+    close(&[s.obj], &[2.5]);
 }
 
 // ---------------------------------------------------------------------------

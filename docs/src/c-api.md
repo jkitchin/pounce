@@ -223,13 +223,19 @@ variables):
 - `IpoptCreateSolver` returns `NULL` and does not consume the handle.
 - `IpoptSolve` (and `IpoptSolveWarmStart`) with a staged SQP working set
   returns `Invalid_Problem_Definition` before any callback runs, and
-  consumes neither the working set nor the pairs. `IpoptGetWorkingSet`
-  returns `FALSE` after a driver solve.
+  consumes neither the working set nor the pairs; `IpoptSolveWarmStart`
+  then writes nothing to its output working-set buffers.
+  `IpoptGetWorkingSet` returns `FALSE`, writing nothing, while pairs are
+  declared, after a driver solve, and after any `IpoptSolve` that did not
+  complete, so a set left over from an earlier SQP solve on the handle is
+  never read as the current one.
 - The intermediate callback fires from every lowered solve (each restarts
   at iteration 0) and returning `FALSE` ends the run with
   `User_Requested_Stop`, but `GetIpoptCurrentIterate` and
   `GetIpoptCurrentViolations` return `FALSE` throughout, for every request
-  shape.
+  shape. This is per solve, not per thread: a pair-free `IpoptSolve` of
+  another problem started from inside that callback has working inspectors
+  for its own duration.
 
 `SetIpoptProblemScaling` applies to the caller's rows and variables in
 every lowered solve, and a nonlinear-variable declaration is forwarded with
@@ -376,13 +382,16 @@ subject to  A x = b,   G x ≤ h   (G x ⪯_K h with cones),   lb ≤ x ≤ ub
   only where its length is 0.
 - `PounceQpSetBounds(lb, ub)` sets the box. Either side may be `NULL` (no bound
   on that side); an entry `≤ -1e19` in `lb` or `≥ 1e19` in `ub` (infinities
-  included) is no bound, as in Ipopt; `NaN` is refused. The default is no box.
+  included) is no bound, as in Ipopt. Refused, storing nothing: `NaN`, and a
+  box no point satisfies — `lb[i] ≥ 1e19` (`+∞`), `ub[i] ≤ -1e19` (`−∞`) or
+  `lb[i] > ub[i]`. `lb[i] == ub[i]` fixes the variable. The default is no box.
   Bounds are accepted with cones too (they join the cone product as a
   trailing nonnegative block), which Python's `solve_socp` does not offer.
 - Each builder validates all of its input before writing any of it and
   returns `FALSE`, changing nothing, on a `NULL` handle or array, an index out
   of range, an upper-triangle entry of `P` or a non-finite value. A later call
-  replaces the earlier one.
+  replaces the earlier one. A builder that succeeds discards the previous
+  solve's result (below).
 
 ### Cones
 
@@ -438,10 +447,12 @@ An option the selected engine would drop is refused at the solve
 
 - under `method=active-set` (no cones), setting `qp_reg`, `qp_hsde` or
   `qp_crossover` at all, to either value;
-- **with any cone**, `method=active-set`, `tau`, `tau_max` and every `qp_*`
-  switch (even `qp_hsde=yes`, the conic default): Python's `solve_socp` takes
-  none of them. The conic solve reads `tol`, `max_iter`, `time_limit`,
-  `method=ipm` and `hessian_inertia`.
+- **with any cone**, `method=active-set`, `tau`, `tau_max`, every `qp_*`
+  switch (even `qp_hsde=yes`, the conic default) and any `hessian_inertia`
+  but `auto` (`psd`, `indefinite`, `unknown`): Python's `solve_socp` takes
+  none of them, and always runs the PSD screen, so a claim would skip a check
+  Python never skips. The conic solve reads `tol`, `max_iter`, `time_limit`
+  and `method=ipm`.
 
 ### PSD screen
 
@@ -451,11 +462,14 @@ IPM would return a silently wrong "optimal" at a saddle point.
 
 - With `hessian_inertia=auto` (the default) an empty `P` passes, and any other
   `P` is asked of `pounce_convex::certify_psd_lower_triangle`, as the CLI's
-  dispatch does, at the CLI's band `t = 1e-9 · min(max|P_ij|, 1)` (the largest
+  dispatch does, at the CLI's band `t = 1e-9 · min(max|P_ij|, 1)`
+  (`pounce_convex::psd_band`, the one definition both call; the largest
   entry after summing duplicates): `P` passes when `λ_min(P) ≥ −t`, decided by
   a sign scan for a diagonal `P` and by the inertia of an `LDLᵀ` factorization
   of `P + t·I` otherwise. A factorization that cannot decide counts as **not
-  certified**.
+  certified**. The verdict is kept on the handle: a re-solve after changing
+  `b`, `h`, the bounds, the cones or an option does not factor `P` again;
+  `PounceQpSetObjective` and any `hessian_inertia` setting drop it.
 - This is **not** Python's check. Python decides the same question in numpy
   (`python/pounce/qp.py::_psd_verdict`: relative tolerance `1e-8 · max|P_ij|`,
   dense eigenvalues for `n ≤ 1500`, an inertia count above, an undecided
@@ -463,8 +477,9 @@ IPM would return a silently wrong "optimal" at a saddle point.
   `λ_min` within a few tolerances of zero, or a badly scaled rank-deficient
   `P` — the C entry can refuse a `P` that Python's numpy check accepts. It
   errs toward refusing.
-- `hessian_inertia=psd`, `indefinite` or `unknown` replaces the verdict with
-  the caller's claim, used as given: `psd` and `unknown` pass the screen,
+- Without cones, `hessian_inertia=psd`, `indefinite` or `unknown` replaces
+  the verdict with the caller's claim, used as given (with cones a claim is
+  refused, above): `psd` and `unknown` pass the screen,
   `indefinite` is refused under the IPM. `auto` restores the computed
   verdict. Use `psd` to accept a `P` you know is PSD and the screen refuses.
 - Under `method=active-set` the verdict is not a refusal: it is handed to the
@@ -510,12 +525,19 @@ equals the CLI's for the same status (0, 1, 200, 300, 400, 400, 500).
 
 The getters describe the most recent `PounceQpSolve` that returned a status.
 Before one, and after a solve that returned an error, they return `FALSE` and
-write nothing. A builder or option call after a solve does not erase the
-result.
+write nothing. A builder call that succeeds (`SetObjective`,
+`SetEqualities`, `SetInequalities`, `SetBounds`, `AddCone`) erases the result,
+so the getters and the report never describe a problem the handle no longer
+holds; they return `FALSE` until the next solve. An option call does **not**
+erase it: the result is still a solve of the problem the handle holds, under
+the options it ran with (as an `IpoptProblem`'s last solve survives
+`AddIpoptNumOption`).
 
 - `PounceQpGetSolution(qp, x, y, z, z_lb, z_ub, obj, iters)` copies `x`,
   `z_lb`, `z_ub` (length `n`), `y` (`m_eq`), `z` (`m_ineq`), the objective and
-  the engine's iteration count; any output may be `NULL`. Signs:
+  the engine's iteration count; any output may be `NULL`. It returns `FALSE`,
+  writing nothing, if a result vector is not of its stated length (an
+  internal inconsistency, never copied past your buffer). Signs:
   `Px + c + Aᵀy + Gᵀz − z_lb + z_ub = 0` with `z, z_lb, z_ub ≥ 0` (`z` in the
   dual cone with cones; in `svec` coordinates on a PSD block).
 - `PounceQpGetResiduals` and `PounceQpGetCertificate` fill

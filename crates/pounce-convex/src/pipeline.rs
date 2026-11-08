@@ -168,6 +168,42 @@ impl EngineSwitches {
 /// rather than answered. `Psd` and `Unknown` pass; the verdict itself is the
 /// caller's (Python's `check_psd` guard, or
 /// [`crate::certify_psd_lower_triangle`]).
+/// The [`QpOptions`] a matrix-form entry builds from its overrides: the
+/// rule both Python's `solve_qp`/`solve_socp` and the C API's `PounceQpSolve`
+/// follow, kept here so neither restates it (gh#1147 review). Each `None`
+/// leaves the default: `time_limit = None` is no deadline at all, not a huge
+/// one, and every convex entry point opens its own deadline scope from it,
+/// so the budget is per solve. A bare `tau` means "use this τ", so it raises
+/// the ceiling with it when it passes the default ceiling; an explicit
+/// `tau_max`, applied after, still wins. Engine switches and
+/// `collect_iterates` are the caller's to set on the result.
+pub fn qp_options_from_overrides(
+    tol: Option<f64>,
+    max_iter: Option<usize>,
+    tau: Option<f64>,
+    tau_max: Option<f64>,
+    time_limit: Option<std::time::Duration>,
+) -> QpOptions {
+    let mut o = QpOptions {
+        time_limit,
+        ..QpOptions::default()
+    };
+    if let Some(t) = tol {
+        o.tol = t;
+    }
+    if let Some(m) = max_iter {
+        o.max_iter = m;
+    }
+    if let Some(t) = tau {
+        o.tau = t;
+        o.tau_max = o.tau_max.max(t);
+    }
+    if let Some(t) = tau_max {
+        o.tau_max = t;
+    }
+    o
+}
+
 pub fn check_ipm_inertia(inertia: HessianInertia) -> Result<(), PipelineError> {
     if inertia == HessianInertia::Indefinite {
         return Err(PipelineError::IndefiniteUnderIpm);
@@ -526,5 +562,27 @@ mod tests {
             check_ipm_inertia(HessianInertia::Indefinite),
             Err(PipelineError::IndefiniteUnderIpm)
         );
+    }
+
+    #[test]
+    fn overrides_leave_defaults_and_tau_raises_its_ceiling() {
+        let d = QpOptions::default();
+        let o = qp_options_from_overrides(None, None, None, None, None);
+        assert_eq!(
+            (o.tol, o.max_iter, o.tau, o.tau_max),
+            (d.tol, d.max_iter, d.tau, d.tau_max)
+        );
+        assert!(o.time_limit.is_none());
+        // A bare tau above the default ceiling carries the ceiling with it.
+        let hi = d.tau_max + (1.0 - d.tau_max) / 2.0;
+        let o = qp_options_from_overrides(None, None, Some(hi), None, None);
+        assert_eq!((o.tau, o.tau_max), (hi, hi));
+        // A bare tau below the ceiling leaves it.
+        let lo = d.tau_max / 2.0;
+        let o = qp_options_from_overrides(None, None, Some(lo), None, None);
+        assert_eq!((o.tau, o.tau_max), (lo, d.tau_max));
+        // An explicit tau_max wins over the raise.
+        let o = qp_options_from_overrides(Some(1e-6), Some(7), Some(hi), Some(lo), None);
+        assert_eq!((o.tol, o.max_iter, o.tau, o.tau_max), (1e-6, 7, hi, lo));
     }
 }

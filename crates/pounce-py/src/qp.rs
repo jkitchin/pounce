@@ -240,17 +240,8 @@ fn solution_dict_hsde<'py>(
     d.set_item("status", status_str(sol.status))?;
     d.set_item("tau", hsde.map(|h| h.tau))?;
     d.set_item("kappa", hsde.map(|h| h.kappa))?;
-    let norm = |vs: &[&[f64]]| {
-        vs.iter()
-            .flat_map(|v| v.iter())
-            .fold(0.0_f64, |m, x| m.max(x.abs()))
-    };
-    let scale = match sol.status {
-        QpStatus::PrimalInfeasible => Some(norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub])),
-        QpStatus::DualInfeasible => Some(norm(&[&sol.x])),
-        _ => None,
-    };
-    d.set_item("certificate_scale", scale)?;
+    // One definition with the C API's `PounceQpGetCertificate`.
+    d.set_item("certificate_scale", pounce_convex::certificate_scale(&sol))?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
@@ -261,12 +252,8 @@ fn solution_dict_hsde<'py>(
         // measurement the `optimal` verdict is judged on -- so `status ==
         // "optimal"` never sits beside `kkt_error > tol`. The plain absolute
         // max is `kkt_error_raw`. Conic solves keep the plain residuals.
-        let raw = sol.kkt_residuals_conic(p, cones);
-        let r = if cones.is_empty() {
-            sol.kkt_residuals_above_floor(p)
-        } else {
-            raw
-        };
+        // One definition with the C API's `PounceQpGetResiduals`.
+        let (r, raw) = pounce_convex::reported_kkt_residuals(&sol, p, cones);
         let rd = PyDict::new_bound(py);
         rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
         rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
@@ -429,27 +416,8 @@ fn opts_tau(
     tau_max: Option<f64>,
     time_limit: Option<Duration>,
 ) -> QpOptions {
-    let mut o = QpOptions::default();
-    // `None` leaves the field at its `None` default: no deadline at all, not a
-    // huge one. Every convex entry point opens its own deadline scope from this
-    // field, so the budget is **per solve** (per instance on the batch paths).
-    o.time_limit = time_limit;
-    if let Some(t) = tol {
-        o.tol = t;
-    }
-    if let Some(m) = max_iter {
-        o.max_iter = m;
-    }
-    if let Some(t) = tau {
-        o.tau = t;
-        // A bare `tau=` means "use this τ", so the ceiling follows it up when
-        // the caller raises the floor past the default ceiling; an explicit
-        // `tau_max=` below still wins (applied after).
-        o.tau_max = o.tau_max.max(t);
-    }
-    if let Some(t) = tau_max {
-        o.tau_max = t;
-    }
+    // The override rule is shared with the C API (`PounceQpSolve`).
+    let mut o = pounce_convex::qp_options_from_overrides(tol, max_iter, tau, tau_max, time_limit);
     o.collect_iterates = collect_iterates;
     o
 }

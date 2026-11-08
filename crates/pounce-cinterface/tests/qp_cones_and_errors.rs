@@ -11,7 +11,8 @@
 //!   NULL arrays, one per argument of each builder; unknown option keys; each
 //!   getter before any solve; and each option the conic path refuses
 //!   (`method=active-set`, `tau`, `tau_max`, `qp_presolve`, `qp_reg`,
-//!   `qp_hsde`, `qp_equilibrate`, `qp_crossover`);
+//!   `qp_hsde`, `qp_equilibrate`, `qp_crossover`, and each
+//!   `hessian_inertia` claim: `unknown`, `indefinite`, `psd`);
 //! * **the passing side of every branch those refusals test** (CLAUDE.md, "A
 //!   test is only evidence about the branch it reaches"): a zero-row nonneg
 //!   cone, an exponent just inside `(0, 1)`, NULL arrays at `nnz = 0`, the
@@ -743,6 +744,66 @@ fn conic_refuses_qp_equilibrate() {
 #[test]
 fn conic_refuses_qp_crossover() {
     conic_refuses(|q| q.str_opt("qp_crossover", "no"));
+}
+
+/// `indefinite_p_is_refused_with_cones`'s model: `P = diag(1, −1)` with a
+/// nonneg cone on `x ≤ 1`, whose interior-point "optimum" would be a saddle.
+fn indefinite_with_a_cone() -> Qp {
+    let qp = Qp::new(2, 0, 2, 0);
+    assert_eq!(
+        qp.objective(&[(0, 0, 1.0), (1, 1, -1.0)], &[0.0, 0.0]),
+        TRUE
+    );
+    assert_eq!(
+        qp.inequalities(&[(0, 0, 1.0), (1, 1, 1.0)], &[1.0, 1.0]),
+        TRUE
+    );
+    assert_eq!(qp.cone(POUNCE_CONE_NONNEG, 2, 0.0), 0);
+    qp
+}
+
+/// gh#1147 PR review (thread 3): `solve_socp` takes no `hessian_inertia` and
+/// always runs the PSD screen, so a claim with cones is refused as an
+/// option, one fixture per claim. `unknown` skipped the screen, and the
+/// indefinite `P` came back from the conic IPM as a status; `psd` did the
+/// same; `indefinite` returned `INDEFINITE` where the docs say `OPTIONS`.
+#[test]
+fn conic_refuses_hessian_inertia_unknown() {
+    let qp = indefinite_with_a_cone();
+    assert_eq!(qp.str_opt("hessian_inertia", "unknown"), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert!(!qp.has_result());
+    conic_refuses(|q| q.str_opt("hessian_inertia", "unknown"));
+}
+
+#[test]
+fn conic_refuses_hessian_inertia_indefinite() {
+    let qp = indefinite_with_a_cone();
+    assert_eq!(qp.str_opt("hessian_inertia", "indefinite"), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    conic_refuses(|q| q.str_opt("hessian_inertia", "indefinite"));
+}
+
+#[test]
+fn conic_refuses_hessian_inertia_psd() {
+    let qp = indefinite_with_a_cone();
+    assert_eq!(qp.str_opt("hessian_inertia", "psd"), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    conic_refuses(|q| q.str_opt("hessian_inertia", "psd"));
+}
+
+/// The passing branch: an explicit `auto` (also after a claim) is the
+/// screen `solve_socp` runs, so it is accepted, and still refuses the
+/// indefinite `P` as `INDEFINITE`.
+#[test]
+fn conic_accepts_hessian_inertia_auto() {
+    let qp = nonneg_model();
+    assert_eq!(qp.str_opt("hessian_inertia", "psd"), TRUE);
+    assert_eq!(qp.str_opt("hessian_inertia", "auto"), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
+    let qp = indefinite_with_a_cone();
+    assert_eq!(qp.str_opt("hessian_inertia", "auto"), TRUE);
+    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
 }
 
 /// The options `solve_socp` does take reach the conic path, and an explicit

@@ -21,8 +21,11 @@
 //! so there is one implementation of it. What is *not* Python's is the PSD
 //! verdict feeding [`check_ipm_inertia`]: Python decides it in numpy
 //! (`python/pounce/qp.py::_psd_verdict`); this entry asks
-//! [`pounce_convex::certify_psd_lower_triangle`], as the CLI's dispatch does,
-//! at the CLI's tolerance band. See [`psd_inertia`].
+//! [`pounce_convex::certify_psd_lower_triangle_in_band`], the CLI dispatch's
+//! certificate at the CLI's band ([`pounce_convex::psd_band`], one
+//! definition). See [`psd_inertia`]. The residual block, the certificate
+//! scale and the report's status mapping are `pounce_convex::report`'s, the
+//! definitions Python and the CLI call.
 
 use crate::{
     Bool, ExtensibleOut, FALSE, Index, Number, TRUE, ffi_guard, struct_size_of, write_extensible,
@@ -33,12 +36,12 @@ use pounce_convex::pipeline::{
 };
 use pounce_convex::{
     ActiveSetOverrides, ConeSpec, HessianInertia, NEG_INF, POS_INF, QpOptions, QpProblem,
-    QpSolution, QpStatus, Triplet, certify_psd_lower_triangle, solve_qp_active_set_inertia,
-    solve_qp_ipm, solve_socp_ipm,
+    QpSolution, QpStatus, Triplet, certificate_scale, certify_psd_lower_triangle_in_band,
+    qp_status_to_ars, reported_kkt_residuals, solve_qp_active_set_inertia, solve_qp_ipm,
+    solve_socp_ipm,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use std::ffi::{CStr, c_char, c_int};
 use std::time::Duration;
 
@@ -76,10 +79,6 @@ pub const POUNCE_CONE_PSD: c_int = 4;
 pub const POUNCE_QP_CERT_NONE: c_int = 0;
 pub const POUNCE_QP_CERT_PRIMAL_INFEASIBLE: c_int = 1;
 pub const POUNCE_QP_CERT_DUAL_INFEASIBLE: c_int = 2;
-
-/// The CLI's PSD band (`pounce-cli/src/dispatch.rs::PSD_TOL`): an eigenvalue
-/// above `-PSD_TOL · min(‖P‖∞, 1)` counts as zero.
-const PSD_TOL: f64 = 1e-9;
 
 // ---------------------------------------------------------------------------
 // C structs
@@ -150,7 +149,7 @@ enum Method {
 /// Where the inertia of `P` handed to the pipeline comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InertiaChoice {
-    /// Decide it with [`certify_psd_lower_triangle`] (the default).
+    /// Decide it with [`certify_psd_lower_triangle_in_band`] (the default).
     Auto,
     /// The caller's claim, used as given (Python's `hessian_inertia=`).
     Claim(HessianInertia),
@@ -184,27 +183,18 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The [`QpOptions`] Python's `opts_tau` builds from the same inputs
-    /// (`pounce-py/src/qp.rs`): a bare `tau` raises the ceiling with it, an
-    /// explicit `tau_max` wins; then the engine switches are written on.
+    /// The [`QpOptions`] for this handle's overrides, by the rule Python's
+    /// `solve_qp`/`solve_socp` share
+    /// ([`pounce_convex::qp_options_from_overrides`]); then the engine
+    /// switches are written on.
     fn qp_options(&self) -> QpOptions {
-        let mut o = QpOptions {
-            time_limit: self.time_limit,
-            ..QpOptions::default()
-        };
-        if let Some(t) = self.tol {
-            o.tol = t;
-        }
-        if let Some(m) = self.max_iter {
-            o.max_iter = m;
-        }
-        if let Some(t) = self.tau {
-            o.tau = t;
-            o.tau_max = o.tau_max.max(t);
-        }
-        if let Some(t) = self.tau_max {
-            o.tau_max = t;
-        }
+        let mut o = pounce_convex::qp_options_from_overrides(
+            self.tol,
+            self.max_iter,
+            self.tau,
+            self.tau_max,
+            self.time_limit,
+        );
         self.switches.apply(&mut o);
         o
     }
@@ -235,6 +225,17 @@ pub struct PounceQpInfo {
     ub: Vec<f64>,
     cones: Vec<ConeSpec>,
     settings: Settings,
+    /// The `hessian_inertia = auto` certificate's verdict on the current `P`
+    /// (`Ok(certified)`, or `Err` for a `P` the certificate refuses), so a
+    /// re-solve after a change to anything but `P` does not refactor it.
+    /// Cleared by [`PounceQpSetObjective`] and by every `hessian_inertia`
+    /// setting.
+    psd_verdict: Option<Result<bool, ()>>,
+    /// The most recent solve's result. Cleared by every solve, and by every
+    /// builder that changes the problem (objective, rows, bounds, cones), so
+    /// the getters and the report never describe a problem the handle no
+    /// longer holds. The option setters leave it: the result is still a
+    /// solve of the problem the handle holds, under the options it ran with.
     last: Option<QpLast>,
 }
 
@@ -305,12 +306,21 @@ impl PounceQpInfo {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`psd_inertia`] ran the certificate on this thread
+    /// (unit tests only: each test runs on its own thread).
+    static CERTIFICATE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The inertia of `P` the pipeline is handed.
 ///
 /// With the default `hessian_inertia = "auto"`, an empty `P` is `Psd`; any
-/// other `P` is asked of [`certify_psd_lower_triangle`] at the CLI's band
-/// (`1e-9 · min(‖P‖∞, 1)` with `‖P‖∞` the largest summed entry): certified is
-/// `Psd`, not certified is `Indefinite`. "Not certified" includes a
+/// other `P` is asked of [`certify_psd_lower_triangle_in_band`] at the CLI's
+/// band ([`pounce_convex::psd_band`]: `1e-9 · min(‖P‖∞, 1)` with `‖P‖∞` the
+/// largest summed entry): certified is `Psd`, not certified is `Indefinite`.
+/// The verdict is cached on the handle until `P` or `hessian_inertia`
+/// changes. "Not certified" includes a
 /// factorization that could not decide — the CLI routes such a model to the
 /// NLP arm, and this entry, which has no NLP arm, treats it the same
 /// conservative way: refused under the IPM, driven as indefinite by the
@@ -318,24 +328,30 @@ impl PounceQpInfo {
 ///
 /// `Err` only for an input the certificate refuses (duplicate entries whose
 /// sum overflows); the builders have already refused everything else.
-fn psd_inertia(qp: &PounceQpInfo) -> Result<HessianInertia, ()> {
+fn psd_inertia(qp: &mut PounceQpInfo) -> Result<HessianInertia, ()> {
     if let InertiaChoice::Claim(h) = qp.settings.inertia {
         return Ok(h);
     }
     if qp.p.is_empty() {
         return Ok(HessianInertia::Psd);
     }
-    let mut summed = std::collections::HashMap::<(usize, usize), f64>::new();
-    for t in &qp.p {
-        *summed.entry((t.row, t.col)).or_default() += t.val;
-    }
-    let scale = summed.values().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let tol = PSD_TOL * scale.min(1.0);
-    match certify_psd_lower_triangle(qp.n, &qp.p, tol, backend) {
-        Ok(true) => Ok(HessianInertia::Psd),
-        Ok(false) => Ok(HessianInertia::Indefinite),
-        Err(_) => Err(()),
-    }
+    let verdict = match qp.psd_verdict {
+        Some(v) => v,
+        None => {
+            #[cfg(test)]
+            CERTIFICATE_RUNS.with(|c| c.set(c.get() + 1));
+            let v = certify_psd_lower_triangle_in_band(qp.n, &qp.p, backend).map_err(|_| ());
+            qp.psd_verdict = Some(v);
+            v
+        }
+    };
+    verdict.map(|certified| {
+        if certified {
+            HessianInertia::Psd
+        } else {
+            HessianInertia::Indefinite
+        }
+    })
 }
 
 fn status_code(s: QpStatus) -> c_int {
@@ -350,30 +366,10 @@ fn status_code(s: QpStatus) -> c_int {
     }
 }
 
-/// The CLI's `qp_status_to_ars` (`pounce-cli/src/main.rs`), so a report from
-/// this entry and the CLI's convex report share one status vocabulary. The
-/// AMPL codes `status_to_solve_result_num` derives from these equal the
-/// CLI's `convex_status_report` codes on every variant.
-fn report_status(s: QpStatus) -> ApplicationReturnStatus {
-    match s {
-        QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
-        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
-        QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
-        QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates,
-        QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
-        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
-        QpStatus::NumericalFailure => ApplicationReturnStatus::ErrorInStepComputation,
-    }
-}
-
-/// Python's residual block (`solution_dict_hsde` in `pounce-py/src/qp.rs`).
+/// Python's residual block, through the definition Python's
+/// `solution_dict_hsde` calls ([`reported_kkt_residuals`]).
 fn residuals(sol: &QpSolution, prob: &QpProblem, cones: &[ConeSpec]) -> PounceQpResiduals {
-    let raw = sol.kkt_residuals_conic(prob, cones);
-    let r = if cones.is_empty() {
-        sol.kkt_residuals_above_floor(prob)
-    } else {
-        raw
-    };
+    let (r, raw) = reported_kkt_residuals(sol, prob, cones);
     PounceQpResiduals {
         struct_size: struct_size_of::<PounceQpResiduals>(),
         primal_infeasibility: r.primal_infeasibility,
@@ -431,6 +427,7 @@ pub unsafe extern "C" fn PounceCreateQp(
             ub: vec![POS_INF; n],
             cones: Vec::new(),
             settings: Settings::default(),
+            psd_verdict: None,
             last: None,
         }))
     })
@@ -449,11 +446,13 @@ pub unsafe extern "C" fn PounceFreeQp(qp: PounceQp) {
 
 // ---------------------------------------------------------------------------
 // Builders: each validates everything first and changes nothing on FALSE.
+// On TRUE each discards the previous solve's result (the problem changed).
 // ---------------------------------------------------------------------------
 
 /// Set `P` (lower triangle, `nnz_p` triplets) and `c` (length `n`, required).
-/// Replaces any earlier objective. FALSE for a NULL handle, a NULL array, an
-/// index out of range, an upper-triangle entry, or a non-finite value.
+/// Replaces any earlier objective and discards the previous solve's result.
+/// FALSE for a NULL handle, a NULL array, an index out of range, an
+/// upper-triangle entry, or a non-finite value.
 ///
 /// # Safety
 /// `qp` is NULL or live; each array is NULL or holds the stated length.
@@ -478,6 +477,8 @@ pub unsafe extern "C" fn PounceQpSetObjective(
         };
         info.p = p;
         info.c = Some(c);
+        info.psd_verdict = None;
+        info.last = None;
         TRUE
     })
 }
@@ -509,6 +510,7 @@ pub unsafe extern "C" fn PounceQpSetEqualities(
         };
         info.a = a;
         info.b = Some(b);
+        info.last = None;
         TRUE
     })
 }
@@ -540,14 +542,18 @@ pub unsafe extern "C" fn PounceQpSetInequalities(
         };
         info.g = g;
         info.h = Some(h);
+        info.last = None;
         TRUE
     })
 }
 
 /// Set the variable box. `lb` / `ub` are length `n`, or NULL for "no bound on
 /// that side". An entry `≤ -1e19` in `lb` or `≥ 1e19` in `ub` (the Ipopt
-/// convention, infinities included) is no bound. FALSE for a NULL handle or a
-/// NaN entry. Replaces any earlier box.
+/// convention, infinities included) is no bound. FALSE, storing nothing, for
+/// a NULL handle, a NaN entry, a box no point satisfies — `lb[i] ≥ 1e19`
+/// (`+∞`), `ub[i] ≤ -1e19` (`−∞`), or `lb[i] > ub[i]` — consistent with the
+/// finiteness checks on `c`, `b` and `h`. `lb[i] == ub[i]` (a fixed variable)
+/// is accepted. Replaces any earlier box.
 ///
 /// # Safety
 /// `qp` is NULL or live; `lb` / `ub` are NULL or hold `n` values.
@@ -577,7 +583,7 @@ pub unsafe extern "C" fn PounceQpSetBounds(
                         Some(v)
                     }
                 })
-                .collect()
+                .collect::<Option<Vec<f64>>>()
         };
         let Some(l) = read(lb, NEG_INF, |v| v <= -1e19) else {
             return FALSE;
@@ -585,8 +591,19 @@ pub unsafe extern "C" fn PounceQpSetBounds(
         let Some(u) = read(ub, POS_INF, |v| v >= 1e19) else {
             return FALSE;
         };
+        // A lower bound at `+∞`, an upper bound at `−∞`, or a crossed pair:
+        // no `x` satisfies the box. (`l` is `NEG_INF` or below `1e19`, `u`
+        // is `POS_INF` or above `-1e19`, so the last test also catches each
+        // infinite side against a finite other.)
+        if l.iter()
+            .zip(&u)
+            .any(|(&lo, &hi)| lo >= 1e19 || hi <= -1e19 || lo > hi)
+        {
+            return FALSE;
+        }
         info.lb = l;
         info.ub = u;
+        info.last = None;
         TRUE
     })
 }
@@ -596,8 +613,9 @@ pub unsafe extern "C" fn PounceQpSetBounds(
 /// must be 3 for `POUNCE_CONE_EXP` and `POUNCE_CONE_POW`, and is the matrix
 /// order `k ≥ 1` for `POUNCE_CONE_PSD` (spanning `k(k+1)/2` svec rows).
 /// `alpha` is the power cone's exponent, in `(0, 1)`, and ignored otherwise.
-/// Returns the cone's 0-based position, or `POUNCE_QP_ERR_NULL` /
-/// `POUNCE_QP_ERR_ARGUMENT` (nothing added).
+/// Returns the cone's 0-based position (and discards the previous solve's
+/// result), or `POUNCE_QP_ERR_NULL` / `POUNCE_QP_ERR_ARGUMENT` (nothing
+/// added).
 ///
 /// # Safety
 /// `qp` is NULL or live.
@@ -627,6 +645,7 @@ pub unsafe extern "C" fn PounceQpAddCone(
             return POUNCE_QP_ERR_ARGUMENT;
         };
         info.cones.push(spec);
+        info.last = None;
         pos
     })
 }
@@ -634,7 +653,9 @@ pub unsafe extern "C" fn PounceQpAddCone(
 /// Set a numeric option: `tol` (in `(0, 1)`), `max_iter` (a whole number
 /// `≥ 1`), `time_limit` (seconds, `≥ 0`), `tau` / `tau_max` (in `(0, 1)`),
 /// `qp_reg` (finite, `≥ 0`). FALSE for a NULL handle or key, an unknown key or
-/// a value outside its range; nothing changes then.
+/// a value outside its range; nothing changes then. An option setter keeps
+/// the previous solve's result readable (it is still a solve of the problem
+/// the handle holds); only the builders and [`PounceQpSolve`] discard it.
 ///
 /// # Safety
 /// `qp` is NULL or live; `key` is NULL or a NUL-terminated string.
@@ -678,6 +699,7 @@ pub unsafe extern "C" fn PounceQpSetNumOption(
 /// (`auto` | `psd` | `indefinite` | `unknown`), and the switches `qp_presolve`,
 /// `qp_hsde`, `qp_equilibrate`, `qp_crossover` (`yes` | `no`). FALSE for a
 /// NULL handle, key or value, an unknown key or value; nothing changes then.
+/// Like [`PounceQpSetNumOption`], it keeps the previous solve's result.
 ///
 /// # Safety
 /// `qp` is NULL or live; `key` and `value` are NULL or NUL-terminated.
@@ -721,6 +743,12 @@ pub unsafe extern "C" fn PounceQpSetStrOption(
             ("qp_crossover", _, Some(v)) => s.switches.crossover = Some(v),
             _ => return FALSE,
         }
+        if key == "hessian_inertia" {
+            // The cached `auto` verdict is only ever read under `auto`, but
+            // drop it on every change of the source, so a verdict never
+            // outlives the setting it was computed under.
+            info.psd_verdict = None;
+        }
         TRUE
     })
 }
@@ -738,7 +766,9 @@ pub unsafe extern "C" fn PounceQpSetStrOption(
 ///   cone is mixed with an exponential/power one.
 /// * `OPTIONS` — a switch the selected engine would drop
 ///   ([`EngineSwitches::check`]), or, with cones, `method=active-set` or any
-///   option Python's `solve_socp` does not take (`tau`, `tau_max`, `qp_*`).
+///   option Python's `solve_socp` does not take (`tau`, `tau_max`, `qp_*`,
+///   and any `hessian_inertia` but `auto`: `solve_socp` always runs the PSD
+///   screen, so a claim would skip it).
 /// * `INDEFINITE` — `method=ipm` and `P` is not certified PSD (gh#112).
 /// * `INTERNAL` — a panic caught at the boundary.
 ///
@@ -780,6 +810,7 @@ fn solve(info: &mut PounceQpInfo) -> c_int {
             || s.tau.is_some()
             || s.tau_max.is_some()
             || s.switches != EngineSwitches::default()
+            || s.inertia != InertiaChoice::Auto
         {
             return POUNCE_QP_ERR_OPTIONS;
         }
@@ -847,7 +878,9 @@ fn solve(info: &mut PounceQpInfo) -> c_int {
 /// lengths are `x`, `z_lb`, `z_ub`: `n`; `y`: `m_eq`; `z`: `m_ineq`. Signs
 /// are `pounce_convex`'s: `Px + c + Aᵀy + Gᵀz − z_lb + z_ub = 0` with
 /// `z, z_lb, z_ub ≥ 0` (cone-dual for conic `z`). `iters` is the engine's
-/// iteration count. FALSE for a NULL handle or no solve result.
+/// iteration count. FALSE (nothing written) for a NULL handle, no solve
+/// result, or a result whose vectors do not have those lengths (an internal
+/// inconsistency, refused rather than copied past a caller's buffer).
 ///
 /// # Safety
 /// `qp` is NULL or live; every non-NULL output holds its stated length.
@@ -866,16 +899,21 @@ pub unsafe extern "C" fn PounceQpGetSolution(
         let Some(last) = qp.as_ref().and_then(|i| i.last.as_ref()) else {
             return FALSE;
         };
+        let info = &*qp;
         let sol = &last.sol;
-        for (dst, src) in [
-            (x, &sol.x),
-            (y, &sol.y),
-            (z, &sol.z),
-            (z_lb, &sol.z_lb),
-            (z_ub, &sol.z_ub),
-        ] {
+        let outs = [
+            (x, &sol.x, info.n),
+            (y, &sol.y, info.m_eq),
+            (z, &sol.z, info.m_ineq),
+            (z_lb, &sol.z_lb, info.n),
+            (z_ub, &sol.z_ub, info.n),
+        ];
+        if outs.iter().any(|(_, src, len)| src.len() != *len) {
+            return FALSE;
+        }
+        for (dst, src, len) in outs {
             if !dst.is_null() {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
             }
         }
         if !obj.is_null() {
@@ -932,19 +970,13 @@ pub unsafe extern "C" fn PounceQpGetCertificate(
             return FALSE;
         }
         let sol = &last.sol;
-        let norm = |vs: &[&[f64]]| {
-            vs.iter()
-                .flat_map(|v| v.iter())
-                .fold(0.0_f64, |m, x| m.max(x.abs()))
+        let kind = match sol.status {
+            QpStatus::PrimalInfeasible => POUNCE_QP_CERT_PRIMAL_INFEASIBLE,
+            QpStatus::DualInfeasible => POUNCE_QP_CERT_DUAL_INFEASIBLE,
+            _ => POUNCE_QP_CERT_NONE,
         };
-        let (kind, scale) = match sol.status {
-            QpStatus::PrimalInfeasible => (
-                POUNCE_QP_CERT_PRIMAL_INFEASIBLE,
-                norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub]),
-            ),
-            QpStatus::DualInfeasible => (POUNCE_QP_CERT_DUAL_INFEASIBLE, norm(&[&sol.x])),
-            _ => (POUNCE_QP_CERT_NONE, f64::NAN),
-        };
+        // Python's `certificate_scale`, one definition.
+        let scale = certificate_scale(sol).unwrap_or(f64::NAN);
         let cert = PounceQpCertificate {
             struct_size: struct_size_of::<PounceQpCertificate>(),
             kind,
@@ -997,7 +1029,7 @@ pub unsafe extern "C" fn PounceQpWriteSolveReport(
         };
         let idx = |v: usize| Index::try_from(v).unwrap_or(Index::MAX);
         let sol = &last.sol;
-        let status = report_status(sol.status);
+        let status = qp_status_to_ars(sol.status);
         let mut b = ReportBuilder::new(detail, InputDescriptor::TnlpDirect);
         b.problem.n_variables = idx(info.n);
         b.problem.n_constraints = idx(info.m_eq + info.m_ineq);
@@ -1027,6 +1059,7 @@ pub unsafe extern "C" fn PounceQpWriteSolveReport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr::null;
 
     // error-path: PounceFreeQp
     #[test]
@@ -1040,6 +1073,178 @@ mod tests {
             assert!(PounceCreateQp(2, 0, 0, 2).is_null());
             let qp = PounceCreateQp(2, 0, 0, 1);
             assert!(!qp.is_null());
+            PounceFreeQp(qp);
+        }
+    }
+
+    /// `min ½x0² + ½x1² − x0` s.t. `x0 + x1 = b`, `x1 ≤ h`: a coupled-free
+    /// diagonal `P` would take the certificate's sign scan, so `P` has an
+    /// off-diagonal (`[[2, 1], [1, 2]]`) and the `LDLᵀ` runs.
+    unsafe fn coupled_qp(b: f64, h: f64) -> PounceQp {
+        unsafe {
+            let qp = PounceCreateQp(2, 1, 1, 0);
+            assert!(!qp.is_null());
+            let (pr, pc, pv) = ([0, 1, 1], [0, 0, 1], [2.0, 1.0, 2.0]);
+            let c = [-1.0, 0.0];
+            assert_eq!(
+                PounceQpSetObjective(qp, 3, pr.as_ptr(), pc.as_ptr(), pv.as_ptr(), c.as_ptr()),
+                TRUE
+            );
+            set_rows(qp, b, h);
+            qp
+        }
+    }
+
+    unsafe fn set_rows(qp: PounceQp, b: f64, h: f64) {
+        unsafe {
+            let (r, cc, v) = ([0, 0], [0, 1], [1.0, 1.0]);
+            assert_eq!(
+                PounceQpSetEqualities(qp, 2, r.as_ptr(), cc.as_ptr(), v.as_ptr(), [b].as_ptr()),
+                TRUE
+            );
+            let (r, cc, v) = ([0], [1], [1.0]);
+            assert_eq!(
+                PounceQpSetInequalities(qp, 1, r.as_ptr(), cc.as_ptr(), v.as_ptr(), [h].as_ptr()),
+                TRUE
+            );
+        }
+    }
+
+    fn runs() -> usize {
+        CERTIFICATE_RUNS.with(|c| c.get())
+    }
+
+    /// gh#1147 PR review (thread 9): the `auto` PSD verdict is cached on the
+    /// handle. A re-solve after `b`, `h`, the bounds or an option changed
+    /// does not refactor `P`; a changed `P` does, and so does a change of
+    /// `hessian_inertia` (back to `auto`). One fixture per branch.
+    #[test]
+    fn the_psd_certificate_runs_once_per_objective() {
+        unsafe {
+            let qp = coupled_qp(1.0, 5.0);
+            assert_eq!(runs(), 0);
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 1, "the first solve certifies P");
+            // `b` changed: no new certificate.
+            set_rows(qp, 2.0, 5.0);
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            // Bounds and an option changed: still none.
+            assert_eq!(PounceQpSetBounds(qp, [-10.0, -10.0].as_ptr(), null()), TRUE);
+            assert_eq!(PounceQpSetNumOption(qp, c"tol".as_ptr(), 1e-9), TRUE);
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 1, "b, bounds, options: the cached verdict");
+            // `P` changed: certified again.
+            let (pr, pc, pv) = ([0, 1, 1], [0, 0, 1], [3.0, 1.0, 3.0]);
+            let c = [-1.0, 0.0];
+            assert_eq!(
+                PounceQpSetObjective(qp, 3, pr.as_ptr(), pc.as_ptr(), pv.as_ptr(), c.as_ptr()),
+                TRUE
+            );
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 2, "a new P is certified");
+            // A claim skips the certificate; `auto` again recomputes it.
+            assert_eq!(
+                PounceQpSetStrOption(qp, c"hessian_inertia".as_ptr(), c"psd".as_ptr()),
+                TRUE
+            );
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 2, "a claim is used as given");
+            assert_eq!(
+                PounceQpSetStrOption(qp, c"hessian_inertia".as_ptr(), c"auto".as_ptr()),
+                TRUE
+            );
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 3, "a hessian_inertia change drops the verdict");
+            PounceFreeQp(qp);
+        }
+    }
+
+    /// The cached verdict is the certificate's, both ways: an indefinite `P`
+    /// stays refused on a re-solve without being refactored, and a cached
+    /// `Psd` cannot outlive a `P` that is no longer PSD.
+    #[test]
+    fn a_cached_verdict_never_outlives_its_objective() {
+        unsafe {
+            let qp = coupled_qp(1.0, 5.0);
+            let (pr, pc, pv) = ([0, 1, 1], [0, 0, 1], [1.0, 2.0, 1.0]); // λ = −1, 3
+            let c = [-1.0, 0.0];
+            assert_eq!(
+                PounceQpSetObjective(qp, 3, pr.as_ptr(), pc.as_ptr(), pv.as_ptr(), c.as_ptr()),
+                TRUE
+            );
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_ERR_INDEFINITE);
+            set_rows(qp, 2.0, 5.0);
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_ERR_INDEFINITE);
+            assert_eq!(runs(), 1);
+            let pv = [2.0, 1.0, 2.0];
+            assert_eq!(
+                PounceQpSetObjective(qp, 3, pr.as_ptr(), pc.as_ptr(), pv.as_ptr(), c.as_ptr()),
+                TRUE
+            );
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            assert_eq!(runs(), 2);
+            PounceFreeQp(qp);
+        }
+    }
+
+    /// gh#1147 PR review (thread 5): `PounceQpGetSolution` copies `n`,
+    /// `m_eq`, `m_ineq`, `n`, `n` values and refuses a result whose vectors
+    /// have other lengths, writing nothing. Unreachable through the public
+    /// calls, so planted: one fixture per vector, each one long.
+    #[test]
+    fn get_solution_refuses_a_result_of_the_wrong_shape() {
+        unsafe {
+            let qp = coupled_qp(1.0, 5.0);
+            assert_eq!(PounceQpSolve(qp), POUNCE_QP_STATUS_OPTIMAL);
+            let read = |qp: PounceQp| {
+                let (mut x, mut y, mut z) = ([7.0; 2], [7.0; 1], [7.0; 1]);
+                let (mut zl, mut zu, mut obj, mut it) = ([7.0; 2], [7.0; 2], 7.0, 7);
+                let ok = PounceQpGetSolution(
+                    qp,
+                    x.as_mut_ptr(),
+                    y.as_mut_ptr(),
+                    z.as_mut_ptr(),
+                    zl.as_mut_ptr(),
+                    zu.as_mut_ptr(),
+                    &mut obj,
+                    &mut it,
+                );
+                let untouched = x == [7.0; 2]
+                    && y == [7.0]
+                    && z == [7.0]
+                    && zl == [7.0; 2]
+                    && zu == [7.0; 2]
+                    && obj == 7.0
+                    && it == 7;
+                (ok, untouched)
+            };
+            assert_eq!(read(qp), (TRUE, false), "the control: a true shape");
+            for k in 0..5 {
+                let sol = &mut (*qp).last.as_mut().unwrap().sol;
+                let v = [
+                    &mut sol.x,
+                    &mut sol.y,
+                    &mut sol.z,
+                    &mut sol.z_lb,
+                    &mut sol.z_ub,
+                ];
+                let target = v.into_iter().nth(k).unwrap();
+                target.push(0.0);
+                assert_eq!(read(qp), (FALSE, true), "vector {k} one long");
+                let sol = &mut (*qp).last.as_mut().unwrap().sol;
+                [
+                    &mut sol.x,
+                    &mut sol.y,
+                    &mut sol.z,
+                    &mut sol.z_lb,
+                    &mut sol.z_ub,
+                ]
+                .into_iter()
+                .nth(k)
+                .unwrap()
+                .pop();
+                assert_eq!(read(qp).0, TRUE, "vector {k} restored");
+            }
             PounceFreeQp(qp);
         }
     }
@@ -1061,7 +1266,11 @@ mod tests {
         ];
         for (s, code, srn) in all {
             assert_eq!(status_code(s), code, "{s:?}");
-            assert_eq!(status_to_solve_result_num(report_status(s)), srn, "{s:?}");
+            assert_eq!(
+                status_to_solve_result_num(qp_status_to_ars(s)),
+                srn,
+                "{s:?}"
+            );
         }
     }
 }
