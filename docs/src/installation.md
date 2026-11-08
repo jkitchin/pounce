@@ -40,7 +40,18 @@ pip install "pounce-solver[jax]"     # pounce.jax autodiff frontend
 pip install "pounce-solver[torch]"   # pounce.torch autodiff frontend
 pip install "pounce-solver[viz]"     # debugger plots (pounce-dbg-viz)
 pip install "pounce-solver[gams]"    # GAMS solver link — see gams.md
+pip install "pounce-solver[mcp]"     # MCP server for Claude and other agents
 ```
+
+The `[mcp]` extra installs `pounce-studio-mcp`, an MCP server that lets an
+agent solve, diagnose, verify and live-debug models. For Claude Desktop,
+install the `pounce-studio-<version>.mcpb` extension from the GitHub release,
+or point Desktop at `uvx --from "pounce-solver[mcp]" pounce-studio-mcp`. For
+Claude Code: `claude mcp add pounce-studio -- uvx --from "pounce-solver[mcp]"
+pounce-studio-mcp`. The extra first ships in the release after 0.16.0;
+earlier versions do not contain `pounce.studio`. Setup details, environment variables and troubleshooting
+are in
+[`studio/mcp/README.md`](https://github.com/jkitchin/pounce/blob/main/studio/mcp/README.md).
 
 ### If the CLI will not start (`GLIBC_2.39 not found`)
 

@@ -129,6 +129,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install maturin pytest jsonschema
           python -m pip install scipy "jax[cpu]" diffrax
+          # The `[mcp]` extra's dependency. Without it python/tests/studio
+          # skips, and pounce-studio-pyo3 -- compiled into `_pounce.so` and
+          # reachable only through `pounce.studio` -- reads ~0%.
+          python -m pip install "mcp>=1.0,<2"
           # pyomo-pounce's suite: pyomo itself, plus the numpy/pandas/networkx
           # /scipy set that keeps its incidence and sensitivity tests from
           # importorskip-ing away (see the same list in ci.yml).

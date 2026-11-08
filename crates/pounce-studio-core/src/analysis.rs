@@ -1,6 +1,6 @@
 //! Derived series and diagnostics over a [`SolveReport`].
 //!
-//! Mirrors the Python analysis helpers in `studio/mcp/pounce_studio_mcp/
+//! Mirrors the Python analysis helpers in `python/pounce/studio/
 //! reports.py` so the desktop / VS Code shells and the MCP server can
 //! agree on the same notion of "stall window", "restoration window",
 //! and "common failure modes". Heuristics are tunable via the

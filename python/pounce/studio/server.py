@@ -77,20 +77,36 @@ _BUILTINS: dict[str, dict[str, Any]] = {
 def _find_pounce_bin() -> str:
     """Locate the pounce CLI binary.
 
-    Search order: POUNCE_BIN env var → `target/release/pounce` walking
-    up from this file → `pounce` on $PATH.
+    Search order: POUNCE_BIN env var → the binary bundled in this
+    pounce-solver wheel (`pounce/bin/pounce`), so the server runs the same
+    POUNCE version as its own analysis code → `target/release/pounce`
+    walking up from this file (a source checkout) → `pounce` on $PATH.
+
+    When both of the middle two exist this is an editable install in a
+    checkout, where `pounce/bin/pounce` is a staged copy refreshed only by
+    `make python-cli-bin`; the newer of the two wins, so a plain
+    `cargo build --release` is not shadowed by a stale copy. This is a
+    heuristic: a fresh `pip install` can make the bundled copy newer than a
+    build from newer source. Set POUNCE_BIN when it matters which one runs.
     """
     env = os.environ.get("POUNCE_BIN")
     if env:
         if not Path(env).exists():
             raise FileNotFoundError(f"POUNCE_BIN={env} does not exist")
         return env
+    exe = "pounce.exe" if os.name == "nt" else "pounce"
+    bundled = Path(__file__).resolve().parent.parent / "bin" / exe
+    checkout: Path | None = None
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "target" / "release" / "pounce"
-        if candidate.exists():
-            return str(candidate)
+        candidate = parent / "target" / "release" / exe
+        if candidate.is_file():
+            checkout = candidate
+            break
         if parent == parent.parent:
             break
+    found = [c for c in (bundled, checkout) if c is not None and c.is_file()]
+    if found:
+        return str(max(found, key=lambda c: c.stat().st_mtime))
     which = shutil.which("pounce")
     if which:
         return which
@@ -1165,6 +1181,12 @@ _FLOW_VERBS = frozenset({
 
 _STARTUP_TIMEOUT = 30.0   # seconds to see hello + the first pause
 _PAUSE_GRACE = 30.0       # after an in-band pause, seconds to reach a checkpoint
+# Floor on the wait for a command's own `result`. `timeout` bounds how long
+# a flow verb may run before it is paused (`_drain`); it is not a deadline
+# for the acknowledgement, which the CLI sends before resuming. Without the
+# floor, a tiny timeout on a slow machine raised TimeoutError where it should
+# have returned "interrupted" (seen in CI with timeout_seconds=0.0001).
+_RESULT_GRACE = 10.0
 
 
 class _DebugSession:
@@ -1287,12 +1309,13 @@ class _DebugSession:
             # 1) read up to the matching result; stash any stray events.
             result: dict[str, Any] | None = None
             pre: list[dict[str, Any]] = []
-            r_deadline = time.monotonic() + timeout
+            r_wait = max(timeout, _RESULT_GRACE)
+            r_deadline = time.monotonic() + r_wait
             while result is None:
                 kind, ev = self._read(r_deadline - time.monotonic())
                 if kind == "timeout":
                     raise TimeoutError(
-                        f"no `result` for command {cmd!r} within {timeout}s"
+                        f"no `result` for command {cmd!r} within {r_wait}s"
                     )
                 if kind == "eof":
                     raise RuntimeError(
@@ -1356,7 +1379,7 @@ class _DebugSession:
                 return events, "terminated"
             if e == "pause":
                 self.last_pause = ev
-                if ev.get("checkpoint") == "terminated":
+                if _is_final_stop(ev):
                     # The terminal checkpoint is a real stop: the solve is
                     # done (status is non-null) but parked here so the
                     # final/failing iterate stays inspectable. The summary
@@ -1374,6 +1397,16 @@ class _DebugSession:
                     self._send({"cmd": "quit"})
                 except OSError:
                     pass
+            # Close stdin before waiting, not after: in JSON mode EOF on
+            # stdin also stops the solve, so this ends the child even if
+            # `quit` lands somewhere it is not read (a pounce older than the
+            # quit latch parked a follow-on solve on stdin, so every close
+            # used to wait out the 5 s below and end in SIGKILL).
+            try:
+                self.proc.stdin.close()  # type: ignore[union-attr]
+            except OSError:
+                pass
+            if self.alive():
                 try:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -1382,16 +1415,32 @@ class _DebugSession:
                         self.proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
-            for stream in (self.proc.stdin, self.proc.stdout):
-                try:
-                    stream.close()  # type: ignore[union-attr]
-                except OSError:
-                    pass
+            try:
+                self.proc.stdout.close()  # type: ignore[union-attr]
+            except OSError:
+                pass
             try:
                 self._stderr_fh.close()
             except OSError:
                 pass
             return self.proc.poll()
+
+
+def _is_final_stop(ev: dict[str, Any]) -> bool:
+    """True for the pause at the *real* end of the solve.
+
+    The `terminated` checkpoint also fires when restoration's inner solve
+    returns (gh#987); those pauses carry `final: false` and the solve goes on
+    after them. Treating them as the end reported a restoration sub-solve's
+    status (`LocalInfeasibility`, even `Success`) as the solve's result and
+    left the client believing it had finished. Older pounce builds without
+    the `final` field are judged by `in_restoration`.
+    """
+    if ev.get("checkpoint") != "terminated":
+        return False
+    if "final" in ev:
+        return bool(ev["final"])
+    return not ev.get("in_restoration", False)
 
 
 def _spawn_session(argv: list[str], label: str) -> _DebugSession:
@@ -1768,11 +1817,34 @@ _GAMS_SUITES = (
 
 
 def _find_repo_root() -> Path:
-    """Walk up to find the pounce repo root (contains gams/ and Cargo.toml)."""
+    """Locate a pounce source checkout (contains gams/ and Cargo.toml).
+
+    The GAMS example suites are not shipped in the pounce-solver wheel, so
+    an installed server finds them only through `POUNCE_REPO`; a server run
+    from a checkout finds them by walking up from this file.
+    """
+    def is_checkout(p: Path) -> bool:
+        return (p / "Cargo.toml").exists() and (p / "gams").is_dir()
+
+    env = os.environ.get("POUNCE_REPO")
+    if env:
+        # Expanded like POUNCE_WORKDIR, and an explicit setting that does not
+        # point at a checkout is reported as such: falling through to the
+        # generic message would ask the user to set the variable they set.
+        repo = Path(os.path.expandvars(os.path.expanduser(env)))
+        if is_checkout(repo):
+            return repo
+        raise FileNotFoundError(
+            f"POUNCE_REPO={env} is not a pounce source checkout (expected "
+            f"Cargo.toml and gams/ in {repo})."
+        )
     for parent in Path(__file__).resolve().parents:
-        if (parent / "Cargo.toml").exists() and (parent / "gams").is_dir():
+        if is_checkout(parent):
             return parent
-    raise FileNotFoundError("could not locate pounce repo root from MCP server")
+    raise FileNotFoundError(
+        "the GAMS example suites need a pounce source checkout; they are not "
+        "in the pounce-solver wheel. Set POUNCE_REPO=/path/to/pounce."
+    )
 
 
 def _find_gams_bin() -> str:
@@ -2294,7 +2366,12 @@ def run_gams_problem(
 
 
 def main() -> None:
-    """Entry point used by `python -m pounce_studio_mcp`."""
+    """Run the stdio server: `pounce-studio-mcp`, `python -m pounce.studio`
+    and `python -m pounce.studio.server` all land here, so each honours
+    `POUNCE_WORKDIR`."""
+    from . import _enter_workdir
+
+    _enter_workdir()
     mcp.run()
 
 

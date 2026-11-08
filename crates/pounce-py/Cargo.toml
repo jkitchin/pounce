@@ -49,6 +49,11 @@ pounce-observability.workspace = true
 pounce-solve-report.workspace = true
 # `_pounce.find_minima`: the shared multistart / find-minima search (gh#966).
 pounce-minima.workspace = true
+# `_pounce.studio`: the report-analysis bindings behind `pounce.studio`, the
+# MCP server shipped as the `[mcp]` extra. Not published, like this crate.
+# Its lib target is named `_native` (the standalone module name), hence the
+# rename to give it a readable path here.
+pounce_studio_pyo3 = { package = "pounce-studio-pyo3", path = "../pounce-studio-pyo3" }
 tracing.workspace = true
 pyo3 = { version = "0.22", features = ["abi3-py39"] }
 numpy = "0.22"

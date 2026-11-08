@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "pounce-studio": {
-      "description": "Post-mortem and live-debug tools for pounce solve reports (requires pounce-studio-mcp on PATH; see studio/mcp/README.md)",
-      "command": "pounce-studio-mcp"
+      "description": "Solve, diagnose, verify and live-debug optimization models with POUNCE (runs pounce-solver's [mcp] extra via uvx; needs a pounce-solver release after 0.16.0, the first to ship it; see studio/mcp/README.md)",
+      "command": "uvx",
+      "args": ["--from", "pounce-solver[mcp]>0.16.0", "pounce-studio-mcp"]
     }
   }
 }

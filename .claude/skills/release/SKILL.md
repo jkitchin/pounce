@@ -67,6 +67,14 @@ makes it. Body has historically been the matching `## [X.Y.Z]` section of
 CHANGELOG.md. A git tag alone does NOT create a Release, and creating a Release
 does NOT trigger any workflow (nothing has an `on: release` trigger).
 
+Attach the Claude Desktop extension: `make mcpb` writes
+`dist/pounce-studio-<v>.mcpb`, stamped with `python/pyproject.toml`'s version
+and pinning `pounce-solver[mcp]==<v>`, so build it from the release commit and
+upload it **after** the PyPI release is live (`gh release upload vX.Y.Z
+dist/pounce-studio-*.mcpb`) — before then the pin does not resolve and the
+extension fails to install. The first release that contains `pounce.studio`
+is the first one the extension (and the `[mcp]` extra) works with.
+
 ## Checking what's published (don't get this wrong)
 
 crates.io API needs a User-Agent or it silently looks unpublished:

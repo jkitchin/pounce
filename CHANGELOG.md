@@ -63,6 +63,41 @@ changes.
   and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
   `0.16.0`; they now equal the crate version, and a test and the release
   guard (`scripts/check-release-consistency.sh`) keep them so.
+- **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
+  `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
+  `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"
+  pounce-studio-mcp` runs it with nothing installed. Before this it was a
+  separate package built from `studio/mcp` with a Rust toolchain. The server
+  is now `pounce.studio`, its report analysis is mounted in the wheel's
+  extension as `pounce._pounce.studio`, and it spawns the `pounce` binary the
+  wheel already bundles. `POUNCE_WORKDIR` sets the directory that relative
+  model paths resolve against, since Claude Desktop starts servers in `/`.
+- **A Claude Desktop extension (`.mcpb`).** `make mcpb` builds
+  `dist/pounce-studio-<version>.mcpb` from `studio/mcpb/`. Desktop installs
+  `pounce-solver[mcp]` with uv and asks for a workspace folder.
+
+### Fixed
+- **The debugger's `quit` ends the solve.** `quit` stopped the solve at the
+  current pause, but the terminal pause that follows (and, during
+  restoration, the outer solve's pauses) paused again. In `--debug-json`
+  mode that left the process waiting for input it would never get. In
+  `--debug-json` mode `quit`, and EOF on the command stream, now latch a stop
+  for the rest of the run, so the process reports `User_Requested_Stop` and
+  exits. The REPL is unchanged: `quit` still lands on the post-mortem pause.
+- **The debugger's `final` pause is the end of the run.** The automatic
+  re-solves inside the application (`mu_strategy_fallback`, the ℓ₁ fallback,
+  `dual_divergence_retry`, the scale-audit retry) ran after the debugger's
+  `final: true` pause without pausing, since the hook drives one solve, and
+  could replace the verdict it had shown: a capped Waechter-Biegler run under
+  `--debug-json` re-solved under `mu_strategy=adaptive` unseen. Like the
+  second-opinion ladder, they now stand down while a debugger is attached.
+- **The MCP server's live debugger stops at the real end of a solve, and
+  `debug_close` returns promptly.** The terminal pause of restoration's inner
+  solve (`final: false`) was reported as the end of the run, so a session
+  read `finished` while the outer solve was still paused, and could not be
+  closed. The server now treats only the outer terminal pause as the end.
+  `debug_close` sends `quit` and closes the child's stdin, then waits up to
+  5 s before killing it.
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost
   most of its digits close to `-1`: relative error 3.6e-5 at `-1 + 1e-13` and
   3.0e-3 at `-1 + 1e-15`, enough for discopt to certify the wrong objective

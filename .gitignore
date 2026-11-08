@@ -261,3 +261,6 @@ docs/linkedin-v*.org
 *.profraw
 /benchmarks/kkt_scaling/blockfac/target/
 /benchmarks/kkt_scaling/blockfac/Cargo.lock
+
+# Claude Desktop extension bundles (scripts/build-mcpb.sh)
+/dist/

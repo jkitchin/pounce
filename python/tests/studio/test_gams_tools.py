@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pounce_studio_mcp.server import (
+from pounce.studio.server import (
     _parse_gms_convert_header,
     _parse_gms_solve_directive,
     _parse_lst_solve_summary,
@@ -17,7 +17,24 @@ from pounce_studio_mcp.server import (
 )
 
 
-FIXTURES = Path(__file__).parent.parent / "fixtures"
+# Shared with crates/pounce-studio-core/tests/fixtures.rs, which include_str!s them.
+FIXTURES = Path(__file__).resolve().parents[3] / "studio" / "mcp" / "fixtures"
+
+
+def _has_repo() -> bool:
+    from pounce.studio.server import _find_repo_root
+    try:
+        _find_repo_root()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+# `list_gams_examples` reads the repo's gams/ tree, which an installed wheel
+# reaches only through POUNCE_REPO.
+needs_repo = pytest.mark.skipif(
+    not _has_repo(), reason="no pounce checkout reachable (set POUNCE_REPO)"
+)
 EX8_GMS = FIXTURES / "ex8_3_10_header.gms"
 HANDWRITTEN_GMS = FIXTURES / "handwritten.gms"
 EX8_LST = FIXTURES / "ex8_3_10.lst"
@@ -173,6 +190,7 @@ def test_lst_parser_tolerates_partial_block():
 # ---- list_gams_examples ---------------------------------------------
 
 
+@needs_repo
 def test_list_examples_summary_includes_known_suites():
     r = list_gams_examples()
     suites = {s["name"]: s["count"] for s in r["suites"]}
@@ -183,6 +201,7 @@ def test_list_examples_summary_includes_known_suites():
     assert r["total"] == sum(s["count"] for s in r["suites"])
 
 
+@needs_repo
 def test_list_examples_globallib_returns_paginated_files():
     # globallib.gms is committed into the repo; pagination should work.
     r = list_gams_examples(suite="globallib.gms", limit=5, offset=0)
@@ -192,11 +211,13 @@ def test_list_examples_globallib_returns_paginated_files():
     assert all(f.endswith(".gms") for f in r["files"])
 
 
+@needs_repo
 def test_list_examples_unknown_suite_raises():
     with pytest.raises(ValueError, match="unknown suite"):
         list_gams_examples(suite="does-not-exist")
 
 
+@needs_repo
 def test_list_examples_smoke_suite_returns_test_hs071():
     r = list_gams_examples(suite="smoke")
     assert r["count"] in (0, 1)

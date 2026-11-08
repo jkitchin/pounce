@@ -1,10 +1,12 @@
 # pounce-studio-pyo3
 
-PyO3 bindings for [`pounce-studio-core`](../pounce-studio-core). Built
-as the `_native` extension module of the `pounce-studio-mcp` Python
-package (see `studio/mcp/pyproject.toml`).
+PyO3 bindings for [`pounce-studio-core`](../pounce-studio-core). Linked
+into `pounce-solver`'s own extension (`crates/pounce-py`) and mounted as
+the submodule `pounce._pounce.studio` via [`register`]; the crate's own
+`_native` module entry point is kept for standalone builds.
 
-The Python MCP server in `studio/mcp/pounce_studio_mcp/` delegates all
+The Python MCP server in `python/pounce/studio/` (the `[mcp]` extra of
+`pounce-solver`) delegates all
 analysis through these bindings, so the Rust core stays the single
 source of truth for derived series and diagnostics.
 
@@ -31,17 +33,19 @@ even though the Rust side returns a string.
   `from_bytes` / `from_path`. Methods: `header`, `records`,
   `record_count`.
 - `compare_reports(pairs)` — compare a set of named reports.
-- `_native` (`pymodule`) — the extension module that exposes the above.
+- `register(module)` — adds all of the above to a module; `pounce-py`
+  calls it on `pounce._pounce.studio`.
+- `_native` (`pymodule`) — a standalone module built from `register`.
 
 ## Build
 
 `maturin` sets the `extension-module` feature when building the wheel;
 plain `cargo build` leaves it off so workspace CI stays
 Python-toolchain-free. The crate is `publish = false` — it ships only
-inside the `pounce-studio-mcp` wheel.
+inside the `pounce-solver` wheel.
 
 ```sh
-cd studio/mcp && maturin develop
+make install-mcp      # or: maturin develop -m python/pyproject.toml -E mcp
 ```
 
 ## License

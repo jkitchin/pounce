@@ -128,7 +128,7 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
 | [`pounce-rs`](crates/pounce-rs)                   | Single-crate Rust facade — re-exports the TNLP trait and the solver driver, so a Rust caller depends on one crate, not eight.  |
 | [`pounce-studio-core`](crates/pounce-studio-core) | Solve-report / iter-dump parsers and diagnostic analysis (foundation for the `pounce-studio` GUI / MCP server).               |
-| [`pounce-studio-pyo3`](crates/pounce-studio-pyo3) | PyO3 `_native` extension exposing `pounce-studio-core` to the `pounce-studio-mcp` Python MCP server.                          |
+| [`pounce-studio-pyo3`](crates/pounce-studio-pyo3) | PyO3 bindings mounting `pounce-studio-core` as `pounce._pounce.studio`, for the `pounce-studio-mcp` server (`[mcp]` extra).   |
 | [`pounce-wasm`](crates/pounce-wasm)               | WebAssembly build behind the in-browser demo (`docs/` → `/demo/`). Not published to crates.io.                                 |
 
 ## Install
@@ -360,7 +360,8 @@ and capability, so an **LLM agent, script, or visual debugger** can drive
 the solver with no out-of-band docs. Full guide:
 [`docs/src/debugger.md`](docs/src/debugger.md). Post-mortem analysis of a
 finished solve is also available through the **pounce-studio MCP server**
-([`studio/mcp`](studio/mcp)) and the JSON solve report.
+(`pip install "pounce-solver[mcp]"`; see [`studio/mcp`](studio/mcp))
+and the JSON solve report.
 
 ### Sensitivity analysis (sIPOPT-compatible)
 

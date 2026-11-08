@@ -1014,6 +1014,21 @@ pub struct SolverDebugger {
     in_restoration: bool,
     /// Once true, never pause again (`detach`).
     detached: bool,
+    /// Set by `quit` and by a closed stdin, in JSON mode only. Final: every
+    /// later checkpoint returns `Stop` at once, without pausing or reading
+    /// stdin. Stopping at one checkpoint does not end the run: the solve's
+    /// own terminal checkpoint follows, and a `quit` typed inside
+    /// restoration returns into the outer solve, which reaches its own
+    /// checkpoints. Without the latch each of those paused again and sat
+    /// waiting on a stdin the client had stopped writing to, so `quit`
+    /// never ended the process. (The application's automatic re-solves do
+    /// not re-enter the hook: it drives one solve, and they stand down
+    /// while it is attached.)
+    ///
+    /// Not set in REPL mode, where a person at the prompt can type `quit`
+    /// again: there the stop still lands on the post-mortem pause, so the
+    /// failing iterate stays inspectable, as it always has.
+    quit: bool,
     /// Whether the JSON `hello` handshake has been emitted (once per
     /// session, at the first checkpoint).
     hello_sent: bool,
@@ -1124,6 +1139,7 @@ impl SolverDebugger {
             mu_stall: 0,
             in_restoration: false,
             detached: false,
+            quit: false,
             hello_sent: false,
             pause_iters: true,
             pause_terminal: true,
@@ -1481,7 +1497,10 @@ impl SolverDebugger {
             "pause" => CmdOut::ok(vec!["already paused".into()]),
             // Easter egg — not in COMMANDS / help / Tab, so it stays hidden.
             "coffee" | "brew" | "espresso" => self.cmd_coffee(),
-            "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
+            "quit" | "q" | "exit" => {
+                self.quit = matches!(self.mode, DebugMode::Json);
+                CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop)
+            }
             other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
         }
     }
@@ -4081,6 +4100,11 @@ impl DebugHook for SolverDebugger {
     }
 
     fn at_checkpoint(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
+        // In JSON mode `quit` is final: no further pause or stdin read for
+        // the rest of the run (see the `quit` field).
+        if self.quit {
+            return DebugAction::Stop;
+        }
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
         if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
@@ -4248,7 +4272,10 @@ impl SolverDebugger {
                             self.detached = true;
                             DebugAction::Resume
                         }
-                        DebugMode::Json => DebugAction::Stop,
+                        DebugMode::Json => {
+                            self.quit = true;
+                            DebugAction::Stop
+                        }
                     };
                 }
             };
@@ -5060,6 +5087,20 @@ mod tests {
             out.lines.iter().all(|l| !l.contains('\x1b')),
             "no color when stderr isn't a TTY"
         );
+    }
+
+    /// `quit` latches only in JSON mode. At the REPL the stop still lands on
+    /// the post-mortem pause (a person can type `quit` again there), so the
+    /// failing iterate stays inspectable; a JSON client cannot, and the
+    /// latch is what lets its process exit.
+    #[test]
+    fn quit_latches_in_json_mode_only() {
+        let mut repl = SolverDebugger::new(DebugMode::Repl, None);
+        let _ = repl.dispatch("quit", &mut MinimalState);
+        assert!(!repl.quit, "REPL quit must keep the post-mortem pause");
+        let mut json = SolverDebugger::new(DebugMode::Json, None);
+        let _ = json.dispatch("quit", &mut MinimalState);
+        assert!(json.quit, "JSON quit must latch");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! parsing, GAMS `.gms` header / Solve-directive parsing, and `.lst`
 //! SOLVE SUMMARY extraction.
 //!
-//! Ported from `studio/mcp/pounce_studio_mcp/server.py`. All entry
+//! Ported from `python/pounce/studio/server.py`. All entry
 //! points are byte-slice / `&str` based so the module stays WASM-clean.
 
 use serde::Serialize;

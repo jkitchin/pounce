@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from pounce_studio_mcp import reports as R
-from pounce_studio_mcp import _native
+from pounce.studio import reports as R
+from pounce._pounce import studio as _native
 
 
-FIXTURES = Path(__file__).parent.parent / "fixtures"
+# Shared with crates/pounce-studio-core/tests/fixtures.rs, which include_str!s them.
+FIXTURES = Path(__file__).resolve().parents[3] / "studio" / "mcp" / "fixtures"
 ROSENBROCK = FIXTURES / "rosenbrock.json"
 STALLED = FIXTURES / "rosenbrock-stalled.json"
 
@@ -134,7 +135,7 @@ def test_main_module_does_not_run_server_on_import():
     # package. Now guarded by `if __name__ == "__main__"`.
     import importlib
 
-    mod = importlib.import_module("pounce_studio_mcp.__main__")
+    mod = importlib.import_module("pounce.studio.__main__")
     # Just confirm import returned without hanging or raising; the
     # presence of `main` is verified by the fact that the module
     # imports it from `.server`.
@@ -149,14 +150,14 @@ def test_main_module_does_not_run_server_on_import():
 
 
 def test_tool_load_solve_report():
-    from pounce_studio_mcp.server import load_solve_report
+    from pounce.studio.server import load_solve_report
 
     out = load_solve_report(str(ROSENBROCK))
     assert out["status"] == "SolveSucceeded"
 
 
 def test_tool_convergence_trace_full_and_subset():
-    from pounce_studio_mcp.server import convergence_trace
+    from pounce.studio.server import convergence_trace
 
     full = convergence_trace(str(ROSENBROCK))
     assert set(full) >= {"iter", "objective", "inf_pr", "inf_du", "mu"}
@@ -165,14 +166,14 @@ def test_tool_convergence_trace_full_and_subset():
 
 
 def test_tool_convergence_trace_rejects_unknown_column():
-    from pounce_studio_mcp.server import convergence_trace
+    from pounce.studio.server import convergence_trace
 
     with pytest.raises(ValueError):
         convergence_trace(str(ROSENBROCK), columns=["bogus"])
 
 
 def test_tool_find_stalls_returns_count():
-    from pounce_studio_mcp.server import find_stalls
+    from pounce.studio.server import find_stalls
 
     out = find_stalls(str(ROSENBROCK))
     assert "windows" in out and "count" in out
@@ -180,7 +181,7 @@ def test_tool_find_stalls_returns_count():
 
 
 def test_tool_diagnose_includes_findings_key():
-    from pounce_studio_mcp.server import diagnose
+    from pounce.studio.server import diagnose
 
     out = diagnose(str(ROSENBROCK))
     assert "findings" in out and "n_findings" in out
@@ -188,35 +189,35 @@ def test_tool_diagnose_includes_findings_key():
 
 
 def test_tool_restoration_windows():
-    from pounce_studio_mcp.server import restoration_windows
+    from pounce.studio.server import restoration_windows
 
     out = restoration_windows(str(ROSENBROCK))
     assert out["windows"] == [] and out["count"] == 0
 
 
 def test_tool_get_iterate():
-    from pounce_studio_mcp.server import get_iterate
+    from pounce.studio.server import get_iterate
 
     out = get_iterate(str(ROSENBROCK), 0)
     assert out["iter"] == 0
 
 
 def test_tool_compare_runs_label_mismatch_raises():
-    from pounce_studio_mcp.server import compare_runs
+    from pounce.studio.server import compare_runs
 
     with pytest.raises(ValueError):
         compare_runs([str(ROSENBROCK), str(STALLED)], labels=["only-one"])
 
 
 def test_tool_compare_runs():
-    from pounce_studio_mcp.server import compare_runs
+    from pounce.studio.server import compare_runs
 
     out = compare_runs([str(ROSENBROCK), str(STALLED)], labels=["ok", "stalled"])
     assert out["n_runs"] == 2
 
 
 def test_tool_linear_solver_summary_present_for_feral_run():
-    from pounce_studio_mcp.server import linear_solver_summary
+    from pounce.studio.server import linear_solver_summary
 
     out = linear_solver_summary(str(ROSENBROCK))
     assert out["available"] is True, out
@@ -231,7 +232,7 @@ def test_tool_linear_solver_summary_present_for_feral_run():
 
 def test_tool_linear_solver_summary_absent_for_legacy_report(tmp_path):
     """Reports written before the field existed deserialize with `linear_solver = null`."""
-    from pounce_studio_mcp.server import linear_solver_summary
+    from pounce.studio.server import linear_solver_summary
 
     legacy = json.loads(ROSENBROCK.read_text())
     legacy.pop("linear_solver", None)
@@ -245,7 +246,7 @@ def test_tool_linear_solver_summary_absent_for_legacy_report(tmp_path):
 
 
 def test_explain_known_column():
-    from pounce_studio_mcp.server import explain
+    from pounce.studio.server import explain
 
     out = explain("inf_pr")
     assert out["kind"] == "column" and out["term"] == "inf_pr"
@@ -253,14 +254,14 @@ def test_explain_known_column():
 
 
 def test_explain_known_finding():
-    from pounce_studio_mcp.server import explain
+    from pounce.studio.server import explain
 
     out = explain("mu_stuck")
     assert out["kind"] == "finding" and out["severity"] == "warning"
 
 
 def test_explain_unknown_suggests():
-    from pounce_studio_mcp.server import explain
+    from pounce.studio.server import explain
 
     with pytest.raises(ValueError) as exc:
         explain("inf_p")  # near-miss for inf_pr
@@ -268,7 +269,7 @@ def test_explain_unknown_suggests():
 
 
 def test_citations_no_args_lists_topics():
-    from pounce_studio_mcp.server import citations
+    from pounce.studio.server import citations
 
     out = citations()
     assert "topics" in out
@@ -278,7 +279,7 @@ def test_citations_no_args_lists_topics():
 
 
 def test_citations_by_topic():
-    from pounce_studio_mcp.server import citations
+    from pounce.studio.server import citations
 
     out = citations(topic="restoration")
     assert out["topic"] == "restoration"
@@ -286,8 +287,8 @@ def test_citations_by_topic():
 
 
 def test_citations_by_key():
-    from pounce_studio_mcp.server import citations
-    from pounce_studio_mcp import glossary as G
+    from pounce.studio.server import citations
+    from pounce.studio import glossary as G
 
     # Skip if we couldn't locate the bib (e.g. installed-out-of-tree).
     if not G.load_bib():
@@ -298,14 +299,14 @@ def test_citations_by_key():
 
 
 def test_citations_rejects_both_args():
-    from pounce_studio_mcp.server import citations
+    from pounce.studio.server import citations
 
     with pytest.raises(ValueError):
         citations(topic="restoration", key="wachter2006")
 
 
 def test_citations_unknown_topic():
-    from pounce_studio_mcp.server import citations
+    from pounce.studio.server import citations
 
     with pytest.raises(ValueError):
         citations(topic="not-a-subsystem")
@@ -315,7 +316,7 @@ def test_findings_codes_match_rust_source():
     """Regression guard: every finding the Rust diagnose() can emit
     must have a glossary entry. Update glossary.FINDINGS when a new
     code is added on the Rust side."""
-    from pounce_studio_mcp import glossary as G
+    from pounce.studio import glossary as G
     # Source of truth — keep in lockstep with analysis.rs.
     rust_codes = {
         "converged", "max_iter_exceeded", "restoration_used", "mu_stuck",
@@ -331,12 +332,34 @@ def test_findings_codes_match_rust_source():
 
 
 def _pounce_available() -> bool:
-    from pounce_studio_mcp.server import _find_pounce_bin
+    """True only if the located CLI actually runs.
+
+    `_find_pounce_bin()` falls back to `pounce` on $PATH, which in a wheel
+    built without `pounce/bin/` staged (CI's maturin-action jobs) is the
+    console-script shim: present, but it exits 1 on every call. Probing
+    `--version` turns that into a skip instead of a page of
+    "exited before the handshake" errors.
+    """
+    import subprocess
+
+    import os
+
+    from pounce.studio.server import _find_pounce_bin
     try:
-        _find_pounce_bin()
-        return True
-    except FileNotFoundError:
-        return False
+        binary = _find_pounce_bin()
+        proc = subprocess.run([binary, "--version"], capture_output=True,
+                              timeout=60)
+        ok = proc.returncode == 0
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        ok = False
+    if not ok and os.environ.get("POUNCE_STUDIO_REQUIRE_CLI"):
+        # A CI job that is there to run these tests must not report a skip
+        # as success (ci.yml, `wheel smoke (pounce-solver)`).
+        raise RuntimeError(
+            "POUNCE_STUDIO_REQUIRE_CLI is set but no working pounce CLI "
+            "was found; set POUNCE_BIN to a built binary"
+        )
+    return ok
 
 
 PARAMETRIC_NL = (
@@ -346,7 +369,7 @@ PARAMETRIC_NL = (
 
 
 def test_analyze_builtin_rosenbrock():
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     out = analyze_problem(builtin="rosenbrock")
     assert out["kind"] == "builtin"
@@ -357,14 +380,14 @@ def test_analyze_builtin_rosenbrock():
 
 
 def test_analyze_builtin_unknown_raises():
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     with pytest.raises(ValueError):
         analyze_problem(builtin="not-a-real-problem")
 
 
 def test_analyze_requires_exactly_one_input():
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     with pytest.raises(ValueError):
         analyze_problem()
@@ -373,7 +396,7 @@ def test_analyze_requires_exactly_one_input():
 
 
 def test_analyze_nl_file_dimensions():
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     if not PARAMETRIC_NL.exists():
         pytest.skip(f"fixture not present at {PARAMETRIC_NL}")
@@ -391,7 +414,7 @@ def test_analyze_nl_file_dimensions():
 def test_analyze_nl_file_reports_complementarity_pairs(tmp_path):
     """Line 3 as Pyomo's mpec.nl writes it: nlc nlo n_cc nlcc ndcc nzlb. The
     Rust preflight (`pounce-studio analyze-nl`) reads the same field."""
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     nl = tmp_path / "cc.nl"
     nl.write_text(
@@ -404,7 +427,7 @@ def test_analyze_nl_file_reports_complementarity_pairs(tmp_path):
 
 
 def test_analyze_missing_nl_file():
-    from pounce_studio_mcp.server import analyze_problem
+    from pounce.studio.server import analyze_problem
 
     with pytest.raises(FileNotFoundError):
         analyze_problem(nl_file="/tmp/definitely-not-there.nl")
@@ -412,7 +435,7 @@ def test_analyze_missing_nl_file():
 
 @pytest.mark.skipif(not _pounce_available(), reason="pounce binary not built")
 def test_run_problem_rosenbrock_includes_analysis(tmp_path: Path):
-    from pounce_studio_mcp.server import run_problem
+    from pounce.studio.server import run_problem
 
     out_json = tmp_path / "rosenbrock.json"
     out = run_problem(builtin="rosenbrock", json_output=str(out_json))
@@ -426,7 +449,7 @@ def test_run_problem_rosenbrock_includes_analysis(tmp_path: Path):
 
 @pytest.mark.skipif(not _pounce_available(), reason="pounce binary not built")
 def test_run_problem_forwards_options(tmp_path: Path):
-    from pounce_studio_mcp.server import run_problem
+    from pounce.studio.server import run_problem
 
     out_json = tmp_path / "rosenbrock-capped.json"
     out = run_problem(
@@ -442,7 +465,7 @@ def test_run_problem_forwards_options(tmp_path: Path):
 
 
 def test_run_problem_requires_exactly_one_input():
-    from pounce_studio_mcp.server import run_problem
+    from pounce.studio.server import run_problem
 
     with pytest.raises(ValueError):
         run_problem()
@@ -451,7 +474,7 @@ def test_run_problem_requires_exactly_one_input():
 
 
 def test_run_problem_rejects_bad_json_detail():
-    from pounce_studio_mcp.server import run_problem
+    from pounce.studio.server import run_problem
 
     with pytest.raises(ValueError):
         run_problem(builtin="rosenbrock", json_detail="medium")

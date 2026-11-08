@@ -1015,6 +1015,15 @@ pub struct IpoptApplication {
     /// at each iteration to inspect / mutate live state. Consumed on use
     /// (one solve per installed hook).
     debug_hook: Option<std::rc::Rc<std::cell::RefCell<dyn crate::debug::DebugHook>>>,
+    /// True for the whole of an `optimize_tnlp` call that started with a
+    /// debugger hook installed. The hook drives exactly one IPM solve, so
+    /// any re-solve after it (the ℓ₁ fallback, the gh#884 retry, the
+    /// `mu_strategy_fallback` flip, the gh#983 scale retry) would run
+    /// unobserved *after* the debugger has shown its `final: true`
+    /// terminal pause, and could replace the verdict the user was shown.
+    /// Those retries stand down while this is set, as the second-opinion
+    /// ladder already does for an attached debugger.
+    debugger_attached: std::cell::Cell<bool>,
     /// Provider for the BNW outer loop (pounce#10 Phase 3). When set,
     /// `optimize_constrained` consults the provider before each inner
     /// solve, replacing `restoration_factory` with a fresh one so
@@ -1366,6 +1375,7 @@ impl IpoptApplication {
             restoration_factory: None,
             diagnostics: None,
             debug_hook: None,
+            debugger_attached: std::cell::Cell::new(false),
             restoration_factory_provider: None,
             on_converged: None,
             on_converged_refreshes_hessian: true,
@@ -2287,6 +2297,7 @@ impl IpoptApplication {
         // solve saw it" rather than "the last one did".
         self.dual_divergence_signature.set(false);
         self.tiny_step_dual_stall.set(false);
+        self.debugger_attached.set(self.debug_hook.is_some());
         self.obj_scale_refused.set((false, false));
         self.dual_divergence_retry_promoted.set(false);
         *self.mu_strategy_fallback_record.borrow_mut() = None;
@@ -2533,7 +2544,11 @@ impl IpoptApplication {
         // SolveSucceeded — otherwise return the original. Skipped if
         // the user already opted into the wrapper above (this avoids
         // a double pass and keeps semantics predictable).
-        if info.m > 0 && self.is_l1_fallback_enabled() && !self.is_l1_penalty_enabled() {
+        if info.m > 0
+            && self.is_l1_fallback_enabled()
+            && !self.is_l1_penalty_enabled()
+            && !self.debugger_attached.get()
+        {
             return self.run_with_l1_fallback(tnlp);
         }
         // Biactive dual-divergence retry (gh#884): if the solve settles
@@ -2543,7 +2558,7 @@ impl IpoptApplication {
         // "base solve" is the whole standard dispatch below including the
         // μ flip — the signature is about a *solve*, and spending the μ
         // flip first is strictly cheaper than spending this one first.
-        let status = if self.is_dual_divergence_retry_enabled() {
+        let status = if self.is_dual_divergence_retry_enabled() && !self.debugger_attached.get() {
             self.run_with_dual_divergence_retry(tnlp)
         } else {
             self.dispatch_standard_solve(tnlp)
@@ -2610,7 +2625,7 @@ impl IpoptApplication {
         // Applies to constrained and unconstrained alike (both run the
         // same IPM). Independent of, and lower priority than, the ℓ₁
         // fallback above.
-        if self.is_mu_strategy_fallback_enabled() {
+        if self.is_mu_strategy_fallback_enabled() && !self.debugger_attached.get() {
             return self.run_with_mu_strategy_fallback(tnlp);
         }
         // Every problem — constrained or not — goes through the same
@@ -5596,8 +5611,22 @@ impl IpoptApplication {
                         "",
                     ));
             }
-            Some(kind) if gradient_based => {
+            Some(kind) if gradient_based && !self.debugger_attached.get() => {
                 status = self.run_scale_retry(tnlp, first_status, kind, grad_scale);
+            }
+            Some(kind) if gradient_based => {
+                // Same caveat as below, different reason: the re-solve would
+                // run after the debugger's final pause, unobserved.
+                self.statistics
+                    .borrow_mut()
+                    .warnings
+                    .push(scale_audit_warning(
+                        kind,
+                        &base,
+                        grad_scale,
+                        acceptable_tol,
+                        "was not attempted: the interactive debugger is attached",
+                    ));
             }
             Some(kind) => {
                 // The caller owns the scaling (`none` / `user-scaling`): not ours
