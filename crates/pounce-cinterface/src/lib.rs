@@ -40,7 +40,9 @@ use pounce_algorithm::application::{
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_nlp::mpcc::{ComplementarityPair, PairErrorKind, validate_pairs};
+use pounce_nlp::mpcc::{
+    ComplementarityPair, PairErrorKind, PairShape, classify_pair, validate_pairs,
+};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -186,6 +188,13 @@ pub struct IpoptProblemInfo {
     /// passed [`pounce_nlp::mpcc::validate_pairs`] against this handle's
     /// bounds when it was declared. Empty — the default — means no pairs.
     pub(crate) complementarity: Vec<ComplementarityPair>,
+    /// Every `(row, var)`, 0-based, that [`AddPounceComplementsConstraint`]
+    /// accepted on this handle, whether or not it declared a pair. The
+    /// helper refuses a row or variable already in here (or in
+    /// `complementarity`), so one `F` or one `x` cannot be in two MOI
+    /// `Complements` constraints. Never cleared: the bound edits it records
+    /// are not undone either.
+    pub(crate) complements_used: Vec<ComplementarityPair>,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -394,6 +403,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             user_scaling: None,
             nonlinear_vars: None,
             complementarity: Vec::new(),
+            complements_used: Vec::new(),
             last_solve: None,
             pending_working_set: None,
         });
@@ -2074,7 +2084,9 @@ fn declare_pairs(
 /// mixed — exactly as Python's `Problem(complementarity=)` and the `.nl`
 /// reader accept, and is checked at once by the same classifier the
 /// solve's lowering runs (`pounce_nlp::mpcc::validate_pairs`), against the
-/// bounds given to [`CreateIpoptProblem`] and the pairs already declared.
+/// handle's bounds — those given to [`CreateIpoptProblem`], as
+/// [`AddPounceComplementsConstraint`] may have edited them — and the pairs
+/// already declared.
 ///
 /// Returns [`POUNCE_CC_OK`] or a negative `POUNCE_CC_ERR_*` code; a refused
 /// pair leaves the declared set unchanged. Pairs persist on the handle
@@ -2226,6 +2238,200 @@ pub unsafe extern "C" fn GetPounceComplementarityPairs(
             vars[i] = p.var as Index + offset;
         }
         TRUE
+    })
+}
+
+// ---------------------------------------------------------------------------
+// MOI `[F, x] ∈ Complements` semantics (gh#1147)
+// ---------------------------------------------------------------------------
+
+/// `x` boxed, `l < u` both finite: a native **mixed** pair was declared;
+/// the row's bounds are unchanged (free).
+pub const POUNCE_COMPLEMENTS_PAIR_MIXED: c_int = 0;
+/// `x >= l` only: the row's lower bound was set to `0` (`F >= 0`) and a
+/// native one-sided pair declared.
+pub const POUNCE_COMPLEMENTS_PAIR_LOWER: c_int = 1;
+/// `x <= u` only: the row's upper bound was set to `0` (`F <= 0`) and a
+/// native one-sided pair declared.
+pub const POUNCE_COMPLEMENTS_PAIR_UPPER: c_int = 2;
+/// `x` free: both row bounds were set to `0` (`F = 0`); no pair.
+pub const POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR: c_int = 3;
+/// `x` fixed (`l == u`): nothing changed, `F` stays free; no pair.
+pub const POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR: c_int = 4;
+/// NULL handle.
+pub const POUNCE_COMPLEMENTS_ERR_NULL: c_int = -1;
+/// Row or variable outside `[0, m)` / `[0, n)`, read in the problem's
+/// index style.
+pub const POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE: c_int = -2;
+/// The variable is in a declared pair or in an earlier accepted
+/// [`AddPounceComplementsConstraint`] call.
+pub const POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED: c_int = -3;
+/// The row is in a declared pair or in an earlier accepted
+/// [`AddPounceComplementsConstraint`] call.
+pub const POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED: c_int = -4;
+/// The row has a finite bound (`g_L > -1e19` or `g_U < 1e19`), including
+/// one an earlier call of this helper set: MOI's `F` is a free function.
+/// Declare such a row with [`AddPounceComplementarityPair`].
+pub const POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE: c_int = -5;
+/// The variable's bounds are NaN or crossed (`l > u`, both finite): no row
+/// of the MOI table applies.
+pub const POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS: c_int = -6;
+/// The handle's state is inconsistent (a declared pair no longer passes
+/// validation against its bounds), or a Rust panic was caught at the
+/// boundary. Nothing was changed.
+pub const POUNCE_COMPLEMENTS_ERR_INTERNAL: c_int = -7;
+
+/// Which row of the MOI `Complements` table a variable with bounds
+/// `[xl, xu]` takes, read with the same `±1e19` convention as the pair
+/// classifier; `None` for NaN or crossed bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComplementsRow {
+    Mixed,
+    Lower,
+    Upper,
+    RowFixed,
+    VarFixed,
+}
+
+fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
+    if xl.is_nan() || xu.is_nan() {
+        return None;
+    }
+    match (xl > NLP_LOWER_BOUND_INF, xu < NLP_UPPER_BOUND_INF) {
+        (true, true) if xl < xu => Some(ComplementsRow::Mixed),
+        (true, true) if xl == xu => Some(ComplementsRow::VarFixed),
+        (true, true) => None,
+        (true, false) => Some(ComplementsRow::Lower),
+        (false, true) => Some(ComplementsRow::Upper),
+        (false, false) => Some(ComplementsRow::RowFixed),
+    }
+}
+
+impl ComplementsRow {
+    /// The row bounds the table gives a free row, and whether it declares a
+    /// pair.
+    fn row_bounds(self, gl: Number, gu: Number) -> (Number, Number, bool) {
+        match self {
+            ComplementsRow::Mixed => (gl, gu, true),
+            ComplementsRow::Lower => (0.0, gu, true),
+            ComplementsRow::Upper => (gl, 0.0, true),
+            ComplementsRow::RowFixed => (0.0, 0.0, false),
+            ComplementsRow::VarFixed => (gl, gu, false),
+        }
+    }
+
+    fn code(self) -> c_int {
+        match self {
+            ComplementsRow::Mixed => POUNCE_COMPLEMENTS_PAIR_MIXED,
+            ComplementsRow::Lower => POUNCE_COMPLEMENTS_PAIR_LOWER,
+            ComplementsRow::Upper => POUNCE_COMPLEMENTS_PAIR_UPPER,
+            ComplementsRow::RowFixed => POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR,
+            ComplementsRow::VarFixed => POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR,
+        }
+    }
+
+    /// The native shape the edited bounds must classify as (pair rows).
+    fn shape_matches(self, shape: Option<PairShape>) -> bool {
+        matches!(
+            (self, shape),
+            (ComplementsRow::Mixed, Some(PairShape::Mixed { .. }))
+                | (ComplementsRow::Lower, Some(PairShape::OneSided { .. }))
+                | (ComplementsRow::Upper, Some(PairShape::OneSided { .. }))
+        )
+    }
+}
+
+fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int {
+    let offset = if info.index_style == 1 { 1 } else { 0 };
+    let (r, v) = (
+        zero_based(row, offset, info.m),
+        zero_based(var, offset, info.n),
+    );
+    if r == usize::MAX || v == usize::MAX {
+        return POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE;
+    }
+    let (gl, gu) = (info.g_l[r], info.g_u[r]);
+    if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
+        return POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE;
+    }
+    let used = || info.complementarity.iter().chain(&info.complements_used);
+    if used().any(|p| p.var == v) {
+        return POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED;
+    }
+    if used().any(|p| p.row == r) {
+        return POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED;
+    }
+    let Some(table_row) = complements_row(info.x_l[v], info.x_u[v]) else {
+        return POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS;
+    };
+    let (new_gl, new_gu, declares) = table_row.row_bounds(gl, gu);
+    debug_assert!(
+        !declares
+            || table_row.shape_matches(classify_pair(info.x_l[v], info.x_u[v], new_gl, new_gu)),
+        "MOI table row {table_row:?} edits to a bound pair that is not its native shape"
+    );
+    // Tentative edit, then validate the declared pairs (and the new one)
+    // against the edited bounds through the same path every declaration
+    // takes. The edited row is in no declared pair, so this passes by
+    // construction; if it does not, the handle was already inconsistent,
+    // and it is restored rather than left half-edited.
+    info.g_l[r] = new_gl;
+    info.g_u[r] = new_gu;
+    let new: &[(Index, Index)] = if declares { &[(row, var)] } else { &[] };
+    match declare_pairs(info, new, false) {
+        Ok(()) => {
+            info.complements_used
+                .push(ComplementarityPair { row: r, var: v });
+            table_row.code()
+        }
+        Err(_) => {
+            info.g_l[r] = gl;
+            info.g_u[r] = gu;
+            POUNCE_COMPLEMENTS_ERR_INTERNAL
+        }
+    }
+}
+
+/// Declare MOI's `[F, x] ∈ Complements` for constraint row `row` (`F`) and
+/// variable `var` (`x`), both **in the problem's index style** (gh#1147).
+///
+/// MOI writes `F` as a free function and reads the sign it must have off
+/// `x`'s bounds; POUNCE's native pairs read both sides' signs off their
+/// bounds. This helper transcribes one into the other **by editing the
+/// handle's copy of the row bounds**, then declares the native pair, as
+/// the table says (bounds at or beyond `±1e19` are infinite):
+///
+/// | `x` bounds         | row edit            | pair            | returns |
+/// |--------------------|---------------------|-----------------|---------|
+/// | `l < u`, finite    | none                | native mixed    | [`POUNCE_COMPLEMENTS_PAIR_MIXED`] |
+/// | `l` only           | `g_L = 0` (`F ≥ 0`) | one-sided       | [`POUNCE_COMPLEMENTS_PAIR_LOWER`] |
+/// | `u` only           | `g_U = 0` (`F ≤ 0`) | one-sided       | [`POUNCE_COMPLEMENTS_PAIR_UPPER`] |
+/// | free               | `g_L = g_U = 0`     | none (`F = 0`)  | [`POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR`] |
+/// | `l == u`           | none (`F` free)     | none            | [`POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR`] |
+///
+/// The row must be free (else [`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE`]:
+/// use [`AddPounceComplementarityPair`] for a row that already has a
+/// side). Checks, in order: NULL handle, range, row free, variable then
+/// row not already used (by a declared pair or by an earlier accepted call
+/// of this helper), the variable's bounds neither NaN nor crossed. A
+/// refused call changes nothing. Bound edits are permanent on the handle:
+/// [`ClearPounceComplementarityPairs`] and
+/// [`SetPounceComplementarityPairs`] drop pairs, not edits.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn AddPounceComplementsConstraint(
+    ipopt_problem: IpoptProblem,
+    row: Index,
+    var: Index,
+) -> c_int {
+    ffi_guard(POUNCE_COMPLEMENTS_ERR_INTERNAL, || unsafe {
+        if ipopt_problem.is_null() {
+            return POUNCE_COMPLEMENTS_ERR_NULL;
+        }
+        add_complements(&mut *ipopt_problem, row, var)
     })
 }
 
@@ -5069,6 +5275,130 @@ mod tests {
         use pounce_algorithm::mpcc::Strategy;
         for s in [Strategy::Both, Strategy::Exact, Strategy::Continuation] {
             assert!(s.name().len() < 16, "{}", s.name());
+        }
+    }
+
+    // ----- AddPounceComplementsConstraint (gh#1147): the mapping and the
+    // re-validation branch no public call reaches.
+
+    #[test]
+    fn complements_row_reads_every_table_row_and_refuses_nan_and_crossed() {
+        use ComplementsRow::*;
+        let inf = 2e19;
+        assert_eq!(complements_row(0.0, 2.0), Some(Mixed));
+        assert_eq!(complements_row(-1.0, inf), Some(Lower));
+        assert_eq!(complements_row(-inf, 3.0), Some(Upper));
+        assert_eq!(complements_row(-inf, inf), Some(RowFixed));
+        assert_eq!(complements_row(1.0, 1.0), Some(VarFixed));
+        // The ±1e19 convention of the pair classifier: exactly 1e19 is
+        // infinite, just inside it is finite.
+        assert_eq!(complements_row(-1e19, 1e19), Some(RowFixed));
+        assert_eq!(complements_row(-9.9e18, 1e19), Some(Lower));
+        assert_eq!(complements_row(2.0, 1.0), None);
+        assert_eq!(complements_row(f64::NAN, 1.0), None);
+        assert_eq!(complements_row(0.0, f64::NAN), None);
+    }
+
+    #[test]
+    fn complements_edits_classify_as_the_native_shape_they_declare() {
+        // The debug_assert in `add_complements`, as a test: for each pair
+        // row of the table, the edited bounds of a free row are exactly the
+        // native shape, and a no-pair row declares nothing.
+        let inf = 2e19;
+        for (xl, xu, want) in [
+            (0.0, 2.0, ComplementsRow::Mixed),
+            (-1.0, inf, ComplementsRow::Lower),
+            (-inf, 3.0, ComplementsRow::Upper),
+        ] {
+            let row = complements_row(xl, xu).unwrap();
+            assert_eq!(row, want);
+            let (gl, gu, declares) = row.row_bounds(-inf, inf);
+            assert!(declares);
+            let shape = classify_pair(xl, xu, gl, gu);
+            assert!(row.shape_matches(shape), "{row:?}: {shape:?}");
+        }
+        assert_eq!(
+            ComplementsRow::RowFixed.row_bounds(-inf, inf),
+            (0.0, 0.0, false)
+        );
+        assert_eq!(
+            ComplementsRow::VarFixed.row_bounds(-inf, inf),
+            (-inf, inf, false)
+        );
+        // `shape_matches` refuses a wrong shape, so the assert can fire.
+        assert!(!ComplementsRow::Mixed.shape_matches(None));
+        assert!(!ComplementsRow::Lower.shape_matches(classify_pair(0.0, 2.0, -inf, inf)));
+    }
+
+    /// Two variables, two free rows, no callback is ever called.
+    fn create_two_by_two(x_l: [Number; 2], x_u: [Number; 2]) -> IpoptProblem {
+        let g_l = [-2e19, -2e19];
+        let g_u = [2e19, 2e19];
+        let p = unsafe {
+            CreateIpoptProblem(
+                2,
+                x_l.as_ptr(),
+                x_u.as_ptr(),
+                2,
+                g_l.as_ptr(),
+                g_u.as_ptr(),
+                0,
+                0,
+                0,
+                Some(quad_eval_f),
+                Some(cb_quad_eval_g),
+                Some(quad_eval_grad_f),
+                Some(cb_quad_eval_jac_g),
+                Some(cb_quad_eval_h),
+            )
+        };
+        assert!(!p.is_null());
+        p
+    }
+
+    #[test]
+    fn complements_refuses_on_a_handle_whose_declared_pairs_no_longer_validate() {
+        // error-path: AddPounceComplementsConstraint
+        // Carry-over from S1-I4: a declared pair is only known to pass
+        // validation against the bounds it was declared with. No public
+        // call edits a paired row or variable today, so plant the state a
+        // future in-place bound update could produce: var 0 in a mixed pair,
+        // then its box collapsed to a point (fixed var + free row is no
+        // native shape). The helper's re-validation must refuse with a
+        // status and change nothing, rather than store an edit beside an
+        // invalid set.
+        let p = create_two_by_two([0.0, -2e19], [2.0, 2e19]);
+        unsafe {
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 0, 0),
+                POUNCE_COMPLEMENTS_PAIR_MIXED
+            );
+            (&mut (*p).x_u)[0] = 0.0;
+            let snapshot = |p: IpoptProblem| {
+                let i = &*p;
+                (
+                    i.g_l.clone(),
+                    i.g_u.clone(),
+                    i.complementarity.clone(),
+                    i.complements_used.clone(),
+                )
+            };
+            let before = snapshot(p);
+            // Row 1 / var 1 (free var): would fix row 1 to F = 0.
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
+                POUNCE_COMPLEMENTS_ERR_INTERNAL
+            );
+            assert_eq!(before, snapshot(p));
+            // Restored, the same call goes through.
+            (&mut (*p).x_u)[0] = 2.0;
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
+                POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
+            );
+            let i = &*p;
+            assert_eq!((i.g_l[1], i.g_u[1]), (0.0, 0.0));
+            FreeIpoptProblem(p);
         }
     }
 }

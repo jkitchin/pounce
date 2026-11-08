@@ -64,6 +64,16 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   variable or row already paired, unsupported shape, NULL, negative count)
   and leaves the declared set unchanged. With pairs declared, `IpoptSolve`
   solves through the complementarity driver (see *Solving*).
+- `AddPounceComplementsConstraint` declares MOI's `[F, x] ∈ Complements`
+  for a free row `F` and a variable `x`: it writes the sign MOI implies
+  into the handle's copy of the row bounds (`F >= 0` when `x` has only a
+  lower bound, `F <= 0` for only an upper, `F = 0` when `x` is free) and
+  declares the native pair, or none when `x` is free or fixed. The returned
+  `POUNCE_COMPLEMENTS_*` code says which; a negative one is a refusal that
+  changed nothing (row not free, row or variable already used, NULL, out of
+  range, NaN or crossed variable bounds). The edits are permanent on the
+  handle. The table is in [Complementarity
+  Constraints](complementarity.md#from-moi--jump-complements).
 
 ## Solving
 

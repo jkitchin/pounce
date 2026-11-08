@@ -29,6 +29,11 @@ changes.
   solve report's `complementarity` block as scalars, one lowered solve at a
   time, and its texts. `IpoptWriteSolveReport` writes that block after a
   driver solve, the same block the CLI and Python write.
+  `AddPounceComplementsConstraint` takes MOI / JuMP `[F, x] ∈ Complements`
+  semantics on a free row and maps them onto the native pairs by writing
+  the sign MOI implies into the handle's row bounds (`F >= 0`, `F <= 0` or
+  `F = 0`, or nothing for a boxed or fixed `x`), returning a
+  `POUNCE_COMPLEMENTS_*` code that says which.
 
 ### Fixed
 - **`atanh` is accurate near `-1` (gh#1151).** The `.nl` `atanh` opcode lost

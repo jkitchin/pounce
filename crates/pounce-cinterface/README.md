@@ -82,6 +82,13 @@ POUNCE extensions:
   Python do; the `complementarity_*` options apply); `IpoptCreateSolver`
   and a staged SQP working set refuse them, and the live inspectors report
   no data during such a solve.
+- MOI / JuMP `[F, x] ∈ Complements` (gh#1147): `AddPounceComplementsConstraint`
+  takes MOI's semantics (`F` a free row, its sign read off `x`'s bounds) and
+  maps them onto the native pairs by **editing the handle's copy of the row
+  bounds** — `F >= 0` for `x >= l`, `F <= 0` for `x <= u`, `F = 0` for a free
+  `x`, nothing for a boxed (mixed pair) or fixed (no pair) `x`. The row must
+  be free; the `POUNCE_COMPLEMENTS_*` return code says which row of the table
+  applied, or why the call was refused (nothing changes then).
 - Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
   (`#[repr(C)]` `PounceComplementarityStats`: strategy, what was reported
   and by which formulation, total iterations, the stationarity certificate,

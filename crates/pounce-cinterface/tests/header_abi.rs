@@ -151,9 +151,10 @@ fn header_version_defines_match_the_crate() {
     );
 }
 
-/// The `POUNCE_CC_*` codes are an ABI too: a C caller compares the `int`
-/// it gets back against the header's value, the library returns the Rust
-/// constant's. Read every `#define POUNCE_CC_` out of the header and hold
+/// The `POUNCE_CC_*` and `POUNCE_COMPLEMENTS_*` codes are an ABI too: a C
+/// caller compares the `int` it gets back against the header's value, the
+/// library returns the Rust constant's. Read every `#define POUNCE_CC_` and
+/// `#define POUNCE_COMPLEMENTS_` out of the header and hold
 /// the two sides to the same names and values, so adding a code to one
 /// side only, or renumbering one, fails here (gh#1147).
 #[test]
@@ -193,6 +194,51 @@ fn header_complementarity_codes_match_the_implementation() {
         ("POUNCE_CC_TEXT_SUMMARY", POUNCE_CC_TEXT_SUMMARY),
         ("POUNCE_CC_TEXT_POLISH_REASON", POUNCE_CC_TEXT_POLISH_REASON),
         ("POUNCE_CC_TEXT_B_REASON", POUNCE_CC_TEXT_B_REASON),
+        (
+            "POUNCE_COMPLEMENTS_PAIR_MIXED",
+            POUNCE_COMPLEMENTS_PAIR_MIXED,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_PAIR_LOWER",
+            POUNCE_COMPLEMENTS_PAIR_LOWER,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_PAIR_UPPER",
+            POUNCE_COMPLEMENTS_PAIR_UPPER,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR",
+            POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR",
+            POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR,
+        ),
+        ("POUNCE_COMPLEMENTS_ERR_NULL", POUNCE_COMPLEMENTS_ERR_NULL),
+        (
+            "POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE",
+            POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED",
+            POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED",
+            POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE",
+            POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS",
+            POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS,
+        ),
+        (
+            "POUNCE_COMPLEMENTS_ERR_INTERNAL",
+            POUNCE_COMPLEMENTS_ERR_INTERNAL,
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k, i64::from(v)))
@@ -205,7 +251,10 @@ fn header_complementarity_codes_match_the_implementation() {
             continue;
         };
         let mut words = rest.split_whitespace();
-        let Some(name) = words.next().filter(|n| n.starts_with("POUNCE_CC_")) else {
+        let Some(name) = words
+            .next()
+            .filter(|n| n.starts_with("POUNCE_CC_") || n.starts_with("POUNCE_COMPLEMENTS_"))
+        else {
             continue;
         };
         let value = words

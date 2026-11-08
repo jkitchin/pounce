@@ -668,8 +668,9 @@ Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
  *
  * Indices are in the problem's index style (the index_style given to
  * CreateIpoptProblem), like IpoptSetNonlinearVariables. Each declaration
- * is validated at once, against the bounds given to CreateIpoptProblem and
- * the pairs already declared, by the same classifier the solve's lowering
+ * is validated at once, against the handle's bounds (those given to
+ * CreateIpoptProblem, as AddPounceComplementsConstraint may have edited
+ * them) and the pairs already declared, by the same classifier the solve's lowering
  * runs; a refused declaration leaves the declared set unchanged. Pairs
  * persist on the handle across solves.
  *
@@ -728,6 +729,55 @@ Bool GetPounceComplementarityPairs(
     IpoptProblem ipopt_problem,
     ipindex     *rows,
     ipindex     *vars
+);
+
+/* ---------------------------------------------------------------------
+ * MOI / JuMP [F, x] in Complements (gh#1147)
+ *
+ * AddPounceComplementsConstraint(problem, row, var) takes MOI's semantics
+ * -- F = g_row is a free function, and the sign it must have is read off
+ * x_var's bounds -- and transcribes it onto the native pairs above by
+ * EDITING THE HANDLE'S COPY OF THE ROW BOUNDS, then declaring the native
+ * pair. The row must be free (g_L <= -1e19 and g_U >= 1e19). The return
+ * code says what was done (bounds at or beyond +-1e19 are infinite):
+ *
+ *   x bounds        row edit               pair          returns
+ *   l < u, finite   none                   native mixed  POUNCE_COMPLEMENTS_PAIR_MIXED
+ *   l only          g_L = 0     (F >= 0)   one-sided     POUNCE_COMPLEMENTS_PAIR_LOWER
+ *   u only          g_U = 0     (F <= 0)   one-sided     POUNCE_COMPLEMENTS_PAIR_UPPER
+ *   free            g_L = g_U = 0 (F = 0)  none          POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
+ *   l == u          none        (F free)   none          POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR
+ *
+ * Checks, in order: NULL handle; row/var in range (index style); row free;
+ * the variable, then the row, not already used -- by a declared pair or by
+ * an earlier accepted call of this function, pair or not, so one F or one
+ * x cannot be in two Complements constraints; x's bounds neither NaN nor
+ * crossed. A refused call changes nothing. The edits are permanent:
+ * ClearPounceComplementarityPairs / SetPounceComplementarityPairs drop
+ * pairs, not edits, and do not free a row or variable for another call.
+ * A row that already has a side is a native declaration: use
+ * AddPounceComplementarityPair. GetPounceComplementarityPairs lists the
+ * pairs declared here like any other.
+ * ------------------------------------------------------------------- */
+#define POUNCE_COMPLEMENTS_PAIR_MIXED              0
+#define POUNCE_COMPLEMENTS_PAIR_LOWER              1
+#define POUNCE_COMPLEMENTS_PAIR_UPPER              2
+#define POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR       3
+#define POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR       4
+#define POUNCE_COMPLEMENTS_ERR_NULL               -1   /* NULL handle */
+#define POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE       -2   /* row or var outside [0,m) / [0,n) (in index style) */
+#define POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED -3   /* var in a pair or an earlier accepted call */
+#define POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED -4   /* row in a pair or an earlier accepted call */
+#define POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE       -5   /* row has a finite bound (incl. one written here) */
+#define POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS         -6   /* var bounds NaN or crossed (l > u) */
+#define POUNCE_COMPLEMENTS_ERR_INTERNAL           -7   /* inconsistent handle or internal error; nothing changed */
+
+/** Declare [F, x] in Complements for (row, var); see the table above. A
+ *  non-negative return is success, a negative one a refusal. */
+int AddPounceComplementsConstraint(
+    IpoptProblem ipopt_problem,
+    ipindex      row,
+    ipindex      var
 );
 
 /* ---------------------------------------------------------------------

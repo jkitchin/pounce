@@ -26,7 +26,7 @@ that ticks it.
 - [x] **S1-I6** Outcome getters: `GetPounceComplementarityStats`, `GetPounceComplementaritySolve`, `GetPounceComplementarityText`; "driver did not run" behaviour tested.
 - [x] **S1-I7** `IpoptWriteSolveReport` carries the `complementarity` block.
 - [x] **S1-I8** CLI-parity test over `crates/pounce-cli/tests/fixtures_mpcc/` through the C API (`crates/pounce-cli/tests/cinterface_mpcc_parity.rs`).
-- [ ] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
+- [x] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
 - [ ] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
 - [ ] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
 
@@ -1833,6 +1833,126 @@ Gate (all on the ticking commit's tree):
   only the restriction-group `unwrap_used` / `expect_used` warns other
   tests carry. `cargo fmt --all -- --check` clean.
 - Sweep not run: no solver or CLI code moved (test-only change).
+
+### S1-I9 — MOI-semantics helper (commit that ticks S1-I9)
+
+What moved:
+- `src/lib.rs`: `int AddPounceComplementsConstraint(IpoptProblem, ipindex
+  row, ipindex var)` through `ffi_guard`, and 12 constants. Outcomes
+  `POUNCE_COMPLEMENTS_PAIR_MIXED 0`, `_PAIR_LOWER 1`, `_PAIR_UPPER 2`,
+  `_ROW_FIXED_NO_PAIR 3`, `_VAR_FIXED_NO_PAIR 4`; errors `_ERR_NULL -1`,
+  `_ERR_OUT_OF_RANGE -2`, `_ERR_VAR_ALREADY_PAIRED -3`,
+  `_ERR_ROW_ALREADY_PAIRED -4`, `_ERR_ROW_NOT_FREE -5`, **`_ERR_VAR_BOUNDS
+  -6`** and **`_ERR_INTERNAL -7`** (the last two not in §3.1; see below).
+  The shared negative values equal the `POUNCE_CC_*` ones (NULL, range,
+  var, row, internal). Check order: NULL; range (`zero_based`, so
+  `Index::MIN` in Fortran style cannot overflow); row free (`g_L <= -1e19
+  && g_U >= 1e19`, so a NaN row bound is "not free"); variable, then row,
+  not already used; `x`'s bounds neither NaN nor crossed; then the table.
+  The table is a pure `complements_row(xl, xu)` (same `±1e19` thresholds
+  as the classifier) plus `row_bounds`. The edit is written tentatively,
+  then **every declared pair plus the new one** is re-validated through
+  `declare_pairs` against the edited bounds (also for the no-pair
+  `ROW_FIXED` edit, with an empty batch); on `Err` the two bounds are
+  restored and `_ERR_INTERNAL` returned — carry-over (a). A `debug_assert!`
+  checks the edited bounds classify as the native shape the row names.
+- `IpoptProblemInfo.complements_used` (new, 0-based): every accepted
+  `(row, var)`, pair or not, never cleared.
+- `pounce.h`: table, check order, permanence, 12 defines, prototype; the
+  §3.2 text "validated against the bounds given to `CreateIpoptProblem`"
+  now says "the handle's bounds, as `AddPounceComplementsConstraint` may
+  have edited them" (also in `lib.rs`, `complementarity.md`). README,
+  `c-api.md`, `complementarity.md` ("From MOI / JuMP `Complements`", the
+  five-row table and every refusal), CHANGELOG `[Unreleased]` (one sentence).
+- `tests/header_abi.rs`: the define parser also reads `POUNCE_COMPLEMENTS_`;
+  the 12 names in the known list, both directions (checked to fail with
+  `_VAR_BOUNDS` set to `-8` in the header).
+
+Design choices the plan did not settle, conservative, **for the ABI review**:
+1. **Same row or variable in two calls** — refused whether or not the
+   first call declared a pair: a `VAR_FIXED_NO_PAIR` row (still free) is
+   `ROW_ALREADY_PAIRED` on reuse, a variable from a `ROW_FIXED` or
+   `VAR_FIXED` call is `VAR_ALREADY_PAIRED`. That needs the
+   `complements_used` ledger. Clear/Set do not empty it and do not undo
+   edits, so the helper is a one-pass builder per handle. The native
+   `AddPounceComplementarityPair` does not read the ledger (S1-I4's
+   contract is unchanged): a free `VAR_FIXED` row can still be paired
+   natively with a boxed variable.
+2. **Row bounds that agree or conflict with MOI's implied sign** — both
+   `ROW_NOT_FREE` (§3.1 says any non-free row), including `g_L = 0` with
+   `x >= 0`. That is a native declaration. Because the free check comes
+   first (plan order), a row in a **one-sided** pair reads
+   `ROW_NOT_FREE`, not `ROW_ALREADY_PAIRED`; a row in a mixed pair (free)
+   reads `ROW_ALREADY_PAIRED`.
+3. **Crossed (`l > u`) or NaN variable bounds** match no row of the table
+   → new `_ERR_VAR_BOUNDS`.
+4. **`_ERR_INTERNAL`** covers a panic and the re-validation refusal. No
+   public call reaches the second today: the edited row is in no pair, and
+   no call edits a paired row or variable. Stage 2's in-place bound update
+   would make it reachable.
+
+Tests (`tests/complementarity_moi.rs`, new, 17). Model family `min (x-a)^2 +
+(y-b)^2`, one row `F = cx x + cy y - s`, the pair `[F, x]`; answers worked
+by branch in each test's comment and checked to `1e-6` (status, `x`, `F`,
+objective) after `IpoptSolve`:
+- mixed, `x ∈ [0,2]`, `F = x + y`: target `(1,1)` → `(0,1)` (lower end),
+  target `(1.5,-5)` → `(2,-5)` (upper end); row stays free (reuse is
+  `ROW_ALREADY_PAIRED`).
+- lower, `x >= 1`, `F = x + y - 4`: target `(2,5)` → `(1,5)` (the pair
+  decides; `F >= 0` alone keeps the target), target `(0,0)` → `(2,2)` (the
+  sign decides; the signless pair would accept `(1,0)`, `F = -3`); reuse
+  `ROW_NOT_FREE` proves the edit. **Also bit for bit against the native
+  formulation** (`g_L = 0` at create + `AddPounceComplementarityPair`):
+  `x`, `F`, objective, status, total iterations; and **Python's**
+  `Problem(complementarity=[(0, 0)])` on the same model, start `(2,2)`:
+  `x` and objective to the bit, total iterations 43 and 40 (the venv's
+  editable build of this tree).
+- upper, `x <= 2`, `F = x - y + 1`: the mirror, `(2,5)` and `(1,2)`.
+- free `x`, `F = x + y - 3`: `ROW_FIXED_NO_PAIR`, no pair, driver not run;
+  targets on both sides of `F = 0` → `(-0.5,3.5)`, `(1.5,1.5)`.
+- fixed `x = 1`: `VAR_FIXED_NO_PAIR`; targets `(1,1)` → `F = -1` and
+  `(1,5)` → `F = 3`, so neither sign was written.
+- (a) QpecSmall with row 1 created free: native `(0, y1)`, then the helper
+  on `(1, y2)` writes `g_L[1] = 0` (= QpecSmall): both pairs listed,
+  `SetPounceComplementarityPairs` of the same set accepted (re-validation
+  from outside against the edited bounds), solve equal **to the bit**
+  (status, `x`, objective, `GetIpoptIterCount`) to native QpecSmall, at
+  `(1,1,0)`. Unit test (`src/lib.rs`) plants a declared mixed pair whose
+  box is then collapsed and checks `_ERR_INTERNAL` with bounds, pairs and
+  ledger unchanged, then the same call succeeding once restored. Two more
+  unit tests cover `complements_row` on every branch (including `±1e19`
+  exactly) and that each pair row's edit classifies as its native shape.
+- Errors, each on a handle that already holds a declaration, asserting the
+  set unchanged and the probe row still free: NULL; out of range (−1, m/n,
+  `MIN`/`MAX` on each index); Fortran style (0 and m+1 refused, 1-based
+  accepted, read back 1-based); `ROW_NOT_FREE` for `[0,∞)`, `[1,∞)`,
+  `(−∞,5]`, `(−∞,0]`, `[0,0]`, `[−1,1]`, `[NaN,∞)`; `VAR_ALREADY_PAIRED`
+  (helper pair, native pair); `ROW_ALREADY_PAIRED` (helper mixed, native
+  mixed); `VAR_BOUNDS` (crossed, NaN either side); check order; reuse after
+  no-pair calls; Clear keeps the edit and the ledger.
+- Mutations: `ROW_FIXED` writing only `g_L` fails the free-`x` test;
+  `VAR_FIXED` writing `g_L = 0` fails the fixed-`x` test; no ledger push,
+  or a check that ignores the ledger, fails 3.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 22 binaries (lib 61,
+  `complementarity_moi` 17, `export_surface` 13, `header_abi` 4,
+  `c_examples_build_and_run` 6: `sqp_warm_start.c` and the struct-layout
+  program still build strict against the extended header).
+- Export guard (`--test export_surface --test header_abi`): `ok. 13 passed` /
+  `ok. 4 passed`. It failed first on the missing README and `c-api.md`
+  mentions, as it should.
+- Clippy, CI flags (`--all-targets --no-deps -D clippy::correctness -D
+  clippy::suspicious`): clean, exit 0. Plain `-D warnings` still fails
+  first in `pounce-common` (pre-existing, as before). Under plain
+  `--no-deps`, the new test has only the restriction-group `unwrap_used`
+  warns.
+- `cargo fmt --all -- --check` clean; `mdbook build docs` (0.5.2) clean,
+  anchor `complementarity.html#from-moi--jump-complements` exists and
+  `c-api.md` links to it; `make ask-check` top-1 17/20, top-5 20/20, OK;
+  `make c-api-examples` green; `scripts/check-release-consistency.sh` OK.
+- Sweep not run: no solver code moved, and the CLI does not link
+  `pounce-cinterface`.
 
 ### Facts recorded while planning (2ac0ad9)
 

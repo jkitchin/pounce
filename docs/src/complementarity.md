@@ -103,8 +103,9 @@ if (rc != POUNCE_CC_OK) { /* pair `bad` was refused; see rc */ }
 `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount` and
 `GetPounceComplementarityPairs` drop and read them. Indices are in the
 problem's index style (`CreateIpoptProblem`'s `index_style`). Each
-declaration is checked at once against the bounds given to
-`CreateIpoptProblem`, by the same classifier the lowering runs, and a pair
+declaration is checked at once against the handle's bounds (those given
+to `CreateIpoptProblem`, as `AddPounceComplementsConstraint` below may have
+edited them), by the same classifier the lowering runs, and a pair
 Python or the `.nl` reader would refuse is refused here with a code:
 `POUNCE_CC_ERR_OUT_OF_RANGE`, `POUNCE_CC_ERR_VAR_ALREADY`,
 `POUNCE_CC_ERR_ROW_ALREADY` or `POUNCE_CC_ERR_SHAPE` (plus
@@ -123,6 +124,37 @@ returns `Invalid_Problem_Definition` before any callback; and
 `IpoptGetWorkingSet` reports no set after a driver solve. The intermediate
 callback fires from every lowered solve, and `GetIpoptCurrentIterate` /
 `GetIpoptCurrentViolations` report no data during them.
+
+### From MOI / JuMP `Complements`
+
+MathOptInterface writes a complementarity constraint as `[F, x] ∈
+Complements`: `F` is a free function and the sign it must have is read off
+`x`'s bounds. The native pairs above read both signs off bounds instead.
+`AddPounceComplementsConstraint(nlp, row, var)` transcribes one into the
+other, on a row `F` that has **no finite bound**, by editing the handle's
+copy of that row's bounds and then declaring the native pair:
+
+| `x` bounds | meaning | edit on the handle | pair declared | returns |
+|---|---|---|---|---|
+| `l < u`, both finite | mixed complementarity | none | native mixed | `POUNCE_COMPLEMENTS_PAIR_MIXED` |
+| `x >= l` only | `F >= 0`, `(x - l)·F = 0` | `g_L[row] = 0` | one-sided | `POUNCE_COMPLEMENTS_PAIR_LOWER` |
+| `x <= u` only | `F <= 0`, `(u - x)·F = 0` | `g_U[row] = 0` | one-sided | `POUNCE_COMPLEMENTS_PAIR_UPPER` |
+| free | `F = 0` | `g_L[row] = g_U[row] = 0` | none | `POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR` |
+| `l == u` | `F` free | none | none | `POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR` |
+
+Writing the bound is not a solver trick: `F >= 0` is a constraint of the
+MPCC, and the return code says that it was written. The edits are
+permanent on the handle — clearing or replacing the pairs does not undo
+them. A negative return is a refusal that changes nothing:
+`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` (the row already has a side, whether
+or not it agrees with the one MOI implies: declare it natively with
+`AddPounceComplementarityPair`), `_ERR_VAR_ALREADY_PAIRED` /
+`_ERR_ROW_ALREADY_PAIRED` (the variable or row is in a declared pair or in
+an earlier accepted call of this function, with or without a pair, so one
+`F` or one `x` is never in two `Complements` constraints), `_ERR_VAR_BOUNDS`
+(NaN or crossed bounds), `_ERR_OUT_OF_RANGE`, `_ERR_NULL` and
+`_ERR_INTERNAL`. Each row of the table is solved against a hand-worked
+answer in `crates/pounce-cinterface/tests/complementarity_moi.rs`.
 
 ## What POUNCE does with them
 
