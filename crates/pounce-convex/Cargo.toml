@@ -31,6 +31,11 @@ pounce-qp.workspace = true
 # convex path (gh #494). Acyclic: pounce-presolve depends only on
 # pounce-nlp / pounce-common, neither of which reaches pounce-convex.
 pounce-presolve.workspace = true
+# `ApplicationReturnStatus`, for the convex → NLP status mapping the CLI and
+# the C API report with (`report::qp_status_to_ars`, gh#1147 PR review).
+# Already a transitive dependency through pounce-presolve, and acyclic for the
+# same reason: pounce-nlp does not reach pounce-convex.
+pounce-nlp.workspace = true
 # feral's unsymmetric sparse LU (factor / ftran / btran / column update) is the
 # basis engine for the revised-simplex LP crossover (`simplex.rs`). Already a
 # transitive workspace dependency via pounce-qp, so no new external crate.

@@ -21,8 +21,11 @@
 //! so there is one implementation of it. What is *not* Python's is the PSD
 //! verdict feeding [`check_ipm_inertia`]: Python decides it in numpy
 //! (`python/pounce/qp.py::_psd_verdict`); this entry asks
-//! [`pounce_convex::certify_psd_lower_triangle`], as the CLI's dispatch does,
-//! at the CLI's tolerance band. See [`psd_inertia`].
+//! [`pounce_convex::certify_psd_lower_triangle_in_band`], the CLI dispatch's
+//! certificate at the CLI's band ([`pounce_convex::psd_band`], one
+//! definition). See [`psd_inertia`]. The residual block, the certificate
+//! scale and the report's status mapping are `pounce_convex::report`'s, the
+//! definitions Python and the CLI call.
 
 use crate::{
     Bool, ExtensibleOut, FALSE, Index, Number, TRUE, ffi_guard, struct_size_of, write_extensible,
@@ -33,12 +36,12 @@ use pounce_convex::pipeline::{
 };
 use pounce_convex::{
     ActiveSetOverrides, ConeSpec, HessianInertia, NEG_INF, POS_INF, QpOptions, QpProblem,
-    QpSolution, QpStatus, Triplet, certify_psd_lower_triangle, solve_qp_active_set_inertia,
-    solve_qp_ipm, solve_socp_ipm,
+    QpSolution, QpStatus, Triplet, certificate_scale, certify_psd_lower_triangle_in_band,
+    qp_status_to_ars, reported_kkt_residuals, solve_qp_active_set_inertia, solve_qp_ipm,
+    solve_socp_ipm,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use std::ffi::{CStr, c_char, c_int};
 use std::time::Duration;
 
@@ -76,10 +79,6 @@ pub const POUNCE_CONE_PSD: c_int = 4;
 pub const POUNCE_QP_CERT_NONE: c_int = 0;
 pub const POUNCE_QP_CERT_PRIMAL_INFEASIBLE: c_int = 1;
 pub const POUNCE_QP_CERT_DUAL_INFEASIBLE: c_int = 2;
-
-/// The CLI's PSD band (`pounce-cli/src/dispatch.rs::PSD_TOL`): an eigenvalue
-/// above `-PSD_TOL · min(‖P‖∞, 1)` counts as zero.
-const PSD_TOL: f64 = 1e-9;
 
 // ---------------------------------------------------------------------------
 // C structs
@@ -150,7 +149,7 @@ enum Method {
 /// Where the inertia of `P` handed to the pipeline comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InertiaChoice {
-    /// Decide it with [`certify_psd_lower_triangle`] (the default).
+    /// Decide it with [`certify_psd_lower_triangle_in_band`] (the default).
     Auto,
     /// The caller's claim, used as given (Python's `hessian_inertia=`).
     Claim(HessianInertia),
@@ -308,9 +307,9 @@ impl PounceQpInfo {
 /// The inertia of `P` the pipeline is handed.
 ///
 /// With the default `hessian_inertia = "auto"`, an empty `P` is `Psd`; any
-/// other `P` is asked of [`certify_psd_lower_triangle`] at the CLI's band
-/// (`1e-9 · min(‖P‖∞, 1)` with `‖P‖∞` the largest summed entry): certified is
-/// `Psd`, not certified is `Indefinite`. "Not certified" includes a
+/// other `P` is asked of [`certify_psd_lower_triangle_in_band`] at the CLI's
+/// band ([`pounce_convex::psd_band`]: `1e-9 · min(‖P‖∞, 1)` with `‖P‖∞` the
+/// largest summed entry): certified is `Psd`, not certified is `Indefinite`. "Not certified" includes a
 /// factorization that could not decide — the CLI routes such a model to the
 /// NLP arm, and this entry, which has no NLP arm, treats it the same
 /// conservative way: refused under the IPM, driven as indefinite by the
@@ -325,13 +324,7 @@ fn psd_inertia(qp: &PounceQpInfo) -> Result<HessianInertia, ()> {
     if qp.p.is_empty() {
         return Ok(HessianInertia::Psd);
     }
-    let mut summed = std::collections::HashMap::<(usize, usize), f64>::new();
-    for t in &qp.p {
-        *summed.entry((t.row, t.col)).or_default() += t.val;
-    }
-    let scale = summed.values().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let tol = PSD_TOL * scale.min(1.0);
-    match certify_psd_lower_triangle(qp.n, &qp.p, tol, backend) {
+    match certify_psd_lower_triangle_in_band(qp.n, &qp.p, backend) {
         Ok(true) => Ok(HessianInertia::Psd),
         Ok(false) => Ok(HessianInertia::Indefinite),
         Err(_) => Err(()),
@@ -350,30 +343,10 @@ fn status_code(s: QpStatus) -> c_int {
     }
 }
 
-/// The CLI's `qp_status_to_ars` (`pounce-cli/src/main.rs`), so a report from
-/// this entry and the CLI's convex report share one status vocabulary. The
-/// AMPL codes `status_to_solve_result_num` derives from these equal the
-/// CLI's `convex_status_report` codes on every variant.
-fn report_status(s: QpStatus) -> ApplicationReturnStatus {
-    match s {
-        QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
-        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
-        QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
-        QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates,
-        QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
-        QpStatus::TimeLimit => ApplicationReturnStatus::MaximumWallTimeExceeded,
-        QpStatus::NumericalFailure => ApplicationReturnStatus::ErrorInStepComputation,
-    }
-}
-
-/// Python's residual block (`solution_dict_hsde` in `pounce-py/src/qp.rs`).
+/// Python's residual block, through the definition Python's
+/// `solution_dict_hsde` calls ([`reported_kkt_residuals`]).
 fn residuals(sol: &QpSolution, prob: &QpProblem, cones: &[ConeSpec]) -> PounceQpResiduals {
-    let raw = sol.kkt_residuals_conic(prob, cones);
-    let r = if cones.is_empty() {
-        sol.kkt_residuals_above_floor(prob)
-    } else {
-        raw
-    };
+    let (r, raw) = reported_kkt_residuals(sol, prob, cones);
     PounceQpResiduals {
         struct_size: struct_size_of::<PounceQpResiduals>(),
         primal_infeasibility: r.primal_infeasibility,
@@ -932,19 +905,13 @@ pub unsafe extern "C" fn PounceQpGetCertificate(
             return FALSE;
         }
         let sol = &last.sol;
-        let norm = |vs: &[&[f64]]| {
-            vs.iter()
-                .flat_map(|v| v.iter())
-                .fold(0.0_f64, |m, x| m.max(x.abs()))
+        let kind = match sol.status {
+            QpStatus::PrimalInfeasible => POUNCE_QP_CERT_PRIMAL_INFEASIBLE,
+            QpStatus::DualInfeasible => POUNCE_QP_CERT_DUAL_INFEASIBLE,
+            _ => POUNCE_QP_CERT_NONE,
         };
-        let (kind, scale) = match sol.status {
-            QpStatus::PrimalInfeasible => (
-                POUNCE_QP_CERT_PRIMAL_INFEASIBLE,
-                norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub]),
-            ),
-            QpStatus::DualInfeasible => (POUNCE_QP_CERT_DUAL_INFEASIBLE, norm(&[&sol.x])),
-            _ => (POUNCE_QP_CERT_NONE, f64::NAN),
-        };
+        // Python's `certificate_scale`, one definition.
+        let scale = certificate_scale(sol).unwrap_or(f64::NAN);
         let cert = PounceQpCertificate {
             struct_size: struct_size_of::<PounceQpCertificate>(),
             kind,
@@ -997,7 +964,7 @@ pub unsafe extern "C" fn PounceQpWriteSolveReport(
         };
         let idx = |v: usize| Index::try_from(v).unwrap_or(Index::MAX);
         let sol = &last.sol;
-        let status = report_status(sol.status);
+        let status = qp_status_to_ars(sol.status);
         let mut b = ReportBuilder::new(detail, InputDescriptor::TnlpDirect);
         b.problem.n_variables = idx(info.n);
         b.problem.n_constraints = idx(info.m_eq + info.m_ineq);
@@ -1061,7 +1028,11 @@ mod tests {
         ];
         for (s, code, srn) in all {
             assert_eq!(status_code(s), code, "{s:?}");
-            assert_eq!(status_to_solve_result_num(report_status(s)), srn, "{s:?}");
+            assert_eq!(
+                status_to_solve_result_num(qp_status_to_ars(s)),
+                srn,
+                "{s:?}"
+            );
         }
     }
 }

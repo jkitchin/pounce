@@ -37,15 +37,11 @@
 
 use crate::nl_reader::NlProblem;
 use pounce_common::types::{lower_bound_present, upper_bound_present};
-use pounce_convex::{Triplet, certify_psd_lower_triangle};
-
-/// Tolerance for the smallest-eigenvalue sign test in the convexity
-/// check. A Hessian eigenvalue below `-PSD_TOL` is treated as a genuine
-/// negative direction (nonconvex); within `±PSD_TOL` it is treated as
-/// zero. Scaled tolerances would be better once we have problem scaling
-/// in this path; a fixed absolute tolerance is adequate here and errs
-/// toward the safe (more general) class.
-const PSD_TOL: f64 = 1e-9;
+// `PSD_TOL` and `psd_band` live in `pounce_convex` (moved there, gh#1147 PR
+// review) so the C API's `PounceQp*` handle screens at the same band.
+#[cfg(test)]
+use pounce_convex::PSD_TOL;
+use pounce_convex::{Triplet, certify_psd_lower_triangle, psd_band};
 
 /// Budget on the **structural** cost of putting a convex QCQP into conic form,
 /// above which it is routed to the general NLP solver instead.
@@ -816,28 +812,16 @@ fn socp_reform_flops(h: &QuadHessian) -> u128 {
     }
 }
 
-/// The band around zero within which a Hessian eigenvalue counts as zero.
-///
-/// [`PSD_TOL`] scaled by `‖H‖∞`, and deliberately only in the *lowering*
-/// direction (`.min(1.0)`): tightening the band on a small `H` fixes gh#872,
-/// while widening it on a large `H` would hand the convex engine Hessians it
-/// rejects today — a wrong answer, not a slower one. The asymmetry is the
-/// point, so this is not a plain `PSD_TOL * h_scale`.
-fn psd_band(h: &QuadHessian) -> f64 {
-    let h_scale = h.values().fold(0.0_f64, |a, v| a.max(v.abs()));
-    PSD_TOL * h_scale.min(1.0)
-}
-
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
 ///
 /// A diagonal Hessian is settled in `O(nnz)` by sign before converting to the
 /// reusable triplet API. A coupled Hessian is certified from the inertia of
 /// `H + tol·I`. An inconclusive certificate conservatively routes to NLP.
 ///
-/// `tol` is [`PSD_TOL`] scaled by `‖H‖∞`, but **only downwards** — see
-/// [`psd_band`]. An eigenvalue is in the units of `H`, so a fixed `1e-9` is an
-/// absolute threshold on a scale-dependent quantity, and the failure it
-/// produced (gh#872) is worse than a widened band: on a `‖H‖∞ ~ 1e-10` model
+/// `tol` is [`pounce_convex::PSD_TOL`] scaled by `‖H‖∞`, but **only
+/// downwards** — see [`pounce_convex::psd_band`]. An eigenvalue is in the
+/// units of `H`, so a fixed `1e-9` is an absolute threshold on a
+/// scale-dependent quantity, and the failure it produced (gh#872) is worse than a widened band: on a `‖H‖∞ ~ 1e-10` model
 /// the shift *dominates* `H`, so the inertia count certifies `1e-9·I` rather
 /// than `H` and the certificate is vacuous. A pure change of variable units —
 /// metres to micrometres — was enough to route a strongly indefinite Hessian
@@ -854,7 +838,7 @@ fn hessian_is_psd(h: &QuadHessian, n: usize) -> bool {
     if h.is_empty() {
         return true;
     }
-    let tol = psd_band(h);
+    let tol = psd_band(h.values().copied());
     if h.keys().all(|(i, j)| i == j) {
         return h.values().all(|value| *value >= -tol);
     }
@@ -1247,7 +1231,7 @@ mod tests {
             "−1e-7 must stay indefinite however large the rest of H is"
         );
         assert_eq!(
-            psd_band(&h),
+            psd_band(h.values().copied()),
             PSD_TOL,
             "the band is clamped at PSD_TOL for ‖H‖∞ ≥ 1"
         );

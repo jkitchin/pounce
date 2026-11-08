@@ -956,6 +956,7 @@ dependencies = [
  "pounce-feral",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-nlp",
  "pounce-presolve",
  "pounce-qp",
  "pounce-sens-core",

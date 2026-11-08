@@ -109,7 +109,61 @@ where
     if !tolerance.is_finite() || tolerance < 0.0 {
         return Err(PsdCertificateError::InvalidTolerance);
     }
+    let entries = sum_lower_triangle(n, triplets)?;
+    certify_summed(entries, tolerance, make_backend)
+}
 
+/// The tolerance in the frontends' convexity screen: an eigenvalue below
+/// `-PSD_TOL` is treated as a genuine negative direction (nonconvex); within
+/// `±PSD_TOL` it is treated as zero. Scaled tolerances would be better once
+/// we have problem scaling in this path; a fixed absolute tolerance is
+/// adequate here and errs toward the safe (more general) class. Used through
+/// [`psd_band`], which scales it down for a small `‖H‖∞`.
+///
+/// Moved here from `pounce-cli/src/dispatch.rs` (gh#1147 PR review) so the
+/// CLI's dispatch and the C API's `PounceQp*` handle read one definition.
+pub const PSD_TOL: f64 = 1e-9;
+
+/// The band around zero within which a Hessian eigenvalue counts as zero,
+/// for a Hessian whose (summed) entries are `values`.
+///
+/// [`PSD_TOL`] scaled by `‖H‖∞`, and deliberately only in the *lowering*
+/// direction (`.min(1.0)`): tightening the band on a small `H` fixes gh#872,
+/// while widening it on a large `H` would hand the convex engine Hessians it
+/// rejects today — a wrong answer, not a slower one. The asymmetry is the
+/// point, so this is not a plain `PSD_TOL * h_scale`.
+///
+/// Moved here from `pounce-cli/src/dispatch.rs` with [`PSD_TOL`]; there it
+/// took the CLI's `QuadHessian` map, here the map's values.
+pub fn psd_band<I: IntoIterator<Item = f64>>(values: I) -> f64 {
+    let h_scale = values.into_iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    PSD_TOL * h_scale.min(1.0)
+}
+
+/// [`certify_psd_lower_triangle`] at [`psd_band`] of the matrix itself: the
+/// band is read off the summed entries the certificate builds anyway, so a
+/// caller holding raw triplets (duplicates allowed) does not sum them a
+/// second time just to find `‖H‖∞`. Same errors, except that the tolerance
+/// is always valid.
+pub fn certify_psd_lower_triangle_in_band<F>(
+    n: usize,
+    triplets: &[Triplet],
+    make_backend: F,
+) -> Result<bool, PsdCertificateError>
+where
+    F: FnOnce() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let entries = sum_lower_triangle(n, triplets)?;
+    let tolerance = psd_band(entries.values().copied());
+    certify_summed(entries, tolerance, make_backend)
+}
+
+/// Validate `triplets` (lower triangle of an `n × n` matrix, finite) and sum
+/// duplicates, refusing a sum that overflows.
+fn sum_lower_triangle(
+    n: usize,
+    triplets: &[Triplet],
+) -> Result<HashMap<(usize, usize), f64>, PsdCertificateError> {
     let mut entries = HashMap::<(usize, usize), f64>::with_capacity(triplets.len());
     for &Triplet { row, col, val } in triplets {
         if row >= n || col >= n {
@@ -131,6 +185,18 @@ where
             return Err(PsdCertificateError::NonFiniteSum { row, col });
         }
     }
+    Ok(entries)
+}
+
+/// The certificate proper, on summed entries and a validated tolerance.
+fn certify_summed<F>(
+    mut entries: HashMap<(usize, usize), f64>,
+    tolerance: f64,
+    make_backend: F,
+) -> Result<bool, PsdCertificateError>
+where
+    F: FnOnce() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     entries.retain(|_, value| *value != 0.0);
 
     if entries.is_empty() {
@@ -209,6 +275,64 @@ mod tests {
 
     fn feral_backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(pounce_feral::FeralSolverInterface::serial())
+    }
+
+    /// `psd_band` (moved from the CLI's dispatch, gh#1147 PR review) clamps
+    /// at `PSD_TOL` above unit scale and scales down below it.
+    #[test]
+    fn psd_band_scales_down_only() {
+        assert_eq!(psd_band([1e6, -3.0]), PSD_TOL);
+        assert_eq!(psd_band([1.0]), PSD_TOL);
+        assert_eq!(psd_band([-1e-4, 5e-5]), PSD_TOL * 1e-4);
+        assert_eq!(psd_band(std::iter::empty()), 0.0);
+    }
+
+    /// `certify_psd_lower_triangle_in_band` is `certify_psd_lower_triangle`
+    /// at `psd_band` of the *summed* entries, on each branch: diagonal and
+    /// coupled, inside and outside the band, with a duplicate whose sum sets
+    /// the scale (`0.25 + 0.25`, so a per-triplet max would read half of it).
+    #[test]
+    fn the_in_band_certificate_is_the_certificate_at_the_band_of_the_sum() {
+        let t = |r, c, v| Triplet::new(r, c, v);
+        let cases: Vec<(Vec<Triplet>, bool)> = vec![
+            // Diagonal, a negative eigenvalue inside / outside the band.
+            (vec![t(0, 0, 0.25), t(0, 0, 0.25), t(1, 1, -1e-10)], true),
+            (vec![t(0, 0, 0.25), t(0, 0, 0.25), t(1, 1, -1e-9)], false),
+            // Coupled PSD and indefinite.
+            (vec![t(0, 0, 2.0), t(1, 0, 1.0), t(1, 1, 2.0)], true),
+            (vec![t(0, 0, 1.0), t(1, 0, 2.0), t(1, 1, 1.0)], false),
+        ];
+        for (trip, want) in cases {
+            let summed = sum_lower_triangle(2, &trip).unwrap();
+            let tol = psd_band(summed.values().copied());
+            assert_eq!(
+                certify_psd_lower_triangle_in_band(2, &trip, feral_backend),
+                Ok(want),
+                "{trip:?}"
+            );
+            assert_eq!(
+                certify_psd_lower_triangle(2, &trip, tol, feral_backend),
+                Ok(want),
+                "{trip:?}"
+            );
+        }
+        assert_eq!(
+            sum_lower_triangle(1, &[t(0, 0, 0.25), t(0, 0, 0.25)]).unwrap()[&(0, 0)],
+            0.5
+        );
+        // Same refusals as the certificate.
+        assert_eq!(
+            certify_psd_lower_triangle_in_band(2, &[t(0, 1, 1.0)], feral_backend),
+            Err(PsdCertificateError::UpperTriangle { row: 0, col: 1 })
+        );
+        assert_eq!(
+            certify_psd_lower_triangle_in_band(
+                1,
+                &[t(0, 0, f64::MAX), t(0, 0, f64::MAX)],
+                feral_backend
+            ),
+            Err(PsdCertificateError::NonFiniteSum { row: 0, col: 0 })
+        );
     }
 
     #[test]

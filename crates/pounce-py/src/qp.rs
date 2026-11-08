@@ -240,17 +240,8 @@ fn solution_dict_hsde<'py>(
     d.set_item("status", status_str(sol.status))?;
     d.set_item("tau", hsde.map(|h| h.tau))?;
     d.set_item("kappa", hsde.map(|h| h.kappa))?;
-    let norm = |vs: &[&[f64]]| {
-        vs.iter()
-            .flat_map(|v| v.iter())
-            .fold(0.0_f64, |m, x| m.max(x.abs()))
-    };
-    let scale = match sol.status {
-        QpStatus::PrimalInfeasible => Some(norm(&[&sol.y, &sol.z, &sol.z_lb, &sol.z_ub])),
-        QpStatus::DualInfeasible => Some(norm(&[&sol.x])),
-        _ => None,
-    };
-    d.set_item("certificate_scale", scale)?;
+    // One definition with the C API's `PounceQpGetCertificate`.
+    d.set_item("certificate_scale", pounce_convex::certificate_scale(&sol))?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
@@ -261,12 +252,8 @@ fn solution_dict_hsde<'py>(
         // measurement the `optimal` verdict is judged on -- so `status ==
         // "optimal"` never sits beside `kkt_error > tol`. The plain absolute
         // max is `kkt_error_raw`. Conic solves keep the plain residuals.
-        let raw = sol.kkt_residuals_conic(p, cones);
-        let r = if cones.is_empty() {
-            sol.kkt_residuals_above_floor(p)
-        } else {
-            raw
-        };
+        // One definition with the C API's `PounceQpGetResiduals`.
+        let (r, raw) = pounce_convex::reported_kkt_residuals(&sol, p, cones);
         let rd = PyDict::new_bound(py);
         rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
         rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
