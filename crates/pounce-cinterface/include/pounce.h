@@ -1182,12 +1182,20 @@ Bool IpoptSolverReducedHessian(
  * returns FALSE (NULL handle or array, index out of range, an
  * upper-triangle entry of P, a non-finite value).
  *
+ * Cones (PounceQpAddCone) partition the G rows in order; each block's
+ * slack s = h - G x must lie in its cone (table at POUNCE_CONE_*). A PSD
+ * block of order k holds svec(S): the lower triangle of the k x k slack
+ * column by column, (0,0), (1,0), ..., (k-1,0), (1,1), (2,1), ..., with
+ * every off-diagonal entry scaled by sqrt(2), so <X,Y> = svec(X).svec(Y).
+ * Variable bounds are allowed with cones (a trailing nonnegative block).
+ *
  * Without cones the solve is Python's solve_qp pipeline (presolve when
  * qp_presolve=yes, then the IPM or the active-set engine, postsolve,
  * the unverified-Optimal demotion); with any cone it is solve_socp's
  * conic IPM. Both run pounce_convex::pipeline, the code Python runs.
  *
- * PSD screen (gh#112). Under method=ipm a P that is not certified
+ * PSD screen (gh#112). Under method=ipm (with or without cones) a P
+ * that is not certified
  * positive semidefinite is refused (POUNCE_QP_ERR_INDEFINITE). With
  * hessian_inertia=auto (the default) the verdict comes from
  * pounce_convex::certify_psd_lower_triangle, as in the CLI's dispatch:
@@ -1229,11 +1237,11 @@ typedef struct PounceQpInfo* PounceQp;
 #define POUNCE_QP_ERR_INTERNAL    -7   /* internal error caught at the boundary */
 
 /* PounceQpAddCone kinds. */
-#define POUNCE_CONE_NONNEG  0   /* dim rows, dim >= 0 */
+#define POUNCE_CONE_NONNEG  0   /* dim rows, dim >= 0: s >= 0 */
 #define POUNCE_CONE_SOC     1   /* dim rows, dim >= 1: s0 >= ||s[1:]|| */
-#define POUNCE_CONE_EXP     2   /* dim must be 3 */
-#define POUNCE_CONE_POW     3   /* dim must be 3; alpha in (0, 1) */
-#define POUNCE_CONE_PSD     4   /* dim = matrix order k >= 1; k(k+1)/2 svec rows */
+#define POUNCE_CONE_EXP     2   /* dim must be 3: s1*exp(s0/s1) <= s2, s1 > 0 (closure) */
+#define POUNCE_CONE_POW     3   /* dim must be 3; alpha in (0, 1): |s0| <= s1^alpha s2^(1-alpha) */
+#define POUNCE_CONE_PSD     4   /* dim = matrix order k >= 1; k(k+1)/2 svec rows: smat(s) PSD */
 
 /* PounceQpCertificate.kind. */
 #define POUNCE_QP_CERT_NONE               0
@@ -1260,7 +1268,8 @@ typedef struct {
  *  certificate_scale, tau, kappa). `scale` is the ray's inf-norm, NaN
  *  when kind is POUNCE_QP_CERT_NONE. The ray carries the embedding's
  *  1/tau scale; divide by `scale` for a unit ray. tau and kappa are NaN
- *  when the driver had no embedding (qp_hsde=no, active-set). */
+ *  when the driver records none: the direct IPM (qp_hsde=no), the
+ *  active-set engine, and the exponential/power-cone driver. */
 typedef struct {
     ipindex  kind;
     ipnumber scale;

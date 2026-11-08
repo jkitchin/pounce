@@ -51,6 +51,38 @@ changes.
   - `examples/complementarity.c` exercises all of it, and the book's
     `docs/src/c-api.md` documents it, including how to make a
     callback model reproduce the CLI's run on the same `.nl` model.
+- **Matrix-form convex QP and conic programs through the C API (gh#1147).**
+  A new opaque `PounceQp` handle takes `min ½xᵀPx + cᵀx` subject to
+  `Ax = b`, `Gx ≤ h` (or `Gx ⪯_K h`) and `lb ≤ x ≤ ub` as triplets (0- or
+  1-based, `P` lower triangle) and solves it with the convex engines, through
+  the pipeline Python's `solve_qp` and `solve_socp` run, now shared as
+  `pounce_convex::pipeline`. Additions only; nothing existing changed.
+  - *Building:* `PounceCreateQp`, `PounceFreeQp`, `PounceQpSetObjective`,
+    `PounceQpSetEqualities`, `PounceQpSetInequalities`, `PounceQpSetBounds`,
+    and `PounceQpAddCone` for nonnegative, second-order, exponential, power
+    and PSD (`svec`) blocks. Each builder validates everything first and
+    changes nothing on `FALSE`.
+  - *Options and solving:* `PounceQpSetNumOption` / `PounceQpSetStrOption`
+    take `tol`, `max_iter`, `time_limit`, `tau`, `tau_max`, `qp_reg`,
+    `method` (`ipm` / `active-set`), `hessian_inertia` and the `qp_presolve`,
+    `qp_hsde`, `qp_equilibrate`, `qp_crossover` switches. `PounceQpSolve`
+    returns a `POUNCE_QP_STATUS_*`, or a `POUNCE_QP_ERR_*` before any engine
+    runs: an option the engine would drop is refused, not ignored (with a
+    cone, `active-set`, `tau`, `tau_max` and every `qp_*` switch), and so is a
+    `P` the IPM's PSD screen does not certify. The screen is
+    `certify_psd_lower_triangle` at the CLI's band, not Python's numpy check,
+    so it can refuse a borderline `P` Python accepts; `hessian_inertia=psd`
+    overrides it.
+  - *Reading back:* `PounceQpGetSolution`, `PounceQpGetResiduals`
+    (`PounceQpResiduals`), `PounceQpGetCertificate` (`PounceQpCertificate`:
+    Farkas or recession ray, `tau`, `kappa`) and `PounceQpWriteSolveReport`
+    (`pounce.solve-report/v1`; `solution.engine` is `cvx-qp`,
+    `qp-active-set`, or `cvx-qcqp` for any cone).
+  - On Linux x86_64 the results equal Python's bit for bit on 25 models
+    covering every cone kind and both engines. `examples/qp_socp.c` runs a QP,
+    an SOCP, an infeasibility certificate and three refusals, and the book's
+    `docs/src/c-api.md` documents the cone layouts, every option, status and
+    error code.
 - **The C examples are built and run by `cargo test`.** Every
   `crates/pounce-cinterface/examples/*.c` is compiled with
   `-std=c99 -Wall -Wextra -Werror -pedantic` against `pounce.h` and run;

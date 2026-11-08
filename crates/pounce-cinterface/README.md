@@ -46,6 +46,10 @@ be run; set `POUNCE_C_EXAMPLES_SKIP=1` to skip it knowingly.
   pair declared natively, one through `AddPounceComplementsConstraint`, the
   refusal codes, the session refusal, the solve, the three outcome getters
   and the JSON report's `complementarity` block.
+- `examples/qp_socp.c` — the matrix-form `PounceQp*` entry: a convex QP
+  (solution, multipliers, residuals, report engine `cvx-qp`), an SOCP (report
+  engine `cvx-qcqp`), a primal-infeasible LP and its Farkas certificate, and
+  three refusal codes (`POUNCE_QP_ERR_INDEFINITE`, `_CONES`, `_ARGUMENT`).
 
 ## Surface
 
@@ -145,10 +149,18 @@ POUNCE extensions:
   (`#[repr(C)]` `PounceQpResiduals`), `PounceQpGetCertificate`
   (`PounceQpCertificate`); and `PounceQpWriteSolveReport`. It runs
   `pounce_convex::pipeline`, the code Python's `solve_qp` / `solve_socp`
-  run. The IPM's PSD screen comes from
+  run, and matches Python's results bit for bit on Linux x86_64
+  (`tests/qp_python_parity.rs`). Standard form `min ½xᵀPx + cᵀx`,
+  `Ax = b`, `Gx ≤ h` (`⪯_K` with cones), `lb ≤ x ≤ ub`; triplets 0- or
+  1-based by the handle's index style, `P` lower triangle, a PSD cone's rows
+  in `svec` order (lower triangle by columns, off-diagonals `×√2`). With a
+  cone, `method=active-set`, `tau`, `tau_max` and the `qp_*` switches are
+  refused (`POUNCE_QP_ERR_OPTIONS`), and the report's `solution.engine` is
+  `cvx-qcqp` for every cone kind. The IPM's PSD screen comes from
   `pounce_convex::certify_psd_lower_triangle` at the CLI's band, not
-  Python's numpy check, so the two can disagree on a borderline `P`; see
-  `pounce.h`.
+  Python's numpy check, so it can refuse a borderline `P` that Python
+  accepts; `hessian_inertia=psd` overrides it. See `pounce.h` and the book's
+  C API page for the cone table, every option, status and error code.
 
 All entry points are `extern "C"` and `#[no_mangle]`. Pointers are raw
 and the caller owns lifetimes; the `IpoptProblem` handle is opaque

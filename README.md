@@ -123,7 +123,7 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-convex`](crates/pounce-convex)           | Convex/conic interior-point solver — LP, QP, SOCP, exponential/power cones, small SDP, and SOS polynomial optimization.       |
 | [`pounce-solve-report`](crates/pounce-solve-report) | `pounce.solve-report/v1` JSON writer (shared by `pounce-cli --json-output` and `IpoptWriteSolveReport`).                     |
 | [`pounce-observability`](crates/pounce-observability) | `tracing` subscriber install + per-iteration collector layer that feeds the iteration stream into the solve report.       |
-| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`.                              |
+| [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`; `PounceQp*` matrix-form QP/conic entry. |
 | [`pounce-py`](crates/pounce-py)                   | PyO3 bindings — the cyipopt-compatible `pounce` Python package (the `pounce-solver` wheel).                                  |
 | [`pounce-cli`](crates/pounce-cli)                 | The `pounce` command-line driver.                                                                                             |
 | [`pounce-rs`](crates/pounce-rs)                   | Single-crate Rust facade — re-exports the TNLP trait and the solver driver, so a Rust caller depends on one crate, not eight.  |

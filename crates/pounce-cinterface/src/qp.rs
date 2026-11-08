@@ -112,8 +112,8 @@ pub struct PounceQpResiduals {
 /// is dual infeasible (the recession ray is in `x`), and `POUNCE_QP_CERT_NONE`
 /// otherwise. `scale` is the ray's inf-norm (divide by it for a unit ray), NaN
 /// when `kind` is NONE. `tau` and `kappa` are the homogeneous embedding's at
-/// termination, NaN when the answer came from a driver without one (the
-/// direct IPM, the active-set engine).
+/// termination, NaN when the answer came from a driver that records none (the
+/// direct IPM, the active-set engine, the exponential/power-cone driver).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PounceQpCertificate {

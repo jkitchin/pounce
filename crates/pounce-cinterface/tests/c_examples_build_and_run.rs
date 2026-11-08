@@ -53,6 +53,10 @@ const EXPECTED_STDOUT: &[(&str, &str)] = &[
         "complementarity.c",
         "complementarity example: S-stationary answer (1, 1, 0) certified",
     ),
+    (
+        "qp_socp.c",
+        "qp_socp example: QP (1/2, 1/2), SOC distance 1/sqrt(2), infeasibility certified, 3 refusals",
+    ),
     ("sqp_warm_start.c", "all 4 solves succeeded"),
 ];
 

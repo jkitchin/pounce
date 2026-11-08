@@ -42,7 +42,7 @@ that ticks it.
 - [x] **S3-I1** Lift `solve_presolved` / `demote_unverified_optimal` from `pounce-py/src/qp.rs` into `pounce-convex` (pure move).
 - [x] **S3-I2** `PounceQp*` handle, builder, solve and getters.
 - [x] **S3-I3** Tests for every cone kind and every error path; parity against Python `solve_qp` / `solve_socp` anchors.
-- [ ] **S3-I4** Docs, README, CHANGELOG, `examples/qp_socp.c`; export guard green.
+- [x] **S3-I4** Docs, README, CHANGELOG, `examples/qp_socp.c`; export guard green.
 
 ### Stage 4 — multistart over an NLP handle
 
@@ -1346,6 +1346,107 @@ No Fortran symbol added (`src/fortran.rs` is still the eight upstream
       the other declared-pair corpora named in `CLAUDE.md`, only if a review
       finds `pounce-nlp` changed beyond the pure classifier move (S1-I1's
       sweep and S1-I11's say it did not).
+
+### 8.7 Stage 3 — matrix-form convex/conic entry (filled in by S3-I4)
+
+Written at S3-I4 against the tree that ticks it. Base for "added" is the
+Stage 1 surface above; nothing in §8.1–8.4 changed. Layouts measured as in
+S1-I10 (x86_64 Linux, gcc 13.3, LP64, a `sizeof`/`offsetof`/`_Alignof`
+program against `pounce.h`) and held to the Rust side on every `cargo test
+-p pounce-cinterface` by `repr_c_structs_match_the_header_layout`.
+
+Fourteen functions (`src/qp.rs`, all `#[unsafe(no_mangle)] pub unsafe extern
+"C"`, bodies through `ffi_guard` except `PounceFreeQp` and the NULL check of
+`PounceQpSolve`), and one opaque handle type
+`typedef struct PounceQpInfo* PounceQp`:
+
+- [ ] `PounceQp PounceCreateQp(ipindex n, ipindex m_eq, ipindex m_ineq, ipindex index_style)` (`NULL` unless `n ≥ 1`, `m_* ≥ 0`, style 0/1)
+- [ ] `void PounceFreeQp(PounceQp)` (`NULL` no-op)
+- [ ] `Bool PounceQpSetObjective(PounceQp, ipindex nnz_p, const ipindex *p_row, const ipindex *p_col, const ipnumber *p_val, const ipnumber *c)`
+- [ ] `Bool PounceQpSetEqualities(PounceQp, ipindex nnz_a, const ipindex *a_row, const ipindex *a_col, const ipnumber *a_val, const ipnumber *b)`
+- [ ] `Bool PounceQpSetInequalities(PounceQp, ipindex nnz_g, const ipindex *g_row, const ipindex *g_col, const ipnumber *g_val, const ipnumber *h)`
+- [ ] `Bool PounceQpSetBounds(PounceQp, const ipnumber *lb, const ipnumber *ub)`
+- [ ] `int PounceQpAddCone(PounceQp, int kind, ipindex dim, ipnumber alpha)`
+- [ ] `Bool PounceQpSetNumOption(PounceQp, const char *key, ipnumber value)`
+- [ ] `Bool PounceQpSetStrOption(PounceQp, const char *key, const char *value)`
+- [ ] `int PounceQpSolve(PounceQp)`
+- [ ] `Bool PounceQpGetSolution(PounceQp, ipnumber *x, ipnumber *y, ipnumber *z, ipnumber *z_lb, ipnumber *z_ub, ipnumber *obj, ipindex *iters)`
+- [ ] `Bool PounceQpGetResiduals(PounceQp, PounceQpResiduals *)`
+- [ ] `Bool PounceQpGetCertificate(PounceQp, PounceQpCertificate *)`
+- [ ] `Bool PounceQpWriteSolveReport(PounceQp, const char *path, const char *detail)`
+
+(S3-I2's §9 entry says "15 exports"; `grep -c 'pub unsafe extern "C" fn'
+src/qp.rs` is 14, the list above. `export_surface.rs` holds the header and
+the Rust signatures to each other.)
+
+Twenty-two `#define`s (held both ways by
+`header_qp_codes_match_the_implementation` in `tests/header_abi.rs`):
+
+- [ ] `POUNCE_QP_STATUS_OPTIMAL 0`, `_OPTIMAL_INACCURATE 1`,
+      `_PRIMAL_INFEASIBLE 2`, `_DUAL_INFEASIBLE 3`, `_ITERATION_LIMIT 4`,
+      `_TIME_LIMIT 5`, `_NUMERICAL_FAILURE 6` (one per `QpStatus`).
+- [ ] `POUNCE_QP_ERR_NULL -1`, `_ARGUMENT -2`, `_INCOMPLETE -3`,
+      `_CONES -4`, `_OPTIONS -5`, `_INDEFINITE -6`, `_INTERNAL -7`.
+- [ ] `POUNCE_CONE_NONNEG 0`, `_SOC 1`, `_EXP 2`, `_POW 3`, `_PSD 4`.
+- [ ] `POUNCE_QP_CERT_NONE 0`, `_PRIMAL_INFEASIBLE 1`, `_DUAL_INFEASIBLE 2`.
+
+Two structs:
+
+- [ ] `PounceQpResiduals`, 64 bytes, align 8: `primal_infeasibility` 0,
+      `dual_infeasibility` 8, `complementarity` 16, `kkt_error` 24,
+      `primal_infeasibility_raw` 32, `dual_infeasibility_raw` 40,
+      `complementarity_raw` 48, `kkt_error_raw` 56 (all `ipnumber`; no
+      padding).
+- [ ] `PounceQpCertificate`, 32 bytes, align 8: `kind ipindex` 0,
+      `scale ipnumber` 8, `tau ipnumber` 16, `kappa ipnumber` 24 (padding
+      4 bytes at 4).
+
+Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
+
+- [ ] **PSD screen** (S3-I1/S3-I2): `hessian_inertia=auto` asks
+      `pounce_convex::certify_psd_lower_triangle` at the CLI's band
+      `1e-9·min(max|P_ij|, 1)`, and an undecided factorization counts as
+      not certified (refused under `ipm`). Python's numpy verdict
+      (`_psd_verdict`, relative `1e-8·max|P_ij|`, undecided → unknown with a
+      warning) is not ported, so the C entry can refuse a borderline or badly
+      scaled rank-deficient `P` that Python accepts. `hessian_inertia=psd`
+      overrides it. S3-I3's parity models keep every eigenvalue in
+      `{1, 2, 3, −1}`, away from the border, so no test measures the
+      divergence.
+- [ ] **Option spellings** (S3-I2): `qp_presolve`, `qp_hsde`,
+      `qp_equilibrate`, `qp_crossover` (the CLI's and Python's names, like
+      `qp_reg`), not §7's bare `presolve` etc.
+- [ ] **Conic option refusals** (S3-I2): with any cone, `method=active-set`,
+      `tau`, `tau_max` and every `qp_*` switch (even `qp_hsde=yes`, the
+      default) are `POUNCE_QP_ERR_OPTIONS`, because `solve_socp` takes none
+      of them; refused rather than silently dropped.
+- [ ] **`cvx-qcqp` for exp/pow/PSD** (S3-I2): the report's
+      `solution.engine` is `cvx-qcqp` for every conic solve, including the
+      non-symmetric exp/power driver; there is no engine string for a
+      matrix-form conic solve, and a new one would be a new value in the
+      report schema's vocabulary.
+- [ ] **Report input and `lambda`** (S3-I2): the input descriptor is
+      `TnlpDirect` (no `.nl` file, no matrix-form descriptor exists), and
+      `solution.lambda` is `[y; z]` (equality then inequality multipliers);
+      `z_lb`, `z_ub` are not in the report.
+- [ ] **Small re-statements of private helpers** (S3-I2), each pinned by a
+      test rather than shared, because the originals are private to their
+      crates: the status mapping (`qp_status_to_ars`,
+      `pounce-cli/src/main.rs`; unit test `status_mappings_cover_every_variant`
+      pins every variant and the AMPL codes), the PSD band
+      (`dispatch.rs::psd_band`), and Python's `opts_tau` rule (a bare `tau`
+      lifts `tau_max`; parity rows with `tau`/`tau_max` are bit-exact).
+      Lifting them would touch `pounce-cli` / `pounce-py`, which Stage 3
+      did not.
+- [ ] **Two unreachable overflow guards** (S3-I3): `PounceQpAddCone`'s PSD
+      `d·(d+1)` `checked_mul` and `PounceQpSolve`'s cone-row `checked_add`
+      cannot overflow on a 64-bit target with a 32-bit `ipindex`; kept as
+      guards, not tested.
+- [ ] **Bounds with cones** (noticed in S3-I4): the handle accepts a box with
+      cones (`solve_socp_ipm` appends it as a trailing nonnegative block),
+      which Python's `solve_socp` does not offer, so that combination has no
+      Python parity row. Checked by hand once in S3-I4 (SOC distance with
+      `x1 ≤ 1`: `x = (1, 1, −1)`, `z_ub[1] = 1`), not by a test.
 
 ## 9. Per-iteration log
 
@@ -2652,6 +2753,78 @@ Gate (all on the ticking commit's tree):
 - `cargo fmt --all -- --check` clean.
 - `make python-test` (extension rebuilt from this tree): 2016 passed,
   36 skipped, 0 failed.
+- No sweep: no solver source changed.
+
+### S3-I4 — example, docs accuracy pass, CHANGELOG, §8.7 (commit that ticks S3-I4)
+
+Approved by the human with Stage 3, on this branch. No solver or handle
+behaviour changed: the only `src/` edit is one doc comment in `src/qp.rs`.
+
+What moved:
+- `examples/qp_socp.c` (new): (1) convex QP `min ½‖x‖² − x0 − 2x1`,
+  `x0 − x1 = 0`, `x0 + x1 ≤ 1`, `x ≥ 0` (ub NULL), 0-based → checks
+  `x = (½, ½)`, `obj = −5/4`, `y = −½`, `z = 1`, `z_lb = 0`, both KKT
+  residuals `≤ 1e-6`, certificate `NONE` with `scale` NaN, `GetSolution`
+  FALSE before the solve, and the summary report names `cvx-qp` and the
+  schema; (2) SOC distance from `(2, −1)` to `x1 + x2 = 0` (`P` empty, NULL
+  arrays at `nnz = 0`) → `t = obj = 1/√2`, `x = (3/2, −3/2)`, report engine
+  `cvx-qcqp`; (3) `x ≤ −1`, `x ≥ 0` → `PRIMAL_INFEASIBLE`, certificate kind 1
+  with a finite positive scale; (4) refusals: indefinite `diag(1, −1)` under
+  `ipm` → `POUNCE_QP_ERR_INDEFINITE` and `GetSolution` FALSE after it, the
+  same handle solves under `active-set`, one `SOC(1)` over 2 rows →
+  `POUNCE_QP_ERR_CONES`, `POW` with `alpha = 1.5` → `POUNCE_QP_ERR_ARGUMENT`.
+  Last line, registered in `EXPECTED_STDOUT`: `qp_socp example: QP (1/2,
+  1/2), SOC distance 1/sqrt(2), infeasibility certified, 3 refusals`.
+  Measured: QP 7 iterations, SOCP 7, Farkas scale 400. Strict flags, gcc and
+  clang.
+- Docs accuracy pass, against the code on this tree. Corrected:
+  - `c-api.md` intro said the C API "does not route to the CLI's convex
+    QP/QCQP engines" — true of `IpoptProblem` only; now points to `PounceQp`.
+  - `c-api.md` *ABI and versioning* listed three guarded structs; now five.
+  - `pounce.h` / `src/qp.rs`: `tau`/`kappa` NaN listed only `qp_hsde=no` and
+    active-set; the exp/power-cone driver records none either (S3-I3's
+    `exponential_cone` test).
+  - S3-I2's §9 entry says "15 exports"; there are 14 (§8.7).
+  Added (missing, not wrong): `c-api.md`'s Stage 3 section rewritten into
+  subsections — standard form and index convention; the cone table with each
+  cone's definition and row count, and the PSD `svec` order and `√2`
+  scaling; every option with its range; the `OPTIONS` refusals (active-set
+  and conic); the PSD screen (band, diagonal scan vs. `LDLᵀ` inertia,
+  undecided = not certified, the divergence from `_psd_verdict` toward
+  refusing, `hessian_inertia` claims overriding it, also with cones);
+  status and error tables with the report status and AMPL codes; getters;
+  certificates; the report (`cvx-qcqp` for every cone, `TnlpDirect`,
+  `lambda = [y; z]`); Python parity bit-exact on Linux x86_64. `pounce.h`
+  gains the cone definitions on `POUNCE_CONE_*`, the `svec` layout, "with
+  or without cones" on the screen, and bounds-with-cones. Crate README: the
+  example and the essentials. Root README crate table and
+  `convex-solver.md` link the entry. `CHANGELOG.md`: one `[Unreleased]`
+  *Added* entry beside Stage 1's.
+- Bounds with cones: the handle accepts them (`solve_socp_ipm` appends a
+  nonnegative block); Python's `solve_socp` has none, so there is no parity
+  row. Checked once by hand (scratch C program, not committed): the SOC
+  distance with `x1 ≤ 1` → `x = (1, 1, −1)`, `z_ub[1] ≈ 1`. Documented, and
+  listed in §8.7.
+- §8.7 written: 14 functions, the handle type, 22 defines, 2 structs with
+  measured layouts (`PounceQpResiduals` 64/8, no padding;
+  `PounceQpCertificate` 32/8, padding 4 at 4), and 8 decisions to confirm.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface`: 26 binaries, all green
+  (`c_examples_build_and_run` 6 with the new example, `export_surface` 13,
+  `header_abi` 5, `qp_cones_and_errors` 63, `qp_python_parity` 26,
+  `qp_handle` 14, lib 64).
+- `make c-api-examples` (gcc and `CC=clang`): all three examples print
+  their lines.
+- `make book` (mdbook 0.5.2): builds with no warning; anchors
+  `c-api.html#matrix-form-convex-qp-and-conic-programs`, `#cones`,
+  `#psd-screen`, `#python-parity`, `#json-report` exist. (A `|` inside a
+  code span split the power-cone table row; escaped.)
+- `make ask-check`: top-1 17/20, top-5 20/20, OK (unchanged).
+- `scripts/check-release-consistency.sh`: OK.
+- `cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D
+  clippy::correctness -D clippy::suspicious`: exit 0.
+- `cargo fmt --all -- --check` clean.
 - No sweep: no solver source changed.
 
 ### Facts recorded while planning (2ac0ad9)

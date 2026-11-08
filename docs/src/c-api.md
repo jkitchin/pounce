@@ -13,9 +13,11 @@ symbol is named on it, and a test (`tests/export_surface.rs` in the crate)
 fails if one is not, or if the header and the library disagree on any
 function's name, arity or argument widths.
 
-The C API reaches the NLP path: the interior-point method and, with
-`algorithm=active-set-sqp`, the active-set SQP loop. It does not route to the
-CLI's convex QP/QCQP engines.
+The `IpoptProblem` handle reaches the NLP path: the interior-point method and,
+with `algorithm=active-set-sqp`, the active-set SQP loop. It does not route to
+the CLI's convex QP/QCQP engines. A matrix-form convex QP or conic program goes
+through the separate `PounceQp` handle instead
+([below](#matrix-form-convex-qp-and-conic-programs)).
 
 ## Build and link
 
@@ -329,10 +331,11 @@ by the next.
 ## Matrix-form convex QP and conic programs
 
 Separate from the NLP handle, a `PounceQp` handle takes a convex problem in
-matrix form — `min ½xᵀPx + cᵀx` subject to `Ax = b`, `Gx ≤ h` (or `Gx ⪯_K h`
-with cones) and `lb ≤ x ≤ ub` — and solves it with the convex engines, through
-the same pipeline as Python's `solve_qp` and `solve_socp`
-([Convex Solver](convex-solver.md)).
+matrix form and solves it with the convex engines, through the pipeline
+Python's `solve_qp` and `solve_socp` run (`pounce_convex::pipeline`; see
+[Convex Solver](convex-solver.md)). It is not an Ipopt API, so every name
+carries the `Pounce` prefix. `examples/qp_socp.c` in the crate runs a QP, an
+SOCP, an infeasibility certificate, the report and three refusals.
 
 ```c
 PounceQp qp = PounceCreateQp(n, m_eq, m_ineq, 0);   /* 0-based triplets */
@@ -346,34 +349,220 @@ PounceQpGetSolution(qp, x, y, z, z_lb, z_ub, &obj, &iters);
 PounceFreeQp(qp);
 ```
 
-- **Lifecycle.** `PounceCreateQp` returns `NULL` unless `n ≥ 1`, `m_eq ≥ 0`,
-  `m_ineq ≥ 0` and the index style (for every triplet) is 0 or 1;
-  `PounceFreeQp` releases the handle (`NULL` is a no-op).
-- **Builders.** `PounceQpSetObjective`, `PounceQpSetEqualities`,
-  `PounceQpSetInequalities` and `PounceQpSetBounds` validate everything
-  before changing anything and return `FALSE` on a `NULL` handle or array,
-  an index out of range, an upper-triangle entry of `P` or a non-finite
-  value. `PounceQpAddCone` appends a `POUNCE_CONE_*` block to the partition
-  of the `G` rows and returns its position, or a negative `POUNCE_QP_ERR_*`.
-- **Options.** `PounceQpSetNumOption` takes `tol`, `max_iter`,
-  `time_limit`, `tau`, `tau_max` and `qp_reg`; `PounceQpSetStrOption`
-  takes `method` (`ipm` or `active-set`), `hessian_inertia` and the
-  `qp_presolve`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` switches
-  (`yes` or `no`), with the CLI's meanings.
-- **Solve.** `PounceQpSolve` returns a status, or a negative error before
-  any engine runs: an incomplete problem, cones that do not partition `G`,
-  a switch the selected engine would drop, or, under `method=ipm`, a `P`
-  that is not certified positive semidefinite (gh#112). The PSD verdict is
-  `pounce_convex::certify_psd_lower_triangle` at the CLI's tolerance, not
-  Python's numpy check, so the two can disagree on a borderline `P`.
-- **Getters.** `PounceQpGetSolution`, `PounceQpGetResiduals` (a
-  `PounceQpResiduals`) and `PounceQpGetCertificate` (a
-  `PounceQpCertificate`: infeasibility certificate and HSDE scalars)
-  describe the most recent solve that returned a status. They return
-  `FALSE` before one and after a refused solve.
-- **Report.** `PounceQpWriteSolveReport` writes a `pounce.solve-report/v1`
-  JSON file, with `solution.engine` set to `cvx-qp`, `qp-active-set` or
-  `cvx-qcqp`.
+### Standard form and indexing
+
+```text
+minimize    ½ xᵀP x + cᵀx
+subject to  A x = b,   G x ≤ h   (G x ⪯_K h with cones),   lb ≤ x ≤ ub
+```
+
+- `PounceCreateQp(n, m_eq, m_ineq, index_style)` fixes the dimensions: `n ≥ 1`
+  variables, `m_eq ≥ 0` rows of `A`, `m_ineq ≥ 0` rows of `G`. It returns
+  `NULL` on any other argument. `PounceFreeQp` releases the handle (`NULL` is
+  a no-op).
+- Every matrix is a list of `(row, col, value)` triplets, **0-based** when the
+  handle was created with `index_style = 0` and **1-based** with
+  `index_style = 1` (the `IpoptProblem` convention). Duplicate triplets are
+  summed.
+- `P` is given as its **lower triangle** (`row ≥ col`); an entry above the
+  diagonal is refused. `P` may be empty (`nnz_p = 0`): an LP. `A` and `G` are
+  given in full.
+- `PounceQpSetObjective` takes `P` and `c` (length `n`, required);
+  `PounceQpSetEqualities` takes `A` and `b` (length `m_eq`);
+  `PounceQpSetInequalities` takes `G` and `h` (length `m_ineq`). Each must be
+  called before a solve unless its row count is 0. A NULL array is accepted
+  only where its length is 0.
+- `PounceQpSetBounds(lb, ub)` sets the box. Either side may be `NULL` (no bound
+  on that side); an entry `≤ -1e19` in `lb` or `≥ 1e19` in `ub` (infinities
+  included) is no bound, as in Ipopt; `NaN` is refused. The default is no box.
+  Bounds are accepted with cones too (they join the cone product as a
+  trailing nonnegative block), which Python's `solve_socp` does not offer.
+- Each builder validates all of its input before writing any of it and
+  returns `FALSE`, changing nothing, on a `NULL` handle or array, an index out
+  of range, an upper-triangle entry of `P` or a non-finite value. A later call
+  replaces the earlier one.
+
+### Cones
+
+Without cones every `G` row is `Gx ≤ h`. With cones, `PounceQpAddCone(qp,
+kind, dim, alpha)` appends one block to a partition of the `G` rows, in row
+order, and returns its 0-based position. Each block's slack `s = h − Gx` (its
+rows of it) must lie in its cone:
+
+| kind | `dim` | rows | cone |
+|---|---|---|---|
+| `POUNCE_CONE_NONNEG` (0) | `≥ 0` | `dim` | `s ≥ 0` |
+| `POUNCE_CONE_SOC` (1) | `≥ 1` | `dim` | `s₀ ≥ ‖(s₁, …, s_{dim−1})‖₂` |
+| `POUNCE_CONE_EXP` (2) | `3` | 3 | `(s₀, s₁, s₂)` with `s₁·exp(s₀/s₁) ≤ s₂`, `s₁ > 0` (closure) |
+| `POUNCE_CONE_POW` (3) | `3` | 3 | `\|s₀\| ≤ s₁^α · s₂^(1−α)`, `s₁, s₂ ≥ 0`, `α = alpha ∈ (0, 1)` |
+| `POUNCE_CONE_PSD` (4) | matrix order `k ≥ 1` | `k(k+1)/2` | `smat(s) ⪰ 0` |
+
+- **PSD layout.** A PSD block's rows are `svec(S)` of the symmetric `k × k`
+  slack matrix: the lower triangle **column by column** — `(0,0), (1,0), …,
+  (k−1,0), (1,1), (2,1), …, (k−1,k−1)` — with every **off-diagonal entry
+  scaled by `√2`**, so that `⟨X, Y⟩ = svec(X)·svec(Y)`. The `G` rows and `h`
+  entries of an off-diagonal position carry that `√2`, and so does the dual
+  `z` read back for it.
+- `alpha` is read for `POUNCE_CONE_POW` only and ignored otherwise.
+- `AddCone` returns `POUNCE_QP_ERR_NULL` for a `NULL` handle and
+  `POUNCE_QP_ERR_ARGUMENT` for an unknown kind, a `dim` out of range or an
+  `alpha` outside `(0, 1)` (`NaN` and `±∞` included); nothing is added.
+- At the solve, the blocks must cover exactly `m_ineq` rows, and a PSD block
+  cannot be mixed with an exponential or power one (they run on different
+  drivers); either is `POUNCE_QP_ERR_CONES`. SOC mixes with either family.
+
+### Options
+
+`PounceQpSetNumOption` and `PounceQpSetStrOption` return `FALSE`, changing
+nothing, on a `NULL` handle, key or value, an unknown key, or a value out of
+range. The names and meanings are the CLI's and Python's.
+
+| key | values | meaning |
+|---|---|---|
+| `tol` | `(0, 1)` | convergence tolerance |
+| `max_iter` | whole number `≥ 1` | iteration cap (`POUNCE_QP_STATUS_ITERATION_LIMIT`) |
+| `time_limit` | seconds `≥ 0`, finite | wall-clock cap for this solve (`POUNCE_QP_STATUS_TIME_LIMIT`) |
+| `tau`, `tau_max` | `(0, 1)` | fraction-to-boundary floor and ceiling; a bare `tau` raises the ceiling to it, an explicit `tau_max` wins (Python's rule) |
+| `qp_reg` | finite `≥ 0` | KKT regularization of the IPM |
+| `method` | `ipm` (default), `active-set` | the convex interior-point engine, or the `pounce-qp` parametric active-set engine |
+| `hessian_inertia` | `auto` (default), `psd`, `indefinite`, `unknown` | where the PSD verdict on `P` comes from (below) |
+| `qp_presolve` | `yes`, `no` | presolve → engine → postsolve (and, on the IPM, the unverified-optimal demotion) |
+| `qp_hsde` | `yes`, `no` | homogeneous self-dual embedding on the IPM (`no`: the direct driver) |
+| `qp_equilibrate` | `yes`, `no` | Ruiz equilibration |
+| `qp_crossover` | `yes`, `no` | crossover after the IPM |
+
+An option the selected engine would drop is refused at the solve
+(`POUNCE_QP_ERR_OPTIONS`), not ignored:
+
+- under `method=active-set` (no cones), setting `qp_reg`, `qp_hsde` or
+  `qp_crossover` at all, to either value;
+- **with any cone**, `method=active-set`, `tau`, `tau_max` and every `qp_*`
+  switch (even `qp_hsde=yes`, the conic default): Python's `solve_socp` takes
+  none of them. The conic solve reads `tol`, `max_iter`, `time_limit`,
+  `method=ipm` and `hessian_inertia`.
+
+### PSD screen
+
+Under `method=ipm`, with or without cones, a `P` that is not certified positive
+semidefinite is refused with `POUNCE_QP_ERR_INDEFINITE` (gh#112): the convex
+IPM would return a silently wrong "optimal" at a saddle point.
+
+- With `hessian_inertia=auto` (the default) an empty `P` passes, and any other
+  `P` is asked of `pounce_convex::certify_psd_lower_triangle`, as the CLI's
+  dispatch does, at the CLI's band `t = 1e-9 · min(max|P_ij|, 1)` (the largest
+  entry after summing duplicates): `P` passes when `λ_min(P) ≥ −t`, decided by
+  a sign scan for a diagonal `P` and by the inertia of an `LDLᵀ` factorization
+  of `P + t·I` otherwise. A factorization that cannot decide counts as **not
+  certified**.
+- This is **not** Python's check. Python decides the same question in numpy
+  (`python/pounce/qp.py::_psd_verdict`: relative tolerance `1e-8 · max|P_ij|`,
+  dense eigenvalues for `n ≤ 1500`, an inertia count above, an undecided
+  factorization reported as unknown with a warning). On a borderline `P` —
+  `λ_min` within a few tolerances of zero, or a badly scaled rank-deficient
+  `P` — the C entry can refuse a `P` that Python's numpy check accepts. It
+  errs toward refusing.
+- `hessian_inertia=psd`, `indefinite` or `unknown` replaces the verdict with
+  the caller's claim, used as given: `psd` and `unknown` pass the screen,
+  `indefinite` is refused under the IPM. `auto` restores the computed
+  verdict. Use `psd` to accept a `P` you know is PSD and the screen refuses.
+- Under `method=active-set` the verdict is not a refusal: it is handed to the
+  engine, which solves an indefinite `P` to a first-order point (Python's
+  `method="active-set"`; see [Convex Solver](convex-solver.md)).
+- A `P` whose summed duplicate entries overflow to infinity is
+  `POUNCE_QP_ERR_ARGUMENT` at the solve.
+
+### Solving, statuses and errors
+
+`PounceQpSolve` returns a status (`≥ 0`) and keeps the result, or a negative
+error before any engine runs. It discards the previous result first, either
+way. Without cones it is Python's `solve_qp` pipeline (the IPM, or presolve →
+IPM → postsolve → unverified-optimal demotion with `qp_presolve=yes`; or the
+active-set engine, optionally presolved); with any cone it is `solve_socp`'s
+conic IPM (the symmetric driver, or the non-symmetric one when an exponential
+or power cone is present).
+
+| status | value | meaning | report `solution.status` |
+|---|---|---|---|
+| `POUNCE_QP_STATUS_OPTIMAL` | 0 | converged to `tol` | `Solve_Succeeded` |
+| `POUNCE_QP_STATUS_OPTIMAL_INACCURATE` | 1 | reduced accuracy: usable point, residual above `tol` | `Solved_To_Acceptable_Level` |
+| `POUNCE_QP_STATUS_PRIMAL_INFEASIBLE` | 2 | infeasible, with a Farkas certificate | `Infeasible_Problem_Detected` |
+| `POUNCE_QP_STATUS_DUAL_INFEASIBLE` | 3 | unbounded, with a recession certificate | `Diverging_Iterates` |
+| `POUNCE_QP_STATUS_ITERATION_LIMIT` | 4 | `max_iter` reached | `Maximum_Iterations_Exceeded` |
+| `POUNCE_QP_STATUS_TIME_LIMIT` | 5 | `time_limit` reached | `Maximum_WallTime_Exceeded` |
+| `POUNCE_QP_STATUS_NUMERICAL_FAILURE` | 6 | the KKT factorization failed | `Error_In_Step_Computation` |
+
+| error | value | returned when |
+|---|---|---|
+| `POUNCE_QP_ERR_NULL` | −1 | `NULL` handle (`Solve`, `AddCone`) |
+| `POUNCE_QP_ERR_ARGUMENT` | −2 | `AddCone`: bad kind, `dim` or `alpha`; `Solve`: `P` entries whose sum overflows |
+| `POUNCE_QP_ERR_INCOMPLETE` | −3 | no objective, or `m_eq > 0` / `m_ineq > 0` rows never set |
+| `POUNCE_QP_ERR_CONES` | −4 | the cones do not cover exactly `m_ineq` rows, or PSD mixed with exp/power |
+| `POUNCE_QP_ERR_OPTIONS` | −5 | an option the engine would drop (above) |
+| `POUNCE_QP_ERR_INDEFINITE` | −6 | `method=ipm` and `P` not certified PSD |
+| `POUNCE_QP_ERR_INTERNAL` | −7 | an internal error caught at the boundary |
+
+The report column is the CLI's convex mapping, so the AMPL `solve_result_num`
+equals the CLI's for the same status (0, 1, 200, 300, 400, 400, 500).
+
+### Reading the result
+
+The getters describe the most recent `PounceQpSolve` that returned a status.
+Before one, and after a solve that returned an error, they return `FALSE` and
+write nothing. A builder or option call after a solve does not erase the
+result.
+
+- `PounceQpGetSolution(qp, x, y, z, z_lb, z_ub, obj, iters)` copies `x`,
+  `z_lb`, `z_ub` (length `n`), `y` (`m_eq`), `z` (`m_ineq`), the objective and
+  the engine's iteration count; any output may be `NULL`. Signs:
+  `Px + c + Aᵀy + Gᵀz − z_lb + z_ub = 0` with `z, z_lb, z_ub ≥ 0` (`z` in the
+  dual cone with cones; in `svec` coordinates on a PSD block).
+- `PounceQpGetResiduals` fills a `PounceQpResiduals` (Python's
+  `QpResult.residuals`): `primal_infeasibility`, `dual_infeasibility`,
+  `complementarity`, `kkt_error` and their four `_raw` twins. Without cones the
+  first four are read above their finite-precision floor, in the objective's
+  units (the measurement the `Optimal` verdict is judged on), and the `_raw`
+  four are the plain absolute values; with cones both sets are the plain conic
+  residuals.
+- `PounceQpGetCertificate` fills a `PounceQpCertificate` and is `TRUE` after
+  every solve that returned a status. `kind` is
+  `POUNCE_QP_CERT_PRIMAL_INFEASIBLE` (1) on a primal-infeasible status — the
+  Farkas ray is in the `y`, `z`, `z_lb`, `z_ub` that `GetSolution` returns —,
+  `POUNCE_QP_CERT_DUAL_INFEASIBLE` (2) on a dual-infeasible one — the recession
+  ray is in `x` —, and `POUNCE_QP_CERT_NONE` (0) otherwise. `scale` is the
+  ray's inf-norm (`NaN` with no certificate); the ray carries the embedding's
+  `1/τ` scale, so divide by `scale` for a unit ray. `tau` and `kappa` are the
+  homogeneous embedding's scalars at termination, `NaN` when the answer came
+  from a driver that records none: the direct IPM (`qp_hsde=no`), the
+  active-set engine and the exponential/power-cone driver.
+
+### JSON report
+
+`PounceQpWriteSolveReport(qp, path, detail)` writes the most recent result as
+a `pounce.solve-report/v1` JSON file ([JSON Solve Report](json-output.md)) at
+`detail` `"summary"` (or `NULL`) or `"full"`. It returns `FALSE` for a `NULL`
+handle or path, no result, an unknown detail or an I/O error.
+
+- `solution.engine` is `cvx-qp` (the convex IPM), `qp-active-set` (the
+  active-set engine) or **`cvx-qcqp` for any solve with a cone**, exponential,
+  power and PSD included: the conic IPM the CLI's QCQP arm also runs. There is
+  no separate engine string for a matrix-form conic solve.
+- The input descriptor is `TnlpDirect`; `problem.n_constraints` is
+  `m_eq + m_ineq`; `solution.lambda` is `y` followed by `z`;
+  `solution.status` is the mapping in the status table; the statistics'
+  final residuals are the first four `PounceQpResiduals` fields.
+
+### Python parity
+
+The handle runs the functions Python's `solve_qp` / `solve_socp` run, on the
+same `QpProblem`. The crate's `tests/qp_python_parity.rs` feeds 25 models
+(LP, QP and every cone kind; both engines, presolve, crossover, the direct
+driver and the `tau` / `qp_reg` options; infeasible, unbounded and capped) through the handle and compares
+them with Python's results: **bit-exact on Linux x86_64** on status, objective,
+iterations, `x`, `y`, `z`, `z_lb`, `z_ub`, all eight residuals, `tau`,
+`kappa` and the certificate. Elsewhere the test asks only for Python's status
+and, on a solution, `x` and the objective to `1e-6`, since the reference was generated on Linux x86_64
+and floating-point results may differ by platform. The one deliberate
+difference is the PSD screen above.
 
 ## Fortran shim
 
@@ -394,7 +583,8 @@ extensions are mirrored there: they are C-only.
   mismatch at run time.
 - Changes to the C ABI are **additions only**: no existing prototype,
   `#[repr(C)]` struct layout (`PounceLinearSolverStats`,
-  `PounceComplementarityStats`, `PounceComplementaritySolve`) or `#define`
+  `PounceComplementarityStats`, `PounceComplementaritySolve`,
+  `PounceQpResiduals`, `PounceQpCertificate`) or `#define`
   value changes within the 0.x line. New capabilities arrive as new
   symbols. A test compiles a C program against the header and holds every
   struct's size and every field's offset and width to the Rust side.
