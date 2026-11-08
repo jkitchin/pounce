@@ -310,8 +310,18 @@ same driver outcome. Its fields are the ones the
 `GetPounceComplementarity*` getters return, with `null` or an absent key
 where a getter reads `NaN`, `-1` or an empty label. A solve without pairs
 writes no block. A refused solve leaves no report: the write returns `FALSE`.
-The report does not yet carry the `second_opinion` block the CLI and Python
-write when the second-opinion ladder ran.
+
+After a solve without pairs on which the second-opinion ladder ran a rung,
+the report carries the `second_opinion` block at either detail level, from
+the conversion the CLI and Python use: which rungs ran, which one was
+promoted, and the base solve's status and iteration count. On a promotion
+`solution.status` and `statistics.iteration_count` are the promoted rung's,
+so the block is the only record in the report that the base solve failed
+and of what the run cost (`total_iteration_count`). A solve on which no rung
+ran (the converged one) writes no block, and neither does a solve with pairs
+or a session solve, neither of which runs the ladder. Like the
+`complementarity` block it describes the most recent solve and is replaced
+by the next.
 
 ## Fortran shim
 

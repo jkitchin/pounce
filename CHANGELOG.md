@@ -42,6 +42,12 @@ changes.
     `snprintf` contract) return the solve report's `complementarity` block
     as scalars, and `IpoptWriteSolveReport` writes that block, the same one
     the CLI and Python write.
+  - `IpoptWriteSolveReport` also writes the `second_opinion` block (gh#850)
+    after a solve without pairs on which the second-opinion ladder ran,
+    under the same condition and through the same conversion as the CLI
+    and Python. It had kept only the ladder's status and statistics, so a
+    solve a rung rescued read as a clean, fast one: the report's iteration
+    count is the promoted rung's alone. Solve behaviour is unchanged.
   - `examples/complementarity.c` exercises all of it, and the book's
     `docs/src/c-api.md` documents it, including how to make a
     callback model reproduce the CLI's run on the same `.nl` model.

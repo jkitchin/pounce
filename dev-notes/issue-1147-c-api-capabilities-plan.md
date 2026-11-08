@@ -29,6 +29,7 @@ that ticks it.
 - [x] **S1-I9** MOI-semantics helper `AddPounceComplementsConstraint`: all five table rows + error rows tested.
 - [x] **S1-I10** C example `examples/complementarity.c`; docs (`complementarity.md`, `c-api.md`, README, CHANGELOG); Pounce.jl gate/ABI-review checklist written.
 - [x] **S1-I11** Stage-1 closing gate: full fixture sweep (both legs, cc: lines) diffs empty against the baseline binary; `make check clippy fmt-check`; `make python-test`.
+- [x] **S1-I12** `IpoptWriteSolveReport` carries the `second_opinion` block (gh#850) after a pairs-free `IpoptSolve` on which the ladder ran, under the CLI's and Python's `ran()` test and through `SecondOpinionOutcome::report_info()`; no solve-behaviour change, no new symbol or struct. Approved by the human after S1-I11 (§8.5). **Gate:** `cargo test -p pounce-cinterface` (every binary green, new `tests/second_opinion_report.rs`: rescued block equals Python's, every-rung-fails, converged, pairs, no leak; the rescued test fails without the change); `cargo test -p pounce-cli --test cinterface_mpcc_parity`; export guard (`export_surface`, `header_abi`); CI clippy flags on this crate (`--all-targets --no-deps -D clippy::correctness -D clippy::suspicious`); `cargo fmt --all -- --check`; `make book`; `make ask-check`; `make c-api-examples`. No sweep (the CLI does not link this crate; confirmed in §9).
 
 **Stop here and report to the human before starting any later stage.**
 
@@ -1313,10 +1314,11 @@ No Fortran symbol added (`src/fortran.rs` is still the eight upstream
       `pounce-cinterface` (S1-I7): tests only, so reals read back to the
       bit; `Cargo.lock` unchanged. `pounce-cli`'s parser deliberately not
       changed (its tests compare report text instead).
-- [ ] **No `second_opinion` block in the C report** (noticed in S1-I7, not
-      changed): the CLI and Python write one when the ladder ran;
-      `IpoptWriteSolveReport` never has. Now stated in `docs/src/c-api.md`.
-      Separate issue or accept?
+- [x] **No `second_opinion` block in the C report** (noticed in S1-I7):
+      **resolved by S1-I12**, which the human approved. `IpoptWriteSolveReport`
+      now writes the block under the CLI's and Python's `ran()` test, through
+      the same `report_info()`; `docs/src/c-api.md`, `pounce.h`, the README,
+      the schema page and the CHANGELOG say so.
 - [ ] **Trajectory vs the CLI** (S1-I5/I8): a callback model and the `.nl`
       file of the same model agree on the answer but not always on the
       iteration count (row constant in `g` or in its bound; the `.nl`
@@ -2277,6 +2279,93 @@ suites (`make -C benchmarks mpcc-opf-run`, `capacity-equilibria-run`,
 `mpcc-compare`) and the other declared-pair corpora in `CLAUDE.md` — only
 if review finds `pounce-nlp` changed beyond the classifier move; both
 sweeps say it did not.
+
+### S1-I12 — `IpoptWriteSolveReport` carries the `second_opinion` block (commit that ticks S1-I12)
+
+Approved by the human after S1-I11 as an extra Stage-1 item (§8.5's open
+`second_opinion` question).
+
+What moved:
+- `src/lib.rs`: `LastSolve` gains `second_opinion:
+  Option<SecondOpinionOutcome>`. `IpoptSolve`'s path without pairs keeps the
+  whole ladder outcome (it took `status` and `statistics` and dropped the
+  rest); the driver path and the session solve (`src/solver.rs`) store
+  `None`. `IpoptWriteSolveReport` adds `if let Some(so) =
+  &last.second_opinion && so.ran() { builder.set_second_opinion(
+  so.report_info()) }`: the CLI's (`pounce-cli/src/main.rs`, `if
+  second_opinion.ran()`) and Python's (`pounce-py/src/problem.rs::
+  write_solve_report`) test and conversion, so no second emitter.
+  `ReportBuilder::finish` copies the block at every detail level, as it does
+  for the CLI and Python. Solve behaviour unchanged: the ladder already ran,
+  its status and statistics are still what ships and what the getters read.
+- Other entry points: `IpoptSolveWarmStart` reaches the ladder only through
+  `IpoptSolve`, so it is covered with no code of its own; `IpoptSolverSolve`
+  never ran the ladder and stores `None`. No other call site of
+  `run_second_opinion_ladder` in the crate.
+- Pairs: the CLI skips the ladder when the driver ran (`mpcc_outcome.is_none()`
+  in its gate) and Python returns `SecondOpinionOutcome::unchanged`
+  (`ran()` false), so neither writes a block on a driver solve; the C path
+  stores `None` there, the same behaviour.
+- No new exported symbol, no struct or `#define` change; export guard green.
+- Docs: `docs/src/c-api.md` ("Solve report": the "does not yet carry"
+  sentence S1-I10 added is replaced by what the block is and when it is
+  absent), `pounce.h` and the Rust doc comment on `IpoptWriteSolveReport`,
+  the crate README, `docs/src/schema/solve-report-v1.md` (the C API named as
+  a producer, and "never with declared pairs"), one CHANGELOG bullet under
+  the gh#1147 entry; §8.5's item marked resolved. The S1-I7 and S1-I10 log
+  entries above are left as written (history).
+
+Tests (`tests/second_opinion_report.rs`, 5; Python reference in
+`tests/common/second_opinion_python_reports.json`, from the scratchpad
+venv's 0.16.0 extension built from this branch, whose Python path this item
+does not touch; Python's `full` and `summary` blocks identical):
+- (1) rescued: `degenerate_start_hs008` (the CLI's gh#850 model,
+  `issue850_second_opinion_is_recorded.rs`) as callbacks with its exact
+  Hessian, free variables, from the origin: base
+  `Infeasible_Problem_Detected`/9, rungs `feral_scaling=mc64` 9,
+  `mu_strategy=adaptive` 7, `start_point_perturbation=1e-2` 5 (promoted),
+  total 30, reported `Solve_Succeeded`/5 — the same numbers as the CLI on
+  the `.nl` file. The C block equals Python's as a JSON value at both
+  levels (the block has no timing field, so nothing is stripped); the
+  report's status and `iteration_count` equal Python's;
+  `statistics.iteration_count` = `GetIpoptIterCount` = the promoted rung's
+  entry of `rung_iteration_counts`; `total = base + Σ rungs`; `base_status`
+  differs from the shipped status.
+- (2) every rung fails: Python's `NoRealSolution` (`x² + 1 = 0`) with its
+  exact Hessian, from 0.5: block present, no `promoted_by`, `base_status` =
+  the shipped status, reported count = `base_iteration_count` (17), three
+  rungs (17, 14, 26). Equal to Python's block on this platform; the test
+  compares whole only when the rung lists agree, because rung 4 is
+  platform arithmetic (`python/tests/test_second_opinion.py::
+  _expected_rungs`), and always checks the three fixed rungs lead.
+- (3) converged (HS008 from `(3, 2)`, 5 iterations): no key at either level.
+- (4) pairs (`infeasible_pair`): the driver's verdict is
+  `Infeasible_Problem_Detected`, a status that opens the ladder on the
+  path without pairs, and the report has `complementarity` and no
+  `second_opinion` at either level; Python's report on the same model has
+  the same two facts.
+- (5) no leak: HS008 rescued from the origin, then re-solved from `(3, 2)`
+  on the same handle: the second report has no block, and its iteration
+  count (5) is Python's for the same sequence on one `Problem`.
+- Without the change (`src/` stashed, tests kept): `2 passed; 3 failed` —
+  (1), (2) and (5) panic at `no second_opinion block in the C report`;
+  (3) and (4) pass, being the absent branches.
+
+Gate (all on the ticking commit's tree):
+- `cargo test -p pounce-cinterface` — all green, 22 binaries, 235 passed
+  (lib 61, `second_opinion_report` 5, `complementarity_report` 10,
+  `export_surface` 13, `header_abi` 4, `c_examples_build_and_run` 6, ...).
+- `cargo test -p pounce-cli --test cinterface_mpcc_parity` — `ok. 16 passed`.
+- Export guard (`export_surface` 13, `header_abi` 4) green within the above.
+- `cargo clippy -p pounce-cinterface --all-targets --no-deps -- -D
+  clippy::correctness -D clippy::suspicious` — exit 0 (only pre-existing
+  warnings in other test files; none in `second_opinion_report.rs`).
+- `cargo fmt --all -- --check` clean; `make book` (mdbook 0.5.2) builds, no
+  warnings; `make ask-check` top-1 17/20 (floor 14), top-5 20/20 (floor
+  18), OK; `make c-api-examples` green.
+- Sweep not run, and not needed: no solver code moved, and the CLI binary
+  the sweep runs does not link `pounce-cinterface` (it is a dev-dependency
+  of `pounce-cli`, S1-I8, i.e. test binaries only).
 
 ### Facts recorded while planning (2ac0ad9)
 

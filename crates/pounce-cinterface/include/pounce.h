@@ -1013,6 +1013,13 @@ Bool IpoptEnableIterHistory(IpoptProblem ipopt_problem);
  * where those read NaN, -1 or "". The block is absent after a solve that
  * did not run the driver, and a refused solve leaves no report at all.
  *
+ * When that solve ran no driver and the second-opinion ladder ran at
+ * least one rung, the report carries the `second_opinion` block at either
+ * detail level, the same block the CLI and Python write: the rungs tried,
+ * the promoted one, and the base solve's status and iteration count (on a
+ * promotion, the report's status and iteration count are the promoted
+ * rung's). Absent when no rung ran and after a solve with pairs.
+ *
  * Returns 1 (TRUE) on a successful write, 0 (FALSE) for: NULL handle,
  * no prior solve, an invalid `detail`, a bad path, or an I/O error.
  */

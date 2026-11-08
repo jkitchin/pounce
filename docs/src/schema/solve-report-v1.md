@@ -356,8 +356,10 @@ What the second-opinion ladder did (gh#850). Present only when a failing
 verdict opened the ladder; omitted from every ordinary solve. On a promotion,
 `solution.status` and `statistics.iteration_count` are the promoted rung's, so
 this block is the only record that the base solve failed and of what the run
-cost. Written by the CLI's `--json-output` and by Python's
-`solve(report_path=...)`.
+cost. Written by the CLI's `--json-output`, by Python's
+`solve(report_path=...)` and by the C API's `IpoptWriteSolveReport`, all
+through one conversion; never on a solve with declared complementarity
+pairs, whose driver replaces the ladder.
 
 | Field | Type | Notes |
 |---|---|---|

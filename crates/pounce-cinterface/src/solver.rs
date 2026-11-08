@@ -298,6 +298,7 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 final_lambda: bridge_ref.final_lambda.clone(),
                 final_obj: bridge_ref.final_obj,
                 mpcc: None,
+                second_opinion: None,
             });
             if !x.is_null() && n_us > 0 {
                 std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);

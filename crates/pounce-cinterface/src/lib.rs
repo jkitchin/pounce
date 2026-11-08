@@ -222,6 +222,13 @@ pub(crate) struct LastSolve {
     /// The complementarity driver's record when the solve declared pairs
     /// (gh#1147); `None` on every other solve, including every session solve.
     pub(crate) mpcc: Option<pounce_restoration::mpcc_driver::MpccOutcome>,
+    /// The second-opinion ladder's outcome when the solve took the path
+    /// without pairs (gh#850, gh#1147); `None` on a driver solve and on
+    /// every session solve, neither of which runs the ladder. Kept whether
+    /// or not a rung ran: [`IpoptWriteSolveReport`] writes the block under
+    /// the same `ran()` test as the CLI and Python.
+    pub(crate) second_opinion:
+        Option<pounce_restoration::second_opinion_driver::SecondOpinionOutcome>,
 }
 
 impl Default for LastSolve {
@@ -234,6 +241,7 @@ impl Default for LastSolve {
             final_lambda: Vec::new(),
             final_obj: 0.0,
             mpcc: None,
+            second_opinion: None,
         }
     }
 }
@@ -824,7 +832,7 @@ pub unsafe extern "C" fn IpoptSolve(
             // and forwards the reported point to the bridge's
             // `finalize_solution` exactly once, so the copy-back below is the
             // same for both paths.
-            let (status, statistics, mpcc) = if !info.complementarity.is_empty() {
+            let (status, statistics, mpcc, second_opinion) = if !info.complementarity.is_empty() {
                 let narrate =
                     pounce_algorithm::second_opinion::narration_is_wanted(info.app.options());
                 let result = {
@@ -874,7 +882,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 if info.app.release_end_verdict() {
                     info.app.print_end_verdict(out.status);
                 }
-                (out.status, out.statistics.clone(), Some(out))
+                (out.status, out.statistics.clone(), Some(out), None)
             } else {
                 // The path without pairs, unchanged: one solve, then the ladder.
                 let status = info.app.optimize_tnlp(bridge_for_solve);
@@ -906,7 +914,7 @@ pub unsafe extern "C" fn IpoptSolve(
                         }
                     },
                 );
-                (ladder.status, ladder.statistics, None)
+                (ladder.status, ladder.statistics.clone(), None, Some(ladder))
             };
             let bridge_ref = bridge.borrow();
             info.last_solve = Some(LastSolve {
@@ -917,6 +925,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 final_lambda: bridge_ref.final_lambda.clone(),
                 final_obj: bridge_ref.final_obj,
                 mpcc,
+                second_opinion,
             });
             if !x.is_null() && n_us > 0 {
                 std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
@@ -3473,6 +3482,12 @@ pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> 
 /// built by the same conversion as the CLI's and Python's reports; it is
 /// absent otherwise.
 ///
+/// When that solve took the path without pairs and the second-opinion
+/// ladder ran at least one rung, the report carries the `second_opinion`
+/// block (gh#850) at either detail level, from the same conversion and
+/// under the same condition as the CLI's and Python's; absent when no rung
+/// ran, after a driver solve, and after a session solve.
+///
 /// Returns `TRUE` on a successful write, `FALSE` for NULL handle,
 /// no prior solve, an invalid `detail`, a bad path, or an I/O error.
 ///
@@ -3545,6 +3560,18 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
         // a solve that did not run the driver (no pairs declared).
         if let Some(out) = &last.mpcc {
             builder.set_complementarity(out.report_info());
+        }
+        // gh#850: what the second-opinion ladder did, and what the *base*
+        // solve did before it, under the CLI's and Python's `ran()` test and
+        // through the same `report_info()`. `ingest_stats` above wrote the
+        // promoted rung's iteration count as though it were the solve's;
+        // without this block a rescued solve reads as a clean, fast one.
+        // Absent when no rung ran, and on a driver solve, which does not run
+        // the ladder (the CLI and Python skip it there too).
+        if let Some(so) = &last.second_opinion
+            && so.ran()
+        {
+            builder.set_second_opinion(so.report_info());
         }
 
         let report = builder.finish();

@@ -117,7 +117,9 @@ POUNCE extensions:
   [`pounce-solve-report`](../pounce-solve-report)) from the most
   recent solve. Schema-compatible with the CLI's `--json-output`; after a
   complementarity-driver solve it carries the same `complementarity` block
-  the CLI and Python write for the same driver outcome.
+  the CLI and Python write for the same driver outcome, and after a solve
+  the second-opinion ladder ran a rung on, the same `second_opinion` block
+  (gh#850: which rung was promoted, and the base solve's status and cost).
 - Working-set warm start (active-set SQP): `IpoptGetWorkingSet`,
   `IpoptSetWarmStartWorkingSet`, `IpoptClearWarmStartWorkingSet`,
   `IpoptSolveWarmStart`. Example: `examples/sqp_warm_start.c`.
