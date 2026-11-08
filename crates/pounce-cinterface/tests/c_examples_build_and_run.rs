@@ -402,6 +402,7 @@ macro_rules! layout {
 fn repr_c_structs_match_the_header_layout() {
     use pounce_cinterface::{
         PounceComplementaritySolve, PounceComplementarityStats, PounceLinearSolverStats,
+        PounceQpCertificate, PounceQpResiduals,
     };
     let structs = [
         layout!(PounceLinearSolverStats;
@@ -417,6 +418,11 @@ fn repr_c_structs_match_the_header_layout() {
             polish_residual_after, polish_threshold),
         layout!(PounceComplementaritySolve;
             stage, relaxed, tau, status, iterations, max_abs_product, seconds),
+        layout!(PounceQpResiduals;
+            primal_infeasibility, dual_infeasibility, complementarity, kkt_error,
+            primal_infeasibility_raw, dual_infeasibility_raw, complementarity_raw,
+            kkt_error_raw),
+        layout!(PounceQpCertificate; kind, scale, tau, kappa),
     ];
 
     let header =

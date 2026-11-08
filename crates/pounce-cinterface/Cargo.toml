@@ -18,6 +18,11 @@ pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-qp.workspace = true
+# The matrix-form convex/conic entry (`src/qp.rs`, gh#1147 Stage 3) runs
+# `pounce_convex::pipeline` on a FERAL backend. Both were already in this
+# crate's dependency closure through pounce-algorithm.
+pounce-convex.workspace = true
+pounce-feral.workspace = true
 pounce-restoration.workspace = true
 pounce-sensitivity.workspace = true
 pounce-linsol.workspace = true

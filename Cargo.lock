@@ -895,6 +895,8 @@ version = "0.16.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
+ "pounce-convex",
+ "pounce-feral",
  "pounce-hsl",
  "pounce-linsol",
  "pounce-nlp",

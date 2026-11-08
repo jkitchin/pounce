@@ -326,6 +326,55 @@ or a session solve, neither of which runs the ladder. Like the
 `complementarity` block it describes the most recent solve and is replaced
 by the next.
 
+## Matrix-form convex QP and conic programs
+
+Separate from the NLP handle, a `PounceQp` handle takes a convex problem in
+matrix form — `min ½xᵀPx + cᵀx` subject to `Ax = b`, `Gx ≤ h` (or `Gx ⪯_K h`
+with cones) and `lb ≤ x ≤ ub` — and solves it with the convex engines, through
+the same pipeline as Python's `solve_qp` and `solve_socp`
+([Convex Solver](convex-solver.md)).
+
+```c
+PounceQp qp = PounceCreateQp(n, m_eq, m_ineq, 0);   /* 0-based triplets */
+PounceQpSetObjective(qp, nnz_p, p_row, p_col, p_val, c);   /* P: lower triangle */
+PounceQpSetEqualities(qp, nnz_a, a_row, a_col, a_val, b);
+PounceQpSetInequalities(qp, nnz_g, g_row, g_col, g_val, h);
+PounceQpSetBounds(qp, lb, NULL);                    /* NULL: no upper bounds */
+PounceQpAddCone(qp, POUNCE_CONE_SOC, 3, 0.0);       /* optional */
+int status = PounceQpSolve(qp);                     /* POUNCE_QP_STATUS_* or < 0 */
+PounceQpGetSolution(qp, x, y, z, z_lb, z_ub, &obj, &iters);
+PounceFreeQp(qp);
+```
+
+- **Lifecycle.** `PounceCreateQp` returns `NULL` unless `n ≥ 1`, `m_eq ≥ 0`,
+  `m_ineq ≥ 0` and the index style (for every triplet) is 0 or 1;
+  `PounceFreeQp` releases the handle (`NULL` is a no-op).
+- **Builders.** `PounceQpSetObjective`, `PounceQpSetEqualities`,
+  `PounceQpSetInequalities` and `PounceQpSetBounds` validate everything
+  before changing anything and return `FALSE` on a `NULL` handle or array,
+  an index out of range, an upper-triangle entry of `P` or a non-finite
+  value. `PounceQpAddCone` appends a `POUNCE_CONE_*` block to the partition
+  of the `G` rows and returns its position, or a negative `POUNCE_QP_ERR_*`.
+- **Options.** `PounceQpSetNumOption` takes `tol`, `max_iter`,
+  `time_limit`, `tau`, `tau_max` and `qp_reg`; `PounceQpSetStrOption`
+  takes `method` (`ipm` or `active-set`), `hessian_inertia` and the
+  `qp_presolve`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` switches
+  (`yes` or `no`), with the CLI's meanings.
+- **Solve.** `PounceQpSolve` returns a status, or a negative error before
+  any engine runs: an incomplete problem, cones that do not partition `G`,
+  a switch the selected engine would drop, or, under `method=ipm`, a `P`
+  that is not certified positive semidefinite (gh#112). The PSD verdict is
+  `pounce_convex::certify_psd_lower_triangle` at the CLI's tolerance, not
+  Python's numpy check, so the two can disagree on a borderline `P`.
+- **Getters.** `PounceQpGetSolution`, `PounceQpGetResiduals` (a
+  `PounceQpResiduals`) and `PounceQpGetCertificate` (a
+  `PounceQpCertificate`: infeasibility certificate and HSDE scalars)
+  describe the most recent solve that returned a status. They return
+  `FALSE` before one and after a refused solve.
+- **Report.** `PounceQpWriteSolveReport` writes a `pounce.solve-report/v1`
+  JSON file, with `solution.engine` set to `cvx-qp`, `qp-active-set` or
+  `cvx-qcqp`.
+
 ## Fortran shim
 
 The same library exports the eight Fortran 77 entry points of Ipopt's

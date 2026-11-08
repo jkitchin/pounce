@@ -12,7 +12,7 @@
 //!
 //! What it enforces, for every exported name:
 //!
-//! 1. **Header.** The set of C exports in `src/lib.rs` + `src/solver.rs`
+//! 1. **Header.** The set of C exports in `src/lib.rs` + `src/solver.rs` + `src/qp.rs`
 //!    equals the set of top-level prototypes in `include/pounce.h`.
 //! 2. **Signature.** Same arity; each parameter and the return mapped to a
 //!    width class (`i1`, `i32`, `f64`, `ptr`, `fnptr(<typedef>)`, `void`)
@@ -96,7 +96,7 @@ fn rust_class(ty: &str) -> Result<Class, String> {
         "Bool" => Class::I1,
         "Index" | "c_int" | "i32" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
         "Number" | "f64" => Class::F64,
-        "IpoptProblem" | "IpoptSolver" => Class::Ptr,
+        "IpoptProblem" | "IpoptSolver" | "PounceQp" => Class::Ptr,
         "" | "()" => Class::Void,
         _ => return Err(format!("unrecognised Rust type `{ty}`")),
     })
@@ -274,7 +274,7 @@ fn c_class(decl: &str, has_name: bool) -> Result<Class, String> {
         "bool" | "Bool" => Class::I1,
         "int" | "ipindex" | "Index" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
         "ipnumber" | "Number" | "double" => Class::F64,
-        "IpoptProblem" | "IpoptSolver" | "UserDataPtr" => Class::Ptr,
+        "IpoptProblem" | "IpoptSolver" | "PounceQp" | "UserDataPtr" => Class::Ptr,
         "void" => Class::Void,
         _ => return Err(format!("unrecognised C type `{ty}` in `{decl}`")),
     })
@@ -438,7 +438,7 @@ fn test_corpus() -> String {
             corpus.push('\n');
         }
     }
-    for f in ["lib.rs", "solver.rs", "fortran.rs"] {
+    for f in ["lib.rs", "solver.rs", "qp.rs", "fortran.rs"] {
         let src = read(root.join("src").join(f));
         if let Some(pos) = src.find("#[cfg(test)]") {
             corpus.push_str(&src[pos..]);
@@ -477,7 +477,7 @@ struct Surface {
 fn surface() -> Surface {
     let root = manifest_dir();
     let mut c = BTreeMap::new();
-    for f in ["lib.rs", "solver.rs"] {
+    for f in ["lib.rs", "solver.rs", "qp.rs"] {
         let ex = rust_exports(&read(root.join("src").join(f)))
             .unwrap_or_else(|e| panic!("src/{f}: {e}"));
         for (k, v) in ex {

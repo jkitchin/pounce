@@ -1168,6 +1168,171 @@ Bool IpoptSolverReducedHessian(
     Number        *hr_out
 );
 
+/* -----------------------------------------------------------------
+ * Matrix-form convex QP / conic entry (gh#1147 Stage 3). Not an Ipopt
+ * API: every name carries the Pounce prefix.
+ *
+ *   minimize    1/2 x'P x + c'x
+ *   subject to  A x = b,   G x <= h  (G x <=_K h with cones),   lb <= x <= ub
+ *
+ * P is given as its LOWER triangle (row >= col); A and G as full
+ * triplets. Triplet indices are 0-based for index_style 0 and 1-based
+ * for index_style 1. Duplicate triplets are summed. Every builder
+ * validates all of its input first and changes nothing when it
+ * returns FALSE (NULL handle or array, index out of range, an
+ * upper-triangle entry of P, a non-finite value).
+ *
+ * Without cones the solve is Python's solve_qp pipeline (presolve when
+ * qp_presolve=yes, then the IPM or the active-set engine, postsolve,
+ * the unverified-Optimal demotion); with any cone it is solve_socp's
+ * conic IPM. Both run pounce_convex::pipeline, the code Python runs.
+ *
+ * PSD screen (gh#112). Under method=ipm a P that is not certified
+ * positive semidefinite is refused (POUNCE_QP_ERR_INDEFINITE). With
+ * hessian_inertia=auto (the default) the verdict comes from
+ * pounce_convex::certify_psd_lower_triangle, as in the CLI's dispatch:
+ * P passes when the inertia of P + t*I has no negative eigenvalue, at
+ * the CLI's band t = 1e-9 * min(max|P_ij|, 1). A factorization that
+ * cannot decide counts as not certified. Python decides the same
+ * question in numpy (relative tolerance 1e-8*max|P_ij|, eigenvalues
+ * for n <= 1500), so on a borderline P (lambda_min within a few
+ * tolerances of zero, or a badly scaled rank-deficient P) the two can
+ * disagree; this entry errs toward refusing. hessian_inertia=psd,
+ * indefinite or unknown replaces the verdict with the caller's claim.
+ * Under method=active-set the verdict is handed to the engine
+ * (indefinite P is solved to a local point, not refused).
+ *
+ * Getters describe the most recent PounceQpSolve that returned a
+ * status (>= 0): before one, and after a solve that returned an
+ * error (< 0), they return FALSE and write nothing. A builder or
+ * option call does not erase the result.
+ * ----------------------------------------------------------------- */
+struct PounceQpInfo;
+typedef struct PounceQpInfo* PounceQp;
+
+/* PounceQpSolve statuses (>= 0), one per pounce_convex::QpStatus. */
+#define POUNCE_QP_STATUS_OPTIMAL             0
+#define POUNCE_QP_STATUS_OPTIMAL_INACCURATE  1
+#define POUNCE_QP_STATUS_PRIMAL_INFEASIBLE   2
+#define POUNCE_QP_STATUS_DUAL_INFEASIBLE     3
+#define POUNCE_QP_STATUS_ITERATION_LIMIT     4
+#define POUNCE_QP_STATUS_TIME_LIMIT          5
+#define POUNCE_QP_STATUS_NUMERICAL_FAILURE   6
+
+/* Negative returns of PounceQpSolve and PounceQpAddCone. */
+#define POUNCE_QP_ERR_NULL        -1   /* NULL handle */
+#define POUNCE_QP_ERR_ARGUMENT    -2   /* bad cone kind/dim/alpha; P entries whose sum overflows */
+#define POUNCE_QP_ERR_INCOMPLETE  -3   /* no objective, or declared rows never set */
+#define POUNCE_QP_ERR_CONES       -4   /* cones do not partition the m_ineq rows; PSD mixed with exp/pow */
+#define POUNCE_QP_ERR_OPTIONS     -5   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_* */
+#define POUNCE_QP_ERR_INDEFINITE  -6   /* method=ipm and P not certified PSD */
+#define POUNCE_QP_ERR_INTERNAL    -7   /* internal error caught at the boundary */
+
+/* PounceQpAddCone kinds. */
+#define POUNCE_CONE_NONNEG  0   /* dim rows, dim >= 0 */
+#define POUNCE_CONE_SOC     1   /* dim rows, dim >= 1: s0 >= ||s[1:]|| */
+#define POUNCE_CONE_EXP     2   /* dim must be 3 */
+#define POUNCE_CONE_POW     3   /* dim must be 3; alpha in (0, 1) */
+#define POUNCE_CONE_PSD     4   /* dim = matrix order k >= 1; k(k+1)/2 svec rows */
+
+/* PounceQpCertificate.kind. */
+#define POUNCE_QP_CERT_NONE               0
+#define POUNCE_QP_CERT_PRIMAL_INFEASIBLE  1   /* Farkas ray in y, z, z_lb, z_ub */
+#define POUNCE_QP_CERT_DUAL_INFEASIBLE    2   /* recession ray in x */
+
+/** Final KKT residuals (Python's QpResult.residuals). Without cones the
+ *  first four are read above their finite-precision floor in the
+ *  objective's units (what the Optimal verdict is judged on); the
+ *  _raw four are the plain absolute values. With cones both sets are
+ *  the plain conic residuals. */
+typedef struct {
+    ipnumber primal_infeasibility;
+    ipnumber dual_infeasibility;
+    ipnumber complementarity;
+    ipnumber kkt_error;
+    ipnumber primal_infeasibility_raw;
+    ipnumber dual_infeasibility_raw;
+    ipnumber complementarity_raw;
+    ipnumber kkt_error_raw;
+} PounceQpResiduals;
+
+/** Infeasibility certificate and HSDE scalars (Python's
+ *  certificate_scale, tau, kappa). `scale` is the ray's inf-norm, NaN
+ *  when kind is POUNCE_QP_CERT_NONE. The ray carries the embedding's
+ *  1/tau scale; divide by `scale` for a unit ray. tau and kappa are NaN
+ *  when the driver had no embedding (qp_hsde=no, active-set). */
+typedef struct {
+    ipindex  kind;
+    ipnumber scale;
+    ipnumber tau;
+    ipnumber kappa;
+} PounceQpCertificate;
+
+/** n >= 1 variables, m_eq >= 0 and m_ineq >= 0 rows, index_style 0 or
+ *  1. NULL on any other argument. */
+PounceQp PounceCreateQp(ipindex n, ipindex m_eq, ipindex m_ineq, ipindex index_style);
+
+/** Free a handle. NULL is a no-op. The handle must not be used after. */
+void PounceFreeQp(PounceQp qp);
+
+/** P (lower triangle, nnz_p triplets) and c (length n, required). */
+Bool PounceQpSetObjective(PounceQp qp, ipindex nnz_p, const ipindex* p_row,
+                          const ipindex* p_col, const ipnumber* p_val,
+                          const ipnumber* c);
+
+/** A (m_eq x n) and b (length m_eq). Required when m_eq > 0. */
+Bool PounceQpSetEqualities(PounceQp qp, ipindex nnz_a, const ipindex* a_row,
+                           const ipindex* a_col, const ipnumber* a_val,
+                           const ipnumber* b);
+
+/** G (m_ineq x n) and h (length m_ineq). Required when m_ineq > 0. */
+Bool PounceQpSetInequalities(PounceQp qp, ipindex nnz_g, const ipindex* g_row,
+                             const ipindex* g_col, const ipnumber* g_val,
+                             const ipnumber* h);
+
+/** Variable box, each length n or NULL (no bound on that side). An
+ *  entry <= -1e19 in lb or >= 1e19 in ub is no bound; NaN is refused. */
+Bool PounceQpSetBounds(PounceQp qp, const ipnumber* lb, const ipnumber* ub);
+
+/** Append a cone (POUNCE_CONE_*) to the partition of the G rows, in
+ *  order. Returns its 0-based position, or POUNCE_QP_ERR_NULL /
+ *  POUNCE_QP_ERR_ARGUMENT. alpha is read for POUNCE_CONE_POW only. */
+int PounceQpAddCone(PounceQp qp, int kind, ipindex dim, ipnumber alpha);
+
+/** tol (0,1); max_iter (whole, >= 1); time_limit (seconds, >= 0);
+ *  tau, tau_max (0,1); qp_reg (>= 0). FALSE on an unknown key or a
+ *  value out of range. */
+Bool PounceQpSetNumOption(PounceQp qp, const char* key, ipnumber value);
+
+/** method: ipm | active-set; hessian_inertia: auto | psd | indefinite |
+ *  unknown; qp_presolve, qp_hsde, qp_equilibrate, qp_crossover: yes |
+ *  no. FALSE on an unknown key or value. */
+Bool PounceQpSetStrOption(PounceQp qp, const char* key, const char* value);
+
+/** POUNCE_QP_STATUS_* (>= 0), or POUNCE_QP_ERR_* (< 0) before any
+ *  engine runs. Discards the previous result either way. */
+int PounceQpSolve(PounceQp qp);
+
+/** Copy the solution out; any output may be NULL. x, z_lb, z_ub: n;
+ *  y: m_eq; z: m_ineq. Signs: P x + c + A'y + G'z - z_lb + z_ub = 0,
+ *  z, z_lb, z_ub >= 0 (z cone-dual with cones). */
+Bool PounceQpGetSolution(PounceQp qp, ipnumber* x, ipnumber* y, ipnumber* z,
+                         ipnumber* z_lb, ipnumber* z_ub, ipnumber* obj,
+                         ipindex* iters);
+
+/** FALSE for a NULL handle or out, or no result. */
+Bool PounceQpGetResiduals(PounceQp qp, PounceQpResiduals* out);
+
+/** TRUE after every solve that returned a status; kind says whether a
+ *  certificate is present. FALSE for a NULL handle or out, or no result. */
+Bool PounceQpGetCertificate(PounceQp qp, PounceQpCertificate* out);
+
+/** pounce.solve-report/v1 JSON at detail "summary" (or NULL) / "full".
+ *  solution.engine is cvx-qp, qp-active-set, or cvx-qcqp (any cone);
+ *  solution.lambda is y then z. FALSE for a NULL handle or path, no
+ *  result, an unknown detail, or an I/O error. */
+Bool PounceQpWriteSolveReport(PounceQp qp, const char* path, const char* detail);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

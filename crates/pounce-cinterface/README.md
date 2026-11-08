@@ -134,6 +134,22 @@ POUNCE extensions:
   [`docs/src/sessions.md`](../../docs/src/sessions.md) for the
   walkthrough.
 
+- Matrix-form convex QP / conic entry (gh#1147 Stage 3; `src/qp.rs`): an
+  opaque `PounceQp` handle — `PounceCreateQp`, `PounceFreeQp`; builders
+  `PounceQpSetObjective` (`P` lower triangle + `c`),
+  `PounceQpSetEqualities`, `PounceQpSetInequalities`, `PounceQpSetBounds`,
+  `PounceQpAddCone` (`POUNCE_CONE_*`: nonneg, SOC, exp, power, PSD);
+  options `PounceQpSetNumOption`, `PounceQpSetStrOption`; `PounceQpSolve`
+  (a `POUNCE_QP_STATUS_*`, or a negative `POUNCE_QP_ERR_*` before any
+  engine runs); getters `PounceQpGetSolution`, `PounceQpGetResiduals`
+  (`#[repr(C)]` `PounceQpResiduals`), `PounceQpGetCertificate`
+  (`PounceQpCertificate`); and `PounceQpWriteSolveReport`. It runs
+  `pounce_convex::pipeline`, the code Python's `solve_qp` / `solve_socp`
+  run. The IPM's PSD screen comes from
+  `pounce_convex::certify_psd_lower_triangle` at the CLI's band, not
+  Python's numpy check, so the two can disagree on a borderline `P`; see
+  `pounce.h`.
+
 All entry points are `extern "C"` and `#[no_mangle]`. Pointers are raw
 and the caller owns lifetimes; the `IpoptProblem` handle is opaque
 (`void*` from C).
@@ -154,7 +170,8 @@ return 0 (`OKRetVal`) or 1. POUNCE's C extensions are not mirrored here.
 `scripts/check-release-consistency.sh` both check). The ABI changes by
 addition only: no existing prototype, struct layout or `#define` value
 changes. The `#[repr(C)]` structs (`PounceLinearSolverStats`,
-`PounceComplementarityStats`, `PounceComplementaritySolve`) are held to the
+`PounceComplementarityStats`, `PounceComplementaritySolve`,
+`PounceQpResiduals`, `PounceQpCertificate`) are held to the
 header field by field (size, offset, width) by a C program in
 `tests/c_examples_build_and_run.rs`.
 

@@ -32,7 +32,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod fortran;
+pub mod qp;
 pub mod solver;
+
+pub use qp::*;
 
 use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
