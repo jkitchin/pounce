@@ -17,7 +17,7 @@ authors:
     orcid: 0000-0002-8308-5016
     affiliation: 2
   - name: Johannes P. Dürholt
-    orcid: 0000-0000-0000-0000
+    orcid: 0000-0002-3494-1621
     affiliation: 3
   - name: Frederik Geth
     orcid: 0000-0002-9345-2959
