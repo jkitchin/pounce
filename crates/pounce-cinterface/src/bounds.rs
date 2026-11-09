@@ -534,10 +534,17 @@ pub unsafe extern "C" fn GetPounceBounds(
             return POUNCE_ERR_ARGUMENT;
         }
         let offset = if info.index_style == 1 { 1 } else { 0 };
+        // Both counts before any entry (the C API's check order, stage 3).
+        // The getter allows duplicates, so a count may exceed the side's
+        // length when an index array is given; only the NULL-array
+        // consistency of `count_ok` applies.
+        let null_ok = |count: Index, idx: *const Index, len: Index| {
+            count >= 0 && (!idx.is_null() || count == 0 || count == len)
+        };
+        if !null_ok(nx, x_idx, info.n) || !null_ok(ng, g_idx, info.m) {
+            return POUNCE_ERR_COUNT;
+        }
         let resolve = |count: Index, idx: *const Index, len: Index, base: Index| {
-            if count < 0 || (idx.is_null() && count != 0 && count != len) {
-                return Err((POUNCE_ERR_COUNT, -1));
-            }
             (0..count as usize)
                 .map(|p| {
                     let j = if idx.is_null() {
@@ -553,9 +560,6 @@ pub unsafe extern "C" fn GetPounceBounds(
                 })
                 .collect::<Result<Vec<usize>, Refusal>>()
         };
-        if nx < 0 || ng < 0 {
-            return POUNCE_ERR_COUNT;
-        }
         let (vars, rows) = match resolve(nx, x_idx, info.n, 0)
             .and_then(|v| resolve(ng, g_idx, info.m, nx).map(|r| (v, r)))
         {

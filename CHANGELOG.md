@@ -31,6 +31,9 @@ changes.
   reports a bad index anywhere in the batch before a bad shape anywhere in
   it, and `AddPounceComplementsConstraint` reports a row it already used
   as `POUNCE_ERR_ROW_ALREADY_PAIRED` rather than `_ROW_NOT_FREE`.
+  `SetPounceComplementarityPairs` refuses `n_pairs > min(n, m)` (which
+  must repeat a variable or a row) as `POUNCE_ERR_COUNT` before reading
+  the arrays, and `GetPounceBounds` checks both counts before any entry.
 - **`SetPounceComplementarityPairs` takes a reserved `flags` argument**,
   before `bad_index`, as `SetPounceBounds` does. It must be 0; an unknown
   bit is refused with `POUNCE_ERR_FLAGS`, so a later relaxation of the

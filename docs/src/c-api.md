@@ -261,7 +261,7 @@ bad shape at pair 0 reports `POUNCE_ERR_OUT_OF_RANGE` at 3:
 | `POUNCE_OK` | 0 | declared |
 | `POUNCE_ERR_NULL` | -1 | NULL handle |
 | `POUNCE_ERR_FLAGS` | -6 | `Set`: `flags` has a bit this library does not define |
-| `POUNCE_ERR_COUNT` | -2 | `Set`: `n_pairs < 0` |
+| `POUNCE_ERR_COUNT` | -2 | `Set`: `n_pairs < 0`, or `n_pairs > min(n, m)` (which must repeat a variable or a row) |
 | `POUNCE_ERR_NULL` | -1 | `Set`: a NULL array with `n_pairs > 0` |
 | `POUNCE_ERR_OUT_OF_RANGE` | -3 | row or variable outside the problem (in its index style) |
 | `POUNCE_ERR_VAR_ALREADY_PAIRED` | -20 | the variable is already in a pair, or twice in the batch |

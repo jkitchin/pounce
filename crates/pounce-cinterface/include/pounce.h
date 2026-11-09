@@ -761,7 +761,9 @@ int AddPounceComplementarityPair(
  * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
  * receives the batch position of the first refused pair (the second
  * occurrence, for a duplicate), or -1 on success, POUNCE_ERR_NULL,
- * POUNCE_ERR_FLAGS and POUNCE_ERR_COUNT. Range and already-paired checks
+ * POUNCE_ERR_FLAGS and POUNCE_ERR_COUNT. n_pairs < 0, or above min(n, m)
+ * (which must repeat a variable or a row), is POUNCE_ERR_COUNT, refused
+ * before rows/vars are read. Range and already-paired checks
  * run over the whole batch before any shape check (the shared check order
  * above), so an argument fault is reported before a shape fault anywhere
  * in the batch. `flags` must be 0: no bit is

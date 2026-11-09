@@ -13,8 +13,13 @@
 //! vacuously (CLAUDE.md, "A test is only evidence about the branch it
 //! reaches"). Every refusal must leave the handle as it was.
 //!
-//! Model: `QpecSmall` (`common/qpec.rs`), 3 variables, 2 rows.
+//! Model: `QpecSmall` (`common/qpec.rs`), 3 variables, 2 rows; the QP
+//! handle's cases use `common/qp_c.rs`.
 
+#![allow(clippy::unwrap_used)]
+
+#[path = "common/qp_c.rs"]
+mod qp_c;
 #[path = "common/qpec.rs"]
 mod qpec;
 
@@ -83,6 +88,32 @@ fn pairs_batch_reports_an_argument_fault_before_an_earlier_shape_fault() {
         );
         assert_eq!(declared(p), vec![(1, 2)], "second pair {second:?}");
     }
+    free(p);
+}
+
+#[test]
+fn pairs_count_above_min_n_m_is_a_count_fault_before_any_read() {
+    // QpecSmall: n = 3, m = 2, so at most 2 pairs.
+    let p = create_qpec(0);
+    assert_eq!(set_pairs(p, &[(1, 2)]), (POUNCE_OK, -1));
+    // Control: two pairs repeating a row are an already-paired fault.
+    assert_eq!(
+        set_pairs(p, &[(0, 0), (0, 2)]),
+        (POUNCE_ERR_ROW_ALREADY_PAIRED, 1)
+    );
+    // Three pairs must repeat a row: a count fault, not that one.
+    assert_eq!(
+        set_pairs(p, &[(0, 0), (1, 1), (0, 2)]),
+        (POUNCE_ERR_COUNT, -1)
+    );
+    // A garbage count is refused before the (one-entry) arrays are read.
+    let (rows, vars) = ([0 as Index], [0 as Index]);
+    let mut bad = -42;
+    let code = unsafe {
+        SetPounceComplementarityPairs(p, Index::MAX, rows.as_ptr(), vars.as_ptr(), 0, &mut bad)
+    };
+    assert_eq!((code, bad), (POUNCE_ERR_COUNT, -1));
+    assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
 
@@ -259,4 +290,84 @@ fn bounds_reports_a_row_argument_fault_before_a_variable_semantic_fault() {
     assert_eq!(bounds(p), before);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
+}
+
+// --- GetPounceBounds --------------------------------------------------------
+
+fn get_bounds(p: IpoptProblem, x_idx: &[Index], ng: Index) -> (i32, Index) {
+    let mut xl = vec![-7.0; x_idx.len()];
+    let mut gl = vec![-7.0; 2];
+    let mut bad = -42;
+    let code = unsafe {
+        GetPounceBounds(
+            p,
+            x_idx.len() as Index,
+            x_idx.as_ptr(),
+            xl.as_mut_ptr(),
+            ptr::null_mut(),
+            ng,
+            ptr::null(),
+            gl.as_mut_ptr(),
+            ptr::null_mut(),
+            POUNCE_BOUNDS_VIEW_USER,
+            0,
+            &mut bad,
+        )
+    };
+    if code != POUNCE_OK {
+        assert!(xl.iter().chain(&gl).all(|&v| v == -7.0), "wrote on refusal");
+    }
+    (code, bad)
+}
+
+#[test]
+fn get_bounds_reports_a_bad_row_count_before_a_variable_entry_fault() {
+    let p = create_qpec(0);
+    // Control: the out-of-range x entry alone.
+    assert_eq!(get_bounds(p, &[99], 0), (POUNCE_ERR_OUT_OF_RANGE, 0));
+    // With ng = 1 (neither 0 nor m = 2) and a NULL g index array: COUNT.
+    assert_eq!(get_bounds(p, &[99], 1), (POUNCE_ERR_COUNT, -1));
+    // The getter allows duplicates, so a count above n with an index array
+    // is not a count fault (the branch `count_ok` would refuse).
+    assert_eq!(get_bounds(p, &[0, 0, 1, 2], 2), (POUNCE_OK, -1));
+    free(p);
+}
+
+// --- PounceQpSolve ----------------------------------------------------------
+
+use qp_c::{Qp, TRUE};
+
+/// `PounceQpSolve`'s stage-6 checks run INCOMPLETE, CONES, OPTIONS,
+/// INDEFINITE. Each case carries every later fault too, so a reordering
+/// reports the wrong one; the controls show each later fault is refused on
+/// its own.
+#[test]
+fn qp_solve_checks_incomplete_cones_options_indefinite_in_order() {
+    // Indefinite P, 3 inequality rows, a 2-row cone (CONES), and `tau`
+    // (an option the conic path refuses).
+    let build = |objective: bool, short_cone: bool, tau: bool| {
+        let qp = Qp::new(2, 0, 3, 0);
+        if objective {
+            assert_eq!(
+                qp.objective(&[(0, 0, 1.0), (1, 1, -1.0)], &[0.0, 0.0]),
+                TRUE
+            );
+        }
+        assert_eq!(
+            qp.inequalities(&[(0, 0, 1.0), (1, 1, 1.0)], &[1.0, 1.0, 1.0]),
+            TRUE
+        );
+        assert_eq!(qp.cone(POUNCE_CONE_NONNEG, 2, 0.0), 0);
+        if !short_cone {
+            assert_eq!(qp.cone(POUNCE_CONE_NONNEG, 1, 0.0), 1);
+        }
+        if tau {
+            assert_eq!(qp.num_opt("tau", 0.9), TRUE);
+        }
+        qp
+    };
+    assert_eq!(build(false, true, true).solve(), POUNCE_ERR_INCOMPLETE);
+    assert_eq!(build(true, true, true).solve(), POUNCE_ERR_CONES);
+    assert_eq!(build(true, false, true).solve(), POUNCE_ERR_OPTIONS);
+    assert_eq!(build(true, false, false).solve(), POUNCE_ERR_INDEFINITE);
 }

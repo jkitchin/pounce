@@ -381,7 +381,9 @@ fn a_model_with_no_rows_refuses_every_pair() {
     assert!(!p.is_null());
     // error-path: AddPounceComplementarityPair
     assert_eq!(add(p, 0, 0), POUNCE_ERR_OUT_OF_RANGE);
-    assert_eq!(set(p, &[(0, 0)]), (POUNCE_ERR_OUT_OF_RANGE, 0));
+    // With m = 0 no pair fits, so any nonempty batch is a count fault
+    // (n_pairs > min(n, m)), refused before the pair is read.
+    assert_eq!(set(p, &[(0, 0)]), (POUNCE_ERR_COUNT, -1));
     assert_eq!(set(p, &[]), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![]);
     free(p);
@@ -444,16 +446,19 @@ fn set_refuses_out_of_range_and_names_the_pair() {
     free(p);
 }
 
-/// The refusal order is the classifier's, pair by pair: a duplicate in
-/// pair 1 is reported before an out-of-range index in pair 2, not after
-/// a range pre-pass over the whole batch.
+/// Argument faults are reported in batch order, each pair's checks in
+/// kind order (range, variable, row): the first refused pair is named, not
+/// the first fault of the earliest kind. (Three pairs would exceed
+/// `min(n, m) = 2` here, a count fault; `tests/check_order.rs`.)
 #[test]
 fn set_reports_the_first_refused_pair_in_declaration_order() {
     let p = create_qpec(0);
     assert_eq!(
-        set(p, &[(0, 1), (1, 1), (9, 9)]),
+        set(p, &[(0, 1), (1, 1)]),
         (POUNCE_ERR_VAR_ALREADY_PAIRED, 1)
     );
+    assert_eq!(set(p, &[(0, 1), (9, 1)]), (POUNCE_ERR_OUT_OF_RANGE, 1));
+    assert_eq!(set(p, &[(9, 1), (1, 1)]), (POUNCE_ERR_OUT_OF_RANGE, 0));
     assert_eq!(declared(p), vec![]);
     free(p);
 }

@@ -1238,10 +1238,9 @@ namespace in which each value has one meaning everywhere (generic -1..-8,
 pairs from -20, bounds from -40, QP from -60), plus `PounceErrorString`.
 The codes named in this plan are the old per-family ones and their old
 numbers; `crates/pounce-cinterface/src/errors.rs` and `docs/src/c-api.md`,
-"Error codes", are current. Not part of the reversal: the uniform check
-order, since `SetPounceComplementarityPairs` validates pair by pair
-(range, duplicate, shape per pair) rather than check by check as
-`SetPounceBounds` does.
+"Error codes", are current. (The uniform check order was first left out
+of the reversal, because `SetPounceComplementarityPairs` validated pair by
+pair; it was adopted later on the same branch, below.)
 
 Also before 0.17: `SetPounceComplementarityPairs` gained a reserved
 `unsigned int flags` before `bad_index` (must be 0; unknown bits are
@@ -1266,6 +1265,18 @@ before any entry (a bad `ng` used to lose to an `x` entry's fault).
 the batch and a control that the later fault is refused on its own; each
 fix's revert fails it. The check orders quoted earlier in this plan predate
 this.
+
+PR review of that change found two more: `GetPounceBounds` checked each
+side's NULL-array count consistency only when it reached that side (so an
+`x` entry's range fault beat a bad `ng`), and `SetPounceComplementarityPairs`
+had no upper bound on `n_pairs`, so a garbage count sized a read and an
+allocation and a real `n_pairs > min(n, m)` came back as `*_ALREADY_PAIRED`
+rather than `COUNT`. Both now check counts first (the getter allows
+duplicates, so it checks only the NULL-array consistency, not
+`count <= len`). The batch setter's shape pass now calls `classify_pair`
+directly instead of re-running range and duplicate checks inside
+`validate_pairs`. `tests/check_order.rs` also pins the getter and
+`PounceQpSolve`'s order (INCOMPLETE, CONES, OPTIONS, INDEFINITE).
 
 ## 7. Stage 3 and Stage 4 — design and iteration list
 

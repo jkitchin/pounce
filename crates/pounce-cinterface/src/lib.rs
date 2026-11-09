@@ -48,9 +48,7 @@ use pounce_algorithm::application::{
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_common::reg_options::OptionType;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_nlp::mpcc::{
-    ComplementarityPair, PairErrorKind, PairShape, classify_pair, validate_pairs,
-};
+use pounce_nlp::mpcc::{ComplementarityPair, PairErrorKind, PairShape, classify_pair};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -2139,14 +2137,14 @@ pub(crate) fn zero_based(p: Index, offset: Index, len: Index) -> usize {
 /// Two passes, in the C API's check order (`errors.rs`): first every
 /// pair's argument checks — range, variable not already in the batch, row
 /// not already in the batch — then every pair's shape, by
-/// [`validate_pairs`], the classifier the solve's lowering runs. That
-/// classifier checks pair by pair (a shape refusal at pair 0 would come
-/// before a range refusal at pair 1), so the first pass is what makes a
-/// mixed batch report its argument error, as `SetPounceBounds` does; the
-/// classifier is left as it is because the lowering shares it.
+/// [`classify_pair`]. Together they are the checks [`validate_pairs`](pounce_nlp::mpcc::validate_pairs) (the
+/// solve's lowering) runs, but check by check over the batch where it goes
+/// pair by pair, so a shape fault at pair 0 does not hide an argument
+/// fault at pair 1, as in `SetPounceBounds`. `validate_pairs` is left as
+/// it is because the lowering shares it.
 ///
-/// O(n + m + P): each pass allocates a flag per variable and row. Fine
-/// once per batch; the one-pair path is [`append_pair`].
+/// O(n + m + P): one flag per variable and row. Fine once per batch; the
+/// one-pair path is [`append_pair`].
 fn replace_pairs(
     info: &mut IpoptProblemInfo,
     new: &[(Index, Index)],
@@ -2172,25 +2170,24 @@ fn replace_pairs(
             return Err((k, PairErrorKind::RowAlreadyPaired));
         }
     }
-    match validate_pairs(
-        info.n as usize,
-        info.m as usize,
-        &info.x_l,
-        &info.x_u,
-        &info.g_l,
-        &info.g_u,
-        &candidate,
-    ) {
-        Ok(_) => {
-            info.complementarity.replace(candidate);
-            Ok(())
+    for (k, p) in candidate.iter().enumerate() {
+        if classify_pair(
+            info.x_l[p.var],
+            info.x_u[p.var],
+            info.g_l[p.row],
+            info.g_u[p.row],
+        )
+        .is_none()
+        {
+            return Err((k, PairErrorKind::UnsupportedShape));
         }
-        Err(e) => Err((e.pair, e.kind)),
     }
+    info.complementarity.replace(candidate);
+    Ok(())
 }
 
 /// Append one pair `(row, var)`, in the problem's index style, to the
-/// declared set, after the checks [`validate_pairs`] runs on a pair, in its
+/// declared set, after the checks [`validate_pairs`](pounce_nlp::mpcc::validate_pairs) runs on a pair, in its
 /// order: range, variable not in a pair, row not in a pair, a shape
 /// [`classify_pair`] accepts. O(1) expected (gh#1147 Stage 2): the stored
 /// pairs are not re-validated, because every stored pair passed when it was
@@ -2266,6 +2263,10 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
 /// Checked after the handle and before the count, as in
 /// [`SetPounceBounds`].
 ///
+/// `n_pairs < 0`, or above `min(n, m)` (more pairs than that must repeat a
+/// variable or a row), is [`POUNCE_ERR_COUNT`], refused before `rows` and
+/// `vars` are read.
+///
 /// Range and already-paired checks run over the whole batch before any
 /// shape check (the shared check order, `errors.rs`).
 ///
@@ -2301,7 +2302,13 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
         if flags & !KNOWN_PAIR_FLAGS != 0 {
             return POUNCE_ERR_FLAGS;
         }
-        if n_pairs < 0 {
+        // More pairs than `min(n, m)` must repeat a variable or a row, so it
+        // is a count fault, refused before the arrays are read: a garbage
+        // count (an uninitialised `n_pairs`) would otherwise size the read
+        // and the allocation below, and a failed allocation aborts the
+        // process past `ffi_guard`. Same rule as `SetPounceBounds`.
+        let max_pairs = (*ipopt_problem).n.min((*ipopt_problem).m);
+        if n_pairs < 0 || n_pairs > max_pairs {
             return POUNCE_ERR_COUNT;
         }
         if n_pairs > 0 && (rows.is_null() || vars.is_null()) {
