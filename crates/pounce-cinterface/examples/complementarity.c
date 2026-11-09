@@ -194,9 +194,9 @@ int main(int argc, char **argv)
         return fail(prob, "y1 paired twice was not ERR_VAR_ALREADY");
     if (AddPounceComplementarityPair(prob, M, 0) != POUNCE_ERR_OUT_OF_RANGE)
         return fail(prob, "row m was not ERR_OUT_OF_RANGE");
-    /* Row 1 now has a side (written in step 2), so it is no longer free. */
-    if (AddPounceComplementsConstraint(prob, 1, 0) != POUNCE_ERR_ROW_NOT_FREE)
-        return fail(prob, "edited row 1 was not ERR_ROW_NOT_FREE");
+    /* Row 1 was used in step 2 (and bounded by it): already paired. */
+    if (AddPounceComplementsConstraint(prob, 1, 0) != POUNCE_ERR_ROW_ALREADY_PAIRED)
+        return fail(prob, "used row 1 was not ERR_ROW_ALREADY_PAIRED");
 
     ipindex rows[2], vars[2];
     if (GetPounceComplementarityPairCount(prob) != 2

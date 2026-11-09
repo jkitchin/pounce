@@ -210,6 +210,12 @@ struct Side {
     at: HashMap<usize, usize>,
 }
 
+/// A side's count is usable: in `[0, len]`, and with a NULL index array
+/// either 0 or `len` (the whole side, in order).
+fn count_ok(count: Index, idx: *const Index, len: Index) -> bool {
+    (0..=len).contains(&count) && (!idx.is_null() || count == 0 || count == len)
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn read_side(
     count: Index,
@@ -225,7 +231,7 @@ unsafe fn read_side(
     // refused here, before anything is reserved: a garbage count (say an
     // uninitialised `nx`) would otherwise size the reservation below, and a
     // failed allocation aborts the process, past `ffi_guard`.
-    if count < 0 || count > len || (idx.is_null() && count != 0 && count != len) {
+    if !count_ok(count, idx, len) {
         return Err((POUNCE_ERR_COUNT, -1));
     }
     let k = count as usize;
@@ -296,9 +302,10 @@ unsafe fn set_bounds(
     g_u: *const Number,
 ) -> Result<(), Refusal> {
     let offset = if info.index_style == 1 { 1 } else { 0 };
-    // Both counts before any entry, so a bad count is never reported as an
-    // entry's fault.
-    if nx < 0 || ng < 0 {
+    // Both counts in full before any entry (the C API's check order,
+    // `errors.rs`), so a bad `ng` is never reported after an `x` entry's
+    // fault, nor a bad count as an entry's. `read_side` repeats the test.
+    if !count_ok(nx, x_idx, info.n) || !count_ok(ng, g_idx, info.m) {
         return Err((POUNCE_ERR_COUNT, -1));
     }
     let xs = unsafe {

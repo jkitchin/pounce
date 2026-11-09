@@ -2121,9 +2121,8 @@ fn pair_error_code(kind: &PairErrorKind) -> c_int {
 }
 
 /// An index in the problem's index style, as a 0-based `usize` when it is
-/// in `[0, len)`, else `usize::MAX` — which [`validate_pairs`] refuses as
-/// out of range in its own order (range, duplicate variable, duplicate
-/// row, shape, pair by pair). `checked_sub` keeps `i32::MIN` in Fortran
+/// in `[0, len)`, else `usize::MAX`, which every caller refuses as out of
+/// range. `checked_sub` keeps `i32::MIN` in Fortran
 /// style from overflowing.
 pub(crate) fn zero_based(p: Index, offset: Index, len: Index) -> usize {
     match p.checked_sub(offset) {
@@ -2133,13 +2132,21 @@ pub(crate) fn zero_based(p: Index, offset: Index, len: Index) -> usize {
 }
 
 /// Replace the declared pairs with `new` (pairs in the problem's index
-/// style), validated as a whole and on their own by
-/// [`validate_pairs`] — the classifier the solve's lowering runs — and
-/// stored only if every pair passes. On refusal the declared set is
-/// untouched and the error names the refused pair's position in `new`.
+/// style), validated as a whole and on their own, and stored only if every
+/// pair passes. On refusal the declared set is untouched and the error
+/// names the refused pair's position in `new`.
 ///
-/// O(n + m + P): `validate_pairs` allocates a flag per variable and row.
-/// Fine once per batch; the one-pair path is [`append_pair`].
+/// Two passes, in the C API's check order (`errors.rs`): first every
+/// pair's argument checks — range, variable not already in the batch, row
+/// not already in the batch — then every pair's shape, by
+/// [`validate_pairs`], the classifier the solve's lowering runs. That
+/// classifier checks pair by pair (a shape refusal at pair 0 would come
+/// before a range refusal at pair 1), so the first pass is what makes a
+/// mixed batch report its argument error, as `SetPounceBounds` does; the
+/// classifier is left as it is because the lowering shares it.
+///
+/// O(n + m + P): each pass allocates a flag per variable and row. Fine
+/// once per batch; the one-pair path is [`append_pair`].
 fn replace_pairs(
     info: &mut IpoptProblemInfo,
     new: &[(Index, Index)],
@@ -2152,6 +2159,19 @@ fn replace_pairs(
             var: zero_based(var, offset, info.n),
         })
         .collect();
+    let mut seen_var = vec![false; info.n as usize];
+    let mut seen_row = vec![false; info.m as usize];
+    for (k, p) in candidate.iter().enumerate() {
+        if p.var == usize::MAX || p.row == usize::MAX {
+            return Err((k, PairErrorKind::OutOfRange));
+        }
+        if std::mem::replace(&mut seen_var[p.var], true) {
+            return Err((k, PairErrorKind::VarAlreadyPaired));
+        }
+        if std::mem::replace(&mut seen_row[p.row], true) {
+            return Err((k, PairErrorKind::RowAlreadyPaired));
+        }
+    }
     match validate_pairs(
         info.n as usize,
         info.m as usize,
@@ -2245,6 +2265,9 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
 /// [`POUNCE_ERR_FLAGS`], so an older library never silently ignores one.
 /// Checked after the handle and before the count, as in
 /// [`SetPounceBounds`].
+///
+/// Range and already-paired checks run over the whole batch before any
+/// shape check (the shared check order, `errors.rs`).
 ///
 /// `bad_index`, when non-NULL, receives the position in the batch of the
 /// first refused pair (for a duplicate, the second occurrence), or `-1`
@@ -2447,15 +2470,18 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
     if r == usize::MAX || v == usize::MAX {
         return POUNCE_ERR_OUT_OF_RANGE;
     }
-    let (gl, gu) = (info.g_l[r], info.g_u[r]);
-    if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
-        return POUNCE_ERR_ROW_NOT_FREE;
-    }
+    // Argument checks before semantic ones (the C API's check order,
+    // `errors.rs`): a row an earlier call already used reads as already
+    // paired, not as "not free" because that call bounded it.
     if info.complementarity.of_var(v).is_some() || info.complements_used.of_var(v).is_some() {
         return POUNCE_ERR_VAR_ALREADY_PAIRED;
     }
     if info.complementarity.of_row(r).is_some() || info.complements_used.of_row(r).is_some() {
         return POUNCE_ERR_ROW_ALREADY_PAIRED;
+    }
+    let (gl, gu) = (info.g_l[r], info.g_u[r]);
+    if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
+        return POUNCE_ERR_ROW_NOT_FREE;
     }
     let Some(table_row) = complements_row(info.x_l[v], info.x_u[v]) else {
         return POUNCE_ERR_VAR_BOUNDS;
@@ -2507,9 +2533,9 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
 ///
 /// The row must be free (else [`POUNCE_ERR_ROW_NOT_FREE`]:
 /// use [`AddPounceComplementarityPair`] for a row that already has a
-/// side). Checks, in order: NULL handle, range, row free, variable then
-/// row not already used (by a declared pair or by an earlier accepted call
-/// of this helper), the variable's bounds neither NaN nor crossed. A
+/// side). Checks, in order: NULL handle, range, variable then row not
+/// already used (by a declared pair or by an earlier accepted call of this
+/// helper), row free, the variable's bounds neither NaN nor crossed. A
 /// refused call changes nothing. Bound edits are permanent on the handle:
 /// [`ClearPounceComplementarityPairs`] and
 /// [`SetPounceComplementarityPairs`] drop pairs, not edits.

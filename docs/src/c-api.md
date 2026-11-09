@@ -251,18 +251,22 @@ ignores it. Indices are in the problem's index style,
 and are read back in it. Each declaration is checked at once, against the
 handle's bounds and the pairs already declared, by the classifier the
 solve's lowering runs, so a pair Python or the `.nl` reader would refuse is
-refused here, and a refused call changes nothing:
+refused here, and a refused call changes nothing. The codes below are in
+check order. `Set` runs the range and already-paired checks over the whole
+batch before any shape check, so a batch with a bad index at pair 3 and a
+bad shape at pair 0 reports `POUNCE_ERR_OUT_OF_RANGE` at 3:
 
 | code | value | meaning |
 |---|---|---|
 | `POUNCE_OK` | 0 | declared |
-| `POUNCE_ERR_NULL` | -1 | NULL handle, or a NULL array with `n_pairs > 0` |
+| `POUNCE_ERR_NULL` | -1 | NULL handle |
+| `POUNCE_ERR_FLAGS` | -6 | `Set`: `flags` has a bit this library does not define |
+| `POUNCE_ERR_COUNT` | -2 | `Set`: `n_pairs < 0` |
+| `POUNCE_ERR_NULL` | -1 | `Set`: a NULL array with `n_pairs > 0` |
 | `POUNCE_ERR_OUT_OF_RANGE` | -3 | row or variable outside the problem (in its index style) |
 | `POUNCE_ERR_VAR_ALREADY_PAIRED` | -20 | the variable is already in a pair, or twice in the batch |
 | `POUNCE_ERR_ROW_ALREADY_PAIRED` | -21 | the row is already in a pair, or twice in the batch |
 | `POUNCE_ERR_SHAPE` | -22 | not a native shape (boxed or equality row, both sides free, a fixed variable with a free row, ...) |
-| `POUNCE_ERR_FLAGS` | -6 | `Set`: `flags` has a bit this library does not define |
-| `POUNCE_ERR_COUNT` | -2 | `n_pairs < 0` |
 | `POUNCE_ERR_INTERNAL` | -8 | an internal error caught at the boundary; not a diagnosis of the input |
 
 Pairs persist across solves until cleared or replaced.
@@ -288,13 +292,14 @@ pair:
 | `l == u` | none (`F` free) | none | `POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR` (4) |
 
 A negative return is a refusal that changed nothing, checked in this order:
-`POUNCE_ERR_NULL` (-1); `_ERR_OUT_OF_RANGE` (-3); `_ERR_ROW_NOT_FREE`
-(-23), for any row with a finite bound, **including one whose bound agrees
-with the sign MOI implies** (`g_L = 0` with `x >= 0`: that is a native
-declaration, use `AddPounceComplementarityPair`) and a row this function
-already wrote; `_ERR_VAR_ALREADY_PAIRED` (-20) and `_ERR_ROW_ALREADY_PAIRED`
-(-21), for a variable or row in a declared pair or in **any earlier accepted
-call** of this function, pair or not; `_ERR_VAR_BOUNDS` (-24), NaN or crossed
+`POUNCE_ERR_NULL` (-1); `_ERR_OUT_OF_RANGE` (-3); `_ERR_VAR_ALREADY_PAIRED`
+(-20) and `_ERR_ROW_ALREADY_PAIRED` (-21), for a variable or row in a
+declared pair or in **any earlier accepted call** of this function, pair or
+not (so a row this function already wrote reads as already paired);
+`_ERR_ROW_NOT_FREE` (-23), for any other row with a finite bound,
+**including one whose bound agrees with the sign MOI implies** (`g_L = 0`
+with `x >= 0`: that is a native declaration, use
+`AddPounceComplementarityPair`); `_ERR_VAR_BOUNDS` (-24), NaN or crossed
 variable bounds; and `_ERR_INTERNAL` (-8). The edits and that ledger are
 permanent on the handle: `ClearPounceComplementarityPairs` and
 `SetPounceComplementarityPairs` drop pairs, not edits, and do not free a row
@@ -705,7 +710,28 @@ Every POUNCE extension reports a refusal from one namespace, `POUNCE_ERR_*`,
 and each value means the same thing whichever function returns it, so a
 wrapper keeps a single code-to-message table and a logged `-3` always means
 "index out of range". Success is `POUNCE_OK` (0). The sections above list
-which codes each function returns and in what order it checks them.
+which codes each function returns.
+
+Every function checks in the same order, so a call with several faults
+reports the same one whichever function it is:
+
+1. the handle (`POUNCE_ERR_NULL`);
+2. `flags` and enum arguments (`_ERR_FLAGS`, `_ERR_ARGUMENT`);
+3. counts (`_ERR_COUNT`), then the arrays they size (`_ERR_NULL`);
+4. per entry, over the **whole batch** in batch order: range, then
+   duplicate or already paired, then NaN (`_ERR_OUT_OF_RANGE`,
+   `_ERR_DUPLICATE`, `_ERR_VAR_ALREADY_PAIRED`, `_ERR_ROW_ALREADY_PAIRED`,
+   `_ERR_NAN`);
+5. per entry, over the whole batch in batch order: what the entry would
+   mean (`_ERR_SHAPE`, `_ERR_ROW_NOT_FREE`, `_ERR_VAR_BOUNDS`,
+   `_ERR_COMPLEMENTS_CLASS`, `_ERR_PAIR_CHANGED`);
+6. state beyond the batch (`_ERR_WORKING_SET`; `PounceQpSolve`'s
+   `_ERR_INCOMPLETE`, `_ERR_CONES`, `_ERR_OPTIONS`, `_ERR_INDEFINITE`).
+
+So an argument fault anywhere in a batch is reported before a semantic
+fault anywhere in it, and `bad_index` names the first entry with the
+earliest-stage fault. `crates/pounce-cinterface/tests/check_order.rs`
+holds each batch function to this.
 
 ```c
 const char *PounceErrorString(int code);

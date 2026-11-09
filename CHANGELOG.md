@@ -23,7 +23,14 @@ changes.
   differently (-2 was "out of range", "count" or "argument" depending on
   the function); none of them shipped in a release. The results that are
   not errors keep their own names: `POUNCE_QP_STATUS_*` and the
-  `POUNCE_COMPLEMENTS_*` outcomes.
+  `POUNCE_COMPLEMENTS_*` outcomes. Every function also checks in one
+  order (handle; flags and enum arguments; counts; each entry's range,
+  duplicate and NaN over the whole batch; then what each entry means; then
+  state beyond the batch), so a call with several faults reports the same
+  code whichever function it is: `SetPounceComplementarityPairs` now
+  reports a bad index anywhere in the batch before a bad shape anywhere in
+  it, and `AddPounceComplementsConstraint` reports a row it already used
+  as `POUNCE_ERR_ROW_ALREADY_PAIRED` rather than `_ROW_NOT_FREE`.
 - **`SetPounceComplementarityPairs` takes a reserved `flags` argument**,
   before `bad_index`, as `SetPounceBounds` does. It must be 0; an unknown
   bit is refused with `POUNCE_ERR_FLAGS`, so a later relaxation of the

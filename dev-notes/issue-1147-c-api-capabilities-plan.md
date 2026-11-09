@@ -1249,6 +1249,24 @@ Also before 0.17: `SetPounceComplementarityPairs` gained a reserved
 `SetPounceBounds`, so a later relaxation of the batch setter is opt-in. The
 prototypes quoted in this plan predate it.
 
+And the uniform check order, after all (same branch): every function checks
+the handle, then `flags`/enum arguments, then counts and the arrays they
+size, then each entry's argument checks (range, duplicate / already paired,
+NaN) over the whole batch, then each entry's meaning over the whole batch,
+then state beyond the batch. Three places deviated and were changed, none
+by touching `validate_pairs` (the lowering shares it):
+`SetPounceComplementarityPairs` now runs range and already-paired over the
+batch before calling it, so only shape is left for it to refuse;
+`AddPounceComplementsConstraint` checks already-used before row-free (so a
+row it wrote reads `ROW_ALREADY_PAIRED`, no longer `ROW_NOT_FREE`, and the
+tests that used that code to detect the edit now read `GetPounceBounds`'
+effective view instead); `SetPounceBounds` checks both sides' counts in full
+before any entry (a bad `ng` used to lose to an `x` entry's fault).
+`tests/check_order.rs` pins each, with a later-stage fault placed first in
+the batch and a control that the later fault is refused on its own; each
+fix's revert fails it. The check orders quoted earlier in this plan predate
+this.
+
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
 ### Stage 3 — matrix-form convex/conic entry

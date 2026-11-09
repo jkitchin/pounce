@@ -52,6 +52,17 @@
  * number is never reused. Non-negative returns stay per function: 0 is
  * POUNCE_OK, and the QP statuses and AddPounceComplementsConstraint
  * outcomes are results, not errors.
+ *
+ * Check order, the same in every function, so a call with several
+ * faults reports the same one whichever function it is: (1) the handle;
+ * (2) flags and enum arguments; (3) counts, then the arrays they size;
+ * (4) per entry over the whole batch, in batch order: range, then
+ * duplicate / already paired, then NaN; (5) per entry over the whole
+ * batch: what the entry would mean (shape, row not free, variable
+ * bounds, Complements class, pair changed); (6) state beyond the batch
+ * (working set; the QP solve's checks). An argument fault anywhere in a
+ * batch is reported before a semantic fault anywhere in it, and
+ * bad_index names the first entry with the earliest-stage fault.
  * ----------------------------------------------------------------- */
 #define POUNCE_OK                        0
 /* generic, -1..-19 */
@@ -750,7 +761,10 @@ int AddPounceComplementarityPair(
  * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
  * receives the batch position of the first refused pair (the second
  * occurrence, for a duplicate), or -1 on success, POUNCE_ERR_NULL,
- * POUNCE_ERR_FLAGS and POUNCE_ERR_COUNT. `flags` must be 0: no bit is
+ * POUNCE_ERR_FLAGS and POUNCE_ERR_COUNT. Range and already-paired checks
+ * run over the whole batch before any shape check (the shared check order
+ * above), so an argument fault is reported before a shape fault anywhere
+ * in the batch. `flags` must be 0: no bit is
  * defined yet, and an unknown bit is POUNCE_ERR_FLAGS (checked after the
  * handle, before the count), so a later relaxation is opt-in and an older
  * library never ignores one.
@@ -803,11 +817,11 @@ Bool GetPounceComplementarityPairs(
  *   free            g_L = g_U = 0 (F = 0)  none          POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
  *   l == u          none        (F free)   none          POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR
  *
- * Checks, in order: NULL handle; row/var in range (index style); row free;
- * the variable, then the row, not already used -- by a declared pair or by
- * an earlier accepted call of this function, pair or not, so one F or one
- * x cannot be in two Complements constraints; x's bounds neither NaN nor
- * crossed. A refused call changes nothing. The edits are permanent:
+ * Checks, in order: NULL handle; row/var in range (index style); the
+ * variable, then the row, not already used -- by a declared pair or by an
+ * earlier accepted call of this function, pair or not, so one F or one x
+ * cannot be in two Complements constraints; row free; x's bounds neither
+ * NaN nor crossed. A refused call changes nothing. The edits are permanent:
  * ClearPounceComplementarityPairs / SetPounceComplementarityPairs drop
  * pairs, not edits, and do not free a row or variable for another call.
  * So after a clear the handle solves a plain NLP with the edited row

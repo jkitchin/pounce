@@ -22,6 +22,24 @@
 //! meaning is the same (`POUNCE_ERR_ROW_NOT_FREE` is returned by both
 //! `AddPounceComplementsConstraint` and `SetPounceBounds`).
 //!
+//! Every function checks in the same order, so a call with several faults
+//! reports the same code whichever function it is:
+//!
+//! 1. the handle ([`POUNCE_ERR_NULL`]);
+//! 2. `flags` and enum arguments ([`POUNCE_ERR_FLAGS`], [`POUNCE_ERR_ARGUMENT`]);
+//! 3. counts ([`POUNCE_ERR_COUNT`]), then the arrays they size (`NULL`);
+//! 4. per entry, over the whole batch in batch order: range, then duplicate
+//!    or already paired, then NaN;
+//! 5. per entry, over the whole batch in batch order: what the entry would
+//!    mean (shape, row not free, variable bounds, `Complements` class, pair
+//!    changed);
+//! 6. state beyond the batch (the staged working set; `PounceQpSolve`'s
+//!    checks).
+//!
+//! An argument fault anywhere in a batch is therefore reported before a
+//! semantic fault anywhere in it. `tests/check_order.rs` holds the batch
+//! functions to this.
+//!
 //! Non-negative returns stay per function: `POUNCE_OK` (0) for success, and
 //! the QP statuses (`POUNCE_QP_STATUS_*`) and `AddPounceComplementsConstraint`
 //! outcomes (`POUNCE_COMPLEMENTS_*`) are results, not errors.

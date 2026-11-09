@@ -161,16 +161,16 @@ copy of that row's bounds and then declaring the native pair:
 Writing the bound is not a solver trick: `F >= 0` is a constraint of the
 MPCC, and the return code says that it was written. The edits are
 permanent on the handle — clearing or replacing the pairs does not undo
-them. A negative return is a refusal that changes nothing:
-`POUNCE_ERR_ROW_NOT_FREE` (the row already has a side, whether
-or not it agrees with the one MOI implies: declare it natively with
-`AddPounceComplementarityPair`), `_ERR_VAR_ALREADY_PAIRED` /
-`_ERR_ROW_ALREADY_PAIRED` (the variable or row is in a declared pair or in
-an earlier accepted call of this function, with or without a pair, even if
-the pairs have since been cleared, so one `F` or one `x` is never in two
-`Complements` constraints), `_ERR_VAR_BOUNDS`
-(NaN or crossed bounds), `_ERR_OUT_OF_RANGE`, `_ERR_NULL` and
-`_ERR_INTERNAL`. Each row of the table is solved against a hand-worked
+them. A negative return is a refusal that changes nothing, checked in
+this order: `POUNCE_ERR_NULL`, `_ERR_OUT_OF_RANGE`,
+`_ERR_VAR_ALREADY_PAIRED` / `_ERR_ROW_ALREADY_PAIRED` (the variable or row
+is in a declared pair or in an earlier accepted call of this function,
+with or without a pair, even if the pairs have since been cleared, so one
+`F` or one `x` is never in two `Complements` constraints),
+`_ERR_ROW_NOT_FREE` (the row already has a side, whether or not it agrees
+with the one MOI implies: declare it natively with
+`AddPounceComplementarityPair`), `_ERR_VAR_BOUNDS` (NaN or crossed bounds)
+and `_ERR_INTERNAL`. Each row of the table is solved against a hand-worked
 answer in `crates/pounce-cinterface/tests/complementarity_moi.rs`.
 
 ## What POUNCE does with them
